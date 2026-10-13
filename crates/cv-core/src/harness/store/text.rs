@@ -84,7 +84,10 @@ pub(crate) fn append(
 
 // Only a successful complete quoted string may reach generated_string_text; writer and producer
 // failures leave unpublished append bytes. Builder fields prevent callers from emitting raw bytes.
-fn generate_string(writer: &mut dyn Write, produce: impl FnOnce(&mut Builder<'_>) -> Result<()>) -> Result<()> {
+pub(crate) fn generate_string(
+    writer: &mut dyn Write,
+    produce: impl FnOnce(&mut Builder<'_>) -> Result<()>,
+) -> Result<()> {
     writer.write_all(b"\"")?;
     produce(&mut Builder(writer))?;
     writer.write_all(b"\"")?;

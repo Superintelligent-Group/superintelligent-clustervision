@@ -21,15 +21,28 @@ fn main() -> Result<()> {
     #[cfg(feature = "probe-heap")]
     let baseline = cv_testkit::heap::begin();
     let start = std::time::Instant::now();
-    let result = cv_core::emit::emit(
-        &session,
-        Harness::Codex,
-        std::path::Path::new(&args[3]),
-        &cv_core::emit::EmitOptions {
-            new_id: Some("00000000-0000-0000-0000-000000000001".into()),
-            ..Default::default()
-        },
-    )?;
+    let result = if args.get(4).is_some_and(|a| a == "report") {
+        cv_core::emit::emit_report(
+            &session,
+            Harness::Codex,
+            std::path::Path::new(&args[3]),
+            &cv_core::emit::EmitOptions {
+                new_id: Some("00000000-0000-0000-0000-000000000001".into()),
+                ..Default::default()
+            },
+        )?
+        .0
+    } else {
+        cv_core::emit::emit(
+            &session,
+            Harness::Codex,
+            std::path::Path::new(&args[3]),
+            &cv_core::emit::EmitOptions {
+                new_id: Some("00000000-0000-0000-0000-000000000001".into()),
+                ..Default::default()
+            },
+        )?
+    };
     #[cfg(feature = "probe-heap")]
     eprintln!("{}", serde_json::to_string(&cv_testkit::heap::end(baseline))?);
     println!("{} {}", start.elapsed().as_secs_f64(), result.path.display());

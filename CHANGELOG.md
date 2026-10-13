@@ -10,6 +10,8 @@
 - Cold WAL databases use guarded private snapshots, preserving committed WAL data without creating sidecars in harness stores.
 
 - Goose partial reads stage SQLite payloads in bounded memory; doctor retains typed facts without decoding large native metadata bags.
+- Verified native Codex ports stream checked payloads and compare compact fidelity facts while preserving complete records and loss reports.
+
 - Native JSONL exports stage bounded bytes and stream records for Codex, Grok, OpenClaw and Qwen without retaining complete output histories.
 
 - Doctor rejects unavailable lazy text instead of counting zero tokens; length-only reads avoid copying decoded fragments.

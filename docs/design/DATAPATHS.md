@@ -1371,3 +1371,50 @@ and entire conversation into a truncated temporary file before replacement, as c
 [Goose v1.9.0 writer](https://github.com/aaif-goose/goose/blob/v1.9.0/crates/goose/src/session/storage.rs#L1157).
 Its file extension does not justify a resumable byte suffix. New writer guarantees can reopen this
 capability assessment; current unsupported formats are explicit engineering decisions.
+
+
+## Verified native export and port consumption (Codex, 2026-10-12)
+
+`emit_report` now streams reparsed messages through the same feature reducer used by its
+collected reference oracle. Its compact projection retains only comparison facts. Claude keeps
+answered call IDs and pending call-bearing fact rows until EOF, preserving future-answer
+filtering; session model fallback is applied after final metadata. All session-field deltas,
+expected-loss classifications, unsupported turns, carriers and full/complete parsing contracts
+remain part of verification. Native 52 and portable 42 scoped emitter tests pass, including
+whole-report equality against collected verification across every emitter and thinking mode.
+
+Cross-harness native Codex port preparation requests full metadata with checked lazy bodies;
+same-harness ports still parse format-complete records. The Codex writer streams selected text,
+reasoning, canonical arguments and tool results through the shared staged string writer. It
+preserves multipart separator rules, compact record bytes and error prefixes. A source-backed
+fixture matches independently materialized output and its complete loss report; changing its
+source before re-emission fails without replacing an existing export. Partial serialization
+failures also prevent stage publication.
+
+The actual scratch Claude parse → native Codex write → adapter read-back → fidelity report
+probe is `examples/port_probe.rs`; `lazy` selects the same preparation API used by `cv port`.
+An owned full parse on baseline `971d8e76` is the control. Requested Rust heap begins before
+source parsing; mmap, C heaps, allocator overhead and RSS remain outside this measurement.
+
+| Source shape | End-to-end heap before → after |
+|---|---:|
+| 32 × 256 KiB text messages | after 1,548,715 B |
+| 128 × 256 KiB text messages | 67,788,122 → 1,653,801 B |
+| One 32 MiB text message | 134,226,424 → 67,120,604 B |
+
+The giant control exposes a remaining native Codex reader floor: its mmap lazy branch still
+materializes selected user/assistant text through `lean::parse` into Values. The positioned
+portable projection is being composed into the native producer; the consumer change does not
+hide that floor by reducing metadata fidelity. The many-message output remains exactly
+100,695,160 bytes with SHA-256
+`50c79139013fd016eb1a703c9565b323aaadde918a372588dcb3c6b85051e8cd`; three alternating clean
+release controls reproduce identical whole loss reports. Their child user+system CPU medians
+are 1.775812 → 2.003143 seconds (+12.8%); repeated checked source/canonical passes exchange CPU
+for smaller retained heap. Debug allocation controls are separate binaries.
+
+Remaining ownership includes the source message roster and selected metadata, Claude pairing
+IDs, format-complete raw carriers, adapters using owned stream bridges, and other emitters or
+non-native thinking transforms that still materialize bodies. Staged disk scales with output.
+These results establish reduced retained payloads on the measured many-message native Codex
+port path, not constant total memory across every harness, giant record or complete-mode port.
+Durable evidence is `resume-verify-evidence/{clean-cpu-current,port-*-heap}.json`.

@@ -2,7 +2,8 @@
 //! backwards plus a store writer. Registered in `crate::emit::emitter_for`; the shared skeleton
 //! (`EmitOptions`, `effective_cwd`, the fidelity table) is in [`crate::emit`].
 
-use crate::emit::fidelity::unrepresentable;
+use crate::emit::fidelity::unrepresentable_checked;
+mod writer;
 use crate::emit::*;
 use crate::harness::store::JsonlStage;
 use crate::harness::EmitResult;
@@ -15,8 +16,8 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<EmitResult> {
-    let session = crate::emit::materialized_session(session)?;
-    let session = session.as_ref();
+    crate::emit::validate_native_source(session, Harness::Codex, opts.thinking)?;
+    let resolver = session.resolver();
     let new_id = opts.new_id.clone().unwrap_or_else(|| Uuid::now_v7().to_string());
     // Which tool calls exist at all, so a result whose call was pruned away can be paired below.
     let called = called_tool_ids(session);
@@ -121,34 +122,33 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
             msg.kind,
             MessageKind::CompactionBoundary | MessageKind::CompactionSummary
         ) {
-            let text = if msg.kind == MessageKind::CompactionSummary {
-                msg.text().unwrap_or_default()
-            } else {
-                String::new()
-            };
-            lines.push(json!({
-                "type": "compacted",
-                "timestamp": ts,
-                "payload": { "message": text },
-            }))?;
+            writer::record(&mut lines, &ts, "compacted", |out| {
+                out.write_all(b"{\"message\":")?;
+                if msg.kind == MessageKind::CompactionSummary {
+                    writer::message_string(out, msg, &resolver)?;
+                } else {
+                    serde_json::to_writer(&mut *out, "")?;
+                }
+                out.write_all(b"}")?;
+                Ok(())
+            })?;
             continue;
         }
 
         match msg.role {
             Role::System => {
-                let text = msg.text().unwrap_or_default();
-                lines.push(codex_response_item(
-                    &ts,
-                    json!({
-                        "type": "message",
-                        "role": "developer",
-                        "content": [{ "type": "input_text", "text": text }],
-                    }),
-                ))?;
+                writer::message(&mut lines, &ts, "developer", "input_text", None, msg, &resolver)?;
             }
             Role::User => {
-                let text = message_text(msg);
-                push_text(&mut lines, &ts, "user", "input_text", "user_message", &text)?;
+                writer::message(
+                    &mut lines,
+                    &ts,
+                    "user",
+                    "input_text",
+                    Some("user_message"),
+                    msg,
+                    &resolver,
+                )?;
             }
             Role::Assistant => {
                 let first_record = lines.len();
@@ -156,46 +156,48 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
                 for b in &msg.content {
                     match b {
                         Block::Text { text } => {
-                            push_text(&mut lines, &ts, "assistant", "output_text", "agent_message", text)?;
+                            writer::text(&mut lines, &ts, text, &resolver)?;
                         }
                         Block::Thinking { text, encrypted, .. } => {
-                            let mut p = Map::new();
-                            p.insert("type".into(), json!("reasoning"));
-                            // `reasoning.content` is an output-only/raw-reasoning surface for the
-                            // current Codex Responses wire. Replaying even one `reasoning_text`
-                            // entry makes the next request fail with `array_above_max_length`
-                            // (the input schema accepts zero raw content entries). Preserve the
-                            // useful text through the replayable summary and the opaque state
-                            // through `encrypted_content`, matching native Codex rollouts.
-                            // The distinct user-visible summary a Codex source recorded, when it
-                            // had one (IR v2: harness facts live in the harness bag, never flat).
                             let summary = msg
                                 .harness_extra(Harness::Codex)
-                                .and_then(|b| b.get("reasoning_summary"))
-                                .and_then(Value::as_str)
-                                .unwrap_or(text);
-                            let summary_items = if summary.is_empty() {
-                                Vec::new()
-                            } else {
-                                vec![json!({ "type": "summary_text", "text": summary })]
+                                .and_then(|extra| extra.get("reasoning_summary"))
+                                .and_then(Value::as_str);
+                            let present = match summary {
+                                Some(summary) => !summary.is_empty(),
+                                None => text.try_decoded_len(&resolver)? != 0,
                             };
-                            p.insert("summary".into(), Value::Array(summary_items));
-                            if let Some(enc) = encrypted {
-                                p.insert("encrypted_content".into(), json!(enc));
-                            }
-                            lines.push(codex_response_item(&ts, Value::Object(p)))?;
+                            writer::record(&mut lines, &ts, "response_item", |out| {
+                                out.write_all(b"{\"type\":\"reasoning\",\"summary\":[")?;
+                                if present {
+                                    out.write_all(b"{\"type\":\"summary_text\",\"text\":")?;
+                                    if let Some(summary) = summary {
+                                        serde_json::to_writer(&mut *out, summary)?;
+                                    } else {
+                                        writer::string(out, text, &resolver, "")?;
+                                    }
+                                    out.write_all(b"}")?;
+                                }
+                                out.write_all(b"]")?;
+                                if let Some(encrypted) = encrypted {
+                                    out.write_all(b",\"encrypted_content\":")?;
+                                    serde_json::to_writer(&mut *out, encrypted)?;
+                                }
+                                out.write_all(b"}")?;
+                                Ok(())
+                            })?;
                         }
                         Block::ToolUse { id, name, input, .. } => {
-                            let args = serde_json::to_string(input.resolve()?.as_ref())?;
-                            lines.push(codex_response_item(
-                                &ts,
-                                json!({
-                                    "type": "function_call",
-                                    "call_id": id,
-                                    "name": name,
-                                    "arguments": args,
-                                }),
-                            ))?;
+                            writer::record(&mut lines, &ts, "response_item", |out| {
+                                out.write_all(b"{\"type\":\"function_call\",\"call_id\":")?;
+                                serde_json::to_writer(&mut *out, id)?;
+                                out.write_all(b",\"name\":")?;
+                                serde_json::to_writer(&mut *out, name)?;
+                                out.write_all(b",\"arguments\":")?;
+                                writer::argument(out, input)?;
+                                out.write_all(b"}")?;
+                                Ok(())
+                            })?;
                         }
                         Block::File { path, source, .. } => {
                             let label = path.as_deref().or(source.as_deref()).unwrap_or("?");
@@ -216,7 +218,9 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
                 // ported session read back `usage: 393 → 0`. Only when the turn actually wrote
                 // records Codex reads back: trailing nothing (or only an empty `reasoning` item,
                 // which its reader drops) the event would synthesize a bare usage-only turn.
-                if lines.len() > first_record && !unrepresentable(Harness::Codex, opts.thinking, msg) {
+                if lines.len() > first_record
+                    && !unrepresentable_checked(Harness::Codex, opts.thinking, msg, &resolver)?
+                {
                     if let Some(info) = codex_token_usage(msg.usage.as_ref()) {
                         lines.push(codex_event_msg(
                             &ts,
@@ -241,11 +245,6 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
                         // to write is undecodable: the line was dropped on resume, orphaning its
                         // `function_call`. Keep the error visible in the text instead; cv's own
                         // Codex parser recognizes the `[error] ` prefix and restores `is_error`.
-                        let output = if *is_error {
-                            json!(format!("[error] {content}"))
-                        } else {
-                            json!(content)
-                        };
                         // Codex pairs an output with the call above it and logs "Orphan function
                         // call output for call id" for one it cannot pair — which a pruned session
                         // produces, since its first turn can be a result whose call was snipped.
@@ -262,14 +261,14 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
                                 }),
                             ))?;
                         }
-                        lines.push(codex_response_item(
-                            &ts,
-                            json!({
-                                "type": "function_call_output",
-                                "call_id": tool_use_id,
-                                "output": output,
-                            }),
-                        ))?;
+                        writer::record(&mut lines, &ts, "response_item", |out| {
+                            out.write_all(b"{\"type\":\"function_call_output\",\"call_id\":")?;
+                            serde_json::to_writer(&mut *out, tool_use_id)?;
+                            out.write_all(b",\"output\":")?;
+                            writer::string(out, content, &resolver, if *is_error { "[error] " } else { "" })?;
+                            out.write_all(b"}")?;
+                            Ok(())
+                        })?;
                     }
                 }
             }
@@ -393,18 +392,6 @@ fn push_text(
         },
     })
 }
-fn message_text(message: &crate::ir::Message) -> std::borrow::Cow<'_, str> {
-    let mut blocks = message.content.iter().filter_map(|block| match block {
-        Block::Text { text } => Some(text),
-        _ => None,
-    });
-    match (blocks.next(), blocks.next()) {
-        (Some(text), None) => std::borrow::Cow::Borrowed(text),
-        (None, _) => std::borrow::Cow::Borrowed(""),
-        _ => std::borrow::Cow::Owned(message.text().unwrap_or_default()),
-    }
-}
-
 #[cfg(test)]
 mod staged_tests {
     use super::*;

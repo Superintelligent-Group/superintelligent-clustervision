@@ -12,8 +12,6 @@
 
 use crate::harness::claude::verify_claude_resumable;
 use crate::harness::EmitResult;
-#[cfg(feature = "sqlite")]
-use crate::harness::Parse;
 use crate::ir::{Block, Harness, Message, MessageKind, Role, Session, SessionRef};
 use crate::stream::ParseOptions;
 use anyhow::Result;
@@ -23,7 +21,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub(crate) mod fidelity;
-use fidelity::{diff_fidelity, is_carrier, reparse_emitted, target_holds};
+use fidelity::{diff_features, is_carrier, reparse_features, source_features, target_holds};
+#[cfg(test)]
+use fidelity::{diff_fidelity, reparse_emitted};
 pub use fidelity::{Delta, FidelityReport};
 
 /// Knobs for emitting/porting a session.
@@ -158,13 +158,14 @@ pub fn emit(session: &Session, target: Harness, out_dir: &Path, opts: &EmitOptio
     // [`Span`](crate::lazy::Span) — and a span that reached `serde_json::to_value` would serialize
     // as its `{source,off,len}` struct, shipping garbage into the target file. A lazily-parsed
     // session must be resolved before it hits an emitter; do it here (on a clone, since `emit`
-    // takes `&Session`) so no caller can forget.
+    // takes `&Session`) so no caller can forget. Codex can consume checked lazy fields
+    // directly through its staged writer; native thinking therefore needs no whole-session clone.
     //
     // [`ThinkingMode`] is applied in the same place and on the same clone, for the same reason: it
     // is one rewrite of the IR that every emitter must see, and doing it here means no emitter has
     // to know the mode exists. It runs AFTER materialization (it reads `Thinking.text`).
     let mut owned: Option<Session> = None;
-    if has_unresolved_spans(session) {
+    if has_unresolved_spans(session) && !(target == Harness::Codex && opts.thinking == ThinkingMode::Native) {
         let mut s = session.clone();
         s.materialize()?;
         owned = Some(s);
@@ -357,8 +358,7 @@ pub fn emit_report(
     out_dir: &Path,
     opts: &EmitOptions,
 ) -> Result<(EmitResult, FidelityReport)> {
-    let session = materialized_session(session)?;
-    let session = session.as_ref();
+    let before = source_features(target, opts.thinking, session)?;
     let result = emit(session, target, out_dir, opts)?;
     // The emitter owns resumability for Claude; assert the three rules on what it wrote.
     if target == Harness::Claude {
@@ -375,8 +375,8 @@ pub fn emit_report(
     } else {
         ParseOptions::full()
     };
-    let report = match reparse_emitted(target, &result, &reparse_opts) {
-        Ok(reparsed) => diff_fidelity(target, opts.thinking, session, &reparsed),
+    let report = match reparse_features(target, opts.thinking, &result, &reparse_opts) {
+        Ok((reparsed, after)) => diff_features(target, opts.thinking, session, &reparsed, before, after),
         Err(e) => FidelityReport {
             deltas: vec![Delta {
                 field: "round_trip".into(),
@@ -449,15 +449,45 @@ pub(crate) fn short_hash(s: &str) -> String {
     format!("{h:016x}")
 }
 
+/// Validate source-backed fields before a native writer creates output. The fidelity projection
+/// keeps only scalar facts; it does not materialize bodies or arguments.
+pub(crate) fn validate_native_source(session: &Session, target: Harness, thinking: ThinkingMode) -> Result<()> {
+    if has_unresolved_spans(session) {
+        source_features(target, thinking, session)?;
+    }
+    Ok(())
+}
+
+/// Parse at native emission fidelity. Same-harness ports retain complete records; cross-harness
+/// Codex ports retain full metadata with lazy payloads consumed directly by its staged writer.
+pub fn parse_for_emit(
+    adapter: &dyn crate::harness::Adapter,
+    reference: &SessionRef,
+    target: Harness,
+) -> Result<Session> {
+    let mut options = if reference.harness == target {
+        ParseOptions::complete()
+    } else {
+        ParseOptions::full()
+    };
+    if target == Harness::Codex && reference.harness != target {
+        options.spans = true;
+    }
+    let mut session = crate::stream::collect_with(adapter, reference, &options)?;
+    if target != Harness::Codex || reference.harness == target {
+        session.materialize()?;
+    }
+    Ok(session)
+}
+
 #[cfg(test)]
 mod tests {
     use super::fidelity::*;
     use super::*;
     use crate::harness::claude::emit::claude_encode_cwd;
-    use crate::harness::{
-        claude::Claude, codex::Codex, gemini::Gemini, grok::Grok, openclaw::OpenClaw, opencode::OpenCode, Adapter,
-        Parse,
-    };
+    use crate::harness::{claude::Claude, codex::Codex, gemini::Gemini, grok::Grok, openclaw::OpenClaw, Parse};
+    #[cfg(feature = "sqlite")]
+    use crate::harness::{opencode::OpenCode, Adapter};
     use crate::ir::*;
     use serde_json::json;
     use uuid::Uuid;
@@ -547,6 +577,56 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn codex_source_payloads_match_owned_bytes_and_reject_changed_sources() -> Result<()> {
+        let out = temp_dir();
+        let source_path = out.join("payload.json");
+        fs::write(
+            &source_path,
+            r#"{"text":"a\"\\\nλ","input":{"z":0,"a":[true,null,"\u03bb"],"z":1.25}}"#,
+        )?;
+        let source = crate::Json::source(&source_path, 0, fs::metadata(&source_path)?.len())?;
+        let text = source.with_view(|view| Ok(view.get("text")?.unwrap().source_text()?.unwrap()))?;
+        let input = source.with_view(|view| view.get("input")?.unwrap().to_json())?;
+        let mut session = sample_session(Harness::Claude);
+        session.model = None;
+        for message in &mut session.messages {
+            message.model = None;
+            for block in &mut message.content {
+                match block {
+                    Block::Text { text: value } | Block::Thinking { text: value, .. } => *value = text.clone(),
+                    Block::ToolUse { input: value, .. } => *value = input.clone(),
+                    Block::ToolResult { content, is_error, .. } => {
+                        *content = text.clone();
+                        *is_error = true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        session.messages[1].content.insert(0, Block::Text { text: "".into() });
+        session.messages[1].content.push(Block::Text { text: "".into() });
+        session.messages[1].content.push(Block::Text { text: text.clone() });
+        let owned = materialized_session(&session)?;
+        let opts = EmitOptions {
+            new_id: Some("00000000-0000-0000-0000-000000000001".into()),
+            ..Default::default()
+        };
+        let (expected, expected_report) = emit_report(&owned, Harness::Codex, &out.join("owned"), &opts)?;
+        let (actual, actual_report) = emit_report(&session, Harness::Codex, &out.join("lazy"), &opts)?;
+        assert_eq!(fs::read(&actual.path)?, fs::read(&expected.path)?);
+        assert_eq!(
+            serde_json::to_value(actual_report)?,
+            serde_json::to_value(expected_report)?
+        );
+        let before = fs::read(&actual.path)?;
+        fs::write(&source_path, b"{}")?;
+        assert!(emit_report(&session, Harness::Codex, &out.join("lazy"), &opts).is_err());
+        assert_eq!(fs::read(&actual.path)?, before);
+        fs::remove_dir_all(out)?;
+        Ok(())
     }
 
     #[test]
@@ -3048,6 +3128,65 @@ mod tests {
                 "…and it is still REPORTED into {target}, got {:?}",
                 report.deltas
             );
+        }
+    }
+    #[test]
+    fn accumulated_fidelity_matches_materialized_reports() {
+        let world = cv_testkit::World::new("fidelity-accumulator");
+        let targets = vec![
+            Harness::Claude,
+            Harness::Codex,
+            Harness::Grok,
+            Harness::OpenClaw,
+            Harness::Gemini,
+            Harness::Qwen,
+        ];
+        #[cfg(feature = "sqlite")]
+        let targets = targets.into_iter().chain([Harness::OpenCode, Harness::Hermes]);
+        for target in targets {
+            for thinking in [ThinkingMode::Native, ThinkingMode::Text, ThinkingMode::Drop] {
+                let mut source = sample_session(Harness::Claude);
+                source.system_prompt = Some("system instructions".into());
+                source.lineage.forked_from = Some("previous-session".into());
+                let mut command = Message::new(Role::User);
+                command.content = vec![
+                    Block::Text { text: "  ".into() },
+                    Block::Text {
+                        text: " /compact".into(),
+                    },
+                ];
+                source.messages.push(command);
+                let mut orphan = Message::new(Role::Assistant);
+                orphan.content.push(Block::ToolUse {
+                    id: "orphan".into(),
+                    name: "unanswered".into(),
+                    input: json!({"ignored": "body"}).into(),
+                    namespace: None,
+                });
+                source.messages.push(orphan);
+                let mut signed = Message::new(Role::Assistant);
+                signed.content.push(Block::Thinking {
+                    text: "  ".into(),
+                    signature: Some("signature".into()),
+                    encrypted: None,
+                    redacted: true,
+                });
+                source.messages.push(signed);
+                let opts = EmitOptions {
+                    thinking,
+                    new_id: Some(Uuid::new_v4().to_string()),
+                    ..Default::default()
+                };
+                let (result, actual) =
+                    emit_report(&source, target, &world.base.join(format!("{target}-{thinking}")), &opts).unwrap();
+                let reparsed = reparse_emitted(target, &result, &ParseOptions::full()).unwrap();
+                let expected = diff_fidelity(target, thinking, &source, &reparsed);
+                assert_eq!(
+                    serde_json::to_value(actual).unwrap(),
+                    serde_json::to_value(expected).unwrap(),
+                    "{target}/{thinking}"
+                );
+            }
         }
     }
 }

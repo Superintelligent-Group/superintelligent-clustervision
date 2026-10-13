@@ -4,17 +4,28 @@
 //! kept). `emit_verified` fails on an unexpected loss only, so a strict port is a checked claim.
 
 use super::*;
+mod accumulator;
 use crate::harness::grok::emit::grok_model_id;
+pub(super) use accumulator::source_features;
+use accumulator::Accumulator;
 #[cfg(feature = "sqlite")]
 use anyhow::Context;
 
 /// Re-parse a just-emitted session back into the IR using `target`'s adapter, so we can diff it
 /// against the source. Mirrors how each adapter's `parse` keys off a [`SessionRef`].
+#[cfg(test)]
 pub(super) fn reparse_emitted(target: Harness, result: &EmitResult, opts: &ParseOptions) -> Result<Session> {
-    use crate::harness::Adapter;
-    // Adapters that stream honour `opts` (complete ⇒ carriers + exhaustive `extra`); the rest fall
-    // through `Adapter::stream`’s default bridge to `parse`, which ignores it.
-    let collect = |a: &dyn Adapter, r: &SessionRef| crate::stream::collect_with(a, r, opts);
+    let opts = reparse_options(target, opts);
+    reparse_with(target, result, &|adapter, reference| {
+        crate::stream::collect_with(adapter, reference, &opts)
+    })
+}
+
+fn reparse_with(
+    target: Harness,
+    result: &EmitResult,
+    collect: &impl Fn(&dyn crate::harness::Adapter, &SessionRef) -> Result<Session>,
+) -> Result<Session> {
     let sref = |id: String, path: PathBuf| SessionRef {
         id,
         harness: target,
@@ -63,9 +74,9 @@ pub(super) fn reparse_emitted(target: Harness, result: &EmitResult, opts: &Parse
             &crate::harness::gemini::Gemini::detect(),
             &sref(result.new_id.clone(), result.path.clone()),
         ),
-        Harness::OpenCode => reparse_opencode(result),
+        Harness::OpenCode => reparse_opencode(result, collect),
         #[cfg(feature = "sqlite")]
-        Harness::Hermes => reparse_hermes(result),
+        Harness::Hermes => reparse_hermes(result, collect),
         // The emitters whose output is parseable directly from the EmitResult path.
         Harness::LmStudio => collect(
             &crate::harness::lmstudio::LmStudio::detect(),
@@ -96,7 +107,10 @@ pub(super) fn reparse_emitted(target: Harness, result: &EmitResult, opts: &Parse
 /// mutation: `set_var` is process-global and races any concurrent `getenv` — e.g. rayon discovery
 /// threads). This fixes the old "could not locate storage root" failure of the dead JSON-tree path.
 #[cfg(feature = "sqlite")]
-pub(super) fn reparse_opencode(result: &EmitResult) -> Result<Session> {
+fn reparse_opencode(
+    result: &EmitResult,
+    collect: &impl Fn(&dyn crate::harness::Adapter, &SessionRef) -> Result<Session>,
+) -> Result<Session> {
     use crate::harness::Adapter;
     let oc = crate::harness::opencode::OpenCode::with_db(result.path.clone());
     oc.discover()
@@ -104,20 +118,26 @@ pub(super) fn reparse_opencode(result: &EmitResult) -> Result<Session> {
         .and_then(|refs| {
             refs.into_iter()
                 .find(|r| r.id == result.new_id)
-                .and_then(|r| oc.parse(&r).ok())
+                .and_then(|r| collect(&oc, &r).ok())
         })
         .context("re-discovering emitted opencode session")
 }
 
 #[cfg(not(feature = "sqlite"))]
-pub(super) fn reparse_opencode(_result: &EmitResult) -> Result<Session> {
+fn reparse_opencode(
+    _result: &EmitResult,
+    _collect: &impl Fn(&dyn crate::harness::Adapter, &SessionRef) -> Result<Session>,
+) -> Result<Session> {
     anyhow::bail!("opencode re-parse requires the `sqlite` feature")
 }
 
 /// Hermes re-parses straight from the emitted `state.db` (no `HERMES_HOME` mutation — see
 /// [`reparse_opencode`] for why env writes are off-limits here).
 #[cfg(feature = "sqlite")]
-pub(super) fn reparse_hermes(result: &EmitResult) -> Result<Session> {
+fn reparse_hermes(
+    result: &EmitResult,
+    collect: &impl Fn(&dyn crate::harness::Adapter, &SessionRef) -> Result<Session>,
+) -> Result<Session> {
     use crate::harness::Adapter;
     let h = crate::harness::hermes::Hermes::with_db(result.path.clone());
     h.discover()
@@ -125,7 +145,7 @@ pub(super) fn reparse_hermes(result: &EmitResult) -> Result<Session> {
         .and_then(|refs| {
             refs.into_iter()
                 .find(|r| r.id == result.new_id)
-                .and_then(|r| h.parse(&r).ok())
+                .and_then(|r| collect(&h, &r).ok())
         })
         .context("re-discovering emitted hermes session")
 }
@@ -198,7 +218,7 @@ impl FidelityReport {
 }
 
 /// Per-message + per-session features extracted for a before/after comparison.
-#[derive(Default)]
+#[derive(Default, Debug, PartialEq, Eq)]
 pub(super) struct Features {
     role_counts: std::collections::BTreeMap<&'static str, usize>,
     kind_counts: std::collections::BTreeMap<&'static str, usize>,
@@ -224,6 +244,7 @@ pub(super) struct Features {
     ids: usize,
     ids_tool: usize,
     model_eff: usize,
+    dropped: usize,
 }
 
 /// A verbatim meta record carried under `ParseOptions::complete` — never a conversational turn.
@@ -276,6 +297,7 @@ pub(crate) fn unrepresentable(target: Harness, thinking: ThinkingMode, m: &Messa
     !m.content.is_empty() && !m.content.iter().any(|b| block_survives(target, thinking, b))
 }
 
+#[cfg(test)]
 pub(super) fn features(target: Harness, thinking: ThinkingMode, session: &Session) -> Features {
     let mut f = Features::default();
     // The Claude emitter drops a `tool_use` the transcript never answered (`make_resumable`, rule
@@ -298,7 +320,25 @@ pub(super) fn features(target: Harness, thinking: ThinkingMode, session: &Sessio
     let orphan_call = |b: &Block| {
         target == Harness::Claude && matches!(b, Block::ToolUse { id, .. } if !answered.contains(id.as_str()))
     };
-    for m in &session.messages {
+    for message in &session.messages {
+        f.note(target, thinking, message, session.model.is_some(), &orphan_call);
+    }
+    f
+}
+
+impl Features {
+    fn note(
+        &mut self,
+        target: Harness,
+        thinking: ThinkingMode,
+        m: &Message,
+        session_model: bool,
+        orphan_call: &impl Fn(&Block) -> bool,
+    ) {
+        let f = self;
+        if !is_carrier(m) && unrepresentable(target, thinking, m) {
+            f.dropped += 1;
+        }
         // Two kinds of message are not *turns* for this comparison and are skipped whole — counting
         // their timestamps/ids/model would have reported losses that no emitter could have avoided:
         //
@@ -310,7 +350,7 @@ pub(super) fn features(target: Harness, thinking: ThinkingMode, session: &Sessio
             || unrepresentable(target, thinking, m)
             || (!m.content.is_empty() && m.content.iter().all(&orphan_call))
         {
-            continue;
+            return;
         }
         // A store whose own reader re-tags a turn on the way back in is not LOSING it, and the
         // verifier must not cry loss over a transformation the format defines. Model the known one
@@ -353,7 +393,7 @@ pub(super) fn features(target: Harness, thinking: ThinkingMode, session: &Sessio
         }
         // Effective model: a turn's own model, else the session default (the "model only when it
         // differs" IR rule means comparing raw `Message::model` would flag non-losses).
-        if m.model.is_some() || session.model.is_some() {
+        if m.model.is_some() || session_model {
             f.model_eff += 1;
         }
         for b in m.content.iter().filter(|b| !orphan_call(b)) {
@@ -398,7 +438,6 @@ pub(super) fn features(target: Harness, thinking: ThinkingMode, session: &Sessio
             }
         }
     }
-    f
 }
 
 pub(super) fn role_str(r: Role) -> &'static str {
@@ -531,6 +570,7 @@ pub(crate) fn holds(target: Harness, thinking: ThinkingMode, field: &str) -> boo
 /// field, classifying each surviving delta. Only *losses* (count decreases, dropped/altered session
 /// fields) are reported — the re-parse legitimately adds records (compaction notes, synthesized
 /// ids/timestamps), and an addition is never a fidelity loss.
+#[cfg(test)]
 pub(super) fn diff_fidelity(
     target: Harness,
     thinking: ThinkingMode,
@@ -539,13 +579,18 @@ pub(super) fn diff_fidelity(
 ) -> FidelityReport {
     let before = features(target, thinking, input);
     let after = features(target, thinking, reparsed);
-    // Turns the target cannot represent at all: reported once, as their own expected loss, instead
-    // of as a phantom deficit spread over role/kind/timestamp/id counts.
-    let dropped = input
-        .messages
-        .iter()
-        .filter(|m| !is_carrier(m) && unrepresentable(target, thinking, m))
-        .count();
+    diff_features(target, thinking, input, reparsed, before, after)
+}
+
+pub(super) fn diff_features(
+    target: Harness,
+    thinking: ThinkingMode,
+    input: &Session,
+    reparsed: &Session,
+    before: Features,
+    after: Features,
+) -> FidelityReport {
+    let dropped = before.dropped;
     let mut deltas = Vec::new();
 
     // A count loss (after < before) for `field`, classified via the target's capability table.
@@ -788,4 +833,71 @@ pub(super) fn diff_fidelity(
     }
 
     FidelityReport { deltas }
+}
+
+pub(super) fn reparse_features(
+    target: Harness,
+    thinking: ThinkingMode,
+    result: &EmitResult,
+    opts: &ParseOptions,
+) -> Result<(Session, Features)> {
+    let mut opts = reparse_options(target, opts);
+    // Verification retains the same full/complete metadata and roles, but consumes bodies
+    // through checked lazy views; complete-mode adapters may still require owned raw carriers.
+    opts.spans = true;
+    let sink = std::cell::RefCell::new(Accumulator::new(
+        target,
+        thinking,
+        crate::lazy::Resolver::new(Some(result.path.clone())),
+    ));
+    let metadata = reparse_with(target, result, &|adapter, reference| {
+        crate::stream::stream_counted(adapter, reference, &opts, &mut *sink.borrow_mut())
+    })?;
+    let features = sink.into_inner().finish(&metadata);
+    Ok((metadata, features))
+}
+
+fn reparse_options(target: Harness, opts: &ParseOptions) -> ParseOptions {
+    // These database branches historically called parse(), which requests full rather than
+    // format-complete records. Preserve that comparison contract while changing retention.
+    if matches!(target, Harness::OpenCode | Harness::Hermes) {
+        ParseOptions::full()
+    } else {
+        opts.clone()
+    }
+}
+
+pub(crate) fn unrepresentable_checked(
+    target: Harness,
+    thinking: ThinkingMode,
+    message: &Message,
+    resolver: &crate::lazy::Resolver,
+) -> Result<bool> {
+    if message.content.is_empty() {
+        return Ok(false);
+    }
+    for block in &message.content {
+        let survives = match block {
+            Block::Thinking {
+                text,
+                signature,
+                encrypted,
+                redacted,
+            } => {
+                thinking_fate(
+                    target,
+                    thinking,
+                    &accumulator::marker(text, resolver)?,
+                    signature.as_deref(),
+                    encrypted.as_deref(),
+                    *redacted,
+                ) != ThinkingFate::Drop
+            }
+            _ => block_survives(target, thinking, block),
+        };
+        if survives {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }

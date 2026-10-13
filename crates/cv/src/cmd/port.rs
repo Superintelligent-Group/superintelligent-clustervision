@@ -8,7 +8,7 @@
 use crate::util::{home_rel, parse_harness, resolve, usage};
 use anyhow::{bail, Context, Result};
 use cv_core::ir::{Harness, Session, SessionRef};
-use cv_core::{Adapter, EmitOptions, ParseOptions};
+use cv_core::{Adapter, EmitOptions};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -18,13 +18,7 @@ use std::path::{Path, PathBuf};
 /// plain full-fidelity parse: carriers hold *source*-native records that no other emitter can
 /// replay (they'd just surface as empty turns).
 fn parse_for_emit(adapter: &dyn Adapter, r: &SessionRef, to_h: Harness) -> Result<Session> {
-    if r.harness == to_h {
-        let mut s = cv_core::stream::collect_with(adapter, r, &ParseOptions::complete())?;
-        s.materialize()?;
-        Ok(s)
-    } else {
-        adapter.parse(r)
-    }
+    cv_core::emit::parse_for_emit(adapter, r, to_h)
 }
 
 pub(crate) fn cmd_port(

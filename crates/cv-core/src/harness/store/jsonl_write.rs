@@ -25,9 +25,12 @@ impl JsonlStage {
         self.records == 0
     }
     pub(crate) fn push(&mut self, value: impl Serialize) -> Result<()> {
+        self.push_with(|writer| serde_json::to_writer(writer, &value).map_err(Into::into))
+    }
+    pub(crate) fn push_with(&mut self, produce: impl FnOnce(&mut dyn Write) -> Result<()>) -> Result<()> {
         anyhow::ensure!(!self.failed, "JSONL stage already failed");
         self.failed = true;
-        serde_json::to_writer(&mut self.output, &value)?;
+        produce(&mut self.output)?;
         self.output.write_all(b"\n")?;
         self.records += 1;
         self.failed = false;
@@ -56,7 +59,7 @@ mod tests {
     use super::*;
     #[test]
     fn exact_spilled_jsonl_and_failed_publication() -> Result<()> {
-        let dir = cv_testkit::World::new("jsonl-stage");
+        let dir = cv_testkit::World::new("jsonl-stage-spill");
         let path = dir.base.join("records.jsonl");
         let value = serde_json::json!({"escaped": "a\"\\\nλ".repeat(300_000), "n": 1.25});
         let mut stage = JsonlStage::new();
@@ -79,13 +82,22 @@ mod tests {
         assert!(stage.push(Failure).is_err());
         assert!(stage.publish(&path).is_err());
         assert_eq!(std::fs::read(&path)?, before);
+        let mut stage = JsonlStage::new();
+        assert!(stage
+            .push_with(|writer| {
+                writer.write_all(b"{\"partial\":")?;
+                anyhow::bail!("checked payload source failed")
+            })
+            .is_err());
+        assert!(stage.publish(&path).is_err());
+        assert_eq!(std::fs::read(&path)?, before);
         Ok(())
     }
     #[cfg(unix)]
     #[test]
     fn preserves_destination_links_and_permissions() -> Result<()> {
         use std::os::unix::fs::{symlink, PermissionsExt};
-        let dir = cv_testkit::World::new("jsonl-stage");
+        let dir = cv_testkit::World::new("jsonl-stage-links");
         let path = dir.base.join("original");
         let hard = dir.base.join("hard");
         let sym = dir.base.join("sym");
