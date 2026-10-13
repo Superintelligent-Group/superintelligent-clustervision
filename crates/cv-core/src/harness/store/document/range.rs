@@ -25,7 +25,8 @@ impl Range {
 /// One readonly descriptor shared by all projected fields in an operation. Independent cursors
 /// use positioned reads so nested views do not share seek position or hold a RefCell borrow.
 pub(crate) struct RangeSource {
-    file: File,
+    file: Option<File>,
+    memory: Option<std::sync::Arc<crate::harness::store::bytes::ByteSource>>,
     captured: crate::json::JsonSource,
     decoded_len: Option<u64>,
 }
@@ -37,7 +38,8 @@ impl RangeSource {
     pub fn from_captured(captured: crate::json::JsonSource) -> Result<Self> {
         let file = File::open(captured.path()).with_context(|| format!("opening {}", captured.path().display()))?;
         let source = Self {
-            file,
+            file: Some(file),
+            memory: None,
             captured,
             decoded_len: None,
         };
@@ -47,12 +49,17 @@ impl RangeSource {
     #[cfg(not(feature = "mmap"))]
     pub(crate) fn decoded(
         captured: crate::json::JsonSource,
-        bytes: &crate::harness::store::bytes::ByteSource,
+        bytes: &std::sync::Arc<crate::harness::store::bytes::ByteSource>,
     ) -> Result<Self> {
-        let file = bytes.file()?;
-        let decoded_len = Some(file.metadata()?.len());
+        let decoded_len = Some(bytes.len()?);
+        let (file, memory) = if bytes.memory_bytes().is_some() {
+            (None, Some(bytes.clone()))
+        } else {
+            (Some(bytes.file()?), None)
+        };
         let source = Self {
             file,
+            memory,
             captured,
             decoded_len,
         };
@@ -67,7 +74,7 @@ impl RangeSource {
     }
     pub fn check_identity(&self) -> Result<()> {
         if self.decoded_len.is_none() {
-            self.captured.check_metadata(self.file.metadata()?)?;
+            self.captured.check_metadata(self.file.as_ref().unwrap().metadata()?)?;
         }
         self.captured.check()
     }
@@ -79,7 +86,10 @@ impl RangeSource {
             ));
         }
         Ok(Cursor {
-            backing: Backing::File(&self.file),
+            backing: match &self.memory {
+                Some(bytes) => Backing::Bytes(bytes.memory_bytes().unwrap(), 0),
+                None => Backing::File(self.file.as_ref().unwrap()),
+            },
             range,
             position: range.offset,
             window: Vec::new(),
@@ -90,8 +100,7 @@ impl RangeSource {
 }
 
 enum Backing<'a> {
-    #[cfg(test)]
-    Bytes(&'a [u8]),
+    Bytes(&'a [u8], u64),
     File(&'a File),
 }
 pub(crate) struct Cursor<'a> {
@@ -111,7 +120,7 @@ impl<'a> Cursor<'a> {
         };
         range.end()?;
         Ok(Self {
-            backing: Backing::Bytes(bytes),
+            backing: Backing::Bytes(bytes, base),
             range,
             position: base,
             window: Vec::new(),
@@ -137,8 +146,7 @@ impl<'a> Cursor<'a> {
     }
     pub fn borrow_range(&self, range: Range) -> Option<&[u8]> {
         let (bytes, base) = match &self.backing {
-            #[cfg(test)]
-            Backing::Bytes(b) => (*b, self.range.offset),
+            Backing::Bytes(b, base) => (*b, *base),
             Backing::File(_) => (self.window.as_slice(), self.window_start),
         };
         let start = usize::try_from(range.offset.checked_sub(base)?).ok()?;
@@ -241,8 +249,9 @@ impl BufRead for Cursor<'_> {
             return Ok(&[]);
         }
         match self.backing {
-            #[cfg(test)]
-            Backing::Bytes(bytes) => Ok(&bytes[(self.position - self.range.offset) as usize..]),
+            Backing::Bytes(bytes, base) => {
+                Ok(&bytes[(self.position - base) as usize..(self.range.end()? - base) as usize])
+            }
             Backing::File(file) => {
                 let consumed = usize::try_from(self.position - self.window_start).unwrap_or(usize::MAX);
                 if consumed < self.window.len() {
@@ -515,10 +524,20 @@ impl RangeSource {
         if range.len == 0 {
             return Ok(None);
         }
-        anyhow::ensure!(range.end()? <= self.captured.len(), "JSON range outside source");
+        anyhow::ensure!(range.end()? <= self.range().end()?, "JSON range outside source");
         let mut byte = [0];
         loop {
-            match read_at(&self.file, &mut byte, range.offset) {
+            match if let Some(memory) = &self.memory {
+                let source = memory.memory_bytes().unwrap();
+                if let Some(b) = source.get(range.offset as usize) {
+                    byte[0] = *b;
+                    Ok(1)
+                } else {
+                    Ok(0)
+                }
+            } else {
+                read_at(self.file.as_ref().unwrap(), &mut byte, range.offset)
+            } {
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 Err(e) => return Err(e.into()),
                 Ok(0) => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "JSON source was truncated").into()),

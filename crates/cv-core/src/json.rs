@@ -179,6 +179,47 @@ impl JsonSource {
             decoded: None,
         })
     }
+    pub(crate) fn read_range_syntax<T>(
+        &self,
+        offset: u64,
+        len: u64,
+        f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>,
+    ) -> Result<T> {
+        self.range(offset, len)?.with_validation(Validation::Syntax, f)
+    }
+    /// The producer captures/checks the original opened source before deriving these private bytes.
+    /// Backing ownership and original provenance survive every selected child descriptor.
+    pub(crate) fn read_backing_syntax<T>(
+        &self,
+        backing: Arc<crate::harness::store::bytes::ByteSource>,
+        offset: u64,
+        len: u64,
+        f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>,
+    ) -> Result<T> {
+        self.check()?;
+        let backing_len = backing.len()?;
+        anyhow::ensure!(
+            len != 0 && offset.checked_add(len).is_some_and(|end| end <= backing_len),
+            "backing range out of bounds"
+        );
+        if backing.is_arena() {
+            let mut decoded = self
+                .0
+                .decoded
+                .lock()
+                .map_err(|_| std::io::Error::other("decoded backing poisoned"))?;
+            if decoded.is_none() {
+                *decoded = Some(backing.clone());
+            }
+        }
+        JsonRange {
+            source: self.clone(),
+            offset,
+            len,
+            decoded: Some(backing),
+        }
+        .with_validation(Validation::Syntax, f)
+    }
     pub(crate) fn read_document<T>(&self, f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>) -> Result<T> {
         self.range(0, self.0.identity.len)?
             .with_validation(Validation::Value, f)
@@ -190,8 +231,7 @@ impl JsonSource {
         if self.0.identity.len == 0 {
             return Err(InvalidJson.into());
         }
-        self.range(0, self.0.identity.len)?
-            .with_validation(Validation::Syntax, f)
+        self.read_range_syntax(0, self.0.identity.len, f)
     }
     /// Archive grammar and UTF-8 are whole-source; each child resets Value's depth budget.
     /// Invalid children remain None so a consumer can preserve first-record shape semantics.
@@ -250,6 +290,22 @@ impl JsonRange {
     #[cfg(feature = "mmap")]
     fn with_raw<T>(&self, f: impl for<'a> FnOnce(Raw<'a>) -> Result<T>) -> Result<T> {
         self.check()?;
+        let mut callback = Some(f);
+        if let Some(bytes) = &self.decoded {
+            if let Some(result) = bytes.with_bytes(|bytes| {
+                let index = document::Index::default();
+                let start = usize::try_from(self.offset)?;
+                let end = start
+                    .checked_add(usize::try_from(self.len)?)
+                    .context("backing range overflow")?;
+                let text = std::str::from_utf8(bytes.get(start..end).context("backing range out of bounds")?)
+                    .map_err(|_| InvalidJson)?;
+                callback.take().unwrap()(Raw::new(text, &index))
+            })? {
+                self.check()?;
+                return result;
+            }
+        }
         let file = match &self.decoded {
             Some(bytes) => bytes.file()?,
             None => std::fs::File::open(self.path())?,
@@ -264,7 +320,7 @@ impl JsonRange {
         let result = source
             .slice(self.offset, self.len)
             .ok_or_else(|| InvalidJson.into())
-            .and_then(f);
+            .and_then(callback.take().unwrap());
         // Check even after callback failure: an intentional staged-output cap must not hide
         // a source mutation. Source failure takes precedence over the callback error.
         if self.decoded.is_none() {
@@ -638,13 +694,10 @@ impl<'a> JsonView<'a> {
         if blank {
             return Ok(serde_json::json!({}).into());
         }
-        let candidate = JsonRange {
-            source: range.source.clone(),
-            offset,
-            len,
-            decoded: Some(bytes),
-        };
-        match candidate.with_validation(Validation::Value, |view| {
+        match range.source.read_backing_syntax(bytes, offset, len, |view| {
+            if !view.accepts_value()? {
+                return Err(InvalidJson.into());
+            }
             if view.is_object()? || view.is_array()? {
                 Ok(Some(view.to_json()?))
             } else {
@@ -1628,6 +1681,60 @@ mod tests {
         std::fs::remove_file(&fixture.path).unwrap();
         assert!(restored.resolve().is_err());
         assert!(child.canonical_len().is_err());
+    }
+
+    #[test]
+    fn memory_backing_ranges_do_not_read_prefix_suffix_or_recapture_provenance() {
+        let fixture = Fixture::new(b"original provenance");
+        let source = JsonSource::capture(&fixture.path).unwrap();
+        let body = br#"{"p":[0,{"n":42}]}"#;
+        let bytes = [b"prefix ".as_slice(), body.as_slice(), b" suffix".as_slice()].concat();
+        let backing = Arc::new(crate::harness::store::bytes::ByteSource::read(bytes.as_slice()).unwrap());
+        let child = source
+            .read_backing_syntax(backing, 7, body.len() as u64, |view| {
+                view.get("p")?
+                    .unwrap()
+                    .array()?
+                    .unwrap()
+                    .nth(1)
+                    .unwrap()?
+                    .get("n")?
+                    .unwrap()
+                    .to_json()
+            })
+            .unwrap();
+        assert_eq!(canonical(&child), b"42");
+        std::fs::remove_file(&fixture.path).unwrap();
+        assert!(child.resolve().is_err());
+    }
+
+    #[test]
+    fn nested_encoded_document_uses_same_arena_without_read_append_deadlock() {
+        let inner = format!("{{\"payload\":\"{}\"}}", "x".repeat(9000));
+        let outer = serde_json::to_vec(&serde_json::json!({"arguments":inner})).unwrap();
+        let fixture = Fixture::new(b"compressed provenance placeholder");
+        let captured = JsonSource::capture(&fixture.path).unwrap();
+        let backing = Arc::new(crate::harness::store::bytes::ByteSource::arena().unwrap());
+        let (offset, len) = backing
+            .append(|writer| {
+                writer.write_all(&outer)?;
+                Ok(())
+            })
+            .unwrap();
+        let value = captured
+            .read_backing_syntax(backing.clone(), offset, len, |view| {
+                view.get("arguments")?.unwrap().encoded_argument()
+            })
+            .unwrap();
+        let Json::Source(range) = &value else {
+            panic!("decoded source")
+        };
+        assert!(Arc::ptr_eq(range.decoded.as_ref().unwrap(), &backing));
+        assert!(range.offset >= len);
+        assert!(canonical(&value) == inner.as_bytes());
+        assert!(backing.len().unwrap() > len);
+        std::fs::remove_file(&fixture.path).unwrap();
+        assert!(value.canonical_len().is_err());
     }
 
     #[test]
