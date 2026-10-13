@@ -1923,13 +1923,20 @@ No parser, cache, scoring policy, event ingestion or timing experiment was added
    sharing benefit without more coordination. Existing verified API page continuations, watch EOF
    reuse and stats token-ledger reuse remain intact.
 
-Listing enrichment follow-up: `cmd/browse.rs::enrich_head` currently collects every user message,
-while `Session::synth_title` needs only the first meaningful prompt unless an explicit final title
-wins. Only a stable inline prefix can be reduced immediately: source-backed prompts resolve after
-EOF, using its source path, and a changed source can make a later prompt become the fallback.
-Keep that deferred suffix behavior. Reuse the existing title policy for the inline case, including
-its full Inline text and per-Span/Source-block prefix cap. Preserve late git/title metadata and
-the EOF pass used for count publication; this is a retention issue, not permission to stop early.
+**Listing enrichment retention completed (2026-10-13):** `cmd/browse.rs::enrich_head` reduces
+stable Inline user candidates with the existing `Session::synth_title` policy. It discards noise
+and retains only the first meaningful fallback title. An explicit EOF title still wins. At the
+first Source/Span Text candidate, it preserves the deferred suffix: resolution needs EOF's source
+path, and a source changed after delivery can make a later prompt become the fallback. Full Inline
+text and the per-Span/Source-block prefix policy are unchanged. The full stream still supplies
+late git/title metadata and count publication; there is no early stop or CPU speedup claim.
+
+Independent prior-collector controls with 100/10,000 later turns retain 103/10,003 user messages
+before, versus zero messages/Inline payload bytes plus the short fallback after. One thousand
+noise messages also retain zero. Separate fresh-source mutation controls, a legacy Span whose EOF
+source path differs from the reference path, explicit final titles, late git and published counts
+preserve prior results. Deferred suffix memory and each individual Inline candidate's joined
+allocation remain unbounded; this is a common-path retention reduction, not a universal heap cap.
 
 ### Browser window/head work audit (2026-10-13)
 
