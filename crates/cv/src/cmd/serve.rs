@@ -818,6 +818,7 @@ fn header(field: &str, value: &str) -> Header {
 
 #[cfg(test)]
 mod staged_tests {
+    #[cfg(feature = "probe-heap")]
     use super::*;
     #[cfg(feature = "probe-heap")]
     #[test]
