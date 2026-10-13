@@ -6,6 +6,9 @@
 
 - Diagnostics and affordance views request selected metadata facts; Claude and Cursor CLI avoid copying unrelated raw sidecars.
 - Lane summaries request response identities for usage deduplication without loading unrelated record metadata.
+- Cursor IDE partial reads and doctor facts stream selected string payloads while preserving session modes and checked SQLite snapshot dependencies.
+
+- Cursor CLI discovery and partial reads stream selected message fields with bounded scratch and reject changed SQLite snapshot dependencies.
 - Shared payload staging copies bounded chunks before appending, preventing mapped-source writes from hanging on macOS.
 
 - Compaction summary scans propagate lazy source read failures and preserve full summary text.
@@ -21,7 +24,6 @@
 
 - Warm token statistics reuse bounded, dependency-validated usage rows while preserving response deduplication and exact cost totals.
 
-- Cursor CLI discovery and partial reads stream selected message fields with bounded scratch and reject changed SQLite snapshot dependencies.
 - Portable and compressed Codex reads retain giant tool outputs and assistant-event text in checked source ranges, preserving metadata, usage, error markers and resumptions.
 
 - LM Studio discovery projects source metadata and bounded titles without loading whole documents, including portable builds.

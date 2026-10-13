@@ -3,6 +3,33 @@ use super::*;
 use crate::harness::store::bytes::ByteSource;
 use std::io::{self, Read};
 
+/// Append one immutable snapshot cell into the session's shared arena. BLOB values retain
+/// Cursor's historical lossy UTF-8 conversion; TEXT uses the shared incremental SQL copier.
+pub(super) fn append_cell(conn: &Connection, table: &str, key: &str, arena: &ByteSource) -> Result<(u64, u64)> {
+    let row = conn.query_row(
+        &format!("SELECT _rowid_, typeof(value) FROM {table} WHERE key = ?1"),
+        [key],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+    );
+    if let Ok((rowid, kind)) = row {
+        if kind != "blob" {
+            return crate::harness::store::sqlite::append_cell(conn, table, "value", rowid, arena);
+        }
+        if let Ok(blob) = conn.blob_open(rusqlite::DatabaseName::Main, table, "value", rowid, true) {
+            let mut input = LossyUtf8::new(blob);
+            return arena.append(|out| {
+                io::copy(&mut input, out)?;
+                Ok(())
+            });
+        }
+    }
+    let source = cell(conn, table, key)?;
+    arena.append(|out| {
+        io::copy(&mut source.reader()?, out)?;
+        Ok(())
+    })
+}
+
 pub(super) fn cell(conn: &Connection, table: &str, key: &str) -> Result<ByteSource> {
     let row = conn.query_row(
         &format!("SELECT _rowid_, typeof(value) FROM {table} WHERE key = ?1"),

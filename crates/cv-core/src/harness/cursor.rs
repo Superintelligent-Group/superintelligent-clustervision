@@ -39,6 +39,7 @@ use std::path::{Path, PathBuf};
 mod cli;
 mod composer;
 mod legacy;
+mod selected;
 mod source;
 
 pub struct Cursor {
@@ -182,6 +183,9 @@ impl Adapter for Cursor {
             }
             if let Some(legacy_id) = r.id.strip_prefix("legacy:") {
                 return stream_legacy(&conn, r, legacy_id, sink);
+            }
+            if opts.spans && !opts.wants_full_extra() {
+                return selected::global(&conn, r, sink);
             }
             stream_global(&conn, r, sink)
         })
@@ -366,6 +370,54 @@ fn stream_global(conn: &Connection, r: &SessionRef, sink: &mut dyn MessageSink) 
     let d = &header.metadata;
     let mut lookup = conn.prepare("SELECT value FROM cursorDiskKV WHERE key = ?1")?;
 
+    let mut session = global_session(d, r);
+
+    // Session model: the latest message's model (whole-Vec `rev().find_map` originally). Tracked
+    // incrementally here — each emitted message overwrites it when it carries a model — so the last
+    // one wins without retaining the body. Falls back to the composer's modelConfig below.
+    let mut last_model: Option<String> = None;
+    let mut emit = |sink: &mut dyn MessageSink, m: Message| -> Flow {
+        if m.model.is_some() {
+            last_model = m.model.clone();
+        }
+        sink.message(m)
+    };
+
+    // The immutable, fully validated source replays only the authoritative selected array.
+    header.replay(&source, &mut |value, external| {
+        let bubble = if external {
+            let Some(bubble_id) = value.get("bubbleId").and_then(Value::as_str) else {
+                return Flow::Continue;
+            };
+            let bkey = format!("bubbleId:{}:{}", r.id, bubble_id);
+            let Some(braw) = disk_kv_get(&mut lookup, &bkey) else {
+                return Flow::Continue;
+            };
+            let Ok(bubble) = serde_json::from_str::<Value>(&braw) else {
+                return Flow::Continue;
+            };
+            bubble
+        } else {
+            value
+        };
+        if let Some(message) = bubble_to_message(&bubble) {
+            emit(sink, message)
+        } else {
+            Flow::Continue
+        }
+    })?;
+
+    session.model = last_model.or_else(|| {
+        d.pointer("/modelConfig/modelName")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    });
+
+    Ok(session)
+}
+
+fn global_session(d: &Value, r: &SessionRef) -> Session {
     let created = d.get("createdAt").and_then(Value::as_i64);
     let updated = d.get("lastUpdatedAt").and_then(Value::as_i64).or(created);
     let title = d
@@ -415,49 +467,7 @@ fn stream_global(conn: &Connection, r: &SessionRef, sink: &mut dyn MessageSink) 
         }
     }
 
-    // Session model: the latest message's model (whole-Vec `rev().find_map` originally). Tracked
-    // incrementally here — each emitted message overwrites it when it carries a model — so the last
-    // one wins without retaining the body. Falls back to the composer's modelConfig below.
-    let mut last_model: Option<String> = None;
-    let mut emit = |sink: &mut dyn MessageSink, m: Message| -> Flow {
-        if m.model.is_some() {
-            last_model = m.model.clone();
-        }
-        sink.message(m)
-    };
-
-    // The immutable, fully validated source replays only the authoritative selected array.
-    header.replay(&source, &mut |value, external| {
-        let bubble = if external {
-            let Some(bubble_id) = value.get("bubbleId").and_then(Value::as_str) else {
-                return Flow::Continue;
-            };
-            let bkey = format!("bubbleId:{}:{}", r.id, bubble_id);
-            let Some(braw) = disk_kv_get(&mut lookup, &bkey) else {
-                return Flow::Continue;
-            };
-            let Ok(bubble) = serde_json::from_str::<Value>(&braw) else {
-                return Flow::Continue;
-            };
-            bubble
-        } else {
-            value
-        };
-        if let Some(message) = bubble_to_message(&bubble) {
-            emit(sink, message)
-        } else {
-            Flow::Continue
-        }
-    })?;
-
-    session.model = last_model.or_else(|| {
-        d.pointer("/modelConfig/modelName")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-    });
-
-    Ok(session)
+    session
 }
 
 /// Convert one Cursor "bubble" (message) object into an IR [`Message`].
