@@ -1109,3 +1109,17 @@ reparsed target. Structured record-local Values can still be payload-sized. Spil
 traffic scale with output bytes; there is no constant total disk, RSS or whole-port heap claim.
 Evidence is in `resume-emit-evidence/{summary,final-clean-cpu,after-heap}.json` under the durable
 worktree evidence directory; baseline is `621b5977`, implementation `74ab96ec` (integrated `971d8e76`).
+Cursor structured IDE followup (`1b23670`) removes the selected lexical richText and non-string
+result floors above by sharing bounded generated text construction. Object and JSON-encoded
+Lexical documents keep the existing recursive text/paragraph order; canonical JSON results keep
+the owned reader's ordering/escaping. Full/lazy-extra/complete fidelity paths are unchanged.
+Eighteen synthetic 16/64 MiB controls cover encoded richText, inline richText and inline structured
+results across discard, Facts doctor and dataset. All counts, doctor reports, output lengths and
+SHA-256 values match the prior reader. Native additional requested heap stays flat: encoded
+richText discard/doctor 253,997 bytes, dataset 1,495,881; inline richText discard 249,390,
+doctor 249,716, dataset 1,496,093; inline structured results discard/doctor 271,948,
+dataset 1,502,083. These use the shared builder before its trusted-generated publication followup;
+clean CPU evidence remains separate. Structural key/navigation state and owned identifier fields
+are still not universal bounds. Evidence: cursor-ide-structured-{baseline,after}-reports.json,
+cursor_ide_structured_scale.py and cursor-ide-structured-scale/manifest.json in the lane scratch
+home; these controls are synthetic, not new genuine corpus captures.
