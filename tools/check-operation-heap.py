@@ -364,6 +364,39 @@ def gemini_port_gate(binary, root, env):
     shutil.rmtree(directory)
 
 
+
+def cline_port_gate(binary, root, env):
+    directory = root / "cline-port"
+    directory.mkdir()
+    source = directory / "source.jsonl"
+    prune_fixture(source, "ascii-declass", timestamp="2026-10-12T12:00:00Z", cwd="/synthetic/export", payload_bytes=32 * MIB)
+    original = file_digest(source)
+    assert source.stat().st_size == 33555239
+    assert original == "a2859c7a05a72e86e52f0cd359c9222ec3c4bb949ef36eb36c3531d71be602fb"
+    child = subprocess.run([str(binary), "claude", str(source), str(directory / "output"), "native", "cline"],
+                           env=env, text=True, capture_output=True)
+    assert child.returncode == 0, f"verified Cline export failed: {child.stderr[-2000:]}"
+    report = json.loads(child.stdout)
+    peak = checked_peak(json.loads(child.stderr))
+    # Frozen legacy format loses timestamps and IDs; ownership changes preserve its report.
+    assert report["messages"] == 4 and report["fidelity"] == dict(deltas=[
+        dict(field="timestamps", before="4", after="1", expected=False),
+        dict(field="message ids", before="4", after="0", expected=False)])
+    output = Path(report["path"])
+    files = {
+        "api_conversation_history.json": (33555154, "ce2ed1d91cd5c44afd871021a6a417c7a3bcde99ac31369715447509f515286c"),
+        "task_metadata.json": (58, "862aa2776b8e6dc3df0f1b435e4aa4c2f6f6e83418e97179ec8bc22b7d8a195b"),
+        "ui_messages.json": (89, "f6a41742990f6eba4165b270afc88296d9b9331705772b22aaa353f76584af87"),
+    }
+    for name, (size, digest) in files.items():
+        path = output / name
+        assert path.stat().st_size == size and file_digest(path) == digest, f"Cline output changed: {name}"
+    assert file_digest(source) == original, "Cline export modified its source"
+    print(json.dumps(dict(case="verified-cline-export", peak_live_rust_bytes=peak,
+                          messages=4, output_bytes=sum(size for size, _ in files.values()),
+                          sha256=files["api_conversation_history.json"][1])), flush=True)
+    shutil.rmtree(directory)
+
 def claude_rehome_gate(binary, root, env):
     directory = root / "claude-rehome"
     directory.mkdir()
@@ -461,6 +494,7 @@ def main():
         claude_port_gate(args.claude_port_probe.resolve(strict=True), root, env)
         codex_thinking_gate(args.claude_port_probe.resolve(strict=True), root, env)
         gemini_port_gate(args.claude_port_probe.resolve(strict=True), root, env)
+        cline_port_gate(args.claude_port_probe.resolve(strict=True), root, env)
         claude_rehome_gate(args.claude_port_probe.resolve(strict=True), root, env)
 
 

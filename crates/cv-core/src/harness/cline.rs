@@ -44,6 +44,7 @@
 //! parsing lives here as `pub` helpers; `roo.rs` reuses them with Roo's paths + `Harness::Roo`.
 
 mod prompt;
+mod writer;
 
 use super::store::document::{array_iter, Fields, Index, Raw};
 use super::wire::anthropic;
@@ -825,8 +826,6 @@ pub fn emit_with_harness(
     opts: &crate::emit::EmitOptions,
     harness: Harness,
 ) -> Result<crate::harness::EmitResult> {
-    let session = crate::emit::materialized_session(session)?;
-    let session = session.as_ref();
     let extension = match harness {
         Harness::Roo => "Roo Code",
         _ => "Cline",
@@ -841,64 +840,12 @@ pub fn emit_with_harness(
     let cwd = opts.new_cwd.clone().or_else(|| session.cwd.clone());
     let cwd_str = cwd.as_ref().map(|p| p.to_string_lossy().to_string());
 
+    // Complete checked production before opening any destination transcript or sidecar.
+    let stage = writer::history(session, opts, harness, cwd_str.as_deref())?;
     let task_dir = out_dir.join("tasks").join(&new_id);
     fs::create_dir_all(&task_dir).with_context(|| format!("creating {}", task_dir.display()))?;
-
-    // ── api_conversation_history.json ──
-    let mut history: Vec<Value> = Vec::new();
-    let mut first_user_seen = false;
-    for msg in &session.messages {
-        match msg.role {
-            Role::User => {
-                // Thread the cwd through the first user turn's <environment_details>, mirroring
-                // where the parser reads it back from.
-                let inject = if !first_user_seen {
-                    first_user_seen = true;
-                    cwd_str.as_deref()
-                } else {
-                    None
-                };
-                let mut blocks = anthropic::user_blocks(&msg.content, &anthropic::ANTHROPIC)?;
-                if let Some(cwd) = inject {
-                    // Prepend a <task> title block (when we have one) so titles round-trip, then
-                    // append the environment_details so cwd extraction finds it.
-                    if let Some(title) = &session.title {
-                        blocks.insert(0, json!({ "type": "text", "text": format!("<task>{title}</task>") }));
-                    }
-                    blocks.push(json!({
-                        "type": "text",
-                        "text": format!(
-                            "<environment_details>\n# Current Working Directory ({cwd}) Files\n</environment_details>"
-                        ),
-                    }));
-                }
-                history.push(json!({ "role": "user", "content": Value::Array(blocks) }));
-            }
-            Role::Assistant => {
-                history.push(json!({
-                    "role": "assistant",
-                    "content": Value::Array(anthropic::assistant_blocks(&msg.content, &anthropic::ANTHROPIC)?),
-                }));
-            }
-            Role::Tool => {
-                // A tool turn is a `user` message of only tool_result blocks; the parser
-                // reclassifies it back to Role::Tool.
-                history.push(json!({
-                    "role": "user",
-                    "content": Value::Array(anthropic::tool_result_blocks(&msg.content)?),
-                }));
-            }
-            Role::System => {
-                history.push(json!({
-                    "role": "system",
-                    "content": Value::Array(anthropic::assistant_blocks(&msg.content, &anthropic::ANTHROPIC)?),
-                }));
-            }
-        }
-    }
     let history_path = task_dir.join("api_conversation_history.json");
-    fs::write(&history_path, serde_json::to_string_pretty(&Value::Array(history))?)
-        .with_context(|| format!("writing {}", history_path.display()))?;
+    super::store::publish_stage(stage, &history_path)?;
 
     // ── task_metadata.json (cwd + model hints; sidecar the parser falls back to for cwd) ──
     let mut meta = Map::new();

@@ -1,0 +1,197 @@
+use super::*;
+use crate::emit::{EmitOptions, ThinkingMode};
+
+fn fixture() -> Result<Session> {
+    let mut session = Session::new("source", Harness::Claude);
+    let ts = "2026-10-12T12:00:00Z".parse()?;
+    session.created_at = Some(ts);
+    session.updated_at = Some(ts + chrono::Duration::seconds(2));
+    session.cwd = Some("/synthetic/cline λ".into());
+    session.title = Some("title \"λ\"".into());
+    session.model = Some("session-model".into());
+    let mut user = Message::new(Role::User);
+    user.content = vec![
+        Block::Text {
+            text: "prompt\n雪".into(),
+        },
+        Block::Image {
+            media_type: Some("image/png".into()),
+            data_ref: Some("file:img".into()),
+        },
+        Block::File {
+            mime: Some("text/plain".into()),
+            path: Some("report λ.txt".into()),
+            source: Some("https://report".into()),
+        },
+    ];
+    let mut assistant = Message::new(Role::Assistant);
+    assistant.content = vec![
+        Block::Thinking {
+            text: "reasoning λ\n".into(),
+            signature: Some("signature".into()),
+            encrypted: None,
+            redacted: false,
+        },
+        Block::Thinking {
+            text: " ".into(),
+            signature: Some("signature-only".into()),
+            encrypted: None,
+            redacted: false,
+        },
+        Block::Thinking {
+            text: "".into(),
+            signature: None,
+            encrypted: Some("opaque".into()),
+            redacted: true,
+        },
+        Block::Text {
+            text: "answer \"\\\t".into(),
+        },
+        Block::ToolUse {
+            id: "linked".into(),
+            name: "tool".into(),
+            namespace: None,
+            input: json!({"β":[1,true,null]}).into(),
+        },
+        Block::File {
+            mime: None,
+            path: None,
+            source: Some("https://assistant/file".into()),
+        },
+    ];
+    let mut tools = Message::new(Role::Tool);
+    tools.content = vec![
+        Block::Text {
+            text: "not emitted in a Tool turn".into(),
+        },
+        Block::ToolResult {
+            tool_use_id: "linked".into(),
+            content: "tool result λ".into(),
+            is_error: true,
+            tool_name: Some("tool".into()),
+            status: None,
+            details: None,
+        },
+    ];
+    let mut empty = Message::new(Role::Assistant);
+    empty.content.push(Block::Thinking {
+        text: "".into(),
+        signature: None,
+        encrypted: None,
+        redacted: false,
+    });
+    session.messages = vec![
+        user,
+        assistant,
+        tools,
+        Message::new(Role::System),
+        empty,
+        Message::new(Role::User),
+    ];
+    Ok(session)
+}
+
+#[test]
+fn checked_cline_roo_match_frozen_pretty_all_modes() -> Result<()> {
+    let world = cv_testkit::World::in_process("cline-checked-wire");
+    let session = fixture()?;
+    for harness in [Harness::Cline, Harness::Roo] {
+        for mode in ThinkingMode::ALL {
+            let options = EmitOptions {
+                new_id: Some("fixed".into()),
+                thinking: mode,
+                ..Default::default()
+            };
+            let mut owned = session.clone();
+            crate::emit::project_owned_thinking_for_test(&mut owned, harness, mode);
+            let before = legacy::emit(
+                &owned,
+                &world.base.join(format!("old-{harness}-{mode}")),
+                &options,
+                harness,
+            )?;
+            let after = crate::emit::emit(
+                &session,
+                harness,
+                &world.base.join(format!("new-{harness}-{mode}")),
+                &options,
+            )?;
+            for name in [
+                "api_conversation_history.json",
+                "task_metadata.json",
+                "ui_messages.json",
+            ] {
+                let raw = fs::read(after.path.join(name))?;
+                assert_eq!(raw, fs::read(before.path.join(name))?, "{harness}/{mode}/{name}");
+                let parsed: Value = serde_json::from_slice(&raw)?;
+                assert_eq!(raw, serde_json::to_vec_pretty(&parsed)?);
+                assert!(!raw.ends_with(b"\n"));
+            }
+            assert!(after
+                .resume_hint
+                .as_ref()
+                .unwrap()
+                .contains(if harness == Harness::Roo { "Roo Code" } else { "Cline" }));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn checked_cline_guarded_failure_preserves_all_destination_files() -> Result<()> {
+    let world = cv_testkit::World::in_process("cline-checked-guard");
+    for text_leaf in [true, false] {
+        let path = world.base.join(format!("leaf-{text_leaf}.json"));
+        let raw = serde_json::to_vec(&if text_leaf {
+            json!("guarded λ\n".repeat(10000))
+        } else {
+            json!({"payload":"guarded λ\n".repeat(10000)})
+        })?;
+        fs::write(&path, &raw)?;
+        let json = crate::Json::source(&path, 0, raw.len() as u64)?;
+        let mut session = Session::new("source", Harness::Claude);
+        let mut message = Message::new(Role::Assistant);
+        message.content.push(if text_leaf {
+            Block::Text {
+                text: json.with_view(|v| v.source_text())?.unwrap(),
+            }
+        } else {
+            Block::ToolUse {
+                id: "id".into(),
+                name: "name".into(),
+                namespace: None,
+                input: json,
+            }
+        });
+        session.messages.push(message);
+        let out = world.base.join(format!("out-{text_leaf}"));
+        let task = out.join("tasks/fixed");
+        fs::create_dir_all(&task)?;
+        for name in [
+            "api_conversation_history.json",
+            "task_metadata.json",
+            "ui_messages.json",
+        ] {
+            fs::write(task.join(name), "original")?;
+        }
+        fs::write(&path, "changed source")?;
+        assert!(crate::emit::emit(
+            &session,
+            Harness::Cline,
+            &out,
+            &EmitOptions {
+                new_id: Some("fixed".into()),
+                ..Default::default()
+            }
+        )
+        .is_err());
+        for name in [
+            "api_conversation_history.json",
+            "task_metadata.json",
+            "ui_messages.json",
+        ] {
+            assert_eq!(fs::read_to_string(task.join(name))?, "original");
+        }
+    }
+    Ok(())
+}

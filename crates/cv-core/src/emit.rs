@@ -148,7 +148,10 @@ fn emitter_for(target: Harness) -> Option<EmitFn> {
 
 /// Targets whose native writer consumes guarded lazy leaves without owning their payloads.
 pub(crate) fn checked_target(target: Harness) -> bool {
-    matches!(target, Harness::Claude | Harness::Codex | Harness::Gemini)
+    matches!(
+        target,
+        Harness::Claude | Harness::Codex | Harness::Gemini | Harness::Cline | Harness::Roo
+    )
 }
 
 /// Emit `session` into `target`'s native format under `out_dir` (the target harness's storage root,
@@ -165,8 +168,8 @@ pub fn emit(session: &Session, target: Harness, out_dir: &Path, opts: &EmitOptio
     // [`Span`](crate::lazy::Span) — and a span that reached `serde_json::to_value` would serialize
     // as its `{source,off,len}` struct, shipping garbage into the target file. A lazily-parsed
     // session must be resolved before it hits an emitter; do it here (on a clone, since `emit`
-    // takes `&Session`) so no caller can forget. Codex can consume checked lazy fields
-    // directly through its staged writer. Both checked writers project all thinking modes
+    // takes `&Session`) so no caller can forget. Checked targets consume lazy fields
+    // directly through staged writers. Checked writers project all thinking modes
     // per block, preserving direct-emitter and dispatch equality without materializing the session.
     //
     // [`ThinkingMode`] is applied in the same place and on the same clone, for the same reason: it
@@ -499,7 +502,7 @@ pub fn prepare_selected(
 }
 
 /// Parse at native emission fidelity. Claude/Codex retain guarded full or complete bodies;
-/// cross-harness Gemini retains guarded full bodies. Same-harness Gemini keeps its complete
+/// cross-harness Gemini/Cline/Roo retain guarded full bodies. Same-harness Gemini/Cline/Roo keep their complete
 /// owned compatibility path. Public full/complete parsing still owns bodies by default.
 pub fn parse_for_emit(
     adapter: &dyn crate::harness::Adapter,
