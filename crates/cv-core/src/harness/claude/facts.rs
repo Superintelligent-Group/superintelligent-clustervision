@@ -253,9 +253,9 @@ fn project_view(view: JsonView<'_>, shape: Shape) -> Result<Value> {
         let Some(field) = fields.get(key) else { continue };
         let value = if let Some(child) = nested(shape, key) {
             project_view(field, child)?
-        } else if matches!((shape, key), (Shape::Top, "scheduledTaskId" | "scheduledFireId")) {
-            Value::Null
-        } else if matches!((shape, key), (Shape::Message, "id")) && !field.is_string()? {
+        } else if matches!((shape, key), (Shape::Top, "scheduledTaskId" | "scheduledFireId"))
+            || (matches!((shape, key), (Shape::Message, "id")) && !field.is_string()?)
+        {
             Value::Null
         } else {
             field.resolve()?.into_owned()
