@@ -1193,3 +1193,22 @@ trials, allocator disabled): 16 MiB default 25.47/22.51 → 43.07/40.90, revive 
 oracle cases include the separate 16/64 MiB giant tool-result and ignored-field controls. Full
 counters/trials/hashes are in `PRUNE-STAGED-EVIDENCE.json`. Destination canonical-path guards also
 reject a renamed source whose filename would otherwise be reused as its own prune output.
+
+### OpenCode files publication metadata follow-up (2026-10-12)
+
+The fixed-field history gate exposed dataset late-query peak growth even after shared decoded
+arenas bounded file handles. Registry diagnostics for 256 turns showed 768 captured sources and
+one arena, about 400 KiB of retained source/key metadata; no retained payload buffers. Source
+inventory publication was a larger contributor: it serialized and parsed a fresh complete stamp
+while holding both captured inventories, and serialized strings retained growth capacity.
+Publication now compares fresh typed entries directly against the captured records and releases
+unused string capacity after stamp construction. The stamp wire format and metadata identity /
+conditional-absence checks remain unchanged.
+
+An isolated native-debug control on the same 256-turn files fixture reduced publication absolute
+heap peak from 2,911,635 to 2,173,149 bytes. Each retained inventory string shrank from 524,288 to
+283,820 requested bytes; the externally serialized Snapshot remained 299,289 bytes. This is a
+source-metadata control, not a consumer-wide heap bound. Inventory/registry metadata still scales
+with distinct source files. Private probe/control evidence is under
+`/Users/ember/dev/cv-worktrees/encoded-arguments-evidence/source-metadata-control.json`; activated
+consumer gate composition remains the separate matched test.

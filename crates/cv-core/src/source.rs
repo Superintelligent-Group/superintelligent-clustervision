@@ -63,6 +63,14 @@ struct Records {
 pub struct Stamp(String);
 
 impl Stamp {
+    fn serialize(records: &Records) -> Option<Self> {
+        let mut text = serde_json::to_string(records).ok()?;
+        // These operation/checkpoint strings live across publication checks. Serializer growth
+        // capacity is unused afterward and otherwise doubles retained inventory storage.
+        text.shrink_to_fit();
+        Some(Self(text))
+    }
+
     fn records(&self) -> Option<Records> {
         let records: Records = serde_json::from_str(&self.0).ok()?;
         (records.version == 2).then_some(records)
@@ -225,7 +233,7 @@ impl Snapshot {
             }
             let mut records = self.dependencies.as_ref()?.records()?;
             records.reads = Some(reads.entries.values().cloned().collect());
-            Some(Stamp(serde_json::to_string(&records).ok()?))
+            Stamp::serialize(&records)
         })();
         Self {
             primary: self.primary,
@@ -295,6 +303,16 @@ impl Probe {
     }
 
     fn dependencies_from(&mut self, r: &SessionRef, primary: &Path) -> Option<Stamp> {
+        Stamp::serialize(&Records {
+            version: 2,
+            entries: self.dependency_entries(r, primary)?,
+            reads: None,
+        })
+    }
+
+    // Publication already has typed captured records; collect fresh entries without a second
+    // serialized stamp and parser allocation. The same inventory serves serialized checkpoints.
+    fn dependency_entries(&mut self, r: &SessionRef, primary: &Path) -> Option<Vec<Entry>> {
         let mut files = Vec::new();
         let mut directories = Vec::new();
         let ext = r.path.extension().and_then(|e| e.to_str());
@@ -498,14 +516,7 @@ impl Probe {
             }
             entries.insert(file.clone(), self.entry(&file)?);
         }
-        Some(Stamp(
-            serde_json::to_string(&Records {
-                version: 2,
-                entries: entries.into_values().collect(),
-                reads: None,
-            })
-            .ok()?,
-        ))
+        Some(entries.into_values().collect())
     }
 
     pub fn snapshot(&mut self, r: &SessionRef) -> Snapshot {
@@ -538,17 +549,20 @@ pub fn unchanged(r: &SessionRef, snapshot: &Snapshot) -> bool {
 /// Publication guard against the concrete adapter's source path.
 pub fn unchanged_from(r: &SessionRef, primary: &Path, snapshot: &Snapshot) -> bool {
     let mut probe = Probe::default();
-    let now = probe.snapshot_from(r, primary);
-    if now.primary != snapshot.primary {
+    let current_primary = probe
+        .entry(primary)
+        .and_then(|entry| entry.state)
+        .map_or((0, 0), |state| (state.modified_ns as i64, state.len as i64));
+    if current_primary != snapshot.primary {
         return false;
     }
     let Some(before) = snapshot.dependencies.as_ref().and_then(Stamp::records) else {
         return false;
     };
-    let Some(now) = now.dependencies.as_ref().and_then(Stamp::records) else {
+    let Some(now) = probe.dependency_entries(r, primary) else {
         return false;
     };
-    before.entries == now.entries
+    before.entries == now
         && before.reads.as_ref().is_none_or(|reads| {
             reads
                 .iter()
@@ -751,6 +765,54 @@ pub fn update(_consumer: &str, _updates: &[Update]) {}
 
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
+    #[test]
+    fn typed_publication_matches_serialized_inventory_and_preserves_wire() {
+        let world = cv_testkit::World::in_process("source-typed-publication");
+        let storage = world.base.join("storage");
+        for dir in ["session/project", "message/sid", "part/mid"] {
+            std::fs::create_dir_all(storage.join(dir)).unwrap();
+        }
+        let path = storage.join("session/project/sid.json");
+        std::fs::write(&path, "{}").unwrap();
+        std::fs::write(storage.join("message/sid/header.json"), r#"{"id":"mid"}"#).unwrap();
+        let part = storage.join("part/mid/part.json");
+        std::fs::write(&part, "before").unwrap();
+        let r = SessionRef::new("sid", Harness::OpenCode, path);
+        let absent = world.base.join("conditional");
+        let mut reads = ReadSet::default();
+        reads.record(&absent);
+        let before = Probe::default().snapshot(&r).with_reads(&reads);
+        let stamp = before.dependencies.as_ref().unwrap();
+        assert_eq!(stamp.0, serde_json::to_string(&stamp.records().unwrap()).unwrap());
+        assert_eq!(stamp.0.capacity(), stamp.0.len());
+        let reference = |captured: &Snapshot| {
+            let mut probe = Probe::default();
+            let now = probe.snapshot(&r);
+            let old = captured.dependencies.as_ref().unwrap().records().unwrap();
+            let fresh = now.dependencies.as_ref().unwrap().records().unwrap();
+            now.primary == captured.primary
+                && old.entries == fresh.entries
+                && old.reads.as_ref().is_none_or(|reads| {
+                    reads
+                        .iter()
+                        .all(|entry| probe.entry(&entry.path).as_ref() == Some(entry))
+                })
+        };
+        assert!(reference(&before));
+        assert!(unchanged(&r, &before));
+        std::fs::write(&absent, "created").unwrap();
+        assert_eq!(unchanged(&r, &before), reference(&before));
+        assert!(!unchanged(&r, &before));
+        std::fs::remove_file(&absent).unwrap();
+        std::fs::write(&part, "after!").unwrap();
+        assert_eq!(unchanged(&r, &before), reference(&before));
+        assert!(!unchanged(&r, &before));
+        let updated = Probe::default().snapshot(&r).with_reads(&ReadSet::default());
+        std::fs::write(storage.join("part/mid/new.json"), "new").unwrap();
+        assert_eq!(unchanged(&r, &updated), reference(&updated));
+        assert!(!unchanged(&r, &updated));
+    }
+
     #[test]
     fn cursor_cli_metadata_creation_and_rewrite_invalidate_consumers() {
         let world = cv_testkit::World::in_process("cursor-cli-source-metadata");
@@ -1020,8 +1082,9 @@ mod tests {
         let before = Probe::default().snapshot(&r).with_reads(&ReadSet::default());
         std::fs::write(&wire, "line1\nline2\n").unwrap();
         let after = Probe::default().snapshot(&r).with_reads(&ReadSet::default());
-        assert_eq!(before.primary, after.primary);
-        assert_ne!(before.dependencies, after.dependencies);
+        // The finalized-step adapter now uses wire.jsonl as its concrete append primary.
+        assert_ne!(before.primary, after.primary);
+        assert_eq!(before.dependencies, after.dependencies);
         std::fs::write(session.join("state.json"), "after!").unwrap();
         assert_ne!(
             after.dependencies,
