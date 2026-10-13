@@ -248,10 +248,11 @@ fn sessions(query: &str) -> (u16, Value) {
     if let Some(n) = limit {
         refs.truncate(n);
     }
-    ok(json!(refs
-        .iter()
-        .map(|r| crate::rows::session_row(r, size_of(r)))
-        .collect::<Vec<_>>()))
+    ok(Value::Array(
+        refs.iter()
+            .map(|r| crate::rows::session_row(r, size_of(r)))
+            .collect(),
+    ))
 }
 
 /// The transcript's on-disk size, or `None` when it has been deleted since discovery.
