@@ -3178,3 +3178,31 @@ clippy passes and the native 64 MiB heap peak remains 1,317,890 bytes. Ten instr
 children total (eight original matched controls plus two focused recovery runs), no
 second scale matrix. Unicode declassification/oversized usage and other operations
 retain their earlier explicit fallback boundaries; this is not an across-product CPU claim.
+
+### Checked Claude port ownership (2026-10-13)
+
+The actual cross-harness `parse_for_emit` → `emit_report` port now keeps lazy body sources
+through Native, Text and Drop thinking modes. A checked Anthropic writer stages one record
+at a time; borrowed replay overlays preserve arbitrary metadata and carrier content. Global
+orphan/parent repair retains only UUID/tool-ID facts rather than `Vec<Value>` bodies. The
+resumability verifier frames checked source ranges instead of reading the complete output into
+a String and Value history. Direct Claude emitter callers now honor their thinking option,
+an explicit correction to the former direct API; dispatch mode semantics remain unchanged.
+
+[Whole-operation allocation evidence](../../tools/profiling/results/claude-port-heap-native.json)
+includes source preparation, emission, resumability verification and fidelity reparse. Growing
+escaped Unicode reasoning from 17,709,284 to 70,837,134 decoded UTF-8 bytes changes native
+peak above baseline from 81,334,600/325,303,280 bytes to 1,398,327 bytes in both controls.
+The large Text control has the same 1,398,327-byte peak; Drop falls from 205,126,764 to
+401,022 bytes. Output fields and fidelity match the independent old operation after only
+generated UUID/parent normalization. Stable-ID unit controls additionally compare exact
+legacy bytes for carrier tool arrays, replay/type/content overrides, orphan/duplicate IDs,
+parent repair and every thinking mode. Strict verifier acceptance/error controls compare the
+independent old verifier; a mutation during block serialization cannot publish a destination.
+
+Requested allocation bytes decline, but request counts increase (large Native: 17,876 →
+73,856) with bounded chunk decoding. This is an ownership result, not a CPU/latency, physical
+I/O or RSS claim. Staging writes output-sized private disk bytes; no new physical-read
+measurement is implied. Lazy IR and identity facts still grow with history, requested owned
+metadata still costs its size, and same-harness complete parsing remains owned to preserve
+carriers. Other emitters' non-native thinking paths are outside this Claude change.

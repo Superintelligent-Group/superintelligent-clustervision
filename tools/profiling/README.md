@@ -421,3 +421,28 @@ fixed repeats (prune.rs44a1396b). Raw artifacts and warmed exclusive target rema
 in the stopped cv-cachegrind-control volume `/scratch/prune-cpu-control`; host copy
 and report: `/Users/ember/dev/cv-worktrees/prune-cpu-evidence`. No other container
 artifacts, installed binary or real stores were changed.
+
+## Verified Claude port ownership
+
+`claude_port_probe` measures the actual `parse_for_emit` → `emit_report` composition,
+including resumability verification and fidelity reparse. Build with `--features probe-heap`
+and default core features; stderr is Rust allocation counters, stdout is the result/fidelity.
+The checked-in native artifact uses debug Rust1.99.0 on macOS ARM64, one Rayon worker.
+It excludes native allocations/mmap/stacks and makes no CPU or RSS claim.
+
+```sh
+python3 tools/profiling/claude-port-fixture.py /owned/new-source.jsonl
+CARGO_TARGET_DIR=/owned/target CLUSTERVISION_HOME=/owned/build-home CARGO_BUILD_JOBS=2 \
+  cargo build -p clustervision-core --example claude_port_probe --features probe-heap
+CLUSTERVISION_HOME=/owned/new-catalog RAYON_NUM_THREADS=1 \
+  /owned/target/debug/examples/claude_port_probe codex /owned/new-source.jsonl \
+  /owned/new-output native
+```
+
+Use fresh scratch paths and repeat with `text`/`drop` for mode controls. Fixture generation
+is outside the measured child and produces synthetic data, not a genuine corpus capture.
+`--characters` counts Unicode characters; record actual source/decoded UTF-8 byte sizes.
+The [paired artifact](results/claude-port-heap-native.json) compares an additive copy of this
+probe on `f08377be` against the checked writer. Normalize only generated top-level UUID/parent
+IDs consistently; compare every other field, message count and fidelity exactly. Stable-ID
+legacy unit oracles separately check byte equality and unusual replay/carrier behavior.

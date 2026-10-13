@@ -89,6 +89,9 @@ impl StringCount {
     }
 }
 impl Builder<'_> {
+    pub(crate) fn decoded_len(&self) -> usize {
+        self.1
+    }
     /// Append decoded text, bounding re-encoding scratch even for giant borrowed chunks.
     pub(crate) fn push(&mut self, mut text: &str) -> Result<()> {
         let len = text.len();

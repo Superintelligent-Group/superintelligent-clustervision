@@ -161,11 +161,16 @@ pub fn emit(session: &Session, target: Harness, out_dir: &Path, opts: &EmitOptio
     // session must be resolved before it hits an emitter; do it here (on a clone, since `emit`
     // takes `&Session`) so no caller can forget. Codex can consume checked lazy fields
     // directly through its staged writer; native thinking therefore needs no whole-session clone.
+    // Claude's checked writer additionally projects all thinking modes per block, preserving
+    // direct-emitter and dispatch equality without materializing the session.
     //
     // [`ThinkingMode`] is applied in the same place and on the same clone, for the same reason: it
-    // is one rewrite of the IR that every emitter must see, and doing it here means no emitter has
-    // to know the mode exists. It runs AFTER materialization (it reads `Thinking.text`).
+    // remains the shared fallback for emitters without a checked block writer. It runs AFTER
+    // materialization (it reads `Thinking.text`).
     let mut owned: Option<Session> = None;
+    if target == Harness::Claude {
+        return f(session, out_dir, opts);
+    }
     if has_unresolved_spans(session) && !(target == Harness::Codex && opts.thinking == ThinkingMode::Native) {
         let mut s = session.clone();
         s.materialize()?;
@@ -240,7 +245,7 @@ fn apply_thinking_mode(session: &mut Session, target: Harness, mode: ThinkingMod
 
 /// What becomes of one thinking block under a [`ThinkingMode`] for one target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ThinkingFate {
+pub(crate) enum ThinkingFate {
     /// Written as a thinking block — the target holds at least one of its payloads.
     Keep,
     /// Written as a [`Block::Text`] carrying the reasoning text verbatim.
@@ -260,7 +265,17 @@ fn thinking_fate(
     encrypted: Option<&str>,
     redacted: bool,
 ) -> ThinkingFate {
-    let has_text = !text.trim().is_empty();
+    thinking_fate_with_presence(target, mode, !text.trim().is_empty(), signature, encrypted, redacted)
+}
+
+pub(crate) fn thinking_fate_with_presence(
+    target: Harness,
+    mode: ThinkingMode,
+    has_text: bool,
+    signature: Option<&str>,
+    encrypted: Option<&str>,
+    redacted: bool,
+) -> ThinkingFate {
     // Whether the target can hold this block AS a thinking block: any one payload is enough.
     let structural = (has_text && target_holds(target, "thinking_text"))
         || (signature.is_some() && target_holds(target, "thinking_signature"))
@@ -280,7 +295,7 @@ fn thinking_fate(
 
 /// The stand-in text [`ThinkingMode::Text`] writes for a block with no plaintext: what it was and
 /// how big it was, in one short line. Never pretends to be the reasoning itself.
-fn thinking_placeholder(signature: Option<&str>, encrypted: Option<&str>, redacted: bool) -> String {
+pub(crate) fn thinking_placeholder(signature: Option<&str>, encrypted: Option<&str>, redacted: bool) -> String {
     if let Some(e) = encrypted {
         format!("[thinking: encrypted reasoning blob, {} bytes, not portable]", e.len())
     } else if let Some(s) = signature {
@@ -474,7 +489,8 @@ pub fn prepare_selected(
 }
 
 /// Parse at native emission fidelity. Same-harness ports retain complete records; cross-harness
-/// Codex ports retain full metadata with lazy payloads consumed directly by its staged writer.
+/// Codex and Claude ports retain full metadata with guarded lazy payloads consumed directly by
+/// their staged writers. Same-harness complete records retain their existing parser contract.
 pub fn parse_for_emit(
     adapter: &dyn crate::harness::Adapter,
     reference: &SessionRef,
@@ -485,15 +501,15 @@ pub fn parse_for_emit(
     } else {
         ParseOptions::full()
     };
-    if target == Harness::Codex && reference.harness != target {
+    if matches!(target, Harness::Codex | Harness::Claude) && reference.harness != target {
         options.spans = true;
     }
-    let mut session = if target == Harness::Codex && reference.harness != target {
+    let mut session = if matches!(target, Harness::Codex | Harness::Claude) && reference.harness != target {
         prepare::parse(adapter, reference, &options)?
     } else {
         crate::stream::collect_with(adapter, reference, &options)?
     };
-    if target != Harness::Codex || reference.harness == target {
+    if !matches!(target, Harness::Codex | Harness::Claude) || reference.harness == target {
         session.materialize()?;
     }
     Ok(session)
@@ -508,6 +524,7 @@ mod tests {
     #[cfg(feature = "sqlite")]
     use crate::harness::{opencode::OpenCode, Adapter};
     use crate::ir::*;
+    use anyhow::Context as _;
     use serde_json::json;
     use uuid::Uuid;
 
@@ -645,6 +662,281 @@ mod tests {
         assert!(emit_report(&session, Harness::Codex, &out.join("lazy"), &opts).is_err());
         assert_eq!(fs::read(&actual.path)?, before);
         fs::remove_dir_all(out)?;
+        Ok(())
+    }
+
+    #[test]
+    fn claude_checked_writer_matches_legacy_payloads_metadata_and_resumability() -> Result<()> {
+        use crate::harness::claude::emit::emit_legacy;
+        let world = cv_testkit::World::in_process("claude-checked-legacy");
+        let text_path = world.base.join("text.json");
+        let args_path = world.base.join("args.json");
+        fs::write(&text_path, serde_json::to_vec(&"a\"\\\nλ".repeat(5000))?)?;
+        fs::write(&args_path, br#"{"first":1.20,"blob":"escaped\nargument","first":2}"#)?;
+        let text = crate::Json::source(&text_path, 0, fs::metadata(&text_path)?.len())?
+            .with_view(|view| view.source_text()?.context("source text"))?;
+        let args = crate::Json::source(&args_path, 0, fs::metadata(&args_path)?.len())?;
+        let mut session = Session::new("source", Harness::Claude);
+        session.cwd = Some("/synthetic/claude-checked".into());
+        session.created_at = Some("2026-10-12T12:00:00Z".parse()?);
+        session.title = Some("retained title".into());
+        let mut user = Message::new(Role::User);
+        user.id = Some("u".into());
+        user.content = vec![
+            Block::Text {
+                text: String::new().into(),
+            },
+            Block::Text { text: text.clone() },
+            Block::Text {
+                text: String::new().into(),
+            },
+        ];
+        session.messages.push(user);
+        let mut dropped = Message::new(Role::System);
+        dropped.id = Some("system".into());
+        dropped.parent_id = Some("u".into());
+        session.messages.push(dropped);
+        let mut assistant = Message::new(Role::Assistant);
+        assistant.id = Some("a".into());
+        assistant.parent_id = Some("system".into());
+        assistant.content = vec![
+            Block::Thinking {
+                text: text.clone(),
+                signature: Some("signature".into()),
+                encrypted: None,
+                redacted: false,
+            },
+            Block::Thinking {
+                text: String::new().into(),
+                signature: None,
+                encrypted: None,
+                redacted: true,
+            },
+            Block::ToolUse {
+                id: "answered".into(),
+                name: "Read".into(),
+                input: args,
+                namespace: None,
+            },
+            Block::ToolUse {
+                id: "orphan".into(),
+                name: "Read".into(),
+                input: Value::Null.into(),
+                namespace: None,
+            },
+        ];
+        assistant.harness_extra_mut(Harness::Claude).extend([
+            ("version".into(), json!("kept")),
+            ("message.stop_reason".into(), Value::Null),
+            ("unknown".into(), json!({"large":"replay metadata ".repeat(5000)})),
+        ]);
+        session.messages.push(assistant);
+        let mut orphan = Message::new(Role::Assistant);
+        orphan.id = Some("gone".into());
+        orphan.parent_id = Some("a".into());
+        orphan.content.push(Block::ToolUse {
+            id: "orphan-only".into(),
+            name: "Read".into(),
+            input: Value::Null.into(),
+            namespace: None,
+        });
+        session.messages.push(orphan);
+        let mut result = Message::new(Role::Tool);
+        result.id = Some("result".into());
+        result.parent_id = Some("gone".into());
+        result.content.push(Block::ToolResult {
+            tool_use_id: "answered".into(),
+            content: text.clone(),
+            tool_name: Some("Read".into()),
+            is_error: false,
+            status: None,
+            details: Some(json!({"kept":"detail","persistedOutput":"derived-only"})),
+        });
+        session.messages.push(result);
+        let mut carrier = Message::new(Role::System);
+        carrier.extra.insert(crate::harness::claude::CARRIER_KEY.into(),json!({"type":"system","uuid":"carrier","parentUuid":"missing","sessionId":"old","cwd":"old","isSidechain":true,"agentId":"old","unrecognized":{"must":"survive"}}));
+        session.messages.push(carrier);
+        let mut raw_carrier = Message::new(Role::System);
+        raw_carrier.extra.insert(crate::harness::claude::CARRIER_KEY.into(),json!({"type":"assistant","uuid":"raw-carrier","parentUuid":"carrier","message":{"role":"assistant","content":[{"type":"tool_use","id":"answered"},{"type":"tool_use","id":"raw-orphan"},{"type":"text","text":"verbatim carrier content"}]}}));
+        session.messages.push(raw_carrier);
+        let mut raw_result = Message::new(Role::System);
+        raw_result.extra.insert(crate::harness::claude::CARRIER_KEY.into(),json!({"type":"user","uuid":"raw-result","message":{"content":[{"type":"tool_result","tool_use_id":"carrier-answer","content":"raw result"}]}}));
+        session.messages.push(raw_result);
+        let mut carrier_call = Message::new(Role::Assistant);
+        carrier_call.id = Some("carrier-call".into());
+        carrier_call.content.push(Block::ToolUse {
+            id: "carrier-answer".into(),
+            name: "Read".into(),
+            input: Value::Null.into(),
+            namespace: None,
+        });
+        session.messages.push(carrier_call);
+        // Duplicate UUID/tool IDs, raw content overrides, and forward parents keep their old rules.
+        let mut override_msg = Message::new(Role::Assistant);
+        override_msg.id = Some("a".into());
+        override_msg.parent_id = Some("future".into());
+        override_msg.harness_extra_mut(Harness::Claude).extend([
+            ("message".into(),json!({"role":"assistant","opaque":true,"content":[{"type":"tool_use","id":"raw-orphan"},{"type":"text","text":"raw text"}]})),
+            ("message.custom".into(),json!("inner kept"))]);
+        session.messages.push(override_msg);
+        let mut future = Message::new(Role::User);
+        future.id = Some("future".into());
+        future.content = vec![
+            Block::Text { text: "mixed".into() },
+            Block::Image {
+                media_type: Some("image/png".into()),
+                data_ref: Some("file:img".into()),
+            },
+            Block::File {
+                mime: Some("text/plain".into()),
+                path: Some("doc".into()),
+                source: Some("https://example.invalid/doc".into()),
+            },
+        ];
+        session.messages.push(future);
+        for mode in ThinkingMode::ALL {
+            for sidechain in [None, Some(("root".to_owned(), "agent".to_owned()))] {
+                let opts = EmitOptions {
+                    new_id: Some("fixed-id".into()),
+                    thinking: mode,
+                    sidechain_of: sidechain,
+                    ..Default::default()
+                };
+                // This oracle models old dispatch. Legacy direct calls ignored thinking options.
+                let mut owned = session.clone();
+                owned.materialize()?;
+                if mode != ThinkingMode::Native {
+                    apply_thinking_mode(&mut owned, Harness::Claude, mode);
+                }
+                let old = emit_legacy(
+                    &owned,
+                    &world
+                        .base
+                        .join(format!("old-{}-{}", mode.as_str(), opts.sidechain_of.is_some())),
+                    &opts,
+                )?;
+                let new = emit(
+                    &session,
+                    Harness::Claude,
+                    &world
+                        .base
+                        .join(format!("new-{}-{}", mode.as_str(), opts.sidechain_of.is_some())),
+                    &opts,
+                )?;
+                assert_eq!(
+                    fs::read(&old.path)?,
+                    fs::read(&new.path)?,
+                    "mode={mode:?}, sidechain={:?}",
+                    opts.sidechain_of
+                );
+                verify_claude_resumable(&new.path, opts.sidechain_of.as_ref().map(|(_, a)| a.as_str()))?;
+                let direct = crate::harness::claude::emit::emit(
+                    &session,
+                    &world
+                        .base
+                        .join(format!("direct-{}-{}", mode.as_str(), opts.sidechain_of.is_some())),
+                    &opts,
+                )?;
+                assert_eq!(
+                    fs::read(&new.path)?,
+                    fs::read(&direct.path)?,
+                    "direct callers honor every thinking mode too"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn claude_checked_writer_type_and_content_only_overrides_match_old_dispatch() -> Result<()> {
+        let world = cv_testkit::World::in_process("claude-extra-overrides");
+        for (case, role, override_content) in [
+            (0, Role::Assistant, false),
+            (1, Role::User, false),
+            (2, Role::Assistant, true),
+            (3, Role::User, true),
+        ] {
+            let mut session = Session::new("s", Harness::Claude);
+            session.created_at = Some("2026-10-12T12:00:00Z".parse()?);
+            let mut message = Message::new(role);
+            message.id = Some("fixed-message".into());
+            message.content = vec![
+                Block::ToolUse {
+                    id: "orphan".into(),
+                    name: "Read".into(),
+                    input: Value::Null.into(),
+                    namespace: None,
+                },
+                Block::Text {
+                    text: "original text".into(),
+                },
+            ];
+            let bag = message.harness_extra_mut(Harness::Claude);
+            bag.insert(
+                "type".into(),
+                json!(if role == Role::Assistant { "user" } else { "assistant" }),
+            );
+            if override_content {
+                bag.insert(
+                    "message.content".into(),
+                    json!([{"type":"tool_use","id":"raw-orphan"},{"type":"text","text":"override text"}]),
+                );
+            }
+            for i in 0..128 {
+                bag.insert(format!("opaque-{i}"), json!({"kept":i}));
+            }
+            session.messages.push(message);
+            let opts = EmitOptions {
+                new_id: Some("fixed-id".into()),
+                ..Default::default()
+            };
+            let old =
+                crate::harness::claude::emit::emit_legacy(&session, &world.base.join(format!("old-{case}")), &opts)?;
+            let new = emit(
+                &session,
+                Harness::Claude,
+                &world.base.join(format!("new-{case}")),
+                &opts,
+            )?;
+            assert_eq!(fs::read(old.path)?, fs::read(new.path)?, "case {case}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn claude_checked_writer_source_failure_preserves_destination_in_every_mode() -> Result<()> {
+        let world = cv_testkit::World::in_process("claude-checked-failure");
+        let source = world.base.join("body.json");
+        fs::write(&source, serde_json::to_vec(&"checked body".repeat(3000))?)?;
+        let text = crate::Json::source(&source, 0, fs::metadata(&source)?.len())?
+            .with_view(|v| v.source_text()?.context("source text"))?;
+        let mut session = Session::new("s", Harness::Codex);
+        let mut message = Message::new(Role::Assistant);
+        message.id = Some("a".into());
+        message.content.push(Block::Thinking {
+            text,
+            signature: Some("sig".into()),
+            encrypted: None,
+            redacted: false,
+        });
+        session.messages.push(message);
+        fs::write(&source, serde_json::to_vec(&"changed body".repeat(3000))?)?;
+        for mode in ThinkingMode::ALL {
+            let dir = world.base.join(mode.as_str());
+            fs::create_dir_all(dir.join("-"))?;
+            let destination = dir.join("-/fixed.jsonl");
+            fs::write(&destination, "existing destination")?;
+            let opts = EmitOptions {
+                new_id: Some("fixed".into()),
+                thinking: mode,
+                ..Default::default()
+            };
+            assert!(emit(&session, Harness::Claude, &dir, &opts).is_err());
+            assert_eq!(fs::read(&destination)?, b"existing destination");
+            // Direct emitter callers preserve the same guarded boundary as dispatch callers.
+            assert!(crate::harness::claude::emit::emit(&session, &dir, &opts).is_err());
+            assert_eq!(fs::read(&destination)?, b"existing destination");
+        }
         Ok(())
     }
 

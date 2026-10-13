@@ -15,6 +15,7 @@ use serde_json::Value;
 
 pub mod anthropic;
 pub mod openai;
+pub(crate) mod write;
 
 /// A part is an image whatever the family calls it.
 pub(crate) fn is_image_part(ty: &str) -> bool {

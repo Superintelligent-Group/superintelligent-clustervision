@@ -4,6 +4,7 @@
 //! key or two, which a [`Quirks`] constant names so the adapter does not re-type the shape.
 
 use super::{coerce_text, str_field};
+pub(crate) mod write;
 use crate::ir::Block;
 use crate::lazy::Text;
 use serde_json::{json, Map, Value};

@@ -5,6 +5,7 @@
 //! `crate::emit::emitter_for`; the shared skeleton is in [`crate::emit`].
 
 use crate::emit::*;
+#[cfg(test)]
 use crate::harness::store::write_jsonl;
 use crate::harness::wire::anthropic;
 use crate::harness::EmitResult;
@@ -47,7 +48,11 @@ pub(crate) fn claude_encode_cwd(cwd: &Path) -> String {
     out
 }
 
-pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<EmitResult> {
+mod stream;
+pub use stream::emit;
+
+#[cfg(test)]
+pub(crate) fn emit_legacy(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<EmitResult> {
     let session = crate::emit::materialized_session(session)?;
     let session = session.as_ref();
     // The id every record is stamped with, and the id the caller resumes by. For a main-thread
@@ -336,6 +341,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
 }
 
 /// The content blocks of a threaded record, if it has any.
+#[cfg(test)]
 fn record_blocks(v: &Value) -> Option<&Vec<Value>> {
     v.pointer("/message/content").and_then(Value::as_array)
 }
@@ -357,6 +363,7 @@ fn record_blocks(v: &Value) -> Option<&Vec<Value>> {
 ///    span lifted from a sub-agent joins the thread instead of being skipped by the loader.
 ///
 /// [`verify_claude_resumable`] checks the same three on a written file.
+#[cfg(test)]
 fn make_resumable(lines: &mut Vec<Value>, agent: Option<&str>) {
     // 1. Orphan calls.
     let answered: std::collections::HashSet<String> = lines
@@ -426,7 +433,13 @@ fn make_resumable(lines: &mut Vec<Value>, agent: Option<&str>) {
 /// `None`: no record with `isSidechain: true`; `Some`: every record `isSidechain: true` with that
 /// `agentId`). The post-emit assertion [`emit_verified`] runs on every Claude emit; an error here
 /// is a bug in cv, never in the input.
+mod verify;
 pub fn verify_claude_resumable(path: &Path, agent: Option<&str>) -> Result<()> {
+    verify::verify(path, agent)
+}
+
+#[cfg(test)]
+fn verify_legacy(path: &Path, agent: Option<&str>) -> Result<()> {
     let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let lines: Vec<Value> = text
         .lines()
@@ -505,6 +518,7 @@ fn is_internal_extra_key(k: &str) -> bool {
 /// IR-first-classed keys (uuid/parentUuid/timestamp/type and `message.content`) are never present
 /// in `extra` (the parser excludes them), so they're untouched and the [`Message`]'s own fields
 /// remain authoritative.
+#[cfg(test)]
 fn apply_claude_extra(line: &mut Map<String, Value>, extra: &Map<String, Value>) {
     use crate::harness::claude::MESSAGE_EXTRA_PREFIX;
     for (k, val) in extra {
@@ -554,6 +568,7 @@ fn claude_usage(usage: Option<&crate::ir::Usage>) -> Option<Value> {
 
 /// An assistant line's content: the Anthropic blocks, never empty (an empty turn is one empty
 /// text block, as Claude Code writes it).
+#[cfg(test)]
 fn claude_assistant_blocks(content: &[Block]) -> Result<Vec<Value>> {
     let mut out = anthropic::assistant_blocks(content, &anthropic::ANTHROPIC)?;
     if out.is_empty() {
@@ -564,10 +579,12 @@ fn claude_assistant_blocks(content: &[Block]) -> Result<Vec<Value>> {
 
 /// A user line's content: text/image natively, a [`Block::File`] as the `document` attachment
 /// the parser reads back into a File, a stray tool result kept as a `tool_result` block.
+#[cfg(test)]
 fn claude_user_blocks(content: &[Block]) -> Result<Vec<Value>> {
     anthropic::user_blocks(content, &anthropic::ANTHROPIC)
 }
 
+#[cfg(test)]
 fn claude_tool_result_blocks(content: &[Block]) -> Result<Vec<Value>> {
     anthropic::tool_result_blocks(content)
 }
@@ -582,6 +599,7 @@ fn claude_tool_result_blocks(content: &[Block]) -> Result<Vec<Value>> {
 /// re-derived from the transcript stub on every parse and was never a Claude wire field — replaying
 /// it would invent a key the source record never had). `None` when the block carried nothing but
 /// that pointer.
+#[cfg(test)]
 fn claude_tool_use_result(content: &[Block]) -> Option<Value> {
     let details = content.iter().find_map(|b| match b {
         Block::ToolResult { details: Some(d), .. } => Some(d),
@@ -601,3 +619,49 @@ fn claude_tool_use_result(content: &[Block]) -> Option<Value> {
 // ------------------------------------------------------------------------------------------------
 // shared by the emitters (each lives beside its reader: `harness/<h>/emit.rs`)
 // ------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod checked_verifier_tests {
+    use super::*;
+    #[test]
+    fn resumability_checked_views_match_legacy_acceptance_and_errors() -> Result<()> {
+        let world = cv_testkit::World::new("claude-verifier-oracle");
+        let path = world.base.join("output.jsonl");
+        let nested = format!("{}0{}", "[".repeat(140), "]".repeat(140));
+        let cases = vec![
+            "\n \t\n\u{2003}\n".to_string(),
+            r#"{"uuid":"a","uuid":"b","parentUuid":"b"}"#.into(),
+            r#"{"uuid":"a","message":{"content":[{"type":"tool_use","id":"c"}]} }
+{"uuid":"a","parentUuid":"a","message":{"content":[{"type":"tool_result","tool_use_id":"c"}]}}"#
+                .replace("\\n", "\n"),
+            r#"{"uuid":"a","message":{"content":[{"type":"tool_use","id":"missing"}],"content":[]}}"#.into(),
+            r#"{"parentUuid":"missing"}"#.into(),
+            r#"{"message":{"content":[{"type":"tool_use","id":"missing"}]}}"#.into(),
+            r#"{"isSidechain":true,"agentId":"agent"}"#.into(),
+            r#"{"isSidechain":false,"agentId":17}"#.into(),
+            r#"{"ignored":"\ud800"}"#.into(),
+            r#"{"ignored":1e400}"#.into(),
+            format!("{{\"ignored\":{nested}}}"),
+            "\u{2003}{\"uuid\":\"a\"}".into(),
+            "true\n17\n[]\nnull".into(),
+        ];
+        for case in cases {
+            fs::write(&path, &case)?;
+            for agent in [None, Some("agent")] {
+                let old = verify_legacy(&path, agent);
+                let new = verify_claude_resumable(&path, agent);
+                assert_eq!(
+                    old.is_ok(),
+                    new.is_ok(),
+                    "case={case:?}, agent={agent:?}, old={old:?}, new={new:?}"
+                );
+                if let (Err(old), Err(new)) = (old, new) {
+                    if !old.to_string().contains("not a JSON record") {
+                        assert_eq!(old.to_string(), new.to_string());
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}

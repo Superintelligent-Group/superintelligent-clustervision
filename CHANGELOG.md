@@ -12,6 +12,8 @@
 
 - Rich lazy Cursor IDE reads retain checked payload ranges, avoiding unused bubble ownership while preserving JSON fields and record acceptance.
 
+- Claude export streams checked payloads and honors thinking modes without whole-session copies, preserving resumability and verified fidelity.
+
 - Forward JSON windows avoid constructing unselected Claude rich metadata, preserving record acceptance, selected details and final session metadata.
 - Claude checkpoint counts retain restorable result facts; cached counts from older views are recomputed.
 
