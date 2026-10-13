@@ -469,6 +469,12 @@ pub fn matches_streamed(
     matches_streamed_with_probe(query, adapter, r, text_sets, &mut crate::source::Probe::default())
 }
 
+struct StreamedMatch {
+    decision: anyhow::Result<bool>,
+    source: crate::source::Snapshot,
+    counted: Option<crate::stream::Counted>,
+}
+
 fn matches_streamed_with_probe(
     query: &SessionQuery,
     adapter: &dyn crate::harness::Adapter,
@@ -476,36 +482,47 @@ fn matches_streamed_with_probe(
     text_sets: &TextSets,
     probe: &mut crate::source::Probe,
 ) -> anyhow::Result<bool> {
+    let matched = reduce_streamed(query, adapter, r, text_sets, probe)?;
+    if let Some(counted) = matched.counted {
+        counted.record_with_source(r, &matched.source);
+    }
+    matched.decision
+}
+
+/// Reduce independently; publication belongs to the caller's serial stage.
+fn reduce_streamed(
+    query: &SessionQuery,
+    adapter: &dyn crate::harness::Adapter,
+    r: &SessionRef,
+    text_sets: &TextSets,
+    probe: &mut crate::source::Probe,
+) -> anyhow::Result<StreamedMatch> {
     let mut sink = FactSink::new(query);
     let affordances = query
         .needles(FieldId::Has)
         .iter()
         .any(|flag| crate::affordance::Kind::parse(flag).is_some());
-    // Reuse the counted pass's classifier and side-store rows instead of extracting a second
-    // set of affordance rows merely to ask which kinds occurred. The operation's probe also
-    // shares sibling/directory metadata across refs, both here and on the cached fast path.
-    let session = if affordances {
-        let source = probe.snapshot(r);
-        let (session, counted) = crate::stream::stream_counting(adapter, r, &crate::ParseOptions::lazy(), &mut sink)?;
-        if let Some(counted) = counted {
-            sink.facts.counts = Some(counted.counts.clone());
-            counted.record_with_source(r, &source);
-        }
-        session
-    } else {
-        // Preserve conditional side-store reads while sharing dependency probes across refs.
-        let source = probe.snapshot(r);
-        crate::stream::stream_counted_with_source(adapter, r, &crate::ParseOptions::lazy(), &mut sink, &source)?
-    };
-    let reduced = sink.finish(&session)?;
-    let facts = SessionFacts {
-        reduced: Some(&reduced),
-        ..SessionFacts::new(r, &session, text_sets)
-    };
-    query.matches(&Facts {
-        r,
-        session: Some(&session),
-        ext: &facts,
+    let source = probe.snapshot(r);
+    let (session, counted) = crate::stream::stream_counting(adapter, r, &crate::ParseOptions::lazy(), &mut sink)?;
+    if affordances {
+        sink.facts.counts = counted.as_ref().map(|c| c.counts.clone());
+    }
+    let decision = (|| {
+        let reduced = sink.finish(&session)?;
+        let facts = SessionFacts {
+            reduced: Some(&reduced),
+            ..SessionFacts::new(r, &session, text_sets)
+        };
+        query.matches(&Facts {
+            r,
+            session: Some(&session),
+            ext: &facts,
+        })
+    })();
+    Ok(StreamedMatch {
+        decision,
+        source,
+        counted,
     })
 }
 
@@ -536,18 +553,20 @@ impl ExtFacts for RefFacts<'_> {
 /// a definite miss without a parse, and parse only what is still undecided. `cv ls`/`stats` and
 /// `cv serve`'s `/api/stats?q=` all go through here, so `-q` means the same thing on every door.
 pub fn filter_refs(refs: &mut Vec<SessionRef>, query: &SessionQuery, text_sets: &TextSets) -> anyhow::Result<()> {
+    let _reads = crate::source::read_scope();
     let heavy = query.needs_parse() || query.needs_index() || query.needs_events() || query.needs_forest();
     let table = query.needs_counted().then(crate::catalog::AffordanceTable::load);
     let mut probe = crate::source::Probe::default();
-    // Decide before mutating: a read error leaves the caller's list intact.
-    let mut keep = Vec::with_capacity(refs.len());
-    for r in refs.iter() {
+    // Plan cheap decisions serially, sharing dependency probes. Do not mutate the caller's
+    // list until every fallible decision succeeds.
+    let mut keep = vec![false; refs.len()];
+    let mut pending = Vec::new();
+    for (index, r) in refs.iter().enumerate() {
         if !query.prefilter(r) {
-            keep.push(false);
             continue;
         }
         if !heavy && !query.needs_counted() {
-            keep.push(true);
+            keep[index] = true;
             continue;
         }
         let cheap_facts = RefFacts {
@@ -557,19 +576,62 @@ pub fn filter_refs(refs: &mut Vec<SessionRef>, query: &SessionQuery, text_sets: 
                 .as_ref()
                 .and_then(|t| t.counts_with_probe(r, &probe.snapshot(r), &mut probe)),
         };
-        let decision = match query.eval(&Facts {
+        match query.eval(&Facts {
             r,
             session: None,
             ext: &cheap_facts,
         })? {
-            Tri::True => true,
-            Tri::False => false,
-            Tri::Unknown => match crate::harness::for_harness(r.harness) {
-                Some(a) => matches_streamed_with_probe(query, a.as_ref(), r, text_sets, &mut probe)?,
-                None => anyhow::bail!("no adapter for {}", r.harness),
-            },
-        };
-        keep.push(decision);
+            Tri::True => keep[index] = true,
+            Tri::False => {}
+            Tri::Unknown => pending.push(index),
+        }
+    }
+    // Use the existing Rayon helpers, with finite batches rather than another executor or
+    // semaphore. As in indexing, primary bytes are conservative source pressure, not a heap
+    // estimate (SQLite contains other sessions, mapped JSON may own only descriptors).
+    // A source exceeding the 2 GiB guard runs alone. Width is bounded by available cores.
+    const SOURCE_BYTES: u64 = 2 << 30;
+    let width = std::thread::available_parallelism().map_or(1, usize::from);
+    let mut writer = (!pending.is_empty()).then(crate::catalog::Writer::open).flatten();
+    let mut next = 0;
+    while next < pending.len() {
+        let start = next;
+        let mut bytes: u64 = 0;
+        while next < pending.len() && next - start < width {
+            let size = refs[pending[next]].path.metadata().map_or(0, |m| m.len());
+            if next > start && size > SOURCE_BYTES.saturating_sub(bytes) {
+                break;
+            }
+            bytes = bytes.saturating_add(size);
+            next += 1;
+            if bytes >= SOURCE_BYTES {
+                break;
+            }
+        }
+        let mut results = crate::par_filter_map(pending[start..next].to_vec(), |index| {
+            let r = &refs[index];
+            let result = match crate::harness::for_harness(r.harness) {
+                Some(adapter) => reduce_streamed(
+                    query,
+                    adapter.as_ref(),
+                    r,
+                    text_sets,
+                    &mut crate::source::Probe::default(),
+                ),
+                None => Err(anyhow::anyhow!("no adapter for {}", r.harness)),
+            };
+            Some((index, result))
+        });
+        // Parallel helpers need not promise output order. Publish and propagate errors in the
+        // original order, preserving deterministic selection and the caller's intact-list rule.
+        results.sort_unstable_by_key(|(index, _)| *index);
+        for (index, result) in results {
+            let matched = result?;
+            if let (Some(writer), Some(counted)) = (&mut writer, matched.counted) {
+                writer.record_counted(&refs[index], &matched.source, counted);
+            }
+            keep[index] = matched.decision?;
+        }
     }
     let mut decisions = keep.into_iter();
     refs.retain(|_| decisions.next().expect("one decision per ref"));
@@ -602,6 +664,38 @@ mod tests {
                 HashSet::new()
             }
         })
+    }
+
+    #[test]
+    fn parallel_filter_keeps_input_order_and_does_not_prune_on_error() {
+        let world = cv_testkit::World::in_process("parallel_query_order");
+        let refs: Vec<_> = (0..35)
+            .map(|i| {
+                let id = format!("ordered-{i}");
+                let path = world.write_session(
+                    &id,
+                    &[serde_json::json!({
+                        "type":"assistant","uuid":id,"message":{"role":"assistant","content":[
+                            {"type":"tool_use","id":"call","name":if i % 3 == 0 { "Edit" } else { "Read" },
+                            "input":{"file_path":"a.rs"}}
+                        ]}
+                    })],
+                );
+                SessionRef::new(id, crate::Harness::Claude, path)
+            })
+            .collect();
+        let query = SessionQuery::parse("tool:edit").unwrap();
+        let mut actual = refs.clone();
+        filter_refs(&mut actual, &query, &TextSets::empty()).unwrap();
+        assert_eq!(
+            actual.iter().map(|r| &r.id).collect::<Vec<_>>(),
+            refs.iter().step_by(3).map(|r| &r.id).collect::<Vec<_>>()
+        );
+        let mut with_error = refs;
+        with_error.insert(17, missing_source());
+        let before = with_error.iter().map(|r| r.id.clone()).collect::<Vec<_>>();
+        assert!(filter_refs(&mut with_error, &query, &TextSets::empty()).is_err());
+        assert_eq!(with_error.iter().map(|r| r.id.clone()).collect::<Vec<_>>(), before);
     }
 
     #[test]

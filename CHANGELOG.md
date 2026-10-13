@@ -9,6 +9,7 @@
 
 - Gemini reads composite tool results and formatted thoughts with bounded selected-payload memory while preserving output.
 - Goose legacy discovery streams metadata and exact counts without retaining entire transcripts.
+- Uncached session queries reduce facts in bounded parallel batches, preserving result order and publishing counts through one catalog writer.
 
 - Unchanged full-text refreshes avoid starting Tantivy writers while still completing pending compaction.
 - Codex lazy reads retain giant prompt, reply, reasoning and tool arguments in checked source storage across native and portable transports.
