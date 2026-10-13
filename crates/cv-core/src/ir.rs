@@ -300,17 +300,18 @@ impl Session {
     /// leading `<system-reminder>` block off an otherwise-real turn (tool results are [`Role::Tool`],
     /// already excluded). `None` only when a session carries no explicit title and no user prose.
     ///
-    /// Resolver-aware and bounded (reads at most a few KB of any one message via
-    /// [`Text::resolve_prefix`](crate::lazy::Text::resolve_prefix)), so it never panics on a lazy
-    /// [`Span`](crate::lazy::Span) and never materializes a giant paste — safe to call on a
-    /// [`ParseOptions::lazy`](crate::ParseOptions::lazy) parse. The result is transcript-derived text
+    /// Resolver-aware: [`Text::resolve_prefix`](crate::lazy::Text::resolve_prefix) reads at most
+    /// 8 KiB per Span/Source Text block; Inline blocks contribute their complete existing text.
+    /// A candidate joins all its Text blocks, so its allocation is not capped at 8 KiB. Safe to
+    /// call on a [`ParseOptions::lazy`](crate::ParseOptions::lazy) parse without dereferencing a
+    /// lazy [`Span`](crate::lazy::Span) as inline text. The result is transcript-derived text
     /// (untrusted): JSON consumers get it raw; a terminal seam must sanitize it.
     pub fn synth_title(&self) -> Option<String> {
         if let Some(t) = &self.title {
             return Some(t.clone());
         }
-        // A title is short; reading the head of each candidate is plenty and keeps a multi-megabyte
-        // first message from being materialized in full.
+        // Read prefixes of Span/Source blocks; Inline text is already owned and contributes in
+        // full. Multiple Text blocks retain their existing joined-candidate semantics.
         const HEAD: u64 = 8 * 1024;
         let resolver = self.resolver();
         self.messages

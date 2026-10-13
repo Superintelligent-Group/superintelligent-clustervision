@@ -5,7 +5,7 @@
 
 use crate::util::{dim_cwd, parse_harness, session_row, short_id};
 use anyhow::Result;
-use cv_core::ir::{truncate, SessionRef};
+use cv_core::ir::{SessionRef, truncate};
 use cv_core::sanitize::sanitize_line;
 
 /// Apply a parsed query to a ref list in place. The two-phase filter itself is
@@ -27,23 +27,61 @@ fn json_rows<'a>(refs: impl Iterator<Item = &'a SessionRef>, limit: usize) -> Ve
         .collect()
 }
 
-/// What `ls --enrich` reads from a transcript: the session metadata (`git`, `title`) and its user
-/// turns, the only messages `synth_title` looks at. A lazy stream that keeps just those holds a
-/// few prompts instead of the whole session (assistant turns and tool output are most of it).
-fn enrich_head(adapter: &dyn cv_core::Adapter, r: &SessionRef) -> Option<cv_core::Session> {
-    struct Users(Vec<cv_core::Message>);
-    impl cv_core::MessageSink for Users {
-        fn message(&mut self, m: cv_core::Message) -> cv_core::Flow {
-            if m.role == cv_core::Role::User {
-                self.0.push(m);
-            }
-            cv_core::Flow::Continue
+/// Reduce the stable inline prefix with the existing title policy. Once lazy text appears,
+/// preserve deferred user collection: resolution needs EOF source metadata and may fail after
+/// a source mutation, allowing a later user turn to become the title.
+struct TitleUsers {
+    candidates: cv_core::Session,
+    deferred: bool,
+    fallback: Option<String>,
+}
+impl TitleUsers {
+    fn new(harness: cv_core::Harness) -> Self {
+        Self {
+            candidates: cv_core::Session::new("", harness),
+            deferred: false,
+            fallback: None,
         }
     }
-    let mut users = Users(Vec::new());
-    let mut session = cv_core::stream::stream_counted(adapter, r, &cv_core::ParseOptions::lazy(), &mut users).ok()?;
-    session.messages = users.0;
-    Some(session)
+    fn finish(self, mut session: cv_core::Session) -> (cv_core::Session, Option<String>) {
+        session.messages = self.candidates.messages;
+        let title = session
+            .title
+            .clone()
+            .or(self.fallback)
+            .or_else(|| session.synth_title());
+        (session, title)
+    }
+}
+impl cv_core::MessageSink for TitleUsers {
+    fn message(&mut self, m: cv_core::Message) -> cv_core::Flow {
+        if m.role != cv_core::Role::User || self.fallback.is_some() {
+            return cv_core::Flow::Continue;
+        }
+        self.deferred |= m.content.iter().any(|block| {
+            matches!(
+                block,
+                cv_core::Block::Text {
+                    text: cv_core::lazy::Text::Span(_) | cv_core::lazy::Text::Source(_)
+                }
+            )
+        });
+        self.candidates.messages.push(m);
+        if !self.deferred {
+            // No resolver reads: synth_title borrows complete Inline strings, joins Text blocks,
+            // and applies the canonical reminder/wrapper filtering and truncation policy.
+            self.fallback = self.candidates.synth_title();
+            self.candidates.messages.clear();
+        }
+        cv_core::Flow::Continue
+    }
+}
+
+/// Read all metadata/counts through EOF, retaining only the title's deferred candidate suffix.
+fn enrich_head(adapter: &dyn cv_core::Adapter, r: &SessionRef) -> Option<(cv_core::Session, Option<String>)> {
+    let mut users = TitleUsers::new(r.harness);
+    let session = cv_core::stream::stream_counted(adapter, r, &cv_core::ParseOptions::lazy(), &mut users).ok()?;
+    Some(users.finish(session))
 }
 
 /// Select the requested listing window. Text listings retain their exact-total contract;
@@ -137,7 +175,7 @@ pub(crate) fn cmd_ls(
                     // content on disk (memory-safe on the multi-MB "single-exchange giants" sesh
                     // warns about) while still carrying the session's git metadata and enough of the
                     // first user turn to synthesize a title.
-                    if let Some(session) =
+                    if let Some((session, display_title)) =
                         cv_core::harness::for_harness(r.harness).and_then(|a| enrich_head(a.as_ref(), r))
                     {
                         let map = obj.as_object_mut().expect("json object");
@@ -151,7 +189,7 @@ pub(crate) fn cmd_ls(
                         // `display_title`: `title` with a first-real-user-text fallback. Explicit
                         // null (not absent) when a session has neither, so consumers can tell "no
                         // title anywhere" from "not enriched" (the key is absent without --enrich).
-                        map.insert("display_title".into(), serde_json::json!(session.synth_title()));
+                        map.insert("display_title".into(), serde_json::json!(display_title));
                     }
                 }
                 obj
@@ -369,5 +407,256 @@ mod window_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod enrich_tests {
+    use super::*;
+    use cv_core::{Block, Flow, Harness, Message, MessageSink, Role, Session, Text};
+
+    fn user(texts: impl IntoIterator<Item = Text>) -> Message {
+        let mut message = Message::new(Role::User);
+        message.content = texts.into_iter().map(|text| Block::Text { text }).collect();
+        message
+    }
+    // Independent prior collector: keeps every user turn and resolves only after EOF.
+    #[derive(Default)]
+    struct OldUsers(Vec<Message>);
+    impl MessageSink for OldUsers {
+        fn message(&mut self, message: Message) -> Flow {
+            if message.role == Role::User {
+                self.0.push(message);
+            }
+            Flow::Continue
+        }
+    }
+    fn retained_text(users: &TitleUsers) -> usize {
+        users
+            .candidates
+            .messages
+            .iter()
+            .map(|message| {
+                message
+                    .content
+                    .iter()
+                    .filter_map(|block| {
+                        if let Block::Text {
+                            text: Text::Inline(text),
+                        } = block
+                        {
+                            Some(text.len())
+                        } else {
+                            None
+                        }
+                    })
+                    .sum::<usize>()
+            })
+            .sum()
+    }
+
+    #[test]
+    fn enrich_inline_history_matches_old_title_without_retaining_user_payloads() {
+        for count in [100, 10_000] {
+            for explicit in [None, Some("EOF title")] {
+                let mut old = OldUsers::default();
+                let mut reduced = TitleUsers::new(Harness::Claude);
+                // A complete Inline reminder must not be capped before its closing tag.
+                let long_reminder = format!("<system-reminder>{}</system-reminder>", "x".repeat(9000));
+                for texts in [
+                    vec!["Caveat: local command".to_string()],
+                    vec!["<command-name>/help</command-name>".to_string()],
+                    vec![long_reminder, "real question\nwith joined blocks".to_string()],
+                ] {
+                    let message = user(texts.into_iter().map(Text::from));
+                    old.message(message.clone());
+                    reduced.message(message);
+                    assert!(reduced.candidates.messages.is_empty());
+                    assert_eq!(retained_text(&reduced), 0);
+                }
+                for i in 0..count {
+                    let message = user([Text::from(format!("later user {i}: {}", "y".repeat(128)))]);
+                    old.message(message.clone());
+                    reduced.message(message);
+                }
+                assert_eq!(old.0.len(), count + 3);
+                assert!(reduced.candidates.messages.is_empty());
+                assert!(reduced.fallback.as_ref().unwrap().len() <= 323);
+                let mut metadata = Session::new("inline", Harness::Claude);
+                metadata.title = explicit.map(str::to_owned);
+                metadata.git = Some(cv_core::ir::GitInfo {
+                    branch: Some("late branch".into()),
+                    ..Default::default()
+                });
+                let mut baseline = metadata.clone();
+                baseline.messages = old.0;
+                let (actual, title) = reduced.finish(metadata);
+                assert_eq!(title, baseline.synth_title());
+                assert_eq!(actual.title, baseline.title);
+                assert_eq!(actual.git.unwrap().branch.as_deref(), Some("late branch"));
+                assert!(actual.messages.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn enrich_inline_noise_has_no_title_or_retained_messages() {
+        let mut reduced = TitleUsers::new(Harness::Claude);
+        let mut old = OldUsers::default();
+        for _ in 0..1000 {
+            let message = user([
+                "<system-reminder>noise</system-reminder>".into(),
+                "<command-message>/help</command-message>".into(),
+            ]);
+            old.message(message.clone());
+            reduced.message(message);
+        }
+        let mut baseline = Session::new("noise", Harness::Claude);
+        baseline.messages = old.0;
+        let (actual, title) = reduced.finish(Session::new("noise", Harness::Claude));
+        assert_eq!(title, baseline.synth_title());
+        assert_eq!(title, None);
+        assert!(actual.messages.is_empty());
+    }
+
+    struct Scripted {
+        messages: Vec<Message>,
+        metadata: Session,
+        mutate: Option<std::path::PathBuf>,
+        callbacks: std::sync::atomic::AtomicUsize,
+    }
+    impl cv_core::Adapter for Scripted {
+        fn harness(&self) -> Harness {
+            Harness::Claude
+        }
+        fn roots(&self) -> Vec<std::path::PathBuf> {
+            Vec::new()
+        }
+        fn discover(&self) -> Result<Vec<SessionRef>> {
+            Ok(Vec::new())
+        }
+        fn stream(&self, _: &SessionRef, _: &cv_core::ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+            for message in &self.messages {
+                self.callbacks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                assert_eq!(sink.message(message.clone()), Flow::Continue);
+            }
+            if let Some(path) = &self.mutate {
+                std::fs::write(path, "\"changed after delivery\"")?;
+            }
+            Ok(self.metadata.clone())
+        }
+    }
+    fn compare_streams(adapter: &Scripted, reference: &SessionRef) -> (Session, Option<String>) {
+        // Candidate runs while its initial guarded source is still valid.
+        let (actual, title) = enrich_head(adapter, reference).unwrap();
+        let published = cv_core::catalog::AffordanceTable::load().counts(reference);
+        let mut old = OldUsers::default();
+        let mut baseline =
+            cv_core::stream::stream_counted(adapter, reference, &cv_core::ParseOptions::lazy(), &mut old).unwrap();
+        baseline.messages = old.0;
+        assert_eq!(published, cv_core::catalog::AffordanceTable::load().counts(reference));
+        assert_eq!(title, baseline.synth_title());
+        assert_eq!(
+            serde_json::to_value(&actual.git).unwrap(),
+            serde_json::to_value(&baseline.git).unwrap()
+        );
+        assert_eq!(
+            adapter.callbacks.load(std::sync::atomic::Ordering::Relaxed),
+            adapter.messages.len() * 2
+        );
+        (actual, title)
+    }
+
+    #[test]
+    fn enrich_deferred_source_mutation_keeps_later_fallback() {
+        let world = cv_testkit::World::in_process("enrich_source_mutation");
+        let make_adapter = |id: &str| {
+            let primary = world.base.join(format!("{id}.jsonl"));
+            std::fs::write(&primary, "primary").unwrap();
+            let body = world.base.join(format!("{id}-body.json"));
+            std::fs::write(
+                &body,
+                serde_json::to_vec(&format!("first source prompt{}", "x".repeat(5000))).unwrap(),
+            )
+            .unwrap();
+            let text = cv_core::Json::source(&body, 0, std::fs::metadata(&body).unwrap().len())
+                .unwrap()
+                .with_view(|view| Ok(view.source_text()?.unwrap()))
+                .unwrap();
+            assert!(matches!(text, Text::Source(_)));
+            assert!(
+                text.try_resolve_prefix(&cv_core::Resolver::new(None), 32)
+                    .unwrap()
+                    .starts_with("first source prompt")
+            );
+            (
+                SessionRef::new(id, Harness::Claude, primary),
+                Scripted {
+                    messages: vec![
+                        user(["Caveat: noise".into()]),
+                        user([text]),
+                        user(["later fallback".into()]),
+                    ],
+                    metadata: Session::new(id, Harness::Claude),
+                    mutate: Some(body),
+                    callbacks: Default::default(),
+                },
+            )
+        };
+        // Separate fresh captures ensure both readers deliver valid Sources before mutation.
+        let (reference, adapter) = make_adapter("candidate");
+        let (actual, title) = enrich_head(&adapter, &reference).unwrap();
+        let (old_reference, old_adapter) = make_adapter("oracle");
+        let mut old = OldUsers::default();
+        let mut baseline =
+            cv_core::stream::stream_counted(&old_adapter, &old_reference, &cv_core::ParseOptions::lazy(), &mut old)
+                .unwrap();
+        baseline.messages = old.0;
+        assert_eq!(title, baseline.synth_title());
+        assert_eq!(title.as_deref(), Some("later fallback"));
+        assert_eq!(actual.messages.len(), 2); // Stable noise removed; deferred suffix unchanged.
+        assert_eq!(adapter.callbacks.load(std::sync::atomic::Ordering::Relaxed), 3);
+        assert_eq!(old_adapter.callbacks.load(std::sync::atomic::Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn enrich_deferred_span_uses_eof_source_path_and_preserves_counts() {
+        let world = cv_testkit::World::in_process("enrich_span_source");
+        let primary = world.base.join("primary.jsonl");
+        std::fs::write(&primary, "wrong source").unwrap();
+        let body = world.base.join("resolved.txt");
+        std::fs::write(&body, "right EOF source").unwrap();
+        drop(cv_core::catalog::Writer::open().expect("scratch catalog"));
+        let reference = SessionRef::new("span", Harness::Claude, primary);
+        let mut metadata = Session::new("span", Harness::Claude);
+        metadata.source_path = Some(body);
+        metadata.git = Some(cv_core::ir::GitInfo {
+            commit: Some("late commit".into()),
+            ..Default::default()
+        });
+        let mut adapter = Scripted {
+            messages: vec![
+                user(["<system-reminder>noise</system-reminder>".into()]),
+                user([Text::Span(cv_core::Span {
+                    source: None,
+                    offset: 0,
+                    len: 16,
+                    escaped: false,
+                })]),
+                user(["later fallback".into()]),
+            ],
+            metadata,
+            mutate: None,
+            callbacks: Default::default(),
+        };
+        let (actual, title) = compare_streams(&adapter, &reference);
+        assert_eq!(title.as_deref(), Some("right EOF source"));
+        assert_eq!(actual.messages.len(), 2);
+        assert!(cv_core::catalog::AffordanceTable::load().counts(&reference).is_some());
+        adapter.metadata.title = Some("explicit EOF title".into());
+        adapter.callbacks.store(0, std::sync::atomic::Ordering::Relaxed);
+        let (actual, title) = compare_streams(&adapter, &reference);
+        assert_eq!(title.as_deref(), Some("explicit EOF title"));
+        assert_eq!(actual.title.as_deref(), Some("explicit EOF title"));
     }
 }
