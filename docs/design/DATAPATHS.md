@@ -1332,3 +1332,15 @@ leaves a full pending tier with no stale sources and proves compaction still run
 its docs/query/catalog outputs. The existing resumed-versus-whole corpus oracle also passes.
 Large-fleet merge/query costs remain an explicit measurement task; this audit supplies no evidence
 for replacing the current merge policy, exact session ranking or transaction boundaries.
+### Prune staged CPU follow-through (2026-10-12)
+
+The unchanged giant rewrite was repeating mapping, syntax validation and top-level id selection.
+The strict first pass now captures at most two id spans while its giant-string bounds index is
+already warm; rewrite checks the source and copies those spans directly. Transcript/revival stages
+now buffer 64 KiB, preventing serde's small fragments from becoming spill-file writes. Preparation
+and existing-output publication copy in 64 KiB chunks rather than 8 KiB.
+
+Allocator-free alternating release trials show history default CPU 31.46→38.75 ms (16 MiB),
+with revival 33.42→39.33 ms; large ignored 64 MiB default 68.88→122.88 ms and revival
+75.84→151.33 ms. This substantially removes the prior 2–4× CPU costs, while retaining a residual
+strict scanning/staging cost. Exact-output oracle and focused tests remain unchanged.

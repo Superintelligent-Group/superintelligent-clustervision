@@ -53,6 +53,7 @@ pub fn restamp_line(line: &str, new_id: &str) -> Option<String> {
 /// Stream a captured UTF-8 record with the same top-level id surgery as `restamp_line`.
 /// The producer chooses UTF-8/JSON acceptance and owns staging of partial writes. Malformed JSON
 /// and duplicate known id fields are copied verbatim, matching the borrowed serde struct above.
+#[cfg(test)]
 pub(crate) fn write_restamped_source(
     source: &crate::json::JsonSource,
     file: &std::fs::File,
@@ -61,41 +62,61 @@ pub(crate) fn write_restamped_source(
     new_id: &str,
     output: &mut impl std::io::Write,
 ) -> anyhow::Result<bool> {
-    use crate::harness::store::{
-        document::{Fields, InvalidStruct},
-        jsonl::ranges::{self, Range},
-    };
+    use crate::harness::store::document::InvalidStruct;
     source.check_metadata(file.metadata()?)?;
     source.check()?;
     let mut spans = if len == 0 {
         Vec::new()
     } else {
-        match source.read_range_syntax(offset, len, |view| {
-            let Some(ids) = Fields::parse_struct(view, &["sessionId", "session_id"])? else {
-                return Ok(Vec::new());
-            };
-            let mut spans = Vec::new();
-            for key in ["sessionId", "session_id"] {
-                if let Some(value) = ids.get(key) {
-                    if value.is_string()? {
-                        let crate::json::Json::Source(value) = value.to_json()? else {
-                            anyhow::bail!("expected source id range");
-                        };
-                        spans.push((value.offset(), value.offset() + value.len()));
-                    }
-                }
-            }
-            Ok(spans)
-        }) {
+        match source.read_range_syntax(offset, len, |view| source_id_spans(view)) {
             Ok(spans) => spans,
             Err(e) if e.is::<crate::json::InvalidJson>() || e.is::<InvalidStruct>() => Vec::new(),
             Err(e) => return Err(e),
         }
     };
+    write_restamped_spans(source, file, offset, len, new_id, &mut spans, output)
+}
+
+/// Selected during strict producer validation; preserve derived-struct id acceptance.
+pub(crate) fn source_id_spans(view: crate::json::JsonView<'_>) -> anyhow::Result<Vec<(u64, u64)>> {
+    use crate::harness::store::document::{Fields, InvalidStruct};
+    let ids = match Fields::parse_struct(view, &["sessionId", "session_id"]) {
+        Ok(Some(ids)) => ids,
+        Ok(None) => return Ok(Vec::new()),
+        Err(e) if e.is::<InvalidStruct>() => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut spans = Vec::new();
+    for key in ["sessionId", "session_id"] {
+        if let Some(value) = ids.get(key) {
+            if value.is_string()? {
+                let (offset, len) = value
+                    .source_range()?
+                    .ok_or_else(|| anyhow::anyhow!("expected source id range"))?;
+                spans.push((offset, offset + len));
+            }
+        }
+    }
+    Ok(spans)
+}
+
+/// Copy captured, already selected id spans without repeating source JSON scans.
+pub(crate) fn write_restamped_spans(
+    source: &crate::json::JsonSource,
+    file: &std::fs::File,
+    offset: u64,
+    len: u64,
+    new_id: &str,
+    spans: &mut [(u64, u64)],
+    output: &mut impl std::io::Write,
+) -> anyhow::Result<bool> {
+    use crate::harness::store::jsonl::ranges::{self, Range};
+    source.check_metadata(file.metadata()?)?;
+    source.check()?;
     spans.sort_unstable();
     let stamped = !spans.is_empty();
     let mut at = offset;
-    for (start, end) in spans {
+    for &(start, end) in spans.iter() {
         std::io::copy(
             &mut ranges::reader(
                 file,

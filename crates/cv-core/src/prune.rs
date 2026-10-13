@@ -427,6 +427,7 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
     let mut lines = Vec::new();
     let mut parsed = Vec::new();
     let mut tool_names = HashMap::new();
+    let mut id_spans = HashMap::new();
     // Retain only decision facts; payload trees live for one record. Preserve the old global
     // trim_end contract (including whitespace-only trailing records) without copying the file.
     for record in ranges::records(
@@ -439,7 +440,10 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
         let (range, _) = record?;
         let facts = if range.len >= LARGE_RECORD {
             match source.read_range_value(range.offset, range.len, |view| {
-                decision_facts_source(view, range, opts, &mut tool_names)
+                let spans = crate::restamp::source_id_spans(view)?;
+                let facts = decision_facts_source(view, range, opts, &mut tool_names)?;
+                id_spans.insert(range.offset, spans);
+                Ok(facts)
             }) {
                 Ok(facts) => Some(facts),
                 Err(e) if e.is::<crate::json::InvalidJson>() => {
@@ -538,7 +542,7 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
         ));
     }
 
-    let mut output = ByteStage::new();
+    let mut output = std::io::BufWriter::with_capacity(64 * 1024, ByteStage::new());
     let mut output_facts = Vec::new();
     let mut output_pruned = Vec::new();
     let mut sidecar_stage = std::io::BufWriter::with_capacity(64 * 1024, ByteStage::new());
@@ -605,7 +609,15 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
                 || (needs_root && facts.get("_prune_parent").and_then(Value::as_bool).unwrap_or(true));
         if range.len >= LARGE_RECORD && !may_mutate {
             let mut scan = MarkerWriter::new(&mut output);
-            crate::restamp::write_restamped_source(&source, &file, range.offset, range.len, &new_id, &mut scan)?;
+            crate::restamp::write_restamped_spans(
+                &source,
+                &file,
+                range.offset,
+                range.len,
+                &new_id,
+                &mut id_spans.remove(&range.offset).unwrap_or_default(),
+                &mut scan,
+            )?;
             scan.write_all(b"\n")?;
             let pruned = scan.found;
             if needs_root {
@@ -705,7 +717,7 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
 
     source.check_metadata(file.metadata()?)?;
     source.check()?;
-    let output = output.finish()?;
+    let output = output.into_inner().map_err(|e| e.into_error())?.finish()?;
     let (output, usage_rewritten, revive_tokens, revive_old_tokens) = if opts.revive {
         revive_staged(output, &output_facts, &output_pruned, windowing, window_real)?
     } else {
@@ -782,7 +794,10 @@ impl PreparedFile {
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
         let mut file = options.open(&prepared.temporary)?;
-        bytes.copy_to(&mut file)?;
+        std::io::copy(
+            &mut std::io::BufReader::with_capacity(64 * 1024, bytes.reader()?),
+            &mut file,
+        )?;
         file.flush()?;
         Ok(prepared)
     }
@@ -808,7 +823,10 @@ impl PreparedFile {
             #[cfg(not(unix))]
             let _ = source;
             destination.set_len(0)?;
-            std::io::copy(&mut std::fs::File::open(&self.temporary)?, &mut destination)?;
+            std::io::copy(
+                &mut std::io::BufReader::with_capacity(64 * 1024, std::fs::File::open(&self.temporary)?),
+                &mut destination,
+            )?;
             Ok(())
         } else {
             std::fs::rename(&self.temporary, &self.destination)
@@ -1180,9 +1198,9 @@ fn revive_staged(
     let honest = honest_window_tokens(parsed, pruned, window, window == 0 && !windowed).max(real_override.unwrap_or(0));
     let mut rewritten = 0;
     let mut stale_max = 0;
-    let mut stage = ByteStage::new();
+    let mut stage = std::io::BufWriter::with_capacity(64 * 1024, ByteStage::new());
     use std::io::BufRead;
-    let mut reader = std::io::BufReader::new(output.reader()?);
+    let mut reader = std::io::BufReader::with_capacity(64 * 1024, output.reader()?);
     for (i, facts) in parsed.iter().enumerate() {
         let total = facts
             .as_ref()
@@ -1223,7 +1241,7 @@ fn revive_staged(
         }
     }
     Ok((
-        stage.finish()?,
+        stage.into_inner().map_err(|e| e.into_error())?.finish()?,
         rewritten,
         (rewritten > 0).then_some(honest),
         (rewritten > 0).then_some(stale_max),
