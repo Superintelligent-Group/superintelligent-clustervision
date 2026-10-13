@@ -304,7 +304,10 @@ impl JsonRange {
         Ok(())
     }
 
-    pub(crate) fn dependencies(&self) -> Option<&crate::source::ReadSet> {
+    /// Captured auxiliary source dependencies, retaining original stamps and absence.
+    /// Consumers merge these records into their cache guards; `path()` remains separate so
+    /// append-aware consumers can handle their primary transcript identity independently.
+    pub fn dependencies(&self) -> Option<&crate::source::ReadSet> {
         self.source.0.reads.as_deref()
     }
     pub(crate) fn same_range(&self, other: &Self) -> bool {
@@ -494,7 +497,17 @@ impl Json {
     /// Validate a complete JSON range before constructing a source descriptor. Missing files,
     /// overflow, truncated ranges and values rejected by serde_json Value return errors.
     pub fn source(path: impl AsRef<Path>, offset: u64, len: u64) -> Result<Self> {
-        let source = JsonSource::capture(path.as_ref())?;
+        Self::source_with_reads(path, offset, len, &crate::source::ReadSet::default())
+    }
+    /// Validate a complete JSON range under an already captured auxiliary dependency guard.
+    /// Guarded dependencies (including missing conditional files) must still be fresh.
+    pub fn source_with_reads(
+        path: impl AsRef<Path>,
+        offset: u64,
+        len: u64,
+        reads: &crate::source::ReadSet,
+    ) -> Result<Self> {
+        let source = JsonSource::capture_with_reads(path.as_ref(), reads)?;
         let mut range = source.range(offset, len)?;
         #[cfg(feature = "mmap")]
         let (leading, normalized_len) = range.with_raw(|raw| {
@@ -1281,6 +1294,29 @@ mod tests {
         value.write_canonical(&mut output).unwrap();
         assert_eq!(value.canonical_len().unwrap(), output.len() as u64);
         output
+    }
+
+    #[test]
+    fn public_source_guard_factory_retains_absence_and_rejects_stale_dependencies() {
+        let fixture = Fixture::new(br#"{"arg":true}"#);
+        let sidecar = fixture.dir.join("conditional-wal");
+        let mut reads = crate::source::ReadSet::default();
+        reads.record(&sidecar);
+        let value = Json::source_with_reads(&fixture.path, 0, 12, &reads).unwrap();
+        let Json::Source(range) = &value else {
+            panic!("checked source")
+        };
+        let mut consumer = crate::source::ReadSet::default();
+        consumer.merge(range.dependencies().unwrap());
+        assert!(consumer.fresh(&mut crate::source::Probe::default()));
+        std::fs::write(&sidecar, "adopted dependency").unwrap();
+        assert!(!consumer.fresh(&mut crate::source::Probe::default()));
+        assert!(value.canonical_prefix(1).is_err());
+        assert!(Json::source_with_reads(&fixture.path, 0, 12, &reads).is_err());
+        reads = crate::source::ReadSet::default();
+        reads.record(&sidecar);
+        assert!(Json::source_with_reads(&fixture.path, 0, 12, &reads).is_ok());
+        assert!(Json::source_with_reads(&fixture.path, 1, 3, &reads).is_err());
     }
 
     #[test]
