@@ -50,6 +50,80 @@ pub fn restamp_line(line: &str, new_id: &str) -> Option<String> {
     Some(out)
 }
 
+/// Stream a captured UTF-8 record with the same top-level id surgery as `restamp_line`.
+/// The producer chooses UTF-8/JSON acceptance and owns staging of partial writes. Malformed JSON
+/// and duplicate known id fields are copied verbatim, matching the borrowed serde struct above.
+pub(crate) fn write_restamped_source(
+    source: &crate::json::JsonSource,
+    file: &std::fs::File,
+    offset: u64,
+    len: u64,
+    new_id: &str,
+    output: &mut impl std::io::Write,
+) -> anyhow::Result<bool> {
+    use crate::harness::store::{
+        document::{Fields, InvalidStruct},
+        jsonl::ranges::{self, Range},
+    };
+    source.check_metadata(file.metadata()?)?;
+    source.check()?;
+    let mut spans = if len == 0 {
+        Vec::new()
+    } else {
+        match source.read_range_syntax(offset, len, |view| {
+            let Some(ids) = Fields::parse_struct(view, &["sessionId", "session_id"])? else {
+                return Ok(Vec::new());
+            };
+            let mut spans = Vec::new();
+            for key in ["sessionId", "session_id"] {
+                if let Some(value) = ids.get(key) {
+                    if value.is_string()? {
+                        let crate::json::Json::Source(value) = value.to_json()? else {
+                            anyhow::bail!("expected source id range");
+                        };
+                        spans.push((value.offset(), value.offset() + value.len()));
+                    }
+                }
+            }
+            Ok(spans)
+        }) {
+            Ok(spans) => spans,
+            Err(e) if e.is::<crate::json::InvalidJson>() || e.is::<InvalidStruct>() => Vec::new(),
+            Err(e) => return Err(e),
+        }
+    };
+    spans.sort_unstable();
+    let stamped = !spans.is_empty();
+    let mut at = offset;
+    for (start, end) in spans {
+        std::io::copy(
+            &mut ranges::reader(
+                file,
+                Range {
+                    offset: at,
+                    len: start - at,
+                },
+            )?,
+            output,
+        )?;
+        serde_json::to_writer(&mut *output, new_id)?;
+        at = end;
+    }
+    std::io::copy(
+        &mut ranges::reader(
+            file,
+            Range {
+                offset: at,
+                len: offset + len - at,
+            },
+        )?,
+        output,
+    )?;
+    source.check_metadata(file.metadata()?)?;
+    source.check()?;
+    Ok(stamped)
+}
+
 /// A restamped transcript and what the restamp touched.
 pub struct Restamped {
     pub body: String,
@@ -84,6 +158,38 @@ pub fn restamp(text: &str, new_id: &str) -> Restamped {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_writer_matches_borrowed_struct_bytes_and_rejections() {
+        let world = cv_testkit::World::new("source-restamp");
+        let path = world.base.join("rows.jsonl");
+        for line in [
+            "",
+            "not json",
+            "null",
+            "{}",
+            r#"{"sessionId":"x","session_id":"x","nested":{"sessionId":"keep"}}"#,
+            r#" { "sessionId" : "x", "n":1.50, "session_id":true } "#,
+            r#"{"sessionId":"x","sessionId":"duplicate"}"#,
+            r#"{"sessionId":null,"session_id":12}"#,
+            r#"["x","y"]"#,
+            r#"["x","y","extra"]"#,
+            r#"{"ignored":1e9999,"sessionId":"x"}"#,
+        ] {
+            std::fs::write(&path, line).unwrap();
+            let source = crate::json::JsonSource::capture(&path).unwrap();
+            let file = std::fs::File::open(&path).unwrap();
+            let mut output = Vec::new();
+            let stamped = write_restamped_source(&source, &file, 0, line.len() as u64, "new\"☃", &mut output).unwrap();
+            let expected = restamp_line(line, "new\"☃");
+            assert_eq!(stamped, expected.is_some(), "{line}");
+            assert_eq!(
+                String::from_utf8(output).unwrap(),
+                expected.unwrap_or_else(|| line.to_owned()),
+                "{line}"
+            );
+        }
+    }
 
     #[test]
     fn restamp_line_ignores_lines_without_a_top_level_id() {

@@ -1172,7 +1172,8 @@ compaction boundaries, singleton titles, usage iterations, thinking, declassific
 malformed rows, trailing whitespace, dry-run and resource copying. Existing filtered prune tests
 plus compact/full-Value evidence parity and failed-sidecar preparation preservation cover the
 implementation. Serialization and both output writes finish privately before publication; each
-rename is atomic, but transcript/sidecar/resource-copy publication remains separate operations.
+new-path rename is atomic; existing destinations are overwritten through their open inode to preserve
+symlinks, hardlinks and permissions. Transcript/sidecar/resource-copy publication remains separate operations.
 This does not add a transaction across those outputs.
 
 Measured requested Rust peak above baseline (MiB), 128/512 assistant/user pairs with 64 KiB result
@@ -1251,3 +1252,24 @@ conditional dynamic reads. Cached first-observed metadata remains available for 
 The isolated publication peak fell further from 1,765,968 to 1,472,420 bytes with unchanged
 allocation requests/bytes and wire size. Directory membership/removal and conditional-absence
 oracles continue to match the former serialized comparison.
+### Prune large unchanged records (2026-10-12)
+
+Records at least 1 MiB use source-selected decision facts and source-backed restamping when no
+payload, thinking, declassification, parent reroot or usage correction requires mutation. Restamping
+shares the native borrowed-struct acceptance rules, including duplicate fields and positional
+sequences, and copies untouched spans directly. Marker detection and the unchanged revival pass
+use bounded buffers. The 16/64 MiB ignored-field control now peaks at **1.192/1.192 MiB** requested
+Rust heap above baseline for both default and revival (owned baseline 64.005/256.005 MiB).
+Twenty native transcript/sidecar/result comparisons remain exact; 34 prune and five restamp tests
+pass. Source hardlinks are checked before truncation; existing output inode/permissions and
+symlinks have regression coverage. No-default-features library checking passes with existing
+unrelated warnings; scoped clippy passes with the known baseline single-element-loop lint excluded.
+
+This is not a bound for changed records or malformed giant records: a single changed 16/64 MiB
+tool result still peaks at 64.070/256.070 MiB. History default peaks are 1.901/2.934 MiB and revival
+1.913/3.450 MiB. Clean allocator-free release timing remains a tradeoff: three alternating trials
+show default history CPU 25.85→56.54 ms (16 MiB), 93.21→202.26 ms (64 MiB); giant ignored CPU
+18.74→62.63 ms and 65.04→220.04 ms. Revival giant CPU 23.70→73.07 ms and 72.60→313.24 ms.
+Source syntax/compatibility scanning and staged copying need further CPU work; these changes
+claim reduced peak heap, not throughput. Full new counters and timing trials are in
+`PRUNE-SOURCE-EVIDENCE.json`.

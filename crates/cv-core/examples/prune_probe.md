@@ -29,3 +29,8 @@ declassification, usage iterations, CRLF, malformed rows, trailing whitespace an
 
 A single giant changed record still uses the owned mutation fallback. Scale measurements show
 aggregate retention removed; they do not establish constant scratch for an arbitrarily giant row.
+
+Large unchanged records now stream through source-backed restamping and unchanged revival.
+The giant ignored-field 16/64 MiB control uses 1.192 MiB requested peak in both cases. Changed
+records, usage corrections and malformed giant records retain an owned fallback. See
+`docs/design/PRUNE-SOURCE-EVIDENCE.json` for separate allocator-free CPU costs.

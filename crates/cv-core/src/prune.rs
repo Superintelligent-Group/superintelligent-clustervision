@@ -56,6 +56,7 @@ const TUR_SUFFIX: &str = "#tur";
 /// so it walks `message.content` itself, with [`crate::ir::est_tokens_bytes`]'s arithmetic and
 /// [`crate::ir::IMAGE_TOKENS`] per image — the same numbers the IR-side estimator produces.
 const TEXT_BYTES_PER_TOKEN: f64 = 3.5;
+const LARGE_RECORD: u64 = 1024 * 1024;
 
 /// Knobs for [`prune_session`].
 #[derive(Debug, Clone)]
@@ -436,24 +437,40 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
         },
     )? {
         let (range, _) = record?;
-        let line = read_line(&file, range)?;
-        let value = serde_json::from_str::<Value>(&line).ok();
-        if let Some(v) = &value {
-            collect_tool_names(v, range, &mut tool_names);
-        }
-        // The compact roster is payload-free; a complete Value lives for one input record only.
-        let facts = value.as_ref().map(|v| decision_facts(v, opts.window.is_some()));
+        let facts = if range.len >= LARGE_RECORD {
+            match source.read_range_value(range.offset, range.len, |view| {
+                decision_facts_source(view, range, opts, &mut tool_names)
+            }) {
+                Ok(facts) => Some(facts),
+                Err(e) if e.is::<crate::json::InvalidJson>() => {
+                    // Preserve malformed-row passthrough and the historical fatal UTF-8 policy.
+                    let line = read_line(&file, range)?;
+                    serde_json::from_str::<Value>(&line)
+                        .ok()
+                        .as_ref()
+                        .map(|v| decision_facts(v, opts.window.is_some()))
+                }
+                Err(e) => return Err(e),
+            }
+        } else {
+            let line = read_line(&file, range)?;
+            let value = serde_json::from_str::<Value>(&line).ok();
+            if let Some(v) = &value {
+                collect_tool_names(v, range, &mut tool_names);
+            }
+            value.as_ref().map(|v| decision_facts(v, opts.window.is_some()))
+        };
         parsed.push(facts);
         lines.push(range);
     }
     while let Some(range) = lines.last_mut() {
-        let line = read_line(&file, *range)?;
-        let trimmed = line.trim_end();
-        if trimmed.is_empty() {
+        let trimmed = ranges::trim(&file, *range)?;
+        if trimmed.len == 0 {
             lines.pop();
             parsed.pop();
         } else {
-            range.len = trimmed.len() as u64;
+            // trim() locates both boundaries; only the final boundary belongs to trim_end().
+            range.len = trimmed.offset + trimmed.len - range.offset;
             break;
         }
     }
@@ -510,7 +527,6 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
         }
         keep_singletons.extend(last.into_values());
     }
-    drop(parsed);
     let mut dropped_turns = 0usize;
     let mut warnings: Vec<String> = Vec::new();
     if overshoot {
@@ -534,9 +550,9 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
     let mut est_tokens_saved = 0u64;
     let mut turn = 0usize;
 
-    for (idx, range) in lines.iter().enumerate() {
-        let line = read_line(&file, *range)?;
-        let Some(mut v) = serde_json::from_str::<Value>(&line).ok() else {
+    for (idx, (facts, range)) in parsed.into_iter().zip(lines.iter()).enumerate() {
+        let Some(facts) = facts else {
+            let line = read_line(&file, *range)?;
             writeln!(output, "{line}")?;
             if opts.revive {
                 output_facts.push(None);
@@ -544,10 +560,9 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
             }
             continue;
         };
-
-        let ty = v.get("type").and_then(Value::as_str).unwrap_or("");
+        let ty = facts.get("type").and_then(Value::as_str).unwrap_or("");
         let is_turn_line = ty == "user" || ty == "assistant";
-        let is_turn = turn_kind(&v).is_some();
+        let is_turn = turn_kind(&facts).is_some();
         let this_turn = turn;
         if is_turn {
             turn += 1;
@@ -578,6 +593,32 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
                 continue;
             }
         }
+
+        let needs_root = windowing && keep_start > 0 && !rooted && is_main_turn(&facts);
+        let may_mutate =
+            (is_old && ty == "user" && facts.get("_prune_payload").and_then(Value::as_bool).unwrap_or(true))
+                || (is_old
+                    && ty == "assistant"
+                    && opts.thinking
+                    && facts.get("_prune_thinking").and_then(Value::as_bool).unwrap_or(true))
+                || (is_turn_line && opts.declassify)
+                || (needs_root && facts.get("_prune_parent").and_then(Value::as_bool).unwrap_or(true));
+        if range.len >= LARGE_RECORD && !may_mutate {
+            let mut scan = MarkerWriter::new(&mut output);
+            crate::restamp::write_restamped_source(&source, &file, range.offset, range.len, &new_id, &mut scan)?;
+            scan.write_all(b"\n")?;
+            let pruned = scan.found;
+            if needs_root {
+                rooted = true;
+            }
+            if opts.revive {
+                output_facts.push(Some(facts));
+                output_pruned.push(pruned);
+            }
+            continue;
+        }
+        let line = read_line(&file, *range)?;
+        let mut v: Value = serde_json::from_str(&line)?;
 
         // Unique per-line key for sidecar ids when a block has no id of its own: the line's uuid,
         // or its file line index as a last resort — never a shared constant (collisions would make
@@ -690,11 +731,11 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
             .transpose()?;
         source.check_metadata(file.metadata()?)?;
         source.check()?;
-        // Serialization and writes complete before publication. Each rename is atomic, but the
-        // transcript, sidecar and optional resource copy remain separate filesystem operations.
-        transcript.publish()?;
+        // Serialization and writes complete before publication. New destinations use atomic renames; existing destinations preserve fs::write
+        // behavior. Transcript, sidecar and resource publication remain separate operations.
+        transcript.publish(&file)?;
         if let Some(sidecar_file) = sidecar_file {
-            sidecar_file.publish()?;
+            sidecar_file.publish(&file)?;
         }
         if let Some(dst) = &copied {
             copy_dir(&dir.join(src_stem), dst)
@@ -740,19 +781,39 @@ impl PreparedFile {
         };
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
         let mut file = options.open(&prepared.temporary)?;
         bytes.copy_to(&mut file)?;
         file.flush()?;
         Ok(prepared)
     }
-    fn publish(self) -> Result<()> {
-        std::fs::rename(&self.temporary, &self.destination)
-            .with_context(|| format!("publishing {}", self.destination.display()))
+    fn publish(self, source: &std::fs::File) -> Result<()> {
+        if std::fs::symlink_metadata(&self.destination).is_ok() {
+            // Existing outputs keep fs::write's symlink, hardlink, permissions and read-only
+            // semantics. Open without truncation so a source inode alias is rejected first.
+            let mut destination = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&self.destination)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                let original = source.metadata()?;
+                let target = destination.metadata()?;
+                anyhow::ensure!(
+                    original.dev() != target.dev() || original.ino() != target.ino(),
+                    "output aliases source inode"
+                );
+            }
+            #[cfg(not(unix))]
+            let _ = source;
+            destination.set_len(0)?;
+            std::io::copy(&mut std::fs::File::open(&self.temporary)?, &mut destination)?;
+            Ok(())
+        } else {
+            std::fs::rename(&self.temporary, &self.destination)
+                .with_context(|| format!("publishing {}", self.destination.display()))
+        }
     }
 }
 impl Drop for PreparedFile {
@@ -765,6 +826,280 @@ fn read_line(file: &std::fs::File, range: Range) -> Result<String> {
     let mut line = String::with_capacity(usize::try_from(range.len)?);
     ranges::reader(file, range)?.read_to_string(&mut line)?;
     Ok(line)
+}
+
+fn decision_facts_source(
+    view: crate::json::JsonView<'_>,
+    range: Range,
+    opts: &PruneOptions,
+    tools: &mut HashMap<String, (String, Range, usize)>,
+) -> Result<Value> {
+    use crate::harness::store::document::Fields;
+    let keys = [
+        "type",
+        "subtype",
+        "isSidechain",
+        "isApiErrorMessage",
+        "sessionId",
+        "_cv_orig_ctx",
+        "message",
+        "parentUuid",
+        "toolUseResult",
+        "rendered",
+    ];
+    let Some(fields) = Fields::parse(view, &keys)? else {
+        return Ok(decision_facts(&Value::Null, false));
+    };
+    let mut facts = fields.project(&keys[..6])?;
+    let ty = facts.get("type").and_then(Value::as_str).unwrap_or("");
+    let mut message = serde_json::Map::new();
+    let mut content = None;
+    if let Some(native) = fields.get("message") {
+        if let Some(native) = Fields::parse(native, &["model", "usage", "content"])? {
+            if let Some(model) = native.value("model")? {
+                message.insert("model".into(), model);
+            }
+            if let Some(usage) = native.get("usage") {
+                if let Some(usage) = source_usage_total(usage)? {
+                    message.insert("usage".into(), serde_json::json!({"input_tokens":usage}));
+                }
+            }
+            content = native.get("content");
+        }
+    }
+    let mut payload = fields
+        .get("toolUseResult")
+        .map(|v| value_byte_size_source(v).map(|n| n > opts.min_size))
+        .transpose()?
+        .unwrap_or(false);
+    let mut thinking = false;
+    if let Some(blocks) = content.map(|c| c.array()).transpose()?.flatten() {
+        for (index, block) in blocks.enumerate() {
+            let Some(block) = Fields::parse(block?, &["type", "id", "name", "content"])? else {
+                continue;
+            };
+            match block.string("type")?.as_deref() {
+                Some("tool_use") if ty == "assistant" => {
+                    if let Some(id) = block.string("id")? {
+                        tools.insert(id, (block.string("name")?.unwrap_or_default(), range, index));
+                    }
+                }
+                Some("tool_result") => {
+                    payload |= block
+                        .get("content")
+                        .map(|v| value_byte_size_source(v).map(|n| n > opts.min_size))
+                        .transpose()?
+                        .unwrap_or(false);
+                }
+                Some("thinking") => thinking = true,
+                _ => {}
+            }
+        }
+    }
+    let estimate = if opts.window.is_some() || opts.revive {
+        match ty {
+            "user" | "assistant" => content.map(est_tokens_source).transpose()?.unwrap_or(0),
+            "attachment" => {
+                let mut estimate = 0;
+                if let Some(items) = fields.get("rendered").map(|v| v.array()).transpose()?.flatten() {
+                    for item in items {
+                        if let Some(item) = Fields::parse(item?, &["content"])? {
+                            if let Some(text) = item.get("content") {
+                                if text.is_string()? {
+                                    estimate += source_string_tokens(text)?;
+                                }
+                            }
+                        }
+                    }
+                }
+                estimate
+            }
+            _ => 0,
+        }
+    } else {
+        0
+    };
+    let parent = fields
+        .get("parentUuid")
+        .map(|v| v.is_null().map(|n| !n))
+        .transpose()?
+        .unwrap_or(false);
+    facts.insert("message".into(), Value::Object(message));
+    facts.insert("_prune_est".into(), Value::from(estimate));
+    facts.insert("_prune_payload".into(), Value::from(payload));
+    facts.insert("_prune_thinking".into(), Value::from(thinking));
+    facts.insert("_prune_parent".into(), Value::from(parent));
+    Ok(Value::Object(facts))
+}
+
+/// Retain only the counters and the last non-auxiliary iteration that usage_total consumes.
+fn source_usage_total(view: crate::json::JsonView<'_>) -> Result<Option<u64>> {
+    use crate::harness::store::document::Fields;
+    let Some(fields) = Fields::parse(
+        view,
+        &[
+            "input_tokens",
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+            "iterations",
+        ],
+    )?
+    else {
+        return Ok(None);
+    };
+    let mut usage = serde_json::Map::new();
+    for key in USAGE_CTX_KEYS {
+        if let Some(value) = fields
+            .get(key)
+            .map(|v| v.as_number())
+            .transpose()?
+            .flatten()
+            .and_then(|n| n.as_u64())
+        {
+            usage.insert(key.into(), Value::from(value));
+        }
+    }
+    if ctx_sum(&usage) > 0 {
+        if let Some(iterations) = fields.get("iterations").map(|v| v.array()).transpose()?.flatten() {
+            let mut last = None;
+            for iteration in iterations {
+                let Some(fields) = Fields::parse(
+                    iteration?,
+                    &[
+                        "type",
+                        "input_tokens",
+                        "cache_read_input_tokens",
+                        "cache_creation_input_tokens",
+                        "output_tokens",
+                    ],
+                )?
+                else {
+                    last = Some(Value::Null);
+                    continue;
+                };
+                let mut record = serde_json::Map::new();
+                if let Some(kind) = fields.string("type")? {
+                    record.insert("type".into(), Value::String(kind));
+                }
+                if matches!(
+                    record.get("type").and_then(Value::as_str),
+                    Some("advisor_message" | "compaction")
+                ) {
+                    continue;
+                }
+                for key in USAGE_CTX_KEYS.into_iter().chain(["output_tokens"]) {
+                    if let Some(value) = fields
+                        .get(key)
+                        .map(|v| v.as_number())
+                        .transpose()?
+                        .flatten()
+                        .and_then(|n| n.as_u64())
+                    {
+                        record.insert(key.into(), Value::from(value));
+                    }
+                }
+                last = Some(Value::Object(record));
+            }
+            if let Some(last) = last {
+                usage.insert("iterations".into(), Value::Array(vec![last]));
+            }
+        }
+    }
+    Ok(Some(usage_total(&usage)))
+}
+
+fn source_string_tokens(view: crate::json::JsonView<'_>) -> Result<u64> {
+    let mut bytes = 0;
+    view.for_each_str_chunk(|part| {
+        bytes += part.len();
+        Ok(())
+    })?;
+    Ok(crate::ir::est_tokens_bytes(bytes, TEXT_BYTES_PER_TOKEN))
+}
+fn value_byte_size_source(view: crate::json::JsonView<'_>) -> Result<usize> {
+    if view.is_null()? {
+        return Ok(0);
+    }
+    if view.is_string()? {
+        let mut bytes = 0;
+        view.for_each_str_chunk(|part| {
+            bytes += part.len();
+            Ok(())
+        })?;
+        Ok(bytes)
+    } else {
+        Ok(usize::try_from(view.canonical_len()?)?)
+    }
+}
+fn est_tokens_source(view: crate::json::JsonView<'_>) -> Result<u64> {
+    if view.is_string()? {
+        return source_string_tokens(view);
+    }
+    let Some(blocks) = view.array()? else {
+        return Ok(crate::ir::est_tokens_bytes(
+            usize::try_from(view.canonical_len()?)?,
+            TEXT_BYTES_PER_TOKEN,
+        ));
+    };
+    let mut total = 0;
+    for block in blocks {
+        let block = block?;
+        let fields = crate::harness::store::document::Fields::parse(block, &["type", "text"])?;
+        match fields
+            .as_ref()
+            .map(|f| f.string("type"))
+            .transpose()?
+            .flatten()
+            .as_deref()
+        {
+            Some("image") => total += crate::ir::IMAGE_TOKENS,
+            Some("text") => {
+                if let Some(text) = fields.and_then(|f| f.get("text")) {
+                    if text.is_string()? {
+                        total += source_string_tokens(text)?;
+                    }
+                }
+            }
+            _ => total += crate::ir::est_tokens_bytes(usize::try_from(block.canonical_len()?)?, TEXT_BYTES_PER_TOKEN),
+        }
+    }
+    Ok(total)
+}
+
+/// Marker evidence follows emitted bytes, including source chunks split by id surgery.
+struct MarkerWriter<'a, W> {
+    output: &'a mut W,
+    tail: Vec<u8>,
+    found: bool,
+}
+impl<'a, W: Write> MarkerWriter<'a, W> {
+    fn new(output: &'a mut W) -> Self {
+        Self {
+            output,
+            tail: Vec::new(),
+            found: false,
+        }
+    }
+}
+impl<W: Write> Write for MarkerWriter<'_, W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let n = self.output.write(bytes)?;
+        let bytes = &bytes[..n];
+        if !self.found {
+            let marker = MARKER_PREFIX.as_bytes();
+            let mut boundary = self.tail.clone();
+            boundary.extend_from_slice(&bytes[..bytes.len().min(marker.len() - 1)]);
+            self.found =
+                boundary.windows(marker.len()).any(|p| p == marker) || bytes.windows(marker.len()).any(|p| p == marker);
+            self.tail.extend_from_slice(bytes);
+            let keep = (marker.len() - 1).min(self.tail.len());
+            self.tail.drain(..self.tail.len() - keep);
+        }
+        Ok(n)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.output.flush()
+    }
 }
 
 /// Compact decision roster: no message content, thinking, image or tool-result payloads.
@@ -848,36 +1183,44 @@ fn revive_staged(
     let mut stage = ByteStage::new();
     use std::io::BufRead;
     let mut reader = std::io::BufReader::new(output.reader()?);
-    let mut i = 0;
-    let mut bytes = Vec::new();
-    while reader.read_until(b'\n', &mut bytes)? != 0 {
-        if bytes.last() == Some(&b'\n') {
-            bytes.pop();
-        }
-        let mut line = String::from_utf8(std::mem::take(&mut bytes))?;
-        if i >= window {
-            if let Some(facts) = &parsed[i] {
-                let total = facts
-                    .pointer("/message/usage")
-                    .and_then(Value::as_object)
-                    .map(usage_total)
-                    .unwrap_or(0);
-                if !is_sidechain(facts) && total > honest {
-                    let mut v: Value = serde_json::from_str(&line)?;
-                    if v.get("_cv_orig_ctx").is_none() {
-                        v["_cv_orig_ctx"] = Value::from(total);
-                    }
-                    if let Some(usage) = v.pointer_mut("/message/usage").and_then(Value::as_object_mut) {
-                        pin_usage(usage, honest);
-                    }
-                    line = v.to_string();
-                    rewritten += 1;
-                    stale_max = stale_max.max(total);
+    for (i, facts) in parsed.iter().enumerate() {
+        let total = facts
+            .as_ref()
+            .filter(|v| !is_sidechain(v))
+            .and_then(|v| v.pointer("/message/usage").and_then(Value::as_object).map(usage_total))
+            .unwrap_or(0);
+        if i >= window && total > honest {
+            let mut bytes = Vec::new();
+            reader.read_until(b'\n', &mut bytes)?;
+            if bytes.last() == Some(&b'\n') {
+                bytes.pop();
+            }
+            let mut v: Value = serde_json::from_slice(&bytes)?;
+            if v.get("_cv_orig_ctx").is_none() {
+                v["_cv_orig_ctx"] = Value::from(total);
+            }
+            if let Some(usage) = v.pointer_mut("/message/usage").and_then(Value::as_object_mut) {
+                pin_usage(usage, honest);
+            }
+            serde_json::to_writer(&mut stage, &v)?;
+            stage.write_all(b"\n")?;
+            rewritten += 1;
+            stale_max = stale_max.max(total);
+        } else {
+            // Usage metadata tells us this row is unchanged; copy its framed bytes without
+            // allocating a giant String just to discover that its usage doesn't need rewriting.
+            loop {
+                let bytes = reader.fill_buf()?;
+                anyhow::ensure!(!bytes.is_empty(), "staged transcript ended before its decision roster");
+                let newline = memchr::memchr(b'\n', bytes);
+                let n = newline.map_or(bytes.len(), |i| i + 1);
+                stage.write_all(&bytes[..n])?;
+                reader.consume(n);
+                if newline.is_some() {
+                    break;
                 }
             }
         }
-        writeln!(stage, "{line}")?;
-        i += 1;
     }
     Ok((
         stage.finish()?,

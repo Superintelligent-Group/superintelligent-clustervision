@@ -1141,3 +1141,136 @@ fn renamed_source_cannot_be_its_own_prune_destination() {
     assert_eq!(std::fs::read(renamed).unwrap(), original);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn projected_source_facts_match_owned_metadata_and_token_estimates() {
+    let dir = tmpdir();
+    let path = dir.join("projection.jsonl");
+    for row in [
+        serde_json::json!({"type":"user","message":{"content":"escaped\n☃ prompt"},"ignored":"irrelevant"}),
+        serde_json::json!({"type":"assistant","isSidechain":true,"message":{"model":"<synthetic>","usage":{"input_tokens":100,"iterations":[{"type":"message","input_tokens":40,"cache_read_input_tokens":3,"cache_creation_input_tokens":4,"output_tokens":1}]},"content":[{"type":"text","text":"answer ☃"},{"type":"tool_use","id":"t","name":"Read","input":{"file_path":"/a"}},{"type":"image"}]}}),
+        serde_json::json!({"type":"user","message":{"content":[{"type":"tool_result","content":{"number":1.5,"parts":["a",null,true]}},"literal",{"type":"text","text":null}]}}),
+        serde_json::json!({"type":"attachment","rendered":[{"content":"system reminder"},{"content":1}]}),
+    ] {
+        let line = row.to_string();
+        std::fs::write(&path, &line).unwrap();
+        let source = crate::json::JsonSource::capture(&path).unwrap();
+        let options = PruneOptions {
+            revive: true,
+            ..Default::default()
+        };
+        let mut tools = HashMap::new();
+        let range = Range {
+            offset: 0,
+            len: line.len() as u64,
+        };
+        let mut facts = source
+            .read_range_value(0, range.len, |v| decision_facts_source(v, range, &options, &mut tools))
+            .unwrap();
+        for key in ["_prune_payload", "_prune_thinking", "_prune_parent"] {
+            facts.as_object_mut().unwrap().remove(key);
+        }
+        assert_eq!(facts, decision_facts(&row, true));
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn giant_ignored_row_preserves_raw_bytes_and_marker_revive_evidence() {
+    let dir = tmpdir();
+    let sid = "11111111-1111-4111-8111-111111111111";
+    let new_id = "22222222-2222-4222-8222-222222222222";
+    let line = format!(" {{ \"sessionId\":\"{sid}\", \"type\":\"user\", \"message\":{{\"content\":\"prompt\"}}, \"unrelated\":\"{}[PRUNED id=fake]{}\" }}", "x".repeat(LARGE_RECORD as usize), "x".repeat(LARGE_RECORD as usize));
+    let usage = serde_json::json!({"type":"assistant","sessionId":sid,"message":{"content":"answer","usage":{"input_tokens":100000000}}});
+    let src = dir.join(format!("{sid}.jsonl"));
+    std::fs::write(&src, format!("{line}\n{usage}\n")).unwrap();
+    let options = PruneOptions {
+        new_id: Some(new_id.into()),
+        revive: true,
+        keep_last: 0,
+        ..Default::default()
+    };
+    let result = prune_session(&src, &options).unwrap();
+    let output = std::fs::read_to_string(result.new_path).unwrap();
+    assert_eq!(
+        output.lines().next().unwrap(),
+        crate::restamp_line(&line, new_id).unwrap()
+    );
+    assert_eq!(result.pruned_count, 0);
+    assert_eq!(result.usage_rewritten, 1);
+    assert_eq!(
+        result.revive_tokens,
+        Some(
+            line_est_tokens(&serde_json::json!({"type":"user","message":{"content":"prompt"}}))
+                + line_est_tokens(&usage)
+        )
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn marker_writer_detects_every_chunk_split_with_bounded_tail() {
+    let bytes = format!("prefix {MARKER_PREFIX}fake] suffix").into_bytes();
+    for split in 0..=bytes.len() {
+        let mut output = Vec::new();
+        let mut writer = MarkerWriter::new(&mut output);
+        writer.write_all(&bytes[..split]).unwrap();
+        writer.write_all(&bytes[split..]).unwrap();
+        assert!(writer.found);
+        assert!(writer.tail.len() < MARKER_PREFIX.len());
+        assert_eq!(output, bytes);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn existing_output_preserves_symlinks_hardlinks_and_permissions() {
+    use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
+    for symbolic in [true, false] {
+        let dir = tmpdir();
+        let source = fixture(&dir, &"payload".repeat(1024));
+        let new_id = "22222222-2222-4222-8222-222222222222";
+        let target = dir.join("existing-target");
+        let destination = dir.join(format!("{new_id}.jsonl"));
+        std::fs::write(&target, "before").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
+        if symbolic {
+            symlink(&target, &destination).unwrap();
+        } else {
+            std::fs::hard_link(&target, &destination).unwrap();
+        }
+        let inode = std::fs::metadata(&target).unwrap().ino();
+        let options = PruneOptions {
+            new_id: Some(new_id.into()),
+            keep_last: 0,
+            ..Default::default()
+        };
+        prune_session(&source, &options).unwrap();
+        assert_eq!(std::fs::metadata(&destination).unwrap().ino(), inode);
+        assert_eq!(std::fs::metadata(&target).unwrap().permissions().mode() & 0o777, 0o640);
+        assert!(std::fs::read_to_string(&target).unwrap().contains(MARKER_PREFIX));
+        assert_eq!(
+            std::fs::symlink_metadata(destination).unwrap().file_type().is_symlink(),
+            symbolic
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn hardlinked_source_is_rejected_before_truncation() {
+    let dir = tmpdir();
+    let source = fixture(&dir, &"payload".repeat(1024));
+    let original = std::fs::read(&source).unwrap();
+    let new_id = "22222222-2222-4222-8222-222222222222";
+    std::fs::hard_link(&source, dir.join(format!("{new_id}.jsonl"))).unwrap();
+    let options = PruneOptions {
+        new_id: Some(new_id.into()),
+        keep_last: 0,
+        ..Default::default()
+    };
+    assert!(prune_session(&source, &options).is_err());
+    assert_eq!(std::fs::read(source).unwrap(), original);
+    std::fs::remove_dir_all(dir).unwrap();
+}
