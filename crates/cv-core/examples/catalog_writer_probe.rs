@@ -31,7 +31,7 @@ mod probe {
             message.content.push(Block::ToolUse {
                 id: format!("t{i}"),
                 name: "Edit".into(),
-                input: serde_json::json!({"file_path":format!("/repo/file-{i}.rs")}),
+                input: serde_json::json!({"file_path":format!("/repo/file-{i}.rs")}).into(),
                 namespace: None,
             });
         }

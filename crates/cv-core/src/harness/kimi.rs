@@ -547,7 +547,7 @@ fn old_context_pass(
             }
             return Flow::Continue;
         }
-        let Some(mut m) = context_message(&v, &enrich, complete, &mut call_names) else {
+        let Some(mut m) = context_message(&v, enrich, complete, &mut call_names) else {
             return Flow::Continue;
         };
         match m.role {

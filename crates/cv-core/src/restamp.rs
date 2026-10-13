@@ -68,7 +68,7 @@ pub(crate) fn write_restamped_source(
     let mut spans = if len == 0 {
         Vec::new()
     } else {
-        match source.read_range_syntax(offset, len, |view| source_id_spans(view)) {
+        match source.read_range_syntax(offset, len, source_id_spans) {
             Ok(spans) => spans,
             Err(e) if e.is::<crate::json::InvalidJson>() || e.is::<InvalidStruct>() => Vec::new(),
             Err(e) => return Err(e),

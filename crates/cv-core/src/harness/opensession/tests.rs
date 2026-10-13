@@ -460,12 +460,14 @@ fn native_messages_match_document_codec_and_reject_late_invalid_turns() {
     }
     let mut published = None;
     let mut mutate = |message: Message| {
-        let input = message.content.iter().find_map(|block| match block {
-            Block::ToolUse {
-                input: crate::json::Json::Source(_),
-                ..
-            } => Some(block),
-            _ => None,
+        let input = message.content.iter().find(|block| {
+            matches!(
+                block,
+                Block::ToolUse {
+                    input: crate::json::Json::Source(_),
+                    ..
+                }
+            )
         });
         if let Some(Block::ToolUse { input, .. }) = input {
             published = Some(input.clone());

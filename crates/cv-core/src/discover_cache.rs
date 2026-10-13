@@ -495,7 +495,12 @@ mod tests {
         })
         .unwrap();
         let reads = captured_reads(&path).unwrap();
-        crate::catalog::replace_harness(crate::Harness::Claude, &[r.clone()], &[], &Default::default());
+        crate::catalog::replace_harness(
+            crate::Harness::Claude,
+            std::slice::from_ref(&r),
+            &[],
+            &Default::default(),
+        );
         let conn = crate::catalog::open_db().unwrap();
         let json: String = conn
             .query_row(

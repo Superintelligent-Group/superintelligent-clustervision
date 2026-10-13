@@ -201,6 +201,17 @@ fn project(message: &Message, resolver: &crate::lazy::Resolver, target: Harness)
     Ok(facts)
 }
 
+fn validate_text(text: &crate::lazy::Text, resolver: &crate::lazy::Resolver) -> Result<()> {
+    match text {
+        crate::lazy::Text::Inline(_) => Ok(()),
+        crate::lazy::Text::Source(source) => source.json().with_view(|view| {
+            anyhow::ensure!(view.is_string()?, "expected source text string");
+            Ok(())
+        }),
+        crate::lazy::Text::Span(_) => text.try_for_each_chunk(resolver, 64 * 1024, |_| Ok(())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,16 +275,5 @@ mod tests {
             }
         }
         Ok(())
-    }
-}
-
-fn validate_text(text: &crate::lazy::Text, resolver: &crate::lazy::Resolver) -> Result<()> {
-    match text {
-        crate::lazy::Text::Inline(_) => Ok(()),
-        crate::lazy::Text::Source(source) => source.json().with_view(|view| {
-            anyhow::ensure!(view.is_string()?, "expected source text string");
-            Ok(())
-        }),
-        crate::lazy::Text::Span(_) => text.try_for_each_chunk(resolver, 64 * 1024, |_| Ok(())),
     }
 }
