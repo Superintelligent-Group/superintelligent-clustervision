@@ -1,7 +1,134 @@
-//! Legacy discovery retains header metadata and the exact conversational count.
+//! Checked legacy framing and schema-selected discovery/message fields.
 use super::*;
 use crate::harness::store::{document::Fields, jsonl::ranges};
 use crate::json::{InvalidJson, JsonSource, JsonView};
+
+/// The first physical record is always the header, including when it is malformed or empty.
+/// Rich fields follow ParseOptions demand; unrelated legacy fields never become owned trees.
+pub(super) fn stream(name: &str, path: &Path, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+    let source = JsonSource::capture(path)?;
+    let file = std::fs::File::open(path)?;
+    let metadata = file.metadata()?;
+    source.check_metadata(metadata.clone())?;
+    let mut records = ranges::records(
+        &file,
+        ranges::Range {
+            offset: 0,
+            len: metadata.len(),
+        },
+    )?;
+    #[cfg(feature = "mmap")]
+    let mapped = crate::harness::store::document::Source::map_file(&file)?;
+    #[cfg(not(feature = "mmap"))]
+    let positioned = crate::harness::store::document::range::RangeSource::from_captured(source.clone())?;
+    let arena = std::sync::Arc::new(crate::harness::store::bytes::ByteSource::arena()?);
+    let mut session = Session::new(name, Harness::Goose);
+    session.source_path = Some(path.to_path_buf());
+    let mut tools = HashMap::new();
+    let mut header = true;
+    while let Some(record) = records.next() {
+        let (range, _) = record?;
+        // Empty lines are still headers when first; subsequent empty lines are ignored.
+        let result = if range.len == 0 {
+            Ok(None)
+        } else {
+            let visit = |view: JsonView<'_>| {
+                if header {
+                    read_header(view, &mut session)?;
+                    Ok(None)
+                } else {
+                    read_message(view, &mut tools, opts, &source, &arena)
+                }
+            };
+            #[cfg(feature = "mmap")]
+            {
+                let start = usize::try_from(range.offset)?;
+                let end = usize::try_from(range.offset + range.len)?;
+                match std::str::from_utf8(&mapped.bytes()[start..end]) {
+                    Ok(text) => source.read_borrowed_range_value(range.offset, text, visit),
+                    Err(_) => Err(InvalidJson.into()),
+                }
+            }
+            #[cfg(not(feature = "mmap"))]
+            {
+                source.read_positioned_range_value(&positioned, range.offset, range.len, visit)
+            }
+        };
+        let message = match result {
+            Ok(message) => message,
+            Err(error) if error.downcast_ref::<InvalidJson>().is_some() => None,
+            Err(error) => return Err(error),
+        };
+        if header {
+            sink.meta(&session);
+            header = false;
+        } else if let Some(message) = message {
+            if sink.message(message) == Flow::Stop {
+                break;
+            }
+        }
+    }
+    if header {
+        sink.meta(&session);
+    }
+    source.check_metadata(file.metadata()?)?;
+    source.check()?;
+    Ok(session)
+}
+
+fn read_header(view: JsonView<'_>, session: &mut Session) -> Result<()> {
+    let Some(fields) = Fields::parse(view, &["description", "working_dir", "created_at", "updated_at"])? else {
+        return Ok(());
+    };
+    session.title = fields.string("description")?.filter(|s| !s.trim().is_empty());
+    session.cwd = fields
+        .string("working_dir")?
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from);
+    for (key, output) in [
+        ("created_at", &mut session.created_at),
+        ("updated_at", &mut session.updated_at),
+    ] {
+        if let Some(value) = fields.get(key) {
+            if value.is_string()? || value.as_number()?.is_some() {
+                *output = parse_ts_value(value.resolve()?.as_ref());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn read_message(
+    view: JsonView<'_>,
+    tools: &mut HashMap<String, String>,
+    opts: &ParseOptions,
+    source: &JsonSource,
+    arena: &std::sync::Arc<crate::harness::store::bytes::ByteSource>,
+) -> Result<Option<Message>> {
+    let Some(fields) = Fields::parse(view, &["role", "id", "created", "content"])? else {
+        return Ok(None);
+    };
+    let role = fields.string("role")?.unwrap_or_else(|| "user".into());
+    let id = fields.string("id")?;
+    let timestamp = fields
+        .get("created")
+        .map(|v| v.as_number())
+        .transpose()?
+        .flatten()
+        .and_then(|n| n.as_i64())
+        .and_then(ts_from_epoch);
+    let decoded = match fields.get("content") {
+        Some(content) => decode_content_view(content, tools, opts, source, arena)?,
+        None => Decoded::default(),
+    };
+    let Some(mut message) = build_message(&role, id, timestamp, None, decoded) else {
+        return Ok(None);
+    };
+    if !opts.wants_full_extra() {
+        omit_rich_details(&mut message);
+    }
+    Ok(Some(message))
+}
 
 pub(super) fn discover(name: &str, path: &Path) -> Option<SessionRef> {
     discover_checked(name, path).ok()
@@ -200,6 +327,162 @@ mod tests {
             observe(discover("legacy", &path)),
             observe(legacy_oracle("legacy", &path))
         );
+    }
+
+    fn collected(path: &Path, opts: &ParseOptions) -> Session {
+        let mut sink = crate::stream::CollectSink::default();
+        let mut session = stream("legacy", path, opts, &mut sink).unwrap();
+        session.messages = sink.messages;
+        session.materialize().unwrap();
+        session
+    }
+
+    /// Oracle is the original line/Value reader; it tests acceptance and ordering independently
+    /// of source selection, including malformed ignored fields and duplicate keys.
+    fn owned_messages(text: &[u8]) -> Vec<Message> {
+        let mut tools = HashMap::new();
+        text.split(|b| *b == b'\n')
+            .skip(1)
+            .filter_map(|line| {
+                let value = serde_json::from_slice::<Value>(line).ok()?;
+                let role = value.get("role").and_then(Value::as_str).unwrap_or("user");
+                let id = value.get("id").and_then(Value::as_str).map(str::to_owned);
+                let timestamp = value.get("created").and_then(Value::as_i64).and_then(ts_from_epoch);
+                let decoded = value
+                    .get("content")
+                    .map(|c| decode_content(c, &mut tools))
+                    .unwrap_or_default();
+                build_message(role, id, timestamp, None, decoded)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn selected_stream_preserves_legacy_acceptance_order_and_rich_demand() {
+        let world = cv_testkit::World::in_process("goose-legacy-stream");
+        let path = world.base.join("legacy.jsonl");
+        let giant = "雪\n\"".repeat(30_000);
+        let header =
+            serde_json::json!({"description":"old","working_dir":"/repo","created_at":1704067200,"ignored":giant});
+        let messages = serde_json::json!([
+            {"id":"user","role":"user","created":1704067200,"content":[{"type":"text","text":giant}]},
+            {"id":"call","role":"assistant","content":[{"type":"toolRequest","id":"tool","toolCall":{"value":{"name":"shell","arguments":{"command":giant}}}}]},
+            {"id":"result","role":"user","content":[{"type":"toolResponse","id":"tool","toolResult":{"value":{"content":[{"type":"text","text":giant},{"type":"resource","resource":{"text":"end"}}],"structuredContent":{"stdout":giant},"_meta":{"child":"s"}}}}]},
+            {"id":"notice","role":"assistant","content":[{"type":"systemNotification","msg":giant,"ignored":giant}]},
+            {"id":"error","role":"assistant","content":[{"type":"error","message":giant}]}
+        ]);
+        let mut bytes = format!("{header}\n").into_bytes();
+        for message in messages.as_array().unwrap() {
+            bytes.extend_from_slice(message.to_string().as_bytes());
+            bytes.push(b'\n');
+        }
+        bytes.extend_from_slice(
+            br#"{bad}
+{"role":"user","content":"reject","ignored":1e400}
+{"role":"user","content":"reject","ignored":"\ud800"}
+{"role":"user","role":"assistant","content":"accepted duplicate","ignored":1e400,"ignored":1}
+"#,
+        );
+        bytes.extend_from_slice(b"\xff\n");
+        bytes.extend_from_slice(br#"{"role":null,"id":false,"created":1.5,"content":"final"}"#);
+        std::fs::write(&path, &bytes).unwrap();
+        let expected = owned_messages(&bytes);
+        let observe = |messages: Vec<Message>| serde_json::to_value(messages).unwrap();
+        for opts in [
+            ParseOptions::full(),
+            ParseOptions::complete(),
+            ParseOptions::lazy_extra(),
+        ] {
+            let actual = collected(&path, &opts);
+            assert_eq!(actual.title.as_deref(), Some("old"));
+            assert_eq!(actual.cwd.as_deref(), Some(Path::new("/repo")));
+            assert_eq!(observe(actual.messages), observe(expected.clone()), "{opts:?}");
+        }
+        let mut expected = expected;
+        for message in &mut expected {
+            message.extra.clear();
+            for block in &mut message.content {
+                if let Block::ToolResult { details, .. } = block {
+                    *details = None;
+                }
+            }
+        }
+        for opts in [
+            ParseOptions::lazy(),
+            ParseOptions::bulk(),
+            ParseOptions::facts(),
+            ParseOptions::usage(),
+        ] {
+            assert_eq!(
+                observe(collected(&path, &opts).messages),
+                observe(expected.clone()),
+                "{opts:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn selected_stream_retains_checked_bodies_and_stops_before_later_records() {
+        let world = cv_testkit::World::in_process("goose-legacy-stop");
+        let path = world.base.join("legacy.jsonl");
+        let giant = "\n雪".repeat(30_000);
+        let first = serde_json::json!({"role":"assistant","content":[{"type":"text","text":giant},{"type":"toolRequest","id":"tool","toolCall":{"value":{"name":"shell","arguments":{"command":giant}}}}]});
+        // Invalid UTF-8 on a later row is skipped by the old reader; first-message demand must
+        // retain only the admitted record and remain usable after this read ends.
+        let mut bytes = format!("{{\"description\":\"before\"}}\n{first}\n").into_bytes();
+        bytes.extend_from_slice(b"\xff\n");
+        bytes.extend_from_slice(br#"{"role":"user","content":"unread"}"#);
+        std::fs::write(&path, bytes).unwrap();
+        struct Stop(Option<Message>);
+        impl MessageSink for Stop {
+            fn message(&mut self, message: Message) -> Flow {
+                assert!(self.0.is_none());
+                self.0 = Some(message);
+                Flow::Stop
+            }
+        }
+        let mut stop = Stop(None);
+        let session = stream("legacy", &path, &ParseOptions::lazy(), &mut stop).unwrap();
+        assert_eq!(session.title.as_deref(), Some("before"));
+        let mut message = stop.0.unwrap();
+        assert!(matches!(
+            &message.content[0],
+            Block::Text {
+                text: crate::lazy::Text::Source(_)
+            }
+        ));
+        assert!(matches!(
+            &message.content[1],
+            Block::ToolUse {
+                input: crate::json::Json::Source(_),
+                ..
+            }
+        ));
+        let mut copy = message.clone();
+        copy.materialize(&crate::lazy::Resolver::new(None)).unwrap();
+        assert!(matches!(&copy.content[0], Block::Text { text } if text.inline_str() == Some(giant.as_str())));
+        // Header changes invalidate retained fields even when their own message bytes are stable.
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .write_all(br#"{"description":"after!"}"#)
+            .unwrap();
+        assert!(message.materialize(&crate::lazy::Resolver::new(None)).is_err());
+        struct ChangeAtStop(PathBuf);
+        impl MessageSink for ChangeAtStop {
+            fn message(&mut self, _: Message) -> Flow {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&self.0)
+                    .unwrap()
+                    .write_all(br#"{"description":"before"}"#)
+                    .unwrap();
+                Flow::Stop
+            }
+        }
+        assert!(stream("legacy", &path, &ParseOptions::lazy(), &mut ChangeAtStop(path.clone())).is_err());
     }
 
     fn legacy_oracle(name: &str, path: &Path) -> Option<SessionRef> {

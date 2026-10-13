@@ -118,7 +118,7 @@ use super::wire::anthropic;
 use super::{ts_from_epoch, Adapter};
 use crate::ir::*;
 use crate::stream::{Flow, MessageSink, ParseOptions};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
 use rusqlite::Connection;
 use serde_json::Value;
@@ -241,7 +241,7 @@ impl Adapter for Goose {
             let sink: &mut dyn MessageSink = &mut spawns;
             // A legacy session's `path` is the `.jsonl`; a DB session's `path` is `sessions.db`.
             if r.path.extension().is_some_and(|e| e == "jsonl") {
-                return stream_legacy(&r.id, &r.path, sink);
+                return legacy::stream(&r.id, &r.path, opts, sink);
             }
             let conn = open_ro(&r.path)?;
             conn.read(|conn| stream_db_opts_with_reads(conn, r, opts, sink, conn.reads()))
@@ -543,7 +543,7 @@ fn stream_db_opts_with_reads(
     let mut stmt = conn.prepare(&sql)?;
     // Partial readers select row IDs rather than giant TEXT cells. SQLite copies demanded cells
     // into one private arena; selected text/arguments retain checked DB/WAL provenance. Full
-    // readers keep their owned output floor and the established tolerant native decoder.
+    // readers keep their demanded rich output and the established tolerant native decoder.
     let rows = stmt.query_map([&r.id], |row| {
         Ok((
             if opts.spans { Some(row.get::<_, i64>(1)?) } else { None },
@@ -580,7 +580,7 @@ fn stream_db_opts_with_reads(
                 let (offset, len) =
                     super::store::sqlite::append_cell(conn, "messages", "metadata_json", rowid, &arena)?;
                 let metadata = source.read_backing_value(arena.clone(), offset, len, |v| {
-                    if opts.facts_only() {
+                    if !opts.wants_full_extra() {
                         project_metadata(v)
                     } else {
                         Ok(v.resolve()?.into_owned())
@@ -609,7 +609,7 @@ fn stream_db_opts_with_reads(
                 &mut tool_names,
             )
         };
-        let Some(mut m) = row.into_message_decoded(decoded, s.model.as_deref(), &mut history, !opts.facts_only())
+        let Some(mut m) = row.into_message_decoded(decoded, s.model.as_deref(), &mut history, opts.wants_full_extra())
         else {
             continue;
         };
@@ -709,9 +709,19 @@ impl DbMsg {
             apply_metadata(&mut m, meta, session_model, compaction_summary);
         }
         if !rich {
-            m.extra.remove(Harness::Goose.as_str());
+            omit_rich_details(&mut m);
         }
         Some(m)
+    }
+}
+
+/// Structured result details are part of full extra demand, like the native harness bag.
+fn omit_rich_details(message: &mut Message) {
+    message.extra.remove(Harness::Goose.as_str());
+    for block in &mut message.content {
+        if let Block::ToolResult { details, .. } = block {
+            *details = None;
+        }
     }
 }
 
@@ -814,71 +824,6 @@ fn list_legacy(dir: &Path) -> Vec<(String, PathBuf)> {
 /// Project the metadata header and conversational count without retaining raw message lines.
 fn discover_legacy(name: &str, path: &Path) -> Option<SessionRef> {
     legacy::discover(name, path)
-}
-
-fn stream_legacy(name: &str, path: &Path, sink: &mut dyn MessageSink) -> Result<Session> {
-    use std::io::{BufRead, BufReader};
-    // Stream line-by-line: a legacy transcript can be large, and `read_to_string` would
-    // resident-spike the whole file. `BufReader::lines()` keeps peak at O(largest line) and handing
-    // each message to the sink keeps it at O(largest message).
-    let file = std::fs::File::open(path).with_context(|| format!("reading {}", path.display()))?;
-    let mut lines = BufReader::new(file).lines();
-
-    // First line is the metadata header.
-    let header: Value = lines
-        .next()
-        .and_then(|l| l.ok())
-        .and_then(|l| serde_json::from_str(&l).ok())
-        .unwrap_or(Value::Null);
-
-    let s = Session {
-        id: name.to_string(),
-        harness: Harness::Goose,
-        cwd: header
-            .get("working_dir")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .map(PathBuf::from),
-        title: header
-            .get("description")
-            .and_then(Value::as_str)
-            .filter(|s| !s.trim().is_empty())
-            .map(str::to_string),
-        created_at: header.get("created_at").and_then(parse_ts_value),
-        updated_at: header.get("updated_at").and_then(parse_ts_value),
-        model: None,
-        git: None,
-        messages: Vec::new(),
-        source_path: Some(path.to_path_buf()),
-        extra: serde_json::Map::new(),
-        system_prompt: None,
-        lineage: crate::ir::Lineage::default(),
-    };
-    sink.meta(&s);
-
-    let mut tool_names: HashMap<String, String> = HashMap::new();
-    for line in lines {
-        let Ok(line) = line else { continue };
-        if line.trim().is_empty() {
-            continue;
-        }
-        let Ok(v) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        let role = v.get("role").and_then(Value::as_str).unwrap_or("user");
-        let id = v.get("id").and_then(Value::as_str).map(str::to_string);
-        let ts = v.get("created").and_then(Value::as_i64).and_then(ts_from_epoch);
-        let decoded = v
-            .get("content")
-            .map(|c| decode_content(c, &mut tool_names))
-            .unwrap_or_default();
-        if let Some(m) = build_message(role, id, ts, None, decoded) {
-            if sink.message(m) == Flow::Stop {
-                break;
-            }
-        }
-    }
-    Ok(s)
 }
 
 // ---------------------------------------------------------------------------
@@ -1197,11 +1142,11 @@ fn parse_db(conn: &Connection, r: &SessionRef) -> Result<Session> {
     Ok(s)
 }
 
-/// Whole-`Session` convenience over [`stream_legacy`] for tests.
+/// Whole-`Session` convenience over the legacy stream for tests.
 #[cfg(test)]
 fn parse_legacy(name: &str, path: &Path) -> Result<Session> {
     let mut sink = crate::stream::CollectSink::default();
-    let mut s = stream_legacy(name, path, &mut sink)?;
+    let mut s = legacy::stream(name, path, &ParseOptions::full(), &mut sink)?;
     s.messages = sink.messages;
     Ok(s)
 }
@@ -1957,12 +1902,7 @@ mod tests {
         let conn = open_ro(&path).unwrap();
         for r in discover_db(&conn, &path).unwrap() {
             let expected = serde_json::to_value(projected_session(&conn, &r, &ParseOptions::full())).unwrap();
-            for opts in [
-                ParseOptions::lazy(),
-                ParseOptions::lazy_extra(),
-                ParseOptions::bulk(),
-                ParseOptions::complete(),
-            ] {
+            for opts in [ParseOptions::lazy_extra(), ParseOptions::complete()] {
                 assert_eq!(
                     serde_json::to_value(projected_session(&conn, &r, &opts)).unwrap(),
                     expected,
@@ -1970,7 +1910,35 @@ mod tests {
                     r.id
                 );
             }
+            let lean = without_rich_message_fields(projected_session(&conn, &r, &ParseOptions::full()));
+            for opts in [
+                ParseOptions::lazy(),
+                ParseOptions::bulk(),
+                ParseOptions::facts(),
+                ParseOptions::usage(),
+            ] {
+                assert_eq!(
+                    serde_json::to_value(projected_session(&conn, &r, &opts)).unwrap(),
+                    lean,
+                    "{} {opts:?}",
+                    r.id
+                );
+            }
         }
+    }
+
+    // ParseOptions explicitly reserves native sidecars and structured result details for full
+    // extra demand. Lean output must retain every first-class field and ordinary content block.
+    fn without_rich_message_fields(mut session: Session) -> Value {
+        for message in &mut session.messages {
+            message.extra.remove(Harness::Goose.as_str());
+            for block in &mut message.content {
+                if let Block::ToolResult { details, .. } = block {
+                    *details = None;
+                }
+            }
+        }
+        serde_json::to_value(session).unwrap()
     }
 
     #[test]
@@ -2001,11 +1969,15 @@ mod tests {
         conn.execute("INSERT INTO messages (session_id,role,content_json,created_timestamp,metadata_json) VALUES ('large','user',?1,1,?2)", rusqlite::params![content.to_string(),metadata.to_string()]).unwrap();
         let r = SessionRef::new("large", Harness::Goose, path.clone());
         let full = projected_session(&conn, &r, &ParseOptions::full());
-        for opts in [ParseOptions::lazy(), ParseOptions::bulk(), ParseOptions::complete()] {
+        for opts in [ParseOptions::lazy_extra(), ParseOptions::complete()] {
             assert_eq!(
                 serde_json::to_value(projected_session(&conn, &r, &opts)).unwrap(),
                 serde_json::to_value(&full).unwrap()
             );
+        }
+        let lean = without_rich_message_fields(projected_session(&conn, &r, &ParseOptions::full()));
+        for opts in [ParseOptions::lazy(), ParseOptions::bulk(), ParseOptions::usage()] {
+            assert_eq!(serde_json::to_value(projected_session(&conn, &r, &opts)).unwrap(), lean);
         }
         let facts = projected_session(&conn, &r, &ParseOptions::facts());
         assert_eq!(facts.messages[0].role, full.messages[0].role);
@@ -2082,7 +2054,7 @@ mod tests {
         assert_eq!(full.messages[1].kind, MessageKind::CompactionSummary);
         assert_eq!(
             serde_json::to_value(projected_session(&conn, &r, &ParseOptions::lazy())).unwrap(),
-            serde_json::to_value(&full).unwrap()
+            without_rich_message_fields(projected_session(&conn, &r, &ParseOptions::full()))
         );
         assert_eq!(
             kinds(&projected_session(&conn, &r, &ParseOptions::facts())),

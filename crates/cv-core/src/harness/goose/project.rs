@@ -1,4 +1,4 @@
-//! Selected Goose wire fields over checked SQLite source ranges.
+//! Selected Goose wire fields over checked source ranges.
 use super::*;
 
 /// Reducers require visibility, usage, and model identity, not arbitrary native operations.
@@ -87,7 +87,7 @@ pub(super) fn decode_content_view(
     }
     let Some(items) = view.array()? else {
         let mut d = Decoded::default();
-        if let Some(text) = view.text(true)? {
+        if let Some(text) = view.source_text()? {
             if text
                 .try_resolve_prefix(&crate::lazy::Resolver::new(None), 4)?
                 .is_empty()
@@ -112,14 +112,14 @@ pub(super) fn decode_content_view(
                 flat_media: None,
                 ..anthropic::GOOSE
             };
-            if let Some(block) = anthropic::block_from_view(item, &q, true)? {
+            if let Some(block) = anthropic::block_from_view(item, &q, opts.spans)? {
                 d.blocks.push(block);
                 d.substantive = true;
             }
         } else if matches!(ty.as_deref(), Some("image" | "document")) {
             let fields = Fields::parse(item, &["mimeType", "data", "name"])?.expect("object with type");
             let media_type = fields.string("mimeType")?;
-            let data = fields.get("data").map(|v| v.text(true)).transpose()?.flatten();
+            let data = fields.get("data").map(|v| v.source_text()).transpose()?.flatten();
             let block = if ty.as_deref() == Some("image") {
                 let data_ref = data
                     .map(|text| {
@@ -180,13 +180,13 @@ pub(super) fn decode_content_view(
             d.blocks.push(Block::Text { text });
             if ty.as_deref() == Some("error") {
                 if d.error.is_none() {
-                    d.error = Some(if opts.facts_only() {
+                    d.error = Some(if !opts.wants_full_extra() {
                         Value::Object(Default::default())
                     } else {
                         serde_json::json!({ "kind": fields.string("kind")?.unwrap_or_else(|| "other".into()), "message": fields.string("message")?.unwrap_or_default() })
                     });
                 }
-            } else if !opts.facts_only() {
+            } else if opts.wants_full_extra() {
                 d.control.push(item.resolve()?.into_owned());
             } else {
                 d.control.push(Value::Null);
@@ -199,6 +199,20 @@ pub(super) fn decode_content_view(
                 d.blocks.push(block);
                 d.substantive = true;
             }
+        }
+    }
+    // Anthropic's shared projection exposes original-file string spans. Goose retains them as
+    // checked source values so collected windows remain usable without a primary-path resolver.
+    for block in &mut d.blocks {
+        let text = match block {
+            Block::Text { text } | Block::Thinking { text, .. } | Block::ToolResult { content: text, .. } => text,
+            _ => continue,
+        };
+        if let crate::lazy::Text::Span(span) = text {
+            let crate::json::Json::Source(range) = source.validated_range(span.offset - 1, span.len + 2)? else {
+                unreachable!("validated range is source-backed");
+            };
+            *text = crate::lazy::Text::Source(crate::lazy::SourceText::new(range));
         }
     }
     Ok(d)
@@ -237,7 +251,7 @@ fn tool_from_view(
                 writer.write_all(b"}")?;
                 Ok(())
             })?;
-            let input = source.read_backing_value(arena.clone(), offset, len, |v| v.argument(true))?;
+            let input = source.read_backing_value(arena.clone(), offset, len, |v| v.argument(opts.spans))?;
             return Ok(Some(Block::ToolUse {
                 id,
                 name: String::new(),
@@ -258,7 +272,7 @@ fn tool_from_view(
         let input = value
             .as_ref()
             .and_then(|f| f.get("arguments"))
-            .map(|v| v.argument(true))
+            .map(|v| v.argument(opts.spans))
             .transpose()?
             .unwrap_or_default();
         if !id.is_empty() && !name.is_empty() {
@@ -281,7 +295,7 @@ fn tool_from_view(
         .transpose()?
         .flatten();
     let mut details = serde_json::Map::new();
-    if !opts.facts_only() {
+    if opts.wants_full_extra() {
         if let Some(fields) = &fields {
             for key in ["structuredContent", "_meta"] {
                 if let Some(v) = fields.value(key)? {
@@ -301,7 +315,7 @@ fn tool_from_view(
         result
             .as_ref()
             .and_then(|f| f.get("error"))
-            .map(|v| v.text(true))
+            .map(|v| v.source_text())
             .transpose()?
             .flatten()
             .unwrap_or_default()
