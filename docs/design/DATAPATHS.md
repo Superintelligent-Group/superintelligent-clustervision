@@ -15,11 +15,11 @@ work is explicitly deferred. This changes priority, not the correctness or fidel
 
 | User operation | What we know | Next question / action |
 |---|---|---|
-| List / find a session | Known-ID lookup bypasses fleet discovery. Warm listing uses cached metadata and verifies all captured primary identities. Cold discovery still derives counts from content. | Preserve warm paths. Distinguish inventory discovery, source validation and exact counting; investigate their coupling before tuning more line scanners. |
+| List / find a session | Known-ID lookup bypasses fleet discovery. Warm listing uses cached metadata and verifies all captured primary identities. Cold discovery still derives counts from content. | Eight-session CLI instruction controls attribute 31–40% of work to SQLite source. Explicit catalog connection reuse is in progress; preserve freshness and exact counts. This small fixture does not rank the real fleet. |
 | Filter the fleet | All 6,714 common count maps match the earlier control; the current frozen query completes all 6,883 refs. Limited JSON selection now stops at the required ranked prefix, preserves stable order, and fails on needed read errors. | Keep complete filtering for exact totals/statistics. Counted `has:plan` can reuse facts; parse predicates still inspect needed bodies. The fact table still loads fleet-wide, so total work is not bounded solely by the window size. |
-| Read / navigate | API has verified bounded continuations; CLI requires final EOF metadata. Generated MCP now stages CLI output in bounded memory and forwards continuation hints; it still loses persistent read state. | Preserve exact CLI semantics and bounded transport. Account for repeated traversals, copies and staged bytes before unifying read engines with different metadata contracts. |
+| Read / navigate | API has verified bounded continuations; CLI requires final EOF metadata. Generated MCP stages CLI output in bounded memory and forwards continuation hints. Browser first pages now render without awaiting EOF metadata; deferred-fetch checks preserve paging and navigation. | Preserve exact CLI semantics and bounded transport. CLI frames serialize once and batch writes. Sidecar retrieval still loads unrelated records; remove that work through existing checked projections. Persistent MCP read state remains separate. |
 | Refresh / search | Production sweep tests now assert zero callbacks/document submissions/writer opens when unchanged. Resumed appends deliver fewer callbacks and body bytes than whole rebuilds, with exact search/event/count parity. CLI `index` still enumerates the fleet; unchanged publication now avoids session/watch/primary/scan-cache row mutations. | Carry work accounting across the CLI discovery boundary; inspect logical index mutations, publication and compaction separately. Current tests cover successful sweeps, not every possible merge or failure path. |
-| Transform / export | Verified Codex port retains checked source-backed bodies. Prune/archive/dataset can still scan or stage whole output; archive replacement necessarily writes a new complete artifact. | Hold further Claude emitter work. Splice now retains only selected guarded messages and moves them into the composition; EOF metadata still requires a scan. Inspect remaining full collectors and consumer correctness. |
+| Transform / export | Verified Codex port retains checked source-backed bodies. Prune/archive/dataset can still scan or stage whole output; archive replacement necessarily writes a new complete artifact. | Hold further Claude emitter work. Splice retains selected guarded messages; distill shares one prepared tail and skips unused findings products. Selected --upto loading and bounded sidecar serialization are in progress; full-source distill analysis still owns its input. |
 
 ### Measurement correction: count the work (2026-10-12)
 
@@ -1881,14 +1881,13 @@ No parser, cache, scoring policy, event ingestion or timing experiment was added
 
 ### Ranked consumer follow-up (Sol audit, 2026-10-12)
 
-1. **Distill analysis products, before another lazy-parser expansion.** `cmd/distill.rs::load`
-   materializes every source; `cmd_distill` applies `--upto` afterwards. Separately, core
-   `distill.rs::render_tail` prepares the transformed tail, token accounting prepares it again,
-   and `resumable_session` prepares it a third time. `findings` calls full `distill` and discards
-   brief/tail/statistics/elided outputs, including copied complete tool outputs. Share analysis
-   products and one prepared tail first, keeping `--upto` and source preparation semantics fixed.
-   Refutation: legacy exact head/tail/finding/stats/sidecar/native-output oracle; count prepared-tail
-   constructions, copied elided bytes, and selected materialization requests at their actual boundaries.
+1. **Distill shared products completed; input/output boundaries next.** CLI resume now prepares
+   one tail instead of three, and findings skips unused elision copies, tails and token estimates.
+   Frozen orchestration compares exact head/tail/findings/stats/sidecar/native output; work counters
+   and retained allocation addresses verify removal of duplicate work. `cmd/distill.rs::load`
+   still materializes every source before `--upto`; sidecar output still builds a complete String.
+   Reuse selected preparation and bounded JSONL staging for those boundaries. The full fact scan
+   and analyzer's input ownership remain separate work.
 2. **Pack stale-event traversal composition, pending operation profiling.** `cmd/pack.rs::build_source`
    runs `best_window`, then `events::ingest_ref` reads the same source again when the event catalog
    is stale; both use lazy parsing and visit the complete message stream. Warm events already avoid
@@ -1897,14 +1896,17 @@ No parser, cache, scoring policy, event ingestion or timing experiment was added
    ignores ingestion failure); blindly substituting `TeeSink` would make those failures fatal.
    Refutation: a counted real adapter boundary must change cold callbacks from 2N to N while
    excerpt/range/events match, warm ingestion stays zero, and mutation/failure publication matches.
-3. **Compose read demands, pending operation profiling.** `web/components/cv-app.js:158` requests
+3. **Browser scheduling completed; traversal composition remains deferred.** `web/components/cv-app.js:158` requests
    `/messages` and `/head` together; `api/read.rs::head` traverses EOF, separately from the window
    parse. API windows deliberately allow prefix metadata while head promises exact EOF metadata;
-   CLI also has different final-envelope requirements. Share sinks/traversal where a combined
+   CLI also has different final-envelope requirements. The browser now publishes a ready window
+   while head remains pending, with exact late metadata and navigation/paging race controls.
+   This removes a UI dependency without reducing backend traversals. Share sinks/traversal where a combined
    demand is explicit, preserving existing contracts; do not add another cache or universal reader.
    Refutation: cold callback/prefix-decode counts with exact selected JSON and late EOF metadata,
    plus dependency mutation and independent endpoint-error controls. Existing verified API page
    continuations, watch EOF reuse and stats token-ledger reuse should remain intact.
+
 ### CLI JSON staging write batching (2026-10-12)
 
 CLI selected-message frames and the final pretty Session/OpenSession document now use persistent
@@ -1921,6 +1923,7 @@ are writer-call counts, not timing or syscall measurements. Two sequential stagi
 bounded scratch (64 KiB each during their respective phases); private spool I/O and client payload
 sizes are unchanged. Scoped tests cover exact plain/document windows and continuations, rejected
 giant-frame extent/rollback, late-source validation, and deferred flush/finish errors.
+
 Retained-text consumer audit (2026-10-12): `cat` lazily selects the requested tool result, then
 previously called best-effort `Text::resolve`, which converted a failed Source demand to an
 empty successful result. It now uses checked resolution before printing any transcript bytes.
