@@ -798,41 +798,42 @@ fn stream_conn_with_reads(
             };
             let get_i64 =
                 |name: &str| -> Option<i64> { idx(name).and_then(|i| row.get::<_, Option<i64>>(i).ok().flatten()) };
-            // Complete preparation keeps ordinary bodies in the existing checked arena.
-            // Multimodal/provider wrappers and failed-turn classification retain their parser.
-            let content_source = if let Some(source) = &checked_source {
-                match row.get_ref(idx("content").unwrap())? {
-                    rusqlite::types::ValueRef::Text(bytes) => {
-                        let raw = std::str::from_utf8(bytes).ok();
-                        if let Some(raw) = raw.filter(|raw| {
-                            raw.len() > crate::lazy::INLINE_MAX
-                                && !raw.starts_with(MULTIMODAL_SENTINEL)
-                                && !FAILED_TURN_NOTICES.contains(&raw.trim())
-                        }) {
-                            Some(
-                                super::store::text::append(source, arena.as_ref().unwrap(), |builder| {
-                                    builder.push(raw)
-                                })
-                                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?,
-                            )
-                        } else {
-                            None
-                        }
+            // Complete preparation borrows SQLite's current cell, retaining large ordinary
+            // bodies and multimodal text in the same checked arena. Classification notices stay
+            // owned until into_message has examined their text.
+            let mut content_source = None;
+            let mut decoded_content = None;
+            if let Some(source) = &checked_source {
+                if let rusqlite::types::ValueRef::Text(bytes) = row.get_ref(idx("content").unwrap())? {
+                    if let Some(raw) = std::str::from_utf8(bytes)
+                        .ok()
+                        .filter(|raw| raw.len() > crate::lazy::INLINE_MAX && !FAILED_TURN_NOTICES.contains(&raw.trim()))
+                    {
+                        let mut prepare = || -> Result<()> {
+                            let arena = arena.as_ref().unwrap();
+                            if row.get_ref(idx("role").unwrap())? != rusqlite::types::ValueRef::Text(b"tool") {
+                                decoded_content = checked_multimodal_content(raw, source, arena)?;
+                            }
+                            if decoded_content.is_none() {
+                                content_source =
+                                    Some(super::store::text::append(source, arena, |builder| builder.push(raw))?);
+                            }
+                            Ok(())
+                        };
+                        prepare().map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?;
                     }
-                    _ => None,
                 }
-            } else {
-                None
-            };
+            }
             Ok(MsgRow {
                 id: get_i64("id").unwrap_or(0),
                 role: get_str("role").unwrap_or_default(),
-                content: if content_source.is_some() {
+                content: if content_source.is_some() || decoded_content.is_some() {
                     None
                 } else {
                     get_str("content")
                 },
                 content_source,
+                decoded_content,
                 tool_call_id: get_str("tool_call_id"),
                 tool_calls: get_str("tool_calls"),
                 tool_name: get_str("tool_name"),
@@ -1031,6 +1032,7 @@ struct MsgRow {
     role: String,
     content: Option<String>,
     content_source: Option<crate::Text>,
+    decoded_content: Option<Vec<Block>>,
     tool_call_id: Option<String>,
     tool_calls: Option<String>,
     tool_name: Option<String>,
@@ -1125,34 +1127,34 @@ impl MsgRow {
         if matches!(self.active, Some(0)) {
             bag.insert("active".into(), Value::Bool(false));
         }
-        if let Some(k) = self.display_kind.as_deref().filter(|s| !s.is_empty()) {
-            bag.insert("display_kind".into(), Value::String(k.to_string()));
+        if let Some(k) = self.display_kind.filter(|s| !s.is_empty()) {
+            bag.insert("display_kind".into(), Value::String(k));
         }
-        if let Some(ed) = self.effect_disposition.as_deref().filter(|s| !s.is_empty()) {
-            bag.insert("effect_disposition".into(), Value::String(ed.to_string()));
+        if let Some(ed) = self.effect_disposition.filter(|s| !s.is_empty()) {
+            bag.insert("effect_disposition".into(), Value::String(ed));
         }
         // `api_content`: the verbatim provider view of this (user) row — what was actually sent, when
         // it differs from the displayed `content` (e.g. injected context). Kept as a sidecar so the
         // block text stays the user's own words.
-        if let Some(api) = self.api_content.as_deref().filter(|s| !s.is_empty()) {
-            bag.insert("api_content".into(), Value::String(api.to_string()));
+        if let Some(api) = self.api_content.filter(|s| !s.is_empty()) {
+            bag.insert("api_content".into(), Value::String(api));
         }
-        if let Some(raw) = self.display_metadata.as_deref().filter(|s| !s.is_empty()) {
-            let v = serde_json::from_str::<Value>(raw).unwrap_or_else(|_| Value::String(raw.to_string()));
+        if let Some(raw) = self.display_metadata.filter(|s| !s.is_empty()) {
+            let v = serde_json::from_str::<Value>(&raw).unwrap_or_else(|_| Value::String(raw));
             bag.insert("display_metadata".into(), v);
         }
         // v31 identity columns: plain strings stay strings, the JSON list/map columns are parsed.
         for (key, raw, json) in [
-            ("message_uid", &self.message_uid, false),
-            ("tool_call_uid", &self.tool_call_uid, false),
-            ("absorbed_message_uids", &self.absorbed_message_uids, true),
-            ("tool_call_uids", &self.tool_call_uids, true),
+            ("message_uid", self.message_uid, false),
+            ("tool_call_uid", self.tool_call_uid, false),
+            ("absorbed_message_uids", self.absorbed_message_uids, true),
+            ("tool_call_uids", self.tool_call_uids, true),
         ] {
-            if let Some(raw) = raw.as_deref().filter(|s| !s.is_empty()) {
+            if let Some(raw) = raw.filter(|s| !s.is_empty()) {
                 let v = if json {
-                    serde_json::from_str::<Value>(raw).unwrap_or_else(|_| Value::String(raw.to_string()))
+                    serde_json::from_str::<Value>(&raw).unwrap_or_else(|_| Value::String(raw))
                 } else {
-                    Value::String(raw.to_string())
+                    Value::String(raw)
                 };
                 bag.insert(key.into(), v);
             }
@@ -1186,15 +1188,8 @@ impl MsgRow {
         // round-trip reproduces them byte-for-byte. The summary text we fold into `Thinking.text`
         // below is a *projection* (it merges `reasoning` + `reasoning_content` + the text entries of
         // `reasoning_details` and dedups them); reconstructing the original columns from that
-        // projection is impossible, so we stash the originals here. These are small metadata strings
-        // (summaries / encrypted handles), never large tool payloads. `reasoning_details` /
-        // `codex_*` are already stashed (as parsed JSON) further down.
-        if let Some(r) = self.reasoning.as_deref().filter(|s| !s.is_empty()) {
-            bag.insert(RAW_REASONING_KEY.into(), Value::String(r.to_string()));
-        }
-        if let Some(r) = self.reasoning_content.as_deref().filter(|s| !s.is_empty()) {
-            bag.insert(RAW_REASONING_CONTENT_KEY.into(), Value::String(r.to_string()));
-        }
+        // projection is impossible, so we move the originals into the owned fact bag after folding
+        // the text. Structured reasoning/codex sidecars are parsed once and moved into the bag too.
 
         // Reasoning: combine summary text from `reasoning`, `reasoning_content`, and the text
         // entries of `reasoning_details`; collect any encrypted blob (reasoning_details or codex).
@@ -1219,27 +1214,57 @@ impl MsgRow {
             }
         }
         let mut encrypted: Option<String> = None;
-        if let Some(raw) = self.reasoning_details.as_deref() {
-            let (texts, enc) = parse_reasoning_details(raw);
-            for t in texts {
-                push_reasoning(&t);
+        if let Some(v) = self
+            .reasoning_details
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        {
+            if let Value::Array(items) = &v {
+                for item in items {
+                    if encrypted.is_none() {
+                        encrypted = item
+                            .get("encrypted_content")
+                            .and_then(Value::as_str)
+                            .map(str::to_string);
+                    }
+                    let text = item
+                        .get("summary")
+                        .or_else(|| item.get("thinking"))
+                        .or_else(|| item.get("content"))
+                        .or_else(|| item.get("text"))
+                        .and_then(Value::as_str);
+                    if let Some(text) = text {
+                        push_reasoning(text);
+                    }
+                }
             }
-            encrypted = encrypted.or(enc);
-            // Preserve the full structured blob for lossless round-tripping.
-            if let Ok(v) = serde_json::from_str::<Value>(raw) {
-                bag.insert("reasoning_details".into(), v);
-            }
+            // The projection borrows the already parsed sidecar before moving it into extras.
+            bag.insert("reasoning_details".into(), v);
         }
-        if let Some(raw) = self.codex_reasoning_items.as_deref() {
-            encrypted = encrypted.or_else(|| extract_codex_encrypted(raw));
-            if let Ok(v) = serde_json::from_str::<Value>(raw) {
-                bag.insert("codex_reasoning_items".into(), v);
+        if let Some(v) = self
+            .codex_reasoning_items
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        {
+            if encrypted.is_none() {
+                encrypted = v.as_array().and_then(|items| {
+                    items.iter().find_map(|item| {
+                        item.get("encrypted_content")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    })
+                });
             }
+            bag.insert("codex_reasoning_items".into(), v);
         }
-        if let Some(raw) = self.codex_message_items.as_deref() {
-            if let Ok(v) = serde_json::from_str::<Value>(raw) {
+        if let Some(raw) = self.codex_message_items {
+            if let Ok(v) = serde_json::from_str::<Value>(&raw) {
                 bag.insert("codex_message_items".into(), v);
             }
+        }
+        if let Some(r) = self.reasoning.filter(|s| !s.is_empty()) {
+            bag.insert(RAW_REASONING_KEY.into(), Value::String(r));
+        }
+        if let Some(r) = self.reasoning_content.filter(|s| !s.is_empty()) {
+            bag.insert(RAW_REASONING_CONTENT_KEY.into(), Value::String(r));
         }
         if !reasoning_text.is_empty() || encrypted.is_some() {
             m.content.push(Block::Thinking {
@@ -1271,10 +1296,10 @@ impl MsgRow {
         // text / multimodal content
         if let Some(text) = self.content_source {
             m.content.push(Block::Text { text });
-        } else if let Some(raw) = &self.content {
-            for b in decode_content(raw) {
-                m.content.push(b);
-            }
+        } else if let Some(blocks) = self.decoded_content {
+            m.content.extend(blocks);
+        } else if let Some(raw) = self.content {
+            m.content.extend(decode_content(raw));
         }
 
         // assistant tool calls
@@ -1288,7 +1313,42 @@ impl MsgRow {
     }
 }
 
-fn decode_content(raw: &str) -> Vec<Block> {
+/// Source-backed counterpart of decode_content. Validate the entire sentinel document before
+/// selecting parts, preserving serde Value's rejection of invalid ignored fields. Non-array or
+/// empty provider wrappers fall back to the original literal text, as the owned decoder does.
+fn checked_multimodal_content(
+    raw: &str,
+    source: &crate::json::JsonSource,
+    arena: &std::sync::Arc<super::store::bytes::ByteSource>,
+) -> Result<Option<Vec<Block>>> {
+    let Some(rest) = raw.strip_prefix(MULTIMODAL_SENTINEL) else {
+        return Ok(None);
+    };
+    if serde_json::from_str::<&crate::lazy::RawValue>(rest).is_err()
+        || !super::store::json::value_compatible(rest.as_bytes())
+    {
+        return Ok(None);
+    }
+    let (offset, len) = arena.append(|writer| {
+        writer.write_all(rest.as_bytes())?;
+        Ok(())
+    })?;
+    source.read_backing_syntax(arena.clone(), offset, len, |view| {
+        let array = view.is_array()?;
+        let parts = if array { Some(view) } else { view.get("parts")? };
+        let Some(parts) = parts.map(|parts| parts.array()).transpose()?.flatten() else {
+            return Ok(None);
+        };
+        let mut blocks = Vec::new();
+        for part in parts {
+            let part = part?;
+            blocks.extend(openai::part_view(part, &openai::HERMES)?);
+        }
+        Ok((array || !blocks.is_empty()).then_some(blocks))
+    })
+}
+
+fn decode_content(raw: String) -> Vec<Block> {
     if let Some(rest) = raw.strip_prefix(MULTIMODAL_SENTINEL) {
         match serde_json::from_str::<Value>(rest) {
             Ok(Value::Array(items)) => {
@@ -1310,9 +1370,7 @@ fn decode_content(raw: &str) -> Vec<Block> {
     if raw.is_empty() {
         vec![]
     } else {
-        vec![Block::Text {
-            text: raw.to_string().into(),
-        }]
+        vec![Block::Text { text: raw.into() }]
     }
 }
 
@@ -1334,47 +1392,6 @@ fn object_content_to_blocks(map: &serde_json::Map<String, Value>) -> Option<Vec<
 /// Hermes `tool_calls` is an OpenAI-shaped array: `[{id,type,function:{name,arguments}}]`.
 fn parse_tool_calls(raw: &str) -> Vec<Block> {
     openai::tool_calls(serde_json::from_str::<Value>(raw).ok().as_ref())
-}
-
-/// `reasoning_details` is an OpenRouter-unified array. Each item may carry summary/thinking text
-/// (`reasoning.summary`, `thinking`, `redacted_thinking`) or an encrypted blob
-/// (`reasoning.encrypted_content`). Returns (collected text summaries, first encrypted blob).
-fn parse_reasoning_details(raw: &str) -> (Vec<String>, Option<String>) {
-    let mut texts = Vec::new();
-    let mut encrypted = None;
-    let Ok(Value::Array(items)) = serde_json::from_str::<Value>(raw) else {
-        return (texts, encrypted);
-    };
-    for it in &items {
-        if encrypted.is_none() {
-            if let Some(enc) = it.get("encrypted_content").and_then(Value::as_str) {
-                encrypted = Some(enc.to_string());
-            }
-        }
-        // Summary/thinking text lives under one of several keys (provider-dependent).
-        let text = it
-            .get("summary")
-            .or_else(|| it.get("thinking"))
-            .or_else(|| it.get("content"))
-            .or_else(|| it.get("text"))
-            .and_then(Value::as_str);
-        if let Some(t) = text {
-            if !t.is_empty() {
-                texts.push(t.to_string());
-            }
-        }
-    }
-    (texts, encrypted)
-}
-
-/// `codex_reasoning_items` is `[{type:"reasoning", id, encrypted_content}]`.
-fn extract_codex_encrypted(raw: &str) -> Option<String> {
-    let Value::Array(items) = serde_json::from_str::<Value>(raw).ok()? else {
-        return None;
-    };
-    items
-        .iter()
-        .find_map(|it| it.get("encrypted_content").and_then(Value::as_str).map(str::to_string))
 }
 
 /// Whole-`Session` convenience over [`stream_conn`] for tests: stream into a [`CollectSink`] and
@@ -1542,6 +1559,12 @@ mod tests {
                 }
             ))));
         assert_eq!(checked.messages[5].kind, owned.messages[5].kind);
+        assert!(matches!(
+            checked.messages[6].content[0],
+            Block::Text {
+                text: crate::Text::Source(_)
+            }
+        ));
         let mut materialized = checked.clone();
         materialized.materialize()?;
         assert_eq!(serde_json::to_value(&materialized)?, serde_json::to_value(&owned)?);
@@ -1565,6 +1588,67 @@ mod tests {
         assert_eq!(std::fs::read(&path)?, before_main, "mutation is WAL-only");
         assert!(crate::emit::emit(&wal_checked, Harness::Hermes, &world.base.join("stale-wal"), &options).is_err());
         assert!(crate::emit::emit(&checked, Harness::Hermes, &world.base.join("stale"), &options).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn complete_checked_multimodal_matches_owned_acceptance_and_guards_sources() -> Result<()> {
+        let world = cv_testkit::World::in_process("hermes-checked-multimodal");
+        let path = world.base.join("state.db");
+        let writer = Connection::open(&path)?;
+        writer.execute_batch(&fixture("schema-v14.sql"))?;
+        insert_session(&writer, "s", None, None, 1000.0, None);
+        let body = "large 🌙\n\"quoted\"".repeat(4096);
+        let parts = serde_json::json!([
+            {"type":"text","text":body},
+            {"type":"text","text":""},
+            {"type":"image_url","image_url":{"url":"λ\n".repeat(100)}},
+            {"type":"unknown","text":"kept"},
+            false
+        ]);
+        let documents = [
+            parts.to_string(),
+            serde_json::json!({"parts":parts}).to_string(),
+            // Duplicate keys use the final Value just as the owned decoder does.
+            format!(r#"[{{"text":"discarded","text":{}}}]"#, serde_json::to_string(&body)?),
+            format!(r#"[{{"text":{},"ignored":"\ud800"}}]"#, serde_json::to_string(&body)?),
+            format!(r#"[{{"text":{},"ignored":1e400}}]"#, serde_json::to_string(&body)?),
+            format!(r#"{{"parts":[],"ignored":{}}}"#, serde_json::to_string(&body)?),
+            format!(r#"[{{"text":{}}}"#, serde_json::to_string(&body)?),
+        ];
+        for document in documents {
+            writer.execute(
+                "INSERT INTO messages(session_id,role,content,timestamp) VALUES('s','user',?1,1001)",
+                [format!("{MULTIMODAL_SENTINEL}{document}")],
+            )?;
+        }
+        // A tool result's sentinel is literal output, never decoded as multimodal parts.
+        writer.execute(
+            "INSERT INTO messages(session_id,role,content,timestamp,tool_call_id) VALUES('s','tool',?1,1002,'call')",
+            [format!("{MULTIMODAL_SENTINEL}{parts}")],
+        )?;
+        drop(writer);
+        let adapter = Hermes::with_db(path.clone());
+        let reference = adapter.discover()?.remove(0);
+        let owned = crate::stream::collect_with(&adapter, &reference, &ParseOptions::complete())?;
+        let checked = crate::emit::parse_for_emit(&adapter, &reference, Harness::Hermes)?;
+        assert_eq!(checked.messages.len(), 8);
+        for message in checked.messages.iter().take(3) {
+            assert!(matches!(
+                message.content[0],
+                Block::Text {
+                    text: crate::Text::Source(_)
+                }
+            ));
+        }
+        let mut materialized = checked.clone();
+        materialized.materialize()?;
+        assert_eq!(serde_json::to_value(materialized)?, serde_json::to_value(owned)?);
+        std::fs::write(&path, "replaced producer")?;
+        let Block::Text { text } = &checked.messages[0].content[0] else {
+            unreachable!()
+        };
+        assert!(text.try_resolve(&checked.resolver()).is_err());
         Ok(())
     }
 
