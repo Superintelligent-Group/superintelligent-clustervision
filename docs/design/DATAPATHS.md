@@ -22,6 +22,21 @@ reshaping. A bounded reader or completed export lane alone does not establish co
   convergence batch. No intermediate releases or repeated full gates while implementation moves.
   Explicitly requested rich output and format-required scans remain costs, not automatic defects.
 
+### Current implementation batch (2026-10-13)
+
+Ember's latest steering is to drain per-harness waste with a wider Sol swarm and batched
+integration. Earlier numerical targets are investigation aids, not reasons to add machinery.
+Prefer faster useful operations, less redundant work and simpler shared code.
+
+- Adapter owners implement coherent changes and focused regression cases in isolated worktrees.
+- Root combines the changes, builds once per required configuration, runs the relevant checks
+  together, and distributes concrete failures back to owners. Repeat after repairs, not after
+  every intermediate edit or cherry-pick. Broad release gates wait for a settled batch.
+- Active scope: OpenCode complete replay; OpenClaw trees/SQLite; Devin rows; Kimi/Kimi Code/Qwen
+  discovery; Kimi reading; legacy Codex; Goose; Hermes; Zed; shared writer simplification.
+- Preserve exact format semantics, source freshness and useful output. Keep required navigation,
+  requested rich metadata and native storage costs distinct from avoidable payload copies.
+
 ## Current priorities: whole operations (2026-10-12, user steering)
 
 Ember asked us to zoom out: giant-payload heap has dominated the investigation for too long.
