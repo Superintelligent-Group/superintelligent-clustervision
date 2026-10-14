@@ -206,12 +206,21 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
                                 Ok(())
                             })?;
                         }
-                        Block::ToolUse { id, name, input, .. } => {
+                        Block::ToolUse {
+                            id,
+                            name,
+                            namespace,
+                            input,
+                        } => {
                             writer::record(&mut lines, &ts, "response_item", |out| {
                                 out.write_all(b"{\"type\":\"function_call\",\"call_id\":")?;
                                 serde_json::to_writer(&mut *out, id)?;
                                 out.write_all(b",\"name\":")?;
                                 serde_json::to_writer(&mut *out, name)?;
+                                if let Some(namespace) = namespace {
+                                    out.write_all(b",\"namespace\":")?;
+                                    serde_json::to_writer(&mut *out, namespace)?;
+                                }
                                 out.write_all(b",\"arguments\":")?;
                                 writer::argument(out, input)?;
                                 out.write_all(b"}")?;
@@ -283,6 +292,18 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
                         writer::record(&mut lines, &ts, "response_item", |out| {
                             out.write_all(b"{\"type\":\"function_call_output\",\"call_id\":")?;
                             serde_json::to_writer(&mut *out, tool_use_id)?;
+                            if let Some(name) = tool_name {
+                                out.write_all(b",\"name\":")?;
+                                serde_json::to_writer(&mut *out, name)?;
+                            }
+                            if let Some(namespace) = msg
+                                .harness_extra(Harness::Codex)
+                                .and_then(|bag| bag.get("namespace"))
+                                .and_then(Value::as_str)
+                            {
+                                out.write_all(b",\"namespace\":")?;
+                                serde_json::to_writer(&mut *out, namespace)?;
+                            }
                             out.write_all(b",\"output\":")?;
                             writer::string(out, content, &resolver, if *is_error { "[error] " } else { "" })?;
                             out.write_all(b"}")?;
@@ -415,6 +436,60 @@ fn push_text(
 #[cfg(test)]
 mod staged_tests {
     use super::*;
+    #[test]
+    fn native_namespaced_tool_calls_and_named_results_round_trip() -> Result<()> {
+        use crate::harness::{Adapter, Parse};
+        use crate::ir::{Message, SessionRef};
+        let world = cv_testkit::World::in_process("codex-tool-identity-wire");
+        let mut session = Session::new("source", Harness::Codex);
+        let mut call = Message::new(Role::Assistant);
+        call.content.push(Block::ToolUse {
+            id: "call".into(),
+            name: "send_message".into(),
+            namespace: Some("collaboration".into()),
+            input: json!({"target":"worker","message":"payload λ"}).into(),
+        });
+        let mut result = Message::new(Role::Tool);
+        result
+            .harness_extra_mut(Harness::Codex)
+            .insert("namespace".into(), json!("collaboration"));
+        result.content.push(Block::ToolResult {
+            tool_use_id: "call".into(),
+            content: "delivered".into(),
+            is_error: false,
+            tool_name: Some("send_message".into()),
+            status: Some("completed".into()),
+            details: None,
+        });
+        session.messages = vec![call, result];
+        let emitted = emit(
+            &session,
+            &world.base,
+            &EmitOptions {
+                new_id: Some("tool-identity".into()),
+                ..Default::default()
+            },
+        )?;
+        let adapter = super::super::Codex::with_home(&world.home);
+        let parsed = adapter.parse(&SessionRef::new("tool-identity", adapter.harness(), &emitted.path))?;
+        assert_eq!(parsed.messages.len(), 2);
+        assert_eq!(
+            serde_json::to_value(&parsed.messages[0].content)?,
+            serde_json::to_value(&session.messages[0].content)?
+        );
+        assert_eq!(
+            serde_json::to_value(&parsed.messages[1].content)?,
+            serde_json::to_value(&session.messages[1].content)?
+        );
+        assert_eq!(
+            parsed.messages[1]
+                .harness_extra(Harness::Codex)
+                .and_then(|bag| bag.get("namespace")),
+            Some(&json!("collaboration"))
+        );
+        Ok(())
+    }
+
     #[test]
     fn usage_wire_aggregates_saturate_large_component_counts() {
         let value = codex_token_usage(Some(&crate::ir::Usage {
