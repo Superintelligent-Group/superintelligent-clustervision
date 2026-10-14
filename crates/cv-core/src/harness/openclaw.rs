@@ -978,7 +978,7 @@ fn sqlite_key_facts_inner(
                 write!(&mut encoded_plan_key, "{byte:02x}")?;
             }
             let (plain, _) =
-                crate::source::inventory("openclaw-parent-plan", &path.join(encoded_plan_key), reads, || {
+                crate::source::inventory("openclaw-parent-plan", &path.join(&encoded_plan_key), reads, || {
                     Ok((
                         plain_parent_scan(conn, by, session_id)?,
                         reads.clone(),
@@ -996,22 +996,9 @@ fn sqlite_key_facts_inner(
                     std::sync::Arc::new(load()?)
                 }
             } else {
-                let selector = if &key == by {
-                    format!("{}:{session_id}", by.len()) + by
-                } else {
-                    by.clone()
-                };
-                let mut encoded = String::with_capacity(selector.len() * 2);
-                use std::fmt::Write as _;
-                for byte in selector.as_bytes() {
-                    write!(&mut encoded, "{byte:02x}")?;
-                }
-                let namespace = if &key == by {
-                    "openclaw-self-parent-windows"
-                } else {
-                    "openclaw-parent-windows"
-                };
-                crate::source::inventory(namespace, &path.join(encoded), reads, || {
+                // Both SQL parameters determine membership. Rust string equality cannot
+                // decide whether this key includes the current child under custom collations.
+                crate::source::inventory("openclaw-parent-windows", &path.join(&encoded_plan_key), reads, || {
                     let candidates = load()?;
                     let bytes = candidates.capacity() * std::mem::size_of::<String>()
                         + candidates.iter().map(String::capacity).sum::<usize>();
@@ -3713,6 +3700,37 @@ mod tests {
             3,
             "standalonecalls must not retain inventory"
         );
+        Ok(())
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_scoped_parent_fallback_keys_both_parameters_under_nocase() -> Result<()> {
+        let world = cv_testkit::World::in_process("openclaw-nocase-parent-scope");
+        let path = world.base.join("sessions.db");
+        let conn = rusqlite::Connection::open(&path)?;
+        conn.execute_batch(
+            "CREATE TABLE session_windows(session_id TEXT,session_key TEXT COLLATE NOCASE,spawned_by TEXT);
+            INSERT INTO session_windows VALUES ('child-a','PARENT','parent'),('child-b','PARENT','parent');",
+        )?;
+        let mut reads = crate::source::ReadSet::default();
+        reads.record(&path);
+        let _scope = crate::source::read_scope();
+        for id in ["child-a", "child-b", "child-a", "child-b"] {
+            let original: String = conn.query_row(
+                "SELECT session_id FROM session_windows WHERE session_key=?1 AND session_id!=?2",
+                ["parent", id],
+                |row| row.get(0),
+            )?;
+            let reference = SessionRef::new(id, Harness::OpenClaw, &path);
+            let facts = sqlite_key_facts_scoped(&conn, &reference, &reads)?;
+            assert_eq!(facts.parent.as_deref(), Some(original.as_str()));
+            assert_ne!(
+                facts.parent.as_deref(),
+                Some(id),
+                "the SQL exclusion remains child-specific"
+            );
+        }
         Ok(())
     }
 
