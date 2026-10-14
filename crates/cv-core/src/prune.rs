@@ -399,6 +399,11 @@ fn select_kept_turns(
             pending += fact_est_tokens(v);
         }
     }
+    // Trailing rendered reminders still belong to the retained tail even without a following
+    // provider turn. Account for them before choosing a window.
+    if let Some(last) = per_turn.last_mut() {
+        *last = last.saturating_add(pending);
+    }
     let mut acc = 0u64;
     let mut start = per_turn.len();
     let mut overshoot = false;
@@ -417,7 +422,11 @@ fn select_kept_turns(
     if start == per_turn.len() {
         start = 0; // no turns at all — degenerate, keep everything
     }
-    (snap(start), total_turns, None, overshoot)
+    let start = snap(start);
+    // Reopening on the preceding user prompt can enlarge a byte-sized selection; report that
+    // unavoidable coherent-tail overshoot rather than silently promising the original budget.
+    let retained = per_turn[start..].iter().copied().fold(0u64, u64::saturating_add);
+    (start, total_turns, None, overshoot || retained > budget)
 }
 
 /// Prune `src_path` (a Claude `<id>.jsonl`) into a new session. Returns what happened.
