@@ -3689,7 +3689,11 @@ mod tests {
         assert_eq!(call[2]["id"], "cv_tool_0");
         assert_eq!(call[1]["id"], result[0]["tool_use_id"]);
         assert_eq!(call[1]["input"]["untouched"], "a:b");
-        assert_eq!(result[2]["type"], "text");
+        assert_eq!(
+            result.as_array().unwrap().len(),
+            2,
+            "redacted reasoning is removed, not replaced"
+        );
         Ok(())
     }
     #[test]
