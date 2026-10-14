@@ -1016,7 +1016,7 @@ check("large folded bodies defer Markdown and DOM until opened; nested folds sta
 });
 await acheck("copying a closed tool body copies complete source without opening the fold", async () => {
   const big = "tool output ".repeat(1000);
-  const el = renderTranscript(normalizeSession({ id: "copy-lazy", messages: [
+  const el = renderTranscript(normalizeSession({ id: "copy-lazy", system_prompt: big, messages: [
     { role: "tool", content: [{ type: "tool_result", content: big }] },
   ] }));
   const descriptor = Object.getOwnPropertyDescriptor(navigator, "clipboard");
@@ -1028,6 +1028,12 @@ await acheck("copying a closed tool body copies complete source without opening 
     await Promise.resolve();
     eq(copied, big, "copy includes full deferred output");
     eq(fold.open, false, "copy leaves fold closed");
+    const prompt = el.querySelector(".th-sysprompt");
+    copied = null;
+    prompt.querySelector("[data-copy]").click();
+    await Promise.resolve();
+    eq(copied, big, "system prompt copy has one complete-source handler");
+    eq(prompt.open, false, "prompt copy leaves fold closed");
   } finally {
     if (descriptor) Object.defineProperty(navigator, "clipboard", descriptor);
     else delete navigator.clipboard;

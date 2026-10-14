@@ -490,6 +490,7 @@ class CvTranscript extends HTMLElement {
       });
     });
     root.querySelectorAll("[data-copy]:not([data-wired])").forEach((btn) => {
+      if (!btn.closest(".block")) return; // system prompt has its header-specific handler
       btn.setAttribute("data-wired", "1");
       btn.addEventListener("click", async (e) => {
         // Some copy buttons live inside a <summary> — don't toggle the <details>.
