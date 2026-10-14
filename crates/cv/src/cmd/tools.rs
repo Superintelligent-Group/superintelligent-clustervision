@@ -3,7 +3,7 @@
 //! breakdown, and the time-ordered tool-call timeline.
 
 use crate::util::short_id;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use cv_core::ir::truncate;
 use cv_core::tools::{ForestTools, ToolHistogram};
 
