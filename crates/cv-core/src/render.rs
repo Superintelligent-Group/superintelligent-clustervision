@@ -135,11 +135,16 @@ pub fn write_md_block(b: &Block, out: &mut impl Write, resolver: &crate::Resolve
                 }
                 Ok(())
             })?;
+            let excerpt = truncate(&head, 4000);
+            // A tool can return Markdown containing its own fenced blocks. Keep that text
+            // literal by choosing a fence longer than every run in the rendered excerpt.
+            let longest = excerpt.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+            let fence = "`".repeat(3.max(longest + 1));
             write!(
                 out,
-                "**↩ result{}**\n\n```\n{}\n```\n\n",
+                "**↩ result{}**\n\n{fence}\n{}\n{fence}\n\n",
                 if *is_error { " (error)" } else { "" },
-                truncate(&head, 4000)
+                excerpt
             )?;
         }
         Block::File { path, source, .. } => write!(out, "_[file: {}]_\n\n", file_label(path, source))?,
@@ -308,6 +313,24 @@ mod tests {
         }
         out
     }
+    #[test]
+    fn markdown_tool_results_keep_nested_fences_literal() {
+        let mut output = Vec::new();
+        let block = Block::ToolResult {
+            tool_use_id: "tool".into(),
+            content: "before\n```rust\nlet x = 1;\n```\nafter".into(),
+            is_error: false,
+            tool_name: None,
+            status: None,
+            details: None,
+        };
+        write_md_block(&block, &mut output, &crate::Resolver::new(None)).unwrap();
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "**↩ result**\n\n````\nbefore\n```rust\nlet x = 1;\n```\nafter\n````\n\n"
+        );
+    }
+
     #[test]
     fn checked_session_writers_match_complete_owned_format_oracles() {
         let fixture = serde_json::json!({

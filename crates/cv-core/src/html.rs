@@ -253,6 +253,17 @@ pub fn share_begin(meta: &ShareMeta) -> String {
 /// One message card. `idx` becomes the anchor id (`#m0`, `#m1`, …) used by keyboard nav.
 /// A source error may leave a prefix in `out`; callers must discard the staged card on failure.
 pub fn share_message(m: &Message, idx: usize, out: &mut String) -> anyhow::Result<()> {
+    share_message_with_resolver(m, idx, out, &crate::Resolver::new(None))
+}
+
+/// Render lazy text using the caller's session source for implicit spans. Failed source reads
+/// leave only a staged prefix, which the caller must discard.
+pub fn share_message_with_resolver(
+    m: &Message,
+    idx: usize,
+    out: &mut String,
+    resolver: &crate::Resolver,
+) -> anyhow::Result<()> {
     use std::fmt::Write as _;
     let role = role_class(m.role);
     let _ = writeln!(out, "<section class=\"msg msg-{role}\" id=\"m{idx}\">");
@@ -264,7 +275,7 @@ pub fn share_message(m: &Message, idx: usize, out: &mut String) -> anyhow::Resul
     }
     out.push_str("</div>\n<div class=\"msg-body\">\n");
     for b in &m.content {
-        share_block(b, out)?;
+        share_block(b, out, resolver)?;
     }
     out.push_str("</div>\n");
     if let Some(u) = &m.usage {
@@ -274,15 +285,17 @@ pub fn share_message(m: &Message, idx: usize, out: &mut String) -> anyhow::Resul
     Ok(())
 }
 
-fn share_block(b: &Block, out: &mut String) -> anyhow::Result<()> {
+fn share_block(b: &Block, out: &mut String, resolver: &crate::Resolver) -> anyhow::Result<()> {
     use std::fmt::Write as _;
     match b {
         Block::Text { text } => {
+            let text = text.try_resolve(resolver)?;
             out.push_str("<div class=\"text\">");
-            render_text(text, out);
+            render_text(&text, out);
             out.push_str("</div>\n");
         }
         Block::Thinking { text, redacted, .. } => {
+            let text = text.try_resolve(resolver)?;
             out.push_str("<details class=\"fold think\"><summary><span class=\"t-ico\">🧠</span> thinking");
             if *redacted {
                 out.push_str(" <em>(redacted by provider)</em>");
@@ -290,14 +303,14 @@ fn share_block(b: &Block, out: &mut String) -> anyhow::Result<()> {
             let _ = write!(
                 out,
                 "<span class=\"hint\">{}</span>",
-                escape(&crate::ir::truncate(text, 72))
+                escape(&crate::ir::truncate(&text, 72))
             );
             out.push_str("</summary>\n");
             if *redacted && text.trim().is_empty() {
                 out.push_str("<p class=\"redacted\">[redacted by provider]</p>");
             } else {
                 out.push_str("<div class=\"text\">");
-                render_text(text, out);
+                render_text(&text, out);
                 out.push_str("</div>");
             }
             out.push_str("\n</details>\n");
@@ -321,6 +334,7 @@ fn share_block(b: &Block, out: &mut String) -> anyhow::Result<()> {
             status,
             ..
         } => {
+            let content = content.try_resolve(resolver)?;
             let cls = if *is_error {
                 "fold tool tool-res err"
             } else {
@@ -342,7 +356,7 @@ fn share_block(b: &Block, out: &mut String) -> anyhow::Result<()> {
             }
             let _ = write!(out, "<span class=\"hint\">{}</span>", human_bytes(content.len() as u64));
             out.push_str("</summary>\n<pre><code>");
-            out.push_str(&escape(content));
+            out.push_str(&escape(&content));
             out.push_str("</code></pre>\n</details>\n");
         }
         Block::File { path, source, .. } => {
@@ -899,5 +913,50 @@ mod tests {
         assert_eq!(input_preview(&v.into()).unwrap(), "/a/b.rs");
         let v2 = serde_json::json!({"weird": 1});
         assert!(input_preview(&v2.into()).unwrap().contains("weird"));
+    }
+
+    #[test]
+    fn lazy_html_text_matches_owned_and_rejects_changed_sources() -> anyhow::Result<()> {
+        let world = cv_testkit::World::in_process("html-lazy-card");
+        let path = world.base.join("body.json");
+        let body = format!(
+            "{}<script>bad</script> `λ`\n\n```rust\n<unsafe>\n```",
+            "ordinary ".repeat(2000)
+        );
+        std::fs::write(&path, serde_json::to_vec(&body)?)?;
+        let source = crate::json::JsonSource::capture(&path)?;
+        let text = source
+            .read_range_value(0, source.len(), |view| view.source_text())?
+            .unwrap();
+        let mut lazy = Message::new(Role::Assistant);
+        lazy.content = vec![
+            Block::Text { text: text.clone() },
+            Block::Thinking {
+                text: text.clone(),
+                signature: None,
+                encrypted: None,
+                redacted: false,
+            },
+            Block::ToolResult {
+                tool_use_id: "call".into(),
+                content: text,
+                is_error: false,
+                tool_name: None,
+                status: None,
+                details: None,
+            },
+        ];
+        let mut owned = lazy.clone();
+        owned.materialize(&crate::Resolver::new(None))?;
+        let mut before = String::new();
+        let mut after = String::new();
+        share_message(&owned, 0, &mut before)?;
+        share_message(&lazy, 0, &mut after)?;
+        assert_eq!(before, after);
+        assert!(!after.contains("<script>bad"));
+        assert!(after.contains("&lt;script&gt;bad"));
+        std::fs::write(&path, b"changed")?;
+        assert!(share_message(&lazy, 0, &mut String::new()).is_err());
+        Ok(())
     }
 }
