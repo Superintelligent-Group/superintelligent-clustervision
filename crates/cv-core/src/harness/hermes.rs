@@ -73,7 +73,6 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use serde_json::Value;
-use std::borrow::Cow;
 use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
@@ -359,7 +358,7 @@ fn refs_conn(conn: &Connection, path: &Path, delegates_of: Option<&HashSet<Strin
     };
     let has_parent = scols.contains("parent_session_id");
     let sql = format!(
-        "SELECT id, {title}, started_at, ended_at, message_count, {cwd}, {last}, {model_config} \
+        "SELECT id, {title}, started_at, ended_at, {cwd}, {last}, {model_config} \
          FROM sessions ORDER BY started_at DESC",
         title = expr("title"),
         cwd = expr("cwd"),
@@ -384,14 +383,13 @@ fn refs_conn(conn: &Connection, path: &Path, delegates_of: Option<&HashSet<Strin
         let title: Option<String> = row.get(1).ok().flatten();
         let started: Option<f64> = row.get(2).ok().flatten();
         let ended: Option<f64> = row.get(3).ok().flatten();
-        let count: Option<i64> = row.get(4).ok().flatten();
-        let cwd: Option<String> = row.get(5).ok().flatten();
-        let last: Option<f64> = row.get(6).ok().flatten();
-        let model_config: Option<String> = row.get(7).ok().flatten();
-        Ok((id, title, started, ended, count, cwd, last, model_config))
+        let cwd: Option<String> = row.get(4).ok().flatten();
+        let last: Option<f64> = row.get(5).ok().flatten();
+        let model_config: Option<String> = row.get(6).ok().flatten();
+        Ok((id, title, started, ended, cwd, last, model_config))
     })?;
     let mut out = Vec::new();
-    for (id, title, started, ended, count, cwd, last, model_config) in rows.flatten() {
+    for (id, title, started, ended, cwd, last, model_config) in rows.flatten() {
         if compression_parents.contains(&id) {
             continue;
         }
@@ -417,10 +415,38 @@ fn refs_conn(conn: &Connection, path: &Path, delegates_of: Option<&HashSet<Strin
             title: title.map(|t| crate::ir::truncate(&t, 80)),
             created_at: started.and_then(ts_from_epoch),
             updated_at: latest_of([ended, last, started]),
-            message_count: count.unwrap_or(0).max(0) as usize,
+            message_count: 0,
         });
     }
+    // Native message_count counts active rows (including tools/notices, omitting compacted
+    // history). SessionRef counts canonical prompts/replies, including rotation ancestors.
+    // Reuse the display parser so generation/replay dedup and type classification cannot drift.
+    let options = if path.is_file() {
+        ParseOptions::lazy()
+    } else {
+        ParseOptions::bulk()
+    };
+    for reference in &mut out {
+        let mut count = TurnCount::default();
+        stream_conn_with_reads(
+            conn,
+            reference,
+            &options,
+            &mut count,
+            &crate::source::ReadSet::default(),
+        )?;
+        reference.message_count = count.0;
+    }
     Ok(out)
+}
+
+#[derive(Default)]
+struct TurnCount(usize);
+impl MessageSink for TurnCount {
+    fn message(&mut self, message: Message) -> Flow {
+        self.0 += usize::from(message.is_turn());
+        Flow::Continue
+    }
 }
 
 /// Hermes titles a compression chain `COALESCE(tip.title, root.title)` (`hermes_state_sessions.py:1137`):
@@ -1071,8 +1097,10 @@ impl ReplayDedup {
     /// avoiding a second whole-key hash and text copy for each new trailing prompt.
     fn admit(&mut self, msg: &Message) -> Result<bool> {
         if msg.role == Role::User {
-            if let Some(text) = single_text(msg)?.filter(|text| !text.is_empty()) {
-                return self.recent_user_texts.insert_borrowed(&text);
+            if let Some(text) = single_text(msg).filter(|text| !text.is_empty()) {
+                return self
+                    .recent_user_texts
+                    .insert_source(text, &crate::lazy::Resolver::new(None));
             }
         }
         self.observe(msg)?;
@@ -1083,9 +1111,10 @@ impl ReplayDedup {
     fn observe(&mut self, m: &Message) -> Result<()> {
         match m.role {
             Role::User => {
-                if let Some(text) = single_text(m)? {
+                if let Some(text) = single_text(m) {
                     if !text.is_empty() {
-                        self.recent_user_texts.insert(text.into_owned())?;
+                        self.recent_user_texts
+                            .insert_source(text, &crate::lazy::Resolver::new(None))?;
                     }
                 }
             }
@@ -1128,7 +1157,7 @@ fn session_lineage_root_to_tip(conn: &Connection, session_id: &str) -> Vec<Strin
     let mut chain: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     let mut current = session_id.to_string();
-    for _ in 0..100 {
+    loop {
         if current.is_empty() || seen.contains(&current) {
             break;
         }
@@ -1165,16 +1194,11 @@ fn session_lineage_root_to_tip(conn: &Connection, session_id: &str) -> Vec<Strin
 /// The streaming equivalent is [`ReplayDedup`] (a bounded look-back over the trailing user run).
 ///
 /// Plain text of a message iff it is exactly one Text block (the shape Hermes replays as a string).
-fn single_text(m: &Message) -> Result<Option<Cow<'_, str>>> {
-    if m.content.len() == 1 {
-        if let Block::Text { text } = &m.content[0] {
-            return Ok(Some(match text.inline_str() {
-                Some(text) => Cow::Borrowed(text),
-                None => Cow::Owned(text.try_resolve(&crate::lazy::Resolver::new(None))?.into_owned()),
-            }));
-        }
+fn single_text(m: &Message) -> Option<&crate::Text> {
+    match m.content.as_slice() {
+        [Block::Text { text }] => Some(text),
+        _ => None,
     }
-    Ok(None)
 }
 
 /// Borrow native TEXT only when the old String decoder would have accepted the column.
@@ -3168,12 +3192,113 @@ mod tests {
     fn discover_orders_and_counts() {
         let conn = mk_conn("schema-v14.sql");
         conn.execute_batch(&fixture("discover_orders_and_counts.sql")).unwrap();
+        conn.execute_batch(
+            "INSERT INTO messages(session_id,role,content,timestamp) VALUES \
+            ('a','system','system',1),('a','tool','result',2),('a','assistant','reply',3), \
+            ('b','user','prompt',1),('b','assistant','reply',2),('b','tool','result',3), \
+            ('b','system','system',4),('b','assistant','another reply',5);",
+        )
+        .unwrap();
         let refs = discover_conn(&conn, &PathBuf::from(":memory:")).unwrap();
         assert_eq!(refs.len(), 2);
         // ordered by started_at DESC
         assert_eq!(refs[0].id, "b");
-        assert_eq!(refs[0].message_count, 5);
+        assert_eq!(refs[0].message_count, 3);
         assert_eq!(refs[1].id, "a");
+        assert_eq!(refs[1].message_count, 1);
+    }
+
+    #[test]
+    fn checked_giant_prompts_dedup_exactly_and_reset_after_a_reply() -> Result<()> {
+        let world = cv_testkit::World::in_process("hermes-checked-prompt-dedup");
+        let path = world.base.join("state.db");
+        let writer = Connection::open(&path)?;
+        writer.execute_batch(&fixture("schema-v30.sql"))?;
+        insert_session(&writer, "s", None, None, 1000.0, None);
+        let prompt = "λ\n\0quoted \"body\"".repeat(100_000);
+        for (role, body, timestamp) in [
+            ("user", prompt.as_str(), 1001),
+            ("user", prompt.as_str(), 1002),
+            ("assistant", "reply resets replay", 1003),
+            ("user", prompt.as_str(), 1004),
+        ] {
+            writer.execute(
+                "INSERT INTO messages(session_id,role,content,timestamp) VALUES('s',?1,?2,?3)",
+                rusqlite::params![role, body, timestamp],
+            )?;
+        }
+        let adapter = Hermes::with_db(path);
+        let reference = adapter.discover()?.remove(0);
+        assert_eq!(reference.message_count, 3);
+        let owned = parse_conn(&writer, &reference)?;
+        let mut checked = crate::stream::collect_with(&adapter, &reference, &ParseOptions::lazy_extra())?;
+        assert_eq!(checked.messages.len(), 3);
+        assert!(matches!(
+            &checked.messages[0].content[0],
+            Block::Text {
+                text: crate::Text::Source(_)
+            }
+        ));
+        checked.materialize()?;
+        assert_eq!(serde_json::to_value(&checked)?, serde_json::to_value(&owned)?);
+        Ok(())
+    }
+
+    #[test]
+    fn compression_lineage_walks_all_ancestors_and_still_stops_on_cycles() {
+        let conn = mk_conn("schema-v14.sql");
+        for index in 0..150 {
+            let id = format!("s{index}");
+            let parent = (index > 0).then(|| format!("s{}", index - 1));
+            insert_session(&conn, &id, parent.as_deref(), Some("compression"), index as f64, None);
+            conn.execute(
+                "INSERT INTO messages(session_id,role,content,timestamp) VALUES(?1,'assistant',?2,?3)",
+                rusqlite::params![id, format!("reply {index}"), index],
+            )
+            .unwrap();
+        }
+        assert_eq!(session_lineage_root_to_tip(&conn, "s149").len(), 150);
+        let reference = SessionRef::new("s149", Harness::Hermes, ":memory:");
+        assert_eq!(parse_conn(&conn, &reference).unwrap().messages.len(), 150);
+        conn.execute("UPDATE sessions SET parent_session_id='s149' WHERE id='s0'", [])
+            .unwrap();
+        assert_eq!(session_lineage_root_to_tip(&conn, "s149").len(), 150);
+    }
+
+    #[test]
+    fn discovery_turn_counts_match_native_display_and_compression_replay() -> Result<()> {
+        let world = cv_testkit::World::in_process("hermes-discovery-turn-counts");
+        let path = world.base.join("state.db");
+        std::fs::copy(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hermes/state-v30.db"),
+            &path,
+        )?;
+        let writer = Connection::open(&path)?;
+        writer.execute("UPDATE sessions SET message_count=999", [])?;
+        let adapter = Hermes::with_db(path.clone());
+        for reference in adapter.discover()? {
+            let parsed = crate::stream::collect_with(&adapter, &reference, &ParseOptions::full())?;
+            assert_eq!(
+                reference.message_count,
+                parsed.messages.iter().filter(|m| m.is_turn()).count(),
+                "{}",
+                reference.id
+            );
+            for child in subagent_refs(&reference) {
+                let parsed = crate::stream::collect_with(&adapter, &child, &ParseOptions::full())?;
+                assert_eq!(
+                    child.message_count,
+                    parsed.messages.iter().filter(|m| m.is_turn()).count(),
+                    "{}",
+                    child.id
+                );
+            }
+        }
+        let changed: i64 = writer.query_row("SELECT COUNT(*) FROM sessions WHERE message_count<>999", [], |row| {
+            row.get(0)
+        })?;
+        assert_eq!(changed, 0, "discovery leaves native counters untouched");
+        Ok(())
     }
 
     /// `tests/fixtures/hermes/state-v30.db` was written by Hermes's OWN store code (hermes-agent
@@ -3235,7 +3360,7 @@ mod tests {
         assert_eq!(
             by_id(A).message_count,
             8,
-            "Hermes's message_count is the ACTIVE row count"
+            "SessionRef counts canonical conversational turns"
         );
 
         // A: the display view — each carried message once, in id order, the summary as a system turn.
