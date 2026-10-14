@@ -661,6 +661,17 @@ fn stream_conn_with_reads(
     sink: &mut dyn MessageSink,
     reads: &crate::source::ReadSet,
 ) -> Result<Session> {
+    stream_conn_with_demand(conn, r, opts, sink, reads, false)
+}
+
+fn stream_conn_with_demand(
+    conn: &Connection,
+    r: &SessionRef,
+    opts: &ParseOptions,
+    sink: &mut dyn MessageSink,
+    reads: &crate::source::ReadSet,
+    count_only: bool,
+) -> Result<Session> {
     let checked_source = opts
         .spans
         .then(|| crate::json::JsonSource::capture_with_reads(&r.path, reads))
@@ -832,7 +843,7 @@ fn stream_conn_with_reads(
     // tail into each generation — same role/content/timestamp/tool fields, different id/flags — so
     // each logical message is emitted once (its first row; the copies are byte-identical).
     let dedup_generations = has("compacted") && !opts.complete;
-    let mut seen_generations: HashSet<u64> = HashSet::new();
+    let mut generations = GenerationDedup::default();
 
     // Hand the session-level metadata to the sink before the body (header-rendering sinks use it).
     sink.meta(&s);
@@ -851,13 +862,13 @@ fn stream_conn_with_reads(
         // Stream rows lazily: one `MsgRow` -> one `Message` at a time, emitted and dropped before
         // the next row (a single Hermes session can be large; never materialize the whole Vec).
         let mut rows = stmt.query_map([sid], |row| {
-            if dedup_generations
-                && !seen_generations.insert(
-                    generation_key(row, &idx, conn, incremental_content)
-                        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?,
-                )
-            {
-                return Ok(None);
+            if dedup_generations {
+                let admitted = generations
+                    .admit(row, &idx, conn, incremental_content)
+                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?;
+                if !admitted {
+                    return Ok(None);
+                }
             }
             let get_str = |name: &str| -> Option<String> {
                 idx(name).and_then(|i| row.get::<_, Option<String>>(i).ok().flatten())
@@ -870,10 +881,38 @@ fn stream_conn_with_reads(
             let mut content_source = None;
             let mut decoded_content = None;
             let mut untyped_failed_turn = false;
-            let content = if incremental_content {
+            // Counts still use into_message's classification/acceptance. Nonturn bodies cannot
+            // affect replay suppression; plain assistant bodies need only typed presence and the
+            // failed-turn classifier, not an escaped arena copy. User text and multimodal content
+            // retain their established exact decoder because their block shape affects dedup.
+            let nonturn = matches!(borrowed_text(row, idx("role")), Some("tool" | "system"))
+                || get_i64("_compressed_summary").is_some_and(|n| n != 0)
+                || borrowed_text(row, idx("display_kind"))
+                    .and_then(harness_display_kind)
+                    .is_some();
+            let content = if count_only && nonturn {
+                None
+            } else if incremental_content {
                 if borrowed_text(row, idx("content")).is_some_and(|kind| kind == "text") {
                     let rowid = row.get::<_, i64>(idx("_content_rowid").unwrap())?;
                     let mut prepare = || -> Result<Option<String>> {
+                        if count_only && borrowed_text(row, idx("role")) == Some("assistant") {
+                            let projected = super::store::sqlite::with_cell_reader(
+                                conn,
+                                "messages",
+                                "content",
+                                rowid,
+                                |reader, _| count_content(reader),
+                            );
+                            match projected {
+                                Ok((present, failed)) => {
+                                    untyped_failed_turn = get_str("display_kind").is_none() && failed;
+                                    return Ok(present.then(|| "[content present]".to_string()));
+                                }
+                                Err(error) if error.is::<CountNeedsBody>() => {}
+                                Err(error) => return Err(error),
+                            }
+                        }
                         if let Some(source) = &checked_source {
                             let mut valid = false;
                             let text = super::store::sqlite::with_cell_reader(
@@ -969,7 +1008,9 @@ fn stream_conn_with_reads(
                 }
             }
             let mut has_reasoning_extra = false;
-            let thinking = if opts.wants_full_extra() {
+            let thinking = if opts.wants_full_extra()
+                || (count_only && (nonturn || borrowed_text(row, idx("role")) == Some("assistant")))
+            {
                 None
             } else {
                 let (text, encrypted, present) = lean_reasoning(row, &idx);
@@ -1211,15 +1252,31 @@ fn borrowed_text<'a>(row: &'a rusqlite::Row<'_>, index: Option<usize>) -> Option
 
 /// Hermes's copied-generation identity precedes lazy body selection and extra projection.
 /// Borrowing the native cells preserves the original String/Option hashing without body copies.
+#[cfg(test)]
 fn generation_key(
     row: &rusqlite::Row<'_>,
     index: &impl Fn(&str) -> Option<usize>,
     conn: &Connection,
-    incremental_content: bool,
+    incremental: bool,
 ) -> Result<u64> {
+    generation_identity(row, index, conn, incremental).map(|identity| identity.hash)
+}
+
+#[derive(Clone, Copy)]
+struct GenerationIdentity {
+    hash: u64,
+    content: bool,
+}
+fn generation_identity(
+    row: &rusqlite::Row<'_>,
+    index: &impl Fn(&str) -> Option<usize>,
+    conn: &Connection,
+    incremental_content: bool,
+) -> Result<GenerationIdentity> {
     use std::hash::{Hash, Hasher};
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     borrowed_text(row, index("role")).unwrap_or_default().hash(&mut hash);
+    let content_present;
     if incremental_content {
         let mut content_hash = hash.clone();
         let present = if borrowed_text(row, index("content")).is_some_and(|kind| kind == "text") {
@@ -1245,6 +1302,7 @@ fn generation_key(
         } else {
             false
         };
+        content_present = present;
         if present {
             content_hash.write_u8(0xff);
             hash = content_hash;
@@ -1252,7 +1310,9 @@ fn generation_key(
             None::<&str>.hash(&mut hash);
         }
     } else {
-        borrowed_text(row, index("content")).hash(&mut hash);
+        let content = borrowed_text(row, index("content"));
+        content_present = content.is_some();
+        content.hash(&mut hash);
     }
     index("timestamp")
         .and_then(|i| row.get::<_, Option<f64>>(i).ok().flatten())
@@ -1261,7 +1321,178 @@ fn generation_key(
     for key in ["tool_call_id", "tool_calls", "tool_name"] {
         borrowed_text(row, index(key)).hash(&mut hash);
     }
-    Ok(hash.finish())
+    Ok(GenerationIdentity {
+        hash: hash.finish(),
+        content: content_present,
+    })
+}
+
+#[derive(Default)]
+struct GenerationDedup {
+    headers: std::collections::HashMap<u64, Vec<(i64, Option<GenerationIdentity>)>>,
+    #[cfg(test)]
+    forced_hash: Option<u64>,
+}
+impl GenerationDedup {
+    fn fingerprint(&self, hash: u64) -> u64 {
+        #[cfg(test)]
+        if let Some(forced) = self.forced_hash {
+            return forced;
+        }
+        hash
+    }
+    fn admit(
+        &mut self,
+        row: &rusqlite::Row<'_>,
+        index: &impl Fn(&str) -> Option<usize>,
+        conn: &Connection,
+        incremental: bool,
+    ) -> Result<bool> {
+        use std::hash::{Hash, Hasher};
+        let mut header = std::collections::hash_map::DefaultHasher::new();
+        borrowed_text(row, index("role")).unwrap_or_default().hash(&mut header);
+        for column in ["tool_call_id", "tool_calls", "tool_name"] {
+            borrowed_text(row, index(column)).hash(&mut header);
+        }
+        index("timestamp")
+            .and_then(|i| row.get::<_, Option<f64>>(i).ok().flatten())
+            .map(f64::to_bits)
+            .hash(&mut header);
+        let id: i64 = row.get(index(if incremental { "_content_rowid" } else { "id" }).unwrap())?;
+        let fingerprint = self.fingerprint(header.finish());
+        if let std::collections::hash_map::Entry::Vacant(entry) = self.headers.entry(fingerprint) {
+            entry.insert(vec![(id, None)]);
+            return Ok(true);
+        }
+        let mut current = generation_identity(row, index, conn, incremental)?;
+        current.hash = self.fingerprint(current.hash);
+        // Only collided headers need their original content. Re-query small original columns
+        // under the same snapshot. Equal digests are a filter, never proof of tuple equality.
+        let columns = [
+            "role",
+            "content",
+            "_content_rowid",
+            "timestamp",
+            "tool_call_id",
+            "tool_calls",
+            "tool_name",
+        ];
+        let prior_index = |name: &str| columns.iter().position(|column| *column == name);
+        let sql = if incremental {
+            "SELECT role,typeof(content),rowid,timestamp,tool_call_id,tool_calls,tool_name FROM messages WHERE rowid=?1"
+        } else {
+            "SELECT role,content,id,timestamp,tool_call_id,tool_calls,tool_name FROM messages WHERE id=?1"
+        };
+        #[cfg(test)]
+        let forced = self.forced_hash;
+        let entries = self.headers.get_mut(&fingerprint).unwrap();
+        for (prior, cached) in entries.iter_mut() {
+            if cached.is_some_and(|key| key.hash != current.hash) {
+                continue;
+            }
+            let (key, equal) = conn.query_row(sql, [*prior], |prior_row| {
+                let compare = || -> Result<_> {
+                    let key = match *cached {
+                        Some(key) => key,
+                        None => generation_identity(prior_row, &prior_index, conn, incremental)?,
+                    };
+                    #[cfg(test)]
+                    let key = GenerationIdentity {
+                        hash: forced.unwrap_or(key.hash),
+                        ..key
+                    };
+                    let equal = key.hash == current.hash
+                        && generation_rows_equal(
+                            row,
+                            index,
+                            prior_row,
+                            &prior_index,
+                            conn,
+                            incremental,
+                            (current.content, key.content),
+                        )?;
+                    Ok((key, equal))
+                };
+                compare().map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))
+            })?;
+            *cached = Some(key);
+            if equal {
+                return Ok(false);
+            }
+        }
+        entries.push((id, Some(current)));
+        Ok(true)
+    }
+}
+
+fn generation_rows_equal(
+    current: &rusqlite::Row<'_>,
+    current_index: &impl Fn(&str) -> Option<usize>,
+    prior: &rusqlite::Row<'_>,
+    prior_index: &impl Fn(&str) -> Option<usize>,
+    conn: &Connection,
+    incremental: bool,
+    content: (bool, bool),
+) -> Result<bool> {
+    let (current_content, prior_content) = content;
+    if borrowed_text(current, current_index("role")).unwrap_or_default()
+        != borrowed_text(prior, prior_index("role")).unwrap_or_default()
+    {
+        return Ok(false);
+    }
+    for column in ["tool_call_id", "tool_calls", "tool_name"] {
+        if borrowed_text(current, current_index(column)) != borrowed_text(prior, prior_index(column)) {
+            return Ok(false);
+        }
+    }
+    let stamp = |row: &rusqlite::Row<'_>, index: Option<usize>| {
+        index
+            .and_then(|i| row.get::<_, Option<f64>>(i).ok().flatten())
+            .map(f64::to_bits)
+    };
+    if stamp(current, current_index("timestamp")) != stamp(prior, prior_index("timestamp"))
+        || current_content != prior_content
+    {
+        return Ok(false);
+    }
+    if !current_content {
+        return Ok(true);
+    }
+    if !incremental {
+        return Ok(borrowed_text(current, current_index("content")) == borrowed_text(prior, prior_index("content")));
+    }
+    super::store::sqlite::with_cell_reader(
+        conn,
+        "messages",
+        "content",
+        current.get(current_index("_content_rowid").unwrap())?,
+        |left, left_len| {
+            super::store::sqlite::with_cell_reader(
+                conn,
+                "messages",
+                "content",
+                prior.get(prior_index("_content_rowid").unwrap())?,
+                |right, right_len| {
+                    if left_len != right_len {
+                        return Ok(false);
+                    }
+                    let mut left_bytes = [0; 64 * 1024];
+                    let mut right_bytes = [0; 64 * 1024];
+                    let mut remaining = left_len;
+                    while remaining != 0 {
+                        let take = remaining.min(left_bytes.len());
+                        left.read_exact(&mut left_bytes[..take])?;
+                        right.read_exact(&mut right_bytes[..take])?;
+                        if left_bytes[..take] != right_bytes[..take] {
+                            return Ok(false);
+                        }
+                        remaining -= take;
+                    }
+                    Ok(true)
+                },
+            )
+        },
+    )
 }
 
 /// Preserve acceptance of metadata-only rows even when their extras are not demanded.
@@ -1706,19 +1937,28 @@ fn source_multimodal_content(
     }
 }
 
-fn source_failed_turn(text: &crate::Text) -> Result<bool> {
-    #[derive(Debug, thiserror::Error)]
-    #[error("not a failed-turn notice")]
-    struct NotNotice;
-    let mut leading = true;
-    let mut positions = [Some(0usize); FAILED_TURN_NOTICES.len()];
-    let result = text.try_for_each_chunk(&crate::lazy::Resolver::new(None), 64 * 1024, |chunk| {
+#[derive(Default)]
+struct FailedNotice {
+    leading: bool,
+    positions: [Option<usize>; FAILED_TURN_NOTICES.len()],
+}
+impl FailedNotice {
+    fn new() -> Self {
+        Self {
+            leading: true,
+            positions: [Some(0); FAILED_TURN_NOTICES.len()],
+        }
+    }
+    fn push(&mut self, chunk: &str) -> bool {
+        if self.positions.iter().all(Option::is_none) {
+            return false;
+        }
         for character in chunk.chars() {
-            if leading && character.is_whitespace() {
+            if self.leading && character.is_whitespace() {
                 continue;
             }
-            leading = false;
-            for (position, notice) in positions.iter_mut().zip(FAILED_TURN_NOTICES) {
+            self.leading = false;
+            for (position, notice) in self.positions.iter_mut().zip(FAILED_TURN_NOTICES) {
                 if let Some(current) = *position {
                     if current < notice.len() && character == notice.as_bytes()[current] as char {
                         *position = Some(current + 1);
@@ -1727,20 +1967,59 @@ fn source_failed_turn(text: &crate::Text) -> Result<bool> {
                     }
                 }
             }
-            if positions.iter().all(Option::is_none) {
-                return Err(NotNotice.into());
+            if self.positions.iter().all(Option::is_none) {
+                return false;
             }
         }
-        Ok(())
+        true
+    }
+    fn finished(&self) -> bool {
+        self.positions
+            .iter()
+            .zip(FAILED_TURN_NOTICES)
+            .any(|(p, notice)| *p == Some(notice.len()))
+    }
+}
+
+fn source_failed_turn(text: &crate::Text) -> Result<bool> {
+    #[derive(Debug, thiserror::Error)]
+    #[error("not a failed-turn notice")]
+    struct NotNotice;
+    let mut notice = FailedNotice::new();
+    let result = text.try_for_each_chunk(&crate::lazy::Resolver::new(None), 64 * 1024, |chunk| {
+        if notice.push(chunk) {
+            Ok(())
+        } else {
+            Err(NotNotice.into())
+        }
     });
     match result {
         Err(error) if error.is::<NotNotice>() => Ok(false),
         Err(error) => Err(error),
-        Ok(()) => Ok(positions
-            .iter()
-            .zip(FAILED_TURN_NOTICES)
-            .any(|(position, notice)| *position == Some(notice.len()))),
+        Ok(()) => Ok(notice.finished()),
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("count needs multimodal body projection")]
+struct CountNeedsBody;
+fn count_content(reader: &mut dyn std::io::Read) -> Result<(bool, bool)> {
+    let mut prefix = [0; MULTIMODAL_SENTINEL.len()];
+    let mut prefix_len = 0;
+    let mut present = false;
+    let mut notice = FailedNotice::new();
+    let valid = super::store::sqlite::for_each_utf8(reader, |chunk| {
+        present |= !chunk.is_empty();
+        let take = chunk.len().min(prefix.len() - prefix_len);
+        prefix[prefix_len..prefix_len + take].copy_from_slice(&chunk.as_bytes()[..take]);
+        prefix_len += take;
+        if prefix_len == prefix.len() && prefix.as_slice() == MULTIMODAL_SENTINEL.as_bytes() {
+            return Err(CountNeedsBody.into());
+        }
+        notice.push(chunk);
+        Ok(())
+    })?;
+    Ok((valid && present, valid && notice.finished()))
 }
 
 fn checked_json<T>(
@@ -3206,6 +3485,134 @@ mod tests {
         assert_eq!(refs[0].message_count, 3);
         assert_eq!(refs[1].id, "a");
         assert_eq!(refs[1].message_count, 1);
+    }
+
+    #[test]
+    fn generation_dedup_verifies_exact_cells_and_headers_under_forced_collisions() -> Result<()> {
+        let conn = mk_conn("schema-v30.sql");
+        insert_session(&conn, "s", None, None, 1000.0, None);
+        for (role, body, stamp, tool) in [
+            ("assistant", "left", 1001, ""),
+            ("assistant", "right", 1001, ""),
+            ("assistant", "left", 1001, ""),
+            ("user", "left", 1001, ""),
+            ("user", "left", 1002, ""),
+            ("user", "left", 1002, ""),
+            ("user", "left", 1002, "different tool"),
+        ] {
+            conn.execute(
+                "INSERT INTO messages(session_id,role,content,timestamp,tool_name) VALUES('s',?1,?2,?3,?4)",
+                rusqlite::params![role, body, stamp, tool],
+            )?;
+        }
+        for incremental in [false, true] {
+            let sql = if incremental {
+                "SELECT role,typeof(content),rowid,timestamp,tool_call_id,tool_calls,tool_name FROM messages ORDER BY id"
+            } else {
+                "SELECT role,content,id,timestamp,tool_call_id,tool_calls,tool_name FROM messages ORDER BY id"
+            };
+            let columns = [
+                "role",
+                "content",
+                "_content_rowid",
+                "timestamp",
+                "tool_call_id",
+                "tool_calls",
+                "tool_name",
+            ];
+            let index = |name: &str| {
+                columns
+                    .iter()
+                    .position(|column| *column == name)
+                    .or_else(|| (name == "id").then_some(2))
+            };
+            let mut dedup = GenerationDedup {
+                forced_hash: Some(7),
+                ..Default::default()
+            };
+            let mut statement = conn.prepare(sql)?;
+            let mut rows = statement.query([])?;
+            let mut admission = Vec::new();
+            while let Some(row) = rows.next()? {
+                admission.push(dedup.admit(row, &index, &conn, incremental)?);
+            }
+            assert_eq!(admission, [true, true, false, true, true, false, true], "{incremental}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn count_demand_preserves_parser_acceptance_without_copying_plain_assistant_bodies() -> Result<()> {
+        let world = cv_testkit::World::in_process("hermes-count-demand");
+        let path = world.base.join("state.db");
+        let writer = Connection::open(&path)?;
+        writer.execute_batch(&fixture("schema-v30.sql"))?;
+        insert_session(&writer, "s", None, None, 1000.0, None);
+        let large = "ordinary λ body".repeat(100_000);
+        for (role, body, reasoning, stamp) in [
+            ("assistant", large.as_str(), None, 1001),
+            ("assistant", large.as_str(), None, 1001), // copied generation
+            ("assistant", FAILED_TURN_NOTICES[0], None, 1002),
+            ("assistant", "", Some("thought only"), 1003),
+            ("user", "same prompt", Some("user reasoning"), 1004),
+            ("user", "same prompt", Some("user reasoning"), 1005),
+            ("assistant", "\0json:[]", None, 1006),
+            (
+                "assistant",
+                "\0json:[{\"type\":\"text\",\"text\":\"multimodal\"}]",
+                None,
+                1007,
+            ),
+        ] {
+            writer.execute(
+                "INSERT INTO messages(session_id,role,content,reasoning,timestamp) VALUES('s',?1,?2,?3,?4)",
+                rusqlite::params![role, body, reasoning, stamp],
+            )?;
+        }
+        writer.execute_batch(
+            "INSERT INTO messages(session_id,role,content,timestamp) VALUES \
+            ('s','assistant',CAST(X'FF' AS TEXT),1008),('s','assistant',X'6162',1009), \
+            ('s','assistant',NULL,1010);",
+        )?;
+        let reference = SessionRef::new("s", Harness::Hermes, &path);
+        let parsed = parse_conn(&writer, &reference)?;
+        struct CountSink {
+            turns: usize,
+            placeholders: usize,
+        }
+        impl MessageSink for CountSink {
+            fn message(&mut self, message: Message) -> Flow {
+                self.turns += usize::from(message.is_turn());
+                for block in &message.content {
+                    if let Block::Text { text } = block {
+                        assert!(
+                            !matches!(text, crate::Text::Source(_)),
+                            "ordinary count body must not own arena bytes"
+                        );
+                        self.placeholders += usize::from(text == "[content present]");
+                    }
+                }
+                Flow::Continue
+            }
+        }
+        let mut count = CountSink {
+            turns: 0,
+            placeholders: 0,
+        };
+        stream_conn_with_demand(
+            &writer,
+            &reference,
+            &ParseOptions::lazy(),
+            &mut count,
+            &crate::source::ReadSet::default(),
+            true,
+        )?;
+        assert_eq!(count.turns, parsed.messages.iter().filter(|m| m.is_turn()).count());
+        assert_eq!(
+            count.placeholders, 2,
+            "ordinary reply and failed-turn body are represented without copies"
+        );
+        Ok(())
     }
 
     #[test]
