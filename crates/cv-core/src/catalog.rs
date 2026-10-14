@@ -258,6 +258,23 @@ mod imp {
     /// One row (in [`REF_COLUMNS`] order) → one `SessionRef`. `Ok(None)` for rows whose harness
     /// this binary doesn't know (a newer binary's rows — skipped, never deleted by us).
     fn row_to_ref(row: &Row) -> rusqlite::Result<Option<SessionRef>> {
+        row_to_ref_projected(row, [false, false])
+    }
+
+    // Preserve cell type/UTF8 acceptance even when a hit overrides the catalog hint. Borrow the
+    // native SQLite cell for validation; do not allocate a String that output will discard.
+    fn optional_hint(row: &Row, index: usize, overridden: bool) -> rusqlite::Result<Option<String>> {
+        let value = row.get_ref(index)?;
+        if matches!(value, rusqlite::types::ValueRef::Null) {
+            return Ok(None);
+        }
+        let text = value
+            .as_str()
+            .map_err(|error| rusqlite::Error::FromSqlConversionFailure(index, value.data_type(), Box::new(error)))?;
+        Ok((!overridden).then(|| text.to_owned()))
+    }
+
+    fn row_to_ref_projected(row: &Row, overrides: [bool; 2]) -> rusqlite::Result<Option<SessionRef>> {
         let harness: String = row.get(0)?;
         let Some(harness) = Harness::parse(&harness) else {
             return Ok(None);
@@ -266,8 +283,8 @@ mod imp {
             harness,
             id: row.get(1)?,
             path: PathBuf::from(row.get::<_, String>(2)?),
-            cwd: row.get::<_, Option<String>>(3)?.map(PathBuf::from),
-            title: row.get(4)?,
+            cwd: optional_hint(row, 3, overrides[0])?.map(PathBuf::from),
+            title: optional_hint(row, 4, overrides[1])?,
             created_at: ts_col(row, 8, 5)?,
             updated_at: ts_col(row, 9, 6)?,
             message_count: row.get::<_, i64>(7)? as usize,
@@ -959,14 +976,21 @@ mod imp {
         None
     }
 
-    pub(super) fn exact_session_in(conn: &Connection, id: &str, harness: Option<Harness>) -> Option<SessionRef> {
+    pub(super) fn exact_session_in(
+        conn: &Connection,
+        id: &str,
+        harness: Option<Harness>,
+        overrides: [bool; 2],
+    ) -> Option<SessionRef> {
         let mut stmt = conn
             .prepare_cached(&format!(
                 "SELECT {REF_COLUMNS} FROM sessions WHERE id=?1 AND (?2 IS NULL OR harness=?2) ORDER BY rowid"
             ))
             .ok()?;
         let mut rows = stmt
-            .query_map(params![id, harness.map(Harness::as_str)], row_to_ref)
+            .query_map(params![id, harness.map(Harness::as_str)], |row| {
+                row_to_ref_projected(row, overrides)
+            })
             .ok()?;
         // Unknown newer harness rows are skipped, as in lookup; the first known exact copy wins.
         rows.find_map(|row| row.ok().flatten())
@@ -1076,6 +1100,67 @@ mod imp {
                 row.as_object().unwrap().keys().map(String::as_str).collect::<Vec<_>>(),
                 crate::rows::SEARCH_ROW_KEYS
             );
+        }
+
+        #[test]
+        fn search_projection_omits_overridden_hints_but_keeps_fallback_and_invalid_copy_policy() {
+            let w = cv_testkit::World::in_process("search-row-projection");
+            let mut first = db_ref(Harness::Claude, w.base.join("first"));
+            first.title = Some("catalog custom title".repeat(4096));
+            first.cwd = Some(PathBuf::from("/catalog/path".repeat(4096)));
+            first.created_at = chrono::DateTime::from_timestamp(1_700_000_000, 0);
+            let mut second = first.clone();
+            second.path = w.base.join("second");
+            second.message_count = 9;
+            sync(&[first.clone(), second]);
+            let conn = open().unwrap();
+            let projected = exact_session_in(&conn, "session", Some(Harness::Claude), [true, true]).unwrap();
+            assert!(
+                projected.title.is_none() && projected.cwd.is_none(),
+                "overridden hints were owned"
+            );
+            let full = exact_session_in(&conn, "session", Some(Harness::Claude), [false, false]).unwrap();
+            assert_eq!(full.title, first.title);
+            assert_eq!(full.cwd, first.cwd);
+            let row = crate::rows::SearchRow {
+                id: "session",
+                harness: "claude",
+                title: Some("index title"),
+                cwd: Some("/index"),
+                created_at: Some(i64::MAX),
+                updated_at: Some(0),
+                score: None,
+                snippet: "snippet",
+                agent_id: None,
+                parent_id: None,
+                workflow: None,
+            };
+            let output = row.to_json_with(&crate::rows::SearchRowContext::new());
+            assert_eq!(output["title"], "index title");
+            assert_eq!(output["cwd"], "/index");
+            assert_eq!(
+                output["created_at"],
+                first.created_at.unwrap().to_rfc3339(),
+                "invalid index date lost fallback"
+            );
+            assert_eq!(output["updated_at"], "1970-01-01T00:00:00+00:00");
+            for expression in ["X'ff'", "CAST(X'ff' AS TEXT)"] {
+                conn.execute(
+                    &format!("UPDATE sessions SET title={expression} WHERE path=?1"),
+                    [first.path.to_string_lossy()],
+                )
+                .unwrap();
+                let expected = lookup("session", Some(Harness::Claude))
+                    .into_iter()
+                    .find(|r| r.id == "session")
+                    .unwrap();
+                let actual = exact_session_in(&conn, "session", Some(Harness::Claude), [true, true]).unwrap();
+                assert_eq!(
+                    actual.path, expected.path,
+                    "overridden invalid hint changed copy acceptance"
+                );
+                assert_eq!(actual.message_count, 9);
+            }
         }
 
         #[test]

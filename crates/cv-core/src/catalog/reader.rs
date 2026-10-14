@@ -139,15 +139,15 @@ impl Reader {
 
     /// Search-row enrichment needs exactly one ID, never its prefix siblings. Preserve the
     /// existing first exact catalog copy while reusing this operation's initialized connection.
-    pub(crate) fn exact_session(&self, id: &str, harness: Option<Harness>) -> Option<SessionRef> {
+    pub(crate) fn exact_session(&self, id: &str, harness: Option<Harness>, overrides: [bool; 2]) -> Option<SessionRef> {
         #[cfg(feature = "sqlite")]
         {
             let conn = self.conn.lock().ok()?;
-            super::imp::exact_session_in(&conn, id, harness)
+            super::imp::exact_session_in(&conn, id, harness, overrides)
         }
         #[cfg(not(feature = "sqlite"))]
         {
-            let _ = (id, harness);
+            let _ = (id, harness, overrides);
             None
         }
     }

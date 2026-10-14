@@ -97,44 +97,34 @@ impl SearchRow<'_> {
             .catalog
             .get_or_init(crate::catalog::Reader::open)
             .as_ref()
-            .and_then(|reader| reader.exact_session(self.id, Harness::parse(self.harness)));
-        let mut row = match &cataloged {
-            Some(r) => session_row(r, std::fs::metadata(&r.path).ok().map(|m| m.len())),
-            None => json!({
-                "id": self.id,
-                "harness": self.harness,
-                "path": Value::Null,
-                "cwd": Value::Null,
-                "title": Value::Null,
-                "created_at": Value::Null,
-                "updated_at": Value::Null,
-                "message_count": Value::Null,
-                "size_bytes": Value::Null,
-            }),
-        };
-        let obj = row.as_object_mut().expect("json object");
-        // The index is what matched: its title/cwd/dates win when it has them.
-        if let Some(c) = self.cwd {
-            obj.insert("cwd".into(), json!(c));
-        }
-        if let Some(t) = self.title {
-            obj.insert("title".into(), json!(t));
-        }
-        if let Some(t) = rfc3339(self.created_at) {
-            obj.insert("created_at".into(), json!(t));
-        }
-        if let Some(t) = rfc3339(self.updated_at) {
-            obj.insert("updated_at".into(), json!(t));
-        }
-        obj.insert("score".into(), json!(self.score));
-        obj.insert("snippet".into(), json!(self.snippet));
-        // Sub-agent provenance (an index built with `cv index --subagents` folds lane transcripts
-        // in): the lane's own agent id (`cv show <agent_id>` resolves it), the top-level session
-        // that spawned it, and the workflow run it belonged to.
-        obj.insert("agent_id".into(), json!(self.agent_id));
-        obj.insert("parent_id".into(), json!(self.parent_id));
-        obj.insert("workflow".into(), json!(self.workflow));
-        row
+            .and_then(|reader| {
+                reader.exact_session(
+                    self.id,
+                    Harness::parse(self.harness),
+                    [self.cwd.is_some(), self.title.is_some()],
+                )
+            });
+        let reference = cataloged.as_ref();
+        // Choose each final value before serialization. Valid index dates overlay the catalog;
+        // out-of-range seconds retain the catalog fallback, as in the old overlay policy.
+        let created = rfc3339(self.created_at).or_else(|| reference.and_then(|r| r.created_at).map(|t| t.to_rfc3339()));
+        let updated = rfc3339(self.updated_at).or_else(|| reference.and_then(|r| r.updated_at).map(|t| t.to_rfc3339()));
+        json!({
+            "id": reference.map_or(self.id, |r| r.id.as_str()),
+            "harness": reference.map_or(self.harness, |r| r.harness.as_str()),
+            "path": reference.map(|r| r.path.to_string_lossy()),
+            "cwd": self.cwd.map(std::borrow::Cow::Borrowed).or_else(|| reference.and_then(|r| r.cwd.as_ref()).map(|p| p.to_string_lossy())),
+            "title": self.title.or_else(|| reference.and_then(|r| r.title.as_deref())),
+            "created_at": created,
+            "updated_at": updated,
+            "message_count": reference.map(|r| r.message_count),
+            "size_bytes": reference.and_then(|r| std::fs::metadata(&r.path).ok().map(|m| m.len())),
+            "score": self.score,
+            "snippet": self.snippet,
+            "agent_id": self.agent_id,
+            "parent_id": self.parent_id,
+            "workflow": self.workflow,
+        })
     }
 }
 
