@@ -714,7 +714,7 @@ fn analyze(session: &Session, opts: &DistillOptions, demand: Demand) -> anyhow::
     let uses = tool_index(msgs);
     let tool_calls = uses.len();
 
-    let tail_start = tail_cut(msgs, opts.keep_last);
+    let tail_start = tail_cut(msgs, opts.keep_last, &uses);
 
     // Documents named in the brief or in any message to the agent are instructions by reference:
     // when the agent reads one, its latest read is kept (capped) in the timeline.
@@ -767,11 +767,6 @@ fn analyze(session: &Session, opts: &DistillOptions, demand: Demand) -> anyhow::
             }
         }
     }
-    let tail_tool_calls = msgs[tail_start..]
-        .iter()
-        .flat_map(|m| &m.content)
-        .filter(|b| matches!(b, Block::ToolUse { .. }))
-        .count();
 
     // ── pass: brief, timeline, facts, ledger ──
     let mut brief: Option<(usize, String)> = None;
@@ -1065,6 +1060,11 @@ fn analyze(session: &Session, opts: &DistillOptions, demand: Demand) -> anyhow::
 
     let tail = resumable_tail(msgs, tail_start, opts, &retrieve_ref, &session.resolver())?;
     let tail_md = render_prepared_tail(&tail, tail_start, opts)?;
+    let tail_tool_calls = tail
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter(|block| matches!(block, Block::ToolUse { .. }))
+        .count();
 
     let source_est_tokens: u64 = msgs.iter().try_fold(0u64, |sum, message| {
         Ok::<_, anyhow::Error>(sum + message_est_resolved(message, &resolver)?)
@@ -1361,15 +1361,16 @@ fn render_facts(h: &mut String, f: &Facts) {
 
 /// Where the verbatim tail starts: the assistant message that issued the `keep_last`-th last tool
 /// call, pulled back over adjacent assistant records (one API reply is several records) so it
-/// opens on a whole reply. Every tool result after the cut then has its call after the cut too.
-fn tail_cut(msgs: &[Message], keep_last: usize) -> usize {
+/// opens on a whole reply. Delayed results pull in earlier matching calls transitively; source
+/// orphan results and calls before the brief remain outside this repair's contract.
+fn tail_cut(msgs: &[Message], keep_last: usize, uses: &HashMap<&str, crate::ir::ToolCall<'_>>) -> usize {
     if keep_last == 0 {
         return msgs.len();
     }
     let mut seen = 0usize;
     let mut start = msgs.len();
     for (i, m) in msgs.iter().enumerate().rev() {
-        if m.role != Role::Assistant {
+        if m.role != Role::Assistant || !m.is_model_visible() {
             continue;
         }
         let calls = m.content.iter().filter(|b| matches!(b, Block::ToolUse { .. })).count();
@@ -1397,7 +1398,35 @@ fn tail_cut(msgs: &[Message], keep_last: usize) -> usize {
             }
         }
     }
+    let minimum = first_prompt.map_or(0, |index| index + 1);
+    let mut cursor = msgs.len();
+    while cursor > start {
+        cursor -= 1;
+        if !msgs[cursor].is_model_visible() {
+            continue;
+        }
+        for block in &msgs[cursor].content {
+            if let Block::ToolResult { tool_use_id, .. } = block {
+                if let Some(call) = uses.get(tool_use_id.as_str()) {
+                    if call.msg >= minimum && call.msg < start && msgs[call.msg].is_model_visible() {
+                        start = call.msg;
+                        while start > minimum && msgs[start - 1].role == Role::Assistant {
+                            start -= 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
     start
+}
+
+fn clear_resume_usage(message: &mut Message) {
+    message.usage = None;
+    // The old complete native record would reintroduce stale usage or unclipped payloads
+    // under complete emission. Distillation deliberately replaces that representation.
+    message.complete_record = None;
+    message.extra.remove(crate::harness::claude::CARRIER_KEY);
 }
 
 /// The tail as real IR turns for a resumable session: thinking dropped (unless asked), recorded
@@ -1416,10 +1445,13 @@ fn resumable_tail(
     note_work(|work| work.tail_preparations += 1);
     let mut out: Vec<Message> = Vec::new();
     for m in &msgs[tail_start..] {
+        if !m.is_model_visible() {
+            continue;
+        }
         match (m.role, m.kind) {
             (Role::Assistant, _) => {
                 let mut m2 = m.clone();
-                m2.usage = None;
+                clear_resume_usage(&mut m2);
                 if !opts.keep_tail_thinking {
                     m2.content.retain(|b| !matches!(b, Block::Thinking { .. }));
                 }
@@ -1430,6 +1462,7 @@ fn resumable_tail(
             }
             (Role::Tool, _) | (Role::User, MessageKind::ToolResult) => {
                 let mut m2 = m.clone();
+                clear_resume_usage(&mut m2);
                 m2.materialize(resolver)?;
                 for b in &mut m2.content {
                     if let Block::ToolResult {
@@ -1450,6 +1483,7 @@ fn resumable_tail(
             }
             (Role::User, MessageKind::Prompt) => {
                 let mut owned = m.clone();
+                clear_resume_usage(&mut owned);
                 owned.materialize(resolver)?;
                 out.push(owned);
             }
@@ -1478,6 +1512,18 @@ fn render_prepared_tail(tail: &[Message], tail_start: usize, opts: &DistillOptio
         return Ok(String::new());
     }
     let mut s = String::new();
+    let calls = tail
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter(|block| matches!(block, Block::ToolUse { .. }))
+        .count();
+    if calls > opts.keep_last {
+        let _ = writeln!(
+            s,
+            "_Requested the last {} calls; retained {calls} to keep whole replies and matching call context._\n",
+            opts.keep_last
+        );
+    }
     let _ = writeln!(
         s,
         "## 5. The last {} tool calls, verbatim (from message [{tail_start}] on)\n",
@@ -2416,6 +2462,81 @@ facts text",
         assert_eq!(
             distilled.stats.distilled_est_tokens,
             distilled.stats.pack_est_tokens + tail
+        );
+        Ok(())
+    }
+    #[test]
+    fn tail_keeps_transitive_delayed_call_results_and_clears_all_resume_usage() -> anyhow::Result<()> {
+        let mut source = Session::new("parallel-tail", Harness::Claude);
+        source.messages = vec![
+            msg(Role::User, MessageKind::Prompt, vec![text("brief")]),
+            msg(Role::Assistant, MessageKind::Reply, vec![call("a", "first", "first")]),
+            msg(Role::User, MessageKind::Prompt, vec![text("follow-up")]),
+            msg(Role::Assistant, MessageKind::Reply, vec![call("b", "second", "second")]),
+            msg(
+                Role::Tool,
+                MessageKind::ToolResult,
+                vec![result("a", "delayed first", false)],
+            ),
+            msg(Role::User, MessageKind::Prompt, vec![text("another follow-up")]),
+            msg(Role::Assistant, MessageKind::Reply, vec![call("c", "third", "third")]),
+            msg(
+                Role::Tool,
+                MessageKind::ToolResult,
+                vec![result("b", "delayed second", false)],
+            ),
+            msg(
+                Role::Tool,
+                MessageKind::ToolResult,
+                vec![result("c", "third result", false)],
+            ),
+            msg(
+                Role::Assistant,
+                MessageKind::Carrier,
+                vec![call("hidden", "hidden", "harness only")],
+            ),
+        ];
+        for message in &mut source.messages {
+            message.usage = Some(crate::ir::Usage {
+                input_tokens: Some(100000),
+                ..Default::default()
+            });
+            message.extra.insert(
+                crate::harness::claude::CARRIER_KEY.into(),
+                json!({"usage":{"input_tokens":100000}}),
+            );
+            crate::ir::CompleteRecord::attach(
+                std::slice::from_mut(message),
+                Harness::Claude,
+                json!({"usage":{"input_tokens":100000}}).into(),
+                Default::default(),
+            );
+        }
+        let options = DistillOptions {
+            keep_last: 1,
+            ..Default::default()
+        };
+        let prepared = prepare_distill(&source, &options)?;
+        assert_eq!(prepared.distilled.tail_start, 1);
+        assert_eq!(prepared.distilled.stats.tail_tool_calls, 3);
+        let (_, resumed) = prepared.into_resumable_session(&source);
+        assert!(resumed.messages.iter().all(|message| message.usage.is_none()));
+        assert!(resumed.messages.iter().all(|message| message.complete_record.is_none()
+            && !message.extra.contains_key(crate::harness::claude::CARRIER_KEY)));
+        assert!(resumed.messages.iter().all(Message::is_model_visible));
+        let retained = tool_index(&resumed.messages);
+        for message in &resumed.messages {
+            for block in &message.content {
+                if let Block::ToolResult { tool_use_id, .. } = block {
+                    assert!(retained.contains_key(tool_use_id.as_str()), "{tool_use_id}");
+                }
+            }
+        }
+        assert_eq!(retained.len(), 3);
+        assert!(retained.keys().all(|id| *id != "hidden"));
+        assert_eq!(
+            tail_cut(&source.messages, 0, &tool_index(&source.messages)),
+            source.messages.len()
         );
         Ok(())
     }

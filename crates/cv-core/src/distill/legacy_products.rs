@@ -10,7 +10,7 @@ pub(super) fn distill(session: &Session, opts: &DistillOptions) -> anyhow::Resul
     let uses = tool_index(msgs);
     let tool_calls = uses.len();
 
-    let tail_start = tail_cut(msgs, opts.keep_last);
+    let tail_start = tail_cut(msgs, opts.keep_last, &uses);
 
     // Documents named in the brief or in any message to the agent are instructions by reference:
     // when the agent reads one, its latest read is kept (capped) in the timeline.
