@@ -472,10 +472,11 @@ fn serve_endpoints() {
     assert_eq!(status, 200);
     assert_eq!(v.as_array().unwrap().len(), 1, "{v}");
 
-    // unparseable limit is ignored (no truncation), not a 500.
+    // A malformed selector is a caller error rather than an unbounded read.
     let (status, v) = get_json(port, "/api/sessions?limit=banana");
-    assert_eq!(status, 200);
-    assert_eq!(v.as_array().unwrap().len(), 2, "{v}");
+    assert_eq!(status, 400);
+    let error = v["error"].as_str().unwrap();
+    assert!(error.contains("limit") && error.contains("non-negative integer"), "{v}");
 
     // harness filter + a typo'd harness is a clear 400.
     let (status, v) = get_json(port, "/api/sessions?harness=claude");
