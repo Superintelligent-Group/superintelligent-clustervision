@@ -279,11 +279,12 @@ fn session_header(r: &SessionRef) -> (Session, PathBuf) {
     let (session_dir, agent_id) = split_agent_path(&r.path);
     let state = read_state(session_dir);
     let wire = agent_wire(session_dir, agent_id);
+    let header = peek_header(&wire);
 
     let mut s = Session {
         id: r.id.clone(),
         harness: Harness::KimiCode,
-        system_prompt: None,
+        system_prompt: header.system_prompt,
         lineage: crate::ir::Lineage::default(),
         cwd: r
             .cwd
@@ -294,15 +295,12 @@ fn session_header(r: &SessionRef) -> (Session, PathBuf) {
         updated_at: r.updated_at,
         // The model is bound by the 2nd record (`profile.bind`); peek at the head so the sink's
         // header knows it before the body streams.
-        model: peek_model(&wire),
+        model: header.model,
         git: None,
         messages: Vec::new(),
         source_path: Some(r.path.clone()),
         extra: Map::new(),
     };
-    // The system prompt is bound by the head of the wire (`profile.bind`); peek so the
-    // session-level copy is known before the body streams (INTERFACE-V2 §4).
-    s.system_prompt = peek_system_prompt(&wire);
     if agent_id == "main" {
         // Session facts live in the harness bag, `extra["kimi-code"]`, never at the top level.
         let bag = s.harness_extra_mut(Harness::KimiCode);
@@ -849,97 +847,51 @@ fn file_mtime(path: &Path) -> Option<DateTime<Utc>> {
     Some(DateTime::<Utc>::from_timestamp_nanos(d.as_nanos() as i64))
 }
 
-/// The model alias from the first `profile.bind` / `config.update` near the head of the transcript
-/// (the bind is the 2nd record; scan a handful of lines, never the whole file).
-fn peek_model(wire: &Path) -> Option<String> {
-    let mut model = None;
-    let mut seen = 0usize;
-    peek_fields(wire, &["type", "modelAlias"], |v| {
-        seen += 1;
-        if matches!(
-            v.get("type").and_then(Value::as_str),
-            Some("profile.bind" | "config.update" | "llm.request" | "usage.record")
-        ) {
-            if let Some(m) = v.get("modelAlias").and_then(Value::as_str) {
-                model = Some(m.to_string());
-                return Flow::Stop;
-            }
-        }
-        if seen >= 16 {
-            Flow::Stop
-        } else {
-            Flow::Continue
-        }
-    });
-    model
+#[derive(Default, Debug, PartialEq, Eq)]
+struct HeaderFields {
+    model: Option<String>,
+    system_prompt: Option<String>,
 }
 
-/// Header peeks select metadata without allocating unrelated giant wire payloads.
-fn peek_fields(wire: &Path, keys: &[&'static str], mut visit: impl FnMut(Value) -> Flow) {
-    let mut run = || -> Result<()> {
-        use jsonl::ranges::{self, Range};
+/// The first sixteen accepted records bind both header fields in one checked pass. Decode each
+/// requested field only on relevant record kinds; unrelated body/telemetry fields remain views.
+fn peek_header(wire: &Path) -> HeaderFields {
+    let read = || -> Result<HeaderFields> {
         let file = fs::File::open(wire)?;
         let source = crate::json::JsonSource::capture(wire)?;
-        for record in ranges::records(
-            &file,
-            Range {
-                offset: 0,
-                len: file.metadata()?.len(),
-            },
-        )? {
-            let (range, _) = match record {
-                Ok(record) => record,
-                Err(_) => continue,
-            };
-            let range = ranges::trim(&file, range)?;
-            if range.len == 0 {
-                continue;
+        let mut header = HeaderFields::default();
+        let mut seen = 0;
+        super::store::checked_lines::for_each(&file, 0, &source, |view, _, _, _| {
+            seen += 1;
+            if let Some(record) = Fields::parse(view, &["type", "modelAlias", "systemPrompt"])? {
+                let ty = record.string("type")?.unwrap_or_default();
+                if header.model.is_none()
+                    && matches!(
+                        ty.as_str(),
+                        "profile.bind" | "config.update" | "llm.request" | "usage.record"
+                    )
+                {
+                    header.model = record.string("modelAlias")?;
+                }
+                if header.system_prompt.is_none() && matches!(ty.as_str(), "profile.bind" | "config.update") {
+                    header.system_prompt = record.string("systemPrompt")?.filter(|prompt| !prompt.is_empty());
+                }
             }
-            match source.read_range_value(range.offset, range.len, |view| {
-                let object = Fields::parse(view, keys)?
-                    .map(|fields| fields.project(keys))
-                    .transpose()?;
-                Ok(visit(object.map(Value::Object).unwrap_or(Value::Null)))
-            }) {
-                Ok(Flow::Stop) => break,
-                Ok(Flow::Continue) => {}
-                Err(error) if error.downcast_ref::<crate::json::InvalidJson>().is_some() => continue,
-                Err(error) => return Err(error),
-            }
-        }
-        Ok(())
+            Ok(
+                if seen >= 16 || (header.model.is_some() && header.system_prompt.is_some()) {
+                    Flow::Stop
+                } else {
+                    Flow::Continue
+                },
+            )
+        })?;
+        Ok(header)
     };
-    let _ = run();
+    read().unwrap_or_default()
 }
 
 /// `message.origin.kind` (`user` / `injection` / `system_trigger` / `background_task` / `task`),
-/// `"user"` when absent (older records).
-/// The system prompt from the head of the wire: the first `profile.bind` / `config.update` that
-/// carries a non-empty `systemPrompt` (the same records [`Ctx::system_prompt`] turns into a
-/// `SystemPrompt` message). Bounded like [`peek_model`].
-fn peek_system_prompt(wire: &Path) -> Option<String> {
-    let mut prompt = None;
-    let mut seen = 0usize;
-    peek_fields(wire, &["type", "systemPrompt"], |v| {
-        seen += 1;
-        if matches!(
-            v.get("type").and_then(Value::as_str),
-            Some("profile.bind" | "config.update")
-        ) {
-            if let Some(p) = v.get("systemPrompt").and_then(Value::as_str).filter(|p| !p.is_empty()) {
-                prompt = Some(p.to_string());
-                return Flow::Stop;
-            }
-        }
-        if seen >= 16 {
-            Flow::Stop
-        } else {
-            Flow::Continue
-        }
-    });
-    prompt
-}
-
+/// "user" when absent (older records).
 fn origin_kind(message: Option<&Value>) -> &str {
     message
         .and_then(|m| m.pointer("/origin/kind"))
@@ -1819,6 +1771,55 @@ fn push_parts(m: &mut Message, content: Option<&Value>) {
 mod tests {
     use super::*;
     use crate::harness::Parse;
+
+    #[test]
+    fn one_header_pass_preserves_independent_first_fields_and_record_limit() -> Result<()> {
+        let world = cv_testkit::World::in_process("kimi_code_header_fields");
+        let path = world.home.join("wire.jsonl");
+        let ignored = "unused payload ".repeat(20_000);
+        let cases = [
+            format!("bad json\n{}\n{}\n{}\n",
+                serde_json::json!({"type":"llm.request","modelAlias":"first-model","systemPrompt":ignored,"body":ignored}),
+                serde_json::json!({"type":"profile.bind","modelAlias":"later-model","systemPrompt":"first prompt"}),
+                serde_json::json!({"type":"config.update","systemPrompt":"later prompt"})),
+            format!("{}{}\n{}\n", "42\n".repeat(15),
+                serde_json::json!({"type":"profile.bind","modelAlias":"sixteenth","systemPrompt":"last admitted prompt"}),
+                serde_json::json!({"type":"profile.bind","modelAlias":"outside-limit","systemPrompt":"outside-limit"})),
+            "{\"type\":\"profile.bind\",\"modelAlias\":\"\",\"systemPrompt\":\"\"}\n{\"type\":\"config.update\",\"modelAlias\":\"later\",\"systemPrompt\":\"nonempty\"}\n".into(),
+            "{\"type\":\"profile.bind\",\"modelAlias\":42,\"systemPrompt\":null}\n".into(),
+        ];
+        for body in cases {
+            fs::write(&path, &body)?;
+            let mut expected = HeaderFields::default();
+            let mut seen = 0;
+            super::super::for_each_json_line_str(&body, |value| {
+                seen += 1;
+                let ty = value.get("type").and_then(Value::as_str);
+                if expected.model.is_none()
+                    && matches!(
+                        ty,
+                        Some("profile.bind" | "config.update" | "llm.request" | "usage.record")
+                    )
+                {
+                    expected.model = value.get("modelAlias").and_then(Value::as_str).map(str::to_owned);
+                }
+                if expected.system_prompt.is_none() && matches!(ty, Some("profile.bind" | "config.update")) {
+                    expected.system_prompt = value
+                        .get("systemPrompt")
+                        .and_then(Value::as_str)
+                        .filter(|p| !p.is_empty())
+                        .map(str::to_owned);
+                }
+                if seen >= 16 {
+                    Flow::Stop
+                } else {
+                    Flow::Continue
+                }
+            });
+            assert_eq!(peek_header(&path), expected);
+        }
+        Ok(())
+    }
 
     #[test]
     fn discovery_refreshes_state_and_cwd_fallbacks_without_wire_append() -> Result<()> {
