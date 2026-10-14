@@ -560,6 +560,7 @@ mod tests {
 
     #[test]
     fn cursor_reader_budget_preserves_positions_and_wire_selection() {
+        let _world = cv_testkit::World::in_process("watch-cursor_reader_budget_preserves_positions_and_wire_selection");
         let mut watcher = Watcher::with_discovery(Filter::default(), true, Vec::new);
         for n in 0..16 {
             let r = sref(
@@ -617,6 +618,9 @@ mod tests {
 
     #[test]
     fn same_size_replacement_prunes_positions_even_when_new_source_cannot_be_read() {
+        let _world = cv_testkit::World::in_process(
+            "watch-same_size_replacement_prunes_positions_even_when_new_source_cannot_be_read",
+        );
         fn replacement() -> Vec<SessionRef> {
             let mut r = sref(
                 Harness::Claude,
