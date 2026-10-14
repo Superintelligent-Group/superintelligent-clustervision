@@ -259,13 +259,36 @@ pub fn description_slug(description: &str) -> Option<String> {
 /// `lane:<slug>` assignee matching the description's leading token, case-insensitively) and list
 /// the tasks that endpoint holds, newest activity first.
 pub fn attach_tasks(lanes: &mut [Lane], model: &crate::task::TaskReadModel) {
-    let assignees: std::collections::BTreeSet<&str> =
-        model.tasks.values().filter_map(|t| t.assignee.as_deref()).collect();
+    if lanes.is_empty() {
+        return;
+    }
+    // Index the task roster once instead of scanning and case-folding it for every lane.
+    // A description match historically chose the lexically first spelling when several
+    // assignees differed only in case. Keep that choice separate from exact actor identity.
+    let mut assignees: HashMap<String, &str> = HashMap::new();
+    let mut tasks: HashMap<&str, Vec<&crate::task::TaskProjection>> = HashMap::new();
+    for task in model.tasks.values() {
+        if let Some(assignee) = task.assignee.as_deref() {
+            assignees
+                .entry(assignee.to_lowercase())
+                .and_modify(|existing| *existing = (*existing).min(assignee))
+                .or_insert(assignee);
+            tasks
+                .entry(crate::task::project::canonical_actor(assignee))
+                .or_default()
+                .push(task);
+        }
+    }
+    for group in tasks.values_mut() {
+        // Stable sorting retains task-ID order for equal timestamps, as the original
+        // per-lane scan over the model's BTreeMap did.
+        group.sort_by_key(|task| std::cmp::Reverse(task.last_ts));
+    }
     for lane in lanes.iter_mut() {
         if lane.endpoint.is_none() {
             if let Some(slug) = lane.description.as_deref().and_then(description_slug) {
                 let want = format!("lane:{slug}");
-                if let Some(hit) = assignees.iter().find(|a| a.to_lowercase() == want) {
+                if let Some(hit) = assignees.get(&want) {
                     lane.endpoint = Some(hit.to_string());
                     lane.endpoint_source = Some(EndpointSource::Description);
                 }
@@ -275,14 +298,10 @@ pub fn attach_tasks(lanes: &mut [Lane], model: &crate::task::TaskReadModel) {
             lane.tasks = Some(Vec::new());
             continue;
         };
-        let mut rows: Vec<LaneTask> = model
-            .tasks
-            .values()
-            .filter(|t| {
-                t.assignee
-                    .as_deref()
-                    .is_some_and(|a| crate::task::same_actor(a, endpoint))
-            })
+        let rows: Vec<LaneTask> = tasks
+            .get(crate::task::project::canonical_actor(endpoint))
+            .into_iter()
+            .flatten()
             .map(|t| LaneTask {
                 id: t.task_id.clone(),
                 title: t.title.clone(),
@@ -298,7 +317,6 @@ pub fn attach_tasks(lanes: &mut [Lane], model: &crate::task::TaskReadModel) {
                 last_ts: t.last_ts,
             })
             .collect();
-        rows.sort_by_key(|t| std::cmp::Reverse(t.last_ts));
         lane.tasks = Some(rows);
     }
 }
@@ -871,6 +889,105 @@ mod tests {
         );
         assert_eq!(description_slug("CV-EDITS").as_deref(), Some("cv-edits"));
         assert_eq!(description_slug(": nothing"), None);
+    }
+
+    #[test]
+    fn task_join_preserves_actor_aliases_description_choice_and_stable_order() {
+        use crate::task::{new_event, TaskEventKind, TaskReducer};
+        let actors = [
+            Some("lane:alpha"),
+            Some("web:lane:ALPHA"),
+            Some("lane:ALPHA"),
+            Some("lane:ALPHA"),
+            Some("orchestrator:ALPHA"),
+            None,
+        ];
+        let events: Vec<_> = actors
+            .iter()
+            .enumerate()
+            .map(|(i, actor)| {
+                let mut event = new_event(
+                    None,
+                    "human",
+                    TaskEventKind::Opened {
+                        title: format!("task {i}"),
+                        body: String::new(),
+                        repo: None,
+                        issue: None,
+                        channel: None,
+                        assignee: actor.map(str::to_owned),
+                    },
+                );
+                event.ts = DateTime::from_timestamp(100 + (i % 2) as i64, 0).unwrap();
+                event
+            })
+            .collect();
+        let model = TaskReducer::reduce(&events).unwrap();
+        let lane = |endpoint: Option<&str>, description: Option<&str>| Lane {
+            agent_id: "agent".into(),
+            session_id: "session".into(),
+            path: PathBuf::new(),
+            agent_type: None,
+            description: description.map(str::to_owned),
+            tool_use_id: None,
+            workflow: None,
+            model: None,
+            started_at: None,
+            last_turn_at: None,
+            duration_ms: None,
+            messages: 0,
+            tool_calls: 0,
+            tokens: LaneTokens::default(),
+            status: "running".into(),
+            status_source: StatusSource::Transcript,
+            last_text: None,
+            last_tool: None,
+            stranded: false,
+            failure_cause: None,
+            resets_at: None,
+            failure_detail: None,
+            endpoint: endpoint.map(str::to_owned),
+            endpoint_source: endpoint.map(|_| EndpointSource::Transcript),
+            tasks: None,
+        };
+        let mut lanes = vec![
+            lane(None, Some("Alpha: work")),
+            lane(Some("lane:alpha"), Some("ALPHA")),
+            lane(Some("web:lane:ALPHA"), None),
+            lane(Some("lane:missing"), None),
+            lane(None, None),
+        ];
+        attach_tasks(&mut lanes, &model);
+        assert_eq!(lanes[0].endpoint.as_deref(), Some("lane:ALPHA"));
+        assert_eq!(lanes[0].endpoint_source, Some(EndpointSource::Description));
+        assert_eq!(lanes[1].endpoint_source, Some(EndpointSource::Transcript));
+        for lane in &lanes {
+            // Independent original scan oracle: matching actors remains case-sensitive,
+            // with the single web: alias and stable newest-first ordering.
+            let mut expected: Vec<_> = model
+                .tasks
+                .values()
+                .filter(|task| {
+                    lane.endpoint
+                        .as_deref()
+                        .zip(task.assignee.as_deref())
+                        .is_some_and(|(endpoint, actor)| crate::task::same_actor(endpoint, actor))
+                })
+                .collect();
+            expected.sort_by_key(|task| std::cmp::Reverse(task.last_ts));
+            assert_eq!(
+                lane.tasks
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .map(|task| task.id.as_str())
+                    .collect::<Vec<_>>(),
+                expected.iter().map(|task| task.task_id.as_str()).collect::<Vec<_>>(),
+            );
+        }
+        assert_eq!(lanes[0].tasks, lanes[2].tasks);
+        assert_eq!(lanes[0].tasks.as_ref().unwrap().len(), 3);
+        assert_eq!(lanes[1].tasks.as_ref().unwrap().len(), 1);
     }
 
     /// The record shapes of session 0c315aee's 10-01/02 kills (content redacted to the notice):
