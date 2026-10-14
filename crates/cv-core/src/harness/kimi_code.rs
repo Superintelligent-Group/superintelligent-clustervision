@@ -558,6 +558,7 @@ fn session_uuid(session_dir: &Path) -> &str {
 /// parsing one gives a session whose `lineage.parent` is the uuid and `lineage.agent_path` the
 /// agent id. Sub-agents are not listed by `discover` (like the Claude adapter's `subagents/`).
 pub fn subagent_refs(main: &SessionRef) -> Vec<SessionRef> {
+    let _cache_scope = crate::discover_cache::read::Context::current().enter();
     let Ok(rd) = fs::read_dir(main.path.join("agents")) else {
         return Vec::new();
     };
@@ -571,20 +572,19 @@ pub fn subagent_refs(main: &SessionRef) -> Vec<SessionRef> {
             if !wire.exists() {
                 return None;
             }
-            let w = scan_wire(&wire).ok()?;
-            Some((
-                n,
-                SessionRef {
-                    id: format!("{}/{name}", main.id),
-                    harness: Harness::KimiCode,
-                    path: dir,
-                    cwd: main.cwd.clone(),
+            let mut reference = crate::discover_cache::cached_scan(&wire, || {
+                let w = scan_wire(&wire).ok()?;
+                Some(SessionRef {
                     title: w.title,
                     created_at: w.first_ts.or_else(|| file_mtime(&wire)),
                     updated_at: w.last_ts.or_else(|| file_mtime(&wire)),
                     message_count: w.message_count,
-                },
-            ))
+                    ..SessionRef::new(&name, Harness::KimiCode, &dir)
+                })
+            })?;
+            reference.id = format!("{}/{name}", main.id);
+            reference.cwd.clone_from(&main.cwd);
+            Some((n, reference))
         })
         .collect();
     out.sort_by_key(|(n, _)| *n);
@@ -2616,6 +2616,49 @@ mod tests {
         fs::write(&path, invalid_utf8).unwrap();
         let actual = read_session_index(&path);
         assert!(actual.deleted.is_empty() && actual.cwd.is_empty());
+    }
+
+    #[test]
+    fn subagent_discovery_reuses_histories_and_preserves_numeric_order_and_current_parent() -> Result<()> {
+        let world = cv_testkit::World::in_process("kimi-code-subagent-cache");
+        let context = crate::discover_cache::read::Context::current();
+        let _scope = context.enter();
+        let parent = world.home.join("session_parent");
+        let mut main = SessionRef::new("parent", Harness::KimiCode, &parent);
+        main.cwd = Some(PathBuf::from("/first"));
+        let body = "{\"type\":\"context.append_message\",\"time\":1700000000000,\"message\":{\"role\":\"user\",\"content\":\"child task\"}}\n".repeat(128);
+        for index in (0..12).rev() {
+            let child = parent.join("agents").join(format!("agent-{index}"));
+            fs::create_dir_all(&child)?;
+            fs::write(child.join("wire.jsonl"), &body)?;
+        }
+        let first = subagent_refs(&main);
+        assert_eq!(first.len(), 12);
+        for (index, reference) in first.iter().enumerate() {
+            assert_eq!(reference.id, format!("parent/agent-{index}"));
+            assert_eq!(reference.message_count, 128);
+            assert_eq!(reference.cwd, main.cwd);
+            let wire = reference.path.join("wire.jsonl");
+            let hit =
+                crate::discover_cache::cached_scan(&wire, || panic!("unchanged child wire must be cached")).unwrap();
+            assert_eq!(hit.message_count, reference.message_count);
+            assert_eq!(hit.title, scan_wire(&wire)?.title);
+        }
+        main.id = "new-parent".into();
+        main.cwd = Some(PathBuf::from("/second"));
+        let unchanged = subagent_refs(&main);
+        assert!(unchanged
+            .iter()
+            .all(|reference| reference.id.starts_with("new-parent/") && reference.cwd == main.cwd));
+        let wire = unchanged[2].path.join("wire.jsonl");
+        fs::write(&wire, "{\"type\":\"context.append_message\",\"time\":1800000000000,\"message\":{\"role\":\"user\",\"content\":\"new prompt\"}}\n")?;
+        let refreshed = subagent_refs(&main);
+        assert_eq!(refreshed[2].message_count, 1);
+        assert_eq!(refreshed[2].title.as_deref(), Some("new prompt"));
+        assert_eq!(refreshed[2].created_at.unwrap().timestamp_millis(), 1800000000000);
+        fs::remove_file(wire)?;
+        assert_eq!(subagent_refs(&main).len(), 11);
+        Ok(())
     }
 
     #[test]

@@ -1047,6 +1047,7 @@ fn subagent_meta(path: &Path) -> Option<Value> {
 /// with a `context.jsonl`). Discovery lists only top-level sessions; parsing one of these yields a
 /// [`Session`] whose `lineage.parent` is the session id and `lineage.agent_path` the agent id.
 pub fn subagent_refs(main: &SessionRef) -> Vec<SessionRef> {
+    let _cache_scope = crate::discover_cache::read::Context::current().enter();
     let Ok(rd) = fs::read_dir(main.path.join("subagents")) else {
         return Vec::new();
     };
@@ -1056,17 +1057,27 @@ pub fn subagent_refs(main: &SessionRef) -> Vec<SessionRef> {
         .filter(|p| p.join("context.jsonl").is_file())
         .filter_map(|p| {
             let agent = p.file_name()?.to_str()?.to_string();
-            let mut r = scan(
-                &format!("{}/{agent}", main.id),
-                &p.join("context.jsonl"),
-                &p,
-                main.cwd.clone(),
-            )?;
-            if let Some(d) =
-                subagent_meta(&p).and_then(|m| m.get("description").and_then(Value::as_str).map(str::to_string))
-            {
-                r.title = Some(crate::ir::truncate(&d, 80));
+            let transcript = p.join("context.jsonl");
+            let mut reads = crate::source::ReadSet::default();
+            reads.record(&p);
+            for path in [p.join("state.json"), p.join("meta.json"), p.join("wire.jsonl")] {
+                reads.record(&path);
             }
+            for segment in transcript_segments(&p, &transcript) {
+                reads.record(&segment);
+            }
+            let mut r = crate::discover_cache::cached_scan_with_reads(&transcript, reads, || {
+                let mut r = scan(&agent, &transcript, &p, None)?;
+                if let Some(d) =
+                    subagent_meta(&p).and_then(|m| m.get("description").and_then(Value::as_str).map(str::to_string))
+                {
+                    r.title = Some(crate::ir::truncate(&d, 80));
+                }
+                Some(r)
+            })?;
+            // Parent display identity/cwd are supplied by the caller, not by these cached bytes.
+            r.id = format!("{}/{agent}", main.id);
+            r.cwd.clone_from(&main.cwd);
             Some(r)
         })
         .collect();
@@ -2669,6 +2680,56 @@ mod tests {
 
     /// kimi-cli's `Agent` tool keeps each sub-agent under `<session>/subagents/<agent_id>/` in the
     /// session's own format; it parses as its own session under the parent.
+    #[test]
+    fn subagent_discovery_reuses_histories_and_refreshes_auxiliary_and_parent_metadata() -> Result<()> {
+        let world = cv_testkit::World::in_process("kimi-subagent-cache");
+        let context = crate::discover_cache::read::Context::current();
+        let _scope = context.enter();
+        let parent = world.home.join("parent");
+        let mut main = SessionRef::new("parent-id", Harness::Kimi, &parent);
+        main.cwd = Some(PathBuf::from("/first"));
+        let body = "{\"role\":\"user\",\"content\":\"child task\"}\n".repeat(128);
+        for index in 0..12 {
+            let child = parent.join("subagents").join(format!("agent-{index:02}"));
+            fs::create_dir_all(&child)?;
+            fs::write(child.join("context.jsonl"), &body)?;
+        }
+        let first = subagent_refs(&main);
+        assert_eq!(first.len(), 12);
+        for reference in &first {
+            assert_eq!(reference.message_count, 128);
+            assert_eq!(reference.cwd, main.cwd);
+            let hit = crate::discover_cache::cached_scan(&reference.path.join("context.jsonl"), || {
+                panic!("unchanged child context must be cached")
+            })
+            .unwrap();
+            assert_eq!(hit.message_count, reference.message_count);
+        }
+        main.id = "new-parent".into();
+        main.cwd = Some(PathBuf::from("/second"));
+        let unchanged = subagent_refs(&main);
+        assert!(unchanged
+            .iter()
+            .all(|reference| reference.id.starts_with("new-parent/") && reference.cwd == main.cwd));
+        let child = &unchanged[0].path;
+        fs::write(child.join("meta.json"), r#"{"description":"new task description"}"#)?;
+        assert_eq!(subagent_refs(&main)[0].title.as_deref(), Some("new task description"));
+        fs::write(
+            child.join("context_1.jsonl"),
+            "{\"role\":\"assistant\",\"content\":\"older\"}\n",
+        )?;
+        assert_eq!(subagent_refs(&main)[0].message_count, 129);
+        fs::write(
+            child.join("wire.jsonl"),
+            "{\"timestamp\":1700000000}\n{\"timestamp\":1700000001}\n",
+        )?;
+        let refreshed = subagent_refs(&main);
+        assert_eq!(refreshed[0].created_at, epoch_to_dt(1700000000.0));
+        assert_eq!(refreshed[0].updated_at, epoch_to_dt(1700000001.0));
+        assert_eq!(fs::read_to_string(child.join("context.jsonl"))?, body);
+        Ok(())
+    }
+
     #[test]
     fn subagent_dirs_parse_with_lineage() {
         let dir = write_temp("context.jsonl", r#"{"role":"user","content":"parent"}"#);
