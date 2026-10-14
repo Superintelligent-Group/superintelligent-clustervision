@@ -22,6 +22,7 @@
 //! take resolved files, so they run against fixtures.
 
 use crate::ir::{Harness, SessionRef};
+#[cfg(test)]
 use crate::restamp::restamp;
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
@@ -228,10 +229,51 @@ pub struct Adopted {
     pub bytes: usize,
 }
 
-/// Restamp the transcript in memory; with `write`, place it and the meta into the target's
-/// `subagents/` (each via a temp file and a rename, so a live session never reads half a file).
-/// Refuses an existing destination unless `force`.
+/// Own only uniquely and exclusively created staging paths.
+struct Temporary(PathBuf);
+impl Temporary {
+    fn create(dir: &Path) -> Result<(Self, std::fs::File)> {
+        let path = dir.join(format!(".cv-adopt-{}.tmp", uuid::Uuid::new_v4()));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options
+            .open(&path)
+            .with_context(|| format!("writing {}", path.display()))?;
+        Ok((Self(path), file))
+    }
+    fn publish(&self, destination: &Path, force: bool) -> Result<()> {
+        if force {
+            std::fs::rename(&self.0, destination)
+        } else {
+            std::fs::hard_link(&self.0, destination)
+        }
+        .with_context(|| format!("placing {}", destination.display()))
+    }
+}
+impl Drop for Temporary {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Stream checked transcript surgery into private staging; with `write`, publish the transcript
+/// and optional metadata through exclusive temporary files. Source failures occur before publication.
+/// Refuses existing destinations unless `force`, including names claimed after planning.
 pub fn execute(p: &Plan, write: bool, force: bool) -> Result<Adopted> {
+    execute_after_stage(p, write, force, || Ok(()))
+}
+
+fn execute_after_stage(
+    p: &Plan,
+    write: bool,
+    force: bool,
+    after_stage: impl FnOnce() -> Result<()>,
+) -> Result<Adopted> {
     if p.agent.session_id == p.into_session {
         bail!(
             "agent {} already belongs to session {}",
@@ -253,57 +295,61 @@ pub fn execute(p: &Plan, write: bool, force: bool) -> Result<Adopted> {
             p.dest.display()
         );
     }
-    let text = std::fs::read_to_string(&p.agent.path).with_context(|| format!("reading {}", p.agent.path.display()))?;
-    let r = restamp(&text, &p.into_session);
-    if write {
+    use std::io::Write;
+    let source = crate::json::JsonSource::capture(&p.agent.path)
+        .with_context(|| format!("reading {}", p.agent.path.display()))?;
+    let file = std::fs::File::open(&p.agent.path)?;
+    source.check_metadata(file.metadata()?)?;
+    let mut transcript = None;
+    let mut metadata = None;
+    let counts = if write {
         let dir = p.dest.parent().context("destination has no parent dir")?;
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-        let place = |dest: &Path, bytes: &[u8]| -> Result<()> {
-            use std::io::Write;
-            struct Temporary(PathBuf);
-            impl Drop for Temporary {
-                fn drop(&mut self) {
-                    let _ = std::fs::remove_file(&self.0);
-                }
-            }
-            let tmp = dest.with_extension(format!("adopt-{}.tmp", uuid::Uuid::new_v4()));
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            // Own cleanup only after exclusive creation succeeds.
-            let mut file = options
-                .open(&tmp)
-                .with_context(|| format!("writing {}", tmp.display()))?;
-            let temporary = Temporary(tmp);
-            file.write_all(bytes)?;
-            file.flush()?;
-            drop(file);
-            if force {
-                std::fs::rename(&temporary.0, dest)
-            } else {
-                // Same-directory link publication fails if another writer claimed the name
-                // after planning or the check above. A plain rename would silently replace it.
-                std::fs::hard_link(&temporary.0, dest)
-            }
-            .with_context(|| format!("placing {}", dest.display()))
-        };
+        let (partial, output) = Temporary::create(dir)?;
+        let mut output = std::io::BufWriter::new(output);
+        let counts = crate::restamp::write_restamped_transcript(&source, &file, &p.into_session, &mut output)?;
+        output.flush()?;
+        drop(output);
+        transcript = Some(partial);
         if let (Some(src), Some(dest)) = (&p.agent.meta_path, &p.dest_meta) {
-            place(
-                dest,
-                &std::fs::read(src).with_context(|| format!("reading {}", src.display()))?,
-            )?;
+            let meta_source =
+                crate::json::JsonSource::capture(src).with_context(|| format!("reading {}", src.display()))?;
+            let mut meta_file = std::fs::File::open(src)?;
+            meta_source.check_metadata(meta_file.metadata()?)?;
+            let (partial, mut output) = Temporary::create(dir)?;
+            std::io::copy(&mut meta_file, &mut output)?;
+            output.flush()?;
+            drop(output);
+            metadata = Some((meta_source, meta_file, partial, dest));
         }
-        place(&p.dest, r.body.as_bytes())?;
+        counts
+    } else {
+        crate::restamp::write_restamped_transcript(&source, &file, &p.into_session, &mut std::io::sink())?
+    };
+    after_stage()?;
+    source.check_metadata(file.metadata()?)?;
+    source.check()?;
+    if let Some((meta_source, meta_file, _, _)) = &metadata {
+        meta_source.check_metadata(meta_file.metadata()?)?;
+        meta_source.check()?;
+    }
+    if write && !force && (destination_exists(&p.dest)? || destination_exists(&p.dest.with_extension("meta.json"))?) {
+        bail!(
+            "{} already exists — refusing to overwrite (pass --force to replace it)",
+            p.dest.display()
+        );
+    }
+    if let Some((_, _, partial, destination)) = &metadata {
+        partial.publish(destination, force)?;
+    }
+    if let Some(partial) = &transcript {
+        partial.publish(&p.dest, force)?;
     }
     Ok(Adopted {
         agent_id: p.agent.agent_id.clone(),
-        lines: r.lines,
-        stamped: r.stamped,
-        bytes: r.body.len(),
+        lines: counts.lines,
+        stamped: counts.stamped,
+        bytes: counts.bytes,
     })
 }
 
@@ -397,6 +443,118 @@ mod tests {
         // The source is untouched.
         assert_eq!(std::fs::read_to_string(&hits[0].path).unwrap(), src_text);
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn adopt_streams_large_and_malformed_rows_with_exact_old_output_and_dry_counts() {
+        let root = fixture("streamed-output");
+        let into = sf(&root, LIVE);
+        let dead = sf(&root, DEAD);
+        let agent = find_agent(AGENT, Some(&dead)).unwrap().remove(0);
+        let original = format!(
+            "\r\n{{ \"sessionId\" : \"{DEAD}\", \"text\":\"{}\", \"n\":1.50 }}\r\nnot json ☃\n{}\n{{\"session_id\":\"{DEAD}\"}}",
+            "λ\\n".repeat(40000), " ".repeat(100000)
+        );
+        std::fs::write(&agent.path, &original).unwrap();
+        let expected = restamp(&original, LIVE);
+        let p = plan(agent, vec![], &into);
+        let dry = execute(&p, false, false).unwrap();
+        assert!(!p.dest.parent().unwrap().exists());
+        let actual = execute(&p, true, false).unwrap();
+        assert_eq!(std::fs::read(&p.dest).unwrap(), expected.body.as_bytes());
+        assert_eq!(std::fs::read(&p.agent.path).unwrap(), original.as_bytes());
+        for result in [dry, actual] {
+            assert_eq!(
+                (result.lines, result.stamped, result.bytes),
+                (expected.lines, expected.stamped, expected.body.len())
+            );
+        }
+        cleanup_owned_test_root(&root);
+    }
+
+    fn cleanup_owned_test_root(root: &Path) {
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn adopt_source_and_metadata_failures_do_not_publish_partial_outputs() {
+        for failure in [
+            "invalid-utf8",
+            "invalid-large-utf8",
+            "missing-meta",
+            "changed-source",
+            "changed-meta",
+        ] {
+            let root = fixture(failure);
+            let into = sf(&root, LIVE);
+            let dead = sf(&root, DEAD);
+            let agent = find_agent(AGENT, Some(&dead)).unwrap().remove(0);
+            let p = plan(agent, vec![], &into);
+            let original = std::fs::read(&p.agent.path).unwrap();
+            let metadata = p.agent.meta_path.as_ref().unwrap();
+            let destination_metadata = p.dest_meta.as_ref().unwrap();
+            let prior_transcript = b"previous destination transcript";
+            let prior_metadata = b"previous destination metadata";
+            std::fs::create_dir_all(p.dest.parent().unwrap()).unwrap();
+            std::fs::write(&p.dest, prior_transcript).unwrap();
+            std::fs::write(destination_metadata, prior_metadata).unwrap();
+            match failure {
+                "invalid-utf8" => {
+                    let mut bytes = original.clone();
+                    bytes.extend_from_slice(b"\nlate invalid \xff");
+                    std::fs::write(&p.agent.path, bytes).unwrap();
+                }
+                "invalid-large-utf8" => {
+                    let mut bytes = original.clone();
+                    bytes.extend_from_slice(&vec![b'x'; 100000]);
+                    bytes.push(0xff);
+                    std::fs::write(&p.agent.path, bytes).unwrap();
+                }
+                "missing-meta" => {
+                    std::fs::remove_file(metadata).unwrap();
+                }
+                _ => {}
+            }
+            let result = execute_after_stage(&p, true, true, || {
+                match failure {
+                    "changed-source" => std::fs::write(&p.agent.path, b"source changed")?,
+                    "changed-meta" => std::fs::write(metadata, b"metadata changed")?,
+                    _ => {}
+                }
+                Ok(())
+            });
+            assert!(result.is_err(), "{failure}");
+            assert_eq!(std::fs::read(&p.dest).unwrap(), prior_transcript, "{failure}");
+            assert_eq!(
+                std::fs::read(destination_metadata).unwrap(),
+                prior_metadata,
+                "{failure}"
+            );
+            assert!(std::fs::read_dir(p.dest.parent().unwrap())
+                .unwrap()
+                .flatten()
+                .all(|entry| !entry.file_name().to_string_lossy().starts_with(".cv-adopt-")));
+            cleanup_owned_test_root(&root);
+        }
+    }
+
+    #[test]
+    fn adopt_rechecks_late_metadata_even_when_source_has_no_sidecar() {
+        let root = fixture("late-meta-no-source");
+        let into = sf(&root, LIVE);
+        let dead = sf(&root, DEAD);
+        let mut agent = find_agent(AGENT, Some(&dead)).unwrap().remove(0);
+        agent.meta_path = None;
+        let p = plan(agent, vec![], &into);
+        let meta = p.dest.with_extension("meta.json");
+        let result = execute_after_stage(&p, true, false, || {
+            std::fs::write(&meta, b"concurrent metadata")?;
+            Ok(())
+        });
+        assert!(result.unwrap_err().to_string().contains("refusing to overwrite"));
+        assert!(!p.dest.exists());
+        assert_eq!(std::fs::read(&meta).unwrap(), b"concurrent metadata");
+        cleanup_owned_test_root(&root);
     }
 
     #[test]

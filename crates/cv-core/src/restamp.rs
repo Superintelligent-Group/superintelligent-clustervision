@@ -145,6 +145,105 @@ pub(crate) fn write_restamped_spans(
     Ok(stamped)
 }
 
+/// Counts from the shared streaming transcript surgery; no transcript-sized body is retained.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct RestampCounts {
+    pub lines: usize,
+    pub stamped: usize,
+    pub bytes: usize,
+}
+
+/// Restamp a captured UTF-8 transcript through the existing line/source surgery. Small physical
+/// rows reuse framing scratch; large rows remain positioned ranges. Malformed JSON passes through,
+/// but invalid UTF-8 is fatal, matching `read_to_string` followed by `restamp`. Callers must stage
+/// output because a later invalid row or source mutation can fail after earlier writes.
+pub(crate) fn write_restamped_transcript(
+    source: &crate::json::JsonSource,
+    file: &std::fs::File,
+    new_id: &str,
+    output: &mut impl std::io::Write,
+) -> anyhow::Result<RestampCounts> {
+    use crate::harness::store::jsonl::ranges::{self, Range};
+    use std::io::Write;
+    struct Counted<'a, W> {
+        output: &'a mut W,
+        bytes: usize,
+    }
+    impl<W: Write> Write for Counted<'_, W> {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let count = self.output.write(bytes)?;
+            self.bytes = self
+                .bytes
+                .checked_add(count)
+                .ok_or_else(|| std::io::Error::other("restamped size overflow"))?;
+            Ok(count)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.output.flush()
+        }
+    }
+    source.check_metadata(file.metadata()?)?;
+    source.check()?;
+    let mut output = Counted { output, bytes: 0 };
+    let mut counts = RestampCounts::default();
+    let mut rows = ranges::records(
+        file,
+        Range {
+            offset: 0,
+            len: source.len(),
+        },
+    )?;
+    rows.keep_small_records(64 * 1024);
+    while let Some(row) = rows.next() {
+        let (range, newline) = row?;
+        if let Some(bytes) = rows.small_record() {
+            let line = std::str::from_utf8(bytes).map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "stream did not contain valid UTF-8")
+            })?;
+            counts.lines += usize::from(!line.trim().is_empty());
+            if let Some(restamped) = restamp_line(line, new_id) {
+                counts.stamped += 1;
+                output.write_all(restamped.as_bytes())?;
+            } else {
+                output.write_all(bytes)?;
+            }
+        } else {
+            if !ranges::valid_utf8(&mut ranges::reader(file, range)?)? {
+                return Err(
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, "stream did not contain valid UTF-8").into(),
+                );
+            }
+            counts.lines += usize::from(ranges::trim(file, range)?.len != 0);
+            let mut spans = match source.read_range_syntax(range.offset, range.len, source_id_spans) {
+                Ok(spans) => spans,
+                Err(error)
+                    if error.is::<crate::json::InvalidJson>()
+                        || error.is::<crate::harness::store::document::InvalidStruct>() =>
+                {
+                    Vec::new()
+                }
+                Err(error) => return Err(error),
+            };
+            counts.stamped += usize::from(write_restamped_spans(
+                source,
+                file,
+                range.offset,
+                range.len,
+                new_id,
+                &mut spans,
+                &mut output,
+            )?);
+        }
+        if newline {
+            output.write_all(b"\n")?;
+        }
+    }
+    source.check_metadata(file.metadata()?)?;
+    source.check()?;
+    counts.bytes = output.bytes;
+    Ok(counts)
+}
+
 /// A restamped transcript and what the restamp touched.
 pub struct Restamped {
     pub body: String,
@@ -179,6 +278,40 @@ pub fn restamp(text: &str, new_id: &str) -> Restamped {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transcript_writer_matches_old_restamp_bytes_and_counts_for_mixed_rows() {
+        let world = cv_testkit::World::new("streaming-restamp-transcript");
+        let path = world.base.join("rows.jsonl");
+        let small = concat!(
+            "\r\n  \n",
+            " { \"sessionId\" : \"dead\", \"n\":1.50, \"nested\":{\"sessionId\":\"keep\"} }\r\n",
+            "{\"sessionId\":\"dead\",\"sessionId\":\"duplicate\"}\n",
+            "not json ☃\n[\"dead\",\"snake\"]\n",
+            "{\"session_id\":12}\n{\"sessionId\":\"dead\",\"ignored\":1e9999}"
+        );
+        let large = format!(
+            "{small}\n{{\"sessionId\":\"dead\",\"text\":\"{}\",\"session_id\":\"dead\"}}\r\n{}\n{} trailing malformed ☃\n{{\"sessionId\":\"dead\"}}",
+            "λ\\n".repeat(30000), " ".repeat(100000), "x".repeat(100000)
+        );
+        for original in ["", small, large.as_str()] {
+            std::fs::write(&path, original).unwrap();
+            let source = crate::json::JsonSource::capture(&path).unwrap();
+            let file = std::fs::File::open(&path).unwrap();
+            let expected = restamp(original, "new\"id\\λ");
+            let mut actual = Vec::new();
+            let counts = write_restamped_transcript(&source, &file, "new\"id\\λ", &mut actual).unwrap();
+            assert_eq!(actual, expected.body.as_bytes());
+            assert_eq!(
+                counts,
+                RestampCounts {
+                    lines: expected.lines,
+                    stamped: expected.stamped,
+                    bytes: expected.body.len()
+                }
+            );
+        }
+    }
 
     #[test]
     fn source_writer_matches_borrowed_struct_bytes_and_rejections() {
