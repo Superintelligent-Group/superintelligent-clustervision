@@ -161,7 +161,7 @@ fn projected_texts<'a>(message: &'a Message, mode: ThinkingMode, resolver: &Reso
 fn usage_metadata(m: &Message) -> Option<Value> {
     let u = m.usage.as_ref()?;
     let cached = u.cache_read_tokens.unwrap_or(0);
-    let input = u.input_tokens.map(|i| i + cached);
+    let input = u.input_tokens.map(|i| i.saturating_add(cached));
     let mut out = Map::new();
     if let Some(i) = input {
         out.insert("promptTokenCount".into(), json!(i));
@@ -175,7 +175,7 @@ fn usage_metadata(m: &Message) -> Option<Value> {
     out.insert("cachedContentTokenCount".into(), json!(cached));
     out.insert(
         "totalTokenCount".into(),
-        json!(input.unwrap_or(0) + u.output_tokens.unwrap_or(0)),
+        json!(input.unwrap_or(0).saturating_add(u.output_tokens.unwrap_or(0))),
     );
     Some(Value::Object(out))
 }
@@ -501,6 +501,21 @@ mod tests {
     use super::*;
     use crate::harness::qwen::Qwen;
     use crate::harness::{Adapter, Parse};
+
+    #[test]
+    fn usage_wire_aggregates_saturate_large_component_counts() {
+        let mut message = Message::new(Role::Assistant);
+        message.usage = Some(crate::ir::Usage {
+            input_tokens: Some(u64::MAX),
+            cache_read_tokens: Some(1),
+            output_tokens: Some(2),
+            ..Default::default()
+        });
+        let value = usage_metadata(&message).unwrap();
+        assert_eq!(value["promptTokenCount"], u64::MAX);
+        assert_eq!(value["totalTokenCount"], u64::MAX);
+        assert_eq!(value["cachedContentTokenCount"], 1);
+    }
 
     fn corpus_home() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/qwen/0.25.1/.qwen")

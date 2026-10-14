@@ -1686,7 +1686,7 @@ fn parse_usage(v: &Value) -> Option<Usage> {
     let cache_write = u64f("cache_write_input_tokens");
     let u = Usage {
         input_tokens: u64f("input_tokens")
-            .map(|i| i.saturating_sub(cache_read.unwrap_or(0) + cache_write.unwrap_or(0))),
+            .map(|i| i.saturating_sub(cache_read.unwrap_or(0).saturating_add(cache_write.unwrap_or(0)))),
         output_tokens: u64f("output_tokens"),
         cache_read_tokens: cache_read,
         cache_creation_tokens: cache_write,
@@ -2406,6 +2406,21 @@ mod tests {
             opts,
             sink,
         )
+    }
+
+    #[test]
+    fn usage_disjoint_input_saturates_overlapping_cache_counts() {
+        let usage = parse_usage(&serde_json::json!({
+            "input_tokens":u64::MAX,
+            "cached_input_tokens":u64::MAX,
+            "cache_write_input_tokens":1,
+            "output_tokens":2
+        }))
+        .unwrap();
+        assert_eq!(usage.input_tokens, Some(0));
+        assert_eq!(usage.cache_read_tokens, Some(u64::MAX));
+        assert_eq!(usage.cache_creation_tokens, Some(1));
+        assert_eq!(usage.output_tokens, Some(2));
     }
 
     // Independent old buffered transport/collector: preserve .lines(), trim, lean/full fallback,

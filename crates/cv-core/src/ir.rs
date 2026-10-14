@@ -903,12 +903,15 @@ pub struct Usage {
 impl Usage {
     /// Every prompt token the call read: uncached input + cache reads + cache writes.
     pub fn prompt_tokens(&self) -> u64 {
-        self.input_tokens.unwrap_or(0) + self.cache_read_tokens.unwrap_or(0) + self.cache_creation_tokens.unwrap_or(0)
+        self.input_tokens
+            .unwrap_or(0)
+            .saturating_add(self.cache_read_tokens.unwrap_or(0))
+            .saturating_add(self.cache_creation_tokens.unwrap_or(0))
     }
 
     /// Prompt plus output: the call's whole token throughput.
     pub fn total_tokens(&self) -> u64 {
-        self.prompt_tokens() + self.output_tokens.unwrap_or(0)
+        self.prompt_tokens().saturating_add(self.output_tokens.unwrap_or(0))
     }
 }
 
@@ -1548,5 +1551,31 @@ mod tests {
         for (s, max) in cases {
             assert_eq!(truncate(s, max), reference(s, max), "s={s:?} max={max}");
         }
+    }
+}
+
+#[cfg(test)]
+mod usage_arithmetic_tests {
+    use super::Usage;
+
+    #[test]
+    fn token_aggregates_saturate_at_the_representable_limit() {
+        let usage = Usage {
+            input_tokens: Some(u64::MAX),
+            cache_read_tokens: Some(1),
+            cache_creation_tokens: Some(2),
+            output_tokens: Some(3),
+            ..Default::default()
+        };
+        assert_eq!(usage.prompt_tokens(), u64::MAX);
+        assert_eq!(usage.total_tokens(), u64::MAX);
+        let usage = Usage {
+            input_tokens: Some(u64::MAX - 3),
+            output_tokens: Some(4),
+            ..Default::default()
+        };
+        assert_eq!(usage.prompt_tokens(), u64::MAX - 3);
+        assert_eq!(usage.total_tokens(), u64::MAX);
+        assert_eq!(Usage::default().total_tokens(), 0);
     }
 }

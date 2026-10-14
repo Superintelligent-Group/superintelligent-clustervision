@@ -313,9 +313,10 @@ fn codex_token_usage(usage: Option<&crate::ir::Usage>) -> Option<Value> {
     let u = usage?;
     let mut m = Map::new();
     // The IR's `input_tokens` excludes the cache counts; Codex's includes them.
-    let input = u
-        .input_tokens
-        .map(|i| i + u.cache_read_tokens.unwrap_or(0) + u.cache_creation_tokens.unwrap_or(0));
+    let input = u.input_tokens.map(|i| {
+        i.saturating_add(u.cache_read_tokens.unwrap_or(0))
+            .saturating_add(u.cache_creation_tokens.unwrap_or(0))
+    });
     for (key, val) in [
         ("input_tokens", input),
         ("cached_input_tokens", u.cache_read_tokens),
@@ -414,6 +415,21 @@ fn push_text(
 #[cfg(test)]
 mod staged_tests {
     use super::*;
+    #[test]
+    fn usage_wire_aggregates_saturate_large_component_counts() {
+        let value = codex_token_usage(Some(&crate::ir::Usage {
+            input_tokens: Some(u64::MAX),
+            cache_read_tokens: Some(1),
+            cache_creation_tokens: Some(2),
+            output_tokens: Some(3),
+            ..Default::default()
+        }))
+        .unwrap();
+        assert_eq!(value["input_tokens"], u64::MAX);
+        assert_eq!(value["total_tokens"], u64::MAX);
+        assert_eq!(value["cached_input_tokens"], 1);
+    }
+
     #[test]
     fn borrowed_text_twins_preserve_wire_bytes() -> Result<()> {
         let world = cv_testkit::World::new("codex-text-stage");
