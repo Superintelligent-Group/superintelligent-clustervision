@@ -232,6 +232,44 @@ fn message_is_empty(m: &Message) -> bool {
     })
 }
 
+/// Session-level prompt copies use Message::text's plain-text convention. Compare decoded
+/// chunks exactly, retaining no second prompt String; distinct system turns remain untouched.
+fn represents_system_prompt(message: &Message, prompt: &str, resolver: &crate::Resolver) -> anyhow::Result<bool> {
+    if message.kind != MessageKind::SystemPrompt || !message.is_model_visible() {
+        return Ok(false);
+    }
+    let mut offset = 0usize;
+    let mut equal = true;
+    let mut compare = |part: &str| -> anyhow::Result<()> {
+        let end = offset
+            .checked_add(part.len())
+            .ok_or_else(|| anyhow::anyhow!("system prompt length overflow"))?;
+        equal &= prompt.as_bytes().get(offset..end) == Some(part.as_bytes());
+        offset = end;
+        Ok(())
+    };
+    let mut present = false;
+    for block in &message.content {
+        if let Block::Text { text } = block {
+            if present {
+                compare("\n")?;
+            }
+            text.try_for_each_chunk(resolver, SPAN_CHUNK, |part| {
+                present |= !part.is_empty();
+                compare(part)
+            })?;
+        }
+    }
+    Ok(equal && offset == prompt.len())
+}
+
+fn record_header(format: Format) -> &'static [u8] {
+    match format {
+        Format::Chatml => b"{\"messages\":[",
+        Format::ShareGpt => b"{\"conversations\":[",
+    }
+}
+
 /// Which export shape — the only difference is the array/role/content key names and the role labels.
 #[derive(Clone, Copy)]
 pub enum Format {
@@ -252,6 +290,22 @@ pub fn write_record<W: std::io::Write + ?Sized>(
 ) -> std::io::Result<bool> {
     let mut record = RecordWriter::new(w, fmt, redact);
     let resolver = session.resolver();
+    if let Some(prompt) = session
+        .system_prompt
+        .as_deref()
+        .filter(|prompt| !prompt.trim().is_empty())
+    {
+        let represented = session
+            .messages
+            .iter()
+            .try_fold(false, |represented, message| {
+                Ok::<_, anyhow::Error>(represented || represents_system_prompt(message, prompt, &resolver)?)
+            })
+            .map_err(std::io::Error::other)?;
+        if !represented {
+            record.system_prompt(prompt)?;
+        }
+    }
     for message in &session.messages {
         record.message(message, &resolver)?;
     }
@@ -321,9 +375,40 @@ impl<'a, W: std::io::Write + ?Sized> RecordWriter<'a, W> {
         if blocks.is_empty() {
             return Ok(false);
         }
-        let (array_key, role_key, content_key) = match self.fmt {
-            Format::Chatml => ("messages", "role", "content"),
-            Format::ShareGpt => ("conversations", "from", "value"),
+        let redact = self.redact;
+        self.write_message(role, |emit| {
+            if let Some(opts) = redact {
+                let mut stats = crate::redact::RedactStats::default();
+                render_blocks_impl(blocks, resolver, Some((opts, &mut stats)), emit)
+            } else {
+                render_blocks_into(blocks, resolver, emit)
+            }
+        })
+    }
+
+    fn system_prompt(&mut self, prompt: &str) -> std::io::Result<bool> {
+        if prompt.trim().is_empty() {
+            return Ok(false);
+        }
+        let redact = self.redact;
+        self.write_message("system", |emit| {
+            if let Some(opts) = redact {
+                let mut stats = crate::redact::RedactStats::default();
+                emit(&crate::redact::scrub_cow(prompt, opts, &mut stats))
+            } else {
+                emit(prompt)
+            }
+        })
+    }
+
+    fn write_message(
+        &mut self,
+        role: &str,
+        render: impl FnOnce(&mut dyn FnMut(&str) -> anyhow::Result<()>) -> anyhow::Result<()>,
+    ) -> std::io::Result<bool> {
+        let (role_key, content_key) = match self.fmt {
+            Format::Chatml => ("role", "content"),
+            Format::ShareGpt => ("from", "value"),
         };
         // Keep the established lexicographic outer keys and insertion-ordered tool JSON.
         let role_first = role_key < content_key;
@@ -331,7 +416,7 @@ impl<'a, W: std::io::Write + ?Sized> RecordWriter<'a, W> {
         if self.started {
             w.write_all(b",")?;
         } else {
-            write!(w, "{{\"{array_key}\":[")?;
+            w.write_all(record_header(self.fmt))?;
         }
         self.started = true;
         if role_first {
@@ -340,12 +425,7 @@ impl<'a, W: std::io::Write + ?Sized> RecordWriter<'a, W> {
             write!(w, "{{\"{content_key}\":\"")?;
         }
         let mut emit = |piece: &str| write_json_escaped(w, piece).map_err(anyhow::Error::from);
-        if let Some(opts) = self.redact {
-            let mut stats = crate::redact::RedactStats::default();
-            render_blocks_impl(blocks, resolver, Some((opts, &mut stats)), &mut emit).map_err(std::io::Error::other)?;
-        } else {
-            render_blocks_into(blocks, resolver, &mut emit).map_err(std::io::Error::other)?;
-        }
+        render(&mut emit).map_err(std::io::Error::other)?;
         if role_first {
             w.write_all(b"\"}")?;
         } else {
@@ -376,11 +456,28 @@ impl std::error::Error for InputError {}
 
 /// A complete, accepted record stored in bounded private staging. Publish only this successful
 /// result; skipped records and failed passes never expose their staged prefix to corpus output.
-pub struct StagedRecord(crate::harness::store::bytes::ByteSource);
+/// An EOF-only metadata prompt may supply a leading item; publication joins its bounded stage
+/// with the existing body rather than staging a second complete record.
+pub struct StagedRecord {
+    leading: Option<crate::harness::store::bytes::ByteSource>,
+    body: crate::harness::store::bytes::ByteSource,
+    skip_header: usize,
+}
 impl StagedRecord {
     /// Copy the JSONL record, including its newline, to the corpus destination.
     pub fn publish<W: std::io::Write + ?Sized>(&self, writer: &mut W) -> std::io::Result<()> {
-        self.0.copy_to(writer)?;
+        use std::io::Read;
+        if let Some(leading) = &self.leading {
+            leading.copy_to(writer)?;
+        }
+        if self.skip_header == 0 {
+            self.body.copy_to(writer)?;
+        } else {
+            let mut body = self.body.reader()?;
+            let mut header = [0; b"{\"conversations\":[".len()];
+            body.read_exact(&mut header[..self.skip_header])?;
+            std::io::copy(&mut body, writer)?;
+        }
         Ok(())
     }
 }
@@ -388,7 +485,9 @@ impl StagedRecord {
 /// Render and query one lazy stream without collecting its message history. Records are staged
 /// until successful EOF, raw-message minimum and full query evaluation. Filtered histories stage
 /// message projections with source descriptors and render only accepted records. Unfiltered
-/// histories stage bytes directly. Redaction still demands one complete text/tool field at a time;
+/// histories stage bytes directly. Rendered system-text projections use the same bounded spill
+/// transport for exact deduplication against the final session-level prompt; distinct system
+/// turns retain their order. Redaction still demands one complete text/tool field at a time;
 /// ordinary rendering resolves giant payloads in chunks. Source metadata scales with distinct
 /// captured source paths/identities, while message/byte retention spills under fixed budgets.
 #[allow(clippy::too_many_arguments)]
@@ -405,6 +504,7 @@ pub fn stage_record(
     struct Sink<'a> {
         record: RecordWriter<'a, std::io::BufWriter<crate::harness::store::bytes::ByteStage>>,
         deferred: Option<crate::spill::Ordered<deferred::DeferredMessage>>,
+        systems: crate::spill::Ordered<deferred::DeferredMessage>,
         min_messages: usize,
         wait_query: bool,
         sources: crate::json::SourceRegistry,
@@ -413,6 +513,17 @@ pub fn stage_record(
         messages: usize,
         error: Option<anyhow::Error>,
         failed: bool,
+    }
+    impl Sink<'_> {
+        fn render(&mut self, mut message: Message) -> anyhow::Result<()> {
+            let rendered = self.record.message(&message, &self.resolver)?;
+            if rendered && message.kind == MessageKind::SystemPrompt {
+                message.content.retain(|block| matches!(block, Block::Text { .. }));
+                self.systems
+                    .push(deferred::DeferredMessage::new(message, &mut self.sources))?;
+            }
+            Ok(())
+        }
     }
     impl crate::MessageSink for Sink<'_> {
         fn message(&mut self, message: Message) -> crate::Flow {
@@ -430,11 +541,11 @@ pub fn stage_record(
                     if !self.wait_query && self.messages >= self.min_messages {
                         for row in self.deferred.take().expect("deferred messages").rows()? {
                             let message = row?.restore(&self.sources)?;
-                            self.record.message(&message, &self.resolver)?;
+                            self.render(message)?;
                         }
                     }
                 } else {
-                    self.record.message(&message, &self.resolver)?;
+                    self.render(message)?;
                 }
                 Ok::<_, anyhow::Error>(())
             })();
@@ -455,6 +566,7 @@ pub fn stage_record(
     let mut sink = Sink {
         record: RecordWriter::new(&mut bytes, fmt, redact),
         deferred: (query.is_some_and(|q| !q.is_empty()) || min_messages > 0).then(Default::default),
+        systems: Default::default(),
         min_messages,
         wait_query: query.is_some_and(|q| !q.is_empty()),
         sources: Default::default(),
@@ -492,16 +604,54 @@ pub fn stage_record(
     if let Some(deferred) = sink.deferred.take() {
         for row in deferred.rows()? {
             let message = row?.restore(&sink.sources)?;
-            sink.record.message(&message, &sink.resolver)?;
+            sink.render(message)?;
         }
     }
-    if !sink.record.finish()? {
+    let prompt = session
+        .system_prompt
+        .as_deref()
+        .filter(|prompt| !prompt.trim().is_empty());
+    let mut represented = false;
+    if let Some(prompt) = prompt {
+        for row in sink.systems.rows()? {
+            let message = row?.restore(&sink.sources)?;
+            if represents_system_prompt(&message, prompt, &sink.resolver)? {
+                represented = true;
+                break;
+            }
+        }
+    }
+    let has_body = sink.record.finish()?;
+    if !has_body && (prompt.is_none() || represented) {
         return Ok(None);
     }
-    bytes.write_all(b"\n")?;
-    Ok(Some(StagedRecord(
-        bytes.into_inner().map_err(|e| e.into_error())?.finish()?,
-    )))
+    if has_body {
+        bytes.write_all(b"\n")?;
+    }
+    let leading = if let Some(prompt) = prompt.filter(|_| !represented) {
+        let mut prefix = std::io::BufWriter::with_capacity(64 * 1024, crate::harness::store::bytes::ByteStage::new());
+        {
+            let mut record = RecordWriter::new(&mut prefix, fmt, redact);
+            record.system_prompt(prompt)?;
+            if !has_body {
+                record.finish()?;
+            }
+        }
+        prefix.write_all(if has_body { b"," } else { b"\n" })?;
+        Some(prefix.into_inner().map_err(|error| error.into_error())?.finish()?)
+    } else {
+        None
+    };
+    let skip_header = if has_body && leading.is_some() {
+        record_header(fmt).len()
+    } else {
+        0
+    };
+    Ok(Some(StagedRecord {
+        leading,
+        body: bytes.into_inner().map_err(|error| error.into_error())?.finish()?,
+        skip_header,
+    }))
 }
 
 /// Write `s` to `w` as the *body* of a JSON string (no surrounding quotes), JSON-escaped exactly as
@@ -1123,5 +1273,265 @@ mod tests {
         let mut actual = Vec::new();
         assert!(!write_record(&lazy, &mut actual, Format::Chatml, None).unwrap());
         assert!(actual.is_empty());
+    }
+    struct SystemMetadataFixture {
+        session: Session,
+        initial_prompt: Option<String>,
+    }
+    impl crate::Adapter for SystemMetadataFixture {
+        fn harness(&self) -> Harness {
+            Harness::OpenSession
+        }
+        fn roots(&self) -> Vec<std::path::PathBuf> {
+            Vec::new()
+        }
+        fn discover(&self) -> anyhow::Result<Vec<crate::SessionRef>> {
+            Ok(Vec::new())
+        }
+        fn stream(
+            &self,
+            reference: &crate::SessionRef,
+            _: &crate::ParseOptions,
+            sink: &mut dyn crate::MessageSink,
+        ) -> anyhow::Result<Session> {
+            let mut meta = Session::new(reference.id.clone(), reference.harness);
+            meta.system_prompt = self.initial_prompt.clone();
+            meta.model = Some("present".into());
+            sink.meta(&meta);
+            for message in &self.session.messages {
+                if sink.message(message.clone()) == crate::Flow::Stop {
+                    break;
+                }
+            }
+            meta.system_prompt = self.session.system_prompt.clone();
+            Ok(meta)
+        }
+    }
+    fn system_message(texts: &[&str]) -> Message {
+        msg(
+            Role::System,
+            texts.iter().map(|text| Block::Text { text: (*text).into() }).collect(),
+        )
+    }
+
+    #[test]
+    fn session_only_system_prompts_are_leading_and_equivalent_copies_do_not_duplicate() -> anyhow::Result<()> {
+        let world = cv_testkit::World::in_process("dataset-system-metadata");
+        let path = world.base.join("source");
+        std::fs::write(&path, "stable source")?;
+        let reference = crate::SessionRef::new("system-metadata", Harness::OpenSession, path);
+        let user = msg(
+            Role::User,
+            vec![Block::Text {
+                text: "user prompt".into(),
+            }],
+        );
+        let cases = [
+            ("metadata only", vec![user.clone()], 2),
+            (
+                "after",
+                vec![system_message(&["before"]), user.clone(), system_message(&["after"])],
+                3,
+            ),
+            ("metadata", vec![system_message(&["distinct"]), user.clone()], 3),
+            (
+                "first\nsecond",
+                vec![system_message(&["", "first", "second"]), user.clone()],
+                2,
+            ),
+            (" \n\t", vec![user.clone()], 1),
+            ("only metadata", vec![], 1),
+        ];
+        for (prompt, messages, turns) in cases {
+            let mut session = Session::new("system-metadata", Harness::OpenSession);
+            session.system_prompt = Some(prompt.into());
+            session.messages = messages;
+            let fixture = SystemMetadataFixture {
+                session,
+                initial_prompt: Some("obsolete header prompt".into()),
+            };
+            for format in [Format::Chatml, Format::ShareGpt] {
+                let mut expected = Vec::new();
+                assert!(write_record(&fixture.session, &mut expected, format, None)?);
+                let parsed: Value = serde_json::from_slice(&expected)?;
+                let (array, role, content) = match format {
+                    Format::Chatml => ("messages", "role", "content"),
+                    Format::ShareGpt => ("conversations", "from", "value"),
+                };
+                assert_eq!(parsed[array].as_array().unwrap().len(), turns);
+                if !prompt.trim().is_empty()
+                    && fixture
+                        .session
+                        .messages
+                        .iter()
+                        .all(|message| message.kind != MessageKind::SystemPrompt)
+                {
+                    assert_eq!(parsed[array][0][role], "system");
+                    assert_eq!(parsed[array][0][content], prompt);
+                }
+                expected.push(b'\n');
+                for query in [None, Some(crate::SessionQuery::parse("model:present")?)] {
+                    let staged = stage_record(
+                        &fixture,
+                        &reference,
+                        format,
+                        None,
+                        0,
+                        query.as_ref(),
+                        &Default::default(),
+                    )?
+                    .unwrap();
+                    let mut actual = Vec::new();
+                    staged.publish(&mut actual)?;
+                    assert_eq!(actual, expected, "{prompt:?}");
+                    assert!(!String::from_utf8(actual)?.contains("obsolete header prompt"));
+                }
+            }
+        }
+        // Session metadata is not a transcript message for minimum/query count selection.
+        let mut session = Session::new("minimum", Harness::OpenSession);
+        session.system_prompt = Some("metadata".into());
+        session.messages.push(user);
+        let fixture = SystemMetadataFixture {
+            session,
+            initial_prompt: None,
+        };
+        assert!(stage_record(&fixture, &reference, Format::Chatml, None, 2, None, &Default::default())?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn checked_system_prompt_equivalence_spills_and_redacts_without_losing_changes() -> anyhow::Result<()> {
+        let world = cv_testkit::World::in_process("dataset-system-source");
+        let prompt = format!("{}\nprivate@example.com", "prompt λ ".repeat(512));
+        let path = world.base.join("prompt.json");
+        let wire = serde_json::to_vec(&prompt)?;
+        std::fs::write(&path, &wire)?;
+        let checked = crate::Json::source(&path, 0, wire.len() as u64)?
+            .with_view(|view| view.source_text())?
+            .unwrap();
+        let mut session = Session::new("checked-system", Harness::OpenSession);
+        session.system_prompt = Some(prompt.clone());
+        for _ in 0..1200 {
+            session
+                .messages
+                .push(msg(Role::System, vec![Block::Text { text: checked.clone() }]));
+        }
+        session.messages.push(system_message(&["distinct later system change"]));
+        let fixture = SystemMetadataFixture {
+            session,
+            initial_prompt: None,
+        };
+        let reference = crate::SessionRef::new("checked-system", Harness::OpenSession, path.clone());
+        let redact = crate::redact::RedactOptions::default();
+        for format in [Format::Chatml, Format::ShareGpt] {
+            let mut expected = Vec::new();
+            assert!(write_record(&fixture.session, &mut expected, format, Some(&redact))?);
+            expected.push(b'\n');
+            let query = crate::SessionQuery::parse("model:present")?;
+            let staged = stage_record(
+                &fixture,
+                &reference,
+                format,
+                Some(&redact),
+                0,
+                Some(&query),
+                &Default::default(),
+            )?
+            .unwrap();
+            let mut actual = Vec::new();
+            staged.publish(&mut actual)?;
+            assert_eq!(actual, expected);
+            assert!(!std::str::from_utf8(&actual)?.contains("private@example.com"));
+            let value: Value = serde_json::from_slice(&actual)?;
+            let (array, content) = match format {
+                Format::Chatml => ("messages", "content"),
+                Format::ShareGpt => ("conversations", "value"),
+            };
+            assert_eq!(value[array].as_array().unwrap().len(), 1201);
+            assert_eq!(value[array][1200][content], "distinct later system change");
+        }
+        std::fs::remove_file(&path)?;
+        let rejected = crate::SessionQuery::parse("model:absent")?;
+        assert!(stage_record(
+            &fixture,
+            &reference,
+            Format::Chatml,
+            None,
+            0,
+            Some(&rejected),
+            &Default::default()
+        )?
+        .is_none());
+        assert!(stage_record(&fixture, &reference, Format::Chatml, None, 0, None, &Default::default()).is_err());
+        Ok(())
+    }
+    #[test]
+    fn lmstudio_metadata_only_system_prompt_reaches_dataset_output() -> anyhow::Result<()> {
+        let world = cv_testkit::World::in_process("dataset-lmstudio-system");
+        let path = world.base.join("conversation.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&json!({
+                "systemPrompt":"Follow the house style.",
+                "messages":[{"currentlySelected":0,"versions":[{"type":"singleStep","role":"user","content":[{"type":"text","text":"Write a function."}]}]}]
+            }))?,
+        )?;
+        let adapter = crate::harness::lmstudio::LmStudio::with_root(&world.base);
+        let reference = crate::SessionRef::from_path(&path, Harness::LmStudio);
+        let collected = crate::stream::collect_with(&adapter, &reference, &crate::ParseOptions::lazy())?;
+        assert_eq!(collected.system_prompt.as_deref(), Some("Follow the house style."));
+        assert!(collected
+            .messages
+            .iter()
+            .all(|message| message.kind != MessageKind::SystemPrompt));
+        let staged = stage_record(&adapter, &reference, Format::Chatml, None, 0, None, &Default::default())?.unwrap();
+        let mut output = Vec::new();
+        staged.publish(&mut output)?;
+        let output: Value = serde_json::from_slice(&output)?;
+        assert_eq!(
+            output["messages"],
+            json!([
+                {"role":"system","content":"Follow the house style."},
+                {"role":"user","content":"Write a function."},
+            ])
+        );
+        Ok(())
+    }
+    #[test]
+    fn giant_whitespace_source_text_and_thinking_do_not_open_training_turns() -> anyhow::Result<()> {
+        use std::io::Write;
+        let world = cv_testkit::World::new("dataset-giant-whitespace");
+        let path = world.base.join("whitespace.json");
+        let mut file = std::fs::File::create(&path)?;
+        file.write_all(b"\"")?;
+        for _ in 0..32 {
+            file.write_all(&[b' '; 64 * 1024])?;
+        }
+        file.write_all(b"\"")?;
+        drop(file);
+        let text = crate::Json::source(&path, 0, std::fs::metadata(&path)?.len())?
+            .with_view(|view| view.source_text())?
+            .unwrap();
+        assert!(matches!(text, crate::Text::Source(_)));
+        let mut session = Session::new("giant-whitespace", Harness::Claude);
+        session.messages.push(msg(
+            Role::Assistant,
+            vec![
+                Block::Text { text: text.clone() },
+                Block::Thinking {
+                    text,
+                    signature: None,
+                    encrypted: None,
+                    redacted: false,
+                },
+            ],
+        ));
+        for format in [Format::Chatml, Format::ShareGpt] {
+            let mut output = Vec::new();
+            assert!(!write_record(&session, &mut output, format, None)?);
+            assert!(output.is_empty());
+        }
+        Ok(())
     }
 }
