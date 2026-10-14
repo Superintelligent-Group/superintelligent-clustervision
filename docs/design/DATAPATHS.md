@@ -5,6 +5,34 @@ with the backend complexity follow-up through `64b5bbe6` (2026-10-14).
 This is the working model and tracker for the performance pass. Measurements in `PERF.md` remain historical observations; their causal
 explanations are not all supported by the implementation. Paths below are relative to `crates/`.
 
+## Consumer compatibility follow-up (2026-10-14)
+
+The three open consumer issues are implemented on `fix/consumer-issues`:
+
+- #4: OpenSession accepts unknown fields already; it previously discarded `principal`. The
+  optional opaque string/object now survives owned/positioned reads, checked JSON and window
+  metadata. Missing/null stays omitted. Distill preserves it; composition requires all source
+  principals to agree. Native export reports the expected loss where the target cannot store it.
+- #15: listing size, optional git/title enrichment and raw nullable titles were already present.
+  The manual corrects freshness guarantees. A new CLI control covers fresh enumeration of a
+  previously empty project, removal of deleted rows, and the enriched consumer fields.
+- #21: rewind/port default to portable Claude replay: collision-free legal tool IDs at both
+  endpoints, plaintext thinking demoted to text, opaque reasoning replaced with placeholders.
+  Native remains explicit archival fidelity. Non-native Claude exports repair IDs; explicit Drop
+  also filters raw overrides before survival/parent repair. Shared staged processing uses bounded
+  positioned reads and byte copying, including giant escaped payloads. Model names do not establish
+  signature validity. Local tests cover the reported incompatibilities, not a live API request.
+
+The full workspace passes at `f1dfeced` (1,444 core controls and the end-to-end proxy CLI test),
+as do 232 portable-reader controls, minimal core/search builds, standalone Wasm and the release
+parse budget. All-target build/clippy, manual, corpus tooling and heap-tool controls pass.
+The new whole-operation portable Claude export gate preserves two 67,092,480-byte escaped
+payloads and three distinct call/result pairs, including collision-prone IDs, with peak additional
+live Rust heap of 1,389,386 bytes natively and 1,454,922 bytes without mmap. This measures the
+complete export and reparse; it is not a process RSS or live Anthropic API measurement. Evidence
+is under `excellence-home/consumer-*`. The earlier backend batch also passed the complete remote CI.
+No release, version bump or tag is part of this work.
+
 ## Backend complexity follow-up (2026-10-14)
 
 The preceding source review did not establish the absence of repeated work. A further pass on
@@ -50,13 +78,11 @@ need transcript inspection. The inventory estimate does not bound a giant cell's
 allocation. Required ordering,
 exact source validation, demanded output and complete metadata remain work, not presumed defects.
 
-GitHub triage found no open PRs. [Issue 21](https://github.com/emberian/cv/issues/21) is confirmed:
-rewind preserves proxy-generated tool IDs and foreign thinking signatures that are unsuitable for
-Anthropic replay. Port shares the underlying compatibility gap by source inspection. This remains
-unfixed; tool-pair remapping must avoid collisions, and signature portability cannot be established
-from a model name. [Issue 15](https://github.com/emberian/cv/issues/15) is mostly implemented; the
-manual now accurately describes enumeration freshness, `--fresh`, and optional enrichment.
-[Issue 4](https://github.com/emberian/cv/issues/4) remains an optional principal-field proposal.
+GitHub triage found no open PRs. It confirmed the replay gap in
+[issue 21](https://github.com/emberian/cv/issues/21), the mostly implemented listing contract in
+[issue 15](https://github.com/emberian/cv/issues/15), and the principal proposal in
+[issue 4](https://github.com/emberian/cv/issues/4). The subsequent consumer follow-up above addresses
+all three; the performance batch itself did not fix the replay or principal gaps.
 
 Task-generated Cargo caches and frozen fleets were removed under Ember's disk request, preserving
 source worktrees and reports. `cv-worktrees` fell from about 825 GiB to 34.1 GiB. Further builds use
