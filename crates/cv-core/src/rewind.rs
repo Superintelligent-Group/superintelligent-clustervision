@@ -42,7 +42,10 @@
 //! sha256 of those bytes), the cut and start (message index, byte offset, 1-based line), the
 //! commit evidence when the cut came from a sha, how much of the source was left out after the
 //! cut, when, and by which cv. A transcript keeps growing while it's read; the size is stat'ed
-//! once up front and every pass reads only that prefix, so the hash and the cut agree.
+//! once up front and every pass reads only that prefix through one held source file. Non-growth
+//! mutations are rejected by metadata/identity checks; growth uses the shared resume head/tail
+//! witness under the immutable-prefix append contract. Samples do not prove arbitrary unsampled
+//! prefix rewrites absent when combined with growth.
 //!
 //! ## Commit evidence
 //!
@@ -531,18 +534,99 @@ pub(crate) fn normalize_subagent_record(v: &mut Value) -> bool {
     modified
 }
 
+/// A uniquely and exclusively created operation-owned partial; failed operations clean up only
+/// their own staging path, never another rewind's partial or a previously published destination.
+struct TemporaryOutput(PathBuf);
+impl TemporaryOutput {
+    fn create(dir: &Path) -> Result<(Self, std::fs::File)> {
+        let path = dir.join(format!(".cv-rewind-{}.partial", uuid::Uuid::new_v4()));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options
+            .open(&path)
+            .with_context(|| format!("writing {}", path.display()))?;
+        Ok((Self(path), file))
+    }
+    fn publish(&self, destination: &Path) -> Result<()> {
+        // The temporary and destination share a directory/filesystem. Linking atomically claims
+        // a new name without replacing a concurrent writer's completed output.
+        std::fs::hard_link(&self.0, destination).with_context(|| format!("writing {}", destination.display()))
+    }
+}
+impl Drop for TemporaryOutput {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Initial-prefix receipt using the same immutable-prefix append contract as resume marks.
+/// Non-growth rewrites use strict identity/metadata checks; growth uses bounded head/tail samples.
+/// An unsampled prefix rewrite combined with growth is not proven absent by this receipt.
+struct PrefixReadGuard {
+    source: crate::json::JsonSource,
+    mark: Option<crate::resume::MarkHead>,
+    hash: u64,
+}
+impl PrefixReadGuard {
+    fn capture(path: &Path) -> Result<(Self, std::fs::File)> {
+        let source = crate::json::JsonSource::capture(path)?;
+        let file = std::fs::File::open(path)?;
+        source.check_metadata(file.metadata()?)?;
+        let checkpoint = crate::stream::Checkpoint::new(source.len());
+        let mark = crate::resume::MarkHead::of(path, &checkpoint, "rewind-prefix");
+        let hash = match &mark {
+            Some(mark) => mark.hash,
+            None => crate::resume::prefix_hash(path, source.len()).context("reading rewind prefix guard")?,
+        };
+        source.check()?;
+        Ok((Self { source, mark, hash }, file))
+    }
+    fn verify(&self, file: &std::fs::File) -> Result<()> {
+        let current = std::fs::metadata(self.source.path())?;
+        let size = self.source.len();
+        anyhow::ensure!(
+            file.metadata()?.len() >= size && current.len() >= size,
+            "rewind source was truncated"
+        );
+        if current.len() == size {
+            self.source.check_metadata(file.metadata()?)?;
+            self.source.check()?;
+        } else {
+            let holds = match &self.mark {
+                Some(mark) => mark.holds(self.source.path(), current.len(), "rewind-prefix"),
+                None => crate::resume::prefix_hash(self.source.path(), size) == Some(self.hash),
+            };
+            anyhow::ensure!(holds, "rewind source prefix changed");
+        }
+        Ok(())
+    }
+}
+
 /// Derive the rewound session (see the module docs). Claude Code sessions only: the derivation
 /// copies raw records, and only Claude's records are resumable by id.
 pub fn rewind_session(r: &SessionRef, opts: &RewindOptions) -> Result<RewindResult> {
+    rewind_session_after_scan(r, opts, || Ok(()))
+}
+
+fn rewind_session_after_scan(
+    r: &SessionRef,
+    opts: &RewindOptions,
+    after_scan: impl FnOnce() -> Result<()>,
+) -> Result<RewindResult> {
     if r.harness != Harness::Claude {
         bail!(
             "cv rewind currently supports Claude Code sessions only (got {})",
             r.harness
         );
     }
-    let size = std::fs::metadata(&r.path)
-        .with_context(|| format!("reading {}", r.path.display()))?
-        .len();
+    let (source_guard, mut file) =
+        PrefixReadGuard::capture(&r.path).with_context(|| format!("reading {}", r.path.display()))?;
+    let size = source_guard.source.len();
     let subagent = is_subagent(r);
 
     // Pass 1 — stream the prefix through the adapter: offsets, boundaries, evidence.
@@ -567,10 +651,9 @@ pub fn rewind_session(r: &SessionRef, opts: &RewindOptions) -> Result<RewindResu
             e
         }),
     };
-    let file = std::fs::File::open(&r.path).with_context(|| format!("opening {}", r.path.display()))?;
     crate::harness::claude::stream_reader(
         &r.id,
-        BufReader::new(file.take(size)),
+        BufReader::new(file.try_clone()?.take(size)),
         Some(r.path.clone()),
         &ParseOptions::lazy_offsets(),
         &mut scan,
@@ -578,6 +661,8 @@ pub fn rewind_session(r: &SessionRef, opts: &RewindOptions) -> Result<RewindResu
     if let Some(error) = scan.take_error() {
         return Err(error);
     }
+    after_scan()?;
+    source_guard.verify(&file)?;
     if scan.unstamped {
         bail!("cannot map {}'s messages to source records (no byte offsets)", r.id);
     }
@@ -625,7 +710,7 @@ pub fn rewind_session(r: &SessionRef, opts: &RewindOptions) -> Result<RewindResu
         None => (0, false),
         Some(b) => {
             let b_off = scan.offsets[b];
-            let head = read_line_at(&r.path, b_off)?
+            let head = read_line_at(&file, b_off)?
                 .and_then(|v| {
                     v.pointer("/compactMetadata/preservedSegment/headUuid")
                         .and_then(Value::as_str)
@@ -646,23 +731,22 @@ pub fn rewind_session(r: &SessionRef, opts: &RewindOptions) -> Result<RewindResu
     let out_dir = opts.out_dir.clone().unwrap_or_else(|| project_dir(&r.path));
     let new_path = out_dir.join(format!("{new_id}.jsonl"));
     let provenance_path = out_dir.join(format!("{new_id}{PROVENANCE_SUFFIX}"));
-    let partial = out_dir.join(format!(".{new_id}.jsonl.partial"));
     if new_id == r.id {
         bail!("new id must differ from the source id");
     }
     if !opts.dry_run && (new_path.exists() || provenance_path.exists()) {
         bail!("{} already exists — pick another --to", new_path.display());
     }
-    let mut writer = if opts.dry_run {
-        None
+    let (partial, mut writer) = if opts.dry_run {
+        (None, None)
     } else {
         std::fs::create_dir_all(&out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
-        Some(std::io::BufWriter::new(
-            std::fs::File::create(&partial).with_context(|| format!("writing {}", partial.display()))?,
-        ))
+        let (partial, file) = TemporaryOutput::create(&out_dir)?;
+        (Some(partial), Some(std::io::BufWriter::new(file)))
     };
 
-    let mut reader = BufReader::with_capacity(1 << 20, std::fs::File::open(&r.path)?.take(size));
+    file.seek(std::io::SeekFrom::Start(0))?;
+    let mut reader = BufReader::with_capacity(1 << 20, file.try_clone()?.take(size));
     let mut hasher = crate::digest::Sha256::new();
     let mut buf: Vec<u8> = Vec::new();
     let (mut off, mut line_no) = (0u64, 0usize);
@@ -761,13 +845,13 @@ pub fn rewind_session(r: &SessionRef, opts: &RewindOptions) -> Result<RewindResu
     if cut_line == 0 {
         if let Some(w) = writer.take() {
             drop(w);
-            let _ = std::fs::remove_file(&partial);
         }
         bail!(
             "message {cut_idx}'s record (byte {cut_off}) is not a line start in {}",
             r.path.display()
         );
     }
+    source_guard.verify(&file)?;
     let source_sha256 = hasher.finish_hex();
 
     // The launch dir: among the cwds the window recorded (plus the owning session's first one — a
@@ -837,10 +921,13 @@ pub fn rewind_session(r: &SessionRef, opts: &RewindOptions) -> Result<RewindResu
     if let Some(mut w) = writer.take() {
         w.flush()?;
         drop(w);
-        std::fs::rename(&partial, &res.new_path).with_context(|| format!("writing {}", res.new_path.display()))?;
         let body = serde_json::to_string_pretty(&provenance(&res, opts))? + "\n";
-        std::fs::write(&res.provenance_path, body)
-            .with_context(|| format!("writing {}", res.provenance_path.display()))?;
+        let (provenance_partial, mut file) = TemporaryOutput::create(&out_dir)?;
+        file.write_all(body.as_bytes())?;
+        file.flush()?;
+        drop(file);
+        partial.as_ref().unwrap().publish(&res.new_path)?;
+        provenance_partial.publish(&res.provenance_path)?;
     }
     Ok(res)
 }
@@ -909,8 +996,8 @@ fn first_cwd(path: &Path) -> Option<String> {
 }
 
 /// Read and parse the single record starting at byte `off`.
-fn read_line_at(path: &Path, off: u64) -> Result<Option<Value>> {
-    let mut f = std::fs::File::open(path)?;
+fn read_line_at(file: &std::fs::File, off: u64) -> Result<Option<Value>> {
+    let mut f = file.try_clone()?;
     f.seek(std::io::SeekFrom::Start(off))?;
     let mut line = Vec::new();
     BufReader::new(f).read_until(b'\n', &mut line)?;

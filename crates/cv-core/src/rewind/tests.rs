@@ -502,3 +502,103 @@ fn git_verbs_classify_created_and_pushed() {
     assert_eq!(git_evidence_kind("echo 'legit commit'"), None);
     assert_eq!(git_evidence_kind("/usr/bin/git commit -m z"), Some(Created));
 }
+
+#[test]
+fn rewind_temporary_outputs_preserve_other_partials_and_late_destinations() {
+    let dir = tmpdir();
+    let old_partial = dir.join(".chosen.jsonl.partial");
+    std::fs::write(&old_partial, b"another operation's partial").unwrap();
+    let destination = dir.join("chosen.jsonl");
+    let (temporary, mut file) = TemporaryOutput::create(&dir).unwrap();
+    file.write_all(b"our completed output").unwrap();
+    file.flush().unwrap();
+    drop(file);
+    let staged = temporary.0.clone();
+    assert_ne!(staged, old_partial);
+    std::fs::write(&destination, b"a concurrent writer's completed output").unwrap();
+    assert!(temporary.publish(&destination).is_err());
+    assert_eq!(
+        std::fs::read(&destination).unwrap(),
+        b"a concurrent writer's completed output"
+    );
+    drop(temporary);
+    assert!(!staged.exists());
+    assert_eq!(std::fs::read(&old_partial).unwrap(), b"another operation's partial");
+    std::fs::remove_file(&destination).unwrap();
+    let (temporary, mut file) = TemporaryOutput::create(&dir).unwrap();
+    file.write_all(b"published once").unwrap();
+    drop(file);
+    temporary.publish(&destination).unwrap();
+    drop(temporary);
+    assert_eq!(std::fs::read(&destination).unwrap(), b"published once");
+    cleanup(&dir);
+}
+
+#[test]
+fn rewind_prefix_receipt_accepts_appends_and_rejects_source_mutations() {
+    for mutation in ["append", "rewrite", "replace", "rewrite-grow", "truncate"] {
+        let dir = tmpdir();
+        let path = dir.join(format!("{SID}.jsonl"));
+        let initial = rec("user", "u", None, text("user", "original prefix"));
+        write_jsonl(&path, &[initial]);
+        let original = std::fs::read(&path).unwrap();
+        let r = SessionRef::from_path(&path, Harness::Claude);
+        let opts = RewindOptions {
+            new_id: Some("derived".into()),
+            out_dir: Some(dir.clone()),
+            ..opts(CutAt::End, &dir)
+        };
+        let result = rewind_session_after_scan(&r, &opts, || {
+            match mutation {
+                "append" => {
+                    let mut writer = std::fs::OpenOptions::new().append(true).open(&path)?;
+                    writer.write_all(b"\n")?;
+                }
+                "replace" => {
+                    let replacement = dir.join("replacement.jsonl");
+                    std::fs::write(&replacement, &original)?;
+                    std::fs::rename(replacement, &path)?;
+                }
+                "truncate" => {
+                    std::fs::write(&path, b"")?;
+                }
+                other => {
+                    let mut changed = original.clone();
+                    let start = changed
+                        .windows(b"original".len())
+                        .position(|w| w == b"original")
+                        .unwrap();
+                    changed[start..start + 8].copy_from_slice(b"modified");
+                    if other == "rewrite-grow" {
+                        changed.extend_from_slice(b"\n");
+                    }
+                    std::fs::write(&path, changed)?;
+                }
+            }
+            Ok(())
+        });
+        if mutation == "append" {
+            let result = result.unwrap();
+            assert_eq!(result.source_bytes, original.len() as u64);
+            assert_eq!(result.source_sha256, {
+                let mut hash = crate::digest::Sha256::new();
+                hash.update(&original);
+                hash.finish_hex()
+            });
+            let actual = std::fs::read_to_string(result.new_path).unwrap();
+            assert_eq!(
+                actual,
+                crate::restamp::restamp(std::str::from_utf8(&original).unwrap(), "derived").body
+            );
+        } else {
+            assert!(result.is_err(), "{mutation} must not derive inconsistent output");
+            assert!(!dir.join("derived.jsonl").exists());
+            assert!(!dir.join("derived.rewind.json").exists());
+        }
+        assert!(std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .all(|entry| !entry.file_name().to_string_lossy().starts_with(".cv-rewind-")));
+        cleanup(&dir);
+    }
+}
