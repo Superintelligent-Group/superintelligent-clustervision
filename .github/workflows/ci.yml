@@ -52,8 +52,18 @@ jobs:
       - name: Build (default features)
         run: cargo build --workspace --all-targets
 
+      # One process per test, so the testkit's process-wide environment lock stops serializing
+      # the suite. nextest does not run doctests; the second line keeps them.
+      - name: Install cargo-nextest
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf -o "$RUNNER_TEMP/nextest.tgz" \
+            https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.136/cargo-nextest-0.9.136-x86_64-unknown-linux-gnu.tar.gz
+          echo "a098eed56f2dd88c7fdca1e554a6b99fa1ffbd2a7a1c41b865700112981f6f52  $RUNNER_TEMP/nextest.tgz" | sha256sum -c -
+          tar zxf "$RUNNER_TEMP/nextest.tgz" -C "${CARGO_HOME:-$HOME/.cargo}/bin"
       - name: Test (default features)
-        run: cargo test --workspace
+        run: |
+          cargo nextest run --workspace --profile ci
+          cargo test --workspace --doc
 
       # The parse budget (docs/design/PERF.md): the counting pass over the committed corpus as a
       # ratio to a plain read of the same bytes in the same run, so a slow runner moves both sides.
