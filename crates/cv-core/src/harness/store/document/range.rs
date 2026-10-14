@@ -27,12 +27,28 @@ impl Range {
 pub(crate) struct RangeSource {
     file: Option<File>,
     memory: Option<std::sync::Arc<crate::harness::store::bytes::ByteSource>>,
-    captured: crate::json::JsonSource,
+    captured: Option<crate::json::JsonSource>,
     decoded_len: Option<u64>,
     // Reuse the native bounded long-string endpoint index only within this source operation.
     index: super::Index,
 }
 impl RangeSource {
+    /// Immutable operation-owned bytes need no external source identity or pathname.
+    pub(crate) fn private(bytes: std::sync::Arc<crate::harness::store::bytes::ByteSource>) -> Result<Self> {
+        let len = bytes.len()?;
+        let (file, memory) = if bytes.memory_bytes().is_some() {
+            (None, Some(bytes))
+        } else {
+            (Some(bytes.file()?), None)
+        };
+        Ok(Self {
+            file,
+            memory,
+            captured: None,
+            decoded_len: Some(len),
+            index: super::Index::default(),
+        })
+    }
     #[cfg(test)]
     pub fn open(path: &Path) -> Result<Self> {
         Self::from_captured(crate::json::JsonSource::capture(path)?)
@@ -46,7 +62,7 @@ impl RangeSource {
         let source = Self {
             file: Some(file),
             memory: None,
-            captured,
+            captured: Some(captured),
             decoded_len: None,
             index: super::Index::default(),
         };
@@ -71,7 +87,7 @@ impl RangeSource {
         let source = Self {
             file,
             memory,
-            captured,
+            captured: Some(captured),
             decoded_len,
             index: super::Index::default(),
         };
@@ -80,19 +96,22 @@ impl RangeSource {
     }
     #[cfg(not(feature = "mmap"))]
     pub(crate) fn matches_original(&self, captured: &crate::json::JsonSource) -> bool {
-        self.decoded_len.is_none() && &self.captured == captured
+        self.decoded_len.is_none() && self.captured.as_ref() == Some(captured)
     }
     pub fn range(&self) -> Range {
         Range {
             offset: 0,
-            len: self.decoded_len.unwrap_or_else(|| self.captured.len()),
+            len: self
+                .decoded_len
+                .unwrap_or_else(|| self.captured.as_ref().unwrap().len()),
         }
     }
     pub fn check_identity(&self) -> Result<()> {
+        let Some(captured) = &self.captured else { return Ok(()) };
         if self.decoded_len.is_none() {
-            self.captured.check_metadata(self.file.as_ref().unwrap().metadata()?)?;
+            captured.check_metadata(self.file.as_ref().unwrap().metadata()?)?;
         }
-        self.captured.check()
+        captured.check()
     }
     pub fn cursor(&self, range: Range) -> io::Result<Cursor<'_>> {
         if range.end()? > self.range().end()? {

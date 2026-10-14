@@ -146,6 +146,7 @@ fn opts(at: CutAt, out: &Path) -> RewindOptions {
         new_id: Some("22222222-2222-4222-8222-222222222222".into()),
         dry_run: false,
         generator: "cv-test".into(),
+        thinking: crate::emit::ThinkingMode::Native,
     }
 }
 

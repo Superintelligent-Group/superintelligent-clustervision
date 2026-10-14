@@ -344,6 +344,10 @@ impl Record<'_> {
 }
 
 fn projected<'a>(message: &'a Message, mode: ThinkingMode, resolver: &Resolver) -> Result<Vec<Cow<'a, Block>>> {
+    // Portable policy is applied to the final wire records, including raw content overrides.
+    if mode == ThinkingMode::Portable {
+        return Ok(message.content.iter().map(Cow::Borrowed).collect());
+    }
     let mut blocks = Vec::with_capacity(message.content.len());
     for block in &message.content {
         match crate::emit::thinking::fate(block, Harness::Claude, mode, resolver)? {
@@ -728,7 +732,13 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
             project.join(format!("{new_id}.jsonl"))
         }
     };
-    lines.publish(&file_path)?;
+    if opts.thinking != ThinkingMode::Native {
+        let source = lines.into_source()?;
+        let (stage, _) = crate::harness::claude::replay::normalize(source, opts.thinking)?;
+        crate::harness::store::publish_stage(stage, &file_path)?;
+    } else {
+        lines.publish(&file_path)?;
+    }
     let resume = match (&c.agent, &cwd) {
         (Some(agent), _) => format!(
             "from session {}: SendMessage to=\"{agent}\" with the next instruction",

@@ -36,6 +36,10 @@ impl JsonlStage {
         self.failed = false;
         Ok(())
     }
+    pub(crate) fn into_source(self) -> Result<super::bytes::ByteSource> {
+        anyhow::ensure!(!self.failed, "cannot consume a failed JSONL stage");
+        Ok(self.output.into_inner().map_err(|e| e.into_error())?.finish()?)
+    }
     pub(crate) fn publish(self, path: &Path) -> Result<()> {
         anyhow::ensure!(!self.failed, "cannot publish a failed JSONL stage");
         let stage = self.output.into_inner().map_err(|e| e.into_error())?;

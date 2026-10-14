@@ -69,6 +69,10 @@ pub enum ThinkingMode {
     /// expected loss. The default, and what every port did before this mode existed.
     #[default]
     Native,
+    /// Claude replay: demote plaintext thinking, replace opaque reasoning with placeholders,
+    /// and repair illegal tool IDs. No signature provenance is inferred from model names.
+    /// Other targets use the existing text policy.
+    Portable,
     /// Never lose the turn. Where the target cannot hold thinking structurally, a block with text
     /// becomes a [`Block::Text`]; a signature-only / encrypted / redacted blob becomes a short
     /// placeholder naming what it was and how big it was, so the turn (and the alternation around
@@ -82,12 +86,18 @@ pub enum ThinkingMode {
 
 impl ThinkingMode {
     /// Every mode, in CLI/`possible_values` order.
-    pub const ALL: [ThinkingMode; 3] = [ThinkingMode::Native, ThinkingMode::Text, ThinkingMode::Drop];
+    pub const ALL: [ThinkingMode; 4] = [
+        ThinkingMode::Native,
+        ThinkingMode::Text,
+        ThinkingMode::Drop,
+        ThinkingMode::Portable,
+    ];
 
     /// The wire spelling (`--thinking <mode>`, JSON, `possible_values`).
     pub fn as_str(self) -> &'static str {
         match self {
             ThinkingMode::Native => "native",
+            ThinkingMode::Portable => "portable",
             ThinkingMode::Text => "text",
             ThinkingMode::Drop => "drop",
         }
@@ -264,7 +274,20 @@ pub(crate) fn thinking_fate_with_presence(
     let structural = (has_text && target_holds(target, "thinking_text"))
         || (signature.is_some() && target_holds(target, "thinking_signature"))
         || (encrypted.is_some() && target_holds(target, "thinking_encrypted"));
+    let mode = if mode == ThinkingMode::Portable {
+        if target == Harness::Claude {
+            return if has_text {
+                ThinkingFate::AsText
+            } else {
+                ThinkingFate::Placeholder
+            };
+        }
+        ThinkingMode::Text
+    } else {
+        mode
+    };
     match mode {
+        ThinkingMode::Portable => unreachable!(),
         ThinkingMode::Drop => ThinkingFate::Drop,
         ThinkingMode::Native if structural => ThinkingFate::Keep,
         ThinkingMode::Native => ThinkingFate::Drop,
@@ -871,7 +894,8 @@ mod tests {
             },
         ];
         session.messages.push(future);
-        for mode in ThinkingMode::ALL {
+        // Portable is a new wire policy; frozen legacy dispatch has no corresponding oracle.
+        for mode in [ThinkingMode::Native, ThinkingMode::Text, ThinkingMode::Drop] {
             for sidechain in [None, Some(("root".to_owned(), "agent".to_owned()))] {
                 let opts = EmitOptions {
                     new_id: Some("fixed-id".into()),
@@ -3396,7 +3420,7 @@ mod tests {
         assert!(err.contains("native, text, drop"), "the error lists the modes: {err}");
         assert_eq!(
             ThinkingMode::ALL.map(|m| m.as_str()),
-            ["native", "text", "drop"],
+            ["native", "text", "drop", "portable"],
             "the CLI's possible_values order"
         );
     }
@@ -3577,5 +3601,65 @@ mod tests {
                 );
             }
         }
+    }
+    #[test]
+    fn claude_portable_projects_raw_extra_and_carrier_content() -> Result<()> {
+        let world = cv_testkit::World::in_process("claude-portable-overrides");
+        let mut session = Session::new("raw", Harness::Claude);
+        let mut call = Message::new(Role::Assistant);
+        call.id = Some("call".into());
+        call.content.push(Block::Text {
+            text: "IR projection".into(),
+        });
+        call.harness_extra_mut(Harness::Claude).insert(
+            "message.content".into(),
+            serde_json::json!([
+                {"type":"thinking","thinking":"raw reason","signature":"foreign"},
+                {"type":"tool_use","id":"a:b","name":"Read","input":{"untouched":"a:b"}},
+                {"type":"tool_use","id":"cv_tool_0","name":"Read","input":{}},
+                {"type":"tool_use","id":"orphan:drop","name":"Read","input":{}}
+            ]),
+        );
+        session.messages.push(call);
+        let mut result = Message::new(Role::System);
+        result.extra.insert(
+            crate::harness::claude::CARRIER_KEY.into(),
+            serde_json::json!({
+                "type":"user","uuid":"result","parentUuid":"call","message":{"role":"user","content":[
+                    {"type":"tool_result","tool_use_id":"a:b","content":"raw output"},
+                    {"type":"tool_result","tool_use_id":"cv_tool_0","content":"ok"},
+                    {"type":"redacted_thinking","data":"opaque"}
+                ]}
+            }),
+        );
+        session.messages.push(result);
+        let result = emit(
+            &session,
+            Harness::Claude,
+            &world.base.join("out"),
+            &EmitOptions {
+                thinking: ThinkingMode::Portable,
+                ..Default::default()
+            },
+        )?;
+        verify_claude_resumable(&result.path, None)?;
+        let rows: Vec<Value> = fs::read_to_string(result.path)?
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let call = &rows[0]["message"]["content"];
+        let result = &rows[1]["message"]["content"];
+        assert_eq!(call[0], serde_json::json!({"type":"text","text":"raw reason"}));
+        assert_eq!(
+            call.as_array().unwrap().len(),
+            3,
+            "orphan is still removed before portable projection"
+        );
+        assert_eq!(call[1]["id"], "cv_tool_1");
+        assert_eq!(call[2]["id"], "cv_tool_0");
+        assert_eq!(call[1]["id"], result[0]["tool_use_id"]);
+        assert_eq!(call[1]["input"]["untouched"], "a:b");
+        assert_eq!(result[2]["type"], "text");
+        Ok(())
     }
 }

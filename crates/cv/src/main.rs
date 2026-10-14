@@ -588,6 +588,10 @@ enum Cmd {
         /// Start at the source's first record instead (the whole history up to the cut).
         #[arg(long)]
         full: bool,
+        /// Reasoning policy: portable demotes plaintext and omits opaque signatures while repairing
+        /// tool IDs; native preserves source reasoning and identifiers for archival fidelity.
+        #[arg(long, default_value = "portable", value_parser = ["native", "portable"])]
+        thinking: String,
         /// Report the window that would be written without writing anything.
         #[arg(long)]
         dry_run: bool,
@@ -756,10 +760,10 @@ enum Cmd {
         /// format inherently cannot hold are still only reported under `⚠ lost`.
         #[arg(long)]
         strict: bool,
-        /// What to do with the model's reasoning on the way out: `native` keeps it where the target
-        /// format holds it and drops it elsewhere, `text` keeps the turn by demoting thinking to
-        /// text (a placeholder for provider-signed blobs, which have no text), `drop` omits it.
-        #[arg(long, default_value = "native", value_parser = ["native", "text", "drop"])]
+        /// Portable (default) demotes reasoning and repairs tool IDs for Claude API replay; other
+        /// targets use the text policy. Native preserves archival fidelity where the target holds
+        /// it; text keeps unsupported reasoning as text/placeholders; drop omits reasoning.
+        #[arg(long, default_value = "portable", value_parser = ["native", "text", "drop", "portable"])]
         thinking: String,
     },
     /// Print (or with --launch, run) the resume incantation for a session in its native harness.
@@ -1309,10 +1313,11 @@ fn run() -> Result<()> {
             out,
             to,
             from_compaction: _,
+            thinking,
             full,
             dry_run,
             json,
-        } => compose::cmd_rewind(&id, harness, agent, at.as_deref(), out, to, full, dry_run, json, BUILD_VERSION),
+        } => compose::cmd_rewind(&id, harness, agent, at.as_deref(), out, to, full, thinking.parse()?, dry_run, json, BUILD_VERSION),
         Cmd::Config { add_export, rm_export } => config::cmd_config(add_export, rm_export),
         Cmd::Schema { json, commands } => schema::cmd_schema(&build_cli(), json, commands),
         Cmd::Formats {

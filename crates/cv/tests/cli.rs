@@ -3208,3 +3208,104 @@ fn splice_rejects_invalid_exports_before_source_reads_or_generation() {
         "failed export must not publish a composition report: {stdout}"
     );
 }
+
+/// Claude Code can record foreign models behind a proxy. Replay compatibility cannot be
+/// authenticated by a model label: explicit Claude, foreign, and missing labels get one policy.
+#[test]
+fn claude_portable_rewind_and_port_handle_proxy_records() {
+    let w = World::new("claude-portable-proxy");
+    let ids = ["Bash:0#hex", "Bash_0_hex", "cv_tool_0", "Bash#0:hex"];
+    let mut rows = vec![user_line("u", "2026-01-01T00:00:00Z", "continue")];
+    for (index, model) in [Some("gpt-6.1-sol"), Some("claude-proxy"), None]
+        .into_iter()
+        .enumerate()
+    {
+        let mut message = serde_json::json!({"role":"assistant","content":[
+            {"type":"thinking","thinking":format!("reason {index}"),"signature":"foreign"},
+            {"type":"redacted_thinking","data":"foreign"},
+            {"type":"text","text":"keep Bash:0#hex literally"}
+        ]});
+        if let Some(model) = model {
+            message["model"] = model.into();
+        }
+        rows.push(serde_json::json!({"type":"assistant","uuid":format!("a{index}"),"parentUuid":if index==0 {"u".into()} else {format!("a{}",index-1)},"message":message}));
+    }
+    rows.push(serde_json::json!({"type":"assistant","uuid":"calls","parentUuid":"a2","message":{"role":"assistant","content": ids.iter().map(|id|serde_json::json!({"type":"tool_use","id":id,"name":"Bash","input":{"command":"true","literal":"Bash:0#hex"}})).collect::<Vec<_>>()}}));
+    rows.push(serde_json::json!({"type":"user","uuid":"results","parentUuid":"calls","message":{"role":"user","content":ids.iter().map(|id|serde_json::json!({"type":"tool_result","tool_use_id":id,"content":"Bash:0#hex"})).collect::<Vec<_>>()}}));
+    let source = w.write_session("proxy-source", &rows);
+    let before = fs::read(&source).unwrap();
+    for command in ["rewind", "port"] {
+        let out = w.base.join(command);
+        let mut args = vec![command, source.to_str().unwrap(), "--out", out.to_str().unwrap()];
+        if command == "rewind" {
+            args.extend(["--to", "derived"]);
+        } else {
+            args.extend(["--harness", "claude", "--strict"]);
+        }
+        w.cv_ok(&args);
+        let output = if command == "rewind" {
+            out.join("derived.jsonl")
+        } else {
+            fn find(dir: &std::path::Path) -> PathBuf {
+                for entry in fs::read_dir(dir).unwrap() {
+                    let path = entry.unwrap().path();
+                    if path.is_dir() {
+                        return find(&path);
+                    }
+                    if path.extension().is_some_and(|e| e == "jsonl") {
+                        return path;
+                    }
+                }
+                panic!("no emitted JSONL")
+            }
+            find(&out)
+        };
+        let records: Vec<serde_json::Value> = fs::read_to_string(output)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let blocks: Vec<_> = records
+            .iter()
+            .filter_map(|r| r.pointer("/message/content").and_then(|c| c.as_array()))
+            .flatten()
+            .collect();
+        assert!(blocks
+            .iter()
+            .all(|b| b["type"] != "thinking" && b["type"] != "redacted_thinking"));
+        for index in 0..3 {
+            assert!(blocks.iter().any(|b| b["text"] == format!("reason {index}")));
+        }
+        let calls: Vec<_> = blocks
+            .iter()
+            .filter(|b| b["type"] == "tool_use")
+            .map(|b| b["id"].as_str().unwrap())
+            .collect();
+        let results: Vec<_> = blocks
+            .iter()
+            .filter(|b| b["type"] == "tool_result")
+            .map(|b| b["tool_use_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(calls, results);
+        assert_eq!(calls.iter().collect::<std::collections::HashSet<_>>().len(), 4);
+        assert_eq!(calls[1], ids[1]);
+        assert_eq!(calls[2], ids[2]);
+        assert!(calls
+            .iter()
+            .all(|id| id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')));
+        let native_out = w.base.join(format!("{command}-native"));
+        let mut native = vec![
+            command,
+            source.to_str().unwrap(),
+            "--out",
+            native_out.to_str().unwrap(),
+            "--thinking",
+            "native",
+        ];
+        if command == "rewind" {
+            native.extend(["--to", "native-derived"]);
+        }
+        w.cv_ok(&native);
+    }
+    assert_eq!(fs::read(source).unwrap(), before);
+}

@@ -19,6 +19,7 @@ mod lean;
 mod metadata;
 #[cfg(not(feature = "mmap"))]
 mod portable;
+pub(crate) mod replay;
 /// The sidecar tree beside a transcript (`subagents/`, `workflows/`, `journal.jsonl`): every path
 /// spelled once, and the one journal parser.
 pub mod sidecar;

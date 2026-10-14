@@ -1,3 +1,10 @@
+//! Claude replay defaults to `--thinking portable`: thinking plaintext becomes ordinary text,
+//! opaque/redacted reasoning becomes a placeholder, and illegal tool IDs receive one collision-free
+//! mapping at both endpoints. The source remains unchanged. `--thinking native` preserves archival
+//! format fidelity, including provider signatures and identifiers; it does not promise API acceptance.
+//! Model names are not signature provenance. Other targets use the existing text policy in portable
+//! mode. Other reshape commands retain their explicit policies; this is a rewind/port compatibility
+//! repair rather than a change to the core emitter's native default.
 //! `cv port` / `cv resume` — producing a copy of a session that runs elsewhere (another harness,
 //! another working directory, or both), and launching one in its native harness.
 //!

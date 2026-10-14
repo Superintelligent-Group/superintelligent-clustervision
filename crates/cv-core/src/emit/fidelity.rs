@@ -571,7 +571,9 @@ pub(super) fn folds_tool_result(t: Harness) -> bool {
 /// (`text` needs no override — the text lands in a [`Block::Text`] and the structured payloads are
 /// still classified by the target's own capability, which is what makes the report stay honest.)
 pub(crate) fn holds(target: Harness, thinking: ThinkingMode, field: &str) -> bool {
-    if thinking == ThinkingMode::Drop && field.starts_with("thinking_") {
+    if (thinking == ThinkingMode::Drop || (thinking == ThinkingMode::Portable && target == Harness::Claude))
+        && field.starts_with("thinking_")
+    {
         return false;
     }
     target_holds(target, field)

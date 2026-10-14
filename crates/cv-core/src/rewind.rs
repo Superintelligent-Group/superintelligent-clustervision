@@ -9,7 +9,9 @@
 //! ## What the derived session holds
 //!
 //! Like [`crate::prune`], a rewind works on the **raw JSONL records**, never the IR: every
-//! Claude-specific field survives, and lines that need no rewrite stay byte-identical. The derived
+//! Claude-specific fields survive, and lines that need no rewrite stay byte-identical. Portable
+//! replay additionally repairs illegal tool IDs and demotes all signed reasoning; native preserves
+//! archive fidelity. Model labels cannot prove a thinking signature is safe after a window cut. The derived
 //! file is the contiguous record range `[start, cut]` of the source:
 //!
 //! * **cut** — a message index (the `cv show --range` counting), or a commit sha resolved to the
@@ -399,6 +401,8 @@ pub struct RewindOptions {
     /// The derived session's id (default: a fresh UUIDv4 — what Claude Code expects).
     pub new_id: Option<String>,
     pub dry_run: bool,
+    /// Portable replay removes signed thinking and repairs tool IDs; native keeps archival bytes.
+    pub thinking: crate::emit::ThinkingMode,
     /// Recorded in the provenance sidecar as `cv_version`.
     pub generator: String,
 }
@@ -621,6 +625,13 @@ fn rewind_session_after_scan(
     opts: &RewindOptions,
     after_scan: impl FnOnce() -> Result<()>,
 ) -> Result<RewindResult> {
+    anyhow::ensure!(
+        matches!(
+            opts.thinking,
+            crate::emit::ThinkingMode::Native | crate::emit::ThinkingMode::Portable
+        ),
+        "rewind --thinking supports native or portable"
+    );
     if let Some(id) = &opts.new_id {
         crate::restamp::validate_output_id(id)?;
     }
@@ -761,6 +772,7 @@ fn rewind_session_after_scan(
     let (mut omitted_lines, mut omitted_bytes) = (0usize, 0u64);
     let mut open: HashSet<String> = HashSet::new();
     let mut closed = 0usize;
+    let mut replay_stage = crate::harness::store::bytes::ByteStage::new();
     let mut source_session_id: Option<String> = None;
     let mut cwds: Vec<String> = Vec::new();
     #[derive(PartialEq)]
@@ -834,7 +846,9 @@ fn rewind_session_after_scan(
                 s
             }
         };
-        if let Some(w) = writer.as_mut() {
+        if opts.thinking == crate::emit::ThinkingMode::Portable {
+            replay_stage.write_all(&out_line)?;
+        } else if let Some(w) = writer.as_mut() {
             w.write_all(&out_line)?;
         }
         lines_written += 1;
@@ -889,6 +903,18 @@ fn rewind_session_after_scan(
             "{} tool call(s) issued before the cut have no result in the rewind (the next turn began first)",
             open.len()
         ));
+    }
+
+    if opts.thinking == crate::emit::ThinkingMode::Portable {
+        let source = replay_stage.finish()?;
+        let (stage, changes) = crate::harness::claude::replay::normalize(source, opts.thinking)?;
+        bytes_written = stage.len();
+        if changes.ids != 0 || changes.thinking != 0 {
+            warnings.push(format!("portable replay: remapped {} tool ID(s), demoted {} thinking block(s); opaque provider reasoning is omitted", changes.ids, changes.thinking));
+        }
+        if let Some(w) = writer.as_mut() {
+            stage.finish()?.copy_to(w)?;
+        }
     }
 
     let res = RewindResult {
@@ -957,6 +983,7 @@ fn provenance(res: &RewindResult, opts: &RewindOptions) -> Value {
             "subagent": res.subagent,
         },
         "new_id": res.new_id,
+        "thinking": opts.thinking.as_str(),
         "cut": {
             "by": cut_by,
             "msg_idx": res.cut_msg_idx,

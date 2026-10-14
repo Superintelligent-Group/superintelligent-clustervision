@@ -188,6 +188,7 @@ pub(crate) fn cmd_rewind(
     out: Option<PathBuf>,
     to: Option<String>,
     full: bool,
+    thinking: cv_core::emit::ThinkingMode,
     dry_run: bool,
     json: bool,
     generator: &str,
@@ -213,6 +214,7 @@ pub(crate) fn cmd_rewind(
         &cv_core::rewind::RewindOptions {
             at: cut,
             full,
+            thinking,
             out_dir: out,
             new_id: to,
             dry_run,
