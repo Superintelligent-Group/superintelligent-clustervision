@@ -56,27 +56,8 @@ struct ServeChild(Mutex<Option<Child>>);
 /// Unzip `bytes` in-memory and ingest the contained files into `Session[]` JSON — the shape the
 /// web UI's WASM `ingest_zip` produces, via the same `cv_core::ingest::ingest_files`.
 fn ingest_zip_bytes(bytes: &[u8]) -> Result<String, String> {
-    let reader = std::io::Cursor::new(bytes);
-    let mut archive = zip::ZipArchive::new(reader).map_err(|e| format!("not a readable zip: {e}"))?;
-
-    let mut files: Vec<(String, Vec<u8>)> = Vec::with_capacity(archive.len());
-    for i in 0..archive.len() {
-        let mut entry = archive.by_index(i).map_err(|e| format!("reading zip entry {i}: {e}"))?;
-        if !entry.is_file() {
-            continue;
-        }
-        // Prefer the safe sanitized name; fall back to the raw name so unusual exports still ingest.
-        let name = entry
-            .enclosed_name()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|| entry.name().to_string());
-        let mut buf = Vec::with_capacity(entry.size() as usize);
-        entry
-            .read_to_end(&mut buf)
-            .map_err(|e| format!("decompressing {name}: {e}"))?;
-        files.push((name, buf));
-    }
-
+    let files = cv_core::ingest::archive::extract(std::io::Cursor::new(bytes), Default::default())
+        .map_err(|error| format!("zip: {error:#}"))?;
     let sessions = cv_core::ingest::ingest_files(files);
     serde_json::to_string(&sessions).map_err(|e| format!("serializing sessions: {e}"))
 }

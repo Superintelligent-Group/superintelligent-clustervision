@@ -336,3 +336,6 @@ mod tests {
         assert!(!sessions.iter().any(|s| s.harness == Harness::Gemini));
     }
 }
+
+#[cfg(feature = "zip-ingest")]
+pub mod archive;

@@ -353,6 +353,7 @@ dependencies = [
  "toml",
  "uuid",
  "walkdir",
+ "zip",
 ]
 
 [[package]]
@@ -478,7 +479,6 @@ dependencies = [
  "serde_json",
  "uuid",
  "wasm-bindgen",
- "zip",
 ]
 
 [[package]]

@@ -21,6 +21,7 @@ exclude = ["tests/corpus"]
 name = "cv_core"
 
 [dependencies]
+zip = { version = "2.4", optional = true, default-features = false, features = ["deflate"] }
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
@@ -55,6 +56,7 @@ fs4 = { version = "0.13", default-features = false, features = ["sync"] }
 uuid = { workspace = true, features = ["js"] }
 
 [features]
+zip-ingest = ["dep:zip"]
 default = ["sqlite", "parallel", "mmap"]
 # `mmap` resolves lazy content spans by memory-mapping the source file (only touched pages page in).
 # Off for wasm32 (no mmap); the resolver falls back to a positioned ranged read, behavior identical.
