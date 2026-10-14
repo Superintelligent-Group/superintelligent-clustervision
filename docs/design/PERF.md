@@ -66,3 +66,19 @@ Bounded heap is not free CPU: dense escaped text decodes at 2.1-2.3x the old who
 OpenClaw bounded replay costs about 1.5x CPU, and Zed's decoded spill is about 16% above the
 original one-parse reader on escaped input. None of these figures bounds native SQLite allocation
 or whole-process RSS.
+
+## Resume marks (2026-10-14)
+
+A resume mark (`resume.rs`) is checked by device and inode, length, and a hash of the first 4 KiB
+and the 4 KiB before the mark. An in-place edit outside those samples that is followed by growth
+is not detected: index and watch resume past it, and the edited bytes keep the docs, events and
+counts they were read with until a whole pass (`cv index --rebuild`, a same-size rewrite, or a new
+inode). Rewind's prefix receipt has the same limit.
+
+Hashing the whole prefix on each resume would close the gap, and was rejected. On the largest
+local transcript (189,759,498 bytes), the mark's FNV-1a took 1.03 s and 1.22 s (0.16 to 0.19
+GB/s, on a machine shared with builds), and reading the page-cached file took 0.05 s. A resume
+otherwise reads only the appended suffix. Watch resumes on every append, and the local Claude
+store is 33,168 transcripts holding 36.3 GB. A full check therefore turns every resumed pass back
+into a whole read of bytes already seen. Detecting such edits needs a writer or filesystem change
+signal, which no harness provides.

@@ -1200,12 +1200,13 @@ fn run_job(job: Job, f: &Fields, tx: &std::sync::mpsc::SyncSender<Out>, admissio
     });
     let out = match result {
         Ok(p) => {
+            #[cfg(test)]
+            if let Some(hook) = AFTER_PASS.lock().unwrap().as_mut() {
+                hook(&adapter.resume_source(&job.r));
+            }
             let mark = version.as_deref().and_then(|v| {
                 let cp = p.last?;
-                Some((
-                    cv_core::resume::MarkHead::of(&adapter.resume_source(&job.r), &cp, v)?,
-                    cp,
-                ))
+                Some((cv_core::resume::MarkHead::of_file(p.source.as_ref()?, &cp, v)?, cp))
             });
             Out::Done {
                 job: Box::new(job),
@@ -1275,7 +1276,16 @@ struct JobPass {
     counted: Option<cv_core::stream::Counted>,
     events: Option<(usize, cv_core::events::EventSpool)>,
     last: Option<cv_core::stream::Checkpoint>,
+    /// The resume source, opened before the pass: its mark describes this file, not whatever the
+    /// path names once the pass is over.
+    source: Option<std::fs::File>,
 }
+
+/// Tests: runs between a pass and the mark taken for it, with the resume source's path.
+#[cfg(test)]
+type AfterPass = Box<dyn FnMut(&std::path::Path) + Send>;
+#[cfg(test)]
+static AFTER_PASS: std::sync::Mutex<Option<AfterPass>> = std::sync::Mutex::new(None);
 
 /// Count actual adapter callbacks, not the cumulative counts restored from a checkpoint.
 #[cfg(test)]
@@ -1317,6 +1327,7 @@ fn job_pass(
     from: Option<&cv_core::stream::Checkpoint>,
 ) -> Result<Option<JobPass>> {
     let first = from.and_then(|cp| cp.messages()).unwrap_or(0);
+    let source = std::fs::File::open(adapter.resume_source(&job.r)).ok();
     let mut events = match from {
         None => cv_core::events::SpoolingSink::new(job.r.cwd.clone()),
         Some(cp) => cv_core::events::SpoolingSink::resume(cp).context("checkpoint without events")?,
@@ -1387,6 +1398,7 @@ fn job_pass(
         counted: done.counted,
         events,
         last: done.last,
+        source,
     }))
 }
 
@@ -6491,6 +6503,59 @@ mod tests {
         );
         let unchanged = sweep(&dir, vec![r], false, false).unwrap();
         assert_eq!((unchanged.changed, unchanged.work.callbacks), (0, 0));
+        for d in [dir, sdir] {
+            std::fs::remove_dir_all(d).ok();
+        }
+    }
+
+    /// A same-shaped file renamed over the transcript after a pass read it must not take that
+    /// pass's mark: once it grows, resuming would keep the old file's docs for its prefix.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_renamed_over_after_the_pass_does_not_inherit_its_mark() {
+        use std::io::Write;
+        let _home = IsolatedHome::new();
+        let (dir, sdir) = (tmpdir(), tmpdir());
+        let path = sdir.join("renamed.jsonl");
+        let line = |i: usize, marker: &str| {
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "user", "uuid": format!("u{i}"), "sessionId": "renamed",
+                    "message": {"role": "user", "content": format!("{} {marker}", "stable payload ".repeat(200))}
+                })
+            )
+        };
+        let body = |marker: &str| -> String {
+            (0..20)
+                .map(|i| line(i, if i == 10 { marker } else { "ordinary" }))
+                .collect()
+        };
+        std::fs::write(&path, body("zqoldword")).unwrap();
+        let replacement = sdir.join("replacement.jsonl");
+        std::fs::write(&replacement, body("zqnewword")).unwrap();
+        let r = sref("renamed", "renamed", path.to_string_lossy().into_owned());
+        let pending = replacement.clone();
+        *AFTER_PASS.lock().unwrap() = Some(Box::new(move |source| {
+            let _ = std::fs::rename(&pending, source);
+        }));
+        let first = sweep(&dir, vec![r.clone()], false, false);
+        *AFTER_PASS.lock().unwrap() = None;
+        first.unwrap();
+        assert!(!replacement.exists(), "the hook replaced the transcript");
+        let head = cv_core::resume::MarkTable::load().get(&r).unwrap().clone();
+        let at = body("zqoldword").find("zqoldword").unwrap() as u64;
+        assert!(at > 4096 && at + 4096 < head.offset, "the edit is outside both samples");
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(line(20, "ordinary").as_bytes())
+            .unwrap();
+        let swept = sweep(&dir, vec![r], false, false).unwrap();
+        assert_eq!((swept.changed, swept.resumed), (1, 0));
+        assert!(text_search(&dir, "zqoldword", 10).unwrap().is_empty());
+        assert_eq!(text_search(&dir, "zqnewword", 10).unwrap().len(), 1);
         for d in [dir, sdir] {
             std::fs::remove_dir_all(d).ok();
         }

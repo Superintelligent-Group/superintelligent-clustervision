@@ -541,9 +541,13 @@ pub(crate) fn normalize_subagent_record(v: &mut Value) -> bool {
     modified
 }
 
-/// Initial-prefix receipt using the same immutable-prefix append contract as resume marks.
-/// Non-growth rewrites use strict identity/metadata checks; growth uses bounded head/tail samples.
-/// An unsampled prefix rewrite combined with growth is not proven absent by this receipt.
+/// What rewind can say about the prefix it copied once the copy is done. If the source has not
+/// grown, its whole identity (device, inode, length, mtime, ctime) must be unchanged, so any
+/// rewrite is caught. If it grew, only the append contract resume marks use is checked: the same
+/// device and inode (unix) and the same hash of the first 4 KiB and the 4 KiB before the old end.
+/// A rewrite in place elsewhere in the prefix that is followed by growth is not detected, and the
+/// copy may then hold bytes from before or after it; the provenance's sha256 is of the bytes
+/// actually copied. Catching that would mean reading the prefix a second time.
 struct PrefixReadGuard {
     source: crate::json::JsonSource,
     mark: Option<crate::resume::MarkHead>,

@@ -9,10 +9,13 @@
 //! state format and the consumer's). Anything else means a whole pass, which writes a new mark.
 //!
 //! These samples do not establish that the entire prefix is unchanged. Resuming assumes the
-//! adapter's immutable-prefix append contract; an edit outside the samples followed by growth
-//! can escape detection. Proving arbitrary prefix edits absent requires reading that prefix or
-//! a trusted writer change signal. Consumers must separately reject non-growth rewrites; the
-//! FTS sweep compares the current size with the size of its previously indexed source.
+//! adapter's immutable-prefix append contract; an in-place edit outside the samples (past the
+//! first 4 KiB and before the last 4 KiB under the mark) followed by growth escapes detection, and
+//! the docs and counts of the edited bytes stay as they were read. Proving arbitrary prefix edits
+//! absent requires reading that prefix again: hashing the whole prefix on every resume was
+//! measured and rejected (docs/design/PERF.md, "Resume marks"). Consumers must separately reject
+//! non-growth rewrites; the FTS sweep compares the current size with the size of its previously
+//! indexed source.
 //!
 //! The marks live in the catalog db beside the counts and events they continue (`resume_marks`);
 //! like the rest of the catalog it is a cache, best-effort throughout.
@@ -40,7 +43,15 @@ impl MarkHead {
     /// can no longer be read up to the checkpoint, or stable file identity is unavailable.
     /// Device/inode guards are currently implemented on Unix; other platforms read whole.
     pub fn of(path: &Path, cp: &Checkpoint, version: &str) -> Option<MarkHead> {
-        let (identity, hash) = prefix_guard(path, cp.offset)?;
+        Self::of_file(&std::fs::File::open(path).ok()?, cp, version)
+    }
+
+    /// [`Self::of`] on an open handle: the identity and samples of the file that handle names,
+    /// whatever its path names now. A pass that opens its source before reading takes its mark
+    /// this way, so a file renamed over the path mid-pass is never paired with this pass's
+    /// checkpoint (its next pass sees another inode and reads whole).
+    pub fn of_file(file: &std::fs::File, cp: &Checkpoint, version: &str) -> Option<MarkHead> {
+        let (identity, hash) = prefix_guard_file(file, cp.offset)?;
         identity?; // Without a stable file identity, prefer a whole read.
         Some(MarkHead {
             offset: cp.offset,
@@ -80,8 +91,12 @@ pub fn prefix_hash(path: &Path, offset: u64) -> Option<u64> {
 }
 
 fn prefix_guard(path: &Path, offset: u64) -> Option<(Option<(u64, u64)>, u64)> {
+    prefix_guard_file(&std::fs::File::open(path).ok()?, offset)
+}
+
+fn prefix_guard_file(file: &std::fs::File, offset: u64) -> Option<(Option<(u64, u64)>, u64)> {
     use std::io::{Read as _, Seek as _, SeekFrom};
-    let mut f = std::fs::File::open(path).ok()?;
+    let mut f = file;
     let metadata = f.metadata().ok()?;
     #[cfg(unix)]
     let identity = {
@@ -94,6 +109,7 @@ fn prefix_guard(path: &Path, offset: u64) -> Option<(Option<(u64, u64)>, u64)> {
         return None;
     }
     let mut head = vec![0u8; offset.min(HASH_SPAN) as usize];
+    f.seek(SeekFrom::Start(0)).ok()?;
     f.read_exact(&mut head).ok()?;
     let from = offset.saturating_sub(HASH_SPAN);
     let mut tail = vec![0u8; (offset - from) as usize];
@@ -320,6 +336,16 @@ mod tests {
 
         let head = MarkHead::of(&path, &Checkpoint::new(offset), "v1").unwrap();
         assert!(head.holds(&path, size(&path), "v1"));
+
+        // A mark taken on a handle opened before a rename-over describes the file read, so it
+        // does not hold for what the path names now; reopening the path would have paired them.
+        let read = std::fs::File::open(&path).unwrap();
+        std::fs::write(&replacement, &grown).unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        let of_read = MarkHead::of_file(&read, &Checkpoint::new(offset), "v1").unwrap();
+        assert_eq!(of_read.hash, head.hash);
+        assert!(!of_read.holds(&path, size(&path), "v1"));
+        let head = MarkHead::of(&path, &Checkpoint::new(offset), "v1").unwrap();
 
         // One byte changed just before the mark, then one in the head: both break it.
         for at in [offset as usize - 10, 7] {
