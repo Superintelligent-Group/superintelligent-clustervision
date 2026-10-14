@@ -2567,6 +2567,8 @@ fn resource_copy_preserves_source_when_destination_aliases_it() {
     std::fs::create_dir(&source).unwrap();
     std::fs::write(source.join("agent.jsonl"), b"original resource").unwrap();
     assert!(copy_dir(&source, &source).is_err());
+    assert!(copy_dir(&source, &source.join("not-created/nested-target")).is_err());
+    assert!(!source.join("not-created").exists());
     std::fs::create_dir(source.join("nested-target")).unwrap();
     assert!(copy_dir(&source, &source.join("nested-target")).is_err());
     assert_eq!(std::fs::read(source.join("agent.jsonl")).unwrap(), b"original resource");

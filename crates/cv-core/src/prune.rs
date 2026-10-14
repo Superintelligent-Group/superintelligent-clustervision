@@ -3180,9 +3180,7 @@ fn build_marker(
 /// Recursively copy a directory tree (used to carry `subagents/`/`workflows/` into the new session).
 fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
     reject_resource_symlink(dst)?;
-    if std::fs::canonicalize(dst)
-        .is_ok_and(|path| std::fs::canonicalize(src).is_ok_and(|source| path.starts_with(source)))
-    {
+    if resource_location(dst)?.starts_with(std::fs::canonicalize(src)?) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "resource destination aliases or lies inside source",
@@ -3200,6 +3198,24 @@ fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Resolve existing ancestors too: a not-yet-created child of the source is still inside it.
+fn resource_location(path: &Path) -> std::io::Result<PathBuf> {
+    match std::fs::canonicalize(path) {
+        Ok(path) => Ok(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let name = path.file_name().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "resource destination has no filename")
+            })?;
+            let parent = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or(Path::new("."));
+            Ok(resource_location(parent)?.join(name))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn reject_resource_symlink(path: &Path) -> std::io::Result<()> {
