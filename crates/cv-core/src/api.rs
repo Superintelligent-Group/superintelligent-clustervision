@@ -226,7 +226,10 @@ fn sessions(query: &str) -> (u16, Value) {
         None => None,
     };
     let cwd = params.get("cwd");
-    let limit = params.get("limit").and_then(|l| l.parse::<usize>().ok());
+    let limit = match params.unsigned("limit") {
+        Ok(limit) => limit,
+        Err(error) => return err(400, &error),
+    };
 
     // The fast catalog read (~ms when warm); transparently escalates to a full scan when cold.
     let mut refs = crate::sessions();
@@ -448,15 +451,7 @@ fn message_window(
 ) -> Result<(SessionRef, WindowSink), (u16, Value)> {
     let params = Query::parse(query);
     // Window bounds must parse cleanly — a typo'd index is a clear 400, not a silent full read.
-    let idx_param = |key: &str| -> Result<Option<usize>, (u16, Value)> {
-        match params.get(key) {
-            None => Ok(None),
-            Some(v) => v
-                .parse::<usize>()
-                .map(Some)
-                .map_err(|_| err(400, &format!("{key} must be a non-negative integer, got {v:?}"))),
-        }
-    };
+    let idx_param = |key: &str| params.unsigned(key).map_err(|error| err(400, &error));
     let start = idx_param("start")?.unwrap_or(0);
     let end = idx_param("end")?;
     if end.is_some_and(|e| e < start) {
@@ -680,6 +675,20 @@ impl Query {
             .iter()
             .find(|(k, v)| k == key && !v.is_empty())
             .map(|(_, v)| v.clone())
+    }
+
+    /// A present numeric selector must be nonempty and valid; malformed limits must never
+    /// silently expand into an unbounded read. Other string/flag parameters retain their defaults.
+    pub fn unsigned(&self, key: &str) -> Result<Option<usize>, String> {
+        let Some((_, value)) = self.0.iter().find(|(name, _)| name == key) else {
+            return Ok(None);
+        };
+        if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
+            if let Ok(value) = value.parse() {
+                return Ok(Some(value));
+            }
+        }
+        Err(format!("{key} must be a non-negative integer, got {value:?}"))
     }
 
     /// A boolean parameter: present with any value but `0`/`false` (so `?all=1`, `?all=true` and a

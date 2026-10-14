@@ -1350,6 +1350,32 @@ fn serve_stats() {
 }
 
 #[test]
+fn malformed_numeric_read_selectors_error_before_expanding_the_read() {
+    let w = world("numeric-read-selectors");
+    let (port, _server) = spawn_serve(&w);
+    for path in [
+        "/api/sessions?limit=bad",
+        "/api/sessions?limit=",
+        "/api/search?q=needle&limit=-1",
+        "/api/search?q=needle&limit=",
+        "/api/session/claude/alphasess/messages?end=",
+        "/api/session/claude/missing/messages?start=bad",
+    ] {
+        let (status, error) = get_json(port, path);
+        assert_eq!(status, 400, "{path}: {error}");
+    }
+    assert_eq!(get_json(port, "/api/sessions?limit=0").1, json!([]));
+    assert_eq!(
+        get_json(port, "/api/session/claude/alphasess/messages?start=0&end=0").1["messages"],
+        json!([])
+    );
+    w.cv_ok(&["index"]);
+    let (status, error) = get_json(port, "/api/search?q=%22unterminated");
+    assert_eq!(status, 400, "invalid FTS query was silently retried live: {error}");
+    assert_eq!(get_json(port, "/api/search?q=unmatchableword").1, json!([]));
+}
+
+#[test]
 fn request_headers_are_bounded_and_buffering_preserves_body_and_pipeline() {
     let w = world("header-bounds");
     let (port, _server) = spawn_serve(&w);

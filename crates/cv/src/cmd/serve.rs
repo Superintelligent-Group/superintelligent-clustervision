@@ -545,10 +545,13 @@ fn search(query: &str, semantic_search: &cv_search::SemanticSearch) -> Reply {
         },
         None => None,
     };
-    let limit = params
-        .get("limit")
-        .and_then(|l| l.parse::<usize>().ok())
-        .unwrap_or(SEARCH_LIMIT);
+    let limit = match params.unsigned("limit") {
+        Ok(limit) => limit.unwrap_or(SEARCH_LIMIT),
+        Err(error) => {
+            let (status, body) = err(400, &error);
+            return (status, body, Vec::new());
+        }
+    };
     let cwd = params.get("cwd");
     let semantic = params
         .get("semantic")
@@ -587,6 +590,10 @@ fn search(query: &str, semantic_search: &cv_search::SemanticSearch) -> Reply {
             },
         ) {
             Ok(hits) => (hits, "index", None),
+            Err(error) if cv_search::is_invalid_text_query(&error) => {
+                let (status, body) = err(400, &format!("invalid search query: {error:#}"));
+                return (status, body, Vec::new());
+            }
             Err(e) => (
                 Vec::new(),
                 "live",
