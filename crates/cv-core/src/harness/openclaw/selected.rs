@@ -4,37 +4,30 @@
 use super::*;
 use crate::harness::store::{document::Fields, jsonl::ranges};
 use crate::json::{InvalidJson, JsonSource, JsonView};
-use std::io::Read;
 
+/// Branch controls are accepted top-level records, independent of JSON whitespace/key spelling.
+/// Validate through the shared bounded reader so nested or malformed `type` fields cannot
+/// accidentally turn a flat transcript into a tree.
 pub(super) fn has_leaf_controls(path: &Path) -> Result<bool> {
+    let source = JsonSource::capture(path)?;
     let file = fs::File::open(path).with_context(|| format!("reading {}", path.display()))?;
-    let extent = ranges::Range {
-        offset: 0,
-        len: file.metadata()?.len(),
-    };
-    for row in ranges::records(&file, extent)? {
-        let (row, _) = row?;
-        if !ranges::valid_utf8(&mut ranges::reader(&file, row)?)? {
-            continue;
-        }
-        let mut reader = ranges::reader(&file, row)?;
-        let needle = b"\"type\":\"leaf\"";
-        let mut window = [0u8; 64 * 1024 + 12];
-        let mut keep = 0;
-        loop {
-            let n = reader.read(&mut window[keep..])?;
-            if n == 0 {
-                break;
-            }
-            let end = keep + n;
-            if memchr::memmem::find(&window[..end], needle).is_some() {
-                return Ok(true);
-            }
-            keep = end.min(needle.len() - 1);
-            window.copy_within(end - keep..end, 0);
-        }
-    }
-    Ok(false)
+    source.check_metadata(file.metadata()?)?;
+    let mut found = false;
+    super::super::store::checked_lines::for_each(&file, 0, &source, |view, _, _, _| {
+        let fields = Fields::parse(view, &["type"])?;
+        found = fields
+            .as_ref()
+            .map(|f| f.string("type"))
+            .transpose()?
+            .flatten()
+            .as_deref()
+            == Some("leaf")
+            && is_leaf_control(&navigation_descriptor(view)?);
+        Ok(if found { Flow::Stop } else { Flow::Continue })
+    })?;
+    source.check_metadata(file.metadata()?)?;
+    source.check()?;
+    Ok(found)
 }
 
 pub(super) fn stream(
@@ -757,6 +750,64 @@ mod tests {
                     "tree={tree}/spans={spans}: {error:#}"
                 );
             }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn formatted_leaf_controls_select_the_same_visible_branch() -> Result<()> {
+        let world = cv_testkit::World::in_process("openclaw-formatted-leaf");
+        let path = world.base.join("tree.jsonl");
+        let original =
+            fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/openclaw/branchy-v4.jsonl"))?;
+        let adapter = OpenClaw { roots: vec![] };
+        for leaf in [
+            r#"{ "type" : "leaf", "id" : "l1", "parentId" : "a2", "targetId" : "a1" }"#,
+            r#"{"\u0074ype":"l\u0065af","id":"l1","parentId":"a2","targetId":"a1"}"#,
+            r#"{"type":"future","type":"leaf","id":"l1","parentId":"a2","targetId":"a1"}"#,
+        ] {
+            let text = original
+                .lines()
+                .map(|line| {
+                    if parse_line(line).as_ref().is_some_and(is_leaf_control) {
+                        leaf
+                    } else {
+                        line
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            fs::write(&path, &text)?;
+            assert!(has_leaf_controls(&path)?);
+            let r = SessionRef::new("formatted", Harness::OpenClaw, &path);
+            for complete in [false, true] {
+                for spans in [false, true] {
+                    let options = ParseOptions {
+                        spans,
+                        complete,
+                        ..ParseOptions::full()
+                    };
+                    let expected = parse_text_with(&text, &r, &options);
+                    let mut actual = collect(&adapter, &r, &options)?;
+                    actual.materialize()?;
+                    assert_eq!(
+                        serde_json::to_value(actual)?,
+                        serde_json::to_value(expected)?,
+                        "{leaf} {options:?}"
+                    );
+                }
+            }
+        }
+        // Markers inside payloads and malformed/control-incomplete rows do not select a tree.
+        for row in [
+            r#"{"type":"message","message":{"role":"user","content":"flat"},"metadata":{"type":"leaf"}}"#,
+            r#"{"type":"leaf","id":"missing parent and target"}"#,
+            r#"{"type":"leaf","type":"future","id":"l1","parentId":null,"targetId":null}"#,
+            r#"{"type":"leaf","id":"l1","parentId":null,"targetId":null,"ignored":1e999}"#,
+            r#"{"type":"leaf","id":"l1","parentId":null,"targetId":null"#,
+        ] {
+            fs::write(&path, row)?;
+            assert!(!has_leaf_controls(&path)?, "{row}");
         }
         Ok(())
     }

@@ -285,8 +285,8 @@ fn parse_line(line: &str) -> Option<Value> {
     serde_json::from_str::<Value>(line).ok()
 }
 
-/// Does this JSONL transcript hold a `leaf` navigation control? A cheap substring pass (OpenClaw
-/// writes `JSON.stringify` output — no spaces around the colon) so flat transcripts keep streaming.
+/// Does this JSONL transcript hold an accepted top-level `leaf` navigation control? Flat
+/// transcripts can stream immediately after this bounded projection pass.
 fn file_has_leaf_controls(path: &Path) -> Result<bool> {
     selected::has_leaf_controls(path)
 }
