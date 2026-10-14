@@ -944,6 +944,26 @@ mod tests {
                 }
             }
         }
+        // No custom title may hide first-prompt differences: title joins, hook partitioning,
+        // whitespace-only text, reasoning-only turns and deferred tool identities all matter.
+        let path = world.base.join("projects/p/chats/title-cases.jsonl");
+        for parts in [
+            serde_json::json!([{"text":""},{"text":"  title λ"},{"text":body}]),
+            serde_json::json!([{"text":" ".repeat(100_000)},{"text":"tail"}]),
+            serde_json::json!([{"text":format!("{}<qwen:user-prompt-submit-context>hook", " ".repeat(100_000))},{"text":body}]),
+            serde_json::json!([{"text":body,"thought":true},{"functionCall":{"id":"a","name":"tool_call","args":{"name":"agent","arguments":{"payload":body}}}}]),
+        ] {
+            let rows = [
+                serde_json::json!({"type":"user","message":{"parts":parts}}),
+                serde_json::json!({"type":"assistant","message":{"parts":[{"functionCall":{"id":"a","name":"tool_call","args":{"name":"agent","arguments":{"payload":body}}}}]}}),
+                serde_json::json!({"type":"tool_result","message":{"parts":[{"functionResponse":{"id":"a","response":{"output":{"nested":body}}}}]}}),
+            ];
+            fs::write(&path, rows.iter().map(|row| format!("{row}\n")).collect::<String>())?;
+            assert_eq!(
+                serde_json::to_value(scan_session_jsonl(&path))?,
+                serde_json::to_value(oracle(&path)?)?
+            );
+        }
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/qwen/0.25.1/.qwen");
         for reference in Qwen::with_home(&root).discover()? {
             if !is_session_jsonl(&reference.path) {

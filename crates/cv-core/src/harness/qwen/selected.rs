@@ -28,7 +28,7 @@ fn response(view: Option<JsonView<'_>>, source: &JsonSource) -> Result<Text> {
     }
     crate::harness::store::text::append(source, &source.decoded_backing()?, |builder| builder.push_json(payload))
 }
-fn content(view: JsonView<'_>, source: &JsonSource) -> Result<Vec<Block>> {
+fn content(view: JsonView<'_>, source: &JsonSource, discovery: bool) -> Result<Vec<Block>> {
     let mut out = Vec::new();
     let parts = view
         .get("message")?
@@ -62,17 +62,25 @@ fn content(view: JsonView<'_>, source: &JsonSource) -> Result<Vec<Block>> {
                 id,
                 name,
                 namespace,
-                input: input
-                    .map(|v| v.to_json())
-                    .transpose()?
-                    .unwrap_or_else(|| Value::Null.into()),
+                input: if discovery {
+                    Value::Null.into()
+                } else {
+                    input
+                        .map(|v| v.to_json())
+                        .transpose()?
+                        .unwrap_or_else(|| Value::Null.into())
+                },
             });
         } else if let Some(result) = part.get("functionResponse")? {
             let name = string(result, "name")?.unwrap_or_else(|| "tool".into());
             let resp = result.get("response")?;
             out.push(Block::ToolResult {
                 tool_use_id: string(result, "id")?.unwrap_or_else(|| name.clone()),
-                content: response(resp, source)?,
+                content: if discovery {
+                    Text::default()
+                } else {
+                    response(resp, source)?
+                },
                 is_error: resp.map(|v| v.get("error")).transpose()?.flatten().is_some(),
                 tool_name: Some(name),
                 status: None,
@@ -89,14 +97,30 @@ fn content(view: JsonView<'_>, source: &JsonSource) -> Result<Vec<Block>> {
                 path: None,
                 source: string(file, "fileUri")?,
             });
-        } else if let Some(text) = part.get("text")?.map(|v| v.source_text()).transpose()?.flatten() {
+        } else if let Some(mut text) = part.get("text")?.map(|v| v.source_text()).transpose()?.flatten() {
             if !super::super::store::document::text_head(&text, &Resolver::new(None), 1, false)?.1 {
                 continue;
             }
-            if part.get("thought")?.map(|v| v.as_bool()).transpose()?.flatten() == Some(true) {
+            let thought = part.get("thought")?.map(|v| v.as_bool()).transpose()?.flatten() == Some(true);
+            if discovery {
+                // Counting needs block presence, tool identity and the first prompt's title;
+                // it never needs a decoded result body or argument tree. Keep the classifier's
+                // trimmed hook prefix separately from the title's untrimmed 81 characters.
+                let head = if !thought && prefix(&text, true)?.starts_with(HOOK_CONTEXT_TAG) {
+                    HOOK_CONTEXT_TAG.to_string()
+                } else {
+                    super::super::store::document::text_head(&text, &Resolver::new(None), 81, false)?.0
+                };
+                text = head.into();
+            }
+            if thought {
                 out.push(Block::Thinking {
                     text,
-                    signature: string(part, "thoughtSignature")?,
+                    signature: if discovery {
+                        None
+                    } else {
+                        string(part, "thoughtSignature")?
+                    },
                     encrypted: None,
                     redacted: false,
                 });
@@ -119,8 +143,10 @@ fn discovery_payload(payload: JsonView<'_>, subtype: Option<&str>) -> Result<Val
                 "model",
                 "modelId",
             ] {
-                if let Some(value) = payload.get(key)?.filter(|v| v.is_string().unwrap_or(false)) {
-                    small.insert(key.into(), value.resolve()?.into_owned());
+                if let Some(value) = payload.get(key)? {
+                    if value.is_string()? {
+                        small.insert(key.into(), value.resolve()?.into_owned());
+                    }
                 }
             }
         }
@@ -259,14 +285,14 @@ fn replay(
                         "model",
                         "usageMetadata",
                     ] {
-                        if discovery && key == "usageMetadata" {
+                        if (discovery || stopped) && key == "usageMetadata" {
                             continue;
                         }
                         if let Some(value) = view.get(key)? {
                             record.insert(key.into(), value.resolve()?.into_owned());
                         }
                     }
-                    if let Some(payload) = view.get("systemPayload")? {
+                    if let Some(payload) = view.get("systemPayload")?.filter(|_| !stopped) {
                         let payload = if discovery {
                             discovery_payload(payload, record.get("subtype").and_then(Value::as_str))?
                         } else {
@@ -284,11 +310,12 @@ fn replay(
                         }
                     }
                     session_facts(&mut session, &record, parent);
-                    let blocks = if matches!(
-                        record.get("type").and_then(Value::as_str),
-                        Some("user" | "assistant" | "tool_result")
-                    ) {
-                        content(view, &source)?
+                    let blocks = if !stopped
+                        && matches!(
+                            record.get("type").and_then(Value::as_str),
+                            Some("user" | "assistant" | "tool_result")
+                        ) {
+                        content(view, &source, discovery)?
                     } else {
                         Vec::new()
                     };
@@ -340,6 +367,72 @@ mod tests {
         fn checkpoint(&mut self, checkpoint: &mut Checkpoint) {
             self.checkpoints.push((self.messages.len(), checkpoint.clone()));
         }
+    }
+
+    #[test]
+    fn discovery_content_keeps_only_bounded_title_and_tool_facts() -> Result<()> {
+        let world = cv_testkit::World::in_process("qwen-discovery-content-facts");
+        let path = world.base.join("record.json");
+        let giant = "雪\n".repeat(128 * 1024);
+        let record = serde_json::json!({"message":{"parts":[
+            {"text":giant},
+            {"text":format!("{}{}hook", " ".repeat(100_000), HOOK_CONTEXT_TAG)},
+            {"text":giant,"thought":true,"thoughtSignature":giant},
+            {"functionCall":{"id":"call","name":"tool_call","args":{"name":"agent","arguments":{"prompt":giant}}}},
+            {"functionResponse":{"id":"call","name":"tool_call","response":{"output":{"nested":giant},"error":null}}}
+        ]}});
+        std::fs::write(&path, serde_json::to_vec(&record)?)?;
+        let source = JsonSource::capture(&path)?;
+        let blocks = source.read_document(|view| content(view, &source, true))?;
+        assert!(serde_json::to_vec(&blocks)?.len() < 2000);
+        assert!(
+            matches!(&blocks[3], Block::ToolUse { id, name, namespace: Some(namespace), input }
+            if id == "call" && name == "agent" && namespace == "tool_call" && input.resolve()?.is_null())
+        );
+        assert!(
+            matches!(&blocks[4], Block::ToolResult { tool_use_id, content, is_error: true, .. }
+            if tool_use_id == "call" && content.is_empty())
+        );
+        let Block::Text { text } = &blocks[1] else {
+            panic!("hook text")
+        };
+        assert_eq!(text.try_resolve(&Resolver::new(None))?.as_ref(), HOOK_CONTEXT_TAG);
+        Ok(())
+    }
+
+    #[test]
+    fn stopped_selected_replay_matches_owned_final_facts_and_source_failures() -> Result<()> {
+        let world = cv_testkit::World::in_process("qwen-stopped-selected-facts");
+        let path = world.base.join("session.jsonl");
+        let giant = "payload λ\n".repeat(128 * 1024);
+        let rows = [
+            serde_json::json!({"type":"user","sessionId":"initial","message":{"parts":[{"text":"first prompt"}]}}),
+            serde_json::json!({"type":"assistant","model":"later-model","sessionId":"final","cwd":"/late","version":"late-version","timestamp":"2026-10-14T00:00:00Z","message":{"parts":[{"functionResponse":{"response":{"output":{"nested":giant}}}}]}}),
+            serde_json::json!({"type":"system","subtype":"custom_title","systemPayload":{"title":giant},"gitBranch":"late-branch"}),
+        ];
+        let bytes = rows.iter().map(|row| format!("{row}\n")).collect::<String>();
+        std::fs::write(&path, format!("{bytes}invalid json\n"))?;
+        let mut owned_messages = Vec::new();
+        let owned = stream_session_jsonl(&path, &mut |message| {
+            owned_messages.push(message);
+            Flow::Stop
+        })?;
+        let mut checked_messages = Vec::new();
+        let checked = stream(&path, &mut |message| {
+            checked_messages.push(message);
+            Flow::Stop
+        })?;
+        assert_eq!(serde_json::to_value(checked)?, serde_json::to_value(owned)?);
+        assert_eq!(
+            serde_json::to_value(checked_messages)?,
+            serde_json::to_value(owned_messages)?
+        );
+        assert!(stream(&path, &mut |_message| {
+            std::fs::write(&path, "replacement source").unwrap();
+            Flow::Stop
+        })
+        .is_err());
+        Ok(())
     }
 
     #[test]
