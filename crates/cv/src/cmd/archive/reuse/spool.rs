@@ -156,7 +156,15 @@ mod tests {
             let (bytes, first) = stage(&session);
             let first = first.unwrap();
             assert_eq!(first.ordinal, 2, "empty first user must not lock the label source");
-            assert_eq!(cv_core::label_from(None, first.head.as_deref()), session.label());
+            assert_eq!(
+                cv_core::label_from(None, first.head.as_deref()),
+                cv_core::label_from(None, session.first_user_text().as_deref())
+            );
+            assert_eq!(
+                cv_core::label_from(session.title.as_deref(), first.head.as_deref()),
+                session.label(),
+                "the explicit title must outrank the captured prompt fallback"
+            );
             let mut header = session.clone();
             header.messages.clear();
             let mut full = Vec::new();
