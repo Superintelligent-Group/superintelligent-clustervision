@@ -872,30 +872,28 @@ fn stream_jsonl_spans_at(
         let raw_line = &data[start..end];
         start = end + 1;
         let line_off = off;
-        off += raw_line.len() as u64 + 1; // +1 for the consumed '\n'
-        let lead = raw_line.iter().take_while(|b| b.is_ascii_whitespace()).count();
-        let endw = raw_line.len()
-            - raw_line[lead..]
-                .iter()
-                .rev()
-                .take_while(|b| b.is_ascii_whitespace())
-                .count();
-        if lead >= endw {
+        off += raw_line.len() as u64 + u64::from(end < data.len());
+        // Match the buffered driver's complete-row UTF-8 and Unicode whitespace rules.
+        // Borrowing the validated string retains exact source byte offsets without a line Vec.
+        let Ok(raw_text) = std::str::from_utf8(raw_line) else {
+            skipped += 1;
+            continue;
+        };
+        let line = raw_text.trim();
+        if line.is_empty() {
             continue;
         }
-        let slice = &raw_line[lead..endw];
-        let base_off = line_off + lead as u64;
+        let slice = line.as_bytes();
+        let base_off = line_off + (line.as_ptr() as usize - raw_text.as_ptr() as usize) as u64;
 
         let before = scratch.len();
         let giant = slice.len() > crate::lazy::INLINE_MAX;
         let projected = if giant {
             source
                 .map(|source| {
-                    source.read_borrowed_range_value(
-                        base_off,
-                        std::str::from_utf8(slice).map_err(|_| crate::json::InvalidJson)?,
-                        |view| selected::project(view, source, true, has_events, ctx.complete),
-                    )
+                    source.read_borrowed_range_value(base_off, line, |view| {
+                        selected::project(view, source, true, has_events, ctx.complete)
+                    })
                 })
                 .transpose()
         } else {
@@ -2403,6 +2401,43 @@ mod tests {
             opts,
             sink,
         )
+    }
+
+    #[test]
+    fn native_rows_match_owned_unicode_trim_and_whole_row_utf8_acceptance() {
+        let world = cv_testkit::World::in_process("codex-native-row-acceptance");
+        let path = world.base.join("rollout-unicode.jsonl");
+        let giant = "雪\n".repeat(64 * 1024);
+        let mut bytes = format!(
+            "\u{2003}{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"unicode\"}}}}\u{2002}\n\u{2003}{}\u{2002}\n\u{2003}\u{2002}\n",
+            serde_json::json!({"type":"response_item","payload":{"type":"message","role":"user","content":giant}}),
+        ).into_bytes();
+        // Compacted bookkeeping is ignored by the lean dispatcher but bad UTF-8 still rejects
+        // the complete physical row, exactly as BufRead::lines did before projection.
+        bytes.extend_from_slice(b"{\"type\":\"compacted\",\"payload\":{\"guardian_history\":\"\xff\"}}\n");
+        bytes.extend_from_slice("\u{2003}{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"last\",\"output\":\"EOF result\"}}\u{2002}".as_bytes());
+        fs::write(&path, &bytes).unwrap();
+        let r = SessionRef::new("unicode", Harness::Codex, &path);
+        let mut complete = ParseOptions::complete();
+        complete.spans = true;
+        for opts in [ParseOptions::full(), ParseOptions::lazy(), complete] {
+            let expected = serde_json::to_value(old_buffered_oracle(&r, &opts)).unwrap();
+            for native in [false, true] {
+                let mut sink = crate::stream::CollectSink::default();
+                let mut actual = if native {
+                    Codex { roots: Vec::new() }.stream(&r, &opts, &mut sink).unwrap()
+                } else {
+                    portable::stream(&r, &opts, &mut sink).unwrap()
+                };
+                actual.messages = sink.messages;
+                actual.materialize().unwrap();
+                assert_eq!(
+                    serde_json::to_value(actual).unwrap(),
+                    expected,
+                    "native={native},opts={opts:?}"
+                );
+            }
+        }
     }
 
     #[test]
