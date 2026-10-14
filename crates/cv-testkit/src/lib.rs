@@ -19,7 +19,7 @@
 pub mod heap;
 
 use serde_json::Value;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -87,6 +87,7 @@ pub struct World {
     /// `home/.claude/projects/-work-proj`, where [`World::write_session`] writes.
     pub proj: PathBuf,
     guard: Option<MutexGuard<'static, ()>>,
+    original_env: Vec<(&'static str, Option<OsString>)>,
 }
 
 impl World {
@@ -103,6 +104,7 @@ impl World {
             cv_home,
             proj,
             guard: None,
+            original_env: Vec::new(),
         }
     }
 
@@ -111,6 +113,13 @@ impl World {
     pub fn in_process(tag: &str) -> World {
         let guard = PROCESS_ENV.lock().unwrap_or_else(|e| e.into_inner());
         let mut w = World::new(tag);
+        w.original_env = w
+            .env()
+            .iter()
+            .map(|(k, _)| *k)
+            .chain(CLEARED_ENV.iter().copied())
+            .map(|k| (k, std::env::var_os(k)))
+            .collect();
         for (k, v) in w.env() {
             std::env::set_var(k, v);
         }
@@ -169,12 +178,7 @@ impl World {
         cmd.args(args).envs(env.iter().copied());
         let out = match stdin {
             None => cmd.stdin(Stdio::null()).output().expect("cv should run"),
-            Some(text) => {
-                cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-                let mut child = cmd.spawn().expect("cv should spawn");
-                child.stdin.take().unwrap().write_all(text.as_bytes()).unwrap();
-                child.wait_with_output().expect("cv should run")
-            }
+            Some(text) => output_with_stdin(cmd, text),
         };
         (
             out.status.success(),
@@ -255,13 +259,31 @@ impl World {
 
 impl Drop for World {
     fn drop(&mut self) {
-        if self.guard.is_some() {
-            for k in CLEARED_ENV {
-                std::env::remove_var(k);
+        for (key, value) in &self.original_env {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
             }
         }
         fs::remove_dir_all(&self.base).ok();
     }
+}
+
+fn output_with_stdin(mut cmd: Command, text: &str) -> std::process::Output {
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn().expect("cv should spawn");
+    let mut input = child.stdin.take().unwrap();
+    // Drain both output pipes while feeding stdin: a child may emit more than a pipe
+    // holds before reading its next input byte. Early rejection may close stdin.
+    std::thread::scope(|scope| {
+        let writer = scope.spawn(move || input.write_all(text.as_bytes()));
+        let output = child.wait_with_output().expect("cv should run");
+        let written = writer.join().expect("stdin writer should finish");
+        if output.status.success() {
+            written.expect("successful cv should consume stdin");
+        }
+        output
+    })
 }
 
 /// Claude Code transcript records, in the shapes the real harness writes. Every record carries
@@ -361,5 +383,49 @@ pub mod claude {
             }
             (b, e) => *b = e,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stdin_runs_drain_output_before_input_is_consumed() {
+        let world = World::new("duplex-pipes");
+        let mut command = world.command(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", "tests::duplex_child", "--ignored", "--nocapture"])
+            .env("CV_TESTKIT_DUPLEX_CHILD", "1");
+        let output = output_with_stdin(command, &"i".repeat(2 * 1024 * 1024));
+        assert!(output.status.success(), "{:?}", output.status);
+        assert!(output.stdout.len() >= 1024 * 1024);
+        assert!(output.stderr.len() >= 1024 * 1024);
+    }
+
+    #[test]
+    #[ignore = "subprocess fixture for stdin_runs_drain_output_before_input_is_consumed"]
+    fn duplex_child() {
+        assert_eq!(std::env::var("CV_TESTKIT_DUPLEX_CHILD").as_deref(), Ok("1"));
+        std::io::stdout().write_all(&vec![b'o'; 1024 * 1024]).unwrap();
+        std::io::stderr().write_all(&vec![b'e'; 1024 * 1024]).unwrap();
+        let mut input = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::stdin(), &mut input).unwrap();
+        assert_eq!(input, vec![b'i'; 2 * 1024 * 1024]);
+    }
+
+    #[test]
+    fn in_process_restores_ambient_environment_before_unlocking() {
+        let mut world = World::in_process("restore-env");
+        let original = world.original_env.clone();
+        let guard = world.guard.take();
+        let base = world.base.clone();
+        assert_eq!(std::env::var_os("HOME"), Some(world.home.clone().into_os_string()));
+        drop(world);
+        for (key, value) in original {
+            assert_eq!(std::env::var_os(key), value, "{key} was not restored");
+        }
+        assert!(!base.exists());
+        drop(guard);
     }
 }
