@@ -255,6 +255,27 @@ fn same_block(a: &Block, b: &Block) -> bool {
     }
 }
 #[cfg(any(feature = "sqlite", test))]
+fn same_usage(a: &Option<super::Usage>, b: &Option<super::Usage>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => {
+            a.input_tokens == b.input_tokens
+                && a.output_tokens == b.output_tokens
+                && a.cache_read_tokens == b.cache_read_tokens
+                && a.cache_creation_tokens == b.cache_creation_tokens
+                && a.reasoning_tokens == b.reasoning_tokens
+                && match (a.cost_usd, b.cost_usd) {
+                    // Preserve Value serialization's null normalization for nonfinite costs;
+                    // an absent cost is omitted and therefore remains distinct from null.
+                    (Some(a), Some(b)) => (a == b) || (!a.is_finite() && !b.is_finite()),
+                    (None, None) => true,
+                    _ => false,
+                }
+        }
+        _ => false,
+    }
+}
+#[cfg(any(feature = "sqlite", test))]
 fn same_envelope(a: &Message, b: &Message) -> bool {
     a.id == b.id
         && a.parent_id == b.parent_id
@@ -263,7 +284,7 @@ fn same_envelope(a: &Message, b: &Message) -> bool {
         && a.origin == b.origin
         && a.timestamp == b.timestamp
         && a.model == b.model
-        && serde_json::to_value(&a.usage).ok() == serde_json::to_value(&b.usage).ok()
+        && same_usage(&a.usage, &b.usage)
         && a.extra
             .iter()
             .filter(|(key, _)| key.as_str() != crate::harness::claude::CARRIER_KEY)
@@ -271,6 +292,60 @@ fn same_envelope(a: &Message, b: &Message) -> bool {
                 .extra
                 .iter()
                 .filter(|(key, _)| key.as_str() != crate::harness::claude::CARRIER_KEY))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replay_usage_comparison_matches_serialized_value_oracle() {
+        let mut usages = vec![None];
+        for cost in [
+            None,
+            Some(0.0),
+            Some(-0.0),
+            Some(1.25),
+            Some(f64::NAN),
+            Some(f64::INFINITY),
+            Some(f64::NEG_INFINITY),
+        ] {
+            let usage = super::super::Usage {
+                cost_usd: cost,
+                ..Default::default()
+            };
+            usages.push(Some(usage.clone()));
+            usages.push(Some(super::super::Usage {
+                input_tokens: Some(0),
+                ..usage.clone()
+            }));
+            usages.push(Some(super::super::Usage {
+                output_tokens: Some(u64::MAX),
+                ..usage.clone()
+            }));
+            usages.push(Some(super::super::Usage {
+                cache_read_tokens: Some(1),
+                ..usage.clone()
+            }));
+            usages.push(Some(super::super::Usage {
+                cache_creation_tokens: Some(2),
+                ..usage.clone()
+            }));
+            usages.push(Some(super::super::Usage {
+                reasoning_tokens: Some(3),
+                ..usage
+            }));
+        }
+        for a in &usages {
+            for b in &usages {
+                assert_eq!(
+                    same_usage(a, b),
+                    serde_json::to_value(a).unwrap() == serde_json::to_value(b).unwrap(),
+                    "{a:?} vs {b:?}"
+                );
+            }
+        }
+    }
 }
 #[cfg(any(feature = "sqlite", test))]
 pub(crate) fn same_message(a: &Message, b: &Message) -> bool {
