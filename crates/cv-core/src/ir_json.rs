@@ -40,18 +40,19 @@ impl Session {
 
     fn write_json_format(&self, writer: &mut impl Write, resolver: &Resolver, pretty: bool) -> anyhow::Result<()> {
         let reads = crate::source::session_reads(self);
-        self.serialize(Fields {
+        let result = self.serialize(Fields {
             writer,
             resolver,
             pretty,
             depth: 0,
             first: true,
             context: Context::Session(self),
-        })?;
+        });
         anyhow::ensure!(
             reads.fresh(&mut crate::source::Probe::default()),
             "session sources changed during JSON output"
         );
+        result?;
         Ok(())
     }
 }
@@ -94,14 +95,21 @@ impl Message {
     }
 
     fn write_json_format(&self, writer: &mut impl Write, resolver: &Resolver, pretty: bool) -> anyhow::Result<()> {
-        self.serialize(Fields {
+        let mut reads = crate::source::ReadSet::default();
+        crate::source::record_message_reads(self, std::path::Path::new(""), &mut reads);
+        let result = self.serialize(Fields {
             writer,
             resolver,
             pretty,
             depth: 0,
             first: true,
             context: Context::Message(self),
-        })?;
+        });
+        anyhow::ensure!(
+            reads.fresh(&mut crate::source::Probe::default()),
+            "message sources changed during JSON output"
+        );
+        result?;
         Ok(())
     }
 }
@@ -750,5 +758,68 @@ mod tests {
             }
         }
         assert!(Message::new(Role::User).write_json(&mut Failing, &resolver).is_err());
+    }
+}
+
+#[cfg(test)]
+mod output_freshness_tests {
+    use super::*;
+    #[test]
+    fn earlier_source_mutation_during_trailing_metadata_rejects_ir_json() -> anyhow::Result<()> {
+        let world = cv_testkit::World::in_process("ir-json-final-source-check");
+        let path = world.base.join("body.json");
+        let raw = serde_json::to_vec(&"source body ".repeat(10000))?;
+        std::fs::write(&path, &raw)?;
+        let text = crate::json::JsonSource::capture(&path)?
+            .read_range_value(0, raw.len() as u64, |view| view.source_text())?
+            .unwrap();
+        let mut message = Message::new(crate::Role::User);
+        message.content.push(Block::Text { text });
+        message.extra.insert("mutate_marker".into(), serde_json::json!(true));
+        struct Mutate<'a> {
+            source: &'a std::path::Path,
+            done: bool,
+            fail: bool,
+        }
+        impl Write for Mutate<'_> {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if bytes
+                    .windows(b"mutate_marker".len())
+                    .any(|window| window == b"mutate_marker")
+                {
+                    std::fs::write(self.source, b"changed during trailing metadata")?;
+                    self.done = true;
+                    if self.fail {
+                        return Err(io::Error::other("trailing output failure"));
+                    }
+                }
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        for pretty in [false, true] {
+            for fail in [false, true] {
+                std::fs::write(&path, &raw)?;
+                // Refresh capture after each deliberate source replacement.
+                message.content[0] = Block::Text {
+                    text: crate::json::JsonSource::capture(&path)?
+                        .read_range_value(0, raw.len() as u64, |v| v.source_text())?
+                        .unwrap(),
+                };
+                let mut writer = Mutate {
+                    source: &path,
+                    done: false,
+                    fail,
+                };
+                let error = message
+                    .write_json_format(&mut writer, &Resolver::new(None), pretty)
+                    .unwrap_err();
+                assert!(writer.done);
+                assert!(error.to_string().contains("sources changed"), "{error:#}");
+            }
+        }
+        Ok(())
     }
 }
