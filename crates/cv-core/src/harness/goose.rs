@@ -421,16 +421,21 @@ fn copied_message_id(conn: &Connection, id: &str, created_at: Option<DateTime<Ut
     Some(first)
 }
 
-fn earliest_holder(conn: &Connection, first: &str) -> Option<(DateTime<Utc>, String)> {
-    let mut stmt = conn
-        .prepare("SELECT s.id,s.created_at FROM messages m JOIN sessions s ON s.id=m.session_id WHERE m.message_id=?1")
-        .ok()?;
-    let holders = stmt
-        .query_map([first], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
-        })
-        .ok()?
-        .flatten();
+fn earliest_holder(conn: &Connection, first: &str, excluding: Option<&str>) -> Option<(DateTime<Utc>, String)> {
+    let sql = if excluding.is_some() {
+        "SELECT s.id,s.created_at FROM messages m JOIN sessions s ON s.id=m.session_id WHERE m.message_id=?1 AND m.session_id!=?2"
+    } else {
+        "SELECT s.id,s.created_at FROM messages m JOIN sessions s ON s.id=m.session_id WHERE m.message_id=?1"
+    };
+    let mut stmt = conn.prepare(sql).ok()?;
+    let decode = |row: &rusqlite::Row<'_>| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?));
+    let holders = if let Some(id) = excluding {
+        stmt.query_map([first, id], decode)
+    } else {
+        stmt.query_map([first], decode)
+    }
+    .ok()?
+    .flatten();
     holders
         .filter_map(|(sid, created)| {
             #[cfg(test)]
@@ -440,13 +445,41 @@ fn earliest_holder(conn: &Connection, first: &str) -> Option<(DateTime<Utc>, Str
         .min()
 }
 
+// Sharing a minimum that includes the current holder is equivalent to SQL's exclusion only
+// under native TEXT/BINARY ID comparisons. Custom affinities/collations keep the old query.
+fn binary_holder_ids(conn: &Connection) -> bool {
+    [("sessions", "id"), ("messages", "session_id")]
+        .into_iter()
+        .all(|(table, id)| {
+            let ddl = conn
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name=?1",
+                    [table],
+                    |row| row.get::<_, String>(0),
+                )
+                .ok();
+            if !ddl.is_some_and(|ddl| !ddl.to_ascii_uppercase().contains("COLLATE")) {
+                return false;
+            }
+            let Ok(mut stmt) = conn.prepare(&format!("PRAGMA table_info({table})")) else {
+                return false;
+            };
+            let Ok(columns) = stmt.query_map([], |row| Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?))) else {
+                return false;
+            };
+            columns
+                .flatten()
+                .any(|(name, kind)| name == id && kind.eq_ignore_ascii_case("TEXT"))
+        })
+}
+
 #[cfg(test)]
 thread_local! { static FORK_HOLDER_ROWS:std::cell::Cell<usize>=const {std::cell::Cell::new(0)}; }
 
 #[cfg(test)]
 fn fork_source(conn: &Connection, id: &str, created: Option<DateTime<Utc>>) -> Option<String> {
     let first = copied_message_id(conn, id, created)?;
-    let (time, parent) = earliest_holder(conn, &first)?;
+    let (time, parent) = earliest_holder(conn, &first, Some(id))?;
     (time < created? && parent != id).then_some(parent)
 }
 
@@ -462,6 +495,19 @@ fn fork_source_scoped(
     let Some(first) = copied_message_id(conn, &r.id, Some(created)) else {
         return Ok(None);
     };
+    let binary = if r.path.is_file() {
+        *crate::source::inventory("goose-fork-id-contract", &r.path, reads, || {
+            Ok((binary_holder_ids(conn), reads.clone(), std::mem::size_of::<bool>()))
+        })?
+        .0
+    } else {
+        binary_holder_ids(conn)
+    };
+    if !binary {
+        return Ok(
+            earliest_holder(conn, &first, Some(&r.id)).and_then(|(time, parent)| (time < created).then_some(parent))
+        );
+    }
     let holder = if r.path.is_file() {
         // Synthetic memo selector: only actual DB/WAL paths in reads are freshness authorities.
         let mut selector = String::with_capacity(first.len() * 2);
@@ -471,13 +517,13 @@ fn fork_source_scoped(
         }
         let key = r.path.join(selector);
         let (holder, _) = crate::source::inventory("goose-fork-holder", &key, reads, || {
-            let holder = earliest_holder(conn, &first);
+            let holder = earliest_holder(conn, &first, None);
             let retained = std::mem::size_of_val(&holder) + holder.as_ref().map_or(0, |(_, id)| id.capacity());
             Ok((holder, reads.clone(), retained))
         })?;
         holder
     } else {
-        std::sync::Arc::new(earliest_holder(conn, &first))
+        std::sync::Arc::new(earliest_holder(conn, &first, None))
     };
     Ok(holder
         .as_ref()
@@ -1604,6 +1650,42 @@ mod tests {
             );
             assert!(fork_source(&conn, "source", parse_ts_text("2024-01-01 00:00:00")).is_none());
         }
+    }
+
+    #[test]
+    fn fork_scoped_custom_nocase_ids_preserve_sql_current_holder_exclusion() -> Result<()> {
+        let world = cv_testkit::World::in_process("goose-nocase-fork-scope");
+        let path = world.base.join("sessions.db");
+        let conn = Connection::open(&path)?;
+        conn.execute_batch(&SCHEMA.replace(
+            "session_id TEXT NOT NULL REFERENCES sessions(id)",
+            "session_id TEXT COLLATE NOCASE NOT NULL REFERENCES sessions(id)",
+        ))?;
+        for (id, at) in [
+            ("CASE", "2024-01-01 00:00:00"),
+            ("origin", "2024-01-02 00:00:00"),
+            ("case", "2024-01-03 00:00:00"),
+        ] {
+            conn.execute(
+                "INSERT INTO sessions(id,working_dir,created_at) VALUES (?1,'/synthetic',?2)",
+                rusqlite::params![id, at],
+            )?;
+            conn.execute("INSERT INTO messages(session_id,message_id,role,content_json,created_timestamp) VALUES (?1,'shared','user','[]',1703980800)",[id])?;
+        }
+        assert!(!binary_holder_ids(&conn));
+        let mut reads = crate::source::ReadSet::default();
+        reads.record(&path);
+        let created = parse_ts_text("2024-01-03 00:00:00");
+        let _scope = crate::source::read_scope();
+        for _ in 0..2 {
+            let oracle = fork_source(&conn, "case", created);
+            assert_eq!(oracle.as_deref(), Some("origin"));
+            assert_eq!(
+                fork_source_scoped(&conn, &SessionRef::new("case", Harness::Goose, &path), created, &reads)?,
+                oracle
+            );
+        }
+        Ok(())
     }
 
     #[test]
