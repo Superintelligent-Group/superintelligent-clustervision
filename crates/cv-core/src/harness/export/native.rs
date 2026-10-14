@@ -650,30 +650,38 @@ fn chatgpt_title(view: JsonView<'_>, resolver: &Resolver) -> Result<Option<Optio
     let title = text_summary(texts.iter(), resolver, true);
     Ok((image || title.is_some()).then_some(title))
 }
-fn chatgpt_text(r: Option<&Fields<'_>>, spans: bool, source: &JsonSource, resolver: &Resolver) -> Result<Text> {
+pub(super) fn chatgpt_text(
+    r: Option<&Fields<'_>>,
+    spans: bool,
+    source: &JsonSource,
+    resolver: &Resolver,
+) -> Result<Text> {
     let Some(r) = r else { return Ok(Text::default()) };
     if let Some(parts) = r.get("parts").map(JsonView::array).transpose()?.flatten() {
         if spans {
-            let mut selected = Vec::new();
-            for part in parts {
-                let part = part?;
-                if part.is_string()? {
-                    selected.push(part)
-                }
-            }
-            return match selected.as_slice() {
-                [] => Ok(Text::default()),
-                [part] => Ok(part.text(true)?.unwrap()),
-                _ => crate::harness::store::text::append(source, &source.decoded_backing()?, |builder| {
-                    for (i, part) in selected.into_iter().enumerate() {
-                        if i != 0 {
-                            builder.push("\n")?;
-                        }
-                        anyhow::ensure!(builder.push_string(part)?, "selected ChatGPT string part");
-                    }
-                    Ok(())
-                }),
+            let mut selected =
+                parts.filter_map(
+                    |part| match part.and_then(|part| Ok(part.is_string()?.then_some(part))) {
+                        Ok(Some(part)) => Some(Ok(part)),
+                        Ok(None) => None,
+                        Err(error) => Some(Err(error)),
+                    },
+                );
+            let Some(first) = selected.next().transpose()? else {
+                return Ok(Text::default());
             };
+            let Some(second) = selected.next().transpose()? else {
+                return Ok(first.text(true)?.unwrap());
+            };
+            return crate::harness::store::text::append(source, &source.decoded_backing()?, |builder| {
+                for (i, part) in [Ok(first), Ok(second)].into_iter().chain(selected).enumerate() {
+                    if i != 0 {
+                        builder.push("\n")?;
+                    }
+                    anyhow::ensure!(builder.push_string(part?)?, "selected ChatGPT string part");
+                }
+                Ok(())
+            });
         }
         let mut first = None;
         let mut joined = None::<String>;

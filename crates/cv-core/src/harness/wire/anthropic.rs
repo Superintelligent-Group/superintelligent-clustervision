@@ -308,43 +308,53 @@ pub(crate) fn block_from_view(
 /// empty ones) retain their separator positions. Original capture guards follow joined backing.
 fn coerce_selected_array(content: crate::json::JsonView<'_>) -> anyhow::Result<Text> {
     use crate::harness::store::{document::Fields, text};
-    let mut parts = Vec::new();
-    for item in content.array()?.unwrap() {
-        let Some(item) = Fields::parse(item?, &["type", "text"])? else {
-            continue;
+    let mut parts = content.array()?.unwrap().filter_map(|item| {
+        let selected = (|| -> anyhow::Result<Option<Option<crate::json::JsonView<'_>>>> {
+            let Some(item) = Fields::parse(item?, &["type", "text"])? else {
+                return Ok(None);
+            };
+            if item.string("type")?.as_deref().is_some_and(super::is_image_part) {
+                return Ok(Some(None));
+            }
+            if let Some(value) = item.get("text") {
+                if value.is_string()? {
+                    return Ok(Some(Some(value)));
+                }
+            }
+            Ok(None)
+        })();
+        match selected {
+            Ok(Some(part)) => Some(Ok(part)),
+            Ok(None) => None,
+            Err(error) => Some(Err(error)),
+        }
+    });
+    let Some(first) = parts.next().transpose()? else {
+        return Ok(Text::default());
+    };
+    let Some(second) = parts.next().transpose()? else {
+        return match first {
+            None => Ok("[image]".into()),
+            Some(value) => Ok(value.source_text()?.unwrap()),
         };
-        if item.string("type")?.as_deref().is_some_and(super::is_image_part) {
-            parts.push(None);
-        } else if let Some(value) = item.get("text") {
-            if value.is_string()? {
-                parts.push(Some(value));
+    };
+    let crate::Json::Source(range) = content.to_json()? else {
+        unreachable!("selected array has source backing")
+    };
+    let source = range.captured_source();
+    text::append(source, &source.decoded_backing()?, |builder| {
+        for (i, part) in [Ok(first), Ok(second)].into_iter().chain(parts).enumerate() {
+            if i != 0 {
+                builder.push("\n")?;
+            }
+            if let Some(part) = part? {
+                anyhow::ensure!(builder.push_string(part)?, "selected tool-result text");
+            } else {
+                builder.push("[image]")?;
             }
         }
-    }
-    match parts.as_slice() {
-        [] => Ok(Text::default()),
-        [None] => Ok("[image]".into()),
-        [Some(value)] => Ok(value.source_text()?.unwrap()),
-        _ => {
-            let crate::Json::Source(range) = content.to_json()? else {
-                unreachable!("selected array has source backing")
-            };
-            let source = range.captured_source();
-            text::append(source, &source.decoded_backing()?, |builder| {
-                for (i, part) in parts.into_iter().enumerate() {
-                    if i != 0 {
-                        builder.push("\n")?;
-                    }
-                    if let Some(part) = part {
-                        anyhow::ensure!(builder.push_string(part)?, "selected tool-result text");
-                    } else {
-                        builder.push("[image]")?;
-                    }
-                }
-                Ok(())
-            })
-        }
-    }
+        Ok(())
+    })
 }
 
 /// Every block of a `content` array; a bare string is one text block. (Claude's lazy reader spans
@@ -735,6 +745,38 @@ mod selected_media_tests {
         }
         Ok(())
     }
+    #[test]
+    fn wide_composite_results_preserve_empty_parts_image_precedence_and_guard() -> anyhow::Result<()> {
+        let world = cv_testkit::World::in_process("wire-wide-result");
+        let path = world.base.join("result.json");
+        let mut parts = Vec::new();
+        for i in 0..8192 {
+            parts.push(match i % 4 {
+                0 => json!({"text":""}),
+                1 => json!({"ignored":"not a text part"}),
+                2 => json!({"type":"image_url","text":"ignored image text"}),
+                _ => json!({"text":format!("part-{i} λ\n")}),
+            });
+        }
+        let value = json!({"type":"tool_result","tool_use_id":"call","content":parts});
+        std::fs::write(&path, serde_json::to_vec(&value)?)?;
+        let source = crate::json::JsonSource::capture(&path)?;
+        let block = source
+            .read_range_value(0, source.len(), |view| block_from_view(view, &ANTHROPIC, true))?
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&block)?,
+            serde_json::to_value(block_from(&value, &ANTHROPIC))?
+        );
+        std::fs::write(&path, b"changed")?;
+        if let Block::ToolResult { content, .. } = block {
+            assert!(content.try_resolve(&crate::lazy::Resolver::new(None)).is_err());
+        } else {
+            panic!("tool result");
+        }
+        Ok(())
+    }
+
     #[test]
     fn composite_result_projection_matches_owned_codec_without_joined_body_ownership() -> anyhow::Result<()> {
         let world = cv_testkit::World::in_process("wire-composite-result");

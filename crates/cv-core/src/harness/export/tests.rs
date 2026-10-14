@@ -598,3 +598,30 @@ fn multipart_chatgpt_read_keeps_lazy_payloads_and_breaks_parent_cycles() -> Resu
     );
     Ok(())
 }
+
+#[test]
+fn wide_chatgpt_parts_preserve_filtered_join_and_source_guard() -> Result<()> {
+    let world = cv_testkit::World::in_process("account-wide-parts");
+    let path = world.base.join("parts.json");
+    let mut parts = Vec::new();
+    for i in 0..8192 {
+        parts.push(match i % 3 {
+            0 => json!(""),
+            1 => json!({"ignored":"not a string part"}),
+            _ => json!(format!("part-{i} λ\n")),
+        });
+    }
+    let expected = parts.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("\n");
+    std::fs::write(&path, serde_json::to_vec(&json!({"parts":parts}))?)?;
+    let source = crate::json::JsonSource::capture(&path)?;
+    let resolver = crate::lazy::Resolver::new(None);
+    let text = source.read_range_value(0, source.len(), |view| {
+        let fields = crate::harness::store::document::Fields::parse(view, &["parts"])?;
+        native::chatgpt_text(fields.as_ref(), true, &source, &resolver)
+    })?;
+    assert!(matches!(text, crate::Text::Source(_)));
+    assert_eq!(text.try_resolve(&resolver)?.as_ref(), expected);
+    std::fs::write(&path, b"changed")?;
+    assert!(text.try_resolve(&resolver).is_err());
+    Ok(())
+}
