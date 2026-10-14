@@ -695,21 +695,18 @@ fn load_work_dirs(kimi_json: &Path) -> HashMap<String, PathBuf> {
     map
 }
 
-/// `default_model` from `config.toml`. We don't pull in a TOML parser for a single scalar: scan for
-/// the top-level `default_model = "…"` line.
+/// The top-level model follows TOML string/comment/table rules. The workspace already includes
+/// the parser; typed decoding leaves unrelated configuration out of the adapter's state.
 fn default_model_from_config(config_toml: &Path) -> Option<String> {
-    let text = fs::read_to_string(config_toml).ok()?;
-    for line in text.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("default_model") {
-            let rest = rest.trim_start().strip_prefix('=')?.trim();
-            let val = rest.trim_matches('"').trim_matches('\'');
-            if !val.is_empty() {
-                return Some(val.to_string());
-            }
-        }
+    #[derive(serde::Deserialize)]
+    struct Config {
+        default_model: Option<String>,
     }
-    None
+    let text = fs::read_to_string(config_toml).ok()?;
+    toml::from_str::<Config>(&text)
+        .ok()?
+        .default_model
+        .filter(|model| !model.is_empty())
 }
 
 /// Cheap scan of one transcript into a `SessionRef`. `dir` is the session's source dir (the
@@ -2152,6 +2149,44 @@ mod tests {
         let h = md5_hex(b"/remote/proj");
         assert_eq!(map.get(&format!("box_{h}")).unwrap(), &PathBuf::from("/remote/proj"));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn model_config_uses_top_level_toml_semantics_in_session_headers() -> Result<()> {
+        let world = cv_testkit::World::in_process("kimi_toml_model");
+        let home = world.home.join(".kimi");
+        let session = home.join("sessions/hash/session");
+        fs::create_dir_all(&session)?;
+        fs::write(
+            session.join("context.jsonl"),
+            "{\"role\":\"user\",\"content\":\"prompt\"}\n",
+        )?;
+        let config = home.join("config.toml");
+        let adapter = Kimi::with_home(&home);
+        let reference = SessionRef::new("session", Harness::Kimi, &session);
+        for (text, expected) in [
+            (
+                "default_model_provider = 'unused'\ndefault_model = 'actual' # comment\n",
+                Some("actual"),
+            ),
+            ("\"default_model\" = \"escaped\\u002fmodel\"\n", Some("escaped/model")),
+            ("[profiles.demo]\ndefault_model = 'nested'\n", None),
+            ("default_model = ''\n", None),
+            ("default_model = 42\n", None),
+            ("default_model = 'before'\ninvalid TOML\n", None),
+        ] {
+            fs::write(&config, text)?;
+            assert_eq!(default_model_from_config(&config).as_deref(), expected);
+            let mut sink = |_: Message| Flow::Continue;
+            assert_eq!(
+                adapter
+                    .stream(&reference, &ParseOptions::full(), &mut sink)?
+                    .model
+                    .as_deref(),
+                expected
+            );
+        }
+        Ok(())
     }
 
     #[test]
