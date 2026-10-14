@@ -2423,6 +2423,57 @@ mod tests {
         assert_eq!(usage.output_tokens, Some(2));
     }
 
+    #[test]
+    fn rollout_duplicate_projection_fields_match_full_value_dispatch() {
+        let world = cv_testkit::World::in_process("codex-duplicate-projection-fields");
+        let path = world.base.join("rollout-duplicates.jsonl");
+        let giant = "payload λ".repeat(crate::lazy::INLINE_MAX + 1);
+        let lines = [
+            format!(
+                r#"{{"type":"compacted","payload":{{"type":"message","role":"user","content":"{giant}"}},"type":"response_item"}}"#
+            ),
+            format!(
+                r#"{{"type":"response_item","payload":{{"type":"function_call_output","call_id":"first","output":"{giant}"}},"payload":{{"type":"function_call_output","call_id":"final","output":"final result"}}}}"#
+            ),
+            format!(
+                r#"{{"type":"response_item","payload":{{"type":"function_call_output","output":"{giant}"}},"payload":{{"type":"function_call_output","call_id":"missing"}}}}"#
+            ),
+            format!(
+                r#"{{"type":"response_item","payload":{{"type":"function_call_output","output":"{giant}"}},"payload":null}}"#
+            ),
+        ];
+        fs::write(&path, lines.join("\n")).unwrap();
+        let r = SessionRef::new("duplicates", Harness::Codex, &path);
+        for opts in [ParseOptions::full(), ParseOptions::lazy(), ParseOptions::complete()] {
+            // Decode every physical record as Value, without the lean projector used by the old
+            // transport oracle. This independently establishes duplicate-key dispatch behavior.
+            let mut expected = Session::new("", Harness::Codex);
+            expected.source_path = Some(path.clone());
+            let mut ctx = CodexCtx::for_opts(&opts);
+            for line in &lines {
+                let value = serde_json::from_str::<Value>(line).unwrap();
+                let mut messages = Vec::new();
+                dispatch_line(&mut expected, &mut messages, &value, false, &mut ctx);
+                expected.messages.extend(messages);
+            }
+            expected.id = r.id.clone();
+            for native in [false, true] {
+                let mut sink = crate::stream::CollectSink::default();
+                let mut actual = if native {
+                    Codex { roots: Vec::new() }.stream(&r, &opts, &mut sink).unwrap()
+                } else {
+                    portable::stream(&r, &opts, &mut sink).unwrap()
+                };
+                actual.messages = sink.messages;
+                actual.materialize().unwrap();
+                assert_eq!(
+                    serde_json::to_value(actual).unwrap(),
+                    serde_json::to_value(&expected).unwrap()
+                );
+            }
+        }
+    }
+
     // Independent old buffered transport/collector: preserve .lines(), trim, lean/full fallback,
     // held-message EOF handling, and corruption counts while the production driver tracks bytes.
     fn old_buffered_oracle(r: &SessionRef, opts: &ParseOptions) -> Session {

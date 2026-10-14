@@ -74,6 +74,12 @@ impl<'de, 's> Visitor<'de> for Top<'s, 'de> {
         let mut out = Map::new();
         let mut ty: Option<String> = None;
         while let Some(key) = map.next_key::<String>()? {
+            // Pruning depends on the preceding discriminator and may capture an output outside
+            // the Value tree. A duplicate discriminator/payload can invalidate that decision;
+            // let the caller's ordinary Value fallback apply exact last-wins semantics.
+            if matches!(key.as_str(), "type" | "payload") && out.contains_key(&key) {
+                return Err(serde::de::Error::custom("duplicate rollout projection field"));
+            }
             let val = match (key.as_str(), ty.as_deref()) {
                 ("payload", Some("compacted")) => map.next_value_seed(Compacted)?,
                 ("payload", Some("response_item")) if self.giant => map.next_value_seed(Item {
@@ -252,6 +258,20 @@ impl<'de, 's> Visitor<'de> for Item<'s, 'de> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn duplicate_discriminators_and_payloads_require_value_fallback() {
+        for line in [
+            r#"{"type":"compacted","payload":{"type":"message","role":"user","content":"keep me"},"type":"response_item"}"#,
+            r#"{"type":"response_item","payload":{"type":"function_call_output","output":"stale"},"payload":{"type":"function_call_output","output":"final"}}"#,
+            r#"{"type":"response_item","payload":{"type":"function_call_output","output":"stale"},"payload":{"type":"function_call_output","call_id":"last"}}"#,
+            r#"{"type":"response_item","payload":{"type":"function_call_output","output":"stale"},"payload":null}"#,
+        ] {
+            assert!(parse(line.as_bytes(), false).is_err());
+            assert!(parse(line.as_bytes(), true).is_err());
+            assert!(parse_reader(line.as_bytes()).is_err());
+        }
+    }
 
     /// What the lean parse builds of a record is what a plain parse builds, minus exactly the
     /// pruned fields.
