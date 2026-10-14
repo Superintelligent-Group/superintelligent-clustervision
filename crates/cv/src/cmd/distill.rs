@@ -121,7 +121,7 @@ fn load_findings(spec: &str) -> Result<Session> {
 fn enrich_path_meta(s: &mut Session, p: &Path) {
     // A sub-agent transcript read by path: its label lives in the sibling `<stem>.meta.json`
     // (the resolver path reads it through the parent's sub-agent tree instead).
-    if p.is_file() {
+    if s.harness == Harness::Claude && p.is_file() {
         if let Some(meta) = std::fs::read_to_string(p.with_extension("meta.json"))
             .ok()
             .and_then(|t| serde_json::from_str::<Value>(&t).ok())
@@ -227,18 +227,7 @@ pub(crate) fn emit_to(
             debug_assert_eq!(res.path, dest);
             // The meta sidecar is optional for resume, but carries the model and the label a
             // harness shows; inherit the source's when it has one.
-            let src_meta = source_path.with_extension("meta.json");
-            let mut meta: Value = std::fs::read_to_string(&src_meta)
-                .ok()
-                .and_then(|s| serde_json::from_str(&s).ok())
-                .unwrap_or_else(|| json!({"agentType": "general-purpose"}));
-            if let Some(o) = meta.as_object_mut() {
-                o.insert("description".into(), json!(description));
-                o.remove("toolUseId");
-                if let Some(m) = model {
-                    o.insert("model".into(), json!(m));
-                }
-            }
+            let meta = agent_meta(source_path, description, model.as_deref());
             std::fs::write(sub.join(format!("agent-{agent}.meta.json")), meta.to_string())?;
             let sidecar = write_sidecar(&res.path, elided)?;
             Ok(Emitted {
@@ -252,6 +241,21 @@ pub(crate) fn emit_to(
             })
         }
     }
+}
+
+fn agent_meta(source_path: &Path, description: &str, model: Option<&str>) -> Value {
+    let mut meta: Value = std::fs::read_to_string(source_path.with_extension("meta.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({"agentType":"general-purpose"}));
+    let object = meta.as_object_mut().expect("object metadata or object fallback");
+    object.insert("description".into(), json!(description));
+    object.remove("toolUseId");
+    if let Some(model) = model {
+        object.insert("model".into(), json!(model));
+    }
+    meta
 }
 
 /// Emit `ir` as a Claude transcript under `out_dir` and verify what was written: the fidelity
@@ -268,10 +272,11 @@ fn emit_resumable(ir: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<cv
 /// A root session's transcript, from a path or an id.
 fn root_transcript(root: &str) -> Result<SessionRef> {
     let p = Path::new(root);
-    if p.is_file() {
-        return Ok(SessionRef::from_path(p, Harness::Claude));
-    }
-    let (r, _) = resolve(root, Some(Harness::Claude))?;
+    let r = if p.is_file() {
+        SessionRef::from_path(p, Harness::Claude)
+    } else {
+        resolve(root, Some(Harness::Claude))?.0
+    };
     if r.id.starts_with("agent-") {
         return usage(format!(
             "{root} is a sub-agent; --agent-of takes the ROOT session that should own the new agent"
@@ -611,6 +616,36 @@ mod tests {
             assert_eq!(error.to_string(), format!("--upto {n}: the session has 9 messages"));
             assert!(error.downcast_ref::<crate::util::UsageError>().is_some());
         }
+        Ok(())
+    }
+    #[test]
+    fn subagent_root_path_is_rejected_and_metadata_is_always_an_object() -> Result<()> {
+        let world = cv_testkit::World::new("distill-agent-target");
+        let path = world.base.join("agent-child.jsonl");
+        std::fs::write(&path, b"read-only source")?;
+        let error = root_transcript(path.to_str().unwrap()).unwrap_err();
+        assert!(error.downcast_ref::<crate::util::UsageError>().is_some());
+        for raw in ["null", "false", "17", "[]", "\"string\""] {
+            std::fs::write(path.with_extension("meta.json"), raw)?;
+            let metadata = agent_meta(&path, "new description", Some("new-model"));
+            assert_eq!(
+                metadata,
+                json!({"agentType":"general-purpose", "description":"new description", "model":"new-model"})
+            );
+        }
+        std::fs::write(
+            path.with_extension("meta.json"),
+            r#"{"agentType":"reviewer","description":"old","model":"old-model","toolUseId":"source-link","extra":1}"#,
+        )?;
+        let metadata = agent_meta(&path, "new description", Some("new-model"));
+        assert_eq!(
+            metadata,
+            json!({"agentType":"reviewer", "description":"new description", "model":"new-model", "extra":1})
+        );
+        let mut foreign = Session::new("other", Harness::Codex);
+        enrich_path_meta(&mut foreign, &path);
+        assert!(foreign.harness_extra(Harness::Claude).is_none());
+        assert_eq!(std::fs::read(&path)?, b"read-only source");
         Ok(())
     }
 }
