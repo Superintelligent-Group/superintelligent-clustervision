@@ -694,6 +694,7 @@ mod tests {
     /// file was that long — at EVERY cut point, including mid-line (a record still being written).
     #[test]
     fn byte_baseline_resolves_to_the_count_a_parse_saw_then() {
+        let _world = cv_testkit::World::in_process("watch-byte_baseline_resolves_to_the_count_a_parse_saw_then");
         let dir = std::env::temp_dir().join(format!("cv-watch-baseline-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let fixtures = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/claude");
@@ -729,6 +730,7 @@ mod tests {
     /// both must be exactly the parse's.
     #[test]
     fn streamed_count_and_tail_equal_the_parse() {
+        let _world = cv_testkit::World::in_process("watch-streamed_count_and_tail_equal_the_parse");
         let fx = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
         let mut checked = 0;
         for (h, rel) in [
@@ -779,6 +781,8 @@ mod tests {
     /// writes a new session) rewrites in place; this pins the failure mode should anything else.
     #[test]
     fn a_byte_mark_on_a_rewritten_transcript_resolves_within_the_new_file() {
+        let _world =
+            cv_testkit::World::in_process("watch-a_byte_mark_on_a_rewritten_transcript_resolves_within_the_new_file");
         let dir = std::env::temp_dir().join(format!("cv-watch-rewrite-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("s.jsonl");
@@ -829,6 +833,7 @@ mod tests {
 
     #[test]
     fn baseline_is_a_byte_mark_only_for_append_only_transcripts() {
+        let _world = cv_testkit::World::in_process("watch-baseline_is_a_byte_mark_only_for_append_only_transcripts");
         let dir = std::env::temp_dir().join(format!("cv-watch-mark-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let jsonl = dir.join("s.jsonl");
@@ -850,6 +855,8 @@ mod tests {
     /// runs over one temp transcript instead of the machine's fleet.
     #[test]
     fn bounded_poll_leaves_the_rest_pending_and_a_cursor_resumes_it() {
+        let _world =
+            cv_testkit::World::in_process("watch-bounded_poll_leaves_the_rest_pending_and_a_cursor_resumes_it");
         static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
         let dir = DIR
             .get_or_init(|| std::env::temp_dir().join(format!("cv-watch-cursor-{}", std::process::id())))
@@ -931,6 +938,8 @@ mod tests {
 
     #[test]
     fn optional_resume_state_is_bounded_and_old_cursors_keep_positions() {
+        let _world =
+            cv_testkit::World::in_process("watch-optional_resume_state_is_bounded_and_old_cursors_keep_positions");
         let mut watcher = Watcher::with_discovery(Filter::default(), true, Vec::new);
         let r = sref(
             Harness::Claude,
@@ -959,6 +968,7 @@ mod tests {
 
     #[test]
     fn source_observer_retries_failure_without_advancing_positions() {
+        let _world = cv_testkit::World::in_process("watch-source_observer_retries_failure_without_advancing_positions");
         fn discover() -> Vec<SessionRef> {
             vec![sref(
                 Harness::Claude,
@@ -997,6 +1007,8 @@ mod tests {
 
     #[test]
     fn demanded_poll_surfaces_read_failure_without_a_success_position() {
+        let _world =
+            cv_testkit::World::in_process("watch-demanded_poll_surfaces_read_failure_without_a_success_position");
         fn discover() -> Vec<SessionRef> {
             vec![sref(
                 Harness::Claude,
