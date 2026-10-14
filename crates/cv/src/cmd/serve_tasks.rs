@@ -78,7 +78,7 @@ fn api_inbox(default_who: Option<&str>, q: &Query) -> (u16, Value) {
         return (400, json!({"error": "who? pass ?who=<name> or start with --who"}));
     };
     let who = who.trim();
-    if who.is_empty() {
+    if task::project::canonical_actor(who).trim().is_empty() {
         return (400, json!({"error": "who must not be empty"}));
     }
     let now = Utc::now();
@@ -260,7 +260,7 @@ fn act(id: &str, verb: &str, who: &str, body: &Value) -> Result<Value> {
 }
 
 fn act_in(store: &TaskStore, id: &str, verb: &str, who: &str, body: &Value) -> Result<Value> {
-    let who = task::project::canonical_actor(who.trim());
+    let who = task::project::canonical_actor(who.trim()).trim();
     if who.is_empty() {
         bail!("who must not be empty");
     }
@@ -269,7 +269,7 @@ fn act_in(store: &TaskStore, id: &str, verb: &str, who: &str, body: &Value) -> R
         .map_err(|e| anyhow::anyhow!(e))?
         .to_string();
     let t = &outcome.model.tasks[&id];
-    let by = format!("web:{}", who.trim());
+    let by = format!("web:{who}");
     let text = |k: &str| {
         body.get(k)
             .and_then(Value::as_str)
@@ -345,7 +345,7 @@ fn act_in(store: &TaskStore, id: &str, verb: &str, who: &str, body: &Value) -> R
                 Some(&id),
                 &by,
                 TaskEventKind::Claimed {
-                    assignee: who.trim().to_string(),
+                    assignee: who.to_string(),
                 },
                 Vec::new(),
             )?;
@@ -362,11 +362,11 @@ fn act_in(store: &TaskStore, id: &str, verb: &str, who: &str, body: &Value) -> R
             // Terminal is terminal: the record of the close stays. The task comes back as a NEW
             // task carrying the same title/body/assignee (and, for a decision, the same options),
             // tagged `reopened`, and each side notes the other — all as ONE unit.
-            let assignee = t.assignee.clone().unwrap_or_else(|| who.trim().to_string());
+            let assignee = t.assignee.clone().unwrap_or_else(|| who.to_string());
             let mut events = match &t.decision {
                 Some(d) => task_ops::pose_events(
                     &by,
-                    &DecisionSpec {
+                    DecisionSpec {
                         title: t.title.clone(),
                         body: t.body.clone(),
                         for_who: assignee,
@@ -498,6 +498,42 @@ mod tests {
     }
 
     #[test]
+    fn task_http_reopened_decision_retains_options_and_body_without_reopening_old_record() {
+        let world = cv_testkit::World::new("task-http-decision-reopen");
+        let store = TaskStore::at(world.base.join("tasks"));
+        let body = "question 🌙".repeat(8192);
+        let (events, _) = task_ops::pose(
+            &store,
+            "orchestrator",
+            DecisionSpec {
+                title: "decision".into(),
+                body: body.clone(),
+                for_who: "ember".into(),
+                default_choice: " keep ".into(),
+                options: vec!["change".into(), "keep".into()],
+                provisional: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let old_id = &events[0].task_id;
+        act_in(&store, old_id, "resolve", "ember", &json!({"accept_default":true})).unwrap();
+        let answer = act_in(&store, old_id, "reopen", "web: ember", &json!({})).unwrap();
+        assert_eq!(answer["by"], "web:ember");
+        assert_eq!(answer["task_state"], "open");
+        let new_id = answer["events"][0]["task_id"].as_str().unwrap();
+        let outcome = store.replay().unwrap();
+        let old = &outcome.model.tasks[old_id];
+        let new = &outcome.model.tasks[new_id];
+        assert_eq!(old.state, task::TaskState::Resolved);
+        assert_eq!(new.state, task::TaskState::Open);
+        assert_eq!(new.body, body);
+        assert_eq!(new.decision.as_ref().unwrap().options, ["keep", "change"]);
+        assert!(new.decision.as_ref().unwrap().resolution.is_none());
+        assert!(!old.decision.as_ref().unwrap().resolution.as_ref().unwrap().provisional);
+    }
+
+    #[test]
     fn task_http_empty_actor_and_conflicting_answers_leave_log_unchanged() {
         let world = cv_testkit::World::new("task-http-actor");
         let store = TaskStore::at(world.base.join("tasks"));
@@ -516,7 +552,7 @@ mod tests {
             .unwrap();
         let path = store.dir().join("events.jsonl");
         let before = std::fs::read(&path).unwrap();
-        for who in ["", "  ", "web:"] {
+        for who in ["", "  ", "web:", "web:  "] {
             assert!(act_in(&store, "task", "note", who, &json!({"text":"no anonymous write"})).is_err());
             assert_eq!(std::fs::read(&path).unwrap(), before);
         }
@@ -529,6 +565,9 @@ mod tests {
         )
         .is_err());
         assert_eq!(std::fs::read(path).unwrap(), before);
+        for who in ["", " ", "web:", "web:  "] {
+            assert_eq!(api_inbox(Some(who), &Query::parse("")).0, 400);
+        }
         // The shared decision resolution formatter must also accept short/non-ASCII IDs.
         assert!(act_in(&store, "task", "resolve", "ember", &json!({"accept_default":true})).is_ok());
     }

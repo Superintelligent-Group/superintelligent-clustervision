@@ -55,7 +55,7 @@ pub(crate) fn option_list(default_choice: &str, options: &[String]) -> Vec<Strin
 /// `tagged` only for the caller's own tags, one `blocked_by` per task it blocks, and the
 /// provisional `resolved` when `spec.provisional`. Built, not written: [`pose`] appends them as
 /// ONE unit, and the page's `reopen` adds its notes to the same unit.
-pub(crate) fn pose_events(from: &str, spec: &DecisionSpec) -> Result<Vec<TaskEvent>> {
+pub(crate) fn pose_events(from: &str, spec: DecisionSpec) -> Result<Vec<TaskEvent>> {
     if spec.default_choice.trim().is_empty() {
         bail!("a decision needs a --default (the option that stands if nobody speaks)");
     }
@@ -68,10 +68,10 @@ pub(crate) fn pose_events(from: &str, spec: &DecisionSpec) -> Result<Vec<TaskEve
         None,
         from,
         TaskEventKind::Opened {
-            title: spec.title.clone(),
-            body: spec.body.clone(),
-            repo: spec.repo.clone(),
-            issue: spec.issue.clone(),
+            title: spec.title,
+            body: spec.body,
+            repo: spec.repo,
+            issue: spec.issue,
             channel: None,
             assignee: Some(spec.for_who.trim().to_string()),
         },
@@ -86,7 +86,7 @@ pub(crate) fn pose_events(from: &str, spec: &DecisionSpec) -> Result<Vec<TaskEve
                 options,
                 default_choice: default_choice.clone(),
                 deadline: spec.deadline,
-                source: spec.source.clone(),
+                source: spec.source,
             },
         ),
     ];
@@ -124,7 +124,7 @@ pub(crate) fn pose_events(from: &str, spec: &DecisionSpec) -> Result<Vec<TaskEve
 /// leaves no half-posed decision. I/O failure may leave a completed prefix. Returns append-order
 /// events and advisory warnings.
 pub(crate) fn pose(store: &TaskStore, from: &str, spec: DecisionSpec) -> Result<(Vec<TaskEvent>, Vec<String>)> {
-    let out = task::append_events(store, pose_events(from, &spec)?, Vec::new())?;
+    let out = task::append_events(store, pose_events(from, spec)?, Vec::new())?;
     let mut warnings = out.replay_warnings;
     warnings.extend(out.warnings);
     Ok((out.events, warnings))
