@@ -264,7 +264,7 @@ fn active_chain<'a>(conv: &Fields<'a>) -> Result<Vec<JsonView<'a>>> {
         Ok(())
     })?;
     for _ in 0..100_000 {
-        let Some(node) = nodes.get(&current).copied() else {
+        let Some(node) = nodes.remove(&current) else {
             break;
         };
         chain.push(node);
@@ -342,7 +342,14 @@ pub(super) fn stream(kind: Kind, r: &SessionRef, opts: &ParseOptions, sink: &mut
         .iter()
         .find(|e| e.id == r.id)
         .with_context(|| format!("conversation {} not found in {}", r.id, r.path.display()))?;
-    let value = archive.source.validated_range(entry.offset, entry.len)?;
+    // Cached archives own metadata only. Generated multipart backing belongs to this read,
+    // not to the cache's JsonSource/arena and its uncharged lifetime.
+    let source = JsonSource::capture(&r.path)?;
+    anyhow::ensure!(
+        source.same_identity(&archive.source),
+        "export source changed before selected read"
+    );
+    let value = source.validated_range(entry.offset, entry.len)?;
     value.with_view(|view| {
         let conv = Fields::parse(view, CONVERSATION_FIELDS)?.context("export conversation is not an object")?;
         let mut session = Session::new(&r.id, kind.harness());
@@ -360,7 +367,14 @@ pub(super) fn stream(kind: Kind, r: &SessionRef, opts: &ParseOptions, sink: &mut
                 if node_role(kind, view)?.as_deref().map(role_from_str) != Some(Role::User) {
                     continue;
                 }
-                if let Some(message) = build_message(kind, view, true, &resolver, &mut calls)? {
+                if kind == Kind::ChatGpt {
+                    if let Some(title) = chatgpt_title(view, &resolver)? {
+                        session.title = title;
+                        break;
+                    }
+                    continue;
+                }
+                if let Some(message) = build_message(kind, view, true, &source, &resolver, &mut calls)? {
                     if message.role == Role::User {
                         session.title = text_summary(
                             message.content.iter().filter_map(|b| match b {
@@ -379,7 +393,7 @@ pub(super) fn stream(kind: Kind, r: &SessionRef, opts: &ParseOptions, sink: &mut
         let mut calls = HashMap::new();
         let mut has_sources = false;
         for view in nodes.iter()? {
-            if let Some(message) = build_message(kind, view?, opts.spans, &resolver, &mut calls)? {
+            if let Some(message) = build_message(kind, view?, opts.spans, &source, &resolver, &mut calls)? {
                 let sourced = message.content.iter().any(|block| {
                     matches!(
                         block,
@@ -412,12 +426,13 @@ fn build_message(
     kind: Kind,
     view: JsonView<'_>,
     spans: bool,
+    source: &JsonSource,
     resolver: &Resolver,
     calls: &mut HashMap<String, String>,
 ) -> Result<Option<Message>> {
     match kind {
         Kind::Claude => claude_message(view, spans),
-        Kind::ChatGpt => chatgpt_message(view, spans, resolver, calls),
+        Kind::ChatGpt => chatgpt_message(view, spans, source, resolver, calls),
     }
 }
 fn claude_message(view: JsonView<'_>, spans: bool) -> Result<Option<Message>> {
@@ -482,6 +497,7 @@ fn claude_message(view: JsonView<'_>, spans: bool) -> Result<Option<Message>> {
 fn chatgpt_message(
     view: JsonView<'_>,
     spans: bool,
+    source: &JsonSource,
     resolver: &Resolver,
     calls: &mut HashMap<String, String>,
 ) -> Result<Option<Message>> {
@@ -525,7 +541,7 @@ fn chatgpt_message(
         });
         calls.insert(recipient, id.clone());
     } else {
-        let text = chatgpt_text(content_record.as_ref(), spans, resolver)?;
+        let text = chatgpt_text(content_record.as_ref(), spans, source, resolver)?;
         if role == Role::Tool {
             let name = author.string("name")?.unwrap_or_default();
             content.push(Block::ToolResult {
@@ -573,9 +589,74 @@ fn chatgpt_message(
     m.content = content;
     Ok(Some(m))
 }
-fn chatgpt_text(r: Option<&Fields<'_>>, spans: bool, resolver: &Resolver) -> Result<Text> {
+/// Title selection needs the joined prefix and whether an image keeps the first user message,
+/// not a fully joined generated body. Preserve the old first accepted user stopping point.
+fn chatgpt_title(view: JsonView<'_>, resolver: &Resolver) -> Result<Option<Option<String>>> {
+    let Some(node) = Fields::parse(view, &["message"])? else {
+        return Ok(None);
+    };
+    let Some(message) = node
+        .get("message")
+        .map(|v| Fields::parse(v, &["content"]))
+        .transpose()?
+        .flatten()
+    else {
+        return Ok(None);
+    };
+    let Some(content) = message
+        .get("content")
+        .map(|v| Fields::parse(v, &["parts", "text"]))
+        .transpose()?
+        .flatten()
+    else {
+        return Ok(None);
+    };
+    let mut texts = Vec::new();
+    let mut image = false;
+    if let Some(parts) = content.get("parts").map(JsonView::array).transpose()?.flatten() {
+        for part in parts {
+            let part = part?;
+            if let Some(text) = part.text(true)? {
+                texts.push(text);
+            } else if let Some(record) = Fields::parse(part, &["asset_pointer"])? {
+                image |= record
+                    .get("asset_pointer")
+                    .map(JsonView::is_string)
+                    .transpose()?
+                    .unwrap_or(false);
+            }
+        }
+    } else if let Some(text) = content.get("text").map(|v| v.text(true)).transpose()?.flatten() {
+        texts.push(text);
+    }
+    let title = text_summary(texts.iter(), resolver, true);
+    Ok((image || title.is_some()).then_some(title))
+}
+fn chatgpt_text(r: Option<&Fields<'_>>, spans: bool, source: &JsonSource, resolver: &Resolver) -> Result<Text> {
     let Some(r) = r else { return Ok(Text::default()) };
     if let Some(parts) = r.get("parts").map(JsonView::array).transpose()?.flatten() {
+        if spans {
+            let mut selected = Vec::new();
+            for part in parts {
+                let part = part?;
+                if part.is_string()? {
+                    selected.push(part)
+                }
+            }
+            return match selected.as_slice() {
+                [] => Ok(Text::default()),
+                [part] => Ok(part.text(true)?.unwrap()),
+                _ => crate::harness::store::text::append(source, &source.decoded_backing()?, |builder| {
+                    for (i, part) in selected.into_iter().enumerate() {
+                        if i != 0 {
+                            builder.push("\n")?;
+                        }
+                        anyhow::ensure!(builder.push_string(part)?, "selected ChatGPT string part");
+                    }
+                    Ok(())
+                }),
+            };
+        }
         let mut first = None;
         let mut joined = None::<String>;
         for view in parts {

@@ -556,3 +556,45 @@ fn native_chatgpt_fallback_keeps_insertion_order_and_final_duplicate_value() {
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn multipart_chatgpt_read_keeps_lazy_payloads_and_breaks_parent_cycles() -> Result<()> {
+    let world = cv_testkit::World::in_process("account-multipart-cycle");
+    let path = world.base.join("conversations.json");
+    let body = "λ\n\"escaped\"".repeat(20000);
+    let conversation = json!({"conversation_id":"multi","title":"explicit","current_node":"reply","mapping":{
+        "user":{"id":"user","parent":null,"message":{"author":{"role":"user"},"content":{"parts":["",body,body,""]}}},
+        "reply":{"id":"reply","parent":"user","message":{"author":{"role":"assistant"},"content":{"parts":[body,"",body]}}}
+    }});
+    std::fs::write(&path, serde_json::to_vec(&json!([conversation]))?)?;
+    let reference = discover_kind_in(Kind::ChatGpt, vec![path.clone()]).remove(0);
+    let expected = parse_ref(Kind::ChatGpt, &reference)?;
+    let mut sink = crate::stream::CollectSink::default();
+    let mut actual = native::stream(Kind::ChatGpt, &reference, &ParseOptions::lazy(), &mut sink)?;
+    actual.messages = sink.messages;
+    assert!(
+        actual.messages.iter().all(|m| matches!(
+            &m.content[0],
+            Block::Text {
+                text: crate::Text::Source(_)
+            }
+        )),
+        "joined ordinary bodies remain checked backing"
+    );
+    actual.materialize()?;
+    assert_eq!(serde_json::to_value(&actual)?, serde_json::to_value(&expected)?);
+    let cycle = json!({"conversation_id":"cycle","current_node":"reply","mapping":{
+        "reply":{"id":"reply","parent":"reply","message":{"author":{"role":"assistant"},"content":{"parts":["one reply"]}}}
+    }});
+    std::fs::write(&path, serde_json::to_vec(&json!([cycle]))?)?;
+    let refs = discover_kind_in(Kind::ChatGpt, vec![path.clone()]);
+    assert_eq!(refs[0].message_count, 1);
+    let mut sink = crate::stream::CollectSink::default();
+    native::stream(Kind::ChatGpt, &refs[0], &ParseOptions::lazy(), &mut sink)?;
+    assert_eq!(
+        sink.messages.len(),
+        1,
+        "cycles must not synthesize100,000 duplicate replies"
+    );
+    Ok(())
+}
