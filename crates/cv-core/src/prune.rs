@@ -974,13 +974,17 @@ impl PreparedFile {
             bail!("output is not a regular file: {}", destination.display());
         }
         let temporary = destination.with_file_name(format!(".cv-prune-{}", uuid::Uuid::new_v4()));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        let output_file = options.open(&temporary)?;
+        // Never claim cleanup ownership before exclusive creation succeeds.
         let prepared = Self {
             temporary,
             destination: destination.to_owned(),
         };
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        let mut file = options.open(&prepared.temporary)?;
+        // This handle drops before the owner on failure, including on platforms that cannot unlink
+        // an open file.
+        let mut file = output_file;
         std::io::copy(
             &mut std::io::BufReader::with_capacity(64 * 1024, bytes.reader()?),
             &mut file,
@@ -989,7 +993,12 @@ impl PreparedFile {
         Ok(prepared)
     }
     fn publish(self, source: &std::fs::File) -> Result<()> {
-        if std::fs::symlink_metadata(&self.destination).is_ok() {
+        match std::fs::hard_link(&self.temporary, &self.destination) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error).with_context(|| format!("publishing {}", self.destination.display())),
+        }
+        {
             // Existing outputs keep fs::write's symlink, hardlink, permissions and read-only
             // semantics. Open without truncation so a source inode alias is rejected first.
             let mut destination = std::fs::OpenOptions::new()
@@ -1015,9 +1024,6 @@ impl PreparedFile {
                 &mut destination,
             )?;
             Ok(())
-        } else {
-            std::fs::rename(&self.temporary, &self.destination)
-                .with_context(|| format!("publishing {}", self.destination.display()))
         }
     }
 }
