@@ -205,9 +205,7 @@ pub(super) fn window_output(
         let mut sink = window_sink(&primary, start, end, false, reads);
         sink.staged = staged.then(|| std::io::BufWriter::with_capacity(64 * 1024, crate::bytes::ByteStage::default()));
         let shell = adapter.try_stream(r, &opts, &mut sink)?;
-        if staged {
-            verify(r, &primary, &before, &sink)?;
-        }
+        verify(r, &primary, &before, &sink)?;
         return Ok((shell, sink));
     }
     let key = version.and_then(|version| Key::admitted(r, &primary, version, extra));
@@ -258,14 +256,10 @@ pub(super) fn window_output(
         let mut whole = window_sink(&primary, start, end, false, reads);
         whole.staged = staged.then(|| std::io::BufWriter::with_capacity(64 * 1024, crate::bytes::ByteStage::default()));
         let shell = adapter.try_stream(r, &opts, &mut whole)?;
-        if staged {
-            verify(r, &primary, &retry_before, &whole)?;
-        }
+        verify(r, &primary, &retry_before, &whole)?;
         return Ok((shell, whole));
     }
-    if staged {
-        verify(r, &primary, &before, &sink)?;
-    }
+    verify(r, &primary, &before, &sink)?;
     if stable {
         if let (Some(key), Some((index, checkpoint, meta))) = (key, sink.checkpoint.take()) {
             cache.insert(Entry {
@@ -330,7 +324,11 @@ pub(super) fn head(cache: &Cache, adapter: &dyn Adapter, r: &SessionRef) -> Resu
     map.insert("total".into(), json!(counter.total));
     map.insert("extra".into(), Value::Object(shell.extra));
     let source = before.with_reads(&counter.reads);
-    if let Some(key) = key.filter(|_| fresh(r, &source, &primary) && bounded_size(&value).is_some()) {
+    anyhow::ensure!(
+        fresh(r, &source, &primary) && counter.reads.fresh(&mut Probe::default()),
+        "API head source changed before publication"
+    );
+    if let Some(key) = key.filter(|_| bounded_size(&value).is_some()) {
         cache.insert(Entry {
             key,
             source,
@@ -480,8 +478,8 @@ mod tests {
     }
 
     #[test]
-    fn staged_uncached_window_rejects_mutation_before_publication() {
-        struct Mutating;
+    fn heads_and_windows_reject_mutation_before_publication() {
+        struct Mutating(bool);
         impl Adapter for Mutating {
             fn harness(&self) -> Harness {
                 Harness::Claude
@@ -491,6 +489,9 @@ mod tests {
             }
             fn discover(&self) -> Result<Vec<SessionRef>> {
                 Ok(Vec::new())
+            }
+            fn resume_format(&self) -> Option<u32> {
+                self.0.then_some(1)
             }
             fn stream(&self, r: &SessionRef, _: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
                 let mut message = Message::new(crate::Role::Assistant);
@@ -506,7 +507,18 @@ mod tests {
         let path = world.home.join("source");
         std::fs::write(&path, b"original").unwrap();
         let r = SessionRef::new("mutating", Harness::Claude, path);
-        assert!(window_output(&Cache::default(), &Mutating, &r, 0, Some(1), false, true).is_err());
+        for resumable in [false, true] {
+            for staged in [false, true] {
+                std::fs::write(&r.path, b"original").unwrap();
+                let cache = Cache::default();
+                assert!(window_output(&cache, &Mutating(resumable), &r, 0, Some(1), false, staged).is_err());
+                assert!(cache.entries.lock().unwrap().is_empty());
+            }
+        }
+        std::fs::write(&r.path, b"original").unwrap();
+        let cache = Cache::default();
+        assert!(head(&cache, &Mutating(false), &r).is_err());
+        assert!(cache.entries.lock().unwrap().is_empty());
     }
 
     #[test]
