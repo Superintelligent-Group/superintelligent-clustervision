@@ -113,6 +113,63 @@ impl Head {
     }
 }
 
+/// Complete searchable projection with cooperative cancellation between text chunks and
+/// canonical JSON writes. The joined output is demanded one message at a time.
+pub fn searchable_text_checked(
+    message: &crate::Message,
+    resolver: &Resolver,
+    mut check: impl FnMut() -> anyhow::Result<()>,
+) -> anyhow::Result<String> {
+    struct Checked<'a, F> {
+        bytes: &'a mut Vec<u8>,
+        check: &'a mut F,
+    }
+    impl<F: FnMut() -> anyhow::Result<()>> std::io::Write for Checked<'_, F> {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            (self.check)().map_err(std::io::Error::other)?;
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut bytes = Vec::new();
+    for block in &message.content {
+        check()?;
+        match block {
+            crate::Block::Text { text }
+            | crate::Block::Thinking { text, .. }
+            | crate::Block::ToolResult { content: text, .. } => {
+                text.try_for_each_chunk(resolver, 4096, |part| {
+                    check()?;
+                    bytes.extend_from_slice(part.as_bytes());
+                    Ok(())
+                })?;
+                bytes.push(b'\n');
+            }
+            crate::Block::ToolUse { name, input, .. } => {
+                bytes.extend_from_slice(name.as_bytes());
+                bytes.push(b' ');
+                input.write_canonical(&mut Checked {
+                    bytes: &mut bytes,
+                    check: &mut check,
+                })?;
+                bytes.push(b'\n');
+            }
+            crate::Block::File { path, source, .. } => {
+                if let Some(path) = path.as_deref().or(source.as_deref()) {
+                    bytes.extend_from_slice(path.as_bytes());
+                    bytes.push(b'\n');
+                }
+            }
+            crate::Block::Image { .. } => {}
+        }
+    }
+    check()?;
+    Ok(String::from_utf8(bytes)?)
+}
+
 /// Exact decoded byte prefix of the searchable message projection, with a truncation witness.
 /// Demanded text uses checked chunks; JSON uses the canonical bounded writer. No later block
 /// is demanded after the prefix is established.
@@ -186,6 +243,54 @@ pub fn searchable_prefix(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checked_searchable_projection_matches_owned_text_and_interrupts_chunks() {
+        let mut message = crate::Message::new(crate::Role::Assistant);
+        message.content = vec![
+            crate::Block::Text {
+                text: "λ ordinary\n".into(),
+            },
+            crate::Block::Thinking {
+                text: "thinking".into(),
+                signature: None,
+                encrypted: None,
+                redacted: false,
+            },
+            crate::Block::ToolUse {
+                id: "call".into(),
+                name: "tool".into(),
+                input: serde_json::json!({"z":"λ", "a":2}).into(),
+                namespace: None,
+            },
+            crate::Block::ToolResult {
+                tool_use_id: "call".into(),
+                content: "result".into(),
+                is_error: false,
+                tool_name: None,
+                details: None,
+                status: None,
+            },
+        ];
+        let mut expected = String::new();
+        message.append_searchable(&mut expected).unwrap();
+        assert_eq!(
+            searchable_text_checked(&message, &Resolver::new(None), || Ok(())).unwrap(),
+            expected
+        );
+        message.content = vec![crate::Block::Text {
+            text: "λ".repeat(32 * 1024).into(),
+        }];
+        let mut checks = 0;
+        let error = searchable_text_checked(&message, &Resolver::new(None), || {
+            checks += 1;
+            anyhow::ensure!(checks < 4, "cancelled inside payload");
+            Ok(())
+        })
+        .unwrap_err();
+        assert_eq!(error.to_string(), "cancelled inside payload");
+        assert_eq!(checks, 4);
+    }
 
     #[test]
     fn searchable_prefix_checks_escaped_span_and_retained_text() {

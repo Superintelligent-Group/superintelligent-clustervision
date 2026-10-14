@@ -682,23 +682,8 @@ fn await_omen(args: &Value, cancelled: &AtomicBool) -> anyhow::Result<String> {
         if cancelled.load(Ordering::Relaxed) {
             anyhow::bail!("MCP client disconnected");
         }
-        for ev in watcher.poll() {
-            for m in &ev.new_messages {
-                let text = message_text(m)?;
-                if let Some(hit) = re.find(&text) {
-                    let snippet_start = hit.start().saturating_sub(80);
-                    let snippet_end = (hit.end() + 80).min(text.len());
-                    return Ok(serde_json::to_string_pretty(&json!({
-                        "matched": true,
-                        "harness": ev.reference.harness.as_str(),
-                        "id": ev.reference.id,
-                        "cwd": ev.reference.cwd.as_ref().map(|p| p.to_string_lossy()),
-                        "role": cv_core::render::role_label(m.role),
-                        "matched_text": &text[floor_char(&text, snippet_start)..ceil_char(&text, snippet_end)],
-                        "event": match ev.kind { cv_core::watch::EventKind::New => "new_session", _ => "appended" },
-                    }))?);
-                }
-            }
+        if let Some(matched) = await_poll(&mut watcher, &re, cancelled, start, timeout)? {
+            return Ok(serde_json::to_string_pretty(&matched)?);
         }
         if start.elapsed() >= timeout {
             return Ok(serde_json::to_string_pretty(&json!({
@@ -715,6 +700,58 @@ fn await_omen(args: &Value, cancelled: &AtomicBool) -> anyhow::Result<String> {
             }
             std::thread::sleep((sleep_for - sleep_start.elapsed().min(sleep_for)).min(Duration::from_millis(100)));
         }
+    }
+}
+
+/// Match directly while a checked watch read delivers individual retained messages. A hit
+/// stays private until that read's source acceptance succeeds; failed/cancelled reads publish nothing.
+fn await_poll(
+    watcher: &mut Watcher,
+    re: &regex::Regex,
+    cancelled: &AtomicBool,
+    start: Instant,
+    timeout: Duration,
+) -> anyhow::Result<Option<Value>> {
+    let expired = std::cell::Cell::new(false);
+    let check = || {
+        if cancelled.load(Ordering::Relaxed) {
+            anyhow::bail!("MCP client disconnected");
+        }
+        if start.elapsed() >= timeout {
+            expired.set(true);
+            anyhow::bail!("observation deadline reached");
+        }
+        Ok(())
+    };
+    let mut matched = None;
+    let result = watcher.try_poll_messages(
+        || check(),
+        |kind, reference, message| {
+            let resolver = cv_core::Resolver::new(Some(reference.path.clone()));
+            let text = cv_core::projection::searchable_text_checked(&message, &resolver, || check())?;
+            if let Some(hit) = re.find(&text) {
+                check()?;
+                let snippet_start = hit.start().saturating_sub(80);
+                let snippet_end = hit.end().saturating_add(80).min(text.len());
+                matched = Some(json!({
+                    "matched": true,
+                    "harness": reference.harness.as_str(), "id": reference.id,
+                    "cwd": reference.cwd.as_ref().map(|p| p.to_string_lossy()),
+                    "role": cv_core::render::role_label(message.role),
+                    "matched_text": &text[floor_char(&text, snippet_start)..ceil_char(&text, snippet_end)],
+                    "event": match kind { cv_core::watch::EventKind::New => "new_session", _ => "appended" },
+                }));
+                Ok(cv_core::Flow::Stop)
+            } else {
+                check()?;
+                Ok(cv_core::Flow::Continue)
+            }
+        },
+    );
+    match result {
+        Err(_) if expired.get() => Ok(None),
+        Err(error) => Err(error),
+        Ok(_) => Ok(matched),
     }
 }
 
@@ -815,6 +852,7 @@ fn observe_poll(
 }
 
 /// All matchable text in a message: text + thinking + tool-result content.
+#[cfg(test)]
 fn message_text(m: &cv_core::Message) -> anyhow::Result<String> {
     let mut output = String::new();
     m.append_searchable(&mut output)?;
@@ -1335,6 +1373,69 @@ mod admission_tests {
         let transferred = args["id"].as_str().unwrap();
         assert_eq!(transferred.len(), 2 * 1024 * 1024);
         assert_eq!(transferred.as_ptr(), original, "large request payload was cloned");
+    }
+
+    #[test]
+    fn omen_matches_first_message_and_cursor_keeps_the_unseen_tail() {
+        let world = cv_testkit::World::in_process("omen-incremental");
+        world.write_session("omen", &[
+            json!({"type":"assistant", "uuid":"a", "message":{"role":"assistant", "content":[{"type":"text", "text":"λ BUILD PASSED"}]}}),
+            json!({"type":"user", "uuid":"b", "message":{"role":"user", "content":"unseen second"}}),
+            json!({"type":"user", "uuid":"c", "message":{"role":"user", "content":"unseen third"}}),
+        ]);
+        fn discover_omen() -> Vec<cv_core::SessionRef> {
+            cv_core::harness::for_harness(cv_core::Harness::Claude)
+                .unwrap()
+                .discover()
+                .unwrap()
+        }
+        let mut watcher = Watcher::with_discovery(Filter::default(), true, discover_omen);
+        let matched = await_poll(
+            &mut watcher,
+            &regex::Regex::new("BUILD PASSED").unwrap(),
+            &AtomicBool::new(false),
+            Instant::now(),
+            Duration::from_secs(30),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(matched["matched_text"], "λ BUILD PASSED\n");
+        assert_eq!(matched["id"], "omen");
+        assert_eq!(matched["role"], "assistant");
+        let cursor = Cursor::decode(&watcher.to_cursor().encode()).unwrap();
+        let mut resumed = Watcher::from_cursor(Filter::default(), cursor, discover_omen);
+        let mut tail = Vec::new();
+        resumed
+            .try_poll_messages(
+                || Ok(()),
+                |_, reference, message| {
+                    tail.push(cv_core::projection::searchable_text_checked(
+                        &message,
+                        &cv_core::Resolver::new(Some(reference.path.clone())),
+                        || Ok(()),
+                    )?);
+                    Ok(cv_core::Flow::Continue)
+                },
+            )
+            .unwrap();
+        assert_eq!(tail, ["unseen second\n", "unseen third\n"]);
+        assert!(await_poll(
+            &mut resumed,
+            &regex::Regex::new(".*").unwrap(),
+            &AtomicBool::new(true),
+            Instant::now(),
+            Duration::from_secs(30)
+        )
+        .is_err());
+        assert!(await_poll(
+            &mut resumed,
+            &regex::Regex::new(".*").unwrap(),
+            &AtomicBool::new(false),
+            Instant::now(),
+            Duration::ZERO
+        )
+        .unwrap()
+        .is_none());
     }
 
     #[test]

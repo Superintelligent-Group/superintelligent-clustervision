@@ -401,6 +401,110 @@ impl Watcher {
         self.poll_bounded_inner(max_messages, &mut take, true, true)
     }
 
+    /// Deliver new messages one at a time in discovery/message order. `check` runs before
+    /// discovery, between sessions, and at streaming message/dependency/checkpoint boundaries.
+    /// A consumer stop accepts only delivered messages and leaves unread records pending.
+    /// Projection/read/check failures never accept the current session's position.
+    pub fn try_poll_messages(
+        &mut self,
+        mut check: impl FnMut() -> anyhow::Result<()>,
+        mut take: impl FnMut(EventKind, &SessionRef, Message) -> anyhow::Result<crate::Flow>,
+    ) -> anyhow::Result<bool> {
+        struct Consumer<'a, F> {
+            kind: EventKind,
+            reference: &'a SessionRef,
+            take: &'a mut F,
+            taken: usize,
+            stopped: bool,
+            error: Option<anyhow::Error>,
+        }
+        impl<F: FnMut(EventKind, &SessionRef, Message) -> anyhow::Result<crate::Flow>> crate::MessageSink for Consumer<'_, F> {
+            fn take_error(&mut self) -> Option<anyhow::Error> {
+                self.error.take()
+            }
+            fn message(&mut self, message: Message) -> crate::Flow {
+                match (self.take)(self.kind, self.reference, message) {
+                    Ok(flow) => {
+                        self.taken += 1;
+                        self.stopped = flow == crate::Flow::Stop;
+                        flow
+                    }
+                    Err(error) => {
+                        self.error = Some(error);
+                        crate::Flow::Stop
+                    }
+                }
+            }
+        }
+        let _reads = crate::source::read_scope();
+        check()?;
+        let refs = self.discover_live();
+        check()?;
+        for (key, r) in refs {
+            check()?;
+            let trigger = Self::trigger_of(&r);
+            let (kind, previous_count) = match self.seen.get(&key) {
+                None => (EventKind::New, 0),
+                Some(state)
+                    if state.trigger != trigger
+                        || state.pending
+                        || state
+                            .read
+                            .as_ref()
+                            .map_or(matches!(state.mark, Mark::Messages(_)), |read| {
+                                !read.baseline_unchanged(&r)
+                            }) =>
+                {
+                    let previous = resolve(&r, state.mark).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "could not resolve prior watch position: {} {}",
+                            r.harness,
+                            r.path.display()
+                        )
+                    })?;
+                    (EventKind::Updated, previous)
+                }
+                Some(_) => continue,
+            };
+            check()?;
+            let Some(adapter) = harness::for_harness(r.harness) else {
+                continue;
+            };
+            let mut consumer = Consumer {
+                kind,
+                reference: &r,
+                take: &mut take,
+                taken: 0,
+                stopped: false,
+                error: None,
+            };
+            let previous = self.seen.get(&key).and_then(|state| state.read.as_ref());
+            let pass = read::read_tail_into(
+                adapter.as_ref(),
+                &r,
+                previous,
+                previous_count,
+                &mut consumer,
+                &mut check,
+            )?;
+            let seen_to = previous_count.min(pass.total) + consumer.taken;
+            let pending = !pass.reached_eof || pass.total > seen_to;
+            self.seen.insert(
+                key,
+                State {
+                    trigger,
+                    mark: Mark::Messages(seen_to),
+                    pending,
+                    read: Some(pass.accepted(seen_to)),
+                },
+            );
+            if consumer.stopped {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     fn poll_bounded_inner(
         &mut self,
         max_messages: usize,
@@ -556,6 +660,113 @@ mod tests {
             updated_at: None,
             message_count: 0,
         }
+    }
+
+    #[test]
+    fn incremental_stop_cursor_and_failed_callback_preserve_unseen_messages() {
+        static PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+        let world = cv_testkit::World::in_process("incremental-watch");
+        let path = world.write_session("incremental", &(0..5).map(|n| serde_json::json!({
+            "type":"user", "uuid":format!("u{n}"), "message":{"role":"user", "content":format!("message-{n}")}
+        })).collect::<Vec<_>>());
+        PATH.set(path).unwrap();
+        fn discover() -> Vec<SessionRef> {
+            vec![SessionRef::new("incremental", Harness::Claude, PATH.get().unwrap())]
+        }
+        fn text(r: &SessionRef, m: &Message) -> String {
+            crate::projection::searchable_text_checked(m, &crate::Resolver::new(Some(r.path.clone())), || Ok(()))
+                .unwrap()
+        }
+        let mut watcher = Watcher::with_discovery(Filter::default(), true, discover);
+        let mut delivered = Vec::new();
+        assert!(watcher
+            .try_poll_messages(
+                || Ok(()),
+                |_, r, m| {
+                    delivered.push(text(r, &m));
+                    Ok(if delivered.len() == 2 {
+                        crate::Flow::Stop
+                    } else {
+                        crate::Flow::Continue
+                    })
+                }
+            )
+            .unwrap());
+        assert_eq!(delivered, ["message-0\n", "message-1\n"]);
+        let cursor = Cursor::decode(&watcher.to_cursor().encode()).unwrap();
+        let mut resumed = Watcher::from_cursor(Filter::default(), cursor, discover);
+        let before_failure = resumed.to_cursor().encode();
+        assert!(resumed
+            .try_poll_messages(|| Ok(()), |_, _, _| anyhow::bail!("projection failed"))
+            .is_err());
+        assert_eq!(
+            resumed.to_cursor().encode(),
+            before_failure,
+            "failed projection advanced position"
+        );
+        let mut rest = Vec::new();
+        assert!(!resumed
+            .try_poll_messages(
+                || Ok(()),
+                |_, r, m| {
+                    rest.push(text(r, &m));
+                    Ok(crate::Flow::Continue)
+                }
+            )
+            .unwrap());
+        assert_eq!(rest, ["message-2\n", "message-3\n", "message-4\n"]);
+        assert!(!resumed
+            .try_poll_messages(|| Ok(()), |_, _, _| panic!("idle watch repeated messages"))
+            .unwrap());
+    }
+
+    #[test]
+    fn interrupted_stream_retries_delivery_and_rejects_changed_source() {
+        static PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+        let world = cv_testkit::World::in_process("interrupted-watch");
+        let path = world.write_session("interrupted", &(0..4).map(|n| serde_json::json!({
+            "type":"user", "uuid":format!("u{n}"), "message":{"role":"user", "content":format!("message-{n}")}
+        })).collect::<Vec<_>>());
+        PATH.set(path).unwrap();
+        fn discover() -> Vec<SessionRef> {
+            vec![SessionRef::new("interrupted", Harness::Claude, PATH.get().unwrap())]
+        }
+        let mut watcher = Watcher::with_discovery(Filter::default(), true, discover);
+        let stop = std::cell::Cell::new(false);
+        let mut count = 0;
+        let error = watcher
+            .try_poll_messages(
+                || {
+                    anyhow::ensure!(!stop.get(), "cancelled during read");
+                    Ok(())
+                },
+                |_, _, _| {
+                    count += 1;
+                    stop.set(true);
+                    Ok(crate::Flow::Continue)
+                },
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("cancelled"));
+        assert_eq!(count, 1, "cancellation did not stop the active read");
+        assert!(
+            watcher.to_cursor().is_empty(),
+            "failed read accepted its delivered prefix"
+        );
+        let error = watcher
+            .try_poll_messages(
+                || Ok(()),
+                |_, r, _| {
+                    std::fs::write(&r.path, "changed")?;
+                    Ok(crate::Flow::Stop)
+                },
+            )
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("source changed") || error.to_string().contains("identity changed"),
+            "{error:#}"
+        );
+        assert!(watcher.to_cursor().is_empty(), "stale match advanced position");
     }
 
     #[test]

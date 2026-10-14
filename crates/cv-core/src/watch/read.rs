@@ -166,6 +166,8 @@ pub struct ReadPass {
     pub session: Session,
     pub messages: Vec<Message>,
     pub total: usize,
+    /// Whether this pass reached EOF (rather than a consumer stopping after delivery).
+    pub reached_eof: bool,
     pub resumed: bool,
     /// Old messages proven stable by the adapter checkpoint. Archives replace the suffix after
     /// this boundary, including a Codex EOF message whose trailing usage may change on append.
@@ -208,6 +210,7 @@ impl ReadPass {
 }
 
 struct Tail<'a> {
+    check: Option<&'a mut dyn FnMut() -> Result<()>>,
     output: Option<&'a mut dyn stream::MessageSink>,
     resolver_source: Option<PathBuf>,
     used_implicit_source: bool,
@@ -223,6 +226,20 @@ struct Tail<'a> {
     last: Option<stream::Checkpoint>,
     stop_after_selection: bool,
 }
+impl Tail<'_> {
+    fn check(&mut self) -> bool {
+        if self.error.is_some() {
+            return false;
+        }
+        if let Some(check) = self.check.as_mut() {
+            if let Err(error) = check() {
+                self.error = Some(error);
+                return false;
+            }
+        }
+        true
+    }
+}
 impl stream::MessageSink for Tail<'_> {
     fn take_error(&mut self) -> Option<anyhow::Error> {
         self.error
@@ -230,11 +247,20 @@ impl stream::MessageSink for Tail<'_> {
             .or_else(|| self.output.as_mut().and_then(|sink| sink.take_error()))
     }
     fn dependency(&mut self, path: &std::path::Path) {
+        if !self.check() {
+            return;
+        }
+        if self.check.is_some() {
+            self.materialized_reads.record(path);
+        }
         if let Some(output) = self.output.as_mut() {
             output.dependency(path);
         }
     }
     fn meta(&mut self, session: &Session) {
+        if !self.check() {
+            return;
+        }
         if self.output.is_some() {
             if self.used_implicit_source && session.source_path != self.resolver_source {
                 self.error
@@ -247,7 +273,7 @@ impl stream::MessageSink for Tail<'_> {
         }
     }
     fn message(&mut self, message: Message) -> stream::Flow {
-        if self.error.is_some() {
+        if !self.check() {
             return stream::Flow::Stop;
         }
         if let (true, Some(output)) = (self.total >= self.skip, self.output.as_mut()) {
@@ -281,7 +307,7 @@ impl stream::MessageSink for Tail<'_> {
         }
     }
     fn wants_checkpoint(&mut self, _: u64) -> bool {
-        !self.checkpoint_disabled
+        self.check() && !self.checkpoint_disabled
     }
     fn checkpoint(&mut self, cp: &mut stream::Checkpoint) {
         if !fits(cp, ANCHOR_BYTES) {
@@ -307,7 +333,15 @@ pub fn read(
     skip: usize,
     keep: usize,
 ) -> Result<ReadPass> {
-    read_inner(adapter, r, previous, skip, keep, ReadMode::OwnedTail, None)
+    read_inner(
+        adapter,
+        r,
+        previous,
+        skip,
+        keep,
+        ReadMode::OwnedTail,
+        ReadControl::default(),
+    )
 }
 
 /// Checked selected messages retaining source-backed payloads for bounded projections.
@@ -318,7 +352,15 @@ pub(super) fn read_retained(
     skip: usize,
     keep: usize,
 ) -> Result<ReadPass> {
-    read_inner(adapter, r, previous, skip, keep, ReadMode::RetainedTail, None)
+    read_inner(
+        adapter,
+        r,
+        previous,
+        skip,
+        keep,
+        ReadMode::RetainedTail,
+        ReadControl::default(),
+    )
 }
 
 /// Full session output: on a verified append retain only the checkpoint's stable old prefix,
@@ -336,7 +378,7 @@ pub fn read_session(
         previous_count,
         usize::MAX,
         ReadMode::OwnedSession,
-        None,
+        ReadControl::default(),
     )
 }
 
@@ -358,7 +400,34 @@ pub fn read_session_into(
         previous_count,
         usize::MAX,
         ReadMode::StreamSession,
-        Some(output),
+        ReadControl {
+            output: Some(output),
+            check: None,
+        },
+    )
+}
+
+/// Deliver newly observed retained messages directly. Early consumer stop returns a checked
+/// partial read without claiming EOF metadata; the caller must preserve its pending position.
+pub(super) fn read_tail_into(
+    adapter: &dyn Adapter,
+    r: &SessionRef,
+    previous: Option<&ReadState>,
+    skip: usize,
+    output: &mut dyn stream::MessageSink,
+    check: &mut dyn FnMut() -> Result<()>,
+) -> Result<ReadPass> {
+    read_inner(
+        adapter,
+        r,
+        previous,
+        skip,
+        usize::MAX,
+        ReadMode::StreamTail,
+        ReadControl {
+            output: Some(output),
+            check: Some(check),
+        },
     )
 }
 
@@ -367,19 +436,31 @@ enum ReadMode {
     RetainedTail,
     OwnedSession,
     StreamSession,
+    StreamTail,
 }
 
-fn read_inner(
+#[derive(Default)]
+struct ReadControl<'a> {
+    output: Option<&'a mut dyn stream::MessageSink>,
+    check: Option<&'a mut dyn FnMut() -> Result<()>>,
+}
+
+fn read_inner<'a>(
     adapter: &dyn Adapter,
     r: &SessionRef,
     previous: Option<&ReadState>,
     mut skip: usize,
     keep: usize,
     mode: ReadMode,
-    output: Option<&mut dyn stream::MessageSink>,
+    control: ReadControl<'a>,
 ) -> Result<ReadPass> {
+    let ReadControl { output, check } = control;
     let session_output = matches!(mode, ReadMode::OwnedSession | ReadMode::StreamSession);
-    let retained = matches!(mode, ReadMode::RetainedTail | ReadMode::StreamSession);
+    let retained = matches!(
+        mode,
+        ReadMode::RetainedTail | ReadMode::StreamSession | ReadMode::StreamTail
+    );
+    let streaming_tail = matches!(mode, ReadMode::StreamTail);
     let primary = adapter.resume_source(r);
     let captured = source::Probe::default().snapshot_from(r, &primary);
     let cached = previous
@@ -401,6 +482,7 @@ fn read_inner(
         stream::ParseOptions::full()
     };
     let mut sink = Tail {
+        check,
         output,
         resolver_source: Some(r.path.clone()),
         used_implicit_source: false,
@@ -422,7 +504,9 @@ fn read_inner(
         None => {
             resumed = false;
             let output = sink.output.take();
+            let check = sink.check.take();
             sink = Tail {
+                check,
                 output,
                 resolver_source: Some(r.path.clone()),
                 used_implicit_source: false,
@@ -445,6 +529,8 @@ fn read_inner(
     let complete = done.counted.is_some();
     let mut reads = if let Some(counted) = done.counted {
         counted.dependencies
+    } else if streaming_tail {
+        source::ReadSet::default()
     } else {
         anyhow::ensure!(stop_after_selection, "session read stopped before EOF");
         previous
@@ -512,6 +598,8 @@ fn read_inner(
         };
         let completed = fits(&cached, METADATA_BYTES).then_some(cached);
         (done.session, sink.total, completed)
+    } else if streaming_tail {
+        (done.session, sink.total, None)
     } else {
         let cached = cached.context("missing complete EOF metadata")?;
         (cached.session.clone(), cached.total, Some(cached.clone()))
@@ -520,6 +608,7 @@ fn read_inner(
         version: state_version(adapter),
         session,
         total,
+        reached_eof: complete,
         parsed_messages: sink.total - first,
         suffix_bytes: (captured.primary.1.max(0) as u64).saturating_sub(if resumed {
             from.map_or(0, |cp| cp.offset)
