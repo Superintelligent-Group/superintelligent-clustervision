@@ -209,7 +209,7 @@ fn handle(request: &mut Request<'_>, ctx: &Ctx) {
     if let Some(token) = &ctx.token {
         let authed = header_value(request, "Authorization")
             .and_then(|v| v.strip_prefix("Bearer ").map(str::to_string))
-            .is_some_and(|t| t == *token);
+            .is_some_and(|t| token_matches(&t, token));
         if !authed {
             request.respond(json_response(
                 401,
@@ -371,6 +371,17 @@ fn handle(request: &mut Request<'_>, ctx: &Ctx) {
 /// First value of a (case-insensitively named) request header, if present.
 fn header_value(request: &Request<'_>, name: &'static str) -> Option<String> {
     request.header(name).map(str::to_string)
+}
+
+/// Whether a presented bearer token equals the configured one, in time that depends only on the
+/// presented token's length, so response timing cannot be used to guess the secret byte by byte.
+fn token_matches(presented: &str, token: &str) -> bool {
+    let (presented, token) = (presented.as_bytes(), token.as_bytes());
+    let mut diff = u8::from(presented.len() != token.len());
+    for (i, byte) in presented.iter().enumerate() {
+        diff |= byte ^ token.get(i % token.len().max(1)).copied().unwrap_or(0);
+    }
+    std::hint::black_box(diff) == 0
 }
 
 /// The hostname part of a `Host` header or URL authority: strips a `:port`, unbrackets IPv6.
@@ -946,6 +957,14 @@ mod staged_tests {
 mod semantic_service_tests {
     use super::*;
 
+    #[test]
+    fn token_comparison_needs_every_byte() {
+        assert!(token_matches("opensesame", "opensesame"));
+        for wrong in ["", "opensesam", "opensesamee", "Opensesame", "opensesamf", "x"] {
+            assert!(!token_matches(wrong, "opensesame"), "{wrong:?}");
+        }
+        assert!(!token_matches("x", ""));
+    }
 
     #[test]
     fn semantic_route_uses_service_owned_state_and_observes_replacement() {
