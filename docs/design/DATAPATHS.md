@@ -33,6 +33,13 @@ before publication. Implementation and combined checks are complete, with eviden
 inventories remain applicable; this pass does not claim a fresh line-by-line audit of every adapter or a new hardware-counter campaign.
 The native Zed capture gap and live sharpened-child experiment below remain open.
 
+Two further source-established follow-ups remain in existing features: selected timelines still
+build a rich forest inventory before narrowing child/journal reads, and observation waits collect
+a watch tail before matching and cannot cancel an already active reader pass immediately. The
+filter and sleep fixes here do not eliminate those broader scans. Task coordination still replays
+its complete journal; snapshot/tail reuse needs evidence of task volume before adding that design.
+These are specific remaining work opportunities, not new release blockers or measured regressions.
+
 ### Current batch convergence
 
 Runtime `da50dcbc` passes the full native workspace run (including 1,236 core unit tests),
