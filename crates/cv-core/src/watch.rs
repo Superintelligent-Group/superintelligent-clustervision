@@ -347,6 +347,19 @@ impl Watcher {
         refs
     }
 
+    // Reconcile identities, not just fleet size: an equally sized replacement can remove
+    // a session too. Reuse these keys during polling and allocate the live set only when
+    // an existing position actually disappeared.
+    fn discover_live(&mut self) -> Vec<(String, SessionRef)> {
+        let refs: Vec<_> = self.discover().into_iter().map(|r| (Self::key(&r), r)).collect();
+        let existing = refs.iter().filter(|(key, _)| self.seen.contains_key(key)).count();
+        if existing < self.seen.len() {
+            let live: std::collections::HashSet<&str> = refs.iter().map(|(key, _)| key.as_str()).collect();
+            self.seen.retain(|key, _| live.contains(key.as_str()));
+        }
+        refs
+    }
+
     /// Poll once and return any events since the previous poll.
     pub fn poll(&mut self) -> Vec<SessionEvent> {
         let mut events = Vec::new();
@@ -396,18 +409,10 @@ impl Watcher {
         retained: bool,
     ) -> anyhow::Result<bool> {
         let _reads = crate::source::read_scope();
-        let refs = self.discover();
-        // Prune entries for sessions that vanished from discovery (deleted/pruned transcripts),
-        // so a long-lived watcher (`cv watch`) doesn't grow `seen` without bound. The size check skips
-        // building the key set on the common nothing-vanished poll.
-        if self.seen.len() > refs.len() {
-            let live: std::collections::HashSet<String> = refs.iter().map(Self::key).collect();
-            self.seen.retain(|k, _| live.contains(k));
-        }
+        let refs = self.discover_live();
         let mut consumed = 0usize;
         let mut pending = false;
-        for r in refs {
-            let key = Self::key(&r);
+        for (key, r) in refs {
             let trigger = Self::trigger_of(&r);
             let (kind, prev_len) = match self.seen.get(&key) {
                 None => (EventKind::New, 0),
@@ -495,14 +500,9 @@ impl Watcher {
         mut take: impl FnMut(EventKind, &SessionRef, usize) -> Option<(usize, ReadState)>,
     ) -> usize {
         let _reads = crate::source::read_scope();
-        let refs = self.discover();
-        if self.seen.len() > refs.len() {
-            let live: std::collections::HashSet<String> = refs.iter().map(Self::key).collect();
-            self.seen.retain(|key, _| live.contains(key));
-        }
+        let refs = self.discover_live();
         let mut accepted = 0;
-        for r in refs {
-            let key = Self::key(&r);
+        for (key, r) in refs {
             let trigger = Self::trigger_of(&r);
             let (kind, previous) = match self.seen.get(&key) {
                 None => (EventKind::New, 0),
@@ -555,6 +555,57 @@ mod tests {
             created_at: None,
             updated_at: None,
             message_count: 0,
+        }
+    }
+
+    #[test]
+    fn same_size_replacement_prunes_positions_even_when_new_source_cannot_be_read() {
+        fn replacement() -> Vec<SessionRef> {
+            let mut r = sref(
+                Harness::Claude,
+                std::path::PathBuf::from("/nonexistent/cv-watch-replacement"),
+            );
+            r.id = "replacement".into();
+            vec![r]
+        }
+        fn original() -> Vec<SessionRef> {
+            let mut r = replacement().remove(0);
+            r.id = "original".into();
+            vec![r]
+        }
+        let cursor = Cursor {
+            v: CURSOR_VERSION,
+            o: [(
+                "claude:original".into(),
+                Pos {
+                    t: (0, None),
+                    n: 12,
+                    b: None,
+                    more: false,
+                    r: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        for source_poll in [false, true] {
+            let mut watcher = Watcher::from_cursor(Filter::default(), cursor.clone(), replacement);
+            if source_poll {
+                assert_eq!(watcher.poll_sources(|_, _, _| None), 0);
+            } else {
+                assert!(watcher
+                    .try_poll_bounded(1, |_| panic!("missing source emitted"))
+                    .is_err());
+            }
+            let encoded = watcher.to_cursor().encode();
+            let cursor = Cursor::decode(&encoded).unwrap();
+            assert!(cursor.is_empty(), "vanished position survived: {encoded}");
+            let mut resumed = Watcher::from_cursor(Filter::default(), cursor, original);
+            resumed.poll_sources(|kind, _, previous| {
+                assert_eq!(kind, EventKind::New);
+                assert_eq!(previous, 0, "reappeared identity inherited its removed position");
+                None
+            });
         }
     }
 

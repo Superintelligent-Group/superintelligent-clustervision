@@ -4609,3 +4609,18 @@ value-only callback. Rejected-row counts are captured before checkpoints, preser
 The Kimi Code discovery oracle fixture now uses the actual `agents/main/wire.jsonl` layout, so
 its state/title checks exercise transcript discovery rather than a missing wire fallback. Focused
 native controls are running; root owns combined native/portable convergence.
+
+### Watch fleet replacement identity reconciliation (2026-10-13, next_transport)
+
+Both bounded message polling (native watch and MCP observe) and source polling (archive)
+previously removed vanished cursor positions only when the discovered fleet was smaller.
+An equal-sized replacement whose new source cannot be read never inserts a new position,
+so the vanished position survives indefinitely. If that identity reappears, it resumes the
+removed position instead of being treated as a new session.
+
+The shared discovery reconciliation counts surviving identities rather than comparing fleet
+sizes. It generates each poll key once and creates a borrowed-key live set only when a prior
+identity disappeared. Both polling modes now remove vanished positions before attempting the
+new source. The regression covers a failed replacement read, failed source publication,
+serialized cursor resume, and fresh reappearance. Existing source acceptance remains unchanged.
+Scoped verification is delegated to the integration batch; no performance claim is made.
