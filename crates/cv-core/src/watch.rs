@@ -563,6 +563,7 @@ impl Watcher {
                 &mut consumer,
                 &mut check,
             )?;
+            check()?;
             let seen_to = previous_count.min(pass.total) + consumer.taken;
             let pending = !pass.reached_eof || pass.total > seen_to;
             self.seen.insert(
