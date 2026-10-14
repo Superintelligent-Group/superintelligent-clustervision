@@ -131,7 +131,9 @@ pub fn parse_since(s: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>, String>
         return Err("empty --since".into());
     }
     if let Some(d) = parse_duration(s) {
-        return Ok(now - d);
+        return now
+            .checked_sub_signed(d)
+            .ok_or_else(|| format!("duration {s:?} is outside the supported date range"));
     }
     if let Ok(t) = DateTime::parse_from_rfc3339(s) {
         return Ok(t.with_timezone(&Utc));
@@ -169,7 +171,9 @@ pub fn parse_since(s: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>, String>
 pub fn parse_deadline(s: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>, String> {
     let s = s.trim();
     if let Some(d) = parse_duration(s) {
-        return Ok(now + d);
+        return now
+            .checked_add_signed(d)
+            .ok_or_else(|| format!("deadline {s:?} is outside the supported date range"));
     }
     if let Ok(t) = DateTime::parse_from_rfc3339(s) {
         return Ok(t.with_timezone(&Utc));
@@ -202,17 +206,17 @@ pub fn parse_deadline(s: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>, Stri
 /// `30m` / `2h` / `3d` / `1w` / `45s` → a duration. Whole numbers only.
 pub fn parse_duration(s: &str) -> Option<chrono::Duration> {
     let s = s.trim();
-    let (num, unit) = s.split_at(s.len().checked_sub(1)?);
+    let (num, unit) = s.split_at_checked(s.len().checked_sub(1)?)?;
     let n: i64 = num.trim().parse().ok()?;
     if n < 0 {
         return None;
     }
     match unit {
-        "s" => Some(chrono::Duration::seconds(n)),
-        "m" => Some(chrono::Duration::minutes(n)),
-        "h" => Some(chrono::Duration::hours(n)),
-        "d" => Some(chrono::Duration::days(n)),
-        "w" => Some(chrono::Duration::weeks(n)),
+        "s" => chrono::Duration::try_seconds(n),
+        "m" => chrono::Duration::try_minutes(n),
+        "h" => chrono::Duration::try_hours(n),
+        "d" => chrono::Duration::try_days(n),
+        "w" => chrono::Duration::try_weeks(n),
         _ => None,
     }
 }
@@ -654,6 +658,33 @@ mod tests {
             "end of local day"
         );
         assert!(parse_deadline("whenever", now).is_err());
+    }
+
+    #[test]
+    fn invalid_and_out_of_range_durations_return_errors_without_panicking() {
+        let now = DateTime::from_timestamp(1_000, 0).unwrap();
+        for input in [
+            "",
+            "λ",
+            "12💥",
+            "-1h",
+            "9223372036854775807s",
+            "9223372036854775807m",
+            "9223372036854775807h",
+            "9223372036854775807d",
+            "9223372036854775807w",
+        ] {
+            assert!(parse_duration(input).is_none(), "{input}");
+            assert!(parse_since(input, now).is_err(), "{input}");
+            assert!(parse_deadline(input, now).is_err(), "{input}");
+        }
+        // Representable durations can still exceed the timestamp range.
+        assert!(parse_duration("1000000000000000s").is_some());
+        assert!(parse_since("1000000000000000s", now).is_err());
+        assert!(parse_deadline("1000000000000000s", now).is_err());
+        assert!(parse_since("1s", DateTime::<Utc>::MIN_UTC).is_err());
+        assert!(parse_deadline("1s", DateTime::<Utc>::MAX_UTC).is_err());
+        assert_eq!(parse_duration(" 2h "), Some(chrono::Duration::hours(2)));
     }
 
     #[test]

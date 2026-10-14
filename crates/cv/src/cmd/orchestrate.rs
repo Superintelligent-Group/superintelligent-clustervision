@@ -299,7 +299,11 @@ pub(crate) fn cmd_lanes(
         Some(s) => {
             let d = cv_core::task::parse_duration(&s)
                 .ok_or_else(|| anyhow::anyhow!("--since takes a duration: 30m, 2h, 1d, 1w (got {s:?})"))?;
-            Some(chrono::Utc::now() - d)
+            Some(
+                chrono::Utc::now()
+                    .checked_sub_signed(d)
+                    .ok_or_else(|| anyhow::anyhow!("--since duration is outside the supported date range: {s:?}"))?,
+            )
         }
         None => None,
     };
