@@ -1347,9 +1347,14 @@ fn generation_identity(
 
 #[derive(Default)]
 struct GenerationDedup {
-    headers: std::collections::HashMap<u64, Vec<(i64, Option<GenerationIdentity>)>>,
+    headers: std::collections::HashMap<u64, GenerationGroup>,
     #[cfg(test)]
     forced_hash: Option<u64>,
+}
+#[derive(Default)]
+struct GenerationGroup {
+    pending: Option<i64>,
+    bodies: std::collections::HashMap<u64, Vec<(i64, GenerationIdentity)>>,
 }
 impl GenerationDedup {
     fn fingerprint(&self, hash: u64) -> u64 {
@@ -1379,7 +1384,10 @@ impl GenerationDedup {
         let id: i64 = row.get(index(if incremental { "_content_rowid" } else { "id" }).unwrap())?;
         let fingerprint = self.fingerprint(header.finish());
         if let std::collections::hash_map::Entry::Vacant(entry) = self.headers.entry(fingerprint) {
-            entry.insert(vec![(id, None)]);
+            entry.insert(GenerationGroup {
+                pending: Some(id),
+                ..Default::default()
+            });
             return Ok(true);
         }
         let mut current = generation_identity(row, index, conn, incremental)?;
@@ -1403,42 +1411,42 @@ impl GenerationDedup {
         };
         #[cfg(test)]
         let forced = self.forced_hash;
-        let entries = self.headers.get_mut(&fingerprint).unwrap();
-        for (prior, cached) in entries.iter_mut() {
-            if cached.is_some_and(|key| key.hash != current.hash) {
-                continue;
-            }
-            let (key, equal) = conn.query_row(sql, [*prior], |prior_row| {
-                let compare = || -> Result<_> {
-                    let key = match *cached {
-                        Some(key) => key,
-                        None => generation_identity(prior_row, &prior_index, conn, incremental)?,
-                    };
-                    #[cfg(test)]
-                    let key = GenerationIdentity {
-                        hash: forced.unwrap_or(key.hash),
-                        ..key
-                    };
-                    let equal = key.hash == current.hash
-                        && generation_rows_equal(
-                            row,
-                            index,
-                            prior_row,
-                            &prior_index,
-                            conn,
-                            incremental,
-                            (current.content, key.content),
-                        )?;
-                    Ok((key, equal))
-                };
-                compare().map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))
+        let group = self.headers.get_mut(&fingerprint).unwrap();
+        let mut statement = conn.prepare(sql)?;
+        if let Some(prior) = group.pending {
+            let key = statement.query_row([prior], |prior_row| {
+                generation_identity(prior_row, &prior_index, conn, incremental)
+                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))
             })?;
-            *cached = Some(key);
+            #[cfg(test)]
+            let key = GenerationIdentity {
+                hash: forced.unwrap_or(key.hash),
+                ..key
+            };
+            group.bodies.entry(key.hash).or_default().push((prior, key));
+            group.pending = None;
+        }
+        // Distinct body digests under a repeated header remain an indexed lookup, rather than
+        // scanning every earlier row sharing a timestamp. Only real digest collisions compare.
+        let candidates = group.bodies.entry(current.hash).or_default();
+        for (prior, key) in candidates.iter() {
+            let equal = statement.query_row([*prior], |prior_row| {
+                generation_rows_equal(
+                    row,
+                    index,
+                    prior_row,
+                    &prior_index,
+                    conn,
+                    incremental,
+                    (current.content, key.content),
+                )
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))
+            })?;
             if equal {
                 return Ok(false);
             }
         }
-        entries.push((id, Some(current)));
+        candidates.push((id, current));
         Ok(true)
     }
 }
