@@ -61,26 +61,31 @@ pub(super) fn visit(
         for row in rows {
             let (raw, complete) = row?;
             let range = ranges::trim(&file, raw)?;
-            let mut fingerprint = Fingerprint {
-                reader: ranges::reader(&file, range)?,
-                hash: DefaultHasher::new(),
-            };
-            if !ranges::valid_utf8(&mut fingerprint)? {
-                skipped += 1;
-                continue;
+            // Older segments need fingerprints for their successor. The live segment only
+            // needs them until its copied prefix diverges; accepted JSON validation already
+            // checks UTF-8 afterwards, so an unused hash would reread every remaining body.
+            if !live || shared {
+                let mut fingerprint = Fingerprint {
+                    reader: ranges::reader(&file, range)?,
+                    hash: DefaultHasher::new(),
+                };
+                if !ranges::valid_utf8(&mut fingerprint)? {
+                    skipped += 1;
+                    continue;
+                }
+                // str::hash appends this delimiter; chunked writes retain the same fingerprint.
+                fingerprint.hash.write_u8(0xff);
+                let hash = fingerprint.hash.finish();
+                if !live {
+                    cur.push(hash);
+                }
+                let matches = shared && prev.get(line_index) == Some(&hash);
+                line_index += 1;
+                if matches {
+                    continue;
+                }
+                shared = false;
             }
-            // str::hash appends this delimiter; chunked writes retain the same fingerprint.
-            fingerprint.hash.write_u8(0xff);
-            let hash = fingerprint.hash.finish();
-            if !live {
-                cur.push(hash);
-            }
-            let matches = shared && prev.get(line_index) == Some(&hash);
-            line_index += 1;
-            if matches {
-                continue;
-            }
-            shared = false;
             if range.len == 0 {
                 continue;
             }
