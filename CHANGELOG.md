@@ -12,7 +12,7 @@
 - Codex, Grok and Qwen skip unused discovery and record payloads while preserving duplicate-key acceptance, Unicode text, system prompts and terminal errors.
 - Kimi discovery tracks auxiliary metadata; Kimi Code preserves model switches across resumed reads and avoids repeated header scans.
 - LM Studio exports preserve empty completions carrying token usage and maintain selected and alternate version identities.
-- Hermes exports preserve modern schema metadata and reasoning modes; replay suppression compares large prompt bodies without owning complete strings.
+- Hermes exports preserve modern metadata and reasoning modes; replay suppression indexes candidates and checks exact large bodies without materializing strings.
 - Devin projects navigation from incremental SQLite cells, avoiding whole-body native allocations during metadata reads.
 - OpenCode discovers custom database names, checks WAL changes, preserves unknown records and refuses conflicting native session identifiers.
 - Cursor, Cline and Roo retain native timestamps, errors and model choices; Continue preserves unrelated index entries during export.

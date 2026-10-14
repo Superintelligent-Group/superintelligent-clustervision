@@ -1,13 +1,13 @@
 # Store performance: the system we are optimizing
 
-Source audit: `c0f0044`, 2026-10-12; published runtime integration is `79b4842c` (2026-10-14).
+Source audit began at `c0f0044`, 2026-10-12; whole-codebase runtime integration is `1cbcab99` (2026-10-14).
 This is the working model and tracker for the performance pass. Measurements in `PERF.md` remain historical observations; their causal
 explanations are not all supported by the implementation. Paths below are relative to `crates/`.
 
-## Whole-codebase review in progress (2026-10-14)
+## Whole-codebase review completed (2026-10-14)
 
 Closing the preceding hotspot follow-ups did **not** complete a whole-codebase review. Ember
-explicitly extended the goal to the remaining software. The active branch is `perf/repo-wide-pass`,
+explicitly extended the goal to the remaining software. The batch was developed on `perf/repo-wide-pass`,
 based on `0b99a5cd`; no release is requested. Source review, implementation and combined validation
 are separate states. A green build or the first fixed bug does not establish coverage of a module.
 
@@ -41,7 +41,7 @@ rewrite. Read reports cover no-change paths too. Counts of commits or lines are 
 | Remaining CLI dispatch, archive, show, cat, browse, share, live, schema, blame, utilities | Full pass reported; guarded share publication, archive names, scoped identities, bounded durations and usage errors integrated. |
 | HTTP transport, API, MCP, LLM | Full production pass reported; strict framing/headers/authorities, bounded admission/input lifetimes, request cancellation, prompt budgets and checked LLM egress integrated. |
 | Web, Wasm and desktop | Full production pass reported; bounded ZIP extraction and asynchronous feature ownership repairs integrated. Browser 87/87, ZIP 11/11 and desktop 6/6 pass; standalone Wasm and optimized wasm-pack pass at `45f0f01f`. |
-| Testkit, tools, build, CI, packaging/release automation | Full production pass reported; ambient-state/duplex helpers, corpus guards, provenance and mandatory browser/Wasm gate evidence repaired. Final packaging pending; no release actions. |
+| Testkit, tools, build, CI, packaging/release automation | Full production pass reported; ambient-state/duplex helpers, corpus guards, provenance and mandatory browser/Wasm gate evidence repaired. All three final package archives and their internal dependencies verify at `1cbcab99`; no release actions. |
 
 Source review and implementation cover every scope above. The full native workspace run at
 `41ef5b2b` completed once; its failures were repaired and passed in scoped runs, including fixture
@@ -49,7 +49,26 @@ assumptions and dropped contextual CLI diagnostics. The late Goose/Hermes/OpenCl
 113 controls at `b0c294df`; the additional missing-schema Goose control passes at `e235d6c2`.
 All-target native build and clippy pass at `e235d6c2`. Portable repairs passed 107 controls at
 `45f0f01f`, following the broad portable baseline; the formerly ambient OpenSession test now uses
-committed fixtures. Final memory, package and source-delta checks are still converging.
+committed fixtures. Final Hermes source changes passed all 43 native and all 43 portable controls at `1cbcab99`,
+including forced digest collisions and production discovery. The repeated-header path now indexes
+body digests instead of scanning earlier candidates, retains exact byte comparison on collisions,
+and reuses its SQL lookup statement. Final all-target clippy, formatting and release CLI build pass.
+All three package archives verify with exact source/assets and internal dependencies at `1cbcab99`.
+Minimal core/search, standalone Wasm, optimized wasm-pack, desktop, browser, manual, corpus tools
+and dist planning pass at their recorded source revisions; unrelated successful checks were retained.
+
+The native/portable memory matrix passes all 12 groups (765 case rows), including exact-output,
+growth and 64-file-descriptor controls. Its maximum bounded Rust peak is
+6,684,676 B in Zed escaped-history discovery, below that case's 8 MiB limit. Thirteen whole-operation
+prune/window/export controls pass; the largest measured Rust peak is 1,398,465 B. CLI staged JSON
+uses 1,188,318 B for the tested 60 MB output, versus 111,114,721 B when materialized. Production FTS
+passes with four 100 MB inputs; semantic projection passes for plain/escaped/argument payloads
+using fake vectors, so this does not measure embedding-model memory. Semantic store decoding
+retains its requested vectors plus a bounded input buffer. Final Hermes-only row/giant checks at
+`1cbcab99` preserve baseline hashes and the native/Rust bounds after the indexed-dedup change.
+Native logs/reports are `excellence-home/repo-wide-*`; final archive and portable evidence is
+`desktop-web-convergence-evidence/repo-wide-1cbcab99`. Generated giant fixtures were removed after
+verification; reports remain. The local optimized binary identifies clean runtime `1cbcab99a412`.
 
 Actual adapter discovery now has a native-allocation gate as well as a Rust heap gate. Each case
 checks that the session and its one conversational turn were counted. At `e235d6c2`, all ten
