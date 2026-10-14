@@ -73,6 +73,7 @@ pub struct CompactionSink {
     /// Pending boundaries whose summary hasn't streamed past yet, keyed by boundary uuid → index
     /// into `boundaries`.
     pending: std::collections::HashMap<String, usize>,
+    unpaired: std::collections::BTreeSet<usize>,
     /// Resolver for a lazily-spanned summary body (set on the streaming path; `None` for the
     /// already-materialized in-session path). A compaction summary can exceed the inline threshold.
     resolver: Option<crate::lazy::Resolver>,
@@ -86,6 +87,7 @@ impl CompactionSink {
             msg_idx: 0,
             boundaries: Vec::new(),
             pending: std::collections::HashMap::new(),
+            unpaired: std::collections::BTreeSet::new(),
             resolver: None,
             error: None,
         }
@@ -150,6 +152,7 @@ impl CompactionSink {
                 self.pending.insert(uuid.clone(), self.boundaries.len());
             }
             self.boundaries.push(comp);
+            self.unpaired.insert(self.boundaries.len() - 1);
             return Ok(Flow::Continue);
         }
 
@@ -160,12 +163,16 @@ impl CompactionSink {
         if is_summary {
             let slot = m.parent_id.as_deref().and_then(|p| self.pending.remove(p)).or_else(|| {
                 // No/unknown parent link: attach to the latest boundary still awaiting a summary.
-                let last = self.boundaries.iter().rposition(|c| c.summary_msg_idx.is_none())?;
-                // Drop any stale pending entry for it so it isn't double-claimed.
-                self.pending.retain(|_, v| *v != last);
+                let last = self.unpaired.pop_last()?;
+                if let Some(id) = self.boundaries[last].boundary_uuid.as_ref() {
+                    if self.pending.get(id) == Some(&last) {
+                        self.pending.remove(id);
+                    }
+                }
                 Some(last)
             });
             if let Some(i) = slot {
+                self.unpaired.remove(&i);
                 self.boundaries[i].summary_msg_idx = Some(idx);
                 if self.keep_summaries {
                     self.boundaries[i].summary = summary_text(&m, self.resolver.as_ref())?;
@@ -509,4 +516,27 @@ mod tests {
         assert_eq!(comps[0].summary_msg_idx, Some(1));
         assert_eq!(comps[0].summary, None, "count-only mode keeps no summary text");
     }
+}
+#[test]
+fn queued_unlinked_summaries_pair_latest_once_and_preserve_duplicate_id_links() {
+    let mut sink = CompactionSink::new(false);
+    for i in 0..1000 {
+        sink.try_message(boundary(&format!("b{i}"), "auto", 100)).unwrap();
+    }
+    for _ in 0..1000 {
+        sink.try_message(summary("unknown", "summary")).unwrap();
+    }
+    assert!(sink.pending.is_empty() && sink.unpaired.is_empty());
+    let rows = sink.into_boundaries().unwrap();
+    for (i, row) in rows.iter().enumerate() {
+        assert_eq!(row.summary_msg_idx, Some(1999 - i));
+    }
+    let mut sink = CompactionSink::new(false);
+    sink.try_message(boundary("duplicate", "auto", 100)).unwrap();
+    sink.try_message(boundary("duplicate", "manual", 200)).unwrap();
+    sink.try_message(summary("duplicate", "newest")).unwrap();
+    sink.try_message(summary("unknown", "oldest")).unwrap();
+    let rows = sink.into_boundaries().unwrap();
+    assert_eq!(rows[0].summary_msg_idx, Some(3));
+    assert_eq!(rows[1].summary_msg_idx, Some(2));
 }
