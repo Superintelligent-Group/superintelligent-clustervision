@@ -1915,6 +1915,35 @@ mod tests {
         assert_eq!(hits[1].updated_at, None);
     }
 
+    #[cfg(feature = "probe-heap")]
+    #[test]
+    #[ignore = "requires isolated allocator process; run with --test-threads=1"]
+    fn semantic_store_decode_heap_probe() {
+        let dir = std::env::temp_dir().join(format!("cv-emb-load-heap-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("embeddings.bin");
+        let floats = 1024 * 1024;
+        let original = store(vec![(meta("load", None), vec![0.25; floats])]);
+        save_store(&path, &original).unwrap();
+        drop(original);
+        let baseline = cv_testkit::heap::begin();
+        let loaded = load_store(&path).unwrap();
+        let heap = cv_testkit::heap::end(baseline);
+        assert_eq!(loaded.vectors.len(), floats);
+        assert!(loaded.vectors.iter().all(|&v| v == 0.25));
+        let vector_bytes = floats * std::mem::size_of::<f32>();
+        assert!(
+            heap.peak_above_baseline_bytes < vector_bytes + 512 * 1024,
+            "wire ownership must remain bounded beyond the final vector allocation: {}",
+            heap.peak_above_baseline_bytes
+        );
+        println!(
+            "{}",
+            serde_json::json!({"semantic_store_decode_heap":heap,"vector_bytes":vector_bytes,"wire_buffer_bytes":16 * 1024})
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn binary_store_streaming_preserves_bits_and_rejects_corruption() {
         let dir = std::env::temp_dir().join(format!("cv-emb-stream-{}", uuid::Uuid::new_v4()));
