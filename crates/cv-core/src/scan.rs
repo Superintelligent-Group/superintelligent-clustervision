@@ -160,7 +160,10 @@ pub fn live_search(query: &str, want: Option<Harness>, limit: usize) -> Result<L
             let Some(pos) = low.find(&needle) else { continue };
             out.hits.push(LiveHit {
                 title: crate::label_from(meta.title.as_deref(), sink.first_user.as_deref()),
-                snippet: snippet(sink.hay.as_str(), pos.min(sink.hay.len()), needle.len()),
+                snippet: {
+                    let range = lowercase_source_range(sink.hay.as_str(), pos..pos + needle.len());
+                    snippet(sink.hay.as_str(), range.start, range.len())
+                },
                 session: r,
             });
             if out.hits.len() >= limit {
@@ -170,6 +173,38 @@ pub fn live_search(query: &str, want: Option<Harness>, limit: usize) -> Result<L
         }
     }
     Ok(out)
+}
+
+/// Map a byte range in `source.to_lowercase()` back to enclosing original UTF-8 boundaries.
+/// Matching must still use whole-string lowercase: Greek final sigma depends on its context.
+/// Per-character lowercase lengths are sufficient for mapping because sigma's contextual forms
+/// have equal encoded lengths. Matches within an expansion (such as İ → i + combining dot)
+/// include the complete original character.
+pub fn lowercase_source_range(source: &str, range: std::ops::Range<usize>) -> std::ops::Range<usize> {
+    if source.is_ascii() {
+        return range.start.min(source.len())..range.end.min(source.len());
+    }
+    let mut folded = 0;
+    let mut start = source.len();
+    let mut end = source.len();
+    for (offset, ch) in source.char_indices() {
+        let width: usize = ch.to_lowercase().map(char::len_utf8).sum();
+        if range.start >= folded && range.start < folded + width {
+            start = offset;
+        } else if range.start == folded + width {
+            start = offset + ch.len_utf8();
+        }
+        if range.end <= folded {
+            end = offset;
+            break;
+        }
+        if range.end <= folded + width {
+            end = offset + ch.len_utf8();
+            break;
+        }
+        folded += width;
+    }
+    start..end
 }
 
 /// A one-line excerpt of `hay` around `pos`, with ~40 bytes of lead-in and lead-out.
@@ -201,6 +236,36 @@ pub fn ceil_char(s: &str, mut i: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unicode_lowercase_ranges_preserve_source_matches_and_context() {
+        for (source, needle, expected) in [
+            ("İİ target tail", "target", "target"),
+            ("ȺȺ target tail", "target", "target"),
+            ("İstanbul", "i", "İ"),
+            ("İstanbul", "\u{307}", "İ"),
+            ("ΟΣ next", "ος", "ΟΣ"),
+            ("ΟΣΑ next", "οσα", "ΟΣΑ"),
+            ("ΟΣ next", "ς", "Σ"),
+        ] {
+            let lowered = source.to_lowercase();
+            let pos = lowered.find(needle).unwrap();
+            let range = lowercase_source_range(source, pos..pos + needle.len());
+            assert_eq!(&source[range], expected, "{source:?} / {needle:?}");
+        }
+        // Old lowercased offsets omit the actual match after enough expanding characters.
+        let source = format!("{}target {}", "İ".repeat(200), "end ".repeat(100));
+        let lowered = source.to_lowercase();
+        let pos = lowered.find("target").unwrap();
+        let range = lowercase_source_range(&source, pos..pos + 6);
+        let original = source.find("target").unwrap();
+        assert_eq!(range, original..original + 6);
+        assert_eq!(
+            snippet(&source, range.start, range.len()),
+            truncate(&source[original - 40..original + 6 + 40], 120)
+        );
+        assert!(!snippet(&source, pos, 6).contains("target"));
+    }
 
     #[test]
     fn live_head_caps_arguments_paths_and_labels_together() {

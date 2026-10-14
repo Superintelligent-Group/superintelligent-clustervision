@@ -288,7 +288,7 @@ fn live_scan_adapters<'a>(
             }
             // Lowercasing can expand UTF-8 characters; map the match back to source bytes.
             let folded_pos = words.iter().filter_map(|w| low.find(*w)).min().unwrap_or(0);
-            let pos = source_offset_for_lowercase(sink.hay.as_str(), folded_pos);
+            let pos = cv_core::scan::lowercase_source_range(sink.hay.as_str(), folded_pos..folded_pos).start;
             let lo = floor_char(sink.hay.as_str(), pos.saturating_sub(40));
             let hi = ceil_char(sink.hay.as_str(), (pos + 120).min(sink.hay.len()));
             let snippet = sink.hay.as_str()[lo..hi].replace('\n', " ").trim().to_string();
@@ -315,24 +315,6 @@ fn live_scan_adapters<'a>(
         }
     }
     Ok(scored.into_values().collect())
-}
-
-/// Translate an offset in `source.to_lowercase()` into an original UTF-8 boundary.
-/// ASCII needs no translation. Per-character lowercase lengths also cover contextual casing
-/// (Greek final sigma changes the character but retains the same encoded length).
-fn source_offset_for_lowercase(source: &str, folded_offset: usize) -> usize {
-    if source.is_ascii() {
-        return folded_offset.min(source.len());
-    }
-    let mut folded = 0;
-    for (offset, ch) in source.char_indices() {
-        let width: usize = ch.to_lowercase().map(char::len_utf8).sum();
-        if folded_offset < folded + width {
-            return offset;
-        }
-        folded += width;
-    }
-    source.len()
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -1314,9 +1296,19 @@ mod tests {
             let folded = source.to_lowercase();
             for (offset, _) in source.char_indices() {
                 let prefix = &source[..offset];
-                assert_eq!(source_offset_for_lowercase(source, prefix.to_lowercase().len()), offset);
+                assert_eq!(
+                    cv_core::scan::lowercase_source_range(
+                        source,
+                        prefix.to_lowercase().len()..prefix.to_lowercase().len()
+                    )
+                    .start,
+                    offset
+                );
             }
-            assert_eq!(source_offset_for_lowercase(source, folded.len()), source.len());
+            assert_eq!(
+                cv_core::scan::lowercase_source_range(source, folded.len()..folded.len()).start,
+                source.len()
+            );
         }
         Ok(())
     }
