@@ -707,6 +707,9 @@ fn modern_message(m: &Value, f: &mut dyn FnMut(Message) -> Flow) -> Flow {
             msg.harness_extra_mut(Harness::Zed)
                 .insert("reasoning_details".into(), rd.clone());
         }
+        if (!msg.content.is_empty() || !msg.extra.is_empty()) && f(msg) == Flow::Stop {
+            return Flow::Stop;
+        }
         // tool_results is an id-keyed map ({"<tool_use_id>": {…}}), ordered by insertion.
         let blocks: Vec<Block> = agent
             .get("tool_results")
@@ -715,9 +718,6 @@ fn modern_message(m: &Value, f: &mut dyn FnMut(Message) -> Flow) -> Flow {
             .flat_map(|m| m.values())
             .filter_map(|tr| tool_result_block(tr, &tool_names))
             .collect();
-        if (!msg.content.is_empty() || !msg.extra.is_empty()) && f(msg) == Flow::Stop {
-            return Flow::Stop;
-        }
         if !blocks.is_empty() {
             let mut tm = Message::new(Role::Tool);
             tm.content = blocks;
