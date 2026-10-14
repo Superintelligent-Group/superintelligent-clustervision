@@ -145,12 +145,13 @@ fn agents_in(session: &SessionFile, want: &str) -> Vec<AgentFile> {
     let Ok(rd) = std::fs::read_dir(session.subagents_dir()) else {
         return vec![];
     };
+    let prefix = format!("agent-{want}");
     rd.flatten()
         .map(|e| e.path())
         .filter(|p| {
             p.file_name()
                 .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with(&format!("agent-{want}")) && n.ends_with(".jsonl"))
+                .is_some_and(|n| n.starts_with(&prefix) && n.ends_with(".jsonl"))
         })
         .filter_map(|p| agent_file(session, p))
         .collect()

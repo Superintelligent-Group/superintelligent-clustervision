@@ -1478,8 +1478,8 @@ fn read_meta(path: &std::path::Path) -> (Option<String>, Option<String>, Option<
 
 /// The sub-agent's final return value as text: the last assistant text turn in its transcript
 /// (what a `general-purpose`/`Explore` agent hands back to its parent, surfaced in the parent's
-/// `Agent` tool_result). Reads only the small text fields, never materializing large content.
-/// `None` for an empty/unreadable transcript or one whose final turn carried no text.
+/// `Agent` tool_result). Reads one record at a time and retains the last substantive assistant text.
+/// `None` for an empty/unreadable transcript or one with no substantive assistant text.
 pub fn subagent_return(path: &std::path::Path) -> Option<String> {
     let file = fs::File::open(path).ok()?;
     let mut last: Option<String> = None;
@@ -1512,7 +1512,7 @@ pub fn subagent_return(path: &std::path::Path) -> Option<String> {
 /// `SubagentStop` attachment each time the agent stops; a `SendMessage` resume appends new turns
 /// after it. So `stopped_at > last_turn_at` means the agent is parked — finished or waiting —
 /// and `last_turn_at > stopped_at` (or no stop at all) means it is running, or died without the
-/// hook firing (a harness restart). Pure record scan; content is never materialized.
+/// hook firing (a harness restart). Keeps timing and error facts, discarding ordinary content after each record.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct SubagentEnd {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1564,7 +1564,7 @@ pub fn subagent_end(path: &std::path::Path) -> SubagentEnd {
                 if let Some(ts) = ts {
                     end.last_turn_at = Some(end.last_turn_at.map_or(ts, |t: DateTime<Utc>| t.max(ts)));
                 }
-                let msg = v.get("message").cloned().unwrap_or(Value::Null);
+                let msg = v.get("message").unwrap_or(&Value::Null);
                 if v.get("isApiErrorMessage").and_then(Value::as_bool).unwrap_or(false) {
                     let text = msg
                         .get("content")
@@ -1588,7 +1588,7 @@ pub fn subagent_end(path: &std::path::Path) -> SubagentEnd {
                             .and_then(Value::as_i64)
                             .and_then(|s| DateTime::from_timestamp(s, 0)),
                     });
-                } else if kind == "user" || !is_synthetic_assistant(&v, &msg) {
+                } else if kind == "user" || !is_synthetic_assistant(&v, msg) {
                     // A real turn after the notice: the agent was resumed; the error is history.
                     end.api_error = None;
                 }
