@@ -345,11 +345,7 @@ pub fn index_sessions(
     if !rebuild {
         eprintln!(
             "  ↳ index: {} changed/new ({} read from where the last pass stopped), {} removed, {} unchanged, {} errors",
-            swept.changed,
-            swept.resumed,
-            swept.removed,
-            swept.total.saturating_sub(swept.copies + swept.changed),
-            swept.errors
+            swept.changed, swept.resumed, swept.removed, swept.unchanged, swept.errors
         );
         if swept.copies != 0 {
             eprintln!(
@@ -386,6 +382,8 @@ pub(crate) struct Swept {
     pub copies: usize,
     /// Sessions (top-level or folded sub-agents) whose FTS docs were (re)written.
     pub changed: usize,
+    /// Requested logical sessions whose FTS documents were already fresh.
+    pub unchanged: usize,
     /// Sessions whose parse or event publication failed (successful independent work is kept).
     pub errors: usize,
     first_error: Option<String>,
@@ -617,6 +615,7 @@ fn sweep_refs(dir: &Path, refs: &[cv_core::SessionRef], rebuild: bool, subagents
             return Ok(Swept {
                 total,
                 copies,
+                unchanged: plan.unchanged,
                 ..Default::default()
             });
         }
@@ -631,6 +630,7 @@ fn sweep_refs(dir: &Path, refs: &[cv_core::SessionRef], rebuild: bool, subagents
         writer.commit().context("commit after clear")?;
     }
     let SweepPlan {
+        unchanged,
         jobs,
         missing,
         consumer,
@@ -655,6 +655,7 @@ fn sweep_refs(dir: &Path, refs: &[cv_core::SessionRef], rebuild: bool, subagents
         total,
         copies,
         changed: ran.changed,
+        unchanged,
         removed,
         resumed: ran.resumed,
         errors: ran.errors,
@@ -672,6 +673,7 @@ fn sweep_refs(dir: &Path, refs: &[cv_core::SessionRef], rebuild: bool, subagents
 }
 
 struct SweepPlan {
+    unchanged: usize,
     jobs: Vec<Job>,
     missing: Vec<String>,
     consumer: String,
@@ -723,6 +725,7 @@ impl SweepPlanner<'_> {
 
         let mut seen: HashSet<String> = HashSet::new();
         let mut jobs: Vec<Job> = Vec::new();
+        let mut unchanged = 0;
         // Seal owned folded entries before taking pointers into them. Top-level metadata
         // and provenance stay borrowed until a real Job needs ownership.
         let mut folded_candidates = Vec::new();
@@ -757,6 +760,7 @@ impl SweepPlanner<'_> {
             let fts_fresh = fts_is_fresh(r, existing.get(&r.id), mtime, size, || {
                 dependencies_fresh && dependencies.primary_fresh(r, &source.dependencies)
             }) && metadata.get(&r.id) == Some(&DiscoveryMetadata::new(r, prov));
+            unchanged += usize::from(fts_fresh);
             let events = event_sync.needs_ingest_with_provenance(r, &source, prov, &mut probe);
             // Unchanged on every axis → skip entirely (no re-parse beyond the metadata scan).
             if fts_fresh
@@ -787,6 +791,7 @@ impl SweepPlanner<'_> {
 
         let missing = missing_ids(&existing, &seen, &folded, subagents);
         Ok(SweepPlan {
+            unchanged,
             jobs,
             missing,
             consumer,
@@ -5053,6 +5058,28 @@ mod tests {
         });
         std::fs::write(&p, format!("{line}\n")).unwrap();
         p
+    }
+
+    #[test]
+    fn refresh_unchanged_counts_requested_fresh_sessions_and_folded_lanes() {
+        let _home = IsolatedHome::new();
+        let dir = tmpdir();
+        let sdir = tmpdir();
+        let pp = write_claude(&sdir, "count-parent", "parent body");
+        write_subagent(&pp, "count-child", "child body");
+        let parent = sref("count-parent", "parent session", pp.clone());
+        let first = sweep(&dir, vec![parent.clone()], false, true).unwrap();
+        assert_eq!((first.changed, first.unchanged), (2, 0));
+        let fresh = sweep(&dir, vec![parent.clone()], false, true).unwrap();
+        assert_eq!((fresh.changed, fresh.unchanged), (0, 2));
+        // A plain refresh preserves the forest but counts only its requested top-level scope.
+        let plain = sweep(&dir, vec![parent.clone()], false, false).unwrap();
+        assert_eq!((plain.changed, plain.unchanged), (0, 1));
+        write_subagent(&pp, "count-child", "a substantially longer changed child body");
+        let changed = sweep(&dir, vec![parent], false, true).unwrap();
+        assert_eq!((changed.changed, changed.unchanged), (1, 1));
+        std::fs::remove_dir_all(dir).ok();
+        std::fs::remove_dir_all(sdir).ok();
     }
 
     /// `cv index --subagents` end to end: a string living ONLY inside a sub-agent transcript is
