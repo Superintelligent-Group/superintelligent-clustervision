@@ -11,7 +11,7 @@
 //! parents that still resolve are kept, the cut points are re-linked, a span lifted from a sub-agent
 //! joins the main thread. `cv splice` calls this.
 
-use crate::ir::{Harness, Message, Session};
+use crate::ir::{Harness, Message, Principal, Session};
 
 /// A contiguous span of messages from a source session: `[start, end)` (None end → through the last).
 pub struct Span<'a> {
@@ -55,8 +55,13 @@ impl Composition {
             "source_id": source.id, "harness": source.harness.as_str(), "start": start, "end": end,
         }));
         self.messages.append(&mut source.messages);
-        if self.first.is_none() {
+        if let Some(first) = &mut self.first {
+            if first.principal != source.principal {
+                first.principal = None;
+            }
+        } else {
             let mut defaults = Session::new(&source.id, source.harness);
+            defaults.principal = source.principal.take();
             defaults.cwd = source.cwd.take();
             defaults.title = source.title.take();
             defaults.model = source.model.take();
@@ -70,7 +75,15 @@ impl Composition {
         self.first.as_ref().map(|source| source.harness)
     }
     pub fn finish(self, new_id: Option<String>, harness: Harness) -> Session {
-        assembled(self.first.as_ref(), self.messages, self.provenance, new_id, harness)
+        let principal = self.first.as_ref().and_then(|source| source.principal.clone());
+        assembled(
+            self.first.as_ref(),
+            principal,
+            self.messages,
+            self.provenance,
+            new_id,
+            harness,
+        )
     }
 }
 
@@ -92,11 +105,31 @@ pub fn splice(spans: &[Span<'_>], new_id: Option<String>, harness: Harness) -> S
         messages.extend(span.messages().iter().cloned());
     }
 
-    assembled(spans.first().map(|s| s.source), messages, provenance, new_id, harness)
+    let principal = spans.first().and_then(|first| {
+        first
+            .source
+            .principal
+            .as_ref()
+            .filter(|principal| {
+                spans
+                    .iter()
+                    .all(|span| span.source.principal.as_ref() == Some(*principal))
+            })
+            .cloned()
+    });
+    assembled(
+        spans.first().map(|s| s.source),
+        principal,
+        messages,
+        provenance,
+        new_id,
+        harness,
+    )
 }
 
 fn assembled(
     first_source: Option<&Session>,
+    principal: Option<Principal>,
     messages: Vec<Message>,
     provenance: Vec<serde_json::Value>,
     new_id: Option<String>,
@@ -132,6 +165,7 @@ fn assembled(
         messages,
         source_path: None,
         extra,
+        principal,
         system_prompt: None,
         lineage: crate::ir::Lineage::default(),
     }
@@ -172,6 +206,7 @@ mod tests {
             messages,
             source_path: Some("/tmp/orig.jsonl".into()),
             extra: serde_json::Map::new(),
+            principal: None,
             system_prompt: None,
             lineage: crate::ir::Lineage::default(),
         }
@@ -364,5 +399,60 @@ mod tests {
         assert_eq!(none.created_at, None);
         assert_eq!(none.updated_at, None);
         assert!(!none.id.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod principal_tests {
+    use super::*;
+
+    #[test]
+    fn splice_and_composition_require_unanimous_explicit_principals() {
+        let mut first = Session::new("first", Harness::OpenSession);
+        first.principal = Some(Principal::String("opaque-owner".into()));
+        let mut other = first.clone();
+        other.id = "other".into();
+        for principal in [
+            first.principal.clone(),
+            None,
+            Some(Principal::String("different-owner".into())),
+        ] {
+            other.principal = principal;
+            let expected = (first.principal == other.principal)
+                .then(|| first.principal.clone())
+                .flatten();
+            // Empty spans still name contributing sources; absence never acquires an owner.
+            let spans = [
+                Span {
+                    source: &first,
+                    start: 0,
+                    end: None,
+                },
+                Span {
+                    source: &other,
+                    start: 0,
+                    end: None,
+                },
+            ];
+            let selected = splice(&spans, Some("selected".into()), Harness::OpenSession);
+            assert_eq!(selected.principal, expected);
+            let mut moved = Composition::default();
+            moved.push(first.clone(), 0, 0, None);
+            moved.push(other.clone(), 0, 0, None);
+            assert_eq!(moved.finish(None, Harness::OpenSession).principal, expected);
+        }
+        assert_eq!(
+            splice(
+                &[Span {
+                    source: &first,
+                    start: 0,
+                    end: None
+                }],
+                None,
+                Harness::OpenSession
+            )
+            .principal,
+            first.principal
+        );
     }
 }

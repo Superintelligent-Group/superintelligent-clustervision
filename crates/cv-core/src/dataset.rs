@@ -717,6 +717,7 @@ mod tests {
             messages,
             source_path: None,
             extra: serde_json::Map::new(),
+            principal: None,
             system_prompt: None,
             lineage: crate::ir::Lineage::default(),
         }

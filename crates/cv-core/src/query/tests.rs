@@ -558,6 +558,7 @@ fn sess(primary: Option<&str>, turn_models: &[Option<&str>]) -> Session {
             .collect(),
         source_path: None,
         extra: serde_json::Map::new(),
+        principal: None,
         system_prompt: None,
         lineage: crate::ir::Lineage::default(),
     }

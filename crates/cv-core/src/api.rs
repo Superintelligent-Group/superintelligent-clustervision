@@ -358,14 +358,18 @@ struct WindowSink {
 /// arrive here or it never reaches a reader: the windowed path is the one every transcript open
 /// uses.
 fn session_meta_json(s: &Session) -> Value {
-    json!({
+    let mut meta = json!({
         "title": s.title,
         "model": s.model,
         "cwd": s.cwd.as_ref().map(|c| c.to_string_lossy()),
         "system_prompt": s.system_prompt,
         "lineage": s.lineage,
         "git": s.git,
-    })
+    });
+    if let Some(principal) = &s.principal {
+        meta["principal"] = json!(principal);
+    }
+    meta
 }
 
 impl MessageSink for WindowSink {
@@ -935,5 +939,18 @@ mod tests {
         }
         assert_eq!(route_json(&["api", "nope"], "").0, 404);
         assert_eq!(route_json(&["api", "sessions"], "harness=warpdrive").0, 400);
+    }
+}
+
+#[cfg(test)]
+mod principal_tests {
+    use super::*;
+
+    #[test]
+    fn window_metadata_preserves_principal_only_when_present() {
+        let mut session = Session::new("opaque", crate::Harness::OpenSession);
+        assert!(session_meta_json(&session).get("principal").is_none());
+        session.principal = Some(crate::Principal::String("opaque-owner".into()));
+        assert_eq!(session_meta_json(&session)["principal"], json!("opaque-owner"));
     }
 }

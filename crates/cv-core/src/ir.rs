@@ -169,6 +169,10 @@ impl std::fmt::Display for Harness {
 /// A fully-parsed session in the unified representation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
+    /// The opaque identity this session acts as. Consumers bind it to their own domain;
+    /// cv never infers it from cwd, harness, session id, or a local account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal: Option<Principal>,
     pub id: String,
     pub harness: Harness,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -199,6 +203,15 @@ pub struct Session {
     /// (`system_prompt`, `lineage`, …). See `docs/INTERFACE-V2.md` §4.
     #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// An opaque OpenSession principal, either a stable string or an uninterpreted object.
+/// Object keys and values have no cv-defined identity or authorization semantics.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Principal {
+    String(String),
+    Object(serde_json::Map<String, serde_json::Value>),
 }
 
 /// Where a session came from and where it went. Every field is a session id in the SAME harness
@@ -254,6 +267,7 @@ impl Session {
             updated_at: None,
             model: None,
             git: None,
+            principal: None,
             system_prompt: None,
             lineage: Lineage::default(),
             messages: Vec::new(),

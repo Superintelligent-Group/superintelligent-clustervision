@@ -310,6 +310,7 @@ fn stream_thread_with_source(
         messages: Vec::new(),
         source_path: Some(r.path.clone()),
         extra: serde_json::Map::new(),
+        principal: None,
         system_prompt: None,
         lineage: Lineage {
             parent: parent_thread_id,

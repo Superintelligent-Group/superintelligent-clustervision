@@ -283,6 +283,7 @@ impl Adapter for OpenCode {
                 messages: Vec::new(),
                 source_path: Some(r.path.clone()),
                 extra: serde_json::Map::new(),
+                principal: None,
                 system_prompt: None,
                 lineage: Lineage {
                     parent: meta
@@ -783,6 +784,7 @@ mod db {
         let mut s = Session {
             id: r.id.clone(),
             harness: Harness::OpenCode,
+            principal: None,
             system_prompt: None,
             // A sub-agent session (`@agent` mention, `subtask`) points at the session that spawned it.
             lineage: Lineage {

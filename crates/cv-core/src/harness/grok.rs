@@ -345,6 +345,7 @@ fn session_header(r: &SessionRef) -> (Session, HashMap<String, ToolEnrich>) {
         messages: Vec::new(),
         source_path: Some(dir.clone()),
         extra: serde_json::Map::new(),
+        principal: None,
         system_prompt: None,
         lineage: crate::ir::Lineage::default(),
     };

@@ -282,6 +282,7 @@ fn parse_ref(kind: Kind, r: &SessionRef) -> Result<Session> {
         },
         source_path: Some(r.path.clone()),
         extra: Map::new(),
+        principal: None,
         system_prompt: None,
         lineage: crate::ir::Lineage::default(),
     };

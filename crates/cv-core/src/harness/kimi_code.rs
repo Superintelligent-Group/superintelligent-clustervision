@@ -284,6 +284,7 @@ fn session_header(r: &SessionRef) -> (Session, PathBuf) {
     let mut s = Session {
         id: r.id.clone(),
         harness: Harness::KimiCode,
+        principal: None,
         system_prompt: header.system_prompt,
         lineage: crate::ir::Lineage::default(),
         cwd: r

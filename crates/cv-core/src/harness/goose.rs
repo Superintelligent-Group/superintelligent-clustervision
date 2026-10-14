@@ -646,6 +646,7 @@ fn stream_db_opts_with_reads(
         messages: Vec::new(),
         source_path: Some(r.path.clone()),
         extra,
+        principal: None,
         system_prompt: None,
         lineage,
     };

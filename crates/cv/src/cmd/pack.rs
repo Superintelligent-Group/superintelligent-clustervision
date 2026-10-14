@@ -380,6 +380,7 @@ fn build_source(hit: &cv_search::Hit, task: &str, llm_model: Option<&Option<Stri
             messages: Vec::new(),
             source_path: None,
             extra: Default::default(),
+            principal: None,
             system_prompt: None,
             lineage: cv_core::ir::Lineage::default(),
         };
@@ -898,6 +899,7 @@ fn emit_pack_session(
         messages: vec![user, ack],
         source_path: None,
         extra: Default::default(),
+        principal: None,
         system_prompt: None,
         lineage: cv_core::ir::Lineage::default(),
     };

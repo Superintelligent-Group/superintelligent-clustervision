@@ -430,6 +430,7 @@ pub(super) fn resumable_session(session: &Session, d: &Distilled, opts: &Distill
         updated_at: session.updated_at,
         model: session.model.clone(),
         git: session.git.clone(),
+        principal: session.principal.clone(),
         system_prompt: None,
         lineage: crate::ir::Lineage {
             forked_from: Some(session.id.clone()),

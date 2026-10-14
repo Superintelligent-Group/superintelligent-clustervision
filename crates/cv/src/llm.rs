@@ -609,6 +609,7 @@ mod tests {
             ],
             source_path: None,
             extra: Default::default(),
+            principal: None,
             system_prompt: None,
             lineage: cv_core::ir::Lineage::default(),
         }

@@ -952,6 +952,7 @@ fn stream_session(
         messages: Vec::new(),
         source_path: Some(r.path.clone()),
         extra,
+        principal: None,
         system_prompt: (!prefix.is_empty()).then(|| prefix.join("\n\n")),
         lineage: match agent {
             Some(a) => crate::ir::Lineage {

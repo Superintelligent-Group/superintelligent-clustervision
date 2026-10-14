@@ -346,6 +346,7 @@ fn session_header(
         messages: Vec::new(),
         source_path: Some(r.path.clone()),
         extra: serde_json::Map::new(),
+        principal: None,
         system_prompt: None,
         lineage: subagent_lineage(&r.path),
     };

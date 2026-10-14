@@ -64,6 +64,7 @@ const SESSION_FIELDS: &[&str] = &[
     VERSION_KEY_V02,
     "id",
     "harness",
+    "principal",
     "cwd",
     "title",
     "created_at",

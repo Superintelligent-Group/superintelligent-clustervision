@@ -85,6 +85,7 @@ fn sample_session(harness: Harness) -> Session {
         messages: vec![sys, user, asst, tool],
         source_path: None,
         extra: serde_json::Map::new(),
+        principal: None,
         system_prompt: None,
         lineage: cv_core::ir::Lineage::default(),
     }

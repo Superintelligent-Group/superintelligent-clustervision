@@ -602,6 +602,7 @@ mod tests {
             messages: vec![sys, user, asst, tool],
             source_path: None,
             extra: serde_json::Map::new(),
+            principal: None,
             system_prompt: None,
             lineage: crate::ir::Lineage::default(),
         }
@@ -1976,6 +1977,7 @@ mod tests {
             messages: vec![user, asst],
             source_path: None,
             extra: serde_json::Map::new(),
+            principal: None,
             system_prompt: None,
             lineage: crate::ir::Lineage::default(),
         }

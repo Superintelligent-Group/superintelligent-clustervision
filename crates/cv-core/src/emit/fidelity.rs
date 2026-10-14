@@ -521,6 +521,7 @@ pub(super) fn target_holds(t: Harness, field: &str) -> bool {
         // avoided. A Grok model (or a Grok→Grok rehome) is carried verbatim and is still checked
         // under plain `session_model`, so a genuine model loss there is still unexpected.
         "session_model_foreign" => false,
+        "principal" => t == OpenSession,
         "system_prompt" => matches!(t, Claude | Codex | Hermes | Kimi),
         // Lineage reconstruction on a standalone emit needs a target the pointer resolves in; treat
         // any lineage change as expected (a fresh single-session port has nothing to point at).
@@ -836,6 +837,14 @@ pub(super) fn diff_features(
         input.system_prompt.clone(),
         reparsed.system_prompt.clone(),
     );
+    opt_delta(
+        &mut deltas,
+        target,
+        "principal",
+        "session principal",
+        input.principal.as_ref().map(|p| serde_json::json!(p).to_string()),
+        reparsed.principal.as_ref().map(|p| serde_json::json!(p).to_string()),
+    );
     if !input.lineage.is_empty() && input.lineage != reparsed.lineage {
         deltas.push(Delta {
             field: "lineage".into(),
@@ -917,4 +926,38 @@ pub(crate) fn unrepresentable_checked(
         }
     }
     Ok(true)
+}
+
+#[cfg(test)]
+mod principal_tests {
+    use super::*;
+
+    #[test]
+    fn native_principal_loss_is_reported_and_retained_value_is_not() {
+        let mut input = Session::new("opaque", Harness::OpenSession);
+        input.principal = Some(crate::Principal::String("opaque-owner".into()));
+        let mut output = input.clone();
+        output.principal = None;
+        for target in Harness::ALL.into_iter().filter(|h| *h != Harness::OpenSession) {
+            let report = diff_fidelity(target, ThinkingMode::Native, &input, &output);
+            let delta = report
+                .deltas
+                .iter()
+                .find(|delta| delta.field == "session principal")
+                .unwrap();
+            assert!(delta.expected, "{target} has no principal field");
+            assert!(delta.before.contains("opaque-owner"));
+        }
+        let retained = diff_fidelity(Harness::OpenSession, ThinkingMode::Native, &input, &input);
+        assert!(!retained.deltas.iter().any(|delta| delta.field == "session principal"));
+        let lost = diff_fidelity(Harness::OpenSession, ThinkingMode::Native, &input, &output);
+        assert!(
+            !lost
+                .deltas
+                .iter()
+                .find(|delta| delta.field == "session principal")
+                .unwrap()
+                .expected
+        );
+    }
 }

@@ -507,6 +507,7 @@ mod tests {
                 summary("b2", "SUMMARY TWO"),                  // 5
                 plain_user("after"),                           // 6
             ],
+            principal: None,
             system_prompt: None,
             lineage: crate::ir::Lineage::default(),
         };
@@ -549,6 +550,7 @@ mod tests {
             source_path: None,
             extra: Default::default(),
             messages: vec![boundary("bx", "manual", 100), sum],
+            principal: None,
             system_prompt: None,
             lineage: crate::ir::Lineage::default(),
         };
@@ -572,6 +574,7 @@ mod tests {
             source_path: None,
             extra: Default::default(),
             messages: vec![boundary("b", "manual", 100), summary("b", "text")],
+            principal: None,
             system_prompt: None,
             lineage: crate::ir::Lineage::default(),
         };

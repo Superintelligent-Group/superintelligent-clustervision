@@ -167,6 +167,7 @@ impl Adapter for LmStudio {
                         created_at,
                         updated_at: file_mtime(&r.path).or(created_at),
                         source_path: Some(r.path.clone()),
+                        principal: None,
                         system_prompt: projected_system_prompt(&doc)?,
                         ..Session::new(r.id.clone(), Harness::LmStudio)
                     };

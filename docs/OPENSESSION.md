@@ -50,6 +50,7 @@ now, because an interchange format nobody can round-trip is a wish, not a standa
   "open_session": "0.3",           // format version
   "harness": "claude",             // origin: claude|codex|grok|opencode|gemini|hermes|openclaw|...
   "id": "da9174f4-…",              // session id (native if possible)
+  "principal": {"id": "opaque-owner", "kind": "human"}, // optional: opaque string or object
   "cwd": "/Users/ember/pug/x",     // METADATA, not identity — freely rewritable
   "title": "…",                    // human/AI label (optional)
   "model": "claude-opus-4-8",      // session default; a message names one only when it differs
@@ -95,6 +96,30 @@ now, because an interchange format nobody can round-trip is a wish, not a standa
   ]
 }
 ```
+
+### Principal and forward-compatible fields
+
+`principal` optionally names the WHO a session acts as. Its value is a string or an object;
+cv preserves it without interpreting object keys, validating an identity domain, or granting
+capabilities. For example, `"principal": "tenant-opaque-id"` and
+`"principal": {"id": "opaque-id", "kind": "human"}` are equally valid. Binding this value to a
+human, tenant, settlement system, or other domain is the consumer's responsibility. cv never
+infers a principal from `cwd`, a session id, a harness, or the local account.
+
+Missing `principal` and explicit `null` both mean unspecified. Writers omit unspecified
+principals; older documents keep their existing output. Numbers, booleans, and arrays are invalid
+principal values. This is an additive 0.3 field, with no version change.
+
+Unknown object fields are accepted and ignored, not retained by cv's reader. They do not cause a
+crash. Thus older readers accept a document containing `principal` but drop it when rewriting;
+put harness-specific passthrough facts in namespaced `extra` bags. This tolerance does not make
+invalid values for known fields valid.
+
+Single-source distillation and cloned session transforms preserve principal. Splicing preserves
+it only when every supplied source specifies an equal principal, including empty spans; a
+missing or conflicting principal makes the result unspecified. Equality compares the opaque JSON
+value, without guessing whether two different values name the same owner. Native formats that
+cannot carry it report an expected principal loss during fidelity verification.
 
 ### Block types
 

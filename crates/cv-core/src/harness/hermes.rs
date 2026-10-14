@@ -804,6 +804,7 @@ fn stream_conn_with_demand(
         }),
         messages: Vec::new(),
         source_path: Some(r.path.clone()),
+        principal: None,
         extra,
         system_prompt,
         lineage,

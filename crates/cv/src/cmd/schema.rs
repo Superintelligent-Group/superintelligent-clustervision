@@ -87,8 +87,9 @@ pub(crate) fn data_schema_json() -> Value {
         },
         "session": {
             "description": "the IR `Session` (`show --json`, `export --format json`)",
-            "fields": ["id", "harness", "cwd", "title", "created_at", "updated_at", "model", "git",
+            "fields": ["id", "harness", "principal", "cwd", "title", "created_at", "updated_at", "model", "git",
                        "system_prompt", "lineage", "messages", "source_path", "extra"],
+            "principal": "optional opaque string or object; missing/null means unspecified",
             "lineage": ["forked_from", "parent", "spawned_by_tool_use", "continued_in", "continues", "agent_path"],
             "extra": "harness-specific facts nested under the harness name: extra[\"claude\"][…]; never flat",
         },

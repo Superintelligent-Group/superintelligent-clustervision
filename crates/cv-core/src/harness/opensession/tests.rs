@@ -297,6 +297,9 @@ fn every_field_session() -> Session {
             commit: Some("abc123".into()),
             remote: Some("git@example.com:x/y.git".into()),
         }),
+        principal: Some(Principal::Object(
+            json!({"id":"opaque-owner","kind":"human"}).as_object().unwrap().clone(),
+        )),
         system_prompt: Some("be excellent".into()),
         lineage: Lineage {
             forked_from: Some("s0".into()),
@@ -791,4 +794,78 @@ mod projection_schema {
         assert_eq!(declared["renamed"], set(["type", "wire", "alias"]));
         assert_eq!(declared["old"], declared["renamed"]);
     }
+}
+
+#[test]
+fn opaque_principal_round_trips_in_owned_positioned_and_checked_json_paths() -> Result<()> {
+    let world = cv_testkit::World::in_process("opensession-principal");
+    let path = world.base.join("session.opensession.json");
+    for principal in [
+        json!("opaque-owner"),
+        json!({"id":"opaque-owner","kind":"human","domain_extension":{"roles":["opaque"],"unknown":null}}),
+    ] {
+        let value = json!({"open_session":"0.3","id":"principal-session","harness":"claude","cwd":"/unrelated/project","principal":principal,"future_session_field":{"ignored":true},"messages":[{"role":"user","content":[{"type":"text","text":"hello","future_block_field":42}],"future_message_field":true}]});
+        let text = serde_json::to_string(&value)?;
+        let owned = from_str(&text)?;
+        let expected: Principal = serde_json::from_value(principal.clone())?;
+        assert_eq!(owned.principal.as_ref(), Some(&expected));
+        let written = serde_json::to_value(document(&owned))?;
+        assert_eq!(written["principal"], principal);
+        assert!(written.get("future_session_field").is_none());
+        assert!(written["messages"][0].get("future_message_field").is_none());
+        assert!(written["messages"][0]["content"][0].get("future_block_field").is_none());
+        assert_eq!(from_str(&serde_json::to_string(&written)?)?.principal, owned.principal);
+        let mut checked = Vec::new();
+        owned.write_json(&mut checked, &owned.resolver())?;
+        assert_eq!(
+            serde_json::from_slice::<Value>(&checked)?,
+            serde_json::to_value(&owned)?
+        );
+        std::fs::write(&path, text)?;
+        assert_eq!(read_document(&path)?.principal, owned.principal);
+        let mut sink = crate::stream::CollectSink::default();
+        let lazy = stream_document(&path, &ParseOptions::lazy(), &mut sink)?;
+        assert_eq!(lazy.principal, owned.principal);
+        let (redacted, _) = crate::redact::redact_with(&owned, &Default::default())?;
+        assert_eq!(redacted.principal, owned.principal);
+        let prepared = crate::distill::prepare_distill(&owned, &Default::default())?;
+        let (_, distilled) = prepared.into_resumable_session(&owned);
+        assert_eq!(distilled.principal, owned.principal);
+    }
+    Ok(())
+}
+
+#[test]
+fn principal_absent_and_null_are_omitted_unknown_fields_do_not_crash() -> Result<()> {
+    let world = cv_testkit::World::in_process("opensession-unspecified-principal");
+    let path = world.base.join("session.opensession.json");
+    let baseline = json!({"id":"no-principal","harness":"opensession","messages":[]});
+    let expected = serde_json::to_value(from_str(&baseline.to_string())?)?;
+    for extra in [
+        json!({}),
+        json!({"principal":null}),
+        json!({"future_field":{"arbitrary":[1,2,3]}}),
+    ] {
+        let mut value = baseline.clone();
+        value
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let read = from_str(&value.to_string())?;
+        assert!(read.principal.is_none());
+        assert_eq!(serde_json::to_value(&read)?, expected);
+        std::fs::write(&path, value.to_string())?;
+        let mut positioned = read_document(&path)?;
+        positioned.source_path = None;
+        assert_eq!(serde_json::to_value(&positioned)?, expected);
+    }
+    for invalid in [json!(true), json!(3), json!([])] {
+        let mut value = baseline.clone();
+        value["principal"] = invalid;
+        assert!(from_str(&value.to_string()).is_err());
+        std::fs::write(&path, value.to_string())?;
+        assert!(read_document(&path).is_err());
+    }
+    assert!(Session::new("new", Harness::Claude).principal.is_none());
+    Ok(())
 }
