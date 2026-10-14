@@ -9,9 +9,20 @@ use std::path::Path;
 /// discard staged output on error: a source or writer failure may follow an emitted prefix.
 pub fn write_markdown(s: &Session, out: &mut impl Write, resolver: &crate::Resolver) -> anyhow::Result<()> {
     let reads = crate::source::session_reads(s);
+    let label = match &s.title {
+        Some(title) => truncate(title, 72),
+        None => s
+            .messages
+            .iter()
+            .find(|m| m.role == Role::User)
+            .map(|m| message_label(m, resolver))
+            .transpose()?
+            .flatten()
+            .unwrap_or_else(|| "(untitled)".into()),
+    };
     out.write_all(
         md_header(
-            &s.label(),
+            &label,
             s.harness,
             &s.id,
             s.cwd.as_deref(),
@@ -28,6 +39,37 @@ pub fn write_markdown(s: &Session, out: &mut impl Write, resolver: &crate::Resol
         "session sources changed during Markdown output"
     );
     Ok(())
+}
+
+/// The exact label projection of a message's concatenated plain text, retaining at most 73
+/// scalars. Complete checked demands preserve whitespace-only rejection and late source errors.
+pub fn message_label(m: &Message, resolver: &crate::Resolver) -> anyhow::Result<Option<String>> {
+    let mut head = String::new();
+    let mut remaining = 73;
+    let mut nonempty = false;
+    let mut meaningful = false;
+    let mut append = |part: &str| {
+        if !meaningful {
+            meaningful = part.chars().any(|c| !c.is_whitespace());
+        }
+        for c in part.chars().take(remaining) {
+            head.push(c);
+            remaining -= 1;
+        }
+    };
+    for block in &m.content {
+        if let Block::Text { text } = block {
+            if nonempty {
+                append("\n");
+            }
+            text.try_for_each_chunk(resolver, 64 * 1024, |part| {
+                nonempty |= !part.is_empty();
+                append(part);
+                Ok(())
+            })?;
+        }
+    }
+    Ok(meaningful.then(|| truncate(&head, 72)))
 }
 
 /// Write one Markdown section, preserving the owned renderer's exact formatting.
@@ -312,6 +354,11 @@ mod tests {
         write_markdown(&session, &mut markdown, &resolver).unwrap();
         assert_eq!(markdown, old_markdown(&owned).as_bytes());
         assert_eq!(to_markdown(&session).unwrap(), old_markdown(&owned));
+        session.title = None;
+        owned.title = None;
+        markdown.clear();
+        write_markdown(&session, &mut markdown, &resolver).unwrap();
+        assert_eq!(markdown, old_markdown(&owned).as_bytes());
         let mut compact = Vec::new();
         session.write_json(&mut compact, &resolver).unwrap();
         assert_eq!(compact, serde_json::to_vec(&owned).unwrap());
@@ -322,6 +369,35 @@ mod tests {
         pretty.clear();
         empty.write_json_pretty(&mut pretty, &empty.resolver()).unwrap();
         assert_eq!(pretty, serde_json::to_vec_pretty(&empty).unwrap());
+    }
+
+    #[test]
+    fn checked_message_labels_match_join_trim_and_truncate_oracle() {
+        for pieces in [
+            vec!["", ""],
+            vec!["\u{2003}\n", "\t"],
+            vec!["", "alpha", ""],
+            vec![" \n", "🌙", "tail"],
+        ] {
+            let mut m = Message::new(Role::User);
+            for text in pieces {
+                m.content.push(Block::Text { text: text.into() });
+            }
+            assert_eq!(
+                message_label(&m, &crate::Resolver::new(None)).unwrap(),
+                m.text().filter(|t| !t.trim().is_empty()).map(|t| truncate(&t, 72))
+            );
+        }
+        let text = format!("{}🌙", " ".repeat(100000));
+        let source = Source::new(&serde_json::to_vec(&serde_json::json!({"text":text})).unwrap());
+        let mut m = Message::new(Role::User);
+        m.content.push(Block::Text {
+            text: source_text(&source.json(), "text"),
+        });
+        assert_eq!(
+            message_label(&m, &crate::Resolver::new(None)).unwrap(),
+            Some(truncate(&text, 72))
+        );
     }
 
     #[test]
@@ -345,12 +421,13 @@ mod tests {
             }
         }
         for json in [false, true] {
-            let source = Source::new(br#"{"text":"early"}"#);
+            let source = Source::new(&serde_json::to_vec(&serde_json::json!({"text":"early".repeat(1000)})).unwrap());
             let mut session = Session::new("guarded", Harness::Codex);
             let mut first = Message::new(Role::User);
             first.content.push(Block::Text {
                 text: source_text(&source.json(), "text"),
             });
+            assert!(matches!(&first.content[0], Block::Text { text } if text.is_span()));
             session.messages = vec![first, Message::new(Role::Assistant)];
             let mut writer = Mutating {
                 stage: crate::bytes::ByteStage::new(),
