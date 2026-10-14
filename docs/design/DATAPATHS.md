@@ -1,10 +1,55 @@
 # Store performance: the system we are optimizing
 
-Source audit: `c0f0044`, 2026-10-12; latest runtime integration is `79b4842c` (2026-10-14).
+Source audit: `c0f0044`, 2026-10-12; published runtime integration is `79b4842c` (2026-10-14).
 This is the working model and tracker for the performance pass. Measurements in `PERF.md` remain historical observations; their causal
 explanations are not all supported by the implementation. Paths below are relative to `crates/`.
 
-## Current integration status (2026-10-14)
+## Whole-codebase review in progress (2026-10-14)
+
+Closing the preceding hotspot follow-ups did **not** complete a whole-codebase review. Ember
+explicitly extended the goal to the remaining software. The active branch is `perf/repo-wide-pass`,
+based on `0b99a5cd`; no release is requested. Source review, implementation and combined validation
+are separate states. A green build or the first fixed bug does not establish coverage of a module.
+
+The inventory is every production module under core, CLI, search, testkit, Wasm, desktop and web,
+plus support tools/build automation. Directory scopes below include their child modules. Existing
+tests are inspected with their owning behavior; generated corpus data is evidence, not code to
+rewrite. Read reports cover no-change paths too. Counts of commits or lines are not completion gates.
+
+| Scope | Source review / implementation state |
+|---|---|
+| Claude and workflows | Full adapter/discovery/resume/fork/adopt/emission/sidecar/CLI read complete; checked name lookup, partial-journal recovery and streamed revival integrated. |
+| Codex, Grok, Qwen | Full pass continuing; lean duplicate acceptance, bounded discovery, stopped-reader work and token arithmetic integrated; native emission/UTF8 parity pending. |
+| Gemini, Harmony, formats | Full pass reported; routing, linear terminator scan, streaming census and registry preservation integrated; harness-scoped census follows shared discovery. |
+| Cursor, Cline, Roo, Continue, Cline SDK | Full pass reported; timestamp/error/model parity, index preservation and root dedup integrated. |
+| OpenCode, Zed | Full pass reported; native DB routing/WAL guards, opaque records, collision rejection, stable order and branch fallback integrated. |
+| Hermes, Devin | Full pass continuing; Devin sparse metadata/cache facts integrated, Hermes modern native export underway. |
+| Kimi, Kimi Code, LM Studio | Full pass underway across discovery dependencies, metadata, native paths and exports. |
+| Goose, OpenClaw | Full pass underway; native record/compaction replay and multiple tool-result preservation being implemented. |
+| Wire codecs, account exports, OpenSession, ingest, IR JSON | Full pass underway; selected payloads, multipart backing, input sniffing and cross-field source guards being repaired. |
+| IR, lazy text, JSON and private transport | Full pass underway; checked full materialization and bounded mapped validation integrated; canonical prefix demands under review. |
+| Source guards, projections, sanitization | Full pass underway; custom SQLite source classification integrated; exact prefix and freshness contracts being examined. |
+| Shared store, SQLite snapshots, spill and locks | Full production read reported; Unix unlinked-path ownership and cold snapshot directory identity repaired. Existing framing/ordering/lock contracts retained. |
+| Streaming, watch, resume and top-level dispatch | Full pass underway after adapter work; duplicate concrete identities and scoped discovery being repaired. |
+| Query, catalog, discovery cache and config | Full pass reported; strict predicates/date endpoints, error propagation, auxiliary guards, malformed counts and preserving config updates integrated. |
+| Search and CLI search | Full pass continuing; malformed-index repair, Unicode snippets, document-specific fallback filters and streamed result JSON integrated. |
+| Tasks and task HTTP/CLI | Full pass continuing; aliases/unread history, reopen receipts, safe identity handling, sweep names and bounded selections integrated. |
+| Events, affordances, stats, lanes, tools, hooks, compaction | Full production pass reported, final findings underway; parent-scoped stops/conflicts, indexed pairing/patch dedup and demand selection integrated. |
+| Prune, rewind, restamp, loom, adopt, port, compose | Full pass reported; source-alias/resource publication, native IDs, option validation and window accounting integrated. |
+| Emit/preparation/fidelity/thinking, Markdown, HTML, redaction | Full pass underway; checked lazy rendering, replay scrubbing and bounded secret matching being repaired. |
+| Distill, dataset, doctor, pack and recipes | Full pass continuing; visibility, lazy whitespace parity and pack budgeting/ranking fixes integrated; distill repair pending. |
+| Remaining CLI dispatch, archive, show, cat, browse, share, live, schema, blame, utilities | Full pass reported; guarded share publication, archive names, scoped identities, bounded durations and usage errors integrated. |
+| HTTP transport, API, MCP, LLM | Full pass continuing; strict framing, bounded discard and prompt budgets integrated; lazy LLM egress and protocol paths under review. |
+| Web, Wasm and desktop | Full pass reported; shared fallible bounded ZIP extraction and asynchronous feature ownership repairs integrated; combined browser/native/Wasm checks pending. |
+| Testkit, tools, build, CI, packaging/release automation | Full pass continuing; ambient-state/duplex helpers, corpus path guards, provenance and browser-gate evidence checks integrated. No release actions. |
+
+First combined compile found a test placed outside its module and a missed fallible-query caller;
+both repairs are integrated. Further combined builds, scoped behavior tests and cross-feature
+composition remain pending. The previous published batch's CI run `38509340378` passed; that is
+baseline evidence, not validation of this new branch. Do not mark this review complete until the
+in-progress scopes and their actionable findings are drained and the composed changes converge.
+
+## Previous integration status (2026-10-14)
 
 The reasonableness review is integrated through runtime `79b4842c`. This follows Ember's request to inspect algorithms, redundant work and
 existing feature behavior broadly; instruction-count targets are not acceptance criteria.
