@@ -194,15 +194,11 @@ impl Workflow {
     /// Enrich every agent with its **full** journaled return value from the run's
     /// `subagents/workflows/<runId>/journal.jsonl` (the state file only keeps a ~400-char
     /// `resultPreview`). When the journal is absent or empty (e.g. a crashed run), falls back to
-    /// each agent's own transcript: the final assistant text of
+    /// each missing agent's own transcript: the final assistant text of
     /// `subagents/workflows/<runId>/agent-<id>.jsonl` is the return the orchestrator never got to
     /// journal — the harvestable work.
     pub fn attach_journal(&mut self, parent_path: &Path) {
         let results = run_journal(parent_path, &self.run_id);
-        if results.is_empty() {
-            self.attach_transcript_returns(parent_path);
-            return;
-        }
         for a in self
             .phases
             .iter_mut()
@@ -210,14 +206,20 @@ impl Workflow {
             .chain(&mut self.orphan_agents)
         {
             if let Some(id) = &a.agent_id {
-                a.journal_result = results.get(id).cloned();
+                a.journal_result = results
+                    .get(id)
+                    .or_else(|| results.get(id.strip_prefix("agent-").unwrap_or(id)))
+                    .cloned();
             }
         }
+        // A crash can leave a partial journal: a sibling's recorded result must not hide
+        // completed work from agents whose returns never reached the orchestrator.
+        self.attach_transcript_returns(parent_path);
     }
 
-    /// The journal-less fallback for [`Self::attach_journal`]: read each agent's return straight
-    /// from its transcript in the run's debris dir. Only fills agents whose transcript exists and
-    /// ends in assistant text; the rest stay `None` (honest: no return was recorded anywhere).
+    /// The missing-journal-entry fallback for [`Self::attach_journal`]: read each agent's return straight
+    /// from its transcript in the run's debris dir. Only fills agents whose transcript contains
+    /// substantive assistant text; journaled results remain authoritative.
     fn attach_transcript_returns(&mut self, parent_path: &Path) {
         let Some(dir) = sidecar::workflow_run_dir(parent_path, &self.run_id) else {
             return;
@@ -231,8 +233,12 @@ impl Workflow {
             .flat_map(|p| &mut p.agents)
             .chain(&mut self.orphan_agents)
         {
+            if a.journal_result.is_some() {
+                continue;
+            }
             if let Some(id) = &a.agent_id {
-                if let Some(ret) = super::claude::subagent_return(&dir.join(format!("agent-{id}.jsonl"))) {
+                let bare = id.strip_prefix("agent-").unwrap_or(id);
+                if let Some(ret) = super::claude::subagent_return(&dir.join(format!("agent-{bare}.jsonl"))) {
                     a.journal_result = Some(Value::String(ret));
                 }
             }
@@ -384,6 +390,9 @@ fn scripts_index(parent_path: &Path) -> Vec<(String, String)> {
     let mut out = Vec::new();
     if let Ok(rd) = fs::read_dir(&dir) {
         for e in rd.flatten() {
+            if e.path().extension().and_then(|s| s.to_str()) != Some("js") || !e.path().is_file() {
+                continue;
+            }
             if let Some(stem) = e.path().file_stem().and_then(|s| s.to_str()) {
                 if let (Some(name), Some(rid)) = script_path_identity(stem) {
                     if rid.len() > "wf_".len() {
@@ -396,10 +405,9 @@ fn scripts_index(parent_path: &Path) -> Vec<(String, String)> {
     out
 }
 
-/// Cheap, complete `(name, run_id)` index over a session's recorded runs — WITHOUT parsing the
-/// (often multi-MB) state JSONs. Names come from the script filenames where a script was
-/// persisted; the rest fall back to a byte-scan of the state file for its `"workflowName":"…"`
-/// (the files are compact single-line JSON, so the pattern is stable). Sessions with no
+/// Cheap, complete `(name, run_id)` index over a session's recorded runs without materializing
+/// the state JSONs. Names come from script filenames where a script was persisted; otherwise
+/// a checked document view selects the top-level workflowName. Sessions with no
 /// `workflows/` dir return empty at the cost of one failed `read_dir`.
 pub fn run_names(parent_path: &Path) -> Vec<(String, String)> {
     let Some(dir) = workflows_dir(parent_path) else {
@@ -419,9 +427,11 @@ pub fn run_names(parent_path: &Path) -> Vec<(String, String)> {
                 continue;
             };
             let name = by_script.get(&rid).cloned().or_else(|| {
-                fs::read_to_string(&p)
+                crate::json::JsonSource::capture(&p)
+                    .ok()?
+                    .read_document(|view| crate::affordance::input::field_string(view, "workflowName"))
                     .ok()
-                    .and_then(|txt| scan_json_str_field(&txt, "workflowName"))
+                    .flatten()
             });
             if let Some(name) = name {
                 out.push((name, rid));
@@ -429,25 +439,6 @@ pub fn run_names(parent_path: &Path) -> Vec<(String, String)> {
         }
     }
     out
-}
-
-/// Extract a top-ish-level string field from compact JSON by byte-scan (`"key":"value"`), without
-/// parsing. Used as a prefilter/index only — anything acting on the value re-parses properly.
-fn scan_json_str_field(txt: &str, key: &str) -> Option<String> {
-    let pat = format!("\"{key}\":\"");
-    let start = txt.find(&pat)? + pat.len();
-    let rest = &txt[start..];
-    // Workflow names come from `meta.name` (plain identifiers); stop at the first unescaped quote.
-    let mut end = 0;
-    let bytes = rest.as_bytes();
-    while end < bytes.len() {
-        match bytes[end] {
-            b'"' => return Some(rest[..end].to_string()),
-            b'\\' => end += 2,
-            _ => end += 1,
-        }
-    }
-    None
 }
 
 /// Script files whose run has **no state file** — a launch that persisted its script (written at
@@ -1089,19 +1080,77 @@ mod tests {
     }
 
     #[test]
-    fn scan_json_str_field_handles_escapes_and_misses() {
+    fn run_names_selects_decoded_top_level_fields_and_only_script_files() {
+        let world = cv_testkit::World::in_process("workflow-name-projection");
+        let parent = world.base.join("sess.jsonl");
+        let dir = world.base.join("sess/workflows");
+        fs::create_dir_all(dir.join("scripts")).unwrap();
+        let source = serde_json::json!({
+            "args": {"workflowName":"nested-decoy", "padding":"x".repeat(1100000)},
+            "workflowName":"a\"b λ", "runId":"wf_formatted",
+        });
+        fs::write(
+            dir.join("wf_formatted.json"),
+            serde_json::to_string_pretty(&source).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("wf_duplicate.json"),
+            r#"{"workflowName":"old","workflowName":"last"}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("scripts/wrong-wf_formatted.txt"),
+            "not a persisted workflow script",
+        )
+        .unwrap();
+        let mut names = run_names(&parent);
+        names.sort();
         assert_eq!(
-            scan_json_str_field(
-                r#"{"runId":"wf_x","workflowName":"my-swarm","status":"completed"}"#,
-                "workflowName"
-            ),
-            Some("my-swarm".into())
+            names,
+            vec![
+                ("a\"b λ".into(), "wf_formatted".into()),
+                ("last".into(), "wf_duplicate".into())
+            ]
+        );
+        assert!(orphan_scripts(&parent).is_empty());
+        // Persisted JS filenames remain the name authority for a matching recorded run.
+        fs::write(dir.join("scripts/filename-wf_formatted.js"), "export const meta = {}").unwrap();
+        assert!(run_names(&parent).contains(&("filename".into(), "wf_formatted".into())));
+    }
+
+    #[test]
+    fn partial_journal_recovers_only_missing_agent_returns() {
+        let world = cv_testkit::World::in_process("workflow-partial-journal");
+        let parent = world.base.join("sess.jsonl");
+        let run = world.base.join("sess/subagents/workflows/wf_partial");
+        fs::create_dir_all(&run).unwrap();
+        let transcript = |text: &str| {
+            serde_json::json!({"type":"assistant", "message":{"content":[{"type":"text","text":text}]}}).to_string()
+        };
+        fs::write(run.join("agent-a1.jsonl"), transcript("stale transcript result")).unwrap();
+        fs::write(run.join("agent-a2.jsonl"), transcript("completed sibling work")).unwrap();
+        fs::write(
+            run.join("journal.jsonl"),
+            serde_json::json!({"type":"result","agentId":"a1","result":{"status":"done","summary":"authoritative"}})
+                .to_string(),
+        )
+        .unwrap();
+        let mut workflow = parse_state(&serde_json::json!({"runId":"wf_partial", "workflowProgress":[
+            {"type":"workflow_agent","index":1,"agentId":"a1"},
+            {"type":"workflow_agent","index":2,"agentId":"agent-a2"},
+            {"type":"workflow_agent","index":3,"agentId":"missing"}
+        ]}));
+        workflow.attach_journal(&parent);
+        assert_eq!(
+            workflow.orphan_agents[0].journal_result.as_ref().unwrap()["summary"],
+            "authoritative"
         );
         assert_eq!(
-            scan_json_str_field(r#"{"workflowName":"a\"b","x":1}"#, "workflowName"),
-            Some(r#"a\"b"#.into())
+            workflow.orphan_agents[1].journal_result,
+            Some(Value::String("completed sibling work".into()))
         );
-        assert_eq!(scan_json_str_field(r#"{"other":"x"}"#, "workflowName"), None);
+        assert!(workflow.orphan_agents[2].journal_result.is_none());
     }
 
     #[test]
