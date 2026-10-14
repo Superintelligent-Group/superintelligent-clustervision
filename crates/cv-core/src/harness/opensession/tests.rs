@@ -448,6 +448,16 @@ fn native_messages_match_document_codec_and_reject_late_invalid_turns() {
             }),
             opts.spans
         );
+        if opts.spans {
+            assert!(
+                actual
+                    .messages
+                    .iter()
+                    .flat_map(|m| &m.content)
+                    .any(|block| matches!(block,Block::Text{text} if text.is_span())),
+                "selected text must remain lazy before materialization on every backend"
+            );
+        }
         actual.materialize().unwrap();
         assert_eq!(
             serde_json::to_string(&actual).unwrap(),

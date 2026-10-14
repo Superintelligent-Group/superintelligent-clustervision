@@ -390,18 +390,30 @@ fn ir_block(view: JsonView<'_>, spans: bool) -> Result<Block> {
         });
     }
     let mut fields = record.project(keys)?;
+    let mut selected_text = None;
     if let Some(key) = text_key {
         if let Some(view) = record.get(key) {
-            fields.insert(
-                key.into(),
-                match view.text(spans)? {
-                    Some(text) => serde_json::to_value(text)?,
-                    None => view.resolve()?.into_owned(),
-                },
-            );
+            let value = if let Some(text) = view.text(spans)? {
+                // Keep the authoritative Block deserializer for metadata/required fields,
+                // without serializing a Source leaf back into an owned payload first.
+                selected_text = Some(text);
+                Value::String(String::new())
+            } else {
+                view.resolve()?.into_owned()
+            };
+            fields.insert(key.into(), value);
         }
     }
-    serde_json::from_value(Value::Object(fields)).context("not an OpenSession block")
+    let mut block: Block = serde_json::from_value(Value::Object(fields)).context("not an OpenSession block")?;
+    if let Some(selected) = selected_text {
+        match &mut block {
+            Block::Text { text } | Block::Thinking { text, .. } | Block::ToolResult { content: text, .. } => {
+                *text = selected
+            }
+            _ => unreachable!("text projection only selects text-bearing block variants"),
+        }
+    }
+    Ok(block)
 }
 
 /// Read an OpenSession document from text: check and strip the version marker, then the IR's own
