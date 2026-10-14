@@ -272,17 +272,27 @@ fn lookup(harness: &str, id: &str) -> Result<(SessionRef, Box<dyn crate::Adapter
 }
 
 /// `GET /api/session/{harness}/{id}` — the full parsed session (the IR), or 404.
+// Both full owned-session doors use the same full-fidelity collector as Adapter::parse,
+// but retain its operation receipt until JSON projection finishes and is safe to publish.
+fn complete_session_json(adapter: &dyn crate::Adapter, reference: &SessionRef) -> anyhow::Result<Value> {
+    let mut sink = crate::stream::CollectSink::default();
+    let (mut session, guard) =
+        crate::stream::stream_counted_guarded(adapter, reference, &crate::ParseOptions::full(), &mut sink)?;
+    session.messages = sink.messages;
+    session.materialize()?;
+    let output = serde_json::to_value(&session)?;
+    guard.verify(reference)?;
+    Ok(output)
+}
+
 fn session(harness: &str, id: &str) -> (u16, Value) {
     let (r, adapter) = match lookup(harness, id) {
         Ok(x) => x,
         Err(e) => return e,
     };
-    match adapter.parse(&r) {
-        Ok(session) => match serde_json::to_value(&session) {
-            Ok(v) => ok(v),
-            Err(e) => err(500, &e.to_string()),
-        },
-        Err(e) => err(500, &format!("parse failed: {e:#}")),
+    match complete_session_json(adapter.as_ref(), &r) {
+        Ok(value) => ok(value),
+        Err(error) => err(500, &format!("session read failed: {error:#}")),
     }
 }
 
@@ -603,12 +613,9 @@ fn subagent(harness: &str, parent: &str, agent: &str) -> (u16, Value) {
     .map(|s| s.session) else {
         return err(404, "subagent not found");
     };
-    match adapter.parse(&sr) {
-        Ok(session) => match serde_json::to_value(&session) {
-            Ok(v) => ok(v),
-            Err(e) => err(500, &e.to_string()),
-        },
-        Err(e) => err(500, &format!("parse failed: {e:#}")),
+    match complete_session_json(adapter.as_ref(), &sr) {
+        Ok(value) => ok(value),
+        Err(error) => err(500, &format!("session read failed: {error:#}")),
     }
 }
 
@@ -734,6 +741,54 @@ mod tests {
             capture: false,
             checkpoint: None,
             reads: crate::source::ReadSet::default(),
+        }
+    }
+
+    #[test]
+    fn complete_session_json_retains_full_owned_parity_and_rejects_source_changes() {
+        let world = cv_testkit::World::in_process("owned-api-source-guard");
+        let path = world.write_session(
+            "full",
+            &[json!({"type":"user", "uuid":"u", "message":{"role":"user", "content":"owned text"}})],
+        );
+        let reference = SessionRef::new("full", Harness::Claude, &path);
+        let adapter = crate::harness::for_harness(Harness::Claude).unwrap();
+        assert_eq!(
+            complete_session_json(adapter.as_ref(), &reference).unwrap(),
+            serde_json::to_value(adapter.parse(&reference).unwrap()).unwrap()
+        );
+        struct Changes(std::path::PathBuf);
+        impl crate::Adapter for Changes {
+            fn harness(&self) -> Harness {
+                Harness::Claude
+            }
+            fn roots(&self) -> Vec<std::path::PathBuf> {
+                Vec::new()
+            }
+            fn discover(&self) -> anyhow::Result<Vec<SessionRef>> {
+                Ok(Vec::new())
+            }
+            fn stream(
+                &self,
+                reference: &SessionRef,
+                _: &crate::ParseOptions,
+                sink: &mut dyn crate::MessageSink,
+            ) -> anyhow::Result<Session> {
+                sink.dependency(&self.0);
+                let mut message = Message::new(crate::Role::User);
+                message.content.push(crate::Block::Text {
+                    text: "unpublished".into(),
+                });
+                sink.try_message(message)?;
+                std::fs::write(&self.0, "changed while reading")?;
+                Ok(Session::new(&reference.id, reference.harness))
+            }
+        }
+        let auxiliary = world.base.join("metadata");
+        for dependency in [&path, &auxiliary] {
+            std::fs::write(dependency, "before").unwrap();
+            let error = complete_session_json(&Changes(dependency.clone()), &reference).unwrap_err();
+            assert!(format!("{error:#}").contains("source changed"), "{error:#}");
         }
     }
 
