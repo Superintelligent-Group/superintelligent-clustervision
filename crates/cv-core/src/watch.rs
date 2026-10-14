@@ -63,6 +63,21 @@ impl Filter {
     }
 }
 
+fn resolve_checked(r: &SessionRef, mark: Mark, check: &mut dyn FnMut() -> anyhow::Result<()>) -> anyhow::Result<usize> {
+    check()?;
+    let count = match mark {
+        Mark::Messages(n) => n,
+        Mark::Bytes(len) => match r.harness {
+            Harness::Claude => harness::claude::count_prefix_checked(r, len, check)?,
+            Harness::Codex => harness::codex::count_prefix_checked(r, len, check)?,
+            Harness::Qwen => harness::qwen::count_prefix_checked(r, len, check)?,
+            _ => anyhow::bail!("watch byte mark unsupported for {}", r.harness),
+        },
+    };
+    check()?;
+    Ok(count)
+}
+
 /// Where a follower stands in one session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mark {
@@ -522,13 +537,7 @@ impl Watcher {
                                 !read.baseline_unchanged(&r)
                             }) =>
                 {
-                    let previous = resolve(&r, state.mark).ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "could not resolve prior watch position: {} {}",
-                            r.harness,
-                            r.path.display()
-                        )
-                    })?;
+                    let previous = resolve_checked(&r, state.mark, &mut check)?;
                     (EventKind::Updated, previous)
                 }
                 Some(_) => continue,
@@ -606,7 +615,12 @@ impl Watcher {
                                 !read.baseline_unchanged(&r)
                             }) =>
                 {
-                    let Some(prev_len) = resolve(&r, state.mark) else {
+                    let previous = if controlled {
+                        Some(resolve_checked(&r, state.mark, &mut check)?)
+                    } else {
+                        resolve(&r, state.mark)
+                    };
+                    let Some(prev_len) = previous else {
                         if strict {
                             anyhow::bail!(
                                 "could not resolve prior watch position: {} {}",
@@ -742,6 +756,93 @@ mod tests {
             updated_at: None,
             message_count: 0,
         }
+    }
+
+    #[test]
+    fn prefix_resolution_checks_read_boundaries_even_without_messages() {
+        let world = cv_testkit::World::in_process("checked-prefix-empty-rows");
+        let dir = world.base.join("chats");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("prefix.jsonl");
+        let empty_rows = "\n".repeat(32 * 1024);
+        std::fs::write(&path, &empty_rows).unwrap();
+        for harness in [Harness::Claude, Harness::Codex, Harness::Qwen] {
+            let r = SessionRef::new("prefix", harness, &path);
+            let mark = Mark::Bytes(empty_rows.len() as u64);
+            let mut checks = 0;
+            let error = resolve_checked(&r, mark, &mut || {
+                checks += 1;
+                anyhow::ensure!(checks < 4, "cancelled during prefix framing");
+                Ok(())
+            })
+            .unwrap_err();
+            assert!(
+                format!("{error:#}").contains("cancelled during prefix framing"),
+                "{harness}: {error:#}"
+            );
+            assert_eq!(checks, 4, "{harness} ignored the interrupted input");
+            assert_eq!(
+                resolve_checked(&r, mark, &mut || Ok(())).unwrap(),
+                resolve(&r, mark).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn interrupted_first_update_prefix_keeps_byte_cursor_and_retries_only_the_append() {
+        static PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+        let world = cv_testkit::World::in_process("cancelled-prefix-cursor");
+        let path = world.write_session(
+            "prefix-cursor",
+            &[serde_json::json!({"type":"user", "uuid":"u0", "message":{"role":"user", "content":"existing"}})],
+        );
+        PATH.set(path).unwrap();
+        fn discover() -> Vec<SessionRef> {
+            vec![SessionRef::new("prefix-cursor", Harness::Claude, PATH.get().unwrap())]
+        }
+        let mut watcher = Watcher::with_discovery(Filter::default(), false, discover);
+        let before = serde_json::to_value(watcher.to_cursor()).unwrap();
+        use std::io::Write;
+        writeln!(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(PATH.get().unwrap())
+                .unwrap(),
+            "{}",
+            serde_json::json!({"type":"user", "uuid":"u1", "message":{"role":"user", "content":"appended"}})
+        )
+        .unwrap();
+        let mut checks = 0;
+        let error = watcher
+            .try_poll_messages(
+                || {
+                    checks += 1;
+                    anyhow::ensure!(checks < 5, "cancelled while resolving byte prefix");
+                    Ok(())
+                },
+                |_, _, _| panic!("prefix cancellation reached delivery"),
+            )
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("cancelled while resolving byte prefix"),
+            "{error:#}"
+        );
+        assert_eq!(serde_json::to_value(watcher.to_cursor()).unwrap(), before);
+        let mut texts = Vec::new();
+        watcher
+            .try_poll_messages(
+                || Ok(()),
+                |_, r, m| {
+                    texts.push(crate::projection::searchable_text_checked(
+                        &m,
+                        &crate::Resolver::new(Some(r.path.clone())),
+                        || Ok(()),
+                    )?);
+                    Ok(crate::Flow::Continue)
+                },
+            )
+            .unwrap();
+        assert_eq!(texts, ["appended\n"]);
     }
 
     #[test]

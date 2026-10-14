@@ -355,6 +355,10 @@ fn stream_session_jsonl(path: &Path, sink: &mut dyn MessageSink) -> Result<Sessi
 /// incomplete final physical record exactly as the whole parser would have accepted it then.
 /// Legacy Gemini shapes cannot pin old logical output with a physical byte prefix.
 pub(crate) fn count_prefix(r: &SessionRef, len: u64) -> Result<usize> {
+    count_prefix_checked(r, len, &mut || Ok(()))
+}
+
+pub(crate) fn count_prefix_checked(r: &SessionRef, len: u64, check: &mut dyn FnMut() -> Result<()>) -> Result<usize> {
     anyhow::ensure!(
         is_session_jsonl(&r.path),
         "Qwen recording is not chronological project JSONL"
@@ -365,13 +369,15 @@ pub(crate) fn count_prefix(r: &SessionRef, len: u64) -> Result<usize> {
         count += 1;
         Flow::Continue
     };
-    stream_reader_at(
-        session_shell(&r.path, &mut sink),
-        ReplayState::default(),
-        BufReader::new(file.take(len)),
-        0,
-        &mut sink,
-    )?;
+    crate::stream::with_read_check(BufReader::new(file.take(len)), check, |reader| {
+        stream_reader_at(
+            session_shell(&r.path, &mut sink),
+            ReplayState::default(),
+            reader,
+            0,
+            &mut sink,
+        )
+    })??;
     Ok(count)
 }
 

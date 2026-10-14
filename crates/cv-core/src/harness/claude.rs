@@ -471,6 +471,10 @@ pub fn parse_reader<R: BufRead>(id: &str, reader: R, source_path: Option<PathBuf
 /// parse would have returned when the file was `len` bytes long, since a Claude transcript only
 /// grows by appending. Streams the prefix, so peak memory is O(largest line).
 pub(crate) fn count_prefix(r: &SessionRef, len: u64) -> Result<usize> {
+    count_prefix_checked(r, len, &mut || Ok(()))
+}
+
+pub(crate) fn count_prefix_checked(r: &SessionRef, len: u64, check: &mut dyn FnMut() -> Result<()>) -> Result<usize> {
     use std::io::Read as _;
     let file = fs::File::open(&r.path).with_context(|| format!("opening {}", r.path.display()))?;
     let mut n = 0usize;
@@ -478,13 +482,9 @@ pub(crate) fn count_prefix(r: &SessionRef, len: u64) -> Result<usize> {
         n += 1;
         Flow::Continue
     };
-    stream_reader(
-        &r.id,
-        BufReader::new(file.take(len)),
-        Some(r.path.clone()),
-        &ParseOptions::full(),
-        &mut count,
-    );
+    crate::stream::with_read_check(BufReader::new(file.take(len)), check, |reader| {
+        stream_reader(&r.id, reader, Some(r.path.clone()), &ParseOptions::full(), &mut count)
+    })?;
     Ok(n)
 }
 

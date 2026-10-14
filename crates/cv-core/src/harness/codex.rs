@@ -688,25 +688,31 @@ fn flush_all_but_held(scratch: &mut Vec<Message>, sink: &mut dyn MessageSink) ->
 /// appending. Both passes read only the prefix, so `has_events` is decided exactly as it was then.
 /// Not for `.jsonl.zst` (a byte prefix of a zstd stream is not a prefix of the rollout).
 pub(crate) fn count_prefix(r: &SessionRef, len: u64) -> Result<usize> {
+    count_prefix_checked(r, len, &mut || Ok(()))
+}
+
+pub(crate) fn count_prefix_checked(r: &SessionRef, len: u64, check: &mut dyn FnMut() -> Result<()>) -> Result<usize> {
     use std::io::Read as _;
     let open = || -> Result<BufReader<std::io::Take<fs::File>>> {
         let f = fs::File::open(&r.path).with_context(|| format!("opening {}", r.path.display()))?;
         Ok(BufReader::new(f.take(len)))
     };
-    let has_events = detect_has_events(open()?);
+    let has_events = crate::stream::with_read_check(open()?, check, detect_has_events)?;
     let mut n = 0usize;
     let mut count = |_: Message| {
         n += 1;
         Flow::Continue
     };
-    stream_jsonl(
-        &r.id,
-        open()?,
-        Some(r.path.clone()),
-        has_events,
-        &ParseOptions::full(),
-        &mut count,
-    );
+    crate::stream::with_read_check(open()?, check, |reader| {
+        stream_jsonl(
+            &r.id,
+            reader,
+            Some(r.path.clone()),
+            has_events,
+            &ParseOptions::full(),
+            &mut count,
+        )
+    })?;
     Ok(n)
 }
 

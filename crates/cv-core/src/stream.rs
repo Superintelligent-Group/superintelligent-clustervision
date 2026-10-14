@@ -272,6 +272,60 @@ pub trait MessageSink {
     fn checkpoint(&mut self, _cp: &mut Checkpoint) {}
 }
 
+/// Check cancellation at buffered input boundaries, including rows which emit no message.
+/// Legacy tolerant readers may swallow I/O errors, so preserve the original control failure
+/// independently and return it after the reader operation instead of accepting a partial count.
+pub(crate) fn with_read_check<R: std::io::BufRead, T>(
+    reader: R,
+    check: &mut dyn FnMut() -> Result<()>,
+    read: impl FnOnce(CheckedReader<'_, R>) -> T,
+) -> Result<T> {
+    let mut error = None;
+    let result = read(CheckedReader {
+        reader,
+        check,
+        error: &mut error,
+    });
+    if let Some(error) = error {
+        return Err(error);
+    }
+    Ok(result)
+}
+
+pub(crate) struct CheckedReader<'a, R> {
+    reader: R,
+    check: &'a mut dyn FnMut() -> Result<()>,
+    error: &'a mut Option<anyhow::Error>,
+}
+impl<R> CheckedReader<'_, R> {
+    fn check(&mut self) -> std::io::Result<()> {
+        if self.error.is_none() {
+            if let Err(error) = (self.check)() {
+                *self.error = Some(error);
+            }
+        }
+        if self.error.is_some() {
+            return Err(std::io::Error::other("input read interrupted"));
+        }
+        Ok(())
+    }
+}
+impl<R: std::io::Read> std::io::Read for CheckedReader<'_, R> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        self.check()?;
+        self.reader.read(bytes)
+    }
+}
+impl<R: std::io::BufRead> std::io::BufRead for CheckedReader<'_, R> {
+    fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+        self.check()?;
+        self.reader.fill_buf()
+    }
+    fn consume(&mut self, bytes: usize) {
+        self.reader.consume(bytes);
+    }
+}
+
 /// Run an adapter boundary with a consumer error guard. Legacy adapter loops can keep using
 /// `message() -> Flow`; failures stop delivery immediately and surface after the adapter returns,
 /// including errors raised by metadata, dependencies, checkpoints or an EOF-only sink check.
