@@ -61,16 +61,42 @@ pub struct SearchRow<'a> {
     pub workflow: Option<&'a str>,
 }
 
+/// One search-response enrichment operation. Reuses catalog initialization and the exact-ID
+/// statement, without a daemon cache or a retained second collection of hit metadata.
+pub struct SearchRowContext {
+    catalog: Option<crate::catalog::Reader>,
+}
+
+impl SearchRowContext {
+    pub fn new() -> Self {
+        Self {
+            catalog: crate::catalog::Reader::open(),
+        }
+    }
+}
+
+impl Default for SearchRowContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SearchRow<'_> {
     /// The §3 search row: the session row (filled from the catalog, so `path`, `message_count` and
     /// `size_bytes` are the same values `ls --json` gives — all null for a sub-agent lane, which
     /// the catalog does not list) with the hit's own title/cwd/dates laid over it, plus `score`,
     /// `snippet`, and the sub-agent provenance trio — always present, null for a top-level hit.
     pub fn to_json(&self) -> Value {
-        let harness = Harness::parse(self.harness);
-        let cataloged = crate::catalog::lookup(self.id, harness)
-            .into_iter()
-            .find(|r| r.id == self.id);
+        self.to_json_with(&SearchRowContext::new())
+    }
+
+    /// Shape a response's hits through one operation-owned exact catalog reader. Index overlays,
+    /// key order and the legacy first-exact-copy policy match the standalone row contract.
+    pub fn to_json_with(&self, context: &SearchRowContext) -> Value {
+        let cataloged = context
+            .catalog
+            .as_ref()
+            .and_then(|reader| reader.exact_session(self.id, Harness::parse(self.harness)));
         let mut row = match &cataloged {
             Some(r) => session_row(r, std::fs::metadata(&r.path).ok().map(|m| m.len())),
             None => json!({
@@ -217,6 +243,7 @@ mod tests {
 
     #[test]
     fn search_rows_carry_the_session_row_plus_the_search_fields() {
+        let _world = cv_testkit::World::in_process("rows-search-contract");
         // An uncataloged id (a sub-agent lane): the session-row half is all null, the search half
         // is fully populated — the shape never varies, only the values.
         let row = SearchRow {

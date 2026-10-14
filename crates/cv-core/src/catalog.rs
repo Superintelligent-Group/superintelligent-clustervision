@@ -959,6 +959,19 @@ mod imp {
         None
     }
 
+    pub(super) fn exact_session_in(conn: &Connection, id: &str, harness: Option<Harness>) -> Option<SessionRef> {
+        let mut stmt = conn
+            .prepare_cached(&format!(
+                "SELECT {REF_COLUMNS} FROM sessions WHERE id=?1 AND (?2 IS NULL OR harness=?2) ORDER BY rowid"
+            ))
+            .ok()?;
+        let mut rows = stmt
+            .query_map(params![id, harness.map(Harness::as_str)], row_to_ref)
+            .ok()?;
+        // Unknown newer harness rows are skipped, as in lookup; the first known exact copy wins.
+        rows.find_map(|row| row.ok().flatten())
+    }
+
     /// All catalog rows whose id equals `id` or starts with it, optionally constrained to one
     /// harness. Order: exact-id matches first. Empty on any error or a cold catalog.
     pub fn lookup(id: &str, harness: Option<Harness>) -> Vec<SessionRef> {
@@ -998,6 +1011,70 @@ mod imp {
                 updated_at: None,
                 message_count: 0,
             }
+        }
+
+        #[test]
+        fn search_rows_share_one_exact_catalog_reader_and_keep_first_copy_metadata() {
+            let w = cv_testkit::World::in_process("search-row-catalog-owner");
+            let first_path = w.base.join("first");
+            let newer_path = w.base.join("newer");
+            std::fs::write(&first_path, "old").unwrap();
+            std::fs::write(&newer_path, "newer").unwrap();
+            let mut first = db_ref(Harness::Claude, first_path.clone());
+            first.id = "hit".into();
+            first.message_count = 7;
+            let mut newer = first.clone();
+            newer.path = newer_path;
+            newer.message_count = 9;
+            newer.updated_at = chrono::DateTime::from_timestamp(1_700_000_000, 0);
+            let mut prefix = first.clone();
+            prefix.id = "hit-longer".into();
+            sync(&[first.clone(), newer, prefix]);
+            let count = || OPEN_COUNT.with(std::cell::Cell::get);
+            let before = count();
+            let context = crate::rows::SearchRowContext::new();
+            let make = |id, harness| crate::rows::SearchRow {
+                id,
+                harness,
+                cwd: Some("/indexed"),
+                title: Some("indexed title"),
+                created_at: None,
+                updated_at: None,
+                score: Some(1.0),
+                snippet: "snippet",
+                agent_id: None,
+                parent_id: None,
+                workflow: None,
+            };
+            let row = make("hit", "claude").to_json_with(&context);
+            assert_eq!(row["path"], first_path.to_string_lossy().as_ref());
+            assert_eq!(row["message_count"], 7);
+            assert_eq!(row["size_bytes"], 3);
+            assert_eq!(row["title"], "indexed title");
+            assert_eq!(row["cwd"], "/indexed");
+            assert_eq!(make("hit", "claude").to_json_with(&context), row);
+            assert!(
+                make("hi", "claude").to_json_with(&context)["path"].is_null(),
+                "a prefix is not an indexed exact hit"
+            );
+            assert!(make("hit", "codex").to_json_with(&context)["path"].is_null());
+            assert_eq!(
+                count() - before,
+                1,
+                "one catalog/schema initialization for all shaped hits"
+            );
+            assert_eq!(
+                lookup("hit", Some(Harness::Claude))
+                    .into_iter()
+                    .find(|r| r.id == "hit")
+                    .unwrap()
+                    .path,
+                first.path
+            );
+            assert_eq!(
+                row.as_object().unwrap().keys().map(String::as_str).collect::<Vec<_>>(),
+                crate::rows::SEARCH_ROW_KEYS
+            );
         }
 
         #[test]
