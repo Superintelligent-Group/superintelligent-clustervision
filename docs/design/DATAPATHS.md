@@ -4,6 +4,48 @@ Source audit began at `c0f0044`, 2026-10-12; whole-codebase runtime integration 
 This is the working model and tracker for the performance pass. Measurements in `PERF.md` remain historical observations; their causal
 explanations are not all supported by the implementation. Paths below are relative to `crates/`.
 
+## Backend complexity follow-up (2026-10-14)
+
+The preceding source review did not establish the absence of repeated work. A further pass on
+`perf/backend-complexity`, based on `8fcb6f09`, found and repaired these concrete costs:
+
+| Path | Change |
+|---|---|
+| Claude emission and workflows | Memoize stable dropped-parent chains with shared terminal IDs; index pending receipts, ghost resumes, orphan attribution and phase membership. Preserve duplicate/cycle and first-match ordering semantics. |
+| Gemini rewind / formats census | Index rewind targets; resolve vocabulary once; keep bounded recent candidates instead of sorting all sessions; classify checked prompt prefixes before demanding full text. |
+| Grok / Cline SDK / Continue | Hash location membership; join team runs once; skip unused child manifests and redundant grouped-result context scans. |
+| OpenCode | Skip shadowed legacy histories; emitted v1 databases include the native session/message/part lookup indexes. External read-only schemas remain unchanged. |
+| OpenClaw | Memoize stable parent suffixes and filter run owners before sorting. Shared inventories are described below. |
+| Account exports | Index cached conversation identifiers; multipart lookahead holds two descriptors rather than one descriptor per part. |
+| Kimi / Kimi Code / LM Studio | Reuse guarded child/session discovery scans, including auxiliary-file dependencies and current parent facts. |
+| FTS / watch checkpoints | Space exact owned snapshots by their encoded size as well as the minimum byte interval. Growing state no longer forces repeated prefix snapshots at fixed intervals; large states increase the suffix reread on append. |
+
+Operation-local metadata inventories share original source guards across nested and parallel
+readers, single-flight each key, and cap estimated retained metadata at 16 MiB. Standalone reads
+remain fresh loads. Qwen indexes shared scheduled tasks once, preserving file order in selected
+results. Goose/OpenClaw consumers and combined validation are still in progress at this entry.
+The first combined adapter/stream/workflow/formats batch passed 741 tests; this is algorithm and
+behavior evidence, not a new fleet latency or hardware-counter measurement.
+
+Remaining costs are explicit: Grok sibling lineage retains per-query sibling metadata guards;
+a cache alone cannot remove those stats without weakening freshness. Kimi wire enrichment and
+Kimi Code's auxiliary session index still reread changed prefixes. Claude compaction fork inference
+can inspect sibling prefixes/bodies for shared UUID evidence. External SQLite schemas without the
+relevant native indexes cannot be repaired by writing to the user's stores. Required ordering,
+exact source validation, demanded output and complete metadata remain work, not presumed defects.
+
+GitHub triage found no open PRs. [Issue 21](https://github.com/emberian/cv/issues/21) is confirmed:
+rewind preserves proxy-generated tool IDs and foreign thinking signatures that are unsuitable for
+Anthropic replay. Port shares the underlying compatibility gap by source inspection. This remains
+unfixed; tool-pair remapping must avoid collisions, and signature portability cannot be established
+from a model name. [Issue 15](https://github.com/emberian/cv/issues/15) is mostly implemented; the
+manual now accurately describes enumeration freshness, `--fresh`, and optional enrichment.
+[Issue 4](https://github.com/emberian/cv/issues/4) remains an optional principal-field proposal.
+
+Task-generated Cargo caches and frozen fleets were removed under Ember's disk request, preserving
+source worktrees and reports. `cv-worktrees` fell from about 825 GiB to 34.1 GiB. Further builds use
+one central target with debug information and incremental compilation disabled to stay below 50 GB.
+
 ## Whole-codebase review completed (2026-10-14)
 
 Closing the preceding hotspot follow-ups did **not** complete a whole-codebase review. Ember

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Backend reads and exports index repeated membership and lineage lookups; account multipart reads keep bounded descriptors and discovery reuses guarded metadata.
+- Indexing and watch space large resume snapshots by retained state size, reducing repeated serialization while allowing longer append rereads.
 - Goose, Hermes and Devin discovery count canonical turns while bounding ordinary large SQLite cells, including SQLite’s native allocations.
 - OpenClaw complete exports preserve native records, branch links, compaction metadata and grouped tool results; parent scans retain source guards.
 - Dataset exports retain session-level system prompts without duplicating explicit system messages.
