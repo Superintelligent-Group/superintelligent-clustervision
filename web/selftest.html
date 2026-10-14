@@ -701,7 +701,7 @@ check("the opened half names exactly how many transcripts it covers", () => {
   el.sessions = sessions;
   const heads = [...el.querySelectorAll(".stat-section-head")];
   has(heads[1].textContent, `${sessions.length} of 6,873`, "opened over corpus");
-  has(heads[1].textContent, "these panels describe only those", "the fence is stated");
+  has(heads[1].textContent, "these panels describe only loaded messages", "the fence is stated");
   // The token tiles live in the OPENED half and the corpus tiles in the archive half — never mixed.
   const secs = [...el.querySelectorAll(".stat-section")];
   const archive = secs[0].textContent, opened = secs[1].textContent;
@@ -1354,6 +1354,32 @@ check("one dropzone drop triggers one import", () => {
   Object.defineProperty(drop, "dataTransfer", { value: { files: [{ name: "fixture.json" }] } });
   app.querySelector(".dropzone").dispatchEvent(drop);
   eq(imports, 1, "inner drop does not bubble into a duplicate import");
+});
+
+await acheck("workflow scripts are cached by session and closing releases overlay listeners", async () => {
+  const original = globalThis.fetch; const forest = document.createElement("cv-forest"); let root = { id: "first", harness: "claude" };
+  forest._rootSession = () => root;
+  globalThis.fetch = async (url) => Response.json({ name: "same-name", source: new URL(url).pathname.includes("/first/") ? "first script" : "second script" });
+  try {
+    await forest._showScript("same-name"); has(forest.textContent, "first script", "first session source");
+    forest.querySelector(".scr-close").click(); eq(forest._scriptClosers.size, 0, "close releases tracked keyboard listener");
+    root = { id: "second", harness: "claude" }; await forest._showScript("same-name");
+    has(forest.textContent, "second script", "same workflow name in another session has another source");
+    forest.disconnectedCallback(); eq(forest.querySelectorAll(".scr-overlay").length, 0, "unmount closes active overlays"); eq(forest._scriptClosers.size, 0, "unmount releases listeners");
+  } finally { forest.disconnectedCallback(); globalThis.fetch = original; }
+});
+await acheck("workflow agent drill rejects an old response after selecting another agent", async () => {
+  const original = globalThis.fetch; const first = deferred(), next = deferred();
+  const forest = document.createElement("cv-forest"); forest._rootSession = () => ({ id: "root", harness: "claude" });
+  forest.innerHTML = '<div class="lane-wrap"><div data-agent="first"></div><div data-agent="next"></div></div>';
+  globalThis.fetch = async (url) => ({ ok: true, json: () => new URL(url).pathname.endsWith("/first") ? first.promise : next.promise });
+  try {
+    const old = forest._openAgentInline(forest.querySelector('[data-agent="first"]'));
+    const fresh = forest._openAgentInline(forest.querySelector('[data-agent="next"]'));
+    next.resolve({ id: "next", harness: "claude", messages: [{ role: "assistant", content: [{ type: "text", text: "fresh drill" }] }] }); await fresh;
+    first.resolve({ id: "first", harness: "claude", messages: [{ role: "assistant", content: [{ type: "text", text: "old drill" }] }] }); await old;
+    has(forest.querySelector(".lane-drill").textContent, "fresh drill", "new selection preserved"); truthy(!forest.textContent.includes("old drill"), "obsolete drill dropped");
+  } finally { globalThis.fetch = original; }
 });
 
 // ===========================================================================
