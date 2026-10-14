@@ -789,6 +789,7 @@ fn raw_string_may_contain_ascii(raw: &[u8], byte: u8) -> bool {
     memchr::memmem::find(raw, &escape).is_some()
 }
 impl<'a> JsonView<'a> {
+    #[cfg(any(feature = "sqlite", test))]
     pub(crate) fn owned(value: &'a Value) -> Self {
         Self(View::Owned(value))
     }

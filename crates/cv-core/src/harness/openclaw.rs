@@ -77,7 +77,7 @@
 //! appendMode?}` is a navigation control selecting `targetId` as the active leaf (rewind/branch);
 //! any canonical entry may carry `appendMode:"side"` (written past the visible leaf without moving
 //! it). Readers must replay the *visible path* (`transcript-visible-events.ts`,
-//! `selectSessionTranscriptActiveEntries`), not file order. [`select_rows`] ports that scan; it only
+//! `selectSessionTranscriptActiveEntries`), not file order. [`select_navigation`] ports that scan; it only
 //! runs when a transcript holds a `leaf` control (OpenClaw's own rule for legacy flat readers,
 //! `selectSessionTranscriptLeafControlledPath`). Entries off the active branch are dropped by the
 //! lean passes and carried, tagged `extra["openclaw"]["inactive_branch"]`, under
@@ -314,6 +314,7 @@ impl Row {
 
 /// Rows for a fully-loaded transcript: the branch-selected view when a `leaf` control exists, else
 /// every entry in file order.
+#[cfg(any(feature = "sqlite", test))]
 fn rows_from_values(entries: Vec<Value>, complete: bool) -> Vec<Row> {
     if entries.iter().any(is_leaf_control) {
         select_rows(entries, complete)
@@ -1954,6 +1955,7 @@ struct NavigationRow {
     parent: Option<Option<String>>,
 }
 
+#[cfg(any(feature = "sqlite", test))]
 fn select_rows(entries: Vec<Value>, complete: bool) -> Vec<Row> {
     let selected = select_navigation(&entries, complete);
     let mut entries: Vec<Option<Value>> = entries.into_iter().map(Some).collect();

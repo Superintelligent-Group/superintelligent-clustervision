@@ -600,6 +600,7 @@ fn source_contains(source: &crate::lazy::SourceText, marker: &str) -> Result<boo
 }
 
 /// Apply the same native spawn classification before capturing a complete row witness.
+#[cfg(any(feature = "sqlite", test))]
 pub(crate) fn refine_complete_group(harness: Harness, messages: &mut [Message]) -> Result<()> {
     let mut open = std::collections::HashMap::new();
     for message in messages {

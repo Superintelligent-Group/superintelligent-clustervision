@@ -1,5 +1,7 @@
 //! Checked complete records retain the public `extra._record` contract.
-use super::{Block, Harness, Message};
+#[cfg(any(feature = "sqlite", test))]
+use super::Block;
+use super::{Harness, Message};
 use crate::{harness::wire::write::ObjectWriter, Json};
 use anyhow::Result;
 use serde::{ser::SerializeMap, Serialize, Serializer};
@@ -8,6 +10,7 @@ use std::io::Write;
 
 #[derive(Debug, Clone)]
 pub struct CompleteRecord {
+    #[cfg_attr(not(any(feature = "sqlite", test)), allow(dead_code))]
     pub(crate) harness: Harness,
     pub(crate) value: Json,
     pub(crate) identity: Map<String, Value>,
@@ -20,6 +23,7 @@ impl CompleteRecord {
         Self::attach_inner(messages, harness, value, identity, false);
     }
     /// Retain cheap checked projection descriptors for unchanged native replay.
+    #[cfg(any(feature = "sqlite", test))]
     pub(crate) fn attach_replay(messages: &mut [Message], harness: Harness, value: Json, identity: Map<String, Value>) {
         Self::attach_inner(messages, harness, value, identity, true);
     }
@@ -66,6 +70,7 @@ impl CompleteRecord {
             projection,
         }));
     }
+    #[cfg(any(feature = "sqlite", test))]
     pub(crate) fn unchanged(&self, harness: Harness, messages: &[Message]) -> bool {
         self.harness == harness
             && !self.projection.is_empty()
@@ -76,6 +81,7 @@ impl CompleteRecord {
                 .zip(messages)
                 .all(|(original, current)| same_message(original, current))
     }
+    #[cfg(any(feature = "sqlite", test))]
     pub(crate) fn text_overlay(&self, harness: Harness, messages: &[Message]) -> Result<bool> {
         if self.harness != harness || self.projection.is_empty() || messages.len() < self.projection.len() {
             return Ok(false);
@@ -165,6 +171,7 @@ pub(crate) fn write_extra(message: &Message, writer: &mut dyn Write) -> Result<(
     }
     out.finish()
 }
+#[cfg(any(feature = "sqlite", test))]
 fn same_json(a: &Json, b: &Json) -> bool {
     match (a, b) {
         (Json::Owned(a), Json::Owned(b)) => a == b,
@@ -172,6 +179,7 @@ fn same_json(a: &Json, b: &Json) -> bool {
         _ => false,
     }
 }
+#[cfg(any(feature = "sqlite", test))]
 fn same_block(a: &Block, b: &Block) -> bool {
     match (a, b) {
         (Block::Text { text: a }, Block::Text { text: b }) => a == b,
@@ -246,6 +254,7 @@ fn same_block(a: &Block, b: &Block) -> bool {
         _ => false,
     }
 }
+#[cfg(any(feature = "sqlite", test))]
 fn same_envelope(a: &Message, b: &Message) -> bool {
     a.id == b.id
         && a.parent_id == b.parent_id
@@ -263,11 +272,13 @@ fn same_envelope(a: &Message, b: &Message) -> bool {
                 .iter()
                 .filter(|(key, _)| key.as_str() != crate::harness::claude::CARRIER_KEY))
 }
+#[cfg(any(feature = "sqlite", test))]
 pub(crate) fn same_message(a: &Message, b: &Message) -> bool {
     same_envelope(a, b)
         && a.content.len() == b.content.len()
         && a.content.iter().zip(&b.content).all(|(a, b)| same_block(a, b))
 }
+#[cfg(any(feature = "sqlite", test))]
 pub(crate) fn same_except_first_text(a: &Message, b: &Message) -> bool {
     same_envelope(a, b)
         && a.content.len() == b.content.len()

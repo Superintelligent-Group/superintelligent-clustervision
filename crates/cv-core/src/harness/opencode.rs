@@ -56,6 +56,7 @@
 //! remaining `session` columns land in `Session::extra["opencode"]`.
 
 mod emit;
+#[cfg(any(feature = "sqlite", test))]
 mod v2;
 pub use emit::emit;
 
@@ -1253,6 +1254,7 @@ fn decoded_input(
     view.argument(true)
 }
 
+#[cfg(any(feature = "sqlite", test))]
 fn project_shell(
     view: crate::json::JsonView<'_>,
     source: &crate::json::JsonSource,
