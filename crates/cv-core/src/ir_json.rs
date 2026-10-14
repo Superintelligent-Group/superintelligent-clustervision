@@ -178,20 +178,10 @@ impl<W: Write> Fields<'_, W> {
         }
     }
     fn text(&mut self, text: &Text) -> Result<()> {
-        if let Text::Inline(text) = text {
-            // A string's compact and pretty representations are identical.
-            return serde_json::to_writer(&mut *self.writer, text).map_err(Into::into);
-        }
-        self.writer.write_all(b"\"").map_err(OutputError::from)?;
-        let mut escaped = Vec::new();
-        text.try_for_each_chunk(self.resolver, 64 * 1024, |chunk| {
-            escaped.clear();
-            serde_json::to_writer(&mut escaped, chunk)?;
-            self.writer.write_all(&escaped[1..escaped.len() - 1])?;
-            Ok(())
-        })
-        .map_err(OutputError::from)?;
-        self.writer.write_all(b"\"").map_err(OutputError::from)
+        // Compact/pretty JSON strings share the same bytes. Reuse the checked canonical
+        // single-source path and bounded concatenation writer instead of decoding each
+        // source string and escaping it again in this schema visitor.
+        crate::harness::wire::write::text(self.writer, text, self.resolver).map_err(OutputError::from)
     }
     fn json(&mut self, value: &Json) -> Result<()> {
         if self.pretty {
