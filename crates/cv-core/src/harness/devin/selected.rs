@@ -230,7 +230,7 @@ fn node(
     for block in &mut message.content {
         match block {
             Block::Text { text } => *text = content.clone().expect("mapper emitted selected text"),
-            Block::Thinking { text, .. } => *text = thought.clone().expect("mapper emitted selected thinking"),
+            Block::Thinking { text, .. } => *text = thought.clone().unwrap_or_default(),
             Block::ToolResult { content: text, .. } => *text = content.clone().unwrap_or_default(),
             Block::ToolUse { input, .. } => *input = arguments.next().expect("mapper emitted selected call"),
             _ => {}
@@ -367,6 +367,23 @@ impl HistoryPath {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cache_only_usage_and_signature_only_thinking_survive_both_read_paths() -> Result<()> {
+        let value = json!({"role":"assistant","thinking":{"signature":"provider signature"},
+            "metadata":{"metrics":{"cache_read_tokens":17,"cache_creation_tokens":0}}});
+        let owned = node_to_message(1, 1000, &value, None, &mut HashMap::new());
+        let usage = owned.usage.as_ref().unwrap();
+        assert_eq!(usage.cache_read_tokens, Some(17));
+        assert_eq!(usage.cache_creation_tokens, Some(0));
+        assert_eq!(usage.prompt_tokens(), 17);
+        assert!(matches!(&owned.content[0], Block::Thinking { text, signature, .. }
+            if text.is_empty() && signature.as_deref() == Some("provider signature")));
+        let selected =
+            crate::json::Json::from(value).with_view(|view| node(view, 1, 1000, None, &mut HashMap::new()))?;
+        assert_eq!(serde_json::to_value(&selected)?, serde_json::to_value(&owned)?);
+        Ok(())
+    }
+
     #[test]
     fn selected_mapper_matches_owned_value_and_compaction() -> Result<()> {
         let world = cv_testkit::World::in_process("devin-selected-node");

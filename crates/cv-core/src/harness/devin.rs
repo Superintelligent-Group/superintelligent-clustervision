@@ -317,8 +317,11 @@ fn subagent_head_rows(conn: &Connection, session_id: &str) -> Vec<(String, i64, 
     }
     let sql = "SELECT json_extract(chat_message, '$.metadata.extensions.\"subagent/agent_id\"'), \
                       json_extract(chat_message, '$.metadata.extensions.\"subagent/chain_node_id\"'), created_at \
-               FROM message_nodes WHERE session_id = ?1 AND json_extract(chat_message, '$.role') = 'tool' \
-                 AND json_extract(chat_message, '$.metadata.extensions.\"subagent/chain_node_id\"') IS NOT NULL \
+               FROM message_nodes WHERE session_id = ?1 \
+                 AND CASE WHEN json_valid(chat_message) THEN \
+                     json_extract(chat_message, '$.role') = 'tool' AND \
+                     json_extract(chat_message, '$.metadata.extensions.\"subagent/chain_node_id\"') IS NOT NULL \
+                 ELSE 0 END \
                ORDER BY node_id";
     let mut from_tools: Vec<(String, i64, Option<i64>)> = Vec::new();
     if let Ok(mut stmt) = conn.prepare(sql) {
@@ -1049,8 +1052,8 @@ fn node_to_message(
 ) -> Message {
     let role = chat.get("role").and_then(Value::as_str).unwrap_or("");
     // The message's own metadata object (inside `chat_message`, distinct from the node column).
-    let mmeta = chat.get("metadata").cloned().unwrap_or(Value::Null);
-    let ext = mmeta.get("extensions").cloned().unwrap_or(Value::Null);
+    let mmeta = chat.get("metadata").unwrap_or(&Value::Null);
+    let ext = mmeta.get("extensions").unwrap_or(&Value::Null);
     let is_prefix = node_meta
         .and_then(|m| m.get("is_system_prefix"))
         .and_then(Value::as_bool)
@@ -1092,10 +1095,11 @@ fn node_to_message(
         "assistant" => {
             if let Some(th) = chat.get("thinking") {
                 let text = th.get("thinking").and_then(Value::as_str).unwrap_or("");
-                if !text.is_empty() {
+                let signature = th.get("signature").and_then(Value::as_str).map(str::to_string);
+                if !text.is_empty() || signature.is_some() {
                     m.content.push(Block::Thinking {
                         text: text.to_string().into(),
-                        signature: th.get("signature").and_then(Value::as_str).map(str::to_string),
+                        signature,
                         encrypted: None,
                         redacted: false,
                     });
@@ -1136,7 +1140,11 @@ fn node_to_message(
                     cache_creation_tokens: get("cache_creation_tokens"),
                     ..Default::default()
                 };
-                if u.input_tokens.is_some() || u.output_tokens.is_some() {
+                if u.input_tokens.is_some()
+                    || u.output_tokens.is_some()
+                    || u.cache_read_tokens.is_some()
+                    || u.cache_creation_tokens.is_some()
+                {
                     m.usage = Some(u);
                 }
             }
@@ -1410,6 +1418,40 @@ mod tests {
         )?;
         assert!(large.materialize().is_err());
         let _ = selected;
+        Ok(())
+    }
+
+    #[test]
+    fn corrupt_abandoned_rows_do_not_hide_tool_only_subagent_heads() -> Result<()> {
+        let world = cv_testkit::World::in_process("devin-corrupt-tool-head");
+        let path = world.base.join("sessions.db");
+        std::fs::copy(fixture(), &path)?;
+        let conn = Connection::open(&path)?;
+        conn.execute("DELETE FROM subagent_heads WHERE session_id='fixture-alpha'", [])?;
+        conn.execute_batch(
+            "INSERT INTO message_nodes(session_id,node_id,chat_message,created_at) \
+            VALUES('fixture-alpha',-2,'{broken',1000);",
+        )?;
+        let receipt = json!({"role":"tool","content":"child complete","tool_call_id":"spawn-call",
+            "metadata":{"extensions":{"subagent/agent_id":"sidekick","subagent/chain_node_id":29}}});
+        conn.execute(
+            "INSERT INTO message_nodes(session_id,node_id,parent_node_id,chat_message,created_at) \
+            VALUES('fixture-alpha',30,16,?1,2000)",
+            [receipt.to_string()],
+        )?;
+        let refs = discover_conn(&conn, &path)?;
+        let child = refs.iter().find(|r| r.id == "fixture-alpha/sidekick").unwrap();
+        assert_eq!(child.message_count, 6);
+        assert_eq!(subagent_tree(&path, "fixture-alpha").len(), 1);
+        let parsed = parse_db(&conn, child)?;
+        assert_eq!(parsed.lineage.parent.as_deref(), Some("fixture-alpha"));
+        assert_eq!(parsed.lineage.spawned_by_tool_use.as_deref(), Some("spawn-call"));
+        assert_eq!(parsed.messages.len(), 14);
+        assert!(parsed
+            .system_prompt
+            .as_deref()
+            .unwrap()
+            .starts_with("You are the Sidekick"));
         Ok(())
     }
 
