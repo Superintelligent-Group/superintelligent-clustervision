@@ -321,7 +321,9 @@ pub fn stream_task_dir(
     if let Some(error) = sink.take_error() {
         return Err(error);
     }
-    let meta_cwd = metadata_cwd(dir)?;
+    let metadata = task_metadata(dir, true)?;
+    let meta_cwd = metadata.cwd;
+    session.model = metadata.model;
     session.cwd = meta_cwd.clone();
     session.created_at = task_id_to_time(id);
     session.updated_at = newest_mtime(dir).or(session.created_at);
@@ -988,19 +990,57 @@ fn cwd_from_metadata(dir: &Path) -> Option<PathBuf> {
     metadata_cwd(dir).ok().flatten()
 }
 fn metadata_cwd(dir: &Path) -> Result<Option<PathBuf>> {
+    Ok(task_metadata(dir, false)?.cwd)
+}
+
+#[derive(Default)]
+struct TaskMetadata {
+    cwd: Option<PathBuf>,
+    model: Option<String>,
+}
+
+fn task_metadata(dir: &Path, read_model: bool) -> Result<TaskMetadata> {
     Ok(optional_document(&dir.join("task_metadata.json"), |view| {
         let keys = ["cwd", "workspace", "workspacePath", "workspaceFolder", "cwd_path"];
-        let Some(fields) = Fields::parse(view, &keys)? else {
-            return Ok(None);
+        let Some(fields) = Fields::parse(
+            view,
+            &[
+                "cwd",
+                "workspace",
+                "workspacePath",
+                "workspaceFolder",
+                "cwd_path",
+                "model_usage",
+            ],
+        )?
+        else {
+            return Ok(TaskMetadata::default());
         };
+        let mut metadata = TaskMetadata::default();
         for key in keys {
             if let Some(path) = fields.string(key)?.filter(|p| !p.is_empty()) {
-                return Ok(Some(PathBuf::from(path)));
+                metadata.cwd = Some(PathBuf::from(path));
+                break;
             }
         }
-        Ok(None)
+        if let Some(usage) = fields
+            .get("model_usage")
+            .filter(|_| read_model)
+            .map(JsonView::array)
+            .transpose()?
+            .flatten()
+        {
+            for entry in usage {
+                if let Some(entry) = Fields::parse(entry?, &["model_id"])? {
+                    if let Some(model) = entry.string("model_id")?.filter(|s| !s.is_empty()) {
+                        metadata.model = Some(model);
+                    }
+                }
+            }
+        }
+        Ok(metadata)
     })?
-    .flatten())
+    .unwrap_or_default())
 }
 fn optional_document<T>(path: &Path, visit: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>) -> Result<Option<T>> {
     let Ok(source) = JsonSource::capture(path) else {
@@ -1073,6 +1113,33 @@ mod tests {
             task_roots(ROO_EXT_IDS, ".roo"),
             vec![storage.join(ROO_EXT_IDS[0]).join("tasks")]
         );
+    }
+
+    #[test]
+    fn emitted_model_metadata_round_trips_for_cline_and_roo() {
+        let world = cv_testkit::World::in_process("cline-model-metadata");
+        let mut source = Session::new("source", Harness::Claude);
+        source.model = Some("selected-model".into());
+        let mut user = Message::new(Role::User);
+        user.content.push(Block::Text { text: "prompt".into() });
+        source.messages.push(user);
+        for harness in [Harness::Cline, Harness::Roo] {
+            let out = world.base.join(harness.as_str());
+            let opts = crate::emit::EmitOptions {
+                new_id: Some("fixed".into()),
+                ..Default::default()
+            };
+            let emitted = emit_with_harness(&source, &out, &opts, harness).unwrap();
+            let session = parse_task_dir(&emitted.path, &emitted.new_id, harness).unwrap();
+            assert_eq!(session.model, source.model);
+            fs::write(
+                emitted.path.join("task_metadata.json"),
+                r#"{"model_usage":[{"model_id":"earlier"},{"model_id":"latest"},{"model_id":""}]}"#,
+            )
+            .unwrap();
+            let session = parse_task_dir(&emitted.path, &emitted.new_id, harness).unwrap();
+            assert_eq!(session.model.as_deref(), Some("latest"));
+        }
     }
 
     #[test]
