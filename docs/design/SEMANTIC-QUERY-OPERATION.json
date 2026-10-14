@@ -1,0 +1,249 @@
+{
+  "fixture": {
+    "source": "/Users/ember/dev/cv-worktrees/resume-search-home/semantic-real-final/clean.bin",
+    "source_sha256": "f4bd4a4c52dbacb275f061cd2916ae4901d950251773d30197238c511d5259ba",
+    "rows": 16384,
+    "dimension": 256,
+    "wire_bytes": 22538996,
+    "wire_sha256": "7b0f2d75b72960e9ebf8d2f0cbb8dfd5e333b9284e732353b2de1896307ebc1b",
+    "vector_bytes": 16777216,
+    "scope": "deterministic synthetic expansion of existing 10 cached-model vectors; unique synthetic identities; not fleet data",
+    "model": "/Users/ember/dev/cv-worktrees/resume-search-home/actual-model",
+    "model_files": {
+      "model.safetensors": "f65d0f325faadc1e121c319e2faa41170d3fa07d8c89abd48ca5358d9a223de2",
+      "config.json": "c3d321c8e7e1667deb260e13fe285edf926b58543f987d4f90e8382c315901a8",
+      "tokenizer.json": "e67e803f624fb4d67dea1c730d06e1067e1b14d830e2c2202569e3ef0f70bb50"
+    }
+  },
+  "baseline_commit": "518bd33dd7ac91f3eda07a0a0a2daa62c02ae7a1",
+  "candidate_commit": "95edb824",
+  "binaries": {
+    "before": {
+      "path": "/Users/ember/dev/cv-worktrees/next-index-evidence/cv-baseline-518bd33d",
+      "sha256": "28c1761880a4cf103541a49055828a463127cd9930592a787f534594bdb0e7c2"
+    },
+    "after": {
+      "path": "/Users/ember/dev/cv-worktrees/next-index-evidence/cv-candidate-refined",
+      "sha256": "79f1534d750149bbfaf3ffa98a6fe9eed7a708524cf634ab8a01c55538f24098"
+    }
+  },
+  "runs": {
+    "before": [
+      {
+        "wall_seconds_python": 0.09170258400081366,
+        "counters": {
+          "maximum resident set size": 148455424,
+          "page reclaims": 8902,
+          "page faults": 428,
+          "instructions retired": 473583927,
+          "cycles elapsed": 187047929,
+          "peak memory footprint": 138740288
+        },
+        "stdout_sha256": "9c1ed3e555253356c8d60e8449fb9d9c2a5f6610f688ec1af2b99bd2ec0ce1d6",
+        "command": [
+          "/usr/bin/time",
+          "-l",
+          "/Users/ember/dev/cv-worktrees/next-index-evidence/cv-baseline-518bd33d",
+          "search",
+          "What is 6 times 7?",
+          "--semantic",
+          "--json",
+          "--limit",
+          "10"
+        ]
+      },
+      {
+        "wall_seconds_python": 0.05467283399957523,
+        "counters": {
+          "maximum resident set size": 150798336,
+          "page reclaims": 9474,
+          "page faults": 0,
+          "instructions retired": 431578711,
+          "cycles elapsed": 160819898,
+          "peak memory footprint": 141083200
+        },
+        "stdout_sha256": "9c1ed3e555253356c8d60e8449fb9d9c2a5f6610f688ec1af2b99bd2ec0ce1d6",
+        "command": [
+          "/usr/bin/time",
+          "-l",
+          "/Users/ember/dev/cv-worktrees/next-index-evidence/cv-baseline-518bd33d",
+          "search",
+          "What is 6 times 7?",
+          "--semantic",
+          "--json",
+          "--limit",
+          "10"
+        ]
+      },
+      {
+        "wall_seconds_python": 0.0556631670006027,
+        "counters": {
+          "maximum resident set size": 148865024,
+          "page reclaims": 9356,
+          "page faults": 0,
+          "instructions retired": 428092586,
+          "cycles elapsed": 162552500,
+          "peak memory footprint": 139149888
+        },
+        "stdout_sha256": "9c1ed3e555253356c8d60e8449fb9d9c2a5f6610f688ec1af2b99bd2ec0ce1d6",
+        "command": [
+          "/usr/bin/time",
+          "-l",
+          "/Users/ember/dev/cv-worktrees/next-index-evidence/cv-baseline-518bd33d",
+          "search",
+          "What is 6 times 7?",
+          "--semantic",
+          "--json",
+          "--limit",
+          "10"
+        ]
+      }
+    ],
+    "after": [
+      {
+        "wall_seconds_python": 0.09214866699949198,
+        "counters": {
+          "maximum resident set size": 128876544,
+          "page reclaims": 7701,
+          "page faults": 435,
+          "instructions retired": 455323282,
+          "cycles elapsed": 175531351,
+          "peak memory footprint": 119030312
+        },
+        "stdout_sha256": "9c1ed3e555253356c8d60e8449fb9d9c2a5f6610f688ec1af2b99bd2ec0ce1d6",
+        "command": [
+          "/usr/bin/time",
+          "-l",
+          "/Users/ember/dev/cv-worktrees/next-index-evidence/cv-candidate-refined",
+          "search",
+          "What is 6 times 7?",
+          "--semantic",
+          "--json",
+          "--limit",
+          "10"
+        ]
+      },
+      {
+        "wall_seconds_python": 0.05109062500014261,
+        "counters": {
+          "maximum resident set size": 130777088,
+          "page reclaims": 8252,
+          "page faults": 0,
+          "instructions retired": 414631137,
+          "cycles elapsed": 149982181,
+          "peak memory footprint": 120930856
+        },
+        "stdout_sha256": "9c1ed3e555253356c8d60e8449fb9d9c2a5f6610f688ec1af2b99bd2ec0ce1d6",
+        "command": [
+          "/usr/bin/time",
+          "-l",
+          "/Users/ember/dev/cv-worktrees/next-index-evidence/cv-candidate-refined",
+          "search",
+          "What is 6 times 7?",
+          "--semantic",
+          "--json",
+          "--limit",
+          "10"
+        ]
+      },
+      {
+        "wall_seconds_python": 0.05184625000038068,
+        "counters": {
+          "maximum resident set size": 130711552,
+          "page reclaims": 8247,
+          "page faults": 0,
+          "instructions retired": 414618086,
+          "cycles elapsed": 151673195,
+          "peak memory footprint": 120865320
+        },
+        "stdout_sha256": "9c1ed3e555253356c8d60e8449fb9d9c2a5f6610f688ec1af2b99bd2ec0ce1d6",
+        "command": [
+          "/usr/bin/time",
+          "-l",
+          "/Users/ember/dev/cv-worktrees/next-index-evidence/cv-candidate-refined",
+          "search",
+          "What is 6 times 7?",
+          "--semantic",
+          "--json",
+          "--limit",
+          "10"
+        ]
+      }
+    ]
+  },
+  "summary": {
+    "before": {
+      "wall_seconds_mean": 0.06734619500033052,
+      "counter_means": {
+        "maximum resident set size": 149372928,
+        "page reclaims": 9244,
+        "page faults": 142.66666666666666,
+        "instructions retired": 444418408,
+        "cycles elapsed": 170140109,
+        "peak memory footprint": 139657792
+      }
+    },
+    "after": {
+      "wall_seconds_mean": 0.06502851400000509,
+      "counter_means": {
+        "maximum resident set size": 130121728,
+        "page reclaims": 8066.666666666667,
+        "page faults": 145,
+        "instructions retired": 428190835,
+        "cycles elapsed": 159062242.33333334,
+        "peak memory footprint": 120275496
+      }
+    }
+  },
+  "exact_json_output_parity": true,
+  "source_hash_and_stat_unchanged": true,
+  "copied_model_hashes_and_stats_unchanged": true,
+  "limits": "Three alternating trials per binary. First refined and baseline trials each had page faults; compare zero-fault warm trials separately. Includes cached model loading and query embedding. Hardware counters are actual macOS time -l process counters. Final vector and requested metadata ownership still scale with stored rows/dimensions. Metadata-only encoded buffer can scale with its declared extent; no whole-store or model-memory bound is claimed. No speed threshold or statistical significance claim.",
+  "scope": "Matched macOS arm64 release whole CLI semantic query; deterministic 16,384-row expansion of ten existing cached-model fixture vectors; not fleet evidence.",
+  "warm_trials": {
+    "before": {
+      "count": 2,
+      "wall_seconds_mean": 0.055168000500088965,
+      "instructions_retired_mean": 429835648.5
+    },
+    "after": {
+      "count": 2,
+      "wall_seconds_mean": 0.05146843750026164,
+      "instructions_retired_mean": 414624611.5
+    }
+  },
+  "initial_reader_candidate": {
+    "commit": "dbc03978",
+    "binary": {
+      "path": "/Users/ember/dev/cv-worktrees/next-index-evidence/cv-candidate",
+      "sha256": "833db095f64f540853db5479cc70345f62068c81cd26cd68a8c649b8ff192cce"
+    },
+    "summary": {
+      "before": {
+        "wall_seconds_mean": 0.07014134733253741,
+        "counter_means": {
+          "maximum resident set size": 148728490.66666666,
+          "page reclaims": 9199.666666666666,
+          "page faults": 148,
+          "instructions retired": 433486288,
+          "cycles elapsed": 164804245,
+          "peak memory footprint": 139007885.33333334
+        }
+      },
+      "after": {
+        "wall_seconds_mean": 0.08619868066731821,
+        "counter_means": {
+          "maximum resident set size": 127085226.66666667,
+          "page reclaims": 8026.333333333333,
+          "page faults": 0,
+          "instructions retired": 1080557876.6666667,
+          "cycles elapsed": 263029295.66666666,
+          "peak memory footprint": 117402834.66666667
+        }
+      }
+    },
+    "exact_json_output_parity": true,
+    "disposition": "Replaced per-byte serde JSON reader with metadata-only slice parsing; metadata wire allocation drops before final vectors allocate."
+  },
+  "evidence_directory": "/Users/ember/dev/cv-worktrees/next-index-evidence"
+}
