@@ -10,8 +10,6 @@ use crate::harness::{
 use crate::lazy::{Resolver, Text};
 use std::borrow::Cow;
 
-#[cfg(test)]
-pub(crate) mod legacy;
 use crate::harness::EmitResult;
 use crate::ir::{Block, Harness, Role, Session};
 use anyhow::{Context, Result};

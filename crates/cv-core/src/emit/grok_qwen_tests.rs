@@ -1,4 +1,5 @@
-//! Independent pre-checked wire and fidelity oracles; only generated Qwen UUIDs normalize.
+//! Frozen wire and fidelity oracles for the Grok and Qwen emitters; `$HOME` and generated Qwen
+//! UUIDs normalize.
 use super::*;
 use crate::harness::Adapter;
 use crate::ir::{GitInfo, Message, Origin, Usage};
@@ -192,7 +193,36 @@ fn normalized_qwen(bytes: &[u8]) -> Result<Vec<u8>> {
     Ok(output)
 }
 
-fn compare(session: &Session, target: Harness, mode: ThinkingMode, base: &Path) -> Result<()> {
+/// One emitted session, frozen: each output file's length and SHA-256 (`$HOME` and Qwen UUIDs normalized)
+/// and the SHA-256 of the fidelity report from re-reading it.
+fn entry(target: Harness, result: &EmitResult, owned: &Session, mode: ThinkingMode) -> Result<Value> {
+    let mut files = serde_json::Map::new();
+    // Grok's summary names the per-test `$HOME`; everything else is fixed by the fixture.
+    let home = std::env::var("HOME")?;
+    let mut digest = |name: &str, bytes: Vec<u8>| {
+        let bytes = String::from_utf8(bytes).unwrap().replace(&home, "$HOME");
+        files.insert(
+            name.into(),
+            json!([bytes.len(), crate::digest::sha256_hex(bytes.as_bytes())]),
+        );
+    };
+    if target == Harness::Qwen {
+        digest("session.jsonl", normalized_qwen(&fs::read(&result.path)?)?);
+    } else {
+        for name in ["summary.json", "chat_history.jsonl", "updates.jsonl"] {
+            let path = result.path.join(name);
+            if path.exists() {
+                digest(name, fs::read(path)?);
+            }
+        }
+    }
+    let reread = fidelity::reparse_emitted(target, result, &ParseOptions::full())?;
+    let report = serde_json::to_vec(&fidelity::diff_fidelity(target, mode, owned, &reread))?;
+    Ok(json!({ "files": files, "fidelity": crate::digest::sha256_hex(&report) }))
+}
+
+/// Emit `session` and record its frozen entry under `label`.
+fn compare(frozen: &mut Frozen, session: &Session, target: Harness, mode: ThinkingMode, base: &Path) -> Result<()> {
     let opts = EmitOptions {
         new_id: Some("fixed-session".into()),
         thinking: mode,
@@ -200,37 +230,50 @@ fn compare(session: &Session, target: Harness, mode: ThinkingMode, base: &Path) 
     };
     let mut owned = session.clone();
     owned.materialize()?;
-    let mut projected = owned.clone();
-    project_owned_thinking_for_test(&mut projected, target, mode);
-    let old = match target {
-        Harness::Grok => crate::harness::grok::emit::legacy::emit(&projected, &base.join("old"), &opts)?,
-        Harness::Qwen => crate::harness::qwen::emit::legacy::emit(&projected, &base.join("old"), &opts)?,
-        _ => unreachable!(),
-    };
     let (new, report) = emit_report(session, target, &base.join("new"), &opts)?;
-    if target == Harness::Qwen {
-        assert_eq!(
-            normalized_qwen(&fs::read(&old.path)?)?,
-            normalized_qwen(&fs::read(&new.path)?)?
-        );
-    } else {
-        for name in ["summary.json", "chat_history.jsonl", "updates.jsonl"] {
-            let old_path = old.path.join(name);
-            let new_path = new.path.join(name);
-            assert_eq!(old_path.exists(), new_path.exists(), "{name}");
-            if old_path.exists() {
-                assert_eq!(fs::read(old_path)?, fs::read(new_path)?, "{name}");
-            }
-        }
-    }
-    let old_read = fidelity::reparse_emitted(target, &old, &ParseOptions::full())?;
-    let old_report = fidelity::diff_fidelity(target, mode, &owned, &old_read);
-    assert_eq!(
-        serde_json::to_value(old_report)?,
-        serde_json::to_value(report)?,
-        "exact fidelity classification"
-    );
+    let actual = entry(target, &new, &owned, mode)?;
+    let report = crate::digest::sha256_hex(&serde_json::to_vec(&report)?);
+    assert_eq!(actual["fidelity"], report, "exact fidelity classification");
+    let label = base.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(frozen.0.insert(label, actual).is_none(), "unique label");
     Ok(())
+}
+
+/// Emitted-output goldens per test under `tests/fixtures/emit-frozen/`, frozen from the
+/// pre-streaming emitters. `CV_REGEN_CORPUS=1` rewrites them; explain every diff in the commit.
+struct Frozen(std::collections::BTreeMap<String, Value>, &'static str);
+
+impl Frozen {
+    fn new(name: &'static str) -> Self {
+        Self(Default::default(), name)
+    }
+
+    fn check(self) -> Result<()> {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/fixtures/emit-frozen/{}.json", self.1));
+        let rows: Vec<String> = (self.0.iter())
+            .map(|(label, entry)| {
+                Ok(format!(
+                    "{}: {}",
+                    serde_json::to_string(label)?,
+                    serde_json::to_string(entry)?
+                ))
+            })
+            .collect::<Result<_>>()?;
+        let actual = format!("{{\n{}\n}}\n", rows.join(",\n"));
+        if std::env::var_os("CV_REGEN_CORPUS").is_some() {
+            fs::create_dir_all(path.parent().unwrap())?;
+            fs::write(&path, &actual)?;
+        }
+        let expected = anyhow::Context::with_context(fs::read_to_string(&path), || {
+            format!("{} (CV_REGEN_CORPUS=1 writes it)", path.display())
+        })?;
+        assert!(
+            expected == actual,
+            "{} differs from the frozen emitted output (CV_REGEN_CORPUS=1 rewrites)",
+            self.1
+        );
+        Ok(())
+    }
 }
 
 fn capture_bodies(session: &mut Session, base: &Path) -> Result<()> {
@@ -265,6 +308,7 @@ fn capture_bodies(session: &mut Session, base: &Path) -> Result<()> {
 #[test]
 fn checked_grok_qwen_frozen_all_modes_owned_and_captured() -> Result<()> {
     let world = cv_testkit::World::in_process("checked-grok-qwen-wire");
+    let mut frozen = Frozen::new("grok-qwen-fixture");
     for (target, source) in [
         (Harness::Grok, Harness::Grok),
         (Harness::Grok, Harness::Claude),
@@ -276,12 +320,14 @@ fn checked_grok_qwen_frozen_all_modes_owned_and_captured() -> Result<()> {
         capture_bodies(&mut captured, &world.base.join(format!("sources-{target}-{source}")))?;
         for mode in ThinkingMode::ALL {
             compare(
+                &mut frozen,
                 &owned,
                 target,
                 mode,
                 &world.base.join(format!("owned-{target}-{source}-{mode}")),
             )?;
             compare(
+                &mut frozen,
                 &captured,
                 target,
                 mode,
@@ -289,12 +335,13 @@ fn checked_grok_qwen_frozen_all_modes_owned_and_captured() -> Result<()> {
             )?;
         }
     }
-    Ok(())
+    frozen.check()
 }
 
 #[test]
 fn checked_grok_qwen_real_corpus_matches_frozen_all_modes() -> Result<()> {
     let world = cv_testkit::World::in_process("checked-grok-qwen-corpus");
+    let mut frozen = Frozen::new("grok-qwen-corpus");
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus");
     for (target, version, adapter) in [
         (
@@ -314,6 +361,7 @@ fn checked_grok_qwen_real_corpus_matches_frozen_all_modes() -> Result<()> {
             let session = adapter.parse(&reference)?;
             for mode in ThinkingMode::ALL {
                 compare(
+                    &mut frozen,
                     &session,
                     target,
                     mode,
@@ -322,7 +370,7 @@ fn checked_grok_qwen_real_corpus_matches_frozen_all_modes() -> Result<()> {
             }
         }
     }
-    Ok(())
+    frozen.check()
 }
 
 #[test]
@@ -410,6 +458,7 @@ fn checked_grok_qwen_source_failure_preserves_every_destination() -> Result<()> 
 #[test]
 fn checked_grok_qwen_complete_selected_producer_matches_owned() -> Result<()> {
     let world = cv_testkit::World::in_process("grok-qwen-selected-complete");
+    let mut frozen = Frozen::new("grok-qwen-selected");
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus");
     for (target, adapter) in [
         (
@@ -434,6 +483,7 @@ fn checked_grok_qwen_complete_selected_producer_matches_owned() -> Result<()> {
             );
             for mode in ThinkingMode::ALL {
                 compare(
+                    &mut frozen,
                     &selected,
                     target,
                     mode,
@@ -500,6 +550,7 @@ fn checked_grok_qwen_complete_selected_producer_matches_owned() -> Result<()> {
         assert_eq!(serde_json::to_value(&owned)?, serde_json::to_value(&materialized)?);
         for mode in ThinkingMode::ALL {
             compare(
+                &mut frozen,
                 &selected,
                 target,
                 mode,
@@ -513,5 +564,5 @@ fn checked_grok_qwen_complete_selected_producer_matches_owned() -> Result<()> {
         assert!(emit(&selected, target, &absent, &EmitOptions::default()).is_err());
         assert!(!absent.exists());
     }
-    Ok(())
+    frozen.check()
 }
