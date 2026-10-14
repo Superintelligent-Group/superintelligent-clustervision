@@ -5,6 +5,7 @@ use crate::{
     lazy::Text,
 };
 use anyhow::Result;
+use serde::Serialize;
 use std::{io::Write, sync::Arc};
 
 pub(crate) struct Builder<'a>(&'a mut dyn Write, usize);
@@ -92,18 +93,20 @@ impl Builder<'_> {
     pub(crate) fn decoded_len(&self) -> usize {
         self.1
     }
-    /// Append decoded text, bounding re-encoding scratch even for giant borrowed chunks.
-    pub(crate) fn push(&mut self, mut text: &str) -> Result<()> {
-        let len = text.len();
-        while !text.is_empty() {
-            let mut end = text.len().min(64 * 1024);
-            while !text.is_char_boundary(end) {
-                end -= 1;
+    /// Append decoded text with serde's exact escapes, streaming through the caller's writer.
+    /// Arena appends already protect long borrowed writes with bounded independently owned scratch.
+    pub(crate) fn push(&mut self, text: &str) -> Result<()> {
+        struct Interior;
+        impl serde_json::ser::Formatter for Interior {
+            fn begin_string<W: ?Sized + Write>(&mut self, _: &mut W) -> std::io::Result<()> {
+                Ok(())
             }
-            let encoded = serde_json::to_string(&text[..end])?;
-            self.0.write_all(&encoded.as_bytes()[1..encoded.len() - 1])?;
-            text = &text[end..];
+            fn end_string<W: ?Sized + Write>(&mut self, _: &mut W) -> std::io::Result<()> {
+                Ok(())
+            }
         }
+        let len = text.len();
+        text.serialize(&mut serde_json::Serializer::with_formatter(&mut *self.0, Interior))?;
         self.1 = self
             .1
             .checked_add(len)
@@ -255,6 +258,28 @@ fn write_quoted_json(view: crate::json::JsonView<'_>, writer: &mut dyn std::io::
 mod tests {
     use super::*;
     use crate::lazy::Resolver;
+
+    #[test]
+    fn decoded_push_matches_canonical_serializer_bytes_and_lengths() {
+        let controls = (0..32).map(char::from).collect::<String>();
+        for body in [
+            String::new(),
+            "plain payload ".repeat(20_000),
+            format!("🌙λ\n\"\\{controls}\u{7f}").repeat(8192),
+            format!("{}🌙{}", "x".repeat(65535), "界".repeat(22000)),
+        ] {
+            let mut bytes = Vec::new();
+            let len = generate_string_with_len(&mut bytes, |builder| {
+                builder.push("prefix\n")?;
+                builder.push(&body)?;
+                builder.push("\"suffix\\")
+            })
+            .unwrap();
+            let expected = format!("prefix\n{body}\"suffix\\");
+            assert_eq!(bytes, serde_json::to_vec(&expected).unwrap());
+            assert_eq!(len, expected.len());
+        }
+    }
 
     #[test]
     fn counted_generated_lengths_match_decoding_and_validate_every_demand() {
@@ -419,8 +444,14 @@ mod tests {
                 Ok(())
             }
         }
-        let error = generate_string(&mut Fails { remaining: 8 }, |builder| builder.push("unpublished")).unwrap_err();
-        assert!(error.to_string().contains("writer failure"));
+        for body in [
+            "unpublished".to_owned(),
+            "long borrowed body".repeat(8192),
+            "escaped\n\"\\🌙".repeat(8192),
+        ] {
+            let error = generate_string(&mut Fails { remaining: 8 }, |builder| builder.push(&body)).unwrap_err();
+            assert!(error.to_string().contains("writer failure"));
+        }
         assert_eq!(
             accepted.try_decoded_len(&Resolver::new(None)).unwrap(),
             "keep🌙".len() * 8192
