@@ -565,6 +565,7 @@ impl KeyFacts {
 /// Whether `text` records `key` as a spawned child: a `childSessionKey` field (plain, or JSON-escaped
 /// inside a tool result's text) right before an occurrence of the key. A bare mention, such as a
 /// `sessions_list` result, does not count.
+#[cfg(any(feature = "sqlite", test))]
 fn names_child(text: &str, key: &str) -> bool {
     text.match_indices(key).any(|(i, _)| {
         let start = text.floor_char_boundary(i.saturating_sub(24));

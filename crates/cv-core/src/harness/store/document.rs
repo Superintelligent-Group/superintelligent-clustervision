@@ -7,7 +7,7 @@
 pub(crate) mod range;
 
 use crate::lazy::INLINE_MAX;
-#[cfg(any(feature = "mmap", feature = "sqlite"))]
+#[cfg(feature = "mmap")]
 use anyhow::Context;
 use anyhow::Result;
 use serde_json::Value;
