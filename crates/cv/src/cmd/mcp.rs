@@ -742,10 +742,10 @@ fn await_poll(
     };
     let mut matched = None;
     let result = watcher.try_poll_messages(
-        || check(),
+        &check,
         |kind, reference, message| {
             let resolver = cv_core::Resolver::new(Some(reference.path.clone()));
-            let text = cv_core::projection::searchable_text_checked(&message, &resolver, || check())?;
+            let text = cv_core::projection::searchable_text_checked(&message, &resolver, &check)?;
             if let Some(hit) = re.find(&text) {
                 check()?;
                 let snippet_start = hit.start().saturating_sub(80);
