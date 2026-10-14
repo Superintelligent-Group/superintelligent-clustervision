@@ -2659,6 +2659,14 @@ fn adopt_moves_a_stranded_lane_into_the_live_session() {
     assert!(err.contains("cv cat deadsess"), "the sidecar reminder: {err}");
     assert!(!live_sub.exists(), "a dry run writes nothing");
 
+    let (ok, code, _, err) = w.cv(&["adopt", &aid[..8], aid, "--from", dead, "--into", live]);
+    assert!(!ok && code == 2 && err.contains("selected more than once"), "{err}");
+    assert!(
+        !live_sub.exists(),
+        "duplicate selections must refuse before copying any agent"
+    );
+    assert_eq!(fs::read_to_string(&agent).unwrap(), body);
+
     w.cv_ok(&["adopt", aid]);
     let copied = fs::read_to_string(live_sub.join(format!("agent-{aid}.jsonl"))).unwrap();
     assert_eq!(

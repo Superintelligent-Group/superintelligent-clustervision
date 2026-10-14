@@ -206,7 +206,9 @@ pub fn plan(agent: AgentFile, other_copies: Vec<String>, into: &SessionFile) -> 
         .meta_path
         .as_ref()
         .map(|_| dir.join(format!("agent-{}.meta.json", agent.agent_id)));
-    let exists = dest.exists() || dest_meta.as_ref().is_some_and(|m| m.exists());
+    // Metadata reserves the destination even when the chosen source has no sidecar.
+    let exists =
+        std::fs::symlink_metadata(&dest).is_ok() || std::fs::symlink_metadata(dest.with_extension("meta.json")).is_ok();
     Plan {
         agent,
         into_session: into.session_id.clone(),
@@ -237,7 +239,15 @@ pub fn execute(p: &Plan, write: bool, force: bool) -> Result<Adopted> {
             p.into_session
         );
     }
-    if p.exists && !force {
+    let destination_exists = |path: &Path| -> Result<bool> {
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    };
+    if !force && (p.exists || destination_exists(&p.dest)? || destination_exists(&p.dest.with_extension("meta.json"))?)
+    {
         bail!(
             "{} already exists — refusing to overwrite (pass --force to replace it)",
             p.dest.display()
@@ -249,9 +259,37 @@ pub fn execute(p: &Plan, write: bool, force: bool) -> Result<Adopted> {
         let dir = p.dest.parent().context("destination has no parent dir")?;
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         let place = |dest: &Path, bytes: &[u8]| -> Result<()> {
-            let tmp = dest.with_extension(format!("adopt-{}.tmp", std::process::id()));
-            std::fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
-            std::fs::rename(&tmp, dest).with_context(|| format!("placing {}", dest.display()))
+            use std::io::Write;
+            struct Temporary(PathBuf);
+            impl Drop for Temporary {
+                fn drop(&mut self) {
+                    let _ = std::fs::remove_file(&self.0);
+                }
+            }
+            let tmp = dest.with_extension(format!("adopt-{}.tmp", uuid::Uuid::new_v4()));
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            // Own cleanup only after exclusive creation succeeds.
+            let mut file = options
+                .open(&tmp)
+                .with_context(|| format!("writing {}", tmp.display()))?;
+            let temporary = Temporary(tmp);
+            file.write_all(bytes)?;
+            file.flush()?;
+            drop(file);
+            if force {
+                std::fs::rename(&temporary.0, dest)
+            } else {
+                // Same-directory link publication fails if another writer claimed the name
+                // after planning or the check above. A plain rename would silently replace it.
+                std::fs::hard_link(&temporary.0, dest)
+            }
+            .with_context(|| format!("placing {}", dest.display()))
         };
         if let (Some(src), Some(dest)) = (&p.agent.meta_path, &p.dest_meta) {
             place(
@@ -358,6 +396,48 @@ mod tests {
         );
         // The source is untouched.
         assert_eq!(std::fs::read_to_string(&hits[0].path).unwrap(), src_text);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn adopt_rechecks_destinations_created_after_planning() {
+        let root = fixture("late-destination");
+        let into = sf(&root, LIVE);
+        let dead = sf(&root, DEAD);
+        let agent = find_agent(AGENT, Some(&dead)).unwrap().remove(0);
+        let p = plan(agent, vec![], &into);
+        assert!(!p.exists);
+        std::fs::create_dir_all(p.dest.parent().unwrap()).unwrap();
+        for destination in [&p.dest, p.dest_meta.as_ref().unwrap()] {
+            std::fs::write(destination, "another writer's artifact").unwrap();
+            assert!(execute(&p, true, false)
+                .unwrap_err()
+                .to_string()
+                .contains("refusing to overwrite"));
+            assert_eq!(std::fs::read(destination).unwrap(), b"another writer's artifact");
+            std::fs::remove_file(destination).unwrap();
+        }
+        assert!(!p.dest.exists());
+        assert!(!p.dest_meta.as_ref().unwrap().exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn adopt_source_without_metadata_respects_existing_destination_metadata() {
+        let root = fixture("metadata-reservation");
+        let into = sf(&root, LIVE);
+        let dead = sf(&root, DEAD);
+        let mut agent = find_agent(AGENT, Some(&dead)).unwrap().remove(0);
+        agent.meta_path = None;
+        std::fs::create_dir_all(into.subagents_dir()).unwrap();
+        let meta = into.subagents_dir().join(format!("agent-{AGENT}.meta.json"));
+        std::fs::write(&meta, "reserved metadata").unwrap();
+        let p = plan(agent, vec![], &into);
+        assert!(p.exists);
+        assert!(p.dest_meta.is_none());
+        assert!(execute(&p, true, false).is_err());
+        assert!(!p.dest.exists());
+        assert_eq!(std::fs::read(&meta).unwrap(), b"reserved metadata");
         std::fs::remove_dir_all(&root).ok();
     }
 

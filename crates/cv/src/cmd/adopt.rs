@@ -131,6 +131,18 @@ fn run(roots: &[PathBuf], a: &AdoptArgs) -> Result<()> {
         plans.push(adopt::plan(chosen, others, &into));
     }
 
+    // Repeated prefixes/full ids can resolve to the same agent. Reject the entire request before
+    // the first copy rather than discovering the collision after one adoption has been published.
+    let mut destinations = std::collections::HashSet::new();
+    for plan in &plans {
+        if !destinations.insert(&plan.dest) {
+            return usage(format!(
+                "agent {} was selected more than once — nothing was written",
+                plan.agent.agent_id
+            ));
+        }
+    }
+
     // All-or-nothing: refuse before writing anything.
     let blocked: Vec<&Plan> = plans.iter().filter(|p| p.exists).collect();
     if !blocked.is_empty() && !a.force && !a.dry_run {
