@@ -589,11 +589,7 @@ mod db {
         };
         if has_table(conn, "session") && has_table(conn, "message") {
             let seen: HashSet<String> = refs.iter().map(|r| r.id.clone()).collect();
-            refs.extend(
-                discover_v1(conn, db, source)?
-                    .into_iter()
-                    .filter(|r| !seen.contains(&r.id)),
-            );
+            refs.extend(discover_v1(conn, db, source, &seen)?);
         }
         Ok(refs)
     }
@@ -648,7 +644,20 @@ mod db {
         conn: &rusqlite::Connection,
         db: &Path,
         source: &crate::json::JsonSource,
+        seen: &HashSet<String>,
     ) -> Result<Vec<SessionRef>> {
+        // Migrated stores retain old message bodies. Select only surviving legacy sessions
+        // before touching those bodies; a fully migrated store needs no legacy message scan.
+        let mut refs: Vec<SessionRef> = conn
+            .prepare("SELECT id, directory, title, time_created, time_updated FROM session ORDER BY time_updated DESC")?
+            .query_map([], |r| session_ref(db, r))?
+            .flatten()
+            .filter(|reference| !seen.contains(&reference.id))
+            .collect();
+        if refs.is_empty() {
+            return Ok(refs);
+        }
+        let wanted: HashSet<&str> = refs.iter().map(|reference| reference.id.as_str()).collect();
         let mut counts: HashMap<String, usize> = HashMap::new();
         let (mut stmt, rowid) = match conn.prepare("SELECT session_id, rowid, typeof(data) FROM message") {
             Ok(statement) => (statement, true),
@@ -657,6 +666,9 @@ mod db {
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
             let Ok(sid) = row.get::<_, String>(0) else { continue };
+            if !wanted.contains(sid.as_str()) {
+                continue;
+            }
             let backing = if rowid {
                 if row.get::<_, String>(2)? != "text" {
                     continue;
@@ -688,18 +700,85 @@ mod db {
                 Err(error) => return Err(error),
             }
         }
-        let mut stmt = conn.prepare(
-            "SELECT id, directory, title, time_created, time_updated FROM session ORDER BY time_updated DESC",
-        )?;
-        let refs = stmt
-            .query_map([], |r| session_ref(db, r))?
-            .flatten()
-            .map(|mut r| {
-                r.message_count = counts.get(&r.id).copied().unwrap_or(0);
-                r
-            })
-            .collect();
+        for reference in &mut refs {
+            reference.message_count = counts.get(&reference.id).copied().unwrap_or(0);
+        }
         Ok(refs)
+    }
+
+    #[cfg(test)]
+    mod discovery_tests {
+        use super::*;
+
+        unsafe extern "C" fn deny_legacy_message_read(
+            _: *mut std::ffi::c_void,
+            action: i32,
+            table: *const std::ffi::c_char,
+            _: *const std::ffi::c_char,
+            _: *const std::ffi::c_char,
+            _: *const std::ffi::c_char,
+        ) -> i32 {
+            if action == rusqlite::ffi::SQLITE_READ && !table.is_null()
+                // SAFETY: SQLite supplies a live nul-terminated table name during this call.
+                && unsafe { std::ffi::CStr::from_ptr(table) }.to_bytes() == b"message"
+            {
+                rusqlite::ffi::SQLITE_DENY
+            } else {
+                rusqlite::ffi::SQLITE_OK
+            }
+        }
+
+        #[test]
+        fn migrated_discovery_never_scans_shadowed_legacy_messages() -> Result<()> {
+            let world = cv_testkit::World::new("opencode-shadowed-discovery");
+            let path = world.base.join("provenance");
+            fs::write(&path, b"unchanged")?;
+            let source = crate::json::JsonSource::capture(&path)?;
+            for count in [1, 16, 256] {
+                let conn = rusqlite::Connection::open_in_memory()?;
+                conn.execute_batch("CREATE TABLE session(id TEXT PRIMARY KEY,directory TEXT,title TEXT,time_created INTEGER,time_updated INTEGER); CREATE TABLE message(id TEXT PRIMARY KEY,session_id TEXT,data TEXT); CREATE TABLE session_v2(id TEXT PRIMARY KEY,directory TEXT,title TEXT,time_created INTEGER,time_updated INTEGER); CREATE TABLE session_message(id TEXT PRIMARY KEY,session_id TEXT,type TEXT); INSERT INTO session VALUES('ses_m','/old','old title',1,1); INSERT INTO session_v2 VALUES('ses_m','/new','current title',2,2);")?;
+                let payload = json!({"role":"user","body":"legacy body".repeat(128)}).to_string();
+                for index in 0..count {
+                    conn.execute(
+                        "INSERT INTO message VALUES(?1,'ses_m',?2)",
+                        rusqlite::params![format!("msg_{index}"), payload],
+                    )?;
+                }
+                // Denying any legacy message read makes this an algorithmic control: growing
+                // old histories must not even prepare a scan when every session is covered.
+                // SAFETY: this static callback owns no context and lives until conn drops.
+                unsafe {
+                    rusqlite::ffi::sqlite3_set_authorizer(
+                        conn.handle(),
+                        Some(deny_legacy_message_read),
+                        std::ptr::null_mut(),
+                    );
+                }
+                let refs = discover_snapshot(&path, &source, &conn)?;
+                assert_eq!(refs.len(), 1);
+                assert_eq!(refs[0].title.as_deref(), Some("current title"));
+                assert_eq!(refs[0].message_count, 0);
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn mixed_store_keeps_unmigrated_counts_and_order() -> Result<()> {
+            let world = cv_testkit::World::new("opencode-mixed-discovery");
+            let path = world.base.join("provenance");
+            fs::write(&path, b"unchanged")?;
+            let source = crate::json::JsonSource::capture(&path)?;
+            let conn = rusqlite::Connection::open_in_memory()?;
+            conn.execute_batch(r#"CREATE TABLE session(id TEXT PRIMARY KEY,directory TEXT,title TEXT,time_created INTEGER,time_updated INTEGER); CREATE TABLE message(id TEXT PRIMARY KEY,session_id TEXT,data TEXT); CREATE TABLE session_v2(id TEXT PRIMARY KEY,directory TEXT,title TEXT,time_created INTEGER,time_updated INTEGER); CREATE TABLE session_message(id TEXT PRIMARY KEY,session_id TEXT,type TEXT); INSERT INTO session VALUES('covered','/old','old',1,3),('older','/old','older',1,1),('newer','/old','newer',1,2); INSERT INTO session_v2 VALUES('covered','/new','current',2,2); INSERT INTO message VALUES('hidden','covered','{broken'),('orphan','missing','{broken'),('old','older','{"role":"user"}'),('new','newer','{"role":"system","role":"assistant"}');"#)?;
+            let refs = discover_snapshot(&path, &source, &conn)?;
+            assert_eq!(
+                refs.iter()
+                    .map(|r| (r.id.as_str(), r.message_count))
+                    .collect::<Vec<_>>(),
+                vec![("covered", 0), ("newer", 1), ("older", 1)]
+            );
+            Ok(())
+        }
     }
 
     /// One row as a JSON object keyed by column name (`NULL`s dropped, JSON columns decoded).
