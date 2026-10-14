@@ -310,7 +310,11 @@ pub(crate) fn exercise(
         let hooks = Hooks::new(&mut new, None);
         writer(&session, &options, hooks.connection)?;
         assert_eq!(hooks.counts.commits, 1);
-        assert_eq!(hooks.counts.inserts.len(), 3, "exactly three prepared INSERT shapes");
+        assert_eq!(
+            hooks.counts.inserts.len(),
+            if target == Harness::Hermes { 2 } else { 3 },
+            "one prepared INSERT shape per row type"
+        );
         assert!(hooks.counts.inserts.values().all(|pointers| pointers.len() == 1));
         assert!(
             hooks
