@@ -4748,3 +4748,34 @@ fetch/cache mutation, closed-fold complete copying, and nested open/reopen fidel
 with 140,000-character folded bodies performs zero Markdown renders and creates fewer than
 100 initial nodes; nested expansion parses exactly once and reopening reuses the same body.
 This is a deterministic work/DOM control, not a latency claim for arbitrary live sessions.
+#### Transform orchestration: bounded recall and protected dataset output (2026-10-13)
+
+Pack's no-index fallback previously retained a `Hit` for every matching discovered session before
+stable score sorting and truncation. It now retains the best requested candidates in an ordered
+map, preserves discovery order for equal scores, and skips snippet/title construction for rejected
+candidates. Retention is at most `fetch + 1` hits during insertion; discovery and capped source
+parsing remain unchanged. The focused ranking oracle independently performs the previous full
+stable sort over 128 mixed/tied sessions and compares seven requested limits.
+
+Pack and core live search previously treated byte positions in whole-string Unicode lowercase as
+positions in original text. Two hundred `İ` characters before `target` shift the lowercase match
+past the requested original snippet. Shared `scan::lowercase_source_range` maps matching ranges
+back to enclosing original UTF-8 characters. Actual matching still uses whole-string lowercase,
+preserving Greek final-sigma context. Independent fixtures cover expansion interiors, encoded-
+length expansion, contextual sigma, and exact source-centered snippet bytes.
+
+Dataset `--out` previously called `File::create` before corpus discovery: pointing output at an
+input transcript destroyed it before parsing. File exports now use the existing bounded
+`ByteStage` until the transformation completes, then open without truncation and reject inode
+aliases of discovered parent or visited subagent transcripts before publishing. Exact stdout/file
+output, direct/symlink/hardlink source protection, and existing output link/inode/permission
+semantics have focused CLI oracles. This deliberately adds O(output) private spool I/O for file
+exports; stdout remains streamed. Existing-file publication still uses ordinary writes, so a
+publication-device failure can leave partial bytes after validation. This is not a transaction
+across all files or protection of undiscovered harness sidecars.
+
+Lane commits: `8966f4ef`, `6d2affa6`, `2b0dcb6f`. Formatting and whitespace checks pass; no new
+Rust targets/builds were started in the lane. Root owns the combined `pack_live_recall`,
+`unicode_lowercase_ranges`, and `dataset_file_publication` execution and broader convergence.
+Remaining confirmed shared-output gap: splice `--export md|json` materializes selected bodies
+before rendering complete Strings; the shared Json/Text consumer lane has that handoff.
