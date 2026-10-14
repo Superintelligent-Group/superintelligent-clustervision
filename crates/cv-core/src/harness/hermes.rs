@@ -487,44 +487,52 @@ struct SessionFacts {
 
 /// Read the [`SessionFacts`] for `id`. `source` / `end_reason` come pre-read from the metadata
 /// SELECT; the rest are probed here.
-fn read_session_facts(conn: &Connection, id: &str, source: Option<&str>, end_reason: Option<&str>) -> SessionFacts {
+fn read_session_facts(
+    conn: &Connection,
+    id: &str,
+    source: Option<&str>,
+    end_reason: Option<&str>,
+    opts: &ParseOptions,
+) -> SessionFacts {
     let mut meta = serde_json::Map::new();
-    if let Some(s) = source.filter(|s| !s.is_empty()) {
-        meta.insert("source".into(), Value::String(s.to_string()));
-    }
-    if let Some(e) = end_reason.filter(|s| !s.is_empty()) {
-        meta.insert("end_reason".into(), Value::String(e.to_string()));
-    }
     let scols = columns(conn, "sessions");
-    for col in SESSION_META_TEXT_COLS {
-        if !scols.contains(*col) {
-            continue;
+    if opts.wants_full_extra() {
+        if let Some(s) = source.filter(|s| !s.is_empty()) {
+            meta.insert("source".into(), Value::String(s.to_string()));
         }
-        let v: Option<String> = conn
-            .query_row(&format!("SELECT {col} FROM sessions WHERE id = ?1"), [id], |row| {
-                row.get::<_, Option<String>>(0)
-            })
-            .ok()
-            .flatten();
-        if let Some(v) = v.filter(|s| !s.is_empty()) {
-            meta.insert((*col).into(), Value::String(v));
+        if let Some(e) = end_reason.filter(|s| !s.is_empty()) {
+            meta.insert("end_reason".into(), Value::String(e.to_string()));
         }
-    }
-    for col in SESSION_META_INT_COLS {
-        if !scols.contains(*col) {
-            continue;
+        for col in SESSION_META_TEXT_COLS {
+            if !scols.contains(*col) {
+                continue;
+            }
+            let v: Option<String> = conn
+                .query_row(&format!("SELECT {col} FROM sessions WHERE id = ?1"), [id], |row| {
+                    row.get::<_, Option<String>>(0)
+                })
+                .ok()
+                .flatten();
+            if let Some(v) = v.filter(|s| !s.is_empty()) {
+                meta.insert((*col).into(), Value::String(v));
+            }
         }
-        let v: Option<i64> = conn
-            .query_row(&format!("SELECT {col} FROM sessions WHERE id = ?1"), [id], |row| {
-                row.get::<_, Option<i64>>(0)
-            })
-            .ok()
-            .flatten();
-        // Only carry non-zero aggregates: a freshly-emitted DB leaves these at their DEFAULT 0, so
-        // storing 0 would make the round-trip "lose" a value that was never meaningfully set. emit
-        // writes back exactly the keys present here, so omitting 0 keeps emit→parse symmetric.
-        if let Some(v) = v.filter(|n| *n != 0) {
-            meta.insert((*col).into(), Value::Number(v.into()));
+        for col in SESSION_META_INT_COLS {
+            if !scols.contains(*col) {
+                continue;
+            }
+            let v: Option<i64> = conn
+                .query_row(&format!("SELECT {col} FROM sessions WHERE id = ?1"), [id], |row| {
+                    row.get::<_, Option<i64>>(0)
+                })
+                .ok()
+                .flatten();
+            // Only carry non-zero aggregates: a freshly-emitted DB leaves these at their DEFAULT 0, so
+            // storing 0 would make the round-trip "lose" a value that was never meaningfully set. emit
+            // writes back exactly the keys present here, so omitting 0 keeps emit→parse symmetric.
+            if let Some(v) = v.filter(|n| *n != 0) {
+                meta.insert((*col).into(), Value::Number(v.into()));
+            }
         }
     }
     // The system prompt: schema v25 hollowed `sessions.system_prompt` out into
@@ -558,7 +566,18 @@ fn read_session_facts(conn: &Connection, id: &str, source: Option<&str>, end_rea
         .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
         .and_then(|origin| origin.get("imported_from").cloned())
         .filter(Value::is_object);
-    let imported = imported_from.is_some();
+    let imported = if opts.wants_full_extra() {
+        imported_from.is_some()
+    } else if scols.contains("origin_json") {
+        // Import origin is first-class even on lean reads. Inspect the borrowed native cell,
+        // validating Value acceptance without building unrelated import metadata.
+        conn.query_row("SELECT origin_json FROM sessions WHERE id = ?1", [id], |row| {
+            Ok(borrowed_text(row, Some(0)).is_some_and(imported_origin))
+        })
+        .unwrap_or(false)
+    } else {
+        false
+    };
     if let Some(imported_from) = imported_from {
         bag.insert("imported_from".into(), imported_from);
     }
@@ -616,7 +635,8 @@ fn stream_conn_with_reads(
     sink: &mut dyn MessageSink,
     reads: &crate::source::ReadSet,
 ) -> Result<Session> {
-    let checked_source = (opts.complete && opts.spans)
+    let checked_source = opts
+        .spans
         .then(|| crate::json::JsonSource::capture_with_reads(&r.path, reads))
         .transpose()?;
     let arena = checked_source
@@ -671,7 +691,7 @@ fn stream_conn_with_reads(
         bag: mut hermes_bag,
         system_prompt,
         imported,
-    } = read_session_facts(conn, &r.id, source.as_deref(), end_reason.as_deref());
+    } = read_session_facts(conn, &r.id, source.as_deref(), end_reason.as_deref(), opts);
     // A foreign import: every message of the session came through the importer.
     let session_origin = imported.then_some(Origin::Import);
 
@@ -703,10 +723,10 @@ fn stream_conn_with_reads(
     ) {
         lineage.continued_in = compression_child(conn, &r.id);
     }
-    if let Some(reset) = marker("_reset_from") {
+    if let Some(reset) = marker("_reset_from").filter(|_| opts.wants_full_extra()) {
         hermes_bag.insert("_reset_from".into(), Value::String(reset));
     }
-    if chain.len() == 1 && markers.is_empty() {
+    if opts.wants_full_extra() && chain.len() == 1 && markers.is_empty() {
         if let Some(p) = parent.filter(|p| !p.is_empty()) {
             hermes_bag.insert("parent_session_id".into(), Value::String(p));
         }
@@ -793,12 +813,16 @@ fn stream_conn_with_reads(
         // Stream rows lazily: one `MsgRow` -> one `Message` at a time, emitted and dropped before
         // the next row (a single Hermes session can be large; never materialize the whole Vec).
         let mut rows = stmt.query_map([sid], |row| {
+            if dedup_generations && !seen_generations.insert(generation_key(row, &idx)) {
+                return Ok(None);
+            }
             let get_str = |name: &str| -> Option<String> {
                 idx(name).and_then(|i| row.get::<_, Option<String>>(i).ok().flatten())
             };
             let get_i64 =
                 |name: &str| -> Option<i64> { idx(name).and_then(|i| row.get::<_, Option<i64>>(i).ok().flatten()) };
-            // Complete preparation borrows SQLite's current cell, retaining large ordinary
+            let get_extra = |name| opts.wants_full_extra().then(|| get_str(name)).flatten();
+            // Lazy preparation borrows SQLite's current cell, retaining large ordinary
             // bodies and multimodal text in the same checked arena. Classification notices stay
             // owned until into_message has examined their text.
             let mut content_source = None;
@@ -824,7 +848,60 @@ fn stream_conn_with_reads(
                     }
                 }
             }
-            Ok(MsgRow {
+            let mut decoded_calls = None;
+            if let Some(source) = &checked_source {
+                if let Some(raw) =
+                    borrowed_text(row, idx("tool_calls")).filter(|raw| raw.len() > crate::lazy::INLINE_MAX)
+                {
+                    decoded_calls = Some(
+                        checked_json(raw, source, arena.as_ref().unwrap(), |view| {
+                            let mut calls = Vec::new();
+                            if let Some(array) = view.array()? {
+                                for call in array {
+                                    calls.push(openai::tool_call_view(call?)?);
+                                }
+                            }
+                            Ok(calls)
+                        })
+                        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?
+                        .unwrap_or_default(),
+                    );
+                }
+            }
+            let mut has_reasoning_extra = false;
+            let thinking = if opts.wants_full_extra() {
+                None
+            } else {
+                let (text, encrypted, present) = lean_reasoning(row, &idx);
+                has_reasoning_extra = present;
+                if text.is_empty() && encrypted.is_none() {
+                    None
+                } else {
+                    let text = if let Some(source) =
+                        checked_source.as_ref().filter(|_| text.len() > crate::lazy::INLINE_MAX)
+                    {
+                        super::store::text::append(source, arena.as_ref().unwrap(), |builder| builder.push(&text))
+                            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?
+                    } else {
+                        text.into()
+                    };
+                    Some(Block::Thinking {
+                        text,
+                        signature: None,
+                        encrypted,
+                        redacted: false,
+                    })
+                }
+            };
+            let has_body = content_source.is_some()
+                || decoded_content.as_ref().is_some_and(|blocks| !blocks.is_empty())
+                || decoded_calls.as_ref().is_some_and(|blocks| !blocks.is_empty())
+                || thinking.is_some()
+                || borrowed_text(row, idx("role")) == Some("tool")
+                || borrowed_text(row, idx("content"))
+                    .is_some_and(|raw| !raw.is_empty() && !raw.starts_with(MULTIMODAL_SENTINEL));
+            let has_extra = !opts.wants_full_extra() && !has_body && (has_reasoning_extra || row_has_extra(row, &idx));
+            Ok(Some(MsgRow {
                 id: get_i64("id").unwrap_or(0),
                 role: get_str("role").unwrap_or_default(),
                 content: if content_source.is_some() || decoded_content.is_some() {
@@ -835,30 +912,33 @@ fn stream_conn_with_reads(
                 content_source,
                 decoded_content,
                 tool_call_id: get_str("tool_call_id"),
-                tool_calls: get_str("tool_calls"),
+                tool_calls: decoded_calls.is_none().then(|| get_str("tool_calls")).flatten(),
+                decoded_calls,
+                thinking,
+                has_extra,
                 tool_name: get_str("tool_name"),
                 timestamp: idx("timestamp").and_then(|i| row.get::<_, Option<f64>>(i).ok().flatten()),
                 token_count: get_i64("token_count"),
-                finish_reason: get_str("finish_reason"),
-                reasoning: get_str("reasoning"),
-                reasoning_content: get_str("reasoning_content"),
-                reasoning_details: get_str("reasoning_details"),
-                codex_reasoning_items: get_str("codex_reasoning_items"),
-                codex_message_items: get_str("codex_message_items"),
-                platform_message_id: get_str("platform_message_id"),
+                finish_reason: get_extra("finish_reason"),
+                reasoning: get_extra("reasoning"),
+                reasoning_content: get_extra("reasoning_content"),
+                reasoning_details: get_extra("reasoning_details"),
+                codex_reasoning_items: get_extra("codex_reasoning_items"),
+                codex_message_items: get_extra("codex_message_items"),
+                platform_message_id: get_extra("platform_message_id"),
                 observed: get_i64("observed"),
-                effect_disposition: get_str("effect_disposition"),
+                effect_disposition: get_extra("effect_disposition"),
                 active: get_i64("active"),
                 compacted: get_i64("compacted"),
                 compressed_summary: matches!(get_i64("_compressed_summary"), Some(n) if n != 0),
-                api_content: get_str("api_content"),
+                api_content: get_extra("api_content"),
                 display_kind: get_str("display_kind"),
-                display_metadata: get_str("display_metadata"),
-                message_uid: get_str("message_uid"),
-                absorbed_message_uids: get_str("absorbed_message_uids"),
-                tool_call_uids: get_str("tool_call_uids"),
-                tool_call_uid: get_str("tool_call_uid"),
-            })
+                display_metadata: get_extra("display_metadata"),
+                message_uid: get_extra("message_uid"),
+                absorbed_message_uids: get_extra("absorbed_message_uids"),
+                tool_call_uids: get_extra("tool_call_uids"),
+                tool_call_uid: get_extra("tool_call_uid"),
+            }))
         })?;
 
         for row in rows.by_ref() {
@@ -867,11 +947,9 @@ fn stream_conn_with_reads(
                 Err(error) if checked_source.is_some() => return Err(error.into()),
                 Err(_) => continue,
             };
-            if dedup_generations && !seen_generations.insert(row.generation_key()) {
-                continue;
-            }
+            let Some(row) = row else { continue };
             let row_id = row.id;
-            let Some(mut m) = row.into_message(session_origin) else {
+            let Some(mut m) = row.into_message(session_origin, opts) else {
                 continue;
             };
             // A compaction summary row: emit the boundary marker first, then the summary linked to
@@ -921,7 +999,7 @@ impl ReplayDedup {
     /// avoiding a second whole-key hash and text copy for each new trailing prompt.
     fn admit(&mut self, msg: &Message) -> Result<bool> {
         if msg.role == Role::User {
-            if let Some(text) = single_text(msg).filter(|text| !text.is_empty()) {
+            if let Some(text) = single_text(msg)?.filter(|text| !text.is_empty()) {
                 return self.recent_user_texts.insert_borrowed(&text);
             }
         }
@@ -933,7 +1011,7 @@ impl ReplayDedup {
     fn observe(&mut self, m: &Message) -> Result<()> {
         match m.role {
             Role::User => {
-                if let Some(text) = single_text(m) {
+                if let Some(text) = single_text(m)? {
                     if !text.is_empty() {
                         self.recent_user_texts.insert(text.into_owned())?;
                     }
@@ -1015,16 +1093,135 @@ fn session_lineage_root_to_tip(conn: &Connection, session_id: &str) -> Vec<Strin
 /// The streaming equivalent is [`ReplayDedup`] (a bounded look-back over the trailing user run).
 ///
 /// Plain text of a message iff it is exactly one Text block (the shape Hermes replays as a string).
-fn single_text(m: &Message) -> Option<Cow<'_, str>> {
+fn single_text(m: &Message) -> Result<Option<Cow<'_, str>>> {
     if m.content.len() == 1 {
         if let Block::Text { text } = &m.content[0] {
-            return Some(match text.inline_str() {
-                Some(text) => Cow::Borrowed(text),
-                None => Cow::Owned(text.to_string()),
+            return Ok(Some(text.try_resolve(&crate::lazy::Resolver::new(None))?));
+        }
+    }
+    Ok(None)
+}
+
+/// Borrow native TEXT only when the old String decoder would have accepted the column.
+fn borrowed_text<'a>(row: &'a rusqlite::Row<'_>, index: Option<usize>) -> Option<&'a str> {
+    match row.get_ref(index?).ok()? {
+        rusqlite::types::ValueRef::Text(bytes) => std::str::from_utf8(bytes).ok(),
+        _ => None,
+    }
+}
+
+/// Hermes's copied-generation identity precedes lazy body selection and extra projection.
+/// Borrowing the native cells preserves the original String/Option hashing without body copies.
+fn generation_key(row: &rusqlite::Row<'_>, index: &impl Fn(&str) -> Option<usize>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    borrowed_text(row, index("role")).unwrap_or_default().hash(&mut hash);
+    borrowed_text(row, index("content")).hash(&mut hash);
+    index("timestamp")
+        .and_then(|i| row.get::<_, Option<f64>>(i).ok().flatten())
+        .map(f64::to_bits)
+        .hash(&mut hash);
+    for key in ["tool_call_id", "tool_calls", "tool_name"] {
+        borrowed_text(row, index(key)).hash(&mut hash);
+    }
+    hash.finish()
+}
+
+/// Preserve acceptance of metadata-only rows even when their extras are not demanded.
+/// String sidecars need only a presence check; JSON sidecars retain strict Value acceptance.
+fn row_has_extra(row: &rusqlite::Row<'_>, index: &impl Fn(&str) -> Option<usize>) -> bool {
+    [
+        "display_kind",
+        "effect_disposition",
+        "api_content",
+        "display_metadata",
+        "message_uid",
+        "tool_call_uid",
+        "absorbed_message_uids",
+        "tool_call_uids",
+        "finish_reason",
+        "platform_message_id",
+        "reasoning",
+        "reasoning_content",
+    ]
+    .iter()
+    .any(|key| borrowed_text(row, index(key)).is_some_and(|raw| !raw.is_empty()))
+        || ["compacted", "observed"].iter().any(|key| {
+            index(key)
+                .and_then(|i| row.get::<_, Option<i64>>(i).ok().flatten())
+                .is_some_and(|value| value != 0)
+        })
+        || index("active").and_then(|i| row.get::<_, Option<i64>>(i).ok().flatten()) == Some(0)
+        || borrowed_text(row, index("codex_message_items")).is_some_and(accepted_json)
+}
+
+fn imported_origin(raw: &str) -> bool {
+    use super::store::document::{Index, Raw, Record};
+    let Some(validated) = accepted_raw(raw) else {
+        return false;
+    };
+    let index = Index::default();
+    Record::parse(Raw::new(validated.get(), &index))
+        .and_then(|record| record.get("imported_from"))
+        .is_some_and(|imported| imported.get().starts_with('{'))
+}
+
+/// First-class thinking on lean reads selects summaries/encrypted handles from borrowed rows,
+/// never constructing the unrelated native reasoning sidecars. Full demand keeps the existing
+/// parsed values because their entire structure is requested output.
+fn lean_reasoning(row: &rusqlite::Row<'_>, index: &impl Fn(&str) -> Option<usize>) -> (String, Option<String>, bool) {
+    use super::store::document::{array_iter, Index, Raw, Record};
+    let mut text = String::new();
+    let mut push = |summary: &str| {
+        let summary = summary.trim();
+        if !summary.is_empty() {
+            if !text.is_empty() {
+                text.push_str("\n\n");
+            }
+            text.push_str(summary);
+        }
+    };
+    let reasoning = borrowed_text(row, index("reasoning"));
+    if let Some(reasoning) = reasoning {
+        push(reasoning);
+    }
+    if let Some(content) = borrowed_text(row, index("reasoning_content")).filter(|content| Some(*content) != reasoning)
+    {
+        push(content);
+    }
+    let mut encrypted = None;
+    let strings = Index::default();
+    let mut has_extra = false;
+    if let Some(details) = borrowed_text(row, index("reasoning_details")).and_then(accepted_raw) {
+        has_extra = true;
+        if let Some(items) = array_iter(Raw::new(details.get(), &strings)) {
+            for item in items {
+                let Some(item) = Record::parse(item) else { continue };
+                if encrypted.is_none() {
+                    encrypted = item.string("encrypted_content");
+                }
+                let summary = item
+                    .get("summary")
+                    .or_else(|| item.get("thinking"))
+                    .or_else(|| item.get("content"))
+                    .or_else(|| item.get("text"));
+                if let Some(summary) = summary.and_then(|raw| serde_json::from_str::<String>(raw.get()).ok()) {
+                    push(&summary);
+                }
+            }
+        }
+    }
+    if encrypted.is_none() {
+        if let Some(items) = borrowed_text(row, index("codex_reasoning_items")).and_then(accepted_raw) {
+            has_extra = true;
+            encrypted = array_iter(Raw::new(items.get(), &strings)).and_then(|items| {
+                items
+                    .filter_map(Record::parse)
+                    .find_map(|item| item.string("encrypted_content"))
             });
         }
     }
-    None
+    (text, encrypted, has_extra)
 }
 
 struct MsgRow {
@@ -1035,6 +1232,9 @@ struct MsgRow {
     decoded_content: Option<Vec<Block>>,
     tool_call_id: Option<String>,
     tool_calls: Option<String>,
+    decoded_calls: Option<Vec<Block>>,
+    thinking: Option<Block>,
+    has_extra: bool,
     tool_name: Option<String>,
     timestamp: Option<f64>,
     token_count: Option<i64>,
@@ -1061,23 +1261,9 @@ struct MsgRow {
 }
 
 impl MsgRow {
-    /// Hermes's display-generation identity (`_display_dedupe_key`): the fields a compaction clone
-    /// copies byte-exact. Hashed so the dedup set costs one word per row.
-    fn generation_key(&self) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        self.role.hash(&mut h);
-        self.content.hash(&mut h);
-        self.timestamp.map(f64::to_bits).hash(&mut h);
-        self.tool_call_id.hash(&mut h);
-        self.tool_calls.hash(&mut h);
-        self.tool_name.hash(&mut h);
-        h.finish()
-    }
-
     /// The IR message for this row. `session_origin` overrides every message's origin when the
     /// session as a whole came from somewhere else (a foreign import).
-    fn into_message(self, session_origin: Option<Origin>) -> Option<Message> {
+    fn into_message(self, session_origin: Option<Origin>, opts: &ParseOptions) -> Option<Message> {
         let (mut role, mut kind, mut origin) = match self.role.as_str() {
             "assistant" => (Role::Assistant, MessageKind::Reply, Origin::Model),
             "tool" => (Role::Tool, MessageKind::ToolResult, Origin::Harness),
@@ -1121,13 +1307,16 @@ impl MsgRow {
         // In-place compaction / rewind flags (non-default values only, so old-schema rows carry
         // nothing): `compacted` = summarized away but still displayed history; `active = false`
         // alone = a rewound or superseded row (only reachable under `complete`).
-        if matches!(self.compacted, Some(c) if c != 0) {
+        if opts.wants_full_extra() && matches!(self.compacted, Some(c) if c != 0) {
             bag.insert("compacted".into(), Value::Bool(true));
         }
-        if matches!(self.active, Some(0)) {
+        if opts.wants_full_extra() && matches!(self.active, Some(0)) {
             bag.insert("active".into(), Value::Bool(false));
         }
-        if let Some(k) = self.display_kind.filter(|s| !s.is_empty()) {
+        if let Some(k) = self
+            .display_kind
+            .filter(|s| !s.is_empty() && (opts.wants_full_extra() || opts.facts_only()))
+        {
             bag.insert("display_kind".into(), Value::String(k));
         }
         if let Some(ed) = self.effect_disposition.filter(|s| !s.is_empty()) {
@@ -1180,7 +1369,7 @@ impl MsgRow {
         if let Some(pmid) = self.platform_message_id.filter(|s| !s.is_empty()) {
             bag.insert("platform_message_id".into(), Value::String(pmid));
         }
-        if matches!(self.observed, Some(o) if o != 0) {
+        if opts.wants_full_extra() && matches!(self.observed, Some(o) if o != 0) {
             bag.insert("observed".into(), Value::Bool(true));
         }
 
@@ -1238,7 +1427,9 @@ impl MsgRow {
                 }
             }
             // The projection borrows the already parsed sidecar before moving it into extras.
-            bag.insert("reasoning_details".into(), v);
+            if opts.wants_full_extra() {
+                bag.insert("reasoning_details".into(), v);
+            }
         }
         if let Some(v) = self
             .codex_reasoning_items
@@ -1253,18 +1444,26 @@ impl MsgRow {
                     })
                 });
             }
-            bag.insert("codex_reasoning_items".into(), v);
+            if opts.wants_full_extra() {
+                bag.insert("codex_reasoning_items".into(), v);
+            }
         }
         if let Some(raw) = self.codex_message_items {
             if let Ok(v) = serde_json::from_str::<Value>(&raw) {
                 bag.insert("codex_message_items".into(), v);
             }
         }
-        if let Some(r) = self.reasoning.filter(|s| !s.is_empty()) {
+        if let Some(r) = self.reasoning.filter(|s| !s.is_empty() && opts.wants_full_extra()) {
             bag.insert(RAW_REASONING_KEY.into(), Value::String(r));
         }
-        if let Some(r) = self.reasoning_content.filter(|s| !s.is_empty()) {
+        if let Some(r) = self
+            .reasoning_content
+            .filter(|s| !s.is_empty() && opts.wants_full_extra())
+        {
             bag.insert(RAW_REASONING_CONTENT_KEY.into(), Value::String(r));
+        }
+        if let Some(thinking) = self.thinking {
+            m.content.push(thinking);
         }
         if !reasoning_text.is_empty() || encrypted.is_some() {
             m.content.push(Block::Thinking {
@@ -1303,13 +1502,15 @@ impl MsgRow {
         }
 
         // assistant tool calls
-        if let Some(tc) = &self.tool_calls {
+        if let Some(calls) = self.decoded_calls {
+            m.content.extend(calls);
+        } else if let Some(tc) = &self.tool_calls {
             for b in parse_tool_calls(tc) {
                 m.content.push(b);
             }
         }
 
-        (!m.content.is_empty() || !m.extra.is_empty()).then_some(m)
+        (!m.content.is_empty() || !m.extra.is_empty() || self.has_extra).then_some(m)
     }
 }
 
@@ -1324,16 +1525,7 @@ fn checked_multimodal_content(
     let Some(rest) = raw.strip_prefix(MULTIMODAL_SENTINEL) else {
         return Ok(None);
     };
-    if serde_json::from_str::<&crate::lazy::RawValue>(rest).is_err()
-        || !super::store::json::value_compatible(rest.as_bytes())
-    {
-        return Ok(None);
-    }
-    let (offset, len) = arena.append(|writer| {
-        writer.write_all(rest.as_bytes())?;
-        Ok(())
-    })?;
-    source.read_backing_syntax(arena.clone(), offset, len, |view| {
+    Ok(checked_json(rest, source, arena, |view| {
         let array = view.is_array()?;
         let parts = if array { Some(view) } else { view.get("parts")? };
         let Some(parts) = parts.map(|parts| parts.array()).transpose()?.flatten() else {
@@ -1345,7 +1537,33 @@ fn checked_multimodal_content(
             blocks.extend(openai::part_view(part, &openai::HERMES)?);
         }
         Ok((array || !blocks.is_empty()).then_some(blocks))
-    })
+    })?
+    .flatten())
+}
+
+fn checked_json<T>(
+    raw: &str,
+    source: &crate::json::JsonSource,
+    arena: &std::sync::Arc<super::store::bytes::ByteSource>,
+    select: impl for<'a> FnOnce(crate::json::JsonView<'a>) -> Result<T>,
+) -> Result<Option<T>> {
+    if !accepted_json(raw) {
+        return Ok(None);
+    }
+    let (offset, len) = arena.append(|writer| {
+        writer.write_all(raw.as_bytes())?;
+        Ok(())
+    })?;
+    source.read_backing_syntax(arena.clone(), offset, len, select).map(Some)
+}
+
+fn accepted_json(raw: &str) -> bool {
+    accepted_raw(raw).is_some()
+}
+
+fn accepted_raw(raw: &str) -> Option<&crate::lazy::RawValue> {
+    let value = serde_json::from_str::<&crate::lazy::RawValue>(raw).ok()?;
+    super::store::json::value_compatible(raw.as_bytes()).then_some(value)
 }
 
 fn decode_content(raw: String) -> Vec<Block> {
@@ -1649,6 +1867,199 @@ mod tests {
             unreachable!()
         };
         assert!(text.try_resolve(&checked.resolver()).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn lean_checked_reads_preserve_facts_dedup_and_actual_consumers() -> Result<()> {
+        let world = cv_testkit::World::in_process("hermes-lean-checked");
+        let path = world.base.join("state.db");
+        let writer = Connection::open(&path)?;
+        writer.execute_batch(&fixture("schema-v30.sql"))?;
+        insert_session(&writer, "root", None, Some("compression"), 900.0, Some(999.0));
+        insert_session(&writer, "s", Some("root"), None, 1000.0, None);
+        let body = "large 🌙\n\"quoted\"".repeat(4096);
+        let origin = serde_json::json!({"imported_from":{"tool":"claude"},"ignored":body}).to_string();
+        writer.execute("UPDATE sessions SET origin_json=?1, system_prompt='system', cwd='/tmp/project', git_branch='branch' WHERE id='s'", [&origin])?;
+        writer.execute_batch(
+            "INSERT INTO messages(session_id,role,content,timestamp) VALUES('root','user','first prompt',1000)",
+        )?;
+        writer.execute(
+            "INSERT INTO messages(session_id,role,content,timestamp) VALUES('root','assistant',?1,1001)",
+            [&body],
+        )?;
+        for (session, timestamp) in [("root", 1002.0), ("s", 1002.5)] {
+            writer.execute(
+                "INSERT INTO messages(session_id,role,content,timestamp) VALUES(?1,'user',?2,?3)",
+                rusqlite::params![session, body, timestamp],
+            )?;
+        }
+        // Same-generation clones are suppressed; different large content at the same timestamp
+        // must stay distinct even after both cells become source-backed.
+        for (content, active, compacted) in [(&body, 0, 1), (&body, 1, 0), (&format!("distinct {body}"), 1, 0)] {
+            writer.execute("INSERT INTO messages(session_id,role,content,timestamp,active,compacted,api_content,display_metadata,token_count,reasoning,reasoning_details) VALUES('s','assistant',?1,1003,?2,?3,?4,?4,7,?1,?5)", rusqlite::params![content,active,compacted,body,serde_json::json!([{"text":" detail ","encrypted_content":"handle","ignored":body}]).to_string()])?;
+        }
+        writer.execute("INSERT INTO messages(session_id,role,content,timestamp,tool_call_id,tool_name) VALUES('s','tool',?1,1004,'call','terminal')", [&body])?;
+        let calls = serde_json::json!([{"id":"call","function":{"name":"terminal","arguments":serde_json::json!({"command":"true","opaque":body}).to_string()}}]).to_string();
+        writer.execute(
+            "INSERT INTO messages(session_id,role,tool_calls,timestamp) VALUES('s','assistant',?1,1005)",
+            [&calls],
+        )?;
+        writer.execute_batch("INSERT INTO messages(session_id,role,content,timestamp,display_kind) VALUES('s','user','finished',1006,'process_complete')")?;
+        writer.execute("INSERT INTO messages(session_id,role,content,timestamp,_compressed_summary) VALUES('s','assistant',?1,1007,1)", [&body])?;
+        writer.execute(
+            "INSERT INTO messages(session_id,role,api_content,timestamp) VALUES('s','assistant',?1,1008)",
+            [&body],
+        )?;
+        writer.execute(
+            "INSERT INTO messages(session_id,role,codex_message_items,timestamp) VALUES('s','assistant',?1,1009)",
+            [serde_json::json!({"opaque":body}).to_string()],
+        )?;
+        writer.execute_batch("INSERT INTO messages(session_id,role,codex_message_items,timestamp) VALUES('s','assistant','{',1010); INSERT INTO messages(session_id,role,content,timestamp,active,compacted) VALUES('s','assistant','rewound',1011,0,0)")?;
+        drop(writer);
+        let adapter = Hermes::with_db(path.clone());
+        let reference = adapter.discover()?.into_iter().find(|r| r.id == "s").unwrap();
+        let full = crate::stream::collect_with(&adapter, &reference, &ParseOptions::full())?;
+        assert_eq!(full.messages.len(), 12);
+        assert_eq!(full.lineage.continues.as_deref(), Some("root"));
+        assert!(full.messages.iter().all(|message| message.origin == Origin::Import));
+        for options in [
+            ParseOptions::bulk(),
+            ParseOptions::lazy(),
+            ParseOptions::usage(),
+            ParseOptions::facts(),
+            ParseOptions::lazy_extra(),
+        ] {
+            let mut actual = crate::stream::collect_with(&adapter, &reference, &options)?;
+            if options.spans {
+                assert!(matches!(
+                    actual.messages[1].content[0],
+                    Block::Text {
+                        text: crate::Text::Source(_)
+                    }
+                ));
+                assert!(actual.messages.iter().flat_map(|m| &m.content).any(|block| matches!(
+                    block,
+                    Block::ToolUse {
+                        input: crate::Json::Source(_),
+                        ..
+                    }
+                )));
+                if !options.wants_full_extra() {
+                    assert!(actual.messages.iter().flat_map(|m| &m.content).any(|block| matches!(
+                        block,
+                        Block::Thinking {
+                            text: crate::Text::Source(_),
+                            ..
+                        }
+                    )));
+                }
+            }
+            actual.materialize()?;
+            let mut expected = full.clone();
+            if !options.wants_full_extra() {
+                expected.extra.clear();
+                for message in &mut expected.messages {
+                    let kind = message
+                        .harness_extra(Harness::Hermes)
+                        .and_then(|bag| bag.get("display_kind"))
+                        .cloned();
+                    message.extra.clear();
+                    if options.facts_only() {
+                        if let Some(kind) = kind {
+                            message
+                                .harness_extra_mut(Harness::Hermes)
+                                .insert("display_kind".into(), kind);
+                        }
+                    }
+                }
+            }
+            assert_eq!(
+                serde_json::to_value(actual)?,
+                serde_json::to_value(expected)?,
+                "{options:?}"
+            );
+        }
+        let complete = crate::stream::collect_with(&adapter, &reference, &ParseOptions::complete())?;
+        let mut override_facts = crate::stream::collect_with(
+            &adapter,
+            &reference,
+            &ParseOptions {
+                complete: true,
+                ..ParseOptions::facts()
+            },
+        )?;
+        override_facts.materialize()?;
+        assert_eq!(serde_json::to_value(override_facts)?, serde_json::to_value(complete)?);
+        assert_eq!(
+            serde_json::to_value(crate::compaction::detect(&reference, true)?)?,
+            serde_json::to_value(crate::compaction::detect_in_session(&full, true)?)?
+        );
+        assert_eq!(
+            crate::affordance::read(&adapter, &reference)?,
+            crate::affordance::of_session(&full)?
+        );
+        // Every retained lean body/argument uses the producer read set, including WAL-only writes.
+        let writer = Connection::open(&path)?;
+        writer.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_checkpoint(TRUNCATE)")?;
+        let lean = crate::stream::collect_with(&adapter, &reference, &ParseOptions::facts())?;
+        let before_main = std::fs::read(&path)?;
+        writer.execute("UPDATE messages SET content='changed' WHERE id=2", [])?;
+        assert_eq!(std::fs::read(&path)?, before_main);
+        let Block::Text { text } = &lean.messages[1].content[0] else {
+            unreachable!()
+        };
+        assert!(text.try_resolve(&lean.resolver()).is_err());
+        let input = lean
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .find_map(|b| {
+                if let Block::ToolUse { input, .. } = b {
+                    Some(input)
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+        assert!(input.resolve().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn lean_reasoning_and_import_projection_preserve_owned_json_acceptance() -> Result<()> {
+        let conn = mk_conn("schema-v30.sql");
+        insert_session(&conn, "s", None, None, 1000.0, None);
+        let large = "ignored λ".repeat(4096);
+        for details in [
+            serde_json::json!([{"summary":" first ","encrypted_content":"first handle","ignored":large},{"summary":null,"thinking":"ignored by null precedence"},{"text":" second ","encrypted_content":"second handle"}]).to_string(),
+            r#"[{"text":"discarded","text":"final"}]"#.into(),
+            format!(r#"[{{"text":"rejected","ignored":"\ud800","opaque":{}}}]"#,serde_json::to_string(&large)?),
+            r#"[{"text":"rejected","ignored":1e400}]"#.into(),
+            "null".into(),
+            "[".repeat(128)+"0"+&"]".repeat(128),
+        ] {
+            conn.execute("DELETE FROM messages",[])?;
+            conn.execute(r#"INSERT INTO messages(session_id,role,reasoning,reasoning_content,reasoning_details,codex_reasoning_items,codex_message_items,timestamp) VALUES('s','assistant',' same ',' same ',?1,'[{"encrypted_content":"codex handle"}]',?1,1001)"#, [&details])?;
+            let full = parse_conn_with(&conn,&sref("s"),&ParseOptions::full())?;
+            let mut lean = parse_conn_with(&conn,&sref("s"),&ParseOptions::bulk())?;
+            let mut expected = full;
+            expected.extra.clear();
+            for message in &mut expected.messages { message.extra.clear(); }
+            lean.extra.clear();
+            assert_eq!(serde_json::to_value(lean)?,serde_json::to_value(expected)?,"{details}");
+        }
+        for origin in [
+            serde_json::json!({"imported_from":{"tool":"codex"},"ignored":large}).to_string(),
+            r#"{"imported_from":{},"imported_from":null}"#.into(),
+            r#"{"imported_from":{},"ignored":"\ud800"}"#.into(),
+            r#"{"imported_from":{},"ignored":1e400}"#.into(),
+        ] {
+            conn.execute("UPDATE sessions SET origin_json=?1 WHERE id='s'", [&origin])?;
+            let full = parse_conn_with(&conn, &sref("s"), &ParseOptions::full())?;
+            let lean = parse_conn_with(&conn, &sref("s"), &ParseOptions::bulk())?;
+            assert_eq!(full.messages[0].origin, lean.messages[0].origin, "{origin}");
+        }
         Ok(())
     }
 
