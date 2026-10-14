@@ -13,28 +13,42 @@ fn git(args: &[&str]) -> Option<String> {
     (!s.is_empty()).then_some(s)
 }
 
+fn watch_git_path(name: &str) {
+    if let Some(path) = git(&["rev-parse", "--path-format=absolute", "--git-path", name]) {
+        println!("cargo:rerun-if-changed={path}");
+    }
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=CV_BUILD_SHA");
-    if let Some(dir) = git(&["rev-parse", "--absolute-git-dir"]) {
-        // `HEAD` alone is not enough: on a branch it holds `ref: refs/heads/<name>` and does not
-        // change when you commit — only the ref file does. Watching just `HEAD` left the embedded
-        // sha (and its `-dirty` suffix) stale for every commit made on the same branch, which is
-        // exactly the case `cv --version` exists to make checkable. Watch the resolved ref too,
-        // plus `packed-refs` for when the ref has been packed away and has no loose file.
-        println!("cargo:rerun-if-changed={dir}/HEAD");
-        println!("cargo:rerun-if-changed={dir}/packed-refs");
-        if let Some(r) = git(&["symbolic-ref", "--quiet", "HEAD"]) {
-            println!("cargo:rerun-if-changed={dir}/{r}");
+    // Git resolves shared refs and per-worktree HEAD/index paths differently. In a
+    // linked worktree, joining refs onto --absolute-git-dir watches the wrong file.
+    for name in ["HEAD", "packed-refs", "index"] {
+        watch_git_path(name);
+    }
+    if let Some(reference) = git(&["symbolic-ref", "--quiet", "HEAD"]) {
+        watch_git_path(&reference);
+    }
+    // An explicit rerun list otherwise suppresses rebuilds of the -dirty stamp
+    // when tracked sources change without a commit. Do not watch output/cache dirs.
+    if let (Some(root), Some(files)) = (
+        git(&["rev-parse", "--show-toplevel"]),
+        git(&["ls-files", "--full-name", "-z", ":/"]),
+    ) {
+        for file in files.split('\0').filter(|file| !file.is_empty()) {
+            println!("cargo:rerun-if-changed={root}/{file}");
         }
     }
     let sha = std::env::var("CV_BUILD_SHA")
         .ok()
         .filter(|s| !s.trim().is_empty())
         .or_else(|| {
-            git(&["rev-parse", "--short=12", "HEAD"]).map(|short| match git(&["status", "--porcelain"]) {
-                Some(st) if !st.is_empty() => format!("{short}-dirty"),
-                _ => short,
+            git(&["rev-parse", "--short=12", "HEAD"]).map(|short| {
+                match git(&["status", "--porcelain", "--untracked-files=no"]) {
+                    Some(st) if !st.is_empty() => format!("{short}-dirty"),
+                    _ => short,
+                }
             })
         })
         .unwrap_or_else(|| "unknown".to_string());
