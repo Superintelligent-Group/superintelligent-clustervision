@@ -87,9 +87,13 @@ fn read_json(path: &Path) -> Option<Value> {
 }
 
 fn jsonl_jobs(state: &Path) -> Vec<Value> {
-    read_json(&state.join("cron").join("jobs.json"))
-        .and_then(|v| v.get("jobs").and_then(Value::as_array).cloned())
-        .unwrap_or_default()
+    let Some(mut registry) = read_json(&state.join("cron").join("jobs.json")) else {
+        return Vec::new();
+    };
+    match registry.get_mut("jobs").map(Value::take) {
+        Some(Value::Array(jobs)) => jobs,
+        _ => Vec::new(),
+    }
 }
 
 /// A sub-agent run: the keys it belongs to (requester, controller) and its record.
@@ -103,9 +107,10 @@ fn run_keys(p: &Value) -> Vec<String> {
 }
 
 fn jsonl_runs(state: &Path) -> Vec<Run> {
-    let Some(Value::Object(runs)) =
-        read_json(&state.join("subagents").join("runs.json")).and_then(|v| v.get("runs").cloned())
-    else {
+    let Some(mut registry) = read_json(&state.join("subagents").join("runs.json")) else {
+        return Vec::new();
+    };
+    let Some(Value::Object(runs)) = registry.get_mut("runs").map(Value::take) else {
         return Vec::new();
     };
     let mut out: Vec<Run> = runs.into_iter().map(|(_, p)| (run_keys(&p), p)).collect();
@@ -194,38 +199,45 @@ fn job_belongs(job: &Value, key: &str) -> bool {
     owner || run || main
 }
 
+/// The public summary is 120 characters; retain one lookahead for truncate's ellipsis.
+fn summary_prefix<'a>(parts: impl IntoIterator<Item = &'a str>) -> String {
+    parts.into_iter().flat_map(str::chars).take(121).collect()
+}
+
 /// `corpus-ping · at 2026-10-11T20:48:42Z · Reply with the word pong. · last ok`.
 fn job_row(job: &Value) -> Affordance {
     let when = match str_at(job, "/schedule/kind") {
-        Some("cron") => str_at(job, "/schedule/expr").map(str::to_string),
+        Some("cron") => str_at(job, "/schedule/expr").map(|s| summary_prefix([s])),
         Some("every") => job
             .pointer("/schedule/everyMs")
             .and_then(Value::as_i64)
             .map(|ms| format!("every {}s", ms / 1000)),
-        Some("at") => str_at(job, "/schedule/at").map(|a| format!("at {a}")).or_else(|| {
-            job.pointer("/schedule/atMs")
-                .and_then(Value::as_i64)
-                .and_then(chrono::DateTime::from_timestamp_millis)
-                .map(|t| format!("at {}", t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)))
-        }),
+        Some("at") => str_at(job, "/schedule/at")
+            .map(|a| summary_prefix(["at ", a]))
+            .or_else(|| {
+                job.pointer("/schedule/atMs")
+                    .and_then(Value::as_i64)
+                    .and_then(chrono::DateTime::from_timestamp_millis)
+                    .map(|t| format!("at {}", t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)))
+            }),
         _ => None,
     };
     let name = str_at(job, "/displayName").or_else(|| str_at(job, "/name"));
     let message = str_at(job, "/payload/message").or_else(|| str_at(job, "/payload/kind"));
-    let last = str_at(job, "/state/lastStatus").map(|s| format!("last {s}"));
-    let disabled = (job.get("enabled").and_then(Value::as_bool) == Some(false)).then(|| "disabled".to_string());
-    let parts: Vec<String> = [
-        name.map(str::to_string),
-        when,
-        message.map(str::to_string),
-        last,
-        disabled,
-    ]
-    .into_iter()
-    .flatten()
-    .filter(|p| !p.is_empty())
-    .collect();
-    Affordance::store(Kind::Schedule, "cron", truncate(&parts.join(" · "), 120), Vec::new())
+    let last = str_at(job, "/state/lastStatus").map(|s| summary_prefix(["last ", s]));
+    let disabled = (job.get("enabled").and_then(Value::as_bool) == Some(false)).then_some("disabled");
+    let parts: Vec<&str> = [name, when.as_deref(), message, last.as_deref(), disabled]
+        .into_iter()
+        .flatten()
+        .filter(|p| !p.is_empty())
+        .collect();
+    let prefix = summary_prefix(
+        parts
+            .iter()
+            .enumerate()
+            .flat_map(|(i, part)| [if i == 0 { "" } else { " · " }, *part]),
+    );
+    Affordance::store(Kind::Schedule, "cron", truncate(&prefix, 120), Vec::new())
 }
 
 /// `ok-reply-check · Reply with the single word ok. · ok → ok`.
@@ -235,13 +247,14 @@ fn run_row(p: &Value) -> Affordance {
         .unwrap_or("");
     let task = str_at(p, "/task").unwrap_or("");
     let status = str_at(p, "/execution/outcome/status").or_else(|| str_at(p, "/outcome/status"));
-    let mut summary = format!("{who} · {task}");
+    let mut parts = vec![who, " · ", task];
     if let Some(s) = status {
-        summary.push_str(&format!(" · {s}"));
+        parts.extend([" · ", s]);
     }
     if let Some(res) = str_at(p, "/completion/resultText") {
-        summary.push_str(&format!(" → {res}"));
+        parts.extend([" → ", res]);
     }
+    let summary = summary_prefix(parts);
     let timestamp = p
         .get("createdAt")
         .and_then(Value::as_i64)
@@ -272,6 +285,39 @@ mod tests {
         assert!(!job_belongs(&heartbeat, "agent:other:main"));
         let every = json!({"name": "hb", "schedule": {"kind": "every", "everyMs": 1_800_000}, "payload": {"kind": "heartbeat"}});
         assert_eq!(job_row(&every).summary, "hb · every 1800s · heartbeat");
+    }
+
+    #[test]
+    fn registry_summaries_match_full_rendering_for_large_unicode_fields() {
+        let giant = "雪λ\n".repeat(50000);
+        for name in ["", "short", giant.as_str()] {
+            for payload in ["", "short", giant.as_str()] {
+                let job = json!({"name":name,"schedule":{"kind":"at","at":giant},
+                    "payload":{"message":payload},"state":{"lastStatus":giant},"enabled":false});
+                let expected = [
+                    name.to_owned(),
+                    format!("at {giant}"),
+                    payload.to_owned(),
+                    format!("last {giant}"),
+                    "disabled".into(),
+                ]
+                .into_iter()
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join(" · ");
+                assert_eq!(job_row(&job).summary, truncate(&expected, 120));
+                let run = json!({"label":name,"task":payload,"outcome":{"status":giant},
+                    "completion":{"resultText":giant},"createdAt":1704067200000_i64});
+                assert_eq!(
+                    run_row(&run).summary,
+                    truncate(&format!("{name} · {payload} · {giant} → {giant}"), 120)
+                );
+                assert_eq!(
+                    run_row(&run).timestamp,
+                    chrono::DateTime::from_timestamp_millis(1704067200000)
+                );
+            }
+        }
     }
 
     #[cfg(feature = "sqlite")]
