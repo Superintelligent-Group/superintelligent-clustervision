@@ -78,36 +78,38 @@ def campaign(args, root):
 
 
 def hermes_giant(args, root):
-    """One demanded ordinary TEXT cell: native reads must not materialize the giant value."""
+    """One demanded ordinary TEXT cell per role: native reads and replay dedup stay bounded."""
     catalog = root / "catalog"
     catalog.mkdir()
     temporary = root / "temporary"
     temporary.mkdir()
     env = dict(os.environ, CLUSTERVISION_HOME=str(catalog), TMPDIR=str(temporary))
     results = []
-    for size in args.sizes:
-        fixture = root / f"hermes-giant-{size}"
-        fixture.mkdir()
-        manifest = generate_sqlite("hermes", fixture, size, 1, args.escaped, "history")
-        common = ["hermes", manifest["id"], manifest["path"], "--root", manifest["root"], "--sqlite-heap"]
-        probes = {}
-        for operation, mode in (("collect", "lazy"), ("doctor", "facts"), ("doctor", "full")):
-            child = subprocess.run([str(args.probe.resolve()), operation, *common, "--mode", mode],
-                                   env=env, text=True, capture_output=True, check=True)
-            row = json.loads(child.stdout)
-            peak = checked_peak(row)
-            assert row["messages"] == manifest["expected_messages"] == 1, "giant body was skipped"
-            native = row["sqlite_native_heap"]
-            assert native["accounting_enabled_and_verified"], "native SQLite accounting is inactive"
-            assert 0 < native["peak_above_baseline_bytes"] <= 8 * 1024 * 1024, "native giant-cell read retained payload"
-            assert 0 < native["largest_allocation_request_bytes"] <= 1024 * 1024, "SQLite materialized the giant cell"
-            if mode != "full":
-                assert peak <= 2 * 1024 * 1024, "lean Rust body ownership grew with payload"
-            probes[f"{operation}-{mode}"] = row
-            print(f"hermes/giant/{mode}: {size} payload bytes, {peak} requested Rust peak, {native['peak_above_baseline_bytes']} native peak", flush=True)
-        assert probes["doctor-facts"]["detail"] == probes["doctor-full"]["detail"], "Facts doctor changed the demanded report"
-        assert not list(temporary.iterdir()), "incremental read leaked temporary files"
-        results.append({"fixture": manifest, "probes": probes})
+    # User rows exercise exact replay dedup; assistant-only cells cannot expose key ownership.
+    for shape in ("history", "prompt-only"):
+        for size in args.sizes:
+            fixture = root / f"hermes-giant-{shape}-{size}"
+            fixture.mkdir()
+            manifest = generate_sqlite("hermes", fixture, size, 1, args.escaped, shape)
+            common = ["hermes", manifest["id"], manifest["path"], "--root", manifest["root"], "--sqlite-heap"]
+            probes = {}
+            for operation, mode in (("collect", "lazy"), ("doctor", "facts"), ("doctor", "full")):
+                child = subprocess.run([str(args.probe.resolve()), operation, *common, "--mode", mode],
+                                       env=env, text=True, capture_output=True, check=True)
+                row = json.loads(child.stdout)
+                peak = checked_peak(row)
+                assert row["messages"] == manifest["expected_messages"] == 1, "giant body was skipped"
+                native = row["sqlite_native_heap"]
+                assert native["accounting_enabled_and_verified"], "native SQLite accounting is inactive"
+                assert 0 < native["peak_above_baseline_bytes"] <= 8 * 1024 * 1024, "native giant-cell read retained payload"
+                assert 0 < native["largest_allocation_request_bytes"] <= 1024 * 1024, "SQLite materialized the giant cell"
+                if mode != "full":
+                    assert peak <= 2 * 1024 * 1024, "lean Rust body ownership grew with payload"
+                probes[f"{operation}-{mode}"] = row
+                print(f"hermes/giant/{shape}/{mode}: {size} payload bytes, {peak} requested Rust peak, {native['peak_above_baseline_bytes']} native peak", flush=True)
+            assert probes["doctor-facts"]["detail"] == probes["doctor-full"]["detail"], "Facts doctor changed the demanded report"
+            assert not list(temporary.iterdir()), "incremental read leaked temporary files"
+            results.append({"fixture": manifest, "probes": probes})
     (root / "HERMES-GIANT-REPORT.json").write_text(json.dumps({"results": results}, indent=2) + "\n")
 
 
@@ -119,7 +121,7 @@ def main():
     parser.add_argument("--sizes", type=int, nargs="+", default=[8_000_000, 32_000_000])
     parser.add_argument("--format", action="append", choices=("devin", "hermes", "goose", "opencode", "cursor"))
     parser.add_argument("--escaped", action="store_true", help="use escaped payloads for a focused decoder scale check")
-    parser.add_argument("--hermes-giant", action="store_true", help="check one ordinary giant Hermes cell through lazy collection and Facts/full doctor, including native SQLite allocation")
+    parser.add_argument("--hermes-giant", action="store_true", help="check giant assistant and user Hermes cells through lazy collection and Facts/full doctor, including native SQLite allocation")
     args = parser.parse_args()
     if len(args.sizes) < 2 or any(size <= 0 for size in args.sizes):
         parser.error("at least two positive sizes are required")
