@@ -69,8 +69,9 @@ pub enum ExtraProjection {
 ///   chunks: windowed/`--range` reads, metadata/event extraction, snippet scans, head-only
 ///   embedding, chunk-wise indexing. Supported large fields arrive as [`Span`](crate::lazy::Span)s
 ///   you resolve (possibly capped via [`Resolver::resolve_prefix`](crate::lazy::Resolver::
-///   resolve_prefix) or chunked via `for_each_chunk`) — a 700 MB record costs 16 bytes until you
-///   choose otherwise. Adapters without a span path just hand you inline content, so `lazy()` is
+///   resolve_prefix) or chunked via `for_each_chunk`). Checked sources retain descriptors and
+///   may use private backing; payload ownership is deferred until a consumer requests it.
+///   Adapters without a span path just hand you inline content, so `lazy()` is
 ///   never *less* correct than `bulk()`, only cheaper when spans exist.
 ///
 /// - [`facts()`](ParseOptions::facts) — doctor, compaction and affordance reducers need their
