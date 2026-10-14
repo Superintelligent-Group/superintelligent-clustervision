@@ -10,6 +10,7 @@
 //! word, one meaning.
 
 use anyhow::{anyhow, bail, Context, Result};
+#[cfg(test)]
 use cv_core::scan::{ceil_char, floor_char};
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -143,8 +144,9 @@ fn provider_from_env() -> Option<Provider> {
 
 /// Build the user prompt: the (possibly truncated) rendered transcript plus instructions.
 fn build_prompt(session: &cv_core::Session, opts: &DigestOptions) -> Result<String> {
-    let rendered = cv_core::render::to_markdown(session)?;
-    let (transcript, truncated) = budget(&rendered, TRANSCRIPT_BUDGET);
+    let mut output = TranscriptBudget::new(TRANSCRIPT_BUDGET);
+    cv_core::render::write_markdown(session, &mut output, &session.resolver())?;
+    let (transcript, truncated) = output.finish()?;
 
     let scope = if opts.project {
         "Distill this into durable PROJECT memory (it may span more than one session)."
@@ -168,13 +170,90 @@ fn build_prompt(session: &cv_core::Session, opts: &DigestOptions) -> Result<Stri
     Ok(prompt)
 }
 
+/// Retain the same head/tail byte budget as `budget` while rendering. All source fields
+/// are still demanded and checked; unselected Markdown never becomes a whole-session String.
+struct TranscriptBudget {
+    limit: usize,
+    head: Vec<u8>,
+    tail: Vec<u8>,
+    truncated: bool,
+}
+const TRANSCRIPT_MARKER: &str = "\n\n[… transcript truncated …]\n\n";
+impl TranscriptBudget {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            head: Vec::new(),
+            tail: Vec::new(),
+            truncated: false,
+        }
+    }
+    fn keep_tail(&mut self, bytes: &[u8]) {
+        let usable = self.limit.saturating_sub(TRANSCRIPT_MARKER.len());
+        let capacity = usable - usable * 2 / 3;
+        if bytes.len() >= capacity {
+            self.tail.clear();
+            self.tail.extend_from_slice(&bytes[bytes.len() - capacity..]);
+        } else {
+            let excess = (self.tail.len() + bytes.len()).saturating_sub(capacity);
+            self.tail.drain(..excess);
+            self.tail.extend_from_slice(bytes);
+        }
+    }
+    fn finish(mut self) -> Result<(String, bool)> {
+        if !self.truncated {
+            return Ok((String::from_utf8(self.head)?, false));
+        }
+        // Head may end mid-scalar and tail may begin mid-scalar; the streamed Markdown itself
+        // is UTF8. Drop only these boundary fragments, matching floor_char/ceil_char.
+        if let Err(error) = std::str::from_utf8(&self.head) {
+            if error.error_len().is_some() {
+                bail!("Markdown renderer emitted invalid UTF8");
+            }
+            self.head.truncate(error.valid_up_to());
+        }
+        let start = self
+            .tail
+            .iter()
+            .position(|byte| byte & 0xc0 != 0x80)
+            .unwrap_or(self.tail.len());
+        let mut output = String::from_utf8(self.head)?;
+        output.push_str(TRANSCRIPT_MARKER);
+        output.push_str(std::str::from_utf8(&self.tail[start..])?);
+        Ok((output, true))
+    }
+}
+impl std::io::Write for TranscriptBudget {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if !self.truncated && bytes.len() <= self.limit.saturating_sub(self.head.len()) {
+            self.head.extend_from_slice(bytes);
+        } else {
+            if !self.truncated {
+                self.truncated = true;
+                let saved = std::mem::take(&mut self.head);
+                self.keep_tail(&saved);
+                let head_limit = self.limit.saturating_sub(TRANSCRIPT_MARKER.len()) * 2 / 3;
+                self.head.extend_from_slice(&saved[..saved.len().min(head_limit)]);
+                let remaining = head_limit.saturating_sub(self.head.len());
+                self.head.extend_from_slice(&bytes[..bytes.len().min(remaining)]);
+            }
+            self.keep_tail(bytes);
+        }
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Truncate `s` to roughly `budget` chars, keeping a head and a tail with an elision marker in the
 /// middle. Returns `(text, was_truncated)`. Splits on char boundaries so this never panics.
+#[cfg(test)]
 fn budget(s: &str, budget: usize) -> (String, bool) {
     if s.len() <= budget {
         return (s.to_string(), false);
     }
-    const MARKER: &str = "\n\n[… transcript truncated …]\n\n";
+    const MARKER: &str = TRANSCRIPT_MARKER;
     // Reserve room for the marker; split remaining budget head-heavy (head holds framing, tail
     // holds conclusions).
     let usable = budget.saturating_sub(MARKER.len());
@@ -552,6 +631,26 @@ mod tests {
             );
             assert!(build_prompt(&session, &DigestOptions::default()).is_err());
         }
+    }
+
+    #[test]
+    fn streamed_prompt_budget_matches_whole_render_at_chunk_and_unicode_boundaries() {
+        use std::io::Write;
+        for text in ["small".to_string(), "λ🌙\nbody".repeat(20_000)] {
+            for chunk in [1, 3, 4096, text.len()] {
+                let mut writer = TranscriptBudget::new(TRANSCRIPT_BUDGET);
+                for bytes in text.as_bytes().chunks(chunk) {
+                    writer.write_all(bytes).unwrap();
+                }
+                assert_eq!(writer.finish().unwrap(), budget(&text, TRANSCRIPT_BUDGET));
+            }
+        }
+        let mut session = sample_session();
+        session.messages.push(msg(Role::Assistant, &"λ🌙\nbody".repeat(20_000)));
+        let expected = budget(&cv_core::render::to_markdown(&session).unwrap(), TRANSCRIPT_BUDGET);
+        let prompt = build_prompt(&session, &DigestOptions::default()).unwrap();
+        assert!(expected.1);
+        assert!(prompt.contains(&format!("<transcript>\n{}\n</transcript>", expected.0)));
     }
 
     #[test]
