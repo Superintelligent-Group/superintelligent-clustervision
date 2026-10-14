@@ -202,7 +202,7 @@ impl std::fmt::Display for TitleReady {
 impl std::error::Error for TitleReady {}
 
 /// The emitters' existing first-user-text fallback, retaining only the truncated label.
-/// Unlike synth_title this considers only the first user and applies no prompt filtering.
+/// Like first_user_text this skips empty user turns and applies no prompt filtering.
 pub(crate) fn fallback_title(
     session: &crate::ir::Session,
     target: crate::Harness,
@@ -212,47 +212,49 @@ pub(crate) fn fallback_title(
     if let Some(title) = &session.title {
         return Ok(Some(crate::ir::truncate(title, 80)));
     }
-    let Some(message) = session.messages.iter().find(|m| m.role == crate::ir::Role::User) else {
-        return Ok(None);
-    };
-    let mut prefix = String::new();
-    let mut chars = 0;
-    let mut present = false;
-    let mut meaningful = false;
-    for block in &message.content {
-        let text = if mode == crate::emit::ThinkingMode::Native {
-            match block {
-                crate::ir::Block::Text { text } => Some(std::borrow::Cow::Borrowed(text)),
-                _ => None,
-            }
-        } else {
-            crate::emit::thinking::text(block, target, mode, resolver)?
-        };
-        if let Some(text) = text {
-            if present && chars < 81 {
-                prefix.push('\n');
-                chars += 1;
-            }
-            let result = text.try_for_each_chunk(resolver, 64 * 1024, |chunk| {
-                present |= !chunk.is_empty();
-                meaningful = meaningful || chunk.chars().any(|c| !c.is_whitespace());
-                for c in chunk.chars().take(81 - chars) {
-                    prefix.push(c);
+    for message in session.messages.iter().filter(|m| m.role == crate::ir::Role::User) {
+        let mut prefix = String::new();
+        let mut chars = 0;
+        let mut present = false;
+        let mut meaningful = false;
+        for block in &message.content {
+            let text = if mode == crate::emit::ThinkingMode::Native {
+                match block {
+                    crate::ir::Block::Text { text } => Some(std::borrow::Cow::Borrowed(text)),
+                    _ => None,
+                }
+            } else {
+                crate::emit::thinking::text(block, target, mode, resolver)?
+            };
+            if let Some(text) = text {
+                if present && chars < 81 {
+                    prefix.push('\n');
                     chars += 1;
                 }
-                if chars == 81 && meaningful {
-                    return Err(TitleReady.into());
+                let result = text.try_for_each_chunk(resolver, 64 * 1024, |chunk| {
+                    present |= !chunk.is_empty();
+                    meaningful = meaningful || chunk.chars().any(|c| !c.is_whitespace());
+                    for c in chunk.chars().take(81 - chars) {
+                        prefix.push(c);
+                        chars += 1;
+                    }
+                    if chars == 81 && meaningful {
+                        return Err(TitleReady.into());
+                    }
+                    Ok(())
+                });
+                match result {
+                    Err(error) if error.is::<TitleReady>() => break,
+                    Err(error) => return Err(error),
+                    Ok(()) => {}
                 }
-                Ok(())
-            });
-            match result {
-                Err(error) if error.is::<TitleReady>() => break,
-                Err(error) => return Err(error),
-                Ok(()) => {}
             }
         }
+        if meaningful {
+            return Ok(Some(crate::ir::truncate(&prefix, 80)));
+        }
     }
-    Ok(meaningful.then(|| crate::ir::truncate(&prefix, 80)))
+    Ok(None)
 }
 
 #[cfg(test)]

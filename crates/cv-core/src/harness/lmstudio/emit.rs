@@ -794,8 +794,8 @@ mod tests {
         assert!(super::super::emit(&session, &dest, &opts).is_err());
         assert_eq!(fs::read(&emitted.path)?, before);
         assert_eq!(fs::read(&index).ok(), index_before);
-        // Omitted legacy raw Spans retain best-effort materialization acceptance.
-        // Demanded raw Spans still use the checked output path.
+        // Drop does not demand legacy raw spans. Project the owned oracle before
+        // checked materialization, which correctly rejects an unprojected invalid span.
         fs::write(&path, b"short")?;
         if let Block::Thinking { text, .. } = &mut session.messages[0].content[0] {
             *text = crate::Text::Span(crate::lazy::Span {
@@ -806,8 +806,9 @@ mod tests {
             });
         }
         let mut owned = session.clone();
-        owned.materialize()?;
+        assert!(owned.materialize().is_err());
         crate::emit::project_owned_thinking_for_test(&mut owned, Harness::LmStudio, opts.thinking);
+        owned.materialize()?;
         let oracle = legacy_emit(&owned, &world.base.join("span-oracle"), &opts)?;
         let new = super::super::emit(&session, &dest, &opts)?;
         assert_eq!(fs::read(oracle.path)?, fs::read(new.path)?);
