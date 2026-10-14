@@ -651,6 +651,7 @@ fn search(query: &str, semantic_search: &cv_search::SemanticSearch) -> Reply {
             }
         }
     } else {
+        let context = cv_core::rows::SearchRowContext::new();
         hits.iter()
             .filter(|h| want.is_none_or(|w| h.harness == w.as_str()))
             .map(|h| {
@@ -667,7 +668,7 @@ fn search(query: &str, semantic_search: &cv_search::SemanticSearch) -> Reply {
                     parent_id: h.parent_id.as_deref(),
                     workflow: h.workflow.as_deref(),
                 }
-                .to_json()
+                .to_json_with(&context)
             })
             .collect()
     };
