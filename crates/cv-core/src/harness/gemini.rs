@@ -969,10 +969,15 @@ impl<T> Default for RecordingReplay<T> {
 
 impl<T> RecordingReplay<T> {
     fn insert(&mut self, key: String, body: T) {
-        if !self.msgs.contains_key(&key) {
-            self.order.push(key.clone());
+        match self.msgs.entry(key) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                self.order.push(entry.key().clone());
+                entry.insert(body);
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                entry.insert(body);
+            }
         }
-        self.msgs.insert(key, body);
     }
 
     fn rewind(&mut self, target: &str, make_marker: impl FnOnce(Value) -> T) {
