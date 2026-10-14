@@ -700,7 +700,8 @@ impl SweepPlanner<'_> {
         let (existing, folded, metadata, duplicate_meta) = if rebuild {
             Default::default()
         } else {
-            read_indexed_metadata(index, f, true).unwrap_or_default()
+            read_indexed_metadata(index, f, true)
+                .context("reading prior index metadata (use cv index --rebuild to replace corrupt metadata)")?
         };
         // One query each for the event skip-table and the affordance counts `has:<kind>` reads.
         let event_sync = cv_core::events::SyncTable::load();
@@ -2061,13 +2062,18 @@ fn read_indexed_metadata(index: &Index, f: &Fields, read_metadata: bool) -> Resu
         .search(&kind_query(f, KIND_META), &DocSetCollector)
         .context("listing meta docs")?;
     for addr in metas {
-        let Ok(doc) = searcher.doc::<TantivyDocument>(addr) else {
-            continue;
-        };
-        let id = doc.get_first(f.id).and_then(|v| v.as_str()).map(str::to_string);
+        let doc: TantivyDocument = searcher.doc(addr).context("reading indexed metadata document")?;
+        let id = doc
+            .get_first(f.id)
+            .and_then(|v| v.as_str())
+            .context("indexed metadata is missing a string session id; use cv index --rebuild")?
+            .to_owned();
         let mt = doc.get_first(f.mtime).and_then(|v| v.as_i64());
         let sz = doc.get_first(f.size).and_then(|v| v.as_i64());
-        if let (Some(id), Some(mt), Some(sz)) = (id, mt, sz) {
+        // Keep identity even when the incremental stamp is malformed: the session must be
+        // deleted/replaced, rather than admitted as new alongside its existing stale meta row.
+        let (mt, sz) = mt.zip(sz).unwrap_or((i64::MIN, i64::MIN));
+        {
             if doc.get_first(f.parent_id).is_some() {
                 folded.insert(id.clone());
             }
@@ -4739,6 +4745,44 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&sdir).ok();
+    }
+
+    #[test]
+    fn malformed_index_stamps_preserve_identity_for_replacement() {
+        let _home = IsolatedHome::new();
+        let dir = tmpdir();
+        let (index, f) = open_or_create(&dir).unwrap();
+        let mut writer = open_writer(&index, 15_000_000).unwrap();
+        writer
+            .add_document(tantivy::doc!(f.id => "repair", f.kind => KIND_META,
+            f.title => "stale needle", f.preview => "stale preview"))
+            .unwrap();
+        writer.commit().unwrap();
+        drop(writer);
+        let (sigs, _, metadata, _) = read_indexed_metadata(&index, &f, true).unwrap();
+        assert_eq!(sigs.get("repair"), Some(&(i64::MIN, i64::MIN)));
+        assert!(!metadata.contains_key("repair"));
+        let input = dir.join("repair.jsonl");
+        std::fs::write(&input, "{\"type\":\"user\",\"uuid\":\"u\",\"sessionId\":\"repair\",\"message\":{\"role\":\"user\",\"content\":\"current needle\"}}\n").unwrap();
+        let reference = cv_core::SessionRef::new("repair", cv_core::Harness::Claude, &input);
+        let result = sweep(&dir, vec![reference], false, false).unwrap();
+        assert_eq!((result.changed, result.errors), (1, 0));
+        let (index, f) = open_existing(&dir).unwrap();
+        assert!(read_indexed_metadata(&index, &f, true).unwrap().3.is_empty());
+        let hit = text_search_indexed(&dir, "needle", 1).unwrap().remove(0);
+        assert_eq!(hit.title.as_deref(), Some("current needle"));
+        // Anonymous metadata cannot be repaired by deleting a session-id term.
+        let mut writer = open_writer(&index, 15_000_000).unwrap();
+        writer
+            .add_document(tantivy::doc!(f.kind => KIND_META, f.mtime => 1i64, f.size => 2i64))
+            .unwrap();
+        writer.commit().unwrap();
+        drop(writer);
+        assert!(read_indexed_metadata(&index, &f, true).is_err());
+        let before = std::fs::read(dir.join("meta.json")).unwrap();
+        assert!(sweep(&dir, Vec::new(), false, false).is_err());
+        assert_eq!(std::fs::read(dir.join("meta.json")).unwrap(), before);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
