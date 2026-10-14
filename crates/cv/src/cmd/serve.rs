@@ -411,11 +411,28 @@ fn header_value(request: &Request, name: &'static str) -> Option<String> {
 }
 
 /// The hostname part of a `Host` header or URL authority: strips a `:port`, unbrackets IPv6.
-fn host_name(authority: &str) -> &str {
-    match authority.strip_prefix('[') {
-        Some(rest) => rest.split(']').next().unwrap_or(rest),
-        None => authority.rsplit_once(':').map(|(name, _)| name).unwrap_or(authority),
+fn host_name(authority: &str) -> Option<&str> {
+    fn valid_port(suffix: &str) -> bool {
+        suffix.is_empty()
+            || suffix.strip_prefix(':').is_some_and(|port| {
+                !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()) && port.parse::<u16>().is_ok()
+            })
     }
+    if let Some(rest) = authority.strip_prefix('[') {
+        let (name, suffix) = rest.split_once(']')?;
+        name.parse::<std::net::Ipv6Addr>().ok()?;
+        return valid_port(suffix).then_some(name);
+    }
+    let (name, suffix) = authority
+        .find(':')
+        .map(|at| authority.split_at(at))
+        .unwrap_or((authority, ""));
+    (!name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b".-".contains(&byte))
+        && valid_port(suffix))
+    .then_some(name)
 }
 
 /// A name this server answers to: the loopback names, or the configured bind host.
@@ -439,7 +456,9 @@ fn host_allowed(host_header: Option<&str>, bind_host: &str) -> bool {
     if !is_loopback_host(bind_host) {
         return true;
     }
-    host_header.is_some_and(|h| is_local_name(host_name(h), bind_host))
+    host_header
+        .and_then(host_name)
+        .is_some_and(|name| is_local_name(name, bind_host))
 }
 
 /// The specific `Origin` to echo in `Access-Control-Allow-Origin`, if it's on the allow-list:
@@ -451,7 +470,7 @@ fn allowed_origin(origin: Option<&str>, bind_host: &str) -> Option<String> {
         return Some(o.to_string());
     }
     let authority = o.strip_prefix("http://").or_else(|| o.strip_prefix("https://"))?;
-    is_local_name(host_name(authority), bind_host).then(|| o.to_string())
+    is_local_name(host_name(authority)?, bind_host).then(|| o.to_string())
 }
 
 /// A reply: status, JSON body, and any response headers beyond the standard set. Only `/api/search`

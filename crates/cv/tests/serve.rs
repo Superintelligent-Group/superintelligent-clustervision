@@ -922,6 +922,7 @@ fn serve_cors_allowlist() {
     for origin in [
         "http://localhost:5173",
         "http://127.0.0.1:9999",
+        "http://[::1]:9999",
         "tauri://localhost",
         "http://tauri.localhost",
     ] {
@@ -939,6 +940,11 @@ fn serve_cors_allowlist() {
         "https://evil.example",
         "http://localhost.evil.example",
         "http://127.0.0.1.evil.example:7777",
+        "http://localhost:garbage",
+        "http://localhost:1234/path",
+        "http://localhost:99999",
+        "http://[::1]evil.example",
+        "http://[::1]:1234/path",
     ] {
         let raw = raw_request(port, "GET", "/api/health", &[("Origin", origin)]);
         assert!(
@@ -1726,4 +1732,24 @@ fn malformed_header_fields_fail_before_routing() {
     }
     let response = raw_request(port, "GET", "/api/health", &[("X-Valid_Token", "\tvalid\tvalue\t")]);
     assert_eq!(raw_status(&response), 200, "{response}");
+}
+
+#[test]
+fn malformed_local_host_authorities_are_rejected() {
+    let w = world("host-authority");
+    let (port, _server) = spawn_serve(&w);
+    for authority in [
+        "localhost:garbage",
+        "localhost:99999",
+        "[::1]evil.example",
+        "[::1]:1/path",
+        "localhost:",
+    ] {
+        let response = raw_request(port, "GET", "/api/health", &[("Host", authority)]);
+        assert_eq!(raw_status(&response), 403, "{authority}: {response}");
+    }
+    for authority in ["localhost", "localhost:1234", "[::1]", "[::1]:1234"] {
+        let response = raw_request(port, "GET", "/api/health", &[("Host", authority)]);
+        assert_eq!(raw_status(&response), 200, "{authority}: {response}");
+    }
 }
