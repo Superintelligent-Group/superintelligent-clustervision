@@ -1466,6 +1466,7 @@ mod tests {
                 "usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":3}}),
             ),
             "invalid json".into(),
+            "".into(),           // Empty rows never enter the nonempty positioned JSON API.
             " \u{2003} ".into(), // Blank physical rows still provide safe resume boundaries.
             "[]".into(),         // Accepted non-object rows also preserve checkpoint boundaries.
             rec(

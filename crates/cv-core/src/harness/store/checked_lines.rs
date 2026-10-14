@@ -36,6 +36,14 @@ pub(crate) fn for_each_record(
     let mut skipped = 0;
     while let Some(record) = records.next() {
         let (range, complete) = record?;
+        // The positioned JSON API requires a nonempty range. An empty physical row is a
+        // framing boundary, not malformed JSON, and does not increment skipped state.
+        if range.len == 0 {
+            if accept(None, records.offset(), complete, skipped)? == Flow::Stop {
+                break;
+            }
+            continue;
+        }
         let mut read = |range: ranges::Range| {
             source.read_range_value(range.offset, range.len, |view| {
                 accept(Some(view), records.offset(), complete, skipped)
