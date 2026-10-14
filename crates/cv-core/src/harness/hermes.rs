@@ -1096,7 +1096,10 @@ fn session_lineage_root_to_tip(conn: &Connection, session_id: &str) -> Vec<Strin
 fn single_text(m: &Message) -> Result<Option<Cow<'_, str>>> {
     if m.content.len() == 1 {
         if let Block::Text { text } = &m.content[0] {
-            return Ok(Some(text.try_resolve(&crate::lazy::Resolver::new(None))?));
+            return Ok(Some(match text.inline_str() {
+                Some(text) => Cow::Borrowed(text),
+                None => Cow::Owned(text.try_resolve(&crate::lazy::Resolver::new(None))?.into_owned()),
+            }));
         }
     }
     Ok(None)
@@ -1996,8 +1999,8 @@ mod tests {
             serde_json::to_value(crate::compaction::detect_in_session(&full, true)?)?
         );
         assert_eq!(
-            crate::affordance::read(&adapter, &reference)?,
-            crate::affordance::of_session(&full)?
+            serde_json::to_value(crate::affordance::read(&adapter, &reference)?)?,
+            serde_json::to_value(crate::affordance::of_session(&full)?)?
         );
         // Every retained lean body/argument uses the producer read set, including WAL-only writes.
         let writer = Connection::open(&path)?;
