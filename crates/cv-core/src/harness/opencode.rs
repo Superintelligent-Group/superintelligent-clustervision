@@ -256,7 +256,7 @@ impl Adapter for OpenCode {
             let sink: &mut dyn MessageSink = &mut spawns;
             // A db-backed ref points at the `.db` file itself (like the other SQLite adapters).
             #[cfg(feature = "sqlite")]
-            if db::is_db_ref(r) {
+            if self.db.as_ref() == Some(&r.path) || db::is_db_ref(r) {
                 return db::stream(r, _opts, sink);
             }
             // OpenCode stores a session as a *directory* of per-message JSON files (plus per-message
@@ -328,7 +328,7 @@ impl Adapter for OpenCode {
                     }
                 }
             }
-            order.sort_by_key(|(t, _)| *t);
+            order.sort();
 
             sink.meta(&s);
 
@@ -378,7 +378,7 @@ impl Adapter for OpenCode {
     /// The todo list `todowrite` keeps in `opencode.db`'s `todo` table (1.x; 2.x has none).
     fn store_affordances(&self, r: &SessionRef) -> Vec<crate::affordance::Affordance> {
         #[cfg(feature = "sqlite")]
-        if db::is_db_ref(r) {
+        if self.db.as_ref() == Some(&r.path) || db::is_db_ref(r) {
             return db::todos(r).into_iter().collect();
         }
         Vec::new()
@@ -1033,6 +1033,9 @@ mod db {
         while let Some(row) = rows.next()? {
             let id: String = row.get(0)?;
             let ty: String = row.get(1)?;
+            if opts.complete && !v2::known_type(&ty) {
+                *unknown.entry(ty.clone()).or_default() += 1;
+            }
             if rowid && row.get::<_, String>(3)? != "text" {
                 anyhow::bail!("OpenCode SQLite message data is not TEXT");
             }
@@ -2451,6 +2454,100 @@ mod tests {
             .try_resolve_prefix(&crate::lazy::Resolver::new(None), 8)
             .is_err());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn custom_database_filename_and_unknown_complete_records() -> Result<()> {
+        let world = cv_testkit::World::new("opencode-custom-db");
+        let path = world.base.join("custom-store.sqlite");
+        let connection = rusqlite::Connection::open(&path)?;
+        connection.execute_batch("CREATE TABLE session_v2(id TEXT PRIMARY KEY,directory TEXT,title TEXT,time_created INTEGER,time_updated INTEGER); CREATE TABLE session_message(id TEXT PRIMARY KEY,session_id TEXT,type TEXT,seq INTEGER,data TEXT); INSERT INTO session_v2 VALUES('ses_future','/fixture','future',1,2);")?;
+        let raw = json!({"time":{"created":1},"nested":{"future":[1,2]},"payload":"opaque"});
+        connection.execute(
+            "INSERT INTO session_message VALUES('msg_future','ses_future','future-event',0,?1)",
+            [raw.to_string()],
+        )?;
+        let adapter = OpenCode::with_db(path.clone());
+        let reference = adapter.discover()?.remove(0);
+        for spans in [false, true] {
+            let full = crate::stream::collect_with(
+                &adapter,
+                &reference,
+                &ParseOptions {
+                    spans,
+                    ..ParseOptions::full()
+                },
+            )?;
+            assert!(full.messages.is_empty());
+            assert_eq!(full.extra["opencode"]["unknown_message_types"]["future-event"], 1);
+            let complete = crate::stream::collect_with(
+                &adapter,
+                &reference,
+                &ParseOptions {
+                    spans,
+                    ..ParseOptions::complete()
+                },
+            )?;
+            assert_eq!(complete.messages.len(), 1);
+            let record = serde_json::to_value(&complete.messages[0])?["extra"]["_record"].clone();
+            assert_eq!(record["nested"], raw["nested"]);
+            assert_eq!(record["type"], "future-event");
+            assert_eq!(complete.extra["opencode"]["unknown_message_types"]["future-event"], 1);
+            let result = emit(
+                &complete,
+                &world.base.join(format!("export-{spans}")),
+                &crate::emit::EmitOptions::default(),
+            )?;
+            let output = rusqlite::Connection::open(result.path)?;
+            let (ty, data): (String, String) = output.query_row(
+                "SELECT type,data FROM session_message WHERE session_id=?1",
+                [result.new_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            assert_eq!(ty, "future-event");
+            assert_eq!(serde_json::from_str::<Value>(&data)?, raw);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn file_history_timestamp_ties_use_stable_message_order() -> Result<()> {
+        let world = cv_testkit::World::new("opencode-file-order");
+        let root = world.base.join("storage");
+        fs::create_dir_all(root.join("session/project"))?;
+        fs::create_dir_all(root.join("message/ses_order"))?;
+        fs::write(
+            root.join("session/project/ses_order.json"),
+            json!({"id":"ses_order","title":"order"}).to_string(),
+        )?;
+        for id in ["msg_z", "msg_a"] {
+            fs::write(
+                root.join(format!("message/ses_order/{id}.json")),
+                json!({"id":id,"role":"user","time":{"created":1},"summary":{"body":id}}).to_string(),
+            )?;
+        }
+        let adapter = OpenCode::with_root(root);
+        let reference = adapter.discover()?.remove(0);
+        for spans in [false, true] {
+            let session = crate::stream::collect_with(
+                &adapter,
+                &reference,
+                &ParseOptions {
+                    spans,
+                    ..ParseOptions::full()
+                },
+            )?;
+            assert_eq!(
+                session
+                    .messages
+                    .iter()
+                    .map(|message| message.id.as_deref())
+                    .collect::<Vec<_>>(),
+                vec![Some("msg_a"), Some("msg_z")]
+            );
+        }
+        Ok(())
     }
 
     #[test]

@@ -52,6 +52,23 @@ pub(super) fn attach_complete(messages: &mut [Message], id: &str, ty: &str, data
 /// Map one `session_message` row to IR messages (0–2: a tool-bearing reply gets a trailing
 /// `ToolResult`, a completed compaction gets its summary). `Err(())` means an unknown `type`, which
 /// the caller tallies; it is still carried under `complete`.
+pub(super) fn known_type(ty: &str) -> bool {
+    matches!(
+        ty,
+        "user"
+            | "synthetic"
+            | "system"
+            | "skill"
+            | "shell"
+            | "assistant"
+            | "compaction"
+            | "model-switched"
+            | "agent-switched"
+            | "location-switched"
+            | "idle"
+    )
+}
+
 pub(super) fn build(id: &str, ty: &str, data: &Value, opts: &ParseOptions) -> Result<Vec<Message>, ()> {
     build_projected(id, ty, data, opts, None, None, None)
 }
@@ -243,8 +260,9 @@ pub(super) fn build_projected(
         _ => {
             if opts.complete {
                 out.push(carrier(id, ty, data, ts));
+            } else {
+                return Err(());
             }
-            return Err(());
         }
     }
     crate::affordance::refine_complete_group(Harness::OpenCode, &mut out).map_err(|_| ())?;
@@ -595,5 +613,8 @@ mod tests {
         let c = build("i", "idle", &d, &ParseOptions::complete()).unwrap();
         assert_eq!(c[0].kind, MessageKind::Carrier);
         assert!(build("x", "from-the-future", &d, &ParseOptions::full()).is_err());
+        let c = build("x", "from-the-future", &d, &ParseOptions::complete()).unwrap();
+        assert_eq!(c[0].kind, MessageKind::Carrier);
+        assert_eq!(c[0].extra[crate::harness::claude::CARRIER_KEY]["outcome"], "succeeded");
     }
 }
