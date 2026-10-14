@@ -28,7 +28,7 @@ use std::sync::{Mutex, MutexGuard};
 
 /// Ambient variables no test may inherit: identity (`CV_ENDPOINT`), extra Claude roots
 /// (`CLAUDE_CONFIG_DIR`, `CLUSTERVISION_CLAUDE_ROOTS`), the catalog's staleness override and
-/// Cursor's dir, the pack LLM switch (tests exercise the zero-network digest), and the server
+/// all harness store/export root overrides, the pack LLM switch (tests exercise the zero-network digest), and the server
 /// tokens (a token in the shell must not gate a test's requests).
 pub const CLEARED_ENV: &[&str] = &[
     "CV_ENDPOINT",
@@ -36,6 +36,20 @@ pub const CLEARED_ENV: &[&str] = &[
     "CLUSTERVISION_CLAUDE_ROOTS",
     "CLUSTERVISION_MAX_STALE_SECS",
     "CURSOR_USER_DIR",
+    "CURSOR_CONFIG_DIR",
+    "CODEX_HOME",
+    "HERMES_HOME",
+    "KIMI_SHARE_DIR",
+    "KIMI_CODE_HOME",
+    "CONTINUE_GLOBAL_DIR",
+    "GOOSE_PATH_ROOT",
+    "OPENCLAW_STATE_DIR",
+    "OPENCODE_DB",
+    "CLINE_SESSION_DATA_DIR",
+    "CLINE_DATA_DIR",
+    "CLINE_DIR",
+    "CV_EXPORTS",
+    "CLAURDVOYANT_MAX_STALE_SECS",
     "CV_PACK_LLM",
     "CV_SERVE_TOKEN",
     "CVD_TOKEN",
@@ -131,14 +145,18 @@ impl World {
     }
 
     /// The variables that make a process see this world.
-    pub fn env(&self) -> [(&'static str, PathBuf); 5] {
+    pub fn env(&self) -> [(&'static str, PathBuf); 9] {
         [
             ("HOME", self.home.clone()),
+            ("USERPROFILE", self.home.clone()),
+            ("APPDATA", self.home.join(".config")),
+            ("LOCALAPPDATA", self.home.join(".local/share")),
             ("CLUSTERVISION_HOME", self.cv_home.clone()),
             // Linux fallbacks for dirs::cache_dir / config_dir / data_dir; harmless on macOS.
             ("XDG_CACHE_HOME", self.home.join(".cache")),
             ("XDG_CONFIG_HOME", self.home.join(".config")),
             ("XDG_DATA_HOME", self.home.join(".local/share")),
+            ("XDG_STATE_HOME", self.home.join(".local/state")),
         ]
     }
 
