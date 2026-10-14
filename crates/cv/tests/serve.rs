@@ -1456,6 +1456,28 @@ fn serve_carries_the_inbox_and_guards_its_writes() {
         &[("Content-Type", "application/json"), ("Origin", "https://evil.example")],
     );
     assert_eq!(raw_status(&raw), 403, "{raw}");
+    let raw = raw_post(port, &path, body, &[("Content-Type", "application/json-invalid")]);
+    assert_eq!(raw_status(&raw), 403, "lookalike MIME type was accepted: {raw}");
+    let mut oversized = body.to_string();
+    oversized.push_str(&" ".repeat((1 << 20) + 1 - oversized.len()));
+    let raw = raw_post(port, &path, &oversized, &[("Content-Type", "application/json")]);
+    assert_eq!(raw_status(&raw), 413, "truncated JSON prefix was accepted: {raw}");
+    let (_, _, events) = get_raw(port, "/api/events");
+    assert_eq!(
+        events.lines().count(),
+        1,
+        "rejected writes changed the task store: {events}"
+    );
+    // The exact boundary and a legal MIME parameter remain accepted.
+    let mut boundary = body.to_string();
+    boundary.push_str(&" ".repeat((1 << 20) - boundary.len()));
+    let raw = raw_post(
+        port,
+        &path,
+        &boundary,
+        &[("Content-Type", "Application/JSON; charset=utf-8")],
+    );
+    assert_eq!(raw_status(&raw), 200, "legal boundary body was rejected: {raw}");
     // JSON from the page's own origin → recorded as web:<who>.
     let raw = raw_post(
         port,

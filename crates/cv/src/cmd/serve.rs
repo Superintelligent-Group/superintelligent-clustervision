@@ -242,8 +242,13 @@ fn handle(mut request: Request, ctx: &Ctx) {
     // is refused outright rather than merely denied the response.
     let mut body = Value::Null;
     if post {
-        let json_ct = header_value(&request, "Content-Type")
-            .is_some_and(|ct| ct.to_ascii_lowercase().starts_with("application/json"));
+        let json_ct = header_value(&request, "Content-Type").is_some_and(|ct| {
+            ct.split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .eq_ignore_ascii_case("application/json")
+        });
         if !json_ct || (raw_origin.is_some() && origin.is_none()) {
             let _ = request.respond(json_response(
                 403,
@@ -255,10 +260,25 @@ fn handle(mut request: Request, ctx: &Ctx) {
         }
         // Capped: a note is a paragraph, not an upload.
         let mut buf = String::new();
-        if request.as_reader().take(1 << 20).read_to_string(&mut buf).is_err() {
+        const BODY_LIMIT: u64 = 1 << 20;
+        if request
+            .as_reader()
+            .take(BODY_LIMIT + 1)
+            .read_to_string(&mut buf)
+            .is_err()
+        {
             let _ = request.respond(json_response(
                 400,
                 &json!({"error": "unreadable body"}),
+                origin.as_deref(),
+                &[],
+            ));
+            return;
+        }
+        if buf.len() as u64 > BODY_LIMIT {
+            let _ = request.respond(json_response(
+                413,
+                &json!({"error": "body exceeds 1 MiB limit"}),
                 origin.as_deref(),
                 &[],
             ));
