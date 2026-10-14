@@ -352,12 +352,7 @@ pub(crate) fn cmd_distill(
     };
     for other in with {
         let o = load_findings(other)?;
-        d.head_md.push_str(&findings(&o, &opts)?);
-        d.head_md.push('\n');
-    }
-    if !with.is_empty() {
-        d.stats.pack_est_tokens = (d.head_md.len() as f64 / 3.5).ceil() as u64;
-        d.stats.distilled_est_tokens = d.stats.pack_est_tokens + d.stats.tail_est_tokens;
+        d.append_findings(&findings(&o, &opts)?);
     }
     let description = format!("distilled: {}", d.label());
     let (d, emitted) = match products {

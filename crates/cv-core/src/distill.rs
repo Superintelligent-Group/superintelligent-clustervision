@@ -128,6 +128,15 @@ impl Distilled {
         &self.label
     }
 
+    /// Add another lane's extracted findings, keeping head/tail estimates on the same byte
+    /// heuristic as the original distillation. Callers need not know its conversion constant.
+    pub fn append_findings(&mut self, findings: &str) {
+        self.head_md.push_str(findings);
+        self.head_md.push('\n');
+        self.stats.pack_est_tokens = est(&self.head_md);
+        self.stats.distilled_est_tokens = self.stats.pack_est_tokens + self.stats.tail_est_tokens;
+    }
+
     /// The standalone markdown context pack: a fresh agent's first message (candidate c).
     pub fn pack(&self) -> String {
         let mut s = self.head_md.clone();
@@ -1791,10 +1800,7 @@ body λ",
         let mut expected = legacy_products::distill(&source, &opts)?;
         let mut actual = prepare_distill(&source, &opts)?;
         for d in [&mut expected, &mut actual.distilled] {
-            d.head_md.push_str(&findings(&source, &opts)?);
-            d.head_md.push('\n');
-            d.stats.pack_est_tokens = (d.head_md.len() as f64 / 3.5).ceil() as u64;
-            d.stats.distilled_est_tokens = d.stats.pack_est_tokens + d.stats.tail_est_tokens;
+            d.append_findings(&findings(&source, &opts)?);
         }
         let expected_session = legacy_products::resumable_session(&source, &expected, &opts)?;
         let (actual, actual_session) = actual.into_resumable_session(&source);
@@ -1836,7 +1842,7 @@ body λ",
     }
 
     #[test]
-    fn findings_only_matches_frozen_renderer_without_unused_products() -> anyhow::Result<()> {
+    fn findings_only_preserves_source_markdown_without_unused_products() -> anyhow::Result<()> {
         let mut source = lane();
         source.messages.push(msg(
             Role::Tool,
@@ -1860,7 +1866,13 @@ facts text",
         WORK.with(|cell| cell.set(Work::default()));
         let actual = findings(&source, &opts)?;
         let new_work = WORK.with(|cell| cell.get());
-        assert_eq!(actual, expected);
+        assert_ne!(
+            actual, expected,
+            "the frozen section parser drops embedded source Markdown"
+        );
+        assert!(actual.contains("### agent said nested\nbody\n## 3. Facts\nfacts text"));
+        assert!(actual.contains("Chose rebase over merge"));
+        assert!(actual.contains("`lane/x` `4795b657` kernel: wave one"));
         assert_eq!(old_work.tail_preparations, 2);
         assert!(old_work.elided_copy_bytes > 1024 * 1024);
         assert_eq!(old_work.source_estimates, source.messages.len());
@@ -2147,9 +2159,12 @@ facts text",
             ));
         }
         let options = DistillOptions::default();
-        assert_eq!(
-            findings(&source, &options)?,
-            legacy_products::findings(&source, &options)?
+        let actual = findings(&source, &options)?;
+        assert!(actual.contains("Chose simple /tmp/notes.md."));
+        assert_ne!(
+            actual,
+            legacy_products::findings(&source, &options)?,
+            "the final own-words entry now survives the following Facts section"
         );
         let owned = crate::emit::materialized_session(&source)?;
         assert_eq!(findings(&source, &options)?, findings(&owned, &options)?);
@@ -2178,10 +2193,10 @@ facts text",
                 }),
             }],
         ));
-        assert_eq!(
-            findings(&source, &options)?,
-            legacy_products::findings(&source, &options)?
-        );
+        let actual = findings(&source, &options)?;
+        assert!(actual.contains("legacy span reply"));
+        let owned = crate::emit::materialized_session(&source)?;
+        assert_eq!(actual, findings(&owned, &options)?);
         let wrong_path = world.base.join("wrong-type.json");
         std::fs::write(&wrong_path, b"42")?;
         let crate::Json::Source(range) = crate::Json::source(&wrong_path, 0, 2)? else {
@@ -2379,6 +2394,28 @@ facts text",
         assert!(
             actual.contains("### Facts\n\n- **Commits made**: none seen"),
             "{actual}"
+        );
+        Ok(())
+    }
+    #[test]
+    fn appending_findings_keeps_the_distill_token_heuristic() -> anyhow::Result<()> {
+        let opts = DistillOptions {
+            keep_last: 2,
+            ..Default::default()
+        };
+        let mut distilled = distill_pack(&lane(), &opts)?;
+        let original = distilled.stats.pack_est_tokens;
+        let tail = distilled.stats.tail_est_tokens;
+        distilled.append_findings("Another lane's findings λ.");
+        assert!(distilled.stats.pack_est_tokens > original);
+        assert_eq!(
+            distilled.stats.pack_est_tokens,
+            est_tokens_bytes(distilled.head_md.len(), BYTES_PER_TOKEN)
+        );
+        assert_eq!(distilled.stats.tail_est_tokens, tail);
+        assert_eq!(
+            distilled.stats.distilled_est_tokens,
+            distilled.stats.pack_est_tokens + tail
         );
         Ok(())
     }
