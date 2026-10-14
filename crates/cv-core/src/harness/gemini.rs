@@ -3212,7 +3212,9 @@ mod tests {
 
     #[test]
     fn selected_content_dispatch_preserves_tool_response_presence() {
-        let dir = std::env::temp_dir().join(format!("cv-gemini-dispatch-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("cv-gemini-dispatch-{}", uuid::Uuid::new_v4()));
+        // Native recording selection keys off the chats directory, not merely JSON contents.
+        let dir = root.join("chats");
         fs::create_dir_all(&dir).unwrap();
         let adapter = Gemini { roots: vec![] };
         let response =
@@ -3246,12 +3248,13 @@ mod tests {
                 }
             }
         }
-        fs::remove_dir_all(dir).unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn selected_display_content_matches_owned_shapes_and_demand_modes() {
-        let dir = std::env::temp_dir().join(format!("cv-gemini-display-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("cv-gemini-display-{}", uuid::Uuid::new_v4()));
+        let dir = root.join("chats");
         fs::create_dir_all(&dir).unwrap();
         let body = "display é\n\"quoted\" ".repeat(512);
         let displays = [
@@ -3303,7 +3306,7 @@ mod tests {
                 }
             }
         }
-        fs::remove_dir_all(dir).unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
