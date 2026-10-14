@@ -85,6 +85,14 @@ impl Connection {
         }
     }
 
+    pub(crate) fn set_read_timeout(&self, timeout: Option<std::time::Duration>) -> std::io::Result<()> {
+        match self {
+            Self::Tcp(s) => s.set_read_timeout(timeout),
+            #[cfg(unix)]
+            Self::Unix(s) => s.set_read_timeout(timeout),
+        }
+    }
+
     pub(crate) fn shutdown(&self, how: Shutdown) -> std::io::Result<()> {
         match self {
             Self::Tcp(s) => s.shutdown(how),

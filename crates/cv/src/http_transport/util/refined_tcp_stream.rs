@@ -68,6 +68,8 @@ pub struct RefinedTcpStream {
     stream: Stream,
     close_read: bool,
     close_write: bool,
+    read_timeout: std::time::Duration,
+    read_deadline: Option<std::time::Instant>,
 }
 
 impl RefinedTcpStream {
@@ -83,15 +85,29 @@ impl RefinedTcpStream {
             stream: read,
             close_read: true,
             close_write: false,
+            read_timeout: std::time::Duration::from_secs(30),
+            read_deadline: None,
         };
 
         let write = RefinedTcpStream {
             stream: write,
             close_read: false,
             close_write: true,
+            read_timeout: std::time::Duration::from_secs(30),
+            read_deadline: None,
         };
 
         (read, write)
+    }
+
+    pub(crate) fn set_request_read_timeout(&mut self, timeout: std::time::Duration) {
+        self.read_timeout = timeout;
+    }
+
+    // Called after obtaining the sequential reader: response generation and waiting for
+    // a preceding body to release ownership consume none of the next read's budget.
+    pub(crate) fn begin_read_phase(&mut self) {
+        self.read_deadline = None;
     }
 
     /// Returns true if this struct wraps around a secure connection.
@@ -119,7 +135,29 @@ impl Drop for RefinedTcpStream {
 
 impl Read for RefinedTcpStream {
     fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
-        self.stream.read(buf)
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let deadline = *self
+            .read_deadline
+            .get_or_insert_with(|| std::time::Instant::now() + self.read_timeout);
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "request read deadline exceeded",
+            ));
+        }
+        match &self.stream {
+            Stream::Http(socket) => socket.set_read_timeout(Some(remaining))?,
+        }
+        self.stream.read(buf).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                std::io::Error::new(std::io::ErrorKind::TimedOut, error)
+            } else {
+                error
+            }
+        })
     }
 }
 

@@ -221,7 +221,15 @@ impl Server {
         listener: L,
         ssl_config: Option<SslConfig>,
     ) -> Result<Server, Box<dyn Error + Send + Sync + 'static>> {
-        let listener = listener.into();
+        Self::from_listener_with_limits(listener.into(), ssl_config, Duration::from_secs(30), 64)
+    }
+
+    fn from_listener_with_limits(
+        listener: Listener,
+        ssl_config: Option<SslConfig>,
+        read_timeout: Duration,
+        connections: usize,
+    ) -> Result<Server, Box<dyn Error + Send + Sync + 'static>> {
         // building the "close" variable
         let close_trigger = Arc::new(AtomicBool::new(false));
 
@@ -244,14 +252,15 @@ impl Server {
         let inside_messages = messages.clone();
         thread::spawn(move || {
             // a tasks pool is used to dispatch the connections into threads
-            let tasks_pool = util::TaskPool::new();
+            let tasks_pool = util::TaskPool::with_capacity(connections);
 
             log::debug!("Running accept thread");
             while !inside_close_trigger.load(Relaxed) {
                 let new_client = match server.accept() {
                     Ok((sock, _)) => {
                         use self::util::RefinedTcpStream;
-                        let (read_closable, write_closable) = RefinedTcpStream::new(sock);
+                        let (mut read_closable, write_closable) = RefinedTcpStream::new(sock);
+                        read_closable.set_request_read_timeout(read_timeout);
 
                         Ok(ClientConnection::new(write_closable, read_closable))
                     }
@@ -264,16 +273,14 @@ impl Server {
                         let mut client = Some(client);
                         tasks_pool.spawn(Box::new(move || {
                             if let Some(client) = client.take() {
-                                // Synchronization is needed for HTTPS requests to avoid a deadlock
-                                if client.secure() {
-                                    let (sender, receiver) = mpsc::channel();
-                                    for rq in client {
-                                        messages.push(rq.with_notify_sender(sender.clone()).into());
-                                        receiver.recv().unwrap();
-                                    }
-                                } else {
-                                    for rq in client {
-                                        messages.push(rq.into());
+                                // Begin the next input budget only after this response finishes.
+                                // A slow export must not expire an otherwise healthy keepalive
+                                // client that is waiting for that export before its next request.
+                                let (sender, receiver) = mpsc::channel();
+                                for rq in client {
+                                    messages.push(rq.with_notify_sender(sender.clone()).into());
+                                    if receiver.recv().is_err() {
+                                        break;
                                     }
                                 }
                             }
@@ -383,5 +390,103 @@ impl Drop for Server {
                 let _ = std::fs::remove_file(path);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    fn server() -> Server {
+        Server::from_listener_with_limits(
+            TcpListener::bind("127.0.0.1:0").unwrap().into(),
+            None,
+            Duration::from_millis(200),
+            4,
+        )
+        .unwrap()
+    }
+    #[test]
+    fn silent_and_trickled_headers_expire_without_consuming_a_request_worker() {
+        let server = server();
+        for trickle in [false, true] {
+            let mut client = TcpStream::connect(server.server_addr().to_ip().unwrap()).unwrap();
+            client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let stop = AtomicBool::new(false);
+            let mut writer = client.try_clone().unwrap();
+            let mut response = String::new();
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    if trickle {
+                        while !stop.load(Relaxed) {
+                            if writer.write_all(b"G").is_err() {
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(60));
+                        }
+                    }
+                });
+                let _ = client.read_to_string(&mut response);
+                stop.store(true, Relaxed);
+            });
+            assert!(response.starts_with("HTTP/1.1 408"), "{response:?}");
+            assert!(server.try_recv().unwrap().is_none());
+        }
+    }
+    #[test]
+    fn stalled_request_body_has_its_own_read_deadline() {
+        let server = server();
+        let addr = server.server_addr().to_ip().unwrap();
+        let mut client = TcpStream::connect(addr).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        write!(
+            client,
+            "POST / HTTP/1.1\r\nHost: {addr}\r\nContent-Length: 4096\r\nConnection: close\r\n\r\nx"
+        )
+        .unwrap();
+        let mut request = server.recv_timeout(Duration::from_secs(3)).unwrap().unwrap();
+        let error = request.as_reader().read_to_end(&mut Vec::new()).unwrap_err();
+        assert_eq!(error.kind(), IoErrorKind::TimedOut);
+        request.respond(Response::new_empty(StatusCode(400))).unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+    }
+
+    #[test]
+    fn response_generation_and_keepalive_do_not_share_the_input_deadline() {
+        let server = server();
+        let addr = server.server_addr().to_ip().unwrap();
+        let mut client = TcpStream::connect(addr).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let request = format!("GET / HTTP/1.1\r\nHost: {addr}\r\n\r\n");
+        client.write_all(request.as_bytes()).unwrap();
+        let first = server.recv_timeout(Duration::from_secs(3)).unwrap().unwrap();
+        std::thread::sleep(Duration::from_millis(400));
+        first.respond(Response::from_string("first")).unwrap();
+        let mut response = Vec::new();
+        while !response.ends_with(b"first") {
+            let mut chunk = [0; 1024];
+            let n = client.read(&mut chunk).unwrap();
+            assert_ne!(n, 0);
+            response.extend_from_slice(&chunk[..n]);
+        }
+        client
+            .write_all(request.replace("\r\n\r\n", "\r\nConnection: close\r\n\r\n").as_bytes())
+            .unwrap();
+        server
+            .recv_timeout(Duration::from_secs(3))
+            .unwrap()
+            .unwrap()
+            .respond(Response::from_string("second"))
+            .unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        assert!(
+            response.starts_with("HTTP/1.1 200") && response.ends_with("second"),
+            "{response}"
+        );
     }
 }

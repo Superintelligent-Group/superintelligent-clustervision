@@ -21,6 +21,8 @@ struct Sharing {
 
     // number of total worker threads running
     active_tasks: AtomicUsize,
+    admitted: AtomicUsize,
+    capacity: usize,
 
     // number of idle worker threads
     waiting_tasks: AtomicUsize,
@@ -46,13 +48,32 @@ impl<'a> Drop for Registration<'a> {
     }
 }
 
+struct Admission(Arc<Sharing>);
+impl Drop for Admission {
+    fn drop(&mut self) {
+        self.0.admitted.fetch_sub(1, Ordering::Release);
+    }
+}
+struct Worker(Arc<Sharing>);
+impl Drop for Worker {
+    fn drop(&mut self) {
+        self.0.active_tasks.fetch_sub(1, Ordering::Release);
+    }
+}
+
 impl TaskPool {
+    #[cfg(test)]
     pub fn new() -> TaskPool {
+        Self::with_capacity(64)
+    }
+    pub(crate) fn with_capacity(capacity: usize) -> TaskPool {
         let pool = TaskPool {
             sharing: Arc::new(Sharing {
                 todo: Mutex::new(VecDeque::new()),
                 condvar: Condvar::new(),
                 active_tasks: AtomicUsize::new(0),
+                admitted: AtomicUsize::new(0),
+                capacity: capacity.max(MIN_THREADS),
                 waiting_tasks: AtomicUsize::new(0),
             }),
         };
@@ -66,16 +87,35 @@ impl TaskPool {
 
     /// Executes a function in a thread.
     /// If no thread is available, spawns a new one.
-    pub fn spawn(&self, code: Box<dyn FnMut() + Send>) {
+    pub fn spawn(&self, mut code: Box<dyn FnMut() + Send>) -> bool {
+        if self
+            .sharing
+            .admitted
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                (count < self.sharing.capacity).then_some(count + 1)
+            })
+            .is_err()
+        {
+            return false;
+        }
+        let mut admission = Some(Admission(self.sharing.clone()));
         let mut queue = self.sharing.todo.lock().unwrap();
-
-        self.dispatch_locked(code, &mut queue);
+        self.dispatch_locked(
+            Box::new(move || {
+                let _admission = admission.take();
+                code();
+            }),
+            &mut queue,
+        );
+        true
     }
 
     // The mutex protects both queued reservations and transitions into/out of waiting.
     // A notified worker has not consumed its queued connection until it reacquires this lock.
     fn dispatch_locked(&self, code: Box<dyn FnMut() + Send>, queue: &mut VecDeque<Box<dyn FnMut() + Send>>) {
-        if queue.len() >= self.sharing.waiting_tasks.load(Ordering::Acquire) {
+        if queue.len() >= self.sharing.waiting_tasks.load(Ordering::Acquire)
+            && self.sharing.active_tasks.load(Ordering::Acquire) < self.sharing.capacity
+        {
             self.add_thread(Some(code));
         } else {
             queue.push_back(code);
@@ -85,10 +125,10 @@ impl TaskPool {
 
     fn add_thread(&self, initial_fn: Option<Box<dyn FnMut() + Send>>) {
         let sharing = self.sharing.clone();
-
+        sharing.active_tasks.fetch_add(1, Ordering::Release);
+        let worker = Worker(sharing.clone());
         thread::spawn(move || {
-            let sharing = sharing;
-            let _active_guard = Registration::new(&sharing.active_tasks);
+            let _active_guard = worker;
 
             if let Some(mut f) = initial_fn {
                 f();
@@ -158,6 +198,49 @@ mod tests {
             );
             thread::yield_now();
         }
+    }
+
+    #[test]
+    fn connection_admission_is_bounded_and_reclaimed_after_jobs_finish() {
+        let pool = TaskPool::with_capacity(MIN_THREADS);
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let (started, starts) = mpsc::channel();
+        let (done, finishes) = mpsc::channel();
+        for _ in 0..MIN_THREADS {
+            let release = release.clone();
+            let started = started.clone();
+            let done = done.clone();
+            assert!(pool.spawn(Box::new(move || {
+                started.send(()).unwrap();
+                let mut ready = release.0.lock().unwrap();
+                while !*ready {
+                    ready = release.1.wait(ready).unwrap();
+                }
+                done.send(()).unwrap();
+            })));
+        }
+        for _ in 0..MIN_THREADS {
+            starts.recv_timeout(Duration::from_secs(2)).unwrap();
+        }
+        for _ in 0..100 {
+            assert!(!pool.spawn(Box::new(|| panic!("unadmitted job executed"))));
+        }
+        assert_eq!(pool.sharing.active_tasks.load(Ordering::Acquire), MIN_THREADS);
+        *release.0.lock().unwrap() = true;
+        release.1.notify_all();
+        for _ in 0..MIN_THREADS {
+            finishes.recv_timeout(Duration::from_secs(2)).unwrap();
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while pool.sharing.admitted.load(Ordering::Acquire) != 0 {
+            assert!(std::time::Instant::now() < deadline);
+            thread::yield_now();
+        }
+        let (done, finishes) = mpsc::channel();
+        assert!(pool.spawn(Box::new(move || {
+            done.send(()).unwrap();
+        })));
+        finishes.recv_timeout(Duration::from_secs(2)).unwrap();
     }
 
     #[test]

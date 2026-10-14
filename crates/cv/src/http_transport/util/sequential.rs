@@ -111,7 +111,7 @@ impl<W: Write + Send> Iterator for SequentialWriterBuilder<W> {
 }
 
 impl<R: Read + Send> SequentialReader<R> {
-    fn reader(&mut self) -> IoResult<&mut R> {
+    pub(crate) fn reader(&mut self) -> IoResult<&mut R> {
         if matches!(self.inner, SequentialReaderInner::Waiting(_)) {
             let SequentialReaderInner::Waiting(receiver) = mem::replace(&mut self.inner, SequentialReaderInner::Empty)
             else {

@@ -66,11 +66,6 @@ impl ClientConnection {
         }
     }
 
-    /// true if the connection is HTTPS
-    pub fn secure(&self) -> bool {
-        self.secure
-    }
-
     /// Reads the next line from self.next_header_source.
     ///
     /// Reads until `CRLF` is reached. The next read will start
@@ -102,6 +97,11 @@ impl ClientConnection {
     /// Reads a request from the stream.
     /// Blocks until the header has been read.
     fn read(&mut self) -> Result<Request, ReadError> {
+        self.next_header_source
+            .reader()
+            .map_err(ReadError::ReadIoError)?
+            .get_mut()
+            .begin_read_phase();
         let (method, path, version, headers) = {
             // reading the request line
             let (method, path, version) = {
@@ -138,6 +138,13 @@ impl ClientConnection {
 
             (method, path, version, headers)
         };
+
+        // Header and body reads have separate bounded budgets.
+        self.next_header_source
+            .reader()
+            .map_err(ReadError::ReadIoError)?
+            .get_mut()
+            .begin_read_phase();
 
         // building the writer for the request
         let writer = self.sink.next().unwrap();
