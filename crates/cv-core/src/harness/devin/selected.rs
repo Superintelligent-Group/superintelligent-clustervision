@@ -49,6 +49,42 @@ impl Selected {
         self.cells.borrow_mut().insert((rowid, column), range);
         Ok(range)
     }
+    pub(super) fn content(&self, conn: &Connection, rowid: i64) -> Result<Option<String>> {
+        self.read(conn, rowid, |view| string(view.get("content")?))
+    }
+
+    pub(super) fn facts(&self, conn: &Connection, rowid: i64) -> Result<Option<NodeFacts>> {
+        let kind: String = conn.query_row(
+            "SELECT typeof(metadata) FROM message_nodes WHERE rowid=?1",
+            [rowid],
+            |row| row.get(0),
+        )?;
+        if kind != "text" {
+            return Ok(None);
+        }
+        let (offset, len) = self.cell(conn, rowid, "metadata")?;
+        let result = self.source.read_backing_value(self.arena.clone(), offset, len, |view| {
+            if !view.is_object()? {
+                return Ok(None);
+            }
+            let number = |key| view.get(key)?.map(JsonView::as_number).transpose().map(Option::flatten);
+            Ok(Some(NodeFacts {
+                summarized_from: number("summarized_from")?.and_then(|n| n.as_i64()),
+                num_tokens_preceding: number("num_tokens_preceding")?.and_then(|n| n.as_u64()),
+                is_system_prefix: view
+                    .get("is_system_prefix")?
+                    .map(JsonView::as_bool)
+                    .transpose()?
+                    .flatten()
+                    .unwrap_or(false),
+            }))
+        });
+        match result {
+            Err(error) if error.downcast_ref::<crate::json::InvalidJson>().is_some() => Ok(None),
+            result => result,
+        }
+    }
+
     pub(super) fn metadata(&self, conn: &Connection, rowid: i64) -> Result<Option<Value>> {
         let kind: String = conn.query_row(
             "SELECT typeof(metadata) FROM message_nodes WHERE rowid=?1",
@@ -85,6 +121,79 @@ impl Selected {
         self.read(conn, rowid, |view| node(view, nid, created, metadata, tools))
     }
 }
+#[derive(Default)]
+pub(super) struct Navigation {
+    pub role: Option<String>,
+    pub agent_id: Option<String>,
+    pub chain_node_id: Option<i64>,
+    pub tool_call_id: Option<String>,
+    pub model: Option<String>,
+}
+fn string(view: Option<JsonView<'_>>) -> Result<Option<String>> {
+    let Some(view) = view else { return Ok(None) };
+    if !view.is_string()? {
+        return Ok(None);
+    }
+    Ok(view.resolve()?.as_str().map(str::to_string))
+}
+/// These are the same typed fields the native JSON queries use, selected only after the checked
+/// whole document has passed Value acceptance. Body/telemetry never become native SQL values.
+pub(super) fn navigation(view: JsonView<'_>) -> Result<Navigation> {
+    let mut role = String::new();
+    let mut too_long = false;
+    if let Some(value) = view.get("role")? {
+        value.for_each_str_chunk(|chunk| {
+            if role.len() + chunk.len() <= "assistant".len() && !too_long {
+                role.push_str(chunk);
+            } else {
+                too_long = true;
+            }
+            Ok(())
+        })?;
+    }
+    if too_long || !matches!(role.as_str(), "user" | "assistant" | "system" | "tool") {
+        return Ok(Navigation::default());
+    }
+    let metadata = view.get("metadata")?;
+    let extensions = metadata.and_then(|v| v.get("extensions").transpose()).transpose()?;
+    Ok(Navigation {
+        agent_id: if role == "tool" {
+            string(
+                extensions
+                    .and_then(|v| v.get("subagent/agent_id").transpose())
+                    .transpose()?,
+            )?
+        } else {
+            None
+        },
+        chain_node_id: if role == "tool" {
+            extensions
+                .and_then(|v| v.get("subagent/chain_node_id").transpose())
+                .transpose()?
+                .and_then(|v| v.as_number().transpose())
+                .transpose()?
+                .and_then(|n| n.as_i64())
+        } else {
+            None
+        },
+        tool_call_id: if role == "tool" {
+            string(view.get("tool_call_id")?)?
+        } else {
+            None
+        },
+        model: if role == "assistant" {
+            string(
+                metadata
+                    .and_then(|v| v.get("generation_model").transpose())
+                    .transpose()?,
+            )?
+        } else {
+            None
+        },
+        role: Some(role),
+    })
+}
+
 fn fields(view: JsonView<'_>, keys: &[&'static str]) -> Result<Value> {
     let Some(fields) = Fields::parse(view, keys)? else {
         return Ok(Value::Object(Default::default()));
