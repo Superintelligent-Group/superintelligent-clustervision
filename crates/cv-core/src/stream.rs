@@ -310,13 +310,24 @@ impl<R> CheckedReader<'_, R> {
         }
         Ok(true)
     }
+    fn latch_io<T>(&mut self, result: std::io::Result<T>) -> std::io::Result<T> {
+        match result {
+            Err(error) if error.kind() != std::io::ErrorKind::Interrupted => {
+                let forwarded = std::io::Error::new(error.kind(), error.to_string());
+                self.error.get_or_insert(error.into());
+                Err(forwarded)
+            }
+            other => other,
+        }
+    }
 }
 impl<R: std::io::Read> std::io::Read for CheckedReader<'_, R> {
     fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
         if !self.check()? {
             return Ok(0);
         }
-        self.reader.read(bytes)
+        let result = self.reader.read(bytes);
+        self.latch_io(result)
     }
 }
 impl<R: std::io::BufRead> std::io::BufRead for CheckedReader<'_, R> {
@@ -324,7 +335,14 @@ impl<R: std::io::BufRead> std::io::BufRead for CheckedReader<'_, R> {
         if !self.check()? {
             return Ok(&[]);
         }
-        self.reader.fill_buf()
+        match self.reader.fill_buf() {
+            Err(error) if error.kind() != std::io::ErrorKind::Interrupted => {
+                let forwarded = std::io::Error::new(error.kind(), error.to_string());
+                self.error.get_or_insert(error.into());
+                Err(forwarded)
+            }
+            other => other,
+        }
     }
     fn consume(&mut self, bytes: usize) {
         self.reader.consume(bytes);
@@ -1069,6 +1087,38 @@ fn note_turns(r: &SessionRef, turns: usize) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn checked_reader_latches_underlying_read_errors_even_when_consumer_ignores_them() {
+        struct Failing;
+        impl std::io::Read for Failing {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "source read failed",
+                ))
+            }
+        }
+        impl std::io::BufRead for Failing {
+            fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "source read failed",
+                ))
+            }
+            fn consume(&mut self, _: usize) {}
+        }
+        let error = with_read_check(Failing, &mut || Ok(()), |mut reader| {
+            let _ = std::io::Read::read(&mut reader, &mut [0; 1]);
+            assert_eq!(std::io::Read::read(&mut reader, &mut [0; 1]).unwrap(), 0);
+        })
+        .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::BrokenPipe
+        );
+        assert_eq!(error.to_string(), "source read failed");
+    }
+
     #[test]
     fn metadata_projection_preserves_existing_modes_and_complete_precedence() {
         for opts in [

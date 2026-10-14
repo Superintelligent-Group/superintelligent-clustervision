@@ -436,7 +436,7 @@ fn stream_history_at(
     let skipped = if let Some(source) = source {
         selected::for_each(&file, at, source, enrich, &mut accept)?
     } else {
-        super::for_each_json_line_at(BufReader::new(file), at, |v, offset, complete, skipped| {
+        super::try_for_each_json_line_at(BufReader::new(file), at, |v, offset, complete, skipped| {
             accept(
                 v.get("type").and_then(Value::as_str) == Some("reasoning"),
                 chat_message(&v, enrich),
@@ -444,7 +444,7 @@ fn stream_history_at(
                 complete,
                 skipped,
             )
-        })
+        })?
     };
     if let (Some(p), false) = (pending, stopped) {
         sink.message(p);
