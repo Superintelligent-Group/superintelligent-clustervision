@@ -1121,6 +1121,13 @@ fn stream_conn_with_demand(
             }
         }
     }
+    #[cfg(test)]
+    ARENA_WRITE_OBSERVER.with(|observer| -> Result<()> {
+        if let Some(bytes) = observer.borrow_mut().as_mut() {
+            bytes.push(arena.as_ref().map(|arena| arena.len()).transpose()?.unwrap_or(0));
+        }
+        Ok(())
+    })?;
     Ok(s)
 }
 
@@ -2153,6 +2160,13 @@ fn state_meta_affordances(conn: &Connection, id: &str) -> Vec<crate::affordance:
         });
     }
     out
+}
+
+// Thread-local observation of existing arena length keeps the consumer connection control
+// isolated from concurrent adapter tests. No production counter or shared store hook is needed.
+#[cfg(test)]
+std::thread_local! {
+    static ARENA_WRITE_OBSERVER: std::cell::RefCell<Option<Vec<u64>>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -3539,6 +3553,49 @@ mod tests {
             }
             assert_eq!(admission, [true, true, false, true, true, false, true], "{incremental}");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn production_discovery_writes_no_ordinary_assistant_body_arena() -> Result<()> {
+        fn observe<T>(run: impl FnOnce() -> Result<T>) -> Result<(T, Vec<u64>)> {
+            struct Clear;
+            impl Drop for Clear {
+                fn drop(&mut self) {
+                    ARENA_WRITE_OBSERVER.with(|observer| *observer.borrow_mut() = None);
+                }
+            }
+            ARENA_WRITE_OBSERVER.with(|observer| *observer.borrow_mut() = Some(Vec::new()));
+            let _clear = Clear;
+            let result = run()?;
+            let bytes = ARENA_WRITE_OBSERVER.with(|observer| observer.borrow_mut().take().unwrap());
+            Ok((result, bytes))
+        }
+        let world = cv_testkit::World::in_process("hermes-discovery-body-demand");
+        let path = world.base.join("state.db");
+        let writer = Connection::open(&path)?;
+        writer.execute_batch(&fixture("schema-v30.sql"))?;
+        insert_session(&writer, "s", None, None, 1000.0, None);
+        let body = "ordinary λ\nbody".repeat(100_000);
+        writer.execute(
+            "INSERT INTO messages(session_id,role,content,timestamp) VALUES('s','assistant',?1,1001)",
+            [&body],
+        )?;
+        let adapter = Hermes::with_db(path);
+        let (references, discovery_bytes) = observe(|| adapter.discover())?;
+        assert_eq!(references[0].message_count, 1);
+        assert_eq!(
+            discovery_bytes,
+            [0],
+            "actual listing must not stage the undemanded reply body"
+        );
+        let (session, collection_bytes) =
+            observe(|| crate::stream::collect_with(&adapter, &references[0], &ParseOptions::lazy()))?;
+        assert_eq!(session.messages.len(), 1);
+        assert!(
+            collection_bytes.iter().sum::<u64>() >= body.len() as u64,
+            "the same observer must detect arena writes when lazy collection actually demands the body"
+        );
         Ok(())
     }
 
