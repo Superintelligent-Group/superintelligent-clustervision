@@ -204,17 +204,36 @@ fn verdict(rep: &Report) -> String {
 
     // Tool output is a possible lever when it dominates estimated transcript content.
     let tool_activity = rep.tool_results + rep.tool_call_args;
-    let tool_results_is_top =
-        rep.tool_results >= rep.thinking && rep.tool_results >= rep.assistant_text && rep.tool_results >= rep.user_text;
+    let tool_results_is_top = [
+        rep.thinking,
+        rep.assistant_text,
+        rep.user_text,
+        rep.tool_call_args,
+        rep.images,
+        rep.system_text,
+        rep.attachments,
+    ]
+    .into_iter()
+    .all(|tokens| rep.tool_results >= tokens);
     if rep.tool_results > 0 && (tool_results_is_top || tool_activity * 2 >= total) {
         let mut t: Vec<_> = rep.by_tool.iter().filter(|(_, s)| s.result_tokens > 0).collect();
         t.sort_by_key(|e| std::cmp::Reverse(e.1.result_tokens));
         let top: Vec<String> = t.iter().take(2).map(|(n, _)| (*n).clone()).collect();
+        let share = if tool_results_is_top {
+            format!(
+                "tool output is the largest estimated transcript source ({:.0}%, {:.0}% with tool-call args)",
+                100.0 * rep.tool_results as f64 / total as f64,
+                100.0 * tool_activity as f64 / total as f64
+            )
+        } else {
+            format!(
+                "tool calls and output account for {:.0}% of estimated transcript content ({:.0}% output)",
+                100.0 * tool_activity as f64 / total as f64,
+                100.0 * rep.tool_results as f64 / total as f64
+            )
+        };
         parts.push(format!(
-            "tool output is the biggest estimated transcript source ({:.0}%, {:.0}% with tool-call args), led by {} — \
-             trim verbose output, scope reads/greps, or `cv prune` old tool payloads",
-            100.0 * rep.tool_results as f64 / total as f64,
-            100.0 * tool_activity as f64 / total as f64,
+            "{share}, led by {} — trim verbose output, scope reads/greps, or `cv prune` old tool payloads",
             top.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(" + ")
         ));
     }
@@ -252,10 +271,53 @@ fn verdict(rep: &Report) -> String {
     }
     if parts.is_empty() {
         if rep.compactions == 0 {
-            return "estimated transcript sources look balanced and the session has no recorded compactions.".into();
+            return "the session has no recorded compactions; this report identifies no dominant tool, thinking or reminder payload.".into();
         }
-        return "estimated transcript sources look balanced; recorded compactions do not isolate a single cause."
+        return "this report identifies no dominant tool, thinking or reminder payload; recorded compactions do not isolate a single cause."
             .into();
     }
     parts.join("; ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn verdict_distinguishes_tool_output_from_other_dominant_sources() {
+        for report in [
+            Report {
+                tool_results: 100,
+                system_text: 900,
+                ..Default::default()
+            },
+            Report {
+                tool_results: 100,
+                images: 900,
+                ..Default::default()
+            },
+            Report {
+                tool_results: 100,
+                attachments: 900,
+                ..Default::default()
+            },
+        ] {
+            let text = verdict(&report);
+            assert!(!text.contains("tool output is the largest"), "{text}");
+            assert!(!text.contains("balanced"), "{text}");
+        }
+        let report = Report {
+            tool_results: 100,
+            tool_call_args: 900,
+            ..Default::default()
+        };
+        let text = verdict(&report);
+        assert!(text.contains("tool calls and output account for 100%"), "{text}");
+        assert!(!text.contains("tool output is the largest"), "{text}");
+        let report = Report {
+            tool_results: 900,
+            assistant_text: 100,
+            ..Default::default()
+        };
+        assert!(verdict(&report).contains("tool output is the largest"));
+    }
 }

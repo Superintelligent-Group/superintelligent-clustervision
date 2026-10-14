@@ -48,9 +48,10 @@ One selector at a time. Piped `cv show` with no selector over 200 KB prints the 
 
  6. Doctor a session (why does the context keep filling?)
     cv doctor <id> --json
-    → {sessions, total, tool_results, tool_results_mcp, tool_results_builtin, by_tool: [{tool, calls,
-       result_tokens, mcp}], thinking, messages, system_reminders, by_attachment, fixed_overhead_est,
-       compactions, auto_compactions, peak_context, …}
+    → {sessions, messages, conversational: {total, tool_results, thinking, assistant_text,
+       user_text, tool_call_args, images, system_msgs, system_reminders}, tool_results_mcp,
+       tool_results_builtin, by_tool: [{tool, calls, result_tokens, mcp}], by_attachment,
+       fixed_overhead_est, compactions, auto_compactions, peak_context, …}
 
  7. Prune and resume a maxed-out session
     cv prune <id> --drop-thinking --json         # snips old payloads + thinking; revives the resume gate

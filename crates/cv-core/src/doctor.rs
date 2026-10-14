@@ -205,6 +205,11 @@ impl SessionPass<'_> {
                 self.startup.get_or_insert(total);
             }
         }
+        // Harness-only records can carry any block type. They remain transcript/usage and
+        // compaction evidence, but none of their payload contributes to model context.
+        if !m.is_model_visible() {
+            return Ok(());
+        }
         for b in &m.content {
             // What this block costs, by the one shared rule; the arms below only decide which
             // bucket the number lands in.
@@ -212,14 +217,6 @@ impl SessionPass<'_> {
             match b {
                 Block::Text { .. } => {
                     match (m.role, m.kind) {
-                        // Harness-side notices, errors, markers and carriers are never sent to
-                        // the model: they cost no context.
-                        (_, MessageKind::Notice)
-                        | (_, MessageKind::Error)
-                        | (_, MessageKind::Carrier)
-                        | (_, MessageKind::CompactionBoundary)
-                        | (_, MessageKind::Branch)
-                        | (_, MessageKind::ModelChange) => {}
                         // Context the harness injected into the prompt (system reminders, hook
                         // output, turn context): real per-turn context, itemized by kind — it
                         // used to hide inside "fixed overhead".
@@ -358,5 +355,64 @@ mod tests {
         assert_eq!(rep.by_tool["(unknown tool)"].result_tokens, 1);
         assert_eq!(rep.mcp_tool_results(), 20);
         assert_eq!((rep.sessions, rep.messages), (1, 3));
+    }
+    #[test]
+    fn harness_only_payloads_never_contribute_context_or_tool_attribution() {
+        let mut report = Report::default();
+        let mut pass = report.session(None);
+        for kind in [
+            MessageKind::Notice,
+            MessageKind::Error,
+            MessageKind::Carrier,
+            MessageKind::CompactionBoundary,
+            MessageKind::Branch,
+            MessageKind::ModelChange,
+        ] {
+            let mut message = Message::of_kind(Role::Assistant, kind, crate::Origin::Harness);
+            message.content = vec![
+                Block::Text {
+                    text: "harness text".into(),
+                },
+                Block::Thinking {
+                    text: "harness thought".into(),
+                    signature: Some("signature".into()),
+                    encrypted: Some("opaque".into()),
+                    redacted: false,
+                },
+                Block::ToolUse {
+                    id: "hidden".into(),
+                    name: "mcp__hidden__tool".into(),
+                    input: json!({"argument":"hidden"}).into(),
+                    namespace: None,
+                },
+                Block::ToolResult {
+                    tool_use_id: "hidden".into(),
+                    tool_name: Some("mcp__hidden__tool".into()),
+                    content: "harness result".into(),
+                    is_error: false,
+                    status: None,
+                    details: None,
+                },
+                Block::Image {
+                    media_type: None,
+                    data_ref: None,
+                },
+            ];
+            assert_eq!(pass.message(message), Flow::Continue);
+        }
+        pass.finish().unwrap();
+        assert_eq!(report.messages, 6);
+        assert_eq!(report.conv_total(), 0);
+        assert!(report.by_tool.is_empty());
+        assert!(report.by_attachment.is_empty());
+        // Model-visible injected content still contributes to the appropriate buckets.
+        let mut pass = report.session(None);
+        let mut visible = Message::of_kind(Role::User, MessageKind::InjectedContext, crate::Origin::Harness);
+        visible.content.push(Block::Text {
+            text: "reminder".into(),
+        });
+        pass.message(visible);
+        pass.finish().unwrap();
+        assert!(report.attachments > 0);
     }
 }
