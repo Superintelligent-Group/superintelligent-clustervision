@@ -129,6 +129,8 @@ fn write_database(
     // append into a real store isn't rejected for the synthetic project_id. Create the reader's
     // schema when absent (`IF NOT EXISTS` no-ops against a real store; our INSERTs name only columns
     // both schemas share, so any extra real columns keep their defaults).
+    // Match native lookup indexes even in older cv-created stores. Without these,
+    // reading M messages with P global parts performs M whole-part-table scans.
     tx.execute_batch(
         "CREATE TABLE IF NOT EXISTS session (
             id TEXT PRIMARY KEY,
@@ -161,7 +163,10 @@ fn write_database(
             time_created INTEGER NOT NULL,
             time_updated INTEGER NOT NULL,
             data TEXT NOT NULL
-         );",
+         );
+         CREATE INDEX IF NOT EXISTS message_session_time_created_id_idx
+             ON message (session_id, time_created, id);
+         CREATE INDEX IF NOT EXISTS part_message_id_id_idx ON part (message_id, id);",
     )
     .context("creating opencode schema")?;
 
@@ -401,6 +406,36 @@ mod legacy;
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::*;
+    #[test]
+    fn exported_v1_store_uses_lookup_indexes_with_unrelated_rows() -> Result<()> {
+        let mut connection = rusqlite::Connection::open_in_memory()?;
+        let session = Session::new("source", crate::Harness::Claude);
+        write_database(
+            &session,
+            &EmitOptions::default(),
+            "selected",
+            "/fixture",
+            "project",
+            &mut connection,
+        )?;
+        for count in [1, 16, 256] {
+            for index in 0..count {
+                let id = format!("unrelated-{count}-{index}");
+                connection.execute("INSERT INTO message VALUES(?1,'unrelated',1,1,'{}')", [&id])?;
+                connection.execute("INSERT INTO part VALUES(?1,?1,'unrelated',1,1,'{}')", [&id])?;
+            }
+            for (sql,index) in [
+                ("EXPLAIN QUERY PLAN SELECT id,rowid,typeof(data) FROM message WHERE session_id='selected' ORDER BY time_created,id","message_session_time_created_id_idx"),
+                ("EXPLAIN QUERY PLAN SELECT rowid,id,typeof(data) FROM part WHERE message_id='selected-message' ORDER BY id","part_message_id_id_idx"),
+            ] {
+                let details: Vec<String> = connection.prepare(sql)?.query_map([],|row|row.get(3))?.collect::<rusqlite::Result<_>>()?;
+                assert!(details.iter().any(|detail|detail.contains("SEARCH")&&detail.contains(index)),"unrelated rows {count}: {details:?}");
+                assert!(!details.iter().any(|detail|detail.contains("SCAN")||detail.contains("TEMP B-TREE")),"lookup must not scan/sort unrelated rows: {details:?}");
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn reused_v1_session_id_rejects_without_altering_history() -> Result<()> {
         let mut connection = rusqlite::Connection::open_in_memory()?;

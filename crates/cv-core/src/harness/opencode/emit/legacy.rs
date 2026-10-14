@@ -83,6 +83,8 @@ fn emit_opencode_db(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Re
     // append into a real store isn't rejected for the synthetic project_id. Create the reader's
     // schema when absent (`IF NOT EXISTS` no-ops against a real store; our INSERTs name only columns
     // both schemas share, so any extra real columns keep their defaults).
+    // The independent owned-codec oracle uses the current native schema scaffolding;
+    // payload mapping stays unchanged so schema index additions do not mask wire changes.
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS session (
             id TEXT PRIMARY KEY,
@@ -115,7 +117,10 @@ fn emit_opencode_db(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Re
             time_created INTEGER NOT NULL,
             time_updated INTEGER NOT NULL,
             data TEXT NOT NULL
-         );",
+         );
+         CREATE INDEX IF NOT EXISTS message_session_time_created_id_idx
+             ON message (session_id, time_created, id);
+         CREATE INDEX IF NOT EXISTS part_message_id_id_idx ON part (message_id, id);",
     )
     .context("creating opencode schema")?;
 
