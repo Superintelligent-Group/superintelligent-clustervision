@@ -965,6 +965,30 @@ pub(crate) fn publish_in(
     Some(())
 }
 
+/// Move a consumer's baselines to a new name. Rows the new name already has are newer and kept.
+#[cfg(feature = "sqlite")]
+pub fn rename_consumer(from: &str, to: &str) -> bool {
+    let rename = || -> Option<()> {
+        let mut conn = open()?;
+        let tx = conn.transaction().ok()?;
+        tx.execute(
+            "INSERT OR IGNORE INTO source_dependencies(consumer,harness,id,path,mtime,size,stamp)
+             SELECT ?2,harness,id,path,mtime,size,stamp FROM source_dependencies WHERE consumer=?1",
+            rusqlite::params![from, to],
+        )
+        .ok()?;
+        tx.execute("DELETE FROM source_dependencies WHERE consumer=?1", [from])
+            .ok()?;
+        tx.commit().ok()
+    };
+    rename().is_some()
+}
+
+#[cfg(not(feature = "sqlite"))]
+pub fn rename_consumer(_from: &str, _to: &str) -> bool {
+    true
+}
+
 /// Invalidate old baselines before changing consumer output. Failure must prevent that output
 /// write: otherwise an older stamp could certify newer output after dependencies revert.
 #[cfg(feature = "sqlite")]

@@ -518,13 +518,53 @@ enum Delete {
     From(usize),
 }
 
+/// The catalog keys this index's dependency baselines by an identity stored in the index
+/// directory, so a home moved or copied whole (catalog and index together) keeps its baselines,
+/// and a catalog paired with some other index matches none. Indexes created before that were
+/// keyed by their canonical path; the open that mints an identity moves those rows to it.
 fn source_consumer(dir: &Path) -> Result<String> {
-    Ok(format!(
-        "fts:{}",
-        std::fs::canonicalize(dir)
-            .context("identifying search index dependencies")?
-            .display()
-    ))
+    use std::io::Write;
+    let file = dir.join("cv-index-id");
+    let read = |file: &Path| -> Result<Option<String>> {
+        match std::fs::read_to_string(file) {
+            Ok(id) if !id.trim().is_empty() => Ok(Some(format!("fts:{}", id.trim()))),
+            Ok(_) => anyhow::bail!("empty search index identity {}", file.display()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e).with_context(|| format!("reading {}", file.display())),
+        }
+    };
+    if let Some(consumer) = read(&file)? {
+        return Ok(consumer);
+    }
+    // Write the whole identity aside, then link it into place: a concurrent first open either
+    // wins the link or reads the winner's complete identity, never a partial one.
+    let id = uuid::Uuid::new_v4().to_string();
+    let staged = dir.join(format!(".cv-index-id-{id}"));
+    {
+        let mut out = std::fs::File::create_new(&staged).with_context(|| format!("staging {}", staged.display()))?;
+        out.write_all(id.as_bytes())?;
+        out.sync_all()?;
+    }
+    let linked = std::fs::hard_link(&staged, &file);
+    let _ = std::fs::remove_file(&staged);
+    match linked {
+        Ok(()) => {
+            let consumer = format!("fts:{id}");
+            let legacy = format!(
+                "fts:{}",
+                std::fs::canonicalize(dir)
+                    .context("identifying search index dependencies")?
+                    .display()
+            );
+            // Unmoved rows only cost one rewrite: no baseline exists under the new identity.
+            let _ = cv_core::source::rename_consumer(&legacy, &consumer);
+            Ok(consumer)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            read(&file)?.with_context(|| format!("reading {}", file.display()))
+        }
+        Err(e) => Err(e).with_context(|| format!("recording {}", file.display())),
+    }
 }
 
 fn preferred_index_candidates<'a>(
@@ -6185,6 +6225,49 @@ mod tests {
         assert!(text_search(&dir, "sapphire", 100).unwrap().is_empty());
         assert!(!text_search(&dir, "amber", 100).unwrap().is_empty());
         for d in [dir, root] {
+            std::fs::remove_dir_all(d).ok();
+        }
+    }
+
+    #[test]
+    fn a_copied_index_keeps_its_baselines_and_legacy_path_rows_move_to_the_identity() {
+        let home = IsolatedHome::new();
+        let (dir, sdir) = (tmpdir(), tmpdir());
+        let fleet = resumable_fleet(&sdir, 2);
+        let refs: Vec<_> = fleet.iter().map(|(r, _)| r.clone()).collect();
+        write_heads(&fleet, 1, 3);
+        assert_eq!(sweep(&dir, refs.clone(), false, false).unwrap().changed, refs.len());
+        // The catalog and index travel together; the copy's path differs, its identity does not.
+        let copy = tmpdir();
+        std::fs::remove_dir_all(&copy).unwrap();
+        assert!(std::process::Command::new("cp")
+            .arg("-R")
+            .arg(&dir)
+            .arg(&copy)
+            .status()
+            .unwrap()
+            .success());
+        assert_eq!(source_consumer(&copy).unwrap(), source_consumer(&dir).unwrap());
+        assert_eq!(sweep(&copy, refs.clone(), false, false).unwrap().changed, 0);
+        // An index from before identities: rows keyed by its canonical path move on first open.
+        let legacy = format!("fts:{}", std::fs::canonicalize(&dir).unwrap().display());
+        let conn = rusqlite::Connection::open(home.home.join("catalog.db")).unwrap();
+        conn.execute(
+            "UPDATE source_dependencies SET consumer=?1 WHERE consumer=?2",
+            [legacy.as_str(), source_consumer(&dir).unwrap().as_str()],
+        )
+        .unwrap();
+        std::fs::remove_file(dir.join("cv-index-id")).unwrap();
+        assert_eq!(sweep(&dir, refs.clone(), false, false).unwrap().changed, 0);
+        let left: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM source_dependencies WHERE consumer=?1",
+                [&legacy],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(left, 0);
+        for d in [dir, copy, sdir] {
             std::fs::remove_dir_all(d).ok();
         }
     }
