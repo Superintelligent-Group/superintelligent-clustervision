@@ -112,6 +112,7 @@
 //! `Lineage::forked_from`; `usage.cost.total` is `Usage::cost_usd`; `Message::model` is set only
 //! when it differs from `Session::model` (the first non-synthetic one seen).
 
+mod discovery;
 mod emit;
 mod registry;
 mod selected;
@@ -184,6 +185,7 @@ impl Adapter for OpenClaw {
         let mut out = Vec::new();
         // Sessions the sqlite store owns; a legacy JSONL twin (pre-migration copy) is skipped.
         let mut seen: HashSet<String> = HashSet::new();
+        let mut indexes = discovery::Indexes::default();
         for root in &self.roots {
             // 1. The sqlite store (OpenClaw ≥ 2026-07-11): agents/<agentId>/agent/openclaw-agent*.sqlite
             for db in sqlite_stores(root) {
@@ -209,8 +211,8 @@ impl Adapter for OpenClaw {
                 if path.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()) != Some("sessions") {
                     continue;
                 }
-                let index = load_index(path.parent().unwrap());
-                match scan(path, &index) {
+                let index = indexes.get(path.parent().unwrap());
+                match discovery::scan(path, index) {
                     Ok(r) => {
                         if !seen.contains(&r.id) {
                             out.push(r);
@@ -220,6 +222,7 @@ impl Adapter for OpenClaw {
                 }
             }
         }
+        indexes.check()?;
         Ok(out)
     }
 
@@ -823,21 +826,6 @@ fn sqlite_stores(agents_root: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Load `sessions.json` (sessionId → metadata) from a sessions dir, if present.
-fn load_index(sessions_dir: &Path) -> HashMap<String, Value> {
-    let mut map = HashMap::new();
-    if let Ok(text) = fs::read_to_string(sessions_dir.join("sessions.json")) {
-        if let Ok(Value::Object(entries)) = serde_json::from_str::<Value>(&text) {
-            for (_key, entry) in entries {
-                if let Some(sid) = entry.get("sessionId").and_then(Value::as_str) {
-                    map.insert(sid.to_string(), entry);
-                }
-            }
-        }
-    }
-    map
-}
-
 fn session_id_from_filename(path: &Path) -> String {
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
     // strip a `-topic-<id>` suffix if present
@@ -861,6 +849,7 @@ struct ScanAcc {
 }
 
 impl ScanAcc {
+    #[cfg(any(feature = "sqlite", test))]
     fn feed(&mut self, v: &Value) {
         match v.get("type").and_then(Value::as_str) {
             Some("session") => {
@@ -904,6 +893,7 @@ impl ScanAcc {
 }
 
 /// Title/cwd fields of a `sessions.json` entry / `session_nodes.entry_json` (same shape).
+#[cfg(any(feature = "sqlite", test))]
 fn entry_title(entry: Option<&Value>) -> Option<String> {
     entry
         .and_then(|e| e.get("label").or_else(|| e.get("subject")))
@@ -912,43 +902,13 @@ fn entry_title(entry: Option<&Value>) -> Option<String> {
         .map(|s| crate::ir::truncate(s, 80))
 }
 
+#[cfg(any(feature = "sqlite", test))]
 fn entry_cwd(entry: Option<&Value>) -> Option<PathBuf> {
     entry.and_then(|e| {
         ["cwd", "spawnedCwd", "spawnedWorkspaceDir"]
             .iter()
             .find_map(|k| e.get(*k).and_then(Value::as_str))
             .map(PathBuf::from)
-    })
-}
-
-fn scan(path: &Path, index: &HashMap<String, Value>) -> Result<SessionRef> {
-    let text = fs::read_to_string(path)?;
-    let mut acc = ScanAcc::default();
-    super::for_each_json_line_str(&text, |v| {
-        acc.feed(&v);
-        Flow::Continue
-    });
-
-    let id = if acc.id.is_empty() {
-        session_id_from_filename(path)
-    } else {
-        acc.id
-    };
-    let entry = index.get(&id);
-    let title = entry_title(entry).or(acc.session_name).or(acc.first_user);
-    let cwd = acc.cwd.or_else(|| entry_cwd(entry));
-    // `updatedAt` in the index is epoch-ms.
-    let entry_updated = entry.and_then(|e| e.get("updatedAt")).and_then(ts_from_value);
-
-    Ok(SessionRef {
-        id,
-        harness: Harness::OpenClaw,
-        path: path.to_path_buf(),
-        cwd,
-        title,
-        created_at: acc.created_at,
-        updated_at: entry_updated.or(acc.updated_at),
-        message_count: acc.message_count,
     })
 }
 
