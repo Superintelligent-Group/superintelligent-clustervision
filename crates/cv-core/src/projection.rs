@@ -178,6 +178,16 @@ pub fn searchable_prefix(
     resolver: &Resolver,
     limit: usize,
 ) -> anyhow::Result<(String, bool)> {
+    searchable_prefix_checked(message, resolver, limit, || Ok(()))
+}
+
+/// Bounded searchable projection with cooperative checks at block and decoded text chunks.
+pub fn searchable_prefix_checked(
+    message: &crate::Message,
+    resolver: &Resolver,
+    limit: usize,
+    mut check: impl FnMut() -> anyhow::Result<()>,
+) -> anyhow::Result<(String, bool)> {
     #[derive(Debug)]
     struct PrefixComplete;
     impl std::fmt::Display for PrefixComplete {
@@ -193,6 +203,7 @@ pub fn searchable_prefix(
         stopped: false,
     };
     for block in &message.content {
+        check()?;
         if head.full() {
             break;
         }
@@ -201,6 +212,7 @@ pub fn searchable_prefix(
             | crate::Block::Thinking { text, .. }
             | crate::Block::ToolResult { content: text, .. } => {
                 let result = text.try_for_each_chunk(resolver, 4096, |part| {
+                    check()?;
                     head.push(part);
                     if head.full() {
                         Err(PrefixComplete.into())
@@ -230,6 +242,7 @@ pub fn searchable_prefix(
             crate::Block::Image { .. } => {}
         }
     }
+    check()?;
     let mut text = head.into_string();
     let truncated = text.len() > limit;
     let mut end = text.len().min(limit);
@@ -351,6 +364,10 @@ mod tests {
         message.append_searchable(&mut oracle).unwrap();
         for cap in 0..=oracle.len() + 4 {
             let (actual, truncated) = searchable_prefix(&message, &Resolver::new(None), cap).unwrap();
+            assert_eq!(
+                searchable_prefix_checked(&message, &Resolver::new(None), cap, || Ok(())).unwrap(),
+                (actual.clone(), truncated)
+            );
             let mut end = oracle.len().min(cap);
             while !oracle.is_char_boundary(end) {
                 end -= 1;

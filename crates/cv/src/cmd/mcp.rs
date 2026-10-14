@@ -638,7 +638,7 @@ enum ToolOutput {
 fn call_tool(name: &str, args: &Value, cancelled: &AtomicBool) -> anyhow::Result<ToolOutput> {
     match name {
         "await_omen" => await_omen(args, cancelled).map(ToolOutput::Text),
-        "observe_stream" => observe_stream(args).map(ToolOutput::Text),
+        "observe_stream" => observe_stream(args, cancelled).map(ToolOutput::Text),
         // Removed in 0.15.0 (the coordination board): a pointer, never a silent "unknown tool".
         n if n.starts_with("board_") => anyhow::bail!(
             "{n} was removed in 0.15.0 with the coordination board — the task log is the fleet's record: \
@@ -783,7 +783,12 @@ fn await_poll(
 /// history. Read-only. Sessions come from the catalog fast path (`cv_core::sessions`, ~ms) rather
 /// than a stat-the-fleet scan (~s), because this is *polled*; the catalog's staleness probe
 /// re-stats the most recently updated transcripts, and an actively tailed session is one of them.
-fn observe_stream(args: &Value) -> anyhow::Result<String> {
+fn observe_stream(args: &Value, cancelled: &AtomicBool) -> anyhow::Result<String> {
+    let check = || {
+        anyhow::ensure!(!cancelled.load(Ordering::Relaxed), "MCP client disconnected");
+        Ok(())
+    };
+    check()?;
     let filter = Filter {
         harness: parse_harness(args)?,
         cwd_contains: arg_str(args, "cwd_contains")?.map(str::to_string),
@@ -794,36 +799,49 @@ fn observe_stream(args: &Value) -> anyhow::Result<String> {
     let baseline = prev.is_none();
     let mut watcher = match prev {
         Some(c) => Watcher::from_cursor(filter, c, cv_core::sessions),
-        None => Watcher::with_discovery(filter, false, cv_core::sessions),
+        None => Watcher::try_with_discovery(filter, false, cv_core::sessions, check)?,
     };
 
-    observe_poll(
+    observe_poll_checked(
         &mut watcher,
         baseline,
         max_messages,
         char_cap,
         |message, resolver, room| {
-            let (mut text, truncated) = cv_core::projection::searchable_prefix(message, resolver, room)?;
+            let (mut text, truncated) = cv_core::projection::searchable_prefix_checked(message, resolver, room, check)?;
             if truncated {
                 text.push('…');
             }
             Ok(text)
         },
+        check,
     )
 }
 
+#[cfg(test)]
 fn observe_poll(
     watcher: &mut Watcher,
     baseline: bool,
     max_messages: usize,
     char_cap: usize,
+    project: impl FnMut(&cv_core::Message, &cv_core::Resolver, usize) -> anyhow::Result<String>,
+) -> anyhow::Result<String> {
+    observe_poll_checked(watcher, baseline, max_messages, char_cap, project, || Ok(()))
+}
+
+fn observe_poll_checked(
+    watcher: &mut Watcher,
+    baseline: bool,
+    max_messages: usize,
+    char_cap: usize,
     mut project: impl FnMut(&cv_core::Message, &cv_core::Resolver, usize) -> anyhow::Result<String>,
+    mut check: impl FnMut() -> anyhow::Result<()>,
 ) -> anyhow::Result<String> {
     let mut out_msgs: Vec<Value> = Vec::new();
     let mut chars_used = 0usize;
     let mut projection_error = None;
     let more_pending = !baseline
-        && watcher.try_poll_bounded_retained(max_messages, |ev| {
+        && watcher.try_poll_bounded_retained_checked(max_messages, &mut check, |ev| {
             if projection_error.is_some() {
                 return 0;
             }
@@ -859,6 +877,7 @@ fn observe_poll(
         return Err(error);
     }
 
+    check()?;
     Ok(serde_json::to_string_pretty(&json!({
         "baseline": baseline,
         "messages": out_msgs,
@@ -1459,6 +1478,12 @@ mod admission_tests {
     fn disconnected_poll_does_not_enter_watcher() {
         let cancelled = AtomicBool::new(true);
         let error = await_omen(&json!({"regex":"never"}), &cancelled).unwrap_err();
+        assert_eq!(error.to_string(), "MCP client disconnected");
+    }
+
+    #[test]
+    fn disconnected_observer_does_not_enter_watcher() {
+        let error = observe_stream(&json!({}), &AtomicBool::new(true)).unwrap_err();
         assert_eq!(error.to_string(), "MCP client disconnected");
     }
 

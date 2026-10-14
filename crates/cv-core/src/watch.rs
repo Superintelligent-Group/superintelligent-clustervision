@@ -423,7 +423,7 @@ impl Watcher {
     /// leaves (and every message past the budget) stays pending: the next poll re-reads that
     /// session even if its cheap trigger has not moved. Returns whether anything is pending.
     pub fn poll_bounded(&mut self, max_messages: usize, mut take: impl FnMut(SessionEvent) -> usize) -> bool {
-        self.poll_bounded_inner(max_messages, &mut take, false, false)
+        self.poll_bounded_inner(max_messages, &mut take, false, false, None)
             .unwrap_or(false)
     }
 
@@ -435,7 +435,7 @@ impl Watcher {
         max_messages: usize,
         mut take: impl FnMut(SessionEvent) -> usize,
     ) -> anyhow::Result<bool> {
-        self.poll_bounded_inner(max_messages, &mut take, true, false)
+        self.poll_bounded_inner(max_messages, &mut take, true, false, None)
     }
 
     /// Checked polling retaining source-backed message payloads. The callback must resolve
@@ -445,7 +445,18 @@ impl Watcher {
         max_messages: usize,
         mut take: impl FnMut(SessionEvent) -> usize,
     ) -> anyhow::Result<bool> {
-        self.poll_bounded_inner(max_messages, &mut take, true, true)
+        self.poll_bounded_inner(max_messages, &mut take, true, true, None)
+    }
+
+    /// Retained bounded polling with cooperative checks during discovery/read/projection
+    /// boundaries. Successful output and EOF/cursor semantics match the ordinary retained poll.
+    pub fn try_poll_bounded_retained_checked(
+        &mut self,
+        max_messages: usize,
+        mut check: impl FnMut() -> anyhow::Result<()>,
+        mut take: impl FnMut(SessionEvent) -> usize,
+    ) -> anyhow::Result<bool> {
+        self.poll_bounded_inner(max_messages, &mut take, true, true, Some(&mut check))
     }
 
     /// Deliver new messages one at a time in discovery/message order. `check` runs before
@@ -558,12 +569,21 @@ impl Watcher {
         take: &mut impl FnMut(SessionEvent) -> usize,
         strict: bool,
         retained: bool,
+        mut check: Option<&mut dyn FnMut() -> anyhow::Result<()>>,
     ) -> anyhow::Result<bool> {
+        let controlled = check.is_some();
+        let mut check = || match check.as_mut() {
+            Some(check) => check(),
+            None => Ok(()),
+        };
         let _reads = crate::source::read_scope();
+        check()?;
         let refs = self.discover_live();
+        check()?;
         let mut consumed = 0usize;
         let mut pending = false;
         for (key, r) in refs {
+            check()?;
             let trigger = Self::trigger_of(&r);
             let (kind, prev_len) = match self.seen.get(&key) {
                 None => (EventKind::New, 0),
@@ -596,8 +616,13 @@ impl Watcher {
                 continue;
             };
             let previous = self.seen.get(&key).and_then(|state| state.read.as_ref());
-            let read = if retained { read::read_retained } else { read_tail };
-            let mut pass = match read(adapter.as_ref(), &r, previous, prev_len, room) {
+            let result = if retained && controlled {
+                read::read_retained_checked(adapter.as_ref(), &r, previous, prev_len, room, &mut check)
+            } else {
+                let read = if retained { read::read_retained } else { read_tail };
+                read(adapter.as_ref(), &r, previous, prev_len, room)
+            };
+            let mut pass = match result {
                 Ok(pass) => pass,
                 Err(error) if strict => {
                     return Err(error.context(format!("reading watched {} session {}", r.harness, r.path.display())))
@@ -625,6 +650,7 @@ impl Watcher {
                     "watched source changed during retained projection"
                 );
             }
+            check()?;
             consumed += taken;
             let seen_to = prev_len + taken;
             let left = total > seen_to;
@@ -713,7 +739,7 @@ mod tests {
     fn demanded_baseline_counts_existing_messages_and_checks_during_read() {
         static PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
         let world = cv_testkit::World::in_process("controlled-baseline");
-        let path = world.base.join("checkpoint.json");
+        let path = world.base.join("checkpoint-baseline.json");
         std::fs::write(
             &path,
             include_bytes!("../tests/fixtures/gemini/checkpoint_legacy_array.json"),
@@ -737,7 +763,7 @@ mod tests {
         })
         .err()
         .expect("baseline ignored cancellation");
-        assert!(error.to_string().contains("cancelled inside baseline"), "{error:#}");
+        assert!(format!("{error:#}").contains("cancelled inside baseline"), "{error:#}");
         assert_eq!(checks, 4, "cancelled baseline continued reading");
     }
 
@@ -826,11 +852,30 @@ mod tests {
                 },
             )
             .unwrap_err();
-        assert!(error.to_string().contains("cancelled"));
+        assert!(format!("{error:#}").contains("cancelled"), "{error:#}");
         assert_eq!(count, 1, "cancellation did not stop the active read");
         assert!(
             watcher.to_cursor().is_empty(),
             "failed read accepted its delivered prefix"
+        );
+        stop.set(false);
+        let error = watcher
+            .try_poll_bounded_retained_checked(
+                1,
+                || {
+                    anyhow::ensure!(!stop.get(), "cancelled during projection");
+                    Ok(())
+                },
+                |_| {
+                    stop.set(true);
+                    1
+                },
+            )
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("cancelled during projection"));
+        assert!(
+            watcher.to_cursor().is_empty(),
+            "cancelled projection accepted its position"
         );
         let error = watcher
             .try_poll_messages(
@@ -842,7 +887,7 @@ mod tests {
             )
             .unwrap_err();
         assert!(
-            error.to_string().contains("source changed") || error.to_string().contains("identity changed"),
+            format!("{error:#}").contains("source changed") || format!("{error:#}").contains("identity changed"),
             "{error:#}"
         );
         assert!(watcher.to_cursor().is_empty(), "stale match advanced position");

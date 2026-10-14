@@ -363,6 +363,28 @@ pub(super) fn read_retained(
     )
 }
 
+pub(super) fn read_retained_checked(
+    adapter: &dyn Adapter,
+    r: &SessionRef,
+    previous: Option<&ReadState>,
+    skip: usize,
+    keep: usize,
+    check: &mut dyn FnMut() -> Result<()>,
+) -> Result<ReadPass> {
+    read_inner(
+        adapter,
+        r,
+        previous,
+        skip,
+        keep,
+        ReadMode::RetainedTail,
+        ReadControl {
+            output: None,
+            check: Some(check),
+        },
+    )
+}
+
 /// Full session output: on a verified append retain only the checkpoint's stable old prefix,
 /// replaying its suffix; on declined/invalid reuse collect the whole session in the same pass.
 pub fn read_session(
