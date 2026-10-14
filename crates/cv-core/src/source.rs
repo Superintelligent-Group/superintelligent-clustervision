@@ -494,9 +494,22 @@ impl Probe {
                 );
                 // Only subagents consult sibling parent metadata. Ordinary sessions never scan
                 // a cwd group's siblings merely to establish freshness.
-                let summary = std::fs::read(r.path.join("summary.json")).ok()?;
-                let summary: serde_json::Value = serde_json::from_slice(&summary).ok()?;
-                if summary.get("session_kind").and_then(serde_json::Value::as_str) == Some("subagent") {
+                let summary_path = r.path.join("summary.json");
+                // Retain the before-read metadata: interpreting kind must not bless a later
+                // version of the summary when the inventory is assembled below.
+                self.entry(&summary_path)?;
+                let subagent = crate::json::JsonSource::capture(&summary_path)
+                    .ok()?
+                    .read_document(|view| {
+                        let kind = view
+                            .get("session_kind")?
+                            .map(|kind| crate::projection::string_prefix(kind, 9))
+                            .transpose()?
+                            .flatten();
+                        Ok(kind.as_deref() == Some("subagent"))
+                    })
+                    .ok()?;
+                if subagent {
                     let group = r.path.parent()?;
                     files.push(group.to_path_buf());
                     for sibling in self.directory(group)?.iter() {
@@ -989,6 +1002,37 @@ mod tests {
             is_sqlite_source(&SessionRef::new("old", Harness::OpenCode, legacy)),
             Some(false)
         );
+    }
+
+    #[test]
+    fn grok_dependency_kind_projects_only_exact_subagents_and_keeps_acceptance() {
+        let world = cv_testkit::World::in_process("grok-dependency-kind");
+        let group = world.base.join("sessions");
+        let session = group.join("child");
+        std::fs::create_dir_all(&session).unwrap();
+        std::fs::write(session.join("chat_history.jsonl"), "").unwrap();
+        let reference = crate::SessionRef::new("child", crate::Harness::Grok, session.clone());
+        let large = "ignored payload".repeat(1024);
+        let cases = [
+            serde_json::json!({"session_kind":"subagent", "ignored":large}).to_string(),
+            "{\"session_kind\":\"subagent\",\"session_kind\":false}".into(),
+            "{\"session_kind\":\"subagentx\"}".into(),
+            "null".into(),
+            "{\"session_kind\":\"subagent\",\"ignored\":\"\\ud800\"}".into(),
+        ];
+        for text in cases {
+            std::fs::write(session.join("summary.json"), &text).unwrap();
+            let old = serde_json::from_str::<serde_json::Value>(&text).ok();
+            let stamp = super::Probe::default().dependencies(&reference);
+            assert_eq!(stamp.is_some(), old.is_some());
+            if let Some(stamp) = stamp {
+                let expected = old.unwrap().get("session_kind").and_then(serde_json::Value::as_str) == Some("subagent");
+                assert_eq!(
+                    stamp.records().unwrap().entries.iter().any(|entry| entry.path == group),
+                    expected
+                );
+            }
+        }
     }
 
     #[test]
