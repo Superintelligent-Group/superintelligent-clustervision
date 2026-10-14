@@ -315,6 +315,68 @@ pub(crate) fn append_cell(
     )?
 }
 
+/// Incremental TEXT bytes use the database's encoding. Ordinary UTF-8 rowid tables support
+/// bounded reads; views, virtual/WITHOUT ROWID tables and UTF-16 stores retain their typed reader.
+pub(crate) fn incremental_utf8_table(conn: &Connection, table: &str) -> bool {
+    let utf8 = conn
+        .query_row("PRAGMA encoding", [], |row| row.get::<_, String>(0))
+        .ok()
+        .as_deref()
+        == Some("UTF-8");
+    utf8 && conn
+        .query_row(&format!("PRAGMA main.table_list('{table}')"), [], |row| {
+            Ok(row.get::<_, String>(2)? == "table" && !row.get::<_, bool>(4)?)
+        })
+        .unwrap_or(false)
+}
+
+/// Borrow a read-only cell handle while the caller's active statement/snapshot is still alive.
+/// Adapter-owned table/column identifiers only. Unlike selecting a payload column, opening this
+/// handle does not ask sqlite3_step to materialize the entire TEXT/BLOB value.
+pub(crate) fn with_cell_reader<T>(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    rowid: i64,
+    read: impl FnOnce(&mut dyn std::io::Read, usize) -> Result<T>,
+) -> Result<T> {
+    let mut blob = conn.blob_open(rusqlite::DatabaseName::Main, table, column, rowid, true)?;
+    let len = blob.len();
+    read(&mut blob, len)
+}
+
+/// Strict streaming UTF-8 acceptance, including scalars crossing native read windows. False is
+/// a typed-string rejection, not a read failure; callers discard any unpublished prefix output.
+pub(crate) fn for_each_utf8(reader: &mut dyn std::io::Read, mut visit: impl FnMut(&str) -> Result<()>) -> Result<bool> {
+    let mut buffer = [0u8; 64 * 1024 + 3];
+    let mut pending = 0;
+    loop {
+        let read = match reader.read(&mut buffer[pending..64 * 1024]) {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            result => result?,
+        };
+        if read == 0 {
+            return Ok(pending == 0);
+        }
+        let end = pending + read;
+        match std::str::from_utf8(&buffer[..end]) {
+            Ok(text) => {
+                visit(text)?;
+                pending = 0;
+            }
+            Err(error) => {
+                if error.error_len().is_some() {
+                    return Ok(false);
+                }
+                let accepted = error.valid_up_to();
+                visit(std::str::from_utf8(&buffer[..accepted]).unwrap())?;
+                pending = end - accepted;
+                buffer.copy_within(accepted..end, 0);
+            }
+        }
+    }
+}
+
 /// The columns present on `table` (`PRAGMA table_info`). Every SQLite-backed harness grows its
 /// schema by `ALTER TABLE` across versions, so an adapter probes before it selects; an unknown
 /// table yields the empty set.
@@ -349,6 +411,41 @@ mod tests {
         std::fs::create_dir(&directory).unwrap();
         let database = directory.join("sessions.db");
         (directory, database)
+    }
+
+    #[test]
+    fn incremental_text_reads_keep_utf8_acceptance_and_native_table_constraints() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch("CREATE TABLE cells(value TEXT); CREATE TABLE other(id TEXT PRIMARY KEY, value TEXT) WITHOUT ROWID; CREATE VIEW projected AS SELECT * FROM cells;")?;
+        assert!(incremental_utf8_table(&conn, "cells"));
+        assert!(!incremental_utf8_table(&conn, "other"));
+        assert!(!incremental_utf8_table(&conn, "projected"));
+        let body = format!("{}🌙{}\0end", "x".repeat(65535), "界".repeat(30000));
+        conn.execute("INSERT INTO cells(value) VALUES(?1)", [&body])?;
+        let decoded = with_cell_reader(&conn, "cells", "value", 1, |reader, len| {
+            assert_eq!(len, body.len());
+            let mut decoded = String::new();
+            assert!(for_each_utf8(reader, |part| {
+                decoded.push_str(part);
+                Ok(())
+            })?);
+            Ok(decoded)
+        })?;
+        assert_eq!(decoded, body);
+        for bytes in [b"invalid\xff".as_slice(), b"truncated\xf0\x9f".as_slice()] {
+            conn.execute("INSERT INTO cells(value) VALUES(CAST(?1 AS TEXT))", [bytes])?;
+            assert!(!with_cell_reader(
+                &conn,
+                "cells",
+                "value",
+                conn.last_insert_rowid(),
+                |reader, _| for_each_utf8(reader, |_| Ok(()))
+            )?);
+        }
+        let utf16 = Connection::open_in_memory()?;
+        utf16.execute_batch("PRAGMA encoding='UTF-16le'; CREATE TABLE cells(value TEXT)")?;
+        assert!(!incremental_utf8_table(&utf16, "cells"));
+        Ok(())
     }
 
     #[test]

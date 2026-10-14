@@ -779,7 +779,19 @@ fn stream_conn_with_reads(
             select_cols.push(c);
         }
     }
-    let select_list = select_cols.join(", ");
+    let incremental_content = super::store::sqlite::incremental_utf8_table(conn, "messages");
+    if incremental_content {
+        select_cols.push("_content_rowid");
+    }
+    let select_list = select_cols
+        .iter()
+        .map(|column| match *column {
+            "content" if incremental_content => "typeof(content) AS content",
+            "_content_rowid" => "rowid AS _content_rowid",
+            column => column,
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
 
     // Row visibility (schema v12+): Hermes's display projection is `(active = 1 OR compacted = 1)`
     // — live rows plus the history a compaction summarized away — which drops rewound rows and the
@@ -813,7 +825,12 @@ fn stream_conn_with_reads(
         // Stream rows lazily: one `MsgRow` -> one `Message` at a time, emitted and dropped before
         // the next row (a single Hermes session can be large; never materialize the whole Vec).
         let mut rows = stmt.query_map([sid], |row| {
-            if dedup_generations && !seen_generations.insert(generation_key(row, &idx)) {
+            if dedup_generations
+                && !seen_generations.insert(
+                    generation_key(row, &idx, conn, incremental_content)
+                        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?,
+                )
+            {
                 return Ok(None);
             }
             let get_str = |name: &str| -> Option<String> {
@@ -822,32 +839,89 @@ fn stream_conn_with_reads(
             let get_i64 =
                 |name: &str| -> Option<i64> { idx(name).and_then(|i| row.get::<_, Option<i64>>(i).ok().flatten()) };
             let get_extra = |name| opts.wants_full_extra().then(|| get_str(name)).flatten();
-            // Lazy preparation borrows SQLite's current cell, retaining large ordinary
-            // bodies and multimodal text in the same checked arena. Classification notices stay
-            // owned until into_message has examined their text.
+            // Native rowid tables select only the content type/rowid, then stream the cell into
+            // the same checked arena. Typed rejection and older/view/UTF-16 fallbacks are retained.
             let mut content_source = None;
             let mut decoded_content = None;
-            if let Some(source) = &checked_source {
-                if let rusqlite::types::ValueRef::Text(bytes) = row.get_ref(idx("content").unwrap())? {
-                    if let Some(raw) = std::str::from_utf8(bytes)
-                        .ok()
-                        .filter(|raw| raw.len() > crate::lazy::INLINE_MAX && !FAILED_TURN_NOTICES.contains(&raw.trim()))
-                    {
-                        let mut prepare = || -> Result<()> {
-                            let arena = arena.as_ref().unwrap();
-                            if row.get_ref(idx("role").unwrap())? != rusqlite::types::ValueRef::Text(b"tool") {
-                                decoded_content = checked_multimodal_content(raw, source, arena)?;
+            let mut untyped_failed_turn = false;
+            let content = if incremental_content {
+                if borrowed_text(row, idx("content")) == Some("text") {
+                    let rowid = row.get::<_, i64>(idx("_content_rowid").unwrap())?;
+                    let mut prepare = || -> Result<Option<String>> {
+                        if let Some(source) = &checked_source {
+                            let mut valid = false;
+                            let text = super::store::sqlite::with_cell_reader(
+                                conn,
+                                "messages",
+                                "content",
+                                rowid,
+                                |reader, _| {
+                                    super::store::text::append(source, arena.as_ref().unwrap(), |builder| {
+                                        valid =
+                                            super::store::sqlite::for_each_utf8(reader, |chunk| builder.push(chunk))?;
+                                        Ok(())
+                                    })
+                                },
+                            )?;
+                            if valid && !text.is_empty() {
+                                if borrowed_text(row, idx("role")) != Some("tool") {
+                                    decoded_content =
+                                        source_multimodal_content(&text, source, arena.as_ref().unwrap())?;
+                                }
+                                if decoded_content.is_none() {
+                                    if borrowed_text(row, idx("role")) == Some("assistant")
+                                        && get_str("display_kind").is_none()
+                                    {
+                                        untyped_failed_turn = source_failed_turn(&text)?;
+                                    }
+                                    content_source = Some(text);
+                                }
                             }
-                            if decoded_content.is_none() {
-                                content_source =
-                                    Some(super::store::text::append(source, arena, |builder| builder.push(raw))?);
-                            }
-                            Ok(())
-                        };
-                        prepare().map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?;
-                    }
+                            Ok(None)
+                        } else {
+                            super::store::sqlite::with_cell_reader(conn, "messages", "content", rowid, |reader, len| {
+                                let mut text = String::with_capacity(len);
+                                let valid = super::store::sqlite::for_each_utf8(reader, |chunk| {
+                                    text.push_str(chunk);
+                                    Ok(())
+                                })?;
+                                Ok(valid.then_some(text))
+                            })
+                        }
+                    };
+                    prepare().map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?
+                } else {
+                    None
                 }
-            }
+            } else {
+                let owned = get_str("content");
+                if let (Some(source), Some(raw)) = (
+                    &checked_source,
+                    owned.as_deref().filter(|raw| {
+                        raw.len() > crate::lazy::INLINE_MAX && !FAILED_TURN_NOTICES.contains(&raw.trim())
+                    }),
+                ) {
+                    let mut prepare = || -> Result<()> {
+                        if get_str("role").as_deref() != Some("tool") {
+                            decoded_content = checked_multimodal_content(raw, source, arena.as_ref().unwrap())?;
+                        }
+                        if decoded_content.is_none() {
+                            content_source = Some(super::store::text::append(
+                                source,
+                                arena.as_ref().unwrap(),
+                                |builder| builder.push(raw),
+                            )?);
+                        }
+                        Ok(())
+                    };
+                    prepare().map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?;
+                }
+                if content_source.is_some() || decoded_content.is_some() {
+                    None
+                } else {
+                    owned
+                }
+            };
             let mut decoded_calls = None;
             if let Some(source) = &checked_source {
                 if let Some(raw) =
@@ -898,17 +972,15 @@ fn stream_conn_with_reads(
                 || decoded_calls.as_ref().is_some_and(|blocks| !blocks.is_empty())
                 || thinking.is_some()
                 || borrowed_text(row, idx("role")) == Some("tool")
-                || borrowed_text(row, idx("content"))
+                || content
+                    .as_deref()
                     .is_some_and(|raw| !raw.is_empty() && !raw.starts_with(MULTIMODAL_SENTINEL));
             let has_extra = !opts.wants_full_extra() && !has_body && (has_reasoning_extra || row_has_extra(row, &idx));
             Ok(Some(MsgRow {
                 id: get_i64("id").unwrap_or(0),
                 role: get_str("role").unwrap_or_default(),
-                content: if content_source.is_some() || decoded_content.is_some() {
-                    None
-                } else {
-                    get_str("content")
-                },
+                content,
+                untyped_failed_turn,
                 content_source,
                 decoded_content,
                 tool_call_id: get_str("tool_call_id"),
@@ -1115,11 +1187,49 @@ fn borrowed_text<'a>(row: &'a rusqlite::Row<'_>, index: Option<usize>) -> Option
 
 /// Hermes's copied-generation identity precedes lazy body selection and extra projection.
 /// Borrowing the native cells preserves the original String/Option hashing without body copies.
-fn generation_key(row: &rusqlite::Row<'_>, index: &impl Fn(&str) -> Option<usize>) -> u64 {
+fn generation_key(
+    row: &rusqlite::Row<'_>,
+    index: &impl Fn(&str) -> Option<usize>,
+    conn: &Connection,
+    incremental_content: bool,
+) -> Result<u64> {
     use std::hash::{Hash, Hasher};
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     borrowed_text(row, index("role")).unwrap_or_default().hash(&mut hash);
-    borrowed_text(row, index("content")).hash(&mut hash);
+    if incremental_content {
+        let mut content_hash = hash.clone();
+        let present = if borrowed_text(row, index("content")) == Some("text") {
+            // Use Option's own prefix, followed by str's bytes and terminator. This preserves
+            // the pinned DefaultHasher's borrowed-String identity without owning the body.
+            struct StringPrefix;
+            impl Hash for StringPrefix {
+                fn hash<H: Hasher>(&self, _: &mut H) {}
+            }
+            Some(StringPrefix).hash(&mut content_hash);
+            super::store::sqlite::with_cell_reader(
+                conn,
+                "messages",
+                "content",
+                row.get(index("_content_rowid").unwrap())?,
+                |reader, _| {
+                    super::store::sqlite::for_each_utf8(reader, |chunk| {
+                        content_hash.write(chunk.as_bytes());
+                        Ok(())
+                    })
+                },
+            )?
+        } else {
+            false
+        };
+        if present {
+            content_hash.write_u8(0xff);
+            hash = content_hash;
+        } else {
+            None::<&str>.hash(&mut hash);
+        }
+    } else {
+        borrowed_text(row, index("content")).hash(&mut hash);
+    }
     index("timestamp")
         .and_then(|i| row.get::<_, Option<f64>>(i).ok().flatten())
         .map(f64::to_bits)
@@ -1127,7 +1237,7 @@ fn generation_key(row: &rusqlite::Row<'_>, index: &impl Fn(&str) -> Option<usize
     for key in ["tool_call_id", "tool_calls", "tool_name"] {
         borrowed_text(row, index(key)).hash(&mut hash);
     }
-    hash.finish()
+    Ok(hash.finish())
 }
 
 /// Preserve acceptance of metadata-only rows even when their extras are not demanded.
@@ -1231,6 +1341,7 @@ struct MsgRow {
     id: i64,
     role: String,
     content: Option<String>,
+    untyped_failed_turn: bool,
     content_source: Option<crate::Text>,
     decoded_content: Option<Vec<Block>>,
     tool_call_id: Option<String>,
@@ -1277,12 +1388,13 @@ impl MsgRow {
         };
         // Harness-injected rows (a hidden compaction handoff, auto-continue nudges, model-switch /
         // delegation / process notices) are System turns typed by what they are, never prompts.
-        let untyped_failed_turn = self.display_kind.is_none()
-            && self.role == "assistant"
-            && self
-                .content
-                .as_deref()
-                .is_some_and(|c| FAILED_TURN_NOTICES.contains(&c.trim()));
+        let untyped_failed_turn = self.untyped_failed_turn
+            || (self.display_kind.is_none()
+                && self.role == "assistant"
+                && self
+                    .content
+                    .as_deref()
+                    .is_some_and(|c| FAILED_TURN_NOTICES.contains(&c.trim())));
         let display_kind = self
             .display_kind
             .as_deref()
@@ -1528,20 +1640,83 @@ fn checked_multimodal_content(
     let Some(rest) = raw.strip_prefix(MULTIMODAL_SENTINEL) else {
         return Ok(None);
     };
-    Ok(checked_json(rest, source, arena, |view| {
-        let array = view.is_array()?;
-        let parts = if array { Some(view) } else { view.get("parts")? };
-        let Some(parts) = parts.map(|parts| parts.array()).transpose()?.flatten() else {
-            return Ok(None);
-        };
-        let mut blocks = Vec::new();
-        for part in parts {
-            let part = part?;
-            blocks.extend(openai::part_view(part, &openai::HERMES)?);
+    Ok(checked_json(rest, source, arena, multimodal_blocks)?.flatten())
+}
+
+fn multimodal_blocks(view: crate::json::JsonView<'_>) -> Result<Option<Vec<Block>>> {
+    let array = view.is_array()?;
+    let parts = if array { Some(view) } else { view.get("parts")? };
+    let Some(parts) = parts.map(|parts| parts.array()).transpose()?.flatten() else {
+        return Ok(None);
+    };
+    let mut blocks = Vec::new();
+    for part in parts {
+        blocks.extend(openai::part_view(part?, &openai::HERMES)?);
+    }
+    Ok((array || !blocks.is_empty()).then_some(blocks))
+}
+
+fn source_multimodal_content(
+    text: &crate::Text,
+    source: &crate::json::JsonSource,
+    arena: &std::sync::Arc<super::store::bytes::ByteSource>,
+) -> Result<Option<Vec<Block>>> {
+    let resolver = crate::lazy::Resolver::new(None);
+    let (head, _) = super::store::document::text_head(text, &resolver, MULTIMODAL_SENTINEL.len(), false)?;
+    if head != MULTIMODAL_SENTINEL {
+        return Ok(None);
+    }
+    let (offset, len) = arena.append(|writer| {
+        let mut skip = MULTIMODAL_SENTINEL.len();
+        text.try_for_each_chunk(&resolver, 64 * 1024, |chunk| {
+            let skipped = skip.min(chunk.len());
+            skip -= skipped;
+            writer.write_all(chunk[skipped..].as_bytes())?;
+            Ok(())
+        })
+    })?;
+    match source.read_backing_value(arena.clone(), offset, len, multimodal_blocks) {
+        Ok(blocks) => Ok(blocks),
+        Err(error) if error.is::<crate::json::InvalidJson>() => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn source_failed_turn(text: &crate::Text) -> Result<bool> {
+    #[derive(Debug, thiserror::Error)]
+    #[error("not a failed-turn notice")]
+    struct NotNotice;
+    let mut leading = true;
+    let mut positions = [Some(0usize); FAILED_TURN_NOTICES.len()];
+    let result = text.try_for_each_chunk(&crate::lazy::Resolver::new(None), 64 * 1024, |chunk| {
+        for character in chunk.chars() {
+            if leading && character.is_whitespace() {
+                continue;
+            }
+            leading = false;
+            for (position, notice) in positions.iter_mut().zip(FAILED_TURN_NOTICES) {
+                if let Some(current) = *position {
+                    if current < notice.len() && character == notice.as_bytes()[current] as char {
+                        *position = Some(current + 1);
+                    } else if current < notice.len() || !character.is_whitespace() {
+                        *position = None;
+                    }
+                }
+            }
+            if positions.iter().all(Option::is_none) {
+                return Err(NotNotice.into());
+            }
         }
-        Ok((array || !blocks.is_empty()).then_some(blocks))
-    })?
-    .flatten())
+        Ok(())
+    });
+    match result {
+        Err(error) if error.is::<NotNotice>() => Ok(false),
+        Err(error) => Err(error),
+        Ok(()) => Ok(positions
+            .iter()
+            .zip(FAILED_TURN_NOTICES)
+            .any(|(position, notice)| *position == Some(notice.len()))),
+    }
 }
 
 fn checked_json<T>(
@@ -1722,6 +1897,104 @@ mod tests {
             .stream(&reference, &ParseOptions::default(), &mut MutatingSink(&writer))
             .unwrap_err();
         assert!(failure.to_string().contains("dependencies changed"), "{failure:#}");
+    }
+
+    #[test]
+    fn incremental_content_matches_typed_view_for_cells_notices_and_generations() -> Result<()> {
+        let world = cv_testkit::World::in_process("hermes-incremental-content");
+        let path = world.base.join("native.db");
+        let writer = Connection::open(&path)?;
+        writer.execute_batch(&fixture("schema-v30.sql"))?;
+        insert_session(&writer, "s", None, None, 1000.0, None);
+        let body = format!("{}🌙{}", "x".repeat(65535), "界".repeat(30000));
+        for (i, value) in [
+            rusqlite::types::Value::Text(body.clone()),
+            rusqlite::types::Value::Text(String::new()),
+            rusqlite::types::Value::Text("embedded\0NUL".into()),
+            rusqlite::types::Value::Text(format!(
+                "{}{}{}",
+                "\u{2003} ".repeat(20000),
+                FAILED_TURN_NOTICES[0],
+                "\n\u{2003}".repeat(20000)
+            )),
+            rusqlite::types::Value::Text(format!("{} quoted", FAILED_TURN_NOTICES[1])),
+            rusqlite::types::Value::Blob(b"not a typed String".to_vec()),
+            rusqlite::types::Value::Null,
+            rusqlite::types::Value::Integer(42),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            writer.execute("INSERT INTO messages(session_id,role,content,timestamp,api_content) VALUES('s','assistant',?1,?2,'kept metadata')",rusqlite::params![value,1000+i])?;
+        }
+        for bytes in [b"invalid\xff".as_slice(), b"truncated\xf0\x9f".as_slice()] {
+            writer.execute("INSERT INTO messages(session_id,role,content,timestamp,api_content) VALUES('s','assistant',CAST(?1 AS TEXT),?2,'typed rejection')",rusqlite::params![bytes,writer.last_insert_rowid()+2000])?;
+        }
+        writer.execute("INSERT INTO messages(session_id,role,content,timestamp,active,compacted) VALUES('s','assistant',?1,3000,0,1)",[&body])?;
+        writer.execute("INSERT INTO messages(session_id,role,content,timestamp,active,compacted) VALUES('s','assistant',?1,3000,1,0)",[&body])?;
+        writer.execute(
+            "INSERT INTO messages(session_id,role,content,timestamp) VALUES('s','assistant',?1,3000)",
+            [format!("distinct {body}")],
+        )?;
+        let fields = [
+            "role",
+            "content",
+            "timestamp",
+            "tool_call_id",
+            "tool_calls",
+            "tool_name",
+            "_content_rowid",
+        ];
+        let index = |name: &str| fields.iter().position(|field| *field == name);
+        let mut keys = Vec::new();
+        for (projection, incremental) in [("content", false), ("typeof(content)", true)] {
+            let mut statement = writer.prepare(&format!(
+                "SELECT role,{projection},timestamp,tool_call_id,tool_calls,tool_name,rowid FROM messages ORDER BY id"
+            ))?;
+            let hashes = statement
+                .query_map([], |row| {
+                    generation_key(row, &index, &writer, incremental)
+                        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            keys.push(hashes);
+        }
+        assert_eq!(
+            keys[0], keys[1],
+            "incremental generation identity matches typed borrowed cells"
+        );
+        drop(writer);
+        // A view selects the old typed payload column and cannot use incremental BLOB access.
+        let legacy_path = world.base.join("typed.db");
+        std::fs::copy(&path, &legacy_path)?;
+        let legacy = Connection::open(&legacy_path)?;
+        legacy.execute_batch(
+            "ALTER TABLE messages RENAME TO stored_messages; CREATE VIEW messages AS SELECT * FROM stored_messages",
+        )?;
+        drop(legacy);
+        let adapter = Hermes::with_db(path.clone());
+        let reference = SessionRef::new("s", Harness::Hermes, &path);
+        let typed = Hermes::with_db(legacy_path.clone());
+        let typed_ref = SessionRef::new("s", Harness::Hermes, &legacy_path);
+        for options in [
+            ParseOptions::bulk(),
+            ParseOptions::full(),
+            ParseOptions::lazy(),
+            ParseOptions::facts(),
+            ParseOptions::complete(),
+        ] {
+            let mut actual = crate::stream::collect_with(&adapter, &reference, &options)?;
+            let mut expected = crate::stream::collect_with(&typed, &typed_ref, &options)?;
+            actual.materialize()?;
+            expected.materialize()?;
+            expected.source_path = actual.source_path.clone();
+            assert_eq!(
+                serde_json::to_value(actual)?,
+                serde_json::to_value(expected)?,
+                "{options:?}"
+            );
+        }
+        Ok(())
     }
 
     #[test]
