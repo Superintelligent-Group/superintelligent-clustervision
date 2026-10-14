@@ -402,7 +402,7 @@ fn discover_db(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
 /// earliest-created other session holding that first message (a fork of a fork resolves to the
 /// original). `goose session import` also yields an older first message, but no other session
 /// holds its ids. Two indexed lookups, and only for a copied session.
-fn fork_source(conn: &Connection, id: &str, created_at: Option<DateTime<Utc>>) -> Option<String> {
+fn copied_message_id(conn: &Connection, id: &str, created_at: Option<DateTime<Utc>>) -> Option<String> {
     let created_at = created_at?;
     if !columns(conn, "messages").contains("message_id") {
         return None;
@@ -418,23 +418,71 @@ fn fork_source(conn: &Connection, id: &str, created_at: Option<DateTime<Utc>>) -
     if ts_from_epoch(at)?.timestamp() >= created_at.timestamp() {
         return None;
     }
+    Some(first)
+}
+
+fn earliest_holder(conn: &Connection, first: &str) -> Option<(DateTime<Utc>, String)> {
     let mut stmt = conn
-        .prepare(
-            "SELECT s.id, s.created_at FROM messages m JOIN sessions s ON s.id = m.session_id \
-             WHERE m.message_id = ?1 AND m.session_id != ?2",
-        )
+        .prepare("SELECT s.id,s.created_at FROM messages m JOIN sessions s ON s.id=m.session_id WHERE m.message_id=?1")
         .ok()?;
     let holders = stmt
-        .query_map([first.as_str(), id], |row| {
+        .query_map([first], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
         })
         .ok()?
         .flatten();
     holders
-        .filter_map(|(sid, c)| Some((c.as_deref().and_then(parse_ts_text)?, sid)))
-        .filter(|(c, _)| *c < created_at)
+        .filter_map(|(sid, created)| {
+            #[cfg(test)]
+            FORK_HOLDER_ROWS.with(|rows| rows.set(rows.get() + 1));
+            Some((created.as_deref().and_then(parse_ts_text)?, sid))
+        })
         .min()
-        .map(|(_, sid)| sid)
+}
+
+#[cfg(test)]
+thread_local! { static FORK_HOLDER_ROWS:std::cell::Cell<usize>=const {std::cell::Cell::new(0)}; }
+
+#[cfg(test)]
+fn fork_source(conn: &Connection, id: &str, created: Option<DateTime<Utc>>) -> Option<String> {
+    let first = copied_message_id(conn, id, created)?;
+    let (time, parent) = earliest_holder(conn, &first)?;
+    (time < created? && parent != id).then_some(parent)
+}
+
+fn fork_source_scoped(
+    conn: &Connection,
+    r: &SessionRef,
+    created: Option<DateTime<Utc>>,
+    reads: &crate::source::ReadSet,
+) -> Result<Option<String>> {
+    let Some(created) = created else {
+        return Ok(None);
+    };
+    let Some(first) = copied_message_id(conn, &r.id, Some(created)) else {
+        return Ok(None);
+    };
+    let holder = if r.path.is_file() {
+        // Synthetic memo selector: only actual DB/WAL paths in reads are freshness authorities.
+        let mut selector = String::with_capacity(first.len() * 2);
+        use std::fmt::Write as _;
+        for byte in first.as_bytes() {
+            write!(&mut selector, "{byte:02x}")?;
+        }
+        let key = r.path.join(selector);
+        let (holder, _) = crate::source::inventory("goose-fork-holder", &key, reads, || {
+            let holder = earliest_holder(conn, &first);
+            let retained = std::mem::size_of_val(&holder) + holder.as_ref().map_or(0, |(_, id)| id.capacity());
+            Ok((holder, reads.clone(), retained))
+        })?;
+        holder
+    } else {
+        std::sync::Arc::new(earliest_holder(conn, &first))
+    };
+    Ok(holder
+        .as_ref()
+        .as_ref()
+        .and_then(|(time, parent)| (*time < created && parent != &r.id).then(|| parent.clone())))
 }
 
 #[cfg(test)]
@@ -534,7 +582,7 @@ fn stream_db_opts_with_reads(
     let created_at = created.as_deref().and_then(parse_ts_text).or(r.created_at);
     let lineage = Lineage {
         parent: parent_id.filter(|p| !p.is_empty()),
-        forked_from: fork_source(conn, &r.id, created_at),
+        forked_from: fork_source_scoped(conn, r, created_at, &reads)?,
         ..Default::default()
     };
 
@@ -1556,6 +1604,56 @@ mod tests {
             );
             assert!(fork_source(&conn, "source", parse_ts_text("2024-01-01 00:00:00")).is_none());
         }
+    }
+
+    #[test]
+    fn fork_family_holder_rows_are_scanned_once_per_read_scope_and_fresh_between_scopes() -> Result<()> {
+        let world = cv_testkit::World::in_process("goose-fork-family-scope");
+        let path = world.base.join("sessions.db");
+        let conn = Connection::open(&path)?;
+        conn.execute_batch(SCHEMA)?;
+        for i in 0..80 {
+            conn.execute(
+                "INSERT INTO sessions(id,working_dir,created_at) VALUES (?1,'/synthetic',?2)",
+                rusqlite::params![
+                    format!("family-{i:03}"),
+                    format!("2024-01-{:02} 00:00:00", i / 24 + 1) + &format!(".{:03}", i)
+                ],
+            )?;
+            conn.execute("INSERT INTO messages(session_id,message_id,role,content_json,created_timestamp) VALUES (?1,'shared','user','[{\"type\":\"text\",\"text\":\"copied\"}]',1703980800)",
+                [format!("family-{i:03}")])?;
+        }
+        drop(conn);
+        let adapter = Goose::with_sessions_dir(&world.base);
+        let read = |i| -> Result<Session> {
+            let reference = SessionRef::new(format!("family-{i:03}"), Harness::Goose, &path);
+            crate::stream::collect_with(&adapter, &reference, &ParseOptions::full())
+        };
+        FORK_HOLDER_ROWS.with(|rows| rows.set(0));
+        {
+            let _scope = crate::source::read_scope();
+            for i in 1..80 {
+                assert_eq!(read(i)?.lineage.forked_from.as_deref(), Some("family-000"));
+            }
+            assert_eq!(FORK_HOLDER_ROWS.with(|rows| rows.get()), 80);
+        }
+        FORK_HOLDER_ROWS.with(|rows| rows.set(0));
+        for i in 1..4 {
+            assert_eq!(read(i)?.lineage.forked_from.as_deref(), Some("family-000"));
+        }
+        assert_eq!(FORK_HOLDER_ROWS.with(|rows| rows.get()), 240);
+        // A later operation observes changed holder metadata rather than keeping the old minimum.
+        let conn = Connection::open(&path)?;
+        conn.execute(
+            "UPDATE sessions SET created_at='2023-01-01 00:00:00' WHERE id='family-001'",
+            [],
+        )?;
+        drop(conn);
+        {
+            let _scope = crate::source::read_scope();
+            assert_eq!(read(2)?.lineage.forked_from.as_deref(), Some("family-001"));
+        }
+        Ok(())
     }
 
     #[test]
