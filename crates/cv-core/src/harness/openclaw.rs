@@ -749,6 +749,165 @@ thread_local! {
     static SQL_PARENT_FULLSCANS:std::cell::Cell<usize>=const {std::cell::Cell::new(0)};
 }
 
+#[cfg(feature = "sqlite")]
+enum WindowId {
+    Text(String),
+    Invalid(rusqlite::types::Type),
+    Utf8(std::str::Utf8Error),
+}
+#[cfg(feature = "sqlite")]
+#[derive(Default)]
+struct WindowGroups(HashMap<String, Vec<WindowId>>);
+#[cfg(feature = "sqlite")]
+impl WindowGroups {
+    fn load(conn: &rusqlite::Connection) -> Result<(Option<Self>, usize)> {
+        use rusqlite::types::ValueRef;
+        let mut groups = Self::default();
+        // Leave half the shared 16MiB operation budget for other inventories and guards.
+        // An oversized membership table keeps a tiny unavailable sentinel, then uses SQL.
+        const BUILD_BUDGET: usize = 8 * 1024 * 1024;
+        let mut strings = 0usize;
+        let mut vector_capacity = 0usize;
+        // This path is selected only for the original plain table scan and BINARY TEXT ID
+        // contract. Keep that same traversal order, not an invented chronological/id sort.
+        let mut stmt = conn.prepare("SELECT session_key,session_id FROM session_windows NOT INDEXED")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let Ok(key) = row.get_ref(0)?.as_str() else {
+                continue;
+            };
+            let value = row.get_ref(1)?;
+            if matches!(value, ValueRef::Null) {
+                continue;
+            }
+            let existing = groups.0.get(key);
+            let fresh = existing.is_none();
+            let old_capacity = existing.map_or(0, Vec::capacity);
+            let next_capacity = if existing.is_none_or(|ids| ids.len() == ids.capacity()) {
+                (old_capacity * 2).max(4)
+            } else {
+                old_capacity
+            };
+            let map_capacity = if fresh && groups.0.len() == groups.0.capacity() {
+                (groups.0.capacity() * 2).max(3)
+            } else {
+                groups.0.capacity()
+            };
+            let new_strings = key.len() * usize::from(fresh)
+                + match value {
+                    ValueRef::Text(bytes) => bytes.len(),
+                    _ => 0,
+                };
+            // Twofold table/vector storage allowance covers their next growth before allocating.
+            let estimate = strings
+                .saturating_add(new_strings)
+                .saturating_add(map_capacity * std::mem::size_of::<(String, Vec<WindowId>)>() * 2)
+                .saturating_add((vector_capacity - old_capacity + next_capacity) * std::mem::size_of::<WindowId>() * 2)
+                .saturating_add(std::mem::size_of::<WindowId>() * 8);
+            if estimate > BUILD_BUDGET {
+                return Ok((None, std::mem::size_of::<Option<Self>>()));
+            }
+            strings += new_strings;
+            let id = match value {
+                ValueRef::Text(bytes) => match std::str::from_utf8(bytes) {
+                    Ok(id) => WindowId::Text(id.to_owned()),
+                    Err(error) => WindowId::Utf8(error),
+                },
+                value => WindowId::Invalid(value.data_type()),
+            };
+            #[cfg(test)]
+            SQL_PARENT_ROWS.with(|count| count.set(count.get() + 1));
+            let ids = if fresh {
+                groups.0.entry(key.to_owned()).or_default()
+            } else {
+                groups.0.get_mut(key).expect("existing window group")
+            };
+            ids.push(id);
+            vector_capacity = vector_capacity - old_capacity + ids.capacity();
+        }
+        drop(rows);
+        #[cfg(test)]
+        SQL_PARENT_FULLSCANS
+            .with(|count| count.set(count.get() + stmt.get_status(rusqlite::StatementStatus::FullscanStep) as usize));
+        let bytes = groups.0.capacity() * std::mem::size_of::<(String, Vec<WindowId>)>()
+            + groups
+                .0
+                .iter()
+                .map(|(key, ids)| {
+                    key.capacity()
+                        + ids.capacity() * std::mem::size_of::<WindowId>()
+                        + ids
+                            .iter()
+                            .map(|id| match id {
+                                WindowId::Text(id) => id.capacity(),
+                                _ => 0,
+                            })
+                            .sum::<usize>()
+                })
+                .sum::<usize>();
+        Ok((Some(groups), bytes))
+    }
+    fn candidates(&self, key: &str, current: &str) -> Result<Vec<String>> {
+        let mut out = Vec::new();
+        for id in self.0.get(key).into_iter().flatten() {
+            match id {
+                WindowId::Text(id) if id != current => out.push(id.clone()),
+                WindowId::Text(_) => {}
+                WindowId::Invalid(kind) => {
+                    return Err(rusqlite::Error::InvalidColumnType(0, "session_id".into(), *kind).into())
+                }
+                WindowId::Utf8(error) => {
+                    return Err(rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(*error),
+                    )
+                    .into())
+                }
+            }
+        }
+        Ok(out)
+    }
+}
+#[cfg(feature = "sqlite")]
+fn plain_parent_scan(conn: &rusqlite::Connection, key: &str, current: &str) -> Result<bool> {
+    let plain = conn
+        .prepare("EXPLAIN QUERY PLAN SELECT session_id FROM session_windows WHERE session_key=?1 AND session_id!=?2")?
+        .query_map([key, current], |row| row.get::<_, String>(3))?
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .iter()
+        .any(|detail| detail == "SCAN session_windows");
+    if !plain {
+        return Ok(false);
+    }
+    use rusqlite::OptionalExtension as _;
+    let ddl = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='session_windows'",
+            [],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    let Some(ddl) = ddl else {
+        return Ok(false);
+    };
+    if ddl.to_ascii_uppercase().contains("COLLATE") {
+        return Ok(false);
+    }
+    let columns = conn
+        .prepare("PRAGMA table_info(session_windows)")?
+        .query_map([], |row| Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?)))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    // Native default TEXT/BINARY comparison matches String equality. Custom affinity or any
+    // explicit collation keeps the original SQL, including its coercion/exclusion behavior.
+    Ok(["session_key", "session_id"].iter().all(|name| {
+        columns
+            .iter()
+            .any(|(column, kind)| column == name && kind.eq_ignore_ascii_case("TEXT"))
+    }))
+}
+
 /// [`KeyFacts`] from `session_windows`. The spawner is the window under `spawned_by` — when that key
 /// has several windows (resets, rollovers), the one whose transcript records this session's key as `childSessionKey`.
 #[cfg(feature = "sqlite")]
@@ -807,28 +966,59 @@ fn sqlite_key_facts_inner(
             Ok(candidates)
         };
         let candidates = if let Some((path, reads)) = scoped {
-            let selector = if &key == by {
-                format!("{}:{session_id}", by.len()) + by
-            } else {
-                by.clone()
-            };
-            let mut encoded = String::with_capacity(selector.len() * 2);
+            // Query plans can vary by parameter with SQLite statistics. Check the actual key's
+            // plan rather than applying one plain scan's traversal order to an indexed key.
+            let mut encoded_plan_key = String::with_capacity(by.len() * 2);
             use std::fmt::Write as _;
-            for byte in selector.as_bytes() {
-                write!(&mut encoded, "{byte:02x}")?;
+            for byte in by.as_bytes() {
+                write!(&mut encoded_plan_key, "{byte:02x}")?;
             }
-            let namespace = if &key == by {
-                "openclaw-self-parent-windows"
+            encoded_plan_key.push(':');
+            for byte in session_id.as_bytes() {
+                write!(&mut encoded_plan_key, "{byte:02x}")?;
+            }
+            let (plain, _) =
+                crate::source::inventory("openclaw-parent-plan", &path.join(encoded_plan_key), reads, || {
+                    Ok((
+                        plain_parent_scan(conn, by, session_id)?,
+                        reads.clone(),
+                        std::mem::size_of::<bool>(),
+                    ))
+                })?;
+            if *plain && crate::source::inventory_scoped() {
+                let (groups, _) = crate::source::inventory("openclaw-window-groups", path, reads, || {
+                    let (groups, bytes) = WindowGroups::load(conn)?;
+                    Ok((groups, reads.clone(), bytes))
+                })?;
+                if let Some(groups) = groups.as_ref() {
+                    std::sync::Arc::new(groups.candidates(by, session_id)?)
+                } else {
+                    std::sync::Arc::new(load()?)
+                }
             } else {
-                "openclaw-parent-windows"
-            };
-            crate::source::inventory(namespace, &path.join(encoded), reads, || {
-                let candidates = load()?;
-                let bytes = candidates.capacity() * std::mem::size_of::<String>()
-                    + candidates.iter().map(String::capacity).sum::<usize>();
-                Ok((candidates, reads.clone(), bytes))
-            })?
-            .0
+                let selector = if &key == by {
+                    format!("{}:{session_id}", by.len()) + by
+                } else {
+                    by.clone()
+                };
+                let mut encoded = String::with_capacity(selector.len() * 2);
+                use std::fmt::Write as _;
+                for byte in selector.as_bytes() {
+                    write!(&mut encoded, "{byte:02x}")?;
+                }
+                let namespace = if &key == by {
+                    "openclaw-self-parent-windows"
+                } else {
+                    "openclaw-parent-windows"
+                };
+                crate::source::inventory(namespace, &path.join(encoded), reads, || {
+                    let candidates = load()?;
+                    let bytes = candidates.capacity() * std::mem::size_of::<String>()
+                        + candidates.iter().map(String::capacity).sum::<usize>();
+                    Ok((candidates, reads.clone(), bytes))
+                })?
+                .0
+            }
         } else {
             std::sync::Arc::new(load()?)
         };
@@ -3528,6 +3718,48 @@ mod tests {
 
     #[cfg(feature = "sqlite")]
     #[test]
+    fn sqlite_window_membership_preserves_sql_order_nulls_and_selected_errors() -> Result<()> {
+        let conn = rusqlite::Connection::open_in_memory()?;
+        conn.execute_batch(
+            "CREATE TABLE session_windows(session_key TEXT,session_id TEXT);
+            INSERT INTO session_windows VALUES ('parent','z'),('parent',NULL),('parent','self'),
+                ('parent','a'),('other',x'01'),('utf8',CAST(x'ff' AS TEXT));",
+        )?;
+        assert!(plain_parent_scan(&conn, "parent", "self")?);
+        let (groups, _) = WindowGroups::load(&conn)?;
+        let groups = groups.expect("small native membership table");
+        let oracle = conn
+            .prepare("SELECT session_id FROM session_windows WHERE session_key=?1 AND session_id!=?2")?
+            .query_map(["parent", "self"], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        assert_eq!(groups.candidates("parent", "self")?, oracle);
+        assert!(groups.candidates("missing", "self")?.is_empty());
+        assert!(groups.candidates("other", "self").is_err());
+        assert!(groups.candidates("utf8", "self").is_err());
+        conn.execute("CREATE INDEX windows_by_key ON session_windows(session_key)", [])?;
+        assert!(!plain_parent_scan(&conn, "parent", "self")?);
+        for ddl in [
+            "CREATE TABLE session_windows(session_key TEXT COLLATE NOCASE,session_id TEXT)",
+            "CREATE TABLE session_windows(session_key TEXT,session_id TEXT COLLATE NOCASE)",
+            "CREATE TABLE session_windows(session_key INTEGER,session_id TEXT)",
+            "CREATE TABLE session_windows(session_key TEXT,session_id INTEGER)",
+        ] {
+            let custom = rusqlite::Connection::open_in_memory()?;
+            custom.execute_batch(ddl)?;
+            assert!(!plain_parent_scan(&custom, "parent", "self")?, "{ddl}");
+        }
+        // Construction stops before copying metadata larger than the operation allowance.
+        let large = rusqlite::Connection::open_in_memory()?;
+        large.execute_batch(
+            "CREATE TABLE session_windows(session_key TEXT,session_id TEXT);
+            INSERT INTO session_windows VALUES ('parent',printf('%.*c',9*1024*1024,'x'));",
+        )?;
+        assert!(WindowGroups::load(&large)?.0.is_none());
+        Ok(())
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
     fn sqlite_parent_window_scan_runs_once_per_scope_and_preserves_negative_groups() -> Result<()> {
         let world = cv_testkit::World::in_process("openclaw-sql-parent-scope");
         let dir = world.base.join("agents/main/agent");
@@ -3553,6 +3785,22 @@ mod tests {
                 ],
             )?;
         }
+        for i in 0..40 {
+            let parent = format!("distinct-parent-{i}");
+            let child = format!("distinct-child-{i}");
+            let key = format!("distinct-key-{i}");
+            for (sid, key) in [(&parent, &key), (&child, &format!("distinct-child-key-{i}"))] {
+                conn.execute("INSERT INTO session_nodes(session_key,current_session_id,entry_json,updated_at) VALUES (?1,?2,'{}',1)",rusqlite::params![key,sid])?;
+                conn.execute(
+                    "INSERT INTO session_windows(session_id,session_key,created_at,updated_at) VALUES (?1,?2,1,1)",
+                    rusqlite::params![sid, key],
+                )?;
+            }
+            conn.execute(
+                "UPDATE session_windows SET spawned_by=?1 WHERE session_id=?2",
+                rusqlite::params![key, child],
+            )?;
+        }
         conn.execute("INSERT INTO session_nodes(session_key,current_session_id,entry_json,updated_at) VALUES ('child-negative','negative','{}',1)",[])?;
         conn.execute("INSERT INTO session_windows(session_id,session_key,spawned_by,created_at,updated_at) VALUES ('negative','child-negative','not-yet',1,1)",[])?;
         drop(conn);
@@ -3572,10 +3820,16 @@ mod tests {
             for i in 0..40 {
                 assert_eq!(read(&format!("child-{i}"))?.lineage.parent.as_deref(), Some("parent"));
             }
-            assert_eq!(SQL_PARENT_ROWS.with(|count| count.get()), 1);
+            for i in 0..40 {
+                assert_eq!(
+                    read(&format!("distinct-child-{i}"))?.lineage.parent.as_deref(),
+                    Some(format!("distinct-parent-{i}").as_str())
+                );
+            }
+            assert_eq!(SQL_PARENT_ROWS.with(|count| count.get()), 122);
             one_scan = SQL_PARENT_FULLSCANS.with(|count| count.get());
             assert!(
-                one_scan > 0 && one_scan <= 42,
+                one_scan > 0 && one_scan <= 122,
                 "one actual global scan, not one perchild"
             );
             assert!(read("negative")?.lineage.parent.is_none());
