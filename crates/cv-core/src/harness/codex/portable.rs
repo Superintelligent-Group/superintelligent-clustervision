@@ -288,6 +288,19 @@ fn equals(value: Option<JsonView<'_>>, expected: &str) -> Result<bool> {
 /// Compressed discovery consumes the same frozen decoded ranges as message replay.
 pub(super) fn scan(path: &Path, scan: &mut CodexScan, turns: &mut metadata::Turns) -> Result<()> {
     let rollout = Rollout::open(path)?;
+    // Accepted views already validate every UTF-8 byte. Only malformed giant rows need an
+    // additional encoding check to preserve plain read_to_string's fatal UTF-8 policy;
+    // compressed discovery retains tolerant per-record acceptance.
+    let rejected = |range| -> Result<()> {
+        if rollout.backing.is_none() {
+            anyhow::ensure!(
+                ranges::valid_utf8(&mut rollout.reader(range)?)?,
+                "reading {}: stream did not contain valid UTF-8",
+                path.display()
+            );
+        }
+        Ok(())
+    };
     for record in rollout.records(0)? {
         let (range, _) = record?;
         let range = rollout.trim(range)?;
@@ -307,21 +320,29 @@ pub(super) fn scan(path: &Path, scan: &mut CodexScan, turns: &mut metadata::Turn
                     continue;
                 }
                 Ok(None) => {}
-                Err(error) if error.downcast_ref::<InvalidJson>().is_some() => continue,
+                Err(error) if error.downcast_ref::<InvalidJson>().is_some() => {
+                    rejected(range)?;
+                    continue;
+                }
                 Err(error) => return Err(error),
             }
             // Match .lines()'s whole-line UTF-8 acceptance, including ignored metadata fields.
             match rollout.view(range, |_| Ok(())) {
                 Ok(()) => {}
-                Err(error) if error.downcast_ref::<InvalidJson>().is_some() => continue,
+                Err(error) if error.downcast_ref::<InvalidJson>().is_some() => {
+                    rejected(range)?;
+                    continue;
+                }
                 Err(error) => return Err(error),
             }
             turns.feed_reader(rollout.reader(range)?, scan);
         } else {
             let mut bytes = vec![0; range.len as usize];
             read_exact_at(&rollout.file, &mut bytes, range.offset)?;
-            if let Ok(text) = std::str::from_utf8(&bytes) {
-                turns.feed_line(text, scan);
+            match std::str::from_utf8(&bytes) {
+                Ok(text) => turns.feed_line(text, scan),
+                Err(error) if rollout.backing.is_none() => return Err(error.into()),
+                Err(_) => {}
             }
         }
     }

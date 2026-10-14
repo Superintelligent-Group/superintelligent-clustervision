@@ -2313,10 +2313,7 @@ fn scan_capped(path: &Path, full_scan_cap: u64) -> Result<SessionRef> {
         s.message_count = turns.count();
     } else if is_jsonl {
         if size <= full_scan_cap {
-            let text = fs::read_to_string(path)?;
-            for line in text.lines() {
-                turns.feed_line(line, &mut s);
-            }
+            portable::scan(path, &mut s, &mut turns)?;
             s.message_count = turns.count();
         } else {
             // Head: id / cwd / title / created_at all live near the top.
@@ -2406,6 +2403,43 @@ mod tests {
             opts,
             sink,
         )
+    }
+
+    #[test]
+    fn plain_discovery_bounded_transport_matches_owned_metadata_counts() {
+        let world = cv_testkit::World::in_process("codex-discovery-bounded-transport");
+        let path = world.base.join("rollout-discovery.jsonl");
+        let giant = "body λ\n".repeat(64 * 1024);
+        let records = [
+            serde_json::json!({"type":"session_meta","payload":{"id":"session","cwd":"/p"}}),
+            serde_json::json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"text":giant},{"text":"tail"}]}}),
+            serde_json::json!({"type":"response_item","payload":{"type":"function_call","name":"Read","call_id":"a","arguments":giant}}),
+            serde_json::json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"a","output":giant}}),
+            serde_json::json!({"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":3,"output_tokens":2}}}}),
+        ];
+        let bytes = format!(
+            "{}\ninvalid json\n42\n",
+            records.iter().map(Value::to_string).collect::<Vec<_>>().join("\n")
+        );
+        let mut expected = CodexScan::default();
+        let mut turns = metadata::Turns::default();
+        for line in bytes.lines() {
+            turns.feed_line(line, &mut expected);
+        }
+        expected.message_count = turns.count();
+        fs::write(&path, &bytes).unwrap();
+        let actual = scan_capped(&path, u64::MAX).unwrap();
+        assert_eq!(actual.id, expected.id);
+        assert_eq!(actual.cwd, expected.cwd);
+        assert_eq!(actual.title, expected.title);
+        assert_eq!(actual.message_count, expected.message_count);
+        assert_eq!(actual.created_at, expected.created_at);
+        assert_eq!(actual.updated_at, expected.updated_at);
+        // The whole-file UTF-8 rule applies even to ignored rows after accepted metadata.
+        let mut bad = bytes.into_bytes();
+        bad.extend_from_slice(b"\xff\n");
+        fs::write(&path, bad).unwrap();
+        assert!(scan_capped(&path, u64::MAX).is_err());
     }
 
     #[test]
