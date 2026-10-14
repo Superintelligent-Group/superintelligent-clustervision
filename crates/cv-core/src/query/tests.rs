@@ -130,6 +130,37 @@ fn invalid_queries_point_to_current_schema_command() {
 }
 
 #[test]
+fn ranges_reject_ignored_operators_and_include_date_upper_days() {
+    for source in [
+        "msgs>1..3",
+        "msgs<=1..3",
+        "msgs:3..1",
+        "updated>2026-01-01..2026-01-02",
+        "updated:2026-01-02..2026-01-01",
+        "harness:",
+        "harness:,",
+        "has:",
+        "has:,",
+        "NOT has:",
+    ] {
+        assert!(SessionQuery::parse(source).is_err(), "{source}");
+    }
+    for source in ["msgs:1..3", "msgs=1..3"] {
+        assert!(q(source).prefilter(&refx("a", Harness::Claude, None, None, 3)));
+        assert!(!q(source).prefilter(&refx("a", Harness::Claude, None, None, 4)));
+    }
+    let mut r = refx("a", Harness::Claude, None, None, 1);
+    for source in ["updated:2026-01-01..2026-01-02", "updated=2026-01-01..2026-01-02"] {
+        r.updated_at = "2026-01-02T23:59:59.999999999Z".parse().ok();
+        assert!(q(source).prefilter(&r), "{source}");
+        r.updated_at = "2026-01-03T00:00:00Z".parse().ok();
+        assert!(!q(source).prefilter(&r), "{source}");
+    }
+    r.updated_at = "2026-01-02T12:00:00.000000001Z".parse().ok();
+    assert!(!q("updated:2026-01-01..2026-01-02T12:00:00Z").prefilter(&r));
+}
+
+#[test]
 fn comma_list_is_or() {
     let query = q("harness:claude,codex");
     assert!(query.prefilter(&refx("a", Harness::Claude, None, None, 1)));

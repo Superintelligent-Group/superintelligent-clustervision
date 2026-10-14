@@ -1024,19 +1024,40 @@ fn parse_value(def: &FieldDef, op: Op, raw: &str, quoted: bool) -> Result<Val, S
     match def.kind {
         Kind::Num => {
             if let Some((lo, hi)) = raw.split_once("..") {
-                Ok(Val::NumRange(parse_u64(lo, def)?, parse_u64(hi, def)?))
+                check_range_operator(def, op)?;
+                let (lo, hi) = (parse_u64(lo, def)?, parse_u64(hi, def)?);
+                if lo > hi {
+                    return Err(format!("reversed range for {} — see `cv schema`", def.name));
+                }
+                Ok(Val::NumRange(lo, hi))
             } else {
                 Ok(Val::Num(parse_u64(raw, def)?))
             }
         }
         Kind::Date => {
             if let Some((lo, hi)) = raw.split_once("..") {
-                Ok(Val::DateRange(parse_date(lo)?, parse_date(hi)?))
+                check_range_operator(def, op)?;
+                let lo = parse_date(lo)?;
+                // A date endpoint includes its entire day; RFC3339 endpoints remain exact.
+                let hi = match NaiveDate::parse_from_str(hi.trim(), "%Y-%m-%d") {
+                    Ok(day) => day
+                        .and_hms_nano_opt(23, 59, 59, 999_999_999)
+                        .expect("end of day")
+                        .and_utc(),
+                    Err(_) => parse_date(hi)?,
+                };
+                if lo > hi {
+                    return Err(format!("reversed range for {} — see `cv schema`", def.name));
+                }
+                Ok(Val::DateRange(lo, hi))
             } else if op == Op::Contains {
                 // A plain `field:DATE` means "any time that day", not "exactly midnight".
                 if let Ok(d) = NaiveDate::parse_from_str(raw.trim(), "%Y-%m-%d") {
                     let lo = d.and_hms_opt(0, 0, 0).expect("midnight").and_utc();
-                    let hi = lo + chrono::Duration::days(1) - chrono::Duration::nanoseconds(1);
+                    let hi = d
+                        .and_hms_nano_opt(23, 59, 59, 999_999_999)
+                        .expect("end of day")
+                        .and_utc();
                     return Ok(Val::DateRange(lo, hi));
                 }
                 Ok(Val::Date(parse_date(raw)?)) // an RFC3339 instant stays exact
@@ -1046,6 +1067,9 @@ fn parse_value(def: &FieldDef, op: Op, raw: &str, quoted: bool) -> Result<Val, S
         }
         Kind::HarnessEnum => {
             let names = or_list(raw, quoted, false);
+            if names.is_empty() {
+                return Err(format!("empty value for {} — see `cv schema`", def.name));
+            }
             for n in &names {
                 if Harness::parse(n).is_none() {
                     return Err(format!("unknown harness {n:?} — see `cv schema`"));
@@ -1055,6 +1079,9 @@ fn parse_value(def: &FieldDef, op: Op, raw: &str, quoted: bool) -> Result<Val, S
         }
         Kind::Flag => {
             let flags = or_list(raw, quoted, true);
+            if flags.is_empty() {
+                return Err(format!("empty value for {} — see `cv schema`", def.name));
+            }
             for fl in &flags {
                 if !HAS_FLAGS.iter().any(|(n, _)| n == fl) {
                     return Err(format!(
@@ -1073,6 +1100,16 @@ fn parse_value(def: &FieldDef, op: Op, raw: &str, quoted: bool) -> Result<Val, S
             Ok(Val::Strs(strs))
         }
     }
+}
+
+fn check_range_operator(def: &FieldDef, op: Op) -> Result<(), String> {
+    if matches!(op, Op::Contains | Op::Eq) {
+        return Ok(());
+    }
+    Err(format!(
+        "{} ranges take `:` or `=`; use two comparisons for explicit bounds — see `cv schema`",
+        def.name
+    ))
 }
 
 fn parse_u64(s: &str, def: &FieldDef) -> Result<u64, String> {
@@ -1150,6 +1187,7 @@ pub fn reference() -> String {
     s.push_str("  ops: ':' (contains) '=' (exact); for numbers/dates also > >= < <=\n");
     s.push_str("  text: uses full-text search; only ':' is supported (quote a phrase for phrase search).\n");
     s.push_str("  values: word | \"quoted phrase\" | a,b,c (OR-list) | lo..hi (range, numbers & dates)\n");
+    s.push_str("  ranges are inclusive and take ':' or '='; a date upper endpoint includes that whole day.\n");
     s.push_str("  quoting is literal: commas inside quotes are text, not an OR-list, and a fully-quoted\n");
     s.push_str("  word is always a needle. `field:YYYY-MM-DD` on a date field means that whole day.\n\n");
     s.push_str("FIELDS\n");
