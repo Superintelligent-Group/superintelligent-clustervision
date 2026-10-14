@@ -24,6 +24,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
 #[cfg(test)]
 #[path = "emit_legacy.rs"]
 mod legacy;
+mod replay;
 mod stream;
 #[cfg(test)]
 mod tests;

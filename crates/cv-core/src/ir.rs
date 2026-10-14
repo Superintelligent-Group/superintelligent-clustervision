@@ -703,10 +703,7 @@ impl Message {
         }
         if let Some(record) = &mut self.complete_record {
             let record = std::sync::Arc::make_mut(record);
-            record.value.make_owned()?;
-            // Owned raw records use the native codec comparison at replay time; retaining
-            // an owned witness would duplicate payloads which are already in IR and _record.
-            record.projection.clear();
+            record.materialize()?;
         }
         Ok(())
     }

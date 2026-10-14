@@ -1,5 +1,4 @@
 //! Checked complete records retain the public `extra._record` contract.
-#[cfg(any(feature = "sqlite", test))]
 use super::Block;
 use super::{Harness, Message};
 use crate::{harness::wire::write::ObjectWriter, Json};
@@ -23,7 +22,6 @@ impl CompleteRecord {
         Self::attach_inner(messages, harness, value, identity, false);
     }
     /// Retain cheap checked projection descriptors for unchanged native replay.
-    #[cfg(any(feature = "sqlite", test))]
     pub(crate) fn attach_replay(messages: &mut [Message], harness: Harness, value: Json, identity: Map<String, Value>) {
         Self::attach_inner(messages, harness, value, identity, true);
     }
@@ -70,9 +68,18 @@ impl CompleteRecord {
             projection,
         }));
     }
-    #[cfg(any(feature = "sqlite", test))]
+    /// Full reads own raw payloads; keep only the captured envelopes needed to reject
+    /// edited metadata when a native codec reconstructs that record's blocks later.
+    pub(crate) fn materialize(&mut self) -> Result<()> {
+        self.value.make_owned()?;
+        for message in &mut self.projection {
+            message.content.clear();
+        }
+        Ok(())
+    }
     pub(crate) fn unchanged(&self, harness: Harness, messages: &[Message]) -> bool {
         self.harness == harness
+            && matches!(self.value, Json::Source(_))
             && !self.projection.is_empty()
             && messages.len() >= self.projection.len()
             && self
@@ -171,7 +178,6 @@ pub(crate) fn write_extra(message: &Message, writer: &mut dyn Write) -> Result<(
     }
     out.finish()
 }
-#[cfg(any(feature = "sqlite", test))]
 fn same_json(a: &Json, b: &Json) -> bool {
     match (a, b) {
         (Json::Owned(a), Json::Owned(b)) => a == b,
@@ -179,7 +185,6 @@ fn same_json(a: &Json, b: &Json) -> bool {
         _ => false,
     }
 }
-#[cfg(any(feature = "sqlite", test))]
 fn same_block(a: &Block, b: &Block) -> bool {
     match (a, b) {
         (Block::Text { text: a }, Block::Text { text: b }) => a == b,
@@ -254,7 +259,6 @@ fn same_block(a: &Block, b: &Block) -> bool {
         _ => false,
     }
 }
-#[cfg(any(feature = "sqlite", test))]
 fn same_usage(a: &Option<super::Usage>, b: &Option<super::Usage>) -> bool {
     match (a, b) {
         (None, None) => true,
@@ -275,8 +279,7 @@ fn same_usage(a: &Option<super::Usage>, b: &Option<super::Usage>) -> bool {
         _ => false,
     }
 }
-#[cfg(any(feature = "sqlite", test))]
-fn same_envelope(a: &Message, b: &Message) -> bool {
+pub(crate) fn same_envelope(a: &Message, b: &Message) -> bool {
     a.id == b.id
         && a.parent_id == b.parent_id
         && a.role == b.role
@@ -294,7 +297,6 @@ fn same_envelope(a: &Message, b: &Message) -> bool {
                 .filter(|(key, _)| key.as_str() != crate::harness::claude::CARRIER_KEY))
 }
 
-#[cfg(any(feature = "sqlite", test))]
 pub(crate) fn same_message(a: &Message, b: &Message) -> bool {
     same_envelope(a, b)
         && a.content.len() == b.content.len()
@@ -318,6 +320,23 @@ pub(crate) fn same_except_first_text(a: &Message, b: &Message) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn materialized_empty_replay_never_looks_like_checked_unchanged() -> Result<()> {
+        let world = cv_testkit::World::in_process("record-empty-replay");
+        let path = world.base.join("empty.json");
+        std::fs::write(&path, "{}")?;
+        let mut messages = vec![Message::new(super::super::Role::User)];
+        CompleteRecord::attach_replay(&mut messages, Harness::OpenClaw, Json::source(&path, 0, 2)?, Map::new());
+        let mut record = messages[0].complete_record.as_ref().unwrap().as_ref().clone();
+        assert!(record.unchanged(Harness::OpenClaw, &messages));
+        record.materialize()?;
+        assert!(!record.unchanged(Harness::OpenClaw, &messages));
+        assert!(!record.text_overlay(Harness::OpenClaw, &messages)?);
+        assert_eq!(record.projection.len(), 1);
+        assert!(record.projection[0].content.is_empty());
+        Ok(())
+    }
 
     #[test]
     fn replay_usage_comparison_matches_serialized_value_oracle() {

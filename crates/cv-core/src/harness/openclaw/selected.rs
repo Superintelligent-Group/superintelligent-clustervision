@@ -1,5 +1,5 @@
 //! JSONL reads retain checked ordinary payload ranges, including complete and branch-selected messages.
-//! Complete unknown/control rows and system/custom roles keep their existing owned policy.
+//! Unknown rich metadata and demanded Session.system_prompt keep their owned policy.
 //! One captured original source serves navigation and payload replay.
 use super::*;
 use crate::harness::store::{document::Fields, jsonl::ranges};
@@ -57,7 +57,7 @@ pub(super) fn stream(
                 source.read_borrowed_range_value(
                     at + (trimmed.as_ptr() as usize - text.as_ptr() as usize) as u64,
                     trimmed,
-                    |view| project(view, source),
+                    |view| project(view, source, opts.complete),
                 )
             });
             consume(rows, r, facts, opts, sink)
@@ -74,7 +74,9 @@ pub(super) fn stream(
                 if range.len == 0 {
                     return Ok(None);
                 }
-                source.read_positioned_range_value(&context, range.offset, range.len, |view| project(view, source))
+                source.read_positioned_range_value(&context, range.offset, range.len, |view| {
+                    project(view, source, opts.complete)
+                })
             });
             consume(rows, r, facts, opts, sink)
         }
@@ -129,8 +131,8 @@ pub(super) fn tree(
         let rows = navigation.into_iter().map(|navigation| {
             let (offset, len) = records[navigation.index];
             source.read_range_value(offset, len, |view| {
-                let row = if opts.spans {
-                    project(view, source)?
+                let row = if opts.spans || opts.complete {
+                    project(view, source, opts.complete)?
                 } else {
                     Some(Row::active(view.resolve()?.into_owned()))
                 };
@@ -255,7 +257,7 @@ pub(super) fn sqlite(
         let rows = navigation.into_iter().map(|navigation| {
             let (offset, len) = records[navigation.index];
             source.read_backing_value(Arc::clone(&arena), offset, len, |view| {
-                Ok(project(view, &source)?.map(|mut row| {
+                Ok(project(view, &source, opts.complete)?.map(|mut row| {
                     row.active = navigation.active;
                     row.parent = navigation.parent;
                     row
@@ -382,20 +384,58 @@ fn consume(
             }
         })
         .flatten();
-    let session = stream_rows(rows, r, facts, opts, sink);
+    let session = if opts.spans {
+        stream_rows(rows, r, facts, opts, sink)
+    } else {
+        struct OwnedSink<'a> {
+            inner: &'a mut dyn MessageSink,
+            resolver: crate::lazy::Resolver,
+        }
+        impl MessageSink for OwnedSink<'_> {
+            fn message(&mut self, _: Message) -> Flow {
+                unreachable!("checked wrapper uses try_message")
+            }
+            fn try_message(&mut self, mut message: Message) -> Result<Flow> {
+                message.materialize(&self.resolver)?;
+                self.inner.try_message(message)
+            }
+            fn try_meta(&mut self, session: &Session) -> Result<()> {
+                self.inner.try_meta(session)
+            }
+        }
+        let mut owned = OwnedSink {
+            inner: sink,
+            resolver: crate::lazy::Resolver::new(Some(r.path.clone())),
+        };
+        crate::stream::checked(&mut owned, |sink| Ok(stream_rows(rows, r, facts, opts, sink)))?
+    };
     if let Some(error) = error {
         return Err(error);
     }
     Ok(session)
 }
 
-fn project(view: JsonView<'_>, source: &JsonSource) -> Result<Option<Row>> {
+fn project(view: JsonView<'_>, source: &JsonSource, complete: bool) -> Result<Option<Row>> {
+    let native_record = complete.then(|| view.to_json()).transpose()?;
     const TOP: &[&str] = &["type", "id", "parentId", "timestamp", "message"];
     let Some(top) = Fields::parse(view, TOP)? else {
-        return Ok(Some(Row::active(view.resolve()?.into_owned())));
+        return Ok(Some(Row {
+            native_record,
+            ..Row::active(view.resolve()?.into_owned())
+        }));
     };
-    if top.string("type")?.as_deref() != Some("message") {
-        return Ok(Some(Row::active(view.resolve()?.into_owned())));
+    let record_type = top.string("type")?;
+    if matches!(
+        record_type.as_deref(),
+        Some("compaction" | "branch_summary" | "custom_message")
+    ) {
+        return control(view, source, native_record).map(Some);
+    }
+    if record_type.as_deref() != Some("message") {
+        return Ok(Some(Row {
+            native_record,
+            ..Row::active(view.resolve()?.into_owned())
+        }));
     }
     const META: &[&str] = &[
         "role",
@@ -418,17 +458,32 @@ fn project(view: JsonView<'_>, source: &JsonSource) -> Result<Option<Row>> {
         "details",
         "content",
     ];
-    let Some(body) = top.get("message") else {
-        return Ok(Some(Row::active(view.resolve()?.into_owned())));
+    let Some(body_view) = top.get("message") else {
+        return Ok(Some(Row {
+            native_record,
+            ..Row::active(view.resolve()?.into_owned())
+        }));
     };
-    let Some(body) = Fields::parse(body, META)? else {
-        return Ok(Some(Row::active(view.resolve()?.into_owned())));
+    let Some(body) = Fields::parse(body_view, META)? else {
+        return Ok(Some(Row {
+            native_record,
+            ..Row::active(view.resolve()?.into_owned())
+        }));
     };
     let role = body.string("role")?.unwrap_or_default();
+    if matches!(
+        role.as_str(),
+        "bashExecution" | "branchSummary" | "compactionSummary" | "custom"
+    ) {
+        return custom_message(&top, body_view, &role, source, native_record).map(Some);
+    }
     if !matches!(role.as_str(), "user" | "assistant" | "toolResult") {
-        // System text is also demanded as owned Session.system_prompt; custom role composition
-        // remains the established owned boundary.
-        return Ok(Some(Row::active(view.resolve()?.into_owned())));
+        // System text is also demanded as owned Session.system_prompt; unknown roles
+        // remain the established owned boundary.
+        return Ok(Some(Row {
+            native_record,
+            ..Row::active(view.resolve()?.into_owned())
+        }));
     }
     let content = body.get("content");
     let mut blocks = Vec::new();
@@ -481,12 +536,133 @@ fn project(view: JsonView<'_>, source: &JsonSource) -> Result<Option<Row>> {
     Ok(Some(Row {
         v,
         projected: Some(messages),
+        native_record,
         active: true,
         parent: None,
     }))
 }
 
-fn projected_block(view: JsonView<'_>) -> Result<Option<Block>> {
+/// Keep native control metadata while retaining its visible summary/content separately.
+fn metadata_without(view: JsonView<'_>, payloads: &[&str]) -> Result<serde_json::Map<String, Value>> {
+    let mut out = serde_json::Map::new();
+    view.for_each_entry(|key, value| {
+        if !payloads.contains(&key) {
+            out.insert(key.into(), value.resolve()?.into_owned());
+        }
+        Ok(())
+    })?;
+    Ok(out)
+}
+fn control(view: JsonView<'_>, source: &JsonSource, native_record: Option<crate::Json>) -> Result<Row> {
+    let fields = Fields::parse(view, &["type", "summary", "content"])?.unwrap();
+    let ty = fields.string("type")?.unwrap();
+    let text = if ty == "custom_message" {
+        result_text(fields.get("content"), source)?
+    } else {
+        fields
+            .get("summary")
+            .map(|v| v.source_text())
+            .transpose()?
+            .flatten()
+            .unwrap_or_default()
+    };
+    let mut value = metadata_without(view, &["summary", "content"])?;
+    if ty == "compaction" {
+        let present = match fields.get("summary") {
+            Some(summary) if summary.is_string()? => super::super::wire::text_title(Some(summary))?.is_some(),
+            _ => false,
+        };
+        value.insert(
+            "summary".into(),
+            Value::String(if present { "x".into() } else { String::new() }),
+        );
+    } else {
+        value.insert(
+            if ty == "custom_message" { "content" } else { "summary" }.into(),
+            Value::String(if text.is_empty() { String::new() } else { "x".into() }),
+        );
+    }
+    let value = Value::Object(value);
+    let mut messages = parse_control_entry(&value);
+    for message in &mut messages {
+        if message.kind != MessageKind::CompactionBoundary {
+            if let Some(Block::Text { text: target }) = message.content.first_mut() {
+                *target = text.clone();
+            }
+        }
+    }
+    Ok(Row {
+        v: value,
+        projected: Some(messages),
+        native_record,
+        active: true,
+        parent: None,
+    })
+}
+fn custom_message(
+    top: &Fields<'_>,
+    body: JsonView<'_>,
+    role: &str,
+    source: &JsonSource,
+    native_record: Option<crate::Json>,
+) -> Result<Row> {
+    let fields = Fields::parse(body, &["content", "summary", "command", "output"])?.unwrap();
+    let text = match role {
+        "custom" => result_text(fields.get("content"), source)?,
+        "bashExecution" => {
+            let output = fields.get("output").map(|v| v.source_text()).transpose()?.flatten();
+            super::super::store::text::append(source, &source.decoded_backing()?, |builder| {
+                builder.push("$ ")?;
+                if let Some(command) = fields.get("command") {
+                    builder.push_string(command)?;
+                }
+                if output.as_ref().is_some_and(|text| !text.is_empty()) {
+                    builder.push("\n")?;
+                    builder.push_string(fields.get("output").unwrap())?;
+                }
+                Ok(())
+            })?
+        }
+        _ => fields
+            .get("summary")
+            .map(|v| v.source_text())
+            .transpose()?
+            .flatten()
+            .unwrap_or_default(),
+    };
+    let mut body = metadata_without(body, &["content", "summary", "command", "output"])?;
+    let key = if role == "custom" {
+        "content"
+    } else if role == "bashExecution" {
+        "command"
+    } else {
+        "summary"
+    };
+    body.insert(
+        key.into(),
+        Value::String(if text.is_empty() { String::new() } else { "x".into() }),
+    );
+    let mut value = top.project(&["type", "id", "parentId", "timestamp"])?;
+    value.insert("message".into(), Value::Object(body));
+    let value = Value::Object(value);
+    let mut messages = parse_entry(&value);
+    for message in &mut messages {
+        if message.kind != MessageKind::CompactionBoundary {
+            if let Some(Block::Text { text: target }) = message.content.first_mut() {
+                *target = text.clone();
+            }
+        }
+    }
+    Ok(Row {
+        v: value,
+        projected: Some(messages),
+        native_record,
+        active: true,
+        parent: None,
+    })
+}
+
+pub(super) fn projected_block(view: JsonView<'_>) -> Result<Option<Block>> {
     let mut block = anthropic::block_from_view(view, &anthropic::OPENCLAW, true)?;
     match &mut block {
         Some(Block::Text { text }) => {
@@ -896,6 +1072,82 @@ mod tests {
         )
         .unwrap_err();
         assert!(format!("{error:#}").contains("valid UTF-8"));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod control_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn checked_control_and_custom_bodies_match_owned_without_payload_trees() -> Result<()> {
+        let world = cv_testkit::World::in_process("openclaw-checked-controls");
+        let path = world.base.join("controls.jsonl");
+        let adapter = OpenClaw { roots: vec![] };
+        let giant = "escaped λ\n".repeat(10000);
+        let mut rows = vec![
+            json!({"type":"session","version":4,"cwd":"/repo"}),
+            json!({"type":"compaction","id":"c","parentId":null,"summary":giant,"tokensBefore":17,"details":{"hook":true}}),
+            json!({"type":"branch_summary","id":"b","parentId":"c","summary":giant,"fromId":"earlier"}),
+            json!({"type":"custom_message","id":"n","parentId":"b","content":[{"text":giant},{"text":"tail"}],"details":{"custom":true}}),
+        ];
+        for role in ["bashExecution", "branchSummary", "compactionSummary", "custom"] {
+            rows.push(json!({"type":"message","id":role,"message":{"role":role,"summary":giant,"command":giant,"output":giant,"content":[{"text":giant},{"text":"tail"}],"display":true,"exitCode":1,"tokensBefore":9,"customType":"note"}}));
+        }
+        // A nonstring/missing summary and a whitespace-only compaction must keep their old
+        // boundary/summary cardinality, even when unrelated payloads are large.
+        for summary in [
+            json!(null),
+            json!([{"text":"not a summary"}]),
+            json!(" \n".repeat(10000)),
+        ] {
+            rows.push(json!({"type":"compaction","id":"empty","summary":summary}));
+        }
+        let text = rows.iter().map(Value::to_string).collect::<Vec<_>>().join("\n");
+        fs::write(&path, &text)?;
+        let reference = SessionRef::new("controls", Harness::OpenClaw, &path);
+        for complete in [false, true] {
+            let options = ParseOptions {
+                spans: true,
+                complete,
+                ..ParseOptions::full()
+            };
+            let expected = parse_text_with(&text, &reference, &options);
+            let mut sink = crate::stream::CollectSink::default();
+            let mut actual = adapter.stream(&reference, &options, &mut sink)?;
+            actual.messages = sink.messages;
+            assert!(actual
+                .messages
+                .iter()
+                .filter(|m| m.kind == MessageKind::CompactionSummary)
+                .all(|m| m.content.iter().any(|b| matches!(
+                    b,
+                    Block::Text {
+                        text: crate::Text::Source(_)
+                    }
+                ))));
+            assert!(actual
+                .messages
+                .iter()
+                .find(|m| m.id.as_deref() == Some("bashExecution"))
+                .unwrap()
+                .content
+                .iter()
+                .any(|b| matches!(
+                    b,
+                    Block::Text {
+                        text: crate::Text::Source(_)
+                    }
+                )));
+            actual.materialize()?;
+            assert_eq!(
+                serde_json::to_value(actual)?,
+                serde_json::to_value(expected)?,
+                "complete={complete}"
+            );
+        }
         Ok(())
     }
 }

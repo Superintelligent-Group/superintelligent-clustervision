@@ -244,7 +244,7 @@ impl Adapter for OpenClaw {
                 if tree {
                     return selected::tree(r, &facts, opts, sink, source);
                 }
-                if opts.spans {
+                if opts.spans || opts.complete {
                     return selected::stream(r, &facts, opts, sink, source);
                 }
                 // `filter_map`, not `map_while`: a single undecodable line (stray non-UTF8 bytes) must be
@@ -298,6 +298,7 @@ fn file_has_leaf_controls(path: &Path) -> Result<bool> {
 struct Row {
     v: Value,
     projected: Option<Vec<Message>>,
+    native_record: Option<crate::Json>,
     /// On the visible branch (always true when no `leaf` control exists).
     active: bool,
     /// Parent id after active-branch normalization (`Some(_)` when the tree rewrote it).
@@ -309,6 +310,7 @@ impl Row {
         Row {
             v,
             projected: None,
+            native_record: None,
             active: true,
             parent: None,
         }
@@ -382,6 +384,10 @@ fn stream_rows<I: Iterator<Item = Row>>(
         let ty = v.get("type").and_then(Value::as_str).unwrap_or("");
         if ty == "session" {
             header_version = v.get("version").and_then(Value::as_i64);
+            if opts.complete {
+                s.harness_extra_mut(Harness::OpenClaw)
+                    .insert("header_record".into(), v.clone());
+            }
             if s.cwd.is_none() {
                 s.cwd = v.get("cwd").and_then(Value::as_str).map(PathBuf::from);
             }
@@ -398,7 +404,10 @@ fn stream_rows<I: Iterator<Item = Row>>(
         if !row.active && !opts.complete {
             continue;
         }
-        let msgs = if let Some(messages) = row.projected {
+        let native_record = opts
+            .complete
+            .then(|| row.native_record.unwrap_or_else(|| v.clone().into()));
+        let mut msgs = if let Some(messages) = row.projected {
             messages
         } else {
             match ty {
@@ -449,7 +458,10 @@ fn stream_rows<I: Iterator<Item = Row>>(
                 _ => carrier_if_complete(&v, opts),
             }
         };
-        for (i, mut m) in msgs.into_iter().enumerate() {
+        if opts.complete && msgs.is_empty() {
+            msgs = carrier_if_complete(&v, opts);
+        }
+        for (i, m) in msgs.iter_mut().enumerate() {
             // A cron run's or a sub-agent's prompts were written by the scheduler / the parent
             // agent, not typed: the session key says which.
             if let Some(o) = prompt_origin {
@@ -491,6 +503,11 @@ fn stream_rows<I: Iterator<Item = Row>>(
                 m.harness_extra_mut(Harness::OpenClaw)
                     .insert("session_version".into(), Value::from(ver));
             }
+        }
+        if let Some(record) = native_record.filter(|_| v.is_object()) {
+            CompleteRecord::attach_replay(&mut msgs, Harness::OpenClaw, record, serde_json::Map::new());
+        }
+        for m in msgs {
             // Hand session metadata to the sink before the first message (header consumers).
             if !meta_sent {
                 sink.meta(&s);
@@ -1924,6 +1941,7 @@ fn select_rows(entries: Vec<Value>, complete: bool) -> Vec<Row> {
         .map(|row| Row {
             v: entries[row.index].take().expect("navigation selects each entry once"),
             projected: None,
+            native_record: None,
             active: row.active,
             parent: row.parent,
         })

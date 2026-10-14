@@ -8,7 +8,11 @@ fn normalized(path: &Path) -> Result<Vec<u8>> {
     for line in fs::read_to_string(path)?.lines() {
         let mut value: Value = serde_json::from_str(line)?;
         if value["type"] != "session" {
-            let id = value["id"].as_str().unwrap().to_owned();
+            let Some(id) = value["id"].as_str().map(str::to_owned) else {
+                serde_json::to_writer(&mut output, &value)?;
+                output.push(b'\n');
+                continue;
+            };
             assert_eq!(id.len(), 8);
             assert!(id.bytes().all(|b| b.is_ascii_hexdigit()));
             assert!(!ids.contains_key(&id));
@@ -117,24 +121,14 @@ fn fixture(base: &Path) -> Result<Session> {
         },
     ];
     let mut tool = Message::new(Role::Tool);
-    tool.content = vec![
-        Block::ToolResult {
-            tool_use_id: "deferred".into(),
-            content: source_text(&base.join("result.json"), &"result λ\n".repeat(1000))?,
-            is_error: false,
-            tool_name: Some("inner".into()),
-            status: Some("completed".into()),
-            details: None,
-        },
-        Block::ToolResult {
-            tool_use_id: "ignored-second".into(),
-            content: "second result omitted".into(),
-            is_error: true,
-            tool_name: None,
-            status: None,
-            details: None,
-        },
-    ];
+    tool.content = vec![Block::ToolResult {
+        tool_use_id: "deferred".into(),
+        content: source_text(&base.join("result.json"), &"result λ\n".repeat(1000))?,
+        is_error: false,
+        tool_name: Some("inner".into()),
+        status: Some("completed".into()),
+        details: None,
+    }];
     let mut summary = Message::of_kind(Role::System, MessageKind::CompactionSummary, Origin::Harness);
     summary.content = vec![
         Block::Text { text: "".into() },
@@ -257,7 +251,7 @@ fn checked_openclaw_title_policy_matches_explicit_and_first_user_legacy() -> Res
             ];
             let mut second = Message::new(Role::User);
             second.content.push(Block::Text {
-                text: "never a fallback".into(),
+                text: "later meaningful prompt".into(),
             });
             first.content.push(Block::Thinking {
                 text: "user reasoning".into(),
@@ -436,5 +430,222 @@ fn checked_openclaw_complete_preparation_preserves_ir_wire_report_and_late_failu
         assert_eq!(fs::read(&index)?, index_bytes);
         fs::write(&source, &bytes)?;
     }
+    Ok(())
+}
+
+#[test]
+fn tool_export_preserves_every_result_structured_details_and_images() -> Result<()> {
+    let world = cv_testkit::World::in_process("openclaw-tool-export");
+    let mut source = Session::new("tools", Harness::Claude);
+    source.created_at = Some("2026-10-14T12:00:00Z".parse()?);
+    let mut tool = Message::new(Role::Tool);
+    let body = source_text(&world.base.join("body.json"), &"selected result λ\n".repeat(5000))?;
+    tool.content = vec![
+        Block::ToolResult {
+            tool_use_id: "a".into(),
+            content: body,
+            is_error: false,
+            tool_name: Some("first".into()),
+            status: None,
+            details: Some(json!({"patch":{"path":"file","lines":[1,2]}})),
+        },
+        Block::Image {
+            media_type: Some("image/png".into()),
+            data_ref: Some("https://example.test/image".into()),
+        },
+        Block::ToolResult {
+            tool_use_id: "b".into(),
+            content: "second result".into(),
+            is_error: true,
+            tool_name: Some("second".into()),
+            status: None,
+            details: Some(json!({"failure":"rejected"})),
+        },
+    ];
+    source.messages.push(tool);
+    let result = emit(&source, &world.base.join("output"), &EmitOptions::default())?;
+    let adapter = crate::harness::for_harness(Harness::OpenClaw).unwrap();
+    let reference = crate::SessionRef::new(&result.new_id, Harness::OpenClaw, &result.path);
+    let parsed = crate::stream::collect_with(adapter.as_ref(), &reference, &crate::stream::ParseOptions::full())?;
+    assert_eq!(parsed.messages.len(), 2);
+    assert!(
+        matches!(&parsed.messages[0].content[0], Block::ToolResult { tool_use_id, tool_name, is_error:false, details:Some(details), content, .. }
+        if tool_use_id=="a" && tool_name.as_deref()==Some("first") && details==&json!({"patch":{"path":"file","lines":[1,2]}})
+        && content.inline_str()==Some("selected result λ\n".repeat(5000).as_str()))
+    );
+    assert!(
+        matches!(&parsed.messages[0].content[1], Block::Image { data_ref:Some(value), .. } if value=="https://example.test/image")
+    );
+    assert!(
+        matches!(&parsed.messages[1].content[0], Block::ToolResult { tool_use_id, is_error:true, details:Some(details), content, .. }
+        if tool_use_id=="b" && details==&json!({"failure":"rejected"}) && content.inline_str()==Some("second result"))
+    );
+    assert_eq!(parsed.messages[1].parent_id, parsed.messages[0].id);
+    Ok(())
+}
+
+#[test]
+fn native_complete_export_preserves_records_branch_links_and_one_compaction_pair() -> Result<()> {
+    use crate::stream::ParseOptions;
+    let world = cv_testkit::World::in_process("openclaw-native-complete-export");
+    let original =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/openclaw/branchy-v4.jsonl"))?;
+    let mut rows = original
+        .lines()
+        .map(serde_json::from_str::<Value>)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    rows[0]["futureHeader"] = json!({"preserve":true});
+    rows[1]["message"]["futureUser"] = json!({"retain":"metadata"});
+    rows[2]["message"]["content"].as_array_mut().unwrap().extend([
+        json!({"type":"thinking","thinking":"guarded reasoning λ\n".repeat(1000),"thinkingSignature":"sig"}),
+        json!({"type":"futureBlock","payload":{"retain":true}}),
+    ]);
+    rows[3]["message"]["diagnostics"] = json!({"inactive":"preserve"});
+    rows.push(json!({"type":"future_record","id":"future","parentId":"a3","appendMode":"side","payload":{"large":"retained λ\n".repeat(1000)}}));
+    rows.push(json!({"type":"label","id":"label","parentId":"a3","targetId":"u1","label":"keep target"}));
+    let path = world.base.join("source.jsonl");
+    let mut bytes = Vec::new();
+    for row in &rows {
+        serde_json::to_writer(&mut bytes, row)?;
+        bytes.push(b'\n');
+    }
+    fs::write(&path, &bytes)?;
+    let adapter = crate::harness::for_harness(Harness::OpenClaw).unwrap();
+    let reference = crate::SessionRef::new("source", Harness::OpenClaw, &path);
+    let source = crate::emit::parse_for_emit(adapter.as_ref(), &reference, Harness::OpenClaw)?;
+    assert!(source.messages.iter().any(|m| m.complete_record.is_some()));
+    for mode in ThinkingMode::ALL {
+        let result = emit(
+            &source,
+            &world.base.join(format!("output-{mode}")),
+            &EmitOptions {
+                new_id: Some("rehomed".into()),
+                thinking: mode,
+                ..Default::default()
+            },
+        )?;
+        let actual = fs::read_to_string(&result.path)?
+            .lines()
+            .map(serde_json::from_str::<Value>)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        assert_eq!(
+            actual.len(),
+            rows.len(),
+            "one original row, including a single compaction record, must emit once"
+        );
+        let identities: HashMap<String, String> = actual
+            .iter()
+            .zip(&rows)
+            .skip(1)
+            .filter_map(|(a, b)| Some((a["id"].as_str()?.into(), b["id"].as_str()?.into())))
+            .collect();
+        for (index, (mut actual, expected)) in actual.into_iter().zip(&rows).enumerate() {
+            let mut expected = expected.clone();
+            if index == 0 {
+                expected["id"] = json!("rehomed");
+            } else {
+                for field in [
+                    "id",
+                    "parentId",
+                    "targetId",
+                    "appendParentId",
+                    "firstKeptEntryId",
+                    "fromId",
+                ] {
+                    if let Some(old) = actual
+                        .get(field)
+                        .and_then(Value::as_str)
+                        .and_then(|id| identities.get(id))
+                    {
+                        actual[field] = json!(old);
+                    }
+                }
+                if mode != ThinkingMode::Native {
+                    if let Some(parts) = expected.pointer_mut("/message/content").and_then(Value::as_array_mut) {
+                        for part in parts.iter_mut() {
+                            if part["type"] == "thinking" && mode == ThinkingMode::Text {
+                                *part = json!({"type":"text","text":part["thinking"]});
+                            }
+                        }
+                        if mode == ThinkingMode::Drop {
+                            parts.retain(|part| part["type"] != "thinking");
+                        }
+                    }
+                }
+            }
+            assert_eq!(actual, expected, "row {index} mode {mode}");
+        }
+        let emitted = crate::SessionRef::new(&result.new_id, Harness::OpenClaw, &result.path);
+        let parsed = crate::stream::collect_with(adapter.as_ref(), &emitted, &ParseOptions::full())?;
+        assert_eq!(
+            parsed
+                .messages
+                .iter()
+                .filter(|m| m.kind == MessageKind::CompactionBoundary)
+                .count(),
+            1
+        );
+        assert_eq!(
+            parsed
+                .messages
+                .iter()
+                .filter(|m| m.kind == MessageKind::CompactionSummary)
+                .count(),
+            1
+        );
+        assert!(!parsed
+            .messages
+            .iter()
+            .any(|m| m.text().is_some_and(|text| text == "second answer (side branch)")));
+    }
+    // Actual IR edits must win over the retained raw record.
+    let mut edited = source.clone();
+    let user = edited
+        .messages
+        .iter_mut()
+        .find(|m| m.id.as_deref() == Some("u1"))
+        .unwrap();
+    user.content[0] = Block::Text {
+        text: "edited prompt".into(),
+    };
+    let result = emit(&edited, &world.base.join("edited"), &EmitOptions::default())?;
+    let emitted = crate::SessionRef::new(&result.new_id, Harness::OpenClaw, &result.path);
+    let parsed = crate::stream::collect_with(adapter.as_ref(), &emitted, &ParseOptions::full())?;
+    assert!(parsed
+        .messages
+        .iter()
+        .any(|m| m.text().as_deref() == Some("edited prompt")));
+    let mut owned = source.clone();
+    owned.materialize()?;
+    // The owned codec uses captured envelopes to reject metadata edits as well as body edits.
+    let mut owned_edit = owned.clone();
+    owned_edit
+        .messages
+        .iter_mut()
+        .find(|m| m.id.as_deref() == Some("u1"))
+        .unwrap()
+        .timestamp = Some("2026-10-13T01:02:03Z".parse()?);
+    let changed = emit(&owned_edit, &world.base.join("owned-edited"), &EmitOptions::default())?;
+    let changed_ref = crate::SessionRef::new(&changed.new_id, Harness::OpenClaw, &changed.path);
+    let reparsed = crate::stream::collect_with(adapter.as_ref(), &changed_ref, &ParseOptions::full())?;
+    assert!(reparsed
+        .messages
+        .iter()
+        .any(|m| m.timestamp == Some("2026-10-13T01:02:03Z".parse().unwrap())));
+    fs::write(&path, "changed source")?;
+    assert!(emit(&source, &world.base.join("late-failure"), &EmitOptions::default()).is_err());
+    fs::remove_file(&path)?;
+    let owned_result = emit(&owned, &world.base.join("owned-source-gone"), &EmitOptions::default())?;
+    let owned_rows = fs::read_to_string(owned_result.path)?
+        .lines()
+        .map(serde_json::from_str::<Value>)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    assert_eq!(owned_rows.len(), rows.len());
+    assert_eq!(owned_rows[0]["futureHeader"], rows[0]["futureHeader"]);
+    assert_eq!(owned_rows[1]["message"]["futureUser"], rows[1]["message"]["futureUser"]);
+    assert_eq!(
+        owned_rows[3]["message"]["diagnostics"],
+        rows[3]["message"]["diagnostics"]
+    );
     Ok(())
 }
