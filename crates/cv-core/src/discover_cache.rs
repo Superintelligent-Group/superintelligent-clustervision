@@ -257,6 +257,14 @@ where
         .next()
 }
 
+/// [`cached_scan_many`] with auxiliary identities captured before the caller reads them.
+pub(crate) fn cached_scan_many_with_reads<F>(path: &Path, reads: crate::source::ReadSet, scan: F) -> Vec<SessionRef>
+where
+    F: FnOnce() -> Vec<SessionRef>,
+{
+    cached_scan_inner(path, None, reads, |_| (scan(), None))
+}
+
 /// Opt-in append metadata state. Exact hits retain their existing guards; a continuation is
 /// eligible only under the adapter's immutable-prefix append contract and sampled MarkHead.
 pub(crate) fn cached_scan_continued<F>(path: &Path, version: &str, scan: F) -> Option<SessionRef>

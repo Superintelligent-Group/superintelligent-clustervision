@@ -213,12 +213,16 @@ impl Adapter for Goose {
 
         // Modern SQLite store.
         if let Some(db) = self.db_path() {
-            if let Ok(conn) = open_ro(&db) {
-                if let Ok(refs) = conn.read(|reader| discover_db(reader, &db)) {
-                    for r in refs {
-                        seen_ids.insert(r.id.clone());
-                        out.push(r);
-                    }
+            let refs = super::store::sqlite::cached_discover(&db, || {
+                let Ok(conn) = open_ro(&db) else {
+                    return Ok(Vec::new());
+                };
+                conn.read(|reader| discover_db(reader, &db))
+            });
+            if let Ok(refs) = refs {
+                for r in refs {
+                    seen_ids.insert(r.id.clone());
+                    out.push(r);
                 }
             }
         }

@@ -569,12 +569,14 @@ mod db {
     /// 2.x writes only the new tables, so they win). Either table set may be absent: a 1.x database
     /// has no `session_v2`, a database 2.x created has no `session`.
     pub(super) fn discover(db: &Path) -> Result<Vec<SessionRef>> {
-        let conn = open_ro(db)?;
-        conn.read(|reader| {
-            let source = crate::json::JsonSource::capture_with_reads(db, reader.reads())?;
-            let result = discover_snapshot(db, &source, reader);
-            source.check()?;
-            result
+        crate::harness::store::sqlite::cached_discover(db, || {
+            let conn = open_ro(db)?;
+            conn.read(|reader| {
+                let source = crate::json::JsonSource::capture_with_reads(db, reader.reads())?;
+                let result = discover_snapshot(db, &source, reader);
+                source.check()?;
+                result
+            })
         })
     }
 

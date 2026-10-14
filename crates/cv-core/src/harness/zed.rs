@@ -125,8 +125,10 @@ impl Adapter for Zed {
         let Some(db) = &self.db else {
             return Ok(vec![]);
         };
-        let conn = open_ro(db)?;
-        conn.read(|conn| discover_db(conn, db))
+        super::store::sqlite::cached_discover(db, || {
+            let conn = open_ro(db)?;
+            conn.read(|conn| discover_db(conn, db))
+        })
     }
 
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {

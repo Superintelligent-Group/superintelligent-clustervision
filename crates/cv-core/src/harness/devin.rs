@@ -199,10 +199,12 @@ impl Adapter for Devin {
         let Some(db) = self.db_path() else {
             return Ok(vec![]);
         };
-        let Ok(conn) = open_ro(&db) else {
-            return Ok(vec![]);
-        };
-        conn.read(|conn| discover_conn(conn, &db))
+        super::store::sqlite::cached_discover(&db, || {
+            let Ok(conn) = open_ro(&db) else {
+                return Ok(vec![]);
+            };
+            conn.read(|conn| discover_conn(conn, &db))
+        })
     }
 
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {

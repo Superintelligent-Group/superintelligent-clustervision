@@ -168,6 +168,29 @@ fn check_reads(reads: &crate::source::ReadSet) -> Result<()> {
     Ok(())
 }
 
+/// Discovery over one database, cached in the discovery cache under the read set [`open_ro`]
+/// captures (the file, its WAL and rollback journal; SHM is coordination state). An unchanged
+/// store is neither reopened nor rescanned. `discover` must depend only on that database; its
+/// errors are returned and never cached.
+pub(crate) fn cached_discover(
+    db: &Path,
+    discover: impl FnOnce() -> Result<Vec<crate::SessionRef>>,
+) -> Result<Vec<crate::SessionRef>> {
+    let path = std::path::absolute(db)?;
+    let mut reads = crate::source::ReadSet::default();
+    reads.record(&path);
+    reads.record(&sidecar(&path, "-wal"));
+    reads.record(&sidecar(&path, "-journal"));
+    let mut failure = None;
+    let refs = crate::discover_cache::cached_scan_many_with_reads(&path, reads, || {
+        discover().unwrap_or_else(|error| {
+            failure = Some(error);
+            Vec::new()
+        })
+    });
+    failure.map_or(Ok(refs), Err)
+}
+
 fn sidecar(path: &Path, suffix: &str) -> std::path::PathBuf {
     let mut name = path.as_os_str().to_os_string();
     name.push(suffix);

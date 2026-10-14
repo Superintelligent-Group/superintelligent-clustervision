@@ -241,11 +241,13 @@ impl Adapter for Hermes {
         // unreadable DB (e.g. permission-denied) is skipped rather than failing the whole scan.
         let mut out = Vec::new();
         for db in &self.dbs {
-            let conn = match open_ro(db) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            if let Ok(refs) = conn.read(|conn| discover_conn(conn, db)) {
+            let refs = super::store::sqlite::cached_discover(db, || {
+                let Ok(conn) = open_ro(db) else {
+                    return Ok(Vec::new());
+                };
+                conn.read(|conn| discover_conn(conn, db))
+            });
+            if let Ok(refs) = refs {
                 out.extend(refs);
             }
         }
