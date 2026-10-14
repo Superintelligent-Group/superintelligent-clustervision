@@ -338,6 +338,17 @@ pub(crate) fn exercise(
         new_id: Some("fixed".into()),
         ..Default::default()
     };
+    // OpenCode now rejects identity reuse. Seed one preserved session, then exercise
+    // transactional failures while inserting a distinct session, so collision rejection
+    // cannot masquerade as successful source/SQL rollback coverage.
+    let failure_options = crate::emit::EmitOptions {
+        new_id: if target == Harness::OpenCode {
+            Some("fresh".into())
+        } else {
+            options.new_id.clone()
+        },
+        ..options.clone()
+    };
     let mut database = Connection::open_in_memory()?;
     writer(&session, &options, &mut database)?;
     if target == Harness::Hermes {
@@ -345,9 +356,13 @@ pub(crate) fn exercise(
     }
     let before_schema = logical(&database, target)?;
     let hooks = Hooks::new(&mut database, Some(path.clone()));
-    assert!(writer(&session, &options, hooks.connection).is_err());
+    assert!(writer(&session, &failure_options, hooks.connection).is_err());
     assert_eq!(hooks.counts.commits, 0);
     assert!(hooks.counts.mutation_error.is_none());
+    assert!(
+        hooks.counts.mutate.is_none(),
+        "body-row source mutation was not reached"
+    );
     drop(hooks);
     assert_eq!(
         logical(&database, target)?,
@@ -359,8 +374,12 @@ pub(crate) fn exercise(
     writer(&json_error, &options, &mut database)?;
     let before = logical(&database, target)?;
     let hooks = Hooks::new(&mut database, Some(world.base.join("arguments.json")));
-    assert!(writer(&json_error, &options, hooks.connection).is_err());
+    assert!(writer(&json_error, &failure_options, hooks.connection).is_err());
     assert_eq!(hooks.counts.commits, 0);
+    assert!(
+        hooks.counts.mutate.is_none(),
+        "argument-source mutation was not reached"
+    );
     drop(hooks);
     assert_eq!(
         logical(&database, target)?,
@@ -380,7 +399,7 @@ pub(crate) fn exercise(
     let mut hooks = Hooks::new(&mut database, Some(path));
     hooks.counts.mutate_at = row_count;
     assert!(
-        writer(&last, &options, hooks.connection).is_err(),
+        writer(&last, &failure_options, hooks.connection).is_err(),
         "last-read source change must reject commit"
     );
     assert_eq!(hooks.counts.commits, 0);
@@ -398,7 +417,11 @@ pub(crate) fn exercise(
     database.execute_batch(reject)?;
     let before = logical(&database, target)?;
     let hooks = Hooks::new(&mut database, None);
-    assert!(writer(&sql_error, &options, hooks.connection).is_err());
+    let error = writer(&sql_error, &failure_options, hooks.connection).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("synthetic row rejection"),
+        "unexpected failure before the SQL rejection: {error:#}"
+    );
     assert_eq!(hooks.counts.commits, 0);
     drop(hooks);
     assert_eq!(

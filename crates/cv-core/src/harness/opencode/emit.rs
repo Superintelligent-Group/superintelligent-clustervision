@@ -432,7 +432,7 @@ mod tests {
                 write_database(
                     session,
                     options,
-                    "fixed",
+                    options.new_id.as_deref().unwrap_or("fixed"),
                     "/synthetic/sqlite",
                     &format!("prj_{}", short_hash("/synthetic/sqlite")),
                     connection,
