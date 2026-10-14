@@ -208,6 +208,10 @@ impl ByteSource {
         let end = file.metadata()?.len();
         Ok((offset, end - offset))
     }
+    /// Length of the immutable backing without reading its payload.
+    pub fn byte_len(&self) -> std::io::Result<u64> {
+        self.len()
+    }
     pub(crate) fn len(&self) -> std::io::Result<u64> {
         match &self.bytes {
             Bytes::Memory(bytes) => Ok(bytes.len() as u64),

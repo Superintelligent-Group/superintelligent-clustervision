@@ -307,6 +307,43 @@ fn handle(mut request: Request, ctx: &Ctx) {
             ));
         }
         None => {
+            if let Some(result) = download_export(&parts, query) {
+                match result {
+                    Ok(download) => match download.body.reader() {
+                        Ok(reader) => {
+                            let mut response = Response::new(
+                                crate::http_transport::StatusCode(200),
+                                Vec::new(),
+                                reader,
+                                usize::try_from(download.bytes).ok(),
+                                None,
+                            );
+                            response.add_header(header("Content-Type", download.content_type));
+                            response.add_header(header(
+                                "Content-Disposition",
+                                &format!("attachment; filename=\"{}\"", download.filename),
+                            ));
+                            response.add_header(header("Cache-Control", "no-store"));
+                            for h in cors_headers(origin.as_deref()) {
+                                response.add_header(h);
+                            }
+                            let _ = request.respond(response);
+                        }
+                        Err(error) => {
+                            let _ = request.respond(json_response(
+                                500,
+                                &json!({"error":error.to_string()}),
+                                origin.as_deref(),
+                                &[],
+                            ));
+                        }
+                    },
+                    Err((status, error)) => {
+                        let _ = request.respond(json_response(status, &error, origin.as_deref(), &[]));
+                    }
+                }
+                return;
+            }
             match cv_core::api::route_staged(&parts, query) {
                 Ok(Some(stage)) => {
                     match stage.body.reader() {
@@ -764,6 +801,50 @@ fn json_response(
     resp
 }
 
+struct Download {
+    body: cv_core::bytes::ByteSource,
+    bytes: u64,
+    content_type: &'static str,
+    filename: String,
+}
+
+fn download_export(parts: &[&str], query: &str) -> Option<Result<Download, (u16, Value)>> {
+    let ["api", "session", harness, id, "export"] = parts else {
+        return None;
+    };
+    Some((|| {
+        let format = Query::parse(query).get("format").unwrap_or_else(|| "markdown".into());
+        let (content_type, extension) = match format.as_str() {
+            "markdown" => ("text/markdown; charset=utf-8", "md"),
+            "opensession" => ("application/json", "opensession.json"),
+            _ => return Err(err(400, "format must be markdown or opensession")),
+        };
+        let harness = Harness::parse(harness).ok_or_else(|| err(400, "unknown harness"))?;
+        let (r, adapter) = cv_core::find(id, Some(harness))
+            .map_err(|error| err(500, &error.to_string()))?
+            .ok_or_else(|| err(404, "session not found"))?;
+        let (body, bytes) = super::view::stage_export(adapter.as_ref(), &r, &format)
+            .map_err(|error| err(500, &format!("export failed: {error:#}")))?;
+        let safe_id: String =
+            r.id.chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
+                .take(120)
+                .collect();
+        Ok(Download {
+            body,
+            bytes,
+            content_type,
+            filename: format!("cv-{}-{safe_id}.{extension}", harness.as_str()),
+        })
+    })())
+}
+
 fn staged_response<'a>(
     stage: &cv_core::api::StagedJson,
     reader: Box<dyn std::io::Read + 'a>,
@@ -795,7 +876,7 @@ fn no_content(origin: Option<&str>) -> Response<std::io::Empty> {
 /// Response headers a cross-origin caller is allowed to READ. A browser hides every non-safelisted
 /// response header from `fetch` unless it is named here, so `/api/search`'s "this answer is
 /// degraded" signal would be invisible to a dashboard on a dev server without it.
-const EXPOSED_HEADERS: &str = "X-Cv-Search-Source, X-Cv-Search-Note";
+const EXPOSED_HEADERS: &str = "X-Cv-Search-Source, X-Cv-Search-Note, Content-Disposition";
 
 /// CORS headers echoing the one allowed `origin` — an unlisted origin gets none (the browser then
 /// refuses to share the response with it). `Vary: Origin` keeps caches from mixing the two.

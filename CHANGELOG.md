@@ -6,6 +6,8 @@
 
 - Semantic search retains only requested ranking candidates, preserving exact score and identity order while avoiding full-store sorting.
 - Session ID lookup preserves case-sensitive prefixes and filters harnesses before decoding catalog metadata.
+- HTTP session downloads export complete Markdown or OpenSession documents through checked native staging, including messages beyond the loaded browser page.
+
 - Watch cursor creation copies only eligible reader states and stops reader eligibility serialization when its eight-state budget fills.
 
 - Watch cursors promptly forget vanished sessions during equal-sized fleet replacements, including unreadable replacements, so reappearing sessions start fresh.

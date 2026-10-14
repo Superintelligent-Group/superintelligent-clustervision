@@ -4693,3 +4693,28 @@ and event rows still generate DOM eagerly; PAGE bounds message count, not single
 payload size. Transcript exports currently serialize the loaded page subset without stating
 that limitation. These need separate coherent demand/render/export changes and user-facing
 checks, rather than treating current paging as complete DOM or payload boundedness.
+### Full session HTTP downloads reuse native staged exports (2026-10-13, next_transport)
+
+The paged browser previously serialized its loaded message prefix for Markdown/OpenSession
+exports, silently omitting the rest. The frontend lane now chooses server downloads for remote
+sessions and retains serializers for fully owned local uploads. The HTTP route is
+`/api/session/{harness}/{id}/export?format=markdown|opensession` (Markdown default).
+
+The backend reuses the native CLI Markdown emitter and OpenSession frame/envelope writer with
+no message window or byte budget. Private `ByteStage` backing completes before attachment
+publication. A shared `stream_counted_guarded` receipt captures the original primary snapshot,
+adapter-reported dependencies, and retained message source guards, and is checked after all
+requested fields are resolved. Errors produce existing JSON error responses before any document
+headers/body; unknown formats are 400 and missing sessions are 404. Downloads use a sanitized
+identity filename, correct type, `Content-Disposition: attachment`, and `Cache-Control: no-store`;
+existing Host, Origin and bearer-token guards still apply. HTTP reads immutable private backing
+without a whole document `Value` or browser JSON/Blob. CLI defaults and semantics stay unchanged.
+
+An actual HTTP control first loads a two-message window from a 137-message session, downloads
+both formats, compares exact bytes with native `cv export`, checks the final message and HTTP
+headers, and exercises invalid format/missing identity. A composed staging control changes an
+adapter-reported auxiliary dependency after its read and rejects publication for both formats.
+Execution remains with the central integration batch. Native adapter fallbacks and Markdown
+per-message rendered strings remain; this is bounded transport and elimination of whole-session
+browser ownership, not a claim that every provider streams or that giant selected messages have
+constant payload memory.

@@ -656,6 +656,75 @@ pub fn stream_counted(
     stream_counted_with_source(adapter, r, opts, sink, &source)
 }
 
+/// Source receipt for an operation that stages output before publication.
+/// Validate after resolving all demanded payloads, before exposing the completed stage.
+pub struct StagedReadGuard {
+    source: crate::source::Snapshot,
+    reads: crate::source::ReadSet,
+    primary: std::path::PathBuf,
+}
+impl StagedReadGuard {
+    pub fn verify(&self, r: &SessionRef) -> Result<()> {
+        anyhow::ensure!(
+            crate::source::unchanged_from(r, &self.primary, &self.source.with_reads(&self.reads)),
+            "session source changed while staging export"
+        );
+        Ok(())
+    }
+}
+
+/// Counted streaming with a publication receipt covering the primary, adapter dependencies,
+/// and retained message sources. Output consumers still own staging and publication.
+pub fn stream_counted_guarded(
+    adapter: &dyn Adapter,
+    r: &SessionRef,
+    opts: &ParseOptions,
+    sink: &mut dyn MessageSink,
+) -> Result<(Session, StagedReadGuard)> {
+    struct Guarded<'a> {
+        sink: &'a mut dyn MessageSink,
+        guard: StagedReadGuard,
+    }
+    impl MessageSink for Guarded<'_> {
+        fn extra_projection(&self) -> ExtraProjection {
+            self.sink.extra_projection()
+        }
+        fn take_error(&mut self) -> Option<anyhow::Error> {
+            self.sink.take_error()
+        }
+        fn meta(&mut self, session: &Session) {
+            self.sink.meta(session);
+        }
+        fn dependency(&mut self, path: &std::path::Path) {
+            self.guard.reads.record(path);
+            self.sink.dependency(path);
+        }
+        fn wants_checkpoint(&mut self, offset: u64) -> bool {
+            self.sink.wants_checkpoint(offset)
+        }
+        fn checkpoint(&mut self, cp: &mut Checkpoint) {
+            self.sink.checkpoint(cp);
+        }
+        fn message(&mut self, message: Message) -> Flow {
+            crate::source::record_message_reads(&message, &self.guard.primary, &mut self.guard.reads);
+            self.sink.message(message)
+        }
+    }
+    let primary = adapter.resume_source(r);
+    let source = crate::source::Probe::default().snapshot_from(r, &primary);
+    let mut wrapped = Guarded {
+        sink,
+        guard: StagedReadGuard {
+            source,
+            reads: Default::default(),
+            primary,
+        },
+    };
+    let source = wrapped.guard.source.clone();
+    let session = stream_counted_with_source(adapter, r, opts, &mut wrapped, &source)?;
+    Ok((session, wrapped.guard))
+}
+
 /// [`stream_counted`] using an operation's already captured source snapshot. The caller must
 /// capture it before this pass reads the source; publication still revalidates it and the
 /// adapter's dynamic read set. Side-store counts remain conditional on cache freshness.

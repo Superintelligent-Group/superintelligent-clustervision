@@ -383,6 +383,17 @@ fn staged_session_json(
     max_bytes: Option<usize>,
     document: bool,
 ) -> Result<(cv_core::bytes::ByteSource, Option<usize>)> {
+    staged_session_json_inner(adapter, r, window, max_bytes, document, false)
+}
+
+fn staged_session_json_inner(
+    adapter: &dyn Adapter,
+    r: &SessionRef,
+    window: Option<Window>,
+    max_bytes: Option<usize>,
+    document: bool,
+    checked: bool,
+) -> Result<(cv_core::bytes::ByteSource, Option<usize>)> {
     use cv_core::bytes::ByteStage;
     use std::io::BufWriter;
     struct Selection {
@@ -490,7 +501,16 @@ fn staged_session_json(
         next: None,
         error: None,
     };
-    let session = cv_core::stream::stream_counted(adapter, r, &cv_core::ParseOptions::lazy_extra(), &mut sink)?;
+    let (session, guard) = if checked {
+        let (session, guard) =
+            cv_core::stream::stream_counted_guarded(adapter, r, &cv_core::ParseOptions::lazy_extra(), &mut sink)?;
+        (session, Some(guard))
+    } else {
+        (
+            cv_core::stream::stream_counted(adapter, r, &cv_core::ParseOptions::lazy_extra(), &mut sink)?,
+            None,
+        )
+    };
     if let Some(error) = sink.error.take() {
         return Err(error);
     }
@@ -502,6 +522,9 @@ fn staged_session_json(
     let mut output = BufWriter::with_capacity(64 * 1024, ByteStage::default());
     super::session_json::write_document(&mut output, &session, &frames, sink.count, document)?;
     output.write_all(b"\n")?;
+    if let Some(guard) = guard {
+        guard.verify(r)?;
+    }
     Ok((
         output.into_inner().map_err(|error| error.into_error())?.finish()?,
         sink.next,
@@ -828,6 +851,37 @@ fn show_one_subagent(
     render_text(adapter, &sub.session, range, window.max_bytes, false)
 }
 
+/// Complete export staged privately before HTTP download publication. Uses the native
+/// emitters without CLI window or pipe budgets; requested payloads remain message-sized.
+pub(crate) fn stage_export(
+    adapter: &dyn Adapter,
+    r: &SessionRef,
+    format: &str,
+) -> Result<(cv_core::bytes::ByteSource, u64)> {
+    let _reads = cv_core::source::read_scope();
+    if format == "opensession" {
+        let (body, next) = staged_session_json_inner(adapter, r, None, None, true, true)?;
+        anyhow::ensure!(next.is_none(), "full export unexpectedly truncated");
+        let bytes = body.byte_len()?;
+        return Ok((body, bytes));
+    }
+    anyhow::ensure!(format == "markdown", "unsupported export format");
+    let mut output = std::io::BufWriter::with_capacity(64 * 1024, cv_core::bytes::ByteStage::default());
+    let outcome = stream_session_render_inner(
+        adapter,
+        r,
+        &mut output,
+        md_header,
+        md_message,
+        RenderOpts::default(),
+        true,
+    )?;
+    anyhow::ensure!(outcome.next.is_none(), "full export unexpectedly truncated");
+    let stage = output.into_inner().map_err(|error| error.into_error())?;
+    let bytes = stage.len();
+    Ok((stage.finish()?, bytes))
+}
+
 pub(crate) fn cmd_export(
     id: &str,
     format: &str,
@@ -1134,6 +1188,18 @@ pub(crate) fn stream_session_render<W: std::io::Write>(
     render_msg: impl Fn(&Message) -> Result<String>,
     opts: RenderOpts,
 ) -> Result<RenderOutcome> {
+    stream_session_render_inner(adapter, r, out, header, render_msg, opts, false)
+}
+
+fn stream_session_render_inner<W: std::io::Write>(
+    adapter: &dyn Adapter,
+    r: &SessionRef,
+    out: &mut W,
+    header: impl Fn(&HeaderInfo) -> String,
+    render_msg: impl Fn(&Message) -> Result<String>,
+    opts: RenderOpts,
+    checked: bool,
+) -> Result<RenderOutcome> {
     use cv_core::{Flow, MessageSink, ParseOptions};
     const HOLDBACK: usize = 24;
 
@@ -1424,10 +1490,18 @@ pub(crate) fn stream_session_render<W: std::io::Write>(
     } else {
         ParseOptions::bulk()
     };
-    cv_core::stream::stream_counted(adapter, r, &parse_opts, &mut sink)?;
+    let guard = if checked {
+        Some(cv_core::stream::stream_counted_guarded(adapter, r, &parse_opts, &mut sink)?.1)
+    } else {
+        cv_core::stream::stream_counted(adapter, r, &parse_opts, &mut sink)?;
+        None
+    };
     sink.finish_tail();
     sink.flush_header(); // short sessions (no assistant turn / < HOLDBACK msgs) flush here
     sink.result?;
+    if let Some(guard) = guard {
+        guard.verify(r)?;
+    }
     Ok(RenderOutcome {
         rendered: sink.rendered,
         next: sink.next,
@@ -1517,6 +1591,49 @@ fn md_message(m: &Message) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn staged_full_download_rejects_changed_dynamic_dependencies() -> Result<()> {
+        let world = cv_testkit::World::in_process("download-source-guard");
+        let path = world.write_session(
+            "download-guard",
+            &[serde_json::json!({"type":"user", "uuid":"u", "message":{"role":"user", "content":"complete"}})],
+        );
+        let auxiliary = world.base.join("auxiliary");
+        struct ChangesDependency(PathBuf);
+        impl Adapter for ChangesDependency {
+            fn harness(&self) -> Harness {
+                Harness::Claude
+            }
+            fn roots(&self) -> Vec<PathBuf> {
+                Vec::new()
+            }
+            fn discover(&self) -> Result<Vec<SessionRef>> {
+                Ok(Vec::new())
+            }
+            fn stream(
+                &self,
+                r: &SessionRef,
+                opts: &cv_core::ParseOptions,
+                sink: &mut dyn cv_core::MessageSink,
+            ) -> Result<Session> {
+                sink.dependency(&self.0);
+                let adapter = cv_core::harness::for_harness(Harness::Claude).unwrap();
+                let session = adapter.try_stream(r, opts, sink)?;
+                std::fs::write(&self.0, "changed after demanded read")?;
+                Ok(session)
+            }
+        }
+        let r = SessionRef::new("download-guard", Harness::Claude, path);
+        for format in ["markdown", "opensession"] {
+            std::fs::write(&auxiliary, "before")?;
+            let error = stage_export(&ChangesDependency(auxiliary.clone()), &r, format)
+                .err()
+                .expect("changed export was published");
+            assert!(error.to_string().contains("source changed"), "{error:#}");
+        }
+        Ok(())
+    }
 
     #[test]
     fn selected_extra_demand_preserves_owned_windows_acceptance_and_eof() -> Result<()> {

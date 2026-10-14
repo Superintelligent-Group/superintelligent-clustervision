@@ -259,6 +259,51 @@ fn get_json(port: u16, path: &str) -> (u16, Value) {
     (status, v)
 }
 
+#[test]
+fn full_session_downloads_match_native_exports_beyond_loaded_page() {
+    let w = world("full-session-download");
+    let rows: Vec<_> = (0..137)
+        .map(|n| {
+            json!({"type":"user", "uuid":format!("u{n}"),
+        "message":{"role":"user","content":format!("message-{n}-λ")}})
+        })
+        .collect();
+    w.write_session("download", &rows);
+    let (port, _server) = spawn_serve(&w);
+    let (status, page) = get_json(port, "/api/session/claude/download/messages?start=0&end=2");
+    assert_eq!(status, 200);
+    assert_eq!(page["messages"].as_array().unwrap().len(), 2);
+    for (format, native, content_type, extension) in [
+        ("markdown", "md", "text/markdown; charset=utf-8", "md"),
+        ("opensession", "json", "application/json", "opensession.json"),
+    ] {
+        let (expected, _) = w.cv_ok(&["export", "download", "--harness", "claude", "--format", native]);
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        write!(stream, "GET /api/session/claude/download/export?format={format} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n").unwrap();
+        let mut raw = String::new();
+        stream.read_to_string(&mut raw).unwrap();
+        let (headers, body) = raw.split_once("\r\n\r\n").unwrap();
+        assert!(headers.starts_with("HTTP/1.1 200"), "{headers}");
+        let headers = headers.to_ascii_lowercase();
+        assert!(headers.contains(&format!("content-type: {content_type}")));
+        assert!(headers.contains(&format!(
+            "content-disposition: attachment; filename=\"cv-claude-download.{extension}\""
+        )));
+        assert!(headers.contains("cache-control: no-store"));
+        assert_eq!(body, expected, "native {native} export parity");
+        assert!(
+            body.contains("message-136-λ"),
+            "download silently stopped at loaded prefix"
+        );
+    }
+    assert_eq!(get_json(port, "/api/session/claude/download/export?format=html").0, 400);
+    assert_eq!(
+        get_json(port, "/api/session/claude/missing/export?format=markdown").0,
+        404
+    );
+}
+
 /// A child process killed on drop, so a failing test never leaks a server.
 struct Reaper(Child);
 impl Drop for Reaper {
