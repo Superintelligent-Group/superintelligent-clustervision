@@ -88,7 +88,7 @@ def write_rows(path, rows, payload_prefix="", row_prefix=b"", row_suffix=b"\n", 
 
 
 def prune_gate(binary, root, env, cases=("thinking", "ascii-declass", "unicode-declass")):
-    # Frozen native sidecars from PRUNE-TURN/PRUNE-LINKED-INPUT-EVIDENCE.json. Hashes cover the
+    # Frozen native sidecars (measured when the prune turn/linked-input paths landed). Hashes cover the
     # full decoded payload and metadata, without building a second giant owned Value tree.
     expected = {
         "thinking": ("a#think0", 67116376, "68c8fcaf6c42fa65fcd367f4eca3e8334dfb412f08637b2a206a97cfa3ad4822"),
@@ -240,7 +240,7 @@ def claude_port_gate(binary, root, env):
     generator = Path(__file__).parent / "profiling/claude-port-fixture.py"
     subprocess.run([sys.executable, "-I", str(generator), str(source), "--characters", str(PAYLOAD)],
                    env=env, check=True)
-    # Frozen fixture/output contract from claude-port-heap-native.json, native64M characters.
+    # Frozen fixture/output contract, measured natively at 64M characters.
     original = file_digest(source)
     assert source.stat().st_size == 89479544
     assert original == "0ce7431d3a56ccfeb3c5a565551557380e9eb04ff02f5de1dc1472210301584d"

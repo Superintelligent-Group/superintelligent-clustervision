@@ -32,24 +32,23 @@ aggregate retention removed; they do not establish constant scratch for an arbit
 
 Large unchanged records now stream through source-backed restamping and unchanged revival.
 The giant ignored-field 16/64 MiB control uses 1.192 MiB requested peak in both cases. Changed
-records, usage corrections and malformed giant records retain an owned fallback. See
-`docs/design/PRUNE-SOURCE-EVIDENCE.json` for separate allocator-free CPU costs.
+records, usage corrections and malformed giant records retain an owned fallback.
 
 Large changed string tool-result controls now use source-backed canonical replacement and sidecar
 writing (269,475 bytes default / 463,553 bytes revival at both 16/64 MiB). Rich payloads and other
-mutation kinds retain owned fallback; see `docs/design/PRUNE-PAYLOAD-EVIDENCE.json`.
+mutation kinds retain owned fallback.
 
 The source user path also covers rich arrays and mirrors; mixed/image and string/mirror 16/64 MiB
 controls now have constant requested peak below 465 KB for default/revive/drop/window controls
-without a nonnull parent reroot. See `docs/design/PRUNE-RICH-EVIDENCE.json`.
+without a nonnull parent reroot.
 
 Large Thinking and ASCII declassification now share source turn projections, including their
 sidecars and composed revival estimates. Native 16/64 MiB actual operations have constant
 requested peak: Thinking 269,950 bytes, ASCII declassification 332,541 bytes (revival below464KB).
 Unicode declassification preserves a whole demanded-string lowercase fallback; usage correction
-still owns selected rows at this milestone. See `PRUNE-TURN-EVIDENCE.json`; no timing claim.
+still owns selected rows at this milestone. No timing claim.
 
 Revival correction now frames staged rows and projects only their usage metadata. Unchanged
 16/64 MiB Text or ignored root fields on a corrected row peak at 1,317,875 / 1,317,890 requested
 Rust bytes respectively, constant across sizes. Full native output/result fields match the owned
-f083 control. Oversized usage metadata remains owned; see `PRUNE-USAGE-EVIDENCE.json`.
+f083 control. Oversized usage metadata remains owned.

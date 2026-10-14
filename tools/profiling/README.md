@@ -1,4 +1,10 @@
-# Instruction-count control
+# Profiling tools
+
+Method only. Recorded results and the per-change evidence files that used to live under
+`results/` are in git history; current numbers are in `docs/design/PERF.md`. Every script
+creates its own new scratch directory and never touches real stores.
+
+## Instruction-count control
 
 `cachegrind.py` runs an existing `store_probe` binary natively, then twice under
 Cachegrind, with a new scratch catalog before every invocation. It compares the
@@ -57,46 +63,6 @@ filesystem/catalog state, syscall outcomes and threads change control flow.
 Keep input, binary, command, path lengths and initial catalog state fixed; report
 the observed difference rather than declaring the metric perfectly deterministic.
 
-## Initial control (2026-10-12)
-
-Source `26867544`, Debian trixie ARM64 image manifest
-`sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f`;
-container verified `aarch64`, 3 CPUs and 8 GiB memory. Rust 1.99.0
-`b940084d7eb6a299eb4bfeb8e34901bc051e7ac4`, LLVM 23.1.1, Valgrind 3.24.0-3,
-glibc 2.41-12+deb13u4 and GCC 14.2.0. Build: opt-level 3, ThinLTO,
-debuginfo 1, default core features, no RUSTFLAGS. Runtime: one Rayon worker.
-
-The deterministic synthetic history fixture has 16 records, 65,536 decoded
-payload bytes, 76,259 physical bytes and 48 emitted messages. Its SHA256 and
-the binary SHA256 are in [the result](results/claude-count-arm64.json).
-Instruction-only runs counted **1,871,091** and **1,870,995** instructions:
-96 fewer in the second run, **0.0051%** variation. Both complete count outputs
-matched the native output after removing only `wall_seconds`. This profiles one
-parser/count operation, not the entire `cv` CLI command boundary or fleet query.
-A separate unprofiled native content hash oracle produced message SHA256
-`11300364c11606b79e254d84c0b8d230047620977a6f67d20bcce9145378cfdb`;
-it is not included in instruction counts.
-
-Top function attribution in run one (inclusive of inlined source locations):
-
-| Function | Ir | Share |
-|---|---:|---:|
-| serde_json SliceRead::skip_to_escape | 407,540 | 21.8% |
-| dynamic loader relocation | 168,905 | 9.0% |
-| core::str::from_utf8 | 119,081 | 6.4% |
-| store::json::valid_unicode_escapes | 102,363 | 5.5% |
-| store::json::value_compatible | 91,768 | 4.9% |
-
-The nonzero run diff is in hashbrown/indexmap table entry/control and comparison
-functions, consistent with randomized hash seeds. Parser attribution above is
-unchanged between the runs. This is a useful low-variance work metric, not an
-assertion that all process-level instruction totals are deterministic.
-
-Raw Cachegrind files and both attribution reports are retained in the task-owned
-Docker volume at `/scratch/profile-pinned`; compiler/package evidence is at
-`/scratch/compiler.txt` and `/scratch/packages.txt`. The container is stopped
-after capture; restarting it preserves the exclusive Linux target and results.
-
 ## Whole CLI controls
 
 `--output bytes` compares stdout and stderr byte for byte against the native
@@ -146,97 +112,14 @@ For before/after controls retain the exact input inodes, seed bytes, canonical
 catalog/index paths, auxiliary paths, commands and environment. Preserve old
 reports before reusing their paths. Count only child instructions, not setup.
 
-### Recorded CLI results (2026-10-13)
-
-Eight synthetic sessions (four Claude, four Codex), 586,452 physical input bytes.
-Source `78a3f86d` plus publication change `2a10cfda` (local combined `d14714a6`),
-same Rust/Valgrind/image/build settings as above, actual default-feature CLI,
-one Rayon worker, three CPUs/8 GiB. No timing comparison, cache/branch simulation,
-semantic model or real harness data. Each row is two repeats of one fixed state:
-
-| Operation | Ir run 1 | Ir run 2 | Difference |
-|---|---:|---:|---:|
-| cold `cv ls --json --limit 20` | 23,632,021 | 23,625,936 | 0.0257% |
-| verified warm list, same command | 5,579,741 | 5,578,344 | 0.0250% |
-| unchanged `cv index` | 20,039,841 | 20,033,524 | 0.0315% |
-
-All stdout and stderr bytes match each operation's native child. Cold and warm
-list outputs also match each other (3,091 bytes). Index diagnostics confirm zero
-changed/new, zero removed, eight unchanged and zero errors. Hashes and provenance
-are in the three `cli-*-arm64.json` results. Raw profiles and complete attribution
-remain in the exclusive volume under their `/scratch/cli-*` operation directories.
-
-File attribution accounts for all instructions; these categories are source-file
-locations, **not inclusive call-tree costs** (inlining assigns work to Rust core
-files separately):
-
-| Source files | Cold list | Warm list | Unchanged index |
-|---|---:|---:|---:|
-| SQLite C | 7,383,981 (31.2%) | 2,154,697 (38.6%) | 7,971,380 (39.8%) |
-| glibc allocator | 4,401,882 (18.6%) | 1,225,674 (22.0%) | 5,061,983 (25.3%) |
-| dynamic loader | 565,025 (2.4%) | 563,637 (10.1%) | 565,469 (2.8%) |
-| clap sources | 89,139 (0.4%) | 89,139 (1.6%) | 85,483 (0.4%) |
-
-Warm list's SQLite parser alone executes 334,382 instructions; unchanged index's
-executes 1,213,829, plus 779,418 in parser reduction and 639,980 in tokenization.
-Cold list additionally spends 1,208,012 in serde JSON escape scanning. True unchanged
-index attributes only 59,946 directly to Tantivy files and performs no transcript
-indexing. A deliberately rejected relocated-seed control did tokenize/reindex;
-its 133M instructions are not an unchanged-index result.
-
-The next supported candidate is operation-scoped catalog connection/schema/SQL
-preparation reuse: catalog initialization repeats across last-sync, freshness,
-row reads and index planning. This can remove repeated setup without weakening
-fresh inventory/source checks. It needs its own before/after proof; this profile
-does not establish how much of SQLite or allocation is removable. Loader/clap
-are fixed startup work for this small fixture. These user-space guest instruction
-counts omit kernel/I/O wait costs and do not predict Apple Silicon elapsed time
-or the scaling of a 6,000-session fleet. Known-ID windows and rich queries were
-not profiled in this control.
-
-### Matched catalog-owner comparison
-
-[The comparison artifact](results/catalog-reader-comparison-arm64.json) records
-baseline `d14714a6` and production `9dd193bd` on the **same eight-session fixture**.
-Both binaries used the same recorded compiler, default features, optimized debug
-profile, image and resource limits. Both ran at `/scratch/profile-bin/cv`, with
-identical input inodes/metadata/content, frozen seed bytes/metadata, canonical
-catalog/index and auxiliary paths, one Rayon worker and configured catalog
-backstop of 3,600 seconds. The larger backstop prevents a frozen warm seed aging
-into a cold scan during build/test work; it does not bypass metadata freshness.
-The default-900-second exploratory results above are not the comparison baseline.
-
-| Operation | Before Ir (two runs) | After Ir (two runs) | Mean reduction |
-|---|---:|---:|---:|
-| cold list | 23,623,945 / 23,643,712 | 20,420,190 / 20,422,311 | 13.59% |
-| warm list | 5,581,467 / 5,582,102 | 3,683,962 / 3,681,027 | 34.03% |
-| unchanged index | 20,051,981 / 20,050,922 | 17,046,383 / 17,051,089 | 14.98% |
-
-Both phases independently match native stdout/stderr bytes, and before/after
-outputs also match exactly. Index diagnostics still report eight unchanged,
-zero changed/new, removed or errored sessions. After-repeat spreads are 0.010%,
-0.080% and 0.028%; the small remaining variability is not presented as zero.
-The before/after SQLite-C source attribution falls from 7,384,046 to 5,359,893
-instructions (cold), 2,154,531 to 843,601 (warm), and 7,970,781 to 5,956,846
-(index). Clap attribution is identical; loader attribution increases by 1,925
-instructions in each operation. File attribution is not inclusive call cost.
-The catalog setup reduction accounts for a substantial part of saved work.
-
 `compare.py BEFORE.json AFTER.json` rejects mismatched runtime controls, source
 state and output. When both summaries carry `build` metadata, it also compares
 compiler/LLVM/profile/features/flags/image/resources while allowing source commit
 and binary hash to differ. Raw runner summaries cannot recover their build flags:
 when build metadata is absent the helper explicitly reports that it was not
-verified. This experiment's build metadata was recorded from the build recipe and
-container evidence, then checked separately and included in the durable artifact.
+verified.
 
-This confirms avoided fixed setup work on a small workload. It does not measure
-kernel/I/O time, native macOS elapsed time, large-fleet costs or a current ranking
-of all system operations. No additional workload matrix was added. Baseline and
-after raw profiles remain under `/scratch/cli-*-reader-before` and `/scratch/cli-*`
-in the retained task-owned volume; the container is stopped after capture.
-
-### First-use scoped discovery cache allocations
+## First-use scoped discovery cache allocations
 
 `discovery-cache.py --before PROBE --after PROBE --output NEW_DIRECTORY` compares production
 `cv_core::sessions()` using two `store_probe` binaries with `--features probe-heap`. It creates
@@ -245,116 +128,6 @@ record. Every measured child starts with an empty process-local cache and the sa
 catalog path and original transcript identity. Adding 4,096 unrelated serialized cache rows
 changes no affected inventory. Setup and result reporting are outside the measured child stage;
 elapsed-time fields are discarded. The listing must remain one exact session reference with message count two.
-
-The [recorded native allocation control](results/discovery-cache-allocation-native.json) uses
-rustc 1.99, the same dev build recipe/default mmap+SQLite+parallel features, and one Rayon worker.
-Build parity was verified separately; the runner checks the features reported by the probes.
-At 4,096 unrelated rows, lazy payload decoding reduces allocation requests **50,421 → 13,549**,
-requested bytes **21,478,200 → 8,967,285**, and peak above the starting Rust heap
-**13,748,681 → 7,948,688 bytes**. All four listing digests and empty stderr match; with zero
-unrelated rows, peak stays **20,706 bytes**. These are requested Rust allocations, excluding
-SQLite/C, stacks, mmap and allocator overhead. No native elapsed-time or fleet-wide ranking is
-claimed. Bulk SQL string copying and serialized-row retention still grow with cache size;
-this removes unrelated JSON decoding and nested allocations, not the complete first-use floor.
-The fixture is synthetic metadata, not a genuine harness corpus capture.
-
-`index-discovery-work.py` is an evidence-only native `cv index` control for one synthetic Claude
-primary. It requires the diagnostic [patch](results/index-discovery-work.patch), applied to
-`c8d16a92` in a separate worktree, and the snapshot example contained in that patch. Build the
-CLI with `--features probe-heap,cv-core/probe-heap,cv-search/probe-heap` and the example with
-`cargo build -p cv-search --example index_work_snapshot --no-default-features`, using an exclusive
-target and scratch catalog. Run with `--scratch NEW_DIRECTORY --cv FILE --snapshot FILE`.
-The script creates only scratch stores and keeps discovery, parser/framer, mmap admission,
-lazy-decoder consumption and actual prefix-guard `File::Read` return counts separate. The patch
-is not runtime telemetry shipped in production. No elapsed-time comparison is collected.
-
-The [native baseline](results/index-discovery-work-native.json) admits **8,404,110 bytes** in
-both cold discovery and indexing. An **848-byte** append makes discovery submit all **8,404,958
-bytes** to its metadata framer while resumed indexing supplies only the 848-byte suffix to its
-framer; the mapped extent is still the whole file. Unchanged input submits no source bytes at
-these instrumented boundaries. Required UTF-8/grammar/strict-compatibility inputs are separately
-reported, not added together as physical I/O. The unescaped decoder consumes borrowed slices;
-its consumption counters are not `Read` return counters.
-
-The baseline intentionally records two failed parity controls: title-changing resume retained
-obsolete body title postings, and a timestamp-restored same-size edit was skipped by tuple-only
-primary freshness. Metadata, counts and events agreed with the fresh oracle; complete stored
-fields and controlled public queries exposed the defects. Commit `022e9475` fixes the former
-with metadata guards and an indexing-only migration. The latter motivates separate primary
-identity authority. Query scores are evidence, not a universal fresh/incremental parity promise:
-Tantivy statistics can include deleted postings until merge. Indexed body text is not stored,
-so the snapshot oracle compares all live stored fields plus the explicitly listed term queries,
-not every possible query or complete IR fidelity. This fixed single-primary control establishes
-an overlap target; it does not rank a real fleet or measure physical storage I/O.
-
-### Scoped keyed discovery versus full demand (2026-10-13)
-
-[Matched instruction evidence](results/discovery-keyed-cpu-arm64.json) compares
-`1377fdc9` with `b199c972`, identical default-feature CLI builds using the pinned
-Linux control above. Actual `cv ls --json --harness claude --limit 100000` counts
-36,874,230/36,857,176 baseline instructions versus4,023,954/4,023,954 keyed for one
-changed Claude source plus4096unrelated persisted cache rows:89.085% fewer.
-Forced full discovery (`--fresh`) of4096demanded warm files counts
-501,433,563/501,373,628 versus546,727,785/545,854,238:8.952% more. Repeat spread is
-at most0.160%; stdout/stderr match native and cross-revision exactly (one session,
-325bytes;4096sessions,5,599,219bytes). This is guest instruction work, not timing.
-
-First full-run SQLite source attribution increases41,838,251→64,660,153,
-accounting for22.822M of45.294M added instructions; serialization attribution is
-unchanged. File attribution is not inclusive call-tree attribution. Scoped keyed
-reads are valuable; explicit full demand merits a requested-path batch candidate,
-without resurrecting fleet-wide unrelated cache payload retention.
-
-[Reproduction](discovery-cpu-control.py) creates synthetic sources/frozen seeds,
-restores the same canonical catalog/binary paths, then invokes the existing
-Cachegrind/compare tools. Build the two archived revisions into distinct binaries
-at `/scratch/keyed-discovery-cpu/cv-before` and `cv-after` with the controls above;
-place common build metadata at `build.json` and sources at `before`/`after`.
-The source/archive/binary hashes and exact controls are in the artifact. Exported
-builds both stamp `unknown`; forced affected-crate compilation establishes their
-source. An initial identical-binary Cargo mtime reuse was detected and rejected;
-touch exported source/build inputs or force an own-target scoped clean. Original
-raw profiles/fixtures/targets remain in `cv-cachegrind-control` under
-`/scratch/keyed-discovery-cpu`; host evidence/report is at
-`/Users/ember/dev/cv-worktrees/keyed-discovery-cpu-evidence`. Existing artifacts
-were retained; installed CLI and real stores were untouched.
-
-#### Rejected bounded requested-path batching
-
-[The negative experiment](results/discovery-request-batch-rejected-arm64.json)
-applies only [this retained patch](results/discovery-request-batch-rejected.patch)
-to frozen `b199c972`, preserving the original source inodes, seeds, canonical
-binary/catalog paths and output controls. Claude's enumerated demands are grouped
-in chunks of128; SQL admits only matching path/stat/version tuples, decoded outside
-locks, with newer process entries winning. Shared before-read scan guards avoid an
-extra stat; single demands and SQL failures retain keyed fallback. No schema or
-persistent cache was added. This implementation **does not land**.
-
-Full-demand counts536,559,625/536,460,083 recover only1.790% versus keyed and
-remain7.002% above the bulk baseline. Scoped counts3,948,611/3,948,615 preserve
-the scoped win. Exact old native/profiled/cross-revision outputs remain equal.
-Thirteen cache/read tests,10catalog controls, production core clippy and a
-no-default check pass (existing feature-related warnings); these establish safety
-of the rejected experiment, not sufficient operation benefit.
-
-Full attribution shows keyed versus bulk adds22.822M SQLite-source instructions,
-5.564M pthread mutex lock/unlock-source instructions,2.648M allocator and2.490M
-memcmp. Summed function attribution assigns1.503M added instructions to per-path
-Context::run,0.665M to admit_loaded and0.401M to load_entry. Direct source guard
-attribution stays2.257M→2.228M; this is not repeated large source-guard work.
-Batching saves8.394M SQLite-source instructions but adds3.551M allocator,
-0.655M formatting and0.561M memcpy. Function/source totals are disjoint source
-attributions, not inclusive call-tree costs; inlining/codegen can redistribute them.
-There is no supported simple IN-query hypothesis that removes the remaining
-indexed lookups while keeping demanded tuple guards. Retain the89% scoped benefit
-and explicit9% forced-full tradeoff rather than add machinery for1.8% recovery.
-
-[Hybrid reproduction](discovery-batch-rejected-control.py) reuses original frozen
-fixtures/seeds and profiles a separately built hybrid binary twice per case;
-only the retained patch is applied, with all affected crates forced to rebuild.
-Raw profiles, the final additional chunk-bound test patch and logs are retained at
-`/Users/ember/dev/cv-worktrees/keyed-discovery-batch-evidence` and container volume
-`/scratch/keyed-discovery-cpu`. The exclusive container is stopped after capture.
 
 ## Existing index compaction geometry
 
@@ -372,63 +145,12 @@ parity, source identities and binary provenance. The test contains assertions fo
 queries and append terms; it records rather than assumes large-segment retention, since a
 different input can legitimately need deletion cleanup or higher-tier merges.
 
-The [3.78 GB control](../../docs/design/FTS-EXISTING-INDEX-COMPACTION.json) uses an older-schema
-fleet index: it tests compaction geometry, not a current-schema rebuild or the indexing sweep.
-It does not measure physical I/O, heap, BM25 score parity or latency. Scratch index contents
-remain private; only aggregate work and parity results belong in the repository.
-
-### Actual limited listing operation
-
-`limited-list-operation.py --cv DEFAULT_CV --diagnostic-cv DIAGNOSTIC_CV --output NEW_DIR`
-creates a synthetic64-session source/index/catalog, freezes seeds, restores each
-child's canonical catalog and compares exact default/diagnostic output. Build the
-diagnostic binary in a separate checkout/target after applying
-[the temporary patch](results/limited-list-operation-diagnostic.patch) to `bc58198a`
-(or `f08377be` plus that fix). The patch provides counters and existing full-filter/
-legacy-zero control switches only; none ship in the product. Use two build jobs,
-scratch CLUSTERVISION_HOME and fresh targets or touch exported inputs to avoid
-Cargo source-mtime reuse. The whole-operation artifact is in
-`docs/design/QUERY-WORKFLOW-EVIDENCE.json`; raw synthetic inputs, outputs, logs and
-counter files remain at `/Users/ember/dev/cv-worktrees/limited-list-operation-evidence`.
-
-`listing-append-composition.py --cv DEFAULT_CV --diagnostic-cv DIAGNOSTIC_CV
---prepared-control PRIOR_CONTROL --output NEW_DIR` reruns only the existing known
-one-append operation, preparing a new continuation-bearing warm seed before it.
-Use the prior synthetic control generated above (its `control` directory), never
-a harness store: preparation removes/re-appends only its verified generated final
-record and preserves the final bytes and original seed. Build diagnostic source
-with [the composed patch](results/listing-append-composition-diagnostic.patch) at
-`99c8d421`; whole-operation counters include suffix framing **and** sampled-prefix
-validation. Exact source and result are recorded in QUERY-WORKFLOW-EVIDENCE.json.
-
-### Mutating prune operation CPU controls
-
-`prune-cpu-control.py` uses existing fingerprint/Valgrind controls on actual
-prune_probe: Thinking+revive and usage-corrected unchanged-body 8 MiB fixtures.
-Build default-feature release examples without probe-heap, at the same flags above.
-Task-owned paths `/scratch/prune-cpu-control/{before,after,target,prune-before,
-prune-after,fixtures}` are explicit in the driver. Before source is f08377be;
-after replaces only prune.rs with8521d265. For fixtures, copy the previous synthetic
-prune-projection thinking-16 and usage-text-16 sources, replacing their unique
-contiguous 16 MiB x string with 8 MiB; retain every other byte. Exact original/derived
-hashes and full build/source/binary controls are in PRUNE-CPU-EVIDENCE.json.
-
-The runner removes only generated sibling files and its own scratch catalog between
-children, keeping source inode/content/metadata fixed. Counted child writes its
-actual outputs; setup/fingerprinting is excluded. `prune-usage-framing-control.py`
-reuses the original usage source and baseline semantics for only the two focused
-fixed repeats (prune.rs44a1396b). Raw artifacts and warmed exclusive target remain
-in the stopped cv-cachegrind-control volume `/scratch/prune-cpu-control`; host copy
-and report: `/Users/ember/dev/cv-worktrees/prune-cpu-evidence`. No other container
-artifacts, installed binary or real stores were changed.
-
 ## Verified Claude port ownership
 
 `claude_port_probe` measures the actual `parse_for_emit` → `emit_report` composition,
 including resumability verification and fidelity reparse. Build with `--features probe-heap`
 and default core features; stderr is Rust allocation counters, stdout is the result/fidelity.
-The checked-in native artifact uses debug Rust1.99.0 on macOS ARM64, one Rayon worker.
-It excludes native allocations/mmap/stacks and makes no CPU or RSS claim.
+Measure with a debug build and one Rayon worker. It excludes native allocations/mmap/stacks and makes no CPU or RSS claim.
 
 ```sh
 python3 tools/profiling/claude-port-fixture.py /owned/new-source.jsonl
@@ -442,7 +164,10 @@ CLUSTERVISION_HOME=/owned/new-catalog RAYON_NUM_THREADS=1 \
 Use fresh scratch paths and repeat with `text`/`drop` for mode controls. Fixture generation
 is outside the measured child and produces synthetic data, not a genuine corpus capture.
 `--characters` counts Unicode characters; record actual source/decoded UTF-8 byte sizes.
-The [paired artifact](results/claude-port-heap-native.json) compares an additive copy of this
-probe on `f08377be` against the checked writer. Normalize only generated top-level UUID/parent
-IDs consistently; compare every other field, message count and fidelity exactly. Stable-ID
-legacy unit oracles separately check byte equality and unusual replay/carrier behavior.
+
+## Other controls
+
+- `distill-command.py`: whole `cv distill` allocation/output controls in isolated Rust test
+  processes, baseline against candidate.
+- `window-extra.py`: whole `cv show` extra-demand control; `tools/check-operation-heap.py` uses
+  it in CI.
