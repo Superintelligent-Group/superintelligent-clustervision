@@ -645,6 +645,89 @@ mod tests {
     }
 
     #[test]
+    fn growing_call_maps_amortize_production_checkpoints_and_preserve_delayed_results() -> Result<()> {
+        use crate::stream::stream_resumable_amortized;
+        let world = cv_testkit::World::in_process("qwen-growing-call-checkpoints");
+        let home = world.home.join(".qwen");
+        let path = home.join("projects/hash/chats/session.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap())?;
+        let cadence = 4 * 1024 * 1024; // FTS production cadence, independent of wall-clock timing.
+        for calls in [2048, 4096] {
+            let mut bytes = String::new();
+            for i in 0..calls {
+                let name = if i == 0 {
+                    "agent".to_string()
+                } else {
+                    format!("tool-{i}-{}", "x".repeat(4096))
+                };
+                let row = serde_json::json!({"type":"assistant","uuid":format!("message-{i}"),"model":"model","message":{"parts":[{"functionCall":{"id":format!("call-{i}"),"name":name,"args":{"index":i}}}]}});
+                bytes.push_str(&row.to_string());
+                bytes.push('\n');
+            }
+            // Results can arrive after thousands of other calls, and repeat. Discarding old
+            // mapping entries would change names and subagent-return classification.
+            for id in [0, 1, 0, 1] {
+                let row = serde_json::json!({"type":"tool_result","message":{"parts":[{"functionResponse":{"id":format!("call-{id}"),"response":{"output":"delayed"}}}]}});
+                bytes.push_str(&row.to_string());
+                bytes.push('\n');
+            }
+            std::fs::write(&path, &bytes)?;
+            let adapter = Qwen::with_home(&home);
+            let r = SessionRef::new("session", Harness::Qwen, &path);
+            let mut full = Kept::default();
+            let done =
+                stream_resumable_amortized(&adapter, &r, &ParseOptions::lazy(), &mut full, cadence, None)?.unwrap();
+            assert!(!full.checkpoints.is_empty());
+            let copied = full
+                .checkpoints
+                .iter()
+                .map(|(_, cp)| serde_json::to_vec(cp).map(|v| v.len()))
+                .collect::<std::result::Result<Vec<_>, _>>()?
+                .into_iter()
+                .sum::<usize>();
+            assert!(
+                copied <= 2 * bytes.len(),
+                "{calls} calls: cumulative checkpoint bytes={copied}, source bytes={}",
+                bytes.len()
+            );
+            assert_eq!(full.messages.len(), calls + 4);
+            assert_eq!(full.messages[calls].kind, MessageKind::SubagentReturn);
+            assert_eq!(full.messages[calls + 2].kind, MessageKind::SubagentReturn);
+            for index in [0, full.checkpoints.len() - 1] {
+                let (count, cp) = &full.checkpoints[index];
+                let mut rest = Kept::default();
+                let resumed =
+                    stream_resumable_amortized(&adapter, &r, &ParseOptions::lazy(), &mut rest, cadence, Some(cp))?
+                        .unwrap();
+                assert_eq!(
+                    serde_json::to_value(&resumed.session)?,
+                    serde_json::to_value(&done.session)?
+                );
+                assert_eq!(
+                    resumed.counted.as_ref().unwrap().turns,
+                    done.counted.as_ref().unwrap().turns
+                );
+                assert_eq!(
+                    resumed.counted.as_ref().unwrap().counts,
+                    done.counted.as_ref().unwrap().counts
+                );
+                assert_eq!(
+                    serde_json::to_value(rest.messages)?,
+                    serde_json::to_value(&full.messages[*count..])?
+                );
+                assert_eq!(
+                    rest.checkpoints.iter().map(|(_, cp)| cp).collect::<Vec<_>>(),
+                    full.checkpoints[index + 1..]
+                        .iter()
+                        .map(|(_, cp)| cp)
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn checked_resume_keeps_selected_payloads_and_exact_skipped_checkpoint_state() {
         let world = cv_testkit::World::in_process("qwen_selected_resume");
         let home = world.home.join(".qwen");
