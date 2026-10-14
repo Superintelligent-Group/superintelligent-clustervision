@@ -1412,7 +1412,7 @@ impl GenerationDedup {
         #[cfg(test)]
         let forced = self.forced_hash;
         let group = self.headers.get_mut(&fingerprint).unwrap();
-        let mut statement = conn.prepare(sql)?;
+        let mut statement = conn.prepare_cached(sql)?;
         if let Some(prior) = group.pending {
             let key = statement.query_row([prior], |prior_row| {
                 generation_identity(prior_row, &prior_index, conn, incremental)
