@@ -239,10 +239,7 @@ impl Adapter for OpenClaw {
                 // whole transcript (see [`select_navigation`]). Retain navigation fields and ranges,
                 // then replay payloads only for selected entries.
                 let mut reads = crate::source::ReadSet::default();
-                let facts = jsonl_key_facts(&r.path, &r.id, &mut |path| {
-                    reads.record(path);
-                    sink.dependency(path);
-                });
+                let facts = jsonl_key_facts_with_reads(&r.path, &r.id, &mut |path| sink.dependency(path), &mut reads)?;
                 source.check()?;
                 // Retained bodies depend on the inventory and sibling transcripts consulted
                 // for lineage, not only on their own unchanged bytes.
@@ -622,39 +619,101 @@ fn names_child_file(path: &Path, key: &str) -> Result<bool> {
 /// only (a reset re-points it), so the spawner is pinned by content: the session whose transcript
 /// records this one's key as `childSessionKey` (the `sessions_spawn` result), trying the
 /// spawner key's current session first.
-fn jsonl_key_facts(path: &Path, session_id: &str, dependency: &mut dyn FnMut(&Path)) -> KeyFacts {
+#[derive(Default)]
+struct JsonKeys {
+    sessions: HashMap<String, (String, Option<String>)>,
+    preferred: HashMap<String, String>,
+}
+#[cfg(test)]
+thread_local! { static JSON_KEY_READS:std::cell::Cell<usize>=const {std::cell::Cell::new(0)}; }
+impl JsonKeys {
+    fn read(path: &Path) -> Self {
+        use super::store::document::Fields;
+        #[cfg(test)]
+        JSON_KEY_READS.with(|count| count.set(count.get() + 1));
+        crate::json::JsonSource::capture(path)
+            .and_then(|source| {
+                source.read_document(|view| {
+                    let mut index = Self::default();
+                    view.for_each_entry(|key, entry| {
+                        let Some(fields) = Fields::parse(entry, &["sessionId", "spawnedBy"])? else {
+                            return Ok(());
+                        };
+                        if let Some(id) = fields.string("sessionId")? {
+                            index.preferred.insert(key.to_owned(), id.clone());
+                            index
+                                .sessions
+                                .entry(id)
+                                .or_insert((key.to_owned(), fields.string("spawnedBy")?));
+                        }
+                        Ok(())
+                    })?;
+                    Ok(index)
+                })
+            })
+            .unwrap_or_default()
+    }
+    fn retained_bytes(&self) -> usize {
+        self.sessions.capacity() * std::mem::size_of::<(String, (String, Option<String>))>()
+            + self.preferred.capacity() * std::mem::size_of::<(String, String)>()
+            + self
+                .sessions
+                .iter()
+                .map(|(id, (key, parent))| id.capacity() + key.capacity() + parent.as_ref().map_or(0, String::capacity))
+                .sum::<usize>()
+            + self
+                .preferred
+                .iter()
+                .map(|(key, id)| key.capacity() + id.capacity())
+                .sum::<usize>()
+    }
+}
+#[cfg(test)]
+fn jsonl_key_facts(path: &Path, id: &str, dependency: &mut dyn FnMut(&Path)) -> Result<KeyFacts> {
+    jsonl_key_facts_with_reads(path, id, dependency, &mut crate::source::ReadSet::default())
+}
+fn jsonl_key_facts_with_reads(
+    path: &Path,
+    session_id: &str,
+    dependency: &mut dyn FnMut(&Path),
+    reads: &mut crate::source::ReadSet,
+) -> Result<KeyFacts> {
     let Some(dir) = path.parent() else {
-        return KeyFacts::default();
+        return Ok(KeyFacts::default());
     };
     let index_path = dir.join("sessions.json");
+    let mut baseline = crate::source::ReadSet::default();
+    baseline.record(&index_path);
     dependency(&index_path);
-    let Ok(text) = fs::read_to_string(&index_path) else {
-        return KeyFacts::default();
+    let (index, original) = crate::source::inventory("openclaw-json-keys", &index_path, &baseline, || {
+        let index = JsonKeys::read(&index_path);
+        let bytes = index.retained_bytes();
+        Ok((index, baseline.clone(), bytes))
+    })?;
+    reads.merge(&original);
+    for path in original.paths().filter(|path| *path != index_path) {
+        dependency(path);
+    }
+    let Some((key, spawned_by)) = index.sessions.get(session_id) else {
+        return Ok(KeyFacts::default());
     };
-    let Ok(Value::Object(index)) = serde_json::from_str::<Value>(&text) else {
-        return KeyFacts::default();
-    };
-    let Some((key, entry)) = index
-        .iter()
-        .find(|(_, e)| e.get("sessionId").and_then(Value::as_str) == Some(session_id))
-    else {
-        return KeyFacts::default();
-    };
-    let spawned_by = entry.get("spawnedBy").and_then(Value::as_str).map(str::to_string);
+    let spawned_by = spawned_by.clone();
     let parent = spawned_by.as_ref().and_then(|by| {
         let first = index
+            .preferred
             .get(by)
-            .and_then(|e| e.get("sessionId"))
-            .and_then(Value::as_str)
+            .map(String::as_str)
             .map(|sid| dir.join(format!("{sid}.jsonl")));
         // The preferred current window wins regardless of directory membership. Avoid
         // enumerating/sorting every historical transcript when it already records this child.
         if let Some(first) = first.as_ref().filter(|p| p.as_path() != path) {
+            reads.record(first);
             dependency(first);
             if names_child_file(first, key).unwrap_or(false) {
                 return Some(session_id_from_filename(first));
             }
         }
+        reads.record(dir);
         dependency(dir);
         let mut candidates: Vec<PathBuf> = fs::read_dir(dir)
             .ok()?
@@ -671,22 +730,45 @@ fn jsonl_key_facts(path: &Path, session_id: &str, dependency: &mut dyn FnMut(&Pa
         candidates
             .into_iter()
             .find(|p| {
+                reads.record(p);
                 dependency(p);
                 names_child_file(p, key).unwrap_or(false)
             })
             .map(|p| session_id_from_filename(&p))
     });
-    KeyFacts {
+    Ok(KeyFacts {
         session_key: Some(key.clone()),
         spawned_by,
         parent,
-    }
+    })
+}
+
+#[cfg(all(feature = "sqlite", test))]
+thread_local! {
+    static SQL_PARENT_ROWS:std::cell::Cell<usize>=const {std::cell::Cell::new(0)};
+    static SQL_PARENT_FULLSCANS:std::cell::Cell<usize>=const {std::cell::Cell::new(0)};
 }
 
 /// [`KeyFacts`] from `session_windows`. The spawner is the window under `spawned_by` — when that key
 /// has several windows (resets, rollovers), the one whose transcript records this session's key as `childSessionKey`.
 #[cfg(feature = "sqlite")]
-fn sqlite_key_facts(conn: &rusqlite::Connection, session_id: &str) -> Result<KeyFacts> {
+fn sqlite_key_facts_scoped(
+    conn: &rusqlite::Connection,
+    r: &SessionRef,
+    reads: &crate::source::ReadSet,
+) -> Result<KeyFacts> {
+    sqlite_key_facts_inner(conn, &r.id, Some((&r.path, reads)))
+}
+#[cfg(all(feature = "sqlite", test))]
+fn sqlite_key_facts(conn: &rusqlite::Connection, id: &str) -> Result<KeyFacts> {
+    sqlite_key_facts_inner(conn, id, None)
+}
+#[cfg(feature = "sqlite")]
+fn sqlite_key_facts_inner(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    scoped: Option<(&Path, &crate::source::ReadSet)>,
+) -> Result<KeyFacts> {
     let cols = super::store::sqlite::columns(conn, "session_windows");
     if !cols.contains("session_key") {
         return Ok(KeyFacts::default());
@@ -708,18 +790,55 @@ fn sqlite_key_facts(conn: &rusqlite::Connection, session_id: &str) -> Result<Key
     };
     let mut parent = None;
     if let Some(by) = &spawned_by {
-        let mut stmt =
-            conn.prepare("SELECT session_id FROM session_windows WHERE session_key = ?1 AND session_id != ?2")?;
-        let candidates: Vec<String> = stmt
-            .query_map([by.as_str(), session_id], |row| row.get(0))?
-            .collect::<std::result::Result<_, _>>()?;
+        let load = || -> Result<Vec<String>> {
+            let mut stmt =
+                conn.prepare("SELECT session_id FROM session_windows WHERE session_key=?1 AND session_id!=?2")?;
+            let candidates = stmt
+                .query_map([by.as_str(), session_id], |row| {
+                    #[cfg(test)]
+                    SQL_PARENT_ROWS.with(|count| count.set(count.get() + 1));
+                    row.get(0)
+                })?
+                .collect::<std::result::Result<Vec<String>, _>>()?;
+            #[cfg(test)]
+            SQL_PARENT_FULLSCANS.with(|count| {
+                count.set(count.get() + stmt.get_status(rusqlite::StatementStatus::FullscanStep) as usize)
+            });
+            Ok(candidates)
+        };
+        let candidates = if let Some((path, reads)) = scoped {
+            let selector = if &key == by {
+                format!("{}:{session_id}", by.len()) + by
+            } else {
+                by.clone()
+            };
+            let mut encoded = String::with_capacity(selector.len() * 2);
+            use std::fmt::Write as _;
+            for byte in selector.as_bytes() {
+                write!(&mut encoded, "{byte:02x}")?;
+            }
+            let namespace = if &key == by {
+                "openclaw-self-parent-windows"
+            } else {
+                "openclaw-parent-windows"
+            };
+            crate::source::inventory(namespace, &path.join(encoded), reads, || {
+                let candidates = load()?;
+                let bytes = candidates.capacity() * std::mem::size_of::<String>()
+                    + candidates.iter().map(String::capacity).sum::<usize>();
+                Ok((candidates, reads.clone(), bytes))
+            })?
+            .0
+        } else {
+            std::sync::Arc::new(load()?)
+        };
         parent = if candidates.len() == 1 {
-            candidates.into_iter().next()
+            candidates.first().cloned()
         } else {
             let mut events = EventReader::new(conn)?;
             let mut found = None;
-            for c in candidates {
-                let mut entries = events.rows(&c, parse_line)?;
+            for c in candidates.iter() {
+                let mut entries = events.rows(c, parse_line)?;
                 // Keep reading after finding the child so a later SQL error still fails the
                 // lookup, as it did when this collected the candidate's complete transcript.
                 let mut names = false;
@@ -728,7 +847,7 @@ fn sqlite_key_facts(conn: &rusqlite::Connection, session_id: &str) -> Result<Key
                 }
                 entries.finish()?;
                 if names {
-                    found = Some(c);
+                    found = Some(c.clone());
                     break;
                 }
             }
@@ -1581,7 +1700,7 @@ fn stream_sqlite(r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink
         // Navigation and payload reads must see the same history: a concurrent leaf update cannot
         // change which rows the second pass emits. A deferred read transaction writes no store data.
         let snapshot = conn.unchecked_transaction()?;
-        let facts = sqlite_key_facts(&snapshot, &r.id)?;
+        let facts = sqlite_key_facts_scoped(&snapshot, r, conn.reads())?;
         // Incremental cell access requires a rowid. Historical WITHOUT ROWID stores keep
         // the explicit owned compatibility path rather than guessing a different SQL contract.
         if opts.spans
@@ -3312,6 +3431,171 @@ mod tests {
     }
 
     #[test]
+    fn jsonl_key_inventory_matches_value_first_key_and_final_duplicate_precedence() -> Result<()> {
+        let world = cv_testkit::World::in_process("openclaw-json-key-duplicates");
+        let path = world.base.join("sessions.json");
+        for text in [
+            r#"{"z":{"sessionId":"same","spawnedBy":"first"},"a":{"sessionId":"same","spawnedBy":"second"}}"#,
+            r#"{"a":{"sessionId":"same","spawnedBy":"first"},"z":{"sessionId":"same","spawnedBy":"second"}}"#,
+            r#"{"first":{"sessionId":"old","spawnedBy":"gone"},"second":{"sessionId":"old","spawnedBy":"winner"},"first":{"sessionId":"new","spawnedBy":"replacement"}}"#,
+            r#"{"first":{"sessionId":"old"},"second":{"sessionId":"old","spawnedBy":"winner"},"first":null}"#,
+            r#"{"first":{"sessionId":"same","sessionId":"new","spawnedBy":"old","spawnedBy":"winner"},"second":{"sessionId":"same"}}"#,
+            r#"{"escaped":{"session\u0049d":"same","spawned\u0042y":"winner"},"later":{"sessionId":"same"}}"#,
+        ] {
+            fs::write(&path, text)?;
+            let actual = JsonKeys::read(&path);
+            let Value::Object(owned) = serde_json::from_str(text)? else {
+                unreachable!();
+            };
+            for id in ["same", "old", "new", "missing"] {
+                let expected = owned
+                    .iter()
+                    .find(|(_, v)| v.get("sessionId").and_then(Value::as_str) == Some(id))
+                    .map(|(key, v)| {
+                        (
+                            key.clone(),
+                            v.get("spawnedBy").and_then(Value::as_str).map(str::to_owned),
+                        )
+                    });
+                assert_eq!(actual.sessions.get(id), expected.as_ref(), "{text} id={id}");
+            }
+            let expected: HashMap<String, String> = owned
+                .iter()
+                .filter_map(|(key, v)| Some((key.clone(), v.get("sessionId")?.as_str()?.to_owned())))
+                .collect();
+            assert_eq!(actual.preferred, expected, "{text}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn jsonl_key_inventory_reads_once_per_scope_and_keeps_negative_dependency_guards() -> Result<()> {
+        let world = cv_testkit::World::in_process("openclaw-json-key-scope");
+        let dir = world.base.join("agents/main/sessions");
+        fs::create_dir_all(&dir)?;
+        let adapter = OpenClaw::with_state_dir(&world.base);
+        let mut index = serde_json::Map::new();
+        for i in 0..40 {
+            fs::write(
+                dir.join(format!("child-{i}.jsonl")),
+                serde_json::json!({"type":"message","id":"u",
+                "message":{"role":"user","content":"checked λ\n".repeat(1000)}})
+                .to_string(),
+            )?;
+            index.insert(
+                format!("agent:main:cron:job-{i}"),
+                serde_json::json!({"sessionId":format!("child-{i}")}),
+            );
+        }
+        let read = |i, opts: &ParseOptions| {
+            crate::stream::collect_with(
+                &adapter,
+                &SessionRef::new(
+                    format!("child-{i}"),
+                    Harness::OpenClaw,
+                    dir.join(format!("child-{i}.jsonl")),
+                ),
+                opts,
+            )
+        };
+        JSON_KEY_READS.with(|count| count.set(0));
+        {
+            let _scope = crate::source::read_scope();
+            let mut absent = read(0, &ParseOptions::lazy())?;
+            for i in 1..40 {
+                assert_eq!(read(i, &ParseOptions::full())?.messages[0].origin, Origin::Human);
+            }
+            assert_eq!(JSON_KEY_READS.with(|count| count.get()), 1);
+            fs::write(dir.join("sessions.json"), Value::Object(index).to_string())?;
+            assert_eq!(read(1, &ParseOptions::full())?.messages[0].origin, Origin::Scheduler);
+            assert_eq!(JSON_KEY_READS.with(|count| count.get()), 2);
+            assert!(
+                absent.materialize().is_err(),
+                "cached absence must remain a source guard"
+            );
+        }
+        JSON_KEY_READS.with(|count| count.set(0));
+        for i in 0..3 {
+            assert_eq!(read(i, &ParseOptions::full())?.messages[0].origin, Origin::Scheduler);
+        }
+        assert_eq!(
+            JSON_KEY_READS.with(|count| count.get()),
+            3,
+            "standalonecalls must not retain inventory"
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_parent_window_scan_runs_once_per_scope_and_preserves_negative_groups() -> Result<()> {
+        let world = cv_testkit::World::in_process("openclaw-sql-parent-scope");
+        let dir = world.base.join("agents/main/agent");
+        fs::create_dir_all(&dir)?;
+        let path = dir.join("openclaw-agent.sqlite");
+        let conn = rusqlite::Connection::open(&path)?;
+        conn.execute_batch(&fixture_text("transcript-tables.sql"))?;
+        conn.execute("INSERT INTO session_nodes(session_key,current_session_id,entry_json,updated_at) VALUES ('parent-key','parent','{}',1)",[])?;
+        conn.execute("INSERT INTO session_windows(session_id,session_key,created_at,updated_at) VALUES ('parent','parent-key',1,1)",[])?;
+        for i in 0..40 {
+            let sid = format!("child-{i}");
+            conn.execute(
+                "INSERT INTO session_nodes(session_key,current_session_id,entry_json,updated_at) VALUES (?1,?2,'{}',1)",
+                rusqlite::params![format!("child-key-{i}"), sid],
+            )?;
+            conn.execute("INSERT INTO session_windows(session_id,session_key,spawned_by,created_at,updated_at) VALUES (?1,?2,'parent-key',1,1)",rusqlite::params![sid,format!("child-key-{i}")])?;
+            conn.execute(
+                "INSERT INTO transcript_events(session_id,seq,event_json,created_at) VALUES (?1,0,?2,1)",
+                rusqlite::params![
+                    sid,
+                    serde_json::json!({"type":"message","id":"u","message":{"role":"user","content":"prompt"}})
+                        .to_string()
+                ],
+            )?;
+        }
+        conn.execute("INSERT INTO session_nodes(session_key,current_session_id,entry_json,updated_at) VALUES ('child-negative','negative','{}',1)",[])?;
+        conn.execute("INSERT INTO session_windows(session_id,session_key,spawned_by,created_at,updated_at) VALUES ('negative','child-negative','not-yet',1,1)",[])?;
+        drop(conn);
+        let adapter = OpenClaw::with_state_dir(&world.base);
+        let read = |id: &str| {
+            crate::stream::collect_with(
+                &adapter,
+                &SessionRef::new(id, Harness::OpenClaw, &path),
+                &ParseOptions::full(),
+            )
+        };
+        SQL_PARENT_ROWS.with(|count| count.set(0));
+        SQL_PARENT_FULLSCANS.with(|count| count.set(0));
+        let one_scan;
+        {
+            let _scope = crate::source::read_scope();
+            for i in 0..40 {
+                assert_eq!(read(&format!("child-{i}"))?.lineage.parent.as_deref(), Some("parent"));
+            }
+            assert_eq!(SQL_PARENT_ROWS.with(|count| count.get()), 1);
+            one_scan = SQL_PARENT_FULLSCANS.with(|count| count.get());
+            assert!(
+                one_scan > 0 && one_scan <= 42,
+                "one actual global scan, not one perchild"
+            );
+            assert!(read("negative")?.lineage.parent.is_none());
+            let conn = rusqlite::Connection::open(&path)?;
+            conn.execute("INSERT INTO session_nodes(session_key,current_session_id,entry_json,updated_at) VALUES ('not-yet','new-parent','{}',1)",[])?;
+            conn.execute("INSERT INTO session_windows(session_id,session_key,created_at,updated_at) VALUES ('new-parent','not-yet',1,1)",[])?;
+            drop(conn);
+            assert_eq!(read("negative")?.lineage.parent.as_deref(), Some("new-parent"));
+        }
+        SQL_PARENT_ROWS.with(|count| count.set(0));
+        SQL_PARENT_FULLSCANS.with(|count| count.set(0));
+        for i in 0..3 {
+            assert_eq!(read(&format!("child-{i}"))?.lineage.parent.as_deref(), Some("parent"));
+        }
+        assert_eq!(SQL_PARENT_ROWS.with(|count| count.get()), 3);
+        assert!(SQL_PARENT_FULLSCANS.with(|count| count.get()) > one_scan * 2);
+        Ok(())
+    }
+
+    #[test]
     fn preferred_jsonl_parent_avoids_global_candidate_inventory_and_preserves_fallback_order() -> Result<()> {
         let world = cv_testkit::World::in_process("openclaw-parent-preferred-order");
         let dir = &world.base;
@@ -3334,14 +3618,14 @@ mod tests {
             serde_json::json!({"childSessionKey":key}).to_string(),
         )?;
         let mut consulted = Vec::new();
-        let facts = jsonl_key_facts(&child, "child", &mut |p| consulted.push(p.to_path_buf()));
+        let facts = jsonl_key_facts(&child, "child", &mut |p| consulted.push(p.to_path_buf()))?;
         assert_eq!(facts.parent.as_deref(), Some("preferred"));
         assert_eq!(consulted, vec![dir.join("sessions.json"), preferred.clone()]);
         // The missing/unmatched preferred path stays a dependency; fallback candidates retain
         // their lexicographic precedence and the child's own path is never consulted.
         fs::write(&preferred, "unrelated")?;
         consulted.clear();
-        let facts = jsonl_key_facts(&child, "child", &mut |p| consulted.push(p.to_path_buf()));
+        let facts = jsonl_key_facts(&child, "child", &mut |p| consulted.push(p.to_path_buf()))?;
         assert_eq!(facts.parent.as_deref(), Some("a-earlier"));
         assert_eq!(
             consulted,

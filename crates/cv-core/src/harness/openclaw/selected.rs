@@ -889,7 +889,7 @@ mod tests {
             fs::write(&path, flat)?;
             let r = SessionRef::new("identity", Harness::OpenClaw, &path);
             let error = with_jsonl_source(&path, |source| {
-                let facts = jsonl_key_facts(&path, &r.id, &mut |_| {});
+                let facts = jsonl_key_facts(&path, &r.id, &mut |_| {})?;
                 assert!(!has_leaf_controls(&path)?);
                 // Deterministically replace the primary after selection, before opening payloads.
                 fs::write(&path, tree)?;
