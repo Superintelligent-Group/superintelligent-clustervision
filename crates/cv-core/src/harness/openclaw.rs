@@ -238,7 +238,16 @@ impl Adapter for OpenClaw {
                 // A transcript with `leaf` controls is a tree: the visible branch must be selected over the
                 // whole transcript (see [`select_navigation`]). Retain navigation fields and ranges,
                 // then replay payloads only for selected entries.
-                let facts = jsonl_key_facts(&r.path, &r.id);
+                let mut reads = crate::source::ReadSet::default();
+                let facts = jsonl_key_facts(&r.path, &r.id, &mut |path| {
+                    reads.record(path);
+                    sink.dependency(path);
+                });
+                source.check()?;
+                // Retained bodies depend on the inventory and sibling transcripts consulted
+                // for lineage, not only on their own unchanged bytes.
+                let guarded = crate::json::JsonSource::capture_with_reads(&r.path, &reads)?;
+                let source = &guarded;
                 let tree = file_has_leaf_controls(&r.path)?;
                 source.check()?;
                 if tree {
@@ -258,7 +267,9 @@ impl Adapter for OpenClaw {
                     BufReader::new(file).lines().filter_map(Result::ok)
                 };
                 let rows = lines.filter_map(|l| parse_line(&l)).map(Row::active);
-                Ok(stream_rows(rows, r, &facts, opts, sink))
+                let session = stream_rows(rows, r, &facts, opts, sink);
+                source.check()?;
+                Ok(session)
             })
         })
     }
@@ -561,15 +572,62 @@ fn names_child(text: &str, key: &str) -> bool {
     })
 }
 
+/// Preserve the lexical child marker policy and whole-file UTF-8 rejection while
+/// scanning bounded chunks. A marker and its key may cross any chunk boundary.
+fn names_child_file(path: &Path, key: &str) -> Result<bool> {
+    use super::store::jsonl::ranges;
+    use std::io::Read;
+    struct Scan<'a, R> {
+        reader: R,
+        key: &'a str,
+        window: Vec<u8>,
+        found: bool,
+    }
+    impl<R: Read> Read for Scan<'_, R> {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            let length = self.reader.read(bytes)?;
+            if !self.found {
+                self.window.extend_from_slice(&bytes[..length]);
+                self.found = memchr::memmem::find_iter(&self.window, self.key.as_bytes()).any(|at| {
+                    memchr::memmem::find(&self.window[at.saturating_sub(24)..at], b"childSessionKey").is_some()
+                });
+                let keep = self.key.len().saturating_add(24);
+                let start = self.window.len().saturating_sub(keep);
+                self.window.copy_within(start.., 0);
+                self.window.truncate(self.window.len() - start);
+            }
+            Ok(length)
+        }
+    }
+    let file = fs::File::open(path)?;
+    let range = ranges::Range {
+        offset: 0,
+        len: file.metadata()?.len(),
+    };
+    let scanner = Scan {
+        reader: ranges::reader(&file, range)?,
+        key,
+        window: Vec::new(),
+        found: false,
+    };
+    let mut reader = BufReader::with_capacity(64 * 1024, scanner);
+    // Keep consuming after a match: invalid UTF-8 anywhere made the original read_to_string
+    // reject this candidate, including in a suffix after a perfectly valid spawn result.
+    let valid = ranges::valid_utf8(&mut reader)?;
+    Ok(valid && reader.into_inner().found)
+}
+
 /// [`KeyFacts`] from the `sessions.json` beside a JSONL transcript. A key names a *current* session
 /// only (a reset re-points it), so the spawner is pinned by content: the session whose transcript
 /// records this one's key as `childSessionKey` (the `sessions_spawn` result), trying the
 /// spawner key's current session first.
-fn jsonl_key_facts(path: &Path, session_id: &str) -> KeyFacts {
+fn jsonl_key_facts(path: &Path, session_id: &str, dependency: &mut dyn FnMut(&Path)) -> KeyFacts {
     let Some(dir) = path.parent() else {
         return KeyFacts::default();
     };
-    let Ok(text) = fs::read_to_string(dir.join("sessions.json")) else {
+    let index_path = dir.join("sessions.json");
+    dependency(&index_path);
+    let Ok(text) = fs::read_to_string(&index_path) else {
         return KeyFacts::default();
     };
     let Ok(Value::Object(index)) = serde_json::from_str::<Value>(&text) else {
@@ -583,6 +641,7 @@ fn jsonl_key_facts(path: &Path, session_id: &str) -> KeyFacts {
     let parent = spawned_by.as_ref().and_then(|by| {
         let first = index.get(by).and_then(sid_of);
         let mut candidates: Vec<PathBuf> = first.iter().map(|sid| dir.join(format!("{sid}.jsonl"))).collect();
+        dependency(dir);
         if let Ok(rd) = fs::read_dir(dir) {
             let mut rest: Vec<PathBuf> = rd
                 .flatten()
@@ -596,10 +655,14 @@ fn jsonl_key_facts(path: &Path, session_id: &str) -> KeyFacts {
             rest.sort();
             candidates.extend(rest);
         }
+        let mut seen = HashSet::new();
         candidates
             .into_iter()
-            .filter(|p| p.as_path() != path)
-            .find(|p| fs::read_to_string(p).is_ok_and(|t| names_child(&t, key)))
+            .filter(|p| p.as_path() != path && seen.insert(p.clone()))
+            .find(|p| {
+                dependency(p);
+                names_child_file(p, key).unwrap_or(false)
+            })
             .map(|p| session_id_from_filename(&p))
     });
     KeyFacts {
@@ -3037,6 +3100,72 @@ mod tests {
         assert_eq!(child.extra["openclaw"]["spawned_by"], "agent:main:explicit:parent-1");
         assert_eq!(child.messages[0].origin, Origin::Subagent);
         let _ = fs::remove_dir_all(agents.parent().unwrap());
+    }
+
+    #[test]
+    fn bounded_parent_scan_matches_lexical_policy_across_boundaries_and_utf8_failures() -> Result<()> {
+        let world = cv_testkit::World::in_process("openclaw-parent-scan");
+        let path = world.base.join("parent.jsonl");
+        let key = "agent:main:subagent:child-λ";
+        for marker in [
+            format!("\"childSessionKey\":\"{key}\""),
+            format!("childSessionKey\\\": \\\"{key}"),
+            format!("unrelated {key}"),
+            format!("childSessionKey{} {key}", " ".repeat(30)),
+        ] {
+            for padding in [0, 65510, 65520, 65530, 65540, 65550] {
+                let text = format!("{}雪{marker}{}", "x".repeat(padding), "雪".repeat(30000));
+                fs::write(&path, &text)?;
+                assert_eq!(names_child_file(&path, key)?, names_child(&text, key));
+                let mut bytes = text.into_bytes();
+                bytes.push(0xff);
+                fs::write(&path, bytes)?;
+                assert!(!names_child_file(&path, key)?);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn selected_child_bodies_and_owned_completion_guard_parent_lookup_dependencies() -> Result<()> {
+        let world = cv_testkit::World::in_process("openclaw-parent-source-guard");
+        let dir = world.base.join("agents/main/sessions");
+        fs::create_dir_all(&dir)?;
+        let path = dir.join("child.jsonl");
+        let parent = dir.join("parent.jsonl");
+        let key = "agent:main:subagent:child";
+        let index = dir.join("sessions.json");
+        fs::write(
+            &index,
+            serde_json::json!({"agent:main:main":{"sessionId":"parent"},
+            key:{"sessionId":"child","spawnedBy":"agent:main:main"}})
+            .to_string(),
+        )?;
+        fs::write(&parent, serde_json::json!({"childSessionKey":key}).to_string())?;
+        fs::write(
+            &path,
+            serde_json::json!({"type":"message","id":"c","message":{"role":"user",
+            "content":"guarded child λ\n".repeat(10000)}})
+            .to_string(),
+        )?;
+        let adapter = OpenClaw::with_state_dir(&world.base);
+        let reference = SessionRef::new("child", Harness::OpenClaw, &path);
+        let mut child = crate::stream::collect_with(&adapter, &reference, &ParseOptions::lazy())?;
+        assert_eq!(child.lineage.parent.as_deref(), Some("parent"));
+        fs::write(&parent, "changed parent")?;
+        assert!(child.materialize().is_err());
+        fs::write(&parent, serde_json::json!({"childSessionKey":key}).to_string())?;
+        struct ChangeParent(PathBuf);
+        impl MessageSink for ChangeParent {
+            fn message(&mut self, _: Message) -> Flow {
+                fs::write(&self.0, "changed again").unwrap();
+                Flow::Stop
+            }
+        }
+        assert!(adapter
+            .stream(&reference, &ParseOptions::full(), &mut ChangeParent(parent))
+            .is_err());
+        Ok(())
     }
 
     /// 2026.1: `sessions.json` names a sub-agent's spawner by KEY, and a reset has since re-pointed
