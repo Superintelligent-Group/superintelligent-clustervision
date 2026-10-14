@@ -98,6 +98,13 @@ pub fn baseline(r: &SessionRef) -> Option<Mark> {
     count(r).map(Mark::Messages)
 }
 
+// Capture the source before the mark. Capturing it afterward can bless an append that
+// happened after the byte mark, suppressing that unread append behind an unchanged trigger.
+fn capture_baseline<T>(r: &SessionRef, mark: impl FnOnce() -> T) -> (T, ReadState) {
+    let read = ReadState::baseline(r);
+    (mark(), read)
+}
+
 /// The message count a full parse of `r` returns, without holding the parsed session.
 ///
 /// It is the parse's own count by construction: the session is streamed through the adapter and
@@ -293,8 +300,10 @@ impl Watcher {
         for r in refs {
             check()?;
             let (mark, read) = if append_only(&r) {
-                let bytes = std::fs::metadata(&r.path)?.len();
-                (Mark::Bytes(bytes), ReadState::baseline(&r))
+                let (mark, read) = capture_baseline(&r, || {
+                    std::fs::metadata(&r.path).map(|metadata| Mark::Bytes(metadata.len()))
+                });
+                (mark?, read)
             } else {
                 struct Baseline;
                 impl crate::MessageSink for Baseline {
@@ -369,14 +378,14 @@ impl Watcher {
             // (codex/hermes/claude add reasoning/tool/system turns), so seeding from it makes the
             // first `Updated` poll re-emit messages that predate the watcher. Record the true
             // baseline instead — a byte mark where the transcript is append-only (see [`baseline`]).
-            let mark = baseline(&r).unwrap_or(Mark::Messages(r.message_count));
+            let (mark, read) = capture_baseline(&r, || baseline(&r).unwrap_or(Mark::Messages(r.message_count)));
             self.seen.insert(
                 Self::key(&r),
                 State {
                     trigger: Self::trigger_of(&r),
                     mark,
                     pending: false,
-                    read: Some(ReadState::baseline(&r)),
+                    read: Some(read),
                 },
             );
         }
@@ -732,6 +741,71 @@ mod tests {
             created_at: None,
             updated_at: None,
             message_count: 0,
+        }
+    }
+
+    #[test]
+    fn append_between_byte_mark_and_baseline_completion_is_delivered_with_unchanged_trigger() {
+        static PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+        let world = cv_testkit::World::in_process("baseline-append-race");
+        let path = world.write_session(
+            "baseline-race",
+            &[serde_json::json!({"type":"user", "uuid":"u0", "message":{"role":"user", "content":"existing"}})],
+        );
+        PATH.set(path).unwrap();
+        fn discover() -> Vec<SessionRef> {
+            vec![SessionRef::new("baseline-race", Harness::Claude, PATH.get().unwrap())]
+        }
+        let r = discover().remove(0);
+        let (mark, read) = capture_baseline(&r, || {
+            let mark = baseline(&r).unwrap();
+            use std::io::Write;
+            writeln!(
+                std::fs::OpenOptions::new().append(true).open(&r.path).unwrap(),
+                "{}",
+                serde_json::json!({"type":"user", "uuid":"u1", "message":{"role":"user", "content":"racing append"}})
+            )
+            .unwrap();
+            mark
+        });
+        let mut watcher = Watcher::with_discovery(Filter::default(), true, discover);
+        watcher.seen.insert(
+            Watcher::key(&r),
+            State {
+                trigger: Watcher::trigger_of(&r),
+                mark,
+                pending: false,
+                read: Some(read),
+            },
+        );
+        let cursor = watcher.to_cursor();
+        for incremental in [false, true] {
+            let mut watcher = Watcher::from_cursor(Filter::default(), cursor.clone(), discover);
+            let mut texts = Vec::new();
+            if incremental {
+                watcher
+                    .try_poll_messages(
+                        || Ok(()),
+                        |_, reference, message| {
+                            texts.push(crate::projection::searchable_text_checked(
+                                &message,
+                                &crate::Resolver::new(Some(reference.path.clone())),
+                                || Ok(()),
+                            )?);
+                            Ok(crate::Flow::Continue)
+                        },
+                    )
+                    .unwrap();
+            } else {
+                for event in watcher.poll() {
+                    for message in event.new_messages {
+                        let mut text = String::new();
+                        message.append_searchable(&mut text).unwrap();
+                        texts.push(text);
+                    }
+                }
+            }
+            assert_eq!(texts, ["racing append\n"], "racing append was silently baselined");
         }
     }
 
