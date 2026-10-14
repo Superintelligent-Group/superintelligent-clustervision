@@ -49,8 +49,8 @@ fn share_session(
 ) -> Result<(usize, RedactStats)> {
     // Never open the destination for writing: it may be a transcript, a hard link to one,
     // or an existing artifact. Publish only a complete, accepted read into a fresh name.
-    let mut temporary = ShareOutput::new(out_path)?;
-    let mut w = std::io::BufWriter::new(&mut temporary.file);
+    let mut temporary = cv_core::publish::Staged::beside(out_path, "share", 0o600)?;
+    let mut w = std::io::BufWriter::new(temporary.file());
 
     let mut sink = ShareSink {
         out: &mut w,
@@ -82,49 +82,9 @@ fn share_session(
     w.flush().with_context(|| format!("writing {}", out_path.display()))?;
     drop(w);
     guard.verify(r)?;
-    temporary.publish(out_path)?;
+    temporary.publish(out_path, cv_core::publish::Claim::New)?;
 
     Ok((count, stats))
-}
-
-/// A private sibling ensures publication stays on the destination filesystem. Hard-link
-/// creation is atomic and refuses any existing name, including a symlink or racing writer.
-struct ShareOutput {
-    path: PathBuf,
-    file: std::fs::File,
-}
-impl ShareOutput {
-    fn new(destination: &std::path::Path) -> Result<Self> {
-        let parent = destination
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or_else(|| std::path::Path::new("."));
-        let path = parent.join(format!(".cv-share-{}.tmp", uuid::Uuid::new_v4()));
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let file = options
-            .open(&path)
-            .with_context(|| format!("creating share output in {}", parent.display()))?;
-        Ok(Self { path, file })
-    }
-    fn publish(&self, destination: &std::path::Path) -> Result<()> {
-        std::fs::hard_link(&self.path, destination).with_context(|| {
-            format!(
-                "publishing {} (choose a new path if it already exists)",
-                destination.display()
-            )
-        })
-    }
-}
-impl Drop for ShareOutput {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
 }
 
 /// Streaming sink: scrub + render each message as it arrives and write it through, holding back
@@ -299,29 +259,6 @@ fn safe_stem(id: &str) -> String {
 mod tests {
     use super::*;
     use cv_core::{Block, Json};
-
-    #[test]
-    fn share_publication_preserves_existing_sources_and_cleans_failed_temps() {
-        let world = cv_testkit::World::in_process("share-publication");
-        let destination = world.base.join("source.jsonl");
-        std::fs::write(&destination, "transcript").unwrap();
-        let mut output = ShareOutput::new(&destination).unwrap();
-        let temporary = output.path.clone();
-        output.file.write_all(b"complete HTML").unwrap();
-        assert!(output.publish(&destination).is_err());
-        assert_eq!(std::fs::read(&destination).unwrap(), b"transcript");
-        let fresh = world.base.join("shared.html");
-        output.publish(&fresh).unwrap();
-        assert_eq!(std::fs::read(&fresh).unwrap(), b"complete HTML");
-        drop(output);
-        assert!(!temporary.exists());
-        assert_eq!(std::fs::read(&fresh).unwrap(), b"complete HTML");
-        let discarded = ShareOutput::new(&world.base.join("failed.html")).unwrap();
-        let temporary = discarded.path.clone();
-        drop(discarded);
-        assert!(!temporary.exists());
-        assert!(!world.base.join("failed.html").exists());
-    }
 
     #[test]
     fn failed_share_read_never_publishes_or_replaces_an_artifact() {

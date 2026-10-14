@@ -491,9 +491,13 @@ enum Cmd {
         /// Keep the last N conversational turns' payloads verbatim (recent context stays sharp).
         #[arg(long, default_value_t = 25)]
         keep_last: usize,
-        /// New session id (default: a fresh UUID).
+        /// New session id (default: a fresh UUID). An id whose transcript or sidecar already
+        /// exists is refused (exit 2) unless --force.
         #[arg(long)]
         to: Option<String>,
+        /// Replace an existing --to session (transcript and sidecar) by atomic rename.
+        #[arg(long, requires = "to")]
+        force: bool,
         /// Hard-drop payloads (no sidecar, irreversible) instead of stashing them for retrieval.
         #[arg(long)]
         drop: bool,
@@ -1103,9 +1107,10 @@ fn main() {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
     if let Err(e) = run() {
-        // Caller mistakes (unknown/ambiguous id, removed command/flag, bad window) exit 2 with the
-        // bare message; everything else is a real failure: the anyhow chain, exit 1.
-        if e.downcast_ref::<UsageError>().is_some() {
+        // Caller mistakes (unknown/ambiguous id, removed command/flag, bad window, a taken output
+        // name) exit 2 with the bare message; everything else is a real failure: the anyhow
+        // chain, exit 1.
+        if e.downcast_ref::<UsageError>().is_some() || e.downcast_ref::<cv_core::publish::Exists>().is_some() {
             eprintln!("{e:#}");
             std::process::exit(2);
         }
@@ -1267,6 +1272,7 @@ fn run() -> Result<()> {
             min_size,
             keep_last,
             to,
+            force,
             drop,
             drop_thinking,
             copy_resources,
@@ -1293,6 +1299,7 @@ fn run() -> Result<()> {
                 min_size,
                 keep_last,
                 to,
+                force,
                 drop,
                 drop_thinking,
                 copy_resources,

@@ -203,30 +203,19 @@ fn save_store(path: &Path, store: &Store) -> Result<()> {
         .context("serializing embedding store metadata")?
     };
 
-    let tmp = path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
-    let mut created = false;
-    let result = (|| -> Result<()> {
-        let file = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
-        created = true;
-        let mut out = std::io::BufWriter::new(file);
-        out.write_all(MAGIC)?;
-        out.write_all(&u32::try_from(store.dim)?.to_le_bytes())?;
-        out.write_all(&u32::try_from(store.meta.len())?.to_le_bytes())?;
-        out.write_all(&(meta_json.len() as u64).to_le_bytes())?;
-        out.write_all(&meta_json)?;
-        for vector in &store.vectors {
-            out.write_all(&vector.to_le_bytes())?;
-        }
-        out.flush()?;
-        out.get_ref().sync_all()?;
-        std::fs::rename(&tmp, path)
-            .with_context(|| format!("moving embedding store into place at {}", path.display()))?;
-        Ok(())
-    })();
-    if created && result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
+    let mut staged = cv_core::publish::Staged::beside(path, "embeddings", 0o666)?;
+    let mut out = std::io::BufWriter::new(staged.file());
+    out.write_all(MAGIC)?;
+    out.write_all(&u32::try_from(store.dim)?.to_le_bytes())?;
+    out.write_all(&u32::try_from(store.meta.len())?.to_le_bytes())?;
+    out.write_all(&(meta_json.len() as u64).to_le_bytes())?;
+    out.write_all(&meta_json)?;
+    for vector in &store.vectors {
+        out.write_all(&vector.to_le_bytes())?;
     }
-    result?;
+    out.flush()?;
+    drop(out);
+    staged.publish(path, cv_core::publish::Claim::Replace)?;
     Ok(())
 }
 
@@ -2111,7 +2100,7 @@ mod tests {
             .unwrap()
             .file_name()
             .to_string_lossy()
-            .contains("tmp.")));
+            .starts_with(".cv-")));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

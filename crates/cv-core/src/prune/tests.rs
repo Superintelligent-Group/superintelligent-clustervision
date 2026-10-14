@@ -1112,6 +1112,7 @@ fn sidecar_preparation_failure_preserves_existing_transcript() {
     let options = PruneOptions {
         new_id: Some(new_id.into()),
         keep_last: 0,
+        force: true,
         ..Default::default()
     };
     assert!(prune_session(&src, &options).is_err());
@@ -1222,10 +1223,12 @@ fn marker_writer_detects_every_chunk_split_with_bounded_tail() {
     }
 }
 
+/// An existing destination, a symlink or hard link included, is refused without a byte written;
+/// `force` replaces the name by rename, leaving the old inode (and what it links to) intact.
 #[cfg(unix)]
 #[test]
-fn existing_output_preserves_symlinks_hardlinks_and_permissions() {
-    use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
+fn existing_output_is_refused_and_force_replaces_the_name_not_the_inode() {
+    use std::os::unix::fs::{symlink, MetadataExt};
     for symbolic in [true, false] {
         let dir = tmpdir();
         let source = fixture(&dir, &"payload".repeat(1024));
@@ -1233,26 +1236,29 @@ fn existing_output_preserves_symlinks_hardlinks_and_permissions() {
         let target = dir.join("existing-target");
         let destination = dir.join(format!("{new_id}.jsonl"));
         std::fs::write(&target, "before").unwrap();
-        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
         if symbolic {
             symlink(&target, &destination).unwrap();
         } else {
             std::fs::hard_link(&target, &destination).unwrap();
         }
         let inode = std::fs::metadata(&target).unwrap().ino();
-        let options = PruneOptions {
+        let mut options = PruneOptions {
             new_id: Some(new_id.into()),
             keep_last: 0,
             ..Default::default()
         };
+        let error = prune_session(&source, &options).unwrap_err();
+        assert!(error.downcast_ref::<crate::publish::Exists>().is_some(), "{error:#}");
+        assert!(!dir.join(format!("{new_id}.flat.jsonl")).exists());
+        options.force = true;
         prune_session(&source, &options).unwrap();
-        assert_eq!(std::fs::metadata(&destination).unwrap().ino(), inode);
-        assert_eq!(std::fs::metadata(&target).unwrap().permissions().mode() & 0o777, 0o640);
-        assert!(std::fs::read_to_string(&target).unwrap().contains(MARKER_PREFIX));
-        assert_eq!(
-            std::fs::symlink_metadata(destination).unwrap().file_type().is_symlink(),
-            symbolic
-        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "before");
+        assert_eq!(std::fs::metadata(&target).unwrap().ino(), inode);
+        assert!(!std::fs::symlink_metadata(&destination)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(std::fs::read_to_string(&destination).unwrap().contains(MARKER_PREFIX));
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
@@ -2278,6 +2284,7 @@ fn malformed_large_rows_preserve_owned_passthrough_and_fatal_utf8() -> Result<()
             &PruneOptions {
                 new_id: Some("new".into()),
                 revive,
+                force: true,
                 ..Default::default()
             },
         )?;
@@ -2330,6 +2337,7 @@ fn rejected_large_json_keeps_strict_owned_value_acceptance() -> Result<()> {
             &path,
             &PruneOptions {
                 new_id: Some("new".into()),
+                force: true,
                 ..Default::default()
             },
         )?;

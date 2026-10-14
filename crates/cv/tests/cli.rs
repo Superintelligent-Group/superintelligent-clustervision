@@ -759,6 +759,91 @@ fn prune_json_emits_machine_readable_report() {
     assert!(err.contains("pruned"), "{err}");
 }
 
+/// `--to` names a session that may already exist, or `<id>.flat`, another session's sidecar.
+/// Either is refused (exit 2, nothing written); `--force` replaces by rename, never in place.
+#[test]
+fn prune_to_an_existing_session_is_refused_unless_forced() {
+    let w = World::new("pruneexisting");
+    let line = |uuid: &str, sid: &str, content: serde_json::Value| {
+        serde_json::json!({"type": "user", "uuid": uuid, "sessionId": sid, "timestamp": "2026-01-01T10:00:00Z",
+            "cwd": "/work/proj", "message": {"role": "user", "content": content}})
+    };
+    let big = "x".repeat(4096);
+    w.write_session(
+        "prunesrc",
+        &[
+            line("u1", "prunesrc", "go".into()),
+            line(
+                "u2",
+                "prunesrc",
+                serde_json::json!([{"type": "tool_result", "tool_use_id": "t1", "content": big}]),
+            ),
+        ],
+    );
+    let other = w.write_session("othersess", &[line("o1", "othersess", "keep me".into())]);
+    let dir = other.parent().unwrap().to_owned();
+    let prune = |to: &str, force: bool| {
+        let mut args = vec!["prune", "prunesrc", "--min-size", "100", "--keep-last", "0", "--to", to];
+        if force {
+            args.push("--force");
+        }
+        w.cv(&args)
+    };
+    let listing = || {
+        let mut names: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    };
+    let other_before = fs::read(&other).unwrap();
+    let names_before = listing();
+    let (_, code, _, err) = prune("othersess", false);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("already exists"), "{err}");
+    assert_eq!(fs::read(&other).unwrap(), other_before);
+    assert_eq!(listing(), names_before, "a refused prune writes nothing");
+
+    let (ok, _, _, err) = prune("pruned", false);
+    assert!(ok, "{err}");
+    let sidecar = dir.join("pruned.flat.jsonl");
+    let sidecar_before = fs::read(&sidecar).unwrap();
+    let names_before = listing();
+    let (_, code, _, err) = prune("pruned.flat", false);
+    assert_eq!(code, 2, "{err}");
+    assert_eq!(
+        fs::read(&sidecar).unwrap(),
+        sidecar_before,
+        "the sidecar's payloads stay retrievable"
+    );
+    assert_eq!(listing(), names_before);
+
+    #[cfg(unix)]
+    let held = {
+        use std::os::unix::fs::MetadataExt;
+        (fs::File::open(&other).unwrap(), fs::metadata(&other).unwrap().ino())
+    };
+    let (ok, _, _, err) = prune("othersess", true);
+    assert!(ok, "{err}");
+    assert!(fs::read_to_string(&other).unwrap().contains("[PRUNED"));
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        use std::os::unix::fs::MetadataExt;
+        let (mut reader, inode) = held;
+        assert_ne!(
+            fs::metadata(&other).unwrap().ino(),
+            inode,
+            "--force renames, never truncates in place"
+        );
+        let mut old = Vec::new();
+        reader.read_to_end(&mut old).unwrap();
+        assert_eq!(old, other_before, "a reader of the replaced file keeps its bytes");
+    }
+    assert!(!listing().iter().any(|n| n.starts_with(".cv-")), "{:?}", listing());
+}
+
 // ───────────────────────────── rewind ─────────────────────────────
 
 /// A keeper session (two compactions) that committed `63cef47…` mid-way, plus one sub-agent that

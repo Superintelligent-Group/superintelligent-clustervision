@@ -85,27 +85,18 @@ pub(super) struct StoredPass {
     pub prefix_bytes: u64,
 }
 
-struct Temporary {
-    path: PathBuf,
-    file: Option<fs::File>,
-}
+struct Temporary(cv_core::publish::Staged);
 impl Temporary {
     fn new(dest: &Path) -> Result<Self> {
         let parent = dest.parent().context("archive path has no parent")?;
         fs::create_dir_all(parent)?;
-        let path = parent.join(format!(".cv-archive-{}.tmp", uuid::Uuid::new_v4()));
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let file = options.open(&path)?;
-        Ok(Self { path, file: Some(file) })
+        Ok(Self(cv_core::publish::Staged::create(parent, "archive", 0o600)?))
+    }
+    fn path(&self) -> &Path {
+        self.0.path()
     }
     fn write_json(&mut self, value: &impl Serialize, pretty: bool) -> Result<()> {
-        let mut writer = BufWriter::with_capacity(64 * 1024, self.file.as_mut().unwrap());
+        let mut writer = BufWriter::with_capacity(64 * 1024, self.0.file());
         if pretty {
             serde_json::to_writer_pretty(&mut writer, value)?;
         } else {
@@ -114,15 +105,9 @@ impl Temporary {
         writer.flush()?;
         Ok(())
     }
-    fn publish(mut self, dest: &Path) -> Result<()> {
-        drop(self.file.take());
-        fs::rename(&self.path, dest).with_context(|| format!("finalizing {}", dest.display()))
-    }
-}
-impl Drop for Temporary {
-    fn drop(&mut self) {
-        drop(self.file.take());
-        let _ = fs::remove_file(&self.path);
+    fn publish(self, dest: &Path) -> Result<()> {
+        self.0.publish(dest, cv_core::publish::Claim::Replace)?;
+        Ok(())
     }
 }
 
@@ -196,7 +181,7 @@ impl Archive {
             .write_json(session, true)
             .with_context(|| format!("serializing session {}", session.id))?;
         let _lock = self.lock_catalog()?;
-        let outcome = if equal_files(&temporary.path, &dest) {
+        let outcome = if equal_files(temporary.path(), &dest) {
             // Repair an artifact whose bytes were published before a crash/error prevented the
             // catalog append. The identity comparison and repair share the writer lock.
             if repair_catalog {
@@ -286,7 +271,7 @@ impl Archive {
         let session = pass.session;
         let mut temporary = Temporary::new(&dest)?;
         let prefix = {
-            let mut writer = BufWriter::with_capacity(64 * 1024, temporary.file.as_mut().unwrap());
+            let mut writer = BufWriter::with_capacity(64 * 1024, temporary.0.file());
             let prefix = spool::write_session(
                 &mut writer,
                 &session,
@@ -315,7 +300,7 @@ impl Archive {
                     first_user.as_ref().and_then(|first| first.head.as_deref()),
                 ))
             });
-            let outcome = if equal_files(&temporary.path, &dest) {
+            let outcome = if equal_files(temporary.path(), &dest) {
                 if previous.is_none() {
                     self.upsert_catalog_locked(entry)?;
                 }
@@ -494,7 +479,7 @@ mod tests {
         exact(&a, adapter.as_ref(), &r);
         let dest = a.session_path(r.harness, &r.id);
         let temporary = Temporary::new(&dest).unwrap();
-        let own = temporary.path.clone();
+        let own = temporary.path().to_owned();
         assert!(own.exists());
         drop(temporary);
         assert!(!own.exists());

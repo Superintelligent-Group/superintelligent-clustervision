@@ -541,36 +541,6 @@ pub(crate) fn normalize_subagent_record(v: &mut Value) -> bool {
     modified
 }
 
-/// A uniquely and exclusively created operation-owned partial; failed operations clean up only
-/// their own staging path, never another rewind's partial or a previously published destination.
-struct TemporaryOutput(PathBuf);
-impl TemporaryOutput {
-    fn create(dir: &Path) -> Result<(Self, std::fs::File)> {
-        let path = dir.join(format!(".cv-rewind-{}.partial", uuid::Uuid::new_v4()));
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let file = options
-            .open(&path)
-            .with_context(|| format!("writing {}", path.display()))?;
-        Ok((Self(path), file))
-    }
-    fn publish(&self, destination: &Path) -> Result<()> {
-        // The temporary and destination share a directory/filesystem. Linking atomically claims
-        // a new name without replacing a concurrent writer's completed output.
-        std::fs::hard_link(&self.0, destination).with_context(|| format!("writing {}", destination.display()))
-    }
-}
-impl Drop for TemporaryOutput {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
 /// Initial-prefix receipt using the same immutable-prefix append contract as resume marks.
 /// Non-growth rewrites use strict identity/metadata checks; growth uses bounded head/tail samples.
 /// An unsampled prefix rewrite combined with growth is not proven absent by this receipt.
@@ -751,15 +721,19 @@ fn rewind_session_after_scan(
     if new_id == r.id {
         bail!("new id must differ from the source id");
     }
-    if !opts.dry_run && (new_path.exists() || provenance_path.exists()) {
-        bail!("{} already exists — pick another --to", new_path.display());
+    if !opts.dry_run {
+        crate::publish::refuse_existing(&new_path, " (pick another --to)")?;
+        crate::publish::refuse_existing(&provenance_path, " (pick another --to)")?;
     }
-    let (partial, mut writer) = if opts.dry_run {
-        (None, None)
+    // The rewound session holds the source's records: it is no more exposed than the source.
+    let mode = crate::publish::mode_of(&file);
+    let mut writer = if opts.dry_run {
+        None
     } else {
         std::fs::create_dir_all(&out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
-        let (partial, file) = TemporaryOutput::create(&out_dir)?;
-        (Some(partial), Some(std::io::BufWriter::new(file)))
+        Some(std::io::BufWriter::new(crate::publish::Staged::create(
+            &out_dir, "rewind", mode,
+        )?))
     };
 
     file.seek(std::io::SeekFrom::Start(0))?;
@@ -863,9 +837,7 @@ fn rewind_session_after_scan(
         }
     }
     if cut_line == 0 {
-        if let Some(w) = writer.take() {
-            drop(w);
-        }
+        drop(writer.take());
         bail!(
             "message {cut_idx}'s record (byte {cut_off}) is not a line start in {}",
             r.path.display()
@@ -950,16 +922,18 @@ fn rewind_session_after_scan(
         dry_run: opts.dry_run,
     };
 
-    if let Some(mut w) = writer.take() {
-        w.flush()?;
-        drop(w);
+    if let Some(w) = writer.take() {
+        use crate::publish::{Claim, Staged};
+        let transcript = w.into_inner().map_err(|e| e.into_error())?;
         let body = serde_json::to_string_pretty(&provenance(&res, opts))? + "\n";
-        let (provenance_partial, mut file) = TemporaryOutput::create(&out_dir)?;
-        file.write_all(body.as_bytes())?;
-        file.flush()?;
-        drop(file);
-        partial.as_ref().unwrap().publish(&res.new_path)?;
-        provenance_partial.publish(&res.provenance_path)?;
+        let mut provenance_file = Staged::create(&out_dir, "rewind", mode)?;
+        provenance_file.write_all(body.as_bytes())?;
+        // Provenance first: a published transcript always has the receipt that explains it.
+        let published = provenance_file.publish(&res.provenance_path, Claim::New)?;
+        if let Err(error) = transcript.publish(&res.new_path, Claim::New) {
+            crate::publish::retract(&res.provenance_path, &published);
+            return Err(error);
+        }
     }
     Ok(res)
 }

@@ -148,10 +148,10 @@ fn run(roots: &[PathBuf], a: &AdoptArgs) -> Result<()> {
     let blocked: Vec<&Plan> = plans.iter().filter(|p| p.exists).collect();
     if !blocked.is_empty() && !a.force && !a.dry_run {
         let names: Vec<String> = blocked.iter().map(|p| p.dest.display().to_string()).collect();
-        anyhow::bail!(
+        return usage(format!(
             "refusing to overwrite (pass --force to replace; nothing was written):\n{}",
             names.join("\n")
-        );
+        ));
     }
 
     let mut done = Vec::new();

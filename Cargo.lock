@@ -323,6 +323,7 @@ dependencies = [
  "cv-testkit",
  "dirs 5.0.1",
  "fs4",
+ "libc",
  "memchr",
  "memmap2",
  "percent-encoding",

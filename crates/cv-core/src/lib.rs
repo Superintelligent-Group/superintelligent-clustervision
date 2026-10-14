@@ -40,6 +40,7 @@ pub(crate) mod lockfile;
 pub mod loom;
 pub mod offsets;
 pub mod prune;
+pub mod publish;
 pub mod query;
 pub mod redact;
 pub mod render;

@@ -111,6 +111,9 @@ pub struct PruneOptions {
     pub declassify_min_hits: usize,
     /// Compute and report without writing anything.
     pub dry_run: bool,
+    /// Replace an existing `<new-id>.jsonl` (and its sidecar) by atomic rename. Without it, an
+    /// existing name is refused with [`crate::publish::Exists`].
+    pub force: bool,
 }
 
 impl Default for PruneOptions {
@@ -129,6 +132,7 @@ impl Default for PruneOptions {
             declassify_tokens: Vec::new(), // token-agnostic: caller supplies the terms (no baked-in list)
             declassify_min_hits: 2,
             dry_run: false,
+            force: false,
         }
     }
 }
@@ -540,6 +544,12 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
     if std::fs::canonicalize(&new_path).is_ok_and(|p| p == source_location) {
         bail!("new session path must differ from the source path");
     }
+    if !opts.dry_run && !opts.force {
+        // Another session (or `<id>.flat`, a session's sidecar) already holds the name.
+        let hint = " (pick another --to, or pass --force to replace it)";
+        crate::publish::refuse_existing(&new_path, hint)?;
+        crate::publish::refuse_existing(&sidecar_path, hint)?;
+    }
 
     // Map tool_use_id -> (name, input) from assistant tool_use blocks (which use `id`, not
     // `tool_use_id`); tool_result blocks only carry the id, not the name.
@@ -922,18 +932,35 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
     }
 
     if !opts.dry_run {
-        let transcript = PreparedFile::new(&new_path, &output)?;
-        let sidecar_file = sidecar_out
-            .as_ref()
-            .map(|p| PreparedFile::new(p, &sidecar))
-            .transpose()?;
+        use crate::publish::Claim;
+        let claim = if opts.force { Claim::Replace } else { Claim::New };
+        let mode = crate::publish::mode_of(&file);
+        let transcript = stage(&new_path, &output, mode)?;
+        let sidecar_file = sidecar_out.as_ref().map(|p| stage(p, &sidecar, mode)).transpose()?;
         source.check_metadata(file.metadata()?)?;
         source.check()?;
-        // Serialization and writes complete before publication. New destinations use atomic renames; existing destinations preserve fs::write
-        // behavior. Transcript, sidecar and resource publication remain separate operations.
-        transcript.publish(&file)?;
-        if let Some(sidecar_file) = sidecar_file {
-            sidecar_file.publish(&file)?;
+        // Serialization and writes complete before publication. The sidecar is published first,
+        // so a transcript never names markers its sidecar cannot answer; a transcript that then
+        // fails to publish takes its sidecar back with it.
+        let sidecar_published = sidecar_out
+            .as_ref()
+            .zip(sidecar_file)
+            .map(|(p, staged)| staged.publish(p, claim).map(|file| (p, file)))
+            .transpose()?;
+        if let Err(error) = transcript.publish(&new_path, claim) {
+            if let Some((p, file)) = &sidecar_published {
+                crate::publish::retract(p, file);
+            }
+            return Err(error);
+        }
+        if opts.force && sidecar_out.is_none() {
+            // The replaced session's own sidecar would answer `cv cat <new-id>` with its payloads.
+            match std::fs::remove_file(&sidecar_path) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(e).with_context(|| format!("removing the replaced {}", sidecar_path.display()))
+                }
+                _ => {}
+            }
         }
         if let Some(dst) = &copied {
             copy_dir(&resource_dir.join(src_stem), dst)
@@ -963,74 +990,15 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
     })
 }
 
-/// Same-directory temporary outputs keep a failed write from truncating a prior destination.
-struct PreparedFile {
-    temporary: PathBuf,
-    destination: PathBuf,
-}
-impl PreparedFile {
-    fn new(destination: &Path, bytes: &ByteSource) -> Result<Self> {
-        if destination.exists() && !destination.is_file() {
-            bail!("output is not a regular file: {}", destination.display());
-        }
-        let temporary = destination.with_file_name(format!(".cv-prune-{}", uuid::Uuid::new_v4()));
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        let output_file = options.open(&temporary)?;
-        // Never claim cleanup ownership before exclusive creation succeeds.
-        let prepared = Self {
-            temporary,
-            destination: destination.to_owned(),
-        };
-        // This handle drops before the owner on failure, including on platforms that cannot unlink
-        // an open file.
-        let mut file = output_file;
-        std::io::copy(
-            &mut std::io::BufReader::with_capacity(64 * 1024, bytes.reader()?),
-            &mut file,
-        )?;
-        file.flush()?;
-        Ok(prepared)
-    }
-    fn publish(self, source: &std::fs::File) -> Result<()> {
-        match std::fs::hard_link(&self.temporary, &self.destination) {
-            Ok(()) => return Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error).with_context(|| format!("publishing {}", self.destination.display())),
-        }
-        {
-            // Existing outputs keep fs::write's symlink, hardlink, permissions and read-only
-            // semantics. Open without truncation so a source inode alias is rejected first.
-            let mut destination = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(&self.destination)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt;
-                let original = source.metadata()?;
-                let target = destination.metadata()?;
-                anyhow::ensure!(
-                    original.dev() != target.dev() || original.ino() != target.ino(),
-                    "output aliases source inode"
-                );
-            }
-            #[cfg(not(unix))]
-            let _ = source;
-            destination.set_len(0)?;
-            std::io::copy(
-                &mut std::io::BufReader::with_capacity(64 * 1024, std::fs::File::open(&self.temporary)?),
-                &mut destination,
-            )?;
-            Ok(())
-        }
-    }
-}
-impl Drop for PreparedFile {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.temporary);
-    }
+/// Stage `bytes` beside `destination` for [`crate::publish`]; a failed write leaves nothing behind.
+fn stage(destination: &Path, bytes: &ByteSource, mode: u32) -> Result<crate::publish::Staged> {
+    let mut staged = crate::publish::Staged::beside(destination, "prune", mode)?;
+    std::io::copy(
+        &mut std::io::BufReader::with_capacity(64 * 1024, bytes.reader()?),
+        &mut staged,
+    )
+    .with_context(|| format!("writing {}", destination.display()))?;
+    Ok(staged)
 }
 
 fn read_line(file: &std::fs::File, range: Range) -> Result<String> {

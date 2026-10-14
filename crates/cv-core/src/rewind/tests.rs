@@ -505,37 +505,6 @@ fn git_verbs_classify_created_and_pushed() {
 }
 
 #[test]
-fn rewind_temporary_outputs_preserve_other_partials_and_late_destinations() {
-    let dir = tmpdir();
-    let old_partial = dir.join(".chosen.jsonl.partial");
-    std::fs::write(&old_partial, b"another operation's partial").unwrap();
-    let destination = dir.join("chosen.jsonl");
-    let (temporary, mut file) = TemporaryOutput::create(&dir).unwrap();
-    file.write_all(b"our completed output").unwrap();
-    file.flush().unwrap();
-    drop(file);
-    let staged = temporary.0.clone();
-    assert_ne!(staged, old_partial);
-    std::fs::write(&destination, b"a concurrent writer's completed output").unwrap();
-    assert!(temporary.publish(&destination).is_err());
-    assert_eq!(
-        std::fs::read(&destination).unwrap(),
-        b"a concurrent writer's completed output"
-    );
-    drop(temporary);
-    assert!(!staged.exists());
-    assert_eq!(std::fs::read(&old_partial).unwrap(), b"another operation's partial");
-    std::fs::remove_file(&destination).unwrap();
-    let (temporary, mut file) = TemporaryOutput::create(&dir).unwrap();
-    file.write_all(b"published once").unwrap();
-    drop(file);
-    temporary.publish(&destination).unwrap();
-    drop(temporary);
-    assert_eq!(std::fs::read(&destination).unwrap(), b"published once");
-    cleanup(&dir);
-}
-
-#[test]
 fn rewind_prefix_receipt_accepts_appends_and_rejects_source_mutations() {
     for mutation in ["append", "rewrite", "replace", "rewrite-grow", "truncate"] {
         let dir = tmpdir();

@@ -52,6 +52,10 @@ fs4 = { version = "0.13", default-features = false, features = ["sync"] }
 # crypto API via getrandom's `js` backend. Feature-gating it here (features unify per-target)
 # makes `cargo check -p clustervision-core --no-default-features --target wasm32-unknown-unknown`
 # work standalone instead of relying on cv-web to enable `uuid/js` for the whole graph.
+# No-replace rename (`renamex_np`, `renameat2`) for publishing where hard links are unsupported.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(target_family = "wasm")'.dependencies]
 uuid = { workspace = true, features = ["js"] }
 

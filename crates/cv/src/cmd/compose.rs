@@ -20,6 +20,7 @@ pub(crate) fn cmd_prune(
     min_size: usize,
     keep_last: usize,
     to: Option<String>,
+    force: bool,
     drop: bool,
     thinking: bool,
     copy_resources: bool,
@@ -55,6 +56,7 @@ pub(crate) fn cmd_prune(
         declassify,
         declassify_tokens, // caller-supplied (external); cv ships no built-in list. min_hits from Default (2).
         dry_run,
+        force,
         ..Default::default()
     };
     let res = cv_core::prune::prune_session(&r.path, &opts)?;

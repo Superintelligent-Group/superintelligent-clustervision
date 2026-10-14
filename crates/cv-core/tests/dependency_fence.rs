@@ -30,6 +30,9 @@ const DEPENDENCY_ALLOWLIST: &[&str] = &[
     "chrono",
     "dirs",
     "fs4",
+    // Unix only: renamex_np/renameat2 and their errno values for publishing without hard links
+    // (src/publish.rs). Never reached by replay or wasm.
+    "libc",
     "memchr",
     "memmap2",
     "percent-encoding",

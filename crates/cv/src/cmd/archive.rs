@@ -232,15 +232,15 @@ impl Archive {
             self.schedule_compaction_check(raw.len() as u64);
             return Ok(());
         }
-        let tmp = path.with_extension(format!("{}.jsonl.tmp", std::process::id()));
+        let mut staged = cv_core::publish::Staged::beside(&path, "archive-catalog", 0o666)?;
         {
-            let mut f = fs::File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
+            let mut f = std::io::BufWriter::new(staged.file());
             for e in &entries {
                 writeln!(f, "{}", serde_json::to_string(e)?)?;
             }
             f.flush()?;
         }
-        fs::rename(&tmp, &path).with_context(|| format!("finalizing {}", path.display()))?;
+        staged.publish(&path, cv_core::publish::Claim::Replace)?;
         let size = fs::metadata(&path)
             .with_context(|| format!("stat'ing {}", path.display()))?
             .len();
@@ -496,22 +496,26 @@ mod tests {
         fs::remove_dir_all(a.home()).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn failed_compaction_keeps_the_append_and_retries_cleanup() {
+        use std::os::unix::fs::PermissionsExt;
         let a = archive();
         fs::create_dir_all(a.home()).unwrap();
         let raw: String = (0..64)
             .map(|i| format!("{}\n", serde_json::to_string(&entry("same", i)).unwrap()))
             .collect();
         fs::write(a.catalog_path(), raw).unwrap();
-        let tmp = a
-            .catalog_path()
-            .with_extension(format!("{}.jsonl.tmp", std::process::id()));
-        fs::create_dir(&tmp).unwrap();
-        assert!(a.upsert_catalog(entry("same", 64)).is_err());
+        // The append writes the existing catalog; the compaction's staged file cannot be created.
+        drop(a.lock_catalog().unwrap());
+        let dir = a.catalog_path().parent().unwrap().to_owned();
+        let writable = fs::metadata(&dir).unwrap().permissions();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+        let failed = a.upsert_catalog(entry("same", 64));
+        fs::set_permissions(&dir, writable).unwrap();
+        assert!(failed.is_err());
         assert_eq!(a.load_catalog().unwrap()[0].archived_at.timestamp(), 64);
         assert_eq!(fs::read_to_string(a.catalog_path()).unwrap().lines().count(), 65);
-        fs::remove_dir(&tmp).unwrap();
         a.upsert_catalog(entry("same", 65)).unwrap();
         assert_eq!(a.load_catalog().unwrap()[0].archived_at.timestamp(), 65);
         assert_eq!(fs::read_to_string(a.catalog_path()).unwrap().lines().count(), 1);

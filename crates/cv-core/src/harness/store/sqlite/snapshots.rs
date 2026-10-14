@@ -75,30 +75,25 @@ impl Namespace {
         check_private_root(&self.root)?;
         let path = self.root.join("gate");
         if create && !path.exists() {
-            // Publish a complete, already-locked gate using a hard link. Never truncate or
+            // Publish a complete, already-locked gate under a new name. Never truncate or
             // replace the stable gate: two different lock inodes would split authority.
-            let temporary = self.root.join(format!("initializing-{}", uuid::Uuid::new_v4()));
-            let mut cleanup = RemoveFile(None);
-            let mut candidate = new_file(&temporary)?;
-            cleanup.0 = Some(temporary.clone());
-            FileExt::lock_exclusive(&candidate)?;
+            let mut candidate = crate::publish::Staged::create(&self.root, "gate", 0o600)?;
+            FileExt::lock_exclusive(candidate.file())?;
             serde_json::to_writer(
-                &mut candidate,
+                candidate.file(),
                 &GateRecord {
                     magic: MAGIC.into(),
                     root,
                 },
             )?;
-            candidate.flush()?;
-            match fs::hard_link(&temporary, &path) {
-                Ok(()) => {
-                    drop(cleanup);
+            match candidate.publish(&path, crate::publish::Claim::New) {
+                Ok(candidate) => {
                     ensure_path(&candidate, &path)?;
                     self.ensure_root(root)?;
                     return Ok(Some(candidate));
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(e) => return Err(e.into()),
+                Err(e) if e.downcast_ref::<crate::publish::Exists>().is_some() => {}
+                Err(e) => return Err(e),
             }
         }
         let mut gate = existing_file(&path)?;

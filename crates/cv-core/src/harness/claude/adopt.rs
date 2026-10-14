@@ -230,38 +230,6 @@ pub struct Adopted {
     pub bytes: usize,
 }
 
-/// Own only uniquely and exclusively created staging paths.
-struct Temporary(PathBuf);
-impl Temporary {
-    fn create(dir: &Path) -> Result<(Self, std::fs::File)> {
-        let path = dir.join(format!(".cv-adopt-{}.tmp", uuid::Uuid::new_v4()));
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let file = options
-            .open(&path)
-            .with_context(|| format!("writing {}", path.display()))?;
-        Ok((Self(path), file))
-    }
-    fn publish(&self, destination: &Path, force: bool) -> Result<()> {
-        if force {
-            std::fs::rename(&self.0, destination)
-        } else {
-            std::fs::hard_link(&self.0, destination)
-        }
-        .with_context(|| format!("placing {}", destination.display()))
-    }
-}
-impl Drop for Temporary {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
 /// Stream checked transcript surgery into private staging; with `write`, publish the transcript
 /// and optional metadata through exclusive temporary files. Source failures occur before publication.
 /// Refuses existing destinations unless `force`, including names claimed after planning.
@@ -282,21 +250,23 @@ fn execute_after_stage(
             p.into_session
         );
     }
-    let destination_exists = |path: &Path| -> Result<bool> {
-        match std::fs::symlink_metadata(path) {
-            Ok(_) => Ok(true),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(error) => Err(error.into()),
-        }
+    use crate::publish::refuse_existing;
+    const HINT: &str = " (pass --force to replace it)";
+    let refuse_destinations = || -> Result<()> {
+        refuse_existing(&p.dest, HINT)?;
+        refuse_existing(&p.dest.with_extension("meta.json"), HINT)
     };
-    if !force && (p.exists || destination_exists(&p.dest)? || destination_exists(&p.dest.with_extension("meta.json"))?)
-    {
-        bail!(
-            "{} already exists — refusing to overwrite (pass --force to replace it)",
-            p.dest.display()
-        );
+    if !force {
+        if p.exists {
+            return Err(crate::publish::Exists {
+                path: p.dest.clone(),
+                hint: HINT,
+            }
+            .into());
+        }
+        refuse_destinations()?;
     }
-    use std::io::Write;
+    use crate::publish::{Claim, Staged};
     let source = crate::json::JsonSource::capture(&p.agent.path)
         .with_context(|| format!("reading {}", p.agent.path.display()))?;
     let file = std::fs::File::open(&p.agent.path)?;
@@ -306,22 +276,17 @@ fn execute_after_stage(
     let counts = if write {
         let dir = p.dest.parent().context("destination has no parent dir")?;
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-        let (partial, output) = Temporary::create(dir)?;
-        let mut output = std::io::BufWriter::new(output);
+        let mut output = std::io::BufWriter::new(Staged::create(dir, "adopt", 0o600)?);
         let counts = crate::restamp::write_restamped_transcript(&source, &file, &p.into_session, &mut output)?;
-        output.flush()?;
-        drop(output);
-        transcript = Some(partial);
+        transcript = Some(output.into_inner().map_err(|e| e.into_error())?);
         if let (Some(src), Some(dest)) = (&p.agent.meta_path, &p.dest_meta) {
             let meta_source =
                 crate::json::JsonSource::capture(src).with_context(|| format!("reading {}", src.display()))?;
             let mut meta_file = std::fs::File::open(src)?;
             meta_source.check_metadata(meta_file.metadata()?)?;
-            let (partial, mut output) = Temporary::create(dir)?;
+            let mut output = Staged::create(dir, "adopt", 0o600)?;
             std::io::copy(&mut meta_file, &mut output)?;
-            output.flush()?;
-            drop(output);
-            metadata = Some((meta_source, meta_file, partial, dest));
+            metadata = Some((meta_source, meta_file, output, dest));
         }
         counts
     } else {
@@ -334,17 +299,20 @@ fn execute_after_stage(
         meta_source.check_metadata(meta_file.metadata()?)?;
         meta_source.check()?;
     }
-    if write && !force && (destination_exists(&p.dest)? || destination_exists(&p.dest.with_extension("meta.json"))?) {
-        bail!(
-            "{} already exists — refusing to overwrite (pass --force to replace it)",
-            p.dest.display()
-        );
+    if write && !force {
+        refuse_destinations()?;
     }
-    if let Some((_, _, partial, destination)) = &metadata {
-        partial.publish(destination, force)?;
-    }
-    if let Some(partial) = &transcript {
-        partial.publish(&p.dest, force)?;
+    let claim = if force { Claim::Replace } else { Claim::New };
+    let metadata = metadata
+        .map(|(_, _, staged, destination)| staged.publish(destination, claim).map(|file| (destination, file)))
+        .transpose()?;
+    if let Some(staged) = transcript {
+        if let Err(error) = staged.publish(&p.dest, claim) {
+            if let Some((destination, file)) = &metadata {
+                crate::publish::retract(destination, file);
+            }
+            return Err(error);
+        }
     }
     Ok(Adopted {
         agent_id: p.agent.agent_id.clone(),
