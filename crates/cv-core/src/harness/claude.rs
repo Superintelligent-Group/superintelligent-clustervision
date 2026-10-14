@@ -1338,8 +1338,10 @@ fn subagent_tree_inner(
 type JournalResults = std::collections::BTreeMap<String, Value>;
 
 #[cfg(test)]
-static FOREST_READS: std::sync::Mutex<(Option<PathBuf>, Vec<(&'static str, PathBuf)>)> =
-    std::sync::Mutex::new((None, Vec::new()));
+type ForestReadTrace = (Option<PathBuf>, Vec<(&'static str, PathBuf)>);
+
+#[cfg(test)]
+static FOREST_READS: std::sync::Mutex<ForestReadTrace> = std::sync::Mutex::new((None, Vec::new()));
 #[cfg(test)]
 fn record_forest_read(kind: &'static str, path: &Path) {
     let mut trace = FOREST_READS.lock().unwrap();

@@ -1671,7 +1671,7 @@ fn source_multimodal_content(
         text.try_for_each_chunk(&resolver, 64 * 1024, |chunk| {
             let skipped = skip.min(chunk.len());
             skip -= skipped;
-            writer.write_all(chunk[skipped..].as_bytes())?;
+            writer.write_all(&chunk.as_bytes()[skipped..])?;
             Ok(())
         })
     })?;
