@@ -119,6 +119,7 @@ pub(crate) fn for_each_json_line_with<R: BufRead>(
 /// The same tolerant record contract with absolute consumed positions for append checkpoints.
 /// `complete` is true only after a newline and known byte accounting; a partial EOF record is
 /// emitted but must be replayed on growth. JSON/UTF-8 failures remain per-line skips.
+#[cfg(test)]
 pub(crate) fn for_each_json_line_at<R: BufRead>(
     reader: R,
     offset: u64,

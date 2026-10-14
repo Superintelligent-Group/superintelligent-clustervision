@@ -744,7 +744,7 @@ impl StagedReadGuard {
     pub fn verify(&self, r: &SessionRef) -> Result<()> {
         anyhow::ensure!(
             crate::source::unchanged_from(r, &self.primary, &self.source.with_reads(&self.reads)),
-            "session source changed while staging export"
+            "session source changed while preparing output"
         );
         Ok(())
     }

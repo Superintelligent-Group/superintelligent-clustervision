@@ -31,7 +31,8 @@ provider pointed at `key_proxy.py`, driven by `osascript`). Either way the data 
   (`sidebar_threads`, `sidebar_terminal_threads`, `thread_archived_worktrees`, `archived_git_worktrees`).
 - `SNAPSHOT.toml`: the app version and when the store was last written.
 
-`schema_snapshot.py` opens the databases read-only and immutable. It writes no content: an object
+`schema_snapshot.py` reads private database copies including WAL and rollback journals, and rejects
+observed source changes. SQLite never opens the originals. The report includes no content: an object
 whose keys are not plain identifiers is collapsed to `<key>`. On 2026-10-11 the installed app was
 1.16.1, but the newest thread was written on 2026-06-10, so the blob shape reflects older Zed builds
 (versions 0.2.0 and 0.3.0). The DDL is what 1.16.1 migrated to.
