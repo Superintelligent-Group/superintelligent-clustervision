@@ -2,6 +2,19 @@ use super::*;
 use crate::{harness::wire::anthropic, Json, Message, Origin};
 use std::collections::HashMap;
 
+#[test]
+fn derived_usage_total_saturates_instead_of_panicking_or_wrapping() {
+    let usage = crate::Usage {
+        input_tokens: Some(u64::MAX),
+        output_tokens: Some(1),
+        ..Default::default()
+    };
+    let value = openclaw_usage(Some(&usage)).unwrap();
+    assert_eq!(value["input"], json!(u64::MAX));
+    assert_eq!(value["output"], json!(1));
+    assert_eq!(value["totalTokens"], json!(u64::MAX));
+}
+
 fn normalized(path: &Path) -> Result<Vec<u8>> {
     let mut ids = HashMap::new();
     let mut output = Vec::new();

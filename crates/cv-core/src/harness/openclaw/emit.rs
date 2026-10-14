@@ -54,7 +54,7 @@ fn openclaw_usage(usage: Option<&crate::ir::Usage>) -> Option<Value> {
     }
     m.insert(
         "totalTokens".into(),
-        json!(u.input_tokens.unwrap_or(0) + u.output_tokens.unwrap_or(0)),
+        json!(u.input_tokens.unwrap_or(0).saturating_add(u.output_tokens.unwrap_or(0))),
     );
     Some(Value::Object(m))
 }
