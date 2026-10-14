@@ -26,6 +26,29 @@ pub(crate) fn cursor_cli_metadata(r: &SessionRef) -> Option<PathBuf> {
         .flatten()
 }
 
+/// Native SQLite identities retain sidecars even when a harness permits an arbitrary filename.
+/// Unreadable arbitrary OpenCode sources are unknown, so consumers cannot certify freshness.
+pub(crate) fn is_sqlite_source(r: &SessionRef) -> Option<bool> {
+    if r.path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| matches!(e, "db" | "sqlite" | "sqlite3" | "vscdb"))
+    {
+        return Some(true);
+    }
+    if r.harness != Harness::OpenCode {
+        return Some(false);
+    }
+    use std::io::Read;
+    let mut file = std::fs::File::open(&r.path).ok()?;
+    let mut header = [0; 16];
+    match file.read_exact(&mut header) {
+        Ok(()) => Some(&header == b"SQLite format 3\0"),
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => Some(false),
+        Err(_) => None,
+    }
+}
+
 fn sqlite_sidecars(path: &Path) -> [PathBuf; 2] {
     ["-wal", "-journal"].map(|suffix| {
         let mut sidecar = path.as_os_str().to_os_string();
@@ -423,7 +446,8 @@ impl Probe {
         let mut files = Vec::new();
         let mut directories = Vec::new();
         let ext = r.path.extension().and_then(|e| e.to_str());
-        if ext.is_some_and(|e| matches!(e, "db" | "sqlite" | "sqlite3" | "vscdb")) {
+        let sqlite = is_sqlite_source(r)?;
+        if sqlite {
             files.extend(sqlite_sidecars(&r.path));
         }
         if let Some(metadata) = cursor_cli_metadata(r) {
@@ -578,7 +602,7 @@ impl Probe {
                     }
                 }
             }
-            Harness::OpenCode if !ext.is_some_and(|e| matches!(e, "db" | "sqlite" | "sqlite3")) => {
+            Harness::OpenCode if !sqlite => {
                 let storage = r
                     .path
                     .ancestors()
@@ -941,6 +965,32 @@ pub fn update(_consumer: &str, _updates: &[Update]) {}
 
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
+    #[test]
+    fn arbitrary_opencode_database_names_retain_wal_and_journal_guards() {
+        let w = cv_testkit::World::in_process("source-opencode-arbitrary-db");
+        let path = w.base.join("custom-store");
+        std::fs::write(&path, b"SQLite format 3\0remaining database bytes").unwrap();
+        let r = SessionRef::new("session", Harness::OpenCode, &path);
+        assert_eq!(is_sqlite_source(&r), Some(true));
+        let before = Probe::default().snapshot(&r);
+        assert!(unchanged(&r, &before));
+        for sidecar in sqlite_sidecars(&path) {
+            std::fs::write(&sidecar, "changed native state").unwrap();
+            assert!(!unchanged(&r, &before));
+            std::fs::remove_file(sidecar).unwrap();
+            assert!(unchanged(&r, &before));
+        }
+        let missing = SessionRef::new("missing", Harness::OpenCode, w.base.join("missing"));
+        assert_eq!(is_sqlite_source(&missing), None);
+        assert!(Probe::default().snapshot(&missing).dependencies.is_none());
+        let legacy = w.base.join("ses_old.json");
+        std::fs::write(&legacy, "{}").unwrap();
+        assert_eq!(
+            is_sqlite_source(&SessionRef::new("old", Harness::OpenCode, legacy)),
+            Some(false)
+        );
+    }
+
     #[test]
     fn impossible_child_absence_invalidates_when_parent_becomes_directory() {
         let world = cv_testkit::World::in_process("not-directory-absence");

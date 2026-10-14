@@ -540,12 +540,7 @@ mod imp {
             if sqlite_watch {
                 paths.insert(r.path.clone());
             }
-            if sqlite_watch
-                && r.path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .is_some_and(|e| matches!(e, "db" | "sqlite" | "sqlite3" | "vscdb"))
-            {
+            if sqlite_watch && crate::source::is_sqlite_source(r).unwrap_or(true) {
                 let mut wal = r.path.as_os_str().to_os_string();
                 wal.push("-wal");
                 let wal = PathBuf::from(wal);
@@ -1367,6 +1362,22 @@ mod imp {
                 reads
             );
             assert!(!reads.fresh(&mut crate::source::Probe::default()));
+        }
+
+        #[test]
+        fn arbitrary_opencode_database_names_watch_native_wal() {
+            let w = cv_testkit::World::in_process("catalog-opencode-arbitrary-db");
+            let path = w.base.join("custom-store");
+            std::fs::write(&path, b"SQLite format 3\0native database bytes").unwrap();
+            let r = db_ref(Harness::OpenCode, path.clone());
+            let watches = watches_for(r.harness, std::slice::from_ref(&w.base), std::slice::from_ref(&r));
+            assert!(watches.iter().any(|(p, _)| p == &w.base.join("custom-store-wal")));
+            let legacy = w.base.join("ses_old.json");
+            std::fs::write(&legacy, "{}").unwrap();
+            let r = db_ref(Harness::OpenCode, legacy);
+            assert!(!watches_for(r.harness, &[], &[r])
+                .iter()
+                .any(|(p, _)| p == &w.base.join("ses_old.json-wal")));
         }
 
         #[test]
