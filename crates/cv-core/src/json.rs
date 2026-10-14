@@ -351,6 +351,48 @@ impl JsonSource {
         }
     }
 
+    /// Project a range of this source's private decoded bytes that the producer already mapped
+    /// and UTF-8 checked. Decoded bytes are immutable, so the producer checks the original's
+    /// identity when it decodes and when its pass ends, not per record; retained children keep
+    /// the backing and check the original again whenever they are resolved.
+    #[cfg(feature = "mmap")]
+    pub(crate) fn read_decoded_value<T>(
+        &self,
+        backing: &Arc<crate::harness::store::bytes::ByteSource>,
+        decoded_len: u64,
+        offset: u64,
+        text: &str,
+        f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>,
+    ) -> Result<T> {
+        self.read_decoded(backing, decoded_len, offset, text, Validation::Value, f)
+    }
+    /// Syntax-only counterpart of [`read_decoded_value`](Self::read_decoded_value).
+    #[cfg(feature = "mmap")]
+    pub(crate) fn read_decoded_syntax<T>(
+        &self,
+        backing: &Arc<crate::harness::store::bytes::ByteSource>,
+        decoded_len: u64,
+        offset: u64,
+        text: &str,
+        f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>,
+    ) -> Result<T> {
+        self.read_decoded(backing, decoded_len, offset, text, Validation::Syntax, f)
+    }
+    #[cfg(feature = "mmap")]
+    fn read_decoded<T>(
+        &self,
+        backing: &Arc<crate::harness::store::bytes::ByteSource>,
+        decoded_len: u64,
+        offset: u64,
+        text: &str,
+        validation: Validation,
+        f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>,
+    ) -> Result<T> {
+        let range = self.decoded_range(backing.clone(), decoded_len, offset, text.len() as u64)?;
+        let index = document::Index::default();
+        range.with_native_view(Raw::new(text, &index), validation, f)
+    }
+
     fn backing_range(
         &self,
         backing: Arc<crate::harness::store::bytes::ByteSource>,
@@ -359,6 +401,15 @@ impl JsonSource {
     ) -> Result<JsonRange> {
         self.check()?;
         let backing_len = backing.len()?;
+        self.decoded_range(backing, backing_len, offset, len)
+    }
+    fn decoded_range(
+        &self,
+        backing: Arc<crate::harness::store::bytes::ByteSource>,
+        backing_len: u64,
+        offset: u64,
+        len: u64,
+    ) -> Result<JsonRange> {
         anyhow::ensure!(
             len != 0 && offset.checked_add(len).is_some_and(|end| end <= backing_len),
             "backing range out of bounds"

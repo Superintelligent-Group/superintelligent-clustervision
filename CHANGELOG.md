@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Compressed Codex rollouts read from one mapping of their decoded bytes: first listing and `show` use about half the instructions.
 - `ls -q has:` and unchanged `cv index` detect only the adapter a session needs, once per operation: 2.9x and 1.7x fewer instructions.
 - Emitted sessions, distill sidecars and packs, dataset, pack and share files are published whole, never written into an existing file; a taken name exits 2.
 - `--force` on dataset, pack, distill `--pack` and share replaces a taken file by rename; a symlink there is replaced, other hard links keep old bytes.

@@ -4,7 +4,7 @@ use super::*;
 use crate::harness::store::{
     bytes::ByteSource,
     document::Fields,
-    jsonl::ranges::{self, read_exact_at, Range},
+    jsonl::ranges::{self, read_exact_at, At, Range},
 };
 use crate::json::{InvalidJson, JsonSource, JsonView};
 use std::io;
@@ -15,6 +15,10 @@ struct Rollout {
     source: JsonSource,
     backing: Option<Arc<ByteSource>>,
     file: fs::File,
+    /// The decoded arena, mapped once: framing, trimming and parsing borrow it instead of issuing
+    /// positioned reads and remapping per record.
+    #[cfg(feature = "mmap")]
+    map: Option<memmap2::Mmap>,
     len: u64,
 }
 enum Projection {
@@ -40,18 +44,53 @@ impl Rollout {
             let len = file.metadata()?.len();
             (file, None, len)
         };
+        // The arena is private and its decoded prefix is never rewritten, so one mapping serves
+        // the whole operation.
+        #[cfg(feature = "mmap")]
+        let map = match &backing {
+            Some(_) if len > 0 => unsafe { memmap2::Mmap::map(&file) }
+                .ok()
+                .filter(|map| map.len() as u64 == len),
+            _ => None,
+        };
         Ok(Self {
             path: path.to_path_buf(),
             source,
             backing,
             file,
+            #[cfg(feature = "mmap")]
+            map,
             len,
         })
     }
-    fn reader(&self, range: Range) -> Result<BufReader<ranges::Reader<'_>>> {
-        ranges::reader(&self.file, range)
+    /// Positioned bytes for framing: the mapped decode when there is one, else the descriptor.
+    fn at(&self) -> &dyn At {
+        #[cfg(feature = "mmap")]
+        if let Some(map) = &self.map {
+            return map;
+        }
+        &self.file
+    }
+    /// A mapped decoded record, already validated as UTF-8.
+    fn mapped(&self, range: Range) -> Option<Result<&str>> {
+        #[cfg(feature = "mmap")]
+        if let Some(map) = &self.map {
+            let bytes = &map[range.offset as usize..(range.offset + range.len) as usize];
+            return Some(std::str::from_utf8(bytes).map_err(|_| InvalidJson.into()));
+        }
+        let _ = range;
+        None
+    }
+    fn reader(&self, range: Range) -> Result<BufReader<ranges::Reader<'_, dyn At + '_>>> {
+        ranges::reader(self.at(), range)
     }
     fn view<T>(&self, range: Range, f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>) -> Result<T> {
+        #[cfg(feature = "mmap")]
+        if let (Some(text), Some(backing)) = (self.mapped(range), &self.backing) {
+            return self
+                .source
+                .read_decoded_syntax(backing, self.len, range.offset, text?, f);
+        }
         match &self.backing {
             Some(backing) => self
                 .source
@@ -60,6 +99,12 @@ impl Rollout {
         }
     }
     fn value<T>(&self, range: Range, f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>) -> Result<T> {
+        #[cfg(feature = "mmap")]
+        if let (Some(text), Some(backing)) = (self.mapped(range), &self.backing) {
+            return self
+                .source
+                .read_decoded_value(backing, self.len, range.offset, text?, f);
+        }
         match &self.backing {
             Some(backing) => self
                 .source
@@ -67,9 +112,9 @@ impl Rollout {
             None => self.source.read_range_value(range.offset, range.len, f),
         }
     }
-    fn records(&self, at: u64) -> Result<ranges::Records<'_>> {
+    fn records(&self, at: u64) -> Result<ranges::Records<'_, dyn At + '_>> {
         ranges::records(
-            &self.file,
+            self.at(),
             Range {
                 offset: at,
                 len: self.len - at,
@@ -77,7 +122,7 @@ impl Rollout {
         )
     }
     fn trim(&self, range: Range) -> Result<Range> {
-        ranges::trim(&self.file, range)
+        ranges::trim(self.at(), range)
     }
     fn events(&self) -> Result<bool> {
         let mut detector = EventDetector::default();
@@ -151,7 +196,7 @@ impl Rollout {
     fn parse(&self, range: Range, complete: bool) -> Result<Option<Value>> {
         if range.len <= crate::lazy::INLINE_MAX as u64 {
             let mut bytes = vec![0; range.len as usize];
-            read_exact_at(&self.file, &mut bytes, range.offset)?;
+            read_exact_at(self.at(), &mut bytes, range.offset)?;
             let Ok(text) = std::str::from_utf8(&bytes) else {
                 return Ok(None);
             };
@@ -168,6 +213,15 @@ impl Rollout {
             Ok(()) => {}
             Err(error) if error.downcast_ref::<InvalidJson>().is_some() => return Ok(None),
             Err(error) => return Err(error),
+        }
+        if let Some(text) = self.mapped(range) {
+            let text = text?;
+            if !complete {
+                if let Ok(value) = lean::parse(text.as_bytes(), false) {
+                    return Ok(Some(value.v));
+                }
+            }
+            return Ok(serde_json::from_str(text).ok());
         }
         if !complete {
             if let Ok(value) = lean::parse_reader(self.reader(range)?) {
@@ -384,10 +438,13 @@ pub(super) fn scan(path: &Path, scan: &mut CodexScan, turns: &mut metadata::Turn
                 }
                 Err(error) => return Err(error),
             }
-            turns.feed_reader(rollout.reader(range)?, scan);
+            match rollout.mapped(range) {
+                Some(text) => turns.feed_line(text?, scan),
+                None => turns.feed_reader(rollout.reader(range)?, scan),
+            }
         } else {
             let mut bytes = vec![0; range.len as usize];
-            read_exact_at(&rollout.file, &mut bytes, range.offset)?;
+            read_exact_at(rollout.at(), &mut bytes, range.offset)?;
             match std::str::from_utf8(&bytes) {
                 Ok(text) => turns.feed_line(text, scan),
                 Err(error) if rollout.backing.is_none() => return Err(error.into()),
@@ -452,7 +509,10 @@ fn stream_at(rollout: &Rollout, id: &str, state: ResumeState, at: u64, sink: &mu
             Err(error) if error.downcast_ref::<InvalidJson>().is_none() => return Err(error),
             Ok(None) | Err(_) => {
                 // Invalid records retain old lean/full fallback and skipped-line semantics.
-                rollout.source.check()?;
+                // Private decoded bytes cannot change; their original is checked at open and close.
+                if rollout.backing.is_none() {
+                    rollout.source.check()?;
+                }
                 let Some(value) = rollout.parse(range, ctx.complete)? else {
                     skipped += 1;
                     continue;
