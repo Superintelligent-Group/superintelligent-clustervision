@@ -44,6 +44,7 @@ struct Ctx {
     /// When set, every `/api/*` request must carry `Authorization: Bearer <token>`.
     token: Option<String>,
     default_who: Option<String>,
+    semantic_search: cv_search::SemanticSearch,
 }
 
 /// Gatekeep the exposure, then serve until the process is killed: a non-loopback bind serves the
@@ -133,6 +134,7 @@ fn run(
         web_root,
         token,
         default_who: who,
+        semantic_search: cv_search::SemanticSearch::default(),
     });
     let mut workers = Vec::new();
     // A handful of workers is plenty for dashboard polling; they share the listener.
@@ -393,7 +395,7 @@ fn handle(mut request: Request, ctx: &Ctx) {
                 }
                 Ok(None) => {}
             }
-            let (status, body, extra) = route(&parts, query);
+            let (status, body, extra) = route(&parts, query, &ctx.semantic_search);
             let _ = request.respond(json_response(status, &body, origin.as_deref(), &extra));
         }
     }
@@ -457,10 +459,10 @@ fn allowed_origin(origin: Option<&str>, bind_host: &str) -> Option<String> {
 type Reply = (u16, Value, Vec<(&'static str, String)>);
 
 /// Route a decoded read path + raw query string. Never panics.
-fn route(parts: &[&str], query: &str) -> Reply {
+fn route(parts: &[&str], query: &str, semantic_search: &cv_search::SemanticSearch) -> Reply {
     // Routes that carry extra response headers answer here; everything else is header-free.
     if let ["api", "search"] = parts {
-        return search(query);
+        return search(query, semantic_search);
     }
     if let ["api", "stats"] = parts {
         let (status, body) = stats(query);
@@ -522,7 +524,7 @@ fn stats(query: &str) -> (u16, Value) {
 /// `X-Cv-Search-Source` (`index` | `semantic` | `live`), with a human sentence in `X-Cv-Search-Note`
 /// whenever the answer is degraded or truncated, so the UI can tell the user rather than silently
 /// showing a worse result. Both headers are CORS-exposed. The body stays exactly the CLI's array.
-fn search(query: &str) -> Reply {
+fn search(query: &str, semantic_search: &cv_search::SemanticSearch) -> Reply {
     let params = Query::parse(query);
     // An empty query would mean "every session", which is `/api/sessions`' job; searching for
     // nothing is a caller mistake, not an empty result set.
@@ -551,8 +553,7 @@ fn search(query: &str) -> Reply {
         .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
 
     let (mut hits, source, mut note) = if semantic {
-        match cv_search::semantic_search_filtered(
-            None,
+        match semantic_search.search(
             &q,
             limit,
             cv_search::SearchFilter {
@@ -970,5 +971,41 @@ mod staged_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod semantic_service_tests {
+    use super::*;
+
+    #[test]
+    fn semantic_route_uses_service_owned_state_and_observes_replacement() {
+        let dir = std::env::temp_dir().join(format!("cv-serve-semantic-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("vectors.bin");
+        let metadata = br#"{"model":"unused","projection":1,"records":[]}"#;
+        let mut empty = b"CVEMBED\x02".to_vec();
+        empty.extend_from_slice(&0u32.to_le_bytes());
+        empty.extend_from_slice(&0u32.to_le_bytes());
+        empty.extend_from_slice(&(metadata.len() as u64).to_le_bytes());
+        empty.extend_from_slice(metadata);
+        std::fs::write(&path, &empty).unwrap();
+        let semantic = cv_search::SemanticSearch::new(Some(path.clone()));
+        for _ in 0..2 {
+            let (status, body, headers) = route(&["api", "search"], "q=anything&semantic=1", &semantic);
+            assert_eq!(status, 200);
+            assert_eq!(body, json!([]));
+            assert!(headers
+                .iter()
+                .any(|(name, value)| *name == "X-Cv-Search-Source" && value == "semantic"));
+        }
+        std::fs::write(&path, b"invalid replacement").unwrap();
+        let (status, _, _) = route(&["api", "search"], "q=anything&semantic=1", &semantic);
+        assert_eq!(status, 500);
+        std::fs::write(&path, &empty).unwrap();
+        let (status, body, _) = route(&["api", "search"], "q=anything&semantic=1", &semantic);
+        assert_eq!(status, 200);
+        assert_eq!(body, json!([]));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

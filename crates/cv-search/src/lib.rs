@@ -179,6 +179,10 @@ pub fn embed_sessions(path: impl Into<Option<PathBuf>>, refs: &[cv_core::Session
     semantic::embed_sessions(&path.into().unwrap_or_else(default_embeddings_path), refs)
 }
 
+/// Explicit lazy semantic state for a long-lived service. One-shot search remains stateless.
+#[cfg(feature = "semantic")]
+pub use semantic::SemanticSearch;
+
 /// Embed the query and rank stored session vectors by cosine similarity (default store).
 #[cfg(feature = "semantic")]
 pub fn semantic_search(path: impl Into<Option<PathBuf>>, query: &str, k: usize) -> Result<Vec<Hit>> {

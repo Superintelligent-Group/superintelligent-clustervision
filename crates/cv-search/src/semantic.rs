@@ -751,21 +751,7 @@ pub fn semantic_search_filtered(
         "semantic projection version changed — run cv index --semantic to rebuild vectors"
     );
     let spec = resolve_model(false)?.context("embedding model is not cached — run cv index --semantic")?;
-    let current = &spec.key;
-    if store.model != *current
-        || store.model_reads.is_none()
-        || store
-            .model_reads
-            .as_ref()
-            .is_some_and(|r| !r.fresh(&mut Probe::default()))
-    {
-        bail!(
-            "embedding store {} was built with model {:?}, but the current model is {current:?} \
-             — run `cv index --semantic` to re-embed (or set CV_SEARCH_MODEL to match)",
-            path.display(),
-            store.model
-        );
-    }
+    validate_store_model(&store, &spec, path)?;
     let model = load_model(&spec)?;
     let q = model.encode_single(query);
     if q.len() != store.dim {
@@ -777,6 +763,200 @@ pub fn semantic_search_filtered(
         );
     }
     Ok(rank_filtered(&store, &q, k, filter))
+}
+
+/// Service-owned semantic state. Construction performs no I/O; the first semantic request
+/// loads the store/model. One generation is retained and requests share it under a mutex.
+/// Dropping this handle releases it; one-shot CLI callers keep their existing stateless path.
+pub struct SemanticSearch {
+    inner: ResidentSearch<StaticModel>,
+}
+impl SemanticSearch {
+    pub fn new(path: impl Into<Option<PathBuf>>) -> Self {
+        Self {
+            inner: ResidentSearch::new(path.into().unwrap_or_else(crate::default_embeddings_path)),
+        }
+    }
+    pub fn search(&self, query: &str, k: usize, filter: crate::SearchFilter<'_>) -> Result<Vec<Hit>> {
+        self.inner.search(
+            query,
+            k,
+            filter,
+            || resolve_model(false),
+            load_model,
+            |model, query| model.encode_single(query),
+        )
+    }
+}
+impl Default for SemanticSearch {
+    fn default() -> Self {
+        Self::new(None)
+    }
+}
+
+struct CachedStore {
+    store: Store,
+    reads: ReadSet,
+}
+struct CachedModel<M> {
+    model: M,
+    key: String,
+    reads: ReadSet,
+}
+struct ResidentState<M> {
+    path: PathBuf,
+    store: Option<CachedStore>,
+    model: Option<CachedModel<M>>,
+}
+impl<M> ResidentState<M> {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            store: None,
+            model: None,
+        }
+    }
+    fn clear(&mut self) {
+        self.store = None;
+        self.model = None;
+    }
+    fn search(
+        &mut self,
+        query: &str,
+        k: usize,
+        filter: crate::SearchFilter<'_>,
+        resolve: impl FnOnce() -> Result<Option<ModelSpec>>,
+        load: impl FnOnce(&ModelSpec) -> Result<M>,
+        encode: impl FnOnce(&M, &str) -> Vec<f32>,
+    ) -> Result<Vec<Hit>> {
+        let path = &self.path;
+        let mut before = Probe::default();
+        if self
+            .store
+            .as_ref()
+            .is_none_or(|cached| !cached.reads.fresh(&mut before))
+        {
+            // Release the old generation before loading another; a failed replacement never
+            // leaves an old answer available as fallback.
+            self.store = None;
+            migrate_legacy_sibling(path);
+            let mut reads = ReadSet::default();
+            reads.record(path);
+            let store = load_store(path)?;
+            anyhow::ensure!(
+                reads.fresh(&mut Probe::default()),
+                "embedding store changed while loading: {}",
+                path.display()
+            );
+            self.store = Some(CachedStore { store, reads });
+        }
+        let cached = self.store.as_ref().unwrap();
+        if cached.store.meta.is_empty() {
+            self.model = None;
+            anyhow::ensure!(
+                cached.reads.fresh(&mut Probe::default()),
+                "embedding store changed during search: {}",
+                path.display()
+            );
+            return Ok(Vec::new());
+        }
+        anyhow::ensure!(
+            cached.store.projection == PROJECTION_VERSION,
+            "semantic projection version changed — run cv index --semantic to rebuild vectors"
+        );
+        // Resolution checks paths/revisions and artifact metadata, never model bodies.
+        let spec = resolve()?.context("embedding model is not cached — run cv index --semantic")?;
+        validate_store_model(&cached.store, &spec, path)?;
+        if self
+            .model
+            .as_ref()
+            .is_none_or(|model| model.key != spec.key || !model.reads.fresh(&mut before))
+        {
+            self.model = None;
+            let model = load(&spec)?;
+            anyhow::ensure!(
+                spec.reads.fresh(&mut Probe::default()),
+                "embedding model artifacts changed while loading"
+            );
+            self.model = Some(CachedModel {
+                model,
+                key: spec.key.clone(),
+                reads: spec.reads.clone(),
+            });
+        }
+        let q = encode(&self.model.as_ref().unwrap().model, query);
+        anyhow::ensure!(
+            q.len() == cached.store.dim,
+            "query embedding has dim {}, but store {} has dim {} — run `cv index --semantic` to re-embed",
+            q.len(),
+            path.display(),
+            cached.store.dim
+        );
+        let hits = rank_filtered(&cached.store, &q, k, filter);
+        let mut after = Probe::default();
+        anyhow::ensure!(
+            cached.reads.fresh(&mut after),
+            "embedding store changed during search: {}",
+            path.display()
+        );
+        anyhow::ensure!(
+            spec.reads.fresh(&mut after),
+            "embedding model artifacts changed during search"
+        );
+        Ok(hits)
+    }
+}
+struct ResidentSearch<M> {
+    state: std::sync::Mutex<ResidentState<M>>,
+}
+impl<M> ResidentSearch<M> {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            state: std::sync::Mutex::new(ResidentState::new(path)),
+        }
+    }
+    fn search(
+        &self,
+        query: &str,
+        k: usize,
+        filter: crate::SearchFilter<'_>,
+        resolve: impl FnOnce() -> Result<Option<ModelSpec>>,
+        load: impl FnOnce(&ModelSpec) -> Result<M>,
+        encode: impl FnOnce(&M, &str) -> Vec<f32>,
+    ) -> Result<Vec<Hit>> {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => {
+                let mut state = poisoned.into_inner();
+                state.clear();
+                self.state.clear_poison();
+                state
+            }
+        };
+        let result = state.search(query, k, filter, resolve, load, encode);
+        if result.is_err() {
+            state.clear();
+        }
+        result // The lock is released before HTTP/desktop response rendering.
+    }
+}
+
+fn validate_store_model(store: &Store, spec: &ModelSpec, path: &Path) -> Result<()> {
+    if store.model != spec.key
+        || store
+            .model_reads
+            .as_ref()
+            .is_none_or(|reads| !reads.fresh(&mut Probe::default()))
+    {
+        bail!(
+            "embedding store {} was built with model {:?}, but the current model is {:?} \
+            — run `cv index --semantic` to re-embed (or set CV_SEARCH_MODEL to match)",
+            path.display(),
+            store.model,
+            spec.key
+        );
+    }
+    Ok(())
 }
 
 /// One-time upgrade: when `path` is absent but the old default `embeddings.json` exists alongside
@@ -1947,6 +2127,248 @@ mod tests {
             s.meta.push(m);
         }
         s
+    }
+
+    fn resident_spec(artifact: &Path) -> ModelSpec {
+        let mut reads = ReadSet::default();
+        reads.record(artifact);
+        ModelSpec {
+            key: "fake@resident".into(),
+            path: artifact.parent().unwrap().into(),
+            reads,
+        }
+    }
+    fn write_resident_store(path: &Path, spec: &ModelSpec, flipped: bool) {
+        let mut second = meta("b", None);
+        second.harness = "codex".into();
+        second.cwd = Some("/resident".into());
+        let mut store = store(vec![
+            (meta("a", None), if flipped { vec![0.0, 1.0] } else { vec![1.0, 0.0] }),
+            (second, if flipped { vec![1.0, 0.0] } else { vec![0.0, 1.0] }),
+        ]);
+        store.model = spec.key.clone();
+        store.model_reads = Some(spec.reads.clone());
+        save_store(path, &store).unwrap();
+    }
+    struct HeldModel(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+    impl Drop for HeldModel {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn resident_semantic_reuses_and_invalidates_checked_store_and_model() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let dir = std::env::temp_dir().join(format!("cv-semantic-resident-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("vectors.bin");
+        let artifact = dir.join("model");
+        std::fs::write(&artifact, "v1").unwrap();
+        write_resident_store(&path, &resident_spec(&artifact), false);
+        let search = ResidentSearch::new(path.clone());
+        let loads = AtomicUsize::new(0);
+        let encodes = AtomicUsize::new(0);
+        let drops = Arc::new(AtomicUsize::new(0));
+        let load = |_: &ModelSpec| -> Result<HeldModel> {
+            loads.fetch_add(1, Ordering::Relaxed);
+            Ok(HeldModel(drops.clone()))
+        };
+        let encode = |_: &HeldModel, query: &str| {
+            encodes.fetch_add(1, Ordering::Relaxed);
+            if query == "vertical" {
+                vec![0.0, 1.0]
+            } else {
+                vec![1.0, 0.0]
+            }
+        };
+        let ask = |query, filter| search.search(query, 1, filter, || Ok(Some(resident_spec(&artifact))), load, encode);
+        VECTOR_DECODES.with(|count| count.set(0));
+        assert_eq!(ask("horizontal", crate::SearchFilter::default()).unwrap()[0].id, "a");
+        assert_eq!(ask("vertical", crate::SearchFilter::default()).unwrap()[0].id, "b");
+        assert_eq!(
+            ask(
+                "horizontal",
+                crate::SearchFilter {
+                    harness: Some("codex"),
+                    cwd: Some("resident")
+                }
+            )
+            .unwrap()[0]
+                .id,
+            "b"
+        );
+        assert_eq!(loads.load(Ordering::Relaxed), 1);
+        assert_eq!(encodes.load(Ordering::Relaxed), 3);
+        assert_eq!(VECTOR_DECODES.with(|count| count.get()), 1);
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        // Atomic index publication reloads only the store, retaining the unchanged model.
+        write_resident_store(&path, &resident_spec(&artifact), true);
+        assert_eq!(ask("horizontal", crate::SearchFilter::default()).unwrap()[0].id, "b");
+        assert_eq!(loads.load(Ordering::Relaxed), 1);
+        assert_eq!(VECTOR_DECODES.with(|count| count.get()), 2);
+        // Artifact edits invalidate old vectors even though the store's model key is unchanged.
+        std::fs::write(&artifact, "v2 model").unwrap();
+        assert!(ask("horizontal", crate::SearchFilter::default()).is_err());
+        assert_eq!(encodes.load(Ordering::Relaxed), 4);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+        write_resident_store(&path, &resident_spec(&artifact), true);
+        assert_eq!(ask("horizontal", crate::SearchFilter::default()).unwrap()[0].id, "b");
+        assert_eq!(loads.load(Ordering::Relaxed), 2);
+        // Revision/override identity mismatches never reuse a prior model or answer.
+        assert!(search
+            .search(
+                "q",
+                1,
+                crate::SearchFilter::default(),
+                || {
+                    let mut other = resident_spec(&artifact);
+                    other.key = "other@revision".into();
+                    Ok(Some(other))
+                },
+                load,
+                encode
+            )
+            .is_err());
+        assert_eq!(drops.load(Ordering::Relaxed), 2);
+        assert_eq!(ask("horizontal", crate::SearchFilter::default()).unwrap()[0].id, "b");
+        // Mid-query index publication rejects the captured answer, then the next query reloads.
+        assert!(search
+            .search(
+                "q",
+                1,
+                crate::SearchFilter::default(),
+                || Ok(Some(resident_spec(&artifact))),
+                load,
+                |model, query| {
+                    let q = encode(model, query);
+                    write_resident_store(&path, &resident_spec(&artifact), false);
+                    q
+                }
+            )
+            .is_err());
+        assert_eq!(ask("horizontal", crate::SearchFilter::default()).unwrap()[0].id, "a");
+        // Mid-query artifact changes also reject the answer, not merely the next request.
+        assert!(search
+            .search(
+                "q",
+                1,
+                crate::SearchFilter::default(),
+                || Ok(Some(resident_spec(&artifact))),
+                load,
+                |model, query| {
+                    let q = encode(model, query);
+                    std::fs::write(&artifact, "v3 changed model").unwrap();
+                    q
+                }
+            )
+            .is_err());
+        write_resident_store(&path, &resident_spec(&artifact), false);
+        assert_eq!(ask("horizontal", crate::SearchFilter::default()).unwrap()[0].id, "a");
+        // Deletion is an invalidation too; absent data cannot keep answering old rows.
+        std::fs::remove_file(&path).unwrap();
+        assert!(ask("horizontal", crate::SearchFilter::default()).is_err());
+        write_resident_store(&path, &resident_spec(&artifact), false);
+        assert_eq!(ask("horizontal", crate::SearchFilter::default()).unwrap()[0].id, "a");
+        // Malformed replacements fail instead of serving the previously cached valid store.
+        std::fs::write(&path, b"bad").unwrap();
+        assert!(ask("horizontal", crate::SearchFilter::default()).is_err());
+        write_resident_store(&path, &resident_spec(&artifact), false);
+        assert_eq!(ask("horizontal", crate::SearchFilter::default()).unwrap()[0].id, "a");
+        // A failed cold provider load is retryable and cannot leave a partial resident state.
+        search.state.lock().unwrap().clear();
+        assert!(search
+            .search(
+                "q",
+                1,
+                crate::SearchFilter::default(),
+                || Ok(Some(resident_spec(&artifact))),
+                |_| -> Result<HeldModel> { anyhow::bail!("model unavailable") },
+                |_, _| panic!("failed load must not encode")
+            )
+            .is_err());
+        assert!(search.state.lock().unwrap().store.is_none());
+        assert_eq!(ask("horizontal", crate::SearchFilter::default()).unwrap()[0].id, "a");
+        drop(search);
+        assert_eq!(loads.load(Ordering::Relaxed), drops.load(Ordering::Relaxed));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn resident_semantic_concurrent_requests_load_once_and_recover_poison() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let dir = std::env::temp_dir().join(format!("cv-semantic-resident-threads-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("vectors.bin");
+        let artifact = dir.join("model");
+        std::fs::write(&artifact, "v1").unwrap();
+        write_resident_store(&path, &resident_spec(&artifact), false);
+        let search = ResidentSearch::new(path);
+        let loads = AtomicUsize::new(0);
+        let drops = Arc::new(AtomicUsize::new(0));
+        let decodes = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                let (search, loads, drops, decodes, artifact) = (&search, &loads, &drops, &decodes, &artifact);
+                scope.spawn(move || {
+                    VECTOR_DECODES.with(|count| count.set(0));
+                    let hits = search
+                        .search(
+                            "q",
+                            1,
+                            crate::SearchFilter::default(),
+                            || Ok(Some(resident_spec(artifact))),
+                            |_| {
+                                loads.fetch_add(1, Ordering::Relaxed);
+                                Ok(HeldModel(drops.clone()))
+                            },
+                            |_, _| vec![1.0, 0.0],
+                        )
+                        .unwrap();
+                    assert_eq!(hits[0].id, "a");
+                    decodes.fetch_add(VECTOR_DECODES.with(|count| count.get()), Ordering::Relaxed);
+                });
+            }
+        });
+        assert_eq!(loads.load(Ordering::Relaxed), 1);
+        assert_eq!(decodes.load(Ordering::Relaxed), 1);
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = search.search(
+                "q",
+                1,
+                crate::SearchFilter::default(),
+                || Ok(Some(resident_spec(&artifact))),
+                |_| -> Result<HeldModel> { panic!("cached model should be reused") },
+                |_, _| panic!("provider panic"),
+            );
+        }));
+        assert!(panic.is_err());
+        let hits = search
+            .search(
+                "q",
+                1,
+                crate::SearchFilter::default(),
+                || Ok(Some(resident_spec(&artifact))),
+                |_| {
+                    loads.fetch_add(1, Ordering::Relaxed);
+                    Ok(HeldModel(drops.clone()))
+                },
+                |_, _| vec![0.0, 1.0],
+            )
+            .unwrap();
+        assert_eq!(hits[0].id, "b");
+        assert_eq!(loads.load(Ordering::Relaxed), 2);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+        assert!(!search.state.is_poisoned());
+        drop(search);
+        assert_eq!(drops.load(Ordering::Relaxed), 2);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
