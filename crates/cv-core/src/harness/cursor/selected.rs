@@ -271,6 +271,7 @@ fn bubble(view: JsonView<'_>, captured: &JsonSource, arena: &Arc<ByteSource>) ->
         &[
             "type",
             "bubbleId",
+            "createdAt",
             "thinking",
             "text",
             "richText",
@@ -297,6 +298,7 @@ fn bubble(view: JsonView<'_>, captured: &JsonSource, arena: &Arc<ByteSource>) ->
     };
     let mut message = Message::new(role);
     message.id = fields.string("bubbleId")?;
+    message.timestamp = fields.value("createdAt")?.as_ref().and_then(bubble_timestamp);
     if let Some(thinking) = fields
         .get("thinking")
         .map(|v| Fields::parse(v, &["text", "signature"]))
@@ -345,6 +347,7 @@ fn bubble(view: JsonView<'_>, captured: &JsonSource, arena: &Arc<ByteSource>) ->
                 "status",
                 "error",
                 "result",
+                "additionalData",
             ],
         )?;
         let name = tf
@@ -382,7 +385,19 @@ fn bubble(view: JsonView<'_>, captured: &JsonSource, arena: &Arc<ByteSource>) ->
             .flatten()
             .unwrap_or_default();
         let error = tf.as_ref().and_then(|f| f.get("error"));
-        let is_error = status.eq_ignore_ascii_case("error") || error.map(|v| v.is_null()).transpose()? == Some(false);
+        let command_failed = tf
+            .as_ref()
+            .and_then(|f| f.get("additionalData"))
+            .map(|v| v.get("status"))
+            .transpose()?
+            .flatten()
+            .map(string)
+            .transpose()?
+            .flatten()
+            .is_some_and(|s| s.eq_ignore_ascii_case("error"));
+        let is_error = status.eq_ignore_ascii_case("error")
+            || command_failed
+            || error.map(|v| v.is_null()).transpose()? == Some(false);
         let mut content = tf
             .as_ref()
             .and_then(|f| f.get("result"))

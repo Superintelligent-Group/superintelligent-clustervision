@@ -502,6 +502,7 @@ fn bubble_to_message(b: &Value) -> Option<Message> {
     };
     let mut m = Message::new(role);
     m.id = b.get("bubbleId").and_then(Value::as_str).map(str::to_string);
+    m.timestamp = b.get("createdAt").and_then(bubble_timestamp);
 
     // Thinking block (assistant): {text: "..."} (and sometimes signature).
     if let Some(th) = b.get("thinking") {
@@ -571,6 +572,15 @@ fn bubble_to_message(b: &Value) -> Option<Message> {
     }
 
     (!m.content.is_empty() || !m.extra.is_empty()).then_some(m)
+}
+
+/// IDE bubbles use RFC3339 creation times; tolerate older numeric epoch records too.
+fn bubble_timestamp(value: &Value) -> Option<chrono::DateTime<chrono::Utc>> {
+    match value {
+        Value::String(text) => super::parse_ts(text),
+        Value::Number(number) => number.as_i64().and_then(ts_from_epoch),
+        _ => None,
+    }
 }
 
 /// Numeric bubble modes use the installed Cursor 3.18.25 protocol enum (see the
@@ -901,6 +911,19 @@ mod tests {
         assert_eq!(refs.len(), 1);
         let session = adapter.parse(&refs[0]).unwrap();
         assert_eq!(session.messages.len(), 44);
+        assert_eq!(
+            session.messages[0].timestamp,
+            super::super::parse_ts("2026-10-14T00:49:06.803Z")
+        );
+        assert!(session.messages.iter().all(|m| m.timestamp.is_some()));
+        for opts in [ParseOptions::lazy(), ParseOptions::complete()] {
+            let mut sink = crate::stream::CollectSink::default();
+            adapter.stream(&refs[0], &opts, &mut sink).unwrap();
+            assert_eq!(
+                serde_json::to_value(&sink.messages).unwrap(),
+                serde_json::to_value(&session.messages).unwrap()
+            );
+        }
         let users: Vec<_> = session.messages.iter().filter(|m| m.role == Role::User).collect();
         assert_eq!(users.len(), 4);
         assert!(users[3].text().unwrap().contains("We reopened the IDE after stopping"));
