@@ -5,6 +5,7 @@
 - Emitted sessions, distill sidecars and packs, dataset, pack and share files are published whole, never written into an existing file; a taken name exits 2.
 - `--force` on dataset, pack, distill `--pack` and share replaces a taken file by rename; a symlink there is replaced, other hard links keep old bytes.
 - Harness indexes cv updates on emit (Continue, OpenClaw, Gemini) and cv's config are replaced by rename; a symlinked config is replaced at its target.
+- `prune --copy-resources` refuses an existing resource directory; with `--force` the new directory replaces it whole instead of merging into it.
 - `cv serve` runs on a small built-in server: idle connections close after 5 s, excess connections get 503, and accept errors no longer stop serving.
 - `cv prune --to` refuses an existing session or sidecar name (exit 2, nothing written); `--force` replaces it by atomic rename, never truncating in place.
 - Prune, rewind, adopt, share and archive outputs publish fsynced, without needing hard links (FAT, exFAT); rewind outputs keep the source's permissions.

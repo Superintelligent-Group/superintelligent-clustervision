@@ -549,6 +549,9 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
         let hint = " (pick another --to, or pass --force to replace it)";
         crate::publish::refuse_existing(&new_path, hint)?;
         crate::publish::refuse_existing(&sidecar_path, hint)?;
+        if opts.copy_resources && resource_dir.join(src_stem).is_dir() {
+            crate::publish::refuse_existing(&dir.join(&new_id), hint)?;
+        }
     }
 
     // Map tool_use_id -> (name, input) from assistant tool_use blocks (which use `id`, not
@@ -937,6 +940,10 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
         let mode = crate::publish::mode_of(&file);
         let transcript = stage(&new_path, &output, mode)?;
         let sidecar_file = sidecar_out.as_ref().map(|p| stage(p, &sidecar, mode)).transpose()?;
+        let resources = copied
+            .as_ref()
+            .map(|dst| stage_resources(&resource_dir.join(src_stem), dst))
+            .transpose()?;
         source.check_metadata(file.metadata()?)?;
         source.check()?;
         // Serialization and writes complete before publication. The sidecar is published first,
@@ -962,9 +969,9 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
                 _ => {}
             }
         }
-        if let Some(dst) = &copied {
-            copy_dir(&resource_dir.join(src_stem), dst)
-                .with_context(|| format!("copying session resources to {}", dst.display()))?;
+        if let Some((dst, staged)) = copied.as_ref().zip(resources) {
+            // Published whole: an existing directory is replaced (with --force), never merged into.
+            staged.publish(dst, claim)?;
         }
     }
 
@@ -3160,90 +3167,36 @@ fn build_marker(
 }
 
 /// Recursively copy a directory tree (used to carry `subagents/`/`workflows/` into the new session).
-fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
-    reject_resource_symlink(dst)?;
-    if resource_location(dst)?.starts_with(std::fs::canonicalize(src)?) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "resource destination aliases or lies inside source",
-        ));
+/// Copy the session's resource directory into a private staged directory beside `dst`.
+fn stage_resources(src: &Path, dst: &Path) -> Result<crate::publish::StagedDir> {
+    // Replacing `dst` deletes the tree it held; that must never hold the source.
+    if let (Ok(src), Ok(dst)) = (std::fs::canonicalize(src), std::fs::canonicalize(dst)) {
+        anyhow::ensure!(
+            !src.starts_with(dst),
+            "resource destination contains the source resources"
+        );
     }
-    std::fs::create_dir_all(dst)?;
+    let staged = crate::publish::StagedDir::beside(dst, "prune-resources")?;
+    copy_dir(src, staged.path()).with_context(|| format!("copying session resources to {}", dst.display()))?;
+    Ok(staged)
+}
+
+/// Copy `src` into `dst`, a directory this operation just created: every entry is new.
+fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
         let from = entry.path();
         let to = dst.join(entry.file_name());
         if entry.file_type()?.is_dir() {
+            std::fs::create_dir(&to)?;
             copy_dir(&from, &to)?;
         } else {
-            copy_resource_file(&from, &to)?;
+            let mut source = std::fs::File::open(&from)?;
+            let mut target = std::fs::OpenOptions::new().write(true).create_new(true).open(&to)?;
+            std::io::copy(&mut source, &mut target)?;
+            target.set_permissions(source.metadata()?.permissions())?;
         }
     }
-    Ok(())
-}
-
-/// Resolve existing ancestors too: a not-yet-created child of the source is still inside it.
-fn resource_location(path: &Path) -> std::io::Result<PathBuf> {
-    match std::fs::canonicalize(path) {
-        Ok(path) => Ok(path),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let name = path.file_name().ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::InvalidInput, "resource destination has no filename")
-            })?;
-            let parent = path
-                .parent()
-                .filter(|parent| !parent.as_os_str().is_empty())
-                .unwrap_or(Path::new("."));
-            Ok(resource_location(parent)?.join(name))
-        }
-        Err(error) => Err(error),
-    }
-}
-
-fn reject_resource_symlink(path: &Path) -> std::io::Result<()> {
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "resource destination is a symlink",
-        )),
-        Ok(_) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
-    }
-}
-
-fn copy_resource_file(src: &Path, dst: &Path) -> std::io::Result<()> {
-    reject_resource_symlink(dst)?;
-    let mut source = std::fs::File::open(src)?;
-    let mut target = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(dst)?;
-    reject_resource_symlink(dst)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let from = source.metadata()?;
-        let to = target.metadata()?;
-        if from.dev() == to.dev() && from.ino() == to.ino() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "resource destination aliases source file",
-            ));
-        }
-    }
-    #[cfg(not(unix))]
-    if std::fs::canonicalize(src)? == std::fs::canonicalize(dst)? {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "resource destination aliases source file",
-        ));
-    }
-    target.set_len(0)?;
-    std::io::copy(&mut source, &mut target)?;
-    target.flush()?;
-    target.set_permissions(source.metadata()?.permissions())?;
     Ok(())
 }
 
