@@ -326,7 +326,8 @@ struct SpliceSpec {
 fn parse_splice_spec(spec: &str) -> Result<SpliceSpec> {
     match spec.rsplit_once(':') {
         Some((id, range)) if range.contains("..") => {
-            let (start, end) = parse_range(range).with_context(|| format!("bad spec {spec:?}"))?;
+            let (start, end) =
+                parse_range(range).map_err(|error| crate::util::UsageError(format!("bad spec {spec:?}: {error}")))?;
             Ok(SpliceSpec {
                 id: id.to_string(),
                 start,
@@ -336,10 +337,10 @@ fn parse_splice_spec(spec: &str) -> Result<SpliceSpec> {
         Some((_, range))
             if !range.is_empty() && range.contains('-') && range.chars().all(|c| c.is_ascii_digit() || c == '-') =>
         {
-            bail!(
+            usage(format!(
                 "bad spec {spec:?}: the `<id>:A-B` grammar is gone — use `<id>:A..B` (0-based, end-exclusive), \
                  `<id>:A..`, or `<id>:..B`"
-            )
+            ))
         }
         _ => Ok(SpliceSpec {
             id: spec.to_string(),
@@ -754,5 +755,23 @@ impl EmitCtx<'_> {
             *self.skipped += 1;
         }
         Ok(Flow::Continue)
+    }
+}
+
+#[cfg(test)]
+mod splice_spec_tests {
+    use super::*;
+    #[test]
+    fn invalid_splice_windows_keep_spec_context_in_usage_errors() {
+        for spec in ["alphasess:zz..3", "codex:alphasess:9..3", "alphasess:1-2"] {
+            let error = parse_splice_spec(spec).err().expect("invalid range");
+            let usage = error
+                .downcast_ref::<crate::util::UsageError>()
+                .expect("usage exit status");
+            assert!(usage.0.contains(&format!("bad spec {spec:?}")), "{usage}");
+            if spec.ends_with("1-2") {
+                assert!(usage.0.contains("<id>:A..B"));
+            }
+        }
     }
 }
