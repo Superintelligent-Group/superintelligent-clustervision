@@ -572,10 +572,9 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
     let mut warnings: Vec<String> = Vec::new();
     if overshoot {
         warnings.push(format!(
-            "--window {}: the single newest turn alone is ~{} tokens — kept it, but the tail EXCEEDS \
-             the requested budget and resume may still hit the context wall",
+            "--window {}: the newest coherent tail EXCEEDS the requested budget — kept its required \
+             prompt, turn and reminders; resume may still hit the context wall",
             opts.window.unwrap_or(0),
-            window_real.map(|t| t.to_string()).unwrap_or_else(|| "?".into()),
         ));
     }
 
