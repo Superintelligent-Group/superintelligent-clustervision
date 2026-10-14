@@ -786,6 +786,7 @@ fn ranked_rows<'a>(store: &'a Store, q: &[f32], k: usize, filter: crate::SearchF
     if k == 0 {
         return Vec::new();
     }
+    let query = CosineQuery::new(q);
     let mut winners = std::collections::BinaryHeap::new();
     for (index, meta) in store.meta.iter().enumerate() {
         if !filter.harness.is_none_or(|h| meta.harness == h)
@@ -796,7 +797,7 @@ fn ranked_rows<'a>(store: &'a Store, q: &[f32], k: usize, filter: crate::SearchF
             continue;
         }
         let candidate = RankedRow {
-            score: cosine(q, store.vector(index)),
+            score: query.score(store.vector(index)),
             index,
             meta,
         };
@@ -839,6 +840,42 @@ fn rank_filtered(store: &Store, q: &[f32], k: usize, filter: crate::SearchFilter
         .collect()
 }
 
+// The query norm is shared by every candidate. Keep the same f32 accumulation and
+// denominator order as the defensive cosine oracle; do not assume persisted vectors are unit.
+struct CosineQuery<'a> {
+    vector: &'a [f32],
+    norm: f32,
+}
+impl<'a> CosineQuery<'a> {
+    fn new(vector: &'a [f32]) -> Self {
+        let mut norm = 0.0f32;
+        for x in vector {
+            norm += x * x;
+        }
+        Self {
+            vector,
+            norm: norm.sqrt(),
+        }
+    }
+    fn score(&self, candidate: &[f32]) -> f32 {
+        if self.vector.len() != candidate.len() || self.vector.is_empty() {
+            return 0.0;
+        }
+        let mut dot = 0.0f32;
+        let mut norm = 0.0f32;
+        for (x, y) in self.vector.iter().zip(candidate) {
+            dot += x * y;
+            norm += y * y;
+        }
+        if self.norm == 0.0 || norm == 0.0 {
+            0.0
+        } else {
+            dot / (self.norm * norm.sqrt())
+        }
+    }
+}
+
+#[cfg(test)]
 /// Cosine similarity. model2vec L2-normalizes by default, so this is ~a dot product, but we
 /// normalize defensively so unnormalized vectors still rank sanely.
 fn cosine(a: &[f32], b: &[f32]) -> f32 {
@@ -1750,6 +1787,37 @@ mod tests {
             s.meta.push(m);
         }
         s
+    }
+
+    #[test]
+    fn shared_query_norm_preserves_exact_defensive_cosine() {
+        let mut vectors = vec![
+            vec![],
+            vec![0.0, -0.0],
+            vec![1.0, 0.0],
+            vec![3.0, -4.0],
+            vec![f32::NAN, 1.0],
+            vec![f32::from_bits(0xffc01234), 0.0],
+            vec![f32::INFINITY, 1.0],
+            vec![f32::NEG_INFINITY, 2.0],
+            vec![f32::MIN_POSITIVE, f32::from_bits(1)],
+            vec![f32::MAX, -f32::MAX],
+        ];
+        for dim in [1, 3, 16, 257] {
+            for seed in [1u32, 17, 4129] {
+                vectors.push(
+                    (0..dim)
+                        .map(|i| f32::from_bits((i as u32).wrapping_mul(2_654_435_761).wrapping_add(seed)))
+                        .collect(),
+                );
+            }
+        }
+        for query in &vectors {
+            let shared = CosineQuery::new(query);
+            for candidate in &vectors {
+                assert_eq!(shared.score(candidate).to_bits(), cosine(query, candidate).to_bits());
+            }
+        }
     }
 
     #[test]
