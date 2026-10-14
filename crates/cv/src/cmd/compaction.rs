@@ -10,7 +10,11 @@ use cv_core::ir::{truncate, SessionRef};
 /// context size, and the summary that seeded the next window. With `summaries`, print each
 /// summary's full text.
 pub(crate) fn print_compactions(r: &SessionRef, summaries: bool, json: bool) -> Result<()> {
-    let comps = cv_core::compaction::detect(r, true)?;
+    let comps = if json || summaries {
+        cv_core::compaction::detect(r, true)?
+    } else {
+        cv_core::compaction::detect_preview(r, 200)?
+    };
 
     if json {
         // `compaction::row`: the same row `/api/session/{h}/{id}/compactions` serves.

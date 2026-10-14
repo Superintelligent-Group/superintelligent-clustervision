@@ -68,6 +68,7 @@ impl Compaction {
 /// keeps it; a count-only probe need not. Requested summaries may exceed the boundary metadata.
 pub struct CompactionSink {
     keep_summaries: bool,
+    summary_preview: Option<usize>,
     msg_idx: usize,
     boundaries: Vec<Compaction>,
     /// Pending boundaries whose summary hasn't streamed past yet, keyed by boundary uuid → index
@@ -84,6 +85,7 @@ impl CompactionSink {
     pub fn new(keep_summaries: bool) -> Self {
         CompactionSink {
             keep_summaries,
+            summary_preview: None,
             msg_idx: 0,
             boundaries: Vec::new(),
             pending: std::collections::HashMap::new(),
@@ -175,7 +177,7 @@ impl CompactionSink {
                 self.unpaired.remove(&i);
                 self.boundaries[i].summary_msg_idx = Some(idx);
                 if self.keep_summaries {
-                    self.boundaries[i].summary = summary_text(&m, self.resolver.as_ref())?;
+                    self.boundaries[i].summary = summary_text(&m, self.resolver.as_ref(), self.summary_preview)?;
                 }
             }
         }
@@ -185,31 +187,63 @@ impl CompactionSink {
 
 /// The summary body of an `isCompactSummary` message: its concatenated text blocks, resolving a
 /// lazy span (a long summary can exceed the inline threshold) against `resolver` when present.
-fn summary_text(m: &Message, resolver: Option<&crate::lazy::Resolver>) -> anyhow::Result<Option<String>> {
+fn summary_text(
+    m: &Message,
+    resolver: Option<&crate::lazy::Resolver>,
+    preview: Option<usize>,
+) -> anyhow::Result<Option<String>> {
     let fallback = crate::lazy::Resolver::new(None);
     let resolver = resolver.unwrap_or(&fallback);
     let mut s = String::new();
+    let mut prefix = preview.map(crate::affordance::input::Prefix::new);
+    let mut nonempty = false;
+    let mut nonblank = false;
     for b in &m.content {
         if let Block::Text { text } = b {
-            if !s.is_empty() {
-                s.push('\n');
+            if nonempty {
+                if let Some(prefix) = &mut prefix {
+                    prefix.push("\n");
+                } else {
+                    s.push('\n');
+                }
             }
             text.try_for_each_chunk(resolver, 64 * 1024, |part| {
-                s.push_str(part);
+                nonempty |= !part.is_empty();
+                nonblank |= !part.trim().is_empty();
+                if let Some(prefix) = &mut prefix {
+                    prefix.push(part);
+                } else {
+                    s.push_str(part);
+                }
                 Ok(())
             })?;
         }
     }
-    Ok((!s.trim().is_empty()).then_some(s))
+    Ok(nonblank.then(|| prefix.map_or(s, |prefix| prefix.finish())))
 }
 
 /// Detect every compaction by streaming, retaining boundary rows and requested summaries.
 /// `keep_summaries` retains each boundary's full summary text as requested output. Parse errors
 /// and demanded summary read errors are returned; partial results are not published.
 pub fn detect(r: &SessionRef, keep_summaries: bool) -> anyhow::Result<Vec<Compaction>> {
+    detect_with_preview(r, keep_summaries, None)
+}
+
+/// Detect boundaries with bounded summary previews matching `truncate(full_summary, max_chars)`.
+/// All demanded summary chunks are checked, including a blank prefix with nonblank text later.
+pub fn detect_preview(r: &SessionRef, max_chars: usize) -> anyhow::Result<Vec<Compaction>> {
+    detect_with_preview(r, true, Some(max_chars))
+}
+
+fn detect_with_preview(
+    r: &SessionRef,
+    keep_summaries: bool,
+    preview: Option<usize>,
+) -> anyhow::Result<Vec<Compaction>> {
     let adapter =
         crate::harness::for_harness(r.harness).ok_or_else(|| anyhow::anyhow!("no adapter for {}", r.harness))?;
     let mut sink = CompactionSink::new(keep_summaries);
+    sink.summary_preview = preview;
     sink.resolver = Some(crate::lazy::Resolver::new(Some(r.path.clone())));
     // Boundary kinds and compactMetadata are reducer facts; summary bodies remain lazy until
     // requested. Adapters without a Facts projection conservatively retain their existing extra.
@@ -253,6 +287,7 @@ pub fn row(boundaries: &[Compaction], n: usize) -> Value {
 /// returning demanded summary read errors.
 pub fn detect_in_session(session: &Session, keep_summaries: bool) -> anyhow::Result<Vec<Compaction>> {
     let mut sink = CompactionSink::new(keep_summaries);
+    sink.summary_preview = preview;
     sink.resolver = Some(crate::lazy::Resolver::new(session.source_path.clone()));
     for m in &session.messages {
         sink.try_message(m.clone())?;
@@ -263,6 +298,24 @@ pub fn detect_in_session(session: &Session, keep_summaries: bool) -> anyhow::Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_summary_preview_matches_full_text_for_blank_and_multiblock_bodies() {
+        for body in ["", "   ", "\nλ短\nsecond", "                                  late"] {
+            let mut message = summary("b", body);
+            message.content.push(Block::Text {
+                text: "\ntrailing".into(),
+            });
+            let full = summary_text(&message, None, None).unwrap();
+            for cap in [0, 1, 8, 200] {
+                assert_eq!(
+                    summary_text(&message, None, Some(cap)).unwrap(),
+                    full.as_ref().map(|text| crate::ir::truncate(text, cap))
+                );
+            }
+        }
+    }
+
     use crate::ir::{Harness, Origin, Role};
 
     /// Build a compaction-boundary message (Claude shape) with the given uuid + metadata.
@@ -395,6 +448,12 @@ mod tests {
         let mut session = Session::new("source-summary", Harness::Claude);
         session.messages = vec![boundary("b", "auto", 42), message.clone()];
         std::fs::write(&path, "changed snapshot").unwrap();
+        let mut preview_message = summary("b", &"visible".repeat(100));
+        preview_message.content.push(session.messages[1].content[0].clone());
+        assert!(
+            summary_text(&preview_message, None, Some(8)).is_err(),
+            "a complete preview must still reject a later demanded source failure"
+        );
         assert!(detect_in_session(&session, true).is_err());
         let count_only = detect_in_session(&session, false).unwrap();
         assert_eq!(count_only[0].summary_msg_idx, Some(1));
@@ -417,6 +476,12 @@ mod tests {
         if let Block::Text { text } = &mut session.messages[1].content[0] {
             *text = missing;
         }
+        let mut preview_message = summary("b", &"visible".repeat(100));
+        preview_message.content.push(session.messages[1].content[0].clone());
+        assert!(
+            summary_text(&preview_message, None, Some(8)).is_err(),
+            "a complete preview must still reject a later demanded source failure"
+        );
         assert!(detect_in_session(&session, true).is_err());
         assert_eq!(detect_in_session(&session, false).unwrap().len(), 1);
     }
