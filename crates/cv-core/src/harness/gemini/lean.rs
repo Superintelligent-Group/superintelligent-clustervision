@@ -18,11 +18,16 @@ pub(super) struct Payload<'a> {
     results: std::cell::RefCell<Vec<Option<Text>>>,
     inputs: std::cell::RefCell<Vec<Option<crate::Json>>>,
     thoughts: Option<std::cell::RefCell<Vec<Block>>>,
+    display_text: std::cell::RefCell<Option<String>>,
     tool_response: bool,
     resolver: &'a Resolver,
 }
 
 impl Payload<'_> {
+    pub fn take_display_text(&self) -> Option<String> {
+        self.display_text.borrow_mut().take()
+    }
+
     pub fn take_content(&self) -> Vec<Block> {
         std::mem::take(&mut *self.content.borrow_mut())
     }
@@ -179,21 +184,18 @@ pub(super) fn emit(
         return Ok(Flow::Continue);
     };
     let mut meta = serde_json::Map::new();
-    for key in [
-        "type",
-        "id",
-        "timestamp",
-        "model",
-        "tokens",
-        "displayContent",
-        "rewindTo",
-    ] {
+    for key in ["type", "id", "timestamp", "model", "tokens", "rewindTo"] {
         if let Some(raw) = rec.fields.get(key) {
             if let Ok(v) = serde_json::from_str(raw.get()) {
                 meta.insert(key.into(), v);
             }
         }
     }
+    let display_text = rec
+        .fields
+        .get("displayContent")
+        .map(|raw| ctx.argument(Some(*raw))?.with_view(output::display_text))
+        .transpose()?;
     let mut thoughts = Vec::new();
     if let Some(raw) = rec.fields.get("thoughts") {
         if let (Some(source), Some(arena)) = (ctx.source, ctx.arena) {
@@ -257,6 +259,7 @@ pub(super) fn emit(
         content: std::cell::RefCell::new(content),
         results: std::cell::RefCell::new(results),
         inputs: std::cell::RefCell::new(inputs),
+        display_text: std::cell::RefCell::new(display_text),
         thoughts: (ctx.source.is_some() && ctx.arena.is_some()).then(|| std::cell::RefCell::new(thoughts)),
         tool_response,
         resolver,

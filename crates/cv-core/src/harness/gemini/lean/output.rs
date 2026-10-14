@@ -156,3 +156,39 @@ impl Output<'_> {
         }
     }
 }
+
+/// Materialize the one demanded display string, not a rich Value tree followed by its clone.
+/// Composite parts concatenate without separators, matching Gemini's PartListUnion codec.
+pub(super) fn display_text(view: JsonView<'_>) -> Result<String> {
+    if view.is_string()? {
+        return Ok(match view.resolve()?.into_owned() {
+            serde_json::Value::String(text) => text,
+            _ => unreachable!("view was checked as a string"),
+        });
+    }
+    let mut text = String::new();
+    let mut append = |view: JsonView<'_>| -> Result<()> {
+        let string = if view.is_string()? {
+            Some(view)
+        } else {
+            view.get("text")?
+        };
+        if let Some(string) = string {
+            if let Some(part) = string.source_text()? {
+                part.try_for_each_chunk(&crate::Resolver::new(None), 64 * 1024, |chunk| {
+                    text.push_str(chunk);
+                    Ok(())
+                })?;
+            }
+        }
+        Ok(())
+    };
+    if let Some(parts) = view.array()? {
+        for part in parts {
+            append(part?)?;
+        }
+    } else if view.is_object()? {
+        append(view)?;
+    }
+    Ok(text)
+}

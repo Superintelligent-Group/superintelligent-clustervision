@@ -1606,7 +1606,11 @@ fn emit_record_message_with(
             }
             // `displayContent`: what the user typed when it differs from what the model got (a
             // custom `/command` before expansion, an `@file` prompt before the file was inlined).
-            if let Some(typed) = obj.get("displayContent").map(display_text).filter(|t| !t.is_empty()) {
+            let typed = match payload {
+                Some(payload) => payload.take_display_text(),
+                None => obj.get("displayContent").map(display_text),
+            };
+            if let Some(typed) = typed.filter(|t| !t.is_empty()) {
                 m.harness_extra_mut(harness)
                     .insert("display_text".into(), Value::String(typed));
             }
@@ -3204,6 +3208,63 @@ mod tests {
             "functionCall part and toolCalls[] are one"
         );
         assert_eq!(s.messages[2].content.len(), 1, "one result, not three");
+    }
+
+    #[test]
+    fn selected_display_content_matches_owned_shapes_and_demand_modes() {
+        let dir = std::env::temp_dir().join(format!("cv-gemini-display-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let body = "display é\n\"quoted\" ".repeat(512);
+        let displays = [
+            Value::String(body.clone()),
+            serde_json::json!({"text":body,"ignored":"not display"}),
+            serde_json::json!(["prefix", {"text":body}, null, {"text":false}, ["ignored"], "suffix"]),
+            serde_json::json!(["", {"text":""}]),
+            serde_json::json!({"text":false}),
+            Value::Null,
+        ];
+        let adapter = Gemini { roots: vec![] };
+        for modern in [false, true] {
+            let path = dir.join(if modern { "session.jsonl" } else { "session.json" });
+            let reference = SessionRef::new("source", Harness::Gemini, path.clone());
+            for display in &displays {
+                let records = serde_json::json!([
+                    {"id":"u", "type":"user", "content":"ordinary prompt", "displayContent":display},
+                    {"id":"a", "type":"gemini", "content":"reply", "displayContent":display},
+                    {"id":"empty", "type":"user", "content":"", "displayContent":display}
+                ]);
+                let text = if modern {
+                    format!(
+                        "{{\"sessionId\":\"source\",\"projectHash\":\"x\"}}\n{}\n",
+                        records
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(Value::to_string)
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    )
+                } else {
+                    serde_json::json!({"sessionId":"source", "messages":records}).to_string()
+                };
+                fs::write(&path, &text).unwrap();
+                let expected = parse_all_str(&text, Some(path.clone())).remove(0);
+                for opts in [
+                    ParseOptions::lazy(),
+                    ParseOptions::bulk(),
+                    ParseOptions::full(),
+                    ParseOptions::lazy_extra(),
+                    ParseOptions::complete(),
+                    checked_complete(),
+                    ParseOptions::facts(),
+                ] {
+                    let mut actual = crate::stream::collect_with(&adapter, &reference, &opts).unwrap();
+                    actual.materialize().unwrap();
+                    assert_eq!(as_json(&actual), as_json(&expected));
+                }
+            }
+        }
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

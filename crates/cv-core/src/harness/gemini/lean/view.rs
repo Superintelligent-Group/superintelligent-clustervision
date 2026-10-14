@@ -12,15 +12,7 @@ pub(crate) fn emit(
     resolver: &Resolver,
     sink: &mut dyn MessageSink,
 ) -> Result<Flow> {
-    const META: &[&str] = &[
-        "type",
-        "id",
-        "timestamp",
-        "model",
-        "tokens",
-        "displayContent",
-        "rewindTo",
-    ];
+    const META: &[&str] = &["type", "id", "timestamp", "model", "tokens", "rewindTo"];
     let Some(rec) = Fields::parse(
         view,
         &[
@@ -40,6 +32,7 @@ pub(crate) fn emit(
         return Ok(Flow::Continue);
     };
     let mut meta = rec.project(META)?;
+    let display_text = rec.get("displayContent").map(output::display_text).transpose()?;
     let mut thoughts = Vec::new();
     if let Some(value) = rec.get("thoughts") {
         let (headers, blocks) = output.thoughts(value)?;
@@ -98,6 +91,7 @@ pub(crate) fn emit(
         results: std::cell::RefCell::new(results),
         inputs: std::cell::RefCell::new(inputs),
         thoughts: Some(std::cell::RefCell::new(thoughts)),
+        display_text: std::cell::RefCell::new(display_text),
         tool_response,
         resolver,
     };
