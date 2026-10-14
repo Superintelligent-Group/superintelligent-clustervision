@@ -315,8 +315,23 @@ impl TaskReducer {
     /// agent-facing append, which is why CLI, MCP and HTTP cannot disagree about it.
     pub fn admit(&self, event: &TaskEvent) -> Result<(), ReduceError> {
         match &event.kind {
-            TaskEventKind::Retired(r) => Err(ReduceError::RetiredKind {
+            TaskEventKind::Retired(r) if r.is_known() => Err(ReduceError::RetiredKind {
                 tag: r.tag_str().to_string(),
+            }),
+            TaskEventKind::Retired(r) => Err(ReduceError::UnknownKind {
+                tag: r.tag_str().to_string(),
+            }),
+            TaskEventKind::Opened { channel: Some(_), .. } => Err(ReduceError::InvalidField {
+                field: "channel",
+                value: "removed in 0.15.0 (read-through only)".into(),
+            }),
+            TaskEventKind::Done { check: Some(_), .. } => Err(ReduceError::InvalidField {
+                field: "check",
+                value: "removed in 0.15.0 (read-through only)".into(),
+            }),
+            TaskEventKind::Superseded { by_task } if *by_task == event.task_id => Err(ReduceError::InvalidField {
+                field: "by_task",
+                value: "a task cannot supersede itself".into(),
             }),
             // One way to pose a decision: a `decision` tag on a task with nothing posed made an
             // inbox card with no options and no buttons (two such cards, 10-01). The tag is what
@@ -533,9 +548,12 @@ impl TaskReducer {
 
             TaskEventKind::StatusSet { text } => {
                 require_base(task, kind, &[TaskState::Open, TaskState::Claimed])?;
-                let holder =
-                    |who: &Option<String>| who.as_deref().is_some_and(|w| super::project::same_actor(&event.by, w));
-                if !holder(&task.assignee) && !holder(&Some(task.opened_by.clone())) {
+                if !task
+                    .assignee
+                    .as_deref()
+                    .is_some_and(|who| super::project::same_actor(&event.by, who))
+                    && !super::project::same_actor(&event.by, &task.opened_by)
+                {
                     return Err(ReduceError::StatusNotHolder {
                         task_id: task.task_id.clone(),
                         assignee: task.assignee.clone().unwrap_or_else(|| "-".into()),
@@ -746,6 +764,72 @@ mod tests {
     }
 
     // ── ported roster (names kept from mission-control) ──────────────────
+
+    #[test]
+    fn write_admission_refuses_retired_payloads_unknown_kinds_and_self_supersession_without_changing_replay() {
+        let mut log = Log::new();
+        let id = log.open(AUTHOR);
+        let mut historical_open = log.events[0].clone();
+        if let TaskEventKind::Opened { channel, .. } = &mut historical_open.kind {
+            *channel = Some("old board".into());
+        }
+        let mut reducer = TaskReducer::new();
+        assert!(matches!(
+            reducer.admit(&historical_open),
+            Err(ReduceError::InvalidField { field: "channel", .. })
+        ));
+        reducer.apply(&historical_open).unwrap();
+        let historical_done = TaskEvent {
+            id: "old-done".into(),
+            task_id: id.clone(),
+            ts: historical_open.ts,
+            by: AUTHOR.into(),
+            kind: TaskEventKind::Done {
+                observed: None,
+                check: Some(serde_json::json!({"cmd":"old check"})),
+            },
+        };
+        assert!(matches!(
+            reducer.admit(&historical_done),
+            Err(ReduceError::InvalidField { field: "check", .. })
+        ));
+        reducer.apply(&historical_done).unwrap();
+        assert_eq!(
+            reducer.model().tasks[&id].state,
+            TaskState::Done,
+            "historical replay remains supported"
+        );
+        let alien = TaskEvent {
+            id: "alien".into(),
+            task_id: id.clone(),
+            ts: historical_open.ts,
+            by: AUTHOR.into(),
+            kind: TaskEventKind::Retired(super::super::model::RetiredEvent(
+                serde_json::from_value(serde_json::json!({"event":"not-a-known-kind"})).unwrap(),
+            )),
+        };
+        assert!(matches!(reducer.admit(&alien), Err(ReduceError::UnknownKind { .. })));
+        let mut reducer = TaskReducer::new();
+        reducer.apply(&historical_open).unwrap();
+        let self_supersede = TaskEvent {
+            id: "self".into(),
+            task_id: id.clone(),
+            ts: historical_open.ts,
+            by: AUTHOR.into(),
+            kind: TaskEventKind::Superseded { by_task: id.clone() },
+        };
+        assert!(matches!(
+            reducer.admit(&self_supersede),
+            Err(ReduceError::InvalidField { field: "by_task", .. })
+        ));
+        assert_eq!(reducer.model().tasks[&id].state, TaskState::Open);
+        reducer.apply(&self_supersede).unwrap();
+        assert_eq!(
+            reducer.model().tasks[&id].state,
+            TaskState::Superseded,
+            "do not retroactively change old records"
+        );
+    }
 
     #[test]
     fn unknown_request_and_wrong_open_id_fail_closed() {

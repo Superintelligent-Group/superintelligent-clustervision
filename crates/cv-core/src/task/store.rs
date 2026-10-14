@@ -10,9 +10,9 @@
 //!
 //! A chat reader may skip malformed lines; a replayed event log may not (a silently dropped
 //! event changes history). Here interior garbage is **loud** (surfaced as warnings on every read)
-//! and reads tolerate an unparseable final line without a newline. Appends recover only a
-//! syntactically incomplete JSON tail or an incomplete UTF-8 scalar at EOF; a complete but
-//! unrecognized final record refuses append. Repair follows admission of the entire candidate
+//! and complete unrecognized final rows are loud too. Reads tolerate only an incomplete JSON
+//! tail or an incomplete UTF-8 scalar at EOF. A complete but unrecognized final record refuses
+//! append. Repair follows admission of the entire candidate
 //! batch. A valid final event without a newline is preserved and separated from new records.
 //!
 //! # The CAS append
@@ -213,8 +213,8 @@ impl TaskStore {
             );
         }
         let mut reducer = TaskReducer::new();
-        for (line_no, ev) in &raw {
-            reducer.apply(ev).map_err(|e| {
+        for (line_no, ev) in raw {
+            reducer.apply(&ev).map_err(|e| {
                 anyhow::anyhow!(
                     "refusing to append: task log {} line {line_no} fails replay ({e}) — an \
                      incomplete model must not be written against",
@@ -234,17 +234,17 @@ impl TaskStore {
         // First append to a fresh log stamps the format header (older, header-less logs stay
         // valid: readers treat them as implicit v1).
         let path = self.events_path();
-        let mut line = String::new();
+        let mut line = Vec::new();
         if matches!(tail, LogTail::NeedsNewline) {
-            line.push('\n');
+            line.push(b'\n');
         }
         if !path.exists() {
-            line.push_str(HEADER_LINE);
-            line.push('\n');
+            line.extend_from_slice(HEADER_LINE.as_bytes());
+            line.push(b'\n');
         }
         for event in &events {
-            line.push_str(&serde_json::to_string(event).context("serializing task event")?);
-            line.push('\n');
+            serde_json::to_writer(&mut line, event).context("serializing task event")?;
+            line.push(b'\n');
         }
         let mut f = OpenOptions::new()
             .create(true)
@@ -257,7 +257,7 @@ impl TaskStore {
             f.set_len(offset)
                 .with_context(|| format!("repairing incomplete task log tail {}", path.display()))?;
         }
-        f.write_all(line.as_bytes())
+        f.write_all(&line)
             .with_context(|| format!("appending to task log {}", self.events_path().display()))?;
         f.flush()
             .with_context(|| format!("flushing task log {}", self.events_path().display()))?;
@@ -268,8 +268,8 @@ impl TaskStore {
     }
 
     /// Read raw events as `(1-based line number, event)` pairs. Interior unparseable lines are
-    /// collected as warnings; a trailing partial line (no terminating newline, fails to parse) is
-    /// tolerated silently. Syntax-incomplete tails carry a byte boundary for locked recovery;
+    /// collected as warnings, including complete malformed rows without a final newline.
+    /// A syntactically incomplete EOF prefix is tolerated silently. Syntax-incomplete tails carry a byte boundary for locked recovery;
     /// other unrecognized final rows refuse append. Valid unterminated records need a newline.
     /// A format header is skipped when current, and refused loudly for a newer format version.
     fn read_events(&self) -> Result<(NumberedEvents, Vec<String>, LogTail)> {
@@ -341,7 +341,10 @@ impl TaskStore {
                         // or syntax is unsupported. RawValue checks grammar without a Value tree.
                         tail = match serde_json::from_str::<&serde_json::value::RawValue>(line) {
                             Err(error) if error.is_eof() => LogTail::Torn { offset: start },
-                            _ => LogTail::Unrecognized { line_no },
+                            _ => {
+                                bad.push((line_no, line.chars().take(80).collect()));
+                                LogTail::Unrecognized { line_no }
+                            }
                         };
                         break;
                     }
@@ -425,6 +428,39 @@ mod tests {
             .append_agent_event(new_event(None, "agent:author", open_kind()))
             .unwrap()
             .task_id
+    }
+
+    #[test]
+    fn deprecated_fields_and_self_supersession_refuse_without_writing() {
+        let world = cv_testkit::World::new("task-admission-fields");
+        let store = TaskStore::at(world.base.join("tasks"));
+        let id = open_task(&store);
+        let path = store.events_path();
+        let before = fs::read(&path).unwrap();
+        let channel = TaskEventKind::Opened {
+            title: "old channel".into(),
+            body: String::new(),
+            repo: None,
+            issue: None,
+            channel: Some("old board".into()),
+            assignee: None,
+        };
+        for event in [
+            new_event(None, "author", channel),
+            new_event(
+                Some(&id),
+                "author",
+                TaskEventKind::Done {
+                    observed: None,
+                    check: Some(serde_json::json!({"cmd":"old check"})),
+                },
+            ),
+            new_event(Some(&id), "author", TaskEventKind::Superseded { by_task: id.clone() }),
+        ] {
+            assert!(store.append_agent_event(event).is_err());
+            assert_eq!(fs::read(&path).unwrap(), before);
+        }
+        assert_eq!(store.replay().unwrap().model.tasks[&id].state, TaskState::Open);
     }
 
     #[test]
@@ -801,7 +837,10 @@ mod tests {
             let mut before = prefix.clone();
             before.extend_from_slice(tail.as_bytes());
             fs::write(&path, &before).unwrap();
-            assert_eq!(store.replay().unwrap().events.len(), 1);
+            let replay = store.replay().unwrap();
+            assert_eq!(replay.events.len(), 1);
+            assert_eq!(replay.warnings.len(), 1);
+            assert!(replay.warnings[0].contains("line 3"));
             let error = store
                 .append_agent_event(new_event(
                     Some(&task),
