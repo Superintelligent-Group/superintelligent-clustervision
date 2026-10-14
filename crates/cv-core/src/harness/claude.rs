@@ -327,7 +327,7 @@ impl Adapter for Claude {
                         opts,
                         sink,
                         inputs.as_ref(),
-                    );
+                    )?;
                     finish_inputs(inputs.as_ref(), &file)?;
                     return Ok(with_fork_source(s, &r.path, sink));
                 }
@@ -342,14 +342,14 @@ impl Adapter for Claude {
                 sink,
             )?;
             #[cfg(feature = "mmap")]
-            let s = stream_reader_at(
+            let s = stream_reader_at_checked(
                 new_session_for(&r.id, Some(r.path.clone()), opts),
                 BufReader::new(&file),
                 0,
                 opts,
                 sink,
                 inputs.as_ref(),
-            );
+            )?;
             finish_inputs(inputs.as_ref(), &file)?;
             Ok(with_fork_source(s, &r.path, sink))
         })
@@ -390,7 +390,7 @@ impl Adapter for Claude {
                         .ok()
                         .and_then(|offset| map.get(offset..))
                         .unwrap_or(&[]);
-                    let s = stream_bytes_at(session, bytes, from.offset, opts, sink, inputs.as_ref());
+                    let s = stream_bytes_at(session, bytes, from.offset, opts, sink, inputs.as_ref())?;
                     finish_inputs(inputs.as_ref(), &file)?;
                     return Ok(Some(with_fork_source(s, &r.path, sink)));
                 }
@@ -401,7 +401,7 @@ impl Adapter for Claude {
             file.seek(SeekFrom::Start(from.offset))
                 .with_context(|| format!("seeking {}", r.path.display()))?;
             #[cfg(feature = "mmap")]
-            let s = stream_reader_at(session, BufReader::new(&file), from.offset, opts, sink, inputs.as_ref());
+            let s = stream_reader_at_checked(session, BufReader::new(&file), from.offset, opts, sink, inputs.as_ref())?;
             finish_inputs(inputs.as_ref(), &file)?;
             Ok(Some(with_fork_source(s, &r.path, sink)))
         })
@@ -507,6 +507,40 @@ pub fn stream_reader<R: BufRead>(
 /// into `session` (the state a checkpoint at `file_off` kept, or a fresh shell at 0). After every
 /// whole line it offers the sink a [`Checkpoint`] holding the session so far.
 fn stream_reader_at<R: BufRead>(
+    session: Session,
+    reader: R,
+    file_off: u64,
+    opts: &ParseOptions,
+    sink: &mut dyn MessageSink,
+    json_inputs: Option<&JsonInputs>,
+) -> Session {
+    let mut spawns = crate::affordance::AffordanceSink::new(Harness::Claude, sink);
+    stream_reader_unwrapped(session, reader, file_off, opts, &mut spawns, json_inputs)
+}
+
+#[cfg(feature = "mmap")]
+fn stream_reader_at_checked<R: BufRead>(
+    session: Session,
+    reader: R,
+    file_off: u64,
+    opts: &ParseOptions,
+    sink: &mut dyn MessageSink,
+    json_inputs: Option<&JsonInputs>,
+) -> Result<Session> {
+    let mut spawns = crate::affordance::AffordanceSink::new(Harness::Claude, sink);
+    crate::stream::checked(&mut spawns, |sink| {
+        Ok(stream_reader_unwrapped(
+            session,
+            reader,
+            file_off,
+            opts,
+            sink,
+            json_inputs,
+        ))
+    })
+}
+
+fn stream_reader_unwrapped<R: BufRead>(
     mut session: Session,
     reader: R,
     mut file_off: u64,
@@ -514,8 +548,6 @@ fn stream_reader_at<R: BufRead>(
     sink: &mut dyn MessageSink,
     json_inputs: Option<&JsonInputs>,
 ) -> Session {
-    let mut spawns = crate::affordance::AffordanceSink::new(Harness::Claude, sink);
-    let sink = &mut spawns;
     // Read raw bytes (not `lines()`) so we know each record's byte offset in the file — that's what
     // lets large content fields become lazy [`Span`]s pointing back into the source instead of owned
     // strings. `read_until` keeps peak at O(largest line) just like `lines()` did.
@@ -552,41 +584,42 @@ fn stream_bytes_at(
     opts: &ParseOptions,
     sink: &mut dyn MessageSink,
     json_inputs: Option<&JsonInputs>,
-) -> Session {
+) -> Result<Session> {
     let mut spawns = crate::affordance::AffordanceSink::new(Harness::Claude, sink);
-    let sink = &mut spawns;
-    let mut start = 0;
-    for end in memchr::memchr_iter(b'\n', bytes).map(|i| i + 1) {
-        if ingest_bytes(
-            &mut session,
-            &bytes[start..end],
-            base_off + start as u64,
-            opts,
-            sink,
-            json_inputs,
-        ) == Flow::Stop
-        {
-            return session;
+    crate::stream::checked(&mut spawns, |sink| {
+        let mut start = 0;
+        for end in memchr::memchr_iter(b'\n', bytes).map(|i| i + 1) {
+            if ingest_bytes(
+                &mut session,
+                &bytes[start..end],
+                base_off + start as u64,
+                opts,
+                sink,
+                json_inputs,
+            ) == Flow::Stop
+            {
+                return Ok(session);
+            }
+            let file_off = base_off + end as u64;
+            if sink.wants_checkpoint(file_off) {
+                let mut cp = Checkpoint::new(file_off);
+                cp.put(ADAPTER_LAYER, &session);
+                sink.checkpoint(&mut cp);
+            }
+            start = end;
         }
-        let file_off = base_off + end as u64;
-        if sink.wants_checkpoint(file_off) {
-            let mut cp = Checkpoint::new(file_off);
-            cp.put(ADAPTER_LAYER, &session);
-            sink.checkpoint(&mut cp);
+        if start < bytes.len() {
+            ingest_bytes(
+                &mut session,
+                &bytes[start..],
+                base_off + start as u64,
+                opts,
+                sink,
+                json_inputs,
+            );
         }
-        start = end;
-    }
-    if start < bytes.len() {
-        ingest_bytes(
-            &mut session,
-            &bytes[start..],
-            base_off + start as u64,
-            opts,
-            sink,
-            json_inputs,
-        );
-    }
-    session
+        Ok(session)
+    })
 }
 
 /// Streaming ingest of one raw record line (with its file offset) — parses, updates metadata, and

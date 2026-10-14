@@ -762,7 +762,7 @@ mod tests {
     #[test]
     fn prefix_resolution_checks_read_boundaries_even_without_messages() {
         let world = cv_testkit::World::in_process("checked-prefix-empty-rows");
-        let dir = world.base.join("chats");
+        let dir = world.base.join("projects").join("fixture").join("chats");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("prefix.jsonl");
         let empty_rows = "\n".repeat(32 * 1024);

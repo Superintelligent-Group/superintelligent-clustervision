@@ -1166,7 +1166,8 @@ mod tests {
                     &opts,
                     &mut mapped_sink,
                     None,
-                );
+                )
+                .unwrap();
                 mapped.messages = mapped_sink.messages;
                 mapped.materialize().unwrap();
                 assert!(
