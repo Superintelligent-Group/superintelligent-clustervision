@@ -182,10 +182,10 @@ stays a catalog-only, milliseconds-warm read.
 
 `cv ls` reads the **probed catalog**, not a full fleet scan: warm, it answers in milliseconds. The catalog's freshness rests on a staleness probe plus a time backstop (`CLUSTERVISION_MAX_STALE_SECS`, default **900s**):
 
-- **A brand-new session is always seen.** Creating a session writes a new file, which bumps its directory's mtime; the probe re-stats the watched directories and re-discovers that harness before reading. Worst-case lag for a *just-created* session is one probe cycle, not the backstop window.
+- **A new session in a watched directory is seen on the next read.** Creating a session bumps its directory's mtime; the probe re-stats watched directories and re-discovers the affected harness before reading. A first session in a previously empty deeper directory can escape those watches and remain unseen until the time backstop forces full discovery — at most `CLUSTERVISION_MAX_STALE_SECS` after the last full sync, on the next read.
 - **A new storage root is seen too.** When a root appears that the catalog does not watch yet (a new agent under a `*` entry in `claude-roots`, or a line added to that file — see [Harnesses](harnesses.md#claude-code-sessions-outside-claude)), the probe re-discovers that harness.
-- **The bounded blind spot is an in-place append** to an *existing, older* session (one outside the 50 most-recently-updated files the probe re-stats): its `updated_at`/`message_count` can lag until the backstop forces a full re-discovery — at most `CLUSTERVISION_MAX_STALE_SECS`.
-- **`--fresh` forces a full re-discovery** instead of trusting the probe — the escape hatch when you cannot accept even the bounded append lag. `CLUSTERVISION_MAX_STALE_SECS=0` has the same effect for every read.
+- **Changes to existing sessions are checked regardless of age.** The probe checks every recorded primary source's captured metadata identity, plus recorded auxiliary dependencies such as DB sidecars. An append to a quiet session therefore triggers re-discovery of its harness on the next read. These checks compare metadata identities, not content hashes.
+- **`--fresh` forces a full re-discovery** instead of trusting the probe. Consumers requiring a fresh inventory of the currently discoverable local sessions on each invocation can use `cv ls --json --fresh`, with `--limit` large enough for their desired enumeration (and `--enrich` when they need `git` and `display_title`). `CLUSTERVISION_MAX_STALE_SECS=0` has the same effect for every read.
 
 A row whose file was deleted since the probe is dropped at read time (the `stat` that also yields `size_bytes`), so a stale row never survives into the output.
 
