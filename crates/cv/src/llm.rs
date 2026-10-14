@@ -425,6 +425,8 @@ pub(crate) fn generate(session: &cv_core::Session, opts: &GenerateOptions) -> Re
 /// content blocks to text (tool calls/results become readable notes).
 fn to_chat_messages(session: &cv_core::Session) -> Result<Vec<Value>> {
     use cv_core::ir::{Block, Role};
+    let reads = session.source_reads();
+    let resolver = session.resolver();
     let mut out = Vec::new();
     for m in &session.messages {
         let role = match m.role {
@@ -437,7 +439,10 @@ fn to_chat_messages(session: &cv_core::Session) -> Result<Vec<Value>> {
         for b in &m.content {
             match b {
                 Block::Text { text: t } | Block::Thinking { text: t, .. } => {
-                    text.push_str(t);
+                    t.try_for_each_chunk(&resolver, 64 * 1024, |part| {
+                        text.push_str(part);
+                        Ok(())
+                    })?;
                     text.push('\n');
                 }
                 Block::ToolUse { name, input, .. } => {
@@ -446,7 +451,12 @@ fn to_chat_messages(session: &cv_core::Session) -> Result<Vec<Value>> {
                     text.push_str("]\n");
                 }
                 Block::ToolResult { content, .. } => {
-                    text.push_str(&format!("[tool result] {content}\n"));
+                    text.push_str("[tool result] ");
+                    content.try_for_each_chunk(&resolver, 64 * 1024, |part| {
+                        text.push_str(part);
+                        Ok(())
+                    })?;
+                    text.push('\n');
                 }
                 Block::File { .. } | Block::Image { .. } => {}
             }
@@ -457,6 +467,10 @@ fn to_chat_messages(session: &cv_core::Session) -> Result<Vec<Value>> {
         }
         out.push(json!({ "role": role, "content": text }));
     }
+    anyhow::ensure!(
+        reads.fresh(&mut cv_core::source::Probe::default()),
+        "session sources changed during chat projection"
+    );
     Ok(out)
 }
 
@@ -631,6 +645,48 @@ mod tests {
             );
             assert!(build_prompt(&session, &DigestOptions::default()).is_err());
         }
+    }
+
+    #[test]
+    fn chat_generation_reads_checked_text_and_results_without_materializing_session() {
+        let world = cv_testkit::World::in_process("llm-retained-text");
+        let path = world.base.join("text.json");
+        let text = "λ🌙 checked text\n".repeat(1000);
+        let wire = serde_json::to_vec(&text).unwrap();
+        std::fs::write(&path, &wire).unwrap();
+        let source = cv_core::Json::source(&path, 0, wire.len() as u64).unwrap();
+        let retained = source.with_view(|view| view.source_text()).unwrap().unwrap();
+        let make = |text: cv_core::Text| {
+            let mut session = sample_session();
+            let mut message = Message::new(Role::Tool);
+            message.content = vec![
+                Block::Text { text: text.clone() },
+                Block::Thinking {
+                    text: text.clone(),
+                    signature: None,
+                    encrypted: None,
+                    redacted: false,
+                },
+                Block::ToolResult {
+                    tool_use_id: "call".into(),
+                    tool_name: None,
+                    status: None,
+                    is_error: false,
+                    details: None,
+                    content: text,
+                },
+            ];
+            session.messages.push(message);
+            session
+        };
+        let expected = to_chat_messages(&make(text.into())).unwrap();
+        let session = make(retained);
+        assert_eq!(to_chat_messages(&session).unwrap(), expected);
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            to_chat_messages(&session).is_err(),
+            "generation silently omitted stale text"
+        );
     }
 
     #[test]
