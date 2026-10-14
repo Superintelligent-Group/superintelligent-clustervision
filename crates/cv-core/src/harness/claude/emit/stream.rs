@@ -369,22 +369,68 @@ fn projected<'a>(message: &'a Message, mode: ThinkingMode, resolver: &Resolver) 
     Ok(blocks)
 }
 
-fn resolve_parent(dropped: &HashMap<String, Option<String>>, pid: String) -> Option<String> {
-    let mut p = Some(pid);
-    for _ in 0..=dropped.len() {
-        match p.as_ref().and_then(|id| dropped.get(id)) {
-            Some(next) => p = next.clone(),
-            None => break,
-        }
+/// Cache only completed acyclic resolutions while the dropped-record map is unchanged.
+/// Forward links can become resolvable when a later record is dropped, so every insertion
+/// invalidates the cache. Cycles retain the original bounded-walk result without compression.
+#[derive(Default)]
+struct ParentLinks {
+    links: HashMap<String, Option<String>>,
+    resolved: HashMap<String, Option<String>>,
+    #[cfg(test)]
+    probes: usize,
+}
+impl ParentLinks {
+    fn insert(&mut self, id: String, parent: Option<String>) {
+        self.links.insert(id, parent);
+        self.resolved.clear();
     }
-    p
+    fn clear(&mut self) {
+        self.links.clear();
+        self.resolved.clear();
+    }
+    fn resolve(&mut self, pid: String) -> Option<String> {
+        let mut parent = Some(pid);
+        let mut path = Vec::new();
+        let mut completed = false;
+        for _ in 0..=self.links.len() {
+            let Some(id) = parent.as_ref() else {
+                completed = true;
+                break;
+            };
+            if let Some(cached) = self.resolved.get(id) {
+                parent = cached.clone();
+                completed = true;
+                break;
+            }
+            #[cfg(test)]
+            {
+                self.probes += 1;
+            }
+            match self.links.get(id) {
+                Some(next) => {
+                    path.push(id.clone());
+                    parent = next.clone();
+                }
+                None => {
+                    completed = true;
+                    break;
+                }
+            }
+        }
+        if completed || parent.is_none() {
+            for id in path {
+                self.resolved.insert(id, parent.clone());
+            }
+        }
+        parent
+    }
 }
 fn record<'a>(
     message: &'a Message,
     c: &Context<'a>,
     uuid: Option<&str>,
     previous: &mut Option<String>,
-    dropped: &mut HashMap<String, Option<String>>,
+    dropped: &mut ParentLinks,
     resolver: &Resolver,
 ) -> Result<Option<Record<'a>>> {
     if let Some(carrier) = carrier_record_of(message) {
@@ -407,7 +453,7 @@ fn record<'a>(
     let parent = message
         .parent_id
         .clone()
-        .map(|p| resolve_parent(dropped, p))
+        .map(|p| dropped.resolve(p))
         .unwrap_or_else(|| previous.clone());
     if special.is_none() && message.role == Role::System {
         if let Some(id) = &message.id {
@@ -575,7 +621,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
         .collect();
     let mut answered = HashSet::new();
     let mut ids = HashSet::new();
-    let (mut previous, mut dropped) = (None, HashMap::new());
+    let (mut previous, mut dropped) = (None, ParentLinks::default());
     for (message, uuid) in session.messages.iter().zip(&uuid) {
         if let Some(record) = record(message, &c, uuid.as_deref(), &mut previous, &mut dropped, &resolver)? {
             record.with_fields(|_, message| {
@@ -693,4 +739,104 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
         new_id,
         resume_hint: Some(resume),
     })
+}
+
+#[cfg(test)]
+mod parent_tests {
+    use super::*;
+    fn old_resolve(dropped: &HashMap<String, Option<String>>, pid: String) -> (Option<String>, usize) {
+        let mut p = Some(pid);
+        let mut probes = 0;
+        for _ in 0..=dropped.len() {
+            probes += 1;
+            match p.as_ref().and_then(|id| dropped.get(id)) {
+                Some(next) => p = next.clone(),
+                None => break,
+            }
+        }
+        (p, probes)
+    }
+    #[test]
+    fn forward_dropped_ancestors_resolve_with_linear_probes_and_exact_results() {
+        for count in [64, 1024, 4096] {
+            let mut parents = ParentLinks::default();
+            for n in 0..count {
+                parents.insert(
+                    format!("d{n}"),
+                    Some(if n + 1 == count {
+                        "root".into()
+                    } else {
+                        format!("d{}", n + 1)
+                    }),
+                );
+            }
+            let mut old_probes = 0;
+            for n in 0..count {
+                let id = format!("d{n}");
+                let (expected, probes) = old_resolve(&parents.links, id.clone());
+                old_probes += probes;
+                assert_eq!(parents.resolve(id), expected);
+            }
+            assert!(old_probes >= count * count / 2);
+            assert!(parents.probes <= count + 1);
+            // Resolving a previously absent parent then inserting it must not reuse stale data.
+            parents.insert("root".into(), None);
+            assert_eq!(parents.resolve("d0".into()), None);
+        }
+    }
+    #[test]
+    fn emitted_forward_parent_fanout_matches_owned_native_oracle() -> Result<()> {
+        let world = cv_testkit::World::in_process("claude-parent-fanout");
+        let mut session = crate::Session::new("original", Harness::Claude);
+        session.created_at = chrono::DateTime::from_timestamp(1, 0);
+        let mut root = Message::new(Role::User);
+        root.id = Some("root".into());
+        root.content.push(Block::Text {
+            text: "root prompt".into(),
+        });
+        session.messages.push(root);
+        for n in 0..128 {
+            let mut dropped = Message::new(Role::System);
+            dropped.id = Some(format!("d{n}"));
+            dropped.parent_id = Some(if n == 127 { "root".into() } else { format!("d{}", n + 1) });
+            session.messages.push(dropped);
+        }
+        for n in 0..128 {
+            let mut child = Message::new(Role::User);
+            child.id = Some(format!("child{n}"));
+            child.parent_id = Some(format!("d{n}"));
+            child.content.push(Block::Text {
+                text: format!("child {n}").into(),
+            });
+            session.messages.push(child);
+        }
+        let opts = EmitOptions {
+            new_id: Some("destination".into()),
+            ..Default::default()
+        };
+        let old = super::super::emit_legacy(&session, &world.base.join("old"), &opts)?;
+        let new = emit(&session, &world.base.join("new"), &opts)?;
+        assert_eq!(fs::read(old.path)?, fs::read(&new.path)?);
+        super::super::verify_claude_resumable(&new.path, None)?;
+        Ok(())
+    }
+
+    #[test]
+    fn dropped_parent_cache_preserves_cycles_and_duplicate_updates() {
+        let mut parents = ParentLinks::default();
+        for (id, parent) in [("a", "b"), ("b", "a"), ("c", "a")] {
+            parents.insert(id.into(), Some(parent.into()));
+        }
+        for _ in 0..3 {
+            for id in ["a", "b", "c", "unknown"] {
+                assert_eq!(parents.resolve(id.into()), old_resolve(&parents.links, id.into()).0);
+            }
+        }
+        parents.insert("b".into(), Some("root".into()));
+        assert_eq!(parents.resolve("c".into()), Some("root".into()));
+        parents.insert("b".into(), None);
+        assert_eq!(parents.resolve("c".into()), None);
+        parents.clear();
+        assert_eq!(parents.resolve("a".into()), Some("a".into()));
+    }
 }
