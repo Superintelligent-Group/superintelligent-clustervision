@@ -301,7 +301,7 @@ pub(super) fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Res
     // Checked serialization completes before registry/transcript publication. Preserve the
     // legacy registry layout and fs::write-compatible links/permissions on the transcript.
     let stage = stage.into_inner().map_err(|error| error.into_error())?;
-    let chats = match gemini_register_project(out_dir, &cwd_str) {
+    let chats = match gemini_register_project(out_dir, &cwd_str)? {
         Some(slug) => out_dir.join(slug).join("chats"),
         None => out_dir.join("chats"),
     };

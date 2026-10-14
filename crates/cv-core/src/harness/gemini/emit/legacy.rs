@@ -16,7 +16,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
     // makes the session invisible to the installed binary. So register the cwd→slug mapping (matching
     // gemini's getShortId) and write into the slug's chats dir. (Verified live: with the file in the
     // right slug dir, `gemini --resume <uuid>` recalls the conversation.)
-    let chats_dir = match gemini_register_project(out_dir, &cwd_str) {
+    let chats_dir = match gemini_register_project(out_dir, &cwd_str)? {
         Some(slug) => out_dir.join(slug).join("chats"),
         None => out_dir.join("chats"), // no cwd → fall back to the legacy bare path
     };

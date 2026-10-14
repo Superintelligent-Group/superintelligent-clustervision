@@ -32,9 +32,9 @@ mod stream;
 /// DIFFERENT path already owns that dir's marker), write the `.project_root` marker, and record the
 /// projects.json mapping (the fast path; gemini heals from the marker regardless). After this,
 /// `gemini --resume`/`--list-sessions` discover the session. Returns the slug, `None` if `cwd` empty.
-fn gemini_register_project(global_tmp: &Path, cwd: &str) -> Option<String> {
+fn gemini_register_project(global_tmp: &Path, cwd: &str) -> Result<Option<String>> {
     if cwd.is_empty() {
-        return None;
+        return Ok(None);
     }
     const MARKER: &str = ".project_root";
     // Reuse the slug whose marker already owns this cwd, if any (gemini's findExistingSlugForPath).
@@ -46,7 +46,7 @@ fn gemini_register_project(global_tmp: &Path, cwd: &str) -> Option<String> {
     if let Ok(entries) = fs::read_dir(global_tmp) {
         for e in entries.flatten() {
             if owned_by(&e.path()).as_deref() == Some(cwd) {
-                return e.file_name().to_str().map(str::to_string);
+                return Ok(e.file_name().to_str().map(str::to_string));
             }
         }
     }
@@ -69,8 +69,9 @@ fn gemini_register_project(global_tmp: &Path, cwd: &str) -> Option<String> {
         }
     }
     let slug_dir = global_tmp.join(&slug);
-    let _ = fs::create_dir_all(&slug_dir);
-    let _ = fs::write(slug_dir.join(MARKER), cwd);
+    fs::create_dir_all(&slug_dir).with_context(|| format!("creating Gemini project {}", slug_dir.display()))?;
+    let marker = slug_dir.join(MARKER);
+    fs::write(&marker, cwd).with_context(|| format!("writing Gemini project marker {}", marker.display()))?;
     // Record the projects.json fast-path mapping too (best-effort).
     if let Some(parent) = global_tmp.parent() {
         let projects_json = parent.join("projects.json");
@@ -91,7 +92,7 @@ fn gemini_register_project(global_tmp: &Path, cwd: &str) -> Option<String> {
             let _ = fs::write(&projects_json, s);
         }
     }
-    Some(slug)
+    Ok(Some(slug))
 }
 
 #[cfg(test)]
@@ -101,6 +102,25 @@ mod checked_tests {
         ir::{Message, Usage},
         Harness, Json, SessionRef,
     };
+
+    #[test]
+    fn required_project_marker_failure_prevents_transcript_publication() {
+        let dir = std::env::temp_dir().join(format!("cv-gemini-marker-{}", Uuid::new_v4()));
+        fs::create_dir_all(dir.join("project/.project_root")).unwrap();
+        let mut session = Session::new("source", Harness::Gemini);
+        session.cwd = Some("/synthetic/project".into());
+        let result = emit(
+            &session,
+            &dir,
+            &EmitOptions {
+                new_id: Some("destination".into()),
+                ..Default::default()
+            },
+        );
+        assert!(format!("{:#}", result.unwrap_err()).contains("project marker"));
+        assert!(!dir.join("project/chats").exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     fn normalized(path: &Path) -> Result<Vec<u8>> {
         let mut value: Value = serde_json::from_slice(&fs::read(path)?)?;
