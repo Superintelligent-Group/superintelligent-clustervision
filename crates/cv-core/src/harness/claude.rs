@@ -1329,7 +1329,15 @@ fn subagent_tree_inner(
 type JournalResults = std::collections::BTreeMap<String, Value>;
 
 #[cfg(test)]
-static FOREST_READS: std::sync::Mutex<Vec<(&'static str, PathBuf)>> = std::sync::Mutex::new(Vec::new());
+static FOREST_READS: std::sync::Mutex<(Option<PathBuf>, Vec<(&'static str, PathBuf)>)> =
+    std::sync::Mutex::new((None, Vec::new()));
+#[cfg(test)]
+fn record_forest_read(kind: &'static str, path: &Path) {
+    let mut trace = FOREST_READS.lock().unwrap();
+    if trace.0.as_ref().is_some_and(|root| path.starts_with(root)) {
+        trace.1.push((kind, path.to_path_buf()));
+    }
+}
 
 /// Scan one directory for `agent-*.jsonl` transcripts, pairing each with its `*.meta.json` sidecar
 /// and (for workflow dirs) the journaled result for its agentId. `wf` is `Some(run_id)`
@@ -1361,17 +1369,14 @@ fn agents_in_dir(
     let rich = demand == crate::SubagentDemand::Rich;
     let journal = if rich && wf.is_some() && !paths.is_empty() {
         #[cfg(test)]
-        FOREST_READS
-            .lock()
-            .unwrap()
-            .push(("journal", dir.join("journal.jsonl")));
+        record_forest_read("journal", &dir.join("journal.jsonl"));
         sidecar::journal_results(dir)
     } else {
         JournalResults::new()
     };
     crate::par_discovery_filter_map(paths, |p| {
         #[cfg(test)]
-        FOREST_READS.lock().unwrap().push(("transcript", p.clone()));
+        record_forest_read("transcript", &p);
         let session = if rich {
             scan(&p).ok()?
         } else {
@@ -1404,7 +1409,7 @@ fn agents_in_dir(
 /// Tool analytics demand the agent type, not the task description or spawning-call metadata.
 fn read_agent_type(path: &Path) -> Option<String> {
     #[cfg(test)]
-    FOREST_READS.lock().unwrap().push(("metadata", path.to_path_buf()));
+    record_forest_read("metadata", path);
     let source = JsonSource::capture(path).ok()?;
     source
         .read_document(|view| crate::affordance::input::field_string(view, "agentType"))
@@ -1416,7 +1421,7 @@ fn read_agent_type(path: &Path) -> Option<String> {
 /// failure (or an absent file) is a clean `(None, None, None)`.
 fn read_meta(path: &std::path::Path) -> (Option<String>, Option<String>, Option<String>) {
     #[cfg(test)]
-    FOREST_READS.lock().unwrap().push(("metadata", path.to_path_buf()));
+    record_forest_read("metadata", path);
     let Ok(txt) = fs::read_to_string(path) else {
         return (None, None, None);
     };
@@ -3236,10 +3241,11 @@ mod tests {
         writeln!(jf, r#"{{"type":"result","agentId":"a333","result":"string return"}}"#).unwrap();
         drop(jf);
 
+        FOREST_READS.lock().unwrap().0 = Some(root.clone());
         let tree = subagent_tree(&parent);
         assert_eq!(tree.len(), 3, "two tiers: 1 direct + 2 workflow");
 
-        let before = FOREST_READS.lock().unwrap().len();
+        let before = FOREST_READS.lock().unwrap().1.len();
         let tools = subagent_tree_filtered(&parent, crate::SubagentDemand::Tools, &|id, run| {
             id == "agent-a222" && run == Some("wf_abc-123")
         });
@@ -3252,7 +3258,7 @@ mod tests {
         assert_eq!(tools[0].agent_type, original.agent_type);
         assert_eq!(tools[0].workflow, original.workflow);
         assert!(tools[0].description.is_none() && tools[0].result_summary.is_none());
-        let reads: Vec<_> = FOREST_READS.lock().unwrap()[before..]
+        let reads: Vec<_> = FOREST_READS.lock().unwrap().1[before..]
             .iter()
             .filter(|(_, path)| path.starts_with(&root))
             .cloned()
@@ -3266,10 +3272,10 @@ mod tests {
             .iter()
             .all(|(kind, path)| *kind != "journal"
                 && path.file_name().unwrap().to_string_lossy().starts_with("agent-a222.")));
-        let before = FOREST_READS.lock().unwrap().len();
+        let before = FOREST_READS.lock().unwrap().1.len();
         let sessions = subagent_tree_filtered(&parent, crate::SubagentDemand::Sessions, &|id, _| id == "agent-a111");
         assert_eq!(sessions.len(), 1);
-        let reads: Vec<_> = FOREST_READS.lock().unwrap()[before..]
+        let reads: Vec<_> = FOREST_READS.lock().unwrap().1[before..]
             .iter()
             .filter(|(_, path)| path.starts_with(&root))
             .cloned()
@@ -3281,6 +3287,7 @@ mod tests {
             serde_json::to_value(original).unwrap()
         );
 
+        *FOREST_READS.lock().unwrap() = (None, Vec::new());
         let refs: Vec<_> = tree.iter().map(|s| &s.session).collect();
         for _ in 0..2 {
             assert_eq!(

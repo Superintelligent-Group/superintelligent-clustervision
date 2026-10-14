@@ -298,7 +298,7 @@ pub fn workflow(parent_path: &Path, key: &str) -> Option<Workflow> {
     let selected = resolve_workflow_index(&index, key, |entry| (entry.1.as_str(), entry.2.as_deref()))?;
     let (source, _, _) = index.swap_remove(selected);
     #[cfg(test)]
-    STATE_MATERIALIZATIONS.lock().unwrap().push(source.path().to_path_buf());
+    record_state_materialization(source.path());
     source
         .read_document(|view| Ok(parse_state(view.resolve()?.as_ref())))
         .ok()
@@ -498,14 +498,22 @@ pub fn workflows_named(parent_path: &Path, prefix: &str) -> Vec<Workflow> {
 /// absent option, never a failure (the catalog/forest views degrade gracefully).
 fn parse_state_file(path: &Path) -> Option<Workflow> {
     #[cfg(test)]
-    STATE_MATERIALIZATIONS.lock().unwrap().push(path.to_path_buf());
+    record_state_materialization(path);
     let txt = fs::read_to_string(path).ok()?;
     let v: Value = serde_json::from_str(&txt).ok()?;
     Some(parse_state(&v))
 }
 
 #[cfg(test)]
-static STATE_MATERIALIZATIONS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+static STATE_MATERIALIZATIONS: std::sync::Mutex<(Option<PathBuf>, Vec<PathBuf>)> =
+    std::sync::Mutex::new((None, Vec::new()));
+#[cfg(test)]
+fn record_state_materialization(path: &Path) {
+    let mut trace = STATE_MATERIALIZATIONS.lock().unwrap();
+    if trace.0.as_ref().is_some_and(|root| path.starts_with(root)) {
+        trace.1.push(path.to_path_buf());
+    }
+}
 
 /// Parse a workflow state `Value` into a [`Workflow`] (pure — the testable core of
 /// [`parse_state_file`]).
@@ -1202,7 +1210,8 @@ mod tests {
         assert!(workflow(&sess, "stark-kill").is_none());
         // Identity-only consumers preserve the rich reader's precedence and ambiguity, while
         // neither projecting selectors nor resolving a missing selector materializes any state.
-        let before = STATE_MATERIALIZATIONS.lock().unwrap().len();
+        STATE_MATERIALIZATIONS.lock().unwrap().0 = Some(dir.clone());
+        let before = STATE_MATERIALIZATIONS.lock().unwrap().1.len();
         for key in [
             "wf_aaa-111",
             "aaa",
@@ -1219,18 +1228,19 @@ mod tests {
             };
             assert_eq!(workflow_id(&sess, key), expected);
         }
-        assert!(STATE_MATERIALIZATIONS.lock().unwrap()[before..]
+        assert!(STATE_MATERIALIZATIONS.lock().unwrap().1[before..]
             .iter()
             .all(|path| !path.starts_with(&dir)));
-        let before = STATE_MATERIALIZATIONS.lock().unwrap().len();
+        let before = STATE_MATERIALIZATIONS.lock().unwrap().1.len();
         let selected = workflow(&sess, "aaa").unwrap();
         assert_eq!(selected.run_id, "wf_aaa-111");
-        let reads: Vec<_> = STATE_MATERIALIZATIONS.lock().unwrap()[before..]
+        let reads: Vec<_> = STATE_MATERIALIZATIONS.lock().unwrap().1[before..]
             .iter()
             .filter(|path| path.starts_with(&dir))
             .cloned()
             .collect();
         assert_eq!(reads, [wfdir.join("wf_aaa-111.json")]);
+        *STATE_MATERIALIZATIONS.lock().unwrap() = (None, Vec::new());
         std::fs::remove_dir_all(&dir).ok();
     }
 
