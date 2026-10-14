@@ -1709,3 +1709,21 @@ fn lanes_task_enrichment_reports_degraded_replay_and_skips_empty_forests() {
         "filtered-empty message preserved: {summary}"
     );
 }
+
+#[test]
+fn malformed_header_fields_fail_before_routing() {
+    let w = world("header-grammar");
+    let (port, _server) = spawn_serve(&w);
+    for (name, value) in [
+        ("", "x"),
+        ("X(Bad)", "x"),
+        ("X-Bad", "bad\0value"),
+        ("X-Bad", "bad\x7fvalue"),
+        ("X-Bad", "bad\x0bvalue"),
+    ] {
+        let response = raw_request(port, "GET", "/api/health", &[(name, value)]);
+        assert_eq!(raw_status(&response), 400, "{name:?}={value:?}: {response}");
+    }
+    let response = raw_request(port, "GET", "/api/health", &[("X-Valid_Token", "\tvalid\tvalue\t")]);
+    assert_eq!(raw_status(&response), 200, "{response}");
+}

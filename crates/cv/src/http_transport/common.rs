@@ -169,6 +169,9 @@ impl Header {
         B2: Into<Vec<u8>> + AsRef<[u8]>,
     {
         let header = HeaderField::from_bytes(header).or(Err(()))?;
+        if !valid_field_name(header.as_str().as_str()) || !valid_field_value(value.as_ref()) {
+            return Err(());
+        }
         let value = AsciiString::from_ascii(value).or(Err(()))?;
 
         Ok(Header { field: header, value })
@@ -182,10 +185,11 @@ impl FromStr for Header {
         let mut elems = input.splitn(2, ':');
 
         let field = elems.next().and_then(|f| f.parse().ok()).ok_or(())?;
-        let value = elems
-            .next()
-            .and_then(|v| AsciiString::from_ascii(v.trim()).ok())
-            .ok_or(())?;
+        let raw_value = elems.next().ok_or(())?;
+        if !valid_field_value(raw_value.as_bytes()) {
+            return Err(());
+        }
+        let value = AsciiString::from_ascii(raw_value.trim_matches([' ', '\t'])).map_err(|_| ())?;
 
         Ok(Header { field, value })
     }
@@ -224,12 +228,22 @@ impl FromStr for HeaderField {
     type Err = ();
 
     fn from_str(s: &str) -> Result<HeaderField, ()> {
-        if s.contains(char::is_whitespace) {
+        if !valid_field_name(s) {
             Err(())
         } else {
             AsciiString::from_ascii(s).map(HeaderField).map_err(|_| ())
         }
     }
+}
+
+fn valid_field_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
+}
+fn valid_field_value(value: &[u8]) -> bool {
+    value.iter().all(|byte| *byte == b'\t' || (0x20..=0x7e).contains(byte))
 }
 
 impl Display for HeaderField {
