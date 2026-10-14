@@ -428,7 +428,7 @@ fn update_message_count(conn: &rusqlite::Connection, id: &str) -> Result<()> {
 /// must instead be JSON-quoted, or its next parse could change type (e.g. "null" → Null).
 fn extra_column<'a>(bag: Option<&'a serde_json::Map<String, Value>>, key: &str) -> Option<std::borrow::Cow<'a, str>> {
     bag.and_then(|bag| bag.get(key)).map(|value| match value {
-        Value::String(raw) if !super::accepted_json(raw) => std::borrow::Cow::Borrowed(raw),
+        Value::String(raw) if !super::accepted_json(raw) => std::borrow::Cow::Borrowed(raw.as_str()),
         value => std::borrow::Cow::Owned(value.to_string()),
     })
 }
