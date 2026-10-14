@@ -550,24 +550,41 @@ fn carrier_record_type(m: &crate::ir::Message, h: Harness) -> Option<String> {
 
 /// The N most recent sessions per harness (catalog-backed, newest first), keyed by harness name.
 fn recent_refs(harness: Option<Harness>, recent: usize) -> BTreeMap<&'static str, (Harness, Vec<SessionRef>)> {
-    let mut by: BTreeMap<&'static str, (Harness, Vec<SessionRef>)> = BTreeMap::new();
     if recent == 0 {
-        return by;
+        return BTreeMap::new();
     }
-    for r in crate::sessions_for(harness) {
-        if harness.is_some_and(|h| h != r.harness) {
+    select_recent_refs(crate::sessions_for(harness), harness, recent)
+}
+
+fn select_recent_refs(
+    refs: impl IntoIterator<Item = SessionRef>,
+    harness: Option<Harness>,
+    recent: usize,
+) -> BTreeMap<&'static str, (Harness, Vec<SessionRef>)> {
+    type Rank = (std::cmp::Reverse<Option<chrono::DateTime<chrono::Utc>>>, usize);
+    let mut by: BTreeMap<&'static str, (Harness, BTreeMap<Rank, SessionRef>)> = BTreeMap::new();
+    if recent == 0 {
+        return BTreeMap::new();
+    }
+    for (position, reference) in refs.into_iter().enumerate() {
+        if harness.is_some_and(|h| h != reference.harness) {
             continue;
         }
-        by.entry(r.harness.as_str())
-            .or_insert_with(|| (r.harness, Vec::new()))
-            .1
-            .push(r);
+        let rank = (std::cmp::Reverse(reference.updated_at), position);
+        let (_, candidates) = by
+            .entry(reference.harness.as_str())
+            .or_insert_with(|| (reference.harness, BTreeMap::new()));
+        if candidates.len() == recent && candidates.last_key_value().is_some_and(|(last, _)| rank >= *last) {
+            continue;
+        }
+        candidates.insert(rank, reference);
+        if candidates.len() > recent {
+            candidates.pop_last();
+        }
     }
-    for (_, refs) in by.values_mut() {
-        refs.sort_by_key(|r| std::cmp::Reverse(r.updated_at));
-        refs.truncate(recent);
-    }
-    by
+    by.into_iter()
+        .map(|(name, (harness, candidates))| (name, (harness, candidates.into_values().collect())))
+        .collect()
 }
 
 /// Keep tally state only; failed streams never contribute a partial sample.
@@ -663,6 +680,59 @@ pub fn census(harness: Option<Harness>, recent: usize) -> Census {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_recent_selection_matches_stable_sort_with_ties_and_missing_dates() {
+        let refs: Vec<_> = (0..256)
+            .map(|position| {
+                let harness = if position % 3 == 0 {
+                    Harness::Gemini
+                } else {
+                    Harness::Codex
+                };
+                let mut reference = SessionRef::new(
+                    format!("id-{position}"),
+                    harness,
+                    PathBuf::from(format!("path-{position}")),
+                );
+                if position % 5 != 0 {
+                    reference.updated_at = chrono::DateTime::from_timestamp((position % 7) as i64, 0);
+                }
+                reference
+            })
+            .collect();
+        for harness in [None, Some(Harness::Gemini)] {
+            for limit in [0, 1, 10, 128, 512] {
+                let mut expected: BTreeMap<&str, (Harness, Vec<SessionRef>)> = BTreeMap::new();
+                if limit != 0 {
+                    for reference in refs.iter().filter(|r| harness.is_none_or(|h| h == r.harness)) {
+                        expected
+                            .entry(reference.harness.as_str())
+                            .or_insert_with(|| (reference.harness, Vec::new()))
+                            .1
+                            .push(reference.clone());
+                    }
+                    for (_, candidates) in expected.values_mut() {
+                        candidates.sort_by_key(|r| std::cmp::Reverse(r.updated_at));
+                        candidates.truncate(limit);
+                    }
+                }
+                let actual = select_recent_refs(refs.clone(), harness, limit);
+                let ids = |selection: &BTreeMap<&str, (Harness, Vec<SessionRef>)>| {
+                    selection
+                        .iter()
+                        .map(|(name, (_, candidates))| {
+                            (
+                                name.to_string(),
+                                candidates.iter().map(|r| r.id.clone()).collect::<Vec<_>>(),
+                            )
+                        })
+                        .collect::<BTreeMap<_, _>>()
+                };
+                assert_eq!(ids(&actual), ids(&expected));
+            }
+        }
+    }
 
     #[test]
     fn unseen_carried_types_matches_nested_lookup_oracle_on_wide_vocabulary() {
