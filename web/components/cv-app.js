@@ -210,22 +210,34 @@ class CvApp extends HTMLElement {
   async _loadMoreMessages() {
     const s = this._transcript?.session;
     if (!s || !s._paged) return;
-    try {
-      const win = await getMessages(s, s._paged.next, s._paged.next + PAGE);
-      if (win && win.messages.length) {
-        // Route the raw window through the session normalizer so blocks/usage match the pool.
+    // A page belongs to the cached session, not the current transcript DOM. Returning to
+    // a session while its previous page is pending must share that request.
+    this._pageLoads ||= new WeakMap();
+    let task = this._pageLoads.get(s);
+    if (!task) {
+      const start = s._paged.next;
+      task = (async () => {
+        const win = await getMessages(s, start, start + PAGE);
+        if (!win) throw new Error("Couldn't load more messages. Try again.");
+        // A successful empty terminal page is valid; a non-advancing continuation is not.
+        if (win.start !== start || !Number.isInteger(win.end) || win.end < start
+          || win.end - start !== win.messages.length || (win.has_more && win.end === start)) {
+          throw new Error("The message page was incomplete. Try again.");
+        }
         const norm = normalizeSession({ id: s.id, harness: s.harness, messages: win.messages });
         s.messages.push(...norm.messages);
         if (win.total_known) { s.message_count = win.total; s._totalKnown = true; }
         s._paged = win.has_more ? { next: win.end } : null;
-      } else {
-        s._paged = null; // endpoint gone or nothing left — stop offering more
-      }
-    } catch (e) {
-      console.warn("[clustervision] load-more failed:", e);
-      s._paged = null;
+      })();
+      this._pageLoads.set(s, task);
     }
-    if (this._transcript?.session === s) this._transcript.notifyAppended();
+    let error = null;
+    try { await task; }
+    catch (e) { error = e?.message || "Couldn't load more messages. Try again."; }
+    finally {
+      if (this._pageLoads.get(s) === task) this._pageLoads.delete(s);
+    }
+    if (this._transcript?.session === s) this._transcript.notifyAppended(error);
   }
 
   /** GET JSON with a hard timeout; returns null on any failure/timeout (never throws, never hangs). */

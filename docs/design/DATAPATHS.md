@@ -4668,3 +4668,28 @@ existing checked ordinary/multimodal body and single-decoding reasoning paths re
 This review identifies costs and removes demonstrated duplicate ownership; it establishes no new
 instruction-count or universal memory-bound claim. Focused execution is delegated to the root's
 single integrated native/portable batch rather than building another lane target.
+
+### Browser continuation recovery (2026-10-13, GPT-6.1 Sol)
+
+The frontend audit found that `_loadMoreMessages` treated every failed request as EOF:
+`getMessages` returns null for unavailable/error responses, and the app erased `_paged`.
+The visible history silently stopped there, with no retry. Returning to a cached session
+while its page request was pending also reset the transcript DOM's loading flag, allowing
+a second request for the same continuation and duplicate message appends.
+
+Page ownership now lives in a per-session WeakMap shared across transcript remounts.
+Failed or malformed/non-advancing pages retain the continuation and show an explicit retry;
+automatic intersection loading pauses after failure. Successful terminal pages, including
+empty ones, still complete the history. Page bounds are checked before mutation, and stale
+session results update their cache without painting another selection.
+
+A deterministic deferred-fetch browser check covers failed HTTP, a non-advancing page,
+returning during an active request, exactly-once append and terminal pager removal.
+`NODE_PATH=/Users/ember/tools/playwright/node_modules SELFTEST_CHANNEL=chrome node
+tools/web-selftest.mjs` passes 64/64. No Rust change; root owns the combined build gate.
+
+Remaining frontend limits observed directly in source: collapsed tool/thinking/quiet bodies
+and event rows still generate DOM eagerly; PAGE bounds message count, not single-message
+payload size. Transcript exports currently serialize the loaded page subset without stating
+that limitation. These need separate coherent demand/render/export changes and user-facing
+checks, rather than treating current paging as complete DOM or payload boundedness.

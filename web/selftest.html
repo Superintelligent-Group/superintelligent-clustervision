@@ -942,6 +942,41 @@ await acheck("superseded lookup cannot change navigation; concurrent stub hydrat
   eq(app._transcript.session, other, "stale lookup cannot navigate");
 }));
 
+suite("Retryable transcript pages");
+await acheck("failed and malformed pages retain continuation; retry appends exactly once", async () => {
+  const original = globalThis.fetch;
+  const app = document.createElement("cv-app");
+  app._transcript = document.createElement("cv-transcript");
+  app._transcript._mountEvents = () => {};
+  app._transcript._mountSubagents = () => {};
+  const s = normalizeSession({ id: "retry", harness: "claude", messages: [{ role: "user", content: [] }] });
+  s._paged = { next: 1 };
+  app._transcript.session = s;
+  try {
+    globalThis.fetch = async () => ({ ok: false });
+    await app._loadMoreMessages();
+    eq(s._paged.next, 1, "network error preserves continuation");
+    has(app._transcript.textContent, "Try again", "failure is visible");
+    eq(app._transcript.querySelector(".load-more-btn").disabled, false, "retry enabled");
+    globalThis.fetch = async () => ({ ok: true, json: async () => ({ start: 1, end: 1, messages: [], has_more: true }) });
+    await app._loadMoreMessages();
+    eq(s._paged.next, 1, "non-advancing page preserves continuation");
+    const pending = deferred(); let requests = 0;
+    globalThis.fetch = async () => { requests++; return { ok: true, json: () => pending.promise }; };
+    const first = app._loadMoreMessages();
+    app._transcript.session = null;
+    app._transcript.session = s;
+    const second = app._loadMoreMessages();
+    eq(requests, 1, "returning to session shares pending page");
+    pending.resolve({ start: 1, end: 2, messages: [{ role: "assistant", content: [{ type: "text", text: "retried" }] }], has_more: false });
+    await Promise.all([first, second]);
+    eq(s.messages.length, 2, "message appended once");
+    eq(s._paged, null, "terminal page completes history");
+    eq(app._transcript.querySelector(".load-more"), null, "terminal pager removed");
+    has(app._transcript.textContent, "retried", "retry paints message");
+  } finally { globalThis.fetch = original; }
+});
+
 // ===========================================================================
 // Report
 // ===========================================================================

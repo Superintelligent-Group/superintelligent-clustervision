@@ -106,6 +106,7 @@ class CvTranscript extends HTMLElement {
     this._limit = PAGE;
     this._pumping = false;
     this._moreInFlight = false;
+    this._pageError = null;
     this._io?.disconnect();
     this._io = null;
     this._pump();
@@ -176,7 +177,7 @@ class CvTranscript extends HTMLElement {
       pager.querySelector(".load-more-btn").addEventListener("click", () => this._requestMore());
       if (typeof IntersectionObserver === "function") {
         this._io = new IntersectionObserver((entries) => {
-          if (entries.some((e) => e.isIntersecting)) this._requestMore();
+          if (!this._pageError && entries.some((e) => e.isIntersecting)) this._requestMore();
         });
         this._io.observe(pager);
       }
@@ -186,7 +187,10 @@ class CvTranscript extends HTMLElement {
     const total = s.message_count && s.message_count > shown ? s.message_count
       : loaded > shown ? loaded : null;
     pager.querySelector(".load-more-note").textContent =
-      `showing ${shown}${total ? ` of ${total}` : ""} messages`;
+      this._pageError || `showing ${shown}${total ? ` of ${total}` : ""} messages`;
+    const btn = pager.querySelector(".load-more-btn");
+    btn.disabled = this._moreInFlight;
+    btn.textContent = this._moreInFlight ? "Loading…" : this._pageError ? "Retry loading messages" : "Load more messages";
   }
 
   _requestMore() {
@@ -198,6 +202,7 @@ class CvTranscript extends HTMLElement {
       return;
     }
     if (!this._session._paged) return;
+    this._pageError = null;
     this._moreInFlight = true;
     const btn = this.querySelector(".load-more-btn");
     if (btn) { btn.disabled = true; btn.textContent = "Loading…"; }
@@ -207,8 +212,9 @@ class CvTranscript extends HTMLElement {
   }
 
   /** Host callback once a "load-more" fetch settled (messages appended and/or `_paged` updated). */
-  notifyAppended() {
+  notifyAppended(error = null) {
     this._moreInFlight = false;
+    this._pageError = error;
     const btn = this.querySelector(".load-more-btn");
     if (btn) { btn.disabled = false; btn.textContent = "Load more messages"; }
     this._limit = Math.max(this._limit, this._cursor + PAGE);
