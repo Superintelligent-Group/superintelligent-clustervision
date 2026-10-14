@@ -263,6 +263,78 @@ def claude_port_gate(binary, root, env):
 
 
 
+def claude_portable_gate(binary, root, env):
+    """Portable replay must not own giant reasoning/tool bodies while changing wire fields."""
+    directory = root / "claude-portable"
+    directory.mkdir()
+    source = directory / "source.jsonl"
+    encoded = b'line\\n\\u03bb ' * 4096
+    decoded = ("line\nλ " * 4096).encode()
+    repeats = PAYLOAD // len(encoded)
+    expected = hashlib.sha256()
+    for _ in range(repeats):
+        expected.update(decoded)
+    expected = expected.hexdigest()
+    ids = ["a:b", "a#b", "a_b"]
+    def row(role, uid, content, parent=None):
+        return dict(type=role, uuid=uid, parentUuid=parent, sessionId="source",
+                    timestamp="2026-10-14T12:00:00Z", cwd="/synthetic/portable",
+                    message=dict(role=role, model="proxy-model", content=content))
+    rows = [row("user", "u", "a:b is ordinary prompt text"),
+            row("assistant", "a", [dict(type="thinking", thinking="GIANT", signature="foreign"),
+                *[dict(type="tool_use", id=ident, name="Bash", input=dict(command="echo a:b"))
+                  for ident in ids]], "u"),
+            row("user", "r", [dict(type="tool_result", tool_use_id=ident,
+                                    content="GIANT" if index == 0 else "small a:b result")
+                               for index, ident in enumerate(ids)], "a"),
+            row("assistant", "z", [dict(type="text", text="finished")], "r")]
+    with source.open("wb") as output:
+        for record in rows:
+            wire = json.dumps(record, separators=(",", ":")).encode()
+            parts = wire.split(b'GIANT')
+            output.write(parts[0])
+            for part in parts[1:]:
+                for _ in range(repeats):
+                    output.write(encoded)
+                output.write(part)
+            output.write(b"\n")
+    original = file_digest(source)
+    child = subprocess.run([str(binary), "claude", str(source), str(directory / "output"), "portable"],
+                           env=env, text=True, capture_output=True)
+    assert child.returncode == 0, f"portable Claude export failed: {child.stderr[-2000:]}"
+    report = json.loads(child.stdout)
+    peak = checked_peak(json.loads(child.stderr))
+    assert all(delta["expected"] for delta in report["fidelity"]["deltas"]), report
+    calls, results, giant_texts, giant_results = [], [], 0, 0
+    # Decode output only after the child measurement; these allocations are outside its Rust heap.
+    with Path(report["path"]).open() as output:
+        for line in output:
+            content = json.loads(line).get("message", {}).get("content", [])
+            if isinstance(content, str):
+                assert content == "a:b is ordinary prompt text"
+                continue
+            for block in content:
+                assert block["type"] not in ("thinking", "redacted_thinking"), block["type"]
+                if block["type"] == "tool_use":
+                    calls.append(block["id"])
+                    assert block["input"] == dict(command="echo a:b")
+                elif block["type"] == "tool_result":
+                    results.append(block["tool_use_id"])
+                    if len(block["content"]) > 1024:
+                        assert hashlib.sha256(block["content"].encode()).hexdigest() == expected
+                        giant_results += 1
+                elif block["type"] == "text" and len(block["text"]) > 1024:
+                    assert hashlib.sha256(block["text"].encode()).hexdigest() == expected
+                    giant_texts += 1
+    assert len(calls) == len(set(calls)) == 3 and calls == results, (calls, results)
+    assert calls[2] == "a_b" and all(re.fullmatch(r"[A-Za-z0-9_-]+", ident) for ident in calls)
+    assert giant_texts == giant_results == 1
+    assert file_digest(source) == original
+    print(json.dumps(dict(case="portable-claude-replay", peak_live_rust_bytes=peak,
+                          payload_bytes=repeats * len(encoded), tool_pairs=len(calls))), flush=True)
+    shutil.rmtree(directory)
+
+
 def codex_output_digest(path):
     """Hash the entire fixed-clock output, normalizing only the package version in its metadata."""
     digest = hashlib.sha256()
@@ -536,6 +608,7 @@ def main():
         usage_gate(binary, root, env)
         window_gate(window_binary(args.window_build_report), root, env)
         claude_port_gate(args.claude_port_probe.resolve(strict=True), root, env)
+        claude_portable_gate(args.claude_port_probe.resolve(strict=True), root, env)
         codex_thinking_gate(args.claude_port_probe.resolve(strict=True), root, env)
         gemini_port_gate(args.claude_port_probe.resolve(strict=True), root, env)
         cline_port_gate(args.claude_port_probe.resolve(strict=True), root, env)
