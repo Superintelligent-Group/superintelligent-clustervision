@@ -697,7 +697,7 @@ pub(crate) fn count_prefix_checked(r: &SessionRef, len: u64, check: &mut dyn FnM
         let f = fs::File::open(&r.path).with_context(|| format!("opening {}", r.path.display()))?;
         Ok(BufReader::new(f.take(len)))
     };
-    let has_events = crate::stream::with_read_check(open()?, check, detect_has_events)?;
+    let has_events = crate::stream::with_read_check(open()?, check, |reader| detect_has_events(reader))?;
     let mut n = 0usize;
     let mut count = |_: Message| {
         n += 1;
