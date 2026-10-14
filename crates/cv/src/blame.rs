@@ -265,7 +265,9 @@ pub(crate) fn correlate(commit_time: i64, edits: &[EditEvent], repo_root: &Path)
     for (i, e) in edits.iter().enumerate() {
         let cand = match e.ts {
             Some(ts) => {
-                let delta = commit_time - ts;
+                let Some(delta) = commit_time.checked_sub(ts) else {
+                    continue;
+                };
                 if !(-WINDOW_AFTER_SECS..=WINDOW_BEFORE_SECS).contains(&delta) {
                     continue;
                 }
@@ -280,7 +282,7 @@ pub(crate) fn correlate(commit_time: i64, edits: &[EditEvent], repo_root: &Path)
                 let (Some(c), Some(u)) = (e.created_at, e.updated_at) else {
                     continue;
                 };
-                if commit_time < c || commit_time > u + WINDOW_AFTER_SECS {
+                if commit_time < c || commit_time > u.saturating_add(WINDOW_AFTER_SECS) {
                     continue;
                 }
                 SessionMatch {
@@ -334,9 +336,10 @@ pub(crate) fn rank_commit<'a>(
     timed: Vec<SessionMatch>,
     edits: &[EditEvent],
 ) -> Vec<Ranked<'a>> {
+    let sha = sha.to_ascii_lowercase();
     let mut proven: Vec<&ExactMatch> = exact
         .iter()
-        .filter(|x| cv_core::rewind::output_names_sha(&x.evidence.sha, &sha.to_ascii_lowercase()))
+        .filter(|x| cv_core::rewind::output_names_sha(&x.evidence.sha, &sha))
         .collect();
     proven.sort_by_key(|x| {
         (
@@ -557,6 +560,18 @@ pub(crate) fn candidate_ids(edits: &[EditEvent]) -> Vec<(String, String)> {
     ids
 }
 
+fn event_titles(edits: &[EditEvent]) -> std::collections::HashMap<(&str, &str), &str> {
+    let mut titles = std::collections::HashMap::new();
+    for event in edits {
+        if let Some(title) = event.title.as_deref() {
+            titles
+                .entry((event.harness.as_str(), event.session_id.as_str()))
+                .or_insert(title);
+        }
+    }
+    titles
+}
+
 /// The exact tier for `commits` (see the module docs): candidates are the sessions with an edit on
 /// the file plus the parents of sub-agents among them, kept only if their transcript was written
 /// to after the earliest commit landed; each is scanned for tool output naming a commit's sha.
@@ -565,12 +580,7 @@ fn exact_matches(commits: &[CommitInfo], edits: &[EditEvent]) -> Result<Vec<Exac
         return Ok(Vec::new());
     };
     let ids = candidate_ids(edits);
-    let mut titles: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    for e in edits {
-        if let Some(t) = &e.title {
-            titles.entry(e.session_id.clone()).or_insert_with(|| t.clone());
-        }
-    }
+    let titles = event_titles(edits);
     let written_since = |p: &Path| {
         std::fs::metadata(p)
             .and_then(|m| m.modified())
@@ -591,7 +601,10 @@ fn exact_matches(commits: &[CommitInfo], edits: &[EditEvent]) -> Result<Vec<Exac
             if let Some(ev) = CommitEvidenceSink::best(&found, &sha.to_ascii_lowercase()) {
                 out.push(ExactMatch {
                     harness: r.harness.as_str().to_string(),
-                    title: titles.get(&r.id).cloned().or_else(|| r.title.clone()),
+                    title: titles
+                        .get(&(r.harness.as_str(), r.id.as_str()))
+                        .map(|t| (*t).to_string())
+                        .or_else(|| r.title.clone()),
                     session_id: r.id.clone(),
                     evidence: ev,
                 });
@@ -764,6 +777,22 @@ mod tests {
     const T: i64 = 1_780_000_000; // an arbitrary commit time
     fn root() -> PathBuf {
         PathBuf::from("/repo")
+    }
+
+    #[test]
+    fn blame_identity_qualifies_titles_and_extreme_timestamps_do_not_overflow() {
+        let mut claude = ev("shared-id", 0, Some(i64::MIN), None, None);
+        claude.title = Some("Claude title".into());
+        let mut codex = claude.clone();
+        codex.harness = "codex".into();
+        codex.title = Some("Codex title".into());
+        let edits = vec![claude, codex];
+        let titles = event_titles(&edits);
+        assert_eq!(titles[&("claude", "shared-id")], "Claude title");
+        assert_eq!(titles[&("codex", "shared-id")], "Codex title");
+        assert!(correlate(i64::MAX, &edits, &root()).is_empty());
+        let span = vec![ev("span", 0, None, None, Some((i64::MAX - 10, i64::MAX)))];
+        assert_eq!(correlate(i64::MAX, &span, &root()).len(), 1);
     }
 
     #[test]
