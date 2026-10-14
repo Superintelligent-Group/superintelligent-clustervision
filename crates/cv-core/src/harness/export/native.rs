@@ -263,7 +263,9 @@ fn active_chain<'a>(conv: &Fields<'a>) -> Result<Vec<JsonView<'a>>> {
         nodes.insert(key.to_owned(), value);
         Ok(())
     })?;
-    for _ in 0..100_000 {
+    // Consuming the node entry proves finite traversal without truncating a legitimate
+    // long branch. A cycle reaches an already consumed key and stops at that boundary.
+    loop {
         let Some(node) = nodes.remove(&current) else {
             break;
         };
