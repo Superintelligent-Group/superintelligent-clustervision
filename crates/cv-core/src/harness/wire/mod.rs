@@ -60,26 +60,35 @@ pub(crate) fn text_parts(v: Option<&Value>) -> String {
 /// record view validates the entire row and rechecks its source after this projection.
 pub(crate) fn text_title(content: Option<crate::json::JsonView<'_>>) -> anyhow::Result<Option<String>> {
     let Some(content) = content else { return Ok(None) };
-    let mut texts = Vec::new();
+    let resolver = crate::lazy::Resolver::new(None);
     if let Some(text) = content.source_text()? {
-        texts.push(text);
-    } else if let Some(parts) = content.array()? {
-        for part in parts {
-            if let Some(text) = part?
-                .get("text")?
+        return Ok(super::store::document::text_summary(
+            std::iter::once(text),
+            &resolver,
+            true,
+        ));
+    }
+    let Some(parts) = content.array()? else { return Ok(None) };
+    let mut failure = None;
+    let texts = parts.filter_map(|part| {
+        match part.and_then(|part| {
+            part.get("text")?
                 .map(|value| value.source_text())
-                .transpose()?
-                .flatten()
-            {
-                texts.push(text);
+                .transpose()
+                .map(Option::flatten)
+        }) {
+            Ok(text) => text,
+            Err(error) => {
+                failure = Some(error);
+                None
             }
         }
+    });
+    let title = super::store::document::text_summary(texts, &resolver, true);
+    if let Some(error) = failure {
+        return Err(error);
     }
-    Ok(super::store::document::text_summary(
-        texts.iter(),
-        &crate::lazy::Resolver::new(None),
-        true,
-    ))
+    Ok(title)
 }
 
 fn str_field(v: &Value, key: &str) -> String {
@@ -91,6 +100,28 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn selected_title_matches_full_text_join_without_part_roster() -> anyhow::Result<()> {
+        let world = cv_testkit::World::in_process("wire-title-parts");
+        let path = world.base.join("content.json");
+        let mut many = vec![serde_json::json!({"text":""}); 4096];
+        many.push(serde_json::json!({"text":"late"}));
+        for value in [
+            serde_json::json!("large λ\n\"".repeat(20000)),
+            serde_json::json!([{ "text":""},{"text":""},{"text":"answer"}]),
+            serde_json::json!([{ "text":" \n"},{"ignored":"large"},{"text":"\u{2003}"}]),
+            serde_json::json!(many),
+            serde_json::json!({"text":"ignored non-array"}),
+        ] {
+            std::fs::write(&path, serde_json::to_vec(&value)?)?;
+            let source = crate::json::JsonSource::capture(&path)?;
+            let title = source.read_range_value(0, source.len(), |view| text_title(Some(view)))?;
+            let full = text_parts(Some(&value));
+            let expected = (!full.trim().is_empty()).then(|| crate::ir::truncate(&full, 80));
+            assert_eq!(title, expected);
+        }
+        Ok(())
+    }
     #[test]
     fn coerce_and_text_parts() {
         let arr = json!([
