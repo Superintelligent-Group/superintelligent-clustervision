@@ -59,24 +59,32 @@ def stores(binary, root, env):
     generator = Path(__file__).with_name("perf-fixture.py")
     # Store promises here are for mmap builds. The no-mmap guarantee below applies to the
     # positioned-read chunk resolver, not adapters that must own giant source records.
-    for harness, shape in (("gemini", "giant"), ("claude", "fixed"), ("claude", "giant"), ("codex", "fixed"), ("codex", "giant")):
+    # Most of a real Codex fleet is .jsonl.zst: the same rollouts, compressed, take the decoded path.
+    for harness, shape in (("gemini", "giant"), ("claude", "fixed"), ("claude", "giant"), ("codex", "fixed"), ("codex", "giant"),
+                           ("codex-zst", "fixed"), ("codex-zst", "giant")):
+        compressed = harness == "codex-zst"
+        harness = "codex" if compressed else harness
         for escaped in (False, True):
             peaks = []
             for size in SIZES:
                 # Fixed records refute whole-history retention; giant records refute temporary
                 # field/line ownership (including detector passes) in mmap-backed lazy parsing.
                 records = 4 if shape == "giant" else size // (256 << 10)
-                out = root / f"{harness}-{shape}-{size}-{escaped}"
+                out = root / f"{harness}{'-zst' if compressed else ''}-{shape}-{size}-{escaped}"
                 command = [sys.executable, str(generator), harness, str(out), "--payload-bytes", str(size), "--records", str(records)]
                 if escaped:
                     command.append("--escaped")
                 manifest = json.loads(subprocess.check_output(command, env=env, text=True))
+                if compressed:
+                    subprocess.check_call(["zstd", "-q", "--rm", manifest["path"], "-o", manifest["path"] + ".zst"])
+                    manifest["path"] += ".zst"
+                    manifest["physical_input_bytes"] = os.path.getsize(manifest["path"])
                 row, peak = probe(binary, ["count", harness, manifest["id"], manifest["path"], "--root", manifest["root"], "--mode", "lazy"], env, True)
                 assert row["messages"] == manifest["expected_messages"], f"{harness}: truncated or skipped source"
                 peaks.append(peak)
-                print(json.dumps({"case": f"{harness}-{shape}-{'escaped' if escaped else 'plain'}", "decoded_payload_bytes": size,
+                print(json.dumps({"case": f"{harness}{'-zst' if compressed else ''}-{shape}-{'escaped' if escaped else 'plain'}", "decoded_payload_bytes": size,
                                   "physical_input_bytes": manifest["physical_input_bytes"], "messages": row["messages"], "peak_live_rust_bytes": peak}), flush=True)
-            bound(peaks, STORE_CEILING, STORE_GROWTH, f"{harness} shape={shape} escaped={escaped}")
+            bound(peaks, STORE_CEILING, STORE_GROWTH, f"{harness} shape={shape} escaped={escaped} compressed={compressed}")
 
 
 def active_formats(binary, root, env, baseline=None, formats=None, mmap=True):
