@@ -42,7 +42,7 @@ pub(super) fn affordances(r: &SessionRef) -> Vec<Affordance> {
     let (jobs, runs) = if super::is_sqlite_store_path(&r.path) {
         sqlite_registries(state, &key)
     } else {
-        (jsonl_jobs(state), jsonl_runs(state))
+        (jsonl_jobs(state), jsonl_runs(state, &key))
     };
     let mut out: Vec<Affordance> = jobs.iter().filter(|j| job_belongs(j, &key)).map(job_row).collect();
     out.extend(runs.iter().filter(|(by, _)| by.contains(&key)).map(|(_, p)| run_row(p)));
@@ -106,14 +106,24 @@ fn run_keys(p: &Value) -> Vec<String> {
         .collect()
 }
 
-fn jsonl_runs(state: &Path) -> Vec<Run> {
+fn jsonl_runs(state: &Path, key: &str) -> Vec<Run> {
     let Some(mut registry) = read_json(&state.join("subagents").join("runs.json")) else {
         return Vec::new();
     };
     let Some(Value::Object(runs)) = registry.get_mut("runs").map(Value::take) else {
         return Vec::new();
     };
-    let mut out: Vec<Run> = runs.into_iter().map(|(_, p)| (run_keys(&p), p)).collect();
+    // Only this session's runs need ordering. Filtering before sorting avoids ordering
+    // the full global registry again for every requested session.
+    let mut out: Vec<Run> = runs
+        .into_iter()
+        .filter_map(|(_, p)| {
+            ["requesterSessionKey", "controllerSessionKey"]
+                .into_iter()
+                .any(|field| p.get(field).and_then(Value::as_str) == Some(key))
+                .then(|| (run_keys(&p), p))
+        })
+        .collect();
     out.sort_by_key(|(_, p)| p.get("createdAt").and_then(Value::as_i64).unwrap_or(0));
     out
 }
@@ -285,6 +295,45 @@ mod tests {
         assert!(!job_belongs(&heartbeat, "agent:other:main"));
         let every = json!({"name": "hb", "schedule": {"kind": "every", "everyMs": 1_800_000}, "payload": {"kind": "heartbeat"}});
         assert_eq!(job_row(&every).summary, "hb · every 1800s · heartbeat");
+    }
+
+    #[test]
+    fn jsonl_run_order_and_ownership_match_global_sort_with_many_unrelated_runs() -> anyhow::Result<()> {
+        let world = cv_testkit::World::in_process("openclaw-owned-run-order");
+        fs::create_dir_all(world.base.join("subagents"))?;
+        let key = "agent:main:explicit:requested";
+        let mut runs = serde_json::Map::new();
+        for i in 0..5000 {
+            runs.insert(
+                format!("other-{i}"),
+                json!({"requesterSessionKey":"unrelated",
+            "createdAt":5000-i,"task":"unrelated"}),
+            );
+        }
+        for (id, payload) in [
+            ("late", json!({"requesterSessionKey":key,"createdAt":9})),
+            ("early", json!({"controllerSessionKey":key,"createdAt":-9})),
+            ("tie-a", json!({"requesterSessionKey":key,"createdAt":0})),
+            (
+                "tie-b",
+                json!({"requesterSessionKey":"other","controllerSessionKey":key,"createdAt":0}),
+            ),
+            (
+                "invalid",
+                json!({"requesterSessionKey":false,"controllerSessionKey":1,"createdAt":-100}),
+            ),
+            ("missing-time", json!({"requesterSessionKey":key,"createdAt":"invalid"})),
+        ] {
+            runs.insert(id.into(), payload);
+        }
+        let mut expected: Vec<Run> = runs.values().cloned().map(|p| (run_keys(&p), p)).collect();
+        expected.sort_by_key(|(_, p)| p.get("createdAt").and_then(Value::as_i64).unwrap_or(0));
+        expected.retain(|(keys, _)| keys.iter().any(|by| by == key));
+        fs::write(world.base.join("subagents/runs.json"), json!({"runs":runs}).to_string())?;
+        let actual = jsonl_runs(&world.base, key);
+        assert_eq!(actual, expected);
+        assert_eq!(actual.len(), 5);
+        Ok(())
     }
 
     #[test]
