@@ -121,7 +121,7 @@ impl Archive {
     fn rel_session_path(harness: Harness, id: &str) -> PathBuf {
         PathBuf::from("archive")
             .join(harness.as_str())
-            .join(format!("{id}.json"))
+            .join(format!("{}.json", archive_stem(id)))
     }
 
     fn session_path(&self, harness: Harness, id: &str) -> PathBuf {
@@ -254,6 +254,21 @@ impl Archive {
             next_size: size.saturating_mul(2).max(1),
         });
     }
+}
+
+/// Preserve ordinary IDs while encoding bytes that can change path structure. Escape `%`
+/// too, so a native `a/b` ID cannot collide with a literal `a%2Fb` ID.
+fn archive_stem(id: &str) -> String {
+    use std::fmt::Write as _;
+    let mut stem = String::new();
+    for byte in id.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.') {
+            stem.push(byte as char);
+        } else {
+            write!(stem, "%{byte:02X}").expect("writing to String");
+        }
+    }
+    stem
 }
 
 /// A cwd for logs/listings: `~`-relative, or `-` when unknown.
@@ -396,6 +411,25 @@ pub(crate) fn cmd_path(archive: &Archive) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn archive_ids_are_single_components_without_encoding_collisions() {
+        assert_eq!(archive_stem("normal-session_1.2"), "normal-session_1.2");
+        for id in ["../escape", "/absolute", "a/b", "a\\b", "a%2Fb", "月", ""] {
+            let path = Archive::rel_session_path(Harness::Claude, id);
+            assert_eq!(path.parent().unwrap(), Path::new("archive/claude"));
+            assert_eq!(path.components().count(), 3);
+        }
+        assert_ne!(archive_stem("a/b"), archive_stem("a%2Fb"));
+        let a = archive();
+        let mut session = Session::new("../../escape", Harness::Claude);
+        session.messages.push(cv_core::Message::new(cv_core::Role::User));
+        a.store(&session).unwrap();
+        let catalog = a.load_catalog().unwrap();
+        assert_eq!(catalog[0].id, "../../escape");
+        assert_eq!(catalog[0].path.parent().unwrap(), Path::new("archive/claude"));
+        fs::remove_dir_all(a.home()).unwrap();
+    }
 
     fn archive() -> Archive {
         let home = std::env::temp_dir().join(format!("cv-archive-test-{}", uuid::Uuid::new_v4()));

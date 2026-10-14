@@ -168,7 +168,7 @@ impl Archive {
         self.home
             .join("archive-source")
             .join(r.harness.as_str())
-            .join(format!("{}.json", r.id))
+            .join(format!("{}.json", archive_stem(&r.id)))
     }
 
     fn stored(&self, r: &SessionRef) -> Option<Stored> {
