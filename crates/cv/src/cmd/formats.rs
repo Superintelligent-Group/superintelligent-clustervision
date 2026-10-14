@@ -35,6 +35,10 @@ fn census(harness: Option<Harness>, recent: usize, json_out: bool) -> Result<()>
         return Ok(());
     }
     if c.harnesses.is_empty() {
+        if recent == 0 {
+            println!("no sessions sampled (--recent 0)");
+            return Ok(());
+        }
         println!(
             "no sessions found (try `cv index`{})",
             harness

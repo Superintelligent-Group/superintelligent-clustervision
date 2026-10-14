@@ -600,7 +600,7 @@ fn census_session(
     });
     let mut opts = ParseOptions::complete();
     opts.spans = true;
-    adapter.stream(r, &opts, &mut sink)?;
+    adapter.try_stream(r, &opts, &mut sink)?;
     Ok(sample)
 }
 
