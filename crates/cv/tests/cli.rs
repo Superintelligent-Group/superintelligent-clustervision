@@ -550,7 +550,7 @@ fn export_formats() {
     let (full, _) = w.cv_ok(&["export", "giant-export", "--format", "md"]);
     let (windowed, _) = w.cv_ok(&["export", "giant-export", "--format", "md", "--range", "0.."]);
     assert_eq!(full, windowed);
-    // A late fatal UTF8 source error discards private output instead of publishing a prefix.
+    // Claude rejects malformed individual records without rejecting an otherwise valid session.
     use std::io::Write;
     fs::OpenOptions::new()
         .append(true)
@@ -558,11 +558,8 @@ fn export_formats() {
         .unwrap()
         .write_all(b"\xff\n")
         .unwrap();
-    let (failed_out, _) = w.cv_fails(&["export", "giant-export", "--format", "md", "--harness", "claude"]);
-    assert!(
-        failed_out.is_empty(),
-        "failed complete Markdown export published stdout"
-    );
+    let (with_invalid_row, _) = w.cv_ok(&["export", "giant-export", "--format", "md", "--harness", "claude"]);
+    assert_eq!(with_invalid_row, full);
 
     // JSON: the full IR round-trips through serde — and `export` is a DOCUMENT boundary, so what
     // it writes is an OpenSession 0.3 document: the IR led by the version marker.

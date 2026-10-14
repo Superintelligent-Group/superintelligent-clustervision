@@ -1743,10 +1743,14 @@ mod tests {
         let r = SessionRef::new("download-guard", Harness::Claude, path);
         for format in ["markdown", "opensession"] {
             std::fs::write(&auxiliary, "before")?;
-            let error = stage_export(&ChangesDependency(auxiliary.clone()), &r, format)
-                .err()
-                .expect("changed export was published");
+            let mut published = Vec::new();
+            let result = stage_export(&ChangesDependency(auxiliary.clone()), &r, format).and_then(|(body, _)| {
+                body.copy_to(&mut published)?;
+                Ok(())
+            });
+            let error = result.expect_err("changed export was published");
             assert!(error.to_string().contains("source changed"), "{error:#}");
+            assert!(published.is_empty(), "failed source guard published output");
         }
         Ok(())
     }
