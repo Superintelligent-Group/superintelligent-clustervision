@@ -204,6 +204,19 @@ impl ReadSet {
 }
 
 /// Record the original and auxiliary sources retained by one message before a consumer demands it.
+pub(crate) fn session_reads(session: &crate::Session) -> ReadSet {
+    let mut reads = ReadSet::default();
+    let primary = session.source_path.as_deref().unwrap_or_else(|| Path::new(""));
+    if session.source_path.is_some() {
+        reads.record(primary);
+    }
+    for message in &session.messages {
+        record_message_reads(message, primary, &mut reads);
+    }
+    reads
+}
+
+/// Record the original and auxiliary sources retained by one message before a consumer demands it.
 pub(crate) fn record_message_reads(message: &crate::Message, primary: &std::path::Path, reads: &mut ReadSet) {
     if let Some(record) = &message.complete_record {
         if let crate::Json::Source(range) = &record.value {

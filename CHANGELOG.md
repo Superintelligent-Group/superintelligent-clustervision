@@ -19,6 +19,7 @@
 - Transcript paging preserves failed continuations with visible retries and shares pending pages when reopening sessions, preventing silent truncation and duplicate messages.
 - Cursor IDE failed shell commands retain error status when the native tool invocation itself completed.
 
+- Splice Markdown and JSON exports stage checked source-backed messages without materializing selected bodies, preserving complete output and source freshness.
 - Codex legacy reads and discovery use checked source views, retaining lazy bodies and bounded title prefixes with unchanged output and counts.
 - Kimi and Kimi Code retain checked bodies during lazy and complete reads, preserving usage, rotations, raw records and resume behavior.
 - Goose legacy reads retain checked text and arguments; lean reads omit undemanded native sidecars while preserving usage, model and turn kinds.

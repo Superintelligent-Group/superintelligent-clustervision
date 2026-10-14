@@ -4,7 +4,7 @@
 //! leaves; ordinary fields still use serde_json. Output may be partial on any error, so callers
 //! publishing files must stage them first.
 use crate::{
-    ir::{Block, Message},
+    ir::{Block, Message, Session},
     json::Json,
     lazy::{Resolver, Text},
 };
@@ -23,6 +23,36 @@ struct OutputError(anyhow::Error);
 impl std::fmt::Display for OutputError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(f)
+    }
+}
+
+impl Session {
+    /// Write the complete derived Session schema without materializing lazy message leaves.
+    /// Output may be partial on error; stage it before publication.
+    pub fn write_json(&self, writer: &mut impl Write, resolver: &Resolver) -> anyhow::Result<()> {
+        self.write_json_format(writer, resolver, false)
+    }
+
+    /// Write byte-identical serde_json pretty Session output with bounded leaf scratch.
+    pub fn write_json_pretty(&self, writer: &mut impl Write, resolver: &Resolver) -> anyhow::Result<()> {
+        self.write_json_format(writer, resolver, true)
+    }
+
+    fn write_json_format(&self, writer: &mut impl Write, resolver: &Resolver, pretty: bool) -> anyhow::Result<()> {
+        let reads = crate::source::session_reads(self);
+        self.serialize(Fields {
+            writer,
+            resolver,
+            pretty,
+            depth: 0,
+            first: true,
+            context: Context::Session(self),
+        })?;
+        anyhow::ensure!(
+            reads.fresh(&mut crate::source::Probe::default()),
+            "session sources changed during JSON output"
+        );
+        Ok(())
     }
 }
 impl std::error::Error for OutputError {
@@ -78,6 +108,7 @@ impl Message {
 
 #[derive(Clone, Copy)]
 enum Context<'a> {
+    Session(&'a Session),
     Message(&'a Message),
     Block(&'a Block),
 }
@@ -99,6 +130,31 @@ fn indent(writer: &mut impl Write, depth: usize) -> io::Result<()> {
     Ok(())
 }
 impl<W: Write> Fields<'_, W> {
+    fn messages(&mut self, messages: &[Message]) -> Result<()> {
+        self.writer.write_all(b"[")?;
+        for (i, message) in messages.iter().enumerate() {
+            if i != 0 {
+                self.writer.write_all(b",")?;
+            }
+            if self.pretty {
+                self.writer.write_all(b"\n")?;
+                indent(self.writer, self.depth + 2)?;
+            }
+            message.serialize(Fields {
+                writer: &mut *self.writer,
+                resolver: self.resolver,
+                pretty: self.pretty,
+                depth: self.depth + 2,
+                first: true,
+                context: Context::Message(message),
+            })?;
+        }
+        if self.pretty && !messages.is_empty() {
+            self.writer.write_all(b"\n")?;
+            indent(self.writer, self.depth + 1)?;
+        }
+        self.writer.write_all(b"]").map_err(OutputError::from)
+    }
     fn value<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<()> {
         if self.pretty {
             serde_json::to_writer_pretty(
@@ -187,6 +243,7 @@ impl<W: Write> SerializeStruct for Fields<'_, W> {
             .write_all(if self.pretty { b": " } else { b":" })
             .map_err(OutputError::from)?;
         match (self.context, key) {
+            (Context::Session(session), "messages") => self.messages(&session.messages),
             (Context::Message(message), "content") => self.content(&message.content),
             (Context::Message(message), "extra") if message.complete_record.is_some() => {
                 if self.pretty {

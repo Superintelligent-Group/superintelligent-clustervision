@@ -391,9 +391,8 @@ pub(crate) fn cmd_splice(
             .context("splice needs at least one session")?,
     };
     let mut spliced = composition.finish(None, to_h);
-    // Text exports and generation retain their ordinary owned-IR contract. Only selected bodies
-    // are materialized, after discarded source owners have already been released.
-    if generate || (resumable.is_none() && harness.is_none() && out.is_none() && export.is_some()) {
+    // Generation demands owned text. Exports retain checked leaves through staged publication.
+    if generate {
         spliced.materialize()?;
     }
     if let Some(target) = resumable {
@@ -487,6 +486,22 @@ fn finish_composed(
         );
     }
 
+    // Complete checked demands before publishing either the report or the exported document.
+    let staged = match export.as_deref() {
+        Some("json" | "md" | "markdown") => {
+            use std::io::Write;
+            let mut stage = std::io::BufWriter::with_capacity(64 * 1024, cv_core::bytes::ByteStage::new());
+            let resolver = session.resolver();
+            if export.as_deref() == Some("json") {
+                session.write_json_pretty(&mut stage, &resolver)?;
+                stage.write_all(b"\n")?;
+            } else {
+                cv_core::render::write_markdown(&session, &mut stage, &resolver)?;
+            }
+            Some(stage.into_inner().map_err(|e| e.into_error())?.finish()?)
+        }
+        _ => None,
+    };
     // Otherwise: print a summary, and with --export, dump the composed session to stdout.
     println!(
         "✦ composed {} ({}) · {} msg",
@@ -514,8 +529,11 @@ fn finish_composed(
         None => {
             println!("\n(use --export md|json to print it, or --harness <harness> [--out <dir>] to emit it)");
         }
-        Some("json") => println!("{}", serde_json::to_string_pretty(&session)?),
-        Some("md") | Some("markdown") => print!("{}", cv_core::render::to_markdown(&session)?),
+        Some("json" | "md" | "markdown") => {
+            staged
+                .context("composed export was not staged")?
+                .copy_to(&mut std::io::stdout().lock())?;
+        }
         Some(other) => bail!("unknown export format {other:?} (use md or json)"),
     }
     Ok(())
