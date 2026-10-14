@@ -1,14 +1,19 @@
-//! Durable task event log: a single append-only JSONL file with locked compare-and-swap appends.
+//! Task event log: one JSONL file with locked compare-and-swap appends.
 //!
-//! `$CLUSTERVISION_HOME/tasks/events.jsonl` + sibling `events.lock`: a crash-safe flock +
-//! `O_APPEND` single-`write_all` recipe (see [`crate::lockfile`]).
+//! `$CLUSTERVISION_HOME/tasks/events.jsonl` + sibling `events.lock`: advisory locking across
+//! replay, validation, tail repair and `O_APPEND` writes (see [`crate::lockfile`]). Accepted
+//! history is append-only; an incomplete final record may be removed before a successful append.
+//! `write_all` can make multiple writes: a failed/crashed batch may leave a completed prefix and
+//! an incomplete last record. Flush is not an fsync or a crash-atomic batch guarantee.
 //!
 //! # Loud, not lenient
 //!
 //! A chat reader may skip malformed lines; a replayed event log may not (a silently dropped
 //! event changes history). Here interior garbage is **loud** (surfaced as warnings on every read)
-//! and only a *trailing* partial line — the one torn shape the locked writer can produce by
-//! crashing mid-append — is tolerated.
+//! and reads tolerate an unparseable final line without a newline. Appends recover only a
+//! syntactically incomplete JSON tail or an incomplete UTF-8 scalar at EOF; a complete but
+//! unrecognized final record refuses append. Repair follows admission of the entire candidate
+//! batch. A valid final event without a newline is preserved and separated from new records.
 //!
 //! # The CAS append
 //!
@@ -58,6 +63,15 @@ const HEADER_LINE: &str = r#"{"format":"cv-task-log","v":1}"#;
 /// where the line number keys quarantine warnings back to the physical file.
 type NumberedEvents = Vec<(usize, TaskEvent)>;
 
+/// Physical EOF framing, separate from events admitted by replay. Readers do not modify it.
+#[derive(Clone, Copy)]
+enum LogTail {
+    Terminated,
+    NeedsNewline,
+    Torn { offset: u64 },
+    Unrecognized { line_no: usize },
+}
+
 /// A parsed replay of the whole log: the read model plus any loud warnings about interior
 /// garbage. Every read surface must show `warnings` to its caller — a corrupted coordination log
 /// is a finding, not a detail.
@@ -106,14 +120,14 @@ impl TaskStore {
         self.dir.join("events.lock")
     }
 
-    /// Replay the log without holding the lock (readers never block writers; a concurrent append
-    /// is either wholly visible or wholly absent thanks to single-`write_all` O_APPEND lines).
+    /// Replay without holding the lock. Readers may see a completed prefix of a concurrent
+    /// batch and ignore an incomplete final record; this is not an atomic snapshot of a batch.
     ///
     /// Events the reducer refuses are **quarantined**: skipped with a loud warning (line number +
     /// reason) and counted, so one poisoned interior line degrades the model instead of bricking
     /// the CLI, `cv serve`, and every append at once.
     pub fn replay(&self) -> Result<ReplayOutcome> {
-        let (raw, mut warnings) = self.read_events()?;
+        let (raw, mut warnings, _) = self.read_events()?;
         let path = self.events_path();
         let mut reducer = TaskReducer::new();
         let mut events = Vec::with_capacity(raw.len());
@@ -145,10 +159,9 @@ impl TaskStore {
         self.append(event)
     }
 
-    /// Agent-facing append of several events as ONE unit: every event is validated in order
-    /// against the replay under one lock and the lines are written with one `write_all`, so
-    /// either all of them land or none does. `cv task done --note-file F` uses it so a lane
-    /// cannot lose its evidence by ordering (the note, then the terminal event).
+    /// Validate several events in order under one lock before writing any. Candidate refusal
+    /// leaves the log unchanged; I/O failure or a crash may leave a completed prefix of the batch.
+    /// `cv task done --note-file F` orders the evidence note before the terminal event.
     pub fn append_agent_events(&self, events: Vec<TaskEvent>) -> Result<Vec<TaskEvent>> {
         self.append_all(events)
     }
@@ -164,8 +177,8 @@ impl TaskStore {
         Ok(out.pop().expect("one event in, one out"))
     }
 
-    /// [`Self::append`] for a batch: validate every candidate in order, then write them all in one
-    /// `write_all`.
+    /// [`Self::append`] for a batch: admit and serialize every candidate before repairing EOF
+    /// framing or writing. The lock covers the entire replay, repair and append.
     fn append_all(&self, events: Vec<TaskEvent>) -> Result<Vec<TaskEvent>> {
         if events.is_empty() {
             return Ok(events);
@@ -175,7 +188,14 @@ impl TaskStore {
 
         // Replay under the lock: the candidate is validated against the exact state it will
         // land after.
-        let (raw, warnings) = self.read_events()?;
+        let (raw, warnings, tail) = self.read_events()?;
+        if let LogTail::Unrecognized { line_no } = tail {
+            bail!(
+                "refusing to append: task log {} line {line_no} is an unrecognized final record \
+                — only an incomplete tail can be recovered; repair the log or upgrade cv before writing",
+                self.events_path().display()
+            );
+        }
         if let Some(first) = warnings.first() {
             bail!(
                 "refusing to append: task log {} is degraded ({} warning(s); first: {first}) — \
@@ -207,6 +227,9 @@ impl TaskStore {
         // valid: readers treat them as implicit v1).
         let path = self.events_path();
         let mut line = String::new();
+        if matches!(tail, LogTail::NeedsNewline) {
+            line.push('\n');
+        }
         if !path.exists() {
             line.push_str(HEADER_LINE);
             line.push('\n');
@@ -220,6 +243,12 @@ impl TaskStore {
             .append(true)
             .open(&path)
             .with_context(|| format!("opening task log {}", self.events_path().display()))?;
+        // Candidate rejection and serialization failure cannot mutate an existing log. Once
+        // admitted, discard only the unparseable EOF suffix excluded from the validated history.
+        if let LogTail::Torn { offset } = tail {
+            f.set_len(offset)
+                .with_context(|| format!("repairing incomplete task log tail {}", path.display()))?;
+        }
         f.write_all(line.as_bytes())
             .with_context(|| format!("appending to task log {}", self.events_path().display()))?;
         f.flush()
@@ -229,32 +258,56 @@ impl TaskStore {
 
     /// Read raw events as `(1-based line number, event)` pairs. Interior unparseable lines are
     /// collected as warnings; a trailing partial line (no terminating newline, fails to parse) is
-    /// tolerated silently. A format header is skipped when current, and refused loudly when it
-    /// declares a version this cv does not read (a log written by a newer cv).
-    fn read_events(&self) -> Result<(NumberedEvents, Vec<String>)> {
+    /// tolerated silently. Syntax-incomplete tails carry a byte boundary for locked recovery;
+    /// other unrecognized final rows refuse append. Valid unterminated records need a newline.
+    /// A format header is skipped when current, and refused loudly for a newer format version.
+    fn read_events(&self) -> Result<(NumberedEvents, Vec<String>, LogTail)> {
         let path = self.events_path();
         let file = match File::open(&path) {
             Ok(f) => f,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), Vec::new())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok((Vec::new(), Vec::new(), LogTail::Terminated))
+            }
             Err(e) => return Err(e).with_context(|| format!("opening task log {}", path.display())),
         };
 
         let mut events: Vec<(usize, TaskEvent)> = Vec::new();
         let mut bad: Vec<(usize, String)> = Vec::new(); // (1-based line no, snippet)
         let mut reader = BufReader::new(file);
-        let mut raw = String::new();
+        let mut raw = Vec::new();
         let mut line_no = 0usize;
+        let mut offset = 0u64;
+        let mut tail = LogTail::Terminated;
         loop {
             raw.clear();
             let n = reader
-                .read_line(&mut raw)
+                .read_until(b'\n', &mut raw)
                 .with_context(|| format!("reading task log {}", path.display()))?;
             if n == 0 {
                 break;
             }
             line_no += 1;
-            let terminated = raw.ends_with('\n');
-            let line = raw.trim();
+            let start = offset;
+            offset += n as u64;
+            let terminated = raw.ends_with(b"\n");
+            tail = if terminated {
+                LogTail::Terminated
+            } else {
+                LogTail::NeedsNewline
+            };
+            let text = match std::str::from_utf8(&raw) {
+                Ok(text) => text,
+                Err(error) if !terminated && error.error_len().is_none() => {
+                    // A valid UTF-8 prefix ending inside its final scalar is a possible torn write.
+                    tail = LogTail::Torn { offset: start };
+                    break;
+                }
+                Err(error) => {
+                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+                        .with_context(|| format!("reading task log {}", path.display()));
+                }
+            };
+            let line = text.trim();
             if line.is_empty() {
                 continue;
             }
@@ -272,7 +325,13 @@ impl TaskStore {
                         continue; // current (or ancient) header: skip
                     }
                     if !terminated {
-                        // Trailing torn line: the only shape a crashed locked writer leaves behind.
+                        // A complete unknown event could come from a newer binary. Recover only
+                        // an unfinished JSON value, never erase a row just because its event schema
+                        // or syntax is unsupported. RawValue checks grammar without a Value tree.
+                        tail = match serde_json::from_str::<&serde_json::value::RawValue>(line) {
+                            Err(error) if error.is_eof() => LogTail::Torn { offset: start },
+                            _ => LogTail::Unrecognized { line_no },
+                        };
                         break;
                     }
                     let snippet: String = line.chars().take(80).collect();
@@ -292,7 +351,7 @@ impl TaskStore {
                 )
             })
             .collect();
-        Ok((events, warnings))
+        Ok((events, warnings, tail))
     }
 }
 
@@ -410,10 +469,10 @@ mod tests {
         assert_eq!(store.replay().unwrap().events.len(), before);
     }
 
-    /// A batch lands whole or not at all: a note then a `done` both land; a note then a refused
-    /// event writes neither (the note is not left behind as a half-applied unit).
+    /// Validation is all-or-nothing: a note then `done` are ordered; a note then a refused
+    /// candidate writes neither. This does not test or promise crash-atomic publication.
     #[test]
-    fn batch_append_is_all_or_nothing() {
+    fn batch_validation_writes_all_or_none() {
         let dir = tmp_tasks();
         let store = TaskStore::at(&dir);
         let task = open_task(&store);
@@ -554,6 +613,239 @@ mod tests {
     }
 
     #[test]
+    fn append_recovers_torn_tail_and_preserves_completed_batch_prefix() {
+        let store = TaskStore::at(tmp_tasks());
+        let task = open_task(&store);
+        let note = new_event(
+            Some(&task),
+            "agent:a",
+            TaskEventKind::Noted {
+                text: "completed evidence 🌙".into(),
+                session_ref: None,
+            },
+        );
+        store.append_agent_event(note.clone()).unwrap();
+        let path = store.events_path();
+        let prefix = fs::read(&path).unwrap();
+        let mut torn = prefix.clone();
+        torn.extend_from_slice(b"{\"event\":\"done\",\"id\":\"unfinished");
+        fs::write(&path, &torn).unwrap();
+        let replay = store.replay().unwrap();
+        assert!(replay.warnings.is_empty());
+        assert_eq!(replay.events.len(), 2);
+        assert_eq!(fs::read(&path).unwrap(), torn, "reads never repair the log");
+
+        let done = new_event(
+            Some(&task),
+            "agent:a",
+            TaskEventKind::Done {
+                observed: None,
+                check: None,
+            },
+        );
+        assert_eq!(store.append_agent_event(done.clone()).unwrap(), done);
+        let mut expected = prefix;
+        expected.extend_from_slice(serde_json::to_string(&done).unwrap().as_bytes());
+        expected.push(b'\n');
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            expected,
+            "only the excluded EOF suffix was removed"
+        );
+        let replay = TaskStore::at(store.dir()).replay().unwrap();
+        assert!(replay.warnings.is_empty());
+        assert_eq!(replay.quarantined, 0);
+        assert_eq!(&replay.events[1..], &[note, done]);
+        assert_eq!(replay.model.tasks[&task].state, TaskState::Done);
+        assert_eq!(replay.model.tasks[&task].notes.len(), 1);
+    }
+
+    #[test]
+    fn append_separates_valid_unterminated_event_and_header() {
+        for header in [false, true] {
+            let store = TaskStore::at(tmp_tasks());
+            let opened = new_event(None, "agent:a", open_kind());
+            let prefix = format!(
+                "{} \t{}\r ",
+                if header {
+                    format!("{HEADER_LINE}\n")
+                } else {
+                    String::new()
+                },
+                serde_json::to_string(&opened).unwrap()
+            );
+            fs::write(store.events_path(), &prefix).unwrap();
+            assert_eq!(store.replay().unwrap().events, vec![opened.clone()]);
+            let note = new_event(
+                Some(&opened.task_id),
+                "agent:a",
+                TaskEventKind::Noted {
+                    text: "still separate".into(),
+                    session_ref: None,
+                },
+            );
+            store.append_agent_event(note.clone()).unwrap();
+            assert_eq!(
+                fs::read_to_string(store.events_path()).unwrap(),
+                format!("{prefix}\n{}\n", serde_json::to_string(&note).unwrap())
+            );
+            let replay = store.replay().unwrap();
+            assert!(replay.warnings.is_empty());
+            assert_eq!(replay.quarantined, 0);
+            assert_eq!(replay.events, vec![opened, note]);
+        }
+        let store = TaskStore::at(tmp_tasks());
+        fs::write(store.events_path(), HEADER_LINE).unwrap();
+        let opened = new_event(None, "agent:a", open_kind());
+        store.append_agent_event(opened.clone()).unwrap();
+        assert_eq!(
+            fs::read_to_string(store.events_path()).unwrap(),
+            format!("{HEADER_LINE}\n{}\n", serde_json::to_string(&opened).unwrap())
+        );
+        assert_eq!(store.replay().unwrap().events, vec![opened]);
+    }
+
+    #[test]
+    fn refused_batch_does_not_repair_or_change_existing_log() {
+        // Valid missing newline, torn JSON, incomplete UTF-8, and interior garbage plus a torn
+        // suffix all remain byte-identical when a later candidate in the batch is refused.
+        for suffix in [
+            &b""[..],
+            &b"{\"id\":\"torn"[..],
+            &b"{\"text\":\"\xf0\x9f\x8c"[..],
+            &b"garbage\n{torn"[..],
+        ] {
+            let store = TaskStore::at(tmp_tasks());
+            let task = open_task(&store);
+            let path = store.events_path();
+            let mut before = fs::read(&path).unwrap();
+            if suffix.is_empty() {
+                assert_eq!(before.pop(), Some(b'\n'));
+            } else {
+                before.extend_from_slice(suffix);
+            }
+            fs::write(&path, &before).unwrap();
+            let note = new_event(
+                Some(&task),
+                "agent:a",
+                TaskEventKind::Noted {
+                    text: "must not land".into(),
+                    session_ref: None,
+                },
+            );
+            let refused = new_event(Some(&task), "agent:a", TaskEventKind::Released {});
+            assert!(store.append_agent_events(vec![note, refused]).is_err());
+            assert_eq!(fs::read(&path).unwrap(), before);
+            assert_eq!(store.replay().unwrap().events.len(), 1);
+        }
+    }
+
+    #[test]
+    fn incomplete_utf8_tail_is_recovered_but_invalid_utf8_is_fail_closed() {
+        let store = TaskStore::at(tmp_tasks());
+        let task = open_task(&store);
+        let path = store.events_path();
+        let prefix = fs::read(&path).unwrap();
+        let mut torn = prefix.clone();
+        torn.extend_from_slice(b"{\"text\":\"\xf0\x9f\x8c");
+        fs::write(&path, torn).unwrap();
+        assert!(store.replay().unwrap().warnings.is_empty());
+        let note = new_event(
+            Some(&task),
+            "agent:a",
+            TaskEventKind::Noted {
+                text: "recovered".into(),
+                session_ref: None,
+            },
+        );
+        store.append_agent_event(note.clone()).unwrap();
+        let mut expected = prefix.clone();
+        expected.extend_from_slice(serde_json::to_string(&note).unwrap().as_bytes());
+        expected.push(b'\n');
+        assert_eq!(fs::read(&path).unwrap(), expected);
+        assert_eq!(store.replay().unwrap().events.len(), 2);
+
+        for invalid in [&b"\xff"[..], &b"{\"text\":\"\xf0\x9f\x8c\n"[..], &b"\xe2\x28\xa1"[..]] {
+            let mut before = prefix.clone();
+            before.extend_from_slice(invalid);
+            fs::write(&path, &before).unwrap();
+            assert!(store.replay().is_err());
+            assert!(store.append_agent_event(note.clone()).is_err());
+            assert_eq!(fs::read(&path).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn unrecognized_complete_or_malformed_final_rows_refuse_append_without_erasure() {
+        let store = TaskStore::at(tmp_tasks());
+        let task = open_task(&store);
+        let path = store.events_path();
+        let prefix = fs::read(&path).unwrap();
+        for tail in [
+            r#"{"event":"a-future-event","id":"future","payload":{}}"#,
+            r#"{"id":42}"#,
+            "not json",
+            r#"{"id":"invalid",!}"#,
+        ] {
+            let mut before = prefix.clone();
+            before.extend_from_slice(tail.as_bytes());
+            fs::write(&path, &before).unwrap();
+            assert_eq!(store.replay().unwrap().events.len(), 1);
+            let error = store
+                .append_agent_event(new_event(
+                    Some(&task),
+                    "agent:a",
+                    TaskEventKind::Noted {
+                        text: "must not erase unknown history".into(),
+                        session_ref: None,
+                    },
+                ))
+                .unwrap_err();
+            assert!(error.to_string().contains("unrecognized final record"), "{error}");
+            assert_eq!(fs::read(&path).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn concurrent_claims_recover_torn_tail_with_one_winner() {
+        let store = TaskStore::at(tmp_tasks());
+        let task = open_task(&store);
+        let path = store.events_path();
+        let mut before = fs::read(&path).unwrap();
+        before.extend_from_slice(b"{\"id\":\"torn");
+        fs::write(&path, before).unwrap();
+        let wins = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|i| {
+                    let store = store.clone();
+                    let task = task.clone();
+                    scope.spawn(move || {
+                        store
+                            .append_agent_event(new_event(
+                                Some(&task),
+                                &format!("agent:{i}"),
+                                TaskEventKind::Claimed {
+                                    assignee: format!("agent:{i}"),
+                                },
+                            ))
+                            .is_ok()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .filter(|won| *won)
+                .count()
+        });
+        assert_eq!(wins, 1);
+        let replay = store.replay().unwrap();
+        assert!(replay.warnings.is_empty());
+        assert_eq!(replay.events.len(), 2);
+        assert_eq!(replay.model.tasks[&task].state, TaskState::Claimed);
+    }
+
+    #[test]
     fn interior_reducer_refused_event_is_quarantined_and_replay_continues() {
         let dir = tmp_tasks();
         let store = TaskStore::at(&dir);
@@ -621,6 +913,7 @@ mod tests {
         let mut f = OpenOptions::new().append(true).open(store.events_path()).unwrap();
         writeln!(f, "{}", serde_json::to_string(&refused).unwrap()).unwrap();
         drop(f);
+        let before = fs::read(store.events_path()).unwrap();
         let err = store
             .append_agent_event(new_event(
                 Some(&task),
@@ -631,6 +924,7 @@ mod tests {
             ))
             .unwrap_err();
         assert!(err.to_string().contains("refusing to append"), "{err}");
+        assert_eq!(fs::read(store.events_path()).unwrap(), before);
         assert_eq!(
             store.replay().unwrap().events.len(),
             1,
@@ -644,6 +938,7 @@ mod tests {
         let mut f = OpenOptions::new().append(true).open(store2.events_path()).unwrap();
         writeln!(f, "not json at all").unwrap();
         drop(f);
+        let before2 = fs::read(store2.events_path()).unwrap();
         let err = store2
             .append_agent_event(new_event(
                 Some(&task2),
@@ -654,6 +949,7 @@ mod tests {
             ))
             .unwrap_err();
         assert!(err.to_string().contains("refusing to append"), "{err}");
+        assert_eq!(fs::read(store2.events_path()).unwrap(), before2);
     }
 
     #[test]
