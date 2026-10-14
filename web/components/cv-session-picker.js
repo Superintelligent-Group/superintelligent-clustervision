@@ -10,7 +10,7 @@
 //   picker.value = id                 // current selection (id)
 //   picker.placeholder = "Pick a session…"
 //   emits "pick" CustomEvent { detail: { id, session } }
-import { esc, sessionLabel, shortPath, fmtTime, msgCount, harnessBadge, HARNESS_LABELS } from "./util.js";
+import { esc, sessionLabel, shortPath, fmtTime, msgCount, harnessBadge, HARNESS_LABELS, sessionKey, sessionByKey } from "./util.js";
 
 // Only one picker may be open at a time (two side-by-side pickers in Compare were overlapping).
 let OPEN_PICKER = null;
@@ -24,6 +24,7 @@ class CvSessionPicker extends HTMLElement {
     super();
     this._sessions = [];
     this._value = null;
+    this._selectionKey = null;
     this._placeholder = "Pick a session…";
     this._open = false;
     this._query = "";
@@ -44,11 +45,19 @@ class CvSessionPicker extends HTMLElement {
 
   set value(id) {
     this._value = id ?? null;
+    this._selectionKey = null;
     this._renderTrigger();
   }
   get value() {
     return this._value;
   }
+
+  set selection(session) {
+    this._value = session?.id ?? null;
+    this._selectionKey = session ? sessionKey(session) : null;
+    this._renderTrigger();
+  }
+  get selection() { return this._current(); }
 
   set placeholder(p) {
     this._placeholder = p || "Pick a session…";
@@ -77,7 +86,7 @@ class CvSessionPicker extends HTMLElement {
       this._search.addEventListener("keydown", (e) => this._onKey(e));
       this._list.addEventListener("click", (e) => {
         const row = e.target.closest(".sp-entry");
-        if (row) this._choose(row.dataset.id);
+        if (row) this._choose(this._filtered[+row.dataset.idx]);
       });
       this._list.addEventListener("mousemove", (e) => {
         const row = e.target.closest(".sp-entry");
@@ -100,7 +109,7 @@ class CvSessionPicker extends HTMLElement {
   }
 
   _current() {
-    return this._sessions.find((s) => (s.id || "") === this._value) || null;
+    return sessionByKey(this._sessions, this._selectionKey ?? this._value);
   }
 
   _renderTrigger() {
@@ -129,7 +138,7 @@ class CvSessionPicker extends HTMLElement {
     this._search.value = "";
     // Start the active row on the current selection, if any.
     this._renderList();
-    const cur = this._filtered.findIndex((s) => (s.id || "") === this._value);
+    const cur = this._filtered.findIndex((s) => sessionKey(s) === sessionKey(this._current()));
     this._active = cur >= 0 ? cur : 0;
     this._paintActive(true);
     document.addEventListener("pointerdown", this._onDocDown, true);
@@ -166,15 +175,17 @@ class CvSessionPicker extends HTMLElement {
     const more = overflow > 0
       ? `<div class="sp-more muted">…and ${overflow.toLocaleString()} more — keep typing to narrow</div>`
       : "";
+    const selectedKey = sessionKey(this._current());
     this._list.innerHTML = this._filtered
       .map((s, i) => {
         const h = (s.harness || "").toLowerCase();
         const when = fmtTime(s.updated_at || s.created_at);
         const n = msgCount(s);
         const proj = s.cwd ? esc(shortPath(s.cwd, 2)) : "";
-        const cur = (s.id || "") === this._value ? " sp-current" : "";
+        const selected = sessionKey(s) === selectedKey;
+        const cur = selected ? " sp-current" : "";
         return `
-          <div class="sp-entry${cur}" role="option" data-id="${esc(s.id || "")}" data-idx="${i}" aria-selected="${(s.id || "") === this._value}">
+          <div class="sp-entry${cur}" role="option" data-id="${esc(s.id || "")}" data-idx="${i}" aria-selected="${selected}">
             ${harnessBadge(h)}
             <span class="sp-entry-main">
               <span class="sp-entry-title">${esc(sessionLabel(s))}</span>
@@ -204,7 +215,7 @@ class CvSessionPicker extends HTMLElement {
     } else if (e.key === "Enter") {
       e.preventDefault();
       const s = this._filtered[this._active];
-      if (s) this._choose(s.id || "");
+      if (s) this._choose(s);
     } else if (e.key === "Escape") {
       e.preventDefault();
       this.close();
@@ -212,11 +223,13 @@ class CvSessionPicker extends HTMLElement {
     }
   }
 
-  _choose(id) {
+  _choose(session) {
+    if (!session) return;
+    const id = session.id || "";
     this._value = id;
+    this._selectionKey = sessionKey(session);
     this._renderTrigger();
     this.close();
-    const session = this._current();
     this.dispatchEvent(new CustomEvent("pick", { detail: { id, session }, bubbles: true }));
   }
 }

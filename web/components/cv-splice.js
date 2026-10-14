@@ -21,14 +21,14 @@ import "./cv-transcript.js";
 import "./cv-harness-badge.js";
 import "./cv-session-picker.js";
 import {
-  esc, sessionLabel, ROLE_LABELS, toOpenSession, toMarkdown,
+  sessionKey, sessionByKey, esc, sessionLabel, ROLE_LABELS, toOpenSession, toMarkdown,
   downloadFile, slug, randomId,
 } from "./util.js";
 import {
   generate, getKey, setKey, getModel, setModel, hasKey,
   MODEL_PRESETS, DEFAULT_MODEL,
 } from "../openrouter.js";
-import { hydrateSession, isStub } from "./hydrate.js";
+import { hydrateSession, needsFullSession } from "./hydrate.js";
 
 class CvSplice extends HTMLElement {
   constructor() {
@@ -39,6 +39,7 @@ class CvSplice extends HTMLElement {
     this._dragUid = null;
     this._hydratedSrc = new Map(); // id -> full session (with messages)
     this._pendingSrc = new Set();
+    this._sourceErrors = new Map();
 
     // Branch tree. Each branch is a named variant holding its own lane:
     //   { id, name, lane: [{ uid, message, from, harness }], composedId }
@@ -75,8 +76,12 @@ class CvSplice extends HTMLElement {
 
   set sessions(arr) {
     this._sessions = Array.isArray(arr) ? arr : [];
-    if (!this._sessions.find((s) => (s.id || "") === this._sourceId)) {
-      this._sourceId = this._sessions[0]?.id ?? null;
+    this._poolVersion = (this._poolVersion || 0) + 1;
+    this._hydratedSrc.clear();
+    this._pendingSrc.clear();
+    this._sourceErrors.clear();
+    if (!sessionByKey(this._sessions, this._sourceId)) {
+      this._sourceId = this._sessions[0] ? sessionKey(this._sessions[0]) : null;
     }
     this.render();
   }
@@ -88,23 +93,41 @@ class CvSplice extends HTMLElement {
 
   // Prefer the hydrated (full) source if we have it; otherwise the stub from the pool.
   _source() {
-    return this._hydratedSrc.get(this._sourceId) || this._sessions.find((s) => (s.id || "") === this._sourceId) || null;
+    return this._hydratedSrc.get(this._sourceId) || sessionByKey(this._sessions, this._sourceId) || null;
   }
 
   // Pull the full transcript for the current source, then refresh the source pane. No-op if ready.
   _ensureSourceHydrated() {
     const id = this._sourceId;
-    const s = this._sessions.find((x) => (x.id || "") === id);
-    if (!s || this._hydratedSrc.has(id) || this._pendingSrc.has(id) || !isStub(s)) return;
+    const s = sessionByKey(this._sessions, id);
+    if (!s || this._hydratedSrc.has(id) || this._pendingSrc.has(id) || this._sourceErrors.has(id) || !needsFullSession(s)) return;
+    const version = this._poolVersion;
     this._pendingSrc.add(id);
+    this._renderSourceStatus();
     hydrateSession(s)
       .then((full) => {
+        if (version !== this._poolVersion) return;
         this._hydratedSrc.set(id, full);
         this._pendingSrc.delete(id);
         const srcT = this.querySelector(".splice-transcript");
         if (srcT && this._sourceId === id) srcT.session = full;
+        this._renderSourceStatus();
       })
-      .catch(() => { this._pendingSrc.delete(id); });
+      .catch((error) => {
+        if (version !== this._poolVersion) return;
+        this._pendingSrc.delete(id);
+        this._sourceErrors.set(id, error?.message || "Read API unavailable");
+        this._renderSourceStatus();
+      });
+  }
+
+  _renderSourceStatus() {
+    const status = this.querySelector(".splice-source-status");
+    if (!status) return;
+    const error = this._sourceErrors.get(this._sourceId);
+    status.querySelector("span").textContent = error ? `Couldn't load complete source: ${error}`
+      : this._pendingSrc.has(this._sourceId) ? "Loading complete source transcript…" : "";
+    status.querySelector("button").hidden = !error;
   }
 
   _composed() {
@@ -137,6 +160,7 @@ class CvSplice extends HTMLElement {
             <strong>Source</strong>
             <cv-session-picker class="splice-source-pick" aria-label="Source session"></cv-session-picker>
           </div>
+          <div class="splice-source-status muted" role="status"><span></span><button type="button" class="mini-btn" data-source-retry hidden>Retry loading source</button></div>
           <div class="splice-source-body">
             <cv-transcript class="splice-transcript"></cv-transcript>
           </div>
@@ -178,13 +202,19 @@ class CvSplice extends HTMLElement {
     // Source picker (searchable, not a 2000-option <select>).
     const pick = this.querySelector(".splice-source-pick");
     pick.sessions = this._sessions;
-    pick.value = this._sourceId;
+    pick.selection = this._source();
     pick.placeholder = "Pick a source session…";
     pick.addEventListener("pick", (e) => {
-      this._sourceId = e.detail.id;
+      this._sourceId = sessionKey(e.detail.session);
       this.querySelector(".splice-transcript").session = this._source();
       this._ensureSourceHydrated();
+      this._renderSourceStatus();
     });
+    this.querySelector("[data-source-retry]").addEventListener("click", () => {
+      this._sourceErrors.delete(this._sourceId);
+      this._ensureSourceHydrated();
+    });
+    this._renderSourceStatus();
     // Pull the current source's full transcript if it's still a stub.
     this._ensureSourceHydrated();
     this.querySelector(".splice-title").addEventListener("input", (e) => {

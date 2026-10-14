@@ -21,12 +21,13 @@
 // file never touches styles.css. Motion is gated behind prefers-reduced-motion.
 import "./cv-harness-badge.js";
 import "./cv-transcript.js";
+import "./cv-session-picker.js";
 import {
-  esc, fmtTime, sessionLabel, shortPath, truncate, msgCount, sumTokens, harnessExtra,
+  sessionKey, sessionByKey, esc, fmtTime, sessionLabel, shortPath, truncate, msgCount, sumTokens, harnessExtra,
 } from "./util.js";
 import {
   getSubagentTree, getSubagent, getMessages, getWorkflowScript, getCompactions,
-  hydrateSession, isStub, PAGE,
+  hydrateSession, needsFullSession, PAGE,
 } from "./hydrate.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -255,10 +256,12 @@ class CvForest extends HTMLElement {
 
   set sessions(list) {
     this._sessions = Array.isArray(list) ? list : [];
+    this._loadedFor = null;
+    this._loadToken = (this._loadToken || 0) + 1;
     // Pick a default root: an explicit pin, else the most-recently-active session that has a forest
     // (we can't know cheaply, so just the newest). The picker lets the user change it.
-    if (!this._rootId && this._sessions.length) {
-      this._rootId = this._mostRecent()?.id || this._sessions[0].id;
+    if (!sessionByKey(this._sessions, this._rootId) && this._sessions.length) {
+      this._rootId = sessionKey(this._mostRecent() || this._sessions[0]);
     }
     this.render();
     this._ensureLoaded();
@@ -267,8 +270,8 @@ class CvForest extends HTMLElement {
 
   set session(s) {
     if (!s) return;
-    this._rootId = s.id;
-    if (!this._sessions.some((x) => x.id === s.id)) this._sessions = [s, ...this._sessions];
+    this._rootId = sessionKey(s);
+    if (!this._sessions.some((x) => sessionKey(x) === sessionKey(s))) this._sessions = [s, ...this._sessions];
     this.render();
     this._ensureLoaded();
   }
@@ -286,16 +289,18 @@ class CvForest extends HTMLElement {
   }
 
   _rootSession() {
-    return this._sessions.find((s) => s.id === this._rootId) || null;
+    return sessionByKey(this._sessions, this._rootId);
   }
 
   // ── load the forest + a transcript window + the compaction boundaries ──
   async _ensureLoaded() {
     const stub = this._rootSession();
     if (!stub) return;
-    if (this._loadedFor === stub.id && this._tree) return; // already have it
+    const key = sessionKey(stub);
+    if (this._loadedFor === key && (this._tree || this._loading)) return; // already have it
     this._loading = true;
-    this._loadedFor = stub.id;
+    this._loadedFor = key;
+    const token = this._loadToken = (this._loadToken || 0) + 1;
     this._tree = null;
     this._root = null;
     this._compactions = null;
@@ -314,7 +319,7 @@ class CvForest extends HTMLElement {
       getMessages(stub, 0, WINDOW).catch(() => null),
       getCompactions(stub).catch(() => null),
     ]);
-    if (this._loadedFor !== stub.id) return; // raced past — a newer root was chosen
+    if (this._loadToken !== token) return; // raced past — a newer root was chosen
 
     this._tree = tree || [];
     if (win && Array.isArray(win.messages)) {
@@ -322,14 +327,16 @@ class CvForest extends HTMLElement {
         _windowTotal: win.total_known ? win.total : null,
         _windowHasMore: !!win.has_more };
     } else {
-      // Fall back to a full hydrate (older server) — still bounded by the parse.
+      // Older servers require an owned complete-history fallback.
       try {
-        const full = isStub(stub) ? await hydrateSession(stub) : stub;
-        if (this._loadedFor === stub.id) this._root = full;
+        const full = needsFullSession(stub) ? await hydrateSession(stub) : stub;
+        if (this._loadToken !== token) return;
+        this._root = full;
       } catch { /* leave _root null; analyses degrade gracefully */ }
     }
     // The dedicated endpoint gives every boundary; if it's unavailable, derive from the window's
     // messages (only those in the loaded window will be found — flagged as sampled in the UI).
+    if (this._loadToken !== token) return;
     this._compactions = compactions || null;
     this._loading = false;
     this.render();
@@ -436,7 +443,7 @@ class CvForest extends HTMLElement {
         <span class="muted">The agent forest, workflow lanes, tool shape &amp; compaction seams of one session.</span>
         <label class="fr-pick">
           <span class="muted">root</span>
-          <select class="fr-root" aria-label="Root session"></select>
+          <cv-session-picker class="fr-root" aria-label="Root session"></cv-session-picker>
         </label>
       </div>
 
@@ -450,19 +457,14 @@ class CvForest extends HTMLElement {
       <div class="fr-body"></div>
     `;
 
-    // Root picker (built once per render; selection preserved via value).
+    // Shared searchable picker exposes every root while retaining exact harness identity.
     const sel = this.querySelector(".fr-root");
     if (sel) {
-      const opts = this._sessions
-        .slice()
-        .sort((a, b) => (new Date(b.updated_at || b.created_at || 0)) - (new Date(a.updated_at || a.created_at || 0)))
-        .slice(0, 200);
-      sel.innerHTML = opts.map((s) =>
-        `<option value="${esc(s.id)}"${s.id === this._rootId ? " selected" : ""}>${esc(truncate(sessionLabel(s), 70))}</option>`).join("");
-      sel.value = this._rootId || "";
-      sel.addEventListener("change", () => {
-        this._rootId = sel.value;
-        this._sub = this._sub; // keep sub-view
+      sel.sessions = this._sessions;
+      sel.selection = this._rootSession();
+      sel.placeholder = "Pick a root session…";
+      sel.addEventListener("pick", (event) => {
+        this._rootId = sessionKey(event.detail.session);
         this.render();
         this._ensureLoaded();
       });

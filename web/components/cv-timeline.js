@@ -4,7 +4,7 @@
 //
 // API: timeline.sessions = Session[]   (setter)
 //      emits "open" CustomEvent { detail: { session } } when a node is clicked.
-import { esc, sortTime, sessionLabel, shortPath, msgCount, harnessBadge, HARNESS_LABELS } from "./util.js";
+import { sessionKey, sessionByKey, esc, sortTime, sessionLabel, shortPath, msgCount, harnessBadge, HARNESS_LABELS } from "./util.js";
 
 const DAY_MS = 86400000;
 // Heatmap look-back cap: one mis-dated session (epoch 0, a bad clock) would otherwise
@@ -259,7 +259,7 @@ class CvTimeline extends HTMLElement {
     const time = t ? new Date(t).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }) : "";
     const count = msgCount(s);
     return `
-      <div class="tl-node" style="--c: var(--h-${esc(h)}, var(--fg-muted))" data-id="${esc(s.id || "")}" tabindex="0" role="button" title="Open ${esc(sessionLabel(s))}">
+      <div class="tl-node" style="--c: var(--h-${esc(h)}, var(--fg-muted))" data-id="${esc(s.id || "")}" data-key="${esc(sessionKey(s))}" tabindex="0" role="button" title="Open ${esc(sessionLabel(s))}">
         <span class="tl-dot"></span>
         <span class="tl-time muted">${esc(time)}</span>
         ${harnessBadge(h)}
@@ -273,8 +273,7 @@ class CvTimeline extends HTMLElement {
     const feed = this.querySelector(".tl-feed");
     if (feed) {
       const open = (el) => {
-        const id = el?.dataset.id;
-        const s = id && this._sessions.find((x) => (x.id || "") === id);
+        const s = el && sessionByKey(this._sessions, el.dataset.key);
         if (s) this.dispatchEvent(new CustomEvent("open", { detail: { session: s }, bubbles: true }));
       };
       feed.addEventListener("click", (e) => open(e.target.closest(".tl-node")));

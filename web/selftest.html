@@ -62,7 +62,7 @@
 <script type="module">
 import {
   normalizeSession, normalizeSessions, searchableText, sessionLabel, sumTokens,
-  toOpenSession, toMarkdown, harnessExtra, MESSAGE_KINDS, fmtCost,
+  toOpenSession, toMarkdown, harnessExtra, MESSAGE_KINDS, fmtCost, sessionKey,
 } from "./components/util.js";
 import { blockToText, messagesToChat } from "./openrouter.js";
 import { SAMPLE_SESSIONS } from "./sample.js";
@@ -1061,6 +1061,167 @@ await acheck("paged remote export delegates attachment download without fetching
     eq(s.messages.length, 0, "download leaves paged cache untouched");
     eq(s._paged.next, 200, "download leaves continuation untouched");
   } finally { HTMLAnchorElement.prototype.click = originalClick; globalThis.fetch = originalFetch; }
+});
+
+suite("Archive identity and search ownership");
+check("same ids in different harnesses remain distinct through click and keyboard navigation", () => {
+  const sessions = normalizeSessions([{ id: "shared", harness: "claude", title: "A" }, { id: "shared", harness: "codex", title: "B" }]);
+  const list = makeList(sessions);
+  const picked = [];
+  list.addEventListener("select", (event) => picked.push(event.detail.session.harness));
+  list.querySelectorAll(".session-row")[0].click();
+  list.moveSelection(1);
+  eq(picked.join(","), "claude,codex", "keyboard moves between colliding ids");
+  eq(list.selectedSession.harness, "codex", "selected identity includes harness");
+  eq(list.querySelectorAll(".session-row.selected").length, 1, "one selected row");
+  const picker = document.createElement("cv-session-picker");
+  document.body.appendChild(picker); picker.sessions = sessions;
+  picker.openPopover(); picker.querySelectorAll(".sp-entry")[1].click();
+  eq(picker.selection.harness, "codex", "picker click selects exact row");
+  picker.openPopover(); eq(picker._active, 1, "reopening highlights exact identity");
+  picker.remove();
+});
+await acheck("superseded search results cannot paint during debounce, after clear or disconnect", async () => {
+  const list = makeList(stubs(5));
+  const pending = deferred();
+  list.searchProvider = () => pending.promise; list.searchMode = "server";
+  list._query = "old"; list._refresh(); const old = list.whenSettled();
+  const input = list.querySelector(".search"); input.value = "new"; input.dispatchEvent(new Event("input"));
+  pending.resolve([{ id: "stale", harness: "codex", score: 1 }]); await old;
+  truthy(!list._rows.some((row) => row.id === "stale"), "debounced query owns result set immediately");
+  clearTimeout(list._searchTimer);
+  const clearing = deferred(); list.searchProvider = () => clearing.promise;
+  list._query = "pending"; list._refresh(); const waiting = list.whenSettled();
+  list._query = ""; list._refresh(); clearing.resolve([{ id: "stale-clear", harness: "codex" }]); await waiting;
+  eq(list._rows.length, 5, "clearing keeps browse results");
+  const removed = deferred(); list.searchProvider = () => removed.promise;
+  list._query = "removed"; list._refresh(); const unmounted = list.whenSettled();
+  list.remove(); removed.resolve(null); await unmounted;
+  eq(list.searchMode, "server", "retired response cannot force fallback");
+});
+await acheck("multiple harness filters ask each selected harness before merging global best matches", async () => {
+  const list = makeList(stubs(5)); const requested = [];
+  list.searchProvider = async (query, opts) => {
+    requested.push(opts.harness);
+    return Array.from({ length: 60 }, (_, index) => ({ id: `${opts.harness}-${index}`, harness: opts.harness, score: index + (opts.harness === "codex" ? 10 : 0) }));
+  };
+  list.searchMode = "server"; list._harnessFilter = new Set(["claude", "codex"]);
+  list._query = "query"; list._refresh(); await list.whenSettled();
+  eq(requested.sort().join(","), "claude,codex", "both constraints reach the provider");
+  eq(list._rows.length, 60, "merged limit remains bounded");
+  eq(list._rows[0].id, "codex-59", "global ranking across selected harnesses");
+  truthy(list._result.truncated, "limit is visible");
+});
+check("highlighting preserves source entities and local search notices appended pages", () => {
+  const list = makeList(normalizeSessions([{ id: "mutable", harness: "claude", messages: [] }]));
+  list._query = "lt amp";
+  const span = document.createElement("span"); span.innerHTML = list._markup("<literal> & amp");
+  eq(span.textContent, "<literal> & amp", "escaped entities never become highlight targets");
+  truthy(!span.querySelector("literal"), "literal source stays inert");
+  const session = list.sessions[0]; list._query = "later";
+  eq(list._filteredLocal().length, 0, "initial local cache");
+  session.messages.push({ role: "user", content: [{ type: "text", text: "later page" }] });
+  eq(list._filteredLocal().length, 1, "appended text invalidates local cache");
+});
+
+suite("Complete-history tools and refreshed sources");
+await acheck("compare refresh rejects old hydration and fetches complete paged history", async () => {
+  const original = globalThis.fetch;
+  const first = deferred(), second = deferred(); let requests = 0;
+  globalThis.fetch = async (url) => {
+    if (!new URL(url).pathname.endsWith("/same")) return { ok: true, json: async () => [] };
+    const value = requests++ === 0 ? first : second;
+    return { ok: true, json: () => value.promise };
+  };
+  const compare = document.createElement("cv-compare");
+  try {
+    const old = normalizeSession({ id: "same", harness: "claude", messages: [{ role: "user", content: [] }] }); old._paged = { next: 1 };
+    compare.sessions = [old]; compare._a = sessionKey(old); compare.render();
+    const fresh = { ...old, title: "refreshed" }; compare.sessions = [fresh];
+    eq(requests, 2, "pool refresh launches fresh complete read");
+    first.resolve({ id: "same", harness: "claude", title: "obsolete", messages: [] });
+    for (let n = 0; n < 20; n++) await Promise.resolve();
+    eq(compare._hydrated.size, 0, "old result cannot populate refreshed cache");
+    truthy(compare._pending.has(sessionKey(fresh)), "old result cannot clear fresh pending read");
+    second.resolve({ id: "same", harness: "claude", title: "complete", messages: [{ role: "user", content: [] }, { role: "assistant", content: [] }] });
+    for (let n = 0; n < 20; n++) await Promise.resolve();
+    eq(compare._byId(sessionKey(fresh)).messages.length, 2, "complete history used");
+    eq(old.messages.length, 1, "browsing cache stays paged");
+  } finally { globalThis.fetch = original; }
+});
+await acheck("splice source failures are visible and retry restores complete history", async () => {
+  const original = globalThis.fetch; let reads = 0;
+  globalThis.fetch = async (url) => {
+    if (!new URL(url).pathname.endsWith("/retry-source")) return { ok: true, json: async () => [] };
+    if (++reads === 1) throw new Error("offline fixture");
+    return { ok: true, json: async () => ({ id: "retry-source", harness: "claude", messages: [{ role: "user", content: [] }, { role: "assistant", content: [] }] }) };
+  };
+  const splice = document.createElement("cv-splice");
+  try {
+    const page = normalizeSession({ id: "retry-source", harness: "claude", messages: [{ role: "user", content: [] }] }); page._paged = { next: 1 };
+    splice.sessions = [page];
+    for (let n = 0; n < 20; n++) await Promise.resolve();
+    has(splice.querySelector(".splice-source-status").textContent, "offline fixture", "failure visible");
+    eq(splice.querySelector("[data-source-retry]").hidden, false, "retry offered");
+    splice.querySelector("[data-source-retry]").click();
+    for (let n = 0; n < 20; n++) await Promise.resolve();
+    eq(splice._source().messages.length, 2, "retry obtains complete source");
+    eq(splice.querySelector("[data-source-retry]").hidden, true, "error clears");
+  } finally { globalThis.fetch = original; }
+});
+check("compare distinguishes rich content and Structure can choose roots beyond the old cap", () => {
+  const compare = document.createElement("cv-compare");
+  const message = (block) => ({ role: "user", kind: "prompt", content: [block] });
+  truthy(compare._sig(message({ type: "image", data_ref: "a.png" })) !== compare._sig(message({ type: "image", data_ref: "b.png" })), "images differ");
+  truthy(compare._sig(message({ type: "unknown", payload: "a" })) !== compare._sig(message({ type: "unknown", payload: "b" })), "unknown payloads differ");
+  const forest = document.createElement("cv-forest"); forest._ensureLoaded = () => {};
+  forest.sessions = stubs(250); document.body.appendChild(forest);
+  const picker = forest.querySelector(".fr-root"); picker.openPopover();
+  const search = picker.querySelector(".sp-search"); search.value = "Session number 249"; search.dispatchEvent(new Event("input"));
+  eq(picker.querySelectorAll(".sp-entry").length, 1, "all roots searchable");
+  picker.querySelector(".sp-entry").click(); eq(forest._rootSession().id, "s-0249", "root outside old cap selectable");
+  forest.remove();
+});
+
+await acheck("timeline, projects and lineage navigation preserve the harness of colliding ids", async () => {
+  const sessions = normalizeSessions([{ id: "shared", harness: "claude", title: "Claude", cwd: "/tmp/project", created_at: "2026-01-01T00:00:00Z" }, { id: "shared", harness: "codex", title: "Codex", cwd: "/tmp/project", created_at: "2026-01-01T00:00:00Z" }]);
+  for (const [tag, selector] of [["cv-timeline", ".tl-node"], ["cv-projects", ".proj-row"]]) {
+    const view = document.createElement(tag); document.body.appendChild(view); view.sessions = sessions;
+    let opened;
+    view.addEventListener("open", (event) => { opened = event.detail.session; });
+    if (tag === "cv-projects") view.querySelector(".proj-head").click();
+    const row = [...view.querySelectorAll(selector)].find((node) => node.dataset.key === sessionKey(sessions[1]));
+    truthy(row, `${tag} renders distinct identity`); row.click();
+    eq(opened.harness, "codex", `${tag} opens clicked harness`); view.remove();
+  }
+  const app = document.createElement("cv-app"); app._sessions = sessions;
+  let opened; app._openInSessions = (session) => { opened = session; };
+  await app._openById({ id: "shared", harness: "codex" });
+  eq(opened.harness, "codex", "lineage prefers supplied harness");
+});
+await acheck("Structure rejects a stale fallback and shares pending root reads", async () => {
+  const original = globalThis.fetch; const full = deferred(); let oldWindows = 0;
+  globalThis.fetch = async (url) => {
+    const path = new URL(url).pathname;
+    if (path.endsWith("/old-root/messages")) { oldWindows++; return { ok: true, json: async () => null }; }
+    if (path.endsWith("/old-root")) return { ok: true, json: () => full.promise };
+    if (path.endsWith("/new-root/messages")) return { ok: true, json: async () => ({ messages: [{ role: "user", content: [{ type: "text", text: "new-root" }] }], has_more: false }) };
+    return { ok: true, json: async () => [] };
+  };
+  const forest = document.createElement("cv-forest");
+  try {
+    const old = normalizeSession({ id: "old-root", harness: "claude" }); old._stub = true;
+    forest.sessions = [old]; forest._ensureLoaded();
+    eq(oldWindows, 1, "pending root read shared");
+    for (let n = 0; n < 20; n++) await Promise.resolve();
+    forest.session = normalizeSession({ id: "new-root", harness: "codex" });
+    for (let n = 0; n < 20; n++) await Promise.resolve();
+    eq(forest._root.id, "new-root", "new root loads while old full fallback waits");
+    full.resolve({ id: "old-root", harness: "claude", messages: [] });
+    for (let n = 0; n < 20; n++) await Promise.resolve();
+    eq(forest._root.id, "new-root", "old fallback cannot replace new root");
+    eq(forest._loading, false, "new root settled");
+  } finally { globalThis.fetch = original; }
 });
 
 // ===========================================================================

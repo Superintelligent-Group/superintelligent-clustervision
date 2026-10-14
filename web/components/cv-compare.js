@@ -5,11 +5,11 @@
 // API: compare.sessions = Session[]   (setter)
 //
 // Alignment: we walk both message lists in parallel. While the messages match
-// (same role + same flattened text), they're marked "same". From the first
+// (same role, kind, origin and content blocks), they're marked "same". From the first
 // mismatch onward, everything is "diverged".
 import "./cv-session-picker.js";
-import { esc, sessionLabel, fmtTime, harnessBadge, ROLE_LABELS } from "./util.js";
-import { hydrateSession, isStub } from "./hydrate.js";
+import { esc, sessionLabel, fmtTime, harnessBadge, ROLE_LABELS, sessionKey, sessionByKey } from "./util.js";
+import { hydrateSession, needsFullSession } from "./hydrate.js";
 
 function injectStyles() {
   if (document.getElementById("cv-compare-styles")) return;
@@ -87,6 +87,7 @@ class CvCompare extends HTMLElement {
 
   set sessions(arr) {
     this._sessions = Array.isArray(arr) ? arr : [];
+    this._poolVersion = (this._poolVersion || 0) + 1;
     // Refreshed metadata pool: drop stale full copies / in-flight / error state
     // so updated stubs aren't masked by old hydrated sessions.
     this._hydrated.clear();
@@ -94,8 +95,8 @@ class CvCompare extends HTMLElement {
     this._errors.clear();
     // Keep any still-valid prior picks, but DON'T auto-select a pair — auto-aligning two arbitrary
     // (often huge) sessions on every visit was both chuggy and a useless diff. The user picks.
-    if (!this._sessions.find((s) => (s.id || "") === this._a)) this._a = null;
-    if (!this._sessions.find((s) => (s.id || "") === this._b)) this._b = null;
+    if (!sessionByKey(this._sessions, this._a)) this._a = null;
+    if (!sessionByKey(this._sessions, this._b)) this._b = null;
     this.render();
   }
   get sessions() { return this._sessions; }
@@ -103,31 +104,27 @@ class CvCompare extends HTMLElement {
   connectedCallback() { this.render(); }
 
   // Prefer the hydrated (full) copy if we've fetched it; otherwise the stub from the pool.
-  _byId(id) { return this._hydrated.get(id) || this._sessions.find((s) => (s.id || "") === id) || null; }
+  _byId(id) { return this._hydrated.get(id) || sessionByKey(this._sessions, id) || null; }
 
   // Pull the full transcript for a picked stub, then re-render. No-op if already full/pending.
   _maybeHydrate(id) {
-    const s = this._sessions.find((x) => (x.id || "") === id);
-    if (!s || this._hydrated.has(id) || this._pending.has(id) || this._errors.has(id) || !isStub(s)) return;
+    const s = sessionByKey(this._sessions, id);
+    if (!s || this._hydrated.has(id) || this._pending.has(id) || this._errors.has(id) || !needsFullSession(s)) return;
+    const version = this._poolVersion;
     this._pending.add(id);
     hydrateSession(s)
-      .then((full) => { this._hydrated.set(id, full); this._pending.delete(id); this.render(); })
-      .catch(() => { this._pending.delete(id); this._errors.add(id); this.render(); });
+      .then((full) => { if (version !== this._poolVersion) return; this._hydrated.set(id, full); this._pending.delete(id); this.render(); })
+      .catch(() => { if (version !== this._poolVersion) return; this._pending.delete(id); this._errors.add(id); this.render(); });
   }
 
-  // Flatten a message to a comparable signature. Memoized per-message (was a per-render hot spot —
-  // it JSON.stringifies tool inputs over both full sessions' shared prefix).
+  // Memoize rich message signatures so rerendering the same comparison reuses them.
   _sig(m) {
     if (!this._sigCache) this._sigCache = new WeakMap();
     const hit = this._sigCache.get(m);
     if (hit !== undefined) return hit;
-    const text = (m.content || []).map((b) => {
-      if (b.type === "text" || b.type === "thinking") return b.text || "";
-      if (b.type === "tool_use") return `⚙${b.name}:${JSON.stringify(b.input)}`;
-      if (b.type === "tool_result") return `↳${b.content || ""}`;
-      return b.type;
-    }).join("\n");
-    const sig = `${m.role} ${text}`;
+    // Compare rich payloads as well as prose: two different images/files or unknown blocks
+    // must not be reported as an identical stream merely because their types match.
+    const sig = JSON.stringify([m.role, m.kind, m.origin, m.content || []]);
     this._sigCache.set(m, sig);
     return sig;
   }
@@ -157,7 +154,7 @@ class CvCompare extends HTMLElement {
       return;
     }
     const a = this._byId(this._a), b = this._byId(this._b);
-    const aReady = a && !isStub(a), bReady = b && !isStub(b);
+    const aReady = a && !needsFullSession(a), bReady = b && !needsFullSession(b);
     const aErr = this._a && this._errors.has(this._a);
     const bErr = this._b && this._errors.has(this._b);
     const anyErr = aErr || bErr;
@@ -209,10 +206,10 @@ class CvCompare extends HTMLElement {
     this.querySelectorAll("cv-session-picker").forEach((p) => {
       const side = p.dataset.side;
       p.sessions = this._sessions;
-      p.value = side === "a" ? this._a : this._b;
+      p.selection = side === "a" ? a : b;
       p.placeholder = side === "a" ? "Pick session A…" : "Pick session B…";
       p.addEventListener("pick", (e) => {
-        if (side === "a") this._a = e.detail.id; else this._b = e.detail.id;
+        if (side === "a") this._a = sessionKey(e.detail.session); else this._b = sessionKey(e.detail.session);
         this.render();
       });
     });
@@ -220,6 +217,13 @@ class CvCompare extends HTMLElement {
       [this._a, this._b] = [this._b, this._a];
       this._justSwapped = true;
       this.render();
+    });
+
+    this.querySelectorAll("[data-retry-session]").forEach((button) => {
+      button.addEventListener("click", () => {
+        this._errors.delete(button.dataset.retrySession);
+        this.render();
+      });
     });
 
     // Fill the alignment grid in rAF-scheduled chunks so a 6000-row comparison doesn't block.
@@ -272,7 +276,8 @@ class CvCompare extends HTMLElement {
   _errHtml(side, id) {
     return `<div class="cmp-error">
       <b>⚠ Side ${esc(side)}: couldn't load transcript</b> (cv serve unreachable?)
-      <div><code>${esc(id || "")}</code></div>
+      <div><code>${esc(this._byId(id)?.id || id || "")}</code></div>
+      <button type="button" class="mini-btn" data-retry-session="${esc(id)}">Retry loading transcript</button>
     </div>`;
   }
 

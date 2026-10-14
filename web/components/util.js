@@ -10,6 +10,17 @@ export function esc(s) {
     .replace(/'/g, "&#39;");
 }
 
+/** Session ids are unique within a harness, not across the merged archive. */
+export function sessionKey(session) {
+  return JSON.stringify([String(session?.harness || "").toLowerCase(), String(session?.id || "")]);
+}
+
+/** Identity lookup; a plain id remains supported for older component callers. */
+export function sessionByKey(sessions, key) {
+  return sessions.find((s) => sessionKey(s) === key)
+    || sessions.find((s) => (s.id || "") === key) || null;
+}
+
 /** Pretty-print a JSON value, falling back to String() on cycles. */
 export function pretty(value) {
   try {

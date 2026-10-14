@@ -19,7 +19,7 @@
 //     never had. The placeholder names whichever is true.
 import {
   esc, fmtTime, sortTime, searchableText, sessionLabel, shortPath, msgCount, harnessBadge,
-  truncate, normalizeSession, HARNESS_LABELS,
+  truncate, normalizeSession, HARNESS_LABELS, sessionKey, sessionByKey,
 } from "./util.js";
 
 /** Rows rendered beyond the visible band, so a fast scroll finds content already painted. */
@@ -33,14 +33,16 @@ class CvSessionList extends HTMLElement {
     super();
     this._sessions = [];
     this._rows = [];
-    this._rowsById = new Map();
+    this._rowsByKey = new Map();
+    this._indicesByKey = new Map();
     this._query = "";
     this._harnessFilter = new Set(); // empty = all
     this._semantic = false;
     this._sort = "recent";
     this._sortTouched = false;   // until the user picks one, the sort follows the mode
     this._selectedId = null;
-    this._focusedId = null;
+    this._selectedKey = null;
+    this._focusedKey = null;
     this._searchCache = new WeakMap();
     this._searchMode = "local";
     this._searchProvider = null;
@@ -51,6 +53,7 @@ class CvSessionList extends HTMLElement {
   set sessions(arr) {
     this._sessions = Array.isArray(arr) ? arr : [];
     this._searchCache = new WeakMap();
+    this._poolByKey = new Map(this._sessions.map((session) => [sessionKey(session), session]));
     // Drop any harness filters that no longer apply.
     const present = new Set(this._sessions.map((s) => (s.harness || "").toLowerCase()));
     for (const h of [...this._harnessFilter]) if (!present.has(h)) this._harnessFilter.delete(h);
@@ -74,9 +77,18 @@ class CvSessionList extends HTMLElement {
 
   set selectedId(id) {
     this._selectedId = id;
+    const current = this._rowsByKey.get(this._selectedKey);
+    const session = current?.id === id ? current : sessionByKey(this._sessions, id);
+    this._selectedKey = session ? sessionKey(session) : null;
     this._layout({ force: true });
   }
   get selectedId() { return this._selectedId; }
+  set selectedSession(session) {
+    this._selectedId = session?.id ?? null;
+    this._selectedKey = session ? sessionKey(session) : null;
+    this._layout({ force: true });
+  }
+  get selectedSession() { return this._rowsByKey.get(this._selectedKey) || this._poolByKey?.get(this._selectedKey) || null; }
 
   connectedCallback() {
     this._clip = undefined;
@@ -93,12 +105,12 @@ class CvSessionList extends HTMLElement {
   // ---- filtering -----------------------------------------------------------
 
   _search(session) {
-    let v = this._searchCache.get(session);
-    if (v === undefined) {
-      v = searchableText(session);
-      this._searchCache.set(session, v);
-    }
-    return v;
+    const cached = this._searchCache.get(session);
+    const stamp = [session.messages, session.messages?.length || 0, session.title, session.cwd, session.model];
+    if (cached && stamp.every((value, index) => value === cached.stamp[index])) return cached.text;
+    const text = searchableText(session);
+    this._searchCache.set(session, { stamp, text });
+    return text;
   }
 
   _cmp() {
@@ -120,7 +132,7 @@ class CvSessionList extends HTMLElement {
       if (q && !this._search(s).includes(q)) return false;
       return true;
     });
-    return rows.slice().sort(this._cmp());
+    return rows.sort(this._cmp());
   }
 
   /** Recompute the result set. In server mode with a query this goes to the daemon; everything
@@ -165,7 +177,7 @@ class CvSessionList extends HTMLElement {
     const kind = this._result.kind;
     if (kind === "search" || kind === "semantic") {
       this._rows = this._rows.slice().sort(this._cmp());
-      this._rowsById = new Map(this._rows.map((r) => [r.id || "", r]));
+      this._indexRows(this._rows);
       this._layout({ force: true });
       return;
     }
@@ -178,24 +190,27 @@ class CvSessionList extends HTMLElement {
     this._abort = ctrl;
     const seq = (this._seq = (this._seq || 0) + 1);
     this._setCount(`searching ${this._sessions.length.toLocaleString()} sessions for “${esc(q)}”…`, true);
-    const only = this._harnessFilter.size === 1 ? [...this._harnessFilter][0] : null;
+    const harnesses = this._harnessFilter.size ? [...this._harnessFilter] : [null];
     let raw;
     try {
-      raw = await this._searchProvider(q, {
-        harness: only, semantic: this._semantic, limit: SEARCH_LIMIT, signal: ctrl.signal,
-      });
+      const results = await Promise.all(harnesses.map((harness) => this._searchProvider(q, {
+        harness, semantic: this._semantic, limit: SEARCH_LIMIT, signal: ctrl.signal,
+      })));
+      raw = results.some((rows) => rows == null) ? null : results.flat();
     } catch (e) {
       if (e?.name === "AbortError") return;          // superseded by a later keystroke
       raw = null;
     }
-    if (seq !== this._seq) return;
+    if (seq !== this._seq || ctrl.signal.aborted) return;
     if (raw == null) {
       // The endpoint went away (or never existed). Say so once, then behave like the demo.
       this._searchMode = "local";
       this.render();
       return;
     }
-    const rows = raw.map((r) => this._asRow(r)).filter((r) => {
+    const ranked = [...new Map(raw.map((row) => [sessionKey(row), row])).values()]
+      .sort((a, b) => (b.score ?? 0) - (a.score ?? 0)).slice(0, SEARCH_LIMIT);
+    const rows = ranked.map((r) => this._asRow(r)).filter((r) => {
       if (!this._harnessFilter.size) return true;
       return this._harnessFilter.has((r.harness || "").toLowerCase());
     });
@@ -210,7 +225,7 @@ class CvSessionList extends HTMLElement {
   /** A `/api/search` row → a pool-shaped stub that `cv-app` can hydrate on click, keeping the
    *  three search-only facts (`score`, `snippet`, sub-agent provenance) the normalizer drops. */
   _asRow(r) {
-    const known = this._sessions.find((s) => s.id === r.id && s.harness === r.harness);
+    const known = this._poolByKey?.get(sessionKey(r));
     const base = known || normalizeSession(r);
     const row = known ? { ...known } : base;
     if (!known) row._stub = true;
@@ -224,10 +239,21 @@ class CvSessionList extends HTMLElement {
     return row;
   }
 
+  _indexRows(rows) {
+    this._rowsByKey = new Map();
+    this._indicesByKey = new Map();
+    rows.forEach((row, index) => {
+      const key = sessionKey(row);
+      this._rowsByKey.set(key, row);
+      this._indicesByKey.set(key, index);
+    });
+  }
+
   _applyResults(rows, result) {
-    const changed = result.kind !== this._result.kind || rows.length !== this._rows.length;
+    const changed = result.kind !== this._result.kind || rows.length !== this._rows.length
+      || rows.some((row, index) => sessionKey(row) !== sessionKey(this._rows[index]));
     this._rows = rows;
-    this._rowsById = new Map(rows.map((r) => [r.id || "", r]));
+    this._indexRows(rows);
     this._result = result;
     this._hasSnippets = rows.some((r) => r.snippet);
     this._ul?.classList.toggle("has-snippets", !!this._hasSnippets);
@@ -298,6 +324,7 @@ class CvSessionList extends HTMLElement {
     // happen once per character.
     search.addEventListener("input", () => {
       this._query = search.value;
+      this._abort?.abort(); // invalidate previous results immediately, before debounce
       clearTimeout(this._searchTimer);
       // A local keystroke costs a scan; a server keystroke costs a request. Wait longer before
       // spending the second one.
@@ -355,7 +382,8 @@ class CvSessionList extends HTMLElement {
     if (this._result.kind === "all") {
       html = `<b>${total.toLocaleString()}</b> session${total === 1 ? "" : "s"}`;
     } else if (this._result.kind === "local-filter") {
-      html = `<b>${n.toLocaleString()}</b> of ${total.toLocaleString()} — titles &amp; paths only`;
+      const content = this._sessions.some((session) => session.messages?.length) ? "loaded messages, titles &amp; paths" : "titles &amp; paths only";
+      html = `<b>${n.toLocaleString()}</b> of ${total.toLocaleString()} — ${content}`;
     } else {
       const how = this._result.kind === "semantic" ? "by meaning" : "in message text";
       html = this._result.truncated
@@ -462,8 +490,8 @@ class CvSessionList extends HTMLElement {
     // Keep the selected row realized wherever it is, so focus and the j/k cursor always have a
     // node to land on even when the user has scrolled a thousand rows away from it.
     let extra = null;
-    if (this._selectedId != null) {
-      const i = rows.findIndex((r) => (r.id || "") === this._selectedId);
+    if (this._selectedKey != null) {
+      const i = this._indicesByKey.get(this._selectedKey) ?? -1;
       if (i >= 0 && (i < start || i >= end)) extra = i;
     }
 
@@ -477,14 +505,15 @@ class CvSessionList extends HTMLElement {
 
     // Replacing the window's innerHTML drops whatever had focus onto <body>. Put it back, so
     // Enter still opens the row a user is sitting on when a scroll re-renders underneath them.
-    if (this._focusedId != null && document.activeElement === document.body) {
-      this._liFor(this._focusedId)?.focus({ preventScroll: true });
+    if (this._focusedKey != null && document.activeElement === document.body) {
+      this._liFor(this._focusedKey)?.focus({ preventScroll: true });
     }
   }
 
   _rowHtml(s, i, stride) {
     const id = s.id || "";
-    const sel = id && id === this._selectedId ? " selected" : "";
+    const key = sessionKey(s);
+    const sel = key === this._selectedKey ? " selected" : "";
     const when = fmtTime(s.updated_at || s.created_at);
     const count = msgCount(s);
     const cwd = s.cwd ? `<span class="row-cwd" title="${esc(s.cwd)}">${esc(shortPath(s.cwd))}</span>` : "";
@@ -493,7 +522,7 @@ class CvSessionList extends HTMLElement {
       ? `<div class="row-snippet">${this._markup(s.snippet)}</div>` : "";
     return `
       <li class="session-row${sel}" role="option" aria-selected="${!!sel}" aria-setsize="${this._rows.length}"
-          aria-posinset="${i + 1}" data-id="${esc(id)}" tabindex="0" style="top:${i * stride}px">
+          aria-posinset="${i + 1}" data-id="${esc(id)}" data-key="${esc(key)}" tabindex="0" style="top:${i * stride}px">
         <div class="row-top">
           ${harnessBadge((s.harness || "").toLowerCase())}
           <span class="row-title">${esc(sessionLabel(s))}</span>
@@ -510,15 +539,15 @@ class CvSessionList extends HTMLElement {
 
   /** Escape the daemon's snippet, then mark the query's own words inside it. */
   _markup(text) {
-    const safe = esc(String(text));
+    const source = String(text);
     const terms = this._query.trim().split(/\s+/).filter((t) => t.length > 1).slice(0, 6);
-    if (!terms.length) return safe;
+    if (!terms.length) return esc(source);
     const re = new RegExp(`(${terms.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`, "gi");
-    return safe.replace(re, "<mark>$1</mark>");
+    return source.split(re).map((part, index) => index % 2 ? `<mark>${esc(part)}</mark>` : esc(part)).join("");
   }
 
-  _liFor(id) {
-    return id == null ? null : this._ul?.querySelector(`.session-row[data-id="${CSS.escape(id)}"]`);
+  _liFor(key) {
+    return key == null ? null : this._ul?.querySelector(`.session-row[data-key="${CSS.escape(key)}"]`);
   }
 
   _wireRows() {
@@ -527,26 +556,27 @@ class CvSessionList extends HTMLElement {
     const ul = this._ul;
     if (!ul || ul._delegated) return;
     ul._delegated = true;
-    const rowId = (e) => e.target.closest(".session-row")?.dataset.id;
+    const rowId = (e) => e.target.closest(".session-row")?.dataset.key;
     ul.addEventListener("click", (e) => {
       const id = rowId(e);
-      if (id) this._selectById(id);
+      if (id) this._selectByKey(id);
     });
     ul.addEventListener("focusin", (e) => {
-      const id = e.target.closest(".session-row")?.dataset.id;
-      if (id) this._focusedId = id;
+      const id = e.target.closest(".session-row")?.dataset.key;
+      if (id) this._focusedKey = id;
     });
     ul.addEventListener("keydown", (e) => {
       if (e.key !== "Enter" && e.key !== " ") return;
       const id = rowId(e);
-      if (id) { e.preventDefault(); this._selectById(id); }
+      if (id) { e.preventDefault(); this._selectByKey(id); }
     });
   }
 
-  _selectById(id) {
-    const session = this._rowsById.get(id) || this._sessions.find((s) => (s.id || "") === id);
+  _selectByKey(key) {
+    const session = this._rowsByKey.get(key) || this._poolByKey?.get(key);
     if (!session) return;
-    this._selectedId = id;
+    this._selectedId = session.id;
+    this._selectedKey = key;
     this._updateSelection();
     this.dispatchEvent(new CustomEvent("select", { detail: { session }, bubbles: true }));
   }
@@ -559,18 +589,19 @@ class CvSessionList extends HTMLElement {
   moveSelection(dir) {
     const rows = this._rows;
     if (!rows.length) return false;
-    let idx = this._selectedId == null ? -1 : rows.findIndex((r) => (r.id || "") === this._selectedId);
+    let idx = this._indicesByKey.get(this._selectedKey) ?? -1;
     if (idx < 0) idx = dir > 0 ? -1 : rows.length; // wrap to an edge on first press
     const next = Math.min(rows.length - 1, Math.max(0, idx + dir));
     if (next === idx) return false;
 
     const row = rows[next];
     this._selectedId = row.id || "";
-    this._focusedId = this._selectedId;
+    this._selectedKey = sessionKey(row);
+    this._focusedKey = this._selectedKey;
     this._layout({ force: true });                 // realize the target wherever it is
-    this._liFor(this._selectedId)?.scrollIntoView({ block: "nearest" });
+    this._liFor(this._selectedKey)?.scrollIntoView({ block: "nearest" });
     this._layout();                                // the scroll moved the window
-    this._liFor(this._selectedId)?.focus({ preventScroll: true });
+    this._liFor(this._selectedKey)?.focus({ preventScroll: true });
     this._updateSelection();
     this.dispatchEvent(new CustomEvent("select", { detail: { session: row }, bubbles: true }));
     return true;
@@ -579,12 +610,12 @@ class CvSessionList extends HTMLElement {
   _updateSelection() {
     // Touch only the realized rows — there are at most a few dozen.
     for (const li of this._ul?.querySelectorAll(".session-row.selected") || []) {
-      if (li.dataset.id !== this._selectedId) {
+      if (li.dataset.key !== this._selectedKey) {
         li.classList.remove("selected");
         li.setAttribute("aria-selected", "false");
       }
     }
-    const next = this._liFor(this._selectedId);
+    const next = this._liFor(this._selectedKey);
     if (next) {
       next.classList.add("selected");
       next.setAttribute("aria-selected", "true");

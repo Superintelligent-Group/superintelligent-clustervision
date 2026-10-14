@@ -5,7 +5,7 @@
 //
 // API: projects.sessions = Session[]   (setter)
 //      emits "open" CustomEvent { detail: { session } } when a session is clicked.
-import { esc, sessionLabel, sortTime, shortPath, msgCount, harnessBadge, HARNESS_LABELS } from "./util.js";
+import { esc, sessionLabel, sortTime, shortPath, msgCount, harnessBadge, HARNESS_LABELS, sessionKey, sessionByKey } from "./util.js";
 import { getTouched } from "./hydrate.js";
 
 const DAY_MS = 86400000;
@@ -201,7 +201,7 @@ class CvProjects extends HTMLElement {
     const when = t ? new Date(t).toLocaleDateString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
     const n = msgCount(s);
     return `
-      <div class="proj-row" data-id="${esc(s.id || "")}" tabindex="0" role="button" title="Open ${esc(sessionLabel(s))}">
+      <div class="proj-row" data-id="${esc(s.id || "")}" data-key="${esc(sessionKey(s))}" tabindex="0" role="button" title="Open ${esc(sessionLabel(s))}">
         ${harnessBadge(h)}
         <span class="proj-row-title">${esc(sessionLabel(s))}</span>
         <span class="proj-row-meta muted">${esc(when)} · ${n} msg${n === 1 ? "" : "s"}</span>
@@ -214,7 +214,7 @@ class CvProjects extends HTMLElement {
     list.addEventListener("click", (e) => {
       const row = e.target.closest(".proj-row");
       if (row) {
-        const s = this._sessions.find((x) => (x.id || "") === row.dataset.id);
+        const s = sessionByKey(this._sessions, row.dataset.key);
         if (s) this.dispatchEvent(new CustomEvent("open", { detail: { session: s }, bubbles: true }));
         return;
       }
@@ -226,7 +226,7 @@ class CvProjects extends HTMLElement {
       const row = e.target.closest(".proj-row");
       if (row) {
         e.preventDefault();
-        const s = this._sessions.find((x) => (x.id || "") === row.dataset.id);
+        const s = sessionByKey(this._sessions, row.dataset.key);
         if (s) this.dispatchEvent(new CustomEvent("open", { detail: { session: s }, bubbles: true }));
       }
     });

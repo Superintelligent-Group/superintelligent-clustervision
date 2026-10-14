@@ -49,11 +49,15 @@ export async function apiGet(path, params = {}) {
   return resp.json();
 }
 
-/** Resolve a stub to a full session (with messages). Full sessions are returned unchanged. */
+/** Whether a view requiring complete history must fetch, including a browsed page prefix. */
+export function needsFullSession(session) { return isStub(session) || !!session?._paged; }
+
+/** Resolve a stub/page prefix to a complete session. Complete local sessions pass through. */
 export async function hydrateSession(stub) {
-  if (!isStub(stub)) return stub;
+  if (!needsFullSession(stub)) return stub;
   const full = normalizeSession(await apiGet(sessionPath(stub.harness, stub.id)));
   full._stub = false;
+  full._remote = true;
   return full;
 }
 

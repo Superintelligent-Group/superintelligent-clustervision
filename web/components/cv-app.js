@@ -281,7 +281,7 @@ class CvApp extends HTMLElement {
       this._setStatus("", "ok");
     }
     this._transcript.session = full;
-    this._list.selectedId = full.id;
+    this._list.selectedSession = full;
   }
 
   // ---- Tauri: native File→Open pushes sessions via the cv://open-sessions event
@@ -298,7 +298,7 @@ class CvApp extends HTMLElement {
         this._refreshViews();
         if (this._list && this._sessions[0] && !this._list.selectedId) {
           this._transcript.session = this._sessions[0];
-          this._list.selectedId = this._sessions[0].id;
+          this._list.selectedSession = this._sessions[0];
         }
         this._setStatus(`Loaded ${sessions.length} session${sessions.length === 1 ? "" : "s"} from File → Open.`, "ok");
       } catch (err) {
@@ -489,10 +489,10 @@ class CvApp extends HTMLElement {
         // Don't auto-hydrate the first stub on load — it'd fire a fetch for a transcript the user
         // may never open. Just mark it selected; opening a row hydrates via `_showSession`.
         if (this._needsHydration(this._sessions[0])) {
-          this._list.selectedId = this._sessions[0].id;
+          this._list.selectedSession = this._sessions[0];
         } else {
           this._transcript.session = this._sessions[0];
-          this._list.selectedId = this._sessions[0].id;
+          this._list.selectedSession = this._sessions[0];
         }
       }
     }
@@ -519,8 +519,9 @@ class CvApp extends HTMLElement {
    *  continued-in id can name a session the current filter never listed. */
   async _openById({ id, harness }) {
     if (!id) return;
-    const hit = this._sessions.find((s) => s.id === id)
-      || this._sessions.find((s) => s.id?.startsWith(id) || id.startsWith(s.id));
+    const candidates = this._sessions.filter((session) => !harness || session.harness === harness);
+    const prefixes = candidates.filter((session) => session.id?.startsWith(id));
+    const hit = candidates.find((session) => session.id === id) || (prefixes.length === 1 ? prefixes[0] : null);
     if (hit) { this._openInSessions(hit); return; }
     const token = (this._showToken = (this._showToken || 0) + 1);
     this._setStatus(`Looking up ${id}…`);
@@ -735,7 +736,7 @@ class CvApp extends HTMLElement {
     this._refreshViews();
     if (this._list && this._sessions[0] && !this._list.selectedId) {
       this._transcript.session = this._sessions[0];
-      this._list.selectedId = this._sessions[0].id;
+      this._list.selectedSession = this._sessions[0];
     }
     if (added) {
       this._setStatus(`Pool now has ${this._sessions.length} session${this._sessions.length === 1 ? "" : "s"} from ${this._sources.length} source${this._sources.length === 1 ? "" : "s"}.`, failed ? "warn" : "ok");
