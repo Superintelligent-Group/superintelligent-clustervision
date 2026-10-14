@@ -2559,3 +2559,40 @@ fn prune_rejects_output_ids_that_escape_or_alias_resource_directories() {
     assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn resource_copy_preserves_source_when_destination_aliases_it() {
+    let dir = tmpdir();
+    let source = dir.join("source-resources");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::write(source.join("agent.jsonl"), b"original resource").unwrap();
+    assert!(copy_dir(&source, &source).is_err());
+    std::fs::create_dir(source.join("nested-target")).unwrap();
+    assert!(copy_dir(&source, &source.join("nested-target")).is_err());
+    assert_eq!(std::fs::read(source.join("agent.jsonl")).unwrap(), b"original resource");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn resource_copy_rejects_destination_symlinks_and_source_hardlinks_before_truncation() {
+    let dir = tmpdir();
+    let source = dir.join("source-resources");
+    let destination = dir.join("destination-resources");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::create_dir(&destination).unwrap();
+    let original = source.join("agent.jsonl");
+    std::fs::write(&original, b"original resource").unwrap();
+    std::fs::hard_link(&original, destination.join("agent.jsonl")).unwrap();
+    assert!(copy_dir(&source, &destination).is_err());
+    assert_eq!(std::fs::read(&original).unwrap(), b"original resource");
+    std::fs::remove_file(destination.join("agent.jsonl")).unwrap();
+    std::os::unix::fs::symlink(&original, destination.join("agent.jsonl")).unwrap();
+    assert!(copy_dir(&source, &destination).is_err());
+    assert_eq!(std::fs::read(&original).unwrap(), b"original resource");
+    let directory_link = dir.join("redirected-resources");
+    std::os::unix::fs::symlink(&source, &directory_link).unwrap();
+    assert!(copy_dir(&source, &directory_link).is_err());
+    assert_eq!(std::fs::read(&original).unwrap(), b"original resource");
+    std::fs::remove_dir_all(dir).ok();
+}

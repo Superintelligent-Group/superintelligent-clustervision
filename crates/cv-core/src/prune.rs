@@ -3179,6 +3179,15 @@ fn build_marker(
 
 /// Recursively copy a directory tree (used to carry `subagents/`/`workflows/` into the new session).
 fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
+    reject_resource_symlink(dst)?;
+    if std::fs::canonicalize(dst)
+        .is_ok_and(|path| std::fs::canonicalize(src).is_ok_and(|source| path.starts_with(source)))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "resource destination aliases or lies inside source",
+        ));
+    }
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
@@ -3187,9 +3196,56 @@ fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
         if entry.file_type()?.is_dir() {
             copy_dir(&from, &to)?;
         } else {
-            std::fs::copy(&from, &to)?;
+            copy_resource_file(&from, &to)?;
         }
     }
+    Ok(())
+}
+
+fn reject_resource_symlink(path: &Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "resource destination is a symlink",
+        )),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn copy_resource_file(src: &Path, dst: &Path) -> std::io::Result<()> {
+    reject_resource_symlink(dst)?;
+    let mut source = std::fs::File::open(src)?;
+    let mut target = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dst)?;
+    reject_resource_symlink(dst)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let from = source.metadata()?;
+        let to = target.metadata()?;
+        if from.dev() == to.dev() && from.ino() == to.ino() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "resource destination aliases source file",
+            ));
+        }
+    }
+    #[cfg(not(unix))]
+    if std::fs::canonicalize(src)? == std::fs::canonicalize(dst)? {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "resource destination aliases source file",
+        ));
+    }
+    target.set_len(0)?;
+    std::io::copy(&mut source, &mut target)?;
+    target.flush()?;
+    target.set_permissions(source.metadata()?.permissions())?;
     Ok(())
 }
 
