@@ -842,12 +842,19 @@ impl<M> ResidentState<M> {
             migrate_legacy_sibling(path);
             let mut reads = ReadSet::default();
             reads.record(path);
-            let store = load_store(path)?;
+            let mut store = load_store(path)?;
             anyhow::ensure!(
                 reads.fresh(&mut Probe::default()),
                 "embedding store changed while loading: {}",
                 path.display()
             );
+            // Refresh provenance is validated by the cold decoder but has no consumer in
+            // resident ranking. Keep hit fields and model guards, not unused source witnesses.
+            for record in &mut store.meta {
+                record.source_path = None;
+                record.source = None;
+                record.hints = None;
+            }
             self.store = Some(CachedStore { store, reads });
         }
         let cached = self.store.as_ref().unwrap();
@@ -2146,6 +2153,18 @@ mod tests {
             (meta("a", None), if flipped { vec![0.0, 1.0] } else { vec![1.0, 0.0] }),
             (second, if flipped { vec![1.0, 0.0] } else { vec![0.0, 1.0] }),
         ]);
+        store.meta[0].source_path = Some(path.with_extension("source"));
+        store.meta[0].source = Some(Snapshot {
+            primary: (7, 9),
+            dependencies: None,
+        });
+        store.meta[0].hints = Some(ReferenceHints {
+            cwd: None,
+            title: Some("unused refresh title".repeat(4096)),
+            created_at: None,
+            updated_at: None,
+            message_count: 17,
+        });
         store.model = spec.key.clone();
         store.model_reads = Some(spec.reads.clone());
         save_store(path, &store).unwrap();
@@ -2205,6 +2224,17 @@ mod tests {
         assert_eq!(encodes.load(Ordering::Relaxed), 3);
         assert_eq!(VECTOR_DECODES.with(|count| count.get()), 1);
         assert_eq!(drops.load(Ordering::Relaxed), 0);
+        assert!(search
+            .state
+            .lock()
+            .unwrap()
+            .store
+            .as_ref()
+            .unwrap()
+            .store
+            .meta
+            .iter()
+            .all(|record| record.source_path.is_none() && record.source.is_none() && record.hints.is_none()));
         // Atomic index publication reloads only the store, retaining the unchanged model.
         write_resident_store(&path, &resident_spec(&artifact), true);
         assert_eq!(ask("horizontal", crate::SearchFilter::default()).unwrap()[0].id, "b");
