@@ -57,6 +57,11 @@ try {
   await page.goto(`http://127.0.0.1:${port}/selftest.html`);
   await page.waitForFunction(() => globalThis.__CV_SELFTEST__, null, { timeout: 30000 });
   const r = await page.evaluate(() => globalThis.__CV_SELFTEST__);
+  if (!Number.isSafeInteger(r?.total) || r.total <= 0 || !Number.isSafeInteger(r.failed)
+      || r.failed < 0 || r.failed > r.total || !Array.isArray(r.failures)
+      || r.failures.length !== r.failed || r.failures.some((f) => typeof f !== "string")) {
+    throw new Error("web selftest: invalid or empty result report");
+  }
   console.log(`web selftest: ${r.total - r.failed}/${r.total} passing`);
   for (const f of r.failures) console.log(`  FAIL ${f}`);
   for (const e of errors) console.log(`  PAGE ERROR ${e}`);

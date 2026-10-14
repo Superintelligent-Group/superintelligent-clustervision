@@ -241,6 +241,9 @@ jobs:
       # web/selftest.html in headless Chrome: every check passes and the page throws nothing.
       # playwright-core (no bundled browser) drives the Chrome the runner image ships, so this is
       # one small npm package, not a browser download.
+      - name: Browser gate report controls
+        run: python3 -I tools/test-web-selftest.py
+
       - name: Rendering self-test (headless Chrome)
         run: |
           set -euo pipefail
