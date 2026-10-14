@@ -11,6 +11,7 @@
 - Dataset file exports stage before publication and reject transcript inode aliases, preserving source sessions and existing outputs when transformation fails.
 
 - Pack fallback recall retains only requested candidates and preserves stable ranking; live search and pack center Unicode snippets on original source matches.
+- Gemini checkpoint replay transfers owned bodies and metadata without duplicate payload allocation; Zed header scans avoid copying unknown field names.
 
 - Codex legacy reads and discovery use checked source views, retaining lazy bodies and bounded title prefixes with unchanged output and counts.
 - Kimi and Kimi Code retain checked bodies during lazy and complete reads, preserving usage, rotations, raw records and resume behavior.

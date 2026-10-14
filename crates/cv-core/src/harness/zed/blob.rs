@@ -228,6 +228,29 @@ macro_rules! scalars {
     };
 }
 
+// Keep only recognized static keys. Unknown keys still receive Serde's strict string
+// validation, but never acquire a second owned copy beyond its reader scratch.
+struct RootKey;
+impl<'de> DeserializeSeed<'de> for RootKey {
+    type Value = Option<&'static str>;
+    fn deserialize<D: serde::Deserializer<'de>>(self, de: D) -> Result<Self::Value, D::Error> {
+        de.deserialize_str(self)
+    }
+}
+impl<'de> Visitor<'de> for RootKey {
+    type Value = Option<&'static str>;
+    fn expecting(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fmt.write_str("a thread field name")
+    }
+    fn visit_str<E: serde::de::Error>(self, key: &str) -> Result<Self::Value, E> {
+        Ok(if key == "messages" {
+            Some("messages")
+        } else {
+            METADATA.iter().copied().find(|name| *name == key)
+        })
+    }
+}
+
 struct Root<'a> {
     count: bool,
     target: Option<usize>,
@@ -257,8 +280,8 @@ impl<'de> Visitor<'de> for Root<'_> {
             ..Header::default()
         };
         let mut member = 0;
-        while let Some(key) = map.next_key::<String>()? {
-            if key == "messages" {
+        while let Some(key) = map.next_key_seed(RootKey)? {
+            if key == Some("messages") {
                 out.last_messages = Some(member);
                 let mut count = 0;
                 if self.count {
@@ -270,9 +293,9 @@ impl<'de> Visitor<'de> for Root<'_> {
                 }
                 out.message_count = count;
                 member += 1;
-            } else if self.target.is_none() && METADATA.contains(&key.as_str()) {
+            } else if let Some(key) = key.filter(|_| self.target.is_none()) {
                 let value = map.next_value::<Value>()?;
-                out.metadata.as_object_mut().unwrap().insert(key, value);
+                out.metadata.as_object_mut().unwrap().insert(key.into(), value);
             } else {
                 map.next_value::<DiscardValue>()?;
             }
@@ -354,6 +377,11 @@ mod tests {
             r#"{"messages":{"ignored":"\ud800"}}"#.into(),
             "null".into(), "42".into(), "\"text\"".into(), "[]".into(),
         ];
+        cases.push(format!(
+            "{{\"{}\":null,\"messages\":[{{\"role\":\"user\",\"text\":\"ok\"}}],\"ti\\u0074le\":\"last\"}}",
+            "unknown".repeat(1024)
+        ));
+        cases.push(r#"{"\ud800":null,"messages":[]}"#.into());
         for depth in 125..=129 {
             cases.push(format!(
                 "{{\"messages\":[],\"ignored\":{}0{}}}",

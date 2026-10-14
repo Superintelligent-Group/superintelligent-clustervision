@@ -4640,3 +4640,31 @@ The mixed-size regression compares the prior selection oracle, serializes/resume
 and checks all positions and pending flags. This establishes eliminated clone/check work by
 construction; no wall-time or allocator-byte improvement is claimed. Scoped execution is part
 of the root integration batch.
+
+### Residual harness ownership review (Sol, 2026-10-13)
+
+Gemini's owned JSONL replay consumed each record but cloned every `$set.messages` body and
+metadata value into the effective state. It now transfers the checkpoint map and array directly;
+replacement order, type-qualified IDs, rewind precedence, invalid-set fallback and non-array reset
+are unchanged. A focused regression asserts transferred body/metadata allocation identity and
+those control cases. This benefits public complete parsing, portable replay and owned compatibility
+fallbacks; the checked selected path was already distinct and is unchanged. Requested
+`displayContent` remains projected into owned `display_text` by the existing Gemini extra contract;
+its output size does not justify another source/metadata representation.
+
+Zed root projection now recognizes static schema keys through a borrowed string visitor rather
+than allocating an owned String for every ignored root field name. Existing compressed/plain,
+reader/slice, count/replay parity controls now include a large unknown key and an invalid surrogate
+key. The remaining largest-string scratch is in strict Serde reader validation, including counted
+text. `IgnoredAny` would weaken UTF-16/finite-number/depth acceptance checks. Reusing the checked
+reader would first decode the SQLite cell into ByteSource, validate its backing and traverse its
+fields, adding staging and traversal to the existing single streaming discovery pass. No such
+conversion is made merely to meet the historical heap target.
+
+Hermes's remaining large raw reasoning/provider extras cross the owned serde_json metadata bag
+contract; SQLite's current input/output rows and FTS also allocate natively. Quoting those extras
+into another arena alone would add writes and deferred decoding without changing that bag. The
+existing checked ordinary/multimodal body and single-decoding reasoning paths remain intact.
+This review identifies costs and removes demonstrated duplicate ownership; it establishes no new
+instruction-count or universal memory-bound claim. Focused execution is delegated to the root's
+single integrated native/portable batch rather than building another lane target.
