@@ -7,8 +7,9 @@ explanations are not all supported by the implementation. Paths below are relati
 ## Current integration status (2026-10-13)
 
 The previous implementation batch converged as recorded below. The wider follow-up batch is
-implemented on `perf/excellence-next`; final convergence and matched semantic-search measurements
-are in progress. Historical lane checks below are not substitutes for current composition checks.
+implemented on `perf/excellence-next`; composition checks and matched semantic-search measurements
+are complete, with package verification finishing. Historical lane checks below are not substitutes
+for current composition checks.
 Current changes remove catalog guard/identity waste, watch cursor copies and stale replacement
 positions, unbounded semantic-ranking and pack-recall candidate retention, semantic wire copies,
 Unicode snippet offsets, dataset input clobbering, Gemini checkpoint copies and Zed root-key copies.
@@ -25,8 +26,33 @@ native core run passes 1,193 tests and the affected portable batch passes eight.
 account-export owned-codec comparison passes in both configurations. Routine coverage uses
 2 MiB with an explicit deferred-text assertion; the identical 32 MiB control remains opt-in.
 The CLI malformed-row oracle was corrected to preserve Claude's existing skip behavior; fatal
-source-mutation staging remains a separate zero-publication check. Remaining CLI integration,
-packaging/build gates and the semantic comparison still need completion before pushing.
+source-mutation staging remains a separate zero-publication check. Remaining CLI integration
+targets and both repairs pass. Final all-target clippy/build, minimal search, release parse budget,
+formatting and semantic decode heap checks pass. Package verification exposed a stale local-registry
+copy of the unchanged 0.16.1 dependency; current-archive verification is being recovered separately.
+
+The matched synthetic 16,384-row semantic whole-command control now reduces warm retired
+instructions 3.54%, warm elapsed time 6.7%, and mean peak RSS 12.9%, with identical JSON results.
+The initial metadata reader saved memory but increased instructions; parsing only the metadata
+extent from a temporary slice, released before vector allocation, repaired that regression.
+See [the operation evidence](SEMANTIC-QUERY-OPERATION.json) for binaries, inputs and all trials.
+This is not a fleet speed claim or a memory-bandwidth measurement. The isolated 4 MiB vector
+decode control peaks at 4,203,716 bytes above baseline, without a second full vector wire buffer.
+
+The continuity study exposed two further correctness issues. Doctor and prune now describe
+byte-derived token equivalents as estimates; opaque thinking/signature bytes do not measure
+reasoning tokens, and rewritten usage does not establish resume acceptance. Child prune already
+read the selected child, but reported its embedded parent ID and treated sidechain turns wrongly.
+It now accepts child ID/path, reports both identities, normalizes child turns before pruning and
+emits a standalone session without modifying the parent or original child. Native prune/rewind
+and related controls pass 74 tests, portable controls 13, and the three affected CLI checks pass.
+Minimal core and standalone Wasm builds also pass after this repair.
+
+Installing a prepared, sharpened native child under a live parent and measuring its resumed
+behavior remains a separate tool/experiment follow-up. Neither lexical retention nor serialized
+byte savings establish preserved reasoning or task success. There is no evidence here for a
+universal token-count or compaction-count retirement rule; retain useful agent continuity and
+recover actual exchanges when an inherited rationale is uncertain.
 
 Genuine Cursor IDE 3.24.12 read/edit/shell/failure/interruption/reopen capture is committed alongside
 the earlier CLI corpus, with a failed-command classification correction. Zed authored-thread
