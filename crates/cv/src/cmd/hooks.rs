@@ -912,6 +912,12 @@ fn minutes_since_modified(path: &Path) -> Option<i64> {
     Some(std::time::SystemTime::now().duration_since(m).ok()?.as_secs() as i64 / 60)
 }
 
+fn is_current_editor(t: &cv_core::events::TouchedSession, session_id: &str, agent_id: Option<&str>) -> bool {
+    t.harness == "claude"
+        && t.parent_id.as_deref().unwrap_or(&t.session_id) == session_id
+        && t.agent_id.as_deref() == agent_id
+}
+
 /// `PreToolUse` (`Edit|Write`): `ask` when another live session edited this path — the edit
 /// index (`cv touched`) names the sessions, the catalog names their transcripts, one `stat` each
 /// says which are live. Nothing printed = allow.
@@ -940,7 +946,7 @@ fn hook_edit(input: &Input) -> Result<Option<Value>> {
         .map(|a| a.strip_prefix("agent-").unwrap_or(a).to_string());
     let mut live: Vec<(String, i64)> = Vec::new();
     for t in cv_core::events::sessions_editing(&abs.to_string_lossy()) {
-        if t.session_id == input.session_id || (my_agent.is_some() && t.agent_id == my_agent) {
+        if is_current_editor(&t, &input.session_id, my_agent.as_deref()) {
             continue;
         }
         let Some(path) = transcript_of(&t) else { continue };
@@ -973,6 +979,35 @@ fn hook_edit(input: &Input) -> Result<Option<Value>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edit_conflicts_distinguish_parent_sibling_and_reused_agent_identities() {
+        let mut touched = cv_core::events::TouchedSession {
+            harness: "claude".into(),
+            session_id: "parent".into(),
+            title: None,
+            edits: 1,
+            reads: 0,
+            last_ts: None,
+            parent_id: None,
+            agent_id: None,
+            workflow: None,
+        };
+        assert!(is_current_editor(&touched, "parent", None));
+        assert!(
+            !is_current_editor(&touched, "parent", Some("self")),
+            "a child and parent are separate writers"
+        );
+        touched.session_id = "agent-self".into();
+        touched.parent_id = Some("parent".into());
+        touched.agent_id = Some("self".into());
+        assert!(is_current_editor(&touched, "parent", Some("self")));
+        assert!(!is_current_editor(&touched, "parent", Some("sibling")));
+        assert!(!is_current_editor(&touched, "parent", None));
+        assert!(!is_current_editor(&touched, "another-parent", Some("self")));
+        touched.harness = "codex".into();
+        assert!(!is_current_editor(&touched, "parent", Some("self")));
+    }
 
     #[test]
     fn install_is_idempotent_and_remove_leaves_the_rest_untouched() {
