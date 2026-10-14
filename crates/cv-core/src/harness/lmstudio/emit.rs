@@ -84,6 +84,120 @@ fn parts(w: &mut dyn Write, block: &Block, resolver: &Resolver) -> Result<()> {
     w.write_all(b"]")?;
     Ok(())
 }
+fn blocks<'a>(msg: &'a Message, mode: ThinkingMode, resolver: &Resolver) -> Result<Vec<(Cow<'a, Block>, bool)>> {
+    let blocks = msg
+        .content
+        .iter()
+        .filter_map(|b| match projected(b, mode, resolver) {
+            Ok(Some(b)) => Some(Ok(b)),
+            Ok(None) => None,
+            Err(e) => Some(Err(e)),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut blocks = blocks;
+    blocks.retain(|(b, _)| {
+        !matches!(b.as_ref(), Block::File { .. } | Block::Image { .. }) || emit_file_part(b).is_some()
+    });
+    Ok(blocks)
+}
+
+fn write_version(
+    w: &mut dyn Write,
+    session: &Session,
+    msg: &Message,
+    created: chrono::DateTime<Utc>,
+    resolver: &Resolver,
+    blocks: &[(Cow<'_, Block>, bool)],
+) -> Result<()> {
+    let mut version = ObjectWriter::new(w)?;
+    version.field(
+        "type",
+        if msg.role == Role::Assistant {
+            "multiStep"
+        } else {
+            "singleStep"
+        },
+    )?;
+    version.field(
+        "role",
+        if msg.role == Role::Assistant {
+            "assistant"
+        } else if msg.role == Role::System {
+            "system"
+        } else {
+            "user"
+        },
+    )?;
+    if msg.role == Role::Assistant {
+        version.field_with("steps", |w| {
+            w.write_all(b"[")?;
+            let ts = msg.timestamp.unwrap_or(created);
+            let step_id = format!("{}-0.0000000000000000", ts.timestamp_millis());
+            let mut attached = false;
+            for (i, (b, thinking)) in blocks.iter().enumerate() {
+                if i != 0 {
+                    w.write_all(b",")?;
+                }
+                let mut step = ObjectWriter::new(w)?;
+                step.field("type", "contentBlock")?;
+                step.field("role", "assistant")?;
+                step.field_with("content", |w| parts(w, b, resolver))?;
+                step.field("stepIdentifier", &step_id)?;
+                if *thinking {
+                    step.field("style", json!({"type":"thinking"}))?;
+                }
+                if !attached {
+                    let mut gen = Map::new();
+                    if let Some(model) = msg.model.as_ref().or(session.model.as_ref()) {
+                        gen.insert("indexedModelIdentifier".into(), json!(model));
+                    }
+                    if let Some(u) = &msg.usage {
+                        let mut stats = Map::new();
+                        if let Some(n) = u.input_tokens {
+                            stats.insert("promptTokensCount".into(), json!(n));
+                        }
+                        if let Some(n) = u.output_tokens {
+                            stats.insert("predictedTokensCount".into(), json!(n));
+                        }
+                        if !stats.is_empty() {
+                            gen.insert("stats".into(), Value::Object(stats));
+                        }
+                    }
+                    if !gen.is_empty() {
+                        step.field("genInfo", gen)?;
+                        attached = true;
+                    }
+                }
+                step.finish()?;
+            }
+            w.write_all(b"]")?;
+            Ok(())
+        })?;
+    } else {
+        version.field_with("content", |w| {
+            w.write_all(b"[")?;
+            for (i, (b, _)) in blocks.iter().enumerate() {
+                if i != 0 {
+                    w.write_all(b",")?;
+                } // one part per represented block
+                  // Strip the single-part array by directly writing its content to a wrapper.
+                part(w, b, resolver)?;
+            }
+            w.write_all(b"]")?;
+            Ok(())
+        })?;
+    }
+    version.finish()?;
+    Ok(())
+}
+
+fn native_versions(message: &Message) -> Option<(usize, usize)> {
+    let bag = message.harness_extra(Harness::LmStudio)?;
+    let selected = usize::try_from(bag.get("currentlySelected")?.as_u64()?).ok()?;
+    let count = usize::try_from(bag.get("version_count")?.as_u64()?).ok()?;
+    (selected < count && message.kind != MessageKind::Branch).then_some((selected, count))
+}
+
 pub(super) fn emit(session: &Session, out_dir: &Path, opts: &crate::emit::EmitOptions) -> Result<EmitResult> {
     super::super::wire::write::check_source_fields(session)?;
     let resolver = Resolver::new(session.source_path.clone());
@@ -106,23 +220,39 @@ pub(super) fn emit(session: &Session, out_dir: &Path, opts: &crate::emit::EmitOp
         root.field_with("messages", |w| {
             w.write_all(b"[")?;
             let mut first = true;
-            for msg in &session.messages {
-                let blocks = msg
-                    .content
-                    .iter()
-                    .filter_map(|b| match projected(b, opts.thinking, &resolver) {
-                        Ok(Some(b)) => Some(Ok(b)),
-                        Ok(None) => None,
-                        Err(e) => Some(Err(e)),
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                let blocks = blocks
-                    .iter()
-                    .filter(|(b, _)| {
-                        !matches!(b.as_ref(), Block::File { .. } | Block::Image { .. }) || emit_file_part(b).is_some()
-                    })
-                    .collect::<Vec<_>>();
-                if blocks.is_empty() {
+            let mut messages = session.messages.iter().peekable();
+            while let Some(msg) = messages.next() {
+                let native = native_versions(msg);
+                let (selected, count) = native.unwrap_or((0, 1));
+                let mut group = std::collections::BTreeMap::new();
+                group.insert(selected, msg);
+                if native.is_some() {
+                    while let Some(alternate) = messages.peek() {
+                        let index = alternate
+                            .harness_extra(Harness::LmStudio)
+                            .and_then(|bag| bag.get("variant"))
+                            .and_then(Value::as_u64)
+                            .and_then(|index| usize::try_from(index).ok());
+                        let Some(index) = index.filter(|index| *index < count && !group.contains_key(index)) else {
+                            break;
+                        };
+                        if alternate.kind != MessageKind::Branch
+                            || alternate
+                                .harness_extra(Harness::LmStudio)
+                                .and_then(|bag| bag.get("orphaned_variant"))
+                                .and_then(Value::as_bool)
+                                == Some(true)
+                        {
+                            break;
+                        }
+                        group.insert(index, messages.next().unwrap());
+                    }
+                }
+                let group = group
+                    .into_iter()
+                    .map(|(index, message)| Ok((index, (message, blocks(message, opts.thinking, &resolver)?))))
+                    .collect::<Result<std::collections::BTreeMap<_, _>>>()?;
+                if group.values().all(|(_, blocks)| blocks.is_empty()) {
                     continue;
                 }
                 if !first {
@@ -132,89 +262,26 @@ pub(super) fn emit(session: &Session, out_dir: &Path, opts: &crate::emit::EmitOp
                 let mut turn = ObjectWriter::new(w)?;
                 turn.field_with("versions", |w| {
                     w.write_all(b"[")?;
-                    let mut version = ObjectWriter::new(w)?;
-                    version.field(
-                        "type",
-                        if msg.role == Role::Assistant {
-                            "multiStep"
-                        } else {
-                            "singleStep"
-                        },
-                    )?;
-                    version.field(
-                        "role",
-                        if msg.role == Role::Assistant {
-                            "assistant"
-                        } else if msg.role == Role::System {
-                            "system"
-                        } else {
-                            "user"
-                        },
-                    )?;
-                    if msg.role == Role::Assistant {
-                        version.field_with("steps", |w| {
-                            w.write_all(b"[")?;
-                            let ts = msg.timestamp.unwrap_or(created);
-                            let step_id = format!("{}-0.0000000000000000", ts.timestamp_millis());
-                            let mut attached = false;
-                            for (i, (b, thinking)) in blocks.iter().enumerate() {
-                                if i != 0 {
-                                    w.write_all(b",")?;
-                                }
-                                let mut step = ObjectWriter::new(w)?;
-                                step.field("type", "contentBlock")?;
-                                step.field("role", "assistant")?;
-                                step.field_with("content", |w| parts(w, b, &resolver))?;
-                                step.field("stepIdentifier", &step_id)?;
-                                if *thinking {
-                                    step.field("style", json!({"type":"thinking"}))?;
-                                }
-                                if !attached {
-                                    let mut gen = Map::new();
-                                    if let Some(model) = msg.model.as_ref().or(session.model.as_ref()) {
-                                        gen.insert("indexedModelIdentifier".into(), json!(model));
-                                    }
-                                    if let Some(u) = &msg.usage {
-                                        let mut stats = Map::new();
-                                        if let Some(n) = u.input_tokens {
-                                            stats.insert("promptTokensCount".into(), json!(n));
-                                        }
-                                        if let Some(n) = u.output_tokens {
-                                            stats.insert("predictedTokensCount".into(), json!(n));
-                                        }
-                                        if !stats.is_empty() {
-                                            gen.insert("stats".into(), Value::Object(stats));
-                                        }
-                                    }
-                                    if !gen.is_empty() {
-                                        step.field("genInfo", gen)?;
-                                        attached = true;
-                                    }
-                                }
-                                step.finish()?;
+                    for index in 0..count {
+                        if index != 0 {
+                            w.write_all(b",")?;
+                        }
+                        match group.get(&index) {
+                            Some((message, blocks)) if !blocks.is_empty() => {
+                                write_version(w, session, message, created, &resolver, blocks)?
                             }
-                            w.write_all(b"]")?;
-                            Ok(())
-                        })?;
-                    } else {
-                        version.field_with("content", |w| {
-                            w.write_all(b"[")?;
-                            for (i, (b, _)) in blocks.iter().enumerate() {
-                                if i != 0 {
-                                    w.write_all(b",")?;
-                                } // one part per represented block
-                                  // Strip the single-part array by directly writing its content to a wrapper.
-                                part(w, b, &resolver)?;
-                            }
-                            w.write_all(b"]")?;
-                            Ok(())
-                        })?;
+                            // Omitted or unsupported versions keep their native index without
+                            // inventing visible text or changing the selected version.
+                            _ => serde_json::to_writer(
+                                &mut *w,
+                                &json!({"type":"singleStep","role":"user","content":[]}),
+                            )?,
+                        }
                     }
-                    version.finish()?;
                     w.write_all(b"]")?;
                     Ok(())
                 })?;
-                turn.field("currentlySelected", 0)?;
+                turn.field("currentlySelected", selected)?;
                 turn.finish()?;
             }
             w.write_all(b"]")?;
@@ -291,6 +358,154 @@ fn legacy_emit(session: &Session, out_dir: &Path, opts: &crate::emit::EmitOption
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn complete_native_versions_roundtrip_selected_indices_roles_and_models() -> Result<()> {
+        let world = cv_testkit::World::in_process("lmstudio_versions_roundtrip");
+        let path = world.home.join("source.conversation.json");
+        let payload = "edited 雪\n\"\\".repeat(10_000);
+        let assistant = |text: &str, model: &str| {
+            json!({"type":"multiStep","role":"assistant","steps":[{
+                "type":"contentBlock","stepIdentifier":"1730000000000-random",
+                "content":[{"type":"text","text":text}],
+                "genInfo":{"identifier":model,"stats":{"promptTokensCount":8,"predictedTokensCount":3}}
+            }]})
+        };
+        let doc = json!({"name":"versions","createdAt":1730000000000_i64,"messages":[
+            {"currentlySelected":1,"versions":[
+                {"role":"user","content":"old user"},
+                {"role":"user","content":payload},
+                null,
+                {"role":"system","content":"alternate system"}
+            ]},
+            {"currentlySelected":99,"versions":[
+                assistant("alternate reply", "alternate-model"),
+                {"role":"invalid","content":"unparsed"},
+                assistant(&payload, "selected-model")
+            ]}
+        ]});
+        fs::write(&path, serde_json::to_vec(&doc)?)?;
+        let adapter = LmStudio::with_root(&world.home);
+        let r = SessionRef::new("source", Harness::LmStudio, &path);
+        let opts = ParseOptions {
+            spans: true,
+            ..ParseOptions::complete()
+        };
+        let session = crate::stream::collect_with(&adapter, &r, &opts)?;
+        assert_eq!(session.messages.len(), 5);
+        assert_eq!(session.messages[4].model.as_deref(), Some("alternate-model"));
+        let emitted = super::super::emit(
+            &session,
+            &world.home.join("output"),
+            &crate::emit::EmitOptions {
+                new_id: Some("copy".into()),
+                ..Default::default()
+            },
+        )?;
+        let native: Value = serde_json::from_slice(&fs::read(&emitted.path)?)?;
+        assert_eq!(
+            native["messages"].as_array().unwrap().len(),
+            2,
+            "alternates stay versions of their native turn"
+        );
+        assert_eq!(native["messages"][0]["currentlySelected"], 1);
+        assert_eq!(native["messages"][0]["versions"].as_array().unwrap().len(), 4);
+        assert_eq!(native["messages"][0]["versions"][3]["role"], "system");
+        assert_eq!(
+            native["messages"][1]["currentlySelected"], 2,
+            "invalid selection fell back to the last version"
+        );
+        let copied = SessionRef::new("copy", Harness::LmStudio, &emitted.path);
+        let reparsed = crate::stream::collect_with(&adapter, &copied, &ParseOptions::complete())?;
+        let mut expected = session.clone();
+        expected.materialize()?;
+        assert_eq!(
+            serde_json::to_value(&reparsed.messages)?,
+            serde_json::to_value(&expected.messages)?
+        );
+        assert_eq!(reparsed.model, expected.model);
+        let visible = crate::stream::collect_with(&adapter, &copied, &ParseOptions::full())?;
+        assert_eq!(visible.messages.len(), 2);
+        assert_eq!(visible.messages[0].text().as_deref(), Some(payload.as_str()));
+        assert_eq!(visible.messages[1].text().as_deref(), Some(payload.as_str()));
+        let before = fs::read(&emitted.path)?;
+        fs::write(&path, b"changed source")?;
+        assert!(super::super::emit(
+            &session,
+            &world.home.join("output"),
+            &crate::emit::EmitOptions {
+                new_id: Some("copy".into()),
+                ..Default::default()
+            }
+        )
+        .is_err());
+        assert_eq!(fs::read(emitted.path)?, before);
+        Ok(())
+    }
+
+    #[test]
+    fn an_unparsed_selected_turn_cannot_attach_its_alternates_to_the_previous_turn() -> Result<()> {
+        let world = cv_testkit::World::in_process("lmstudio_orphan_group");
+        let path = world.home.join("source.conversation.json");
+        fs::write(
+            &path,
+            serde_json::to_vec(&json!({"messages":[
+                {"currentlySelected":0,"versions":[{"role":"user","content":"primary"},{"role":"user","content":"own alternate"}]},
+                {"currentlySelected":0,"versions":[{"role":"invalid","content":"not a parsed primary"},{"role":"user","content":"orphan alternate"}]}
+            ]}))?,
+        )?;
+        let adapter = LmStudio::with_root(&world.home);
+        let session = crate::stream::collect_with(
+            &adapter,
+            &SessionRef::new("source", Harness::LmStudio, &path),
+            &ParseOptions::complete(),
+        )?;
+        assert_eq!(session.messages.len(), 3);
+        assert_eq!(
+            session.messages[2].harness_extra(Harness::LmStudio).unwrap()["orphaned_variant"],
+            true
+        );
+        let emitted = super::super::emit(&session, &world.home.join("output"), &Default::default())?;
+        let native: Value = serde_json::from_slice(&fs::read(emitted.path)?)?;
+        assert_eq!(native["messages"].as_array().unwrap().len(), 2);
+        assert_eq!(native["messages"][0]["versions"].as_array().unwrap().len(), 2);
+        assert_eq!(native["messages"][1]["versions"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            native["messages"][1]["versions"][0]["content"][0]["text"],
+            "orphan alternate"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_or_orphaned_variant_metadata_falls_back_to_independent_turns() -> Result<()> {
+        let world = cv_testkit::World::in_process("lmstudio_variant_fallback");
+        let mut session = Session::new("source", Harness::LmStudio);
+        let mut primary = Message::new(Role::User);
+        primary.content.push(Block::Text { text: "primary".into() });
+        primary
+            .harness_extra_mut(Harness::LmStudio)
+            .insert("currentlySelected".into(), json!(5));
+        primary
+            .harness_extra_mut(Harness::LmStudio)
+            .insert("version_count".into(), json!(2));
+        let mut orphan = Message::new(Role::Assistant);
+        orphan.kind = MessageKind::Branch;
+        orphan.content.push(Block::Text { text: "orphan".into() });
+        orphan
+            .harness_extra_mut(Harness::LmStudio)
+            .insert("variant".into(), json!(1));
+        session.messages = vec![primary, orphan];
+        let emitted = super::super::emit(&session, &world.home, &Default::default())?;
+        let native: Value = serde_json::from_slice(&fs::read(emitted.path)?)?;
+        assert_eq!(native["messages"].as_array().unwrap().len(), 2);
+        assert!(native["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|turn| turn["currentlySelected"] == 0 && turn["versions"].as_array().unwrap().len() == 1));
+        Ok(())
+    }
+
     #[test]
     fn checked_native_writer_matches_owned_oracle_and_preserves_changed_source() -> Result<()> {
         let world = cv_testkit::World::in_process("checked-lmstudio");

@@ -182,16 +182,25 @@ impl Adapter for LmStudio {
                             let Some(versions) = fields.get("versions") else {
                                 continue;
                             };
-                            let Some((selected, version)) = projected_selected_version(&fields, versions)? else {
+                            let Some((selected, version, version_count)) =
+                                projected_selected_version(&fields, versions)?
+                            else {
                                 continue;
                             };
-                            if let Some(message) = projected_version(version, &mut session_model, opts)? {
+                            let primary = projected_version(version, &mut session_model, opts)?;
+                            let has_primary = primary.is_some();
+                            if let Some(mut message) = primary {
+                                if opts.complete {
+                                    let bag = message.harness_extra_mut(Harness::LmStudio);
+                                    bag.insert("currentlySelected".into(), Value::Number(selected.into()));
+                                    bag.insert("version_count".into(), Value::Number(version_count.into()));
+                                }
                                 if sink.message(message) == Flow::Stop {
                                     break;
                                 }
                             }
                             if opts.complete {
-                                let mut throwaway_model = None;
+                                let mut throwaway_model = session_model.clone();
                                 if let Some(variants) = versions.array()? {
                                     for (index, version) in variants.enumerate() {
                                         let version = version?;
@@ -202,9 +211,11 @@ impl Adapter for LmStudio {
                                             projected_version(version, &mut throwaway_model, opts)?
                                         {
                                             message.kind = MessageKind::Branch;
-                                            message
-                                                .harness_extra_mut(Harness::LmStudio)
-                                                .insert("variant".into(), Value::Number(index.into()));
+                                            let bag = message.harness_extra_mut(Harness::LmStudio);
+                                            bag.insert("variant".into(), Value::Number(index.into()));
+                                            if !has_primary {
+                                                bag.insert("orphaned_variant".into(), Value::Bool(true));
+                                            }
                                             if sink.message(message) == Flow::Stop {
                                                 break 'turns;
                                             }
@@ -261,7 +272,7 @@ fn string_is(view: Option<JsonView<'_>>, expected: &str) -> Result<bool> {
 fn projected_selected_version<'a>(
     fields: &Fields<'a>,
     versions: JsonView<'a>,
-) -> Result<Option<(usize, JsonView<'a>)>> {
+) -> Result<Option<(usize, JsonView<'a>, usize)>> {
     let wanted = fields
         .get("currentlySelected")
         .map(JsonView::as_number)
@@ -281,7 +292,8 @@ fn projected_selected_version<'a>(
         }
         last = Some((index, version));
     }
-    Ok(selected.or(last))
+    let count = last.as_ref().map_or(0, |(index, _)| index + 1);
+    Ok(selected.or(last).map(|(index, version)| (index, version, count)))
 }
 
 fn projected_version(
@@ -831,7 +843,7 @@ fn scan_view(view: JsonView<'_>) -> Result<Scan> {
         } else {
             None
         };
-        let Some((_, version)) = selected else {
+        let Some((_, version, _)) = selected else {
             // chat_title's `?` stops at the first versionless turn.
             search_title = false;
             continue;
@@ -1055,6 +1067,7 @@ fn parse_variants(msg: &Value) -> Vec<Message> {
         .unwrap_or(versions.len() - 1);
     let mut out = Vec::new();
     let mut throwaway_model = None;
+    let _ = parse_message(msg, &mut throwaway_model);
     for (i, version) in versions.iter().enumerate() {
         if i == selected {
             continue;
@@ -1264,7 +1277,9 @@ mod tests {
                 if let Some(versions) = fields.get("versions") {
                     projected_selected_version(&fields, versions)
                         .unwrap()
-                        .and_then(|(_, version)| projected_version(version, &mut None, &ParseOptions::full()).unwrap())
+                        .and_then(|(_, version, _)| {
+                            projected_version(version, &mut None, &ParseOptions::full()).unwrap()
+                        })
                 } else {
                     None
                 }
@@ -1280,8 +1295,11 @@ mod tests {
             let mut actual = Vec::new();
             if let Some(fields) = Fields::parse(JsonView::from(&value), &["versions", "currentlySelected"]).unwrap() {
                 if let Some(versions) = fields.get("versions") {
-                    if let Some((selected, _)) = projected_selected_version(&fields, versions).unwrap() {
+                    if let Some((selected, selected_version, _)) =
+                        projected_selected_version(&fields, versions).unwrap()
+                    {
                         let mut model = None;
+                        let _ = projected_version(selected_version, &mut model, &ParseOptions::complete()).unwrap();
                         for (index, version) in versions.array().unwrap().unwrap().enumerate() {
                             if index != selected {
                                 if let Some(mut message) =
