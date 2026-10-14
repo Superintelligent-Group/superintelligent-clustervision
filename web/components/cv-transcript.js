@@ -340,7 +340,7 @@ class CvTranscript extends HTMLElement {
       e.currentTarget.querySelector(".sub-caret").textContent = open ? "▾" : "▸";
     });
     list.addEventListener("click", (e) => {
-      const row = e.target.closest(".sub-row");
+      const row = e.target.closest(".sub-row-head")?.closest(".sub-row");
       if (row) this._toggleSub(row);
     });
   }

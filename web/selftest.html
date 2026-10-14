@@ -1344,6 +1344,9 @@ await acheck("same-session rerenders do not duplicate late enrichment and failed
     const retry = row.querySelector("button"); truthy(retry, "failure offers retry"); retry.click();
     for (let n = 0; n < 20; n++) await Promise.resolve();
     has(row.textContent, "recovered child", "retry replaces error with full content");
+    eq(row.querySelector(".sub-row-body").hidden, false, "retry remains visible");
+    row.querySelector("cv-transcript .th-title").click();
+    eq(row.querySelector(".sub-row-body").hidden, false, "interaction inside nested transcript does not collapse its parent");
     eq(childReads, 2, "retry sends another read");
   } finally { globalThis.fetch = original; }
 });
@@ -1380,6 +1383,11 @@ await acheck("workflow agent drill rejects an old response after selecting anoth
     first.resolve({ id: "first", harness: "claude", messages: [{ role: "assistant", content: [{ type: "text", text: "old drill" }] }] }); await old;
     has(forest.querySelector(".lane-drill").textContent, "fresh drill", "new selection preserved"); truthy(!forest.textContent.includes("old drill"), "obsolete drill dropped");
   } finally { globalThis.fetch = original; }
+});
+
+check("local OpenSession downloads retain the IR source metadata", () => {
+  const session = normalizeSession({ id: "local", harness: "claude", source_path: "/fixture/session.jsonl", messages: [] });
+  eq(normalizeSession(toOpenSession(session)).source_path, session.source_path, "local export preserves source metadata like native OpenSession export");
 });
 
 // ===========================================================================

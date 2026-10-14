@@ -433,6 +433,7 @@ export function toOpenSession(session) {
     updated_at: session.updated_at,
     git: session.git,
     system_prompt: session.system_prompt,
+    source_path: session.source_path,
     lineage: session.lineage,
     messages: (session.messages || []).map(msgOut),
     extra: session.extra,
