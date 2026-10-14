@@ -28,6 +28,7 @@ impl std::io::Write for AppendWriter<'_> {
 pub(crate) struct Spill {
     file: Option<std::fs::File>,
     path: std::path::PathBuf,
+    linked: bool,
 }
 impl Spill {
     fn create(append: bool) -> std::io::Result<Self> {
@@ -42,16 +43,24 @@ impl Spill {
         let spill = Self {
             file: Some(options.open(&path)?),
             path,
+            linked: true,
         };
         #[cfg(unix)]
-        std::fs::remove_file(&spill.path)?;
+        let spill = {
+            let mut spill = spill;
+            std::fs::remove_file(&spill.path)?;
+            spill.linked = false;
+            spill
+        };
         Ok(spill)
     }
 }
 impl Drop for Spill {
     fn drop(&mut self) {
         self.file.take();
-        let _ = std::fs::remove_file(&self.path);
+        if self.linked {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }
 #[derive(Debug)]
@@ -320,6 +329,18 @@ impl<F: std::borrow::Borrow<std::fs::File>> std::io::Read for FileReader<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn dropping_unlinked_spill_preserves_reused_path() {
+        for append in [false, true] {
+            let spill = Spill::create(append).unwrap();
+            let path = spill.path.clone();
+            std::fs::write(&path, b"different owner").unwrap();
+            drop(spill);
+            assert_eq!(std::fs::read(&path).unwrap(), b"different owner");
+            std::fs::remove_file(path).unwrap();
+        }
+    }
     #[test]
     fn unpublished_stage_rollback_preserves_memory_and_spilled_prefixes() {
         use std::io::{Read, Write};

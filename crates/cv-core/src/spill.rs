@@ -10,7 +10,10 @@ use std::path::PathBuf;
 
 /// Exclusively-created temporary file. On Unix it is unlinked immediately; other platforms
 /// remove the owned path after the caller closes its file handles.
-struct Temporary(PathBuf);
+struct Temporary {
+    path: PathBuf,
+    linked: bool,
+}
 impl Temporary {
     fn create(label: &str) -> Result<(File, Self)> {
         let path = std::env::temp_dir().join(format!("cv-{label}-{}", uuid::Uuid::new_v4()));
@@ -22,26 +25,44 @@ impl Temporary {
             options.mode(0o600);
         }
         let file = options.open(&path).context("creating private spill file")?;
-        let owner = Self(path);
+        let owner = Self { path, linked: true };
         #[cfg(unix)]
-        fs::remove_file(&owner.0).context("unlinking private spill file")?;
+        let owner = {
+            let mut owner = owner;
+            fs::remove_file(&owner.path).context("unlinking private spill file")?;
+            owner.linked = false;
+            owner
+        };
         Ok((file, owner))
     }
 }
 impl Drop for Temporary {
     fn drop(&mut self) {
         // Only the exclusive path this operation created, never a source or another pass's file.
-        let _ = fs::remove_file(&self.0);
+        if self.linked {
+            let _ = fs::remove_file(&self.path);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn dropping_unlinked_temporary_preserves_reused_path() {
+        let (file, owner) = Temporary::create("path-reuse-test").unwrap();
+        let path = owner.path.clone();
+        fs::write(&path, b"different owner").unwrap();
+        drop(file);
+        drop(owner);
+        assert_eq!(fs::read(&path).unwrap(), b"different owner");
+        fs::remove_file(path).unwrap();
+    }
     #[test]
     fn private_file_permissions_and_owned_cleanup() {
         let (file, owner) = Temporary::create("ownership-test").unwrap();
-        let path = owner.0.clone();
+        let path = owner.path.clone();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
