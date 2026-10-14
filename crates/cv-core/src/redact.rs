@@ -147,7 +147,10 @@ pub fn redact(session: &Session) -> anyhow::Result<Session> {
 ///
 /// Not scrubbed: `cwd` and `source_path` (filesystem paths — a placeholder would corrupt them, and
 /// path privacy is a separate concern from secret redaction), `model`, ids, timestamps, and
-/// `git.branch`/`git.commit` (user-visible refs, not credential carriers).
+/// `git.branch`/`git.commit` (user-visible refs, not credential carriers). `principal` is also
+/// preserved like other identifiers: it is an opaque identity, and its arbitrary object fields
+/// carry no cv-defined semantics. Consumers must apply their own identity privacy policy before
+/// sharing a principal; secret redaction does not anonymize it.
 pub fn redact_with(session: &Session, opts: &RedactOptions) -> anyhow::Result<(Session, RedactStats)> {
     let mut out = session.clone();
     let resolver = session.resolver();
