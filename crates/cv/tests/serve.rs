@@ -1530,3 +1530,48 @@ fn removed_server_spellings_point_at_cv_serve() {
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
 }
+
+#[test]
+fn lanes_task_enrichment_reports_degraded_replay_and_skips_empty_forests() {
+    let w = world("lanes-task-warnings");
+    w.write_agent(
+        "betasess",
+        "warning-lane",
+        &json!({"agentType": "general-purpose", "description": "useful lane"}),
+        &[
+            json!({"type": "user", "uuid": "lane-u", "timestamp": "2026-01-01T10:00:00Z",
+            "message": {"role": "user", "content": "work"}}),
+        ],
+    );
+    let log = w.cv_home.join("tasks/events.jsonl");
+    fs::create_dir_all(log.parent().unwrap()).unwrap();
+    fs::write(&log, "{malformed task event}\n").unwrap();
+    let (port, _reaper) = spawn_serve(&w);
+    let (status, body) = get_json(port, "/api/lanes?session=betasess");
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["counts"]["total"], 1, "{body}");
+    assert_eq!(body["lanes"][0]["description"], "useful lane", "{body}");
+    assert!(!body["warnings"].as_array().unwrap().is_empty(), "{body}");
+    fs::remove_file(&log).unwrap();
+    fs::create_dir(&log).unwrap(); // task replay now fails, rather than warning and continuing
+    let (status, body) = get_json(port, "/api/lanes?session=betasess");
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["counts"]["total"], 1, "{body}");
+    assert!(
+        body["warnings"][0]
+            .as_str()
+            .unwrap()
+            .contains("task enrichment unavailable"),
+        "{body}"
+    );
+    let (status, body) = get_json(port, "/api/lanes?session=alphasess");
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["counts"]["total"], 0, "{body}");
+    assert!(
+        body["warnings"].as_array().unwrap().is_empty(),
+        "empty forest does not consult broken task log: {body}"
+    );
+    w.cv_ok(&["lanes", "alphasess", "--tasks", "--json"]);
+    // All of the fixture's lanes are not done, so filtering done leaves no task join to read.
+    w.cv_ok(&["lanes", "betasess", "--done", "--tasks", "--json"]);
+}

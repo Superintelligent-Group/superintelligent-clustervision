@@ -115,9 +115,17 @@ fn api_lanes(q: &Query) -> (u16, Value) {
         Ok(lanes) => lanes,
         Err(error) => return (500, json!({"error": format!("{error:#}")})),
     };
-    // Each lane joined to the tasks its endpoint holds (the page shows the task + last note).
-    if let Ok(outcome) = task::replay() {
-        cv_core::lanes::attach_tasks(&mut lanes, &outcome.model);
+    // Task enrichment is optional: retain useful lane facts while exposing degraded replay.
+    // An empty forest has no task join to perform and must not inspect the task log.
+    let mut warnings = Vec::new();
+    if !lanes.is_empty() {
+        match task::replay() {
+            Ok(outcome) => {
+                cv_core::lanes::attach_tasks(&mut lanes, &outcome.model);
+                warnings = outcome.warnings;
+            }
+            Err(error) => warnings.push(format!("task enrichment unavailable: {error:#}")),
+        }
     }
     lanes.sort_by(|a, b| {
         b.is_running()
@@ -133,6 +141,7 @@ fn api_lanes(q: &Query) -> (u16, Value) {
             "session": r.id,
             "counts": {"total": lanes.len(), "running": running, "done": done, "stranded": stranded},
             "lanes": lanes,
+            "warnings": warnings,
         }),
     )
 }
