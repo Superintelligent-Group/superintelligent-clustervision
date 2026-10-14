@@ -420,9 +420,10 @@ fn description_of(cmd: &CommandSpec, a: &ArgSpec) -> String {
 /// Turn an MCP `arguments` object into the argv after the binary: command words, then positionals
 /// in declaration order, then options and flags, then `--json` when the command has it.
 pub(crate) fn build_argv(cmd: &CommandSpec, args: &Value) -> Result<Vec<String>> {
+    let empty = Map::new();
     let obj = match args {
-        Value::Null => Map::new(),
-        Value::Object(o) => o.clone(),
+        Value::Null => &empty,
+        Value::Object(o) => o,
         other => return Err(invalid(format!("arguments must be an object, got {other}"))),
     };
 
