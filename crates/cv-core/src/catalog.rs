@@ -799,11 +799,15 @@ mod imp {
         if o.get(VERSION_KEY).and_then(serde_json::Value::as_u64) != Some(crate::affordance::VIEW_VERSION.into()) {
             return None;
         }
-        Some(
-            o.iter()
-                .filter_map(|(k, v)| Some((crate::affordance::Kind::parse(k)?, v.as_u64()? as u32)))
-                .collect(),
-        )
+        let mut counts = crate::affordance::Counts::new();
+        for (key, value) in &o {
+            if let Some(kind) = crate::affordance::Kind::parse(key) {
+                // A malformed known count is a cache miss, not an absent affordance or a
+                // wrapped zero. Unknown extension keys remain forward compatible.
+                counts.insert(kind, u32::try_from(value.as_u64()?).ok()?);
+            }
+        }
+        Some(counts)
     }
 
     /// Compatibility entry point without a before-read source snapshot. It cannot publish fresh
@@ -1462,6 +1466,21 @@ mod imp {
 
         /// A counts row an older view wrote (no version, or another one) is "not counted": a kind
         /// that view did not know must not read as absent.
+        #[test]
+        fn malformed_known_counts_are_cache_misses_without_integer_wrapping() {
+            for value in [
+                serde_json::json!(4294967296_u64),
+                serde_json::json!(-1),
+                serde_json::json!("1"),
+                serde_json::Value::Null,
+            ] {
+                let text = serde_json::json!({"_v":crate::affordance::VIEW_VERSION, "approval":value}).to_string();
+                assert!(counts_of(&text).is_none(), "{text}");
+            }
+            let valid = serde_json::json!({"_v":crate::affordance::VIEW_VERSION, "approval":u32::MAX, "future_kind":"unknown extension"}).to_string();
+            assert_eq!(counts_of(&valid).unwrap()[&crate::affordance::Kind::Approval], u32::MAX);
+        }
+
         #[test]
         fn counts_an_older_view_wrote_are_not_counted() {
             let mut c = crate::affordance::Counts::new();
