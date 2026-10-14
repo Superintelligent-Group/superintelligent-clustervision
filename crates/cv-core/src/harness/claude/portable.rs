@@ -276,91 +276,92 @@ pub(super) fn stream(
         },
     )?;
     let mut spawns = crate::affordance::AffordanceSink::new(Harness::Claude, sink);
-    let sink = &mut spawns;
     frames.keep_small_records(64 * 1024);
-    while let Some(row) = frames.next() {
-        let (raw, complete) = match row {
-            Ok(row) => row,
-            Err(_) => break,
-        };
-        let range = if frames.small_record().is_some() {
-            raw
-        } else {
-            trim_ascii(file, raw)?
-        };
-        let mut flow = Flow::Continue;
-        if let Some(bytes) = frames.small_record() {
-            flow = ingest_bytes(&mut session, bytes, raw.offset, opts, sink, inputs);
-        } else if range.len == 0 {
-            // A giant whitespace-only physical record has no JSON body.
-        } else if opts.spans {
-            let projected;
-            let message_opts =
-                if opts.wants_full_extra() && sink.extra_projection() == crate::stream::ExtraProjection::Facts {
-                    projected = ParseOptions {
-                        extra_projection: crate::stream::ExtraProjection::Facts,
-                        ..opts.clone()
+    crate::stream::checked(&mut spawns, |sink| {
+        while let Some(row) = frames.next() {
+            let (raw, complete) = match row {
+                Ok(row) => row,
+                Err(_) => break,
+            };
+            let range = if frames.small_record().is_some() {
+                raw
+            } else {
+                trim_ascii(file, raw)?
+            };
+            let mut flow = Flow::Continue;
+            if let Some(bytes) = frames.small_record() {
+                flow = ingest_bytes(&mut session, bytes, raw.offset, opts, sink, inputs);
+            } else if range.len == 0 {
+                // A giant whitespace-only physical record has no JSON body.
+            } else if opts.spans {
+                let projected;
+                let message_opts =
+                    if opts.wants_full_extra() && sink.extra_projection() == crate::stream::ExtraProjection::Facts {
+                        projected = ParseOptions {
+                            extra_projection: crate::stream::ExtraProjection::Facts,
+                            ..opts.clone()
+                        };
+                        &projected
+                    } else {
+                        opts
                     };
-                    &projected
-                } else {
-                    opts
-                };
-            // read_range_value retains strict full-record acceptance before projection.
-            match source.read_range_value(range.offset, range.len, |view| conversation(view, message_opts)) {
-                Ok(Some((meta, content))) => {
-                    published |= content.blocks.iter().any(sourced);
-                    if published {
-                        if let Some(inputs) = inputs {
-                            inputs.has_sources.set(true);
+                // read_range_value retains strict full-record acceptance before projection.
+                match source.read_range_value(range.offset, range.len, |view| conversation(view, message_opts)) {
+                    Ok(Some((meta, content))) => {
+                        published |= content.blocks.iter().any(sourced);
+                        if published {
+                            if let Some(inputs) = inputs {
+                                inputs.has_sources.set(true);
+                            }
+                        }
+                        if let Some(mode) = meta.get("permissionMode").and_then(Value::as_str) {
+                            crate::affordance::note_mode(session.harness_extra_mut(Harness::Claude), mode);
+                        }
+                        note_conversation_metadata(
+                            &mut session,
+                            meta.get("cwd").and_then(Value::as_str),
+                            meta.get("gitBranch").and_then(Value::as_str),
+                            meta.get("timestamp").and_then(Value::as_str).and_then(parse_ts),
+                        );
+                        let ty = meta.get("type").and_then(Value::as_str).unwrap_or("");
+                        if let Some(message) = parse_message_projected(ty, &meta, message_opts, None, Some(content)) {
+                            let ctx = SpanCtx {
+                                slice: &[],
+                                base_off: range.offset,
+                                json_inputs: None,
+                            };
+                            flow = emit_conversation(&mut session, message, opts, sink, Some(&ctx));
                         }
                     }
-                    if let Some(mode) = meta.get("permissionMode").and_then(Value::as_str) {
-                        crate::affordance::note_mode(session.harness_extra_mut(Harness::Claude), mode);
+                    Ok(None) => {
+                        flow = fallback(&mut session, file, &source, range, opts, sink)?;
                     }
-                    note_conversation_metadata(
-                        &mut session,
-                        meta.get("cwd").and_then(Value::as_str),
-                        meta.get("gitBranch").and_then(Value::as_str),
-                        meta.get("timestamp").and_then(Value::as_str).and_then(parse_ts),
-                    );
-                    let ty = meta.get("type").and_then(Value::as_str).unwrap_or("");
-                    if let Some(message) = parse_message_projected(ty, &meta, message_opts, None, Some(content)) {
-                        let ctx = SpanCtx {
-                            slice: &[],
-                            base_off: range.offset,
-                            json_inputs: None,
-                        };
-                        flow = emit_conversation(&mut session, message, opts, sink, Some(&ctx));
+                    Err(error) if error.downcast_ref::<InvalidJson>().is_some() => {
+                        flow = fallback(&mut session, file, &source, range, opts, sink)?;
                     }
+                    Err(error) => return Err(error),
                 }
-                Ok(None) => {
-                    flow = fallback(&mut session, file, &source, range, opts, sink)?;
-                }
-                Err(error) if error.downcast_ref::<InvalidJson>().is_some() => {
-                    flow = fallback(&mut session, file, &source, range, opts, sink)?;
-                }
-                Err(error) => return Err(error),
+            } else {
+                flow = fallback(&mut session, file, &source, range, opts, sink)?;
             }
-        } else {
-            flow = fallback(&mut session, file, &source, range, opts, sink)?;
+            if published || inputs.is_some_and(|i| i.has_sources.get()) {
+                source.check_metadata(file.metadata()?)?;
+            }
+            if flow == Flow::Stop {
+                break;
+            }
+            let end = frames.offset();
+            if complete && sink.wants_checkpoint(end) {
+                let mut cp = Checkpoint::new(end);
+                cp.put(ADAPTER_LAYER, &session);
+                sink.checkpoint(&mut cp);
+            }
         }
-        if published || inputs.is_some_and(|i| i.has_sources.get()) {
+        if published {
             source.check_metadata(file.metadata()?)?;
         }
-        if flow == Flow::Stop {
-            break;
-        }
-        let end = frames.offset();
-        if complete && sink.wants_checkpoint(end) {
-            let mut cp = Checkpoint::new(end);
-            cp.put(ADAPTER_LAYER, &session);
-            sink.checkpoint(&mut cp);
-        }
-    }
-    if published {
-        source.check_metadata(file.metadata()?)?;
-    }
-    Ok(session)
+        Ok(session)
+    })
 }
 
 fn fallback(

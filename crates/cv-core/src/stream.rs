@@ -298,27 +298,32 @@ pub(crate) struct CheckedReader<'a, R> {
     error: &'a mut Option<anyhow::Error>,
 }
 impl<R> CheckedReader<'_, R> {
-    fn check(&mut self) -> std::io::Result<()> {
-        if self.error.is_none() {
-            if let Err(error) = (self.check)() {
-                *self.error = Some(error);
-            }
-        }
+    fn check(&mut self) -> std::io::Result<bool> {
+        // Some tolerant line readers continue after errors. Once interruption is latched,
+        // terminate their input rather than providing an infinite sequence of errors.
         if self.error.is_some() {
+            return Ok(false);
+        }
+        if let Err(error) = (self.check)() {
+            *self.error = Some(error);
             return Err(std::io::Error::other("input read interrupted"));
         }
-        Ok(())
+        Ok(true)
     }
 }
 impl<R: std::io::Read> std::io::Read for CheckedReader<'_, R> {
     fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
-        self.check()?;
+        if !self.check()? {
+            return Ok(0);
+        }
         self.reader.read(bytes)
     }
 }
 impl<R: std::io::BufRead> std::io::BufRead for CheckedReader<'_, R> {
     fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
-        self.check()?;
+        if !self.check()? {
+            return Ok(&[]);
+        }
         self.reader.fill_buf()
     }
     fn consume(&mut self, bytes: usize) {
