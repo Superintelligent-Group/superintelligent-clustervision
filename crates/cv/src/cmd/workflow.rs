@@ -606,23 +606,35 @@ fn mine_lane(a: &cv_core::WorkflowAgent, run_id: &str, session_path: Option<&std
     };
     let bare = id.strip_prefix("agent-").unwrap_or(id);
     let path = dir.join(format!("agent-{bare}.jsonl"));
-    let Ok(text) = std::fs::read_to_string(&path) else {
+    let Ok(file) = std::fs::File::open(&path) else {
         return rev;
     };
-    mine_transcript(&text, &mut rev);
+    mine_transcript_reader(std::io::BufReader::new(file), &mut rev);
     rev
 }
 
 /// The transcript-mining half of [`mine_lane`], split from path resolution so it can be tested
 /// on JSONL text alone: the FULL first user prompt, the files the lane wrote or edited, its distinct
 /// Bash commands (first line, capped), and its last substantive note.
+#[cfg(test)]
 fn mine_transcript(text: &str, rev: &mut Revivable) {
+    mine_transcript_reader(std::io::Cursor::new(text.as_bytes()), rev);
+}
+
+fn mine_transcript_reader(reader: impl std::io::BufRead, rev: &mut Revivable) {
     let mut seen_files = std::collections::BTreeSet::new();
     let mut seen_cmds = std::collections::BTreeSet::new();
     let mut got_prompt = false;
 
-    for line in text.lines() {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+    // Retain one physical record rather than the whole transcript alongside its parsed record.
+    // Corrupt records are omitted; a read failure ends this best-effort recovery scan.
+    for line in std::io::BufRead::lines(reader) {
+        let line = match line {
+            Ok(line) => line,
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidData => continue,
+            Err(_) => break,
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
         let role = v.pointer("/message/role").and_then(|r| r.as_str()).unwrap_or("");
@@ -769,6 +781,37 @@ mod tests {
                 assert_eq!(truncate(&args, 200), truncate(&value.to_string(), 200));
             }
         }
+    }
+
+    #[test]
+    fn revive_reader_recovers_valid_records_after_corrupt_utf8_and_large_ignored_results() {
+        let mut input = Vec::new();
+        input.extend_from_slice(b"invalid-json\n\xff\n");
+        let prompt = serde_json::json!({"message":{"role":"user","content":"full task"}});
+        let ignored = serde_json::json!({"message":{"role":"user","content":[{"type":"tool_result","content":"x".repeat(1100000)}]}});
+        let write = serde_json::json!({"message":{"role":"assistant","content":[{"type":"tool_use","name":"Write","input":{"file_path":"recovered.rs"}}]}});
+        for value in [prompt, ignored, write] {
+            input.extend_from_slice(format!("{value}\n").as_bytes());
+        }
+        let mut rev = Revivable {
+            label: "reader".into(),
+            agent_id: None,
+            phase: 0,
+            state: "error".into(),
+            error: None,
+            tokens: 0,
+            tool_calls: 0,
+            prompt: Some("preview".into()),
+            files: vec![],
+            commands: vec![],
+            last_note: None,
+        };
+        mine_transcript_reader(
+            std::io::BufReader::with_capacity(17, std::io::Cursor::new(input)),
+            &mut rev,
+        );
+        assert_eq!(rev.prompt.as_deref(), Some("full task"));
+        assert_eq!(rev.files, vec!["recovered.rs"]);
     }
 
     #[test]
