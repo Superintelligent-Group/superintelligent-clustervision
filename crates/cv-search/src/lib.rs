@@ -125,6 +125,12 @@ pub fn text_search(dir: impl Into<Option<PathBuf>>, query: &str, limit: usize) -
     fts::text_search(&dir, query, limit)
 }
 
+/// Distinguish an invalid full-text expression from an unavailable index. Callers may
+/// degrade storage/setup failures to live search, but a rejected query is a caller error.
+pub fn is_invalid_text_query(error: &anyhow::Error) -> bool {
+    error.is::<tantivy::query::QueryParserError>()
+}
+
 /// Match every indexed session ID, without ranking or reading source transcripts.
 pub fn text_search_ids(dir: impl Into<Option<PathBuf>>, query: &str) -> Result<std::collections::HashSet<String>> {
     fts::text_search_ids(&dir.into().unwrap_or_else(default_tantivy_dir), query)

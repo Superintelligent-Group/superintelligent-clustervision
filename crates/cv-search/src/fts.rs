@@ -3705,6 +3705,21 @@ mod tests {
     }
 
     #[test]
+    fn invalid_query_errors_remain_distinct_from_missing_index_and_empty_results() {
+        let _home = IsolatedHome::new();
+        let dir = tmpdir();
+        open_or_create(&dir).unwrap();
+        let ranked = text_search_indexed(&dir, "no_such_field:value", 1).unwrap_err();
+        assert!(crate::is_invalid_text_query(&ranked));
+        let batch = text_search_ids_batch(&dir, &["needle", "no_such_field:value"]).unwrap();
+        assert!(batch[0].as_ref().unwrap().is_empty());
+        assert!(crate::is_invalid_text_query(batch[1].as_ref().unwrap_err()));
+        let setup = text_search_ids(&dir.join("missing"), "needle").unwrap_err();
+        assert!(!crate::is_invalid_text_query(&setup));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn body_only_filter_decisions_are_not_reused_by_session_identity() {
         let _home = IsolatedHome::new();
         for reverse in [false, true] {

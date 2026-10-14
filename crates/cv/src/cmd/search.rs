@@ -59,6 +59,7 @@ pub(crate) fn cmd_search(
                 render_search_hits(hits, want, limit, query, "index", json)?;
                 return Ok(());
             }
+            Err(e) if cv_search::is_invalid_text_query(&e) => return crate::util::usage(format!("{e:#}")),
             Err(e) => eprintln!("(tantivy index unavailable: {e:#}; scanning live)"),
         }
     } else {
