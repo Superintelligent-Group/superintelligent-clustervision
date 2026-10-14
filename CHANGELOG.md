@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Hermes reads ordinary SQLite text bodies incrementally, avoiding whole-cell native allocations while preserving copied-session deduplication and compatibility schemas.
+
+- Selected agent and workflow views skip unrelated child files, journals and workflow bodies while preserving identity resolution and ordering.
+- MCP observation matches messages incrementally, preserves unread tails and checks cancellation during reads, projection and initial prefix scans.
+- HTTP and desktop semantic search reuse checked model and vector state, reloading changed stores and rejecting stale model artifacts.
+- Task writes return states captured during their append, avoiding repeated journal replay and interference from later concurrent writes.
+- Lane views display task-log warnings and retryable loading errors; empty selections skip task enrichment while preserving forest totals.
+
 - Shared text construction streams canonical escaping directly, removing repeatedly grown temporary buffers while preserving checked sources and exact output.
 
 - Continue exports preserve native usage and cost, report unsupported cache-creation counts, and reject overflowing conversions before publishing.
