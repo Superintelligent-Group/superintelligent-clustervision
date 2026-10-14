@@ -411,9 +411,10 @@ struct DemandReader<'a, R> {
     state: &'a DemandState,
     since_check: usize,
 }
+const DEMAND_WINDOW: usize = 64 * 1024;
 impl<R> DemandReader<'_, R> {
     fn before_read(&mut self) -> std::io::Result<()> {
-        if !self.state.failed() && self.since_check >= 64 * 1024 {
+        if !self.state.failed() && self.since_check >= DEMAND_WINDOW {
             if let Err(error) = self.source.check() {
                 self.state.fail(error);
             }
@@ -435,7 +436,9 @@ impl<R: std::io::BufRead> std::io::BufRead for DemandReader<'_, R> {
     fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
         self.before_read()?;
         match self.inner.fill_buf() {
-            Ok(bytes) => Ok(bytes),
+            // Cursor-backed mmap readers otherwise expose the entire remaining file. Lossy
+            // UTF8 validation would scan it before the first bounded callback could stop.
+            Ok(bytes) => Ok(&bytes[..bytes.len().min(DEMAND_WINDOW)]),
             Err(error) => {
                 let kind = error.kind();
                 self.state.fail(error.into());
@@ -1363,6 +1366,29 @@ fn unescape_json_body(raw: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn checked_mapped_demands_expose_only_one_validation_window() {
+        use std::io::BufRead;
+        let world = cv_testkit::World::in_process("checked-demand-window");
+        let path = world.base.join("source");
+        let mut body = "x".repeat(super::DEMAND_WINDOW - 1);
+        body.push_str("🌙tail");
+        std::fs::write(&path, &body).unwrap();
+        let source = super::CheckedSource::open(&path).unwrap();
+        let state = super::DemandState::default();
+        let mut reader = super::DemandReader {
+            inner: std::io::Cursor::new(body.as_bytes()),
+            source: &source,
+            state: &state,
+            since_check: 0,
+        };
+        assert_eq!(reader.fill_buf().unwrap().len(), super::DEMAND_WINDOW);
+        let mut decoded = String::new();
+        super::stream_lossy_utf8(&mut reader, &mut |part| decoded.push_str(part));
+        assert_eq!(decoded, body);
+        state.finish(&source).unwrap();
+    }
+
     use super::*;
 
     struct CheckedTestDir(PathBuf);
