@@ -97,7 +97,8 @@ fn render_search_hits(
     if json {
         let stdout = std::io::stdout();
         let mut out = std::io::BufWriter::new(stdout.lock());
-        write_json_rows(&mut out, &hits, hit_json)?;
+        let rows = cv_core::rows::SearchRowContext::new();
+        write_json_rows(&mut out, &hits, |hit| hit_json(hit, &rows))?;
         out.flush()?;
         return Ok(());
     }
@@ -185,7 +186,7 @@ fn write_json_rows<T>(out: &mut impl Write, rows: &[T], row: impl Fn(&T) -> serd
 
 /// One `--json` object for an index/semantic hit — [`cv_core::rows::SearchRow`] does the shaping,
 /// so `cv search --json` and `cv serve`'s `/api/search` emit the identical row for the identical hit.
-fn hit_json(h: &cv_search::Hit) -> serde_json::Value {
+fn hit_json(h: &cv_search::Hit, rows: &cv_core::rows::SearchRowContext) -> serde_json::Value {
     cv_core::rows::SearchRow {
         id: &h.id,
         harness: &h.harness,
@@ -199,7 +200,7 @@ fn hit_json(h: &cv_search::Hit) -> serde_json::Value {
         parent_id: h.parent_id.as_deref(),
         workflow: h.workflow.as_deref(),
     }
-    .to_json()
+    .to_json_with(rows)
 }
 
 fn cmd_search_live(query: &str, want: Option<Harness>, limit: usize, json: bool) -> Result<()> {
