@@ -941,26 +941,46 @@ mod imp {
         }
     }
 
+    /// UTF-8 lexicographic successor of a literal prefix for SQLite's binary text index.
+    /// A suffix of maximal scalars carries into the preceding scalar; empty/all-maximal
+    /// prefixes need no upper bound. Skip the surrogate gap, which Rust strings cannot contain.
+    fn prefix_end(prefix: &str) -> Option<String> {
+        for (offset, ch) in prefix.char_indices().rev() {
+            if ch != char::MAX {
+                let next = if ch == '\u{d7ff}' {
+                    '\u{e000}'
+                } else {
+                    char::from_u32(ch as u32 + 1)?
+                };
+                let mut end = prefix[..offset].to_owned();
+                end.push(next);
+                return Some(end);
+            }
+        }
+        None
+    }
+
     /// All catalog rows whose id equals `id` or starts with it, optionally constrained to one
     /// harness. Order: exact-id matches first. Empty on any error or a cold catalog.
     pub fn lookup(id: &str, harness: Option<Harness>) -> Vec<SessionRef> {
         let Some(conn) = open() else { return Vec::new() };
-        // Escape LIKE metacharacters so ids containing `%`/`_` match literally (same treatment as
-        // `events::sessions_touching`) — `_` is common in real session ids.
-        let escaped = id.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
-        let like = format!("{escaped}%");
+        let upper = prefix_end(id);
+        // Binary prefix ranges use idx_sessions_id; LIKE's case-folded comparison would scan
+        // the entire table despite that index, and disagree with literal Rust ID matching.
+        let range = if upper.is_some() {
+            "id>=?1 AND id<?2"
+        } else {
+            "id>=?1 AND ?2 IS NULL"
+        };
         let Ok(mut stmt) = conn.prepare(&format!(
             "SELECT {REF_COLUMNS} FROM sessions
-             WHERE (id=?1 OR id LIKE ?2 ESCAPE '\\')
-             AND (?3 IS NULL OR harness=?3)
+             WHERE {range} AND (?3 IS NULL OR harness=?3)
              ORDER BY (id=?1) DESC",
         )) else {
             return Vec::new();
         };
-        let rows = stmt.query_map(params![id, like, harness.map(Harness::as_str)], row_to_ref);
+        let rows = stmt.query_map(params![id, upper, harness.map(Harness::as_str)], row_to_ref);
         let Ok(rows) = rows else { return Vec::new() };
-        // SQLite LIKE folds ASCII case. The candidate query is deliberately a superset;
-        // enforce the same literal, case-sensitive prefix contract as uncataloged resolution.
         rows.flatten().flatten().filter(|r| r.id.starts_with(id)).collect()
     }
 
@@ -1043,7 +1063,21 @@ mod imp {
         #[test]
         fn lookup_matches_literal_case_sensitive_prefixes() {
             let w = cv_testkit::World::in_process("catalog-literal-prefix");
-            let ids = ["Alpha", "alpha", "a_%\\literal", "aXYliteral", "λ_session", "λ_other"];
+            let ids = [
+                "Alpha",
+                "alpha",
+                "a_%\\literal",
+                "aXYliteral",
+                "λ_session",
+                "λ_other",
+                "a\0one",
+                "a\0two",
+                "a\u{d7ff}tail",
+                "a\u{e000}tail",
+                "a\u{10ffff}tail",
+                "\u{10ffff}tail",
+                "\u{10ffff}\u{10ffff}tail",
+            ];
             let refs: Vec<_> = ids
                 .into_iter()
                 .enumerate()
@@ -1058,7 +1092,21 @@ mod imp {
             foreign.path = w.base.join("foreign.jsonl");
             sync(&refs);
             sync(&[foreign]);
-            for prefix in ["A", "a", "a_%\\", "λ_", "λ_s", ""] {
+            for prefix in [
+                "A",
+                "a",
+                "a_%\\",
+                "λ_",
+                "λ_s",
+                "",
+                "a\0",
+                "a\u{d7ff}",
+                "a\u{e000}",
+                "a\u{10ffff}",
+                "\u{10ffff}",
+                "\u{10ffff}\u{10ffff}",
+                "missing",
+            ] {
                 let actual: std::collections::BTreeSet<_> = lookup(prefix, Some(Harness::Claude))
                     .into_iter()
                     .map(|r| r.id)
