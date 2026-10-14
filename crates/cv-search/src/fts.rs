@@ -2463,11 +2463,18 @@ fn ranked_search(
             // Resumed chunks can retain older labels/cwd: filter the same current meta doc that
             // describes the returned hit, falling back only for legacy body-only documents.
             match shared.resolve(id) {
-                MetadataDecision::Present { accepted, .. } => return Ok(accepted),
+                MetadataDecision::Present { accepted, .. } => {
+                    return Ok(crate::session_collector::FilterDecision::Session(accepted))
+                }
                 MetadataDecision::Missing | MetadataDecision::Unavailable => {}
             }
             let fallback = store.get::<TantivyDocument>(doc_id)?;
-            Ok(metadata_matches(&fallback, &fields, harness.as_deref(), cwd.as_deref()))
+            Ok(crate::session_collector::FilterDecision::Document(metadata_matches(
+                &fallback,
+                &fields,
+                harness.as_deref(),
+                cwd.as_deref(),
+            )))
         }));
     }
     let ranked = searcher.search(&parsed, &collector).context("running search")?;
@@ -3648,13 +3655,15 @@ mod tests {
                     fallback = store.get::<TantivyDocument>(doc_id)?;
                     &fallback
                 };
-                Ok(harness.as_ref().is_none_or(|wanted| {
-                    doc.get_first(fields.harness).and_then(|v| v.as_str()) == Some(wanted.as_str())
-                }) && cwd.as_ref().is_none_or(|needle| {
-                    doc.get_first(fields.cwd)
-                        .and_then(|v| v.as_str())
-                        .is_some_and(|value| value.contains(needle))
-                }))
+                Ok(crate::session_collector::FilterDecision::Session(
+                    harness.as_ref().is_none_or(|wanted| {
+                        doc.get_first(fields.harness).and_then(|v| v.as_str()) == Some(wanted.as_str())
+                    }) && cwd.as_ref().is_none_or(|needle| {
+                        doc.get_first(fields.cwd)
+                            .and_then(|v| v.as_str())
+                            .is_some_and(|value| value.contains(needle))
+                    }),
+                ))
             }));
         }
         let ranked = searcher.search(&parsed, &collector).context("running search")?;
@@ -3693,6 +3702,45 @@ mod tests {
             });
         }
         Ok(hits)
+    }
+
+    #[test]
+    fn body_only_filter_decisions_are_not_reused_by_session_identity() {
+        let _home = IsolatedHome::new();
+        for reverse in [false, true] {
+            let dir = tmpdir();
+            let (index, f) = open_or_create(&dir).unwrap();
+            let mut writer = open_writer(&index, 15_000_000).unwrap();
+            let rows = [
+                ("claude", "/outside", "needle needle needle", "wrong"),
+                ("codex", "/wanted", "needle padding padding", "right"),
+            ];
+            for i in if reverse { vec![1, 0] } else { vec![0, 1] } {
+                let (harness, cwd, body, preview) = rows[i];
+                writer
+                    .add_document(tantivy::doc!(f.id => "legacy", f.kind => KIND_BODY,
+                    f.harness => harness, f.cwd => cwd, f.body => body, f.preview => preview))
+                    .unwrap();
+            }
+            writer.commit().unwrap();
+            drop(writer);
+            for filter in [
+                crate::SearchFilter {
+                    harness: Some("codex"),
+                    cwd: None,
+                },
+                crate::SearchFilter {
+                    harness: None,
+                    cwd: Some("wanted"),
+                },
+            ] {
+                let hits = text_search_indexed_filtered(&dir, "needle", 1, filter).unwrap();
+                assert_eq!(hits.len(), 1);
+                assert_eq!(hits[0].harness, "codex");
+                assert_eq!(hits[0].snippet, "right");
+            }
+            std::fs::remove_dir_all(dir).unwrap();
+        }
     }
 
     #[test]

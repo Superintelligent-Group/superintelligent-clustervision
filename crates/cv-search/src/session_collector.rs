@@ -134,7 +134,13 @@ impl Winners {
     }
 }
 
-type SessionFilter = std::sync::Arc<dyn Fn(&str, &StoreReader, DocId) -> tantivy::Result<bool> + Send + Sync>;
+pub(crate) enum FilterDecision {
+    /// Authoritative current session metadata is uniform across its body documents.
+    Session(bool),
+    /// Legacy/body-only fallback may differ even between chunks of the same session.
+    Document(bool),
+}
+type SessionFilter = std::sync::Arc<dyn Fn(&str, &StoreReader, DocId) -> tantivy::Result<FilterDecision> + Send + Sync>;
 
 pub(crate) struct TopSessions {
     pub(crate) filter: Option<SessionFilter>,
@@ -254,20 +260,24 @@ impl SegmentCollector for SessionSegment {
                     let accepted = if let Some(accepted) = self.filter_cache.get(&id) {
                         *accepted
                     } else {
-                        let accepted = match filter(&id, &self.store, doc) {
-                            Ok(accepted) => accepted,
+                        let decision = match filter(&id, &self.store, doc) {
+                            Ok(decision) => decision,
                             Err(error) => {
                                 self.error = Some(error);
                                 return;
                             }
                         };
-                        // A bounded metadata cache avoids repeated meta lookups for adjacent
-                        // chunks. Clearing it changes only lookup cost, never selection.
-                        if self.filter_cache.len() == 64 {
-                            self.filter_cache.clear();
+                        match decision {
+                            FilterDecision::Document(accepted) => accepted,
+                            FilterDecision::Session(accepted) => {
+                                // Only authoritative session decisions can be reused by id.
+                                if self.filter_cache.len() == 64 {
+                                    self.filter_cache.clear();
+                                }
+                                self.filter_cache.insert(id.clone(), accepted);
+                                accepted
+                            }
                         }
-                        self.filter_cache.insert(id.clone(), accepted);
-                        accepted
                     };
                     if !accepted {
                         return;
