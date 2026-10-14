@@ -10,6 +10,9 @@
 - Harness indexes cv updates on emit (Continue, OpenClaw, Gemini) and cv's config are replaced by rename; a symlinked config is replaced at its target.
 - `prune --copy-resources` refuses an existing resource directory; with `--force` the new directory replaces it whole instead of merging into it.
 - Reading SQLite harness stores no longer rewrites their `-shm`: WAL stores are opened `immutable=1` when frameless, otherwise through a private db+WAL snapshot.
+- `prune --drop-thinking` omits old thinking blocks with no inline marker, removing emptied records and relinking their children; `cv cat` still retrieves them.
+- Prune's revive estimate anchors on recorded usage and the resumed branch, erring high; calibrated against the API it never read more than 1% low.
+- One token estimator with per-kind rates calibrated against `count_tokens` replaces the flat 3.5 bytes/token in doctor, prune and distill.
 - `cv serve` runs on a small built-in server: idle connections close after 5 s, excess connections get 503, and accept errors no longer stop serving.
 - `cv prune --to` refuses an existing session or sidecar name (exit 2, nothing written); `--force` replaces it by atomic rename, never truncating in place.
 - Prune, rewind, adopt, share and archive outputs publish fsynced, without needing hard links (FAT, exFAT); rewind outputs keep the source's permissions.
