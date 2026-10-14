@@ -49,7 +49,7 @@ fn pass(
         _ => data.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]),
     };
     if compressed {
-        let decoder = ruzstd::decoding::StreamingDecoder::new(data).ok()?;
+        let decoder = crate::harness::store::zst::decoder(data).ok()?;
         let mut de = serde_json::Deserializer::from_reader(std::io::BufReader::new(decoder));
         let out = seed.deserialize(&mut de).ok()?;
         de.end().ok()?;
@@ -95,7 +95,7 @@ fn pass_reader(
     };
     let seed = Root { count, target, f };
     if compressed {
-        let decoder = ruzstd::decoding::StreamingDecoder::new(data).ok()?;
+        let decoder = crate::harness::store::zst::decoder(data).ok()?;
         let mut de = serde_json::Deserializer::from_reader(std::io::BufReader::new(decoder));
         let out = seed.deserialize(&mut de).ok()?;
         de.end().ok()?;
@@ -148,7 +148,7 @@ fn decode(data_type: Option<&str>, data: impl std::io::Read) -> Option<ByteSourc
         _ => data.fill_buf().ok()?.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]),
     };
     if compressed {
-        ByteSource::read(ruzstd::decoding::StreamingDecoder::new(data).ok()?).ok()
+        ByteSource::read(crate::harness::store::zst::decoder(data).ok()?).ok()
     } else {
         ByteSource::read(data).ok()
     }
@@ -351,13 +351,11 @@ mod tests {
     fn invalid_utf8_or_compressed_tail_never_emits_a_prefix() {
         let json = b"{\"messages\":[{\"role\":\"user\",\"text\":\"ok\"}],\"ignored\":\"\xff\"}";
         assert!(serde_json::from_slice::<Value>(json).is_err());
-        let compressed =
-            ruzstd::encoding::compress_to_vec(json.as_slice(), ruzstd::encoding::CompressionLevel::Fastest);
+        let compressed = zstd::encode_all(json.as_slice(), 1).unwrap();
         assert!(header(Some("json"), json, false).is_none());
         assert!(header(Some("zstd"), &compressed, false).is_none());
         let valid = br#"{"messages":[{"role":"user","text":"ok"}]}"#;
-        let compressed =
-            ruzstd::encoding::compress_to_vec(valid.as_slice(), ruzstd::encoding::CompressionLevel::Fastest);
+        let compressed = zstd::encode_all(valid.as_slice(), 1).unwrap();
         assert!(header(Some("zstd"), &compressed[..compressed.len() - 1], false).is_none());
     }
 
@@ -405,7 +403,7 @@ mod tests {
             }
             for compressed in [false, true] {
                 let bytes = if compressed {
-                    ruzstd::encoding::compress_to_vec(text.as_bytes(), ruzstd::encoding::CompressionLevel::Fastest)
+                    zstd::encode_all(text.as_bytes(), 1).unwrap()
                 } else {
                     text.as_bytes().to_vec()
                 };

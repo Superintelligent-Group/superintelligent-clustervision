@@ -171,7 +171,7 @@ impl Adapter for Codex {
                 }
                 // `.jsonl.zst`: Codex compresses rollouts colder than 7 days in place
                 // (rollout/src/compression.rs); `.tmp` are its staging files. The zstd decoder rides
-                // the `sqlite` feature (ruzstd), so compressed rollouts are only listed when we can
+                // the `sqlite` feature (`store::zst`), so compressed rollouts are only listed when we can
                 // read them.
                 if !name.ends_with(".jsonl") && !name.ends_with(".json") && !is_zst_rollout(name) {
                     continue;
@@ -367,7 +367,7 @@ impl ResumeState {
 }
 
 /// A `rollout-*.jsonl.zst`: Codex's in-place compression of cold rollouts (readable only with the
-/// `sqlite` feature, which brings the pure-Rust ruzstd decoder).
+/// `sqlite` feature, which brings the `store::zst` decoder).
 fn is_zst_rollout(name: &str) -> bool {
     cfg!(feature = "sqlite") && name.ends_with(".jsonl.zst")
 }
@@ -386,7 +386,7 @@ fn open_rollout(path: &Path) -> Result<Box<dyn BufRead>> {
     let f = fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
     #[cfg(feature = "sqlite")]
     if is_zst_path(path) {
-        let dec = ruzstd::decoding::StreamingDecoder::new(BufReader::new(f))
+        let dec = super::store::zst::decoder(BufReader::new(f))
             .map_err(|e| anyhow::anyhow!("zstd header of {}: {e}", path.display()))?;
         return Ok(Box::new(BufReader::new(dec)));
     }
@@ -2659,11 +2659,7 @@ mod tests {
             });
             if compressed {
                 #[cfg(feature = "sqlite")]
-                std::fs::write(
-                    &path,
-                    ruzstd::encoding::compress_to_vec(raw.as_bytes(), ruzstd::encoding::CompressionLevel::Fastest),
-                )
-                .unwrap();
+                std::fs::write(&path, zstd::encode_all(raw.as_bytes(), 1).unwrap()).unwrap();
             } else {
                 std::fs::write(&path, &raw).unwrap();
             }
@@ -2804,11 +2800,7 @@ mod tests {
         #[cfg(feature = "sqlite")]
         let paths = {
             let compressed_path = world.base.join("rollout-corrupt.jsonl.zst");
-            std::fs::write(
-                &compressed_path,
-                ruzstd::encoding::compress_to_vec(raw.as_slice(), ruzstd::encoding::CompressionLevel::Fastest),
-            )
-            .unwrap();
+            std::fs::write(&compressed_path, zstd::encode_all(raw.as_slice(), 1).unwrap()).unwrap();
             let mut paths = paths;
             paths.push(compressed_path);
             paths
@@ -2837,8 +2829,7 @@ mod tests {
         let record = serde_json::json!({"type":"response_item","payload":{
             "type":"function_call_output","call_id":"call","output":text}})
         .to_string();
-        let compressed =
-            ruzstd::encoding::compress_to_vec(record.as_bytes(), ruzstd::encoding::CompressionLevel::Fastest);
+        let compressed = zstd::encode_all(record.as_bytes(), 1).unwrap();
         for (path, bytes) in [
             (world.base.join("rollout-source.jsonl"), record.into_bytes()),
             (world.base.join("rollout-source.jsonl.zst"), compressed),
@@ -4181,7 +4172,7 @@ mod tests {
         let _world = cv_testkit::World::in_process("codex-zstd");
         let lines = fixture_lines("zstd_compressed_rollouts_are_discovered_scanned_and_parsed.jsonl");
         let raw = lines.join("\n") + "\n";
-        let zst = ruzstd::encoding::compress_to_vec(raw.as_bytes(), ruzstd::encoding::CompressionLevel::Fastest);
+        let zst = zstd::encode_all(raw.as_bytes(), 1).unwrap();
         let root = std::env::temp_dir().join(format!("cv-codex-zst-{}", uuid::Uuid::new_v4()));
         let day = root.join("sessions").join("2026").join("08").join("01");
         std::fs::create_dir_all(&day).unwrap();

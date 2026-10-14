@@ -1857,7 +1857,7 @@ impl EventRows<'_> {
 #[cfg(feature = "sqlite")]
 fn decompress_zstd(data: &[u8]) -> Option<Vec<u8>> {
     use std::io::Read as _;
-    let mut decoder = ruzstd::decoding::StreamingDecoder::new(data).ok()?;
+    let mut decoder = super::store::zst::decoder(data).ok()?;
     let mut out = Vec::new();
     decoder.read_to_end(&mut out).ok()?;
     Some(out)
@@ -2656,10 +2656,7 @@ mod tests {
                     .ok()
                     .is_some_and(|v| matches!(v["id"].as_str(), Some("a2" | "m4")))
                 {
-                    let compressed = ruzstd::encoding::compress_to_vec(
-                        event.as_bytes(),
-                        ruzstd::encoding::CompressionLevel::Fastest,
-                    );
+                    let compressed = zstd::encode_all(event.as_bytes(), 1).unwrap();
                     writer.execute("UPDATE transcript_events SET event_json=NULL,event_zstd=?1 WHERE session_id='checked' AND seq=?2", rusqlite::params![compressed, seq as i64]).unwrap();
                 }
             }
@@ -3505,7 +3502,7 @@ mod tests {
         let rows: Vec<Row> = vec![
             ("parent-1", 0, Some(r#"{"type":"session","version":4,"id":"parent-1","timestamp":"2026-10-11T20:00:00Z","cwd":"/w"}"#.into()), None),
             ("parent-1", 1, Some(r#"{"type":"message","id":"p2","parentId":null,"timestamp":"2026-10-11T20:00:01Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"c1","name":"sessions_spawn","arguments":{}}],"model":"m"}}"#.into()), None),
-            ("parent-1", 2, None, Some(ruzstd::encoding::compress_to_vec(spawn_result.as_bytes(), ruzstd::encoding::CompressionLevel::Fastest))),
+            ("parent-1", 2, None, Some(zstd::encode_all(spawn_result.as_bytes(), 1).unwrap())),
             ("parent-1", 3, Some(announce), None),
             ("parent-1", 4, None, Some(b"\x28\xb5\x2f\xfd not a frame".to_vec())),
             ("child-1", 0, Some(r#"{"type":"message","id":"k1","parentId":null,"timestamp":"2026-10-11T20:00:01Z","message":{"role":"user","content":"Reply ok."}}"#.into()), None),

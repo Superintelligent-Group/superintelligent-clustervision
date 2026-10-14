@@ -20,6 +20,8 @@ pub(crate) mod text;
 
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
+#[cfg(feature = "sqlite")]
+pub(crate) mod zst;
 
 /// Validate discarded JSON with the same scalar, UTF-16 and depth checks as `Value`, without
 /// retaining its tree. `IgnoredAny` skips some of those checks. Escaped strings still use serde's

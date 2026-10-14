@@ -254,7 +254,7 @@ mod tests {
         }
         for compressed in [false, true] {
             let bytes = if compressed {
-                ruzstd::encoding::compress_to_vec(raw.as_bytes(), ruzstd::encoding::CompressionLevel::Fastest)
+                zstd::encode_all(raw.as_bytes(), 1).unwrap()
             } else {
                 raw.as_bytes().to_vec()
             };

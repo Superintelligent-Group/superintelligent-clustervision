@@ -296,7 +296,7 @@ fn decoded_cell(arena: &crate::harness::store::bytes::ByteSource, encoded: (u64,
         },
     )?;
     let failure = RefCell::new(None);
-    let mut decoder = match ruzstd::decoding::StreamingDecoder::new(CheckedRead {
+    let mut decoder = match crate::harness::store::zst::decoder(CheckedRead {
         inner: input,
         failure: &failure,
     }) {

@@ -1,5 +1,5 @@
 //! Zed editor agent-panel adapter — `threads.db` (SQLite, zstd-compressed JSON blobs).
-//! **sqlite feature only** (rusqlite + ruzstd).
+//! **sqlite feature only** (rusqlite + `store::zst`).
 //!
 //! Zed keeps every agent thread in one SQLite DB under its data dir:
 //!   * **macOS:**   `~/Library/Application Support/Zed/threads/threads.db`
@@ -870,7 +870,7 @@ mod tests {
 
     fn zstd_blob(json: &Value) -> Vec<u8> {
         let bytes = serde_json::to_vec(json).unwrap();
-        ruzstd::encoding::compress_to_vec(bytes.as_slice(), ruzstd::encoding::CompressionLevel::Fastest)
+        zstd::encode_all(bytes.as_slice(), 1).unwrap()
     }
 
     fn sref(id: &str) -> SessionRef {
