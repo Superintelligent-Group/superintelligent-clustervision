@@ -31,8 +31,7 @@ pub(super) fn ingest(replay: &mut RecordingReplay<RangeBody>, source: &RangeSour
             roster.push("messages");
             let values = source.select_fields(set, &roster)?.unwrap();
             if let Some(messages) = values[RECORD_METADATA.len()] {
-                replay.order.clear();
-                replay.msgs.clear();
+                replay.clear_messages();
                 if let Some(messages) = source.array(messages)? {
                     for message in messages {
                         let message = message?;

@@ -52,7 +52,7 @@ use crate::stream::{CollectSink, Flow, MessageSink, ParseOptions};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -937,6 +937,8 @@ struct RecordingReplay<T = Value> {
     /// call (seen on 0.63.0), and keying by id alone let it overwrite the assistant turn.
     order: Vec<String>,
     msgs: BTreeMap<String, T>,
+    /// First insertion position for each wire ID, shared across type-qualified replay keys.
+    first_positions: HashMap<String, usize>,
     /// Whether a real metadata line (sessionId + projectHash) was seen.
     saw_meta: bool,
     /// How many `$rewindTo` records were replayed (names the synthetic Branch markers).
@@ -961,6 +963,7 @@ impl<T> Default for RecordingReplay<T> {
             metadata: Default::default(),
             order: Vec::new(),
             msgs: BTreeMap::new(),
+            first_positions: HashMap::new(),
             saw_meta: false,
             rewinds: 0,
         }
@@ -971,6 +974,9 @@ impl<T> RecordingReplay<T> {
     fn insert(&mut self, key: String, body: T) {
         match self.msgs.entry(key) {
             std::collections::btree_map::Entry::Vacant(entry) => {
+                self.first_positions
+                    .entry(key_id(entry.key()).to_owned())
+                    .or_insert(self.order.len());
                 self.order.push(entry.key().clone());
                 entry.insert(body);
             }
@@ -980,14 +986,23 @@ impl<T> RecordingReplay<T> {
         }
     }
 
+    fn clear_messages(&mut self) {
+        self.order.clear();
+        self.msgs.clear();
+        self.first_positions.clear();
+    }
+
     fn rewind(&mut self, target: &str, make_marker: impl FnOnce(Value) -> T) {
-        if let Some(pos) = self.order.iter().position(|k| key_id(k) == target) {
-            for id in self.order.drain(pos..) {
-                self.msgs.remove(&id);
+        if let Some(pos) = self.first_positions.get(target).copied() {
+            for key in self.order.drain(pos..) {
+                let id = key_id(&key);
+                if self.first_positions.get(id).is_some_and(|first| *first >= pos) {
+                    self.first_positions.remove(id);
+                }
+                self.msgs.remove(&key);
             }
         } else {
-            self.order.clear();
-            self.msgs.clear();
+            self.clear_messages();
         }
         self.rewinds += 1;
         let marker_id = format!("$rewind-{}", self.rewinds);
@@ -1015,8 +1030,7 @@ impl<T> RecordingReplay<T> {
             if let Some(set) = lean::Record::parse(*set) {
                 for (k, v) in set.fields {
                     if k == "messages" {
-                        self.order.clear();
-                        self.msgs.clear();
+                        self.clear_messages();
                         if let Some(messages) = lean::array(v) {
                             for raw in messages {
                                 if let Some(m) = lean::Record::parse(raw) {
@@ -1082,8 +1096,7 @@ impl RecordingReplay<Value> {
             for (k, v) in set {
                 if k == "messages" {
                     // Checkpoint: rebuild the whole message list.
-                    self.order.clear();
-                    self.msgs.clear();
+                    self.clear_messages();
                     if let Value::Array(arr) = v {
                         for m in arr {
                             if let Some(key) = replay_key(&m) {
@@ -2514,6 +2527,61 @@ mod tests {
         assert_eq!(s.model.as_deref(), Some("gemini-3-pro"));
         assert_eq!(s.messages[1].model, None);
         assert_eq!(s.messages[2].model.as_deref(), Some("gemini-3-flash"));
+    }
+
+    #[test]
+    fn rewind_index_matches_linear_first_wire_id_oracle_on_long_history() {
+        let mut replay = RecordingReplay::<Value>::default();
+        let mut order = Vec::<String>::new();
+        let mut bodies = BTreeMap::<String, Value>::new();
+        let insert = |replay: &mut RecordingReplay<Value>,
+                      order: &mut Vec<String>,
+                      bodies: &mut BTreeMap<String, Value>,
+                      key: String| {
+            if !bodies.contains_key(&key) {
+                order.push(key.clone());
+            }
+            bodies.insert(key.clone(), Value::Null);
+            replay.insert(key, Value::Null);
+        };
+        for index in 0..4096 {
+            insert(
+                &mut replay,
+                &mut order,
+                &mut bodies,
+                format!("user\u{1f}prefix-{index}"),
+            );
+        }
+        for turn in 1..=128 {
+            let target = format!("tail-{turn}");
+            for kind in ["user", "gemini"] {
+                insert(&mut replay, &mut order, &mut bodies, format!("{kind}\u{1f}{target}"));
+            }
+            // Replacement must keep the first occurrence's index.
+            insert(&mut replay, &mut order, &mut bodies, format!("user\u{1f}{target}"));
+            let position = order.iter().position(|key| key_id(key) == target).unwrap();
+            for key in order.drain(position..) {
+                bodies.remove(&key);
+            }
+            let marker_id = format!("$rewind-{turn}");
+            let marker = serde_json::json!({"id":marker_id,"type":"rewind","rewindTo":target});
+            order.push(marker_id.clone());
+            bodies.insert(marker_id, marker);
+            replay.rewind(&target, |value| value);
+        }
+        assert_eq!(replay.order, order);
+        assert_eq!(replay.msgs, bodies);
+        assert_eq!(replay.first_positions.len(), order.len());
+        for (id, position) in &replay.first_positions {
+            assert_eq!(key_id(&order[*position]), id);
+        }
+        replay.clear_messages();
+        assert!(replay.first_positions.is_empty());
+        replay.insert("user\u{1f}prefix-0".into(), Value::Null);
+        replay.rewind("prefix-0", |value| value);
+        assert_eq!(replay.order, ["$rewind-129"]);
+        replay.rewind("missing", |value| value);
+        assert_eq!(replay.order, ["$rewind-130"]);
     }
 
     #[test]
