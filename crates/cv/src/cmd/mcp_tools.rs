@@ -453,7 +453,7 @@ pub(crate) fn build_argv(cmd: &CommandSpec, args: &Value) -> Result<Vec<String>>
     // A missing required argument is the caller's protocol mistake (the schema said so), not a
     // `cv` failure — answer it the same way whatever kind of argument it is, rather than letting
     // clap's usage text come back as a tool error for options but not for positionals.
-    if let Some(a) = cmd.args.iter().find(|a| a.required && present(&obj, &a.name).is_none()) {
+    if let Some(a) = cmd.args.iter().find(|a| a.required && present(obj, &a.name).is_none()) {
         return Err(invalid(format!(
             "missing required argument `{}` for `{}`",
             a.name,
@@ -466,7 +466,7 @@ pub(crate) fn build_argv(cmd: &CommandSpec, args: &Value) -> Result<Vec<String>>
     // Positionals first and in order: `cat <session> <tool_use_id>` would silently swap its
     // arguments if a hole were left in the middle.
     for a in cmd.args.iter().filter(|a| a.kind == ArgKind::Positional) {
-        match present(&obj, &a.name) {
+        match present(obj, &a.name) {
             // A list fills a repeatable positional (`splice <spec>…`) in order.
             Some(Value::Array(items)) => {
                 for v in items {
@@ -482,7 +482,7 @@ pub(crate) fn build_argv(cmd: &CommandSpec, args: &Value) -> Result<Vec<String>>
     }
 
     for a in cmd.args.iter().filter(|a| a.kind == ArgKind::Option) {
-        let Some(v) = present(&obj, &a.name) else { continue };
+        let Some(v) = present(obj, &a.name) else { continue };
         // A list repeats the flag (`--blocked-by A --blocked-by B`), as a repeatable option takes it.
         let values = match v {
             Value::Array(items) => items.iter().collect(),
@@ -498,7 +498,7 @@ pub(crate) fn build_argv(cmd: &CommandSpec, args: &Value) -> Result<Vec<String>>
         if a.name == "json" {
             continue;
         }
-        match present(&obj, &a.name) {
+        match present(obj, &a.name) {
             Some(Value::Bool(true)) => argv.push(a.long_flag()),
             Some(Value::Bool(false)) | None => {}
             Some(other) => {
@@ -510,7 +510,7 @@ pub(crate) fn build_argv(cmd: &CommandSpec, args: &Value) -> Result<Vec<String>>
         }
     }
 
-    apply_mcp_defaults(cmd, &obj, &mut argv);
+    apply_mcp_defaults(cmd, obj, &mut argv);
 
     if cmd.has_json() {
         argv.push("--json".into());

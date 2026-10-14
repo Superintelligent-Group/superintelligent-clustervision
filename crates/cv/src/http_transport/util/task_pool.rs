@@ -91,7 +91,7 @@ impl TaskPool {
         if self
             .sharing
             .admitted
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
                 (count < self.sharing.capacity).then_some(count + 1)
             })
             .is_err()
