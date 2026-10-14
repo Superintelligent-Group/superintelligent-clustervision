@@ -3,8 +3,8 @@
 //! each growing its own ad-hoc flags.
 //!
 //! The whole language is driven by one table — [`FIELDS`] — which is the single source of truth for
-//! parsing, evaluation routing, the human reference (`cv query`), and the machine-readable schema
-//! (`cv query --json`). Add a row there and the field is parseable, evaluable, *and* documented; the
+//! parsing, evaluation routing, the human reference (`cv schema`), and the machine-readable schema
+//! (`cv schema --json`). Add a row there and the field is parseable, evaluable, *and* documented; the
 //! three can't drift.
 //!
 //! # Grammar
@@ -378,7 +378,7 @@ pub struct SessionQuery {
 }
 
 impl SessionQuery {
-    /// Parse a query string. Errors are human-readable and point back at `cv query`.
+    /// Parse a query string. Errors are human-readable and point back at `cv schema`.
     pub fn parse(input: &str) -> Result<SessionQuery, String> {
         let toks = lex(input)?;
         let mut p = Parser { toks, i: 0 };
@@ -388,7 +388,7 @@ impl SessionQuery {
             let e = p.parse_or()?;
             if p.i < p.toks.len() {
                 return Err(format!(
-                    "unexpected {:?} (unbalanced parens?) — see `cv query`",
+                    "unexpected {:?} (unbalanced parens?) — see `cv schema`",
                     p.toks[p.i]
                 ));
             }
@@ -827,7 +827,7 @@ fn lex(input: &str) -> Result<Vec<Tok>, String> {
             i += 1;
         }
         if in_quote {
-            return Err("unterminated quote — see `cv query`".to_string());
+            return Err("unterminated quote — see `cv schema`".to_string());
         }
         // Keywords only when unquoted: `"and"` is a needle, AND is an operator.
         match (w.as_str(), quoted_from) {
@@ -907,7 +907,7 @@ impl Parser {
                         self.i += 1;
                         Ok(e)
                     }
-                    _ => Err("missing ')' — see `cv query`".to_string()),
+                    _ => Err("missing ')' — see `cv schema`".to_string()),
                 }
             }
             Some(Tok::Word(w)) => {
@@ -915,7 +915,7 @@ impl Parser {
                 self.i += 1;
                 parse_term(&w)
             }
-            other => Err(format!("expected a term, found {other:?} — see `cv query`")),
+            other => Err(format!("expected a term, found {other:?} — see `cv schema`")),
         }
     }
 }
@@ -935,11 +935,11 @@ fn parse_term(w: &Word) -> Result<Expr, String> {
         // bare `http://…`, `key:value` prose) falls back to a plain needle.
         if let Some(def) = field_for(field) {
             if def.id == FieldId::Text && op != Op::Contains {
-                return Err("`text:` uses full-text search and only takes `:`; use `text:\"quoted phrase\"` for a phrase — see `cv query`".into());
+                return Err("`text:` uses full-text search and only takes `:`; use `text:\"quoted phrase\"` for a phrase — see `cv schema`".into());
             }
             if !matches!(def.kind, Kind::Num | Kind::Date) && !matches!(op, Op::Contains | Op::Eq) {
                 return Err(format!(
-                    "operator {} isn't valid on {} (string field) — see `cv query`",
+                    "operator {} isn't valid on {} (string field) — see `cv schema`",
                     op.as_str(),
                     def.name
                 ));
@@ -956,7 +956,7 @@ fn parse_term(w: &Word) -> Result<Expr, String> {
                     };
                     if op != Op::Contains {
                         return Err(format!(
-                            "{f}: is sugar for `updated{}` and only takes `:` — write `updated{}` for an explicit comparison — see `cv query`",
+                            "{f}: is sugar for `updated{}` and only takes `:` — write `updated{}` for an explicit comparison — see `cv schema`",
                             sugar.as_str(),
                             op.as_str()
                         ));
@@ -970,7 +970,7 @@ fn parse_term(w: &Word) -> Result<Expr, String> {
         }
         if matches!(field.to_ascii_lowercase().as_str(), "thread" | "path") {
             return Err(
-                "`thread:` message paths were removed in 0.15.0 — select the session (`tool:`, `text:`, `has:`) and read the turns with `cv show` — see `cv query`"
+                "`thread:` message paths were removed in 0.15.0 — select the session (`tool:`, `text:`, `has:`) and read the turns with `cv show` — see `cv schema`"
                     .to_string(),
             );
         }
@@ -1048,7 +1048,7 @@ fn parse_value(def: &FieldDef, op: Op, raw: &str, quoted: bool) -> Result<Val, S
             let names = or_list(raw, quoted, false);
             for n in &names {
                 if Harness::parse(n).is_none() {
-                    return Err(format!("unknown harness {n:?} — see `cv query`"));
+                    return Err(format!("unknown harness {n:?} — see `cv schema`"));
                 }
             }
             Ok(Val::Strs(names))
@@ -1058,7 +1058,7 @@ fn parse_value(def: &FieldDef, op: Op, raw: &str, quoted: bool) -> Result<Val, S
             for fl in &flags {
                 if !HAS_FLAGS.iter().any(|(n, _)| n == fl) {
                     return Err(format!(
-                        "unknown has-flag {fl:?} (try {}) — see `cv query`",
+                        "unknown has-flag {fl:?} (try {}) — see `cv schema`",
                         HAS_FLAGS.iter().map(|(n, _)| *n).collect::<Vec<_>>().join("/")
                     ));
                 }
@@ -1068,7 +1068,7 @@ fn parse_value(def: &FieldDef, op: Op, raw: &str, quoted: bool) -> Result<Val, S
         Kind::Str | Kind::Path => {
             let strs = or_list(raw, quoted, true);
             if strs.is_empty() {
-                return Err(format!("empty value for {} — see `cv query`", def.name));
+                return Err(format!("empty value for {} — see `cv schema`", def.name));
             }
             Ok(Val::Strs(strs))
         }
@@ -1078,7 +1078,7 @@ fn parse_value(def: &FieldDef, op: Op, raw: &str, quoted: bool) -> Result<Val, S
 fn parse_u64(s: &str, def: &FieldDef) -> Result<u64, String> {
     s.trim()
         .parse::<u64>()
-        .map_err(|_| format!("{} wants a number, got {s:?} — see `cv query`", def.name))
+        .map_err(|_| format!("{} wants a number, got {s:?} — see `cv schema`", def.name))
 }
 
 fn parse_date(val: &str) -> Result<DateTime<Utc>, String> {
@@ -1088,7 +1088,7 @@ fn parse_date(val: &str) -> Result<DateTime<Utc>, String> {
     }
     DateTime::parse_from_rfc3339(val)
         .map(|dt| dt.with_timezone(&Utc))
-        .map_err(|_| format!("date {val:?} isn't YYYY-MM-DD or RFC3339 — see `cv query`"))
+        .map_err(|_| format!("date {val:?} isn't YYYY-MM-DD or RFC3339 — see `cv schema`"))
 }
 
 /// Split a `field<op>value` word into (field, op, value). Returns None if there's no operator.
@@ -1109,7 +1109,7 @@ fn split_op(w: &str) -> Result<Option<(&str, Op, &str)>, String> {
     if w[k..].starts_with('~') {
         return if field_for(field).is_some() {
             Err(
-                "the `~` regex operator was removed in 0.15.0 — `:` is substring, `=` exact — see `cv query`"
+                "the `~` regex operator was removed in 0.15.0 — `:` is substring, `=` exact — see `cv schema`"
                     .to_string(),
             )
         } else {
@@ -1137,13 +1137,14 @@ fn split_op(w: &str) -> Result<Option<(&str, Op, &str)>, String> {
 // Reference generation (the LLM-facing minispec) + machine schema.
 // ---------------------------------------------------------------------------
 
-/// A compact, complete reference for the query language — printed by `cv query` and embedded in
+/// A compact, complete reference for the query language — printed by `cv schema` and embedded in
 /// parse-error help so an agent crawling the CLI discovers the whole calculus from one place.
 pub fn reference() -> String {
     let mut s = String::new();
-    s.push_str("cv query calculus — one DSL for selecting sessions (used by `-q` on ls/dataset/stats).\n\n");
+    s.push_str("Session query calculus — one DSL for selecting sessions (used by `-q` on ls/dataset/stats).\n\n");
     s.push_str("GRAMMAR\n");
     s.push_str("  terms combine with implicit AND; also: OR (or |), NOT (or a leading -), and ( ) grouping.\n");
+    s.push_str("  unquoted | is always OR, even without spaces; quote literal pipes in URLs or values.\n");
     s.push_str("  a term is  field<op>value  — or a bare word, which matches title/cwd/id.\n");
     s.push_str("  (an unknown `key:value` word is a bare needle too — so URLs just work.)\n");
     s.push_str("  ops: ':' (contains) '=' (exact); for numbers/dates also > >= < <=\n");
@@ -1184,7 +1185,7 @@ pub fn reference() -> String {
     s
 }
 
-/// The machine-readable schema (for `cv query --json`) — fields, types, operators, costs, examples.
+/// The machine-readable schema (for `cv schema --json`) — fields, types, operators, costs, examples.
 pub fn schema_json() -> serde_json::Value {
     use serde_json::json;
     let fields: Vec<_> = FIELDS

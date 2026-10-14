@@ -72,6 +72,15 @@ fn compact_pipe_is_an_operator_but_quoted_pipe_is_literal() {
     let r = refx("alpha", Harness::Claude, None, Some("a|b"), 1);
     assert!(q("title=\"a|b\"").prefilter(&r));
     assert!(q("\"a|b\"").prefilter(&r));
+    let url = refx("alpha", Harness::Claude, None, Some("https://host/a|b"), 1);
+    assert!(q("title=\"https://host/a|b\"").prefilter(&url));
+    assert!(q("\"https://host/a|b\"").prefilter(&url));
+    assert_eq!(q("title:\"a|b\"|title:c").expr, q("title:\"a|b\" OR title:c").expr);
+    // Regex matching was removed: quoting preserves the needle as literal text, including pipes.
+    assert!(q("title:\"a|b\"").prefilter(&r));
+    assert!(SessionQuery::parse("title~\"a|b\"")
+        .unwrap_err()
+        .contains("regex operator was removed"));
     for source in ["|harness:claude", "harness:claude|", "harness:claude||harness:codex"] {
         assert!(SessionQuery::parse(source).is_err(), "{source}");
     }
@@ -97,6 +106,27 @@ fn catalog_string_equality_differs_from_contains() {
         assert!(q(&format!("{field}=\"{whole}\"")).prefilter(&r));
     }
     assert!(!q("cwd=/repo").prefilter(&refx("alpha", Harness::Claude, None, None, 1)));
+}
+
+#[test]
+fn invalid_queries_point_to_current_schema_command() {
+    for source in [
+        "title:\"unterminated",
+        "(title:x",
+        "harness:no-such-harness",
+        "has:no-such-flag",
+        "msgs:no-number",
+        "updated:no-date",
+        "title~pattern",
+        "thread:old",
+        "text=word",
+        "before>=2026-01-01",
+    ] {
+        let error = SessionQuery::parse(source).unwrap_err();
+        assert!(error.contains("see `cv schema`"), "{source}: {error}");
+        assert!(!error.contains("cv query"), "{source}: {error}");
+    }
+    assert!(reference().contains("unquoted | is always OR"));
 }
 
 #[test]
