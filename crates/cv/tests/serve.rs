@@ -331,12 +331,17 @@ fn spawn_serve_with(w: &World, extra: &[&str]) -> (u16, Reaper) {
 /// is `try_wait()`ed inside the wait loop so a server that dies at startup fails the test with its
 /// exit status immediately instead of as connection-reset noise later.
 fn spawn_serve_cfg(w: &World, extra: &[&str], envs: &[(&str, &str)]) -> (u16, Reaper) {
-    let mut args: Vec<String> = vec!["serve".into(), "--port".into(), "0".into()];
-    args.extend(extra.iter().map(|s| s.to_string()));
-    let mut child = w
-        .cv_command()
-        .args(&args)
-        .envs(envs.iter().copied())
+    let mut command = w.cv_command();
+    command
+        .args(["serve", "--port", "0"])
+        .args(extra)
+        .envs(envs.iter().copied());
+    spawn_serve_command(command)
+}
+
+/// Spawn a prepared `cv serve` command (whatever wraps it) and wait for its listener.
+fn spawn_serve_command(mut command: std::process::Command) -> (u16, Reaper) {
+    let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -905,10 +910,24 @@ fn serve_static_web_hub() {
     assert!(status == 403 || status == 200, "status {status}");
     assert!(!body.contains("TOP SECRET"), "traversal leaked the secret:\n{body}");
     // Encoded traversal too.
-    let (status, body) = http(port, "GET", "/%2e%2e/secret.txt");
+    for path in [
+        "/%2e%2e/secret.txt",
+        "/..%2fsecret.txt",
+        "/%2e%2e%2fsecret.txt",
+        "/x/../../secret.txt",
+    ] {
+        let (status, body) = http(port, "GET", path);
+        assert!(!body.contains("TOP SECRET"), "{path} leaked:\n{body} (status {status})");
+    }
+    let secret = web.parent().unwrap().join("secret.txt");
+    let (status, body) = http(
+        port,
+        "GET",
+        &format!("/{}", secret.display().to_string().replace('/', "%2f")),
+    );
     assert!(
         !body.contains("TOP SECRET"),
-        "encoded traversal leaked:\n{body} (status {status})"
+        "absolute segment leaked:\n{body} (status {status})"
     );
 }
 
@@ -1469,6 +1488,123 @@ fn request_body_framing_rejects_ambiguous_or_unsupported_headers() {
     let mut raw = String::new();
     stream.read_to_string(&mut raw).unwrap();
     assert_eq!(raw_status(&raw), 200, "{raw}");
+}
+
+/// Every pipelined request passes the Host check on its own: an allowed first request does not
+/// vouch for the next one on the same connection.
+#[test]
+fn pipelined_requests_each_pass_the_host_check() {
+    let w = world("pipelined-host");
+    let (port, _server) = spawn_serve(&w);
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    write!(stream, "GET /api/health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\nGET /api/health HTTP/1.1\r\nHost: evil.example\r\n\r\nGET /api/health HTTP/1.1\r\nConnection: close\r\n\r\n").unwrap();
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw).unwrap();
+    let statuses: Vec<&str> = raw
+        .match_indices("HTTP/1.1 ")
+        .map(|(at, _)| &raw[at + 9..at + 12])
+        .collect();
+    assert_eq!(statuses, ["200", "403", "403"], "{raw}");
+}
+
+/// Idle connections cannot lock the server out: past the connection cap a newcomer is answered
+/// 503 at once, never queued behind them, and each idle one is closed at the first-byte deadline.
+#[test]
+fn idle_connections_are_shed_then_expire() {
+    let w = world("idle-shed");
+    let (port, _server) = spawn_serve(&w);
+    std::thread::sleep(Duration::from_millis(200)); // let the readiness probe's connection end
+    let idle: Vec<TcpStream> = (0..64)
+        .map(|_| TcpStream::connect(("127.0.0.1", port)).unwrap())
+        .collect();
+    std::thread::sleep(Duration::from_millis(300));
+    let started = Instant::now();
+    let raw = raw_get(port, "/api/health");
+    assert_eq!(raw_status(&raw), 503, "{raw}");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "shedding waited {:?}",
+        started.elapsed()
+    );
+    for mut stream in idle {
+        stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let mut rest = Vec::new();
+        assert!(
+            matches!(stream.read_to_end(&mut rest), Ok(0)),
+            "an idle connection got {rest:?}"
+        );
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(8),
+        "idle connections held {:?}",
+        started.elapsed()
+    );
+    assert_eq!(get_json(port, "/api/health").0, 200);
+}
+
+/// Accept errors are survived: with the descriptor limit far below the connections offered,
+/// accept fails with EMFILE, and the loop backs off and keeps serving once descriptors free up.
+#[cfg(unix)]
+#[test]
+fn accept_errors_back_off_and_the_server_keeps_serving() {
+    let w = world("emfile");
+    let template = w.cv_command();
+    let mut command = std::process::Command::new("sh");
+    command
+        .arg("-c")
+        .arg("ulimit -n 48 && exec \"$0\" serve --port 0")
+        .arg(template.get_program())
+        .env_clear()
+        .envs(template.get_envs().filter_map(|(k, v)| Some((k, v?))));
+    if let Some(dir) = template.get_current_dir() {
+        command.current_dir(dir);
+    }
+    let (port, mut server) = spawn_serve_command(command);
+    let flood: Vec<TcpStream> = (0..80)
+        .filter_map(|_| TcpStream::connect(("127.0.0.1", port)).ok())
+        .collect();
+    std::thread::sleep(Duration::from_millis(500));
+    drop(flood);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        assert!(server.0.try_wait().unwrap().is_none(), "cv serve exited under EMFILE");
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let mut raw = String::new();
+        let sent = write!(
+            stream,
+            "GET /api/health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+        );
+        if sent.is_ok() && stream.read_to_string(&mut raw).is_ok() && raw.starts_with("HTTP/1.1 200") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the accept loop never recovered: {raw:?}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// A client that vanishes mid-request or mid-response costs its own connection only.
+#[test]
+fn abandoned_requests_and_responses_leave_the_server_serving() {
+    let w = world("abandoned");
+    let rows: Vec<_> = (0..2000)
+        .map(|n| json!({"type":"user", "uuid":format!("u{n}"), "message":{"role":"user","content":"x".repeat(500)}}))
+        .collect();
+    w.write_session("big", &rows);
+    let (port, _server) = spawn_serve(&w);
+    for request in [
+        "GET /api/sess".to_string(),
+        "POST /api/task/x/note HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{".to_string(),
+        "GET /api/session/claude/big/export?format=markdown HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".to_string(),
+    ] {
+        for _ in 0..8 {
+            let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            stream.write_all(request.as_bytes()).unwrap();
+        }
+    }
+    assert_eq!(get_json(port, "/api/health").0, 200);
+    assert_eq!(get_json(port, "/api/session/claude/big/messages?start=0&end=1").0, 200);
 }
 
 /// Raw GET returning the full response text (headers + body) — for content-type / CORS assertions.
