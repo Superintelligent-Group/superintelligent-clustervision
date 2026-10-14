@@ -94,12 +94,7 @@ impl ToolHistogram {
         for event in scratch.iter() {
             self.note(event);
         }
-        scratch.clear();
-        // Reuse ordinary calls' row storage, but do not retain a giant multi-file patch's buffer
-        // while the next message parses. At most 64 event slots remain between messages.
-        if scratch.capacity() > 64 {
-            *scratch = Vec::new();
-        }
+        events::release_scratch(scratch);
         Ok(())
     }
 

@@ -221,6 +221,14 @@ pub fn extract(m: &Message, msg_idx: usize, cwd: Option<&Path>) -> Result<Vec<Ev
     Ok(out)
 }
 
+/// Reuse ordinary calls' row storage without retaining a wide patch's buffer between messages.
+pub(crate) fn release_scratch(events: &mut Vec<Event>) {
+    events.clear();
+    if events.capacity() > 64 {
+        *events = Vec::new();
+    }
+}
+
 pub(crate) fn extract_into(m: &Message, msg_idx: usize, cwd: Option<&Path>, out: &mut Vec<Event>) -> Result<()> {
     extract_into_for_tool(m, msg_idx, cwd, None, out)
 }

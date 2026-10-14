@@ -138,6 +138,7 @@ impl SpoolingSink {
                 return Flow::Stop;
             }
         }
+        super::release_scratch(&mut self.inner.events);
         Flow::Continue
     }
 
@@ -185,6 +186,27 @@ impl MessageSink for SpoolingSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wide_patch_rows_spool_in_order_without_retaining_extraction_capacity() {
+        let mut sink = SpoolingSink::new(None);
+        let patch: String = (0..2000).map(|i| format!("*** Update File: file-{i}\n")).collect();
+        let mut message = Message::new(crate::Role::Assistant);
+        message.content.push(crate::Block::ToolUse {
+            id: "wide".into(),
+            name: "apply_patch".into(),
+            namespace: None,
+            input: serde_json::json!({"patch": patch}).into(),
+        });
+        assert_eq!(sink.observe_message(&message), Flow::Continue);
+        assert!(sink.inner.events.capacity() <= 64);
+        let spool = sink.into_spool().unwrap();
+        let rows: Vec<_> = spool.rows().unwrap().collect::<Result<_>>().unwrap();
+        assert_eq!(rows.len(), 2000);
+        for (i, row) in rows.iter().enumerate() {
+            assert_eq!(row.target.as_deref(), Some(format!("file-{i}").as_str()));
+        }
+    }
 
     #[test]
     fn drained_spool_error_cannot_resume_delivery_or_publish_staged_rows() {
@@ -337,7 +359,7 @@ mod tests {
     #[test]
     fn ordered_publication_preserves_suffix_dedup_and_rolls_back_failures() {
         use crate::events::{
-            events_for, needs_ingest, record_from_with_source, record_spooled_with_source, Provenance,
+            Provenance, events_for, needs_ingest, record_from_with_source, record_spooled_with_source,
         };
         use crate::{Harness, SessionRef};
         let world = cv_testkit::World::in_process("event-spool-transaction");

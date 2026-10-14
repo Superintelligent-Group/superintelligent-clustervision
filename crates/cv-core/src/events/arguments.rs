@@ -2,6 +2,7 @@
 use crate::affordance::input::{self, Prefix};
 use crate::json::JsonView;
 use anyhow::Result;
+use std::collections::HashMap;
 
 const HEADERS: &[&str] = &["*** Update File:", "*** Add File:", "*** Delete File:", "*** Move to:"];
 
@@ -51,8 +52,8 @@ pub(super) struct Patch {
     codex: Header,
     unified: Header,
     old: Header,
-    primary: Vec<String>,
-    fallback: Vec<String>,
+    primary: HashMap<String, usize>,
+    fallback: HashMap<String, usize>,
     has_old: bool,
 }
 impl Patch {
@@ -74,10 +75,10 @@ impl Patch {
         }
     }
     fn end_line(&mut self) {
-        fn add(out: &mut Vec<String>, value: &str) {
+        fn add(out: &mut HashMap<String, usize>, value: &str) {
             let value = value.trim();
-            if !value.is_empty() && value != "/dev/null" && !out.iter().any(|path| path == value) {
-                out.push(value.to_string());
+            if !value.is_empty() && value != "/dev/null" && !out.contains_key(value) {
+                out.insert(value.to_string(), out.len());
             }
         }
         if let Some(value) = self.codex.value.take() {
@@ -92,13 +93,16 @@ impl Patch {
     }
     pub(super) fn finish(mut self) -> Vec<String> {
         self.end_line();
-        if !self.primary.is_empty() {
+        let paths = if !self.primary.is_empty() {
             self.primary
         } else if self.has_old {
             self.fallback
         } else {
-            Vec::new()
-        }
+            return Vec::new();
+        };
+        let mut ordered: Vec<_> = paths.into_iter().collect();
+        ordered.sort_unstable_by_key(|(_, position)| *position);
+        ordered.into_iter().map(|(path, _)| path).collect()
     }
 }
 
@@ -260,6 +264,19 @@ pub(super) fn file_key(view: JsonView<'_>, keys: &[&str]) -> Result<Option<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn wide_patch_dedup_preserves_first_seen_order_and_primary_precedence() {
+        let mut patch = Patch::default();
+        patch.push("--- a/fallback\n+++ b/fallback\n");
+        for i in (0..2000).rev() {
+            patch.push(&format!("*** Update File: file-{i}\n*** Update File: file-{i}\n"));
+        }
+        assert_eq!(patch.primary.len(), 2000);
+        assert_eq!(
+            patch.finish(),
+            (0..2000).rev().map(|i| format!("file-{i}")).collect::<Vec<_>>()
+        );
+    }
     #[test]
     fn trigger_matches_whole_string_across_every_boundary() {
         for text in [
