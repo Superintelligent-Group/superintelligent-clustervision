@@ -414,6 +414,16 @@ impl Watcher {
             .into_iter()
             .filter(|r| self.filter.matches(r))
             .collect();
+        // Positions are keyed by harness:id, so multiple concrete copies must have one
+        // authority. Otherwise an old and new copy overwrite the same cursor in one poll.
+        refs.sort_by(|a, b| {
+            a.harness
+                .as_str()
+                .cmp(b.harness.as_str())
+                .then_with(|| a.id.cmp(&b.id))
+                .then_with(|| a.preferred_copy_cmp(b))
+        });
+        refs.dedup_by(|a, b| a.harness == b.harness && a.id == b.id);
         refs.sort_by_key(|r| r.updated_at.or(r.created_at));
         refs
     }
@@ -757,6 +767,97 @@ mod tests {
             updated_at: None,
             message_count: 0,
         }
+    }
+
+    #[test]
+    fn duplicate_session_copies_follow_one_preferred_source_in_both_discovery_orders() {
+        fn copies() -> Vec<SessionRef> {
+            let mut old = sref(Harness::Claude, "/copies/old.jsonl".into());
+            old.updated_at = chrono::DateTime::from_timestamp(1, 0);
+            let mut new = old.clone();
+            new.path = "/copies/new.jsonl".into();
+            new.updated_at = chrono::DateTime::from_timestamp(2, 0);
+            let mut foreign = new.clone();
+            foreign.harness = Harness::Codex;
+            vec![old, foreign, new]
+        }
+        fn reversed() -> Vec<SessionRef> {
+            let mut refs = copies();
+            refs.reverse();
+            refs
+        }
+        for discovery in [copies as fn() -> Vec<SessionRef>, reversed] {
+            let watcher = Watcher::with_discovery(Filter::default(), true, discovery);
+            let selected = watcher.discover();
+            assert_eq!(selected.len(), 2, "different harnesses retain separate positions");
+            assert_eq!(
+                selected.iter().find(|r| r.harness == Harness::Claude).unwrap().path,
+                std::path::PathBuf::from("/copies/new.jsonl")
+            );
+        }
+        // Apply the requested filter before choosing among copies: a matching older cwd
+        // remains observable even when another copy lives outside the requested project.
+        fn projects() -> Vec<SessionRef> {
+            let mut refs = copies();
+            refs[0].cwd = Some("/requested".into());
+            refs[2].cwd = Some("/elsewhere".into());
+            refs
+        }
+        let watcher = Watcher::with_discovery(
+            Filter {
+                cwd_contains: Some("requested".into()),
+                ..Default::default()
+            },
+            true,
+            projects,
+        );
+        assert_eq!(
+            watcher.discover()[0].path,
+            std::path::PathBuf::from("/copies/old.jsonl")
+        );
+    }
+
+    #[test]
+    fn duplicate_copies_do_not_reset_the_cursor_and_repeat_preferred_copy_tails() {
+        let world = cv_testkit::World::in_process("watch-copy-tails");
+        fn discovery() -> Vec<SessionRef> {
+            let dir = std::path::PathBuf::from(std::env::var_os("CLUSTERVISION_HOME").unwrap());
+            let mut old = sref(Harness::Claude, dir.join("old.jsonl"));
+            old.updated_at = chrono::DateTime::from_timestamp(1, 0);
+            old.message_count = 1;
+            let mut new = old.clone();
+            new.path = dir.join("new.jsonl");
+            new.updated_at = chrono::DateTime::from_timestamp(2, 0);
+            new.message_count = 3; // Hold the trigger fixed; source freshness must catch append.
+            vec![old, new]
+        }
+        let row = |text: &str| {
+            format!(
+                "{}\n",
+                serde_json::json!({"type":"user","sessionId":"baseline-test","message":{"role":"user","content":text}})
+            )
+        };
+        let old = world.cv_home.join("old.jsonl");
+        let new = world.cv_home.join("new.jsonl");
+        std::fs::write(&old, row("old-copy")).unwrap();
+        std::fs::write(&new, (0..3).map(|n| row(&format!("new-{n}"))).collect::<String>()).unwrap();
+        let mut watcher = Watcher::with_discovery(Filter::default(), true, discovery);
+        let first = watcher.poll();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].reference.path, new);
+        assert_eq!(first[0].new_messages.len(), 3);
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&new)
+            .unwrap()
+            .write_all(row("new-3").as_bytes())
+            .unwrap();
+        let next = watcher.poll();
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].new_messages.len(), 1);
+        assert_eq!(next[0].new_messages[0].text().as_deref(), Some("new-3"));
+        assert!(watcher.poll().is_empty());
     }
 
     #[test]
