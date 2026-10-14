@@ -161,7 +161,7 @@ impl Text {
     pub fn len(&self) -> usize {
         match self {
             Text::Inline(s) => s.len(),
-            Text::Span(sp) => sp.len as usize,
+            Text::Span(sp) => usize::try_from(sp.len).unwrap_or(usize::MAX),
             Text::Source(source) => source.raw_len(),
         }
     }
@@ -216,7 +216,10 @@ impl Text {
                     .ok_or_else(|| anyhow::anyhow!("text prefix overflow"))?;
             }
             Text::Span(span) if !span.escaped && bytes as u64 <= span.len => {
-                span.offset += bytes as u64;
+                span.offset = span
+                    .offset
+                    .checked_add(bytes as u64)
+                    .ok_or_else(|| anyhow::anyhow!("text prefix offset overflow"))?;
                 span.len -= bytes as u64;
             }
             Text::Span(_) => anyhow::bail!("decoded prefix needs source_text for escaped spans"),
@@ -844,8 +847,8 @@ impl Resolver {
         }
         let maps = self.maps.borrow();
         let mmap = maps.get(&path)?.as_ref()?;
-        let start = sp.offset as usize;
-        let end = start.checked_add(sp.len as usize)?;
+        let start = usize::try_from(sp.offset).ok()?;
+        let end = start.checked_add(usize::try_from(sp.len).ok()?)?;
         if end > mmap.len() {
             return None;
         }
@@ -862,7 +865,11 @@ impl Resolver {
         let path = self.path_for(sp)?;
         let mut f = std::fs::File::open(path).ok()?;
         f.seek(SeekFrom::Start(sp.offset)).ok()?;
-        let mut buf = vec![0u8; sp.len as usize];
+        let end = sp.offset.checked_add(sp.len)?;
+        if end > f.metadata().ok()?.len() {
+            return None;
+        }
+        let mut buf = vec![0u8; usize::try_from(sp.len).ok()?];
         f.read_exact(&mut buf).ok()?;
         Some(Cow::Owned(buf))
     }
@@ -901,13 +908,13 @@ pub fn json_string_span(raw: &RawValue, within: &[u8], base_off: u64) -> Option<
         return None;
     }
     let off = (b.as_ptr() as usize).checked_sub(within.as_ptr() as usize)?;
-    if off + b.len() > within.len() {
+    if off.checked_add(b.len())? > within.len() {
         return None;
     }
     let body = &b[1..b.len() - 1];
     Some(Span {
         source: None,
-        offset: base_off + off as u64 + 1,
+        offset: base_off.checked_add(off as u64)?.checked_add(1)?,
         len: body.len() as u64,
         escaped: body.contains(&b'\\'),
     })
@@ -1366,6 +1373,19 @@ fn unescape_json_body(raw: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn public_span_operations_reject_overflowing_offsets() {
+        let raw: &super::RawValue = serde_json::from_str("\"text\"").unwrap();
+        assert!(super::json_string_span(raw, raw.get().as_bytes(), u64::MAX).is_none());
+        let text = super::Text::Span(super::Span {
+            source: None,
+            offset: u64::MAX,
+            len: 1,
+            escaped: false,
+        });
+        assert!(text.with_skipped_prefix(1).is_err());
+    }
+
     #[test]
     fn checked_mapped_demands_expose_only_one_validation_window() {
         use std::io::BufRead;
