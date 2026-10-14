@@ -241,6 +241,9 @@ impl CommitEvidenceSink {
                         }
                     }
                 }
+                // Failed git operations can quote the requested SHA in diagnostics without
+                // creating or pushing it. They cannot support successful commit provenance.
+                Block::ToolResult { is_error: true, .. } => {}
                 Block::ToolResult {
                     tool_use_id, content, ..
                 } => {
@@ -1056,6 +1059,40 @@ mod tests;
 #[cfg(test)]
 mod json_read_tests {
     use super::*;
+
+    #[test]
+    fn commit_evidence_excludes_failed_tool_results_even_when_they_name_the_sha() {
+        let mut sink = CommitEvidenceSink::new(vec!["abcdef1".into()], None);
+        let mut call = Message::new(crate::Role::Assistant);
+        call.content.push(Block::ToolUse {
+            id: "call".into(),
+            name: "Bash".into(),
+            namespace: None,
+            input: serde_json::json!({"command":"git revert abcdef1"}).into(),
+        });
+        assert!(!sink.observe(&call, 0).unwrap());
+        let mut failed = Message::new(crate::Role::Tool);
+        failed.content.push(Block::ToolResult {
+            tool_use_id: "call".into(),
+            name: None,
+            details: None,
+            is_error: true,
+            content: "error: commit abcdef1 cannot be reverted because of conflicts".into(),
+        });
+        assert!(!sink.observe(&failed, 1).unwrap());
+        assert!(sink.found.is_empty());
+        let mut succeeded = Message::new(crate::Role::Tool);
+        succeeded.content.push(Block::ToolResult {
+            tool_use_id: "call".into(),
+            name: None,
+            details: None,
+            is_error: false,
+            content: "[main abcdef1] created".into(),
+        });
+        assert!(sink.observe(&succeeded, 2).unwrap());
+        assert_eq!(sink.found.len(), 1);
+        assert_eq!(sink.found[0].msg_idx, 2);
+    }
 
     #[test]
     fn chunked_sha_matches_the_whole_output_oracle() {
