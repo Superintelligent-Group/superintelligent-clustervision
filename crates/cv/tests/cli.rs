@@ -542,6 +542,27 @@ fn export_formats() {
     assert!(out.contains("## user"), "{out}");
     assert!(out.contains("zebrafish migration"), "{out}");
     assert!(out.contains("**🔧 Edit**"), "{out}");
+    // Explicit whole-range export keeps the window renderer as an independent output oracle.
+    let (windowed, _) = w.cv_ok(&["export", "alphasess", "--format", "md", "--range", "0.."]);
+    assert_eq!(out, windowed);
+    let giant = "🌙\\\"\n".repeat(16384);
+    let giant_path = w.write_session("giant-export", &[user_line("g", "2026-01-01T10:00:00Z", &giant)]);
+    let (full, _) = w.cv_ok(&["export", "giant-export", "--format", "md"]);
+    let (windowed, _) = w.cv_ok(&["export", "giant-export", "--format", "md", "--range", "0.."]);
+    assert_eq!(full, windowed);
+    // A late fatal UTF8 source error discards private output instead of publishing a prefix.
+    use std::io::Write;
+    fs::OpenOptions::new()
+        .append(true)
+        .open(giant_path)
+        .unwrap()
+        .write_all(b"\xff\n")
+        .unwrap();
+    let (failed_out, _) = w.cv_fails(&["export", "giant-export", "--format", "md", "--harness", "claude"]);
+    assert!(
+        failed_out.is_empty(),
+        "failed complete Markdown export published stdout"
+    );
 
     // JSON: the full IR round-trips through serde — and `export` is a DOCUMENT boundary, so what
     // it writes is an OpenSession 0.3 document: the IR led by the version marker.

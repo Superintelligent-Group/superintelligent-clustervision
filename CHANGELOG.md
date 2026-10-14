@@ -12,6 +12,8 @@
 
 - Semantic search retains only requested ranking candidates, preserving exact score and identity order while avoiding full-store sorting.
 - Session ID lookup preserves case-sensitive prefixes and filters harnesses before decoding catalog metadata.
+- Full unredacted Markdown exports share bounded checked staging with downloads; fatal source errors leave stdout empty.
+- Splice Markdown and JSON exports stage checked source-backed messages without materializing selected bodies, preserving complete output and source freshness.
 - HTTP session downloads export complete Markdown or OpenSession documents through checked native staging, including messages beyond the loaded browser page.
 
 - Watch cursor creation copies only eligible reader states and stops reader eligibility serialization when its eight-state budget fills.

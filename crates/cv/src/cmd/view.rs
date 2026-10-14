@@ -900,6 +900,15 @@ pub(crate) fn cmd_export(
     let stats = std::cell::RefCell::new(RedactStats::default());
     match format {
         "md" | "markdown" => {
+            if !redact && range.is_none() && window.max_bytes.is_none() {
+                // The same checked complete document serves native save and HTTP download.
+                // Finish every source demand before stdout can receive even a header prefix.
+                let (body, _) = stage_export(adapter.as_ref(), &r, "markdown")?;
+                let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+                body.copy_to(&mut out)?;
+                out.flush()?;
+                return Ok(());
+            }
             let mut out = std::io::BufWriter::new(std::io::stdout().lock());
             let outcome = stream_session_render(
                 adapter.as_ref(),
