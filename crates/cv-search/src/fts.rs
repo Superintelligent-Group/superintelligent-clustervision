@@ -4812,6 +4812,30 @@ mod tests {
     }
 
     #[test]
+    fn unreadable_index_metadata_does_not_become_an_empty_refresh_plan() {
+        let _home = IsolatedHome::new();
+        let dir = tmpdir();
+        let (index, f) = open_or_create(&dir).unwrap();
+        let mut writer = open_writer(&index, 15_000_000).unwrap();
+        writer
+            .add_document(tantivy::doc!(f.id => "known", f.kind => KIND_META, f.mtime => 1i64, f.size => 2i64))
+            .unwrap();
+        writer.commit().unwrap();
+        drop(writer);
+        let store = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "store"))
+            .unwrap();
+        let before = std::fs::read(dir.join("meta.json")).unwrap();
+        std::fs::write(store, b"invalid stored field data").unwrap();
+        assert!(read_indexed_metadata(&index, &f, true).is_err());
+        assert!(sweep(&dir, Vec::new(), false, false).is_err());
+        assert_eq!(std::fs::read(dir.join("meta.json")).unwrap(), before);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn malformed_index_stamps_preserve_identity_for_replacement() {
         let _home = IsolatedHome::new();
         let dir = tmpdir();
