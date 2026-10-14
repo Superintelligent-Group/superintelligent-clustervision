@@ -242,3 +242,4 @@ jobs:
           set -euo pipefail
           npm install --no-save --ignore-scripts --prefix "$RUNNER_TEMP/pw" playwright-core@1.62.1
           NODE_PATH="$RUNNER_TEMP/pw/node_modules" SELFTEST_CHANNEL=chrome node tools/web-selftest.mjs web
+          NODE_PATH="$RUNNER_TEMP/pw/node_modules" SELFTEST_CHANNEL=chrome node tools/inbox-selftest.mjs

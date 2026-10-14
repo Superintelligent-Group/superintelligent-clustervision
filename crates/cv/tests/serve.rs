@@ -1574,4 +1574,14 @@ fn lanes_task_enrichment_reports_degraded_replay_and_skips_empty_forests() {
     w.cv_ok(&["lanes", "alphasess", "--tasks", "--json"]);
     // All of the fixture's lanes are not done, so filtering done leaves no task join to read.
     w.cv_ok(&["lanes", "betasess", "--done", "--tasks", "--json"]);
+    let (summary, _) = w.cv_ok(&["lanes", "betasess", "--done", "--tasks"]);
+    assert!(
+        summary.contains("1 sub-agents"),
+        "forest total preserved despite empty status selection: {summary}"
+    );
+    assert!(summary.contains("showing 0 done"), "filter scope preserved: {summary}");
+    assert!(
+        summary.contains("(none match)"),
+        "filtered-empty message preserved: {summary}"
+    );
 }

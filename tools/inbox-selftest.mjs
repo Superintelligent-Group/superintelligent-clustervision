@@ -11,8 +11,9 @@ if (!playwright) throw new Error('Playwright must be on NODE_PATH');
 const html = await readFile(new URL('../crates/cv/src/cmd/serve_tasks_page.html', import.meta.url));
 const server = createServer((_request, response) => { response.setHeader('Content-Type', 'text/html'); response.end(html); });
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-const browser = await playwright.chromium.launch(process.env.SELFTEST_CHANNEL ? { channel: process.env.SELFTEST_CHANNEL } : {});
+let browser;
 try {
+  browser = await playwright.chromium.launch(process.env.SELFTEST_CHANNEL ? { channel: process.env.SELFTEST_CHANNEL } : {});
   const page = await browser.newPage(); const errors = [];
   page.on('pageerror', error => errors.push(String(error)));
   const inbox = { who: 'test', counts: { decisions: 0, discussing: 0, provisional: 0, assigned: 0, claimed: 0, unread: 0, closed: 0 }, items: [], closed: [] };
@@ -58,4 +59,10 @@ try {
   assert.equal(await page.locator('table.lanes').count(), 1, 'lane facts remain useful when task inbox fails');
   assert.deepEqual(errors, [], 'page has no uncaught errors');
   console.log('inbox selftest: lane errors, retries, warnings and stale responses passing');
-} finally { await browser.close(); await new Promise(resolve => server.close(resolve)); }
+} finally {
+  try { await browser?.close(); }
+  finally {
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+  }
+}

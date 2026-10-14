@@ -319,15 +319,14 @@ pub(crate) fn cmd_lanes(
             }
         }
     }
-    all.retain(|lane| lane_passes(lane, filter));
-    if with_tasks && !all.is_empty() {
+    if with_tasks && all.iter().any(|lane| lane_passes(lane, filter)) {
         let outcome = cv_core::task::replay()?;
         for w in &outcome.warnings {
             eprintln!("⚠ {}", sanitize_line(w));
         }
         cv_core::lanes::attach_tasks(&mut all, &outcome.model);
     }
-    let lanes: Vec<&Lane> = all.iter().collect();
+    let lanes: Vec<&Lane> = all.iter().filter(|lane| lane_passes(lane, filter)).collect();
 
     if json {
         if multi {
