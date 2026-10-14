@@ -250,8 +250,9 @@ class CvTranscript extends HTMLElement {
   // sub-agents panel. Sessions without events (or an older server) simply get no panel.
   async _mountEvents(session) {
     if (!session || session._isSubagent) return;
+    const generation = this._generation;
     const events = await getEvents(session);
-    if (this._session !== session || !events.length) return;
+    if (this._generation !== generation || this._session !== session || !events.length) return;
     const counts = {};
     for (const e of events) counts[e.kind] = (counts[e.kind] || 0) + 1;
     const summary = [
@@ -314,8 +315,9 @@ class CvTranscript extends HTMLElement {
   // each child lazily loads its full transcript inline (recursively rendered by a nested transcript).
   async _mountSubagents(session) {
     if (!session || session._isSubagent) return; // sub-agents don't spawn their own
+    const generation = this._generation;
     const subs = await getSubagents(session);
-    if (this._session !== session || !subs.length) return; // changed / none
+    if (this._generation !== generation || this._session !== session || !subs.length) return; // changed / none
     this._subs = subs;
     const panel = document.createElement("div");
     panel.className = "sub-panel";
@@ -374,8 +376,10 @@ class CvTranscript extends HTMLElement {
     body.dataset.loaded = "1";
     body.innerHTML = `<div class="muted sub-loading">Loading sub-agent…</div>`;
     const stub = this._subs[+row.dataset.idx];
+    const generation = this._generation;
     try {
       const full = await getSubagent(stub._parentHarness, stub._parentId, stub.id);
+      if (generation !== this._generation) return;
       full._isSubagent = true; // so the nested transcript doesn't re-query sub-agents
       body.innerHTML = "";
       const nested = document.createElement("cv-transcript");
@@ -385,7 +389,10 @@ class CvTranscript extends HTMLElement {
       const label = sessionLabel(full);
       if (label && label !== "(untitled)") row.querySelector(".sub-row-title").textContent = label;
     } catch (e) {
-      body.innerHTML = `<div class="muted">Couldn't load this sub-agent (${esc(String(e?.message || e))}).</div>`;
+      if (generation !== this._generation) return;
+      delete body.dataset.loaded;
+      body.innerHTML = `<div class="muted">Couldn't load this sub-agent (${esc(String(e?.message || e))}).</div><button type="button" class="mini-btn">Retry loading sub-agent</button>`;
+      body.querySelector("button").addEventListener("click", () => { body.hidden = true; this._toggleSub(row); });
     }
   }
 

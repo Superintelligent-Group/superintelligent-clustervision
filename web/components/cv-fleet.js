@@ -19,7 +19,7 @@
 // diffing against the last-rendered payload (`this._last`) and skipping DOM writes
 // when a section is unchanged.
 import "./cv-harness-badge.js";
-import { esc, fmtTime, sessionLabel, shortPath } from "./util.js";
+import { msgCount, esc, fmtTime, sessionLabel, shortPath } from "./util.js";
 
 const BASE_LS = "cv-fleet-base";
 const DEFAULT_BASE = "http://localhost:7777";
@@ -155,13 +155,16 @@ class CvFleet extends HTMLElement {
     const to = setTimeout(() => ctrl.abort(), POLL_MS + 1500);
     try {
       const health = await this._fetchJson("/api/health", ctrl.signal);
-      this._health = health || { ok: true };
+      const sessions = await this._fetchJson(`/api/sessions?limit=${SESSION_LIMIT}`, ctrl.signal);
+      if (this._ctrl !== ctrl) return;
+      if (ctrl.signal.aborted) throw new Error("request timed out");
+      if (!health || typeof health !== "object" || !Array.isArray(sessions?.sessions ?? sessions)) {
+        throw new Error("Fleet API returned an invalid response");
+      }
+      this._health = health;
       this._state = "ok";
       this._err = "";
-
-      const sessions = await this._fetchJson(`/api/sessions?limit=${SESSION_LIMIT}`, ctrl.signal).catch(() => []);
       this._sessions = this._asSessions(sessions);
-
       this._lastUpdate = Date.now();
     } catch (err) {
       // If this poll was superseded (reconnect/teardown aborted it), drop it
@@ -313,7 +316,7 @@ class CvFleet extends HTMLElement {
 
   _patchSessions() {
     const sig = JSON.stringify(this._sessions.map((s) => [
-      s.id, s.harness, sessionLabel(s), s.cwd, s.updated_at || s.created_at, (s.messages || []).length,
+      s.id, s.harness, sessionLabel(s), s.cwd, s.updated_at || s.created_at, msgCount(s),
     ]));
     const countEl = this._content.querySelector(".fleet-sessions-n");
     if (countEl) countEl.textContent = `(${this._sessions.length})`;
@@ -329,7 +332,7 @@ class CvFleet extends HTMLElement {
     return `<ul class="fleet-session-feed">${this._sessions.map((s) => {
       const h = (s.harness || "").toLowerCase();
       const when = fmtTime(s.updated_at || s.created_at);
-      const n = (s.messages || []).length;
+      const n = msgCount(s);
       return `
         <li class="fleet-session">
           <cv-harness-badge harness="${esc(h)}"></cv-harness-badge>

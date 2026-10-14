@@ -282,6 +282,10 @@ class CvForest extends HTMLElement {
     this._ensureLoaded();
   }
 
+  disconnectedCallback() {
+    for (const close of this._scriptClosers || []) close();
+  }
+
   _mostRecent() {
     return this._sessions
       .slice()
@@ -709,7 +713,9 @@ class CvForest extends HTMLElement {
       body.appendChild(t);
       t.session = full;
     } catch (e) {
-      body.innerHTML = `<div class="fr-empty" style="padding:12px">Couldn't load this agent (${esc(String(e?.message || e))}).</div>`;
+      delete body.dataset.loaded;
+      body.innerHTML = `<div class="fr-empty" style="padding:12px">Couldn't load this agent (${esc(String(e?.message || e))}).</div><button type="button" class="mini-btn">Retry loading agent</button>`;
+      body.querySelector("button").addEventListener("click", () => { body.hidden = true; this._toggleAgent(row); });
     }
   }
 
@@ -787,12 +793,14 @@ class CvForest extends HTMLElement {
     if (panel.dataset.agent === agentId && panel.style.display !== "none") {
       panel.style.display = "none"; panel.dataset.agent = ""; return; // toggle closed
     }
+    const token = panel._loadToken = (panel._loadToken || 0) + 1;
     panel.style.display = "block";
     panel.dataset.agent = agentId;
     panel.innerHTML = `<div class="fr-loading" style="padding:12px">Loading agent transcript…</div>`;
     const stub = this._rootSession();
     try {
       const full = await getSubagent(stub.harness, stub.id, agentId);
+      if (panel._loadToken !== token || panel.dataset.agent !== agentId || !this.contains(panel)) return;
       full._isSubagent = true;
       panel.innerHTML = "";
       const t = document.createElement("cv-transcript");
@@ -800,7 +808,9 @@ class CvForest extends HTMLElement {
       t.session = full;
       panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
     } catch (e) {
-      panel.innerHTML = `<div class="fr-empty" style="padding:12px">Couldn't load this agent (${esc(String(e?.message || e))}).</div>`;
+      if (panel._loadToken !== token || panel.dataset.agent !== agentId || !this.contains(panel)) return;
+      panel.innerHTML = `<div class="fr-empty" style="padding:12px">Couldn't load this agent (${esc(String(e?.message || e))}).</div><button type="button" class="mini-btn">Retry loading agent</button>`;
+      panel.querySelector("button").addEventListener("click", () => { panel.dataset.agent = ""; this._openAgentInline(card); });
     }
   }
 
@@ -819,16 +829,23 @@ class CvForest extends HTMLElement {
         <div class="scr-body"><div class="fr-loading" style="padding:20px">Loading script…</div></div>
       </div>`;
     this.appendChild(overlay);
-    const close = () => overlay.remove();
+    this._scriptClosers ||= new Set();
+    const close = () => {
+      overlay.remove();
+      document.removeEventListener("keydown", onKey);
+      this._scriptClosers.delete(close);
+    };
+    this._scriptClosers.add(close);
     overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
     overlay.querySelector(".scr-close").addEventListener("click", close);
     const onKey = (e) => { if (e.key === "Escape") { close(); document.removeEventListener("keydown", onKey); } };
     document.addEventListener("keydown", onKey);
 
-    let data = this._scriptCache.get(wfId);
+    const cacheKey = JSON.stringify([sessionKey(stub), wfId]);
+    let data = this._scriptCache.get(cacheKey);
     if (data === undefined) {
       data = await getWorkflowScript(stub, wfId);
-      this._scriptCache.set(wfId, data);
+      if (data) this._scriptCache.set(cacheKey, data);
     }
     const bodyEl = overlay.querySelector(".scr-body");
     if (!bodyEl) return;

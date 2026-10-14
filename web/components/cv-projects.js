@@ -123,17 +123,19 @@ class CvProjects extends HTMLElement {
   async _runTouched() {
     const out = this.querySelector(".touched-results");
     if (!out) return;
+    const token = this._touchedToken = (this._touchedToken || 0) + 1;
     const path = this._touchedQuery;
+    const editsOnly = this._touchedEdits;
     if (!path) { out.innerHTML = ""; return; }
     out.innerHTML = `<div class="muted">Looking up ${esc(path)}…</div>`;
-    const rows = await getTouched(path, this._touchedEdits);
-    if (out !== this.querySelector(".touched-results")) return; // re-rendered meanwhile
+    const rows = await getTouched(path, editsOnly);
+    if (token !== this._touchedToken || out !== this.querySelector(".touched-results")) return; // re-rendered meanwhile
     if (rows === null) {
-      out.innerHTML = `<div class="muted">Touched lookup needs a local <code>cv serve</code> — none was reachable.</div>`;
+      out.innerHTML = `<div class="muted">Touched lookup is unavailable. Check the local <code>cv serve</code> and event index.</div>`;
       return;
     }
     if (!rows.length) {
-      out.innerHTML = `<div class="muted">No sessions ${this._touchedEdits ? "edited" : "touched"} ${esc(path)} (events are ingested by <code>cv index</code>).</div>`;
+      out.innerHTML = `<div class="muted">No sessions ${editsOnly ? "edited" : "touched"} ${esc(path)} (events are ingested by <code>cv index</code>).</div>`;
       return;
     }
     out.innerHTML = rows.map((t) => {

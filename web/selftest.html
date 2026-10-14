@@ -64,7 +64,7 @@ import {
   normalizeSession, normalizeSessions, searchableText, sessionLabel, sumTokens,
   toOpenSession, toMarkdown, harnessExtra, MESSAGE_KINDS, fmtCost, sessionKey,
 } from "./components/util.js";
-import { blockToText, messagesToChat } from "./openrouter.js";
+import { blockToText, messagesToChat, generate, getKey, setKey } from "./openrouter.js";
 import { SAMPLE_SESSIONS } from "./sample.js";
 import "./components/cv-transcript.js";
 import "./components/cv-stats.js";
@@ -1222,6 +1222,138 @@ await acheck("Structure rejects a stale fallback and shares pending root reads",
     eq(forest._root.id, "new-root", "old fallback cannot replace new root");
     eq(forest._loading, false, "new root settled");
   } finally { globalThis.fetch = original; }
+});
+
+suite("Generation transport and branch ownership");
+await acheck("generation supports JSON fallback, final SSE data and cancels readers on completion/errors", async () => {
+  const original = globalThis.fetch;
+  const opts = { key: "fixture", messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }], onToken: () => {} };
+  const encoder = new TextEncoder();
+  let cancelled = false;
+  const response = (text) => new Response(new ReadableStream({ start(controller) { controller.enqueue(encoder.encode(text)); controller.close(); }, cancel() { cancelled = true; } }), { headers: { "Content-Type": "text/event-stream" } });
+  try {
+    globalThis.fetch = async () => Response.json({ choices: [{ message: { content: "fallback" } }] });
+    eq(await generate(opts), "fallback", "JSON fallback retains response");
+    globalThis.fetch = async () => response('data: {"choices":[{"delta":{"content":"ready"}}]}\ndata: [DONE]');
+    eq(await generate(opts), "ready", "unterminated final DONE is consumed");
+    globalThis.fetch = async () => new Response(new ReadableStream({ start(controller) { controller.enqueue(encoder.encode('data: [DONE]\n')); }, cancel() { cancelled = true; } }), { headers: { "Content-Type": "text/event-stream" } });
+    cancelled = false; eq(await generate(opts), "", "DONE terminates pending stream"); truthy(cancelled, "reader cancelled without waiting for network EOF");
+    for (const [text, expected] of [['data: {"error":{"message":"provider failed"}}\n', "provider failed"], ['data: malformed\n', "malformed"], ['data: {"choices":[{"delta":{"content":"partial"}}]}\n', "before completion"]]) {
+      globalThis.fetch = async () => response(text); let error;
+      try { await generate(opts); } catch (caught) { error = caught; }
+      has(error?.message || "", expected, "failed stream is not successful partial output");
+    }
+    globalThis.fetch = async () => response('data: {"choices":[{"delta":{"content":"ready"}}]}\n');
+    let callbackError; try { await generate({ ...opts, onToken() { throw new Error("callback failed"); } }); } catch (error) { callbackError = error; }
+    eq(callbackError?.message, "callback failed", "callback failure propagated");
+    globalThis.fetch = async () => new Response("plain server explanation", { status: 429 });
+    let httpError; try { await generate(opts); } catch (error) { httpError = error; }
+    has(httpError?.message || "", "plain server explanation", "non-JSON HTTP error preserved");
+  } finally { globalThis.fetch = original; }
+});
+await acheck("streaming continuation stays in its origin branch when the user switches branches", async () => {
+  const original = globalThis.fetch, key = getKey(); setKey("fixture");
+  const encoder = new TextEncoder(); let controller;
+  globalThis.fetch = async () => new Response(new ReadableStream({ start(value) { controller = value; } }), { headers: { "Content-Type": "text/event-stream" } });
+  const splice = document.createElement("cv-splice");
+  const source = splice._branch(); source.lane.push({ uid: "seed", message: { role: "user", content: [{ type: "text", text: "hello" }] }, from: "fixture", harness: "claude" });
+  try {
+    const pending = splice._generate();
+    for (let n = 0; n < 20; n++) await Promise.resolve();
+    controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"first"}}]}\n'));
+    for (let n = 0; n < 20; n++) await Promise.resolve();
+    const other = splice._newBranch("other"); splice.render();
+    controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":" second"}}]}\ndata: [DONE]\n'));
+    await pending;
+    eq(source.lane.at(-1).message.content[0].text, "first second", "complete result retained by originating branch");
+    eq(other.lane.length, 0, "alternate branch is untouched");
+  } finally { globalThis.fetch = original; setKey(key); }
+});
+suite("Viewer lifecycle and source consistency");
+await acheck("Fleet publishes only its current poll and does not mask failed session reads", async () => {
+  const original = globalThis.fetch; const first = deferred(), second = deferred(); let sessionReads = 0;
+  const fleet = document.createElement("cv-fleet"); fleet.render = () => {};
+  globalThis.fetch = async (url) => {
+    if (new URL(url).pathname.endsWith("/health")) return Response.json({ ok: true });
+    return { ok: true, json: () => (++sessionReads === 1 ? first : second).promise };
+  };
+  try {
+    const old = fleet._poll(); for (let n = 0; n < 20; n++) await Promise.resolve();
+    fleet._stop(); const fresh = fleet._poll(); for (let n = 0; n < 20; n++) await Promise.resolve();
+    second.resolve([{ id: "fresh", harness: "codex", message_count: 12 }]); await fresh;
+    first.resolve([{ id: "old", harness: "claude" }]); await old;
+    eq(fleet._sessions[0].id, "fresh", "old success cannot replace current state");
+    has(fleet._sessionsHtml(), "12", "metadata message count displayed");
+    globalThis.fetch = async (url) => new URL(url).pathname.endsWith("/health") ? Response.json({ ok: true }) : new Response("failed", { status: 500 });
+    await fleet._poll(); eq(fleet._state, "error", "failed sessions route surfaces error");
+    eq(fleet._sessions[0].id, "fresh", "failed poll does not invent an empty fleet");
+  } finally { fleet._stop(); globalThis.fetch = original; }
+});
+await acheck("overlapping touched queries cannot replace a newer answer", async () => {
+  const original = globalThis.fetch; const old = deferred(), fresh = deferred();
+  const projects = document.createElement("cv-projects"); projects.sessions = stubs(2);
+  globalThis.fetch = async (url) => ({ ok: true, json: () => new URL(url).searchParams.get("path") === "old" ? old.promise : fresh.promise });
+  try {
+    projects._touchedQuery = "old"; const first = projects._runTouched();
+    projects._touchedQuery = "fresh"; const second = projects._runTouched(); fresh.resolve([]); await second;
+    old.resolve([{ session_id: "obsolete", harness: "claude", title: "obsolete answer" }]); await first;
+    has(projects.querySelector(".touched-results").textContent, "fresh", "newest lookup remains visible");
+    truthy(!projects.textContent.includes("obsolete answer"), "old rows discarded");
+  } finally { globalThis.fetch = original; }
+});
+await acheck("failed upload preserves demo and source merge preserves cross-harness and remote ids", async () => {
+  const app = document.createElement("cv-app"); const demo = normalizeSession({ id: "same", harness: "claude" });
+  app._sessions = [demo]; app._isSample = true; app._ingestOne = async () => [];
+  app._setStatus = () => {}; app._renderSources = () => {}; app._refreshViews = () => {};
+  await app._handleFiles([{ name: "empty.json" }]); eq(app._sessions[0], demo, "empty import keeps demo");
+  const other = normalizeSession({ id: "same", harness: "codex" });
+  const merged = app._mergePool([demo], [other]); eq(merged[1].id, "same", "cross-harness id is not renamed");
+  const remote = { ...demo, _remote: true, title: "refreshed" };
+  const refreshed = app._mergePool([demo], [remote]); eq(refreshed.length, 1, "remote identity refreshed"); eq(refreshed[0].id, "same", "source id unchanged");
+});
+check("stats describe the actual loaded page coverage", () => {
+  const stats = document.createElement("cv-stats"); stats._asked = true;
+  const page = normalizeSession({ id: "page", harness: "claude", message_count: 1000, messages: [{ role: "user", content: [] }] }); page._paged = { next: 1 };
+  stats.sessions = [page]; has(stats.textContent, "partially loaded", "page subset disclosed"); has(stats.textContent, "only loaded messages", "breakdown scope explicit");
+});
+
+await acheck("same-session rerenders do not duplicate late enrichment and failed subagents retry", async () => {
+  const original = globalThis.fetch;
+  const first = { events: deferred(), subagents: deferred() }, next = { events: deferred(), subagents: deferred() };
+  const counts = { events: 0, subagents: 0 }; let childReads = 0;
+  globalThis.fetch = async (url) => {
+    const path = new URL(url).pathname;
+    if (path.includes("/subagent/")) {
+      if (++childReads === 1) return new Response("failed", { status: 500 });
+      return Response.json({ id: "child", harness: "claude", messages: [{ role: "assistant", content: [{ type: "text", text: "recovered child" }] }] });
+    }
+    const kind = path.endsWith("/events") ? "events" : "subagents";
+    return { ok: true, json: () => (++counts[kind] === 1 ? first : next)[kind].promise };
+  };
+  const transcript = document.createElement("cv-transcript");
+  try {
+    const session = normalizeSession({ id: "same-render", harness: "claude", messages: [] });
+    transcript.session = session; transcript.session = session;
+    next.events.resolve([{ kind: "command", target: "fresh" }]); next.subagents.resolve([{ id: "child", harness: "claude" }]);
+    for (let n = 0; n < 20; n++) await Promise.resolve();
+    first.events.resolve([{ kind: "command", target: "obsolete" }]); first.subagents.resolve([{ id: "obsolete", harness: "claude" }]);
+    for (let n = 0; n < 20; n++) await Promise.resolve();
+    eq(transcript.querySelectorAll(".ev-panel").length, 1, "one events panel");
+    eq(transcript.querySelectorAll(".sub-row").length, 1, "one subagent inventory");
+    const row = transcript.querySelector(".sub-row"); await transcript._toggleSub(row);
+    const retry = row.querySelector("button"); truthy(retry, "failure offers retry"); retry.click();
+    for (let n = 0; n < 20; n++) await Promise.resolve();
+    has(row.textContent, "recovered child", "retry replaces error with full content");
+    eq(childReads, 2, "retry sends another read");
+  } finally { globalThis.fetch = original; }
+});
+check("one dropzone drop triggers one import", () => {
+  const app = document.createElement("cv-app"); app.render(); let imports = 0;
+  app._handleFiles = () => { imports++; };
+  const drop = new Event("drop", { bubbles: true, cancelable: true });
+  Object.defineProperty(drop, "dataTransfer", { value: { files: [{ name: "fixture.json" }] } });
+  app.querySelector(".dropzone").dispatchEvent(drop);
+  eq(imports, 1, "inner drop does not bubble into a duplicate import");
 });
 
 // ===========================================================================

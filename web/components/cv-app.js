@@ -19,7 +19,7 @@ import "./cv-stats.js";
 import "./cv-forest.js";
 import "./cv-splice.js";
 import "./cv-fleet.js";
-import { esc, normalizeSession, normalizeSessions, randomId } from "./util.js";
+import { esc, normalizeSession, normalizeSessions, randomId, sessionKey } from "./util.js";
 import { isTauri, listen, canInvokeNative } from "../tauri.js";
 import {
   apiGet, getMessages, getSessionHead, searchSessions, probeSearch, PAGE, CVD_BASE,
@@ -703,6 +703,7 @@ class CvApp extends HTMLElement {
       const files = [...(e.dataTransfer?.files || [])];
       if (!files.length) return;
       e.preventDefault();
+      e.stopPropagation(); // the dropzone is inside the app; ingest this drop once
       this._handleFiles(files);
     };
     dz.addEventListener("drop", drop);
@@ -710,15 +711,14 @@ class CvApp extends HTMLElement {
   }
 
   async _handleFiles(files) {
-    // Starting fresh: clear the sample dataset on the first real load.
-    if (this._isSample) { this._sessions = []; this._sources = []; this._isSample = false; }
-
     let added = 0, failed = 0;
     for (const file of files) {
       this._setStatus(`Reading ${file.name}…`);
       try {
         const got = await this._ingestOne(file);
         if (got.length) {
+          // A failed/empty import must not discard the existing demo pool.
+          if (this._isSample) { this._sessions = []; this._sources = []; this._isSample = false; }
           this._sessions = this._mergePool(this._sessions, got);
           this._sources.push({ name: file.name, count: got.length });
           added += got.length;
@@ -758,17 +758,23 @@ class CvApp extends HTMLElement {
     throw new Error(`"${name}" isn't a .zip or .json file.`);
   }
 
-  // Merge new sessions into the pool, de-duplicating by id (we keep the first
+  // Merge new sessions by harness + id (we keep the first
   // occurrence to preserve source ordering, but give a fresh id to any collision
   // so nothing is silently dropped). Colliding sessions are cloned rather than
   // mutated — the caller's objects keep their ids, so merging the same array
   // twice can't double-suffix.
   _mergePool(pool, incoming) {
-    const seen = new Set(pool.map((s) => s.id));
     const out = pool.slice();
-    for (const s of incoming) {
-      const add = s.id && seen.has(s.id) ? { ...s, id: `${s.id}~${randomId().slice(0, 4)}` } : s;
-      seen.add(add.id);
+    const indices = new Map(pool.map((session, index) => [sessionKey(session), index]));
+    for (const session of incoming) {
+      const key = sessionKey(session);
+      if (session._remote && indices.has(key)) {
+        out[indices.get(key)] = session; // refresh source identity; never rename a remote id
+        continue;
+      }
+      let add = session;
+      while (add.id && indices.has(sessionKey(add))) add = { ...session, id: `${session.id}~${randomId().slice(0, 8)}` };
+      indices.set(sessionKey(add), out.length);
       out.push(add);
     }
     return out;

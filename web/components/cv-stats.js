@@ -71,7 +71,7 @@ class CvStats extends HTMLElement {
     // `messages` uses msgCount so it counts metadata-only stubs (which carry message_count) too.
     // Role/block breakdowns and token sums need the actual message tree, so they're tallied only over
     // *hydrated* sessions and disclosed as such — never silently zero.
-    let messages = 0, hydrated = 0, tokIn = 0, tokOut = 0, tokCache = 0, tokReason = 0;
+    let messages = 0, hydrated = 0, partial = 0, tokIn = 0, tokOut = 0, tokCache = 0, tokReason = 0;
     let cost = 0, costSeen = false;
     const perHarness = new Map();
     const perRole = new Map();
@@ -97,6 +97,7 @@ class CvStats extends HTMLElement {
       const msgs = s.messages || [];
       if (msgs.length) {
         hydrated++;
+        if (s._paged) partial++;
         const tk = sumTokens(s);
         tokIn += tk.input; tokOut += tk.output; tokCache += tk.cacheRead; tokReason += tk.reasoning;
         if (tk.cost != null) { cost += tk.cost; costSeen = true; }
@@ -115,7 +116,7 @@ class CvStats extends HTMLElement {
 
     times.sort((a, b) => a - b);
     return {
-      sessions: sessions.length, messages, hydrated, tokIn, tokOut, tokCache, tokReason,
+      sessions: sessions.length, messages, hydrated, partial, tokIn, tokOut, tokCache, tokReason,
       cost: costSeen ? cost : null,
       perHarness, perRole, perKind, perOrigin, blockKinds, projects: projects.size,
       cwds: [...cwds.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6),
@@ -193,7 +194,7 @@ class CvStats extends HTMLElement {
 
     const unopened = a.sessions - c.hydrated;
     const openedHead = c.hydrated
-      ? `${c.hydrated.toLocaleString()} of ${a.sessions.toLocaleString()} transcript${a.sessions === 1 ? "" : "s"} downloaded — these panels describe only those`
+      ? `${c.hydrated.toLocaleString()} of ${a.sessions.toLocaleString()} transcript${a.sessions === 1 ? "" : "s"} downloaded${c.partial ? ` · ${c.partial.toLocaleString()} partially loaded` : ""} — these panels describe only loaded messages`
       : `nothing downloaded yet — open a session and these fill in`;
 
     const bars = (map, label) =>
