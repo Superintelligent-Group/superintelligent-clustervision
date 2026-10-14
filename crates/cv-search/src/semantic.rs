@@ -232,45 +232,82 @@ fn save_store(path: &Path, store: &Store) -> Result<()> {
 
 /// Load a store: the binary format, or (transparently) a legacy all-JSON store.
 fn load_store(path: &Path) -> Result<Store> {
-    let bytes = std::fs::read(path)
+    use std::io::Read;
+    let file = std::fs::File::open(path)
         .with_context(|| format!("reading embedding store {} — run `embed_all` first", path.display()))?;
-    if bytes.first() == Some(&b'{') {
-        let legacy: LegacyStore = serde_json::from_slice(&bytes).context("parsing legacy JSON embedding store")?;
+    let file_len = file.metadata()?.len();
+    let mut input = std::io::BufReader::new(file);
+    let mut first = [0u8; 1];
+    let n = input.read(&mut first)?;
+    if n == 1 && first[0] == b'{' {
+        // Legacy JSON keeps its existing owned decoder, but does not need another full wire copy.
+        let prefixed = std::io::Cursor::new(first).chain(input);
+        let legacy: LegacyStore = serde_json::from_reader(prefixed).context("parsing legacy JSON embedding store")?;
         return Ok(legacy.into());
     }
-    if bytes.len() < 24 || &bytes[..8] != MAGIC {
+    let mut header = [0u8; 24];
+    header[0] = first[0];
+    let complete_header = if n == 0 {
+        false
+    } else {
+        match input.read_exact(&mut header[1..]) {
+            Ok(()) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => false,
+            Err(error) => return Err(error).context("reading embedding store header"),
+        }
+    };
+    if !complete_header || &header[..8] != MAGIC {
         bail!(
             "unrecognized embedding store {} (bad magic) — re-run `cv index --semantic`",
             path.display()
         );
     }
-    let dim = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
-    let count = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
-    let meta_len = u64::from_le_bytes(bytes[16..24].try_into().unwrap()) as usize;
-    let meta_end = 24usize
+    let dim = u32::from_le_bytes(header[8..12].try_into().unwrap()) as usize;
+    let count = u32::from_le_bytes(header[12..16].try_into().unwrap()) as usize;
+    let meta_len = u64::from_le_bytes(header[16..24].try_into().unwrap());
+    let meta_end = 24u64
         .checked_add(meta_len)
-        .filter(|&e| e <= bytes.len())
+        .filter(|&end| end <= file_len)
         .with_context(|| format!("truncated embedding store {}", path.display()))?;
-    let meta: MetaBlock = serde_json::from_slice(&bytes[24..meta_end]).context("parsing embedding store metadata")?;
-    let vec_bytes = &bytes[meta_end..];
     let expected_bytes = count
         .checked_mul(dim)
         .and_then(|n| n.checked_mul(4))
         .context("embedding store dimensions overflow")?;
-    if meta.records.len() != count || vec_bytes.len() != expected_bytes {
+    anyhow::ensure!(
+        file_len - meta_end == expected_bytes as u64,
+        "corrupt embedding store {} (vector length mismatch, dim {dim}) — re-run `cv index --semantic`",
+        path.display()
+    );
+    // Take isolates the JSON parser from the binary vectors. from_reader also consumes and
+    // validates trailing JSON whitespace, preserving the old from_slice acceptance contract.
+    let meta: MetaBlock =
+        serde_json::from_reader((&mut input).take(meta_len)).context("parsing embedding store metadata")?;
+    if meta.records.len() != count {
         bail!(
             "corrupt embedding store {} ({} records, {} vector bytes, dim {dim}) — re-run `cv index --semantic`",
             path.display(),
             meta.records.len(),
-            vec_bytes.len()
+            expected_bytes
         );
     }
-    let vectors: Vec<f32> = vec_bytes
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .map(|c| f32::from_le_bytes(*c))
-        .collect();
+    // Decode into the final allocation through a bounded wire buffer. Query and refresh no
+    // longer retain an additional complete encoded vector block alongside these floats.
+    let mut vectors = Vec::with_capacity(expected_bytes / 4);
+    let mut wire = [0u8; 16 * 1024];
+    let mut remaining = expected_bytes;
+    while remaining != 0 {
+        let bytes = remaining.min(wire.len());
+        input
+            .read_exact(&mut wire[..bytes])
+            .context("reading embedding vectors")?;
+        vectors.extend(wire[..bytes].as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)));
+        remaining -= bytes;
+    }
+    anyhow::ensure!(
+        input.read(&mut first)? == 0,
+        "embedding store grew during read: {}",
+        path.display()
+    );
     Ok(Store {
         model: meta.model,
         projection: meta.projection,
@@ -1876,6 +1913,67 @@ mod tests {
         assert_eq!(hits[1].id, "dateless");
         assert_eq!(hits[1].created_at, None);
         assert_eq!(hits[1].updated_at, None);
+    }
+
+    #[test]
+    fn binary_store_streaming_preserves_bits_and_rejects_corruption() {
+        let dir = std::env::temp_dir().join(format!("cv-emb-stream-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("embeddings.bin");
+        let mut record = meta("escaped", None);
+        record.title = Some("\n\"\\雪".repeat(4096));
+        // Cross multiple decode-buffer boundaries, retaining every float bit including NaNs.
+        let vector: Vec<_> = (0..20_003u32)
+            .map(|i| f32::from_bits(i.wrapping_mul(2_654_435_761)))
+            .collect();
+        let original = store(vec![(record, vector)]);
+        save_store(&path, &original).unwrap();
+        let encoded = std::fs::read(&path).unwrap();
+        let loaded = load_store(&path).unwrap();
+        assert_eq!(loaded.meta[0].title, original.meta[0].title);
+        assert_eq!(
+            loaded.vectors.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            original.vectors.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+        );
+        for corrupt in [
+            encoded[..23].to_vec(),
+            encoded[..encoded.len() - 1].to_vec(),
+            {
+                let mut bytes = encoded.clone();
+                bytes.push(0);
+                bytes
+            },
+            {
+                let mut bytes = encoded.clone();
+                bytes[16..24].copy_from_slice(&u64::MAX.to_le_bytes());
+                bytes
+            },
+            {
+                let mut bytes = encoded.clone();
+                bytes[12..16].copy_from_slice(&2u32.to_le_bytes());
+                bytes
+            },
+            {
+                let mut bytes = encoded.clone();
+                bytes[24] = b'!';
+                bytes
+            },
+        ] {
+            std::fs::write(&path, corrupt).unwrap();
+            assert!(load_store(&path).is_err());
+        }
+        // JSON whitespace belongs to the metadata extent, never the vector decoder.
+        let mut spaced = encoded.clone();
+        let meta_len = u64::from_le_bytes(spaced[16..24].try_into().unwrap());
+        let meta_end = 24 + meta_len as usize;
+        spaced.splice(meta_end..meta_end, b" \n\t".iter().copied());
+        spaced[16..24].copy_from_slice(&(meta_len + 3).to_le_bytes());
+        std::fs::write(&path, spaced).unwrap();
+        assert_eq!(load_store(&path).unwrap().vectors.len(), original.vectors.len());
+        let empty = store(Vec::new());
+        save_store(&path, &empty).unwrap();
+        assert!(load_store(&path).unwrap().vectors.is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// The binary store round-trips exactly: metadata, dim, and every vector bit.

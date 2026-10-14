@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Semantic stores decode through bounded buffers, avoiding a second complete vector allocation during search and refresh.
+
 - Semantic search retains only requested ranking candidates, preserving exact score and identity order while avoiding full-store sorting.
 - Session ID lookup preserves case-sensitive prefixes and filters harnesses before decoding catalog metadata.
 - Watch cursor creation copies only eligible reader states and stops reader eligibility serialization when its eight-state budget fills.
