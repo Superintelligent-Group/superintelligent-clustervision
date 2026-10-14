@@ -8,11 +8,20 @@
 #   tools/harness-corpus/zed/snapshot.sh --check    # exits 1 when the store's shape differs from the
 #                                                   # committed snapshot of the installed version
 set -euo pipefail
+case "${1:-}" in
+  ""|--check) ;;
+  *) echo "usage: snapshot.sh [--check]" >&2; exit 2 ;;
+esac
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../../.." && pwd)"
 APP="${ZED_APP:-/Applications/Zed.app}"
 DATA="${ZED_DATA:-$HOME/Library/Application Support/Zed}"
 V="$(defaults read "$APP/Contents/Info.plist" CFBundleShortVersionString)"
+OUT="$ROOT/crates/cv-core/tests/corpus/zed/$V"
+if [ "${1:-}" != "--check" ] && [ -e "$OUT" ]; then
+  echo "refusing: $OUT exists (add a new version instead of regenerating)" >&2
+  exit 1
+fi
 THREADS="$DATA/threads/threads.db"
 WORKSPACE="$(ls -d "$DATA"/db/*-stable/db.sqlite 2>/dev/null | head -1)"
 [ -f "$THREADS" ] || { echo "no $THREADS" >&2; exit 1; }
@@ -22,7 +31,6 @@ TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 [ -z "$WORKSPACE" ] || "${SNAP[@]}" sqlite "$WORKSPACE" \
   --tables sidebar_threads,sidebar_terminal_threads,thread_archived_worktrees,archived_git_worktrees \
   >"$TMP/workspace-agent-tables.schema.txt"
-OUT="$ROOT/crates/cv-core/tests/corpus/zed/$V"
 if [ "${1:-}" = "--check" ]; then
   diff -ru "$OUT" "$TMP" -x SNAPSHOT.toml && echo "zed $V: store shape unchanged"
   exit

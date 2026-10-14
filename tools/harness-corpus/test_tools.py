@@ -334,6 +334,37 @@ class ScrubCase(unittest.TestCase):
                 self.assertNotIn(secret, r.stderr + r.stdout)
 
 
+class SnapshotTests(unittest.TestCase):
+    def test_existing_versions_are_refused_before_opening_stores(self):
+        with tempfile.TemporaryDirectory(prefix="cv-snapshot-refusal-") as directory:
+            for harness in ("zed", "lmstudio"):
+                with self.subTest(harness=harness):
+                    root = os.path.join(directory, harness)
+                    tools = os.path.join(root, "tools", "harness-corpus", harness)
+                    os.makedirs(tools)
+                    script = os.path.join(tools, "snapshot.sh")
+                    shutil.copyfile(os.path.join(HERE, harness, "snapshot.sh"), script)
+                    version = os.path.join(root, "crates", "cv-core", "tests", "corpus", harness, "fixture-version")
+                    os.makedirs(version)
+                    sentinel = os.path.join(version, "preserve.txt")
+                    with open(sentinel, "w") as file:
+                        file.write("original")
+                    commands = os.path.join(root, "bin")
+                    os.mkdir(commands)
+                    defaults = os.path.join(commands, "defaults")
+                    with open(defaults, "w") as file:
+                        file.write("#!/bin/sh\necho fixture-version\n")
+                    os.chmod(defaults, 0o755)
+                    result = subprocess.run(["bash", script], capture_output=True, text=True,
+                                            env=dict(os.environ, PATH=commands + os.pathsep + os.environ["PATH"]))
+                    self.assertEqual(result.returncode, 1)
+                    self.assertIn("instead of regenerating", result.stderr)
+                    with open(sentinel) as file:
+                        self.assertEqual(file.read(), "original")
+                    unknown = subprocess.run(["bash", script, "--typo"], capture_output=True, text=True)
+                    self.assertEqual(unknown.returncode, 2)
+
+
 class GuardTests(unittest.TestCase):
     def test_guard_refuses_outside_and_symlink_paths_without_creating_them(self):
         with tempfile.TemporaryDirectory(prefix="cv-guard-control-") as root:

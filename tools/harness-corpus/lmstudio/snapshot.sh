@@ -7,14 +7,22 @@
 #   tools/harness-corpus/lmstudio/snapshot.sh --check   # exits 1 when the shape differs from the
 #                                                       # committed snapshot of the installed version
 set -euo pipefail
+case "${1:-}" in
+  ""|--check) ;;
+  *) echo "usage: snapshot.sh [--check]" >&2; exit 2 ;;
+esac
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../../.." && pwd)"
 APP="${LMSTUDIO_APP:-/Applications/LM Studio.app}"
 DATA="${LMSTUDIO_HOME:-$HOME/.lmstudio}"
 V="$(defaults read "$APP/Contents/Info.plist" CFBundleShortVersionString)"
+OUT="$ROOT/crates/cv-core/tests/corpus/lmstudio/$V"
+if [ "${1:-}" != "--check" ] && [ -e "$OUT" ]; then
+  echo "refusing: $OUT exists (add a new version instead of regenerating)" >&2
+  exit 1
+fi
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 python3 -I "$HERE/../schema_snapshot.py" json "$DATA/conversations/*.conversation.json" >"$TMP/conversations.shape.txt"
-OUT="$ROOT/crates/cv-core/tests/corpus/lmstudio/$V"
 if [ "${1:-}" = "--check" ]; then
   diff -ru "$OUT" "$TMP" -x SNAPSHOT.toml && echo "lmstudio $V: store shape unchanged"
   exit
