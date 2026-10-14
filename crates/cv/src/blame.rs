@@ -171,11 +171,11 @@ fn line_commits(root: &Path, rel: &str, lo: u32, hi: u32) -> Result<Vec<CommitIn
             continue; // content line
         }
         if let Some(sha) = blame_header_sha(line) {
-            if !order.iter().any(|s| s == sha) {
+            if let std::collections::hash_map::Entry::Vacant(entry) = metas.entry(sha.to_string()) {
                 order.push(sha.to_string());
+                entry.insert(Meta::default());
             }
             cur = Some(sha.to_string());
-            metas.entry(sha.to_string()).or_default();
         } else if let Some(c) = &cur {
             let m = metas.entry(c.clone()).or_default();
             if let Some(t) = line.strip_prefix("committer-time ") {
@@ -348,12 +348,11 @@ pub(crate) fn rank_commit<'a>(
             x.evidence.msg_idx,
         )
     });
-    let mut seen: Vec<(&str, &str)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     let mut out: Vec<Ranked<'a>> = Vec::new();
     for x in proven {
         let key = (x.harness.as_str(), x.session_id.as_str());
-        if !seen.contains(&key) {
-            seen.push(key);
+        if seen.insert(key) {
             out.push(Ranked::Exact(x));
         }
     }
@@ -548,11 +547,12 @@ fn hint_id(id: &str) -> String {
 /// session — the orchestrator that often commits what its agents wrote).
 pub(crate) fn candidate_ids(edits: &[EditEvent]) -> Vec<(String, String)> {
     let mut ids: Vec<(String, String)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for e in edits {
         for (h, id) in std::iter::once((e.harness.as_str(), e.session_id.as_str()))
             .chain(e.parent_id.as_deref().map(|p| ("claude", p)))
         {
-            if !ids.iter().any(|(a, b)| a == h && b == id) {
+            if seen.insert((h, id)) {
                 ids.push((h.to_string(), id.to_string()));
             }
         }
