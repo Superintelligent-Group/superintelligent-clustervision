@@ -1,15 +1,15 @@
 # Store performance: the system we are optimizing
 
-Source audit: `c0f0044`, 2026-10-12; current integration is `perf/excellence-next` (2026-10-13).
+Source audit: `c0f0044`, 2026-10-12; latest runtime integration is `fece0925` (2026-10-13).
 This is the working model and tracker for the performance pass. Measurements in `PERF.md` remain historical observations; their causal
 explanations are not all supported by the implementation. Paths below are relative to `crates/`.
 
 ## Current integration status (2026-10-13)
 
-The previous implementation batch converged as recorded below. The wider follow-up batch is
-implemented on `perf/excellence-next`; composition checks and matched semantic-search measurements
-are complete, with package verification finishing. Historical lane checks below are not substitutes
-for current composition checks.
+The wider follow-up batch has converged through runtime `fece0925`, with package verification at
+documentation commit `b1dd798b`. Composition checks and matched semantic-search measurements are
+complete. No release or version bump is part of this batch. Historical lane checks below are not
+substitutes for current composition checks.
 Current changes remove catalog guard/identity waste, watch cursor copies and stale replacement
 positions, unbounded semantic-ranking and pack-recall candidate retention, semantic wire copies,
 Unicode snippet offsets, dataset input clobbering, Gemini checkpoint copies and Zed root-key copies.
@@ -28,8 +28,14 @@ account-export owned-codec comparison passes in both configurations. Routine cov
 The CLI malformed-row oracle was corrected to preserve Claude's existing skip behavior; fatal
 source-mutation staging remains a separate zero-publication check. Remaining CLI integration
 targets and both repairs pass. Final all-target clippy/build, minimal search, release parse budget,
-formatting and semantic decode heap checks pass. Package verification exposed a stale local-registry
-copy of the unchanged 0.16.1 dependency; current-archive verification is being recovered separately.
+formatting and semantic decode heap checks pass. Manual names/build, corpus tooling and dist
+planning pass. All three current package archives verify with an isolated Cargo home. The initial
+package failure used a stale local-registry copy of the unchanged 0.16.1 dependency; the isolated
+retry confirms current core/search dependency provenance and exact packaged source contents,
+leaving the original cache untouched. This is combined batch evidence plus scoped repairs, not a
+claim that every earlier suite was rerun on the final documentation commit. Private logs and package
+provenance remain under the task's `excellence-home`; the standalone portable/desktop evidence is
+under `desktop-web-wasm-final-evidence`.
 
 The matched synthetic 16,384-row semantic whole-command control now reduces warm retired
 instructions 3.54%, warm elapsed time 6.7%, and mean peak RSS 12.9%, with identical JSON results.
