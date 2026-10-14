@@ -274,7 +274,7 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
             } else {
                 adapter.discover()?
             };
-            out.detail = json!({ "discovered_sessions": refs.len() });
+            out.detail = json!({ "discovered_sessions": refs.len(), "discovered_turns": refs.iter().map(|r| r.message_count).sum::<usize>() });
             if a.hash_output {
                 refs.sort_by(|a, b| (&a.id, &a.path).cmp(&(&b.id, &b.path)));
                 let mut digest = DigestWriter::default();

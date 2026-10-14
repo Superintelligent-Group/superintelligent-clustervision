@@ -113,6 +113,41 @@ def hermes_giant(args, root):
     (root / "HERMES-GIANT-REPORT.json").write_text(json.dumps({"results": results}, indent=2) + "\n")
 
 
+def giant_discovery(args, root):
+    """Exercise actual adapter discovery, including native SQLite cell allocation."""
+    catalog = root / "catalog"
+    catalog.mkdir()
+    temporary = root / "temporary"
+    temporary.mkdir()
+    env = dict(os.environ, CLUSTERVISION_HOME=str(catalog), TMPDIR=str(temporary))
+    results = []
+    cases = (("devin", "history"), ("devin", "metadata"), ("goose", "history"),
+             ("hermes", "history"), ("hermes", "prompt-only"))
+    for harness, shape in cases:
+        if args.format and harness not in args.format:
+            continue
+        for size in args.sizes:
+            fixture = root / f"{harness}-discovery-{shape}-{size}"
+            fixture.mkdir()
+            manifest = generate_sqlite(harness, fixture, size, 1, args.escaped, shape)
+            child = subprocess.run([str(args.probe.resolve()), "discover", harness,
+                                    manifest["id"], manifest["path"], "--root", manifest["root"],
+                                    "--sqlite-heap"], env=env, text=True, capture_output=True, check=True)
+            row = json.loads(child.stdout)
+            peak = checked_peak(row)
+            assert row["detail"]["discovered_sessions"] == 1, "giant session was skipped"
+            assert row["detail"]["discovered_turns"] == 1, "giant conversational turn was not counted"
+            native = row["sqlite_native_heap"]
+            assert native["accounting_enabled_and_verified"], "native SQLite accounting is inactive"
+            assert 0 < native["peak_above_baseline_bytes"] <= 8 * 1024 * 1024, "discovery retained a native giant cell"
+            assert 0 < native["largest_allocation_request_bytes"] <= 1024 * 1024, "SQLite materialized a giant discovery cell"
+            assert peak <= 2 * 1024 * 1024, "discovery Rust ownership grew with payload"
+            assert not list(temporary.iterdir()), "discovery leaked temporary files"
+            results.append({"fixture": manifest, "probe": row})
+            print(f"{harness}/discovery/{shape}: {size} payload bytes, {peak} requested Rust peak, {native['peak_above_baseline_bytes']} native peak", flush=True)
+    (root / "GIANT-DISCOVERY-REPORT.json").write_text(json.dumps({"results": results}, indent=2) + "\n")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--probe", type=Path, required=True)
@@ -121,16 +156,19 @@ def main():
     parser.add_argument("--sizes", type=int, nargs="+", default=[8_000_000, 32_000_000])
     parser.add_argument("--format", action="append", choices=("devin", "hermes", "goose", "opencode", "cursor"))
     parser.add_argument("--escaped", action="store_true", help="use escaped payloads for a focused decoder scale check")
-    parser.add_argument("--hermes-giant", action="store_true", help="check giant assistant and user Hermes cells through lazy collection and Facts/full doctor, including native SQLite allocation")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--giant-discovery", action="store_true", help="check actual giant-cell discovery counts and Rust/native SQLite memory")
+    modes.add_argument("--hermes-giant", action="store_true", help="check giant assistant and user Hermes cells through lazy collection and Facts/full doctor, including native SQLite allocation")
     args = parser.parse_args()
     if len(args.sizes) < 2 or any(size <= 0 for size in args.sizes):
         parser.error("at least two positive sizes are required")
+    run = giant_discovery if args.giant_discovery else hermes_giant if args.hermes_giant else campaign
     if args.out:
         args.out.mkdir(parents=True, exist_ok=False)
-        (hermes_giant if args.hermes_giant else campaign)(args, args.out.resolve())
+        run(args, args.out.resolve())
     else:
         with tempfile.TemporaryDirectory(prefix="cv-sqlite-budget-") as temporary:
-            (hermes_giant if args.hermes_giant else campaign)(args, Path(temporary))
+            run(args, Path(temporary))
 
 
 if __name__ == "__main__":
