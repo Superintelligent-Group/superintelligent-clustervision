@@ -219,6 +219,12 @@ impl ReadSet {
         }
     }
 
+    /// Paths whose original stamps this read set retains. Dependency notifications can replay
+    /// these paths while guarded projections/publication continue to carry the original set.
+    pub(crate) fn paths(&self) -> impl Iterator<Item = &Path> {
+        self.entries.keys().map(PathBuf::as_path)
+    }
+
     /// Combine consumer reads, retaining the first metadata observed for each path.
     pub fn merge(&mut self, other: &Self) {
         self.known &= other.known;
