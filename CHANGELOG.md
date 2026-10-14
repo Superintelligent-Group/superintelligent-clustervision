@@ -7,6 +7,7 @@
 - Watch cursor creation copies only eligible reader states and stops reader eligibility serialization when its eight-state budget fills.
 
 - Watch cursors promptly forget vanished sessions during equal-sized fleet replacements, including unreadable replacements, so reappearing sessions start fresh.
+- Pack fallback recall retains only requested candidates, preserves stable ranking, and centers Unicode snippets on their original source matches.
 
 - Codex legacy reads and discovery use checked source views, retaining lazy bodies and bounded title prefixes with unchanged output and counts.
 - Kimi and Kimi Code retain checked bodies during lazy and complete reads, preserving usage, rotations, raw records and resume behavior.

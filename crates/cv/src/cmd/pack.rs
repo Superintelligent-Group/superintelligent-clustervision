@@ -246,11 +246,24 @@ fn fuse(ranked: Vec<(f32, Vec<cv_search::Hit>)>, limit: usize) -> Vec<cv_search:
 /// No-index fallback: discover and stream every session, scoring a head-capped searchable
 /// haystack against the task's words. Peak memory is O(the cap), never O(session).
 fn live_scan(task: &str, fetch: usize) -> Result<Vec<cv_search::Hit>> {
+    let adapters = cv_core::harness::all();
+    live_scan_adapters(task, fetch, adapters.iter().map(|adapter| adapter.as_ref()))
+}
+
+fn live_scan_adapters<'a>(
+    task: &str,
+    fetch: usize,
+    adapters: impl IntoIterator<Item = &'a dyn cv_core::Adapter>,
+) -> Result<Vec<cv_search::Hit>> {
     let needle = task.to_lowercase();
     let words: Vec<&str> = needle.split_whitespace().filter(|w| w.len() > 2).collect();
 
-    let mut scored: Vec<(i64, cv_search::Hit)> = Vec::new();
-    for adapter in cv_core::harness::all() {
+    if fetch == 0 {
+        return Ok(Vec::new());
+    }
+    let mut scored = BTreeMap::new();
+    let mut ordinal = 0usize;
+    for adapter in adapters {
         if adapter.roots().is_empty() {
             continue;
         }
@@ -267,14 +280,21 @@ fn live_scan(task: &str, fetch: usize) -> Result<Vec<cv_search::Hit>> {
             if score == 0 {
                 continue;
             }
-            // Snippet around the first matched word, from the original-case haystack.
-            let pos = words.iter().filter_map(|w| low.find(*w)).min().unwrap_or(0);
+            let rank = (std::cmp::Reverse(score), ordinal);
+            ordinal += 1;
+            // Equal scores retain discovery order, as in the original stable sort.
+            if scored.len() == fetch && scored.last_key_value().is_some_and(|(worst, _)| rank >= *worst) {
+                continue;
+            }
+            // Lowercasing can expand UTF-8 characters; map the match back to source bytes.
+            let folded_pos = words.iter().filter_map(|w| low.find(*w)).min().unwrap_or(0);
+            let pos = source_offset_for_lowercase(sink.hay.as_str(), folded_pos);
             let lo = floor_char(sink.hay.as_str(), pos.saturating_sub(40));
             let hi = ceil_char(sink.hay.as_str(), (pos + 120).min(sink.hay.len()));
             let snippet = sink.hay.as_str()[lo..hi].replace('\n', " ").trim().to_string();
             let title = cv_core::label_from(meta.title.as_deref(), sink.first_user.as_deref());
-            scored.push((
-                score,
+            scored.insert(
+                rank,
                 cv_search::Hit {
                     id: r.id.clone(),
                     harness: r.harness.as_str().to_string(),
@@ -288,11 +308,31 @@ fn live_scan(task: &str, fetch: usize) -> Result<Vec<cv_search::Hit>> {
                     agent_id: None,
                     workflow: None,
                 },
-            ));
+            );
+            if scored.len() > fetch {
+                scored.pop_last();
+            }
         }
     }
-    scored.sort_by_key(|s| std::cmp::Reverse(s.0));
-    Ok(scored.into_iter().take(fetch).map(|(_, h)| h).collect())
+    Ok(scored.into_values().collect())
+}
+
+/// Translate an offset in `source.to_lowercase()` into an original UTF-8 boundary.
+/// ASCII needs no translation. Per-character lowercase lengths also cover contextual casing
+/// (Greek final sigma changes the character but retains the same encoded length).
+fn source_offset_for_lowercase(source: &str, folded_offset: usize) -> usize {
+    if source.is_ascii() {
+        return folded_offset.min(source.len());
+    }
+    let mut folded = 0;
+    for (offset, ch) in source.char_indices() {
+        let width: usize = ch.to_lowercase().map(char::len_utf8).sum();
+        if folded_offset < folded + width {
+            return offset;
+        }
+        folded += width;
+    }
+    source.len()
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -1183,6 +1223,101 @@ mod tests {
         std::fs::write(&path, b"changed")?;
         assert!(capped_text(&source, &resolver).is_err());
         assert!(best_window(&ExcerptFixture(vec![source]), &reference, "chosen").is_err());
+        Ok(())
+    }
+
+    struct RecallFixture(Vec<(String, String)>);
+    impl cv_core::Adapter for RecallFixture {
+        fn harness(&self) -> Harness {
+            Harness::OpenSession
+        }
+        fn roots(&self) -> Vec<PathBuf> {
+            vec![PathBuf::from("recall-fixture")]
+        }
+        fn discover(&self) -> Result<Vec<cv_core::SessionRef>> {
+            Ok(self
+                .0
+                .iter()
+                .map(|(id, _)| {
+                    let mut reference = cv_core::SessionRef::from_path(Path::new(id), self.harness());
+                    reference.id = id.clone();
+                    reference
+                })
+                .collect())
+        }
+        fn stream(&self, r: &cv_core::SessionRef, _: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+            let (_, text) = self.0.iter().find(|(id, _)| id == &r.id).unwrap();
+            let mut message = Message::new(Role::User);
+            message.content.push(Block::Text {
+                text: text.clone().into(),
+            });
+            sink.message(message);
+            Ok(Session::new(&r.id, r.harness))
+        }
+    }
+
+    #[test]
+    fn pack_live_recall_matches_full_stable_ranking_for_every_limit() -> Result<()> {
+        let fixture = RecallFixture(
+            (0..128)
+                .map(|i| {
+                    (
+                        format!("session-{i}"),
+                        match i % 4 {
+                            0 => "alpha beta".into(),
+                            1 => "alpha".into(),
+                            2 => "beta alpha".into(),
+                            _ => "irrelevant".into(),
+                        },
+                    )
+                })
+                .collect(),
+        );
+        // Independent oracle: retain every match and apply the original stable full sort.
+        let mut expected: Vec<_> = fixture
+            .0
+            .iter()
+            .filter_map(|(id, text)| {
+                let score = match text.as_str() {
+                    "alpha beta" => 7,
+                    "alpha" => 1,
+                    "beta alpha" => 2,
+                    _ => return None,
+                };
+                Some((score, id.as_str()))
+            })
+            .collect();
+        expected.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+        for limit in [0, 1, 2, 7, 32, 96, 128] {
+            let actual = live_scan_adapters("alpha beta", limit, [&fixture as &dyn cv_core::Adapter])?;
+            assert_eq!(
+                actual.iter().map(|hit| hit.id.as_str()).collect::<Vec<_>>(),
+                expected.iter().take(limit).map(|(_, id)| *id).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                actual.iter().map(|hit| hit.score as i64).collect::<Vec<_>>(),
+                expected.iter().take(limit).map(|(score, _)| *score).collect::<Vec<_>>()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn pack_live_recall_unicode_snippet_uses_original_source_offsets() -> Result<()> {
+        let source = format!("{}target {}", "İ".repeat(200), "end ".repeat(100));
+        let fixture = RecallFixture(vec![("unicode".into(), source.clone())]);
+        let actual = live_scan_adapters("target", 1, [&fixture as &dyn cv_core::Adapter])?;
+        let pos = source.find("target").unwrap();
+        assert_eq!(actual[0].snippet, source[pos - 40..pos + 120].trim());
+        assert!(actual[0].snippet.contains("target"));
+        for source in ["plain text", "İΣ ΟΣ target", "Ⱥİ target", "λİ target"] {
+            let folded = source.to_lowercase();
+            for (offset, _) in source.char_indices() {
+                let prefix = &source[..offset];
+                assert_eq!(source_offset_for_lowercase(source, prefix.to_lowercase().len()), offset);
+            }
+            assert_eq!(source_offset_for_lowercase(source, folded.len()), source.len());
+        }
         Ok(())
     }
 
