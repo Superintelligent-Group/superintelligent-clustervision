@@ -75,11 +75,16 @@ fn gemini_register_project(global_tmp: &Path, cwd: &str) -> Result<Option<String
     // Record the projects.json fast-path mapping too (best-effort).
     if let Some(parent) = global_tmp.parent() {
         let projects_json = parent.join("projects.json");
-        let mut doc: Value = fs::read_to_string(&projects_json)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .filter(Value::is_object)
-            .unwrap_or_else(|| json!({}));
+        let mut doc: Value = match fs::read_to_string(&projects_json) {
+            Ok(text) => match serde_json::from_str::<Value>(&text) {
+                Ok(doc) if doc.is_object() => doc,
+                // The required marker is enough for native recovery. Never replace an unreadable
+                // or unrecognized existing registry with an invented empty mapping.
+                _ => return Ok(Some(slug)),
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => json!({}),
+            Err(_) => return Ok(Some(slug)),
+        };
         let projects = doc
             .as_object_mut()
             .unwrap()
@@ -102,6 +107,27 @@ mod checked_tests {
         ir::{Message, Usage},
         Harness, Json, SessionRef,
     };
+
+    #[test]
+    fn project_registration_preserves_unrecognized_existing_registry() {
+        let root = std::env::temp_dir().join(format!("cv-gemini-registry-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let registry = root.join("projects.json");
+        for original in ["{broken registry", "[\"unexpected schema\"]"] {
+            fs::write(&registry, original).unwrap();
+            assert_eq!(
+                gemini_register_project(&root.join("tmp"), "/synthetic/project").unwrap(),
+                Some("project".into())
+            );
+            assert_eq!(fs::read_to_string(&registry).unwrap(), original);
+            assert_eq!(
+                fs::read_to_string(root.join("tmp/project/.project_root")).unwrap(),
+                "/synthetic/project"
+            );
+            fs::remove_dir_all(root.join("tmp")).unwrap();
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn required_project_marker_failure_prevents_transcript_publication() {
