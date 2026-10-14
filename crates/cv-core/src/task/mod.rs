@@ -29,8 +29,8 @@ pub mod store;
 pub mod views;
 
 pub use inbox::{
-    deadline_phrase, decisions_from_notes, inbox_page, DecisionView, InboxCounts, InboxItem, InboxPage, NoteView,
-    ResolutionView,
+    deadline_phrase, decisions_from_notes, inbox_page, inbox_page_brief, DecisionView, InboxCounts, InboxItem,
+    InboxPage, NoteView, ResolutionView,
 };
 pub use model::{RetiredEvent, TaskEvent, TaskEventKind, TaskState, RETIRED_TAGS};
 pub use project::{

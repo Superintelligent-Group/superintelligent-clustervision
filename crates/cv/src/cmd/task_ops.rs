@@ -658,6 +658,105 @@ mod tests {
     use super::*;
 
     #[test]
+    fn inbox_brief_projection_preserves_full_text_without_cloning_rich_payloads() {
+        let now: DateTime<Utc> = "2026-10-01T12:00:00Z".parse().unwrap();
+        let body = "large payload 🌙".repeat(8192);
+        let opened = task::new_event(
+            None,
+            "orchestrator",
+            TaskEventKind::Opened {
+                title: "brief action".into(),
+                body: body.clone(),
+                repo: None,
+                issue: None,
+                channel: None,
+                assignee: Some("ember".into()),
+            },
+        );
+        let action_id = opened.task_id.clone();
+        let decision = task::new_event(
+            None,
+            "orchestrator",
+            TaskEventKind::Opened {
+                title: "brief decision".into(),
+                body: body.clone(),
+                repo: None,
+                issue: None,
+                channel: None,
+                assignee: Some("ember".into()),
+            },
+        );
+        let decision_id = decision.task_id.clone();
+        let events = vec![
+            opened,
+            task::new_event(
+                Some(&action_id),
+                "orchestrator",
+                TaskEventKind::Noted {
+                    text: body.clone(),
+                    session_ref: None,
+                },
+            ),
+            task::new_event(
+                Some(&action_id),
+                "orchestrator",
+                TaskEventKind::StatusSet { text: body.clone() },
+            ),
+            decision,
+            task::new_event(
+                Some(&decision_id),
+                "orchestrator",
+                TaskEventKind::Posed {
+                    options: vec!["keep".into(), "change".into()],
+                    default_choice: "keep".into(),
+                    deadline: None,
+                    source: None,
+                },
+            ),
+            task::new_event(
+                Some(&decision_id),
+                "orchestrator",
+                TaskEventKind::Resolved {
+                    choice: "keep".into(),
+                    note: Some(body.clone()),
+                    provisional: true,
+                },
+            ),
+        ];
+        let outcome = ReplayOutcome {
+            model: task::TaskReducer::reduce(&events).unwrap(),
+            events,
+            warnings: Vec::new(),
+            quarantined: 0,
+        };
+        for unread in [false, true] {
+            let full = task::inbox_page(&outcome, "ember", None, None, unread, now);
+            let brief = task::inbox_page_brief(&outcome, "ember", None, None, unread, now);
+            assert_eq!(render_inbox_text(&brief), render_inbox_text(&full));
+            assert_eq!(
+                serde_json::to_value(&brief.counts).unwrap(),
+                serde_json::to_value(&full.counts).unwrap()
+            );
+            assert!(brief
+                .items
+                .iter()
+                .all(|row| row.body.is_empty() && row.notes.is_empty() && row.status.is_none()));
+            assert!(brief
+                .items
+                .iter()
+                .filter_map(|row| row.decision.as_ref())
+                .filter_map(|d| d.resolution.as_ref())
+                .all(|r| r.note.is_none()));
+            assert!(full
+                .items
+                .iter()
+                .any(|row| row.body == body && row.status.as_deref() == Some(body.as_str())));
+        }
+        assert_eq!(outcome.model.tasks[&action_id].body, body);
+        assert_eq!(outcome.model.tasks[&action_id].notes[0].text, body);
+    }
+
+    #[test]
     fn event_assignee_filters_share_web_actor_aliases() {
         let opened = task::new_event(
             None,

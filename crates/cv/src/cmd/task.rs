@@ -995,7 +995,11 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
             let now = Utc::now();
             let window = scope_window(all, since.as_deref(), now)?;
             let caller = task::default_endpoint();
-            let page = task::inbox_page(&outcome, &who, caller.as_deref(), window, unread, now);
+            let page = if json || md {
+                task::inbox_page(&outcome, &who, caller.as_deref(), window, unread, now)
+            } else {
+                task::inbox_page_brief(&outcome, &who, caller.as_deref(), window, unread, now)
+            };
             if json {
                 // The page the text and Markdown render from — the shape `cv serve`'s `/api/inbox`
                 // serves, and whose `items` are the MCP and `/api/tasks/inbox` rows.

@@ -89,12 +89,12 @@ pub struct ResolutionView {
 }
 
 impl ResolutionView {
-    fn of(r: &Resolution) -> ResolutionView {
+    fn of(r: &Resolution, rich: bool) -> ResolutionView {
         ResolutionView {
             choice: r.choice.clone(),
             by: r.by.clone(),
             ts: r.ts,
-            note: r.note.clone(),
+            note: if rich { r.note.clone() } else { None },
             accepted_default: r.accepted_default,
             provisional: r.provisional,
         }
@@ -176,6 +176,7 @@ struct PageCtx<'a> {
     children: HashMap<String, String>,
     authors: HashMap<&'a str, &'a str>,
     now: DateTime<Utc>,
+    rich: bool,
 }
 
 fn item_of(ctx: &PageCtx<'_>, t: &TaskProjection, reason: Option<InboxReason>, since: DateTime<Utc>) -> InboxItem {
@@ -197,7 +198,7 @@ fn item_of(ctx: &PageCtx<'_>, t: &TaskProjection, reason: Option<InboxReason>, s
         tags: t.tags.clone(),
         repo: t.repo.clone(),
         issue: t.issue.clone(),
-        body: t.body.clone(),
+        body: if ctx.rich { t.body.clone() } else { String::new() },
         blocked: project::is_blocked(model, t),
         last_by: last_by.to_string(),
         last_ts: t.last_ts,
@@ -211,21 +212,32 @@ fn item_of(ctx: &PageCtx<'_>, t: &TaskProjection, reason: Option<InboxReason>, s
             posed_by: d.posed_by.clone(),
             posed_at: d.posed_at,
             source: d.source.clone(),
-            resolution: d.resolution.as_ref().map(ResolutionView::of),
-            superseded_provisional: d.superseded_provisional.as_ref().map(ResolutionView::of),
+            resolution: d.resolution.as_ref().map(|r| ResolutionView::of(r, ctx.rich)),
+            superseded_provisional: if ctx.rich {
+                d.superseded_provisional.as_ref().map(|r| ResolutionView::of(r, true))
+            } else {
+                None
+            },
         }),
-        status: t.status.as_ref().map(|s| s.text.clone()),
-        notes: t
-            .notes
-            .iter()
-            .map(|n| NoteView {
-                by: n.by.clone(),
-                ts: n.ts,
-                text: n.text.clone(),
-                post_close: n.post_close,
-                split_into: children.get(&n.event_id).cloned(),
-            })
-            .collect(),
+        status: if ctx.rich {
+            t.status.as_ref().map(|s| s.text.clone())
+        } else {
+            None
+        },
+        notes: if ctx.rich {
+            t.notes
+                .iter()
+                .map(|n| NoteView {
+                    by: n.by.clone(),
+                    ts: n.ts,
+                    text: n.text.clone(),
+                    post_close: n.post_close,
+                    split_into: children.get(&n.event_id).cloned(),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        },
     }
 }
 
@@ -239,6 +251,31 @@ pub fn inbox_page(
     unread_only: bool,
     now: DateTime<Utc>,
 ) -> InboxPage {
+    build_page(outcome, who, caller, since, unread_only, now, true)
+}
+
+/// The textual inbox summary, using the same rows/order/counts as the full page. Bodies, notes,
+/// pinned status and resolution-note history are omitted; JSON/Markdown callers use inbox_page.
+pub fn inbox_page_brief(
+    outcome: &ReplayOutcome,
+    who: &str,
+    caller: Option<&str>,
+    since: Option<DateTime<Utc>>,
+    unread_only: bool,
+    now: DateTime<Utc>,
+) -> InboxPage {
+    build_page(outcome, who, caller, since, unread_only, now, false)
+}
+
+fn build_page(
+    outcome: &ReplayOutcome,
+    who: &str,
+    caller: Option<&str>,
+    since: Option<DateTime<Utc>>,
+    unread_only: bool,
+    now: DateTime<Utc>,
+    rich: bool,
+) -> InboxPage {
     let model = &outcome.model;
     let ctx = PageCtx {
         model,
@@ -247,6 +284,7 @@ pub fn inbox_page(
         children: decisions_from_notes(model),
         authors: last_authors(model, &outcome.events),
         now,
+        rich,
     };
     let mut items = Vec::new();
     let mut hidden = 0;
