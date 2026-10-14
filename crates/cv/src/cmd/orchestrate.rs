@@ -776,45 +776,75 @@ const STOPWORDS: &[&str] = &[
     "scope",
 ];
 
-/// The words a cross-reference is scored on: lowercase, ≥ 4 chars, alphanumeric, not a stopword.
+/// The words a cross-reference is scored on: lowercase, ≥ 4 bytes, alphanumeric, not a stopword.
 fn significant_words(text: &str) -> HashSet<String> {
-    text.split(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')
+    significant_words_in([text])
+}
+
+fn significant_words_in<'a>(texts: impl IntoIterator<Item = &'a str>) -> HashSet<String> {
+    texts
+        .into_iter()
+        .flat_map(|text| text.split(|c: char| !c.is_alphanumeric() && c != '-' && c != '_'))
         .map(|w| w.trim_matches(|c| c == '-' || c == '_').to_ascii_lowercase())
         .filter(|w| w.len() >= 4 && !STOPWORDS.contains(&w.as_str()))
         .collect()
 }
 
-/// The task sharing the most significant words with `sentence`, if that is at least three.
-fn best_task(model: &cv_core::task::TaskReadModel, sentence: &str) -> Option<TaskMatch> {
-    let words = significant_words(sentence);
-    if words.len() < 3 {
-        return None;
-    }
-    let mut best: Option<(usize, &cv_core::task::TaskProjection, Vec<String>)> = None;
-    for t in model.tasks.values() {
-        let hay = format!("{} {} {}", t.title, t.body, t.issue.as_deref().unwrap_or(""));
-        let theirs = significant_words(&hay);
-        let mut shared: Vec<String> = words.intersection(&theirs).cloned().collect();
-        if shared.len() < 3 {
-            continue;
-        }
-        shared.sort();
-        // Ties go to the newer task (ids are time-sortable), which is the one most likely to be
-        // the deferral's own.
-        let better = match &best {
-            None => true,
-            Some((n, prev, _)) => shared.len() > *n || (shared.len() == *n && t.task_id > prev.task_id),
-        };
-        if better {
-            best = Some((shared.len(), t, shared));
+/// One deferral operation's task vocabulary. Borrow projections; title/body/issue are separated
+/// by whitespace in the original haystack, so their token sets can be united without copying it.
+struct TaskMatcher<'a> {
+    tasks: Vec<(&'a cv_core::task::TaskProjection, HashSet<String>)>,
+}
+impl<'a> TaskMatcher<'a> {
+    fn new(model: &'a cv_core::task::TaskReadModel) -> Self {
+        Self {
+            tasks: model
+                .tasks
+                .values()
+                .map(|task| {
+                    let words = significant_words_in([
+                        task.title.as_str(),
+                        task.body.as_str(),
+                        task.issue.as_deref().unwrap_or(""),
+                    ]);
+                    (task, words)
+                })
+                .collect(),
         }
     }
-    best.map(|(_, t, shared)| TaskMatch {
-        task_id: t.task_id.clone(),
-        title: t.title.clone(),
-        state: cv_core::task::effective_display(t),
-        shared,
-    })
+
+    /// The task sharing the most significant words, if that is at least three. Ties go to the
+    /// newer task id; allocate and sort output words only after the winner has been selected.
+    fn best_task(&self, sentence: &str) -> Option<TaskMatch> {
+        let words = significant_words(sentence);
+        if words.len() < 3 {
+            return None;
+        }
+        let mut best: Option<(usize, &cv_core::task::TaskProjection, &HashSet<String>)> = None;
+        for (task, theirs) in &self.tasks {
+            let shared = words.intersection(theirs).count();
+            if shared < 3 {
+                continue;
+            }
+            let better = match &best {
+                None => true,
+                Some((n, prev, _)) => shared > *n || (shared == *n && task.task_id > prev.task_id),
+            };
+            if better {
+                best = Some((shared, *task, theirs));
+            }
+        }
+        best.map(|(_, task, theirs)| {
+            let mut shared: Vec<String> = words.intersection(theirs).cloned().collect();
+            shared.sort();
+            TaskMatch {
+                task_id: task.task_id.clone(),
+                title: task.title.clone(),
+                state: cv_core::task::effective_display(task),
+                shared,
+            }
+        })
+    }
 }
 
 fn collect_deferrals(
@@ -872,8 +902,11 @@ pub(crate) fn cmd_deferrals(
         for w in &outcome.warnings {
             eprintln!("⚠ task log: {w}");
         }
-        for d in &mut found {
-            d.matched = best_task(&outcome.model, &d.sentence);
+        if !found.is_empty() {
+            let matcher = TaskMatcher::new(&outcome.model);
+            for d in &mut found {
+                d.matched = matcher.best_task(&d.sentence);
+            }
         }
     }
     let unmatched = if open_tasks {
@@ -943,6 +976,113 @@ pub(crate) fn cmd_deferrals(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn best_task_oracle(model: &cv_core::task::TaskReadModel, sentence: &str) -> Option<TaskMatch> {
+        let words = significant_words(sentence);
+        if words.len() < 3 {
+            return None;
+        }
+        let mut best: Option<(usize, &cv_core::task::TaskProjection, Vec<String>)> = None;
+        for t in model.tasks.values() {
+            let hay = format!("{} {} {}", t.title, t.body, t.issue.as_deref().unwrap_or(""));
+            let theirs = significant_words(&hay);
+            let mut shared: Vec<String> = words.intersection(&theirs).cloned().collect();
+            if shared.len() < 3 {
+                continue;
+            }
+            shared.sort();
+            // Ties go to the newer task (ids are time-sortable), which is the one most likely to be
+            // the deferral's own.
+            let better = match &best {
+                None => true,
+                Some((n, prev, _)) => shared.len() > *n || (shared.len() == *n && t.task_id > prev.task_id),
+            };
+            if better {
+                best = Some((shared.len(), t, shared));
+            }
+        }
+        best.map(|(_, t, shared)| TaskMatch {
+            task_id: t.task_id.clone(),
+            title: t.title.clone(),
+            state: cv_core::task::effective_display(t),
+            shared,
+        })
+    }
+
+    #[test]
+    fn deferral_matcher_preserves_scores_ties_states_and_word_normalization() {
+        use cv_core::task::{TaskEventKind, TaskReducer};
+        let specs = [
+            ("ALPHA", "bravo", Some("charlie")),
+            ("alpha bravo", "charlie delta", None),
+            ("alpha", "bravo charlie", Some("irrelevant")),
+            (
+                "external_kind",
+                "ümlaut resource-admission",
+                Some("ÉCLAIR words_boundary"),
+            ),
+            ("foo_", "_bar baz-", Some("-quux")),
+        ];
+        let events: Vec<_> = specs
+            .iter()
+            .enumerate()
+            .map(|(index, (title, body, issue))| {
+                let mut event = cv_core::task::new_event(
+                    None,
+                    "agent:author",
+                    TaskEventKind::Opened {
+                        title: (*title).into(),
+                        body: (*body).into(),
+                        repo: None,
+                        issue: issue.map(String::from),
+                        channel: None,
+                        assignee: None,
+                    },
+                );
+                event.id = format!("01800000-0000-7000-8000-{:012x}", index + 1);
+                event.task_id = event.id.clone();
+                event
+            })
+            .collect();
+        let mut model = TaskReducer::reduce(&events).unwrap();
+        // Deferrals match terminal tasks too; retain that behavior despite --open-tasks spelling.
+        model.tasks.get_mut(&events[2].task_id).unwrap().state = cv_core::task::TaskState::Done;
+        let matcher = TaskMatcher::new(&model);
+        let sentences = [
+            "",
+            "the next task is deferred until later",
+            "alpha bravo",
+            "alpha alpha bravo bravo",
+            "ALPHA, bravo; charlie.",
+            "alpha bravo charlie delta",
+            "alpha bravo charlie delta irrelevant",
+            "external_kind ümlaut resource-admission ÉCLAIR words_boundary",
+            "EXTERNAL_KIND ümlaut resource-admission",
+            "foo bar baz quux",
+            "alpha bravo charlie words_boundary unmatched",
+            "-alpha- _bravo_ charlie",
+        ];
+        for _ in 0..2 {
+            for sentence in sentences {
+                assert_eq!(
+                    serde_json::to_value(matcher.best_task(sentence)).unwrap(),
+                    serde_json::to_value(best_task_oracle(&model, sentence)).unwrap(),
+                    "{sentence}"
+                );
+            }
+        }
+        let tied = matcher.best_task("alpha bravo charlie").unwrap();
+        assert_eq!(tied.task_id, events[2].task_id);
+        assert_eq!(tied.state, "done");
+        assert_eq!(tied.shared, ["alpha", "bravo", "charlie"]);
+        assert_eq!(
+            matcher.best_task("alpha bravo charlie delta").unwrap().task_id,
+            events[1].task_id
+        );
+        assert!(TaskMatcher::new(&cv_core::task::TaskReadModel::default())
+            .best_task("alpha bravo charlie")
+            .is_none());
+    }
 
     #[test]
     fn phrases_compile_and_catch_the_real_sentences() {
@@ -1023,7 +1163,7 @@ mod tests {
         assert!(w.contains("externalkind"));
         assert!(w.contains("exhaustive"));
         assert!(!w.contains("after"));
-        assert!(!w.contains("final-1") || true);
+        assert!(w.contains("final-1"));
         assert!(!w.contains("make"));
     }
 }
