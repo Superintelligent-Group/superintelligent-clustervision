@@ -765,7 +765,7 @@ pub fn semantic_search_filtered(
     Ok(rank_filtered(&store, &q, k, filter))
 }
 
-/// Service-owned semantic state. Construction performs no I/O; the first semantic request
+/// Service-owned semantic state. Construction reads no store/model; the first semantic request
 /// loads the store/model. One generation is retained and requests share it under a mutex.
 /// Dropping this handle releases it; one-shot CLI callers keep their existing stateless path.
 pub struct SemanticSearch {
@@ -918,6 +918,13 @@ struct ResidentSearch<M> {
 }
 impl<M> ResidentSearch<M> {
     fn new(path: PathBuf) -> Self {
+        // The handle owns one configured location, even if an embedding process later
+        // changes its working directory. Missing paths still load lazily on first demand.
+        let path = if path.is_absolute() {
+            path
+        } else {
+            std::env::current_dir().map(|cwd| cwd.join(&path)).unwrap_or(path)
+        };
         Self {
             state: std::sync::Mutex::new(ResidentState::new(path)),
         }
@@ -2325,6 +2332,14 @@ mod tests {
         drop(search);
         assert_eq!(loads.load(Ordering::Relaxed), drops.load(Ordering::Relaxed));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn resident_semantic_anchors_relative_store_location() {
+        let path = PathBuf::from("missing-semantic-store");
+        let expected = std::env::current_dir().unwrap().join(&path);
+        let search = ResidentSearch::<()>::new(path);
+        assert_eq!(search.state.lock().unwrap().path, expected);
     }
 
     #[test]
