@@ -292,6 +292,20 @@ fn tool_calls_against_fixture_corpus() {
 }
 
 #[test]
+fn malformed_utf8_is_a_frame_error_instead_of_rewritten_arguments() {
+    let mut server = Server::spawn("invalid-utf8-frame");
+    server
+        .stdin
+        .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"ping\",\"params\":{\"text\":\"\xff\"}}\n")
+        .unwrap();
+    server.stdin.flush().unwrap();
+    let error = server.recv();
+    assert_eq!(error["error"]["code"], -32700, "invalid input was rewritten: {error}");
+    assert!(error["id"].is_null());
+    assert_eq!(server.request(100, "ping", json!({}))["id"], 100);
+}
+
+#[test]
 fn malformed_observation_strings_are_rejected_instead_of_widening_filters() {
     let mut s = Server::spawn("string-arguments");
     for (tool, args) in [

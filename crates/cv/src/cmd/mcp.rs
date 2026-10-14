@@ -204,9 +204,8 @@ pub(crate) fn cmd_mcp(tree: clap::Command) -> anyhow::Result<()> {
         } else {
             buf.clear();
         }
-        // Read raw bytes, not into a String: a single non-UTF-8 byte on stdin would make
-        // `read_line` error out. Lossy-decode instead so one bad frame is tolerated rather than
-        // fatal, and keep transient read errors non-fatal too — only EOF ends the server.
+        // Read raw frames so malformed UTF8 produces a per-frame JSON parse error rather
+        // than terminating the server or silently rewriting tool arguments.
         let n = match reader.read_until(b'\n', &mut buf) {
             Ok(n) => n,
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -218,13 +217,11 @@ pub(crate) fn cmd_mcp(tree: clap::Command) -> anyhow::Result<()> {
         if n == 0 {
             break; // EOF
         }
-        let line = String::from_utf8_lossy(&buf);
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
+        if buf.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
 
-        let req: Value = match serde_json::from_str(trimmed) {
+        let req: Value = match serde_json::from_slice(&buf) {
             Ok(v) => v,
             Err(e) => {
                 // Parse error: id unknown, reply with null id per JSON-RPC.
