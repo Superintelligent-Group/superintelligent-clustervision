@@ -1624,7 +1624,7 @@ mod tests {
         task.blocked_by = vec!["bad\tblock\x1b[31m".into()];
         let row = TaskRow::full(&task);
         let now: DateTime<Utc> = "2026-07-16T00:00:00Z".parse().unwrap();
-        let rendered = task_row(&row, now, usize::MAX, true);
+        let rendered = task_row(&row, now, row.id.len(), true);
         assert_eq!(rendered.lines().count(), 1);
         assert!(!rendered.contains('\x1b'));
         let tsv = task_row_tsv(&row, now);
