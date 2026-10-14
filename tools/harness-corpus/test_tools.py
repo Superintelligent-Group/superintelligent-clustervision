@@ -6,6 +6,7 @@ jsonl, json and sqlite store.
     python3 -I tools/harness-corpus/test_tools.py
 """
 import glob
+import importlib.util
 import json
 import os
 import re
@@ -435,6 +436,12 @@ class GuardTests(unittest.TestCase):
                                      "guard", os.path.join(HERE, "lib.sh"), work, allowed], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue(os.path.isdir(allowed))
+
+
+schema_test_spec = importlib.util.spec_from_file_location("schema_snapshot_tests", os.path.join(HERE, "test_schema_snapshot.py"))
+schema_tests = importlib.util.module_from_spec(schema_test_spec)
+schema_test_spec.loader.exec_module(schema_tests)
+SchemaSnapshotCase = schema_tests.SchemaSnapshotCase
 
 
 if __name__ == "__main__":

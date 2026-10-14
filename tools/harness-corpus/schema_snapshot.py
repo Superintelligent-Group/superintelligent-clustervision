@@ -21,13 +21,62 @@ import json
 import re
 import sqlite3
 import sys
+import shutil
+import tempfile
 from collections import defaultdict
+from contextlib import contextmanager
+from pathlib import Path
 
 TAGS = {"type", "role", "kind", "status", "version",
         "variant", "mode", "state", "source", "format", "stopReason", "stop_reason", "finish_reason",
         "data_type", "fileType"}
 IDENT = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,40}$")
 TAGVAL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,40}$")
+
+
+def sqlite_files(path):
+    return [path, Path(str(path) + "-wal"), Path(str(path) + "-journal")]
+
+
+def fingerprint(path):
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return None
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
+
+@contextmanager
+def sqlite_snapshot(path):
+    """SQLite touches only an owned scratch copy, including committed WAL content.
+
+    immutable=1 skips WAL entirely; mode=ro alone may create SHM at the source. Copy
+    stable DB/WAL/journal tuples instead and refuse observed concurrent changes rather
+    than report a mixed or stale store shape. No source content is retained afterwards.
+    """
+    path = Path(path).resolve(strict=True)
+    files = sqlite_files(path)
+    captured = [fingerprint(file) for file in files]
+
+    def check():
+        if [fingerprint(file) for file in files] != captured:
+            raise RuntimeError("SQLite source changed during schema snapshot; retry after the writer is quiet")
+
+    with tempfile.TemporaryDirectory(prefix="cv-schema-snapshot.") as scratch:
+        database = Path(scratch) / "store.db"
+        for source, stamp, suffix in zip(files, captured, ("", "-wal", "-journal")):
+            if stamp is not None:
+                target = Path(str(database) + suffix)
+                shutil.copyfile(source, target)
+                target.chmod(0o600)
+        check()
+        connection = sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)
+        try:
+            connection.execute("BEGIN")
+            yield connection
+            check()
+        finally:
+            connection.close()
 
 
 class Shape:
@@ -86,25 +135,25 @@ def main():
     a = ap.parse_args()
     out = []
     if a.kind == "sqlite":
-        c = sqlite3.connect(f"file:{a.paths[0]}?mode=ro&immutable=1", uri=True)
-        out.append(f"-- PRAGMA user_version = {c.execute('PRAGMA user_version').fetchone()[0]}")
-        keep = set(a.tables.split(",")) if a.tables else None
-        for typ, name, tbl, sql in c.execute(
-                "SELECT type, name, tbl_name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name"):
-            if keep is None or tbl in keep:
-                out.append(sql.strip() + ";")
-        for spec in a.json_column:
-            col, _, codec = spec.partition(":")
-            table, column = col.split(".")
-            sh = Shape()
-            n = 0
-            for (cell,) in c.execute(f'SELECT "{column}" FROM "{table}"'):
-                v = decode(cell, codec == "zstd")
-                if v is not None:
-                    sh.add(v)
-                    n += 1
-            out.append(f"\n-- JSON shape of {table}.{column} (merged over {n} rows)")
-            out += sh.lines()
+        with sqlite_snapshot(a.paths[0]) as c:
+            out.append(f"-- PRAGMA user_version = {c.execute('PRAGMA user_version').fetchone()[0]}")
+            keep = set(a.tables.split(",")) if a.tables else None
+            for typ, name, tbl, sql in c.execute(
+                    "SELECT type, name, tbl_name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name"):
+                if keep is None or tbl in keep:
+                    out.append(sql.strip() + ";")
+            for spec in a.json_column:
+                col, _, codec = spec.partition(":")
+                table, column = col.split(".")
+                sh = Shape()
+                n = 0
+                for (cell,) in c.execute(f'SELECT "{column}" FROM "{table}"'):
+                    v = decode(cell, codec == "zstd")
+                    if v is not None:
+                        sh.add(v)
+                        n += 1
+                out.append(f"\n-- JSON shape of {table}.{column} (merged over {n} rows)")
+                out += sh.lines()
     else:
         sh = Shape()
         files = sorted({f for g in a.paths for f in glob.glob(g)})

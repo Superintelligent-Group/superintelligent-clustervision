@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Record (or --check) the shape of the Zed agent store on this machine, without its content:
 # threads/threads.db's DDL plus the merged JSON shape of its zstd `data` blobs, and the DDL of the
-# agent tables in db/<n>-stable/db.sqlite. Read-only (immutable sqlite opens); nothing is written
+# agent tables in db/<n>-stable/db.sqlite. Read-only source copies include WAL; nothing is written
 # next to the store. See README.md for why Zed has no generated corpus.
 #
 #   tools/harness-corpus/zed/snapshot.sh            # writes crates/cv-core/tests/corpus/zed/<app version>/
@@ -37,7 +37,16 @@ if [ "${1:-}" = "--check" ]; then
 fi
 mkdir -p "$OUT"
 cp "$TMP"/*.txt "$OUT/"
-LAST="$(sqlite3 "file:$THREADS?mode=ro&immutable=1" "select max(updated_at) from threads")"
+LAST="$(python3 -I - "$HERE/../schema_snapshot.py" "$THREADS" <<'PY'
+import importlib.util
+import sys
+spec = importlib.util.spec_from_file_location("schema_snapshot", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+with module.sqlite_snapshot(sys.argv[2]) as database:
+    print(database.execute("SELECT max(updated_at) FROM threads").fetchone()[0] or "")
+PY
+)"
 cat >"$OUT/SNAPSHOT.toml" <<TOML
 # Written by tools/harness-corpus/zed/snapshot.sh: a store SHAPE, not a corpus (no sessions).
 harness = "zed"
