@@ -86,14 +86,30 @@ fn carry_context(src: &Path, dst: &Path) {
             eprintln!("  ↳ context: {name} already exists at target — left as-is");
             continue;
         }
-        match fs::create_dir_all(dst).and_then(|_| fs::copy(&from, &to)) {
-            Ok(_) => copied.push(*name),
+        match fs::create_dir_all(dst).and_then(|_| copy_context_if_absent(&from, &to)) {
+            Ok(Some(_)) => copied.push(*name),
+            Ok(None) => eprintln!("  ↳ context: {name} already exists at target — left as-is"),
             Err(e) => eprintln!("  ↳ context: couldn't copy {name}: {e}"),
         }
     }
     if !copied.is_empty() {
         println!("  ↳ carried context: {}", copied.join(", "));
     }
+}
+
+/// Exclusive creation enforces the context-copy contract even for symlinks or concurrent writers.
+fn copy_context_if_absent(from: &Path, to: &Path) -> std::io::Result<Option<u64>> {
+    use std::io::Write;
+    let mut source = fs::File::open(from)?;
+    let mut destination = match fs::OpenOptions::new().write(true).create_new(true).open(to) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let copied = std::io::copy(&mut source, &mut destination)?;
+    destination.flush()?;
+    destination.set_permissions(source.metadata()?.permissions())?;
+    Ok(Some(copied))
 }
 
 pub(crate) fn emit_session(session: &Session, to_h: Harness, out: Option<PathBuf>, opts: EmitOptions) -> Result<()> {
@@ -210,5 +226,40 @@ pub(crate) fn shell_quote(s: &str) -> String {
         s.to_string()
     } else {
         format!("'{}'", s.replace('\'', r"'\''"))
+    }
+}
+
+#[cfg(test)]
+mod context_tests {
+    use super::*;
+
+    #[test]
+    fn context_copy_never_overwrites_existing_destinations() {
+        let world = cv_testkit::World::new("port-context-exclusive");
+        let source = world.base.join("source.md");
+        let destination = world.base.join("target.md");
+        fs::write(&source, "project instructions λ").unwrap();
+        assert_eq!(
+            copy_context_if_absent(&source, &destination).unwrap(),
+            Some("project instructions λ".len() as u64)
+        );
+        fs::write(&destination, "concurrent instructions").unwrap();
+        assert_eq!(copy_context_if_absent(&source, &destination).unwrap(), None);
+        assert_eq!(fs::read(&destination).unwrap(), b"concurrent instructions");
+        assert_eq!(fs::read(&source).unwrap(), "project instructions λ".as_bytes());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn context_copy_leaves_broken_symlinks_and_their_targets_untouched() {
+        let world = cv_testkit::World::new("port-context-symlink");
+        let source = world.base.join("source.md");
+        let destination = world.base.join("target.md");
+        let missing = world.base.join("unrequested.md");
+        fs::write(&source, "instructions").unwrap();
+        std::os::unix::fs::symlink(&missing, &destination).unwrap();
+        assert_eq!(copy_context_if_absent(&source, &destination).unwrap(), None);
+        assert!(destination.is_symlink());
+        assert!(!missing.exists());
     }
 }
