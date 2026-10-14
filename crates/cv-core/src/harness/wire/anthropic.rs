@@ -456,9 +456,24 @@ fn blocks_to(content: &[Block], q: &Quirks, user: bool) -> anyhow::Result<Vec<Va
     Ok(out)
 }
 
+/// Owned-codec output keeps its historical Span schema, but Source text errors are fallible
+/// and its already-owned decoded string can move directly into the output Value.
+fn text_value(text: &Text) -> anyhow::Result<Value> {
+    match text {
+        Text::Inline(value) => Ok(Value::String(value.clone())),
+        Text::Span(span) => serde_json::to_value(span).map_err(Into::into),
+        Text::Source(source) => Ok(Value::String(source.try_resolve()?)),
+    }
+}
+
 fn block_to(b: &Block, q: &Quirks, user: bool) -> anyhow::Result<Option<Value>> {
     Ok(Some(match b {
-        Block::Text { text } => json!({ "type": "text", "text": text }),
+        Block::Text { text } => {
+            let mut fields = Map::new();
+            fields.insert("type".into(), json!("text"));
+            fields.insert("text".into(), text_value(text)?);
+            Value::Object(fields)
+        }
         Block::Thinking {
             text,
             signature,
@@ -475,7 +490,7 @@ fn block_to(b: &Block, q: &Quirks, user: bool) -> anyhow::Result<Option<Value>> 
                 }
                 _ => {
                     m.insert("type".into(), json!("thinking"));
-                    m.insert(q.thinking.0.into(), json!(text));
+                    m.insert(q.thinking.0.into(), text_value(text)?);
                     if let Some(sig) = signature {
                         m.insert(q.thinking.1.into(), json!(sig));
                     }
@@ -483,23 +498,27 @@ fn block_to(b: &Block, q: &Quirks, user: bool) -> anyhow::Result<Option<Value>> 
             }
             Value::Object(m)
         }
-        Block::ToolUse { id, name, input, .. } => json!({
-            "type": q.tool_use.0,
-            "id": id,
-            "name": name,
-            q.tool_use.1: input.resolve()?.as_ref(),
-        }),
+        Block::ToolUse { id, name, input, .. } => {
+            let mut fields = Map::new();
+            fields.insert("type".into(), json!(q.tool_use.0));
+            fields.insert("id".into(), json!(id));
+            fields.insert("name".into(), json!(name));
+            fields.insert(q.tool_use.1.into(), input.resolve()?.into_owned());
+            Value::Object(fields)
+        }
         Block::ToolResult {
             tool_use_id,
             content,
             is_error,
             ..
-        } if user => json!({
-            "type": "tool_result",
-            "tool_use_id": tool_use_id,
-            "content": content,
-            "is_error": is_error,
-        }),
+        } if user => {
+            let mut fields = Map::new();
+            fields.insert("type".into(), json!("tool_result"));
+            fields.insert("tool_use_id".into(), json!(tool_use_id));
+            fields.insert("content".into(), text_value(content)?);
+            fields.insert("is_error".into(), json!(is_error));
+            Value::Object(fields)
+        }
         Block::ToolResult { .. } => return Ok(None),
         Block::Image { media_type, data_ref } => image_block(media_type, data_ref, q),
         Block::File { mime, path, source } if user && q.flat_media.is_none() => {
@@ -686,6 +705,37 @@ mod tests {
 mod selected_media_tests {
     use super::*;
     #[test]
+    fn owned_codec_returns_changed_text_errors_instead_of_panicking() -> anyhow::Result<()> {
+        let world = cv_testkit::World::in_process("anthropic-owned-source-error");
+        let path = world.base.join("text.json");
+        let raw = serde_json::to_vec(&"large text ".repeat(10000))?;
+        std::fs::write(&path, &raw)?;
+        let text = crate::json::JsonSource::capture(&path)?
+            .read_range_value(0, raw.len() as u64, |view| view.source_text())?
+            .unwrap();
+        std::fs::write(&path, b"changed source")?;
+        for block in [
+            Block::Text { text: text.clone() },
+            Block::Thinking {
+                text: text.clone(),
+                signature: None,
+                encrypted: None,
+                redacted: false,
+            },
+            Block::ToolResult {
+                tool_use_id: "call".into(),
+                content: text,
+                is_error: false,
+                tool_name: None,
+                status: None,
+                details: None,
+            },
+        ] {
+            assert!(block_to(&block, &ANTHROPIC, true).is_err());
+        }
+        Ok(())
+    }
+    #[test]
     fn composite_result_projection_matches_owned_codec_without_joined_body_ownership() -> anyhow::Result<()> {
         let world = cv_testkit::World::in_process("wire-composite-result");
         let path = world.base.join("result.json");
@@ -708,7 +758,10 @@ mod selected_media_tests {
         message.content.push(block);
         session.messages.push(message);
         session.materialize()?;
-        assert_eq!(session.messages[0].content[0], block_from(&value, &ANTHROPIC).unwrap());
+        assert_eq!(
+            serde_json::to_value(&session.messages[0].content[0])?,
+            serde_json::to_value(block_from(&value, &ANTHROPIC))?
+        );
         let block = source
             .read_range_value(0, source.len(), |view| block_from_view(view, &ANTHROPIC, true))?
             .unwrap();
@@ -730,7 +783,10 @@ mod selected_media_tests {
                     let source = crate::json::JsonSource::capture(&path)?;
                     let selected =
                         source.read_range_value(0, source.len(), |view| block_from_view(view, &quirks, true))?;
-                    assert_eq!(selected, block_from(&value, &quirks));
+                    assert_eq!(
+                        serde_json::to_value(selected)?,
+                        serde_json::to_value(block_from(&value, &quirks))?
+                    );
                 }
             }
         }
