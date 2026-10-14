@@ -1650,6 +1650,7 @@ fn md5_hex(data: &[u8]) -> String {
 mod tests {
     use super::*;
     use crate::harness::Parse;
+    use serde_json::json;
 
     #[test]
     fn discovery_refreshes_titles_registry_rotations_and_wire_without_live_append() -> Result<()> {
@@ -1805,6 +1806,121 @@ mod tests {
             message.materialize(&resolver).unwrap();
         }
         serde_json::to_value(messages).unwrap()
+    }
+
+    #[test]
+    fn growing_call_name_checkpoints_preserve_late_and_duplicate_result_suffixes() -> Result<()> {
+        let world = cv_testkit::World::in_process("kimi-growing-call-state");
+        let dir = world.home.join("session");
+        fs::create_dir_all(&dir)?;
+        let names = (0..96)
+            .map(|index| format!("tool-{index}-{}", "n".repeat(1024)))
+            .collect::<Vec<_>>();
+        let mut records = names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| {
+                json!({
+                    "role":"assistant","tool_calls":[{"id":format!("call-{index}"),"type":"function",
+                        "function":{"name":name,"arguments":"{}"}}]
+                })
+            })
+            .collect::<Vec<_>>();
+        records.push(json!({"role":"user","content":"all calls have been recorded"}));
+        for index in [0, 48, 95, 0, 999] {
+            records.push(json!({"role":"tool","tool_call_id":format!("call-{index}"),"content":"late result"}));
+        }
+        records.push(json!({"role":"user","content":"done"}));
+        fs::write(
+            dir.join("context.jsonl"),
+            records.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n",
+        )?;
+        let adapter = Kimi {
+            root: None,
+            sessions: None,
+        };
+        let reference = SessionRef::new("session", Harness::Kimi, &dir);
+        for options in [ParseOptions::full(), ParseOptions::lazy()] {
+            let expected = old_context_oracle(&adapter, &reference, &options);
+            let mut full = ResumeKeep::default();
+            adapter.try_stream(&reference, &options, &mut full)?;
+            assert_eq!(
+                materialized(&full.messages, &reference),
+                serde_json::to_value(expected.messages)?
+            );
+            let last = full.checkpoints.last().unwrap();
+            assert_eq!(
+                last.1
+                    .get::<ContextCheckpoint>(crate::stream::ADAPTER_LAYER)
+                    .unwrap()
+                    .ctx
+                    .call_names
+                    .len(),
+                96
+            );
+            assert!(serde_json::to_vec(&last.1)?.len() > 64 * 1024);
+            let result_names = full
+                .messages
+                .iter()
+                .flat_map(|message| &message.content)
+                .filter_map(|block| match block {
+                    Block::ToolResult { tool_name, .. } => Some(tool_name.as_deref()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                result_names,
+                vec![
+                    Some(names[0].as_str()),
+                    Some(names[48].as_str()),
+                    Some(names[95].as_str()),
+                    Some(names[0].as_str()),
+                    None
+                ]
+            );
+            for index in [0, 48, 95] {
+                let (count, checkpoint) = &full.checkpoints[index];
+                let mut suffix = ResumeKeep::default();
+                assert!(adapter
+                    .try_resume(&reference, &options, &mut suffix, checkpoint)?
+                    .is_some());
+                assert_eq!(
+                    materialized(&suffix.messages, &reference),
+                    materialized(&full.messages[*count..], &reference)
+                );
+            }
+            let mut amortized = ResumeKeep::default();
+            crate::stream::stream_resumable_amortized(&adapter, &reference, &options, &mut amortized, 1024, None)?
+                .unwrap();
+            assert_eq!(
+                materialized(&amortized.messages, &reference),
+                materialized(&full.messages, &reference)
+            );
+            assert!(amortized.checkpoints.len() < full.checkpoints.len() / 2);
+            let snapshot_bytes = amortized
+                .checkpoints
+                .iter()
+                .map(|(_, cp)| serde_json::to_vec(cp).unwrap().len())
+                .sum::<usize>();
+            assert!(snapshot_bytes as u64 <= fs::metadata(dir.join("context.jsonl"))?.len() * 4);
+            for (count, checkpoint) in &amortized.checkpoints {
+                let mut suffix = ResumeKeep::default();
+                assert!(crate::stream::stream_resumable_amortized(
+                    &adapter,
+                    &reference,
+                    &options,
+                    &mut suffix,
+                    1024,
+                    Some(checkpoint)
+                )?
+                .is_some());
+                assert_eq!(
+                    materialized(&suffix.messages, &reference),
+                    materialized(&full.messages[*count..], &reference)
+                );
+            }
+        }
+        Ok(())
     }
 
     #[test]
