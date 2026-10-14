@@ -1,6 +1,7 @@
 # Store performance: the system we are optimizing
 
-Source audit began at `c0f0044`, 2026-10-12; whole-codebase runtime integration is `1cbcab99` (2026-10-14).
+Source audit began at `c0f0044`, 2026-10-12; whole-codebase runtime integration is `1cbcab99`,
+with the backend complexity follow-up through `64b5bbe6` (2026-10-14).
 This is the working model and tracker for the performance pass. Measurements in `PERF.md` remain historical observations; their causal
 explanations are not all supported by the implementation. Paths below are relative to `crates/`.
 
@@ -21,17 +22,32 @@ The preceding source review did not establish the absence of repeated work. A fu
 | FTS / watch checkpoints | Space exact owned snapshots by their encoded size as well as the minimum byte interval. Growing state no longer forces repeated prefix snapshots at fixed intervals; large states increase the suffix reread on append. |
 
 Operation-local metadata inventories share original source guards across nested and parallel
-readers, single-flight each key, and cap estimated retained metadata at 16 MiB. Standalone reads
-remain fresh loads. Qwen indexes shared scheduled tasks once, preserving file order in selected
-results. Goose/OpenClaw consumers and combined validation are still in progress at this entry.
-The first combined adapter/stream/workflow/formats batch passed 741 tests; this is algorithm and
-behavior evidence, not a new fleet latency or hardware-counter measurement.
+readers, single-flight each key, and cap estimated retained metadata at 16 MiB. Discovery, token
+statistics and FTS propagate the scope into their actual workers; standalone reads remain fresh
+loads. Qwen's first scheduled-task query remains linear, with labels computed only for selected
+rows; repeat queries initialize one time index, preserving file order in selected results.
+Goose shares copied-message holder minima for native TEXT/BINARY identifiers. OpenClaw shares
+JSON membership and eligible native SQL parent-window inventories, with an 8 MiB construction
+estimate cap. Custom SQL comparisons retain the original queries and both query parameters in
+cache keys. A real TokenStats worker control reads 80 Goose holder rows across 79 sessions,
+instead of repeating the family scan for every child.
+
+The full workspace tests, all-target build/clippy, minimal core/search builds, standalone Wasm
+check and release parse budget passed at `fe982832`; the portable cohort passed 257 controls.
+Browser rendering passed 87 checks; manual, corpus tooling and dist planning also passed.
+The final SQL collation/exclusion repairs passed all 82 Goose/OpenClaw controls in both native
+and portable builds with the runtime source at `64b5bbe6`.
+This is algorithm, scan-count and behavior evidence, not a new fleet latency or hardware-counter
+measurement. Earlier allocation matrices remain evidence at their recorded revisions below.
 
 Remaining costs are explicit: Grok sibling lineage retains per-query sibling metadata guards;
 a cache alone cannot remove those stats without weakening freshness. Kimi wire enrichment and
 Kimi Code's auxiliary session index still reread changed prefixes. Claude compaction fork inference
 can inspect sibling prefixes/bodies for shared UUID evidence. External SQLite schemas without the
-relevant native indexes cannot be repaired by writing to the user's stores. Required ordering,
+relevant native indexes cannot be repaired by writing to the user's stores. OpenClaw's custom or
+over-budget schemas retain per-parent SQL scans, and ambiguous historical-parent candidates still
+need transcript inspection. The inventory estimate does not bound a giant cell's native SQLite
+allocation. Required ordering,
 exact source validation, demanded output and complete metadata remain work, not presumed defects.
 
 GitHub triage found no open PRs. [Issue 21](https://github.com/emberian/cv/issues/21) is confirmed:
