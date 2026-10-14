@@ -141,18 +141,28 @@ impl Manifest {
         if let Some((k, e)) = self.types.get_key_value(wire) {
             return Some((k.as_str(), e));
         }
-        for (k, e) in &self.types {
-            for cand in key_candidates(k) {
-                let hit = match cand.strip_suffix('*') {
-                    Some(prefix) => !prefix.is_empty() && wire.starts_with(prefix),
-                    None => cand == wire,
-                };
-                if hit {
-                    return Some((k.as_str(), e));
+        // Exact wire spellings take precedence over families, independently of key ordering.
+        fn candidates(key: &str) -> [Option<&str>; 2] {
+            [Some(key), key.split_once('.').map(|(_, wire)| wire)]
+        }
+        for (key, entry) in &self.types {
+            if candidates(key).into_iter().flatten().any(|candidate| candidate == wire) {
+                return Some((key.as_str(), entry));
+            }
+        }
+        let mut family = None;
+        let mut longest = 0;
+        for (key, entry) in &self.types {
+            for candidate in candidates(key).into_iter().flatten() {
+                if let Some(prefix) = candidate.strip_suffix('*') {
+                    if prefix.len() > longest && wire.starts_with(prefix) {
+                        longest = prefix.len();
+                        family = Some((key.as_str(), entry));
+                    }
                 }
             }
         }
-        None
+        family
     }
 }
 
@@ -541,6 +551,9 @@ fn carrier_record_type(m: &crate::ir::Message, h: Harness) -> Option<String> {
 /// The N most recent sessions per harness (catalog-backed, newest first), keyed by harness name.
 fn recent_refs(harness: Option<Harness>, recent: usize) -> BTreeMap<&'static str, (Harness, Vec<SessionRef>)> {
     let mut by: BTreeMap<&'static str, (Harness, Vec<SessionRef>)> = BTreeMap::new();
+    if recent == 0 {
+        return by;
+    }
     for r in crate::sessions() {
         if harness.is_some_and(|h| h != r.harness) {
             continue;
@@ -557,6 +570,40 @@ fn recent_refs(harness: Option<Harness>, recent: usize) -> BTreeMap<&'static str
     by
 }
 
+/// Keep tally state only; failed streams never contribute a partial sample.
+fn census_session(
+    adapter: &dyn harness::Adapter,
+    r: &SessionRef,
+    h: Harness,
+    manifest: Option<&Manifest>,
+) -> Result<HarnessCensus> {
+    let mut sample = HarnessCensus::default();
+    let mut sink = stream::TryFnSink::new(|message: crate::Message| {
+        *sample.kinds.entry(message.kind.as_str().to_string()).or_default() += 1;
+        for block in &message.content {
+            *sample.block_types.entry(block_type(block).to_string()).or_default() += 1;
+        }
+        if let Some(ty) = carrier_record_type(&message, h) {
+            let status = manifest.and_then(|m| m.lookup(&ty)).map(|(_, entry)| entry.status);
+            sample
+                .records
+                .entry(ty)
+                .or_insert_with(|| RecordStat {
+                    count: 0,
+                    first_seen: r.path.clone(),
+                    status,
+                    new: status.is_none(),
+                })
+                .count += 1;
+        }
+        Ok(stream::Flow::Continue)
+    });
+    let mut opts = ParseOptions::complete();
+    opts.spans = true;
+    adapter.stream(r, &opts, &mut sink)?;
+    Ok(sample)
+}
+
 /// Parse the `recent` most recent sessions per harness in format-complete mode and tally what
 /// they hold against the manifests.
 pub fn census(harness: Option<Harness>, recent: usize) -> Census {
@@ -571,28 +618,22 @@ pub fn census(harness: Option<Harness>, recent: usize) -> Census {
         let manifest = manifest(h).ok();
         let mut c = HarnessCensus::default();
         for r in &refs {
-            let session = match stream::collect_with(adapter.as_ref(), r, &ParseOptions::complete()) {
-                Ok(s) => s,
-                Err(_) => {
-                    c.parse_errors += 1;
-                    continue;
-                }
-            };
-            c.sessions += 1;
-            for m in &session.messages {
-                *c.kinds.entry(m.kind.as_str().to_string()).or_default() += 1;
-                for b in &m.content {
-                    *c.block_types.entry(block_type(b).to_string()).or_default() += 1;
-                }
-                if let Some(ty) = carrier_record_type(m, h) {
-                    let status = manifest.as_ref().and_then(|m| m.lookup(&ty)).map(|(_, e)| e.status);
-                    let e = c.records.entry(ty).or_insert_with(|| RecordStat {
-                        count: 0,
-                        first_seen: r.path.clone(),
-                        status,
-                        new: status.is_none(),
-                    });
-                    e.count += 1;
+            match census_session(adapter.as_ref(), r, h, manifest.as_ref()) {
+                Err(_) => c.parse_errors += 1,
+                Ok(sample) => {
+                    c.sessions += 1;
+                    for (kind, count) in sample.kinds {
+                        *c.kinds.entry(kind).or_default() += count;
+                    }
+                    for (block, count) in sample.block_types {
+                        *c.block_types.entry(block).or_default() += count;
+                    }
+                    for (ty, record) in sample.records {
+                        c.records
+                            .entry(ty)
+                            .and_modify(|seen| seen.count += record.count)
+                            .or_insert(record);
+                    }
                 }
             }
         }
@@ -619,6 +660,70 @@ pub fn census(harness: Option<Harness>, recent: usize) -> Census {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lookup_prefers_exact_entries_then_the_most_specific_family() {
+        let m: Manifest = toml::from_str(
+            r#"
+            harness = "test"
+            [types]
+            "record.permission.*" = { status = "ignored" }
+            "record.permission.set_mode" = { status = "handled" }
+            "record.permission.scope.*" = { status = "carried" }
+        "#,
+        )
+        .unwrap();
+        assert_eq!(m.lookup("permission.set_mode").unwrap().1.status, Status::Handled);
+        assert_eq!(m.lookup("permission.scope.read").unwrap().1.status, Status::Carried);
+        assert_eq!(m.lookup("permission.other").unwrap().1.status, Status::Ignored);
+    }
+
+    #[test]
+    fn census_streams_tallies_and_discards_failed_samples() {
+        struct Fixture {
+            fail: bool,
+        }
+        impl harness::Adapter for Fixture {
+            fn harness(&self) -> Harness {
+                Harness::Gemini
+            }
+            fn roots(&self) -> Vec<PathBuf> {
+                Vec::new()
+            }
+            fn discover(&self) -> Result<Vec<SessionRef>> {
+                Ok(Vec::new())
+            }
+            fn stream(
+                &self,
+                r: &SessionRef,
+                opts: &ParseOptions,
+                sink: &mut dyn stream::MessageSink,
+            ) -> Result<crate::Session> {
+                assert!(opts.complete && opts.spans);
+                let mut prompt = crate::Message::new(crate::Role::User);
+                prompt.content.push(Block::Text { text: "body".into() });
+                sink.message(prompt);
+                let mut carrier =
+                    crate::Message::of_kind(crate::Role::System, MessageKind::Carrier, crate::Origin::Harness);
+                carrier
+                    .harness_extra_mut(Harness::Gemini)
+                    .insert("record_type".into(), "novel".into());
+                sink.message(carrier);
+                if self.fail {
+                    anyhow::bail!("late source failure");
+                }
+                Ok(crate::Session::new(r.id.clone(), Harness::Gemini))
+            }
+        }
+        let reference = SessionRef::new("sample", Harness::Gemini, PathBuf::from("fixture.json"));
+        let sample = census_session(&Fixture { fail: false }, &reference, Harness::Gemini, None).unwrap();
+        assert_eq!(sample.kinds.values().sum::<u64>(), 2);
+        assert_eq!(sample.block_types["text"], 1);
+        assert_eq!(sample.records["novel"].count, 1);
+        assert!(sample.records["novel"].new);
+        assert!(census_session(&Fixture { fail: true }, &reference, Harness::Gemini, None).is_err());
+        assert!(recent_refs(None, 0).is_empty());
+    }
 
     #[test]
     fn every_manifest_parses_and_names_its_harness() {
