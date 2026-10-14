@@ -126,7 +126,7 @@ const FTS_WEIGHT: f32 = 2.0;
 const SEM_WEIGHT: f32 = 1.0;
 
 fn recall(task: &str, limit: usize) -> Result<Vec<cv_search::Hit>> {
-    let fetch = (limit * 4).max(20);
+    let fetch = limit.saturating_mul(4).max(20);
     let mut ranked: Vec<(f32, Vec<cv_search::Hit>)> = Vec::new();
 
     if cv_search::default_tantivy_dir().exists() {
@@ -193,12 +193,22 @@ fn or_query(task: &str) -> Option<String> {
 /// near-duplicate sessions — same title in the same cwd, e.g. a templated prompt run many times —
 /// collapse to their best-ranked representative (curation over completeness).
 fn fuse(ranked: Vec<(f32, Vec<cv_search::Hit>)>, limit: usize) -> Vec<cv_search::Hit> {
+    if limit == 0 {
+        return Vec::new();
+    }
     let mut fused: HashMap<(String, String), f32> = HashMap::new();
     let mut best: HashMap<(String, String), cv_search::Hit> = HashMap::new();
     for (weight, list) in ranked {
-        for (rank, h) in list.into_iter().enumerate() {
+        let mut seen = HashSet::new();
+        let mut rank = 0;
+        for h in list {
             let key = (h.harness.clone(), h.id.clone());
-            *fused.entry(key.clone()).or_insert(0.0) += weight / (60.0 + rank as f32);
+            // One session contributes once per recall channel; multiple fragments must not
+            // inflate its weight or push later distinct sessions down the session ranking.
+            if seen.insert(key.clone()) {
+                *fused.entry(key.clone()).or_insert(0.0) += weight / (60.0 + rank as f32);
+                rank += 1;
+            }
             match best.get_mut(&key) {
                 None => {
                     best.insert(key, h);
@@ -224,11 +234,15 @@ fn fuse(ranked: Vec<(f32, Vec<cv_search::Hit>)>, limit: usize) -> Vec<cv_search:
             (s, h)
         })
         .collect();
-    out.sort_by(|a, b| b.0.total_cmp(&a.0));
+    out.sort_by(|a, b| {
+        b.0.total_cmp(&a.0)
+            .then_with(|| a.1.harness.cmp(&b.1.harness))
+            .then_with(|| a.1.id.cmp(&b.1.id))
+    });
 
     // Near-duplicate suppression: one source per (title, cwd). Untitled sessions never collapse.
     let mut seen_titles: HashSet<(String, Option<String>)> = HashSet::new();
-    let mut picked = Vec::with_capacity(limit);
+    let mut picked = Vec::with_capacity(limit.min(out.len()));
     for (_, h) in out {
         if let Some(t) = h.title.as_deref().filter(|t| !t.trim().is_empty()) {
             if !seen_titles.insert((t.to_lowercase(), h.cwd.clone())) {
@@ -593,15 +607,18 @@ fn capped_text(m: &Message, resolver: &Resolver) -> Result<String> {
     let mut s = String::new();
     for b in &m.content {
         if let Block::Text { text } = b {
+            if s.len() >= MSG_RESOLVE_BYTES as usize {
+                break;
+            }
             if !s.is_empty() {
                 s.push('\n');
             }
-            let prefix = text.try_resolve_prefix(resolver, MSG_RESOLVE_BYTES)?;
-            if text.inline_str().is_some() {
-                s.push_str(&prefix[..floor_char(&prefix, prefix.len().min(MSG_RESOLVE_BYTES as usize))]);
-            } else {
-                s.push_str(&prefix);
+            let remaining = MSG_RESOLVE_BYTES as usize - s.len();
+            if remaining == 0 {
+                break;
             }
+            let prefix = text.try_resolve_prefix(resolver, remaining as u64)?;
+            s.push_str(&prefix[..floor_char(&prefix, prefix.len().min(remaining))]);
         }
     }
     Ok(trim_excerpt(&s))
@@ -624,12 +641,14 @@ fn trim_excerpt(s: &str) -> String {
         } else {
             line
         };
-        if line.trim_start().starts_with("```") {
+        let remaining = EXCERPT_HARD_CHARS.saturating_sub(out.len());
+        let prefix = &line[..floor_char(line, line.len().min(remaining))];
+        if prefix.trim_start().starts_with("```") {
             in_fence = !in_fence;
         }
-        out.push_str(line);
+        out.push_str(prefix);
         out.push('\n');
-        if out.len() >= EXCERPT_HARD_CHARS {
+        if prefix.len() < line.len() || out.len() >= EXCERPT_HARD_CHARS {
             if in_fence {
                 out.push_str("```\n");
             }
@@ -746,8 +765,8 @@ fn md_bundle(task: &str, sources: &[PackSource], rollup: &[(String, usize, i64, 
             let _ = writeln!(out, "Commands run: {}\n", cmds.join(", "));
         }
         let more = match s.excerpt_range {
-            Some((lo, hi)) => format!("cv show {} --range {lo}-{hi}", short_id(&s.hit.id)),
-            None => format!("cv show {}", short_id(&s.hit.id)),
+            Some((lo, hi)) => format!("cv show {}:{} --range {lo}..{hi}", s.hit.harness, s.hit.id),
+            None => format!("cv show {}:{}", s.hit.harness, s.hit.id),
         };
         let _ = writeln!(out, "(full context: `{more}`)\n");
     }
@@ -1395,5 +1414,60 @@ mod tests {
         let fused = fuse(vec![(SEM_WEIGHT, sem)], 10);
         let ids: Vec<&str> = fused.iter().map(|h| h.id.as_str()).collect();
         assert_eq!(ids, ["t1", "u1", "u2"]);
+    }
+    #[test]
+    fn fusion_counts_channels_once_and_breaks_equal_scores_deterministically() {
+        let duplicated = vec![hit("a", ""), hit("a", "metadata"), hit("b", "")];
+        let unique = vec![hit("a", ""), hit("b", "")];
+        let compare = |fts| fuse(vec![(1.0, fts), (1.0, vec![hit("b", "")])], 10);
+        let actual = compare(duplicated);
+        let expected = compare(unique);
+        assert_eq!(
+            actual.iter().map(|h| (&h.id, h.score)).collect::<Vec<_>>(),
+            expected.iter().map(|h| (&h.id, h.score)).collect::<Vec<_>>()
+        );
+        assert_eq!(actual[0].id, "b");
+        assert_eq!(actual[1].snippet, "metadata");
+        let ties = fuse(vec![(1.0, vec![hit("z", "")]), (1.0, vec![hit("a", "")])], 1);
+        assert_eq!(ties[0].id, "a");
+        assert!(fuse(vec![(1.0, vec![hit("a", "")])], 0).is_empty());
+    }
+
+    #[test]
+    fn pack_message_budget_is_shared_across_blocks_and_hard_line_cuts_close_fences() -> Result<()> {
+        let mut message = Message::new(Role::Assistant);
+        message.content = (0..20)
+            .map(|_| Block::Text {
+                text: " ".repeat(MSG_RESOLVE_BYTES as usize).into(),
+            })
+            .collect();
+        message.content.push(Block::Text {
+            text: "outside the message budget".into(),
+        });
+        assert!(capped_text(&message, &Resolver::new(None))?.is_empty());
+        for body in ["x".repeat(1500), "雪".repeat(500)] {
+            let source = format!("{}\n```rust\n{body}\nstill inside\n```\n", "intro ".repeat(100));
+            let actual = trim_excerpt(&source);
+            assert!(actual.len() <= EXCERPT_HARD_CHARS + 16, "{}", actual.len());
+            assert_eq!(actual.matches("```").count() % 2, 0, "{actual}");
+            assert!(actual.ends_with('…'));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn context_pack_hints_use_the_current_range_syntax_and_full_identity() {
+        let source = PackSource {
+            hit: hit("abcdef0123456789", ""),
+            excerpt: Vec::new(),
+            excerpt_range: Some((4, 9)),
+            edits: BTreeMap::new(),
+            reads: BTreeMap::new(),
+            commands: Vec::new(),
+            llm_digest: None,
+        };
+        let bundle = md_bundle("task", &[source], &[]);
+        assert!(bundle.contains("cv show claude:abcdef0123456789 --range 4..9"));
+        assert!(!bundle.contains("--range 4-9"));
     }
 }
