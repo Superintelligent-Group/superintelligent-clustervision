@@ -52,12 +52,32 @@ impl ExactStrings {
         self.insert_text(Cow::Borrowed(text))
     }
 
-    /// Decode a checked key without owning its complete body. Non-inline keys stage once
-    /// into the existing disk backend; no slot is published until the producer succeeds.
+    /// Small checked keys keep the bounded memory fast path; larger keys stage once
+    /// into the existing disk backend. Neither path publishes before the producer succeeds.
     #[cfg(feature = "sqlite")]
     pub(crate) fn insert_source(&mut self, text: &crate::Text, resolver: &crate::lazy::Resolver) -> Result<bool> {
         if let Some(text) = text.inline_str() {
-            return self.insert_text(Cow::Borrowed(text));
+            return self.insert_borrowed(text);
+        }
+        // Checked JSON text's raw extent bounds decoded bytes. Legacy Span also permits
+        // lossy UTF-8, whose replacement scalars can expand each source byte threefold.
+        let bounded_len = match text {
+            crate::Text::Source(source) => Some(source.raw_len()),
+            crate::Text::Span(span) => span.len.checked_mul(3).and_then(|n| usize::try_from(n).ok()),
+            crate::Text::Inline(_) => unreachable!(),
+        };
+        if let Some(bound) = bounded_len.filter(|&bound| self.spill.is_none() && self.memory_cost(bound) <= self.limit)
+        {
+            let mut decoded = String::with_capacity(bound);
+            text.try_for_each_chunk(resolver, APPEND_BYTES, |chunk| {
+                anyhow::ensure!(
+                    chunk.len() <= bound - decoded.len(),
+                    "decoded key exceeds its bounded source extent"
+                );
+                decoded.push_str(chunk);
+                Ok(())
+            })?;
+            return self.insert(decoded);
         }
         self.spill_memory()?;
         let hasher = self.hashes.build_hasher();
@@ -87,20 +107,10 @@ impl ExactStrings {
         }
         // Account table slots as well as payloads. This conservative upper bound exceeds the
         // HashSet's bucket/control allocation even when the next insert grows an empty table.
-        let slots = self
-            .memory
-            .len()
-            .saturating_add(1)
-            .checked_next_power_of_two()
-            .unwrap_or(usize::MAX)
-            .saturating_mul(2);
-        let estimated = self
-            .bytes
-            .saturating_add(match &text {
-                Cow::Owned(text) => text.capacity(),
-                Cow::Borrowed(text) => text.len(),
-            })
-            .saturating_add(slots.saturating_mul(std::mem::size_of::<String>() + 16));
+        let estimated = self.memory_cost(match &text {
+            Cow::Owned(text) => text.capacity(),
+            Cow::Borrowed(text) => text.len(),
+        });
         if self.spill.is_none() && estimated > self.limit {
             self.spill_memory()?;
         }
@@ -113,6 +123,19 @@ impl ExactStrings {
                 Ok(self.memory.insert(text))
             }
         }
+    }
+
+    fn memory_cost(&self, additional: usize) -> usize {
+        let slots = self
+            .memory
+            .len()
+            .saturating_add(1)
+            .checked_next_power_of_two()
+            .unwrap_or(usize::MAX)
+            .saturating_mul(2);
+        self.bytes
+            .saturating_add(additional)
+            .saturating_add(slots.saturating_mul(std::mem::size_of::<String>() + 16))
     }
 
     #[cfg(all(test, feature = "sqlite"))]
@@ -451,7 +474,12 @@ impl Disk {
         hasher: impl Hasher,
     ) -> Result<bool> {
         anyhow::ensure!(!self.failed, "exact set backing failed");
-        self.flush_pending()?;
+        if let Err(error) = self.flush_pending() {
+            // A prefix-flush error happened before source staging began. Stop reuse rather
+            // than treat partly persisted retained keys as a successful insertion.
+            self.failed = true;
+            return Err(error);
+        }
         let start = self.end;
         let result = (|| {
             let mut hash = ChunkHash::new(hasher);
@@ -624,6 +652,57 @@ mod tests {
 
     #[cfg(feature = "sqlite")]
     #[test]
+    fn small_checked_sources_keep_memory_fast_path() {
+        let world = cv_testkit::World::in_process("exact-small-source");
+        let mut set = ExactStrings::default();
+        let resolver = crate::lazy::Resolver::new(None);
+        for (index, body) in ["short λ\n".to_string(), "escaped \"🌙\"".repeat(1000)]
+            .into_iter()
+            .enumerate()
+        {
+            let path = world.home.join(format!("key-{index}.json"));
+            std::fs::write(&path, serde_json::to_vec(&serde_json::json!({"key":body})).unwrap()).unwrap();
+            let source = crate::json::JsonSource::capture(&path).unwrap();
+            let text = source
+                .read_document(|view| view.get("key")?.unwrap().source_text()?.context("key string"))
+                .unwrap();
+            assert!(matches!(text, crate::Text::Source(_)));
+            assert!(set.insert_source(&text, &resolver).unwrap());
+            assert!(!set.insert_source(&text, &resolver).unwrap());
+            assert!(
+                set.spill.is_none(),
+                "ordinary checked prompts must not open spill files"
+            );
+            assert!(set.contains(&body).unwrap());
+        }
+    }
+
+    #[test]
+    fn streamed_prefix_flush_failure_rejects_backend_before_producer_runs() {
+        let world = cv_testkit::World::new("exact-flush-failure");
+        let path = world.base.join("read-only-data");
+        std::fs::write(&path, "unchanged").unwrap();
+        let mut disk = Disk::new(0).unwrap();
+        assert!(disk.insert(b"pending existing key", 7).unwrap());
+        disk.data = File::open(&path).unwrap();
+        let mut called = false;
+        assert!(disk
+            .insert_stream(
+                |_| {
+                    called = true;
+                    Ok(())
+                },
+                CollisionHash
+            )
+            .is_err());
+        assert!(!called);
+        assert!(disk.failed);
+        assert!(disk.find(b"pending existing key", 7).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"unchanged");
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
     fn checked_source_insertion_matches_inline_keys_and_rejects_stale_sources() {
         let world = cv_testkit::World::in_process("exact-checked-source");
         let path = world.home.join("key.json");
@@ -638,6 +717,7 @@ mod tests {
         let mut set = ExactStrings::default();
         assert!(set.insert_borrowed("retained before spill").unwrap());
         assert!(set.insert_source(&text, &resolver).unwrap());
+        assert!(set.spill.is_some(), "giant checked keys must spill");
         assert!(!set.insert_borrowed(&body).unwrap());
         assert!(!set.insert_source(&text, &resolver).unwrap());
         std::fs::write(&path, "changed backing").unwrap();
