@@ -11,14 +11,16 @@ pub fn write_markdown(s: &Session, out: &mut impl Write, resolver: &crate::Resol
     let reads = crate::source::session_reads(s);
     let label = match &s.title {
         Some(title) => truncate(title, 72),
-        None => s
-            .messages
-            .iter()
-            .find(|m| m.role == Role::User)
-            .map(|m| message_label(m, resolver))
-            .transpose()?
-            .flatten()
-            .unwrap_or_else(|| "(untitled)".into()),
+        None => {
+            let mut label = None;
+            for message in s.messages.iter().filter(|m| m.role == Role::User) {
+                if let Some(candidate) = message_label(message, resolver)? {
+                    label = Some(candidate);
+                    break;
+                }
+            }
+            label.unwrap_or_else(|| "(untitled)".into())
+        }
     };
     out.write_all(
         md_header(
@@ -135,7 +137,14 @@ pub fn write_md_block(b: &Block, out: &mut impl Write, resolver: &crate::Resolve
                 }
                 Ok(())
             })?;
-            let excerpt = truncate(&head, 4000);
+            // Tool output is a literal code excerpt, so preserve its line structure.
+            // The extra scalar distinguishes an exact fit from a truncated result.
+            if remaining == 0 {
+                head.pop();
+                head.pop();
+                head.push('…');
+            }
+            let excerpt = head;
             // A tool can return Markdown containing its own fenced blocks. Keep that text
             // literal by choosing a fence longer than every run in the rendered excerpt.
             let longest = excerpt.split(|c| c != '`').map(str::len).max().unwrap_or(0);
@@ -285,7 +294,14 @@ mod tests {
                 out.push_str(&format!(
                     "**↩ result{}**\n\n```\n{}\n```\n\n",
                     if *is_error { " (error)" } else { "" },
-                    truncate(content, 4000)
+                    {
+                        let mut excerpt: String = content.chars().take(4000).collect();
+                        if content.chars().count() > 4000 {
+                            excerpt.pop();
+                            excerpt.push('…');
+                        }
+                        excerpt
+                    }
                 ));
             }
             Block::File { path, source, .. } => {
@@ -314,6 +330,28 @@ mod tests {
         out
     }
     #[test]
+    fn markdown_title_skips_empty_user_turns_and_propagates_candidate_errors() -> anyhow::Result<()> {
+        let mut session = Session::new("title", Harness::Codex);
+        for text in ["   ", "actual title"] {
+            let mut message = Message::new(Role::User);
+            message.content.push(Block::Text { text: text.into() });
+            session.messages.push(message);
+        }
+        assert!(to_markdown(&session)?.starts_with("# actual title\n"));
+        let world = cv_testkit::World::in_process("markdown-title-source");
+        let path = world.base.join("title.json");
+        std::fs::write(&path, serde_json::to_vec(&"lazy title".repeat(2000))?)?;
+        let source = crate::json::JsonSource::capture(&path)?;
+        let text = source
+            .read_range_value(0, source.len(), |view| view.source_text())?
+            .unwrap();
+        session.messages[1].content = vec![Block::Text { text }];
+        std::fs::write(&path, b"changed title source")?;
+        assert!(to_markdown(&session).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn markdown_tool_results_keep_nested_fences_literal() {
         let mut output = Vec::new();
         let block = Block::ToolResult {
@@ -329,6 +367,36 @@ mod tests {
             String::from_utf8(output).unwrap(),
             "**↩ result**\n\n````\nbefore\n```rust\nlet x = 1;\n```\nafter\n````\n\n"
         );
+    }
+
+    #[test]
+    fn markdown_result_excerpt_preserves_newlines_and_scalar_limit() {
+        for length in [3999, 4000, 4001] {
+            let body = format!("line\n{}", "α".repeat(length - 5));
+            let block = Block::ToolResult {
+                tool_use_id: "tool".into(),
+                content: body.clone().into(),
+                is_error: false,
+                tool_name: None,
+                status: None,
+                details: None,
+            };
+            let mut output = Vec::new();
+            write_md_block(&block, &mut output, &crate::Resolver::new(None)).unwrap();
+            let output = String::from_utf8(output).unwrap();
+            let excerpt = output
+                .strip_prefix("**↩ result**\n\n```\n")
+                .unwrap()
+                .strip_suffix("\n```\n\n")
+                .unwrap();
+            assert!(excerpt.starts_with("line\n"));
+            assert_eq!(excerpt.chars().count(), length.min(4000));
+            if length > 4000 {
+                assert!(excerpt.ends_with('…'));
+            } else {
+                assert_eq!(excerpt, body);
+            }
+        }
     }
 
     #[test]
