@@ -1202,6 +1202,10 @@ fn stream_session_render_inner<W: std::io::Write>(
 ) -> Result<RenderOutcome> {
     use cv_core::{Flow, MessageSink, ParseOptions};
     const HOLDBACK: usize = 24;
+    anyhow::ensure!(
+        !checked || (opts.range.is_none() && opts.max_bytes.is_none()),
+        "checked Markdown export requires a complete render"
+    );
 
     /// The header fields a `meta` call delivers.
     struct Meta {
@@ -1235,6 +1239,9 @@ fn stream_session_render_inner<W: std::io::Write>(
         header: H,
         render_msg: R,
         buf: Vec<String>,
+        // Complete Markdown downloads hold the same header window in bounded private staging.
+        checked_markdown: bool,
+        checked_buf: Option<std::io::BufWriter<cv_core::bytes::ByteStage>>,
         printed: bool,
         result: std::io::Result<()>,
         resolver: cv_core::Resolver,
@@ -1318,6 +1325,18 @@ fn stream_session_render_inner<W: std::io::Write>(
             for s in buffered {
                 self.write(&s);
             }
+            if let Some(mut buffered) = self.checked_buf.take() {
+                if self.result.is_ok() {
+                    self.result = buffered.flush().and_then(|()| {
+                        buffered
+                            .into_inner()
+                            .map_err(|e| e.into_error())?
+                            .finish()?
+                            .copy_to(self.out)
+                            .map(|_| ())
+                    });
+                }
+            }
             self.printed = true;
         }
     }
@@ -1396,6 +1415,38 @@ fn stream_session_render_inner<W: std::io::Write>(
                 return Flow::Continue;
             }
 
+            if self.checked_markdown {
+                let result = (|| -> Result<()> {
+                    if self.first_user.is_none() && m.role == Role::User {
+                        self.first_user = cv_core::render::message_label(&m, &self.resolver)?;
+                    }
+                    if self.printed {
+                        cv_core::render::write_md_message(&m, self.out, &self.resolver)?;
+                    } else {
+                        cv_core::render::write_md_message(
+                            &m,
+                            self.checked_buf.as_mut().context("missing Markdown holdback")?,
+                            &self.resolver,
+                        )?;
+                    }
+                    Ok(())
+                })();
+                if let Err(error) = result {
+                    self.result = Err(std::io::Error::other(error));
+                    return Flow::Stop;
+                }
+                self.rendered += 1;
+                let title_known = self.title.is_some() || self.first_user.is_some();
+                if !self.printed && ((self.model.is_some() && title_known) || self.rendered >= HOLDBACK) {
+                    self.flush_header();
+                }
+                return if self.result.is_err() {
+                    Flow::Stop
+                } else {
+                    Flow::Continue
+                };
+            }
+
             // In-window: resolve this message's lazy content spans (peak = one message) and render.
             let mut m = m;
             if let Err(error) = m.try_materialize_text(&self.resolver) {
@@ -1464,6 +1515,8 @@ fn stream_session_render_inner<W: std::io::Write>(
         header,
         render_msg,
         buf: Vec::new(),
+        checked_markdown: checked,
+        checked_buf: checked.then(|| std::io::BufWriter::with_capacity(64 * 1024, cv_core::bytes::ByteStage::new())),
         printed: false,
         result: Ok(()),
         resolver: cv_core::Resolver::new(Some(r.path.clone())),
@@ -1485,7 +1538,7 @@ fn stream_session_render_inner<W: std::io::Write>(
     // Windowed: lazy spans, so out-of-window giant fields arrive as 16-byte handles and only
     // in-window messages materialize (the sink already resolves per message). A full show reads
     // every byte regardless — spans would only add resolve overhead there (floor = C).
-    let parse_opts = if opts.range.is_some() {
+    let parse_opts = if checked || opts.range.is_some() {
         ParseOptions::lazy()
     } else {
         ParseOptions::bulk()
@@ -1591,6 +1644,60 @@ fn md_message(m: &Message) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checked_markdown_download_keeps_lazy_leaves_and_native_holdback_output() -> Result<()> {
+        let world = cv_testkit::World::in_process("download-markdown-holdback");
+        let text = " \n🌙\\\"".repeat(16384);
+        let mut records = Vec::new();
+        for i in 0..25 {
+            records.push(
+                serde_json::json!({"type":"user", "uuid":format!("u{i}"), "message":{"role":"user", "content":text}}),
+            );
+        }
+        records.push(serde_json::json!({"type":"assistant", "uuid":"a", "message":{"role":"assistant", "model":"late-model", "content":[{"type":"thinking", "thinking":text}, {"type":"text", "text":"final"}]}}));
+        let path = world.write_session("holdback", &records);
+        let reference = SessionRef::new("holdback", Harness::Claude, path);
+        let adapter = cv_core::harness::for_harness(Harness::Claude).unwrap();
+        let mut native = Vec::new();
+        stream_session_render(
+            adapter.as_ref(),
+            &reference,
+            &mut native,
+            md_header,
+            md_message,
+            RenderOpts::default(),
+        )?;
+        struct Lazy;
+        impl Adapter for Lazy {
+            fn harness(&self) -> Harness {
+                Harness::Claude
+            }
+            fn roots(&self) -> Vec<PathBuf> {
+                Vec::new()
+            }
+            fn discover(&self) -> Result<Vec<SessionRef>> {
+                Ok(Vec::new())
+            }
+            fn stream(
+                &self,
+                r: &SessionRef,
+                opts: &cv_core::ParseOptions,
+                sink: &mut dyn cv_core::MessageSink,
+            ) -> Result<Session> {
+                assert!(opts.spans, "complete Markdown download eagerly decoded leaves");
+                cv_core::harness::for_harness(Harness::Claude)
+                    .unwrap()
+                    .try_stream(r, opts, sink)
+            }
+        }
+        let (body, bytes) = stage_export(&Lazy, &reference, "markdown")?;
+        let mut checked = Vec::new();
+        body.copy_to(&mut checked)?;
+        assert_eq!(checked, native);
+        assert_eq!(bytes, checked.len() as u64);
+        Ok(())
+    }
 
     #[test]
     fn staged_full_download_rejects_changed_dynamic_dependencies() -> Result<()> {
