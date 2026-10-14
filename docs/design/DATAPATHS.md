@@ -4624,3 +4624,19 @@ identity disappeared. Both polling modes now remove vanished positions before at
 new source. The regression covers a failed replacement read, failed source publication,
 serialized cursor resume, and fresh reappearance. Existing source acceptance remains unchanged.
 Scoped verification is delegated to the integration batch; no performance claim is made.
+
+### Watch cursor ownership before reader eligibility (2026-10-13, next_transport)
+
+`Watcher::to_cursor`, called by every MCP observe result, cloned each complete watcher state
+before checking whether its optional reader state fit the 64 KiB wire budget. It also ran the
+serialization eligibility check for every remaining reader after the eight-reader quota was
+full, only to discard those copies. Source/read-set/checkpoint state is optional in the cursor;
+message positions are not.
+
+Cursor construction now borrows the position, checks reader eligibility before cloning, and
+stops eligibility work after eight accepted readers. Required positions remain for every
+session. The existing HashMap iteration and first-eight eligible selection are unchanged.
+The mixed-size regression compares the prior selection oracle, serializes/resumes the cursor,
+and checks all positions and pending flags. This establishes eliminated clone/check work by
+construction; no wall-time or allocator-byte improvement is claimed. Scoped execution is part
+of the root integration batch.

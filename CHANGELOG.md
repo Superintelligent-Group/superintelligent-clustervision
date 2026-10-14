@@ -4,6 +4,8 @@
 
 - Semantic search retains only requested ranking candidates, preserving exact score and identity order while avoiding full-store sorting.
 - Session ID lookup preserves case-sensitive prefixes and filters harnesses before decoding catalog metadata.
+- Watch cursor creation copies only eligible reader states and stops reader eligibility serialization when its eight-state budget fills.
+
 - Watch cursors promptly forget vanished sessions during equal-sized fleet replacements, including unreadable replacements, so reappearing sessions start fresh.
 
 - Codex legacy reads and discovery use checked source views, retaining lazy bodies and bounded title prefixes with unchanged output and counts.

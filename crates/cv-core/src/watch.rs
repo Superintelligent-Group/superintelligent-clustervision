@@ -177,8 +177,8 @@ struct Pos {
     r: Option<ReadState>,
 }
 
-impl From<State> for Pos {
-    fn from(s: State) -> Pos {
+impl From<&State> for Pos {
+    fn from(s: &State) -> Pos {
         let (n, b) = match s.mark {
             Mark::Messages(n) => (n, None),
             Mark::Bytes(len) => (0, Some(len)),
@@ -188,7 +188,7 @@ impl From<State> for Pos {
             n,
             b,
             more: s.pending,
-            r: s.read.filter(|read| read.fits_cache(64 * 1024)),
+            r: None,
         }
     }
 }
@@ -294,11 +294,11 @@ impl Watcher {
                 .seen
                 .iter()
                 .map(|(k, s)| {
-                    let mut pos = Pos::from(s.clone());
-                    if pos.r.is_some() {
-                        readers += 1;
-                        if readers > 8 {
-                            pos.r = None;
+                    let mut pos = Pos::from(s);
+                    if readers < 8 {
+                        if let Some(read) = s.read.as_ref().filter(|read| read.fits_cache(64 * 1024)) {
+                            pos.r = Some(read.clone());
+                            readers += 1;
                         }
                     }
                     (k.clone(), pos)
@@ -555,6 +555,63 @@ mod tests {
             created_at: None,
             updated_at: None,
             message_count: 0,
+        }
+    }
+
+    #[test]
+    fn cursor_reader_budget_preserves_positions_and_wire_selection() {
+        let mut watcher = Watcher::with_discovery(Filter::default(), true, Vec::new);
+        for n in 0..16 {
+            let r = sref(
+                Harness::Claude,
+                std::path::PathBuf::from("/nonexistent/cv-watch-budget"),
+            );
+            let mut read = ReadState::baseline(&r);
+            if n < 4 {
+                let mut value = serde_json::to_value(&read).unwrap();
+                value["version"] = serde_json::Value::String("x".repeat(65 * 1024));
+                read = serde_json::from_value(value).unwrap();
+            }
+            watcher.seen.insert(
+                format!("claude:{n}"),
+                State {
+                    trigger: (n, None),
+                    mark: Mark::Messages(n),
+                    pending: n % 2 == 0,
+                    read: Some(read),
+                },
+            );
+        }
+        // Prior wire selection: size eligibility first, then the first eight eligible
+        // reader states in the map's iteration order. Positions always survive both limits.
+        let mut readers = 0;
+        let expected: HashMap<_, _> = watcher
+            .seen
+            .iter()
+            .map(|(key, state)| {
+                let mut pos = Pos::from(state);
+                pos.r = state.read.clone().filter(|read| read.fits_cache(64 * 1024));
+                if pos.r.is_some() {
+                    readers += 1;
+                    if readers > 8 {
+                        pos.r = None;
+                    }
+                }
+                (key.clone(), pos)
+            })
+            .collect();
+        let cursor = watcher.to_cursor();
+        assert_eq!(cursor.len(), 16);
+        assert_eq!(cursor.o.values().filter(|pos| pos.r.is_some()).count(), 8);
+        assert_eq!(
+            serde_json::to_value(&cursor.o).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+        let resumed = Watcher::from_cursor(Filter::default(), Cursor::decode(&cursor.encode()).unwrap(), Vec::new);
+        for (key, state) in &watcher.seen {
+            let restored = &resumed.seen[key];
+            assert_eq!(restored.mark, state.mark);
+            assert_eq!(restored.pending, state.pending);
         }
     }
 
