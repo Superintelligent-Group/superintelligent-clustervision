@@ -213,12 +213,18 @@ fn scheduled_tasks(r: &SessionRef) -> Vec<crate::affordance::Affordance> {
 
 fn task_affordance(task: &Value) -> crate::affordance::Affordance {
     let text = |key: &str| task.get(key).and_then(Value::as_str).unwrap_or("");
-    let mut summary = [text("id"), text("cron"), text("prompt")]
+    task_label(
+        [text("id"), text("cron"), text("prompt")],
+        task.get("recurring").and_then(Value::as_bool) == Some(true),
+    )
+}
+fn task_label(parts: [&str; 3], recurring: bool) -> crate::affordance::Affordance {
+    let mut summary = parts
         .into_iter()
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join(" · ");
-    if task.get("recurring").and_then(Value::as_bool) == Some(true) {
+    if recurring {
         summary.push_str(" · recurring");
     }
     crate::affordance::Affordance::store(
@@ -228,6 +234,7 @@ fn task_affordance(task: &Value) -> crate::affordance::Affordance {
         Vec::new(),
     )
 }
+
 fn task_rows_for_session(value: Value, session: &SessionRef) -> Vec<crate::affordance::Affordance> {
     let Value::Array(tasks) = value else { return Vec::new() };
     tasks.into_iter().filter(|task| match task.get("sessionId").and_then(Value::as_str) {
@@ -237,11 +244,42 @@ fn task_rows_for_session(value: Value, session: &SessionRef) -> Vec<crate::affor
     }).map(|task| task_affordance(&task)).collect()
 }
 
+struct TaskRow {
+    parts: [String; 3],
+    recurring: bool,
+    label: std::sync::OnceLock<crate::affordance::Affordance>,
+}
+impl TaskRow {
+    fn new(task: &Value) -> Self {
+        // One extra scalar beyond the label limit preserves ellipsis/empty/delimiter semantics
+        // while unrelated giant prompts do not become retained inventory payloads.
+        Self {
+            parts: ["id", "cron", "prompt"].map(|key| {
+                task.get(key)
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .chars()
+                    .take(121)
+                    .collect()
+            }),
+            recurring: task.get("recurring").and_then(Value::as_bool) == Some(true),
+            label: std::sync::OnceLock::new(),
+        }
+    }
+    fn label(&self) -> crate::affordance::Affordance {
+        self.label
+            .get_or_init(|| task_label(self.parts.each_ref().map(|part| part.as_str()), self.recurring))
+            .clone()
+    }
+}
+type TaskTime = (chrono::DateTime<chrono::Utc>, usize);
 #[derive(Default)]
 struct TaskInventory {
-    rows: Vec<crate::affordance::Affordance>,
+    rows: Vec<TaskRow>,
     owners: std::collections::HashMap<String, Vec<usize>>,
-    unowned: std::collections::BTreeMap<chrono::DateTime<chrono::Utc>, Vec<usize>>,
+    unowned: Vec<TaskTime>,
+    time_queried: std::sync::atomic::AtomicBool,
+    time_index: std::sync::OnceLock<Vec<TaskTime>>,
 }
 impl TaskInventory {
     fn from_value(value: Value) -> Self {
@@ -261,21 +299,21 @@ impl TaskInventory {
                 else {
                     continue;
                 };
-                inventory.unowned.entry(created).or_default().push(index);
+                inventory.unowned.push((created, index));
             }
-            inventory.rows.push(task_affordance(&task));
+            inventory.rows.push(TaskRow::new(&task));
         }
         inventory
     }
     fn retained_bytes(&self) -> usize {
         let rows = self.rows.iter().fold(
-            self.rows
-                .capacity()
-                .saturating_mul(std::mem::size_of::<crate::affordance::Affordance>()),
+            self.rows.capacity().saturating_mul(std::mem::size_of::<TaskRow>()),
             |bytes, row| {
-                bytes
-                    .saturating_add(row.summary.capacity())
-                    .saturating_add(row.tool.as_ref().map_or(0, String::capacity))
+                // Charge every eventual lazy summary/tool allocation before the cache admits us.
+                row.parts.iter().fold(
+                    bytes.saturating_add(512 + "scheduled_tasks.json".len()),
+                    |bytes, part| bytes.saturating_add(part.capacity()),
+                )
             },
         );
         let owners = self.owners.iter().fold(
@@ -288,30 +326,57 @@ impl TaskInventory {
                     .saturating_add(rows.capacity().saturating_mul(std::mem::size_of::<usize>()))
             },
         );
-        // Conservatively include B-tree node slack/link storage, not just populated indices.
-        let unowned = self.unowned.values().fold(
-            1024usize.saturating_add(self.unowned.len().saturating_mul(256)),
-            |bytes, rows| bytes.saturating_add(rows.capacity().saturating_mul(std::mem::size_of::<usize>())),
-        );
+        // The second query's sorted copy is charged even while still uninitialized.
+        let times = self
+            .unowned
+            .capacity()
+            .saturating_add(self.unowned.len())
+            .saturating_mul(std::mem::size_of::<TaskTime>());
         rows.saturating_add(owners)
-            .saturating_add(unowned)
+            .saturating_add(times)
             .saturating_add(std::mem::size_of::<Self>())
     }
     fn for_session(&self, session: &SessionRef) -> Vec<crate::affordance::Affordance> {
-        let mut selected = self.owners.get(&session.id).cloned().unwrap_or_default();
+        let owned = self.owners.get(&session.id).map(Vec::as_slice).unwrap_or(&[]);
+        let mut selected = owned.to_vec();
         if let Some((from, to)) = session
             .created_at
             .zip(session.updated_at)
             .filter(|(from, to)| from <= to)
         {
-            for rows in self.unowned.range(from..=to).map(|(_, rows)| rows) {
-                selected.extend_from_slice(rows);
+            if !self.time_queried.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                // First query keeps both subsets in physical file order: a linear filter and
+                // ordered merge, including when all tasks match a single scoped CLI session.
+                let unnamed = self
+                    .unowned
+                    .iter()
+                    .filter(|(at, _)| from <= *at && *at <= to)
+                    .map(|(_, index)| *index);
+                let mut left = owned.iter().copied().peekable();
+                let mut right = unnamed.peekable();
+                selected.clear();
+                while let (Some(&a), Some(&b)) = (left.peek(), right.peek()) {
+                    selected.push(if a < b {
+                        left.next().unwrap()
+                    } else {
+                        right.next().unwrap()
+                    });
+                }
+                selected.extend(left);
+                selected.extend(right);
+            } else {
+                let times = self.time_index.get_or_init(|| {
+                    let mut times = self.unowned.clone();
+                    times.sort_unstable();
+                    times
+                });
+                let start = times.partition_point(|(at, _)| *at < from);
+                let end = times.partition_point(|(at, _)| *at <= to);
+                selected.extend(times[start..end].iter().map(|(_, index)| *index));
+                selected.sort_unstable();
             }
         }
-        // Explicit owners and overlapping time windows select disjoint subsets. Restore the
-        // original file order after the time index's chronological lookup.
-        selected.sort_unstable();
-        selected.into_iter().map(|index| self.rows[index].clone()).collect()
+        selected.into_iter().map(|index| self.rows[index].label()).collect()
     }
 }
 
@@ -1115,6 +1180,53 @@ mod tests {
             serde_json::to_vec(&serde_json::json!([{"id":"recreated","sessionId":"session"}]))?,
         )?;
         assert_eq!(scheduled_tasks(&reference)[0].summary, "recreated");
+        Ok(())
+    }
+
+    #[test]
+    fn scoped_first_task_query_is_linear_and_repeat_initializes_time_index() -> Result<()> {
+        let world = cv_testkit::World::in_process("qwen-lazy-task-time-index");
+        let home = world.home.join(".qwen");
+        let mut reference = SessionRef::new("owner", Harness::Qwen, home.join("projects/hash/chats/session.jsonl"));
+        reference.cwd = Some(PathBuf::from("/project"));
+        reference.created_at = chrono::DateTime::from_timestamp_millis(10);
+        reference.updated_at = chrono::DateTime::from_timestamp_millis(40);
+        let file = home
+            .join("tmp")
+            .join(crate::digest::sha256_hex(b"/project"))
+            .join("scheduled_tasks.json");
+        fs::create_dir_all(file.parent().unwrap())?;
+        let tasks=(0..4096).map(|i|serde_json::json!({
+            "id":format!("task-{i}"),"cron":"* * * * *","prompt":"λ".repeat(300),
+            "sessionId":if i%3==0 {serde_json::json!("owner")} else if i%3==1 {serde_json::json!("other")} else {Value::Null},
+            "createdAt":(4096-i)%97,"recurring":i%7==0,
+        })).collect::<Vec<_>>();
+        let value = Value::Array(tasks);
+        fs::write(&file, serde_json::to_vec(&value)?)?;
+        let expected = task_rows_for_session(value, &reference);
+        let _scope = crate::source::read_scope();
+        let first = scheduled_tasks(&reference);
+        assert_eq!(serde_json::to_value(&first)?, serde_json::to_value(&expected)?);
+        let mut baseline = crate::source::ReadSet::default();
+        baseline.record(&file);
+        let (inventory, _) =
+            crate::source::inventory::<TaskInventory>("qwen-scheduled-tasks", &file, &baseline, || {
+                panic!("warm scoped inventory expected")
+            })?;
+        assert!(inventory.time_index.get().is_none());
+        assert_eq!(
+            inventory.rows.iter().filter(|row| row.label.get().is_some()).count(),
+            first.len()
+        );
+        let charged = inventory.retained_bytes();
+        let second = scheduled_tasks(&reference);
+        assert_eq!(serde_json::to_value(second)?, serde_json::to_value(expected)?);
+        assert!(inventory.time_index.get().is_some());
+        assert_eq!(
+            charged,
+            inventory.retained_bytes(),
+            "lazy allocations were charged before admission"
+        );
         Ok(())
     }
 
