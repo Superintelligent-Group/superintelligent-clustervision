@@ -167,7 +167,11 @@ pub(crate) fn resume_lines(h: Harness, id: &str, cwd: Option<&Path>) -> Vec<Stri
     if let Some(dir) = cwd {
         out.push(format!("cd {}", shell_quote(&dir.display().to_string())));
     }
-    out.push(format!("{} {}", program, args.join(" ")));
+    out.push(format!(
+        "{} {}",
+        program,
+        args.iter().map(|arg| shell_quote(arg)).collect::<Vec<_>>().join(" ")
+    ));
     out
 }
 
@@ -196,12 +200,12 @@ fn resume_command(h: Harness, id: &str) -> (String, Vec<String>) {
     }
 }
 
-fn shell_quote(s: &str) -> String {
+pub(crate) fn shell_quote(s: &str) -> String {
     if s.is_empty() {
         return "''".into();
     }
     if s.bytes()
-        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-' | b'~' | b'+' | b':' | b'@'))
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-' | b'+' | b':' | b'@'))
     {
         s.to_string()
     } else {

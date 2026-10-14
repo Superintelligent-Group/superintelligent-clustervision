@@ -161,6 +161,16 @@ fn write_sidecar(transcript: &Path, elided: &[cv_core::distill::Elided]) -> Resu
     Ok(Some(p))
 }
 
+fn resume_hint(id: &str, cwd: Option<&Path>) -> String {
+    use crate::cmd::port::shell_quote;
+    format!(
+        "{}claude -p --resume {} \"<next instruction>\"",
+        cwd.map(|dir| format!("cd {} && ", shell_quote(&dir.display().to_string())))
+            .unwrap_or_default(),
+        shell_quote(id)
+    )
+}
+
 /// Emit an IR session as Claude JSONL to `target`, with the elided outputs as its sidecar.
 pub(crate) fn emit_to(
     ir: &Session,
@@ -185,11 +195,7 @@ pub(crate) fn emit_to(
             let res = emit_resumable(ir, &out_dir, &opts)?;
             let sidecar = write_sidecar(&res.path, elided)?;
             let dir = cwd.clone().or_else(|| ir.cwd.clone());
-            let resume = format!(
-                "{}claude -p --resume {} \"<next instruction>\"",
-                dir.map(|d| format!("cd {} && ", d.display())).unwrap_or_default(),
-                res.new_id
-            );
+            let resume = resume_hint(&res.new_id, dir.as_deref());
             Ok(Emitted {
                 session_id: Some(res.new_id),
                 agent_id: None,
@@ -487,6 +493,34 @@ mod tests {
         );
         std::fs::write(&path, b"changed")?;
         assert!(cv_core::distill::findings(&lazy, &Default::default()).is_err());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn distill_resume_hint_roundtrips_shell_arguments_without_expanding_paths() -> Result<()> {
+        let world = cv_testkit::World::new("distill-resume-shell");
+        let cwd = world.base.join("project's space; $(touch unexpected)");
+        std::fs::create_dir(&cwd)?;
+        let id = "session's id; $(touch unexpected)";
+        let hint = resume_hint(id, Some(&cwd));
+        // A local stub prints argv; this never launches a harness or writes its stores.
+        let script = format!("claude() {{ printf '%s\n' \"$PWD\" \"$@\"; }}; {hint}");
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .current_dir(&world.base)
+            .output()?;
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let lines: Vec<_> = String::from_utf8(output.stdout)?.lines().map(str::to_string).collect();
+        assert_eq!(std::path::PathBuf::from(&lines[0]).canonicalize()?, cwd.canonicalize()?);
+        assert_eq!(&lines[1..], &["-p", "--resume", id, "<next instruction>"]);
+        assert!(!world.base.join("unexpected").exists());
+        assert!(!cwd.join("unexpected").exists());
+        assert_eq!(
+            resume_hint("plain-id", None),
+            "claude -p --resume plain-id \"<next instruction>\""
+        );
         Ok(())
     }
 
