@@ -19,7 +19,7 @@ pub(super) struct Namespace {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-struct Identity {
+pub(super) struct Identity {
     volume: u64,
     file: u128,
 }
@@ -213,6 +213,18 @@ impl Owner {
         let directory = self.directory.join(uuid::Uuid::new_v4().to_string());
         private_directory(&directory, true)?;
         Ok(directory)
+    }
+}
+
+/// Bind individual cold backings to their directory inode too: the owning tree's
+/// recognition record does not authorize an eagerly dropped backing at a reused path.
+pub(super) fn snapshot_identity(path: &Path) -> Result<Identity> {
+    path_identity(path, true)
+}
+
+pub(super) fn remove_snapshot_directory(path: &Path, identity: Identity) {
+    if path_identity(path, true).is_ok_and(|current| current == identity) {
+        let _ = fs::remove_dir_all(path);
     }
 }
 

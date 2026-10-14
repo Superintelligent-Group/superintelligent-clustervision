@@ -138,6 +138,7 @@ fn reader_scope() -> ReadScope {
 struct ColdSnapshot {
     reads: crate::source::ReadSet,
     directory: std::path::PathBuf,
+    directory_identity: snapshots::Identity,
     database: std::path::PathBuf,
     copied_bytes: u64,
     _owner: Option<std::sync::Arc<snapshots::Owner>>,
@@ -145,7 +146,7 @@ struct ColdSnapshot {
 
 impl Drop for ColdSnapshot {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.directory);
+        snapshots::remove_snapshot_directory(&self.directory, self.directory_identity);
     }
 }
 
@@ -226,10 +227,12 @@ fn open_ro_with_copy_check(path: &Path, copied: impl FnOnce(&Path) -> Result<()>
                 Arc::clone(slot.as_ref().unwrap())
             };
             let directory = owner.snapshot_directory()?;
+            let directory_identity = snapshots::snapshot_identity(&directory)?;
             let mut snapshot = ColdSnapshot {
                 reads: reads.clone(),
                 database: directory.join("store.db"),
                 directory,
+                directory_identity,
                 copied_bytes: 0,
                 _owner: Some(owner),
             };
@@ -414,6 +417,29 @@ mod tests {
     }
 
     #[test]
+    fn dropping_replaced_cold_snapshot_preserves_different_directory() {
+        let (directory, database) = fixture();
+        std::fs::write(&database, "owned snapshot").unwrap();
+        let snapshot = ColdSnapshot {
+            reads: crate::source::ReadSet::default(),
+            directory_identity: snapshots::snapshot_identity(&directory).unwrap(),
+            directory: directory.clone(),
+            database,
+            copied_bytes: 0,
+            _owner: None,
+        };
+        let saved = directory.with_extension("saved");
+        std::fs::rename(&directory, &saved).unwrap();
+        std::fs::create_dir(&directory).unwrap();
+        let different = directory.join("different-owner");
+        std::fs::write(&different, "retained").unwrap();
+        drop(snapshot);
+        assert_eq!(std::fs::read_to_string(&different).unwrap(), "retained");
+        std::fs::remove_dir_all(directory).unwrap();
+        std::fs::remove_dir_all(saved).unwrap();
+    }
+
+    #[test]
     fn incremental_text_reads_keep_utf8_acceptance_and_native_table_constraints() -> Result<()> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch("CREATE TABLE cells(value TEXT); CREATE TABLE other(id TEXT PRIMARY KEY, value TEXT) WITHOUT ROWID; CREATE VIEW projected AS SELECT * FROM cells;")?;
@@ -551,6 +577,7 @@ mod tests {
             std::fs::File::create(&database).unwrap().set_len(bytes).unwrap();
             Arc::new(ColdSnapshot {
                 reads: crate::source::ReadSet::default(),
+                directory_identity: snapshots::snapshot_identity(&directory).unwrap(),
                 directory,
                 database,
                 copied_bytes: bytes,
