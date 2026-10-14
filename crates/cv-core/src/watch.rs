@@ -274,6 +274,53 @@ impl Watcher {
         w
     }
 
+    /// Construct a demanded follower with cooperative checks around discovery and baseline
+    /// reads. Discovery remains the supplied synchronous operation; non-append-only baselines
+    /// check adapter streaming boundaries rather than collecting existing messages.
+    pub fn try_with_discovery(
+        filter: Filter,
+        emit_existing: bool,
+        discover: fn() -> Vec<SessionRef>,
+        mut check: impl FnMut() -> anyhow::Result<()>,
+    ) -> anyhow::Result<Self> {
+        check()?;
+        let mut watcher = Self::with_discovery(filter, true, discover);
+        if emit_existing {
+            return Ok(watcher);
+        }
+        let refs = watcher.discover();
+        check()?;
+        for r in refs {
+            check()?;
+            let (mark, read) = if append_only(&r) {
+                let bytes = std::fs::metadata(&r.path)?.len();
+                (Mark::Bytes(bytes), ReadState::baseline(&r))
+            } else {
+                struct Baseline;
+                impl crate::MessageSink for Baseline {
+                    fn message(&mut self, _: Message) -> crate::Flow {
+                        unreachable!("baseline demanded an existing message")
+                    }
+                }
+                let adapter =
+                    harness::for_harness(r.harness).ok_or_else(|| anyhow::anyhow!("unknown watch harness"))?;
+                let pass = read::read_tail_into(adapter.as_ref(), &r, None, usize::MAX, &mut Baseline, &mut check)?;
+                (Mark::Messages(pass.total), pass.accepted(pass.total))
+            };
+            check()?;
+            watcher.seen.insert(
+                Self::key(&r),
+                State {
+                    trigger: Self::trigger_of(&r),
+                    mark,
+                    pending: false,
+                    read: Some(read),
+                },
+            );
+        }
+        Ok(watcher)
+    }
+
     /// Resume from a [`Cursor`]: the watcher stands exactly where the one that issued it stood.
     pub fn from_cursor(filter: Filter, cursor: Cursor, discover: fn() -> Vec<SessionRef>) -> Self {
         Watcher {
@@ -660,6 +707,38 @@ mod tests {
             updated_at: None,
             message_count: 0,
         }
+    }
+
+    #[test]
+    fn demanded_baseline_counts_existing_messages_and_checks_during_read() {
+        static PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+        let world = cv_testkit::World::in_process("controlled-baseline");
+        let path = world.base.join("checkpoint.json");
+        std::fs::write(
+            &path,
+            include_bytes!("../tests/fixtures/gemini/checkpoint_legacy_array.json"),
+        )
+        .unwrap();
+        PATH.set(path).unwrap();
+        fn discover() -> Vec<SessionRef> {
+            vec![SessionRef::new("baseline", Harness::Gemini, PATH.get().unwrap())]
+        }
+        let expected = baseline(&discover().remove(0)).unwrap();
+        let mut watcher = Watcher::try_with_discovery(Filter::default(), false, discover, || Ok(())).unwrap();
+        assert_eq!(watcher.seen["gemini:baseline"].mark, expected);
+        watcher
+            .try_poll_messages(|| Ok(()), |_, _, _| panic!("baseline emitted existing history"))
+            .unwrap();
+        let mut checks = 0;
+        let error = Watcher::try_with_discovery(Filter::default(), false, discover, || {
+            checks += 1;
+            anyhow::ensure!(checks <= 3, "cancelled inside baseline read");
+            Ok(())
+        })
+        .err()
+        .expect("baseline ignored cancellation");
+        assert!(error.to_string().contains("cancelled inside baseline"), "{error:#}");
+        assert_eq!(checks, 4, "cancelled baseline continued reading");
     }
 
     #[test]

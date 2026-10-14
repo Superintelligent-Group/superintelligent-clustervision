@@ -676,8 +676,23 @@ fn await_omen(args: &Value, cancelled: &AtomicBool) -> anyhow::Result<String> {
     if cancelled.load(Ordering::Relaxed) {
         anyhow::bail!("MCP client disconnected");
     }
-    let mut watcher = Watcher::new(filter, false);
     let start = Instant::now();
+    let expired = std::cell::Cell::new(false);
+    let watcher = Watcher::try_with_discovery(filter, false, cv_core::discover_all, || {
+        if cancelled.load(Ordering::Relaxed) {
+            anyhow::bail!("MCP client disconnected");
+        }
+        if start.elapsed() >= timeout {
+            expired.set(true);
+            anyhow::bail!("observation deadline reached");
+        }
+        Ok(())
+    });
+    let mut watcher = match watcher {
+        Ok(watcher) => watcher,
+        Err(_) if expired.get() => return omen_timeout(start),
+        Err(error) => return Err(error),
+    };
     loop {
         if cancelled.load(Ordering::Relaxed) {
             anyhow::bail!("MCP client disconnected");
@@ -686,11 +701,7 @@ fn await_omen(args: &Value, cancelled: &AtomicBool) -> anyhow::Result<String> {
             return Ok(serde_json::to_string_pretty(&matched)?);
         }
         if start.elapsed() >= timeout {
-            return Ok(serde_json::to_string_pretty(&json!({
-                "matched": false,
-                "timed_out": true,
-                "waited_secs": start.elapsed().as_secs(),
-            }))?);
+            return omen_timeout(start);
         }
         let sleep_for = interval.min(timeout.saturating_sub(start.elapsed()));
         let sleep_start = Instant::now();
@@ -701,6 +712,12 @@ fn await_omen(args: &Value, cancelled: &AtomicBool) -> anyhow::Result<String> {
             std::thread::sleep((sleep_for - sleep_start.elapsed().min(sleep_for)).min(Duration::from_millis(100)));
         }
     }
+}
+
+fn omen_timeout(start: Instant) -> anyhow::Result<String> {
+    Ok(serde_json::to_string_pretty(&json!({
+        "matched": false, "timed_out": true, "waited_secs": start.elapsed().as_secs(),
+    }))?)
 }
 
 /// Match directly while a checked watch read delivers individual retained messages. A hit
