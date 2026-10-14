@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Goose, Hermes and Devin discovery count canonical turns while bounding ordinary large SQLite cells, including SQLite’s native allocations.
+- OpenClaw complete exports preserve native records, branch links, compaction metadata and grouped tool results; parent scans retain source guards.
+- Dataset exports retain session-level system prompts without duplicating explicit system messages.
+- HTTP limits concurrent connections and incomplete request lifetimes while preserving slow responses and keepalive.
+
 - Discovery, filtering and search preserve exact identities, auxiliary-file freshness, malformed-cache recovery, and errors instead of silently accepting incomplete results.
 - Claude workflow revival streams selected histories and recovers valid siblings when another journal is incomplete.
 - Codex, Grok and Qwen skip unused discovery and record payloads while preserving duplicate-key acceptance, Unicode text, system prompts and terminal errors.

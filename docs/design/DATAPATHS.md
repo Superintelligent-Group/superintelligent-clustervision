@@ -23,9 +23,9 @@ rewrite. Read reports cover no-change paths too. Counts of commits or lines are 
 | Gemini, Harmony, formats | Full pass reported; routing, linear terminator scan, streaming census and registry preservation integrated; harness-scoped census follows shared discovery. |
 | Cursor, Cline, Roo, Continue, Cline SDK | Full pass reported; timestamp/error/model parity, index preservation and root dedup integrated. |
 | OpenCode, Zed | Full pass reported; native DB routing/WAL guards, opaque records, collision rejection, stable order and branch fallback integrated. |
-| Hermes, Devin | Full production pass reported; native export, sparse metadata, bounded cell navigation and exact replay keys integrated; count-only discovery projection finishing. |
+| Hermes, Devin | Full production pass reported; native export, sparse metadata, bounded cell navigation and exact replay keys integrated; count-only discovery projection and exact canonical counts integrated. |
 | Kimi, Kimi Code, LM Studio | Full production pass reported; auxiliary freshness, typed configuration, one-pass headers, model switches, terminal IO and usage-only native completions integrated. |
-| Goose, OpenClaw | Full production pass reported; Goose fork timestamps integrated; complete OpenClaw record/compaction replay and grouped tool-result preservation ready for integration. |
+| Goose, OpenClaw | Full production pass reported; bounded Goose discovery/counts, complete OpenClaw native replay, grouped results and guarded parent scans integrated. |
 | Wire codecs, account exports, OpenSession, ingest, IR JSON | Full production pass reported; selected payloads, multipart backing, strict sniffing, cross-field source guards and shared checked string output integrated. |
 | IR, lazy text, JSON and private transport | Full production pass reported; checked materialization, bounded mapped validation, overflow checks and positioned canonical prefix writing integrated. |
 | Source guards, projections, sanitization | Full production pass reported; custom SQLite source classification, exact escaped-key matching, shared source checks and terminal sanitization integrated. |
@@ -37,19 +37,44 @@ rewrite. Read reports cover no-change paths too. Counts of commits or lines are 
 | Events, affordances, stats, lanes, tools, hooks, compaction | Full production pass reported; parent-scoped stops/conflicts, indexed pairing/patch dedup and demand selection integrated. |
 | Prune, rewind, restamp, loom, adopt, port, compose | Full pass reported; source-alias/resource publication, native IDs, option validation and window accounting integrated. |
 | Emit/preparation/fidelity/thinking, Markdown, HTML, redaction | Full production pass reported; checked lazy rendering, complete-record/system scrubbing, bounded secret matching and literal Markdown newlines integrated. |
-| Distill, dataset, doctor, pack and recipes | Full production pass reported; visibility, whitespace parity, structured findings, tool closure and pack ranking integrated; missing dataset system prompts being repaired. |
+| Distill, dataset, doctor, pack and recipes | Full production pass reported; visibility, whitespace parity, structured findings, tool closure and pack ranking integrated; session-level dataset system prompts integrated without duplicate output. |
 | Remaining CLI dispatch, archive, show, cat, browse, share, live, schema, blame, utilities | Full pass reported; guarded share publication, archive names, scoped identities, bounded durations and usage errors integrated. |
 | HTTP transport, API, MCP, LLM | Full production pass reported; strict framing/headers/authorities, bounded admission/input lifetimes, request cancellation, prompt budgets and checked LLM egress integrated. |
-| Web, Wasm and desktop | Full production pass reported; bounded ZIP extraction and asynchronous feature ownership repairs integrated. Browser 87/87, ZIP 11/11 and desktop 6/6 pass; final Wasm pending. |
+| Web, Wasm and desktop | Full production pass reported; bounded ZIP extraction and asynchronous feature ownership repairs integrated. Browser 87/87, ZIP 11/11 and desktop 6/6 pass; standalone Wasm and optimized wasm-pack pass at `45f0f01f`. |
 | Testkit, tools, build, CI, packaging/release automation | Full production pass reported; ambient-state/duplex helpers, corpus guards, provenance and mandatory browser/Wasm gate evidence repaired. Final packaging pending; no release actions. |
 
-Combined native builds have converged through successive source batches. The first two scoped
-core batches passed 412 and 742 controls with eight failures; fixes and independent oracle repairs
-are integrated. Search passed 112 controls; testkit passed three. Later affected core/CLI batches
-are exercising new cohorts and have exposed additional fixture/composition repairs. Full native,
-portable, memory and publication gates remain pending; these partial counts are not a final pass. The previous published batch's CI run `38509340378` passed; that is
-baseline evidence, not validation of this new branch. Do not mark this review complete until the
-in-progress scopes and their actionable findings are drained and the composed changes converge.
+Source review and implementation cover every scope above. The full native workspace run at
+`41ef5b2b` completed once; its failures were repaired and passed in scoped runs, including fixture
+assumptions and dropped contextual CLI diagnostics. The late Goose/Hermes/OpenClaw cohort passed
+113 controls at `b0c294df`; the additional missing-schema Goose control passes at `e235d6c2`.
+All-target native build and clippy pass at `e235d6c2`. Portable repairs passed 107 controls at
+`45f0f01f`, following the broad portable baseline; the formerly ambient OpenSession test now uses
+committed fixtures. Final memory, package and source-delta checks are still converging.
+
+Actual adapter discovery now has a native-allocation gate as well as a Rust heap gate. Each case
+checks that the session and its one conversational turn were counted. At `e235d6c2`, all ten
+16/64 MiB cases pass; these are allocation measurements, not throughput or hardware-counter claims:
+
+| Discovery input | Rust peak at 64 MiB | SQLite native peak at 64 MiB |
+|---|---:|---:|
+| Devin history / metadata | 135,242 / 134,814 B | 2,842,272 / 2,694,816 B |
+| Goose history | 134,740 B | 2,686,800 B |
+| Hermes assistant / user | 11,625 / 349,339 B | 2,850,016 B |
+
+The preceding Goose implementation used only about 4 KB of Rust heap but allocated 67,350,864 B
+inside SQLite for the same 64 MiB cell. The production gate caught that blind spot. Large ordinary
+UTF-8 cells now use incremental reads and per-row checked backing; small rows retain the borrowed
+fast path. Hermes collection/Facts checks also cover both assistant and user bodies, so replay
+suppression cannot hide a whole-prompt allocation. Full doctor deliberately owns demanded bodies.
+SQLite row-scale checks at 8/32 MB pass with baseline message/metadata hash parity across ten
+format/shape combinations. Evidence is retained under the task's `excellence-home/repo-wide-*`.
+
+Constraints remain explicit: SQLite views, WITHOUT ROWID/UTF-16 and other ineligible schemas use
+compatibility decoding; rich demanded metadata can still require ownership. OpenClaw registry
+inventories are owned once per lookup, and SQLite parent disambiguation still decodes event rows.
+These are not claims of a universal payload-independent memory bound. The native Zed capture and
+live sharpened-child experiment remain evidence gaps rather than completed experiments. No release,
+version bump or tag is part of this work.
 
 ## Previous integration status (2026-10-14)
 
