@@ -2605,13 +2605,13 @@ fn byte_window_accounts_for_trailing_reminders_and_prompt_snap_overshoot() {
         window: Some(100),
         ..Default::default()
     };
-    let message = |role: &str, text: &str| json!({"type":role,"message":{"content":text}});
+    let message = |role: &str, text: &str| serde_json::json!({"type":role,"message":{"content":text}});
     let rows = vec![
         Some(message("user", "first")),
         Some(message("assistant", "answer")),
         Some(message("user", "latest")),
         Some(message("assistant", "reply")),
-        Some(json!({"type":"attachment","rendered":[{"content":"x".repeat(1000)}]})),
+        Some(serde_json::json!({"type":"attachment","rendered":[{"content":"x".repeat(1000)}]})),
     ];
     assert_eq!(select_kept_turns(&rows, &options, 4), (2, 4, None, true));
     let rows = vec![
