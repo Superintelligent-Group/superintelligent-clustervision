@@ -97,7 +97,9 @@ impl Adapter for Continue {
             if !path.exists() {
                 continue;
             }
-            seen.insert(meta.session_id.clone());
+            if !seen.insert(meta.session_id.clone()) {
+                continue;
+            }
             out.push(ref_from(
                 meta,
                 &path,
@@ -271,11 +273,25 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &crate::emit::EmitOptions) 
     use anyhow::Context;
 
     let new_id = opts.new_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    anyhow::ensure!(
+        new_id != "sessions",
+        "Continue session id 'sessions' is reserved for the native index"
+    );
     let cwd = opts.new_cwd.clone().or_else(|| session.cwd.clone());
     let cwd_str = cwd
         .as_ref()
         .map(|p| p.to_string_lossy().to_string())
         .filter(|s| !s.is_empty());
+
+    // Validate an existing index before publishing the transcript. Treating a corrupt or
+    // unreadable index as empty would erase metadata for every other native conversation.
+    let index_path = out_dir.join("sessions.json");
+    let mut entries: Vec<Value> = match fs::read(&index_path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .with_context(|| format!("reading Continue index {}", index_path.display()))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error).with_context(|| format!("reading {}", index_path.display())),
+    };
 
     fs::create_dir_all(out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
 
@@ -293,12 +309,6 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &crate::emit::EmitOptions) 
     )?;
 
     // ── index: sessions.json (merge-or-create) ──
-    let index_path = out_dir.join("sessions.json");
-    let mut entries: Vec<Value> = fs::read_to_string(&index_path)
-        .ok()
-        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-        .and_then(|v| v.as_array().cloned())
-        .unwrap_or_default();
     // Drop any stale entry for this id, then append a fresh one.
     entries.retain(|e| e.get("sessionId").and_then(Value::as_str) != Some(new_id.as_str()));
     let created = session
@@ -317,8 +327,9 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &crate::emit::EmitOptions) 
         entry.insert("workspaceDirectory".into(), json!(c));
     }
     entries.push(Value::Object(entry));
-    fs::write(&index_path, serde_json::to_string_pretty(&Value::Array(entries))?)
-        .with_context(|| format!("writing {}", index_path.display()))?;
+    let mut stage = super::store::bytes::ByteStage::new();
+    serde_json::to_writer_pretty(&mut stage, &entries)?;
+    super::store::publish_stage(stage, &index_path)?;
 
     Ok(super::EmitResult {
         path: file_path,
@@ -775,6 +786,39 @@ fn mtime(path: &Path) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn export_preserves_existing_files_when_index_is_unusable() {
+        let world = cv_testkit::World::in_process("continue-index-export-error");
+        let dir = world.base.join("sessions");
+        fs::create_dir(&dir).unwrap();
+        let transcript = dir.join("fixed.json");
+        fs::write(&transcript, "original transcript").unwrap();
+        let index = dir.join("sessions.json");
+        let session = Session::new("source", Harness::Continue);
+        let opts = crate::emit::EmitOptions {
+            new_id: Some("fixed".into()),
+            ..Default::default()
+        };
+        for unusable in ["{broken", "{}", "null"] {
+            fs::write(&index, unusable).unwrap();
+            assert!(emit(&session, &dir, &opts).is_err());
+            assert_eq!(fs::read_to_string(&index).unwrap(), unusable);
+            assert_eq!(fs::read_to_string(&transcript).unwrap(), "original transcript");
+        }
+        let reserved = crate::emit::EmitOptions {
+            new_id: Some("sessions".into()),
+            ..Default::default()
+        };
+        fs::write(&index, "[]").unwrap();
+        assert!(emit(&session, &dir, &reserved).is_err());
+        assert_eq!(fs::read_to_string(&index).unwrap(), "[]");
+        fs::write(&index, r#"[{"sessionId":"other","custom":{"retain":true}}]"#).unwrap();
+        emit(&session, &dir, &opts).unwrap();
+        let merged: Value = serde_json::from_slice(&fs::read(&index).unwrap()).unwrap();
+        assert_eq!(merged[0]["custom"]["retain"], true);
+        assert_eq!(merged[1]["sessionId"], "fixed");
+    }
     use crate::harness::Parse;
 
     #[test]
@@ -1413,6 +1457,7 @@ mod tests {
             dir.join("sessions.json"),
             r#"[
             {"sessionId":"indexed","title":"index title","workspaceDirectory":"/index","dateCreated":"1700000000000"},
+            {"sessionId":"indexed","title":"duplicate entry"},
             {"sessionId":"missing","title":"missing"}
         ]"#,
         )
