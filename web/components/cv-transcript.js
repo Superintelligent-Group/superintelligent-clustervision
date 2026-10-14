@@ -11,8 +11,9 @@ import {
   MESSAGE_KINDS, ORIGIN_LABELS, STRUCTURAL_KINDS, LINEAGE_LABELS,
   messageKindLabel, messageKindGlyph, harnessExtra, fmtCost, fmtTokens,
 } from "./util.js";
+import { canInvokeNative, invoke } from "../tauri.js";
 import { renderMarkdown, renderCodeBlock } from "../markdown.js";
-import { getSubagents, getSubagent, getEvents, PAGE } from "./hydrate.js";
+import { getSubagents, getSubagent, getEvents, PAGE, CVD_BASE } from "./hydrate.js";
 
 /** Collapse whitespace and cut to `max` — for one-line peeks and rule details. */
 function truncateLine(s, max) {
@@ -79,6 +80,10 @@ class CvTranscript extends HTMLElement {
   connectedCallback() { if (!this.childElementCount) this.render(); }
 
   render() {
+    this._generation = (this._generation || 0) + 1;
+    this._lazyBodies = new Map();
+    this._lazySerial = 0;
+    this._io?.disconnect();
     const s = this._session;
     if (!s) {
       this.innerHTML = `<div class="transcript-empty muted">
@@ -100,6 +105,7 @@ class CvTranscript extends HTMLElement {
     // go through the same "load more" footer instead of rendering 30k messages up front.
     this.innerHTML = `${this._headerHtml(s)}${this._filterHtml()}<div class="turns ${this._filterClasses()}"></div>`;
     this._wireHeader(s);
+    this._wireBlocks(this);
     this._wireFilters();
     this._turns = this.querySelector(".turns");
     this._cursor = 0;
@@ -124,9 +130,10 @@ class CvTranscript extends HTMLElement {
     const s = this._session;
     if (!s || this._pumping) return;
     this._pumping = true;
+    const generation = this._generation;
     const CHUNK = 250;
     const step = () => {
-      if (this._session !== s) { this._pumping = false; return; } // session changed — abandon
+      if (this._generation !== generation) return; // render replaced, even with the same session
       const messages = s.messages || [];
       const target = Math.min(messages.length, this._limit);
       const end = Math.min(target, this._cursor + CHUNK);
@@ -228,10 +235,12 @@ class CvTranscript extends HTMLElement {
     const header = this.querySelector(".transcript-header");
     if (!s || !header) return;
     const promptOpen = !!header.querySelector(".th-sysprompt")?.open;
+    header.querySelectorAll("[data-lazy-body]").forEach((body) => this._lazyBodies.delete(body.dataset.lazyBody));
     header.outerHTML = this._headerHtml(s);
     const prompt = this.querySelector(".th-sysprompt");
     if (prompt) prompt.open = promptOpen;
     this._wireHeader(s);
+    this._wireBlocks(this.querySelector(".transcript-header"));
     this._renderPager();
   }
 
@@ -260,15 +269,20 @@ class CvTranscript extends HTMLElement {
         <b>${events.length}</b> event${events.length === 1 ? "" : "s"}${summary ? ` — ${esc(summary)}` : ""}
         <span class="sub-caret" aria-hidden="true">▸</span>
       </button>
-      <div class="sub-list ev-list" hidden>${events.map((e) => this._eventRowHtml(e)).join("")}</div>`;
+      <div class="sub-list ev-list" hidden></div>`;
     // Below the sub-agents panel when present, else right under the header.
     const anchor = this.querySelector(".sub-panel") || this.querySelector(".transcript-header");
     if (anchor) anchor.insertAdjacentElement("afterend", panel);
     else this.insertAdjacentElement("afterbegin", panel);
 
     const list = panel.querySelector(".ev-list");
+    let rendered = false;
     panel.querySelector(".sub-panel-head").addEventListener("click", (e) => {
       const open = list.hasAttribute("hidden");
+      if (open && !rendered) {
+        list.innerHTML = events.map((event) => this._eventRowHtml(event)).join("");
+        rendered = true;
+      }
       list.toggleAttribute("hidden", !open);
       e.currentTarget.setAttribute("aria-expanded", String(open));
       e.currentTarget.querySelector(".sub-caret").textContent = open ? "▾" : "▸";
@@ -377,13 +391,32 @@ class CvTranscript extends HTMLElement {
 
   // Header-level controls (export buttons) — wired once per render.
   _wireHeader(s) {
-    this.querySelector("[data-export-json]")?.addEventListener("click", () => {
-      downloadFile(`${slug(sessionLabel(s))}.opensession.json`,
-        JSON.stringify(toOpenSession(s), null, 2), "application/json");
-    });
-    this.querySelector("[data-export-md]")?.addEventListener("click", () => {
-      downloadFile(`${slug(sessionLabel(s))}.md`, toMarkdown(s), "text/markdown");
-    });
+    for (const [format, selector] of [["opensession", "[data-export-json]"], ["markdown", "[data-export-md]"]]) {
+      this.querySelector(selector)?.addEventListener("click", async (e) => {
+        const button = e.currentTarget;
+        if (s._remote || s._stub || s._paged) {
+          if (!canInvokeNative()) {
+            // Let the browser's download manager consume the attachment. No response Blob,
+            // full transcript JSON parsing, or mutation of the paged browsing cache.
+            const link = document.createElement("a");
+            link.href = `${CVD_BASE}/api/session/${encodeURIComponent(s.harness)}/${encodeURIComponent(s.id)}/export?format=${format}`;
+            link.target = "_blank"; link.rel = "noopener";
+            document.body.appendChild(link); link.click(); link.remove();
+            return;
+          }
+          button.disabled = true;
+          const note = this.querySelector(".export-note");
+          if (note) note.textContent = "";
+          try { await invoke("export_session", { harness: s.harness, id: s.id, format }); }
+          catch (error) { if (note) note.textContent = `Couldn't export transcript: ${error?.message || error}`; }
+          finally { button.disabled = false; }
+          return;
+        }
+        downloadFile(`${slug(sessionLabel(s))}.${format === "markdown" ? "md" : "opensession.json"}`,
+          format === "markdown" ? toMarkdown(s) : JSON.stringify(toOpenSession(s), null, 2),
+          format === "markdown" ? "text/markdown" : "application/json");
+      });
+    }
     // Lineage chips ask the host to open another session; the host knows the pool, we do not.
     this.querySelectorAll("[data-open-session]").forEach((btn) => {
       btn.addEventListener("click", () => {
@@ -400,6 +433,7 @@ class CvTranscript extends HTMLElement {
       e.preventDefault(); e.stopPropagation();
       const btn = e.currentTarget;
       try {
+        this._materialize(sp.querySelector("[data-lazy-body]"));
         await navigator.clipboard.writeText(sp.querySelector("pre")?.textContent || "");
         btn.textContent = "copied";
         setTimeout(() => { btn.textContent = "copy"; }, 1200);
@@ -409,7 +443,38 @@ class CvTranscript extends HTMLElement {
 
   // Per-message controls (pick + copy). Re-run for any freshly-mounted window
   // of messages (virtualization), scoped to `root` to avoid double-binding.
+  // Closed folds retain source references, not rendered/highlighted HTML or hidden DOM.
+  // Materialize exactly once when opened (or copied), including nested fold handlers.
+  _deferBody(render) {
+    this._lazyBodies ||= new Map();
+    const id = String(this._lazySerial = (this._lazySerial || 0) + 1);
+    this._lazyBodies.set(id, render);
+    return `<div data-lazy-body="${id}"></div>`;
+  }
+
+  _materialize(body) {
+    if (!body?.hasAttribute("data-lazy-body")) return;
+    const id = body.dataset.lazyBody;
+    const render = this._lazyBodies.get(id);
+    body.removeAttribute("data-lazy-body");
+    this._lazyBodies.delete(id);
+    if (!render) return;
+    body.innerHTML = render();
+    this._wireBlocks(body);
+  }
+
   _wireBlocks(root) {
+    root.querySelectorAll("[data-lazy-body]").forEach((body) => {
+      const fold = body.closest("details");
+      if (!fold || fold.dataset.lazyWired) return;
+      fold.dataset.lazyWired = "1";
+      const generation = this._generation;
+      fold.addEventListener("toggle", () => {
+        if (this._generation !== generation) return;
+        if (fold.open) this._materialize(body);
+      });
+      if (fold.open) this._materialize(body);
+    });
     const s = this._session;
     root.querySelectorAll("[data-pick]:not([data-wired])").forEach((btn) => {
       btn.setAttribute("data-wired", "1");
@@ -430,7 +495,9 @@ class CvTranscript extends HTMLElement {
         // Some copy buttons live inside a <summary> — don't toggle the <details>.
         e.preventDefault();
         e.stopPropagation();
-        const pre = btn.closest(".block")?.querySelector("pre");
+        const block = btn.closest(".block");
+        this._materialize(block?.querySelector("[data-lazy-body]"));
+        const pre = block?.querySelector("pre");
         const text = pre ? pre.textContent : "";
         try {
           await navigator.clipboard.writeText(text);
@@ -515,10 +582,11 @@ class CvTranscript extends HTMLElement {
           <cv-harness-badge harness="${esc(h)}"></cv-harness-badge>
           <h2>${esc(sessionLabel(s))}</h2>
           <div class="th-actions">
-            <button type="button" class="mini-btn" data-export-md title="Download as Markdown">⬇ .md</button>
-            <button type="button" class="mini-btn" data-export-json title="Download as OpenSession JSON">⬇ .json</button>
+            <button type="button" class="mini-btn" data-export-md title="Download complete transcript as Markdown">⬇ .md</button>
+            <button type="button" class="mini-btn" data-export-json title="Download complete transcript as OpenSession JSON">⬇ .json</button>
           </div>
         </div>
+        <div class="export-note muted" role="status"></div>
         <div class="th-meta">${meta.join("")}</div>
         ${this._lineageHtml(s)}
         ${s.source_path ? `<div class="th-source muted" title="${esc(s.source_path)}">${esc(s.source_path)}</div>` : ""}
@@ -560,7 +628,7 @@ class CvTranscript extends HTMLElement {
     return `
       <details class="th-sysprompt">
         <summary><span class="sp-glyph" aria-hidden="true">§</span> system prompt <span class="muted">${words.toLocaleString()} words · ${text.length.toLocaleString()} chars</span><button type="button" class="copy-btn" data-copy aria-label="Copy system prompt">copy</button></summary>
-        <pre class="sp-body"><code>${esc(text)}</code></pre>
+        ${this._deferBody(() => `<pre class="sp-body"><code>${esc(text)}</code></pre>`)}
       </details>`;
   }
 
@@ -589,7 +657,7 @@ class CvTranscript extends HTMLElement {
     const usage = this._usageHtml(m.usage);
     const model = m.model ? `<span class="turn-model">${esc(m.model)}</span>` : "";
     const origin = this._originHtml(m);
-    const blocks = (m.content || []).map((b) => this._blockHtml(b)).join("")
+    const renderBlocks = () => (m.content || []).map((b) => this._blockHtml(b)).join("")
       || '<div class="muted block-empty">(empty)</div>';
     const pick = this._pickMode
       ? `<button type="button" class="pick-btn" data-pick="${idx}" title="Add this message to the splice">＋ splice</button>`
@@ -622,7 +690,7 @@ class CvTranscript extends HTMLElement {
       <article class="${cls} turn-quiet" data-kind="${esc(kind)}">
         <details>
           <summary class="turn-head">${head}<span class="turn-peek muted">${this._peekHtml(m)}</span>${pick}</summary>
-          <div class="turn-body">${blocks}</div>
+          <div class="turn-body">${this._deferBody(renderBlocks)}</div>
         </details>
       </article>`;
     }
@@ -630,7 +698,7 @@ class CvTranscript extends HTMLElement {
     return `
       <article class="${cls}" data-kind="${esc(kind)}">
         <div class="turn-head">${head}${pick}</div>
-        <div class="turn-body">${blocks}</div>
+        <div class="turn-body">${renderBlocks()}</div>
       </article>`;
   }
 
@@ -735,7 +803,7 @@ class CvTranscript extends HTMLElement {
 
       case "thinking": {
         const tag = b.redacted ? " (redacted)" : b.encrypted ? " (encrypted)" : "";
-        const body = b.text
+        const body = () => b.text
           ? this._renderText(b.text)
           : b.redacted ? '<span class="opaque-blob">[redacted reasoning]</span>'
           : b.encrypted ? '<span class="opaque-blob">[encrypted reasoning blob]</span>'
@@ -743,14 +811,14 @@ class CvTranscript extends HTMLElement {
         return `
           <details class="block thinking">
             <summary>💭 Thinking${tag}</summary>
-            <div class="thinking-body">${body}${b.signature ? `<div class="sig muted" title="signature">sig: ${esc(String(b.signature).slice(0, 24))}…</div>` : ""}</div>
+            <div class="thinking-body">${this._deferBody(body)}${b.signature ? `<div class="sig muted" title="signature">sig: ${esc(String(b.signature).slice(0, 24))}…</div>` : ""}</div>
           </details>`;
       }
 
       case "tool_use": {
         const input = b.input == null ? "" : pretty(b.input);
         const big = input.length > 600;
-        const pre = renderCodeBlock(input, "json");
+        const pre = () => renderCodeBlock(input, "json");
         const label = `
           <div class="block-label">
             <span class="tool-glyph">⚙</span> tool_use
@@ -759,8 +827,8 @@ class CvTranscript extends HTMLElement {
             <button type="button" class="copy-btn" data-copy aria-label="Copy input">copy</button>
           </div>`;
         return big
-          ? `<details class="block tool-use"><summary class="tool-summary">⚙ <span class="tool-name">${esc(b.name || "?")}</span> <span class="muted">tool_use · ${input.length} chars</span><button type="button" class="copy-btn" data-copy aria-label="Copy input">copy</button></summary>${pre}</details>`
-          : `<div class="block tool-use">${label}${pre}</div>`;
+          ? `<details class="block tool-use"><summary class="tool-summary">⚙ <span class="tool-name">${esc(b.name || "?")}</span> <span class="muted">tool_use · ${input.length} chars</span><button type="button" class="copy-btn" data-copy aria-label="Copy input">copy</button></summary>${this._deferBody(pre)}</details>`
+          : `<div class="block tool-use">${label}${pre()}</div>`;
       }
 
       case "tool_result": {
@@ -768,9 +836,9 @@ class CvTranscript extends HTMLElement {
         const content = String(b.content ?? "");
         const status = b.status ? `<span class="tool-status">${esc(b.status)}</span>` : "";
         const tname = b.tool_name ? `<span class="tool-name">${esc(b.tool_name)}</span>` : "";
-        const details = this._detailsHtml(b.details);
+        const details = () => this._detailsHtml(b.details);
         const big = content.length > 600;
-        const pre = `<pre class="tool-out"><code>${esc(content)}</code></pre>`;
+        const pre = () => `<pre class="tool-out"><code>${esc(content)}</code></pre>`;
         const label = `
           <div class="block-label">
             <span class="tool-glyph">${b.is_error ? "✖" : "↳"}</span>
@@ -778,8 +846,8 @@ class CvTranscript extends HTMLElement {
             <button type="button" class="copy-btn" data-copy aria-label="Copy result">copy</button>
           </div>`;
         return big
-          ? `<details class="block tool-result${err}"><summary class="tool-summary">${b.is_error ? "✖" : "↳"} <span class="muted">tool_result${b.is_error ? " (error)" : ""} · ${content.length} chars</span> ${status}<button type="button" class="copy-btn" data-copy aria-label="Copy result">copy</button></summary>${pre}${details}</details>`
-          : `<div class="block tool-result${err}">${label}${pre}${details}</div>`;
+          ? `<details class="block tool-result${err}"><summary class="tool-summary">${b.is_error ? "✖" : "↳"} <span class="muted">tool_result${b.is_error ? " (error)" : ""} · ${content.length} chars</span> ${status}<button type="button" class="copy-btn" data-copy aria-label="Copy result">copy</button></summary>${this._deferBody(() => pre() + details())}</details>`
+          : `<div class="block tool-result${err}">${label}${pre()}${details()}</div>`;
       }
 
       case "file": {

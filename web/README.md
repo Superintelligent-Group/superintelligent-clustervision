@@ -214,9 +214,10 @@ All are plain native custom elements (no framework, no build step), in `componen
   **`file`** blocks; images; and a loud fallback for unknown block types and
   unknown message kinds. Shows per-message **token usage** — including reasoning
   tokens and provider cost where recorded — and a session-total. **Very long transcripts
-  are virtualized** — only a sliding window of messages is in the DOM, so a
-  12k-message session renders in ~30 ms instead of freezing the tab. Has
-  per-session **Markdown / OpenSession-JSON export** buttons, and an optional
+  render in pages**, with `content-visibility` skipping layout of offscreen turns. Closed
+  quiet turns, reasoning, large tool payloads and system prompts render their bodies only
+  when opened or copied; nested folds remain deferred. Has
+  complete-session **Markdown / OpenSession-JSON export** buttons, and an optional
   `pickMode` (used by the splice composer).
 - **`<cv-timeline>`**, **`<cv-compare>`**, **`<cv-stats>`**, **`<cv-splice>`**,
   **`<cv-fleet>`** — the views above.
@@ -327,7 +328,10 @@ serves this directory itself); locally, with Playwright on `NODE_PATH`:
 
 ## Export & the splice composer
 
-- From any transcript header: **⬇ .md** and **⬇ .json** (OpenSession).
+- From any transcript header: **⬇ .md** and **⬇ .json** (OpenSession). Remote
+  sessions download their complete source through the server attachment route, even when
+  only one page is loaded. Desktop remote sessions use a native save dialog and the checked
+  CLI exporter; failed exports leave the destination intact. Uploaded sessions export locally.
 - From the splice composer: the composed lane downloads as an OpenSession 0.3
   document (`{ open_session: "0.3", harness, id, title, messages: [...] }`).
 

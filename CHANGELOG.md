@@ -3,6 +3,10 @@
 ## Unreleased
 
 - Semantic stores decode through bounded buffers, avoiding a second complete vector allocation during search and refresh.
+- Transcript downloads export complete remote sessions through server or native file staging while preserving paged browsing.
+- Closed transcript folds defer body rendering until opened or copied, including nested reasoning, large tool payloads, system prompts and event lists.
+
+- Transcript paging preserves failed continuations with visible retries and shares pending pages when reopening sessions, preventing silent truncation and duplicate messages.
 
 - Semantic search retains only requested ranking candidates, preserving exact score and identity order while avoiding full-store sorting.
 - Session ID lookup preserves case-sensitive prefixes and filters harnesses before decoding catalog metadata.

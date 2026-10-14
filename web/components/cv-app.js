@@ -119,7 +119,7 @@ class CvApp extends HTMLElement {
         : await this._fetchJsonWithTimeout(`${CVD_BASE}/api/sessions`, 4000);
       if (!refs) return false;
       if (!Array.isArray(refs) || !refs.length) return false;
-      const sessions = normalizeSessions(refs).map((s) => ((s._stub = true), s));
+      const sessions = normalizeSessions(refs).map((s) => ((s._stub = true), (s._remote = true), s));
       if (!sessions.length) return false;
       this._sessions = sessions;
       this._sources = [{ name: "local (cv serve)", count: sessions.length }];
@@ -172,6 +172,7 @@ class CvApp extends HTMLElement {
       const windowMeta = present(win.session);
       const full = normalizeSession({ ...stub, ...windowMeta, messages: win.messages });
       full._stub = false;
+      full._remote = true;
       full._totalKnown = !!win.total_known;
       if (win.total_known) full.message_count = win.total;
       if (win.has_more) full._paged = { next: win.end };
@@ -201,6 +202,7 @@ class CvApp extends HTMLElement {
     const raw = await apiGet(`/api/session/${encodeURIComponent(stub.harness)}/${encodeURIComponent(stub.id)}`);
     const full = normalizeSession(raw);
     full._stub = false;
+    full._remote = true;
     const i = this._sessions.indexOf(stub);
     if (i >= 0) this._sessions[i] = full; // cache so we don't refetch
     return full;

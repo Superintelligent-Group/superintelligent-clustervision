@@ -332,7 +332,11 @@ check("an unknown block type renders its record instead of an empty turn", () =>
 
 check("the session's system prompt and lineage are reachable", () => {
   truthy(stage.querySelector(".th-sysprompt"), "system prompt fold");
-  has(stage.querySelector(".th-sysprompt").textContent, "software engineering tasks", "its text");
+  const prompt = stage.querySelector(".th-sysprompt");
+  truthy(!prompt.querySelector("pre"), "closed prompt has no hidden body DOM");
+  prompt.open = true;
+  prompt.dispatchEvent(new Event("toggle"));
+  has(prompt.textContent, "software engineering tasks", "its text after opening");
   const chip = stage.querySelector('[data-open-session="c0ffee-claude-002"]');
   truthy(chip, "a navigable `continued in` chip");
   has(chip.textContent, "continued in", "its label");
@@ -841,7 +845,9 @@ await acheck("window paints before head; final merged metadata matches the prior
   const oracle = normalizeSession({ ...s, ...present(head), ...present(win.session), messages: win.messages });
   oracle.message_count = head.total;
   for (const key of Object.keys(oracle)) eq(JSON.stringify(full[key]), JSON.stringify(oracle[key]), `merged ${key}`);
-  has(app._transcript.textContent, "late prompt", "late metadata visible");
+  const prompt = app._transcript.querySelector(".th-sysprompt");
+  prompt.open = true; prompt.dispatchEvent(new Event("toggle"));
+  has(prompt.textContent, "late prompt", "late metadata visible when expanded");
 }));
 
 await acheck("paging before head preserves loaded pages, known total and expanded prompt", () => hydrationFixture(async ({ app, heads, windows, stub, window, settle }) => {
@@ -975,6 +981,80 @@ await acheck("failed and malformed pages retain continuation; retry appends exac
     eq(app._transcript.querySelector(".load-more"), null, "terminal pager removed");
     has(app._transcript.textContent, "retried", "retry paints message");
   } finally { globalThis.fetch = original; }
+});
+
+suite("Demand-rendered transcript folds");
+check("large folded bodies defer Markdown and DOM until opened; nested folds stay lazy", () => {
+  const big = "**large body**\n".repeat(10000);
+  const s = normalizeSession({ id: "lazy", harness: "claude", system_prompt: big, messages: [
+    { role: "assistant", kind: "reply", content: [{ type: "thinking", text: big }, { type: "tool_result", content: big }] },
+    { role: "system", kind: "injected_context", content: [{ type: "text", text: big }, { type: "thinking", text: big }] },
+  ] });
+  const el = document.createElement("cv-transcript");
+  el._mountEvents = () => {}; el._mountSubagents = () => {};
+  let rendered = 0;
+  const renderText = el._renderText.bind(el);
+  el._renderText = (text) => { rendered++; return renderText(text); };
+  el.session = s;
+  eq(rendered, 0, "no hidden prose parsed");
+  truthy(el.querySelectorAll("*").length < 100, "closed folds have bounded DOM");
+  const quiet = el.querySelector(".turn-quiet > details");
+  quiet.open = true; quiet.dispatchEvent(new Event("toggle"));
+  eq(rendered, 1, "opening quiet turn renders its prose only");
+  const nested = quiet.querySelector(".thinking");
+  truthy(!nested.querySelector(".md"), "nested reasoning still closed");
+  nested.open = true; nested.dispatchEvent(new Event("toggle"));
+  eq(rendered, 2, "nested reasoning parses on demand");
+  const body = nested.querySelector(".md");
+  nested.open = false; nested.dispatchEvent(new Event("toggle"));
+  nested.open = true; nested.dispatchEvent(new Event("toggle"));
+  eq(nested.querySelector(".md"), body, "reopening reuses body");
+  eq(rendered, 2, "reopening does not parse again");
+  const result = el.querySelector(".tool-result");
+  result.open = true; result.dispatchEvent(new Event("toggle"));
+  eq(result.querySelector("pre").textContent, big, "large output retained exactly");
+});
+await acheck("copying a closed tool body copies complete source without opening the fold", async () => {
+  const big = "tool output ".repeat(1000);
+  const el = renderTranscript(normalizeSession({ id: "copy-lazy", messages: [
+    { role: "tool", content: [{ type: "tool_result", content: big }] },
+  ] }));
+  const descriptor = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+  let copied;
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async (text) => { copied = text; } } });
+  try {
+    const fold = el.querySelector(".tool-result");
+    fold.querySelector("[data-copy]").click();
+    await Promise.resolve();
+    eq(copied, big, "copy includes full deferred output");
+    eq(fold.open, false, "copy leaves fold closed");
+  } finally {
+    if (descriptor) Object.defineProperty(navigator, "clipboard", descriptor);
+    else delete navigator.clipboard;
+  }
+});
+
+suite("Complete remote exports");
+await acheck("paged remote export delegates attachment download without fetching or changing messages", async () => {
+  const s = normalizeSession({ id: "id/encoded", harness: "claude", messages: [] });
+  s._remote = true; s._paged = { next: 200 };
+  const el = renderTranscript(s);
+  const originalClick = HTMLAnchorElement.prototype.click;
+  const originalFetch = globalThis.fetch;
+  const urls = [];
+  let fetches = 0;
+  HTMLAnchorElement.prototype.click = function () { urls.push(this.href); };
+  globalThis.fetch = async () => { fetches++; throw new Error("unexpected browser export read"); };
+  try {
+    el.querySelector("[data-export-json]").click();
+    el.querySelector("[data-export-md]").click();
+    eq(urls.length, 2, "both formats delegate downloads");
+    truthy(urls[0].endsWith("/api/session/claude/id%2Fencoded/export?format=opensession"), "identity encoded");
+    truthy(urls[1].endsWith("?format=markdown"), "Markdown route");
+    eq(fetches, 0, "browser does not own exported payload");
+    eq(s.messages.length, 0, "download leaves paged cache untouched");
+    eq(s._paged.next, 200, "download leaves continuation untouched");
+  } finally { HTMLAnchorElement.prototype.click = originalClick; globalThis.fetch = originalFetch; }
 });
 
 // ===========================================================================

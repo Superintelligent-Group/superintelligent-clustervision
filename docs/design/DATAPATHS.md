@@ -4718,3 +4718,33 @@ Execution remains with the central integration batch. Native adapter fallbacks a
 per-message rendered strings remain; this is bounded transport and elimination of whole-session
 browser ownership, not a claim that every provider streams or that giant selected messages have
 constant payload memory.
+
+
+### Complete viewer exports and demand-rendered folds (2026-10-13, GPT-6.1 Sol)
+
+The earlier browser audit found exports silently serializing only the cached page subset.
+Remote sessions now retain their source identity through hydration; both export buttons
+request the complete source. Browser exports navigate the attachment route coordinated
+with the transport lane (`/api/session/{harness}/{id}/export?format=markdown|opensession`),
+so the browser download manager consumes bytes without owning a complete Session/Blob in
+JavaScript. Desktop exports use a native save dialog and the existing checked `cv export`
+command, redirecting stdout/stderr to private sibling stages; only successful completion
+publishes the destination. No full text traverses the Tauri bridge. Uploaded complete
+sessions retain the existing client serializers. The native save operation's failure and
+success oracle uses a fake child and checks destination preservation/stage cleanup; root
+owns its standalone desktop compile/test gate.
+
+Closed quiet turns, reasoning, large tool inputs/results and system prompts now retain
+source-backed render closures rather than eagerly built HTML and hidden subtrees. Opening
+or copying materializes once, wires nested controls and leaves nested folds deferred.
+Metadata replacement releases old prompt closures; a render generation prevents obsolete
+frame/fold callbacks mutating a rerender of the same Session. Event-row DOM now waits for
+panel expansion. Event retrieval remains eager; payload ownership and an individually huge
+visible message remain separate limits.
+
+Chrome selftests pass 67/67 after updating the existing metadata oracle to expand the prompt
+before asserting its body. New interaction checks cover complete download delegation without
+fetch/cache mutation, closed-fold complete copying, and nested open/reopen fidelity. A fixture
+with 140,000-character folded bodies performs zero Markdown renders and creates fewer than
+100 initial nodes; nested expansion parses exactly once and reopening reuses the same body.
+This is a deterministic work/DOM control, not a latency claim for arbitrary live sessions.

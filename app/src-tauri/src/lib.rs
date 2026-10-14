@@ -111,6 +111,119 @@ fn api(path: String, query: Option<String>) -> Result<String, String> {
     }
 }
 
+// Full transcript exports stay out of the webview: the existing checked CLI exporter
+// writes a private file beside the destination, published only after successful exit.
+struct ExportStage {
+    path: std::path::PathBuf,
+    file: std::fs::File,
+}
+impl ExportStage {
+    fn create(parent: &std::path::Path) -> Result<Self, String> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        for _ in 0..100 {
+            let path = parent.join(format!(
+                ".cv-export-{}-{}.tmp",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            let mut options = std::fs::OpenOptions::new();
+            options.read(true).write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            match options.open(&path) {
+                Ok(file) => return Ok(Self { path, file }),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(format!("staging export: {e}")),
+            }
+        }
+        Err("couldn't create a private export file".into())
+    }
+}
+impl Drop for ExportStage {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn export_to_path(
+    binary: &std::path::Path,
+    harness: &str,
+    id: &str,
+    format: &str,
+    destination: &std::path::Path,
+) -> Result<(), String> {
+    let cli_format = match format {
+        "markdown" => "md",
+        "opensession" => "json",
+        _ => return Err("unknown export format".into()),
+    };
+    let parent = destination
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let stage = ExportStage::create(parent)?;
+    let mut errors = ExportStage::create(parent)?;
+    let status = Command::new(binary)
+        .args(["export", "--harness", harness, "--format", cli_format, "--", id])
+        .stdin(std::process::Stdio::null())
+        .stdout(stage.file.try_clone().map_err(|e| e.to_string())?)
+        .stderr(errors.file.try_clone().map_err(|e| e.to_string())?)
+        .status()
+        .map_err(|e| format!("starting cv export: {e}"))?;
+    if !status.success() {
+        use std::io::{Seek, SeekFrom};
+        errors.file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+        let mut message = String::new();
+        (&mut errors.file)
+            .take(4096)
+            .read_to_string(&mut message)
+            .map_err(|e| e.to_string())?;
+        return Err(format!("cv export failed ({status}): {}", message.trim()));
+    }
+    stage.file.sync_all().map_err(|e| format!("finishing export: {e}"))?;
+    std::fs::rename(&stage.path, destination).map_err(|e| format!("saving export: {e}"))
+}
+
+#[tauri::command]
+async fn export_session(app: AppHandle, harness: String, id: String, format: String) -> Result<bool, String> {
+    let extension = match format.as_str() {
+        "markdown" => "md",
+        "opensession" => "opensession.json",
+        _ => return Err("unknown export format".into()),
+    };
+    let filename = format!(
+        "cv-{}.{}",
+        id.chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            })
+            .collect::<String>(),
+        extension
+    );
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(picked) = app
+            .dialog()
+            .file()
+            .set_title("Export complete transcript")
+            .set_file_name(filename)
+            .blocking_save_file()
+        else {
+            return Ok(false);
+        };
+        let destination = picked.into_path().map_err(|e| format!("resolving save path: {e}"))?;
+        export_to_path(&cv_binary(), &harness, &id, &format, &destination)?;
+        Ok(true)
+    })
+    .await
+    .map_err(|e| format!("export task failed: {e}"))?
+}
+
 // ---------------------------------------------------------------------------
 // Native application menu
 // ---------------------------------------------------------------------------
@@ -327,7 +440,7 @@ pub fn run() {
         // Persist each window's size/position/etc. across launches and restore on startup.
         .plugin(tauri_plugin_window_state::Builder::new().build())
         .manage(ServeChild::default())
-        .invoke_handler(tauri::generate_handler![api])
+        .invoke_handler(tauri::generate_handler![api, export_session])
         .on_menu_event(handle_menu_event)
         .setup(|app| {
             // Install the native application menu.
@@ -415,8 +528,6 @@ mod tests {
         assert!(sessions.is_empty(), "nothing recognizable → []");
     }
 
-
-
     #[test]
     fn api_command_routes_onto_the_read_api() {
         // The command is `route_json` behind a path splitter: a known route answers, an unknown
@@ -429,6 +540,42 @@ mod tests {
         assert!(api("/api/sessions".into(), Some("harness=warpdrive".into()))
             .unwrap_err()
             .starts_with("400"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_publication_preserves_destination_on_failure() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "cv-export-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let script = root.join("cv-test");
+        let destination = root.join("session.json");
+        std::fs::write(&destination, "previous complete export").unwrap();
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nprintf partial\nprintf 'broken source' >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let error = export_to_path(&script, "claude", "session", "opensession", &destination).unwrap_err();
+        assert!(error.contains("broken source"));
+        assert_eq!(
+            std::fs::read_to_string(&destination).unwrap(),
+            "previous complete export"
+        );
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 2, "private stages removed");
+        std::fs::write(&script, "#!/bin/sh\nprintf 'complete export'\n").unwrap();
+        export_to_path(&script, "claude", "session", "opensession", &destination).unwrap();
+        assert_eq!(std::fs::read_to_string(&destination).unwrap(), "complete export");
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 2, "success stages removed");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
