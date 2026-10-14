@@ -503,6 +503,9 @@ const HOOK_CONTEXT_TAG: &str = "<qwen:user-prompt-submit-context>";
 
 /// IR blocks for a Gemini `Content`'s parts (`message.parts`).
 fn content_blocks(rec: &Map<String, Value>) -> Vec<Block> {
+    if rec.get("type").and_then(Value::as_str) == Some("system") {
+        return system_blocks(rec);
+    }
     let mut out = Vec::new();
     let parts = rec
         .get("message")
@@ -583,6 +586,63 @@ fn content_blocks(rec: &Map<String, Value>) -> Vec<Block> {
         }
     }
     out
+}
+
+/// The owned text recipe shared by ordinary replay and selected system-body dispatch.
+fn system_blocks(rec: &Map<String, Value>) -> Vec<Block> {
+    let payload = rec.get("systemPayload");
+    let text = match rec.get("subtype").and_then(Value::as_str) {
+        Some("chat_compression") => payload
+            .and_then(|p| p.get("compressedHistory"))
+            .and_then(Value::as_array)
+            .and_then(|h| h.first())
+            .and_then(|c| c.get("parts"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|p| p.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Some("goal_state") => {
+            let goal = payload.and_then(|p| p.get("snapshot")).and_then(|s| s.get("goal"));
+            let Some(objective) = goal.and_then(|g| g.get("objective")).and_then(Value::as_str) else {
+                return Vec::new();
+            };
+            let status = goal
+                .and_then(|g| g.get("status"))
+                .and_then(Value::as_str)
+                .unwrap_or("?");
+            let cause = payload
+                .and_then(|p| p.get("cause"))
+                .and_then(Value::as_str)
+                .unwrap_or("update");
+            format!("[goal {cause}] {objective} ({status})")
+        }
+        Some("slash_command" | "at_command" | "notification" | "background_task_completed") => {
+            payload_str(rec, &["rawCommand", "userText", "text", "message", "summary"])
+                .map(str::to_string)
+                .unwrap_or_else(|| payload.map(Value::to_string).unwrap_or_default())
+        }
+        Some("turn_result") => {
+            let Some(error) = payload.and_then(|p| p.get("error")).filter(|e| !e.is_null()) else {
+                return Vec::new();
+            };
+            // An empty error string remains an Error message with an empty text block.
+            return vec![Block::Text {
+                text: error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .map_or_else(|| error.to_string(), str::to_string)
+                    .into(),
+            }];
+        }
+        _ => return Vec::new(),
+    };
+    if text.is_empty() {
+        Vec::new()
+    } else {
+        vec![Block::Text { text: text.into() }]
+    }
 }
 
 /// Gemini usage metadata: `promptTokenCount` includes `cachedContentTokenCount`; the IR's input is
@@ -740,17 +800,7 @@ fn emit_record_with_content(
                     }
                 }
             }
-            let summary: String = payload
-                .and_then(|p| p.get("compressedHistory"))
-                .and_then(Value::as_array)
-                .and_then(|h| h.first())
-                .and_then(|c| c.get("parts"))
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(|p| p.get("text").and_then(Value::as_str))
-                .collect::<Vec<_>>()
-                .join("\n");
+            let summary = blocks();
             if finish(m, rec, subtype, sink) == Flow::Stop {
                 return Flow::Stop;
             }
@@ -758,40 +808,16 @@ fn emit_record_with_content(
                 return Flow::Continue;
             }
             let mut sm = Message::of_kind(Role::System, MessageKind::CompactionSummary, Origin::Harness);
-            sm.content.push(Block::Text { text: summary.into() });
+            sm.content = summary;
             sm.timestamp = rec.get("timestamp").and_then(Value::as_str).and_then(parse_ts);
             return sink.message(sm);
         }
-        ("system", Some("goal_state")) => {
-            // A goal's lifecycle (`/goal`): `{cause, snapshot: {goal: {objective, status, ...}}}`.
-            let payload = rec.get("systemPayload");
-            let goal = payload.and_then(|p| p.get("snapshot")).and_then(|s| s.get("goal"));
-            let objective = goal.and_then(|g| g.get("objective")).and_then(Value::as_str);
-            let status = goal
-                .and_then(|g| g.get("status"))
-                .and_then(Value::as_str)
-                .unwrap_or("?");
-            let cause = payload
-                .and_then(|p| p.get("cause"))
-                .and_then(Value::as_str)
-                .unwrap_or("update");
-            let Some(objective) = objective else {
-                return Flow::Continue;
-            };
+        (
+            "system",
+            Some("goal_state" | "slash_command" | "at_command" | "notification" | "background_task_completed"),
+        ) => {
             let mut m = Message::of_kind(Role::System, MessageKind::Notice, Origin::Harness);
-            m.content.push(Block::Text {
-                text: format!("[goal {cause}] {objective} ({status})").into(),
-            });
-            m
-        }
-        ("system", Some("slash_command" | "at_command" | "notification" | "background_task_completed")) => {
-            let mut m = Message::of_kind(Role::System, MessageKind::Notice, Origin::Harness);
-            let text = payload_str(rec, &["rawCommand", "userText", "text", "message", "summary"])
-                .map(str::to_string)
-                .unwrap_or_else(|| rec.get("systemPayload").map(Value::to_string).unwrap_or_default());
-            if !text.is_empty() {
-                m.content.push(Block::Text { text: text.into() });
-            }
+            m.content = blocks();
             m
         }
         ("system", Some("rewind")) => {
@@ -820,19 +846,8 @@ fn emit_record_with_content(
             return Flow::Continue;
         }
         ("system", Some("turn_result")) => {
-            let Some(err) = rec
-                .get("systemPayload")
-                .and_then(|p| p.get("error"))
-                .filter(|e| !e.is_null())
-            else {
-                return Flow::Continue;
-            };
             let mut m = Message::of_kind(Role::System, MessageKind::Error, Origin::Harness);
-            let text = err
-                .get("message")
-                .and_then(Value::as_str)
-                .map_or_else(|| err.to_string(), str::to_string);
-            m.content.push(Block::Text { text: text.into() });
+            m.content = blocks();
             m
         }
         // Telemetry, attribution and file-history snapshots, session settings echoes, artifacts,

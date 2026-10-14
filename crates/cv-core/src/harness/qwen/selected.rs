@@ -28,7 +28,121 @@ fn response(view: Option<JsonView<'_>>, source: &JsonSource) -> Result<Text> {
     }
     crate::harness::store::text::append(source, &source.decoded_backing()?, |builder| builder.push_json(payload))
 }
+fn system_content(view: JsonView<'_>, source: &JsonSource) -> Result<Vec<Block>> {
+    let subtype = string(view, "subtype")?;
+    let Some(payload) = view.get("systemPayload")? else {
+        return Ok(Vec::new());
+    };
+    let backing = || source.decoded_backing();
+    let text = match subtype.as_deref() {
+        Some("chat_compression") => {
+            let first = payload
+                .get("compressedHistory")?
+                .map(JsonView::array)
+                .transpose()?
+                .flatten()
+                .and_then(|mut items| items.next())
+                .transpose()?;
+            let parts = first
+                .map(|v| v.get("parts"))
+                .transpose()?
+                .flatten()
+                .map(JsonView::array)
+                .transpose()?
+                .flatten();
+            let mut texts = Vec::new();
+            for part in parts.into_iter().flatten() {
+                if let Some(text) = part?.get("text")?.map(JsonView::source_text).transpose()?.flatten() {
+                    texts.push(text);
+                }
+            }
+            match texts.as_slice() {
+                [] => return Ok(Vec::new()),
+                [text] => text.clone(),
+                _ => crate::harness::store::text::append(source, &backing()?, |builder| {
+                    for (i, text) in texts.iter().enumerate() {
+                        if i != 0 {
+                            builder.push("\n")?;
+                        }
+                        text.try_for_each_chunk(&Resolver::new(None), 64 * 1024, |chunk| builder.push(chunk))?;
+                    }
+                    Ok(())
+                })?,
+            }
+        }
+        Some("goal_state") => {
+            let goal = payload.get("snapshot")?.map(|v| v.get("goal")).transpose()?.flatten();
+            let Some(goal) = goal else { return Ok(Vec::new()) };
+            let objective = match goal.get("objective")? {
+                Some(objective) if objective.is_string()? => objective,
+                _ => return Ok(Vec::new()),
+            };
+            let cause = string(payload, "cause")?.unwrap_or_else(|| "update".into());
+            let status = string(goal, "status")?.unwrap_or_else(|| "?".into());
+            crate::harness::store::text::append(source, &backing()?, |builder| {
+                builder.push(&format!("[goal {cause}] "))?;
+                builder.push_string(objective)?;
+                builder.push(&format!(" ({status})"))
+            })?
+        }
+        Some("slash_command" | "at_command" | "notification" | "background_task_completed") => {
+            let mut text = None;
+            for key in ["rawCommand", "userText", "text", "message", "summary"] {
+                if let Some(value) = payload.get(key)?.map(JsonView::source_text).transpose()?.flatten() {
+                    text = Some(value);
+                    break;
+                }
+            }
+            match text {
+                Some(text) => text,
+                None => crate::harness::store::text::append(source, &backing()?, |builder| builder.push_json(payload))?,
+            }
+        }
+        Some("turn_result") => {
+            let Some(error) = payload.get("error")? else {
+                return Ok(Vec::new());
+            };
+            if error.is_null()? {
+                return Ok(Vec::new());
+            }
+            let text = match error.get("message")?.map(JsonView::source_text).transpose()?.flatten() {
+                Some(text) => text,
+                None => crate::harness::store::text::append(source, &backing()?, |builder| builder.push_json(error))?,
+            };
+            return Ok(vec![Block::Text { text }]);
+        }
+        _ => return Ok(Vec::new()),
+    };
+    if super::super::store::document::text_head(&text, &Resolver::new(None), 1, false)?.1 {
+        Ok(vec![Block::Text { text }])
+    } else {
+        Ok(Vec::new())
+    }
+}
+
+/// Only these system facts are demanded by the dispatcher; display bodies arrive separately.
+fn system_metadata(payload: JsonView<'_>, subtype: Option<&str>) -> Result<Value> {
+    match subtype {
+        Some("custom_title" | "parent_session" | "session_model") => discovery_payload(payload, subtype),
+        Some("chat_compression") => {
+            let mut info = Map::new();
+            if let Some(value) = payload.get("info")? {
+                for key in ["triggerReason", "originalTokenCount", "newTokenCount"] {
+                    if let Some(value) = value.get(key)? {
+                        info.insert(key.into(), value.resolve()?.into_owned());
+                    }
+                }
+            }
+            Ok(serde_json::json!({"info": info}))
+        }
+        _ => Ok(Value::Null),
+    }
+}
+
 fn content(view: JsonView<'_>, source: &JsonSource, discovery: bool) -> Result<Vec<Block>> {
+    if string(view, "type")?.as_deref() == Some("system") {
+        return system_content(view, source);
+    }
     let mut out = Vec::new();
     let parts = view
         .get("message")?
@@ -296,7 +410,7 @@ fn replay(
                         let payload = if discovery {
                             discovery_payload(payload, record.get("subtype").and_then(Value::as_str))?
                         } else {
-                            payload.resolve()?.into_owned()
+                            system_metadata(payload, record.get("subtype").and_then(Value::as_str))?
                         };
                         record.insert("systemPayload".into(), payload);
                     }
@@ -313,9 +427,13 @@ fn replay(
                     let blocks = if !stopped
                         && matches!(
                             record.get("type").and_then(Value::as_str),
-                            Some("user" | "assistant" | "tool_result")
+                            Some("user" | "assistant" | "tool_result" | "system")
                         ) {
-                        content(view, &source, discovery)?
+                        if discovery && record.get("type").and_then(Value::as_str) == Some("system") {
+                            system_blocks(&record)
+                        } else {
+                            content(view, &source, discovery)?
+                        }
                     } else {
                         Vec::new()
                     };
@@ -367,6 +485,97 @@ mod tests {
         fn checkpoint(&mut self, checkpoint: &mut Checkpoint) {
             self.checkpoints.push((self.messages.len(), checkpoint.clone()));
         }
+    }
+
+    #[test]
+    fn selected_system_bodies_match_owned_scalar_join_metadata_and_empty_errors() -> Result<()> {
+        let world = cv_testkit::World::in_process("qwen-selected-system-bodies");
+        let path = world.base.join("system.jsonl");
+        let giant = "body λ\n".repeat(128 * 1024);
+        let cases = [
+            (
+                "chat_compression",
+                serde_json::json!({"info":{"triggerReason":"limit","originalTokenCount":20,"newTokenCount":4,"ignored":giant},"compressedHistory":[{"parts":[{"text":""},{"text":giant}]},{"parts":[{"text":giant}]}]}),
+            ),
+            (
+                "chat_compression",
+                serde_json::json!({"compressedHistory":[{"parts":[{"text":""},{"text":""}]}]}),
+            ),
+            (
+                "chat_compression",
+                serde_json::json!({"compressedHistory":[{"parts":[{"text":""}]}]}),
+            ),
+            (
+                "goal_state",
+                serde_json::json!({"cause":"start","snapshot":{"goal":{"objective":giant,"status":"active","ignored":giant}}}),
+            ),
+            (
+                "goal_state",
+                serde_json::json!({"snapshot":{"goal":{"objective":"","status":null}}}),
+            ),
+            (
+                "notification",
+                serde_json::json!({"rawCommand":false,"text":giant,"ignored":giant}),
+            ),
+            (
+                "notification",
+                serde_json::json!({"rawCommand":"","text":"not selected"}),
+            ),
+            ("notification", serde_json::json!({"nested":giant})),
+            ("notification", serde_json::json!(null)),
+            ("notification", serde_json::json!("scalar payload")),
+            (
+                "turn_result",
+                serde_json::json!({"error":{"message":giant,"ignored":giant}}),
+            ),
+            ("turn_result", serde_json::json!({"error":{"message":""}})),
+            (
+                "turn_result",
+                serde_json::json!({"error":{"message":null,"nested":giant}}),
+            ),
+            ("turn_result", serde_json::json!({"error":null})),
+            ("turn_result", serde_json::json!({"error":""})),
+            ("ignored", serde_json::json!({"ignored":giant})),
+        ];
+        for (subtype, payload) in cases {
+            let row = serde_json::json!({"type":"system","subtype":subtype,"systemPayload":payload});
+            std::fs::write(&path, serde_json::to_vec(&row)?)?;
+            let mut owned_messages = Vec::new();
+            let owned = stream_session_jsonl(&path, &mut |message: Message| {
+                owned_messages.push(message);
+                Flow::Continue
+            })?;
+            let mut selected_messages = Vec::new();
+            let selected = stream(&path, &mut |message: Message| {
+                selected_messages.push(message);
+                Flow::Continue
+            })?;
+            assert_eq!(
+                serde_json::to_value(selected)?,
+                serde_json::to_value(owned)?,
+                "{subtype}"
+            );
+            assert_eq!(
+                serde_json::to_value(&selected_messages)?,
+                serde_json::to_value(&owned_messages)?,
+                "{subtype}"
+            );
+            if subtype == "turn_result"
+                && row.pointer("/systemPayload/error/message").and_then(Value::as_str) == Some("")
+            {
+                assert_eq!(selected_messages.len(), 1);
+                assert_eq!(selected_messages[0].kind, MessageKind::Error);
+            }
+            if subtype == "notification"
+                && row.pointer("/systemPayload/text").and_then(Value::as_str) == Some(giant.as_str())
+            {
+                assert!(matches!(
+                    &selected_messages[0].content[0],
+                    Block::Text { text: Text::Source(_) }
+                ));
+            }
+        }
+        Ok(())
     }
 
     #[test]
