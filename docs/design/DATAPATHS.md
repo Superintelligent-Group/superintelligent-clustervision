@@ -80,7 +80,7 @@ short-string allocation repair are integrated at `0af1dc87`; Cline/LM Studio red
 is repaired at `927917a6`. Grok/Qwen selected producers are integrated at `6f13a0b2`, including
 complete rehome and verification. Native OpenCode 2.0.25 fresh/existing/migrated stores accept
 export and continuation after the atomic event-watermark repair (`f958e2c5`, `8556c087`).
-Faithful typed complete OpenCode replay remains in progress. Same-target preparation is a
+Faithful typed complete OpenCode replay is now integrated, including source/edit guards and native continuation controls. Same-target preparation is a
 separate producer-contract check, not an automatic consequence of a checked writer. Run focused composition checks while these
 changes land, then one convergence batch. Changes must preserve complete output, metadata,
 acceptance and source-error semantics; shared checked readers/writers take priority over new
@@ -204,18 +204,18 @@ operation costs and simple code over satisfying a historical number.
 | Qwen modern JSONL | Checked selected reading, discovery, complete preparation, export and verification; finalized-record checkpoints | Requested title/metadata ownership; full replay systemPayload bookkeeping remains owned; no local fleet coverage |
 | Kimi | Checked context bodies and cold discovery share positioned rotation handling; pending usage and wire enrichment preserved | Rotated fingerprint/navigation state and mutable trailing usage; requested metadata remains owned |
 | Kimi Code | Selected cold wire/state discovery and checked finalized-step/complete playback; raw envelopes retain shared checked backing | Call/step state, requested title/cwd, unknown complete carriers and output backing extent |
-| Grok | Checked selected reading, complete preparation/export/verification; mapped and positioned discovery/status projection | Rewind/hook portable framing follow-up in progress; header/system metadata remains owned; enrichment can revise old messages |
+| Grok | Checked selected reading, complete preparation/export/verification; mapped and positioned discovery/status projection | Header/system metadata remains owned; enrichment can revise old messages; portable rewind/hook framing now shares the metadata reader |
 | Cline/Roo legacy | Shared selected-record source views, lazy text/arguments and bounded workspace extraction | Rich metadata, encoded arguments and selected composite output remain |
 | Cline SDK | Shared source views, raw records and Anthropic block dispatch; large arguments use Json ranges | Selected rich fields and compatibility edge cases; giant full-output parity remains separate |
 | Continue | Native/positioned typed header and selected-record source views; lazy payloads, checked encoded arguments and tool-answer dedup | Joined selected text, answer-ID state, rich metadata and mutable snapshots remain |
 | OpenCode files | Ordered message descriptors, selected headers/parts and shared payload arena; deduplicated source inventory released before publication | Necessary file inventory grows with part count; native and portable late-query miss gates now pass |
-| OpenCode SQLite | Indexed selected parts and checked complete native records; guarded DB/WAL/journal dependencies and faithful native replay | Encoded input validation/spill costs; demanded metadata; exports do not clone external linked child/shell stores; combined shell oracle repair pending |
+| OpenCode SQLite | Indexed selected parts and checked complete native records; guarded DB/WAL/journal dependencies and faithful native replay | Encoded input validation/spill costs; demanded metadata; exports do not clone external linked child/shell stores; native SQLite and demanded output costs remain |
 | Cursor SQLite | CLI/ACP reachable-message replay and IDE composer projections; selected strings, Lexical rich text and structured results share private backing | Encoded rich-text CPU cost, owned identifiers/full metadata, WITHOUT ROWID fallback |
 | Devin SQLite | Compact forest, incremental checked message/metadata cells, reused compaction backing and bounded history-path inspection | Native SQL evaluation; navigation descriptors; prefix prompts/demanded rich extras; non-rowid owned fallback |
 | Hermes SQLite | Indexed rows, bounded exact prompt suppression, transactional exports and checked ordinary/multimodal complete bodies; sidecars decoded once | Raw native extras remain owned; giant output rows/FTS dominate native memory; prompt-only CPU tradeoff remains documented |
 | Goose SQLite / legacy | Selected rows and framed legacy payload views; lean demand avoids unrelated sidecars | Full demanded metadata and explicit owned output remain; decoding/staging costs differ by shape |
 | OpenClaw JSONL / SQLite | Flat/tree/SQLite checked payload replay shares branch selection; cells copied incrementally, compressed events staged in bounded chunks | O(events) navigation/backing; codec workspace; demanded complete/control/system metadata; native-cell and non-rowid fallbacks |
-| Zed SQLite | Incremental blobs decoded once; lazy messages use checked selected text/arguments and skip discarded attachment bodies | Decoded spill/I/O; requested metadata; discovery count projection follow-up; WITHOUT ROWID native-cell fallback |
+| Zed SQLite | Incremental blobs decoded once; lazy messages use checked selected text/arguments and skip discarded attachment bodies | Typed discovery counts avoid message trees; largest decoded string still grows Serde scratch; decoded spill, requested metadata and WITHOUT ROWID native-cell fallback |
 | LM Studio | Schema-selected document/turn views, selected lazy text spans and incremental variants; mapped or positioned sources | Bounded discovery title prefixes; Harmony decoding and arbitrary demanded output/metadata remain owned |
 | ChatGPT / Claude account exports | Bounded metadata cache and positioned source views; selected-conversation replay | Branch descriptors, joined text, selected owned output and sender/empty-archive compatibility edges |
 | OpenSession | Shared source validation/views and per-message IR projection | Selected authoritative rich fields remain owned; giant serialization proof separate from count/discovery |
@@ -666,8 +666,8 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Grok, OpenClaw and Qwen JSONL emitters consume checked fields through shared staged writers. Frozen native/portable wire, thinking, sidecar and source-failure controls pass. Actual operation evidence is recorded below; Grok/Qwen selected producers now remove the measured verification transient, with complete preparation separately validated.
 - [x] SQLite exports (OpenCode v1/Hermes): checked session leaves, current-row ownership, reused prepared inserts and one export transaction. Native/portable logical-row, FTS and late-failure rollback controls pass; actual operation evidence records Rust/native allocation separately. Largest-row and SQLite cache costs remain explicit; native OpenCode 2.x is tracked separately.
 - [x] Same-harness complete Cline/Roo/Continue/LM Studio preparation retains checked bodies, with independent native/portable complete IR, wire/fidelity, LM variant and late-source controls. Four actual reader-contract controls establish peak-memory savings; higher cumulative allocation on Cline task directories and LM remains an explicit cost under attribution.
-- [ ] Finish same-harness complete preparation: flat OpenClaw, ordinary Hermes and Grok/Qwen bodies now have owned-complete, wire/fidelity and late-source oracles; faithful native OpenCode complete replay remains. OpenClaw tree/SQLite, Hermes multimodal/raw reasoning and demanded complete carriers retain their stated owned costs.
-- [x] Native OpenCode 2.0.25 export compatibility: fresh and existing v2 stores use native rows; existing v1 output stays supported. Schema/journal bootstrap and event watermark commit atomically. Isolated native get/list/messages/context and actual continuation pass on fresh/existing/migrated stores with 18 imported rows; missing-watermark negative control fails. Native 2.0.26 acceptance and faithful typed complete replay are not claimed.
+- [x] Same-harness complete preparation now includes faithful native OpenCode replay, OpenClaw tree/SQLite, Hermes multimodal, Grok/Qwen and Kimi Code bodies. Owned-complete, wire/fidelity and source/edit controls cover the selected contracts. Raw reasoning/control metadata, unknown carriers and demanded rich fields retain their stated ownership costs.
+- [x] Native OpenCode 2.0.25 export compatibility: fresh and existing v2 stores use native rows; existing v1 output stays supported. Schema/journal bootstrap and event watermark commit atomically. Isolated native get/list/messages/context and actual continuation pass on fresh/existing/migrated stores with 18 imported rows; missing-watermark negative control fails. Native 2.0.26 acceptance is not claimed; faithful typed complete replay was completed in the subsequent swarm.
 - [x] Prune compact decision facts, staged history/sidecars and sequential usage repair.
 - [x] Prune source-selected large-record decisions, shared source restamping, source-backed payload mutation and parent reroot, with exact duplicate-field and native/portable compatibility controls.
 - [x] Prune Thinking, ASCII declassification and ordinary usage-record projections, with whole-operation output parity and CI heap caps.
@@ -4382,7 +4382,7 @@ all native targets. Allowing each target's normal ID generation corrects that ob
 and its focused rerun passes. The portable SQLite configuration passes all 98 composed checks.
 These are scoped export/prepare/fidelity checks, not full repository convergence or a release.
 The subsequent shared prefix repair at `078b14ff` has its own native/portable classification and
-frozen-output controls; faithful OpenCode complete replay remains in progress.
+frozen-output controls; the subsequent swarm completed faithful OpenCode replay (see below).
 History recovery found the positioned JSONL primitive already integrated before the reboot
 (`f064996b`, transcript message 7927). Grok/Qwen's checked acceptance wrapper now reuses
 `store::jsonl::ranges` for framing, offsets, partial EOF and Unicode boundary trimming,
@@ -4498,11 +4498,11 @@ context and continuation, preserve imported row bytes/order, advance sequence an
 embedded image bytes to the actual native model request. Private evidence:
 `native-opencode-v2-rich-native-edited` under `/Users/ember/dev/cv-worktrees`.
 
-Convergence note: the expanded all-native-session oracle currently fails the background-subagent
+Historical convergence failure (repaired below): the expanded all-native-session oracle failed the background-subagent
 assistant row in `ses_ed362eed1ffebZR2VGSZEwUk4J`: guarded replay declines and generic output loses
-native streamed/completed timing and reasoning state. This remains an explicit fidelity blocker;
-the smaller tools/image/compact/skill controls and edit/source/group controls pass. Do not infer
-all-v2 complete replay coverage from those passing controls.
+native streamed/completed timing and reasoning state. This blocked fidelity convergence at that point;
+the smaller tools/image/compact/skill controls and edit/source/group controls alone did not establish
+all-v2 complete replay coverage.
 
 The background-subagent blocker above is now repaired: shared `AffordanceSink` refinement changed
 Reply to SubagentSpawn after the raw witness was captured. Native v2 groups now apply that same
