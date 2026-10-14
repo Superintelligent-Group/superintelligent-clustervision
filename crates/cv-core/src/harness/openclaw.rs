@@ -2396,12 +2396,18 @@ mod tests {
         let l1 = sink.messages.iter().find(|m| m.id.as_deref() == Some("l1")).unwrap();
         assert_eq!(l1.kind, MessageKind::Carrier);
         assert_eq!(l1.extra["openclaw"]["record_type"], "leaf");
-        assert_eq!(l1.extra[crate::harness::claude::CARRIER_KEY]["targetId"], "a1");
+        assert_eq!(
+            serde_json::to_value(l1).unwrap()["extra"][crate::harness::claude::CARRIER_KEY]["targetId"],
+            "a1"
+        );
         // the session name is a notice under complete, carrying its record
         let si = sink.messages.iter().find(|m| m.id.as_deref() == Some("si")).unwrap();
         assert_eq!(si.kind, MessageKind::Notice);
         assert_eq!(si.extra["openclaw"]["record_type"], "session_info");
-        assert_eq!(si.extra[crate::harness::claude::CARRIER_KEY]["name"], "Named session");
+        assert_eq!(
+            serde_json::to_value(si).unwrap()["extra"][crate::harness::claude::CARRIER_KEY]["name"],
+            "Named session"
+        );
         assert_eq!(si.text().as_deref(), Some("[session named: Named session]"));
         for m in &sink.messages {
             assert!(
@@ -2718,11 +2724,17 @@ mod tests {
         let cx = c.messages.iter().find(|m| m.id.as_deref() == Some("cx")).unwrap();
         assert_eq!(cx.kind, MessageKind::Carrier);
         assert_eq!(cx.extra["openclaw"]["record_type"], "custom");
-        assert_eq!(cx.extra[crate::harness::claude::CARRIER_KEY]["data"]["ttl"], 60);
+        assert_eq!(
+            serde_json::to_value(cx).unwrap()["extra"][crate::harness::claude::CARRIER_KEY]["data"]["ttl"],
+            60
+        );
         let lb = c.messages.iter().find(|m| m.id.as_deref() == Some("lb")).unwrap();
         assert_eq!(lb.kind, MessageKind::Notice);
         assert_eq!(lb.text().as_deref(), Some("[label u2: pinned prompt]"));
-        assert_eq!(lb.extra[crate::harness::claude::CARRIER_KEY]["targetId"], "u2");
+        assert_eq!(
+            serde_json::to_value(lb).unwrap()["extra"][crate::harness::claude::CARRIER_KEY]["targetId"],
+            "u2"
+        );
     }
 
     #[test]
