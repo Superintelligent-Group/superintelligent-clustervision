@@ -223,9 +223,21 @@ fn real_downloads_exports_parse() {
     std::env::remove_var("CV_EXPORTS");
 }
 
-// Full-session composition, not a count-only or selected-prefix heap assertion.
+// Full-session composition, not a count-only or selected-prefix heap assertion. The routine
+// fixture crosses INLINE_MAX (4 KiB) and positioned windows (64 KiB) without making every
+// workspace run pay for repeated 32 MiB serialization and hashing in debug builds.
 #[test]
+fn account_archive_full_output_matches_owned_codec() {
+    account_archive_full_output_oracle(2 << 20);
+}
+
+#[test]
+#[ignore = "32 MiB full-session composition control; run explicitly after relevant reader changes"]
 fn giant_account_archive_full_output_matches_owned_codec() {
+    account_archive_full_output_oracle(32 << 20);
+}
+
+fn account_archive_full_output_oracle(payload_bytes: usize) {
     use crate::stream::{CollectSink, ParseOptions};
     use std::io::Write;
 
@@ -260,7 +272,7 @@ fn giant_account_archive_full_output_matches_owned_codec() {
     let path = dir.join("conversations.json");
     // Mixed Unicode and JSON escapes force real decoding; the final turn proves EOF coverage.
     let pattern = "ordinary é😀\n\"quoted\"\t\\end ";
-    let body = pattern.repeat((32 << 20) / pattern.len());
+    let body = pattern.repeat(payload_bytes / pattern.len());
     for kind in [Kind::Claude, Kind::ChatGpt] {
         let conv = match kind {
             Kind::Claude => json!({"uuid":"selected", "name":"complete archive", "chat_messages":[
@@ -290,7 +302,7 @@ fn giant_account_archive_full_output_matches_owned_codec() {
         assert_eq!(expected.messages.len(), 3);
         assert_eq!(expected.messages.last().unwrap().text().unwrap(), "final EOF marker");
         let expected_output = output(&expected);
-        assert!(expected_output.0 > 32 << 20);
+        assert!(expected_output.0 > payload_bytes);
         for opts in [
             ParseOptions::lazy(),
             ParseOptions::bulk(),
@@ -300,6 +312,16 @@ fn giant_account_archive_full_output_matches_owned_codec() {
             let mut sink = CollectSink::default();
             let mut actual = native::stream(kind, &expected_ref, &opts, &mut sink).unwrap();
             actual.messages = sink.messages;
+            assert_eq!(
+                actual.messages[1].content.iter().any(|block| matches!(
+                    block,
+                    Block::Text {
+                        text: crate::lazy::Text::Span(_) | crate::lazy::Text::Source(_)
+                    }
+                )),
+                opts.spans,
+                "fixture must exercise deferred text when requested"
+            );
             actual.materialize().unwrap();
             assert_eq!(actual.messages.len(), 3);
             assert_eq!(output(&actual), expected_output, "full archive output differs");
