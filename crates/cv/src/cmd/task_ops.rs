@@ -281,7 +281,7 @@ pub(crate) fn select_events<'a>(outcome: &'a ReplayOutcome, f: &EventFilter) -> 
                     .model
                     .tasks
                     .get(&ev.task_id)
-                    .is_some_and(|t| t.assignee.as_deref() == Some(a))
+                    .is_some_and(|t| t.assignee.as_deref().is_some_and(|have| task::same_actor(have, a)))
             })
         })
         .collect()
@@ -623,6 +623,49 @@ fn md_block(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn event_assignee_filters_share_web_actor_aliases() {
+        let opened = task::new_event(
+            None,
+            "orchestrator",
+            TaskEventKind::Opened {
+                title: "assigned".into(),
+                body: String::new(),
+                repo: None,
+                issue: None,
+                channel: None,
+                assignee: Some("web:ember".into()),
+            },
+        );
+        let outcome = ReplayOutcome {
+            model: task::TaskReducer::reduce(std::slice::from_ref(&opened)).unwrap(),
+            events: vec![opened],
+            warnings: Vec::new(),
+            quarantined: 0,
+        };
+        for who in ["ember", "web:ember"] {
+            assert_eq!(
+                select_events(
+                    &outcome,
+                    &EventFilter {
+                        assignee: Some(who.into()),
+                        ..Default::default()
+                    }
+                )
+                .len(),
+                1
+            );
+        }
+        assert!(select_events(
+            &outcome,
+            &EventFilter {
+                assignee: Some("lane:ember".into()),
+                ..Default::default()
+            }
+        )
+        .is_empty());
+    }
 
     #[test]
     fn kind_spellings_map_to_wire_tags() {

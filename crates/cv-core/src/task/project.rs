@@ -61,7 +61,7 @@ pub fn list<'m>(model: &'m TaskReadModel, filter: &TaskFilter) -> Result<Vec<&'m
                 return false;
             }
             if let Some(assignee) = &filter.assignee {
-                if t.assignee.as_deref() != Some(assignee.as_str()) {
+                if !t.assignee.as_deref().is_some_and(|have| same_actor(have, assignee)) {
                     return false;
                 }
             }
@@ -343,10 +343,8 @@ pub fn inbox<'m>(model: &'m TaskReadModel, endpoint: &str) -> Vec<InboxEntry<'m>
 }
 
 fn base_inbox_reason(task: &TaskProjection, endpoint: &str) -> Option<(InboxReason, DateTime<Utc>)> {
-    if task.assignee.as_deref() == Some(endpoint)
-        && !task.state.is_terminal()
-        && (task.is_decision() || task.tags.iter().any(|t| t == DECISION_TAG))
-    {
+    let assigned = task.assignee.as_deref().is_some_and(|have| same_actor(have, endpoint));
+    if assigned && !task.state.is_terminal() && (task.is_decision() || task.tags.iter().any(|t| t == DECISION_TAG)) {
         if task.tags.iter().any(|t| t == DISCUSS_TAG) {
             // Parked: ages from the discussion request (its last event), not from the pose.
             return Some((InboxReason::Discussing, task.last_ts));
@@ -356,12 +354,8 @@ fn base_inbox_reason(task: &TaskProjection, endpoint: &str) -> Option<(InboxReas
         return Some((InboxReason::DecisionOwed, since));
     }
     match task.state {
-        TaskState::Open if task.assignee.as_deref() == Some(endpoint) => {
-            Some((InboxReason::AssignedOpen, task.last_ts))
-        }
-        TaskState::Claimed if task.assignee.as_deref() == Some(endpoint) => {
-            Some((InboxReason::ClaimedByYou, task.last_ts))
-        }
+        TaskState::Open if assigned => Some((InboxReason::AssignedOpen, task.last_ts)),
+        TaskState::Claimed if assigned => Some((InboxReason::ClaimedByYou, task.last_ts)),
         _ => None,
     }
 }
@@ -457,6 +451,52 @@ mod tests {
         }
         fn model(&self) -> TaskReadModel {
             TaskReducer::reduce(&self.events).unwrap()
+        }
+    }
+
+    #[test]
+    fn assignee_filters_and_live_inboxes_share_actor_aliases() {
+        let mut log = Log::new();
+        let assigned = log.open("orchestrator", None, Some("web:ember"));
+        let claimed = log.open("orchestrator", None, None);
+        log.push(
+            &claimed,
+            "web:ember",
+            TaskEventKind::Claimed {
+                assignee: "web:ember".into(),
+            },
+        );
+        let decision = log.open("orchestrator", None, Some("ember"));
+        log.push(
+            &decision,
+            "orchestrator",
+            TaskEventKind::Posed {
+                options: vec!["keep".into()],
+                default_choice: "keep".into(),
+                deadline: None,
+                source: None,
+            },
+        );
+        log.open("orchestrator", None, Some("lane:ember"));
+        let model = log.model();
+        for who in ["ember", "web:ember"] {
+            let ids: Vec<_> = list(
+                &model,
+                &TaskFilter {
+                    assignee: Some(who.into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .into_iter()
+            .map(|t| t.task_id.as_str())
+            .collect();
+            assert_eq!(ids, [assigned.as_str(), claimed.as_str(), decision.as_str()]);
+            let items = inbox(&model, who);
+            assert_eq!(items.len(), 3);
+            assert_eq!(items[0].reason, InboxReason::AssignedOpen);
+            assert_eq!(items[1].reason, InboxReason::ClaimedByYou);
+            assert_eq!(items[2].reason, InboxReason::DecisionOwed);
         }
     }
 

@@ -142,10 +142,18 @@ pub struct InboxCounts {
 }
 
 /// `task_id → by of its last event`, from the replayed log.
-fn last_authors(events: &[TaskEvent]) -> HashMap<&str, &str> {
+fn last_authors<'a>(model: &TaskReadModel, events: &'a [TaskEvent]) -> HashMap<&'a str, &'a str> {
     let mut m = HashMap::new();
     for ev in events {
-        m.insert(ev.task_id.as_str(), ev.by.as_str());
+        // Retired events and idempotent re-appends do not touch the projection. The physical
+        // final row is therefore not necessarily the event a reader is being asked to notice.
+        if model
+            .tasks
+            .get(&ev.task_id)
+            .is_some_and(|task| task.last_event_id == ev.id)
+        {
+            m.insert(ev.task_id.as_str(), ev.by.as_str());
+        }
     }
     m
 }
@@ -237,7 +245,7 @@ pub fn inbox_page(
         who,
         plen: project::unique_prefix_len(model.tasks.keys().map(String::as_str), 8),
         children: decisions_from_notes(model),
-        authors: last_authors(&outcome.events),
+        authors: last_authors(model, &outcome.events),
         now,
     };
     let mut items = Vec::new();
@@ -247,16 +255,15 @@ pub fn inbox_page(
             hidden += 1;
             continue;
         }
-        let item = item_of(&ctx, e.task, Some(e.reason), e.since);
-        if unread_only && !item.unread {
+        if unread_only && project::same_actor(ctx.authors.get(e.task.task_id.as_str()).copied().unwrap_or(""), who) {
             continue;
         }
-        items.push(item);
+        items.push(item_of(&ctx, e.task, Some(e.reason), e.since));
     }
     let mut closed: Vec<InboxItem> = model
         .tasks
         .values()
-        .filter(|t| t.state.is_terminal() && t.assignee.as_deref() == Some(who))
+        .filter(|t| t.state.is_terminal() && t.assignee.as_deref().is_some_and(|have| project::same_actor(have, who)))
         // A provisional resolution awaiting a veto is an open item, not a closed one.
         .filter(|t| !t.decision.as_ref().is_some_and(|d| d.awaiting_veto()))
         .filter(|t| project::in_scope(t, since, caller))
@@ -302,6 +309,90 @@ pub fn decisions_from_notes(model: &TaskReadModel) -> HashMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inbox_unread_uses_applied_history_and_closed_rows_share_actor_aliases() {
+        use crate::task::{TaskEventKind, TaskReducer};
+        let ts: DateTime<Utc> = "2026-10-01T12:00:00Z".parse().unwrap();
+        let event = |id: &str, task: &str, by: &str, kind| TaskEvent {
+            id: id.into(),
+            task_id: task.into(),
+            by: by.into(),
+            ts,
+            kind,
+        };
+        let opened = event(
+            "task",
+            "task",
+            "orchestrator",
+            TaskEventKind::Opened {
+                title: "read state".into(),
+                body: "large body".repeat(8192),
+                repo: None,
+                issue: None,
+                channel: None,
+                assignee: Some("web:ember".into()),
+            },
+        );
+        let old_note = event(
+            "old",
+            "task",
+            "orchestrator",
+            TaskEventKind::Noted {
+                text: "old unread note".into(),
+                session_ref: None,
+            },
+        );
+        let current = event(
+            "current",
+            "task",
+            "web:ember",
+            TaskEventKind::Noted {
+                text: "I read it".into(),
+                session_ref: None,
+            },
+        );
+        let retired = event(
+            "retired",
+            "task",
+            "cv-verify",
+            TaskEventKind::Retired(crate::task::RetiredEvent(
+                serde_json::from_value(serde_json::json!({"event":"landed"})).unwrap(),
+            )),
+        );
+        let events = vec![opened, old_note.clone(), current, old_note, retired];
+        let mut outcome = ReplayOutcome {
+            model: TaskReducer::reduce(&events).unwrap(),
+            events,
+            warnings: Vec::new(),
+            quarantined: 0,
+        };
+        for who in ["ember", "web:ember"] {
+            let page = inbox_page(&outcome, who, None, None, false, ts);
+            assert_eq!(page.items.len(), 1);
+            assert_eq!(page.items[0].last_by, "web:ember");
+            assert!(!page.items[0].unread);
+            assert_eq!(page.items[0].notes.len(), 2);
+            assert!(inbox_page(&outcome, who, None, None, true, ts).items.is_empty());
+        }
+        outcome.events.push(event(
+            "done",
+            "task",
+            "web:ember",
+            TaskEventKind::Done {
+                observed: None,
+                check: None,
+            },
+        ));
+        outcome.model = TaskReducer::reduce(&outcome.events).unwrap();
+        for who in ["ember", "web:ember"] {
+            let page = inbox_page(&outcome, who, None, None, false, ts);
+            assert!(page.items.is_empty());
+            assert_eq!(page.closed.len(), 1);
+            assert_eq!(page.closed[0].last_by, "web:ember");
+            assert!(!page.closed[0].unread);
+        }
+    }
 
     #[test]
     fn deadline_phrases_say_in_or_overdue() {
