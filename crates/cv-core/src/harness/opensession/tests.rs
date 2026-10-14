@@ -49,31 +49,7 @@ fn document_leads_with_the_version_and_session_never_carries_it() {
 
 // ── the decisive test: a round trip on real data ──────────────────────────────
 
-/// The newest real local session with a workable size, from whichever harness has one.
-fn a_real_session() -> Option<(&'static str, Session)> {
-    let adapters: Vec<(&'static str, Box<dyn Adapter>)> = vec![
-        ("claude", Box::new(claude::Claude::detect())),
-        ("codex", Box::new(codex::Codex::detect())),
-    ];
-    for (name, a) in adapters {
-        if a.roots().is_empty() {
-            continue;
-        }
-        let Ok(mut refs) = a.discover() else { continue };
-        refs.retain(|r| (5..=250).contains(&r.message_count));
-        refs.sort_by_key(|r| std::cmp::Reverse(r.updated_at.or(r.created_at)));
-        for r in refs.iter().take(4) {
-            if let Ok(s) = a.parse(r) {
-                if s.messages.len() >= 5 {
-                    return Some((name, s));
-                }
-            }
-        }
-    }
-    None
-}
-
-/// **Export a real session to OpenSession, read it back, and compare the two IRs field by field.**
+/// **Export a committed native session to OpenSession, read it back, and compare the two IRs field by field.**
 ///
 /// Everything is asserted equal except one field, and it is not a loss: `source_path` is "where cv
 /// read this session from on disk", so for the re-read session it is the document — naming the
@@ -83,11 +59,37 @@ fn a_real_session() -> Option<(&'static str, Session)> {
 /// Skips (loudly) when the machine has no local session to test with; there is nothing to fake
 /// here, a synthetic fixture would only prove that the writer and reader agree with each other.
 #[test]
-fn round_trips_a_real_session_through_a_document() {
-    let Some((harness_name, original)) = a_real_session() else {
-        eprintln!("no local claude/codex session to round-trip — skipping (nothing to fake here)");
-        return;
+fn round_trips_committed_claude_session_through_a_document() {
+    round_trip_native_corpus(
+        Harness::Claude,
+        "claude/2.1.296/.claude/projects/-home-corpus-project/82a46650-46f1-4cf0-9b71-327449b7393a.jsonl",
+    );
+}
+
+#[test]
+fn round_trips_committed_codex_session_through_a_document() {
+    round_trip_native_corpus(Harness::Codex,
+        "codex/0.162.1/.codex/sessions/2026/10/11/rollout-2026-10-11T15-33-14-01a12c74-7dd5-7180-a5a6-6dde0313b6cf.jsonl");
+}
+
+fn round_trip_native_corpus(harness: Harness, corpus_path: &str) {
+    let _world = cv_testkit::World::in_process("opensession-native-corpus");
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/corpus")
+        .join(corpus_path);
+    let adapter: Box<dyn Adapter> = match harness {
+        Harness::Claude => Box::new(claude::Claude::detect()),
+        Harness::Codex => Box::new(codex::Codex::detect()),
+        _ => unreachable!(),
     };
+    let original = adapter
+        .parse(&SessionRef::new("native-corpus", harness, source))
+        .unwrap();
+    assert!(
+        original.messages.len() >= 5,
+        "native fixture must carry real conversation history"
+    );
+    let harness_name = format!("{harness:?}");
     eprintln!(
         "round trip: {harness_name} session {} — {} messages, source {}",
         original.id,
