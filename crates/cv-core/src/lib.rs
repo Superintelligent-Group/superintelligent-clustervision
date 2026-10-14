@@ -193,6 +193,24 @@ pub fn sessions() -> Vec<SessionRef> {
     sessions_impl().0
 }
 
+/// Enumerate the requested harness without opening unrelated stores. A qualified scope uses
+/// fresh discovery with its per-file metadata cache and publishes only that harness's rows and
+/// watches; it never stamps a full-fleet sync. An unqualified scope retains [`sessions`]' cache
+/// and freshness policy. Discovery failures remain best effort, returning an empty scope.
+pub fn sessions_for(harness: Option<Harness>) -> Vec<SessionRef> {
+    let Some(harness) = harness else {
+        return sessions();
+    };
+    let mut reader = catalog::Reader::open();
+    let refs = discover_harness(harness, reader.as_mut()).unwrap_or_default();
+    if let Some(reader) = &mut reader {
+        reader.persist_discovery(false);
+    } else {
+        discover_cache::persist(false);
+    }
+    refs
+}
+
 /// The catalog exactly as it stands: no freshness probe, no discovery, never a fleet scan. Empty
 /// on a cold catalog. For callers that must answer in milliseconds whatever the store's state
 /// — the `cv hook` commands Claude Code runs on its own events — and can say "as of the last
@@ -398,8 +416,7 @@ pub fn workflows_of(r: &SessionRef) -> Vec<Workflow> {
 /// and rarely mention the workflow's name). Returns `(session, run)` pairs, newest-session first.
 /// Cheap: the sidecar `workflows/` dir is only read for sessions that have one.
 pub fn find_workflows_by_name(name: &str) -> Vec<(SessionRef, Workflow)> {
-    let mut refs = sessions();
-    refs.retain(|r| r.harness == Harness::Claude);
+    let mut refs = sessions_for(Some(Harness::Claude));
     refs.sort_by_key(|r| std::cmp::Reverse(r.updated_at.or(r.created_at)));
     let want = name.to_string();
     let per_session: Vec<Vec<(SessionRef, Workflow)>> = par_filter_map(refs, move |r| {
@@ -425,8 +442,7 @@ pub fn find_workflows_by_name(name: &str) -> Vec<(SessionRef, Workflow)> {
 /// direct agents and `subagents/workflows/<run>/`), in parallel; nothing is parsed.
 pub fn find_subagent_parents(agent_id: &str) -> Vec<SessionRef> {
     let want = format!("agent-{}", agent_id.strip_prefix("agent-").unwrap_or(agent_id));
-    let mut refs = sessions();
-    refs.retain(|r| r.harness == Harness::Claude);
+    let mut refs = sessions_for(Some(Harness::Claude));
     let mut out = par_filter_map(refs, move |r| {
         let base = harness::claude::sidecar::subagents_dir(&r.path)?;
         let has_match = |dir: &std::path::Path| {
@@ -453,8 +469,7 @@ pub fn find_subagent_parents(agent_id: &str) -> Vec<SessionRef> {
 /// recorded at least one workflow (the bounded set where the transcript-vs-state cross-check is
 /// meaningful), in parallel. For finding a swarm you remember by name that left no run record.
 pub fn find_ghost_launches_by_name(name: &str) -> Vec<(SessionRef, WorkflowLaunch)> {
-    let mut refs = sessions();
-    refs.retain(|r| r.harness == Harness::Claude);
+    let mut refs = sessions_for(Some(Harness::Claude));
     let name = name.to_string();
     let mut out: Vec<(SessionRef, WorkflowLaunch)> = par_filter_map(refs, move |r| {
         if !harness::claude_workflow::has_workflow_records(&r.path) {
@@ -750,6 +765,37 @@ mod copy_authority_tests {
             cataloged_sessions().is_empty(),
             "vanished qualified roots clear only their rows"
         );
+    }
+
+    #[test]
+    fn scoped_sessions_refresh_only_requested_rows_without_certifying_the_fleet() {
+        let world = cv_testkit::World::in_process("scoped-session-enumeration");
+        let codex = world.home.join(".codex/sessions");
+        std::fs::create_dir_all(&codex).unwrap();
+        let path = codex.join("rollout-scoped.jsonl");
+        std::fs::write(&path, "{\"type\":\"session_meta\",\"payload\":{\"id\":\"scoped\"}}\n").unwrap();
+        world.write_session(
+            "unrelated",
+            &[serde_json::json!({"type":"user","message":{"role":"user","content":"other store"}})],
+        );
+        let refs = sessions_for(Some(Harness::Codex));
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].path, path);
+        #[cfg(feature = "sqlite")]
+        {
+            let reader = catalog::Reader::open().unwrap();
+            assert!(reader.last_full_sync().is_none());
+            assert!(reader
+                .all_sessions()
+                .unwrap()
+                .iter()
+                .all(|r| r.harness == Harness::Codex));
+        }
+        std::fs::remove_file(path).unwrap();
+        assert!(sessions_for(Some(Harness::Codex)).is_empty());
+        #[cfg(feature = "sqlite")]
+        assert!(cataloged_sessions().is_empty());
+        assert!(sessions_for(None).iter().any(|r| r.id == "unrelated"));
     }
 
     #[test]
