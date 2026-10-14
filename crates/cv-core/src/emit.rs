@@ -457,6 +457,9 @@ pub(crate) fn short_hash(s: &str) -> String {
 /// Validate source-backed fields before a native writer creates output. The fidelity projection
 /// keeps only scalar facts; it does not materialize bodies or arguments.
 pub(crate) fn validate_native_source(session: &Session, target: Harness, thinking: ThinkingMode) -> Result<()> {
+    // Complete records can be the only lazy fields (including records foreign to the
+    // target). Validate their original provenance even when projection ignores them.
+    crate::harness::wire::write::check_source_fields(session)?;
     if has_unresolved_spans(session) {
         source_features(target, thinking, session)?;
     }
@@ -521,6 +524,22 @@ mod tests {
     use anyhow::Context as _;
     use serde_json::json;
     use uuid::Uuid;
+
+    #[test]
+    fn native_source_validation_checks_complete_record_without_lazy_blocks() -> Result<()> {
+        let world = cv_testkit::World::in_process("emit-complete-source");
+        let path = world.base.join("record.json");
+        fs::write(&path, br#"{"type":"assistant","unknown":"original"}"#)?;
+        let mut session = Session::new("complete-source", Harness::OpenCode);
+        session.messages.push(Message::new(Role::Assistant));
+        let raw = crate::Json::source(&path, 0, fs::metadata(&path)?.len())?;
+        crate::ir::CompleteRecord::attach_replay(&mut session.messages, Harness::OpenCode, raw, Default::default());
+        assert!(!has_unresolved_spans(&session));
+        validate_native_source(&session, Harness::Codex, ThinkingMode::Drop)?;
+        fs::write(&path, br#"{"type":"assistant","unknown":"changed-longer"}"#)?;
+        assert!(validate_native_source(&session, Harness::Codex, ThinkingMode::Drop).is_err());
+        Ok(())
+    }
 
     fn temp_dir() -> PathBuf {
         let d = std::env::temp_dir().join(format!("cv-emit-{}", Uuid::new_v4()));
