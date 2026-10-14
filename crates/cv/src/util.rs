@@ -36,7 +36,7 @@ pub(crate) fn parse_harness(s: &Option<String>) -> Result<Option<Harness>> {
             Some(h) => Ok(Some(h)),
             None => match Harness::retired(s) {
                 Some(where_now) => usage(format!("{s} is no longer a harness: {where_now}")),
-                None => bail!("unknown harness: {s}"),
+                None => usage(format!("unknown harness: {s}")),
             },
         },
     }
@@ -186,6 +186,10 @@ impl Window {
 /// `..B` (from the first). The 0.10 `A-B` / `-N` / `N-` / bare `N` forms are rejected with a
 /// pointer to what replaced them.
 pub(crate) fn parse_range(spec: &str) -> Result<(usize, Option<usize>)> {
+    parse_range_inner(spec).map_err(|error| UsageError(error.to_string()).into())
+}
+
+fn parse_range_inner(spec: &str) -> Result<(usize, Option<usize>)> {
     let spec = spec.trim();
     let Some((a, b)) = spec.split_once("..") else {
         if spec.parse::<usize>().is_ok() {
@@ -413,6 +417,20 @@ mod tests {
         assert_eq!(fmt_duration(3144884), "52m 24s");
         assert_eq!(fmt_duration(5_000), "5s");
         assert_eq!(fmt_duration(7_200_000), "2h 0m");
+    }
+
+    #[test]
+    fn invalid_read_selectors_and_harness_names_are_usage_errors() {
+        for spec in ["10-13", "-5", "5-", "5", "9..3", "1..x", "abc"] {
+            assert!(
+                parse_range(spec).unwrap_err().downcast_ref::<UsageError>().is_some(),
+                "{spec}"
+            );
+        }
+        assert!(parse_harness(&Some("unknown-harness".into()))
+            .unwrap_err()
+            .downcast_ref::<UsageError>()
+            .is_some());
     }
 
     #[test]
