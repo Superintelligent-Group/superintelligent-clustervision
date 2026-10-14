@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Harness-qualified session lookups discover only that harness on catalog misses, preserving prefix ambiguity and leaving unrelated store freshness unchanged.
+
 - Semantic stores decode through bounded buffers, avoiding a second complete vector allocation during search and refresh.
 - Transcript downloads export complete remote sessions through server or native file staging while preserving paged browsing.
 - Closed transcript folds defer body rendering until opened or copied, including nested reasoning, large tool payloads, system prompts and event lists.

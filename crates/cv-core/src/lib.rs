@@ -234,22 +234,35 @@ fn sessions_impl() -> (Vec<SessionRef>, bool) {
 /// Re-discover one harness and replace its catalog rows + watches — the probe's scoped escalation.
 /// On a discover error the previous rows are kept (matching [`discover_all`]'s tolerance).
 fn refresh_harness(h: Harness, catalog: &mut catalog::Reader) {
-    let Some(a) = harness::for_harness(h) else { return };
+    let _ = discover_harness(h, Some(catalog));
+}
+
+/// Enumerate one complete harness scope without certifying freshness of the rest of the fleet.
+/// Returns the freshly discovered refs even when the catalog cannot be opened or published.
+fn discover_harness(h: Harness, mut catalog: Option<&mut catalog::Reader>) -> Option<Vec<SessionRef>> {
+    let a = harness::for_harness(h)?;
     let _sources = source::read_scope();
-    let _cache_scope = catalog.discovery_scope();
-    let before = catalog.capture_primary_reads(a.as_ref());
+    let _cache_scope = catalog.as_ref().map(|reader| reader.discovery_scope());
+    let before = catalog
+        .as_ref()
+        .map(|reader| reader.capture_primary_reads(a.as_ref()))
+        .unwrap_or_default();
     let roots = a.roots();
-    if roots.is_empty() {
-        // Root gone (harness uninstalled / dir deleted): its sessions vanish from the catalog.
-        catalog.replace_harness(h, &[], &[], &before);
-        return;
-    }
-    match a.discover() {
-        Ok(refs) => {
-            catalog.replace_harness(h, &refs, &catalog::watches_for(h, &roots, &refs), &before);
+    let refs = if roots.is_empty() {
+        Vec::new()
+    } else {
+        match a.discover() {
+            Ok(refs) => refs,
+            Err(e) => {
+                eprintln!("cv: discover failed for {h}: {e:#}");
+                return None;
+            }
         }
-        Err(e) => eprintln!("cv: discover failed for {h}: {e:#}"),
+    };
+    if let Some(reader) = catalog.as_mut() {
+        reader.replace_harness(h, &refs, &catalog::watches_for(h, &roots, &refs), &before);
     }
+    Some(refs)
 }
 
 /// Map `f` over `items`, keeping the `Some` results — in parallel when the `parallel` feature is on
@@ -459,9 +472,10 @@ pub fn workflow_of(r: &SessionRef, run_id: &str) -> Option<Workflow> {
 pub fn find(id: &str, harness: Option<Harness>) -> Result<Option<(SessionRef, Box<dyn Adapter>)>> {
     match find_inner(id, harness)? {
         (Some(hit), _) => Ok(Some(hit)),
-        // A probe-path miss escalates to the full scan (a session in one of the probe's documented
+        // An unqualified probe-path miss escalates to the full scan (a session in one of the probe's documented
         // blind spots) — unless the probe path already was one (cold catalog): a miss is a miss.
-        // Either way, an `agent-…` shaped id gets one last reading as a sub-agent transcript.
+        // A qualified miss has exhausted its harness. An `agent-…` shaped id gets one last
+        // reading as a sub-agent transcript.
         (None, true) => find_subagent_session(id, harness),
         (None, false) => match resolve_id(discover_all(), id, harness)? {
             Some(hit) => Ok(Some(hit)),
@@ -554,7 +568,7 @@ pub fn one_agent_across(parents: &[SessionRef], id: &str) -> bool {
 type FoundSession = (SessionRef, Box<dyn Adapter>);
 
 /// The shared catalog-then-probe resolution behind [`find`]/[`find_cheap`]. The `bool` reports
-/// whether the probe path was already a full discovery (cold catalog).
+/// whether discovery already exhausted the requested scope (fleet or qualified harness).
 fn find_inner(id: &str, harness: Option<Harness>) -> Result<(Option<FoundSession>, bool)> {
     // Fast path: the persisted catalog resolves the id without touching the fleet. We trust a row
     // only if its file still exists (a stale row — session deleted/moved — falls through to scan).
@@ -566,6 +580,19 @@ fn find_inner(id: &str, harness: Option<Harness>) -> Result<(Option<FoundSession
         if let Some(a) = harness::for_harness(r.harness) {
             return Ok((Some((r, a)), false));
         }
+    }
+
+    // A qualified lookup's universe is one harness. Its complete enumeration resolves prefixes
+    // without opening unrelated stores; scoped publication must not stamp a full-fleet sync.
+    if let Some(h) = harness {
+        let mut reader = catalog::Reader::open();
+        let refs = discover_harness(h, reader.as_mut()).unwrap_or_default();
+        if let Some(reader) = &mut reader {
+            reader.persist_discovery(false);
+        } else {
+            discover_cache::persist(false);
+        }
+        return Ok((resolve_id(refs, id, Some(h))?, true));
     }
 
     // Slow path (cold/stale catalog): freshen via the probe — usually a few hundred stats plus at
@@ -626,6 +653,60 @@ pub mod projection;
 #[cfg(test)]
 mod copy_authority_tests {
     use super::*;
+
+    #[test]
+    fn qualified_cold_lookup_only_discovers_its_harness_and_preserves_resolution() {
+        let world = cv_testkit::World::in_process("qualified-discovery");
+        let codex = world.home.join(".codex/sessions");
+        std::fs::create_dir_all(&codex).unwrap();
+        let write = |id: &str| {
+            let path = codex.join(format!("rollout-{id}.jsonl"));
+            let row = serde_json::json!({"type":"session_meta","payload":{"id":id}});
+            std::fs::write(&path, format!("{row}\n")).unwrap();
+            path
+        };
+        let alpha = write("alpha");
+        world.write_session("unrelated", &[serde_json::json!({"type":"user","sessionId":"unrelated","message":{"role":"user","content":"other store"}})]);
+        let (hit, exhausted) = find_inner("alpha", Some(Harness::Codex)).unwrap();
+        assert!(exhausted);
+        assert_eq!(hit.unwrap().0.path, alpha);
+        #[cfg(feature = "sqlite")]
+        {
+            let reader = catalog::Reader::open().unwrap();
+            assert!(
+                reader.last_full_sync().is_none(),
+                "scoped enumeration cannot warm the fleet"
+            );
+            let rows = reader.all_sessions().unwrap();
+            assert_eq!(rows.len(), 1, "unrelated Claude store was not discovered");
+            assert_eq!(rows[0].harness, Harness::Codex);
+        }
+        assert_eq!(find("al", Some(Harness::Codex)).unwrap().unwrap().0.id, "alpha");
+        write("beta-one");
+        write("beta-two");
+        assert!(
+            find("beta", Some(Harness::Codex)).is_err(),
+            "scoped prefix ambiguity is retained"
+        );
+        assert!(find("missing", Some(Harness::Codex)).unwrap().is_none());
+        #[cfg(feature = "sqlite")]
+        {
+            let reader = catalog::Reader::open().unwrap();
+            assert!(reader.last_full_sync().is_none());
+            assert!(reader
+                .all_sessions()
+                .unwrap()
+                .iter()
+                .all(|r| r.harness == Harness::Codex));
+        }
+        std::fs::remove_dir_all(&codex).unwrap();
+        assert!(find("alpha", Some(Harness::Codex)).unwrap().is_none());
+        #[cfg(feature = "sqlite")]
+        assert!(
+            cataloged_sessions().is_empty(),
+            "vanished qualified roots clear only their rows"
+        );
+    }
 
     #[test]
     fn exact_copy_authority_is_newest_then_deterministic_and_harness_qualified() {
