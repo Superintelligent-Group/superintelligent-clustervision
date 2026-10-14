@@ -137,7 +137,7 @@ fn emit_workflow(
         println!("{}", serde_json::to_string_pretty(wf)?);
         return Ok(());
     }
-    render_workflow(wf, script);
+    render_workflow(wf, script)?;
     if results {
         render_journal_results(wf);
     } else if wf
@@ -327,7 +327,7 @@ fn ghost_line(g: &cv_core::WorkflowLaunch) -> String {
 
 /// Render one workflow run: header (name/status/totals) → each phase with its agents and outcomes
 /// → optionally the driving script.
-fn render_workflow(w: &cv_core::Workflow, show_script: bool) {
+fn render_workflow(w: &cv_core::Workflow, show_script: bool) -> Result<()> {
     println!(
         "# workflow {}  ({})",
         w.name.as_deref().unwrap_or("(unnamed)"),
@@ -358,7 +358,8 @@ fn render_workflow(w: &cv_core::Workflow, show_script: bool) {
         println!("task: {t}");
     }
     if let Some(a) = &w.args {
-        println!("args: {}", truncate(&a.to_string(), 200));
+        let (head, _) = cv_core::JsonView::from(a).canonical_prefix(4 * 201)?;
+        println!("args: {}", truncate(&head, 200));
     }
     if let Some(rf) = &w.resume_from {
         println!("resumed from: {rf}");
@@ -412,15 +413,12 @@ fn render_workflow(w: &cv_core::Workflow, show_script: bool) {
     // The aggregated return value — the harvest payload.
     match &w.result {
         Some(r) => {
-            let pretty = serde_json::to_string_pretty(r).unwrap_or_else(|_| r.to_string());
+            let (preview, truncated) = workflow_result_preview(r)?;
             println!("\n## result");
-            if pretty.len() > 2000 {
-                println!(
-                    "{}\n(truncated — `--json` for the full result)",
-                    truncate(&pretty, 2000)
-                );
+            if truncated {
+                println!("{}\n(truncated — `--json` for the full result)", preview);
             } else {
-                println!("{pretty}");
+                println!("{preview}");
             }
         }
         None => println!("\n(no result recorded — the run returned nothing or died before finishing)"),
@@ -443,6 +441,15 @@ fn render_workflow(w: &cv_core::Workflow, show_script: bool) {
     } else if w.script.is_some() {
         println!("\n→ `--script` to print the driving workflow script");
     }
+    Ok(())
+}
+
+fn workflow_result_preview(value: &serde_json::Value) -> Result<(String, bool)> {
+    // A Unicode scalar occupies at most four UTF8 bytes: this includes the 2001st scalar
+    // needed to preserve truncate's exact ellipsis, without serializing an oversized tail.
+    let (head, stopped) = cv_core::JsonView::from(value).pretty_prefix(4 * 2001)?;
+    let truncated = stopped || head.len() > 2000;
+    Ok((if truncated { truncate(&head, 2000) } else { head }, truncated))
 }
 
 /// One agent line inside a workflow's phase tree: state glyph, label, id, telemetry, and the head
@@ -748,6 +755,21 @@ fn print_revive_block(rev: &Revivable) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_workflow_result_preview_preserves_old_byte_threshold_and_character_cut() {
+        for size in [0, 499, 500, 501, 1998, 1999, 2000, 2001, 100000] {
+            for text in ["x", "🌙", "\"\\\n"] {
+                let value = serde_json::json!({"nested":[{},[],text.repeat(size)], "after":true});
+                let old = serde_json::to_string_pretty(&value).unwrap();
+                let truncated = old.len() > 2000;
+                let expected = if truncated { truncate(&old, 2000) } else { old };
+                assert_eq!(workflow_result_preview(&value).unwrap(), (expected, truncated));
+                let (args, _) = cv_core::JsonView::from(&value).canonical_prefix(4 * 201).unwrap();
+                assert_eq!(truncate(&args, 200), truncate(&value.to_string(), 200));
+            }
+        }
+    }
 
     #[test]
     fn revive_mines_prompt_files_commands_and_last_note() {

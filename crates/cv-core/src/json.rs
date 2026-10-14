@@ -1233,12 +1233,24 @@ impl<'a> JsonView<'a> {
     }
     /// Same bounded output and truncation contract as Json::canonical_prefix.
     pub fn canonical_prefix(self, max_bytes: usize) -> Result<(String, bool)> {
+        self.formatted_prefix(max_bytes, false)
+    }
+    /// A bounded Unicode-complete prefix of serde_json's default pretty representation.
+    /// The containing scoped view retains its normal final source-identity check.
+    pub fn pretty_prefix(self, max_bytes: usize) -> Result<(String, bool)> {
+        self.formatted_prefix(max_bytes, true)
+    }
+    fn formatted_prefix(self, max_bytes: usize, pretty: bool) -> Result<(String, bool)> {
         let mut writer = PrefixWriter {
             bytes: Vec::new(),
             limit: max_bytes,
             stopped: false,
         };
-        let result = self.write_canonical(&mut writer);
+        let result = if pretty {
+            self.write_canonical(&mut crate::PrettyJson::new(&mut writer, 0))
+        } else {
+            self.write_canonical(&mut writer)
+        };
         if !writer.stopped {
             result?;
         }
@@ -2156,21 +2168,43 @@ mod tests {
         let input = r#"{"z":"é🌙尾\n","a":[true,1.25],"z":"é🌙尾\n","last":"tail"}"#;
         let fixture = Fixture::new(input.as_bytes());
         let owned: Value = serde_json::from_str(input).unwrap();
-        let expected = serde_json::to_string(&owned).unwrap();
-        for value in [Json::from(owned), fixture.value()] {
-            for cap in 0..=expected.len() + 4 {
-                let (prefix, truncated) = value.canonical_prefix(cap).unwrap();
-                let mut end = cap.min(expected.len());
-                while !expected.is_char_boundary(end) {
-                    end -= 1;
+        for pretty in [false, true] {
+            let expected = if pretty {
+                serde_json::to_string_pretty(&owned).unwrap()
+            } else {
+                serde_json::to_string(&owned).unwrap()
+            };
+            for value in [Json::from(owned.clone()), fixture.value()] {
+                for cap in 0..=expected.len() + 4 {
+                    let (prefix, truncated) = value
+                        .with_view(|view| {
+                            if pretty {
+                                view.pretty_prefix(cap)
+                            } else {
+                                view.canonical_prefix(cap)
+                            }
+                        })
+                        .unwrap();
+                    let mut end = cap.min(expected.len());
+                    while !expected.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    assert_eq!(prefix, expected[..end]);
+                    assert_eq!(truncated, cap < expected.len());
+                    assert!(prefix.capacity() <= cap);
                 }
-                assert_eq!(prefix, expected[..end]);
-                assert_eq!(truncated, cap < expected.len());
-                assert!(prefix.capacity() <= cap);
+                let (prefix, truncated) = value
+                    .with_view(|view| {
+                        if pretty {
+                            view.pretty_prefix(usize::MAX)
+                        } else {
+                            view.canonical_prefix(usize::MAX)
+                        }
+                    })
+                    .unwrap();
+                assert_eq!(prefix, expected);
+                assert!(!truncated);
             }
-            let (prefix, truncated) = value.canonical_prefix(usize::MAX).unwrap();
-            assert_eq!(prefix, expected);
-            assert!(!truncated);
         }
         let value = fixture.value();
         std::fs::remove_file(&fixture.path).unwrap();
