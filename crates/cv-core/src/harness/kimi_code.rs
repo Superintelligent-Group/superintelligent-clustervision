@@ -214,7 +214,7 @@ impl Adapter for KimiCode {
     }
 
     fn resume_format(&self) -> Option<u32> {
-        Some(1)
+        Some(2)
     }
 
     fn resume_source(&self, r: &SessionRef) -> PathBuf {
@@ -393,6 +393,7 @@ struct ResumeState {
 
 #[derive(serde::Deserialize)]
 struct SavedCtx {
+    model_bindings: ModelBindings,
     call_names: HashMap<String, String>,
     seen_prompts: std::collections::BTreeSet<u64>,
     protocol_version: Option<String>,
@@ -403,6 +404,7 @@ impl SavedCtx {
         Ctx {
             opts,
             step: None,
+            model_bindings: self.model_bindings,
             call_names: self.call_names,
             seen_prompts: self.seen_prompts,
             protocol_version: self.protocol_version,
@@ -421,6 +423,7 @@ fn stream_wire(
     prior_skipped: u64,
     sink: &mut dyn MessageSink,
 ) -> Session {
+    ctx.init_model(s.model.as_deref());
     let skipped = super::for_each_json_line_at(reader, at, |v, offset, complete, skipped| {
         let flow = ctx.record(&v, sink);
         // Pending steps are amended by subsequent parts/results/usage; EOF flush is provisional.
@@ -433,6 +436,7 @@ fn stream_wire(
     if !ctx.stopped {
         ctx.flush_step(sink);
     }
+    s.model = ctx.model_bindings.first.take().or(s.model);
     s.harness_extra_mut(Harness::KimiCode).append(&mut ctx.facts);
     if let Some(pv) = ctx.protocol_version.take() {
         s.harness_extra_mut(Harness::KimiCode)
@@ -452,6 +456,7 @@ fn stream_projected(
     sink: &mut dyn MessageSink,
 ) -> Result<Session> {
     use jsonl::ranges::{self, Range};
+    ctx.init_model(s.model.as_deref());
     let source = crate::json::JsonSource::capture(wire)?;
     source.check_metadata(file.metadata()?)?;
     let end = source.len();
@@ -504,6 +509,7 @@ fn stream_projected(
     if !ctx.stopped {
         ctx.flush_step(sink);
     }
+    s.model = ctx.model_bindings.first.take().or(s.model);
     s.harness_extra_mut(Harness::KimiCode).append(&mut ctx.facts);
     if let Some(pv) = ctx.protocol_version.take() {
         s.harness_extra_mut(Harness::KimiCode)
@@ -847,6 +853,10 @@ fn file_mtime(path: &Path) -> Option<DateTime<Utc>> {
     Some(DateTime::<Utc>::from_timestamp_nanos(d.as_nanos() as i64))
 }
 
+fn loop_request(ty: &str, kind: Option<&str>) -> bool {
+    ty == "llm.request" && kind.is_none_or(|kind| kind == "loop")
+}
+
 #[derive(Default, Debug, PartialEq, Eq)]
 struct HeaderFields {
     model: Option<String>,
@@ -863,13 +873,11 @@ fn peek_header(wire: &Path) -> HeaderFields {
         let mut seen = 0;
         super::store::checked_lines::for_each(&file, 0, &source, |view, _, _, _| {
             seen += 1;
-            if let Some(record) = Fields::parse(view, &["type", "modelAlias", "systemPrompt"])? {
+            if let Some(record) = Fields::parse(view, &["type", "modelAlias", "systemPrompt", "kind"])? {
                 let ty = record.string("type")?.unwrap_or_default();
                 if header.model.is_none()
-                    && matches!(
-                        ty.as_str(),
-                        "profile.bind" | "config.update" | "llm.request" | "usage.record"
-                    )
+                    && (matches!(ty.as_str(), "profile.bind" | "config.update" | "usage.record")
+                        || loop_request(&ty, record.string("kind")?.as_deref()))
                 {
                     header.model = record.string("modelAlias")?;
                 }
@@ -907,12 +915,19 @@ struct StepBuf {
     results: Vec<Message>,
 }
 
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct ModelBindings {
+    first: Option<String>,
+    current: Option<String>,
+}
+
 #[derive(serde::Serialize)]
 struct Ctx<'a> {
     #[serde(skip)]
     opts: &'a ParseOptions,
     #[serde(skip)]
     step: Option<StepBuf>,
+    model_bindings: ModelBindings,
     /// `toolCallId` → tool name, so a result can name its tool (`Block::ToolResult::tool_name`).
     call_names: HashMap<String, String>,
     /// Hashes of system prompts already surfaced (a re-bind with the same prompt is bookkeeping).
@@ -931,6 +946,7 @@ impl<'a> Ctx<'a> {
         Self {
             opts,
             step: None,
+            model_bindings: ModelBindings::default(),
             call_names: HashMap::new(),
             seen_prompts: std::collections::BTreeSet::new(),
             protocol_version: None,
@@ -938,6 +954,38 @@ impl<'a> Ctx<'a> {
             stopped: false,
         }
     }
+    fn init_model(&mut self, initial: Option<&str>) {
+        if self.model_bindings.first.is_none() {
+            self.model_bindings.first = initial.map(str::to_owned);
+        }
+        if self.model_bindings.current.is_none() {
+            self.model_bindings.current.clone_from(&self.model_bindings.first);
+        }
+    }
+
+    fn bind_model(&mut self, model: Option<String>, request: bool) {
+        if let Some(model) = model {
+            if self.model_bindings.first.is_none() {
+                self.model_bindings.first = Some(model.clone());
+            }
+            self.model_bindings.current = Some(model);
+            if request {
+                let reply_model = self.reply_model();
+                if let Some(step) = self.step.as_mut() {
+                    step.msg.model = reply_model;
+                }
+            }
+        }
+    }
+
+    fn reply_model(&self) -> Option<String> {
+        self.model_bindings
+            .current
+            .as_ref()
+            .filter(|model| Some(*model) != self.model_bindings.first.as_ref())
+            .cloned()
+    }
+
     /// Selected payloads keep their source lifetime while the mutable step waits for usage/end.
     fn record_view(
         &mut self,
@@ -945,7 +993,7 @@ impl<'a> Ctx<'a> {
         source: &crate::json::JsonSource,
         sink: &mut dyn MessageSink,
     ) -> Result<Flow> {
-        let Some(record) = Fields::parse(view, &["type", "time", "event", "message"])? else {
+        let Some(record) = Fields::parse(view, &["type", "time", "event", "message", "modelAlias", "kind"])? else {
             return Ok(if self.opts.complete {
                 self.record(view.resolve()?.as_ref(), sink)
             } else {
@@ -953,6 +1001,13 @@ impl<'a> Ctx<'a> {
             });
         };
         let ty = record.string("type")?.unwrap_or_default();
+        if !self.opts.complete && matches!(ty.as_str(), "llm.request" | "usage.record") {
+            let loop_request = loop_request(&ty, record.string("kind")?.as_deref());
+            if ty == "usage.record" || loop_request {
+                self.bind_model(record.string("modelAlias")?, loop_request);
+            }
+            return Ok(Flow::Continue);
+        }
         if ty == "context.append_message" {
             let message = record
                 .get("message")
@@ -1207,6 +1262,13 @@ impl<'a> Ctx<'a> {
     fn record(&mut self, v: &Value, sink: &mut dyn MessageSink) -> Flow {
         let ty = v.get("type").and_then(Value::as_str).unwrap_or("");
         let ts = v.get("time").and_then(super::ts_from_value);
+        let loop_request = loop_request(ty, v.get("kind").and_then(Value::as_str));
+        if loop_request || matches!(ty, "profile.bind" | "config.update" | "usage.record") {
+            self.bind_model(
+                v.get("modelAlias").and_then(Value::as_str).map(str::to_owned),
+                loop_request,
+            );
+        }
         match ty {
             "permission.set_mode" => {
                 let mode = v.get("mode").and_then(Value::as_str).unwrap_or("");
@@ -1474,6 +1536,9 @@ impl<'a> Ctx<'a> {
             Role::System => (MessageKind::InjectedContext, Origin::Harness),
         };
         let mut m = Message::of_kind(role, kind, origin);
+        if role == Role::Assistant {
+            m.model = self.reply_model();
+        }
         m.timestamp = ts;
         if let Some(blocks) = blocks {
             m.content = blocks;
@@ -1585,6 +1650,7 @@ impl<'a> Ctx<'a> {
 
     fn open_step(&mut self, uuid: String, e: &Value, ts: Option<DateTime<Utc>>) {
         let mut msg = Message::of_kind(Role::Assistant, MessageKind::Reply, Origin::Model);
+        msg.model = self.reply_model();
         msg.id = Some(uuid.clone());
         msg.timestamp = ts;
         if self.opts.extra {
@@ -1773,11 +1839,98 @@ mod tests {
     use crate::harness::Parse;
 
     #[test]
+    fn model_bindings_follow_native_request_order_and_survive_every_suffix() -> Result<()> {
+        let world = cv_testkit::World::in_process("kimi_code_model_bindings");
+        let home = world.home.join(".kimi-code");
+        let dir = home.join("sessions/wd_test/session_models");
+        let path = main_wire(&dir);
+        fs::create_dir_all(path.parent().unwrap())?;
+        let payload = "reply 雪\n".repeat(10_000);
+        let mut rows = vec![serde_json::json!({"type":"profile.bind","modelAlias":"first","systemPrompt":"system"})];
+        for (step, alias, config) in [
+            ("one", "first", true),
+            ("two", "second", true),
+            ("three", "third", false),
+        ] {
+            if config {
+                rows.push(serde_json::json!({"type":"config.update","modelAlias":alias,"systemPrompt":"system"}));
+            }
+            rows.push(
+                serde_json::json!({"type":"context.append_message","message":{"role":"user","content":"prompt"}}),
+            );
+            rows.push(
+                serde_json::json!({"type":"context.append_loop_event","event":{"type":"step.begin","uuid":step}}),
+            );
+            // Native llm.request follows step.begin, so it must amend the pending reply too.
+            rows.push(serde_json::json!({"type":"llm.request","kind":"loop","modelAlias":alias}));
+            rows.push(serde_json::json!({"type":"context.append_loop_event","event":{"type":"content.part","stepUuid":step,"part":{"type":"text","text":payload}}}));
+            rows.push(serde_json::json!({"type":"context.append_loop_event","event":{"type":"step.end","uuid":step,"usage":{"inputOther":1,"output":2}}}));
+        }
+        rows.push(serde_json::json!({"type":"llm.request","kind":"title","modelAlias":"title-only"}));
+        rows.push(serde_json::json!({"type":"context.append_message","message":{"role":"assistant","content":"copied third-model reply"}}));
+        rows.push(serde_json::json!({"type":"config.update","modelAlias":"first"}));
+        rows.push(serde_json::json!({"type":"context.append_message","message":{"role":"assistant","content":"back to first"}}));
+        fs::write(
+            &path,
+            rows.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n",
+        )?;
+        let adapter = KimiCode::with_home(&home);
+        let r = SessionRef::new("models", Harness::KimiCode, &dir);
+        for opts in [
+            ParseOptions::full(),
+            ParseOptions::lazy(),
+            ParseOptions {
+                spans: true,
+                ..ParseOptions::complete()
+            },
+        ] {
+            let mut full = Kept::default();
+            let shell = adapter.stream(&r, &opts, &mut full)?;
+            assert_eq!(shell.model.as_deref(), Some("first"));
+            let models = full
+                .messages
+                .iter()
+                .filter(|m| m.role == Role::Assistant)
+                .map(|m| m.model.as_deref().or(shell.model.as_deref()))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                models,
+                vec![
+                    Some("first"),
+                    Some("second"),
+                    Some("third"),
+                    Some("third"),
+                    Some("first")
+                ]
+            );
+            for (count, checkpoint) in &full.checkpoints {
+                let mut rest = Kept::default();
+                let suffix = adapter.resume(&r, &opts, &mut rest, checkpoint)?.unwrap();
+                assert_eq!(serde_json::to_value(&suffix)?, serde_json::to_value(&shell)?);
+                assert_eq!(
+                    serde_json::to_value(&rest.messages)?,
+                    serde_json::to_value(&full.messages[*count..])?
+                );
+            }
+            let mut old = full.checkpoints.last().unwrap().1.clone();
+            old.state.get_mut(crate::stream::ADAPTER_LAYER).unwrap()["ctx"]
+                .as_object_mut()
+                .unwrap()
+                .remove("model_bindings");
+            assert!(adapter.resume(&r, &opts, &mut Kept::default(), &old)?.is_none());
+        }
+        Ok(())
+    }
+
+    #[test]
     fn one_header_pass_preserves_independent_first_fields_and_record_limit() -> Result<()> {
         let world = cv_testkit::World::in_process("kimi_code_header_fields");
         let path = world.home.join("wire.jsonl");
         let ignored = "unused payload ".repeat(20_000);
         let cases = [
+            format!("{}\n{}\n",
+                serde_json::json!({"type":"llm.request","kind":"title","modelAlias":"title-only"}),
+                serde_json::json!({"type":"profile.bind","modelAlias":"main-model","systemPrompt":"prompt"})),
             format!("bad json\n{}\n{}\n{}\n",
                 serde_json::json!({"type":"llm.request","modelAlias":"first-model","systemPrompt":ignored,"body":ignored}),
                 serde_json::json!({"type":"profile.bind","modelAlias":"later-model","systemPrompt":"first prompt"}),
@@ -1796,10 +1949,12 @@ mod tests {
                 seen += 1;
                 let ty = value.get("type").and_then(Value::as_str);
                 if expected.model.is_none()
-                    && matches!(
-                        ty,
-                        Some("profile.bind" | "config.update" | "llm.request" | "usage.record")
-                    )
+                    && (matches!(ty, Some("profile.bind" | "config.update" | "usage.record"))
+                        || (ty == Some("llm.request")
+                            && value
+                                .get("kind")
+                                .and_then(Value::as_str)
+                                .is_none_or(|kind| kind == "loop")))
                 {
                     expected.model = value.get("modelAlias").and_then(Value::as_str).map(str::to_owned);
                 }
@@ -1970,6 +2125,7 @@ mod tests {
         if !ctx.stopped {
             ctx.flush_step(&mut kept);
         }
+        shell.model = ctx.model_bindings.first.take().or(shell.model);
         shell.harness_extra_mut(Harness::KimiCode).append(&mut ctx.facts);
         if let Some(pv) = ctx.protocol_version {
             shell
