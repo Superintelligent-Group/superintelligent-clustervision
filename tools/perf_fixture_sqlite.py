@@ -17,7 +17,7 @@ REPO = Path(__file__).resolve().parent.parent
 def generate_sqlite(harness, root, size, records, escaped, shape):
     allowed = {"devin": ("history", "metadata", "unselected"),
                "hermes": ("history", "prompt-only"), "goose": ("history", "selected", "metadata"),
-               "opencode": ("history", "parts", "selected", "selected-v2"), "cursor": ("history", "inline", "legacy", "metadata", "selected", "selected-ide")}
+               "opencode": ("history", "parts", "selected", "selected-v2", "shell-v2"), "cursor": ("history", "inline", "legacy", "metadata", "selected", "selected-ide")}
     if shape not in allowed[harness]:
         raise ValueError(f"{harness} supports shapes {allowed[harness]}")
     if harness == "cursor" and shape in ("metadata", "selected"):
@@ -89,6 +89,17 @@ def generate_sqlite(harness, root, size, records, escaped, shape):
             else:
                 for i in range(records):
                     db.execute("INSERT INTO messages VALUES(?,?, 'assistant',?,?)", (i, SID, j([{"type": "text", "text": payload(i)}]), 1767225600 + i))
+        elif harness == "opencode" and shape == "shell-v2":
+            db.executescript("CREATE TABLE session_v2(id TEXT PRIMARY KEY,directory TEXT,title TEXT,time_created INTEGER,time_updated INTEGER); CREATE TABLE session_message(id TEXT PRIMARY KEY,session_id TEXT,type TEXT,seq INTEGER,time_created INTEGER,time_updated INTEGER,data TEXT); CREATE INDEX messages_session ON session_message(session_id,seq);")
+            db.execute("INSERT INTO session_v2 VALUES(?,'/perf','shell fixture',1,2)", (SID,))
+            for i in range(records):
+                body = payload(i)
+                data = dict(time=dict(created=i + 1), shellID=f"shell-{i}", command="echo user-shell",
+                            status="exited", exit=0,
+                            output=dict(output=body, cursor=1, size=len(body.encode()), truncated=False),
+                            metadata=dict(background=True))
+                db.execute("INSERT INTO session_message VALUES(?,?,'shell',?,?,?,?)",
+                           (f"m{i:09d}", SID, i, i + 1, i + 1, j(data)))
         elif harness == "opencode" and shape == "selected-v2":
             db.executescript("CREATE TABLE session_v2(id TEXT PRIMARY KEY,directory TEXT,title TEXT,time_created INTEGER,time_updated INTEGER); CREATE TABLE session_message(id TEXT PRIMARY KEY,session_id TEXT,type TEXT,seq INTEGER,time_created INTEGER,time_updated INTEGER,data TEXT); CREATE INDEX messages_session ON session_message(session_id,seq);")
             db.execute("INSERT INTO session_v2 VALUES(?,'/perf','selected fixture',1,2)", (SID,))

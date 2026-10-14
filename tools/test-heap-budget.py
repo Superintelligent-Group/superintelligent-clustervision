@@ -22,6 +22,38 @@ class DriverTests(unittest.TestCase):
     def result(self, features, heap):
         return SimpleNamespace(returncode=0, stdout=json.dumps({"build_features": features, "requested_rust_heap": heap}), stderr="")
 
+    def test_shell_doctor_rejects_owned_row_or_changed_report(self):
+        row = dict(messages=1, detail=budget.SHELL_DOCTOR_EXPECTED,
+                   requested_rust_heap=dict(allocation_requests=344, requested_bytes=235519),
+                   sqlite_native_heap=dict(accounting_enabled_and_verified=True,
+                                           peak_above_baseline_bytes=2622192,
+                                           largest_allocation_request_bytes=65600))
+        budget.check_shell_doctor(row, 135854)
+        with self.assertRaisesRegex(AssertionError, "live Rust heap"):
+            budget.check_shell_doctor(row, 100674181)
+        row["sqlite_native_heap"]["largest_allocation_request_bytes"] = 33554638
+        with self.assertRaisesRegex(AssertionError, "whole large SQLite cell"):
+            budget.check_shell_doctor(row, 135854)
+        row["detail"] = dict(messages=0)
+        with self.assertRaisesRegex(AssertionError, "report changed"):
+            budget.check_shell_doctor(row, 135854)
+
+    def test_shell_fixture_matches_native_output_shape(self):
+        generator = Path(__file__).with_name("perf-fixture.py")
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = json.loads(subprocess.check_output([
+                sys.executable, str(generator), "opencode", str(Path(directory) / "shell"),
+                "--shape", "shell-v2", "--records", "1", "--payload-bytes", "257"], text=True))
+            with sqlite3.connect(f"file:{manifest['path']}?mode=ro", uri=True) as connection:
+                kind, data = connection.execute("SELECT type,data FROM session_message").fetchone()
+            data = json.loads(data)
+            self.assertEqual(kind, "shell")
+            self.assertEqual(data["command"], "echo user-shell")
+            self.assertEqual(len(data["output"]["output"].encode()), 257)
+            self.assertEqual(set(data["output"]), {"output", "cursor", "size", "truncated"})
+            self.assertEqual(data["metadata"], {"background": True})
+            self.assertEqual(manifest["expected_messages"], 1)
+
     def test_clean_timing_binary_is_rejected(self):
         with patch.object(budget.subprocess, "run", return_value=self.result({"mmap": True, "probe_heap": False}, None)):
             with self.assertRaisesRegex(AssertionError, "instrumentation"):

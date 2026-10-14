@@ -602,7 +602,7 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Fallible Json demands across consumers and native Claude large lazy argument activation; giant composed allocation/parity proof.
 - [x] Structured inputs retain checked Json sources across shared Anthropic/native SDK/export/OpenSession producers, Kimi Code, OpenCode, Goose, Gemini, Codex and Continue, including supported JSON-encoded arguments.
 - [x] Inventory remaining demanded owned details and uncommon producer fallbacks by consumer contract. Gemini display text, Continue system prompt and OpenCode rich/unknown metadata remain explicit owned contracts; OpenCode v2 shell output is a concrete avoidable-payload gap tracked below. This inventory does not assert universal bounds.
-- [x] OpenCode v2 shell selected output uses checked command/output projection, preserving current native corpus, fallback formatting, full metadata and source-error behavior. Native/portable scoped controls and actual doctor allocation/report parity pass; a persistent single-case heap gate is being added.
+- [x] OpenCode v2 shell selected output uses checked command/output projection, preserving current native corpus, fallback formatting, full metadata and source-error behavior. Native/portable scoped controls and actual doctor allocation/report parity pass; the persistent single-case heap gate now joins the existing doctor driver.
 - [x] Per-consumer SQLite/WAL/known-sidecar freshness; atomic SQL publication; scan interpretation migration; inode resume guard.
 - [x] Consumer-recorded dependency read sets for conditional fork inference and adopted external outputs.
 - [x] Continue and LM Studio metadata-only discovery, including explicit-root isolation.
@@ -4554,3 +4554,19 @@ The older shell projection test compared complete demand against bulk demand; it
 oracle now compares selected and owned forms of the same demand, reporting only the first
 mismatch and nearby context. Complete metadata enrichment is tested rather than erased to match
 an intentionally narrower projection.
+
+
+#### Recovered native shell doctor gate (2026-10-14, native lane)
+
+Historical shell lane commit `68066f8b` had not reached integration: the current selected-v2
+fixture gates assistant/tool payloads, so it did not supersede the ordinary native shell-output
+control. Its four tool changes are now adapted to the current driver: one 32 MiB native-shaped
+shell case joins the existing doctor CI invocation, compares the frozen small full doctor report,
+checks source database bytes, verifies live Rust/native SQLite accounting and rejects whole-cell
+SQLite allocation. Existing ceilings remain 4 MiB Rust, 8 MiB SQLite and 1 MiB largest native
+request. This adds no producer matrix or timing threshold.
+
+The original shell lane reported 136,467 B Rust / 2,618,560 B SQLite and a failing owned baseline;
+those are historical evidence, not a rerun of the current integration. The adapted Python driver
+and fixture controls pass **13 unit checks**. No Rust build or heap probe was run while root's
+workspace tests were active; the existing combined doctor gate supplies current binary evidence.

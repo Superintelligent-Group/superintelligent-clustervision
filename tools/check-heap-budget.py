@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Process-isolated live Rust heap gates; no timing thresholds or native SQLite heap claims.
+"""Process-isolated live Rust heap gates; no timing thresholds.
+
+The single OpenCode shell control also checks separately instrumented native SQLite allocations.
 
 Run with a release store_probe built with probe-heap. The second binary must also disable mmap.
 Only generated scratch inputs are read, and every subprocess uses an isolated cv catalog.
@@ -176,6 +178,55 @@ def doctors(binary, root, env, baseline=None):
             bound(peaks, STORE_CEILING, STORE_GROWTH, f"doctor {harness} escaped={escaped}")
 
     metadata_facts(binary, root, env, baseline)
+    opencode_shell_doctor(binary, root, env)
+
+
+SHELL_DOCTOR_EXPECTED = {
+    "sessions": 1, "messages": 1, "compactions": 0, "auto_compactions": 0,
+    "pre_tokens": [], "fixed_overhead_est": 0, "peak_context": 0,
+    "conversational": {
+        "total": 9586986, "tool_results": 0, "thinking": 0, "assistant_text": 0,
+        "user_text": 0, "tool_call_args": 0, "images": 0, "system_msgs": 0,
+        "system_reminders": 9586986,
+    },
+    "by_attachment": {"injected_context": 9586986},
+    "tool_results_mcp": 0, "tool_results_builtin": 0, "by_tool": [],
+}
+
+
+def check_shell_doctor(row, peak):
+    assert row["messages"] == 1 and row["detail"] == SHELL_DOCTOR_EXPECTED, "shell doctor report changed"
+    assert 0 < peak <= 4 * MIB, f"shell doctor live Rust heap {peak} exceeds {4 * MIB} bytes"
+    for key in ("allocation_requests", "requested_bytes"):
+        assert type(row["requested_rust_heap"].get(key)) is int and row["requested_rust_heap"][key] > 0, "shell heap instrumentation inactive"
+    native = row["sqlite_native_heap"]
+    assert native["accounting_enabled_and_verified"], "native SQLite accounting inactive"
+    assert 0 < native["peak_above_baseline_bytes"] <= 8 * MIB, "shell native SQLite heap exceeds 8 MiB"
+    assert 0 < native["largest_allocation_request_bytes"] <= MIB, "shell fetched a whole large SQLite cell"
+
+
+def opencode_shell_doctor(binary, root, env):
+    """One ordinary native v2 shell body; no selected-history or producer matrix."""
+    generator = Path(__file__).with_name("perf-fixture.py")
+    manifest = json.loads(subprocess.check_output([
+        sys.executable, str(generator), "opencode", str(root / "opencode-shell"),
+        "--shape", "shell-v2", "--payload-bytes", str(32 * MIB), "--records", "1"], env=env, text=True))
+    source = Path(manifest["path"])
+    def fingerprint():
+        digest = hashlib.sha256()
+        with source.open("rb") as data:
+            for chunk in iter(lambda: data.read(CHUNK_BYTES), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    before = fingerprint()
+    row, peak = probe(binary, ["doctor", "opencode", manifest["id"], source,
+                              "--root", manifest["root"], "--mode", "facts", "--sqlite-heap"], env, True)
+    check_shell_doctor(row, peak)
+    assert fingerprint() == before, "shell doctor modified its source database"
+    print(json.dumps(dict(case="doctor-opencode-v2-shell", decoded_payload_bytes=32 * MIB,
+                          messages=1, peak_live_rust_bytes=peak,
+                          peak_live_sqlite_bytes=row["sqlite_native_heap"]["peak_above_baseline_bytes"])), flush=True)
+    shutil.rmtree(manifest["root"])
 
 
 def metadata_facts(binary, root, env, baseline=None, harnesses=None):
