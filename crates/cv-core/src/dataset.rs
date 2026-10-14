@@ -1308,10 +1308,12 @@ mod tests {
         }
     }
     fn system_message(texts: &[&str]) -> Message {
-        msg(
+        let mut message = msg(
             Role::System,
             texts.iter().map(|text| Block::Text { text: (*text).into() }).collect(),
-        )
+        );
+        message.kind = MessageKind::SystemPrompt;
+        message
     }
 
     #[test]
@@ -1415,10 +1417,10 @@ mod tests {
             .unwrap();
         let mut session = Session::new("checked-system", Harness::OpenSession);
         session.system_prompt = Some(prompt.clone());
+        let mut checked_message = msg(Role::System, vec![Block::Text { text: checked.clone() }]);
+        checked_message.kind = MessageKind::SystemPrompt;
         for _ in 0..1200 {
-            session
-                .messages
-                .push(msg(Role::System, vec![Block::Text { text: checked.clone() }]));
+            session.messages.push(checked_message.clone());
         }
         session.messages.push(system_message(&["distinct later system change"]));
         let fixture = SystemMetadataFixture {
