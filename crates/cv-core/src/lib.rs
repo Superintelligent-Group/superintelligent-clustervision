@@ -292,6 +292,11 @@ where
     R: Send,
     F: Fn(T) -> Option<R> + Sync + Send,
 {
+    let inventory = source::inventory_context();
+    let f = |item| match &inventory {
+        Some(context) => context.run(|| f(item)),
+        None => f(item),
+    };
     #[cfg(feature = "parallel")]
     {
         use rayon::prelude::*;

@@ -150,20 +150,31 @@ impl Stamp {
     }
 }
 
+mod scope;
+pub(crate) use scope::{inventory, inventory_scoped};
+
 /// Lifetime of a multi-session source operation. SQLite cold-store snapshots are reused while
 /// this guard or any reader is alive and removed when the last owner drops. Without an outer
 /// guard, standalone session reads remain safe but may repeat copying on non-cloning filesystems.
 #[must_use]
 pub struct ReadScope {
+    _inventory: scope::Context,
     #[cfg(feature = "sqlite")]
     _sqlite: crate::harness::store::sqlite::ReadScope,
 }
 
 pub fn read_scope() -> ReadScope {
     ReadScope {
+        _inventory: scope::Context::operation(),
         #[cfg(feature = "sqlite")]
         _sqlite: crate::harness::store::sqlite::read_scope(),
     }
+}
+
+/// Capture an active inventory owner for existing parallel helpers, without creating one for
+/// unrelated parallel consumers. Each worker restores its previous thread-local capability.
+pub(crate) fn inventory_context() -> Option<scope::Context> {
+    scope::Context::current()
 }
 
 /// The metadata captured immediately before a consumer reads dynamically resolved paths.
