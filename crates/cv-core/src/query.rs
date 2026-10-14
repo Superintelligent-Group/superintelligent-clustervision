@@ -505,8 +505,17 @@ fn collect_costs(e: &Expr, out: &mut Vec<Cost>) {
             // `has:` is two tiers: an affordance (`has:plan`) is counted in the catalog, the
             // capability flags (`has:errors`) come from events.
             let c = match (&t.field, &t.val) {
-                (FieldId::Has, Val::Strs(v)) if v.iter().all(|f| crate::affordance::Kind::parse(f).is_some()) => {
-                    Cost::Counted
+                (FieldId::Has, Val::Strs(v)) => {
+                    if v.iter().any(|flag| crate::affordance::Kind::parse(flag).is_some())
+                        && !out.contains(&Cost::Counted)
+                    {
+                        out.push(Cost::Counted);
+                    }
+                    if v.iter().all(|flag| crate::affordance::Kind::parse(flag).is_some()) {
+                        Cost::Counted
+                    } else {
+                        c
+                    }
                 }
                 _ => c,
             };

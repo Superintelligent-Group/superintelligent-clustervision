@@ -930,6 +930,21 @@ mod tests {
         assert!(plan.table.is_none());
         assert!(matches!(plan.cheap(&refs[2]).unwrap(), Tri::Unknown));
         assert_eq!(plan.reader.as_ref().unwrap().as_ref().unwrap().counts_work(), (3, 2));
+        for source in ["has:plan,errors", "has:errors,plan"] {
+            let mixed = SessionQuery::parse(source).unwrap();
+            assert!(mixed.needs_counted() && mixed.needs_events());
+            let mut plan = RefQuery::with_counts_mode(&mixed, &texts, true);
+            assert_eq!(
+                plan.cheap(&refs[1]).unwrap(),
+                Tri::True,
+                "cached plan should settle mixed OR: {source}"
+            );
+            assert_eq!(
+                plan.cheap(&refs[0]).unwrap(),
+                Tri::Unknown,
+                "absent plan cannot settle errors: {source}"
+            );
+        }
         let mut full = refs.clone();
         filter_refs(&mut full, &query, &TextSets::empty()).unwrap();
         assert_eq!(
