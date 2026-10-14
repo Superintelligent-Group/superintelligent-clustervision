@@ -134,7 +134,7 @@ export async function generate({ messages, model, key, signal, onToken } = {}) {
 
   if (!resp.ok) throw await describeError(resp);
 
-  if (stream && resp.body && typeof resp.body.getReader === "function") {
+  if (stream && !resp.headers?.get("content-type")?.includes("application/json") && resp.body && typeof resp.body.getReader === "function") {
     return await readStream(resp, onToken);
   }
 
@@ -152,42 +152,50 @@ export async function generate({ messages, model, key, signal, onToken } = {}) {
 async function readStream(resp, onToken) {
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
-  let buffer = "";
-  let full = "";
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    // SSE frames are separated by blank lines; each "data:" line is a JSON chunk.
-    let nl;
-    while ((nl = buffer.indexOf("\n")) >= 0) {
-      const line = buffer.slice(0, nl).trim();
-      buffer = buffer.slice(nl + 1);
-      if (!line || line.startsWith(":")) continue; // keep-alive comment
-      if (!line.startsWith("data:")) continue;
-      const payload = line.slice(5).trim();
-      if (payload === "[DONE]") return full;
-      try {
-        const obj = JSON.parse(payload);
-        const delta = obj?.choices?.[0]?.delta?.content
-          ?? obj?.choices?.[0]?.message?.content
-          ?? "";
-        if (delta) { full += delta; onToken(delta, full); }
-      } catch { /* ignore partial/non-JSON frames */ }
+  let buffer = "", full = "", finished = false;
+  const line = (source) => {
+    const text = source.trim();
+    if (!text.startsWith("data:")) return;
+    const payload = text.slice(5).trim();
+    if (payload === "[DONE]") { finished = true; return; }
+    let obj;
+    try { obj = JSON.parse(payload); }
+    catch { throw new Error("OpenRouter returned a malformed stream frame."); }
+    if (obj.error) throw new Error(`OpenRouter stream error: ${obj.error.message || JSON.stringify(obj.error)}`);
+    const choice = obj.choices?.[0];
+    if (choice?.finish_reason === "error") throw new Error("OpenRouter reported a generation error.");
+    const delta = choice?.delta?.content ?? choice?.message?.content ?? "";
+    if (typeof delta !== "string") throw new Error("OpenRouter returned invalid stream content.");
+    if (delta) { full += delta; onToken(delta, full); }
+    if (choice?.finish_reason) finished = true;
+  };
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
+      let nl;
+      while ((nl = buffer.indexOf("\n")) >= 0) {
+        line(buffer.slice(0, nl)); buffer = buffer.slice(nl + 1);
+        if (finished) return full;
+      }
+      if (done) {
+        if (buffer.trim()) line(buffer);
+        if (!finished) throw new Error("OpenRouter stream ended before completion. Partial reply retained.");
+        return full;
+      }
     }
+  } finally {
+    try { await reader.cancel().catch(() => {}); } finally { reader.releaseLock(); }
   }
-  return full;
 }
 
 /** Turn a non-OK response into a friendly, specific Error. */
 async function describeError(resp) {
-  let detail = "";
+  let detail = await resp.text().catch(() => "");
   try {
-    const j = await resp.json();
-    detail = j?.error?.message || j?.message || JSON.stringify(j);
-  } catch {
-    try { detail = await resp.text(); } catch { /* ignore */ }
-  }
+    const body = JSON.parse(detail);
+    detail = body?.error?.message || body?.message || detail;
+  } catch { /* preserve a non-JSON server explanation */ }
   detail = truncate(detail, 300);
   switch (resp.status) {
     case 401:

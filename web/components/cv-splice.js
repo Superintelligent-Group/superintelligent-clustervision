@@ -395,6 +395,7 @@ class CvSplice extends HTMLElement {
     const i = this._branches.findIndex((b) => b.id === id);
     if (i < 0) return;
     const gone = this._branches[i];
+    if (gone.id === this._generatingBranch) this._abort?.abort();
     // Re-parent any children onto the deleted branch's parent so the tree stays
     // connected (no orphaned sub-trees).
     for (const b of this._branches) if (b.parent === id) { b.parent = gone.parent; b.branchAt = Math.min(b.branchAt, gone.branchAt); }
@@ -437,6 +438,8 @@ class CvSplice extends HTMLElement {
     this._gen.busy = true;
     this._gen.error = "";
     this._abort = new AbortController();
+    const branch = this._branch();
+    this._generatingBranch = branch.id;
 
     // Append a placeholder assistant message we stream into.
     const placeholder = {
@@ -454,40 +457,47 @@ class CvSplice extends HTMLElement {
     this.render();
 
     const setText = (full) => {
-      const m = this._lane.find((e) => e.uid === entry.uid)?.message;
+      const m = branch.lane.find((e) => e.uid === entry.uid)?.message;
       if (m) {
         m.content = [{ type: "text", text: full }];
         // Update only the preview + this lane row's text, cheaply.
-        this._renderPreview();
+        if (this._activeBranchId !== branch.id) return;
+        if (!this._previewFrame) this._previewFrame = requestAnimationFrame(() => {
+          this._previewFrame = null;
+          if (this._activeBranchId === branch.id) this._renderPreview();
+        });
         const row = this.querySelector(`.lane-item[data-uid="${CSS.escape(entry.uid)}"] .lane-preview`);
         if (row) row.textContent = (full || "").replace(/\s+/g, " ").slice(0, 120) || "(generating…)";
       }
     };
 
     try {
-      const messages = this._lane
+      const messages = branch.lane
         .filter((e) => e.uid !== entry.uid) // send everything *before* the placeholder
         .map((e) => e.message);
       const text = await generate({ messages, signal: this._abort.signal, onToken: (_chunk, full) => setText(full) });
       setText(text);
       if (!text.trim()) {
         // Empty reply — drop the placeholder so we don't leave a blank turn.
-        const i = this._lane.findIndex((e) => e.uid === entry.uid);
-        if (i >= 0) this._lane.splice(i, 1);
+        const i = branch.lane.findIndex((e) => e.uid === entry.uid);
+        if (i >= 0) branch.lane.splice(i, 1);
         this._gen.error = "Model returned an empty response.";
       }
     } catch (err) {
       // Remove the placeholder on failure (unless we got partial streamed text).
-      const cur = this._lane.find((e) => e.uid === entry.uid)?.message;
+      const cur = branch.lane.find((e) => e.uid === entry.uid)?.message;
       const got = cur?.content?.[0]?.text?.trim();
       if (!got) {
-        const i = this._lane.findIndex((e) => e.uid === entry.uid);
-        if (i >= 0) this._lane.splice(i, 1);
+        const i = branch.lane.findIndex((e) => e.uid === entry.uid);
+        if (i >= 0) branch.lane.splice(i, 1);
       }
       this._gen.error = err?.name === "AbortError"
         ? "Generation stopped." + (got ? " Kept the partial reply." : "")
         : (err?.message || "Generation failed.");
     } finally {
+      if (this._previewFrame) cancelAnimationFrame(this._previewFrame);
+      this._previewFrame = null;
+      this._generatingBranch = null;
       this._gen.busy = false;
       this._gen.streamUid = null;
       this._abort = null;
@@ -559,7 +569,7 @@ class CvSplice extends HTMLElement {
     list.querySelectorAll("[data-up]").forEach((b) => b.addEventListener("click", () => this._move(b.dataset.up, -1)));
     list.querySelectorAll("[data-down]").forEach((b) => b.addEventListener("click", () => this._move(b.dataset.down, +1)));
     list.querySelectorAll("[data-rm]").forEach((b) => b.addEventListener("click", () => {
-      const i = this._idx(b.dataset.rm); if (i >= 0) this._lane.splice(i, 1); this.render();
+      const i = this._idx(b.dataset.rm); if (i >= 0) branch.lane.splice(i, 1); this.render();
     }));
     // Branch from here → spawn a SIBLING BRANCH containing the prefix, switch to it.
     list.querySelectorAll("[data-branch-here]").forEach((b) => b.addEventListener("click", () => {
