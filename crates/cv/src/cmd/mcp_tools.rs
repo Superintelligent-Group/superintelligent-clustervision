@@ -824,18 +824,21 @@ mod transport_tests {
         let dir = std::env::temp_dir().join(format!("cv-mcp-child-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
         let pid_path = dir.join("pid");
+        // Publish the pid by rename: the file exists only once it holds the whole pid, so the
+        // canceller below cannot fire between the shell creating it and writing to it.
+        let quote = |p: &std::path::Path| format!("'{}'", p.display().to_string().replace('\'', "'\\''"));
         let script = format!(
-            "echo $$ > '{}'; exec sleep 10",
-            pid_path.display().to_string().replace('\'', "'\\''")
+            "echo $$ > {staged} && mv {staged} {pid}; exec sleep 10",
+            staged = quote(&dir.join("pid.staged")),
+            pid = quote(&pid_path),
         );
         let cancelled = std::sync::atomic::AtomicBool::new(false);
         let connection = std::sync::atomic::AtomicBool::new(false);
         std::thread::scope(|scope| {
             scope.spawn(|| {
-                for _ in 0..2000 {
-                    if pid_path.exists() {
-                        break;
-                    }
+                // A loaded machine can take a while to start the shell; cancel only once it runs.
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+                while !pid_path.exists() && std::time::Instant::now() < deadline {
                     std::thread::sleep(std::time::Duration::from_millis(1));
                 }
                 cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
