@@ -43,6 +43,8 @@ const DEPENDENCY_ALLOWLIST: &[&str] = &[
     "toml",
     "uuid",
     "walkdir",
+    // Optional zip-ingest shares the desktop/Web decoder; no default feature or task IO.
+    "zip",
 ];
 
 #[test]
