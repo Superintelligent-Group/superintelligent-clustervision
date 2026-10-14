@@ -52,13 +52,36 @@ pub fn load() -> Config {
     }
 }
 
+/// Load before an explicit update. Missing files start with defaults; malformed or unreadable
+/// existing files are errors so an update cannot overwrite registrations it failed to load.
+pub fn load_for_update() -> Result<Config> {
+    let path = config_path().context("no home directory for the config file")?;
+    match std::fs::read_to_string(&path) {
+        Ok(text) => toml::from_str(&text).with_context(|| format!("reading config {}", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
+        Err(error) => Err(error).with_context(|| format!("reading config {}", path.display())),
+    }
+}
+
 /// Persist the config (creating the dir). Returns the path written.
 pub fn save(cfg: &Config) -> Result<PathBuf> {
     let p = config_path().context("no home directory for the config file")?;
     if let Some(dir) = p.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
-    let body = toml::to_string_pretty(cfg).context("serializing config")?;
+    // Keep unknown keys from a newer binary or a user's extension when updating known fields.
+    // Re-read strictly here too: direct save callers must not overwrite malformed config.
+    let mut document: toml::Value = match std::fs::read_to_string(&p) {
+        Ok(text) => toml::from_str(&text).with_context(|| format!("reading config {}", p.display()))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => toml::Value::Table(Default::default()),
+        Err(error) => return Err(error).with_context(|| format!("reading config {}", p.display())),
+    };
+    let known = toml::Value::try_from(cfg).context("serializing config")?;
+    let table = document.as_table_mut().context("config must be a TOML table")?;
+    for (key, value) in known.as_table().context("serialized config must be a TOML table")? {
+        table.insert(key.clone(), value.clone());
+    }
+    let body = toml::to_string_pretty(&document).context("serializing config")?;
     std::fs::write(&p, body).with_context(|| format!("writing {}", p.display()))?;
     Ok(p)
 }
@@ -66,6 +89,26 @@ pub fn save(cfg: &Config) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn updates_preserve_unknown_keys_and_reject_malformed_existing_files() {
+        let _world = cv_testkit::World::in_process("config-update-preservation");
+        assert!(load_for_update().unwrap().exports.is_empty());
+        let path = save(&Config::default()).unwrap();
+        std::fs::write(&path, "exports = ['/old']\nfuture = 42\n[extension]\nlabel = 'keep'\n").unwrap();
+        let mut cfg = load_for_update().unwrap();
+        cfg.exports.push("/new".into());
+        save(&cfg).unwrap();
+        let document: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(document["future"].as_integer(), Some(42));
+        assert_eq!(document["extension"]["label"].as_str(), Some("keep"));
+        assert_eq!(load_for_update().unwrap().exports, cfg.exports);
+        let malformed = "exports = [unfinished";
+        std::fs::write(&path, malformed).unwrap();
+        assert!(load_for_update().is_err());
+        assert!(save(&cfg).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), malformed);
+    }
 
     #[test]
     fn round_trips_exports() {

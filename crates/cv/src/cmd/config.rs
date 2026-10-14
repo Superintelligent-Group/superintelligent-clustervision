@@ -5,11 +5,15 @@ use anyhow::Result;
 use std::path::PathBuf;
 
 pub(crate) fn cmd_config(add_export: Option<PathBuf>, rm_export: Option<PathBuf>) -> Result<()> {
-    let mut cfg = cv_core::config::load();
+    let mut cfg = if add_export.is_some() || rm_export.is_some() {
+        cv_core::config::load_for_update()?
+    } else {
+        cv_core::config::load()
+    };
     let mut changed = false;
 
     if let Some(p) = add_export {
-        let p = p.canonicalize().unwrap_or(p);
+        let p = p.canonicalize().or_else(|_| std::path::absolute(&p))?;
         if cfg.exports.contains(&p) {
             println!("already registered: {}", p.display());
         } else {
@@ -19,7 +23,7 @@ pub(crate) fn cmd_config(add_export: Option<PathBuf>, rm_export: Option<PathBuf>
         }
     }
     if let Some(p) = rm_export {
-        let canon = p.canonicalize().unwrap_or_else(|_| p.clone());
+        let canon = p.canonicalize().or_else(|_| std::path::absolute(&p))?;
         let before = cfg.exports.len();
         cfg.exports.retain(|e| e != &canon && e != &p);
         if cfg.exports.len() == before {
