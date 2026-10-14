@@ -33,6 +33,7 @@ struct Record<'a> {
     extras: Option<&'a Map<String, Value>>,
     blocks: Vec<Cow<'a, Block>>,
     role: Role,
+    mode: ThinkingMode,
     special: Option<MessageKind>,
     sidecar: Option<&'a Value>,
 }
@@ -128,6 +129,14 @@ impl Record<'_> {
             };
             let mut after = 0;
             for b in content {
+                if self.mode == ThinkingMode::Drop
+                    && matches!(
+                        b.get("type").and_then(Value::as_str),
+                        Some("thinking" | "redacted_thinking")
+                    )
+                {
+                    continue;
+                }
                 match b.get("type").and_then(Value::as_str) {
                     Some("tool_use") => {
                         let id = b.get("id").and_then(Value::as_str).unwrap_or("");
@@ -214,14 +223,24 @@ impl Record<'_> {
             }
             writer.write_all(b"]")?;
         } else if let Some(content) = message.get("content") {
-            if let (Some(answered), Some(array)) = (answered, content.as_array()) {
+            if let Some(array) = content.as_array() {
                 writer.write_all(b"[")?;
                 let mut first = true;
                 for b in array {
+                    if self.mode == ThinkingMode::Drop
+                        && matches!(
+                            b.get("type").and_then(Value::as_str),
+                            Some("thinking" | "redacted_thinking")
+                        )
+                    {
+                        continue;
+                    }
                     if b.get("type").and_then(Value::as_str) == Some("tool_use")
-                        && b.get("id")
-                            .and_then(Value::as_str)
-                            .is_none_or(|id| !answered.contains(id))
+                        && answered.is_some_and(|answered| {
+                            b.get("id")
+                                .and_then(Value::as_str)
+                                .is_none_or(|id| !answered.contains(id))
+                        })
                     {
                         continue;
                     }
@@ -230,6 +249,9 @@ impl Record<'_> {
                     }
                     first = false;
                     serde_json::to_writer(&mut *writer, b)?;
+                }
+                if first && self.mode == ThinkingMode::Drop && !array.is_empty() {
+                    serde_json::to_writer(&mut *writer, &json!({"type":"text","text":"[reasoning omitted]"}))?;
                 }
                 writer.write_all(b"]")?;
             } else {
@@ -447,6 +469,7 @@ fn record<'a>(
             extras: None,
             blocks: Vec::new(),
             role: message.role,
+            mode: c.mode,
             special: None,
             sidecar: None,
         }));
@@ -583,6 +606,7 @@ fn record<'a>(
         } else {
             message.role
         },
+        mode: c.mode,
         special,
         sidecar,
     }))

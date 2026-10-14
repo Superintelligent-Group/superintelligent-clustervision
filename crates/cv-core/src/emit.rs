@@ -3662,4 +3662,71 @@ mod tests {
         assert_eq!(result[2]["type"], "text");
         Ok(())
     }
+    #[test]
+    fn claude_drop_filters_raw_reasoning_before_survival_and_parent_relinking() -> Result<()> {
+        let world = cv_testkit::World::in_process("claude-drop-overrides");
+        let mut session = Session::new("raw-drop", Harness::Claude);
+        for (id, parent, raw) in [
+            (
+                "mixed",
+                None,
+                serde_json::json!([
+                    {"type":"thinking","thinking":"never emit this","signature":"foreign"},
+                    {"type":"tool_use","id":"a:b","name":"Read","input":{}}
+                ]),
+            ),
+            (
+                "thinking-only",
+                Some("mixed"),
+                serde_json::json!([
+                    {"type":"redacted_thinking","data":"opaque"},
+                    {"type":"thinking","thinking":"never emit this either","signature":"foreign"}
+                ]),
+            ),
+        ] {
+            let mut message = Message::new(Role::Assistant);
+            message.id = Some(id.into());
+            message.parent_id = parent.map(str::to_owned);
+            message
+                .harness_extra_mut(Harness::Claude)
+                .insert("message.content".into(), raw);
+            session.messages.push(message);
+        }
+        let mut result = Message::new(Role::System);
+        result.extra.insert(
+            crate::harness::claude::CARRIER_KEY.into(),
+            serde_json::json!({
+                "type":"user","uuid":"result","parentUuid":"thinking-only","message":{"role":"user","content":[
+                    {"type":"tool_result","tool_use_id":"a:b","content":"kept"},
+                    {"type":"thinking","thinking":"hidden in carrier","signature":"foreign"}
+                ]}
+            }),
+        );
+        session.messages.push(result);
+        let result = emit(
+            &session,
+            Harness::Claude,
+            &world.base.join("out"),
+            &EmitOptions {
+                thinking: ThinkingMode::Drop,
+                ..Default::default()
+            },
+        )?;
+        verify_claude_resumable(&result.path, None)?;
+        let output = fs::read_to_string(result.path)?;
+        assert!(!output.contains("never emit") && !output.contains("hidden in carrier") && !output.contains("foreign"));
+        let rows: Vec<Value> = output.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!(
+            rows.len(),
+            2,
+            "raw thinking-only assistant is dropped before rethreading"
+        );
+        assert_eq!(rows[1]["parentUuid"], "mixed");
+        assert_eq!(
+            rows[0]["message"]["content"][0]["id"],
+            rows[1]["message"]["content"][0]["tool_use_id"]
+        );
+        assert_eq!(rows[1]["message"]["content"].as_array().unwrap().len(), 1);
+        Ok(())
+    }
 }
