@@ -467,10 +467,8 @@ fn binary_holder_ids(conn: &Connection) -> bool {
             let Ok(columns) = stmt.query_map([], |row| Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?))) else {
                 return false;
             };
-            let binary = columns
-                .flatten()
-                .any(|(name, kind)| name == id && kind.eq_ignore_ascii_case("TEXT"));
-            binary
+            let mut columns = columns.flatten();
+            columns.any(|(name, kind)| name == id && kind.eq_ignore_ascii_case("TEXT"))
         })
 }
 
