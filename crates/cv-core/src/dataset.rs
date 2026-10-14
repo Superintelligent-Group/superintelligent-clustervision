@@ -73,8 +73,8 @@ const SPAN_CHUNK: usize = 1 << 20; // 1 MiB
 /// Stream one message's blocks as training text to `emit`, resolving span content **in chunks** (so a
 /// giant field is never materialized whole). Byte-identical to the old `parts.join("\n\n")`: the same
 /// parts, separated by `\n\n`, with empty/redacted text turns producing no part.
-fn render_blocks_into(
-    blocks: &[Block],
+fn render_blocks_into<'a>(
+    blocks: impl IntoIterator<Item = &'a Block>,
     resolver: &crate::lazy::Resolver,
     emit: &mut dyn FnMut(&str) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
@@ -92,8 +92,8 @@ type RedactCtx<'a> = (&'a crate::redact::RedactOptions, &'a mut crate::redact::R
 /// scanned whole to redact it), scrub, emit, drop — so the peak is one field, and nothing is cloned
 /// when a field is clean ([`scrub_cow`](crate::redact::scrub_cow) borrows). This replaced a
 /// clone-the-whole-`Message`-then-redact path; tool inputs materialize only for structural scrubbing.
-fn render_blocks_impl(
-    blocks: &[Block],
+fn render_blocks_impl<'a>(
+    blocks: impl IntoIterator<Item = &'a Block>,
     resolver: &crate::lazy::Resolver,
     mut redact: Option<RedactCtx<'_>>,
     emit: &mut dyn FnMut(&str) -> anyhow::Result<()>,
@@ -288,6 +288,39 @@ impl<'a, W: std::io::Write + ?Sized> RecordWriter<'a, W> {
         if message_is_empty(message) {
             return Ok(false);
         }
+        // The deferred eligibility check stays cheap so rejected queries never resolve body
+        // sources. Accepted rendering must apply the same whitespace policy to lazy and owned
+        // fields, including individual blocks inside an otherwise nonempty message.
+        let mut blocks = Vec::new();
+        for block in &message.content {
+            let text = match block {
+                Block::Text { text } => Some(text),
+                Block::Thinking {
+                    text, redacted: false, ..
+                } => Some(text),
+                Block::Thinking { redacted: true, .. } => continue,
+                _ => None,
+            };
+            let keep = match text {
+                Some(text) => {
+                    if let Some(value) = text.inline_str() {
+                        !value.trim().is_empty()
+                    } else {
+                        !crate::harness::store::document::text_head(text, resolver, 1, true)
+                            .map_err(std::io::Error::other)?
+                            .0
+                            .is_empty()
+                    }
+                }
+                None => true,
+            };
+            if keep {
+                blocks.push(block);
+            }
+        }
+        if blocks.is_empty() {
+            return Ok(false);
+        }
         let (array_key, role_key, content_key) = match self.fmt {
             Format::Chatml => ("messages", "role", "content"),
             Format::ShareGpt => ("conversations", "from", "value"),
@@ -309,10 +342,9 @@ impl<'a, W: std::io::Write + ?Sized> RecordWriter<'a, W> {
         let mut emit = |piece: &str| write_json_escaped(w, piece).map_err(anyhow::Error::from);
         if let Some(opts) = self.redact {
             let mut stats = crate::redact::RedactStats::default();
-            render_blocks_impl(&message.content, resolver, Some((opts, &mut stats)), &mut emit)
-                .map_err(std::io::Error::other)?;
+            render_blocks_impl(blocks, resolver, Some((opts, &mut stats)), &mut emit).map_err(std::io::Error::other)?;
         } else {
-            render_blocks_into(&message.content, resolver, &mut emit).map_err(std::io::Error::other)?;
+            render_blocks_into(blocks, resolver, &mut emit).map_err(std::io::Error::other)?;
         }
         if role_first {
             w.write_all(b"\"}")?;
@@ -1012,5 +1044,84 @@ mod tests {
         assert!(error.is::<InputError>());
         assert!(error.to_string().contains("late input unavailable"));
         assert!(crate::catalog::AffordanceTable::load().counts(&r).is_none());
+    }
+    #[test]
+    fn lazy_whitespace_fields_match_owned_turns_and_block_separators() {
+        let world = cv_testkit::World::new("dataset-whitespace-parity");
+        let whitespace = " \n\t\u{2003}".repeat(2048);
+        let mut owned = Session::new("whitespace", Harness::Claude);
+        owned.messages = vec![
+            msg(
+                Role::User,
+                vec![Block::Text {
+                    text: whitespace.clone().into(),
+                }],
+            ),
+            msg(
+                Role::Assistant,
+                vec![
+                    Block::Text {
+                        text: whitespace.clone().into(),
+                    },
+                    Block::Thinking {
+                        text: whitespace.clone().into(),
+                        signature: None,
+                        encrypted: None,
+                        redacted: false,
+                    },
+                    Block::Text {
+                        text: format!("{whitespace}answer").into(),
+                    },
+                    Block::Thinking {
+                        text: "reason".into(),
+                        signature: None,
+                        encrypted: None,
+                        redacted: false,
+                    },
+                ],
+            ),
+            msg(
+                Role::Tool,
+                vec![Block::ToolResult {
+                    tool_use_id: "t".into(),
+                    content: whitespace.into(),
+                    tool_name: None,
+                    is_error: false,
+                    status: None,
+                    details: None,
+                }],
+            ),
+        ];
+        let mut lazy = owned.clone();
+        for (mi, message) in lazy.messages.iter_mut().enumerate() {
+            for (bi, block) in message.content.iter_mut().enumerate() {
+                let text = match block {
+                    Block::Text { text } | Block::Thinking { text, .. } => text,
+                    Block::ToolResult { content, .. } => content,
+                    _ => continue,
+                };
+                let wire = serde_json::to_vec(text.inline_str().unwrap()).unwrap();
+                let path = world.base.join(format!("{mi}-{bi}.json"));
+                std::fs::write(&path, &wire).unwrap();
+                *text = crate::Json::source(&path, 0, wire.len() as u64)
+                    .unwrap()
+                    .with_view(|view| view.source_text())
+                    .unwrap()
+                    .unwrap();
+            }
+        }
+        for format in [Format::Chatml, Format::ShareGpt] {
+            for redact in [None, Some(crate::redact::RedactOptions::default())] {
+                let mut expected = Vec::new();
+                let mut actual = Vec::new();
+                assert!(write_record(&owned, &mut expected, format, redact.as_ref()).unwrap());
+                assert!(write_record(&lazy, &mut actual, format, redact.as_ref()).unwrap());
+                assert_eq!(actual, expected);
+            }
+        }
+        lazy.messages.truncate(1);
+        let mut actual = Vec::new();
+        assert!(!write_record(&lazy, &mut actual, Format::Chatml, None).unwrap());
+        assert!(actual.is_empty());
     }
 }
