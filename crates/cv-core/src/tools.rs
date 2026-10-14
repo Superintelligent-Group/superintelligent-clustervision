@@ -261,19 +261,18 @@ impl MessageSink for CallSink {
                 if self.tool.as_deref().is_some_and(|tool| tool != name) {
                     continue;
                 }
-                let rows = match events::extract_call(
+                let mut rows = Vec::new();
+                if let Err(error) = events::extract_call_into(
                     name,
                     input,
                     self.msg_idx,
                     m.timestamp.map(|t| t.timestamp()),
                     self.cwd.as_deref(),
+                    &mut rows,
                 ) {
-                    Ok(rows) => rows,
-                    Err(error) => {
-                        self.fail = Some(error);
-                        return Flow::Stop;
-                    }
-                };
+                    self.fail = Some(error);
+                    return Flow::Stop;
+                }
                 self.rows.extend(rows.into_iter().map(|e| (id.clone(), e)));
             }
         }
