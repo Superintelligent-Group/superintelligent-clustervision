@@ -138,10 +138,6 @@ impl CliTools {
     }
 
     /// Run the generated CLI unchanged, retaining operation-owned bounded output.
-    #[cfg(test)]
-    pub fn call(&self, tool: &str, args: &Value, cancelled: &std::sync::atomic::AtomicBool) -> Result<CommandOutput> {
-        self.call_cancelled(tool, args, super::mcp::Cancellation::connection(cancelled))
-    }
     pub fn call_cancelled(
         &self,
         tool: &str,
