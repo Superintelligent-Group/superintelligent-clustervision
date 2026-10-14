@@ -388,6 +388,11 @@ impl JsonSource {
         Ok(Json::Source(Arc::new(self.range(offset, len)?)))
     }
 }
+#[cfg(all(test, feature = "mmap"))]
+thread_local! {
+    static NATIVE_VIEW_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 impl JsonRange {
     pub(crate) fn check(&self) -> Result<()> {
         self.source.check()?;
@@ -454,6 +459,8 @@ impl JsonRange {
     #[cfg(feature = "mmap")]
     fn with_raw<T>(&self, f: impl for<'a> FnOnce(Raw<'a>) -> Result<T>) -> Result<T> {
         self.check()?;
+        #[cfg(test)]
+        NATIVE_VIEW_BYTES.with(|bytes| bytes.set(bytes.get() + self.len));
         let mut callback = Some(f);
         if let Some(bytes) = &self.decoded {
             if let Some(result) = bytes.with_bytes(|bytes| {
@@ -517,6 +524,17 @@ impl JsonRange {
         result
     }
 
+    /// Prefix consumers reuse the checked positioned writer in both feature configurations.
+    /// Capture already accepted the complete range; demanded chunks retain safe UTF-8 decoding,
+    /// and descriptor/dependency checks still run after an intentional output-budget stop.
+    fn with_bounded_view<T>(&self, f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>) -> Result<T> {
+        let source = match &self.decoded {
+            Some(bytes) => RangeSource::decoded(self.source.clone(), bytes)?,
+            None => RangeSource::from_captured(self.source.clone())?,
+        };
+        self.with_positioned_view(&source, Validation::Cached, f)
+    }
+
     pub(crate) fn with_view<T>(&self, f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>) -> Result<T> {
         self.with_validation(Validation::Cached, f)
     }
@@ -559,7 +577,6 @@ impl JsonRange {
             self.with_positioned_view(&source, validation, f)
         }
     }
-    #[cfg(not(feature = "mmap"))]
     fn with_positioned_view<T>(
         &self,
         source: &RangeSource,
@@ -726,7 +743,10 @@ impl Json {
     /// value was truncated. Source validation and the final identity check still apply. No more
     /// than max_bytes of output are retained; the prefix need not itself be complete JSON.
     pub fn canonical_prefix(&self, max_bytes: usize) -> Result<(String, bool)> {
-        self.with_view(|view| view.canonical_prefix(max_bytes))
+        match self {
+            Self::Owned(value) => JsonView::from(value).canonical_prefix(max_bytes),
+            Self::Source(range) => range.with_bounded_view(|view| view.canonical_prefix(max_bytes)),
+        }
     }
     /// Emit the exact compact JSON that serde_json serializes from the complete Value.
     ///
@@ -744,7 +764,6 @@ enum View<'a> {
     Owned(&'a Value),
     #[cfg(feature = "mmap")]
     Source(SourceView<'a>),
-    #[cfg(not(feature = "mmap"))]
     Portable(PortableView<'a>),
 }
 #[cfg(feature = "mmap")]
@@ -754,7 +773,6 @@ struct SourceView<'a> {
     range: &'a JsonRange,
     base: usize,
 }
-#[cfg(not(feature = "mmap"))]
 #[derive(Clone, Copy)]
 struct PortableView<'a> {
     source: &'a RangeSource,
@@ -806,7 +824,6 @@ impl<'a> JsonView<'a> {
             View::Owned(_) => Ok(true),
             #[cfg(feature = "mmap")]
             View::Source(source) => Ok(document::accepts_value_at_depth(source.raw, depth)),
-            #[cfg(not(feature = "mmap"))]
             View::Portable(source) => source.source.accepts_value_at_depth(source.value, depth),
         }
     }
@@ -836,7 +853,6 @@ impl<'a> JsonView<'a> {
                     .map(|raw| raw.map(|raw| Self(View::Source(SourceView { raw, ..source }))))
                     .collect()
             }),
-            #[cfg(not(feature = "mmap"))]
             View::Portable(source) => (if unique {
                 source.source.select_unique_fields(source.value, keys)?
             } else {
@@ -863,7 +879,6 @@ impl<'a> JsonView<'a> {
                     source.raw.get().len() as u64,
                 ))
             }
-            #[cfg(not(feature = "mmap"))]
             View::Portable(source) => Some((source.value.offset, source.value.len)),
         })
     }
@@ -888,7 +903,6 @@ impl<'a> JsonView<'a> {
             && match self.0 {
                 #[cfg(feature = "mmap")]
                 View::Source(source) => source.range.decoded.is_some(),
-                #[cfg(not(feature = "mmap"))]
                 View::Portable(source) => source.owner.decoded.is_some(),
                 View::Owned(_) => false,
             }
@@ -915,7 +929,6 @@ impl<'a> JsonView<'a> {
                     Ok(Some(crate::lazy::Text::Inline(serde_json::from_slice(raw)?)))
                 }
             }
-            #[cfg(not(feature = "mmap"))]
             View::Portable(source) => source
                 .source
                 .text(source.value, spans && source.owner.decoded.is_none()),
@@ -981,7 +994,6 @@ impl<'a> JsonView<'a> {
     pub fn get(self, key: &str) -> Result<Option<Self>> {
         Ok(match self.0 {
             View::Owned(value) => value.get(key).map(|value| Self(View::Owned(value))),
-            #[cfg(not(feature = "mmap"))]
             View::Portable(source) => source
                 .source
                 .get(source.value, key)?
@@ -1002,7 +1014,6 @@ impl<'a> JsonView<'a> {
             View::Source(source) => Ok(
                 source.raw.get().starts_with('"') && raw_string_may_contain_ascii(source.raw.get().as_bytes(), byte)
             ),
-            #[cfg(not(feature = "mmap"))]
             View::Portable(source) => {
                 use std::io::Read;
                 if source.source.kind(source.value)? != Some(b'"') {
@@ -1029,7 +1040,6 @@ impl<'a> JsonView<'a> {
     pub fn is_string(self) -> Result<bool> {
         Ok(match self.0 {
             View::Owned(value) => value.is_string(),
-            #[cfg(not(feature = "mmap"))]
             View::Portable(source) => source.source.kind(source.value)? == Some(b'"'),
             #[cfg(feature = "mmap")]
             View::Source(source) => source.raw.get().starts_with('"'),
@@ -1038,7 +1048,6 @@ impl<'a> JsonView<'a> {
     pub fn is_object(self) -> Result<bool> {
         Ok(match self.0 {
             View::Owned(value) => value.is_object(),
-            #[cfg(not(feature = "mmap"))]
             View::Portable(source) => source.source.kind(source.value)? == Some(b'{'),
             #[cfg(feature = "mmap")]
             View::Source(source) => source.raw.get().starts_with('{'),
@@ -1047,7 +1056,6 @@ impl<'a> JsonView<'a> {
     pub fn is_array(self) -> Result<bool> {
         Ok(match self.0 {
             View::Owned(value) => value.is_array(),
-            #[cfg(not(feature = "mmap"))]
             View::Portable(source) => source.source.kind(source.value)? == Some(b'['),
             #[cfg(feature = "mmap")]
             View::Source(source) => source.raw.get().starts_with('['),
@@ -1056,7 +1064,6 @@ impl<'a> JsonView<'a> {
     pub fn is_null(self) -> Result<bool> {
         Ok(match self.0 {
             View::Owned(value) => value.is_null(),
-            #[cfg(not(feature = "mmap"))]
             View::Portable(source) => source.source.kind(source.value)? == Some(b'n'),
             #[cfg(feature = "mmap")]
             View::Source(source) => source.raw.get() == "null",
@@ -1065,7 +1072,6 @@ impl<'a> JsonView<'a> {
     pub fn as_bool(self) -> Result<Option<bool>> {
         Ok(match self.0 {
             View::Owned(value) => value.as_bool(),
-            #[cfg(not(feature = "mmap"))]
             View::Portable(source) => match source.source.kind(source.value)? {
                 Some(b't') => Some(true),
                 Some(b'f') => Some(false),
@@ -1088,7 +1094,6 @@ impl<'a> JsonView<'a> {
             }
             #[cfg(feature = "mmap")]
             View::Source(_) => Ok(None),
-            #[cfg(not(feature = "mmap"))]
             View::Portable(source) => {
                 if matches!(source.source.kind(source.value)?, Some(b'-' | b'0'..=b'9')) {
                     Ok(Some(source.source.materialize(source.value)?))
@@ -1102,7 +1107,6 @@ impl<'a> JsonView<'a> {
     pub fn array(self) -> Result<Option<JsonArray<'a>>> {
         Ok(match self.0 {
             View::Owned(value) => value.as_array().map(|array| JsonArray(Array::Owned(array.iter()))),
-            #[cfg(not(feature = "mmap"))]
             View::Portable(source) => source
                 .source
                 .array(source.value)?
@@ -1131,7 +1135,6 @@ impl<'a> JsonView<'a> {
                     f(&key, Self(View::Source(SourceView { raw: value, ..source })))?;
                 }
             }
-            #[cfg(not(feature = "mmap"))]
             View::Portable(source) => {
                 let Some(entries) = source.source.object(source.value)? else {
                     return Ok(false);
@@ -1179,7 +1182,6 @@ impl<'a> JsonView<'a> {
             }
             #[cfg(feature = "mmap")]
             View::Source(_) => Ok(false),
-            #[cfg(not(feature = "mmap"))]
             View::Portable(source) => {
                 if source.source.kind(source.value)? != Some(b'"') {
                     return Ok(false);
@@ -1194,7 +1196,6 @@ impl<'a> JsonView<'a> {
     pub fn to_json(self) -> Result<Json> {
         match self.0 {
             View::Owned(value) => Ok(Json::Owned(value.clone())),
-            #[cfg(not(feature = "mmap"))]
             View::Portable(source) => Ok(Json::Source(Arc::new(
                 source.owner.child(source.value.offset, source.value.len)?,
             ))),
@@ -1222,7 +1223,6 @@ impl<'a> JsonView<'a> {
             View::Owned(value) => Ok(Cow::Borrowed(value)),
             #[cfg(feature = "mmap")]
             View::Source(source) => Ok(Cow::Owned(serde_json::from_str(source.raw.get())?)),
-            #[cfg(not(feature = "mmap"))]
             View::Portable(source) => Ok(Cow::Owned(source.source.materialize(source.value)?)),
         }
     }
@@ -1267,7 +1267,6 @@ impl<'a> JsonView<'a> {
             View::Owned(_) => None,
             #[cfg(feature = "mmap")]
             View::Source(source) => Some(source.range),
-            #[cfg(not(feature = "mmap"))]
             View::Portable(source) => Some(source.owner),
         };
         if let Some(owner) = owner {
@@ -1323,14 +1322,12 @@ impl<'a> JsonView<'a> {
             View::Owned(value) => serde_json::to_writer(writer, value).map_err(Into::into),
             #[cfg(feature = "mmap")]
             View::Source(source) => write_raw(source.raw, writer),
-            #[cfg(not(feature = "mmap"))]
             View::Portable(_) => write_portable(self, writer),
         }
     }
 }
 
 enum Array<'a> {
-    #[cfg(not(feature = "mmap"))]
     Portable {
         array: document::range::ArrayRanges<'a>,
         source: PortableView<'a>,
@@ -1350,7 +1347,6 @@ impl<'a> Iterator for JsonArray<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         match &mut self.0 {
             Array::Owned(array) => array.next().map(|value| Ok(JsonView(View::Owned(value)))),
-            #[cfg(not(feature = "mmap"))]
             Array::Portable { array, source } => array.next().map(|value| {
                 value
                     .map(|value| JsonView(View::Portable(PortableView { value, ..*source })))
@@ -1539,7 +1535,6 @@ fn write_raw(raw: Raw<'_>, writer: &mut impl Write) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(feature = "mmap"))]
 fn write_portable(value: JsonView<'_>, writer: &mut impl Write) -> Result<()> {
     let View::Portable(source) = value.0 else {
         unreachable!()
@@ -2161,6 +2156,36 @@ mod tests {
         std::fs::remove_file(&link).unwrap();
         symlink(&other, &link).unwrap();
         assert!(value.resolve().is_err());
+    }
+
+    #[test]
+    fn direct_source_prefix_reuses_positioned_writer_with_value_semantics() {
+        let inputs = [
+            serde_json::to_string(&"é🌙\\\n尾".repeat(200_000)).unwrap(),
+            format!("[1,2,3,{}]", serde_json::to_string(&"tail".repeat(500_000)).unwrap()),
+            r#"{"z":"first","a":[1,true,"é🌙"],"z":"last","tail":null}"#.to_string(),
+        ];
+        for input in inputs {
+            let fixture = Fixture::new(input.as_bytes());
+            let source = fixture.value();
+            let owned = Json::from(serde_json::from_str::<Value>(&input).unwrap());
+            for limit in [0, 1, 2, 5, 17, 65, 4096] {
+                #[cfg(feature = "mmap")]
+                NATIVE_VIEW_BYTES.with(|bytes| bytes.set(0));
+                assert_eq!(
+                    source.canonical_prefix(limit).unwrap(),
+                    owned.canonical_prefix(limit).unwrap()
+                );
+                #[cfg(feature = "mmap")]
+                assert_eq!(
+                    NATIVE_VIEW_BYTES.with(|bytes| bytes.get()),
+                    0,
+                    "bounded prefix must not request whole native UTF-8 views"
+                );
+            }
+            std::fs::remove_file(&fixture.path).unwrap();
+            assert!(source.canonical_prefix(0).is_err());
+        }
     }
 
     #[test]
