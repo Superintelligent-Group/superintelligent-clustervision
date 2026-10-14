@@ -1060,7 +1060,7 @@ fn raw_replay_key(rec: &lean::Record<'_>) -> Option<String> {
 
 impl RecordingReplay<Value> {
     /// Fold one JSONL record into the replay state. Non-object junk is ignored.
-    fn ingest(&mut self, rec: Value) {
+    fn ingest(&mut self, mut rec: Value) {
         if !rec.is_object() {
             return;
         }
@@ -1068,21 +1068,26 @@ impl RecordingReplay<Value> {
             self.rewind(rewind, |v| v);
             return;
         }
-        if let Some(set) = rec.get("$set").and_then(Value::as_object) {
+        if rec.get("$set").is_some_and(Value::is_object) {
+            // This replay owns the record: transfer checkpoint bodies and metadata rather than
+            // cloning the entire effective history before dropping its source record.
+            let Value::Object(set) = rec.as_object_mut().unwrap().remove("$set").unwrap() else {
+                unreachable!("$set was checked as an object")
+            };
             for (k, v) in set {
                 if k == "messages" {
                     // Checkpoint: rebuild the whole message list.
                     self.order.clear();
                     self.msgs.clear();
-                    if let Some(arr) = v.as_array() {
+                    if let Value::Array(arr) = v {
                         for m in arr {
-                            if let Some(key) = replay_key(m) {
-                                self.insert(key, m.clone());
+                            if let Some(key) = replay_key(&m) {
+                                self.insert(key, m);
                             }
                         }
                     }
                 } else {
-                    self.metadata.insert(k.clone(), v.clone());
+                    self.metadata.insert(k, v);
                 }
             }
             return;
@@ -2500,6 +2505,41 @@ mod tests {
         assert_eq!(s.model.as_deref(), Some("gemini-3-pro"));
         assert_eq!(s.messages[1].model, None);
         assert_eq!(s.messages[2].model.as_deref(), Some("gemini-3-flash"));
+    }
+
+    #[test]
+    fn owned_checkpoint_transfers_payloads_and_preserves_control_precedence() {
+        let mut replay = RecordingReplay::<Value>::default();
+        let body = "checkpoint body".repeat(1024);
+        let body_ptr = body.as_ptr();
+        let summary = "checkpoint metadata".repeat(1024);
+        let summary_ptr = summary.as_ptr();
+        let mut checkpoint = serde_json::json!({"$set": {
+            "messages": [
+                {"id":"same", "type":"user", "content":"obsolete"},
+                {"id":"same", "type":"user", "content":null},
+                {"type":"user", "content":"missing id"}
+            ],
+            "summary":null
+        }});
+        checkpoint["$set"]["messages"][1]["content"] = Value::String(body);
+        checkpoint["$set"]["summary"] = Value::String(summary);
+        replay.ingest(checkpoint);
+        assert_eq!(replay.order, ["user\u{1f}same"]);
+        assert_eq!(
+            replay.msgs["user\u{1f}same"]["content"].as_str().unwrap().as_ptr(),
+            body_ptr
+        );
+        assert_eq!(replay.metadata["summary"].as_str().unwrap().as_ptr(), summary_ptr);
+
+        replay.ingest(serde_json::json!({"$rewindTo":"same", "$set":{"summary":"ignored"}}));
+        assert_eq!(replay.metadata["summary"].as_str().unwrap().as_ptr(), summary_ptr);
+        replay.ingest(serde_json::json!({"$set":false,"id":"fallback","type":"user","content":"kept"}));
+        assert!(replay.msgs.contains_key("user\u{1f}fallback"));
+        replay.ingest(serde_json::json!({"$set":{"messages":false,"summary":null}}));
+        assert!(replay.order.is_empty());
+        assert!(replay.msgs.is_empty());
+        assert_eq!(replay.metadata["summary"], Value::Null);
     }
 
     #[test]
