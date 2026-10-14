@@ -171,6 +171,7 @@ pub(crate) fn block_from_view(
         "type",
         "source",
         "title",
+        "mimeType",
         "id",
         "name",
         "data",
@@ -201,10 +202,36 @@ pub(crate) fn block_from_view(
         }));
     }
     if matches!(ty.as_str(), "image" | "document") {
-        if q.flat_media.is_some() {
-            // Flat media has a deliberately truncated reference policy; text/tool fields still
-            // use the common checked projection rather than owning the entire content block.
-            return Ok(block_from(view.resolve()?.as_ref(), q));
+        if let Some(max) = q.flat_media {
+            let mime = record.string("mimeType")?;
+            let data = match record.get("data") {
+                Some(data) if data.is_string()? => Some(data),
+                _ => None,
+            };
+            return Ok(Some(if ty == "image" {
+                let data_ref = data
+                    .map(|v| -> anyhow::Result<_> {
+                        let text = v.source_text()?.unwrap();
+                        let (head, _) = super::super::store::document::text_head(
+                            &text,
+                            &crate::lazy::Resolver::new(None),
+                            max.saturating_add(1),
+                            false,
+                        )?;
+                        Ok(crate::ir::truncate(&head, max))
+                    })
+                    .transpose()?;
+                Block::Image {
+                    media_type: mime,
+                    data_ref,
+                }
+            } else {
+                Block::File {
+                    mime,
+                    path: record.string("name")?,
+                    source: data.map(|_| "base64:inline".into()),
+                }
+            }));
         }
         let src = record
             .get("source")
@@ -252,16 +279,18 @@ pub(crate) fn block_from_view(
         return Ok(None);
     };
     let mut fields = record.project(keys)?;
-    if ty == "tool_result" {
+    let mut result = record.get("content").map(|v| v.text(true)).transpose()?.flatten();
+    if ty == "tool_result" && result.is_none() {
         if let Some(content) = record.get("content") {
-            if !content.is_string()? {
+            if content.is_array()? && content.source_range()?.is_some() {
+                result = Some(coerce_selected_array(content)?);
+            } else {
                 fields.insert("content".into(), content.resolve()?.into_owned());
             }
         }
     }
     let text = record.get("text").map(|v| v.text(true)).transpose()?.flatten();
     let thinking = record.get(q.thinking.0).map(|v| v.text(true)).transpose()?.flatten();
-    let result = record.get("content").map(|v| v.text(true)).transpose()?.flatten();
     Ok(block_from_fields(&Value::Object(fields), q, &mut |key| {
         if key == "content" {
             result.clone()
@@ -273,6 +302,49 @@ pub(crate) fn block_from_view(
             None
         }
     }))
+}
+
+/// The exact coerce_text array policy: images become a marker, all string text parts (even
+/// empty ones) retain their separator positions. Original capture guards follow joined backing.
+fn coerce_selected_array(content: crate::json::JsonView<'_>) -> anyhow::Result<Text> {
+    use crate::harness::store::{document::Fields, text};
+    let mut parts = Vec::new();
+    for item in content.array()?.unwrap() {
+        let Some(item) = Fields::parse(item?, &["type", "text"])? else {
+            continue;
+        };
+        if item.string("type")?.as_deref().is_some_and(super::is_image_part) {
+            parts.push(None);
+        } else if let Some(value) = item.get("text") {
+            if value.is_string()? {
+                parts.push(Some(value));
+            }
+        }
+    }
+    match parts.as_slice() {
+        [] => Ok(Text::default()),
+        [None] => Ok("[image]".into()),
+        [Some(value)] => Ok(value.source_text()?.unwrap()),
+        _ => {
+            let crate::Json::Source(range) = content.to_json()? else {
+                unreachable!("selected array has source backing")
+            };
+            let source = range.captured_source();
+            text::append(source, &source.decoded_backing()?, |builder| {
+                for (i, part) in parts.into_iter().enumerate() {
+                    if i != 0 {
+                        builder.push("\n")?;
+                    }
+                    if let Some(part) = part {
+                        anyhow::ensure!(builder.push_string(part)?, "selected tool-result text");
+                    } else {
+                        builder.push("[image]")?;
+                    }
+                }
+                Ok(())
+            })
+        }
+    }
 }
 
 /// Every block of a `content` array; a bare string is one text block. (Claude's lazy reader spans
@@ -607,5 +679,61 @@ mod tests {
         assert_eq!(oc[2]["arguments"]["path"], "x");
         assert_eq!(oc[3]["mimeType"], "image/png");
         assert_eq!(tool_result_blocks(&blocks).unwrap().len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod selected_media_tests {
+    use super::*;
+    #[test]
+    fn composite_result_projection_matches_owned_codec_without_joined_body_ownership() -> anyhow::Result<()> {
+        let world = cv_testkit::World::in_process("wire-composite-result");
+        let path = world.base.join("result.json");
+        let body = "λ\n\"result\"".repeat(20000);
+        let value = json!({"type":"tool_result","tool_use_id":"call","is_error":true,"content":[{"text":""},{"text":body,"ignored":body},{"type":"image_url","text":"ignored image text"},{"text":""},{"text":body}],"ignored":body});
+        std::fs::write(&path, serde_json::to_vec(&value)?)?;
+        let source = crate::json::JsonSource::capture(&path)?;
+        let block = source
+            .read_range_value(0, source.len(), |view| block_from_view(view, &ANTHROPIC, true))?
+            .unwrap();
+        assert!(matches!(
+            &block,
+            Block::ToolResult {
+                content: Text::Source(_),
+                ..
+            }
+        ));
+        let mut session = crate::Session::new("result", crate::Harness::Claude);
+        let mut message = crate::Message::new(crate::Role::Tool);
+        message.content.push(block);
+        session.messages.push(message);
+        session.materialize()?;
+        assert_eq!(session.messages[0].content[0], block_from(&value, &ANTHROPIC).unwrap());
+        let block = source
+            .read_range_value(0, source.len(), |view| block_from_view(view, &ANTHROPIC, true))?
+            .unwrap();
+        std::fs::write(&path, b"changed after selected join")?;
+        if let Block::ToolResult { content, .. } = block {
+            assert!(content.try_resolve(&crate::lazy::Resolver::new(None)).is_err());
+        }
+        Ok(())
+    }
+    #[test]
+    fn flat_media_projection_matches_owned_codec_with_large_ignored_payloads() -> anyhow::Result<()> {
+        let world = cv_testkit::World::in_process("wire-flat-media");
+        let path = world.base.join("part.json");
+        for quirks in [OPENCLAW, GOOSE] {
+            for ty in ["image", "document"] {
+                for data in [json!(""), json!("λ\n\"".repeat(20000)), json!(false)] {
+                    let value = json!({"type":ty,"mimeType":"image/png","data":data,"name":"attachment","unknown":"x".repeat(200000)});
+                    std::fs::write(&path, serde_json::to_vec(&value)?)?;
+                    let source = crate::json::JsonSource::capture(&path)?;
+                    let selected =
+                        source.read_range_value(0, source.len(), |view| block_from_view(view, &quirks, true))?;
+                    assert_eq!(selected, block_from(&value, &quirks));
+                }
+            }
+        }
+        Ok(())
     }
 }
