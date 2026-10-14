@@ -664,7 +664,6 @@ fn team_runs(teams_db: &Path, sid: &str) -> Vec<crate::affordance::Affordance> {
         .unwrap_or_default();
     /// One team run as its events tell it: the last status and result win.
     struct Run {
-        id: String,
         queued: Option<DateTime<Utc>>,
         agent: String,
         task: String,
@@ -672,6 +671,9 @@ fn team_runs(teams_db: &Path, sid: &str) -> Vec<crate::affordance::Affordance> {
         result: String,
     }
     let mut runs: Vec<Run> = Vec::new();
+    // The Vec preserves first-event order; membership must not scan all prior runs
+    // for every update in a growing team's event log.
+    let mut run_positions = std::collections::HashMap::new();
     let mut teammates: Vec<(Option<DateTime<Utc>>, String)> = Vec::new();
     for (ts, ty, payload) in events {
         let Ok(p) = serde_json::from_str::<Value>(&payload) else {
@@ -689,18 +691,19 @@ fn team_runs(teams_db: &Path, sid: &str) -> Vec<crate::affordance::Affordance> {
         };
         let s = |k: &str| run.get(k).and_then(Value::as_str).unwrap_or("").to_string();
         let id = s("id");
-        let i = match runs.iter().position(|r| r.id == id) {
+        let i = match run_positions.get(&id).copied() {
             Some(i) => i,
             None => {
+                let index = runs.len();
+                run_positions.insert(id, index);
                 runs.push(Run {
-                    id,
                     queued: at,
                     agent: s("agentId"),
                     task: s("message"),
                     status: String::new(),
                     result: String::new(),
                 });
-                runs.len() - 1
+                index
             }
         };
         let r = &mut runs[i];
@@ -731,8 +734,9 @@ fn team_runs(teams_db: &Path, sid: &str) -> Vec<crate::affordance::Affordance> {
             row(r.queued, summary)
         })
         .collect();
+    let ran_agents: std::collections::HashSet<&str> = runs.iter().map(|r| r.agent.as_str()).collect();
     for (at, agent) in teammates {
-        if !runs.iter().any(|r| r.agent == agent) {
+        if !ran_agents.contains(agent.as_str()) {
             out.push(row(at, format!("{agent}: spawned, never ran")));
         }
     }
@@ -913,6 +917,64 @@ mod tests {
     /// The corpus run made no schedule, so the fire path is proven on the documented DDL
     /// (`ensureSessionSchema` / `ensureCronSchema`, the columns the reader selects): an execution
     /// and a cron run that ran as the session are its fires; the team events are its team.
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn wide_team_log_preserves_first_order_final_states_and_idle_duplicates() {
+        let world = cv_testkit::World::in_process("cline-wide-team-log");
+        let path = world.base.join("teams.db");
+        let count = 10_000;
+        {
+            let mut database = rusqlite::Connection::open(&path).unwrap();
+            database.execute_batch("CREATE TABLE team_events(id INTEGER PRIMARY KEY, team_name TEXT, ts TEXT, event_type TEXT, payload_json TEXT)").unwrap();
+            let transaction = database.transaction().unwrap();
+            {
+                let mut insert = transaction.prepare("INSERT INTO team_events(team_name,ts,event_type,payload_json) VALUES('lead','2026-10-11T05:00:00Z',?1,?2)").unwrap();
+                for index in 0..count {
+                    insert
+                        .execute(rusqlite::params![
+                            "teammate_spawned",
+                            json!({"agentId":format!("agent-{index}")}).to_string()
+                        ])
+                        .unwrap();
+                    insert
+                        .execute(rusqlite::params![
+                            "teammate_spawned",
+                            json!({"agentId":format!("idle-{index}")}).to_string()
+                        ])
+                        .unwrap();
+                    insert.execute(rusqlite::params!["run_queued", json!({"run":{"id":format!("run-{index}"),"agentId":format!("agent-{index}"),"message":format!("task-{index}"),"status":"queued"}}).to_string()]).unwrap();
+                }
+                // Reverse completion order must not replace first-event run order,
+                // agent/task identity, or the original queued timestamp.
+                for index in (0..count).rev() {
+                    insert.execute(rusqlite::params!["run_completed", json!({"run":{"id":format!("run-{index}"),"agentId":"changed","message":"changed","status":"completed","result":{"text":"done"},"error":"last error wins"}}).to_string()]).unwrap();
+                }
+                insert
+                    .execute(rusqlite::params!["teammate_spawned", r#"{"agentId":"idle-0"}"#])
+                    .unwrap();
+                insert.execute(rusqlite::params!["run_failed", "{malformed"]).unwrap();
+                insert
+                    .execute(rusqlite::params!["unrelated", r#"{"run":{"id":"ignored"}}"#])
+                    .unwrap();
+            }
+            transaction.commit().unwrap();
+        }
+        let rows = team_runs(&path, "lead");
+        assert_eq!(rows.len(), count * 2 + 1);
+        for (index, row) in rows[..count].iter().enumerate() {
+            assert_eq!(
+                row.summary,
+                format!("agent-{index}: task-{index} · completed → last error wins")
+            );
+            assert_eq!(row.timestamp, parse_ts("2026-10-11T05:00:00Z"));
+        }
+        for (index, row) in rows[count..count * 2].iter().enumerate() {
+            assert_eq!(row.summary, format!("idle-{index}: spawned, never ran"));
+        }
+        assert_eq!(rows.last().unwrap().summary, "idle-0: spawned, never ran");
+        assert!(team_runs(&path, "other lead").is_empty());
+    }
+
     #[cfg(feature = "sqlite")]
     #[test]
     fn schedule_fires_and_team_runs_from_the_side_databases() {
