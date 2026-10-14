@@ -46,10 +46,14 @@ fn collect_prompts(
     r: &SessionRef,
     adapter: &dyn cv_core::harness::Adapter,
     window: Option<(usize, Option<usize>)>,
+    prompts: bool,
+    answers: bool,
 ) -> Result<Vec<PromptRow>> {
     let mut rows = Vec::new();
     let mut idx = 0usize;
-    adapter.try_stream(r, &ParseOptions::default(), &mut |m: Message| {
+    let resolver = cv_core::Resolver::new(Some(r.path.clone()));
+    let mut error = None;
+    adapter.try_stream(r, &ParseOptions::lazy(), &mut |m: Message| {
         let i = idx;
         idx += 1;
         if let Some((s, e)) = window {
@@ -60,33 +64,91 @@ fn collect_prompts(
                 return Flow::Stop;
             }
         }
-        if m.kind == MessageKind::Prompt && m.origin == Origin::Human {
-            if let Some(text) = m.text().filter(|t| !t.trim().is_empty()) {
-                rows.push(PromptRow {
-                    index: i,
-                    timestamp: m.timestamp,
-                    kind: "prompt",
-                    text,
-                });
-            }
-        } else if m.role == Role::Tool || m.kind == MessageKind::ToolResult {
-            for b in &m.content {
-                if let Block::ToolResult { content, .. } = b {
-                    let head = content.trim_start();
-                    if ANSWER_MARKERS.iter().any(|mk| head.starts_with(mk)) {
-                        rows.push(PromptRow {
-                            index: i,
-                            timestamp: m.timestamp,
-                            kind: "answer",
-                            text: content.to_string(),
-                        });
+        let selected = (|| -> Result<()> {
+            if prompts && m.kind == MessageKind::Prompt && m.origin == Origin::Human {
+                let mut text = String::new();
+                for block in &m.content {
+                    if let Block::Text { text: body } = block {
+                        if !text.is_empty() {
+                            text.push('\n');
+                        }
+                        body.try_for_each_chunk(&resolver, 64 * 1024, |part| {
+                            text.push_str(part);
+                            Ok(())
+                        })?;
+                    }
+                }
+                if !text.trim().is_empty() {
+                    rows.push(PromptRow {
+                        index: i,
+                        timestamp: m.timestamp,
+                        kind: "prompt",
+                        text,
+                    });
+                }
+            } else if answers && (m.role == Role::Tool || m.kind == MessageKind::ToolResult) {
+                for block in &m.content {
+                    if let Block::ToolResult { content, .. } = block {
+                        if is_question_answer(content, &resolver)? {
+                            rows.push(PromptRow {
+                                index: i,
+                                timestamp: m.timestamp,
+                                kind: "answer",
+                                text: content.try_resolve(&resolver)?.into_owned(),
+                            });
+                        }
                     }
                 }
             }
+            Ok(())
+        })();
+        if let Err(failure) = selected {
+            error = Some(failure);
+            return Flow::Stop;
         }
         Flow::Continue
     })?;
+    if let Some(error) = error {
+        return Err(error);
+    }
     Ok(rows)
+}
+
+fn is_question_answer(content: &cv_core::Text, resolver: &cv_core::Resolver) -> Result<bool> {
+    #[derive(Debug)]
+    struct HeadComplete;
+    impl std::fmt::Display for HeadComplete {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("answer marker determined")
+        }
+    }
+    impl std::error::Error for HeadComplete {}
+    let mut head = String::new();
+    let mut started = false;
+    let mut answer = false;
+    let result = content.try_for_each_chunk(resolver, 4096, |part| {
+        for c in part.chars() {
+            if !started && c.is_whitespace() {
+                continue;
+            }
+            started = true;
+            head.push(c);
+            if ANSWER_MARKERS.iter().any(|marker| head.starts_with(marker)) {
+                answer = true;
+                return Err(HeadComplete.into());
+            }
+            if !ANSWER_MARKERS.iter().any(|marker| marker.starts_with(&head)) {
+                return Err(HeadComplete.into());
+            }
+        }
+        Ok(())
+    });
+    if let Err(error) = result {
+        if !error.is::<HeadComplete>() {
+            return Err(error);
+        }
+    }
+    Ok(answer)
 }
 
 /// What the person said in `r`, within `window`: typed prompts and/or `AskUserQuestion` answers,
@@ -99,8 +161,7 @@ pub(crate) fn print_prompts(
     answers: bool,
     json: bool,
 ) -> Result<()> {
-    let mut rows = collect_prompts(r, adapter, window)?;
-    rows.retain(|p| if p.kind == "prompt" { prompts } else { answers });
+    let rows = collect_prompts(r, adapter, window, prompts, answers)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&rows)?);
         return Ok(());
@@ -976,6 +1037,102 @@ pub(crate) fn cmd_deferrals(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prompt_selectors_only_resolve_selected_bodies_and_keep_window_indices() -> Result<()> {
+        struct Fixture(Vec<Message>);
+        impl cv_core::Adapter for Fixture {
+            fn harness(&self) -> cv_core::Harness {
+                cv_core::Harness::Claude
+            }
+            fn roots(&self) -> Vec<std::path::PathBuf> {
+                Vec::new()
+            }
+            fn discover(&self) -> Result<Vec<SessionRef>> {
+                Ok(Vec::new())
+            }
+            fn stream(
+                &self,
+                r: &SessionRef,
+                opts: &ParseOptions,
+                sink: &mut dyn cv_core::MessageSink,
+            ) -> Result<cv_core::Session> {
+                assert!(opts.spans);
+                for m in &self.0 {
+                    if sink.try_message(m.clone())? == Flow::Stop {
+                        break;
+                    }
+                }
+                Ok(cv_core::Session::new(&r.id, r.harness))
+            }
+        }
+        let world = cv_testkit::World::in_process("prompt-selected-demands");
+        let prompt_path = world.base.join("prompt.txt");
+        let answer_path = world.base.join("answer.txt");
+        let prompt = "typed🌙\n".repeat(1000);
+        let answer = format!("{}The user answered with a complete answer", "\u{2003}".repeat(3000));
+        std::fs::write(&prompt_path, &prompt)?;
+        std::fs::write(&answer_path, &answer)?;
+        let span = |path: &std::path::Path, len: usize| {
+            cv_core::Text::Span(cv_core::Span {
+                source: Some(path.into()),
+                offset: 0,
+                len: len as u64,
+                escaped: false,
+            })
+        };
+        let mut user = Message::new(Role::User);
+        user.content.push(Block::Text {
+            text: span(&prompt_path, prompt.len()),
+        });
+        let mut tool = Message::new(Role::Tool);
+        tool.content.push(Block::ToolResult {
+            tool_use_id: "question".into(),
+            content: span(&answer_path, answer.len()),
+            is_error: false,
+            tool_name: None,
+            status: None,
+            details: None,
+        });
+        let mut irrelevant = Message::new(Role::Assistant);
+        irrelevant.content.push(Block::Text {
+            text: span(&world.base.join("not-demanded"), 8000000),
+        });
+        let fixture = Fixture(vec![irrelevant, user, tool]);
+        let r = SessionRef::new("selection", cv_core::Harness::Claude, world.base.join("source"));
+        let both = collect_prompts(&r, &fixture, None, true, true)?;
+        assert_eq!(both.len(), 2);
+        assert_eq!((both[0].index, both[0].text.as_str()), (1, prompt.as_str()));
+        assert_eq!((both[1].index, both[1].text.as_str()), (2, answer.as_str()));
+        let window = collect_prompts(&r, &fixture, Some((2, Some(3))), true, true)?;
+        assert_eq!(window.len(), 1);
+        assert_eq!(window[0].index, 2);
+        std::fs::remove_file(&answer_path)?;
+        assert_eq!(collect_prompts(&r, &fixture, None, true, false)?[0].text, prompt);
+        assert!(collect_prompts(&r, &fixture, None, false, true).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn answer_marker_projection_matches_trim_start_at_partial_and_unicode_boundaries() -> Result<()> {
+        for text in [
+            "",
+            "The user",
+            "The user answered",
+            "Your questions have been answered:\nreply",
+            "\u{2003}\tUser answered your questions:reply",
+            "ordinary output",
+            "The user answeréd",
+        ] {
+            assert_eq!(
+                is_question_answer(&text.into(), &cv_core::Resolver::new(None))?,
+                ANSWER_MARKERS
+                    .iter()
+                    .any(|marker| text.trim_start().starts_with(marker))
+            );
+        }
+        Ok(())
+    }
 
     fn best_task_oracle(model: &cv_core::task::TaskReadModel, sentence: &str) -> Option<TaskMatch> {
         let words = significant_words(sentence);
