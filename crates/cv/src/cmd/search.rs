@@ -97,7 +97,7 @@ fn render_search_hits(
     if json {
         let stdout = std::io::stdout();
         let mut out = std::io::BufWriter::new(stdout.lock());
-        let rows = cv_core::rows::SearchRowContext::new();
+        let rows = std::cell::LazyCell::new(cv_core::rows::SearchRowContext::new);
         write_json_rows(&mut out, &hits, |hit| hit_json(hit, &rows))?;
         out.flush()?;
         return Ok(());
