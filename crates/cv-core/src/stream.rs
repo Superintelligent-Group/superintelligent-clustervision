@@ -1466,6 +1466,8 @@ mod tests {
                 "usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":3}}),
             ),
             "invalid json".into(),
+            " \u{2003} ".into(), // Blank physical rows still provide safe resume boundaries.
+            "[]".into(),         // Accepted non-object rows also preserve checkpoint boundaries.
             rec(
                 "r1",
                 serde_json::json!({"type":"tool_result","message":{"role":"user","parts":[

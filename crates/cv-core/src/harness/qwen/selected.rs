@@ -211,62 +211,64 @@ fn stream_with_projection(path: &Path, sink: &mut dyn MessageSink, discovery: bo
     let mut stopped = false;
     let file = std::fs::File::open(path)?;
     let skipped =
-        super::super::store::checked_lines::for_each(&file, 0, &source, |view, offset, complete, skipped| {
-            if !view.is_object()? {
-                return Ok(Flow::Continue);
-            }
-            let mut record = Map::new();
-            for key in [
-                "type",
-                "subtype",
-                "provenance",
-                "uuid",
-                "parentUuid",
-                "sessionId",
-                "timestamp",
-                "cwd",
-                "gitBranch",
-                "version",
-                "isSidechain",
-                "model",
-                "usageMetadata",
-            ] {
-                if discovery && key == "usageMetadata" {
-                    continue;
+        super::super::store::checked_lines::for_each_record(&file, 0, &source, |view, offset, complete, skipped| {
+            if let Some(view) = view {
+                if view.is_object()? {
+                    let mut record = Map::new();
+                    for key in [
+                        "type",
+                        "subtype",
+                        "provenance",
+                        "uuid",
+                        "parentUuid",
+                        "sessionId",
+                        "timestamp",
+                        "cwd",
+                        "gitBranch",
+                        "version",
+                        "isSidechain",
+                        "model",
+                        "usageMetadata",
+                    ] {
+                        if discovery && key == "usageMetadata" {
+                            continue;
+                        }
+                        if let Some(value) = view.get(key)? {
+                            record.insert(key.into(), value.resolve()?.into_owned());
+                        }
+                    }
+                    if let Some(payload) = view.get("systemPayload")? {
+                        let payload = if discovery {
+                            discovery_payload(payload, record.get("subtype").and_then(Value::as_str))?
+                        } else {
+                            payload.resolve()?.into_owned()
+                        };
+                        record.insert("systemPayload".into(), payload);
+                    }
+                    for (key, selected) in [
+                        ("executionContext", "approvalMode"),
+                        ("forkedFrom", "sessionId"),
+                        ("toolCallResult", "status"),
+                    ] {
+                        if let Some(value) = view.get(key)?.map(|v| v.get(selected)).transpose()?.flatten() {
+                            record.insert(key.into(), serde_json::json!({selected: value.resolve()?.into_owned()}));
+                        }
+                    }
+                    session_facts(&mut session, &record, parent);
+                    let blocks = if matches!(
+                        record.get("type").and_then(Value::as_str),
+                        Some("user" | "assistant" | "tool_result")
+                    ) {
+                        content(view, &source)?
+                    } else {
+                        Vec::new()
+                    };
+                    if !stopped
+                        && emit_record_with_content(&record, &mut session, &mut state, sink, Some(blocks)) == Flow::Stop
+                    {
+                        stopped = true;
+                    }
                 }
-                if let Some(value) = view.get(key)? {
-                    record.insert(key.into(), value.resolve()?.into_owned());
-                }
-            }
-            if let Some(payload) = view.get("systemPayload")? {
-                let payload = if discovery {
-                    discovery_payload(payload, record.get("subtype").and_then(Value::as_str))?
-                } else {
-                    payload.resolve()?.into_owned()
-                };
-                record.insert("systemPayload".into(), payload);
-            }
-            for (key, selected) in [
-                ("executionContext", "approvalMode"),
-                ("forkedFrom", "sessionId"),
-                ("toolCallResult", "status"),
-            ] {
-                if let Some(value) = view.get(key)?.map(|v| v.get(selected)).transpose()?.flatten() {
-                    record.insert(key.into(), serde_json::json!({selected: value.resolve()?.into_owned()}));
-                }
-            }
-            session_facts(&mut session, &record, parent);
-            let blocks = if matches!(
-                record.get("type").and_then(Value::as_str),
-                Some("user" | "assistant" | "tool_result")
-            ) {
-                content(view, &source)?
-            } else {
-                Vec::new()
-            };
-            if !stopped && emit_record_with_content(&record, &mut session, &mut state, sink, Some(blocks)) == Flow::Stop
-            {
-                stopped = true;
             }
             state.skipped = skipped;
             if !stopped && complete && sink.wants_checkpoint(offset) {

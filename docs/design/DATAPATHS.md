@@ -4570,3 +4570,12 @@ The original shell lane reported 136,467 B Rust / 2,618,560 B SQLite and a faili
 those are historical evidence, not a rerun of the current integration. The adapted Python driver
 and fixture controls pass **13 unit checks**. No Rust build or heap probe was run while root's
 workspace tests were active; the existing combined doctor gate supplies current binary evidence.
+
+Grok/Qwen lane convergence correction (2026-10-13): Qwen's selected replay now retains
+checkpoints at every completed physical row, including rejected JSON, blank rows, and accepted
+non-object values. The checked acceptance wrapper reuses the same positioned framing and exposes
+optional values for consumers needing physical boundaries; other consumers retain their accepted-
+value-only callback. Rejected-row counts are captured before checkpoints, preserving resume state.
+The Kimi Code discovery oracle fixture now uses the actual `agents/main/wire.jsonl` layout, so
+its state/title checks exercise transcript discovery rather than a missing wire fallback. Focused
+native controls are running; root owns combined native/portable convergence.

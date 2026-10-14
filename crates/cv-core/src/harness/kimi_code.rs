@@ -1821,7 +1821,8 @@ mod tests {
         let world = cv_testkit::World::in_process("kimi-code-discovery-selected");
         let dir = world.base.join("session-id");
         fs::create_dir_all(&dir)?;
-        let wire = dir.join("wire.jsonl");
+        let wire = main_wire(&dir);
+        fs::create_dir_all(wire.parent().unwrap())?;
         let body = "body λ\n".repeat(512 * 1024);
         let rows = [
             serde_json::json!({"type":"context.append_message","time":2,"message":{"role":"user","origin":{"kind":"injection"},"content":body}}),
