@@ -1074,7 +1074,8 @@ mod json_read_tests {
         let mut failed = Message::new(crate::Role::Tool);
         failed.content.push(Block::ToolResult {
             tool_use_id: "call".into(),
-            name: None,
+            tool_name: None,
+            status: None,
             details: None,
             is_error: true,
             content: "error: commit abcdef1 cannot be reverted because of conflicts".into(),
@@ -1084,7 +1085,8 @@ mod json_read_tests {
         let mut succeeded = Message::new(crate::Role::Tool);
         succeeded.content.push(Block::ToolResult {
             tool_use_id: "call".into(),
-            name: None,
+            tool_name: None,
+            status: None,
             details: None,
             is_error: false,
             content: "[main abcdef1] created".into(),
