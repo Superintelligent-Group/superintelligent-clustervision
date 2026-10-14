@@ -1220,13 +1220,14 @@ fn run_job(job: Job, f: &Fields, tx: &std::sync::mpsc::SyncSender<Out>, admissio
     tx.send(out).is_ok()
 }
 
-/// The least transcript between two checkpoints of a resumable pass (each serializes the session
-/// so far). An indexing pass takes one only after a chunk flush besides ([`ChunkSink`]), so a
-/// resumed pass re-reads about one chunk of body text, plus a line, before what was appended.
+/// Minimum checkpoint spacing: 4 MiB in production (2 KiB in tests). Checkpoints also require
+/// a chunk flush or the nominal maximum gap below. The shared amortized scheduler raises this
+/// minimum for states larger than a chunk, preserving exact replay history while reducing
+/// repeated snapshots; those large states can require a larger append reread suffix.
 const CHECKPOINT_EVERY: u64 = CHUNK_BYTES as u64;
 
-/// The most transcript an indexing pass reads without taking a checkpoint (see
-/// [`ChunkSink::wants_checkpoint`]).
+/// Nominal maximum checkpoint gap: 32 MiB in production (16 KiB in tests). Adapter boundaries
+/// and the shared snapshot-size spacing can delay this request further.
 const CHECKPOINT_AT_MOST: u64 = 8 * CHUNK_BYTES as u64;
 
 /// The version of what a mark's `fts` layer and the docs behind it mean, part of every mark's
@@ -1364,7 +1365,7 @@ fn job_pass(
         .map(|(_, done, reads)| (done, reads))
     } else {
         let opts = cv_core::ParseOptions::lazy();
-        cv_core::stream::stream_resumable(adapter, &job.r, &opts, event_sink, CHECKPOINT_EVERY, from)?
+        cv_core::stream::stream_resumable_amortized(adapter, &job.r, &opts, event_sink, CHECKPOINT_EVERY, from)?
             .map(|done| (done, cv_core::source::ReadSet::default()))
     };
     let Some((done, reads)) = done else { return Ok(None) };
@@ -1414,9 +1415,9 @@ fn index_session(
     let done = match events {
         Some(es) => {
             let mut tee = cv_core::TeeSink::new(&mut sink, es);
-            cv_core::stream::stream_resumable(adapter, r, &opts, &mut tee, CHECKPOINT_EVERY, from)?
+            cv_core::stream::stream_resumable_amortized(adapter, r, &opts, &mut tee, CHECKPOINT_EVERY, from)?
         }
-        None => cv_core::stream::stream_resumable(adapter, r, &opts, &mut sink, CHECKPOINT_EVERY, from)?,
+        None => cv_core::stream::stream_resumable_amortized(adapter, r, &opts, &mut sink, CHECKPOINT_EVERY, from)?,
     };
     let Some(done) = done else { return Ok(None) };
     sink.finish()?;
@@ -1961,7 +1962,7 @@ impl cv_core::MessageSink for ChunkSink<'_> {
     /// doc boundaries the chunking makes anyway (the more boundaries, the fewer conjunctive
     /// queries match within one doc); or after [`CHECKPOINT_AT_MOST`] of transcript without one,
     /// which only a stretch with little text reaches (giant tool outputs, telemetry), so a resumed
-    /// pass never re-reads much.
+    /// pass normally re-reads little. The shared scheduler can delay requests for large states.
     fn wants_checkpoint(&mut self, offset: u64) -> bool {
         !self.failed
             && self.err.is_none()

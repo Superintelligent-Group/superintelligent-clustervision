@@ -469,7 +469,7 @@ impl Checkpoint {
 
     /// `layer`'s state, when it is there and still reads as `T`.
     pub fn get<T: DeserializeOwned>(&self, layer: &str) -> Option<T> {
-        serde_json::from_value(self.state.get(layer)?.clone()).ok()
+        T::deserialize(self.state.get(layer)?).ok()
     }
 
     /// How many messages the pass had delivered at this point (the counter layer's count): the
@@ -897,13 +897,43 @@ pub fn stream_resumable(
     every: u64,
     from: Option<&Checkpoint>,
 ) -> Result<Option<Resumed>> {
+    stream_resumable_inner(adapter, r, opts, sink, (every, false), from)
+}
+
+/// A resumable pass whose checkpoint work is amortized against new transcript bytes.
+/// `every` is the minimum spacing; after a snapshot, the next one also waits for at least
+/// that snapshot's encoded size in new bytes. All layers still retain their exact owned state.
+/// Large growing replay histories therefore take fewer snapshots, at the cost of a larger
+/// suffix to reread on the next append. Fixed-boundary consumers use [`stream_resumable`].
+pub fn stream_resumable_amortized(
+    adapter: &dyn Adapter,
+    r: &SessionRef,
+    opts: &ParseOptions,
+    sink: &mut dyn MessageSink,
+    every: u64,
+    from: Option<&Checkpoint>,
+) -> Result<Option<Resumed>> {
+    stream_resumable_inner(adapter, r, opts, sink, (every, true), from)
+}
+
+fn stream_resumable_inner(
+    adapter: &dyn Adapter,
+    r: &SessionRef,
+    opts: &ParseOptions,
+    sink: &mut dyn MessageSink,
+    schedule: (u64, bool),
+    from: Option<&Checkpoint>,
+) -> Result<Option<Resumed>> {
+    let (every, amortized) = schedule;
     let mut counting = Counting::new(r, sink, Some(every));
+    counting.amortized = amortized;
     let session = match from {
         Some(cp) => {
             let Some(state) = cp.get::<CounterState>(COUNTER_LAYER) else {
                 return Ok(None);
             };
             counting.restore(state, cp.offset);
+            counting.space_after(cp);
             match adapter.try_resume(r, opts, &mut counting, cp)? {
                 Some(s) => s,
                 None => return Ok(None),
@@ -941,6 +971,26 @@ struct CounterState {
     dependencies: crate::source::ReadSet,
 }
 
+// Count the complete owned snapshot without allocating another JSON buffer. Value serialization
+// is infallible; saturating the count merely declines further checkpoints at unreachable offsets.
+fn checkpoint_bytes(cp: &Checkpoint) -> u64 {
+    struct Size(u64);
+    impl std::io::Write for Size {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(bytes.len() as u64);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut size = Size(0);
+    if serde_json::to_writer(&mut size, cp).is_err() {
+        return u64::MAX;
+    }
+    size.0
+}
+
 /// The wrapper every counted pass streams through: turns, messages and affordances as they go
 /// by, and (in a resumable pass) the checkpoints.
 struct Counting<'a> {
@@ -955,6 +1005,8 @@ struct Counting<'a> {
     /// Take a checkpoint every this many bytes (`None`: never).
     every: Option<u64>,
     last_offset: u64,
+    amortized: bool,
+    spacing: u64,
     last: Option<Checkpoint>,
 }
 
@@ -971,7 +1023,15 @@ impl<'a> Counting<'a> {
             error: None,
             every,
             last_offset: 0,
+            amortized: false,
+            spacing: every.unwrap_or(0),
             last: None,
+        }
+    }
+
+    fn space_after(&mut self, cp: &Checkpoint) {
+        if self.amortized {
+            self.spacing = self.every.unwrap_or(0).max(checkpoint_bytes(cp));
         }
     }
 
@@ -1032,7 +1092,8 @@ impl MessageSink for Counting<'_> {
     }
     fn wants_checkpoint(&mut self, offset: u64) -> bool {
         !self.stopped
-            && self.every.is_some_and(|e| offset >= self.last_offset.saturating_add(e))
+            && self.every.is_some()
+            && offset >= self.last_offset.saturating_add(self.spacing)
             && self.inner.wants_checkpoint(offset)
     }
     fn checkpoint(&mut self, cp: &mut Checkpoint) {
@@ -1055,6 +1116,7 @@ impl MessageSink for Counting<'_> {
             },
         );
         self.inner.checkpoint(cp);
+        self.space_after(cp);
         self.last_offset = cp.offset;
         self.last = Some(cp.clone());
     }
@@ -1253,6 +1315,58 @@ mod tests {
         }
         fn checkpoint(&mut self, cp: &mut Checkpoint) {
             self.cps.push(cp.clone());
+        }
+    }
+
+    #[test]
+    fn amortized_checkpoints_space_growing_owned_state_and_restore_the_schedule() {
+        let r = transcript(crate::Harness::Qwen, "growing.jsonl".into());
+        let mut fixed_sink = Discard;
+        let mut fixed = Counting::new(&r, &mut fixed_sink, Some(1024));
+        let mut sink = Discard;
+        let mut counting = Counting::new(&r, &mut sink, Some(1024));
+        counting.amortized = true;
+        let mut names = std::collections::BTreeMap::new();
+        let mut fixed_bytes = 0;
+        let mut snapshots = Vec::new();
+        let mut cumulative_bytes = 0;
+        for n in 1..=1024 {
+            names.insert(format!("call-{n}"), format!("tool-{}\n\"\u{1f680}", "x".repeat(64)));
+            let offset = n * 128;
+            if fixed.wants_checkpoint(offset) {
+                let mut cp = Checkpoint::new(offset);
+                cp.put(ADAPTER_LAYER, &names);
+                fixed.checkpoint(&mut cp);
+                fixed_bytes += serde_json::to_vec(&cp).unwrap().len() as u64;
+            }
+            if counting.wants_checkpoint(offset) {
+                let mut cp = Checkpoint::new(offset);
+                cp.put(ADAPTER_LAYER, &names);
+                counting.checkpoint(&mut cp);
+                let encoded = serde_json::to_vec(&cp).unwrap();
+                assert_eq!(checkpoint_bytes(&cp), encoded.len() as u64);
+                cumulative_bytes += encoded.len() as u64;
+                snapshots.push(cp);
+            }
+        }
+        let input_bytes = 1024 * 128;
+        assert!(fixed_bytes > 32 * input_bytes, "control must expose repeated prefixes");
+        assert!(cumulative_bytes <= 4 * input_bytes, "snapshot bytes={cumulative_bytes}");
+        assert!(snapshots.len() > 2, "must establish repeated and resumed snapshots");
+        for cp in snapshots {
+            let state = cp.get::<CounterState>(COUNTER_LAYER).unwrap();
+            let restored_names = cp
+                .get::<std::collections::BTreeMap<String, String>>(ADAPTER_LAYER)
+                .unwrap();
+            assert_eq!(restored_names.len() as u64, cp.offset / 128);
+            let mut resumed_sink = Keep::default();
+            let mut resumed = Counting::new(&r, &mut resumed_sink, Some(1024));
+            resumed.amortized = true;
+            resumed.restore(state, cp.offset);
+            resumed.space_after(&cp);
+            let spacing = 1024.max(serde_json::to_vec(&cp).unwrap().len() as u64);
+            assert!(!resumed.wants_checkpoint(cp.offset + spacing - 1));
+            assert!(resumed.wants_checkpoint(cp.offset + spacing));
         }
     }
 
