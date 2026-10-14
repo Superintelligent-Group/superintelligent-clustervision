@@ -8,6 +8,7 @@
 - Rewind, adopt and share exit 2 when their output name is already taken.
 - A transcript replaced or rewritten after parsing fails its first lazy content read instead of silently returning the replacement's bytes.
 - OpenSession preserves optional opaque principals through reads and transformations; mixed-source compositions retain attribution only when every source agrees.
+- The first fleet read after an upgrade that invalidates the catalog prints one stderr note that it is re-discovering, suggesting `cv index`.
 - `ls --json --enrich` `display_title` uses the row's `title` when present and never picks harness-injected turns such as Codex AGENTS.md instructions.
 - Claude rewind and port default to native for all-`claude-*` sessions, portable otherwise; portable removes signature-only reasoning instead of writing placeholders; rewind reports which.
 - Backend reads and exports index repeated membership and lineage lookups; account multipart reads keep bounded descriptors and discovery reuses guarded metadata.

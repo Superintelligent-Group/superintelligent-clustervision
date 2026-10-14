@@ -863,6 +863,10 @@ mod tests {
             0
         );
         assert!(crate::catalog::last_full_sync().is_none());
+        // The first full discovery after the upgrade announces itself, once.
+        let reader = crate::catalog::Reader::open().unwrap();
+        assert!(reader.take_rediscovery_notice());
+        assert!(!reader.take_rediscovery_notice());
         assert!(
             load_entry(&conn, &path, stat_key(&path).unwrap()).is_none(),
             "old persisted interpretation ignored"

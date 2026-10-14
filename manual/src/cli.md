@@ -190,11 +190,15 @@ Codex's AGENTS.md and environment context, the `Caveat:` preamble, bare command 
 tool-result turns); it is explicit `null` only when a session has neither. `title` itself is left
 untouched, so a consumer can tell "no title anywhere" from "not enriched". Enrichment costs one
 lazy transcript parse per emitted row — O(`--limit`), not the fleet — so plain `cv ls --json`
-stays a catalog-only, milliseconds-warm read.
+stays a catalog-only read.
 
 #### Freshness — what `ls` guarantees
 
-`cv ls` reads the **probed catalog**, not a full fleet scan: warm, it answers in milliseconds. The catalog's freshness rests on a staleness probe plus a time backstop (`CLUSTERVISION_MAX_STALE_SECS`, default **900s**):
+`cv ls` reads the **probed catalog**, not a full fleet scan. On a 7,000-session, 95 GB fleet a warm
+`cv ls` takes 0.2–1 s (it checks every primary source, below). The first read on a new home, or
+after an upgrade that changes how sessions are read, re-discovers the whole fleet: 4.5 minutes and
+14 CPU-minutes on that fleet. cv says so on stderr when an upgrade causes it; run `cv index` right
+after upgrading to pay it up front. The catalog's freshness rests on a staleness probe plus a time backstop (`CLUSTERVISION_MAX_STALE_SECS`, default **900s**):
 
 - **A new session in a watched directory is seen on the next read.** Creating a session bumps its directory's mtime; the probe re-stats watched directories and re-discovers the affected harness before reading. A first session in a previously empty deeper directory can escape those watches and remain unseen until the time backstop forces full discovery — at most `CLUSTERVISION_MAX_STALE_SECS` after the last full sync, on the next read.
 - **A new storage root is seen too.** When a root appears that the catalog does not watch yet (a new agent under a `*` entry in `claude-roots`, or a line added to that file — see [Harnesses](harnesses.md#claude-code-sessions-outside-claude)), the probe re-discovers that harness.

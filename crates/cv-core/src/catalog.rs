@@ -218,6 +218,14 @@ mod imp {
                     [&version],
                 )
                 .ok()?;
+                if old.is_some() {
+                    // An earlier cv built this catalog: the next full discovery says why it is slow.
+                    tx.execute(
+                        "INSERT OR REPLACE INTO catalog_meta(key,value) VALUES('rediscovery_notice',?1)",
+                        [&version],
+                    )
+                    .ok()?;
+                }
                 tx.commit().ok()?;
                 crate::discover_cache::invalidate_interpretation(path);
             }
@@ -706,6 +714,12 @@ mod imp {
     }
 
     /// Seconds-since-epoch of the last completed full discovery, if any. Absent = cold catalog.
+    /// Consume the notice a discovery-version upgrade left; exactly one caller sees `true`.
+    pub(super) fn take_rediscovery_notice_in(conn: &Connection) -> bool {
+        conn.execute("DELETE FROM catalog_meta WHERE key='rediscovery_notice'", [])
+            .is_ok_and(|n| n > 0)
+    }
+
     pub(super) fn last_full_sync_in(conn: &Connection) -> Option<i64> {
         conn.query_row("SELECT value FROM catalog_meta WHERE key='last_full_sync'", [], |r| {
             r.get::<_, String>(0)

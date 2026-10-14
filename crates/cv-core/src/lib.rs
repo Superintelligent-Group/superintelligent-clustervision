@@ -251,6 +251,11 @@ fn sessions_impl() -> (Vec<SessionRef>, bool) {
             }
         }
     }
+    if catalog.as_ref().is_some_and(catalog::Reader::take_rediscovery_notice) {
+        eprintln!(
+            "cv: note: re-discovering the fleet once for this cv version (minutes on a large fleet; `cv index` after upgrading does it ahead of time)"
+        );
+    }
     (discover_all_with_catalog(catalog), true)
 }
 

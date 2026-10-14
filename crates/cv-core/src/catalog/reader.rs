@@ -115,6 +115,18 @@ impl Reader {
         }
     }
 
+    /// Whether this is the first full discovery since a newer cv upgraded the catalog.
+    pub(crate) fn take_rediscovery_notice(&self) -> bool {
+        #[cfg(feature = "sqlite")]
+        {
+            super::imp::take_rediscovery_notice_in(&self.conn.lock().unwrap())
+        }
+        #[cfg(not(feature = "sqlite"))]
+        {
+            false
+        }
+    }
+
     pub(crate) fn probe_stale(&self) -> Option<Vec<Harness>> {
         #[cfg(feature = "sqlite")]
         {
