@@ -199,7 +199,7 @@ pub(crate) fn cmd_show(
     // An `agent-…` shaped id goes straight to the sub-agent view: cv_core::find_cheap can now
     // resolve these too (its fleet-wide fallback), but this path keeps the provenance banner and
     // lists candidates on an ambiguous prefix instead of erroring.
-    if id.starts_with("agent-") && show_agent_fleetwide(id, json, window)? {
+    if id.starts_with("agent-") && show_agent_fleetwide(id, want, json, window)? {
         return Ok(());
     }
     // find_cheap first: don't pay a full fleet re-discovery before trying the id as a sub-agent
@@ -210,7 +210,7 @@ pub(crate) fn cmd_show(
     let found = match cv_core::find_cheap(id, want) {
         Ok(Some(hit)) => Ok(Some(hit)),
         Ok(None) => {
-            if show_agent_fleetwide(id, json, window)? {
+            if show_agent_fleetwide(id, want, json, window)? {
                 return Ok(());
             }
             cv_core::find(id, want)
@@ -250,6 +250,9 @@ fn show_range(r: &SessionRef, window: &WindowArgs, pre_compaction: Option<usize>
     let Some(n) = pre_compaction else {
         return window.window();
     };
+    if n == 0 {
+        return usage("--pre-compaction is 1-based; use 1 for the first boundary");
+    }
     let comps = cv_core::compaction::detect(r, false)?;
     if comps.is_empty() {
         bail!("{} never compacted — nothing pre-compaction to show", short_id(&r.id));
@@ -667,12 +670,19 @@ fn render_text(
     Ok(())
 }
 
+fn agent_parents_for_harness(parents: Vec<SessionRef>, want: Option<Harness>) -> Vec<SessionRef> {
+    parents
+        .into_iter()
+        .filter(|parent| want.is_none_or(|h| parent.harness == h))
+        .collect()
+}
+
 /// `cv show <agent-id>` with no parent given: find which session(s) spawned the agent (filename
 /// scan across the fleet) and render it through the one parent — or list the candidates when the
 /// prefix is ambiguous. Returns `false` when nothing agent-shaped matched (the caller has one
 /// more reading of the id to try).
-fn show_agent_fleetwide(agent_id: &str, json: bool, window: &WindowArgs) -> Result<bool> {
-    let parents = cv_core::find_subagent_parents(agent_id);
+fn show_agent_fleetwide(agent_id: &str, want: Option<Harness>, json: bool, window: &WindowArgs) -> Result<bool> {
+    let parents = agent_parents_for_harness(cv_core::find_subagent_parents(agent_id), want);
     // Copies of one agent across sessions (`cv adopt`) read through the newest parent's copy.
     let parents = if parents.len() > 1 && cv_core::one_agent_across(&parents, agent_id) {
         eprintln!(
@@ -1712,6 +1722,20 @@ fn md_message(m: &Message) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fleetwide_agent_selection_honors_harness_and_zero_compaction_is_usage_error() {
+        let parents = vec![
+            SessionRef::new("claude-parent", Harness::Claude, "unused"),
+            SessionRef::new("codex-parent", Harness::Codex, "unused"),
+        ];
+        assert_eq!(agent_parents_for_harness(parents.clone(), None).len(), 2);
+        let selected = agent_parents_for_harness(parents, Some(Harness::Codex));
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].id, "codex-parent");
+        let error = show_range(&selected[0], &WindowArgs::default(), Some(0)).unwrap_err();
+        assert!(error.downcast_ref::<crate::util::UsageError>().is_some());
+    }
 
     #[test]
     fn lazy_tree_rows_preserve_owned_previews_and_first_user_label() -> Result<()> {
