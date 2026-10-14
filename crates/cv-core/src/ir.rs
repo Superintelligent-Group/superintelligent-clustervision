@@ -288,13 +288,16 @@ impl Session {
     pub fn first_user_text(&self) -> Option<String> {
         self.messages
             .iter()
-            .find(|m| m.role == Role::User)
-            .and_then(|m| m.text().filter(|t| !t.trim().is_empty()))
+            .filter(|m| m.role == Role::User)
+            .find_map(|m| m.text().filter(|t| !t.trim().is_empty()))
     }
 
     /// A short human label for listings.
     pub fn label(&self) -> String {
-        label_from(self.title.as_deref(), self.first_user_text().as_deref())
+        match self.title.as_deref() {
+            Some(title) => label_from(Some(title), None),
+            None => label_from(None, self.first_user_text().as_deref()),
+        }
     }
 
     /// The best title for a machine listing: the explicit [`title`](Session::title) when present,
@@ -1192,6 +1195,32 @@ pub fn home_rel(p: &std::path::Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn labels_skip_unused_bodies_and_empty_user_turns() {
+        let mut session = Session::new("label", Harness::Claude);
+        session.title = Some("explicit title".into());
+        let mut message = Message::new(Role::User);
+        message.content.push(Block::Text {
+            text: crate::Text::Span(crate::Span {
+                source: None,
+                offset: 0,
+                len: u64::MAX,
+                escaped: false,
+            }),
+        });
+        session.messages.push(message);
+        assert_eq!(session.label(), "explicit title");
+        session.title = None;
+        session.messages[0].content = vec![Block::Text { text: " \n".into() }];
+        let mut user = Message::new(Role::User);
+        user.content.push(Block::Text {
+            text: "actual prompt".into(),
+        });
+        session.messages.push(user);
+        assert_eq!(session.first_user_text().as_deref(), Some("actual prompt"));
+        assert_eq!(session.label(), "actual prompt");
+    }
 
     #[test]
     fn full_materialization_rejects_missing_span_sources_without_erasing_text() {
