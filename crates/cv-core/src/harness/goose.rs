@@ -320,54 +320,61 @@ fn discover_db(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
         let updated: Option<String> = row.get(4).ok().flatten();
         Ok((id, title, wd, created, updated))
     })?;
-    // One cursor pass counts actual codec turns across all sessions. Eligible native stores
-    // read large cells incrementally; tiny/in-memory/UTF-16/virtual stores keep the typed cursor.
-    let metadata = if columns(conn, "messages").contains("metadata_json") {
-        "metadata_json"
-    } else {
-        "NULL"
-    };
-    let source = if db.is_file() && super::store::sqlite::incremental_utf8_table(conn, "messages") {
-        Some(crate::json::JsonSource::capture(db)?)
-    } else {
-        None
-    };
-    let content_select = if source.is_some() {
-        "typeof(content_json)"
-    } else {
-        "content_json"
-    };
-    let metadata_select = if source.is_some() {
-        format!("typeof({metadata})")
-    } else {
-        metadata.to_owned()
-    };
-    let rowid_select = if source.is_some() { "_rowid_" } else { "NULL" };
     let mut counts = HashMap::<String, usize>::new();
-    let mut count_stmt = conn.prepare(&format!(
-        "SELECT session_id, role, {content_select}, {metadata_select}, {rowid_select} FROM messages"
-    ))?;
-    let mut messages = count_stmt.query([])?;
-    while let Some(row) = messages.next()? {
-        let role = row.get_ref(1).ok().and_then(|v| v.as_str().ok()).unwrap_or("user");
-        let turn = if let Some(source) = &source {
-            if row.get_ref(2)?.as_str()? != "text" {
-                false
-            } else {
-                count::incremental(conn, source, row.get(4)?, role, row.get_ref(3)?.as_str()? == "text")?
-            }
+    let message_columns = columns(conn, "messages");
+    // Older partial stores still list known sessions when message counts are unavailable.
+    if ["session_id", "role", "content_json"]
+        .iter()
+        .all(|column| message_columns.contains(*column))
+    {
+        // One cursor pass counts actual codec turns across all sessions. Eligible native stores
+        // read large cells incrementally; tiny/in-memory/UTF-16/virtual stores keep the typed cursor.
+        let metadata = if message_columns.contains("metadata_json") {
+            "metadata_json"
         } else {
-            let content = row.get_ref(2).ok().and_then(|v| v.as_str().ok());
-            let metadata = row.get_ref(3).ok().and_then(|v| v.as_str().ok());
-            content.is_some_and(|content| count::cell(role, content, metadata))
+            "NULL"
         };
-        if turn {
-            let id: String = row.get(0)?;
-            *counts.entry(id).or_default() += 1;
+        let source = if db.is_file() && super::store::sqlite::incremental_utf8_table(conn, "messages") {
+            Some(crate::json::JsonSource::capture(db)?)
+        } else {
+            None
+        };
+        let content_select = if source.is_some() {
+            "typeof(content_json)"
+        } else {
+            "content_json"
+        };
+        let metadata_select = if source.is_some() {
+            format!("typeof({metadata})")
+        } else {
+            metadata.to_owned()
+        };
+        let rowid_select = if source.is_some() { "_rowid_" } else { "NULL" };
+        let mut count_stmt = conn.prepare(&format!(
+            "SELECT session_id, role, {content_select}, {metadata_select}, {rowid_select} FROM messages"
+        ))?;
+        let mut messages = count_stmt.query([])?;
+        while let Some(row) = messages.next()? {
+            let role = row.get_ref(1).ok().and_then(|v| v.as_str().ok()).unwrap_or("user");
+            let turn = if let Some(source) = &source {
+                if row.get_ref(2)?.as_str()? != "text" {
+                    false
+                } else {
+                    count::incremental(conn, source, row.get(4)?, role, row.get_ref(3)?.as_str()? == "text")?
+                }
+            } else {
+                let content = row.get_ref(2).ok().and_then(|v| v.as_str().ok());
+                let metadata = row.get_ref(3).ok().and_then(|v| v.as_str().ok());
+                content.is_some_and(|content| count::cell(role, content, metadata))
+            };
+            if turn {
+                let id: String = row.get(0)?;
+                *counts.entry(id).or_default() += 1;
+            }
         }
-    }
-    if let Some(source) = source {
-        source.check()?;
+        if let Some(source) = source {
+            source.check()?;
+        }
     }
     let mut out = Vec::new();
     for row in rows.flatten() {
@@ -1988,6 +1995,23 @@ mod tests {
             refs[0].message_count,
             parsed.messages.iter().filter(|m| m.is_turn()).count()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn discovery_keeps_known_sessions_when_message_count_schema_is_unavailable() -> Result<()> {
+        let conn = mk(SCHEMA);
+        conn.execute("INSERT INTO sessions(id,working_dir) VALUES ('known','/synthetic')", [])?;
+        conn.execute("DROP TABLE messages", [])?;
+        for incomplete in [None, Some("CREATE TABLE messages(session_id TEXT,content_json TEXT)")] {
+            if let Some(schema) = incomplete {
+                conn.execute_batch(schema)?;
+            }
+            let refs = discover_db(&conn, Path::new("sessions.db"))?;
+            assert_eq!(refs.len(), 1);
+            assert_eq!(refs[0].id, "known");
+            assert_eq!(refs[0].message_count, 0);
+        }
         Ok(())
     }
 
