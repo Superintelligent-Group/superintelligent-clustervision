@@ -375,7 +375,7 @@ fn projected<'a>(message: &'a Message, mode: ThinkingMode, resolver: &Resolver) 
 #[derive(Default)]
 struct ParentLinks {
     links: HashMap<String, Option<String>>,
-    resolved: HashMap<String, Option<String>>,
+    resolved: HashMap<String, std::sync::Arc<Option<String>>>,
     #[cfg(test)]
     probes: usize,
 }
@@ -392,13 +392,15 @@ impl ParentLinks {
         let mut parent = Some(pid);
         let mut path = Vec::new();
         let mut completed = false;
+        let mut shared = None;
         for _ in 0..=self.links.len() {
             let Some(id) = parent.as_ref() else {
                 completed = true;
                 break;
             };
             if let Some(cached) = self.resolved.get(id) {
-                parent = cached.clone();
+                parent = cached.as_ref().clone();
+                shared = Some(cached.clone());
                 completed = true;
                 break;
             }
@@ -417,9 +419,10 @@ impl ParentLinks {
                 }
             }
         }
-        if completed || parent.is_none() {
+        if !path.is_empty() && (completed || parent.is_none()) {
+            let shared = shared.unwrap_or_else(|| std::sync::Arc::new(parent.clone()));
             for id in path {
-                self.resolved.insert(id, parent.clone());
+                self.resolved.insert(id, shared.clone());
             }
         }
         parent
@@ -784,6 +787,24 @@ mod parent_tests {
             assert_eq!(parents.resolve("d0".into()), None);
         }
     }
+    #[test]
+    fn parent_cache_shares_wide_resolved_endpoints_across_the_path() {
+        let mut parents = ParentLinks::default();
+        let wide = "root".repeat(100000);
+        for n in 0..1024 {
+            parents.insert(
+                format!("d{n}"),
+                Some(if n == 1023 { wide.clone() } else { format!("d{}", n + 1) }),
+            );
+        }
+        assert_eq!(parents.resolve("d0".into()), Some(wide));
+        let endpoint = parents.resolved.get("d0").unwrap();
+        assert!(parents
+            .resolved
+            .values()
+            .all(|value| std::sync::Arc::ptr_eq(value, endpoint)));
+    }
+
     #[test]
     fn emitted_forward_parent_fanout_matches_owned_native_oracle() -> Result<()> {
         let world = cv_testkit::World::in_process("claude-parent-fanout");
