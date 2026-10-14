@@ -684,7 +684,7 @@ fn stream_conn_with_demand(
     // session-level metadata (guard optional columns for historical schemas).
     let scols = columns(conn, "sessions");
     let expr = |col: &str| {
-        if scols.contains(col) {
+        if scols.contains(col) && (!count_only || matches!(col, "parent_session_id" | "end_reason" | "model_config")) {
             col.to_string()
         } else {
             "NULL".to_string()
@@ -729,7 +729,17 @@ fn stream_conn_with_demand(
         bag: mut hermes_bag,
         system_prompt,
         imported,
-    } = read_session_facts(conn, &r.id, source.as_deref(), end_reason.as_deref(), opts);
+    } = if count_only {
+        // Turn classification/replay do not inspect imported origin or system-prompt/header
+        // payloads. Listing already owns its title/cwd; avoid reading these fields again here.
+        SessionFacts {
+            bag: Default::default(),
+            system_prompt: None,
+            imported: false,
+        }
+    } else {
+        read_session_facts(conn, &r.id, source.as_deref(), end_reason.as_deref(), opts)
+    };
     // A foreign import: every message of the session came through the importer.
     let session_origin = imported.then_some(Origin::Import);
 
