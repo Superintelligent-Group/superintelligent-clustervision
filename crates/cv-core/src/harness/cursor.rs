@@ -892,6 +892,9 @@ mod tests {
 
     #[test]
     fn native_ide_failed_command_and_reopened_conversation() {
+        use crate::harness::Parse;
+
+        let _world = cv_testkit::World::in_process("cursor-native-ide");
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/cursor/3.24.12-ide/Cursor/User");
         let adapter = Cursor::with_user_dir(&root);
         let refs = adapter.discover().unwrap();
