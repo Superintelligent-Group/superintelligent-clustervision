@@ -64,6 +64,41 @@ pub(super) fn transcript(
     let stage = stage.into_inner().map_err(|e| e.into_error())?;
     publish_stage(stage, path)
 }
+/// Continue's OpenAI usage counts include cache reads in the prompt total.
+pub(super) fn native_usage(usage: &Usage, model: Option<&str>) -> Result<Map<String, Value>> {
+    let mut out = Map::new();
+    if let Some(input) = usage.input_tokens {
+        let prompt = input
+            .checked_add(usage.cache_read_tokens.unwrap_or(0))
+            .ok_or_else(|| anyhow::anyhow!("Continue prompt token count overflows u64"))?;
+        out.insert("prompt_tokens".into(), json!(prompt));
+    }
+    if let Some(output) = usage.output_tokens {
+        out.insert("completion_tokens".into(), json!(output));
+    }
+    if let Some(cached) = usage.cache_read_tokens {
+        out.insert("prompt_tokens_details".into(), json!({"cached_tokens":cached}));
+    }
+    if let Some(reasoning) = usage.reasoning_tokens {
+        out.insert(
+            "completion_tokens_details".into(),
+            json!({"reasoning_tokens":reasoning}),
+        );
+    }
+    if let Some(cost) = usage.cost_usd {
+        let cents = cost * 100.0;
+        anyhow::ensure!(
+            cost.is_finite() && cents.is_finite(),
+            "Continue cost cannot be represented as finite cost_cents"
+        );
+        out.insert("cost_cents".into(), json!(cents));
+    }
+    if let Some(model) = model {
+        out.insert("model".into(), json!(model));
+    }
+    Ok(out)
+}
+
 fn item(
     w: &mut dyn Write,
     msg: &Message,
@@ -163,6 +198,11 @@ fn item(
                     w.write_all(b"]")?;
                     Ok(())
                 })?;
+            }
+        }
+        if msg.role == Role::Assistant {
+            if let Some(usage) = &msg.usage {
+                message.field("usage", native_usage(usage, msg.model.as_deref())?)?;
             }
         }
         message.finish()
@@ -275,6 +315,81 @@ fn legacy_emit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cn_usage_cost_and_partial_fields_roundtrip_without_invented_counts() -> Result<()> {
+        let world = cv_testkit::World::in_process("continue_usage_cost");
+        let store = world.home.join(".continue");
+        fs::create_dir_all(store.join("sessions"))?;
+        let path = store.join("sessions/source.json");
+        let body = "answer 雪\n\"\\".repeat(10_000);
+        let doc = json!({"sessionId":"source","history":[
+            {"message":{"role":"assistant","content":body,"usage":{"prompt_tokens":100,"completion_tokens":7,"prompt_tokens_details":{"cached_tokens":40},"completion_tokens_details":{"reasoning_tokens":3},"model":"native-model","cost_cents":2}}},
+            {"message":{"role":"assistant","content":"partial","usage":{"prompt_tokens_details":{"cached_tokens":11},"cost_cents":0}}},
+            {"message":{"role":"assistant","content":"empty usage","usage":{}}}
+        ]});
+        fs::write(&path, serde_json::to_vec(&doc)?)?;
+        let adapter = crate::harness::continuedev::Continue::with_root(&store);
+        let session = crate::stream::collect_with(
+            &adapter,
+            &crate::SessionRef::new("source", Harness::Continue, &path),
+            &crate::stream::ParseOptions::lazy(),
+        )?;
+        let opts = crate::emit::EmitOptions {
+            new_id: Some("copy".into()),
+            ..Default::default()
+        };
+        let (emitted, report) = crate::emit::emit_report(&session, Harness::Continue, &store.join("sessions"), &opts)?;
+        assert!(!report
+            .deltas
+            .iter()
+            .any(|delta| delta.field == "usage" || delta.field == "usage cost"));
+        let reparsed = crate::stream::collect_with(
+            &adapter,
+            &crate::SessionRef::new("copy", Harness::Continue, &emitted.path),
+            &crate::stream::ParseOptions::full(),
+        )?;
+        assert_eq!(reparsed.messages.len(), session.messages.len());
+        for (source, copied) in session.messages.iter().zip(&reparsed.messages) {
+            assert_eq!(
+                serde_json::to_value(&source.usage)?,
+                serde_json::to_value(&copied.usage)?
+            );
+            assert_eq!(source.model, copied.model);
+        }
+        let native: Value = serde_json::from_slice(&fs::read(&emitted.path)?)?;
+        assert_eq!(native["history"][0]["message"]["usage"]["prompt_tokens"], 100);
+        assert_eq!(native["history"][0]["message"]["usage"]["cost_cents"], 2.0);
+        assert!(native["history"][1]["message"]["usage"].get("prompt_tokens").is_none());
+        assert_eq!(native["history"][2]["message"]["usage"], json!({}));
+        let mut unsupported = session.clone();
+        unsupported.messages[0].usage.as_mut().unwrap().cache_creation_tokens = Some(17);
+        let (_, report) = crate::emit::emit_report(&unsupported, Harness::Continue, &store.join("sessions"), &opts)?;
+        let loss = report
+            .deltas
+            .iter()
+            .find(|delta| delta.field == "usage cache creation tokens")
+            .expect("native cache-write absence is reported");
+        assert!(loss.expected);
+        assert!(!report
+            .deltas
+            .iter()
+            .any(|delta| delta.field == "usage" || delta.field == "usage cost"));
+        let before = fs::read(&emitted.path)?;
+        let index_before = fs::read(store.join("sessions/sessions.json"))?;
+        let mut overflow = session.clone();
+        overflow.messages[0].usage.as_mut().unwrap().input_tokens = Some(u64::MAX);
+        overflow.messages[0].usage.as_mut().unwrap().cache_read_tokens = Some(1);
+        let error = super::super::emit(&overflow, &store.join("sessions"), &opts).unwrap_err();
+        assert!(error.to_string().contains("overflows u64"));
+        overflow.messages[0].usage.as_mut().unwrap().input_tokens = Some(60);
+        overflow.messages[0].usage.as_mut().unwrap().cost_usd = Some(f64::MAX);
+        let error = super::super::emit(&overflow, &store.join("sessions"), &opts).unwrap_err();
+        assert!(error.to_string().contains("finite cost_cents"));
+        assert_eq!(fs::read(emitted.path)?, before);
+        assert_eq!(fs::read(store.join("sessions/sessions.json"))?, index_before);
+        Ok(())
+    }
+
     #[test]
     fn cn_grouped_tool_results_emit_every_call_and_body() -> Result<()> {
         let world = cv_testkit::World::in_process("continue_grouped_results");

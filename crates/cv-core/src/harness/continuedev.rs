@@ -399,6 +399,16 @@ fn history_item(msg: &Message, session_model: Option<&str>) -> Result<Value> {
         }
     }
 
+    // The owned control includes the same newly supported native usage field; body construction
+    // remains independent of the checked writer and the native roundtrip pins numeric semantics.
+    if msg.role == Role::Assistant {
+        if let Some(usage) = &msg.usage {
+            message.insert(
+                "usage".into(),
+                Value::Object(emit::native_usage(usage, msg.model.as_deref())?),
+            );
+        }
+    }
     let mut item = Map::new();
     item.insert("message".into(), Value::Object(message));
     item.insert("contextItems".into(), Value::Array(context_items));

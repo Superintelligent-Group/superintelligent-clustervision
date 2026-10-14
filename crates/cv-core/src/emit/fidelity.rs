@@ -236,6 +236,8 @@ pub(super) struct Features {
     results_is_error: usize,
     usage: usize,
     cost: usize,
+    // Continue carries usage/cost but has no native cache-write field.
+    continue_cache_creation: usize,
     // Timestamps and ids are counted separately for TOOL turns, because a store that keeps a tool
     // result inside its originating call's record gives that turn no record of its own to carry
     // them on — see the `id:tool_turn` arm of [`target_holds`].
@@ -389,8 +391,11 @@ impl Features {
         // part). Claude also writes a `usage` block on its synthetic client-side error notices,
         // which parse as System turns — counting those made every real port report 13 lost usages
         // that no target has a slot for.
-        if m.usage.is_some() && m.role == Role::Assistant {
+        if let (Role::Assistant, Some(usage)) = (m.role, &m.usage) {
             f.usage += 1;
+            if target == Harness::Continue && usage.cache_creation_tokens.is_some() {
+                f.continue_cache_creation += 1;
+            }
         }
         if m.usage.as_ref().and_then(|u| u.cost_usd).is_some() && m.role == Role::Assistant {
             f.cost += 1;
@@ -459,7 +464,7 @@ pub(super) fn role_str(r: Role) -> &'static str {
 /// Anthropic signature-only thinking survives only into Anthropic-shaped stores; OpenAI encrypted
 /// reasoning only into OpenAI-shaped ones; per-message ids not into Codex/Hermes; a standalone tool
 /// name on a *result* only where the format has a slot for it; structured `details` only into
-/// Claude's `toolUseResult` / OpenCode's tool `state`; cost only into OpenCode.
+/// Claude's `toolUseResult` / OpenCode's tool `state`; cost into OpenCode or Continue.
 pub(super) fn target_holds(t: Harness, field: &str) -> bool {
     use Harness::*;
     match field {
@@ -488,8 +493,9 @@ pub(super) fn target_holds(t: Harness, field: &str) -> bool {
         // to read: `hermes.rs` builds every tool row's block with `is_error: false`.
         "is_error" => !matches!(t, LmStudio | Hermes),
         "details" => matches!(t, Claude | OpenCode),
-        "usage" => !matches!(t, Grok | Cline | Roo | Continue),
-        "cost" => matches!(t, OpenCode),
+        "usage" => !matches!(t, Grok | Cline | Roo),
+        "cost" => matches!(t, OpenCode | Continue),
+        "usage:cache_creation" => t != Continue,
         // Grok's `chat_history.jsonl` turns carry no per-message timestamp; LM Studio none either.
         "timestamp" => !matches!(t, LmStudio | Grok),
         // Per-message ids: kept by the stores that thread by a stable id.
@@ -748,6 +754,13 @@ pub(super) fn diff_features(
     );
     count_delta(&mut deltas, "usage", "usage", before.usage, after.usage);
     count_delta(&mut deltas, "cost", "usage cost", before.cost, after.cost);
+    count_delta(
+        &mut deltas,
+        "usage:cache_creation",
+        "usage cache creation tokens",
+        before.continue_cache_creation,
+        after.continue_cache_creation,
+    );
     count_delta(
         &mut deltas,
         "timestamp",
