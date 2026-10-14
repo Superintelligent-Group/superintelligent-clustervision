@@ -343,14 +343,18 @@ pub enum SubagentDemand {
 pub fn subagent_tree_filtered_of(
     r: &SessionRef,
     demand: SubagentDemand,
+    workflow: Option<&str>,
     select: impl Fn(&str, Option<&str>) -> bool + Sync,
 ) -> Vec<SubagentInfo> {
     if r.harness == Harness::Claude {
-        harness::claude::subagent_tree_filtered(&r.path, demand, &select)
+        harness::claude::subagent_tree_filtered(&r.path, demand, workflow, &select)
     } else {
         subagent_tree_of(r)
             .into_iter()
-            .filter(|s| select(&s.session.id, s.workflow.as_deref()))
+            .filter(|s| {
+                workflow.is_none_or(|run| s.workflow.as_deref() == Some(run))
+                    && select(&s.session.id, s.workflow.as_deref())
+            })
             .collect()
     }
 }
@@ -567,7 +571,7 @@ fn find_subagent_session(id: &str, harness: Option<Harness>) -> Result<Option<Fo
     // Within the one parent, mirror `resolve_id`'s contract: exact match wins, a unique prefix
     // resolves, several distinct prefix hits are an ambiguity error.
     let mut hits: Vec<SessionRef> = Vec::new();
-    for s in subagent_tree_filtered_of(parent, SubagentDemand::Sessions, |candidate, _| {
+    for s in subagent_tree_filtered_of(parent, SubagentDemand::Sessions, None, |candidate, _| {
         candidate.starts_with(id)
     }) {
         if s.session.id == id {
@@ -594,7 +598,7 @@ pub fn one_agent_across(parents: &[SessionRef], id: &str) -> bool {
     let ids: std::collections::BTreeSet<String> = parents
         .iter()
         .flat_map(|parent| {
-            subagent_tree_filtered_of(parent, SubagentDemand::Sessions, |candidate, _| {
+            subagent_tree_filtered_of(parent, SubagentDemand::Sessions, None, |candidate, _| {
                 candidate.starts_with(&want)
             })
         })

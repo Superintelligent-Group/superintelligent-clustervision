@@ -498,7 +498,7 @@ fn selected_tool_agents(
         return Ok(Vec::new());
     }
     let workflow_member = std::sync::atomic::AtomicBool::new(false);
-    let selected = crate::subagent_tree_filtered_of(r, demand, |id, run| {
+    let selected = crate::subagent_tree_filtered_of(r, demand, workflow, |id, run| {
         let matches_workflow = workflow.is_none_or(|wanted| run == Some(wanted));
         if matches_workflow {
             workflow_member.store(true, std::sync::atomic::Ordering::Relaxed);

@@ -1276,13 +1276,13 @@ impl SubagentInfo {
 /// workflow tier (which on a heavy session is the *majority* of the agents) and drops the
 /// meta/journal sidecars that carry each agent's purpose and outcome. Newest first.
 pub fn subagent_tree(parent_path: &std::path::Path) -> Vec<SubagentInfo> {
-    subagent_tree_inner(parent_path, crate::SubagentDemand::Rich, &|_, _| true)
+    subagent_tree_inner(parent_path, crate::SubagentDemand::Rich, None, &|_, _| true)
 }
 
 /// Token aggregation needs the full forest and its metadata order, without task descriptions or
 /// journaled return bodies. Unchanged child metadata reuses the versioned discovery scan cache.
 pub(crate) fn subagent_session_refs(parent_path: &std::path::Path) -> Vec<SessionRef> {
-    subagent_tree_inner(parent_path, crate::SubagentDemand::Sessions, &|_, _| true)
+    subagent_tree_inner(parent_path, crate::SubagentDemand::Sessions, None, &|_, _| true)
         .into_iter()
         .map(|s| s.session)
         .collect()
@@ -1291,14 +1291,16 @@ pub(crate) fn subagent_session_refs(parent_path: &std::path::Path) -> Vec<Sessio
 pub(crate) fn subagent_tree_filtered(
     parent_path: &Path,
     demand: crate::SubagentDemand,
+    workflow: Option<&str>,
     select: &(impl Fn(&str, Option<&str>) -> bool + Sync),
 ) -> Vec<SubagentInfo> {
-    subagent_tree_inner(parent_path, demand, select)
+    subagent_tree_inner(parent_path, demand, workflow, select)
 }
 
 fn subagent_tree_inner(
     parent_path: &Path,
     demand: crate::SubagentDemand,
+    workflow: Option<&str>,
     select: &(impl Fn(&str, Option<&str>) -> bool + Sync),
 ) -> Vec<SubagentInfo> {
     let Some(base) = sidecar::subagents_dir(parent_path) else {
@@ -1308,12 +1310,19 @@ fn subagent_tree_inner(
     let mut out: Vec<SubagentInfo> = Vec::new();
 
     // Tier 1: directly-spawned sub-agents at `subagents/agent-*.jsonl`.
-    out.extend(agents_in_dir(&base, None, demand, select));
+    if workflow.is_none() {
+        out.extend(agents_in_dir(&base, None, demand, select));
+    }
 
     // Tier 2: workflow sub-agents at `subagents/workflows/<wf>/agent-*.jsonl`, grouped by run id,
     // each annotated with the result the workflow `journal.jsonl` recorded for its agentId.
     if let Some(rd) = sidecar::workflow_runs_dir(parent_path).and_then(|d| fs::read_dir(d).ok()) {
-        let wf_dirs: Vec<PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+        let wf_dirs: Vec<PathBuf> = rd
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| workflow.is_none_or(|run| p.file_name().and_then(|name| name.to_str()) == Some(run)))
+            .filter(|p| p.is_dir())
+            .collect();
         let groups = crate::par_flat_map(wf_dirs, |wf_dir| {
             let run_id = wf_dir.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
             agents_in_dir(&wf_dir, Some(&run_id), demand, select)
@@ -3246,9 +3255,16 @@ mod tests {
         assert_eq!(tree.len(), 3, "two tiers: 1 direct + 2 workflow");
 
         let before = FOREST_READS.lock().unwrap().1.len();
-        let tools = subagent_tree_filtered(&parent, crate::SubagentDemand::Tools, &|id, run| {
+        let candidates = std::sync::atomic::AtomicUsize::new(0);
+        let tools = subagent_tree_filtered(&parent, crate::SubagentDemand::Tools, Some("wf_abc-123"), &|id, run| {
+            candidates.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             id == "agent-a222" && run == Some("wf_abc-123")
         });
+        assert_eq!(
+            candidates.load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "the direct-agent directory is outside the selected workflow"
+        );
         assert_eq!(tools.len(), 1);
         let original = tree.iter().find(|s| s.agent_id() == "a222").unwrap();
         assert_eq!(
@@ -3273,7 +3289,9 @@ mod tests {
             .all(|(kind, path)| *kind != "journal"
                 && path.file_name().unwrap().to_string_lossy().starts_with("agent-a222.")));
         let before = FOREST_READS.lock().unwrap().1.len();
-        let sessions = subagent_tree_filtered(&parent, crate::SubagentDemand::Sessions, &|id, _| id == "agent-a111");
+        let sessions = subagent_tree_filtered(&parent, crate::SubagentDemand::Sessions, None, &|id, _| {
+            id == "agent-a111"
+        });
         assert_eq!(sessions.len(), 1);
         let reads: Vec<_> = FOREST_READS.lock().unwrap().1[before..]
             .iter()
@@ -3281,7 +3299,8 @@ mod tests {
             .cloned()
             .collect();
         assert_eq!(reads, [("transcript", a1.clone())]);
-        let selected_rich = subagent_tree_filtered(&parent, crate::SubagentDemand::Rich, &|id, _| id == "agent-a222");
+        let selected_rich =
+            subagent_tree_filtered(&parent, crate::SubagentDemand::Rich, None, &|id, _| id == "agent-a222");
         assert_eq!(
             serde_json::to_value(&selected_rich[0]).unwrap(),
             serde_json::to_value(original).unwrap()

@@ -600,7 +600,7 @@ fn subagent(harness: &str, parent: &str, agent: &str) -> (u16, Value) {
         Err((404, _)) => return err(404, "parent session not found"),
         Err(e) => return e,
     };
-    let Some(sr) = crate::subagent_tree_filtered_of(&r, crate::SubagentDemand::Sessions, |id, _| {
+    let Some(sr) = crate::subagent_tree_filtered_of(&r, crate::SubagentDemand::Sessions, None, |id, _| {
         id == agent || id.strip_prefix("agent-") == Some(agent)
     })
     .into_iter()
