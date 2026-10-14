@@ -147,6 +147,9 @@ impl Adapter for KimiCode {
         let Some(root) = &self.root else {
             return Ok(vec![]);
         };
+        let mut shared_reads = crate::source::ReadSet::default();
+        shared_reads.record(&root.join("session_index.jsonl"));
+        shared_reads.record(&root.join("workspaces.json"));
         let index = read_session_index(&root.join("session_index.jsonl"));
         let workspaces = read_workspaces(&root.join("workspaces.json"));
 
@@ -186,11 +189,12 @@ impl Adapter for KimiCode {
             }
         }
         Ok(crate::par_discovery_flat_map(dirs, |(sdir, id, fallback_cwd)| {
-            // Key the freshness check on the transcript (state.json is rewritten too, but the
-            // transcript grows on every turn and is what the scan reads).
+            let mut reads = shared_reads.clone();
+            reads.record(&sdir.join("state.json"));
             let key = main_wire(&sdir);
+            reads.record(&key);
             let key = if key.exists() { key } else { sdir.join("state.json") };
-            crate::discover_cache::cached_scan(&key, || scan(&sdir, &id, fallback_cwd))
+            crate::discover_cache::cached_scan_with_reads(&key, reads, || scan(&sdir, &id, fallback_cwd))
                 .into_iter()
                 .collect()
         }))
@@ -1815,6 +1819,52 @@ fn push_parts(m: &mut Message, content: Option<&Value>) {
 mod tests {
     use super::*;
     use crate::harness::Parse;
+
+    #[test]
+    fn discovery_refreshes_state_and_cwd_fallbacks_without_wire_append() -> Result<()> {
+        let world = cv_testkit::World::in_process("kimi_code_aux_discovery");
+        let context = crate::discover_cache::read::Context::current();
+        let _scope = context.enter();
+        let home = world.home.join(".kimi-code");
+        let dir = home.join("sessions/wd_test/session_one");
+        let wire = main_wire(&dir);
+        fs::create_dir_all(wire.parent().unwrap())?;
+        let body =
+            "{\"type\":\"context.append_message\",\"message\":{\"role\":\"user\",\"content\":\"prompt fallback\"}}\n";
+        fs::write(&wire, body)?;
+        let index = home.join("session_index.jsonl");
+        fs::write(&index, "{\"sessionId\":\"session_one\",\"workDir\":\"/first-index\"}\n")?;
+        fs::write(dir.join("state.json"), "{\"title\":\"first title\"}")?;
+        let adapter = KimiCode::with_home(&home);
+        let first = adapter.discover()?.remove(0);
+        assert_eq!(first.title.as_deref(), Some("first title"));
+        assert_eq!(first.cwd.as_deref(), Some(Path::new("/first-index")));
+        fs::write(
+            dir.join("state.json"),
+            "{\"title\":\"renamed without a new turn\",\"updatedAt\":1700000000000}",
+        )?;
+        let renamed = adapter.discover()?.remove(0);
+        assert_eq!(renamed.title.as_deref(), Some("renamed without a new turn"));
+        assert_eq!(renamed.updated_at, DateTime::from_timestamp_millis(1700000000000));
+        fs::write(dir.join("state.json"), "{}")?;
+        fs::write(
+            &index,
+            "{\"sessionId\":\"session_one\",\"workDir\":\"/changed-index\"}\n",
+        )?;
+        let fallback = adapter.discover()?.remove(0);
+        assert_eq!(fallback.title.as_deref(), Some("prompt fallback"));
+        assert_eq!(fallback.cwd.as_deref(), Some(Path::new("/changed-index")));
+        fs::write(&index, "")?;
+        fs::write(
+            home.join("workspaces.json"),
+            "{\"workspaces\":{\"wd_test\":{\"root\":\"/workspace\"}}}",
+        )?;
+        assert_eq!(adapter.discover()?[0].cwd.as_deref(), Some(Path::new("/workspace")));
+        fs::write(dir.join("state.json"), "{\"cwd\":\"/state\"}")?;
+        assert_eq!(adapter.discover()?[0].cwd.as_deref(), Some(Path::new("/state")));
+        assert_eq!(fs::read_to_string(wire)?, body);
+        Ok(())
+    }
 
     #[test]
     fn checked_discovery_kimi_code_matches_owned_steps_titles_and_state() -> Result<()> {

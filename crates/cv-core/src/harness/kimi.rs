@@ -145,17 +145,16 @@ impl Adapter for Kimi {
         let Some(sessions) = &self.sessions else {
             return Ok(vec![]);
         };
+        let mut shared_reads = crate::source::ReadSet::default();
+        if let Some(root) = &self.root {
+            shared_reads.record(&root.join("kimi.json"));
+        }
         // hash (dir basename, possibly "<kaos>_<md5>") -> cwd, from kimi.json.
         let hash_to_cwd = self
             .root
             .as_ref()
             .map(|r| load_work_dirs(&r.join("kimi.json")))
             .unwrap_or_default();
-        let default_model = self
-            .root
-            .as_ref()
-            .and_then(|r| default_model_from_config(&r.join("config.toml")));
-
         let mut out = Vec::new();
         let Ok(hash_dirs) = fs::read_dir(sessions) else {
             return Ok(out);
@@ -190,10 +189,19 @@ impl Adapter for Kimi {
                 } else {
                     continue;
                 };
-                // Keyed on the transcript, as kimi-code's scan is: it grows on every turn and is what
-                // the scan reads whole. A rename that only rewrites `state.json` shows at the next turn.
-                let hit = crate::discover_cache::cached_scan(&transcript, || {
-                    scan(&id, &transcript, &dir, cwd.clone(), default_model.clone())
+                let mut reads = shared_reads.clone();
+                reads.record(&dir.join("state.json"));
+                if transcript.file_name().is_some_and(|name| name == "context.jsonl") {
+                    // Capture membership before enumerating rotations, and each existing file
+                    // before the scan reads it. Missing wire/state files are dependencies too.
+                    reads.record(&dir);
+                    reads.record(&dir.join("wire.jsonl"));
+                    for segment in transcript_segments(&dir, &transcript) {
+                        reads.record(&segment);
+                    }
+                }
+                let hit = crate::discover_cache::cached_scan_with_reads(&transcript, reads, || {
+                    scan(&id, &transcript, &dir, cwd.clone())
                 });
                 if let Some(r) = hit {
                     out.push(r);
@@ -712,13 +720,7 @@ fn default_model_from_config(config_toml: &Path) -> Option<String> {
 /// Cheap scan of one transcript into a `SessionRef`. `dir` is the session's source dir (the
 /// `<uuid>/` dir for modern, the hash dir for legacy). Returns `None` only on a fully unreadable
 /// transcript path that doesn't exist.
-fn scan(
-    id: &str,
-    transcript: &Path,
-    dir: &Path,
-    cwd: Option<PathBuf>,
-    _default_model: Option<String>,
-) -> Option<SessionRef> {
+fn scan(id: &str, transcript: &Path, dir: &Path, cwd: Option<PathBuf>) -> Option<SessionRef> {
     let meta = fs::metadata(transcript).ok()?;
     let mtime: Option<DateTime<Utc>> = meta
         .modified()
@@ -765,13 +767,7 @@ fn scan(
 }
 
 #[cfg(test)]
-fn old_scan(
-    id: &str,
-    transcript: &Path,
-    dir: &Path,
-    cwd: Option<PathBuf>,
-    _default_model: Option<String>,
-) -> Option<SessionRef> {
+fn old_scan(id: &str, transcript: &Path, dir: &Path, cwd: Option<PathBuf>) -> Option<SessionRef> {
     let meta = fs::metadata(transcript).ok()?;
     let mtime: Option<DateTime<Utc>> = meta
         .modified()
@@ -1065,7 +1061,6 @@ pub fn subagent_refs(main: &SessionRef) -> Vec<SessionRef> {
                 &p.join("context.jsonl"),
                 &p,
                 main.cwd.clone(),
-                None,
             )?;
             if let Some(d) =
                 subagent_meta(&p).and_then(|m| m.get("description").and_then(Value::as_str).map(str::to_string))
@@ -1646,6 +1641,64 @@ mod tests {
     use crate::harness::Parse;
 
     #[test]
+    fn discovery_refreshes_titles_registry_rotations_and_wire_without_live_append() -> Result<()> {
+        let world = cv_testkit::World::in_process("kimi_aux_discovery");
+        let context = crate::discover_cache::read::Context::current();
+        let _scope = context.enter();
+        let home = world.home.join(".kimi");
+        let cwd = "/synthetic/project";
+        let dir = home.join("sessions").join(md5_hex(cwd.as_bytes())).join("session");
+        fs::create_dir_all(&dir)?;
+        let registry = home.join("kimi.json");
+        fs::write(&registry, serde_json::json!({"work_dirs":[{"path":cwd}]}).to_string())?;
+        let live = dir.join("context.jsonl");
+        let body =
+            "{\"role\":\"user\",\"content\":\"prompt fallback\"}\n{\"role\":\"assistant\",\"content\":\"answer\"}\n";
+        fs::write(&live, body)?;
+        let adapter = Kimi::with_home(&home);
+        let first = adapter.discover()?.remove(0);
+        assert_eq!(first.title.as_deref(), Some("prompt fallback"));
+        assert_eq!(first.message_count, 2);
+        assert_eq!(first.cwd.as_deref(), Some(Path::new(cwd)));
+        fs::write(
+            dir.join("state.json"),
+            "{\"custom_title\":\"renamed without a new turn\"}",
+        )?;
+        assert_eq!(
+            adapter.discover()?[0].title.as_deref(),
+            Some("renamed without a new turn")
+        );
+        fs::write(dir.join("state.json"), "{}")?;
+        assert_eq!(adapter.discover()?[0].title.as_deref(), Some("prompt fallback"));
+        fs::write(
+            &registry,
+            serde_json::json!({"work_dirs":[{"path":cwd,"kaos":"remote"}]}).to_string(),
+        )?;
+        assert_eq!(adapter.discover()?[0].cwd, None);
+        let rotated = dir.join("context_1.jsonl");
+        fs::write(&rotated, "{\"role\":\"user\",\"content\":\"earlier\"}\n")?;
+        assert_eq!(adapter.discover()?[0].message_count, 3);
+        fs::write(
+            &rotated,
+            "{\"role\":\"user\",\"content\":\"earlier\"}\n{\"role\":\"assistant\",\"content\":\"prior reply\"}\n",
+        )?;
+        assert_eq!(adapter.discover()?[0].message_count, 4);
+        fs::write(
+            dir.join("wire.jsonl"),
+            "{\"timestamp\":1700000000}\n{\"timestamp\":1700000001}\n",
+        )?;
+        let last = adapter.discover()?.remove(0);
+        assert_eq!(last.created_at, epoch_to_dt(1700000000.0));
+        assert_eq!(last.updated_at, epoch_to_dt(1700000001.0));
+        assert_eq!(
+            fs::read_to_string(live)?,
+            body,
+            "refresh never needs a transcript append"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn checked_discovery_kimi_matches_owned_segments_titles_and_wire_bounds() -> Result<()> {
         let world = cv_testkit::World::in_process("kimi-discovery-selected");
         let dir = world.base.join("session");
@@ -1678,8 +1731,8 @@ mod tests {
                 dir.join("state.json"),
                 serde_json::to_vec(&serde_json::json!({"custom_title":title,"unused":body}))?,
             )?;
-            let actual = scan("session", &live, &dir, Some("/p".into()), None);
-            let expected = old_scan("session", &live, &dir, Some("/p".into()), None);
+            let actual = scan("session", &live, &dir, Some("/p".into()));
+            let expected = old_scan("session", &live, &dir, Some("/p".into()));
             assert_eq!(serde_json::to_value(actual)?, serde_json::to_value(expected)?);
         }
         let mut file = fs::OpenOptions::new().append(true).open(dir.join("wire.jsonl"))?;
@@ -1699,8 +1752,8 @@ mod tests {
             let dir = entry.path().parent().unwrap();
             let id = dir.file_name().unwrap().to_str().unwrap();
             assert_eq!(
-                serde_json::to_value(scan(id, entry.path(), dir, None, None))?,
-                serde_json::to_value(old_scan(id, entry.path(), dir, None, None))?
+                serde_json::to_value(scan(id, entry.path(), dir, None))?,
+                serde_json::to_value(old_scan(id, entry.path(), dir, None))?
             );
         }
         Ok(())
@@ -2580,7 +2633,7 @@ mod tests {
         )
         .unwrap();
         let id = "s1";
-        let r = scan(id, &dir.join("context.jsonl"), &dir, None, None).unwrap();
+        let r = scan(id, &dir.join("context.jsonl"), &dir, None).unwrap();
         assert_eq!(
             r.title.as_deref(),
             Some("first"),
@@ -2627,7 +2680,7 @@ mod tests {
             r#"{"agent_id":"a1b2","subagent_type":"coder","description":"do it"}"#,
         )
         .unwrap();
-        let main = scan("p1", &dir.join("context.jsonl"), &dir, None, None).unwrap();
+        let main = scan("p1", &dir.join("context.jsonl"), &dir, None).unwrap();
         let refs = subagent_refs(&main);
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].id, "p1/a1b2");
