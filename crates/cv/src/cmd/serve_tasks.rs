@@ -77,6 +77,10 @@ fn api_inbox(default_who: Option<&str>, q: &Query) -> (u16, Value) {
     let Some(who) = q.get("who").or_else(|| default_who.map(str::to_string)) else {
         return (400, json!({"error": "who? pass ?who=<name> or start with --who"}));
     };
+    let who = who.trim();
+    if who.is_empty() {
+        return (400, json!({"error": "who must not be empty"}));
+    }
     let now = Utc::now();
     let window = if q.flag("all") {
         None
@@ -91,7 +95,7 @@ fn api_inbox(default_who: Option<&str>, q: &Query) -> (u16, Value) {
     };
     with_replay(|outcome| {
         let caller = task::default_endpoint();
-        let page = task::inbox_page(&outcome, &who, caller.as_deref(), window, false, now);
+        let page = task::inbox_page(&outcome, who, caller.as_deref(), window, false, now);
         let mut v = serde_json::to_value(&page).expect("page serializes");
         if let Some(o) = v.as_object_mut() {
             o.insert("warnings".into(), json!(outcome.warnings));
@@ -171,7 +175,7 @@ fn api_backlog(q: &Query) -> (u16, Value) {
             .map(|t| {
                 json!({
                     "id": t.task_id,
-                    "short": &t.task_id[..t.task_id.len().min(13)],
+                    "short": super::task::prefix(&t.task_id, 13),
                     "title": t.title,
                     "state": task::effective_display(t),
                     "assignee": t.assignee,
@@ -223,8 +227,20 @@ fn api_events(q: &Query) -> Result<String> {
         assignee: q.get("assignee"),
         task: task_id,
     };
+    event_lines(&outcome, &f)
+}
+
+fn event_lines(outcome: &task::ReplayOutcome, filter: &EventFilter) -> Result<String> {
+    // JSONL rows are events, with no warning envelope. Refuse an incomplete feed rather than
+    // silently omit quarantined history from a poller's view; page/backlog reads expose warnings.
+    if let Some(first) = outcome.warnings.first() {
+        bail!(
+            "task event feed unavailable: degraded log ({} warning(s); first: {first})",
+            outcome.warnings.len()
+        );
+    }
     let mut out = String::new();
-    for ev in task_ops::select_events(&outcome, &f) {
+    for ev in task_ops::select_events(outcome, filter) {
         out.push_str(&serde_json::to_string(&task_ops::event_json(ev, &outcome.model))?);
         out.push('\n');
     }
@@ -240,13 +256,20 @@ fn api_act(id: &str, verb: &str, who: &str, body: &Value) -> (u16, Value) {
 }
 
 fn act(id: &str, verb: &str, who: &str, body: &Value) -> Result<Value> {
-    let outcome = task::replay()?;
+    act_in(&TaskStore::default_store(), id, verb, who, body)
+}
+
+fn act_in(store: &TaskStore, id: &str, verb: &str, who: &str, body: &Value) -> Result<Value> {
+    let who = task::project::canonical_actor(who.trim());
+    if who.is_empty() {
+        bail!("who must not be empty");
+    }
+    let outcome = store.replay()?;
     let id = task::resolve_id(&outcome.model, id)
         .map_err(|e| anyhow::anyhow!(e))?
         .to_string();
     let t = &outcome.model.tasks[&id];
     let by = format!("web:{}", who.trim());
-    let store = TaskStore::default_store();
     let text = |k: &str| {
         body.get(k)
             .and_then(Value::as_str)
@@ -258,12 +281,12 @@ fn act(id: &str, verb: &str, who: &str, body: &Value) -> Result<Value> {
             let accept = body.get("accept_default").and_then(Value::as_bool).unwrap_or(false);
             let confirm = body.get("confirm").and_then(Value::as_bool).unwrap_or(false);
             let answer = task_ops::Answer::from_flags(text("choice"), accept, confirm)?;
-            let out = task_ops::resolve(&store, &outcome.model, &by, &id, answer, text("note"), false)?;
+            let out = task_ops::resolve(store, &outcome.model, &by, &id, answer, text("note"), false)?;
             (vec![out.event], out.effective_state, out.replay_warnings)
         }
         "done" => {
             let out = task::append(
-                &store,
+                store,
                 Some(&id),
                 &by,
                 TaskEventKind::Done {
@@ -279,7 +302,7 @@ fn act(id: &str, verb: &str, who: &str, body: &Value) -> Result<Value> {
                 bail!("a note needs text")
             };
             let out = task::append(
-                &store,
+                store,
                 Some(&id),
                 &by,
                 TaskEventKind::Noted {
@@ -294,7 +317,7 @@ fn act(id: &str, verb: &str, who: &str, body: &Value) -> Result<Value> {
             // One unit: the note and the `discuss` tag land together.
             let detail = text("text").unwrap_or_else(|| "(no detail)".into());
             let out = task::append_events(
-                &store,
+                store,
                 vec![
                     task::new_event(
                         Some(&id),
@@ -318,7 +341,7 @@ fn act(id: &str, verb: &str, who: &str, body: &Value) -> Result<Value> {
         }
         "claim" => {
             let out = task::append(
-                &store,
+                store,
                 Some(&id),
                 &by,
                 TaskEventKind::Claimed {
@@ -329,7 +352,7 @@ fn act(id: &str, verb: &str, who: &str, body: &Value) -> Result<Value> {
             (vec![out.event], out.effective_state, out.replay_warnings)
         }
         "release" => {
-            let out = task::append(&store, Some(&id), &by, TaskEventKind::Released {}, Vec::new())?;
+            let out = task::append(store, Some(&id), &by, TaskEventKind::Released {}, Vec::new())?;
             (vec![out.event], out.effective_state, out.replay_warnings)
         }
         "reopen" => {
@@ -389,7 +412,11 @@ fn act(id: &str, verb: &str, who: &str, body: &Value) -> Result<Value> {
                 Some(&new_id),
                 &by,
                 TaskEventKind::Noted {
-                    text: format!("reopened from {} ({})", &id[..13], task::effective_display(t)),
+                    text: format!(
+                        "reopened from {} ({})",
+                        super::task::prefix(&id, 13),
+                        task::effective_display(t)
+                    ),
                     session_ref: None,
                 },
             ));
@@ -398,12 +425,13 @@ fn act(id: &str, verb: &str, who: &str, body: &Value) -> Result<Value> {
                 Some(&id),
                 &by,
                 TaskEventKind::Noted {
-                    text: format!("reopened as {}", &new_id[..13]),
+                    text: format!("reopened as {}", super::task::prefix(&new_id, 13)),
                     session_ref: None,
                 },
             ));
-            let out = task::append_events(&store, events, Vec::new())?;
-            (out.events, out.effective_state, out.replay_warnings)
+            let out = task::append_events(store, events, Vec::new())?;
+            let state = out.effective_states.get(&new_id).cloned();
+            (out.events, state, out.replay_warnings)
         }
         other => bail!("unknown action {other:?}"),
     };
@@ -414,4 +442,116 @@ fn act(id: &str, verb: &str, who: &str, body: &Value) -> Result<Value> {
         "task_state": state,
         "warnings": warnings,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn open(store: &TaskStore, id: &str) {
+        let mut event = task::new_event(
+            None,
+            "author",
+            TaskEventKind::Opened {
+                title: "existing task".into(),
+                body: "brief".into(),
+                repo: None,
+                issue: None,
+                channel: None,
+                assignee: Some("ember".into()),
+            },
+        );
+        event.id = id.into();
+        event.task_id = id.into();
+        store.append_agent_event(event).unwrap();
+    }
+
+    #[test]
+    fn task_http_reopen_preserves_history_reports_new_state_and_accepts_non_uuid_ids() {
+        let world = cv_testkit::World::new("task-http-reopen");
+        for (case, id) in ["x", "éééééééé-task"].into_iter().enumerate() {
+            let store = TaskStore::at(world.base.join(case.to_string()));
+            open(&store, id);
+            let error = act_in(&store, id, "resolve", "ember", &json!({"accept_default":true})).unwrap_err();
+            assert!(error.to_string().contains("not a decision"), "{error}");
+            act_in(&store, id, "done", "ember", &json!({"observed":"finished"})).unwrap();
+            let answer = act_in(&store, id, "reopen", "web:ember", &json!({})).unwrap();
+            assert_eq!(answer["by"], "web:ember");
+            assert_eq!(answer["task_state"], "open");
+            let new_id = answer["events"][0]["task_id"].as_str().unwrap();
+            let outcome = store.replay().unwrap();
+            let old = &outcome.model.tasks[id];
+            let new = &outcome.model.tasks[new_id];
+            assert_eq!(old.state, task::TaskState::Done);
+            assert_eq!(new.state, task::TaskState::Open);
+            assert_eq!(new.title, old.title);
+            assert_eq!(new.body, old.body);
+            assert_eq!(new.assignee, old.assignee);
+            assert!(old.notes.last().unwrap().post_close);
+            assert!(new
+                .notes
+                .last()
+                .unwrap()
+                .text
+                .contains(super::super::task::prefix(id, 13)));
+        }
+    }
+
+    #[test]
+    fn task_http_empty_actor_and_conflicting_answers_leave_log_unchanged() {
+        let world = cv_testkit::World::new("task-http-actor");
+        let store = TaskStore::at(world.base.join("tasks"));
+        open(&store, "task");
+        store
+            .append_agent_event(task::new_event(
+                Some("task"),
+                "author",
+                TaskEventKind::Posed {
+                    options: vec!["keep".into(), "change".into()],
+                    default_choice: "keep".into(),
+                    deadline: None,
+                    source: None,
+                },
+            ))
+            .unwrap();
+        let path = store.dir().join("events.jsonl");
+        let before = std::fs::read(&path).unwrap();
+        for who in ["", "  ", "web:"] {
+            assert!(act_in(&store, "task", "note", who, &json!({"text":"no anonymous write"})).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+        }
+        assert!(act_in(
+            &store,
+            "task",
+            "resolve",
+            "ember",
+            &json!({"choice":"change","accept_default":true})
+        )
+        .is_err());
+        assert_eq!(std::fs::read(path).unwrap(), before);
+        // The shared decision resolution formatter must also accept short/non-ASCII IDs.
+        assert!(act_in(&store, "task", "resolve", "ember", &json!({"accept_default":true})).is_ok());
+    }
+
+    #[test]
+    fn task_http_event_feed_refuses_degraded_replay_instead_of_silently_dropping_rows() {
+        let world = cv_testkit::World::new("task-http-degraded-feed");
+        let store = TaskStore::at(world.base.join("tasks"));
+        open(&store, "task");
+        let outcome = store.replay().unwrap();
+        let lines = event_lines(&outcome, &EventFilter::default()).unwrap();
+        assert_eq!(lines.lines().count(), 1);
+        assert_eq!(serde_json::from_str::<Value>(lines.trim()).unwrap()["task_id"], "task");
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(store.dir().join("events.jsonl"))
+            .unwrap()
+            .write_all(b"malformed historical row\n")
+            .unwrap();
+        let outcome = store.replay().unwrap();
+        assert_eq!(outcome.events.len(), 1);
+        let error = event_lines(&outcome, &EventFilter::default()).unwrap_err().to_string();
+        assert!(error.contains("degraded log") && error.contains("line 3"), "{error}");
+    }
 }

@@ -141,6 +141,9 @@ pub(crate) enum Answer {
 
 impl Answer {
     pub fn from_flags(choice: Option<String>, accept_default: bool, confirm: bool) -> Result<Answer> {
+        if usize::from(choice.is_some()) + usize::from(accept_default) + usize::from(confirm) > 1 {
+            bail!("pass only one of --choice, --accept-default, or --confirm");
+        }
         match (choice, accept_default, confirm) {
             (Some(c), _, _) => Ok(Answer::Choice(c.trim().to_string())),
             (None, true, _) => Ok(Answer::AcceptDefault),
@@ -164,7 +167,7 @@ pub(crate) fn resolve(
     provisional: bool,
 ) -> Result<task::AppendOutcome> {
     let t = model.tasks.get(id).with_context(|| format!("no task {id}"))?;
-    let short = &id[..13.min(id.len())];
+    let short = super::task::prefix(id, 13);
     let decision = || {
         t.decision.as_ref().with_context(|| {
             format!("task {short} is not a decision (nothing was posed) — finish it with `cv task done`")
@@ -665,6 +668,33 @@ mod tests {
             }
         )
         .is_empty());
+    }
+
+    #[test]
+    fn decision_answer_flags_refuse_conflicting_choices() {
+        for (choice, accept, confirm) in [
+            (Some("keep".into()), true, false),
+            (Some("keep".into()), false, true),
+            (None, true, true),
+            (Some("keep".into()), true, true),
+        ] {
+            assert!(Answer::from_flags(choice, accept, confirm)
+                .unwrap_err()
+                .to_string()
+                .contains("only one"));
+        }
+        assert!(
+            matches!(Answer::from_flags(Some(" keep ".into()), false, false).unwrap(), Answer::Choice(c) if c == "keep")
+        );
+        assert!(matches!(
+            Answer::from_flags(None, true, false).unwrap(),
+            Answer::AcceptDefault
+        ));
+        assert!(matches!(
+            Answer::from_flags(None, false, true).unwrap(),
+            Answer::Confirm
+        ));
+        assert!(Answer::from_flags(None, false, false).is_err());
     }
 
     #[test]
