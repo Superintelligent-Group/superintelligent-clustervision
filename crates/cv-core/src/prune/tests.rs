@@ -2343,3 +2343,188 @@ fn rejected_large_json_keeps_strict_owned_value_acceptance() -> Result<()> {
     std::fs::remove_dir_all(dir)?;
     Ok(())
 }
+
+/// Native children carry their parent's sessionId and sidechain flags on every own turn.
+fn native_child_fixture(base: &Path, big: &str) -> Result<(PathBuf, PathBuf, Vec<u8>)> {
+    let project = base.join("projects/fixture");
+    std::fs::create_dir_all(&project)?;
+    let original = fixture(&project, big);
+    let before = std::fs::read(&original)?;
+    let parent = original.file_stem().unwrap().to_str().unwrap();
+    let subdir = project.join(parent).join("subagents");
+    std::fs::create_dir_all(&subdir)?;
+    let child = subdir.join("agent-native-child.jsonl");
+    let mut rows = String::new();
+    for row in std::str::from_utf8(&before)?.lines() {
+        let mut value: Value = serde_json::from_str(row)?;
+        value["isSidechain"] = Value::Bool(true);
+        value["agentId"] = Value::String("native-child".into());
+        if value["uuid"] == "u0" {
+            value["parentUuid"] = Value::String("parent-turn".into());
+        }
+        rows.push_str(&value.to_string());
+        rows.push('\n');
+    }
+    std::fs::write(&child, rows)?;
+    Ok((original, child, before))
+}
+
+#[test]
+fn subagent_prune_counts_own_turns_and_emits_standalone_without_touching_parent() -> Result<()> {
+    let world = cv_testkit::World::in_process("prune-native-child");
+    for size in [4096, 1100000] {
+        let base = world.base.join(size.to_string());
+        let (parent, child, parent_before) = native_child_fixture(&base, &"x".repeat(size))?;
+        let child_before = std::fs::read(&child)?;
+        let opts = PruneOptions {
+            keep_last: 2,
+            min_size: 100,
+            new_id: Some("child-pruned".into()),
+            ..Default::default()
+        };
+        // Child resources are distinct from its parent's other children/workflows.
+        let parent_resources = parent.with_extension("");
+        std::fs::write(
+            parent_resources.join("unrelated-parent-resource"),
+            "leave parent resources alone",
+        )?;
+        let child_resources = child.with_extension("");
+        std::fs::create_dir_all(&child_resources)?;
+        std::fs::write(child_resources.join("child-resource"), "own")?;
+        let result = prune_session(&child, &opts)?;
+        assert_eq!(result.source_id, "agent-native-child");
+        assert_eq!(
+            result.parent_session_id.as_deref(),
+            parent.file_stem().and_then(|x| x.to_str())
+        );
+        assert_eq!(
+            result.pruned_count, 2,
+            "old child result and mirror are snipped; recent result survives"
+        );
+        assert_eq!(result.new_path.parent(), parent.parent());
+        let output = std::fs::read_to_string(&result.new_path)?;
+        let rows: Vec<Value> = output
+            .lines()
+            .map(serde_json::from_str)
+            .collect::<std::result::Result<_, _>>()?;
+        for row in &rows {
+            assert_eq!(row["sessionId"], "child-pruned");
+            assert_eq!(row["isSidechain"], false);
+            assert!(row.get("agentId").is_none());
+        }
+        assert!(rows[0]["parentUuid"].is_null());
+        assert!(rows[2]["message"]["content"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains(MARKER_PREFIX));
+        assert_eq!(rows[4]["message"]["content"][0]["content"], "x".repeat(size));
+        assert_eq!(std::fs::read(&parent)?, parent_before);
+        assert_eq!(std::fs::read(&child)?, child_before);
+        let copied = prune_session(
+            &child,
+            &PruneOptions {
+                copy_resources: true,
+                new_id: Some("child-resources-pruned".into()),
+                ..opts.clone()
+            },
+        )?;
+        let resources = copied.copied_resources.unwrap();
+        assert!(resources.join("child-resource").is_file());
+        assert!(!resources.join("unrelated-parent-resource").exists());
+        let mut collision = opts.clone();
+        collision.new_id = result.parent_session_id;
+        assert!(prune_session(&child, &collision).is_err());
+        assert_eq!(std::fs::read(&parent)?, parent_before);
+    }
+    Ok(())
+}
+
+#[test]
+fn subagent_prune_keep_window_and_usage_match_standalone_turn_semantics() -> Result<()> {
+    let world = cv_testkit::World::in_process("prune-native-child-window");
+    let (parent, child, _) = native_child_fixture(&world.base, &"x".repeat(4096))?;
+    for (label, keep_range, window) in [("keep", Some((3, None)), None), ("window", None, Some(20))] {
+        let opts = PruneOptions {
+            keep_range,
+            window,
+            new_id: Some(format!("child-{label}")),
+            ..Default::default()
+        };
+        let expected = prune_session(
+            &parent,
+            &PruneOptions {
+                new_id: Some(format!("parent-{label}")),
+                ..opts.clone()
+            },
+        )?;
+        let actual = prune_session(&child, &opts)?;
+        assert!(actual.dropped_turns > 0);
+        assert_eq!(actual.dropped_turns, expected.dropped_turns);
+        let normalized = |path: &Path| -> Result<Vec<Value>> {
+            std::fs::read_to_string(path)?
+                .lines()
+                .map(|line| {
+                    let mut value: Value = serde_json::from_str(line)?;
+                    if let Some(object) = value.as_object_mut() {
+                        object.remove("sessionId");
+                        object.remove("session_id");
+                        object.remove("isSidechain");
+                    }
+                    Ok(value)
+                })
+                .collect()
+        };
+        assert_eq!(normalized(&actual.new_path)?, normalized(&expected.new_path)?);
+    }
+    // Provider-recorded usage belongs to this selected child, rather than an embedded sidechain.
+    let mut rows: Vec<Value> = std::fs::read_to_string(&child)?
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<std::result::Result<_, _>>()?;
+    for (index, row) in rows.iter_mut().enumerate() {
+        if row["type"] == "assistant" {
+            row["message"]["usage"] = serde_json::json!({"input_tokens": (index + 1) * 100});
+        }
+    }
+    std::fs::write(&child, rows.iter().map(|v| format!("{v}\n")).collect::<String>())?;
+    let actual = prune_session(
+        &child,
+        &PruneOptions {
+            window: Some(250),
+            revive: true,
+            new_id: Some("child-usage".into()),
+            ..Default::default()
+        },
+    )?;
+    assert!(actual.window_real_tokens.is_some());
+    assert!(actual.dropped_turns > 0);
+    Ok(())
+}
+
+#[test]
+fn parent_prune_keeps_embedded_sidechains_out_of_own_turns() -> Result<()> {
+    let world = cv_testkit::World::in_process("prune-embedded-child");
+    let (parent, child, before) = native_child_fixture(&world.base, &"x".repeat(4096))?;
+    let embedded = std::fs::read(&child)?;
+    let mut mixed = before;
+    mixed.extend_from_slice(&embedded);
+    std::fs::write(&parent, &mixed)?;
+    let result = prune_session(
+        &parent,
+        &PruneOptions {
+            keep_last: 2,
+            min_size: 100,
+            new_id: Some("parent-pruned".into()),
+            ..Default::default()
+        },
+    )?;
+    assert!(result.parent_session_id.is_none());
+    let rows: Vec<Value> = std::fs::read_to_string(&result.new_path)?
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<std::result::Result<_, _>>()?;
+    assert!(rows.last().unwrap()["isSidechain"].as_bool().unwrap());
+    assert_eq!(rows.last().unwrap()["agentId"], "native-child");
+    assert_eq!(std::fs::read(parent)?, mixed);
+    Ok(())
+}

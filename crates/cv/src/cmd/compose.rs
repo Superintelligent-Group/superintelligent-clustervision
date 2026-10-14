@@ -32,7 +32,7 @@ pub(crate) fn cmd_prune(
     json: bool, // also emit the report as one JSON object on stdout (the human report stays on stderr)
 ) -> Result<()> {
     let want = parse_harness(&harness)?;
-    let (r, _adapter) = resolve(id, want)?;
+    let (r, _adapter) = crate::cmd::distill::resolve_source(id, want)?;
 
     if r.harness != Harness::Claude {
         bail!(

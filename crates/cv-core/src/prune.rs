@@ -139,6 +139,9 @@ impl Default for PruneOptions {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PruneResult {
     pub source_id: String,
+    /// Native parent identity when the selected source is a child transcript.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
     pub new_id: String,
     pub new_path: PathBuf,
     pub sidecar_path: Option<PathBuf>,
@@ -419,6 +422,8 @@ fn select_kept_turns(
 
 /// Prune `src_path` (a Claude `<id>.jsonl`) into a new session. Returns what happened.
 pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult> {
+    let reference = crate::ir::SessionRef::from_path(src_path, crate::ir::Harness::Claude);
+    let subagent = crate::rewind::is_subagent(&reference);
     let source = crate::json::JsonSource::capture(src_path)?;
     let file = std::fs::File::open(src_path)?;
     source.check_metadata(file.metadata()?)?;
@@ -467,6 +472,12 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
             }
             value.as_ref().map(|v| decision_facts(v, opts.window.is_some()))
         };
+        let facts = facts.map(|mut facts| {
+            if subagent {
+                crate::rewind::normalize_subagent_record(&mut facts);
+            }
+            facts
+        });
         parsed.push(facts);
         lines.push(range);
     }
@@ -493,12 +504,23 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
         .flatten()
         .find_map(|v| v.get("sessionId")?.as_str().map(String::from))
         .unwrap_or_default();
+    let parent_session_id = subagent.then(|| source_id.clone()).filter(|id| !id.is_empty());
+    let source_id = if subagent { reference.id.clone() } else { source_id };
     let new_id = opts.new_id.clone().unwrap_or_else(new_uuid);
     if new_id == source_id {
         bail!("new id must differ from the source id");
     }
+    if parent_session_id.as_ref().is_some_and(|parent| parent == &new_id) {
+        bail!("new id must differ from the parent session id");
+    }
 
-    let dir = src_path.parent().unwrap_or(Path::new("."));
+    let project_dir = crate::rewind::project_dir(src_path);
+    let dir = if subagent {
+        project_dir.as_path()
+    } else {
+        src_path.parent().unwrap_or(Path::new("."))
+    };
+    let resource_dir = src_path.parent().unwrap_or(Path::new("."));
     let src_stem = src_path.file_stem().and_then(|s| s.to_str()).unwrap_or(&source_id);
     let new_path = dir.join(format!("{new_id}.jsonl"));
     let sidecar_path = dir.join(format!("{new_id}.flat.jsonl"));
@@ -606,7 +628,57 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
             }
         }
 
-        let needs_root = windowing && keep_start > 0 && !rooted && is_main_turn(&facts);
+        let needs_root = (subagent || (windowing && keep_start > 0)) && !rooted && is_main_turn(&facts);
+        if subagent && range.len >= LARGE_RECORD {
+            let plan = if is_turn_line && (opts.declassify || (is_old && (ty == "user" || opts.thinking))) {
+                source_turn_prune(
+                    &source,
+                    *range,
+                    opts,
+                    &new_id,
+                    idx,
+                    &tool_names,
+                    is_old && ty == "user",
+                    is_old && ty == "assistant" && opts.thinking,
+                )?
+            } else {
+                None
+            };
+            let mut replacements = Vec::new();
+            if needs_root {
+                rooted = true;
+            }
+            let record = source.validated_range(range.offset, range.len)?;
+            if needs_root {
+                if let Some(parent) = source_parent_override(&record)? {
+                    replacements.push(parent);
+                }
+            }
+            let mut facts = facts;
+            if let Some(plan) = plan {
+                replacements.extend(plan.replacements);
+                pruned_count += plan.payloads.len();
+                est_tokens_saved += plan.saved;
+                image_blocks += plan.images;
+                if !opts.drop {
+                    for payload in &plan.payloads {
+                        write_source_payload(payload, &mut sidecar_stage)?;
+                        sidecar_count += 1;
+                    }
+                }
+                if opts.revive {
+                    facts["_prune_est"] = Value::from(plan.estimate);
+                }
+            }
+            let mut scan = MarkerWriter::new(&mut output);
+            record.with_view(|view| write_subagent_source(view, &replacements, &new_id, &mut scan))?;
+            scan.write_all(b"\n")?;
+            if opts.revive {
+                output_facts.push(Some(facts));
+                output_pruned.push(scan.found);
+            }
+            continue;
+        }
         let may_mutate =
             (is_old && ty == "user" && facts.get("_prune_payload").and_then(Value::as_bool).unwrap_or(true))
                 || (is_old
@@ -744,7 +816,7 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
             .map(String::from)
             .unwrap_or_else(|| format!("L{idx}"));
 
-        let mut modified = false;
+        let mut modified = subagent && crate::rewind::normalize_subagent_record(&mut v);
         if is_old && ty == "user" {
             // Only old user messages carry snippable tool results.
             let current_tools = materialize_tool_inputs(&source, &v, &tool_names)?;
@@ -797,7 +869,7 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
         // and whitespace may normalize) and then stamped the same way.
         let out = if modified { v.to_string() } else { line };
         let mut out = crate::restamp_line(&out, &new_id).unwrap_or(out);
-        if windowing && keep_start > 0 && !rooted && is_main_turn(&v) {
+        if (subagent || (windowing && keep_start > 0)) && !rooted && is_main_turn(&v) {
             rooted = true;
             if v.get("parentUuid").is_some_and(|p| !p.is_null()) {
                 // Reparse the stamped line so the new session id survives normalization.
@@ -830,7 +902,7 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
     let sidecar = sidecar_stage.into_inner().map_err(|e| e.into_error())?.finish()?;
 
     let sidecar_out = (!opts.drop && sidecar_count > 0).then(|| sidecar_path.clone());
-    let copied = (opts.copy_resources && dir.join(src_stem).is_dir()).then(|| dir.join(&new_id));
+    let copied = (opts.copy_resources && resource_dir.join(src_stem).is_dir()).then(|| dir.join(&new_id));
     if sidecar_out
         .as_ref()
         .is_some_and(|p| std::fs::canonicalize(p).is_ok_and(|p| p == source_location))
@@ -853,13 +925,14 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
             sidecar_file.publish(&file)?;
         }
         if let Some(dst) = &copied {
-            copy_dir(&dir.join(src_stem), dst)
+            copy_dir(&resource_dir.join(src_stem), dst)
                 .with_context(|| format!("copying session resources to {}", dst.display()))?;
         }
     }
 
     Ok(PruneResult {
         source_id,
+        parent_session_id,
         new_id,
         new_path,
         sidecar_path: sidecar_out,
@@ -1983,6 +2056,42 @@ fn write_source_reroot(
     record.with_view(|view| view.write_canonical_replacing(&replacements, &mut scan))?;
     scan.write_all(b"\n")?;
     Ok(scan.found)
+}
+
+/// Stream a selected native child's record as a standalone record, retaining checked large
+/// payloads and applying the same top-level normalization as rewind's owned record path.
+fn write_subagent_source(
+    view: crate::json::JsonView<'_>,
+    replacements: &[(crate::json::Json, Value)],
+    new_id: &str,
+    writer: &mut impl Write,
+) -> Result<()> {
+    if !view.is_object()? {
+        return view.write_canonical_replacing(replacements, writer);
+    }
+    writer.write_all(b"{")?;
+    let mut first = true;
+    view.for_each_entry(|key, child| {
+        if key == "agentId" {
+            return Ok(());
+        }
+        if !first {
+            writer.write_all(b",")?;
+        }
+        first = false;
+        serde_json::to_writer(&mut *writer, key)?;
+        writer.write_all(b":")?;
+        if key == "isSidechain" && child.as_bool()? == Some(true) {
+            writer.write_all(b"false")?;
+        } else if matches!(key, "sessionId" | "session_id") && child.is_string()? {
+            serde_json::to_writer(&mut *writer, new_id)?;
+        } else {
+            child.write_canonical_replacing(replacements, writer)?;
+        }
+        Ok(())
+    })?;
+    writer.write_all(b"}")?;
+    Ok(())
 }
 
 struct LengthWriter(usize);

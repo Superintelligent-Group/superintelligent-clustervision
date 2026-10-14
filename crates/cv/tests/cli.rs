@@ -2992,3 +2992,62 @@ fn doctor_labels_payload_estimates_and_recorded_usage_without_changing_accountin
     assert_eq!(report["conversational"]["thinking"], 100);
     assert_eq!(report["conversational"]["total"], 104);
 }
+
+#[test]
+fn prune_child_id_and_path_select_child_and_emit_discoverable_standalone() {
+    let w = World::new("prune-child-source");
+    let parent = w.write_session(
+        "prune-parent",
+        &[user_line("parent-u", "2026-01-01T00:00:00Z", "parent-only")],
+    );
+    let child_dir = parent.parent().unwrap().join("prune-parent/subagents");
+    fs::create_dir_all(&child_dir).unwrap();
+    let child = child_dir.join("agent-prune-child.jsonl");
+    let rows = [
+        serde_json::json!({"type":"user", "sessionId":"prune-parent", "session_id":"prune-parent", "isSidechain":true,"agentId":"prune-child","uuid":"c0","message":{"role":"user","content":"child-only"}}),
+        serde_json::json!({"type":"assistant", "sessionId":"prune-parent", "isSidechain":true,"agentId":"prune-child","uuid":"c1","parentUuid":"c0","message":{"role":"assistant","content":[{"type":"tool_use","id":"t","name":"Read","input":{"file_path":"fixture"}}]}}),
+        serde_json::json!({"type":"user", "sessionId":"prune-parent", "isSidechain":true,"agentId":"prune-child","uuid":"c2","parentUuid":"c1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":"x".repeat(4096)}]}}),
+    ];
+    fs::write(&child, rows.iter().map(|row| format!("{row}\n")).collect::<String>()).unwrap();
+    let parent_before = fs::read(&parent).unwrap();
+    let child_before = fs::read(&child).unwrap();
+    for (source, target) in [
+        ("claude:agent-prune-child", "pruned-child-id"),
+        (child.to_str().unwrap(), "pruned-child-path"),
+    ] {
+        let (out, _) = w.cv_ok(&[
+            "prune",
+            source,
+            "--keep-last",
+            "0",
+            "--min-size",
+            "100",
+            "--to",
+            target,
+            "--json",
+        ]);
+        let report: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(report["source_id"], "agent-prune-child");
+        assert_eq!(report["parent_session_id"], "prune-parent");
+        assert_eq!(report["snipped_payloads"], 1);
+        let path = PathBuf::from(report["new_path"].as_str().unwrap());
+        assert_eq!(path.parent(), parent.parent());
+        for row in fs::read_to_string(&path).unwrap().lines() {
+            let row: serde_json::Value = serde_json::from_str(row).unwrap();
+            assert_eq!(row["sessionId"], target);
+            if let Some(id) = row.get("session_id") {
+                assert_eq!(id, target);
+            }
+            assert_eq!(row["isSidechain"], false);
+            assert!(row.get("agentId").is_none());
+        }
+        let (shown, _) = w.cv_ok(&["show", &format!("claude:{target}")]);
+        assert!(shown.contains("child-only"));
+        assert!(!shown.contains("parent-only"));
+    }
+    assert_eq!(fs::read(&parent).unwrap(), parent_before);
+    assert_eq!(fs::read(&child).unwrap(), child_before);
+    let (_, code, _, _) = w.cv(&["prune", child.to_str().unwrap(), "--to", "prune-parent"]);
+    assert_ne!(code, 0);
+    assert_eq!(fs::read(&parent).unwrap(), parent_before);
+}

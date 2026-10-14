@@ -483,7 +483,7 @@ enum Cmd {
     /// — your prompts and flow stay verbatim, the recent turns stay sharp. Resume with
     /// `claude --resume <new-id>`; fetch a stashed original back with `cv cat <new-id> <tool_use_id>`.
     Prune {
-        /// Source session id.
+        /// Source session id, sub-agent's agent-<id>, or Claude transcript path.
         id: String,
         #[arg(long)]
         harness: Option<String>,

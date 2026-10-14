@@ -517,6 +517,20 @@ pub fn is_subagent(r: &SessionRef) -> bool {
             .is_some_and(|n| n.starts_with("agent-"))
 }
 
+/// A directly selected child's records become its own standalone conversation. Embedded
+/// sidechains in a selected parent must retain their original meaning.
+pub(crate) fn normalize_subagent_record(v: &mut Value) -> bool {
+    let mut modified = false;
+    if is_sidechain(v) {
+        v["isSidechain"] = Value::Bool(false);
+        modified = true;
+    }
+    if let Some(object) = v.as_object_mut() {
+        modified |= object.shift_remove("agentId").is_some();
+    }
+    modified
+}
+
 /// Derive the rewound session (see the module docs). Claude Code sessions only: the derivation
 /// copies raw records, and only Claude's records are resumable by id.
 pub fn rewind_session(r: &SessionRef, opts: &RewindOptions) -> Result<RewindResult> {
@@ -696,16 +710,7 @@ pub fn rewind_session(r: &SessionRef, opts: &RewindOptions) -> Result<RewindResu
                 if source_session_id.is_none() {
                     source_session_id = v.get("sessionId").and_then(Value::as_str).map(String::from);
                 }
-                let mut modified = false;
-                if subagent && is_sidechain(&v) {
-                    v["isSidechain"] = Value::Bool(false);
-                    modified = true;
-                }
-                if subagent {
-                    if let Some(o) = v.as_object_mut() {
-                        modified |= o.shift_remove("agentId").is_some();
-                    }
-                }
+                let mut modified = subagent && normalize_subagent_record(&mut v);
                 if phase == Phase::Closing && !closes_open_call(&v) {
                     phase = Phase::Done;
                     omitted_lines += 1;

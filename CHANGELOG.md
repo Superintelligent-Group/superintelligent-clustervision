@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Doctor and prune distinguish stored-payload estimates, recorded prompt usage, and rewritten resume metadata; opaque thinking payloads no longer imply measured reasoning tokens.
+- Prune accepts child transcript IDs and paths, counts their own turns, and creates standalone sessions while reporting child and parent identities.
 - Harness-qualified session lookups discover only that harness on catalog misses, preserving prefix ambiguity and leaving unrelated store freshness unchanged.
 - Semantic stores decode through bounded buffers, avoiding a second complete vector allocation during search and refresh.
 - Transcript downloads export complete remote sessions through server or native file staging while preserving paged browsing.
