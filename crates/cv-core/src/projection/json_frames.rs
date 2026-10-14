@@ -1,6 +1,6 @@
 //! Preserve derived envelope schema while injecting an operation-owned compact JSON array.
 use serde::Serialize;
-use serde_json::ser::Formatter;
+use serde_json::ser::{CharEscape, CompactFormatter, Formatter};
 use std::io::{self, Read, Write};
 
 /// Serialize `envelope`, replacing its empty root `field` array with staged comma-separated
@@ -66,6 +66,27 @@ impl Formatter for &mut Array<'_> {
         }
         out.write_all(part.as_bytes())
     }
+    fn write_char_escape<W: ?Sized + Write>(&mut self, out: &mut W, escape: CharEscape) -> io::Result<()> {
+        if self.reading_key {
+            let character = match escape {
+                CharEscape::Quote => '"',
+                CharEscape::ReverseSolidus => '\\',
+                CharEscape::Solidus => '/',
+                CharEscape::Backspace => '\u{08}',
+                CharEscape::FormFeed => '\u{0c}',
+                CharEscape::LineFeed => '\n',
+                CharEscape::CarriageReturn => '\r',
+                CharEscape::Tab => '\t',
+                CharEscape::AsciiControl(byte) => char::from(byte),
+            };
+            if self.key.len() + character.len_utf8() <= 128 {
+                self.key.push(character);
+            } else {
+                self.reading_key = false;
+            }
+        }
+        CompactFormatter.write_char_escape(out, escape)
+    }
     fn begin_array<W: ?Sized + Write>(&mut self, out: &mut W) -> io::Result<()> {
         let inject = self.depth == 1 && self.selected;
         self.depth += 1;
@@ -100,6 +121,26 @@ impl Formatter for &mut Array<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn escaped_root_keys_match_decoded_names_without_aliasing_other_fields() {
+        let frames = crate::bytes::ByteSource::read(b"1".as_slice()).unwrap();
+        for key in ["mes\"sages", "mes\\sages", "mes\nsages", "mes\u{01}sages"] {
+            let mut envelope = serde_json::Map::new();
+            envelope.insert(key.into(), serde_json::json!([]));
+            envelope.insert("messages".into(), serde_json::json!([]));
+            let mut actual = Vec::new();
+            write_json_array(&mut actual, &envelope, "messages", &frames).unwrap();
+            let mut expected = envelope.clone();
+            expected.insert("messages".into(), serde_json::json!([1]));
+            assert_eq!(actual, serde_json::to_vec(&expected).unwrap());
+            actual.clear();
+            write_json_array(&mut actual, &envelope, key, &frames).unwrap();
+            let mut expected = envelope.clone();
+            expected.insert(key.into(), serde_json::json!([1]));
+            assert_eq!(actual, serde_json::to_vec(&expected).unwrap());
+        }
+    }
+
     #[test]
     fn injected_root_array_preserves_schema_and_nested_arrays() {
         let envelope = serde_json::json!({"head":{"messages":[1]},"messages":[],"tail":[3]});
