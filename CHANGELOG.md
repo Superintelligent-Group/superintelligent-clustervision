@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- LM Studio complete rehomes preserve selected and alternate native versions, sparse indices, roles and distinct alternate models.
+- OpenClaw discovery reuses each directory’s session index and projects transcript metadata without owning unrelated payloads.
+- Deferral matching reuses task word sets within each command and constructs shared-word output only for the winning match.
+
+- Hermes lean reads retain checked payloads and omit undemanded provider extras while preserving reasoning facts, replay suppression and rich exports.
+- Gemini and Devin project consumed display and metadata fields without transient payload trees or repeated record walks.
+- Grok and Qwen resumed reads retain checked payloads and preserve physical checkpoint boundaries.
+- Continue exports preserve every grouped tool result; OpenClaw recognizes formatted and escaped branch controls.
+- Discovery reuses dependency-guarded cache entries; catalog prefix lookup uses indexed case-sensitive ranges.
+- Session heads and JSON windows reject changed sources before returning results.
+- Queries support compact OR expressions and exact metadata equality; unsupported text equality reports actionable syntax guidance.
+- Semantic search shares query normalization, refresh skips unused vector decoding, and keyword search projects winner metadata without redundant document decoding.
+- Lane summaries index task assignments once instead of rescanning tasks per lane; invalid or overflowing durations return errors without panicking.
+- Task appends recover incomplete final records after validating new events, preserving valid history and refusing ambiguous complete tails.
+- Adoption streams checked transcripts and metadata through private stages and rejects conflicting destinations; rewind verifies source identity throughout preparation.
+- Resume hints quote shell arguments safely, including unusual paths and session identifiers.
+- Timeline composes workflow, agent and tool filters; workflow previews and tree views avoid owning unselected payloads or recursing through deep ancestry.
+- Dataset exports honor zero limits without parsing sessions.
+- HTTP task requests enforce body limits and media types; MCP validates envelopes, arguments and observation filters before execution.
+- MCP observation polling respects remaining timeout instead of sleeping a full oversized interval.
+- Browser session identity includes harness; search rejects stale responses and merges results from each selected harness.
+- Browser compare and splice load complete histories with retries; structure views expose every root and rich comparisons include block payloads.
+
 - Doctor and prune distinguish stored-payload estimates, recorded prompt usage, and rewritten resume metadata; opaque thinking payloads no longer imply measured reasoning tokens.
 - Prune accepts child transcript IDs and paths, counts their own turns, and creates standalone sessions while reporting child and parent identities.
 - Harness-qualified session lookups discover only that harness on catalog misses, preserving prefix ambiguity and leaving unrelated store freshness unchanged.

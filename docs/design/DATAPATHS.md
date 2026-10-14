@@ -1,10 +1,40 @@
 # Store performance: the system we are optimizing
 
-Source audit: `c0f0044`, 2026-10-12; latest runtime integration is `fece0925` (2026-10-13).
+Source audit: `c0f0044`, 2026-10-12; latest pushed runtime integration is `5bef874d` (2026-10-13).
 This is the working model and tracker for the performance pass. Measurements in `PERF.md` remain historical observations; their causal
 explanations are not all supported by the implementation. Paths below are relative to `crates/`.
 
 ## Current integration status (2026-10-13)
+
+A further reasonableness review is integrated on `perf/reasonable-system` and undergoing batched
+composition checks. This follows Ember's request to inspect algorithms, redundant work and
+existing feature behavior broadly; instruction-count targets are not acceptance criteria.
+There is no version bump, tag or release in this work.
+
+| Area reviewed | Concrete repairs in this batch |
+|---|---|
+| Readers and native formats | Hermes lean checked bodies and demand-specific extras; Gemini display projection and single content dispatch; Devin nested metadata projection; Grok/Qwen checked resume; structural OpenClaw branch controls; Continue grouped tool-result emission; LM Studio native version selection and alternatives. |
+| Discovery, catalog and read API | Reuse dependency-bearing discovery cache entries and operation-local OpenClaw index inventories; indexed case-sensitive ID prefixes; reject changed sources before returning heads or JSON windows. |
+| Search and query | Hoist semantic query norm; defer unused refresh vector decode; project FTS winner headers; compact OR syntax and exact field equality, with explicit unsupported text-equality errors. |
+| Tasks and orchestration | Join task assignments once per lane inventory and reuse task vocabularies for deferral matching; reject overflowing/non-ASCII durations without panics; repair only genuinely incomplete task-log tails after validating the proposed append. |
+| Reshaping and output | Checked streaming adoption, no-clobber destination publication, guarded rewind sources, shell-safe resume hints, zero-limit datasets, composed timeline filters, bounded workflow previews and iterative compact tree rendering. |
+| HTTP and MCP | Bound task request bodies, validate media types and JSON-RPC envelopes/arguments before execution, reject malformed observation filters, and cap polling sleeps to the remaining timeout. |
+| Browser features | Harness-qualified identity, stale-search guards, per-harness search merge, complete compare/splice histories, searchable full root inventory, and payload-sensitive rich comparisons. |
+
+The three concrete reader/arithmetic revisits below are implemented in this batch. Resident
+semantic-store/model reuse remains a separate lifecycle decision: one-shot commands would not
+benefit, and a server-owned handle needs explicit concurrency and freshness behavior. Existing
+branch/history navigation, required SQLite row allocation, strict Serde string scratch, explicitly
+requested rich output and checked stage I/O remain real costs. No universal speedup or complete
+elimination of waste is claimed.
+
+LM Studio variants, OpenClaw index reuse and deferral matching are integrated. The final bounded
+feature follow-up is faithful Continue usage/cost export, where the native reader already supports
+those fields. Combined validation remains to finish and record here. The earlier broad reader
+inventories remain applicable; this pass does not claim a fresh line-by-line audit of every adapter or a new hardware-counter campaign.
+The native Zed capture gap and live sharpened-child experiment below remain open.
+
+### Previous integrated batch and evidence
 
 The wider follow-up batch has converged through runtime `fece0925`, with package verification at
 documentation commit `b1dd798b`. Composition checks and matched semantic-search measurements are
@@ -74,10 +104,11 @@ not automatically unresolved implementation defects. Qwen still lacks local flee
 Historical follow-ups below are superseded where later implementation records say so; the reader
 and consumer inventories are the current cost map.
 
-### Concrete revisits from the release assessment (2026-10-13)
+### Origin of the current revisits (2026-10-13)
 
-The completed batch does not exhaust avoidable work. A read-only review of `5bef874d` identifies
-these source-established opportunities; their incremental whole-operation benefit is unmeasured:
+The read-only review of `5bef874d` identified the following opportunities. Hermes, Gemini and query
+norm repairs are now integrated in the current batch above; their incremental whole-operation
+benefit has not been benchmarked. This list records the motivation, not a duplicate open backlog:
 
 - **Hermes lean reads:** `harness/hermes.rs::stream_conn_with_reads` enables checked backing only
   for `complete && spans`. Ordinary lazy/facts reads still own content strings and construct raw
