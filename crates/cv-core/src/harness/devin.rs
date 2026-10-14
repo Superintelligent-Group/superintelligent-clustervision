@@ -240,7 +240,8 @@ struct Forest {
     parents: HashMap<i64, Option<i64>>,
     roles: HashMap<i64, String>,
     rows: HashMap<i64, i64>,
-    navigation: Option<HashMap<i64, selected::Navigation>>,
+    navigation: HashMap<i64, selected::Navigation>,
+    node_meta: HashMap<i64, NodeFacts>,
     receipts: Vec<(String, i64, Option<i64>)>,
 }
 
@@ -255,6 +256,7 @@ fn load_forest(conn: &Connection, session_id: &str, selected: Option<&selected::
             }
         }
     }
+    let has_metadata = columns(conn, "message_nodes").contains("metadata");
     if let Some(selected) = selected {
         let mut navigation = HashMap::new();
         let mut statement =
@@ -264,6 +266,11 @@ fn load_forest(conn: &Connection, session_id: &str, selected: Option<&selected::
             let node: i64 = row.get(0)?;
             let rowid: i64 = row.get(1)?;
             f.rows.insert(node, rowid);
+            if has_metadata {
+                if let Some(facts) = selected.facts(conn, rowid)? {
+                    f.node_meta.insert(node, facts);
+                }
+            }
             match selected.read(conn, rowid, selected::navigation) {
                 Ok(facts) => {
                     if let Some(role) = &facts.role {
@@ -278,24 +285,43 @@ fn load_forest(conn: &Connection, session_id: &str, selected: Option<&selected::
                 Err(error) => return Err(error),
             }
         }
-        f.navigation = Some(navigation);
+        f.navigation = navigation;
         return Ok(f);
     }
-    // `json_valid` first: a corrupt chat_message makes bare `json_extract` abort the whole scan,
-    // which would silently drop the roles of every node past the bad row.
-    if let Ok(mut stmt) = conn.prepare(
-        "SELECT node_id, CASE WHEN json_valid(chat_message) \
-         THEN json_extract(chat_message, '$.role') END FROM message_nodes WHERE session_id = ?1",
-    ) {
-        if let Ok(rows) = stmt.query_map([session_id], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?))
-        }) {
-            for r in rows.flatten() {
-                if let Some(role) = r.1 {
-                    f.roles.insert(r.0, role);
-                }
-            }
+    // Views/UTF16/WITHOUT ROWID cannot expose UTF8 incremental cells. Keep the typed owned
+    // fallback, but project through the same decoder instead of SQLite's JSON coercions.
+    let metadata = if has_metadata { "metadata" } else { "NULL" };
+    let mut statement = conn.prepare(&format!(
+        "SELECT node_id,chat_message,created_at,{metadata} \
+        FROM message_nodes WHERE session_id=?1 ORDER BY node_id"
+    ))?;
+    let mut rows = statement.query([session_id])?;
+    while let Some(row) = rows.next()? {
+        let node: i64 = row.get(0)?;
+        if let Some(metadata) = row
+            .get_ref(3)
+            .ok()
+            .and_then(|value| value.as_str().ok())
+            .and_then(NodeFacts::parse)
+        {
+            f.node_meta.insert(node, metadata);
         }
+        let Some(chat) = row
+            .get_ref(1)
+            .ok()
+            .and_then(|value| value.as_str().ok())
+            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+        else {
+            continue;
+        };
+        let facts = crate::Json::from(chat).with_view(selected::navigation)?;
+        if let Some(role) = &facts.role {
+            f.roles.insert(node, role.clone());
+        }
+        if let (Some(agent), Some(head)) = (&facts.agent_id, facts.chain_node_id) {
+            f.receipts.push((agent.clone(), head, row.get(2).ok().flatten()));
+        }
+        f.navigation.insert(node, facts);
     }
     Ok(f)
 }
@@ -351,33 +377,9 @@ fn subagent_head_rows(conn: &Connection, session_id: &str, forest: &Forest) -> V
             }
         }
     }
-    let receipts = if forest.navigation.is_some() {
-        forest.receipts.clone()
-    } else {
-        let sql = "SELECT json_extract(chat_message, '$.metadata.extensions.\"subagent/agent_id\"'), \
-                      json_extract(chat_message, '$.metadata.extensions.\"subagent/chain_node_id\"'), created_at \
-               FROM message_nodes WHERE session_id = ?1 \
-                 AND CASE WHEN json_valid(chat_message) THEN \
-                     json_extract(chat_message, '$.role') = 'tool' AND \
-                     json_extract(chat_message, '$.metadata.extensions.\"subagent/chain_node_id\"') IS NOT NULL \
-                 ELSE 0 END \
-               ORDER BY node_id";
-        let mut receipts = Vec::new();
-        if let Ok(mut stmt) = conn.prepare(sql) {
-            if let Ok(rows) = stmt.query_map([session_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, Option<i64>>(2).ok().flatten(),
-                ))
-            }) {
-                receipts.extend(rows.flatten());
-            }
-        }
-        receipts
-    };
+    let receipts = &forest.receipts;
     let mut from_tools: Vec<(String, i64, Option<i64>)> = Vec::new();
-    for (agent, head, at) in receipts {
+    for (agent, head, at) in receipts.iter().cloned() {
         if out.iter().any(|(a, ..)| *a == agent) {
             continue;
         }
@@ -397,7 +399,9 @@ fn chain_message_count(f: &Forest, head: Option<i64>) -> usize {
     head.map(|h| {
         chain_to_root(&f.parents, h)
             .iter()
-            .filter(|n| matches!(f.roles.get(*n).map(String::as_str), Some("user" | "assistant")))
+            .filter(|n| {
+                f.navigation.get(*n).is_some_and(|n| n.is_turn) && !f.node_meta.get(*n).is_some_and(|m| m.is_summary)
+            })
             .count()
     })
     .unwrap_or(0)
@@ -496,24 +500,13 @@ fn checked_navigation(conn: &Connection, path: &Path) -> Result<Option<selected:
 
 /// A parent's completion receipt records the tool call that launched this child. The same
 /// projection serves parsed lineage and the forest, including older tool-only subagents.
-fn spawning_call(conn: &Connection, session_id: &str, agent: &str, forest: &Forest) -> Option<String> {
-    if let Some(navigation) = &forest.navigation {
-        return navigation
-            .iter()
-            .filter(|(_, n)| n.agent_id.as_deref() == Some(agent))
-            .min_by_key(|(node, _)| *node)
-            .and_then(|(_, n)| n.tool_call_id.clone());
-    }
-    conn.query_row(
-        "SELECT json_extract(chat_message, '$.tool_call_id') FROM message_nodes \
-         WHERE session_id = ?1 AND CASE WHEN json_valid(chat_message) THEN \
-             json_extract(chat_message, '$.role') = 'tool' AND \
-             json_extract(chat_message, '$.metadata.extensions.\"subagent/agent_id\"') = ?2 \
-         ELSE 0 END",
-        rusqlite::params![session_id, agent],
-        |row| row.get::<_, String>(0),
-    )
-    .ok()
+fn spawning_call(agent: &str, forest: &Forest) -> Option<String> {
+    forest
+        .navigation
+        .iter()
+        .filter(|(_, n)| n.agent_id.as_deref() == Some(agent))
+        .min_by_key(|(node, _)| *node)
+        .and_then(|(_, n)| n.tool_call_id.clone())
 }
 
 /// The sub-agent chains a session's `subagent_heads` table names — the same rows [`discover_conn`]
@@ -564,7 +557,7 @@ pub fn subagent_tree(db: &Path, session_id: &str) -> Vec<crate::harness::claude:
             if let Some(session) = child_ref(db, session_id, &agent, head, updated, &forest, &parent) {
                 out.push(crate::harness::claude::SubagentInfo {
                     session,
-                    tool_use_id: spawning_call(conn, session_id, &agent, &forest),
+                    tool_use_id: spawning_call(&agent, &forest),
                     agent_type: Some(agent),
                     description: None,
                     workflow: None,
@@ -597,8 +590,9 @@ type SessionRow = (
 );
 
 /// Session-wide navigation state has fixed size per node, independent of metadata payload size.
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 struct NodeFacts {
+    is_summary: bool,
     summarized_from: Option<i64>,
     num_tokens_preceding: Option<u64>,
     is_system_prefix: bool,
@@ -616,7 +610,11 @@ impl NodeFacts {
                 let mut facts = NodeFacts::default();
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
-                        "summarized_from" => facts.summarized_from = map.next_value::<Value>()?.as_i64(),
+                        "summarized_from" => {
+                            let value = map.next_value::<Value>()?;
+                            facts.is_summary = !value.is_null();
+                            facts.summarized_from = value.as_i64();
+                        }
                         "num_tokens_preceding" => facts.num_tokens_preceding = map.next_value::<Value>()?.as_u64(),
                         "is_system_prefix" => {
                             facts.is_system_prefix = map.next_value::<Value>()?.as_bool().unwrap_or(false)
@@ -720,44 +718,14 @@ fn stream_session(
     let chain = head.map(|h| chain_to_root(&forest.parents, h)).unwrap_or_default();
 
     // For a child, the tool call that spawned it: the parent's `tool` row carrying
-    // `subagent/agent_id` — its `tool_call_id` names the spawning call. One indexed query;
-    // absent on sessions without a completion row. The forest already projected normal stores.
-    let spawned_by = agent.and_then(|a| spawning_call(conn, session_id, a, &forest));
+    // `subagent/agent_id` — its `tool_call_id` names the spawning call. The forest already
+    // projected these receipts; absent on sessions without a completion row.
+    let spawned_by = agent.and_then(|a| spawning_call(a, &forest));
 
-    // Keep only navigation facts; arbitrary node metadata belongs to the selected row replay.
+    // The forest's bounded metadata projection serves compaction, prefix and turn counts.
     let has_node_metadata = columns(conn, "message_nodes").contains("metadata");
-    let mut node_meta = HashMap::new();
-    if let Some(navigation) = navigation.filter(|_| has_node_metadata) {
-        for (nid, rowid) in &forest.rows {
-            if let Some(facts) = navigation.facts(conn, *rowid)? {
-                node_meta.insert(*nid, facts);
-            }
-        }
-    }
-    if has_node_metadata && navigation.is_none() {
-        if let Ok(mut stmt) = conn.prepare("SELECT node_id, metadata FROM message_nodes WHERE session_id = ?1") {
-            if let Ok(mut rows) = stmt.query([session_id]) {
-                while let Ok(Some(row)) = rows.next() {
-                    let Ok(nid) = row.get::<_, i64>(0) else { continue };
-                    let Ok(raw) = row.get_ref(1).and_then(|v| Ok(v.as_str()?)) else {
-                        continue;
-                    };
-                    if let Some(facts) = NodeFacts::parse(raw) {
-                        node_meta.insert(nid, facts);
-                    }
-                }
-            }
-        }
-    }
-
-    // A compaction writes TWO chain nodes sharing one `summarized_from` (the old window's head —
-    // still in the forest): an assistant node whose content is the summary markdown, and a system
-    // node wrapping it ("You are continuing work…") that carries the sidecar extensions
-    // (`devin-rs/summary`, `compact/edited_files`, `compact/todo_list`, `subagent/handoff_history`)
-    // plus a "Full conversation history saved at <path>." line pointing at
-    // `summaries/<agent>/history_<hex>.md`. Gather the per-`summarized_from` facts now (≤2 node
-    // bodies per compaction) so the synthetic boundary can carry them before the first summary
-    // node is emitted. `handoff_history` is deliberately dropped — it duplicates the handoffs.
+    let node_meta = &forest.node_meta;
+    // Gather each compaction pair's facts before its first summary is emitted.
     let mut compaction_facts: HashMap<i64, serde_json::Map<String, Value>> = HashMap::new();
     for &nid in &chain {
         let Some(sf) = node_meta.get(&nid).and_then(|m| m.summarized_from) else {
@@ -839,15 +807,15 @@ fn stream_session(
                     result => result?,
                 }
             } else {
-                conn.query_row(
-                    "SELECT CASE WHEN json_valid(chat_message) \
-                     THEN json_extract(chat_message, '$.content') END FROM message_nodes \
-                     WHERE session_id = ?1 AND node_id = ?2",
-                    rusqlite::params![session_id, nid],
-                    |row| row.get(0),
-                )
-                .ok()
-                .flatten()
+                let chat = conn
+                    .query_row(
+                        "SELECT chat_message FROM message_nodes WHERE session_id=?1 AND node_id=?2",
+                        rusqlite::params![session_id, nid],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .ok()
+                    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+                chat.and_then(|chat| chat.get("content").and_then(Value::as_str).map(str::to_string))
             };
             if let Some(content) = content.filter(|c| !c.is_empty()) {
                 prefix.push(content);
@@ -861,19 +829,7 @@ fn stream_session(
     if model.is_none() {
         for &nid in chain.iter().rev() {
             if forest.roles.get(&nid).is_some_and(|r| r == "assistant") {
-                let g: Option<String> = if let Some(navigation) = &forest.navigation {
-                    navigation.get(&nid).and_then(|n| n.model.clone())
-                } else {
-                    conn.query_row(
-                        "SELECT CASE WHEN json_valid(chat_message) \
-                         THEN json_extract(chat_message, '$.metadata.generation_model') END \
-                         FROM message_nodes WHERE session_id = ?1 AND node_id = ?2",
-                        rusqlite::params![session_id, nid],
-                        |row| row.get(0),
-                    )
-                    .ok()
-                    .flatten()
-                };
+                let g = forest.navigation.get(&nid).and_then(|n| n.model.clone());
                 if let Some(g) = g.filter(|s| !s.is_empty()) {
                     model = Some(g);
                     break;
@@ -1612,7 +1568,7 @@ mod tests {
         )?;
         let refs = discover_conn(&conn, &path)?;
         let child = refs.iter().find(|r| r.id == "fixture-alpha/sidekick").unwrap();
-        assert_eq!(child.message_count, 6);
+        assert_eq!(child.message_count, 5);
         let tree = subagent_tree(&path, "fixture-alpha");
         assert_eq!(tree.len(), 1);
         assert_eq!(tree[0].tool_use_id.as_deref(), Some("spawn-call"));
@@ -1645,6 +1601,10 @@ mod tests {
             assert_eq!(facts.is_some(), old.is_some(), "{text}");
             if let (Some(old), Some(facts)) = (old, facts) {
                 assert_eq!(
+                    facts.is_summary,
+                    old.get("summarized_from").is_some_and(|value| !value.is_null())
+                );
+                assert_eq!(
                     facts.summarized_from,
                     old.get("summarized_from").and_then(Value::as_i64)
                 );
@@ -1671,6 +1631,34 @@ mod tests {
     }
 
     #[test]
+    fn discovery_counts_only_canonical_prompts_and_replies_on_each_chain() -> Result<()> {
+        let world = cv_testkit::World::in_process("devin-canonical-discovery-count");
+        let path = world.base.join("sessions.db");
+        std::fs::copy(fixture(), &path)?;
+        let writer = Connection::open(&path)?;
+        // A user-role injected node is not a human prompt. The fixture also carries assistant
+        // compaction summaries, which are not model replies.
+        writer.execute(
+            "UPDATE message_nodes SET chat_message=json_set(chat_message,'$.metadata.is_user_input',false) \
+            WHERE session_id='fixture-beta' AND node_id=1",
+            [],
+        )?;
+        let adapter = Devin::with_root(&world.base);
+        for reference in adapter.discover()? {
+            let parsed = crate::stream::collect_with(&adapter, &reference, &ParseOptions::full())?;
+            assert_eq!(
+                reference.message_count,
+                parsed.messages.iter().filter(|m| m.is_turn()).count(),
+                "{}",
+                reference.id
+            );
+        }
+        let tree = subagent_tree(&path, "fixture-alpha");
+        assert_eq!(tree[0].session.message_count, 5);
+        Ok(())
+    }
+
+    #[test]
     fn discovers_sessions_and_subagent_children_with_chain_only_counts() {
         let conn = open_ro(&fixture()).unwrap();
         let refs = discover_conn(&conn, &fixture()).unwrap();
@@ -1694,8 +1682,8 @@ mod tests {
         assert_eq!(sub.created_at, a.created_at);
         assert_eq!(sub.updated_at, ts_from_epoch(1_759_600_000i64 + 200));
         // The child's own chain: handoff user + 5 assistant (incl. the compaction summary)
-        // = 6 (its tool + system rows don't).
-        assert_eq!(sub.message_count, 6);
+        // = 5 conversational turns (the assistant summary is not a reply).
+        assert_eq!(sub.message_count, 5);
 
         // Beta: nodes 0 (system), 1 (user), 2 (corrupt), 3 (assistant) → 2.
         assert_eq!(refs[2].message_count, 2);
@@ -1756,7 +1744,7 @@ mod tests {
         assert_eq!(subs.len(), 1);
         assert_eq!(subs[0].session.id, "fixture-alpha/sidekick");
         assert_eq!(subs[0].agent_type.as_deref(), Some("sidekick"));
-        assert_eq!(subs[0].session.message_count, 6);
+        assert_eq!(subs[0].session.message_count, 5);
         // ...and the parent records the ghost head.
         let conn = open_ro(&fixture()).unwrap();
         let s = parse_db(&conn, &sref("fixture-alpha")).unwrap();

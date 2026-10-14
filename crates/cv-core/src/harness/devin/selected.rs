@@ -70,6 +70,11 @@ impl Selected {
             let number = |key| view.get(key)?.map(JsonView::as_number).transpose().map(Option::flatten);
             Ok(Some(NodeFacts {
                 summarized_from: number("summarized_from")?.and_then(|n| n.as_i64()),
+                is_summary: view
+                    .get("summarized_from")?
+                    .map(|v| v.is_null().map(|null| !null))
+                    .transpose()?
+                    .unwrap_or(false),
                 num_tokens_preceding: number("num_tokens_preceding")?.and_then(|n| n.as_u64()),
                 is_system_prefix: view
                     .get("is_system_prefix")?
@@ -124,12 +129,13 @@ impl Selected {
 #[derive(Default)]
 pub(super) struct Navigation {
     pub role: Option<String>,
+    pub is_turn: bool,
     pub agent_id: Option<String>,
     pub chain_node_id: Option<i64>,
     pub tool_call_id: Option<String>,
     pub model: Option<String>,
 }
-fn string(view: Option<JsonView<'_>>) -> Result<Option<String>> {
+pub(super) fn string(view: Option<JsonView<'_>>) -> Result<Option<String>> {
     let Some(view) = view else { return Ok(None) };
     if !view.is_string()? {
         return Ok(None);
@@ -190,6 +196,14 @@ pub(super) fn navigation(view: JsonView<'_>) -> Result<Navigation> {
         } else {
             None
         },
+        is_turn: role == "assistant"
+            || (role == "user"
+                && metadata
+                    .and_then(|v| v.get("is_user_input").transpose())
+                    .transpose()?
+                    .and_then(|v| v.as_bool().transpose())
+                    .transpose()?
+                    .unwrap_or(false)),
         role: Some(role),
     })
 }
