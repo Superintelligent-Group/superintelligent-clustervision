@@ -1341,8 +1341,14 @@ await acheck("same-session rerenders do not duplicate late enrichment and failed
     eq(transcript.querySelectorAll(".ev-panel").length, 1, "one events panel");
     eq(transcript.querySelectorAll(".sub-row").length, 1, "one subagent inventory");
     const row = transcript.querySelector(".sub-row"); await transcript._toggleSub(row);
-    const retry = row.querySelector("button"); truthy(retry, "failure offers retry"); retry.click();
-    for (let n = 0; n < 20; n++) await Promise.resolve();
+    const retry = row.querySelector("button"); truthy(retry, "failure offers retry");
+    // A real Response.json() body read may settle on a later browser task. Capture the
+    // operation initiated by the UI click and await its completion, not a microtask count.
+    const toggle = transcript._toggleSub.bind(transcript);
+    let retryRequest;
+    transcript._toggleSub = (node) => (retryRequest = toggle(node));
+    retry.click(); truthy(retryRequest, "retry click starts a load");
+    await retryRequest;
     has(row.textContent, "recovered child", "retry replaces error with full content");
     eq(row.querySelector(".sub-row-body").hidden, false, "retry remains visible");
     row.querySelector("cv-transcript .th-title").click();
