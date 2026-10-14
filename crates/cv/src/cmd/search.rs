@@ -4,6 +4,7 @@ use crate::util::{dirs_home, parse_harness, short_id};
 use anyhow::{Context, Result};
 use cv_core::ir::{truncate, Harness};
 use cv_core::sanitize::sanitize_line;
+use std::io::Write;
 use std::path::PathBuf;
 
 pub(crate) fn cmd_search(
@@ -27,7 +28,7 @@ pub(crate) fn cmd_search(
             },
         )
         .context("semantic search failed (run `cv index --semantic` first?)")?;
-        render_search_hits(&hits, want, limit, query, "semantic", json)?;
+        render_search_hits(hits, want, limit, query, "semantic", json)?;
         return Ok(());
     }
 
@@ -55,7 +56,7 @@ pub(crate) fn cmd_search(
             },
         ) {
             Ok(hits) => {
-                render_search_hits(&hits, want, limit, query, "index", json)?;
+                render_search_hits(hits, want, limit, query, "index", json)?;
                 return Ok(());
             }
             Err(e) => eprintln!("(tantivy index unavailable: {e:#}; scanning live)"),
@@ -80,32 +81,26 @@ fn legacy_sqlite_index_path() -> Option<PathBuf> {
 /// With `json`, the SAME hits in the same order go to stdout as one JSON array instead —
 /// no hint lines, an empty result is `[]` — so the output pipes cleanly.
 fn render_search_hits(
-    hits: &[cv_search::Hit],
+    mut hits: Vec<cv_search::Hit>,
     want: Option<Harness>,
     limit: usize,
     query: &str,
     source: &str,
     json: bool,
 ) -> Result<()> {
-    let mut selected: Vec<cv_search::Hit> = hits
-        .iter()
-        .filter(|h| want.is_none_or(|w| h.harness == w.as_str()))
-        .take(limit)
-        .cloned()
-        .collect();
+    hits.retain(|h| want.is_none_or(|w| h.harness == w.as_str()));
+    hits.truncate(limit);
     if source == "index" {
-        cv_search::enrich_text_snippets(None, query, &mut selected)?;
+        cv_search::enrich_text_snippets(None, query, &mut hits)?;
     }
-    let rows: Vec<&cv_search::Hit> = selected.iter().collect();
     if json {
-        // Machine-readable hits: a session row (the same shape `ls --json` emits, filled from the
-        // catalog) plus the untruncated snippet and the index's relevance score (BM25 for FTS,
-        // cosine similarity for --semantic). Timestamps are RFC 3339, null when unknown.
-        let vals: Vec<serde_json::Value> = rows.iter().map(|h| hit_json(h)).collect();
-        println!("{}", serde_json::to_string_pretty(&vals)?);
+        let stdout = std::io::stdout();
+        let mut out = std::io::BufWriter::new(stdout.lock());
+        write_json_rows(&mut out, &hits, hit_json)?;
+        out.flush()?;
         return Ok(());
     }
-    if rows.is_empty() {
+    if hits.is_empty() {
         let hint = if source == "semantic" {
             "(semantic; run `cv index --semantic` to (re)build embeddings)"
         } else {
@@ -129,7 +124,7 @@ fn render_search_hits(
         }
         return Ok(());
     }
-    for h in rows {
+    for h in &hits {
         // Dates ride on the hit straight from the index (FTS); semantic hits carry none.
         let date = h
             .updated_at
@@ -165,6 +160,28 @@ fn render_search_hits(
     Ok(())
 }
 
+// Preserve the shared row contract and exact pretty-array formatting, retaining only one
+// projected row at a time rather than another complete Value array and serialized String.
+struct JsonRows<'a, T, F> {
+    rows: &'a [T],
+    row: F,
+}
+impl<T, F: Fn(&T) -> serde_json::Value> serde::Serialize for JsonRows<'_, T, F> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut sequence = serializer.serialize_seq(Some(self.rows.len()))?;
+        for row in self.rows {
+            sequence.serialize_element(&(self.row)(row))?;
+        }
+        sequence.end()
+    }
+}
+fn write_json_rows<T>(out: &mut impl Write, rows: &[T], row: impl Fn(&T) -> serde_json::Value) -> Result<()> {
+    serde_json::to_writer_pretty(&mut *out, &JsonRows { rows, row })?;
+    writeln!(out)?;
+    Ok(())
+}
+
 /// One `--json` object for an index/semantic hit — [`cv_core::rows::SearchRow`] does the shaping,
 /// so `cv search --json` and `cv serve`'s `/api/search` emit the identical row for the identical hit.
 fn hit_json(h: &cv_search::Hit) -> serde_json::Value {
@@ -191,12 +208,12 @@ fn cmd_search_live(query: &str, want: Option<Harness>, limit: usize, json: bool)
     let found = cv_core::scan::live_search(query, want, limit)?;
     if json {
         // Pure JSON on stdout even for a miss: an empty array, no prose.
-        let rows: Vec<serde_json::Value> = found
-            .hits
-            .iter()
-            .map(|h| cv_core::rows::live_search_row(&h.session, &h.title, &h.snippet))
-            .collect();
-        println!("{}", serde_json::to_string_pretty(&rows)?);
+        let stdout = std::io::stdout();
+        let mut out = std::io::BufWriter::new(stdout.lock());
+        write_json_rows(&mut out, &found.hits, |h| {
+            cv_core::rows::live_search_row(&h.session, &h.title, &h.snippet)
+        })?;
+        out.flush()?;
         if found.truncated {
             eprintln!("(stopped at {limit} hits; use --limit)");
         }
@@ -250,4 +267,35 @@ pub(crate) fn cmd_index(semantic: bool, rebuild: bool, subagents: bool) -> Resul
     }
     println!("events: extracted on the same pass → try `cv events <id>` / `cv touched <path>`");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn streamed_search_json_preserves_exact_pretty_row_array() {
+        for rows in [
+            Vec::new(),
+            vec![
+                serde_json::json!({"id":"one","text":"雪\n\""}),
+                serde_json::json!({"id":"two","score":null,"fields":[1,true,"é"]}),
+            ],
+        ] {
+            let mut output = Vec::new();
+            write_json_rows(&mut output, &rows, Clone::clone).unwrap();
+            assert_eq!(
+                String::from_utf8(output).unwrap(),
+                format!("{}\n", serde_json::to_string_pretty(&rows).unwrap())
+            );
+        }
+        let rows = vec![1, 2, 3];
+        let visits = std::cell::RefCell::new(Vec::new());
+        let mut out = Vec::new();
+        write_json_rows(&mut out, &rows, |row| {
+            visits.borrow_mut().push(*row);
+            serde_json::json!(row)
+        })
+        .unwrap();
+        assert_eq!(*visits.borrow(), rows);
+    }
 }
