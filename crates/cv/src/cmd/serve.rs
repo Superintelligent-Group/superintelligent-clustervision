@@ -624,7 +624,14 @@ fn search(query: &str, semantic_search: &cv_search::SemanticSearch) -> Reply {
     }
 
     let mut rows: Vec<Value> = if source == "live" {
-        match cv_core::scan::live_search(&q, want, limit) {
+        match cv_core::scan::live_search_filtered(&q, want, limit, |reference| {
+            cwd.as_ref().is_none_or(|needle| {
+                reference
+                    .cwd
+                    .as_ref()
+                    .is_some_and(|path| path.to_string_lossy().contains(needle.as_str()))
+            })
+        }) {
             Ok(found) => {
                 if found.truncated {
                     note = Some(format!(

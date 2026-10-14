@@ -1350,6 +1350,30 @@ fn serve_stats() {
 }
 
 #[test]
+fn live_search_filters_cwd_before_spending_the_result_budget() {
+    let w = world("live-filter-budget");
+    for id in ["alphasess", "betasess"] {
+        w.write_session(id, &[json!({"type":"user", "uuid":id, "cwd":format!("/work/{id}"), "message":{"role":"user", "content":"sharedneedle"}})]);
+    }
+    let (port, _server) = spawn_serve(&w);
+    let (_, first) = get_json(port, "/api/search?q=sharedneedle&limit=1");
+    let target = if first[0]["id"] == "alphasess" {
+        "betasess"
+    } else {
+        "alphasess"
+    };
+    let (status, filtered) = get_json(port, &format!("/api/search?q=sharedneedle&limit=1&cwd=/work/{target}"));
+    assert_eq!(status, 200, "{filtered}");
+    assert_eq!(
+        filtered.as_array().unwrap().len(),
+        1,
+        "nonmatching hit exhausted live limit: {filtered}"
+    );
+    assert_eq!(filtered[0]["id"], target);
+    assert_eq!(get_json(port, "/api/search?q=sharedneedle&limit=0").1, json!([]));
+}
+
+#[test]
 fn malformed_numeric_read_selectors_error_before_expanding_the_read() {
     let w = world("numeric-read-selectors");
     let (port, _server) = spawn_serve(&w);

@@ -139,23 +139,33 @@ pub struct LiveSearch {
 /// Trade-off, stated plainly: a match beyond a session's capped head is missed here; finding those
 /// is the index's job (`cv index`).
 pub fn live_search(query: &str, want: Option<Harness>, limit: usize) -> Result<LiveSearch> {
-    if limit == 0 {
-        return Ok(LiveSearch {
-            hits: Vec::new(),
-            truncated: false,
-        });
-    }
+    live_search_filtered(query, want, limit, |_| true)
+}
+
+/// Live search with caller metadata selection applied before payload reads and the hit budget.
+pub fn live_search_filtered(
+    query: &str,
+    want: Option<Harness>,
+    limit: usize,
+    mut select: impl FnMut(&crate::SessionRef) -> bool,
+) -> Result<LiveSearch> {
     let _sources = crate::source::read_scope();
     let needle = query.to_lowercase();
     let mut out = LiveSearch {
         hits: Vec::new(),
         truncated: false,
     };
+    if limit == 0 {
+        return Ok(out);
+    }
     for adapter in crate::harness::all() {
         if want.is_some_and(|h| adapter.harness() != h) || adapter.roots().is_empty() {
             continue;
         }
         for r in adapter.discover()? {
+            if !select(&r) {
+                continue;
+            }
             let mut sink = CapSink::new(&r.path);
             let meta = adapter
                 .try_stream(&r, &ParseOptions::lazy(), &mut sink)
