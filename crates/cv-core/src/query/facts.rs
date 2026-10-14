@@ -1364,8 +1364,8 @@ mod tests {
     fn streamed_compaction_facts_preserve_full_detector_validation() {
         let world = cv_testkit::World::in_process("streamed_compaction_validation");
         let path = world.transcript("invalid-sidecar");
-        // The legacy lean reader tolerates overflow inside this ignored sidecar. The extra-enabled
-        // compaction detector rejects the record, so its count differs from the lazy IR's kinds.
+        // A record that is not a serde Value (here an overflowing number in a sidecar nobody
+        // reads) is rejected by every demand, so the lazy IR and the detector agree.
         std::fs::write(
             &path,
             r#"{"type":"system","subtype":"compact_boundary","toolUseResult":{"ignored":1e400}}"#,
@@ -1376,7 +1376,7 @@ mod tests {
         let full = crate::stream::collect_with(adapter.as_ref(), &r, &crate::ParseOptions::lazy()).unwrap();
         let query = SessionQuery::parse("compactions=0").unwrap();
         let texts = TextSets::default();
-        assert_eq!(full.messages.len(), 1);
+        assert_eq!(full.messages.len(), 0);
         assert!(matches_full(&query, &r, &full, &texts).unwrap());
         assert!(matches_streamed(&query, adapter.as_ref(), &r, &texts).unwrap());
     }

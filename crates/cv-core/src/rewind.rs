@@ -652,13 +652,7 @@ fn rewind_session_after_scan(
         }),
         foreign: Vec::new(),
     };
-    crate::harness::claude::stream_reader(
-        &r.id,
-        BufReader::new(file.try_clone()?.take(size)),
-        Some(r.path.clone()),
-        &ParseOptions::lazy_offsets(),
-        &mut scan,
-    );
+    crate::harness::claude::stream_prefix(r, size, &ParseOptions::lazy_offsets(), &mut scan)?;
     if let Some(error) = scan.take_error() {
         return Err(error);
     }

@@ -30,7 +30,7 @@ record that published a source descriptor and once at the end, never per record.
 fields it reads; a giant line is never copied on positioned builds; spans and source arguments
 defer payloads to the consumer. The CI heap gate (`check-heap-budget.py`, both builds) and the
 operation gates stay the proof. Still owned, and so still output-sized: complete-mode carriers
-and metadata, rich `toolUseResult` sidecars, array tool-result content (inline coercion).
+and metadata, rich `toolUseResult` sidecars, array tool results under 64 KiB (coerced inline).
 
 **Tests.** Per format: the corpus golden summaries (frozen per harness version) and the heap
 gate, plus behavior tests where the rule lives (classification, checkpoints and resume,

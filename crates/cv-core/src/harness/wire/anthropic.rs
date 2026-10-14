@@ -163,10 +163,23 @@ pub(crate) fn block_from_view(
     q: &Quirks,
     spans: bool,
 ) -> anyhow::Result<Option<Block>> {
-    use super::super::store::document::Fields;
     if !spans {
         return Ok(block_from(view.resolve()?.as_ref(), q));
     }
+    block_from_view_with(view, q, true, &mut |v| v.text(true), 0)
+}
+
+/// [`block_from_view`] with the caller's text rule for content strings, `spans` for tool
+/// arguments, and the size above which a source-backed tool-result array becomes checked joined
+/// text rather than being coerced inline. Unselected fields are never decoded, in every demand.
+pub(crate) fn block_from_view_with(
+    view: crate::json::JsonView<'_>,
+    q: &Quirks,
+    spans: bool,
+    text: &mut dyn FnMut(crate::json::JsonView<'_>) -> anyhow::Result<Option<Text>>,
+    joined_over: u64,
+) -> anyhow::Result<Option<Block>> {
+    use super::super::store::document::Fields;
     let keys = [
         "type",
         "source",
@@ -195,7 +208,7 @@ pub(crate) fn block_from_view(
             name: record.string("name")?.unwrap_or_default(),
             input: record
                 .get(q.tool_use.1)
-                .map(|v| v.argument(true))
+                .map(|v| v.argument(spans))
                 .transpose()?
                 .unwrap_or_default(),
             namespace: None,
@@ -279,25 +292,25 @@ pub(crate) fn block_from_view(
         return Ok(None);
     };
     let mut fields = record.project(keys)?;
-    let mut result = record.get("content").map(|v| v.text(true)).transpose()?.flatten();
+    let mut result = record.get("content").map(&mut *text).transpose()?.flatten();
     if ty == "tool_result" && result.is_none() {
         if let Some(content) = record.get("content") {
-            if content.is_array()? && content.source_range()?.is_some() {
+            if content.is_array()? && content.source_range()?.is_some_and(|(_, len)| len > joined_over) {
                 result = Some(coerce_selected_array(content)?);
             } else {
                 fields.insert("content".into(), content.resolve()?.into_owned());
             }
         }
     }
-    let text = record.get("text").map(|v| v.text(true)).transpose()?.flatten();
-    let thinking = record.get(q.thinking.0).map(|v| v.text(true)).transpose()?.flatten();
+    let body = record.get("text").map(&mut *text).transpose()?.flatten();
+    let thinking = record.get(q.thinking.0).map(&mut *text).transpose()?.flatten();
     Ok(block_from_fields(&Value::Object(fields), q, &mut |key| {
         if key == "content" {
             result.clone()
         } else if key == q.thinking.0 {
             thinking.clone()
         } else if key == "text" {
-            text.clone()
+            body.clone()
         } else {
             None
         }

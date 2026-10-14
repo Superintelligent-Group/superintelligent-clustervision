@@ -15,16 +15,14 @@ pub(crate) use transport::{SourceDescriptor, SourceRegistry};
 
 use crate::harness::store::document;
 use crate::harness::store::document::range::{Range, RangeSource};
-#[cfg(any(feature = "mmap", test))]
 use crate::harness::store::document::Raw;
 #[cfg(feature = "mmap")]
-use crate::harness::store::document::{Record, Source};
+use crate::harness::store::document::Source;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Number, Value};
 use std::borrow::Cow;
 use std::fs::Metadata;
-#[cfg(feature = "mmap")]
 use std::io::Cursor;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -256,6 +254,23 @@ impl JsonSource {
         self.check()?;
         result
     }
+    /// One Value-compatible record of an in-memory copy (mapped or read) of this capture. No
+    /// stat: the record reader checks identity once per operation and after each record that
+    /// published a source descriptor, rather than twice per record.
+    pub(crate) fn read_record<T>(
+        &self,
+        offset: u64,
+        text: &str,
+        f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>,
+    ) -> Result<T> {
+        let index = document::Index::default();
+        let raw = Raw::new(text, &index);
+        if !document::validate(raw) {
+            return Err(InvalidJson.into());
+        }
+        self.range(offset, text.len() as u64)?
+            .with_native_view(raw, Validation::Cached, f)
+    }
     /// Reuse one checked original-source positioned context for many typed records.
     #[cfg(not(feature = "mmap"))]
     pub(crate) fn read_positioned_range_syntax<T>(
@@ -273,7 +288,6 @@ impl JsonSource {
             .with_positioned_view(context, Validation::Syntax, f)
     }
     /// Strict Value counterpart sharing an original-source positioned context across records.
-    #[cfg(not(feature = "mmap"))]
     pub(crate) fn read_positioned_range_value<T>(
         &self,
         context: &RangeSource,
@@ -618,7 +632,6 @@ impl JsonRange {
     pub(crate) fn with_view<T>(&self, f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>) -> Result<T> {
         self.with_validation(Validation::Cached, f)
     }
-    #[cfg(feature = "mmap")]
     fn with_native_view<T>(
         &self,
         raw: Raw<'_>,
@@ -842,11 +855,9 @@ impl Json {
 #[derive(Clone, Copy)]
 enum View<'a> {
     Owned(&'a Value),
-    #[cfg(feature = "mmap")]
     Source(SourceView<'a>),
     Portable(PortableView<'a>),
 }
-#[cfg(feature = "mmap")]
 #[derive(Clone, Copy)]
 struct SourceView<'a> {
     raw: Raw<'a>,
@@ -902,7 +913,6 @@ impl<'a> JsonView<'a> {
     pub(crate) fn accepts_value_at_depth(self, depth: usize) -> Result<bool> {
         match self.0 {
             View::Owned(_) => Ok(true),
-            #[cfg(feature = "mmap")]
             View::Source(source) => Ok(document::accepts_value_at_depth(source.raw, depth)),
             View::Portable(source) => source.source.accepts_value_at_depth(source.value, depth),
         }
@@ -910,8 +920,27 @@ impl<'a> JsonView<'a> {
     pub(crate) fn select_fields(self, keys: &[&str]) -> Result<Option<Vec<Option<Self>>>> {
         self.select_fields_with(keys, false)
     }
-    pub(crate) fn select_unique_fields(self, keys: &[&str]) -> Result<Option<Vec<Option<Self>>>> {
-        self.select_fields_with(keys, true)
+    /// Visit requested fields; the last visit of a key wins. False for a nonobject.
+    pub(crate) fn select_each(
+        self,
+        keys: &[&str],
+        unique: bool,
+        visit: &mut dyn FnMut(usize, Self) -> Result<()>,
+    ) -> Result<bool> {
+        if let View::Source(source) = self.0 {
+            return document::select_each(source.raw, keys, unique, &mut |i, raw| {
+                visit(i, Self(View::Source(SourceView { raw, ..source })))
+            });
+        }
+        let Some(fields) = self.select_fields_with(keys, unique)? else {
+            return Ok(false);
+        };
+        for (i, field) in fields.into_iter().enumerate() {
+            if let Some(field) = field {
+                visit(i, field)?;
+            }
+        }
+        Ok(true)
     }
     fn select_fields_with(self, keys: &[&str], unique: bool) -> Result<Option<Vec<Option<Self>>>> {
         Ok(match self.0 {
@@ -921,7 +950,6 @@ impl<'a> JsonView<'a> {
                     .collect(),
             ),
             View::Owned(_) => None,
-            #[cfg(feature = "mmap")]
             View::Source(source) => (if unique {
                 document::select_unique_fields(source.raw, keys)?
             } else {
@@ -949,7 +977,6 @@ impl<'a> JsonView<'a> {
     pub(crate) fn source_range(self) -> Result<Option<(u64, u64)>> {
         Ok(match self.0 {
             View::Owned(_) => None,
-            #[cfg(feature = "mmap")]
             View::Source(source) => {
                 let delta = (source.raw.get().as_ptr() as usize)
                     .checked_sub(source.base)
@@ -977,11 +1004,106 @@ impl<'a> JsonView<'a> {
         }
         self.text(false)
     }
+    /// Transcript text by the codec's span rule: a string whose *decoded* length exceeds
+    /// INLINE_MAX stays in the source when `spans` is demanded, and anything else is inline.
+    /// Mapped builds describe it as a [`Span`](crate::lazy::Span) of the session's primary file;
+    /// positioned builds as a checked source text. None for a nonstring.
+    pub(crate) fn lazy_text(self, spans: bool) -> Result<Option<crate::lazy::Text>> {
+        if !self.is_string()? {
+            return Ok(None);
+        }
+        if spans
+            && self
+                .source_range()?
+                .is_some_and(|(_, len)| len - 2 > crate::lazy::INLINE_MAX as u64)
+        {
+            // A JSON escape is at most six bytes per decoded byte: only near-threshold escaped
+            // strings need their decoded length, and those are at most 24 KiB of input.
+            let (_, len) = self.source_range()?.context("JSON text source")?;
+            let mut decoded = 0;
+            if len - 2 <= 6 * crate::lazy::INLINE_MAX as u64 {
+                self.for_each_char(|c| {
+                    decoded += c.len_utf8();
+                    decoded <= crate::lazy::INLINE_MAX
+                })?;
+            }
+            if len - 2 > 6 * crate::lazy::INLINE_MAX as u64 || decoded > crate::lazy::INLINE_MAX {
+                #[cfg(feature = "mmap")]
+                return self.text(true);
+                #[cfg(not(feature = "mmap"))]
+                return self.source_text();
+            }
+        }
+        self.text(false)
+    }
+    /// Visit a string's decoded characters until `visit` returns false. A borrowed string is
+    /// decoded in place, without a decode window; false for a nonstring.
+    pub(crate) fn for_each_char(self, mut visit: impl FnMut(char) -> bool) -> Result<bool> {
+        if let View::Source(source) = self.0 {
+            let raw = source.raw.get();
+            if !raw.starts_with('"') {
+                return Ok(false);
+            }
+            let mut chars = raw[1..raw.len() - 1].chars();
+            while let Some(c) = chars.next() {
+                let c = if c != '\\' {
+                    c
+                } else {
+                    // Validated: every escape is well formed and surrogates are paired.
+                    let hex = |chars: &mut std::str::Chars<'_>| {
+                        (0..4).try_fold(0, |n, _| Some(n * 16 + chars.next()?.to_digit(16)?))
+                    };
+                    match chars.next() {
+                        Some('b') => '\u{8}',
+                        Some('f') => '\u{c}',
+                        Some('n') => '\n',
+                        Some('r') => '\r',
+                        Some('t') => '\t',
+                        Some('u') => {
+                            let high = hex(&mut chars).context("validated JSON escape")?;
+                            let code = if (0xd800..=0xdbff).contains(&high) {
+                                chars.nth(1);
+                                let low = hex(&mut chars).context("validated JSON escape")?;
+                                0x10000 + ((high - 0xd800) << 10) + low - 0xdc00
+                            } else {
+                                high
+                            };
+                            char::from_u32(code).context("validated JSON escape")?
+                        }
+                        Some(other) => other,
+                        None => anyhow::bail!("validated JSON string failed decoding"),
+                    }
+                };
+                if !visit(c) {
+                    break;
+                }
+            }
+            return Ok(true);
+        }
+        #[derive(Debug)]
+        struct Stop;
+        impl std::fmt::Display for Stop {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("character visit stopped")
+            }
+        }
+        impl std::error::Error for Stop {}
+        match self.for_each_str_chunk(|chunk| {
+            for c in chunk.chars() {
+                if !visit(c) {
+                    return Err(Stop.into());
+                }
+            }
+            Ok(())
+        }) {
+            Err(error) if error.is::<Stop>() => Ok(true),
+            result => result,
+        }
+    }
     /// Native transcript text uses the session's primary source, just like existing Text spans.
     pub(crate) fn text(self, spans: bool) -> Result<Option<crate::lazy::Text>> {
         if spans
             && match self.0 {
-                #[cfg(feature = "mmap")]
                 View::Source(source) => source.range.decoded.is_some(),
                 View::Portable(source) => source.owner.decoded.is_some(),
                 View::Owned(_) => false,
@@ -991,7 +1113,6 @@ impl<'a> JsonView<'a> {
         }
         match self.0 {
             View::Owned(value) => Ok(value.as_str().map(|s| crate::lazy::Text::Inline(s.to_owned()))),
-            #[cfg(feature = "mmap")]
             View::Source(source) => {
                 let raw = source.raw.get().as_bytes();
                 if raw.first() != Some(&b'"') {
@@ -1078,9 +1199,8 @@ impl<'a> JsonView<'a> {
                 .source
                 .get(source.value, key)?
                 .map(|value| Self(View::Portable(PortableView { value, ..source }))),
-            #[cfg(feature = "mmap")]
-            View::Source(source) => Record::parse(source.raw)
-                .and_then(|record| record.get(key))
+            View::Source(source) => document::select_fields(source.raw, &[key])
+                .and_then(|mut fields| fields.pop().flatten())
                 .map(|raw| Self(View::Source(SourceView { raw, ..source }))),
         })
     }
@@ -1090,7 +1210,6 @@ impl<'a> JsonView<'a> {
         anyhow::ensure!((0x20..=0x7e).contains(&byte), "expected printable ASCII");
         match self.0 {
             View::Owned(value) => Ok(value.as_str().is_some_and(|s| s.as_bytes().contains(&byte))),
-            #[cfg(feature = "mmap")]
             View::Source(source) => Ok(
                 source.raw.get().starts_with('"') && raw_string_may_contain_ascii(source.raw.get().as_bytes(), byte)
             ),
@@ -1121,7 +1240,6 @@ impl<'a> JsonView<'a> {
         Ok(match self.0 {
             View::Owned(value) => value.is_string(),
             View::Portable(source) => source.source.kind(source.value)? == Some(b'"'),
-            #[cfg(feature = "mmap")]
             View::Source(source) => source.raw.get().starts_with('"'),
         })
     }
@@ -1129,7 +1247,6 @@ impl<'a> JsonView<'a> {
         Ok(match self.0 {
             View::Owned(value) => value.is_object(),
             View::Portable(source) => source.source.kind(source.value)? == Some(b'{'),
-            #[cfg(feature = "mmap")]
             View::Source(source) => source.raw.get().starts_with('{'),
         })
     }
@@ -1137,7 +1254,6 @@ impl<'a> JsonView<'a> {
         Ok(match self.0 {
             View::Owned(value) => value.is_array(),
             View::Portable(source) => source.source.kind(source.value)? == Some(b'['),
-            #[cfg(feature = "mmap")]
             View::Source(source) => source.raw.get().starts_with('['),
         })
     }
@@ -1145,7 +1261,6 @@ impl<'a> JsonView<'a> {
         Ok(match self.0 {
             View::Owned(value) => value.is_null(),
             View::Portable(source) => source.source.kind(source.value)? == Some(b'n'),
-            #[cfg(feature = "mmap")]
             View::Source(source) => source.raw.get() == "null",
         })
     }
@@ -1157,7 +1272,6 @@ impl<'a> JsonView<'a> {
                 Some(b'f') => Some(false),
                 _ => None,
             },
-            #[cfg(feature = "mmap")]
             View::Source(source) => match source.raw.get() {
                 "true" => Some(true),
                 "false" => Some(false),
@@ -1168,11 +1282,9 @@ impl<'a> JsonView<'a> {
     pub fn as_number(self) -> Result<Option<Number>> {
         match self.0 {
             View::Owned(value) => Ok(value.as_number().cloned()),
-            #[cfg(feature = "mmap")]
             View::Source(source) if matches!(source.raw.get().as_bytes().first(), Some(b'-' | b'0'..=b'9')) => {
                 Ok(Some(serde_json::from_str(source.raw.get())?))
             }
-            #[cfg(feature = "mmap")]
             View::Source(_) => Ok(None),
             View::Portable(source) => {
                 if matches!(source.source.kind(source.value)?, Some(b'-' | b'0'..=b'9')) {
@@ -1191,7 +1303,6 @@ impl<'a> JsonView<'a> {
                 .source
                 .array(source.value)?
                 .map(|array| JsonArray(Array::Portable { array, source })),
-            #[cfg(feature = "mmap")]
             View::Source(source) => {
                 document::array_iter(source.raw).map(|array| JsonArray(Array::Source { array, source }))
             }
@@ -1206,12 +1317,11 @@ impl<'a> JsonView<'a> {
                     f(key, Self(View::Owned(value)))?;
                 }
             }
-            #[cfg(feature = "mmap")]
             View::Source(source) => {
-                let Some(record) = Record::parse(source.raw) else {
+                let Some(entries) = document::object_entries(source.raw) else {
                     return Ok(false);
                 };
-                for (key, value) in record.entries_in_order() {
+                for (key, value) in entries {
                     f(&key, Self(View::Source(SourceView { raw: value, ..source })))?;
                 }
             }
@@ -1255,12 +1365,10 @@ impl<'a> JsonView<'a> {
                 }
                 None => Ok(false),
             },
-            #[cfg(feature = "mmap")]
             View::Source(source) if source.raw.get().starts_with('"') => {
                 decode_string(source.raw, &mut f)?;
                 Ok(true)
             }
-            #[cfg(feature = "mmap")]
             View::Source(_) => Ok(false),
             View::Portable(source) => {
                 if source.source.kind(source.value)? != Some(b'"') {
@@ -1279,7 +1387,6 @@ impl<'a> JsonView<'a> {
             View::Portable(source) => Ok(Json::Source(Arc::new(
                 source.owner.child(source.value.offset, source.value.len)?,
             ))),
-            #[cfg(feature = "mmap")]
             View::Source(source) => {
                 let delta = (source.raw.get().as_ptr() as usize)
                     .checked_sub(source.base)
@@ -1301,7 +1408,6 @@ impl<'a> JsonView<'a> {
     pub fn resolve(self) -> Result<Cow<'a, Value>> {
         match self.0 {
             View::Owned(value) => Ok(Cow::Borrowed(value)),
-            #[cfg(feature = "mmap")]
             View::Source(source) => Ok(Cow::Owned(serde_json::from_str(source.raw.get())?)),
             View::Portable(source) => Ok(Cow::Owned(source.source.materialize(source.value)?)),
         }
@@ -1342,7 +1448,6 @@ impl<'a> JsonView<'a> {
     pub(crate) fn replacement(self, replacements: &[(Json, Value)]) -> Result<Option<&Value>> {
         let owner = match self.0 {
             View::Owned(_) => None,
-            #[cfg(feature = "mmap")]
             View::Source(source) => Some(source.range),
             View::Portable(source) => Some(source.owner),
         };
@@ -1408,7 +1513,6 @@ impl<'a> JsonView<'a> {
     pub fn write_canonical(self, writer: &mut impl Write) -> Result<()> {
         match self.0 {
             View::Owned(value) => serde_json::to_writer(writer, value).map_err(Into::into),
-            #[cfg(feature = "mmap")]
             View::Source(source) => write_raw(source.raw, writer),
             View::Portable(_) => write_portable(self, writer),
         }
@@ -1421,7 +1525,6 @@ enum Array<'a> {
         source: PortableView<'a>,
     },
     Owned(std::slice::Iter<'a, Value>),
-    #[cfg(feature = "mmap")]
     Source {
         array: document::ArrayIter<'a>,
         source: SourceView<'a>,
@@ -1440,7 +1543,6 @@ impl<'a> Iterator for JsonArray<'a> {
                     .map(|value| JsonView(View::Portable(PortableView { value, ..*source })))
                     .map_err(Into::into)
             }),
-            #[cfg(feature = "mmap")]
             Array::Source { array, source } => array
                 .next()
                 .map(|raw| Ok(JsonView(View::Source(SourceView { raw, ..*source })))),
@@ -1496,7 +1598,6 @@ impl Write for CountWriter {
         Ok(())
     }
 }
-#[cfg(feature = "mmap")]
 fn decode_string(raw: Raw<'_>, f: &mut impl FnMut(&str) -> Result<()>) -> Result<()> {
     let body = &raw.get()[1..raw.get().len() - 1];
     // Validated unescaped text is borrowed directly. A callback can choose its own bounded scan.
@@ -1519,7 +1620,6 @@ fn decode_string(raw: Raw<'_>, f: &mut impl FnMut(&str) -> Result<()>) -> Result
 }
 /// Strictly validated strings need only the eight ASCII escape mappings here. Unicode
 /// escapes retain serde's surrogate-aware decoder; raw UTF-8 stays on character boundaries.
-#[cfg(feature = "mmap")]
 fn decode_ascii_escapes(body: &str, f: &mut impl FnMut(&str) -> Result<()>) -> Result<()> {
     const WINDOW: usize = 64 * 1024;
     // Valid JSON escapes never decode to more bytes than their encoded body. Preserve the
@@ -1564,13 +1664,12 @@ fn decode_ascii_escapes(body: &str, f: &mut impl FnMut(&str) -> Result<()>) -> R
     }
     Ok(())
 }
-#[cfg(feature = "mmap")]
 fn write_raw(raw: Raw<'_>, writer: &mut impl Write) -> Result<()> {
     match raw.get().as_bytes().first() {
         Some(b'{') => {
-            let record = Record::parse(raw).context("invalid validated JSON object")?;
+            let entries = document::object_entries(raw).context("invalid validated JSON object")?;
             writer.write_all(b"{")?;
-            for (i, (key, value)) in record.entries_in_order().enumerate() {
+            for (i, (key, value)) in entries.into_iter().enumerate() {
                 if i != 0 {
                     writer.write_all(b",")?;
                 }

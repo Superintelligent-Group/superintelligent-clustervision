@@ -60,7 +60,7 @@ demanded output are not themselves avoidable bloat.
 
 | Store / format | Current traversal and retained state | Remaining costs / limits |
 |---|---|---|
-| Claude JSONL | Typed borrowed mmap records and positioned portable projections; lazy text/arguments, Facts metadata, checkpoints and projected discovery/fork heads | Full details and uncommon fallback records remain owned; native/portable CPU convergence is measured separately |
+| Claude JSONL | One record codec (`claude/record.rs`, see [`CODEC.md`](CODEC.md)) over the shared JSONL reader in both builds; lazy text/arguments, facts, usage, discovery and fork heads are demands on it; checkpoints | Complete-mode carriers and metadata, rich `toolUseResult` sidecars and array tool results under 64 KiB remain owned |
 | Codex JSONL | mmap or positioned buffered scan; bounded authority prepass; selected prompt/reply/reasoning/arguments/result ranges and checkpoints | Full/unknown metadata remains owned, and discovery retains its small-file full-scan / sampled head-tail policy |
 | Codex legacy JSON / zstd | Legacy reads/discovery use checked document views and selected items/title prefixes; compressed modern JSONL decodes once into shared backing | Demanded rich fallback fields; decoded/staged disk extent; no general compressed incremental marks |
 | Gemini legacy JSON | Checked selected string/canonical/composite results and formatted thoughts; native mmap or portable range projections | Full/complete modes and rich display extras still own required payloads |
