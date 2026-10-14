@@ -4,7 +4,7 @@ mod spool;
 use spool::{FirstUser, Prefix, Spool};
 use std::io::{BufReader, BufWriter, Read};
 
-const STATE_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "/archive-full1");
+const STATE_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "/archive-full2");
 const STATE_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

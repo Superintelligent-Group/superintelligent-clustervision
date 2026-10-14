@@ -1003,7 +1003,6 @@ fn read_tree(r: &SessionRef, adapter: &dyn Adapter) -> Result<(Session, Vec<Tree
     struct TreeSink {
         rows: Vec<TreeRow>,
         resolver: cv_core::Resolver,
-        first_user_seen: bool,
         first_user: Option<String>,
         error: Option<anyhow::Error>,
     }
@@ -1016,8 +1015,7 @@ fn read_tree(r: &SessionRef, adapter: &dyn Adapter) -> Result<(Session, Vec<Tree
         }
         fn message(&mut self, m: Message) -> cv_core::Flow {
             let result = (|| -> Result<()> {
-                if !self.first_user_seen && m.role == Role::User {
-                    self.first_user_seen = true;
+                if self.first_user.is_none() && m.role == Role::User {
                     self.first_user = cv_core::render::message_label(&m, &self.resolver)?;
                 }
                 let preview = cv_core::render::message_text_preview(&m, &self.resolver, 80)?;
@@ -1039,7 +1037,6 @@ fn read_tree(r: &SessionRef, adapter: &dyn Adapter) -> Result<(Session, Vec<Tree
     let mut sink = TreeSink {
         rows: Vec::new(),
         resolver: cv_core::Resolver::new(Some(r.path.clone())),
-        first_user_seen: false,
         first_user: None,
         error: None,
     };
@@ -1742,6 +1739,8 @@ mod tests {
         let world = cv_testkit::World::in_process("tree-row-projection");
         let text = "🌙\\\"\n".repeat(30000);
         let path = world.write_session("tree-preview", &[
+            serde_json::json!({"type":"user","uuid":"empty","message":{"role":"user","content":""}}),
+            serde_json::json!({"type":"user","uuid":"blank","message":{"role":"user","content":" \n\t"}}),
             serde_json::json!({"type":"user","uuid":"u","message":{"role":"user","content":text}}),
             serde_json::json!({"type":"assistant","uuid":"a","parentUuid":"u","message":{"role":"assistant","content":[{"type":"text","text":text},{"type":"tool_use","id":"call","name":"Agent","input":{"prompt":text}}]}}),
             serde_json::json!({"type":"user","uuid":"r","parentUuid":"a","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call","content":text}]}}),

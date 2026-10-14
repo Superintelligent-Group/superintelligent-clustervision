@@ -60,38 +60,12 @@ impl cv_core::MessageSink for Spool {
         }
         let result = (|| -> Result<()> {
             if self.first_user.is_none() && message.role == cv_core::Role::User {
-                let mut head = String::new();
-                let mut chars = 0;
-                let has_text = Cell::new(false);
-                let nonwhite = Cell::new(false);
-                let mut add = |text: &str| {
-                    has_text.set(has_text.get() || !text.is_empty());
-                    nonwhite.set(nonwhite.get() || text.chars().any(|c| !c.is_whitespace()));
-                    if chars < 73 {
-                        for c in text.chars().take(73 - chars) {
-                            head.push(c);
-                            chars += 1;
-                        }
-                    }
-                };
-                for block in &message.content {
-                    if let cv_core::Block::Text { text } = block {
-                        // Message::text inserts a separator after any preceding nonempty block,
-                        // including before a later empty block. Preserve that exact label rule.
-                        let separator = has_text.get();
-                        if separator {
-                            add("\n");
-                        }
-                        text.try_for_each_chunk(&self.resolver, 64 * 1024, |text| {
-                            add(text);
-                            Ok(())
-                        })?;
-                    }
+                if let Some(head) = cv_core::render::message_label(&message, &self.resolver)? {
+                    self.first_user = Some(FirstUser {
+                        ordinal: self.messages + 1,
+                        head: Some(head),
+                    });
                 }
-                self.first_user = Some(FirstUser {
-                    ordinal: self.messages + 1,
-                    head: nonwhite.get().then_some(head),
-                });
             }
             let stage = self.stage.as_mut().unwrap();
             crate::cmd::session_json::write_message_frame(stage, &message, &self.resolver)?;
@@ -180,10 +154,9 @@ mod tests {
         ];
         for stable in 0..=session.messages.len() {
             let (bytes, first) = stage(&session);
-            assert!(
-                first.unwrap().head.is_none(),
-                "first empty user remains the label source"
-            );
+            let first = first.unwrap();
+            assert_eq!(first.ordinal, 2, "empty first user must not lock the label source");
+            assert_eq!(cv_core::label_from(None, first.head.as_deref()), session.label());
             let mut header = session.clone();
             header.messages.clear();
             let mut full = Vec::new();
@@ -244,16 +217,15 @@ mod tests {
             "".into(),
             " \n\t".into(),
             "🦀".repeat(80),
-            format!("{}x", " ".repeat(100)),
+            format!("{}x", " ".repeat(100_000)),
         ] {
             let mut session = Session::new("label", Harness::Claude);
             session.messages = vec![message(&text), message("later user")];
             session.messages[0].content.push(Block::Text { text: "".into() });
             let (_, first) = stage(&session);
-            assert_eq!(
-                cv_core::label_from(None, first.unwrap().head.as_deref()),
-                session.label()
-            );
+            let first = first.unwrap();
+            assert!(first.head.as_ref().unwrap().chars().count() <= 72);
+            assert_eq!(cv_core::label_from(None, first.head.as_deref()), session.label());
         }
     }
 }
