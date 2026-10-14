@@ -1,13 +1,12 @@
 # Store performance: the system we are optimizing
 
-Source audit: `c0f0044`, 2026-10-12; latest pushed runtime integration is `5bef874d` (2026-10-13).
+Source audit: `c0f0044`, 2026-10-12; latest runtime integration is `a55662cf` (2026-10-13).
 This is the working model and tracker for the performance pass. Measurements in `PERF.md` remain historical observations; their causal
 explanations are not all supported by the implementation. Paths below are relative to `crates/`.
 
 ## Current integration status (2026-10-13)
 
-A further reasonableness review is integrated on `perf/reasonable-system` and undergoing batched
-composition checks. This follows Ember's request to inspect algorithms, redundant work and
+The further reasonableness review is integrated through runtime `a55662cf`. This follows Ember's request to inspect algorithms, redundant work and
 existing feature behavior broadly; instruction-count targets are not acceptance criteria.
 There is no version bump, tag or release in this work.
 
@@ -30,9 +29,51 @@ elimination of waste is claimed.
 
 LM Studio variants, OpenClaw index reuse, deferral matching and Continue usage/cost export are
 integrated. Continue reports unsupported cache-creation counts and rejects overflowing conversions
-before publication. Implementation is settled; combined validation remains to finish and record here. The earlier broad reader
+before publication. Implementation and combined checks are complete, with evidence below. The earlier broad reader
 inventories remain applicable; this pass does not claim a fresh line-by-line audit of every adapter or a new hardware-counter campaign.
 The native Zed capture gap and live sharpened-child experiment below remain open.
+
+### Current batch convergence
+
+Runtime `da50dcbc` passes the full native workspace run (including 1,236 core unit tests),
+all-target clippy/build, formatting, corpus tools, release parse control, manual build/names,
+dist planning and the semantic-store decode heap check. The secondary configuration passes
+293 affected portable tests, minimal core/search builds, six desktop tests and its all-target
+check, standalone core Wasm, optimized wasm-pack, 19 web syntax checks and 76 browser selftests.
+All three published crate archives verify; both archive sources and internal dependency sources
+match `da50dcbc`. A narrow isolated Cargo home avoids the earlier stale same-version local-registry
+cache problem. All native/portable heap groups pass, including selected payloads, SQLite rows,
+production FTS/semantic indexing and whole-operation prune/window/export controls.
+
+The final shared text-writer repair, `a55662cf`, removes per-chunk JSON String construction by
+streaming serde's canonical escaped interior through the existing protected writer. It passes
+44 focused native and 47 portable checks, plus all-target clippy/build and formatting. Canonical
+byte/length, short-write/failure and checked-source controls cover this shared boundary. The full
+suite and heap campaign above ran once on the combined baseline; this final repair uses scoped
+verification rather than repeating all passing suites. All three package archives and their
+internal dependency sources also verify at exact `a55662cf`, with separate repair evidence under
+`desktop-web-convergence-evidence/reasonable-a55662cf`.
+
+A separate pre-repair Hermes ordinary-body control at `da50dcbc` uses one 16/64 MiB assistant row. Lazy collection peaks
+at 271,305 requested live Rust bytes for both sizes; Facts doctor at 271,395, with identical full
+reports. Full doctor Rust peaks grow from 16,786,260 to 67,117,908 bytes. Native SQLite peaks remain
+16,955,584 / 67,385,536 bytes in both paths: the current giant cell is still allocated by SQLite.
+That baseline requests ~50.5 / 201.6 MB cumulative Rust allocation. Source attribution explains
+the excess exactly: each 64 KiB serializer chunk grows through 128, 65,537 and 131,074 bytes.
+The final shared-writer repair removes these temporary buffers; no speedup is inferred from
+allocation counters. These controls exclude giant reasoning/provider extras,
+prompt suppression and FTS writes. Existing behavioral tests cover their semantics separately.
+The task-private evidence is `hermes-remaining-evidence-20261013/HERMES-LEAN-GIANT.json`;
+native convergence logs use `excellence-home/reasonable-*`, and secondary/package evidence uses
+`desktop-web-convergence-evidence/reasonable-da50dcbc`.
+
+Repeating the identical 16/64 MiB Hermes controls after `a55662cf` removes that allocation slope.
+Lazy collection requests 162,555 Rust bytes across 272 allocations at either size, with 140,231
+peak live bytes above baseline. Facts doctor requests 169,077 bytes across 319 allocations, with
+140,321 peak live bytes. Retained memory, complete doctor reports and native SQLite allocation
+remain identical. Full doctor also remains unchanged. `HERMES-LEAN-GIANT-AFTER.json` beside the
+baseline evidence records the comparison. This measures ordinary body construction, not every
+Hermes payload or elapsed speed; generated giant fixtures were removed after the controls.
 
 ### Previous integrated batch and evidence
 
