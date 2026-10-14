@@ -556,6 +556,9 @@ impl ToolEnrich {
 /// yields an empty map and zero behavior change.
 fn read_update_enrichment(dir: &Path) -> HashMap<String, ToolEnrich> {
     let mut map: HashMap<String, ToolEnrich> = HashMap::new();
+    // Preserve first-seen order in the public vector without repeatedly scanning its prefix.
+    // Membership belongs to this one read, not the retained enrichment or replay state.
+    let mut seen_locations: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
     if metadata::scan(&dir.join("updates.jsonl"), |v| {
         let Some(u) = v.get("params")?.map(|p| p.get("update")).transpose()?.flatten() else {
             return Ok(());
@@ -567,6 +570,7 @@ fn read_update_enrichment(dir: &Path) -> HashMap<String, ToolEnrich> {
         let Some(id) = u.string_field("toolCallId")? else {
             return Ok(());
         };
+        let seen = seen_locations.entry(id.clone()).or_default();
         let e = map.entry(id).or_default();
         if let Some(title) = u.string_field("title")? {
             if su.as_deref() == Some("tool_call_update") || e.title.is_none() {
@@ -579,7 +583,7 @@ fn read_update_enrichment(dir: &Path) -> HashMap<String, ToolEnrich> {
         if let Some(locations) = u.get("locations")? {
             for location in locations.array()? {
                 if let Some(path) = location?.string_field("path")? {
-                    if !e.locations.contains(&path) {
+                    if seen.insert(path.clone()) {
                         e.locations.push(path)
                     }
                 }
@@ -909,6 +913,31 @@ mod tests {
         super::super::note_skipped_lines(&mut s, skipped);
         s.messages = kept.messages;
         s
+    }
+
+    #[test]
+    fn enrichment_many_locations_keeps_first_seen_order_per_call() {
+        let world = cv_testkit::World::in_process("grok-many-tool-locations");
+        let dir = world.base.join("session");
+        fs::create_dir_all(&dir).unwrap();
+        let mut rows = Vec::new();
+        for i in 0..4096 {
+            for id in ["a", "b"] {
+                rows.push(serde_json::json!({"params":{"update":{
+                    "sessionUpdate":"tool_call_update","toolCallId":id,
+                    "title":format!("title-{i}"),"status":"completed",
+                    "locations":[{"path":format!("{id}/file-{i}")},{"path":format!("{id}/file-0")},{"path":format!("{id}/file-{i}")}]
+                }}}).to_string());
+            }
+        }
+        fs::write(dir.join("updates.jsonl"), rows.join("\n")).unwrap();
+        let actual = read_update_enrichment(&dir);
+        for id in ["a", "b"] {
+            let expected = (0..4096).map(|i| format!("{id}/file-{i}")).collect::<Vec<_>>();
+            assert_eq!(actual[id].locations, expected);
+            assert_eq!(actual[id].title.as_deref(), Some("title-4095"));
+            assert_eq!(actual[id].status.as_deref(), Some("completed"));
+        }
     }
 
     #[test]
