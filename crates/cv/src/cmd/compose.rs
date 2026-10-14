@@ -1,7 +1,7 @@
 //! `cv prune` / `cv rewind` / `cv splice` / `cv dataset` — reshaping sessions into new ones.
 
 use crate::cmd::port::emit_session;
-use crate::util::{dry_run_nulls, parse_harness, parse_range, report, resolve, short_id, usage};
+use crate::util::{dry_run_nulls, parse_harness, parse_range, report, short_id, usage};
 use anyhow::{bail, Context, Result};
 use cv_core::ir::{human_bytes, Block, Harness, Message, Role, Session};
 use cv_core::EmitOptions;
@@ -193,13 +193,7 @@ pub(crate) fn cmd_rewind(
     generator: &str,
 ) -> Result<()> {
     let cut = parse_cut(at)?;
-    let path = std::path::Path::new(id);
-    let r = if path.is_file() {
-        // A transcript path (a sub-agent file straight from `subagents/`, or a copy elsewhere).
-        cv_core::ir::SessionRef::from_path(path, Harness::Claude)
-    } else {
-        resolve(id, parse_harness(&harness)?)?.0
-    };
+    let (r, _adapter) = crate::cmd::distill::resolve_source(id, parse_harness(&harness)?)?;
     let r = match &agent {
         Some(a) => crate::cmd::view::resolve_subagent(&r, a)?.session,
         None => r,
@@ -371,6 +365,11 @@ pub(crate) fn cmd_splice(
     resumable: Option<crate::cmd::distill::Target>,
     json: bool,
 ) -> Result<()> {
+    if let Some(format) = export.as_deref() {
+        if !matches!(format, "json" | "md" | "markdown") {
+            bail!("unknown export format {format:?} (use md or json)");
+        }
+    }
     let parsed: Vec<SpliceSpec> = specs.iter().map(|s| parse_splice_spec(s)).collect::<Result<_>>()?;
 
     let mut composition = cv_core::loom::Composition::default();

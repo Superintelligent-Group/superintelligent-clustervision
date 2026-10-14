@@ -3142,3 +3142,38 @@ fn prune_child_id_and_path_select_child_and_emit_discoverable_standalone() {
     assert_ne!(code, 0);
     assert_eq!(fs::read(&parent).unwrap(), parent_before);
 }
+
+#[test]
+fn rewind_validates_explicit_harness_for_direct_paths_before_writing() {
+    let w = World::new("rewind-path-harness");
+    standard_corpus(&w);
+    let source = w.transcript("alphasess");
+    let original = fs::read(&source).unwrap();
+    let output = w.base.join("derived");
+    let (ok, code, _, error) = w.cv(&[
+        "rewind",
+        source.to_str().unwrap(),
+        "--harness",
+        "codex",
+        "--out",
+        output.to_str().unwrap(),
+    ]);
+    assert!(!ok && code == 2, "{error}");
+    assert!(error.contains("Claude Code sessions only (got codex)"), "{error}");
+    assert!(!output.exists());
+    assert_eq!(fs::read(&source).unwrap(), original);
+    let (ok, _, _, error) = w.cv(&["rewind", source.to_str().unwrap(), "--harness", "unknown-harness"]);
+    assert!(!ok && error.contains("unknown-harness"), "{error}");
+}
+
+#[test]
+fn splice_rejects_invalid_exports_before_source_reads_or_generation() {
+    let w = World::new("splice-export-validation");
+    let (ok, _, stdout, error) = w.cv(&["splice", "nonexistent-source", "--export", "yaml", "--generate"]);
+    assert!(!ok, "{error}");
+    assert!(error.contains("unknown export format \"yaml\""), "{error}");
+    assert!(
+        stdout.is_empty(),
+        "failed export must not publish a composition report: {stdout}"
+    );
+}
