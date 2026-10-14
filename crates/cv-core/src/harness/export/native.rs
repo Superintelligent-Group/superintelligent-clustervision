@@ -19,7 +19,23 @@ struct Entry {
 struct Archive {
     source: JsonSource,
     entries: Vec<Entry>,
+    // Positions sorted by id then original position; discovery keeps archive order.
+    by_id: Vec<usize>,
     charge: usize,
+}
+impl Archive {
+    fn entry(&self, id: &str) -> Option<&Entry> {
+        let position = self.by_id.partition_point(|&i| self.entries[i].id.as_str() < id);
+        self.by_id
+            .get(position)
+            .map(|&i| &self.entries[i])
+            .filter(|entry| entry.id == id)
+    }
+}
+fn entry_index(entries: &[Entry]) -> Vec<usize> {
+    let mut index: Vec<_> = (0..entries.len()).collect();
+    index.sort_unstable_by(|&a, &b| entries[a].id.cmp(&entries[b].id).then(a.cmp(&b)));
+    index
 }
 struct Cached {
     path: PathBuf,
@@ -130,7 +146,10 @@ fn load_bounded(path: &Path, selected: Option<&str>, admission_bytes: usize) -> 
                     payload_charge = payload_charge.saturating_add(r.title.as_ref().map_or(0, String::capacity));
                 }
                 entries.push(Entry { id, offset, len, refs });
-                charge = payload_charge.saturating_add(entries.capacity() * std::mem::size_of::<Entry>());
+                // Charge the lookup positions along with the roster before admission, so
+                // indexed cached selection stays within the existing memory budget.
+                charge = payload_charge
+                    .saturating_add(entries.capacity() * (std::mem::size_of::<Entry>() + std::mem::size_of::<usize>()));
                 if charge > admission_bytes {
                     cacheable = false;
                     if selected.is_some() {
@@ -155,9 +174,11 @@ fn load_bounded(path: &Path, selected: Option<&str>, admission_bytes: usize) -> 
         if !cacheable && selected.is_some() {
             entries = selected_entry.into_iter().collect();
         }
+        let by_id = entry_index(&entries);
         let archive = Arc::new(Archive {
             source,
             entries,
+            by_id,
             charge,
         });
         if cacheable && charge <= CACHE_BYTES {
@@ -337,9 +358,7 @@ fn node_role(kind: Kind, view: JsonView<'_>) -> Result<Option<String>> {
 pub(super) fn stream(kind: Kind, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
     let archive = load(&r.path, Some(&r.id))?;
     let entry = archive
-        .entries
-        .iter()
-        .find(|e| e.id == r.id)
+        .entry(&r.id)
         .with_context(|| format!("conversation {} not found in {}", r.id, r.path.display()))?;
     // Cached archives own metadata only. Generated multipart backing belongs to this read,
     // not to the cache's JsonSource/arena and its uncharged lifetime.
@@ -684,6 +703,43 @@ fn chatgpt_text(r: Option<&Fields<'_>>, spans: bool, source: &JsonSource, resolv
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn indexed_archive_selection_preserves_first_duplicate_and_archive_order() -> Result<()> {
+        let world = cv_testkit::World::in_process("export-indexed-selection");
+        let path = world.base.join("conversations.json");
+        let mut values = Vec::new();
+        for i in (0..4096).rev() {
+            values.push(serde_json::json!({"uuid":format!("conversation-{i:04}"),"chat_messages":[]}));
+        }
+        // A later duplicate must never displace the first record at selection.
+        values.push(
+            serde_json::json!({"uuid":"conversation-2048","chat_messages":[{"sender":"human","text":"duplicate"}]}),
+        );
+        std::fs::write(&path, serde_json::to_vec(&values)?)?;
+        let archive = load(&path, None)?;
+        assert_eq!(archive.entries.len(), values.len());
+        assert_eq!(archive.by_id.len(), archive.entries.len());
+        for (entry, value) in archive.entries.iter().zip(&values) {
+            assert_eq!(entry.id, value["uuid"].as_str().unwrap());
+        }
+        for i in 0..4096 {
+            let id = format!("conversation-{i:04}");
+            let expected = archive.entries.iter().find(|entry| entry.id == id).unwrap();
+            assert!(std::ptr::eq(archive.entry(&id).unwrap(), expected));
+        }
+        assert!(archive.entry("conversation-2048-extra").is_none());
+        assert!(archive.entry("before-all").is_none());
+        assert!(archive.entry("zzz-after-all").is_none());
+        // Cache hits reuse the charged index, and freshness still rejects changed archives.
+        assert!(Arc::ptr_eq(&archive, &load(&path, Some("conversation-2048"))?));
+        std::fs::write(&path, b"[]")?;
+        assert!(archive.source.check().is_err());
+        assert!(load(&path, Some("conversation-2048"))?
+            .entry("conversation-2048")
+            .is_none());
+        Ok(())
+    }
 
     #[test]
     fn oversized_selected_lookup_keeps_the_first_accepted_duplicate_on_either_side_of_admission() {
