@@ -1831,7 +1831,7 @@ mod tests {
                 if self.0.position() == self.0.get_ref().len() as u64 {
                     return Err(std::io::Error::other("synthetic terminal wire read failure"));
                 }
-                self.0.read(bytes)
+                std::io::Read::read(&mut self.0, bytes)
             }
         }
         impl std::io::BufRead for FailingReader {
