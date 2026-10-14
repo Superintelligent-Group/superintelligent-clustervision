@@ -101,6 +101,18 @@ fn blocks<'a>(msg: &'a Message, mode: ThinkingMode, resolver: &Resolver) -> Resu
     Ok(blocks)
 }
 
+fn native_usage(msg: &Message) -> bool {
+    msg.role == Role::Assistant
+        && msg
+            .usage
+            .as_ref()
+            .is_some_and(|usage| usage.input_tokens.is_some() || usage.output_tokens.is_some())
+}
+
+fn represented(msg: &Message, blocks: &[(Cow<'_, Block>, bool)]) -> bool {
+    !blocks.is_empty() || native_usage(msg)
+}
+
 fn write_version(
     w: &mut dyn Write,
     session: &Session,
@@ -134,16 +146,22 @@ fn write_version(
             let ts = msg.timestamp.unwrap_or(created);
             let step_id = format!("{}-0.0000000000000000", ts.timestamp_millis());
             let mut attached = false;
-            for (i, (b, thinking)) in blocks.iter().enumerate() {
+            for i in 0..blocks.len().max(usize::from(native_usage(msg))) {
                 if i != 0 {
                     w.write_all(b",")?;
                 }
                 let mut step = ObjectWriter::new(w)?;
                 step.field("type", "contentBlock")?;
                 step.field("role", "assistant")?;
-                step.field_with("content", |w| parts(w, b, resolver))?;
+                step.field_with("content", |w| match blocks.get(i) {
+                    Some((block, _)) => parts(w, block, resolver),
+                    None => {
+                        w.write_all(b"[]")?;
+                        Ok(())
+                    }
+                })?;
                 step.field("stepIdentifier", &step_id)?;
-                if *thinking {
+                if blocks.get(i).is_some_and(|(_, thinking)| *thinking) {
                     step.field("style", json!({"type":"thinking"}))?;
                 }
                 if !attached {
@@ -255,7 +273,7 @@ pub(super) fn emit(session: &Session, out_dir: &Path, opts: &crate::emit::EmitOp
                     .into_iter()
                     .map(|(index, message)| Ok((index, (message, blocks(message, opts.thinking, &resolver)?))))
                     .collect::<Result<std::collections::BTreeMap<_, _>>>()?;
-                if group.values().all(|(_, blocks)| blocks.is_empty()) {
+                if group.values().all(|(message, blocks)| !represented(message, blocks)) {
                     continue;
                 }
                 if !first {
@@ -270,7 +288,7 @@ pub(super) fn emit(session: &Session, out_dir: &Path, opts: &crate::emit::EmitOp
                             w.write_all(b",")?;
                         }
                         match group.get(&index) {
-                            Some((message, blocks)) if !blocks.is_empty() => {
+                            Some((message, blocks)) if represented(message, blocks) => {
                                 write_version(w, session, message, created, &resolver, blocks)?
                             }
                             // Omitted or unsupported versions keep their native index without
@@ -394,6 +412,81 @@ mod tests {
                 .any(|reference| reference.id == id && reference.path == result.path));
         }
         assert!(!conversations.join("conversations").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn usage_only_selected_and_alternate_completions_roundtrip_without_text() -> Result<()> {
+        let world = cv_testkit::World::in_process("lmstudio_empty_completions");
+        let path = world.home.join("source.conversation.json");
+        let completion = |model: &str, stats: Value, timestamp: &str| {
+            json!({"type":"multiStep","role":"assistant","steps":[{
+                "type":"contentBlock","stepIdentifier":timestamp,"content":[],
+                "genInfo":{"indexedModelIdentifier":model,"stats":stats}
+            }]})
+        };
+        fs::write(
+            &path,
+            serde_json::to_vec(&json!({"createdAt":1730000000000_i64,"messages":[
+                {"currentlySelected":0,"versions":[{"role":"user","content":"try again"}]},
+                {"currentlySelected":1,"versions":[
+                    completion("alternate", json!({"promptTokensCount":12,"predictedTokensCount":2}), "1730000001000-alt"),
+                    completion("selected", json!({"promptTokensCount":9,"predictedTokensCount":0}), "1730000002000-selected"),
+                    completion("ignored", json!({"unrelated":42}), "1730000003000-empty")
+                ]}
+            ]}))?,
+        )?;
+        let adapter = LmStudio::with_root(&world.home);
+        let reference = SessionRef::new("source", Harness::LmStudio, &path);
+        let complete = crate::stream::collect_with(&adapter, &reference, &ParseOptions::complete())?;
+        assert_eq!(complete.messages.len(), 3);
+        assert_eq!(complete.model.as_deref(), Some("selected"));
+        let selected = &complete.messages[1];
+        assert!(selected.content.is_empty());
+        assert_eq!(selected.usage.as_ref().unwrap().input_tokens, Some(9));
+        assert_eq!(selected.usage.as_ref().unwrap().output_tokens, Some(0));
+        assert_eq!(selected.timestamp.unwrap().timestamp_millis(), 1730000002000);
+        let alternate = &complete.messages[2];
+        assert_eq!(alternate.kind, MessageKind::Branch);
+        assert_eq!(alternate.model.as_deref(), Some("alternate"));
+        assert!(alternate.content.is_empty());
+        assert_eq!(alternate.usage.as_ref().unwrap().output_tokens, Some(2));
+        for options in [ParseOptions::full(), ParseOptions::default()] {
+            let visible = crate::stream::collect_with(&adapter, &reference, &options)?;
+            assert_eq!(visible.messages.len(), 2);
+            assert!(visible.messages[1].content.is_empty());
+            assert_eq!(
+                serde_json::to_value(&visible.messages[1].usage)?,
+                serde_json::to_value(&selected.usage)?
+            );
+        }
+        let emitted = super::super::emit(&complete, &world.home.join("output"), &Default::default())?;
+        let native: Value = serde_json::from_slice(&fs::read(&emitted.path)?)?;
+        assert_eq!(native["messages"].as_array().unwrap().len(), 2);
+        assert_eq!(native["messages"][1]["currentlySelected"], 1);
+        let versions = native["messages"][1]["versions"].as_array().unwrap();
+        assert_eq!(versions.len(), 3);
+        assert_eq!(versions[0]["steps"][0]["content"], json!([]));
+        assert_eq!(versions[1]["steps"][0]["content"], json!([]));
+        assert_eq!(versions[0]["steps"][0]["genInfo"]["stats"]["predictedTokensCount"], 2);
+        assert_eq!(versions[1]["steps"][0]["genInfo"]["stats"]["predictedTokensCount"], 0);
+        let reparsed = crate::stream::collect_with(
+            &adapter,
+            &SessionRef::new("copy", Harness::LmStudio, &emitted.path),
+            &ParseOptions::complete(),
+        )?;
+        assert_eq!(reparsed.model, complete.model);
+        assert_eq!(
+            serde_json::to_value(reparsed.messages)?,
+            serde_json::to_value(complete.messages)?
+        );
+        // Empty cache-only IR usage has no corresponding native stats field.
+        let mut unsupported = Message::new(Role::Assistant);
+        unsupported.usage = Some(Usage {
+            cache_read_tokens: Some(4),
+            ..Default::default()
+        });
+        assert!(!represented(&unsupported, &[]));
         Ok(())
     }
 

@@ -327,7 +327,7 @@ fn projected_version(
     } else {
         projected_content(version.get("content"), &mut message, false, opts)?;
     }
-    Ok((!message.content.is_empty()).then_some(message))
+    Ok((!message.content.is_empty() || (role == Role::Assistant && message.usage.is_some())).then_some(message))
 }
 
 fn projected_step(
@@ -1045,7 +1045,7 @@ fn parse_version(version: &Value, session_model: &mut Option<String>) -> Option<
         }
     }
 
-    if m.content.is_empty() {
+    if m.content.is_empty() && !(role == Role::Assistant && m.usage.is_some()) {
         return None;
     }
     Some(m)
