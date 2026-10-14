@@ -156,6 +156,7 @@ impl ClientConnection {
             match e {
                 request::RequestCreationError::CreationIoError(e) => ReadError::ReadIoError(e),
                 request::RequestCreationError::ExpectationFailed => ReadError::ExpectationFailed(version),
+                request::RequestCreationError::InvalidBodyFraming => ReadError::WrongHeader(version),
             }
         })?;
 

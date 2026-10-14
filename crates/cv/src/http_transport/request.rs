@@ -106,6 +106,9 @@ pub enum RequestCreationError {
     /// The client sent an `Expect` header that was not recognized by tiny-http.
     ExpectationFailed,
 
+    /// Conflicting, malformed, or unsupported request body framing.
+    InvalidBodyFraming,
+
     /// Error while reading data from the socket during the creation of the `Request`.
     CreationIoError(IoError),
 }
@@ -114,6 +117,35 @@ impl From<IoError> for RequestCreationError {
     fn from(err: IoError) -> RequestCreationError {
         RequestCreationError::CreationIoError(err)
     }
+}
+
+// The decoder supports exactly chunked coding. Never silently reinterpret invalid lengths
+// as empty bodies or disagree with another HTTP reader about which bytes form this request.
+fn body_framing(headers: &[Header]) -> Result<(Option<usize>, bool), ()> {
+    let mut length = None;
+    let mut chunked = false;
+    for header in headers {
+        if header.field.equiv("Content-Length") {
+            let text = header.value.as_str().trim();
+            if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err(());
+            }
+            let parsed = text.parse::<usize>().map_err(|_| ())?;
+            if length.is_some_and(|prior| prior != parsed) {
+                return Err(());
+            }
+            length = Some(parsed);
+        } else if header.field.equiv("Transfer-Encoding") {
+            if chunked || !header.value.as_str().trim().eq_ignore_ascii_case("chunked") {
+                return Err(());
+            }
+            chunked = true;
+        }
+    }
+    if chunked && length.is_some() {
+        return Err(());
+    }
+    Ok((length, chunked))
 }
 
 /// Builds a new request.
@@ -140,23 +172,8 @@ where
     R: Read + Send + 'static,
     W: Write + Send + 'static,
 {
-    // finding the transfer-encoding header
-    let transfer_encoding = headers
-        .iter()
-        .find(|h: &&Header| h.field.equiv("Transfer-Encoding"))
-        .map(|h| h.value.clone());
-
-    // finding the content-length header
-    let content_length = if transfer_encoding.is_some() {
-        // if transfer-encoding is specified, the Content-Length
-        // header must be ignored (RFC2616 #4.4)
-        None
-    } else {
-        headers
-            .iter()
-            .find(|h: &&Header| h.field.equiv("Content-Length"))
-            .and_then(|h| FromStr::from_str(h.value.as_str()).ok())
-    };
+    let (content_length, transfer_encoding) =
+        body_framing(&headers).map_err(|_| RequestCreationError::InvalidBodyFraming)?;
 
     // true if the client sent a `Expect: 100-continue` header
     let expects_continue = {
@@ -215,7 +232,7 @@ where
             let (data_reader, _) = EqualReader::new(source_data, content_length); // TODO:
             Box::new(FusedReader::new(data_reader)) as Box<dyn Read + Send + 'static>
         }
-    } else if transfer_encoding.is_some() {
+    } else if transfer_encoding {
         // if a transfer-encoding was specified, then "chunked" is ALWAYS applied
         // over the message (RFC2616 #3.6)
         Box::new(FusedReader::new(Decoder::new(source_data))) as Box<dyn Read + Send + 'static>

@@ -1349,6 +1349,37 @@ fn serve_stats() {
     assert!(msg.contains("msgs") && msg.contains("cv schema"), "{v}");
 }
 
+#[test]
+fn request_body_framing_rejects_ambiguous_or_unsupported_headers() {
+    let w = world("request-framing");
+    let (port, _server) = spawn_serve(&w);
+    for headers in [
+        vec![("Content-Length", "garbage")],
+        vec![("Content-Length", "+0")],
+        vec![("Content-Length", "0"), ("Content-Length", "1")],
+        vec![("Content-Length", "0"), ("Transfer-Encoding", "chunked")],
+        vec![("Transfer-Encoding", "gzip")],
+        vec![("Transfer-Encoding", "gzip, chunked")],
+        vec![("Transfer-Encoding", "chunked"), ("Transfer-Encoding", "chunked")],
+    ] {
+        let raw = raw_request(port, "GET", "/api/sessions", &headers);
+        assert_eq!(raw_status(&raw), 400, "ambiguous framing accepted {headers:?}: {raw}");
+    }
+    for headers in [
+        vec![("Content-Length", "0")],
+        vec![("Content-Length", "0"), ("Content-Length", "0")],
+    ] {
+        assert_eq!(raw_status(&raw_request(port, "GET", "/api/sessions", &headers)), 200);
+    }
+    // Valid chunked framing remains accepted and decoded through the ordinary request path.
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    write!(stream, "GET /api/sessions HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nTransfer-Encoding: Chunked\r\nConnection: close\r\n\r\n0\r\n\r\n").unwrap();
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw).unwrap();
+    assert_eq!(raw_status(&raw), 200, "{raw}");
+}
+
 /// Raw GET returning the full response text (headers + body) — for content-type / CORS assertions.
 fn raw_get(port: u16, path: &str) -> String {
     raw_request(port, "GET", path, &[])
