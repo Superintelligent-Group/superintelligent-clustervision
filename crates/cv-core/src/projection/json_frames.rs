@@ -68,7 +68,7 @@ impl Formatter for &mut Array<'_> {
     }
     fn write_char_escape<W: ?Sized + Write>(&mut self, out: &mut W, escape: CharEscape) -> io::Result<()> {
         if self.reading_key {
-            let character = match escape {
+            let character = match &escape {
                 CharEscape::Quote => '"',
                 CharEscape::ReverseSolidus => '\\',
                 CharEscape::Solidus => '/',
@@ -77,7 +77,7 @@ impl Formatter for &mut Array<'_> {
                 CharEscape::LineFeed => '\n',
                 CharEscape::CarriageReturn => '\r',
                 CharEscape::Tab => '\t',
-                CharEscape::AsciiControl(byte) => char::from(byte),
+                CharEscape::AsciiControl(byte) => char::from(*byte),
             };
             if self.key.len() + character.len_utf8() <= 128 {
                 self.key.push(character);

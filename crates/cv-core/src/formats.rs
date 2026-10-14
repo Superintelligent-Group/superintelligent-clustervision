@@ -554,7 +554,7 @@ fn recent_refs(harness: Option<Harness>, recent: usize) -> BTreeMap<&'static str
     if recent == 0 {
         return by;
     }
-    for r in crate::sessions() {
+    for r in crate::sessions_for(harness) {
         if harness.is_some_and(|h| h != r.harness) {
             continue;
         }
