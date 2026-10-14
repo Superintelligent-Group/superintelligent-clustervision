@@ -139,8 +139,8 @@ pub fn redact(session: &Session) -> anyhow::Result<Session> {
 ///
 /// # Scope
 ///
-/// Scrubbed: the title; every message (all text/thinking/tool blocks via [`redact_message`], plus
-/// each message's harness-specific `extra` map); the session-level `extra` map; and `git.remote` —
+/// Scrubbed: the title and stored system prompt; every message (all text/thinking/tool blocks via [`redact_message`], plus
+/// each message's harness-specific `extra` map and complete replay record); the session-level `extra` map; and `git.remote` —
 /// remotes can embed credentials (`https://x-access-token:ghs_…@github.com/o/r.git`). Note that an
 /// scp-style `git@host:…` remote has its `user@host` scrubbed as an email; that's cosmetic, not a
 /// leak.
@@ -150,10 +150,16 @@ pub fn redact(session: &Session) -> anyhow::Result<Session> {
 /// `git.branch`/`git.commit` (user-visible refs, not credential carriers).
 pub fn redact_with(session: &Session, opts: &RedactOptions) -> anyhow::Result<(Session, RedactStats)> {
     let mut out = session.clone();
+    let resolver = session.resolver();
     let mut stats = RedactStats::default();
 
     if let Some(title) = out.title.as_mut() {
         *title = scrub(title, opts, &mut stats);
+    }
+    if let Some(prompt) = out.system_prompt.as_mut() {
+        if let Cow::Owned(scrubbed) = scrub_cow(prompt, opts, &mut stats) {
+            *prompt = scrubbed;
+        }
     }
     if let Some(remote) = out.git.as_mut().and_then(|g| g.remote.as_mut()) {
         if let Cow::Owned(scrubbed) = scrub_cow(remote, opts, &mut stats) {
@@ -164,7 +170,7 @@ pub fn redact_with(session: &Session, opts: &RedactOptions) -> anyhow::Result<(S
         scrub_value(v, opts, &mut stats);
     }
     for msg in &mut out.messages {
-        redact_message(msg, opts, &mut stats)?;
+        redact_message_with_resolver(msg, opts, &mut stats, &resolver)?;
     }
 
     Ok((out, stats))
@@ -179,6 +185,25 @@ pub fn redact_text(s: &str) -> String {
 /// Redact secrets from a single message in place. Public so streaming consumers (dataset export) can
 /// scrub one message at a time without materializing the whole session.
 pub fn redact_message(msg: &mut Message, opts: &RedactOptions, stats: &mut RedactStats) -> anyhow::Result<()> {
+    redact_message_with_resolver(msg, opts, stats, &crate::Resolver::new(None))
+}
+
+fn redact_message_with_resolver(
+    msg: &mut Message,
+    opts: &RedactOptions,
+    stats: &mut RedactStats,
+    resolver: &crate::Resolver,
+) -> anyhow::Result<()> {
+    // Resolve fallibly before changing text or statistics. Earlier successful fields may
+    // become owned, but a late failed source must never become a successful scrub.
+    msg.try_materialize_text(resolver)?;
+    if let Some(record) = &mut msg.complete_record {
+        let record = std::sync::Arc::make_mut(record);
+        record.value.make_owned()?;
+        // Redaction invalidates the original replay witness; the scrubbed owned native record
+        // remains available to codec comparison without retaining secret-bearing descriptors.
+        record.projection.clear();
+    }
     // Validate every demanded input before changing text or statistics. A failed read leaves
     // source descriptors intact; earlier successful values may become owned without changing data.
     for block in &mut msg.content {
@@ -208,6 +233,9 @@ pub fn redact_message(msg: &mut Message, opts: &RedactOptions, stats: &mut Redac
             }
             Block::Image { .. } | Block::File { .. } => {}
         }
+    }
+    if let Some(record) = &mut msg.complete_record {
+        scrub_value(std::sync::Arc::make_mut(record).value.make_owned()?, opts, stats);
     }
     // Harness-specific passthrough fields can carry anything the harness logged (env snapshots,
     // request metadata) — scrub their string leaves too.
@@ -471,8 +499,13 @@ fn rules() -> &'static [Rule] {
                 let close = after[5..].find("-----")? + 10;
                 after[..close].contains("PRIVATE KEY").then_some(())?;
                 let from = start + close;
-                let end = match s[from..].find("PRIVATE KEY-----") {
-                    Some(e) => from + e + "PRIVATE KEY-----".len(),
+                let footer = s[from..].match_indices("-----END ").find_map(|(offset, _)| {
+                    let marker = &s[from + offset..];
+                    let close = marker[5..].find("-----")? + 10;
+                    marker[..close].contains("PRIVATE KEY").then_some(from + offset + close)
+                });
+                let end = match footer {
+                    Some(end) => end,
                     None => truncated_pem_body_end(s, from)?,
                 };
                 Some((start, end))
@@ -584,19 +617,21 @@ fn next_blob(re: &Regex, s: &str, mut from: usize) -> Option<Hit> {
     loop {
         let m = re.find_at(s, from)?;
         let (start, end) = (m.start(), m.end());
-        // (all hex, all base64url, all base64) for each suffix `[p, end)`.
-        let mut pure = vec![(true, true, true); end - start + 1];
-        for q in (start..end).rev() {
-            let (h, u, d) = pure[q + 1 - start];
-            let c = b[q];
-            pure[q - start] = (
-                h && c.is_ascii_hexdigit(),
-                u && is_token_char(c),
-                d && is_base64_std_char(c),
-            );
+        // Each predicate stays true for every suffix beginning after its last invalid byte.
+        // Retain three offsets, not a tuple for every byte of a potentially giant clean token.
+        let mut pure_from = [start; 3];
+        for (q, &c) in b.iter().enumerate().take(end).skip(start) {
+            for (index, valid) in [c.is_ascii_hexdigit(), is_token_char(c), is_base64_std_char(c)]
+                .into_iter()
+                .enumerate()
+            {
+                if !valid {
+                    pure_from[index] = q + 1;
+                }
+            }
         }
         for p in start..end.saturating_sub(31) {
-            let (h, u, d) = pure[p - start];
+            let [h, u, d] = pure_from.map(|from| p >= from);
             if (h || u || d) && end - p >= if h { 32 } else { 40 } && boundary_before(s, p) && keyword_before(s, p, 48)
             {
                 return Some(Hit {
@@ -1323,5 +1358,141 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn redaction_resolves_lazy_text_and_scrubs_system_prompt_and_complete_record() -> anyhow::Result<()> {
+        let world = cv_testkit::World::in_process("redact-checked-record");
+        let path = world.base.join("record.json");
+        let secret = fixture("sk-", "testabcdefghijklmnopqrstuvwxyz");
+        let body = format!("{} {secret}", "ordinary ".repeat(2000));
+        let value = serde_json::json!({"type":"assistant","text":body,"unknown":{"credential":secret}});
+        std::fs::write(&path, serde_json::to_vec(&value)?)?;
+        let source = crate::json::JsonSource::capture(&path)?;
+        let text = source
+            .read_range_value(0, source.len(), |view| view.get("text")?.unwrap().source_text())?
+            .unwrap();
+        let raw = crate::Json::source(&path, 0, source.len())?;
+        let mut session = Session::new("redaction", crate::Harness::OpenCode);
+        session.system_prompt = Some(format!("Authorization: Bearer {secret}"));
+        let mut message = Message::new(crate::Role::Assistant);
+        message.content.push(Block::Text { text });
+        session.messages.push(message);
+        crate::ir::CompleteRecord::attach_replay(
+            &mut session.messages,
+            crate::Harness::OpenCode,
+            raw,
+            Default::default(),
+        );
+        let original = session.messages[0].complete_record.as_ref().unwrap();
+        assert!(!original.projection.is_empty());
+        let (redacted, stats) = redact_with(&session, &RedactOptions::default())?;
+        assert!(!serde_json::to_string(&redacted)?.contains(&secret));
+        assert!(serde_json::to_string(&session)?.contains(&secret));
+        assert!(
+            !original.projection.is_empty(),
+            "copy-on-write must not alter the input witness"
+        );
+        assert!(redacted.messages[0]
+            .complete_record
+            .as_ref()
+            .unwrap()
+            .projection
+            .is_empty());
+        assert!(stats.total() >= 3);
+        assert_eq!(std::fs::read(&path)?, serde_json::to_vec(&value)?);
+        // Direct message calls propagate stale text instead of panicking or returning clean data.
+        let mut stale = session.messages[0].clone();
+        std::fs::write(&path, b"replacement")?;
+        let mut failed_stats = RedactStats::default();
+        assert!(redact_message(&mut stale, &RedactOptions::default(), &mut failed_stats).is_err());
+        assert_eq!(failed_stats.total(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn redaction_uses_session_resolver_for_implicit_spans() -> anyhow::Result<()> {
+        let world = cv_testkit::World::in_process("redact-implicit-span");
+        let path = world.base.join("body.txt");
+        let secret = fixture("sk-", "testabcdefghijklmnopqrstuvwxyz");
+        std::fs::write(&path, &secret)?;
+        let mut session = Session::new("implicit", crate::Harness::Claude);
+        session.source_path = Some(path);
+        let mut message = Message::new(crate::Role::User);
+        message.content.push(Block::Text {
+            text: crate::Text::Span(crate::lazy::Span {
+                source: None,
+                offset: 0,
+                len: secret.len() as u64,
+                escaped: false,
+            }),
+        });
+        session.messages.push(message);
+        assert!(!serde_json::to_string(&redact(&session)?)?.contains(&secret));
+        Ok(())
+    }
+
+    #[test]
+    fn a_second_pem_header_is_never_mistaken_for_the_private_key_footer() {
+        let body = "ABCDEFGHIJKLMNOP";
+        let input = format!(
+            "-----BEGIN PRIVATE KEY-----\n{body}\n-----BEGIN PRIVATE KEY-----\n{body}\n-----END PRIVATE KEY-----"
+        );
+        let output = redact_one(&input);
+        assert!(!output.contains(body));
+        assert!(output.contains("[REDACTED:private_key]"));
+        assert_eq!(redact_one(&output), output);
+    }
+
+    #[test]
+    fn blob_suffix_offsets_match_the_previous_suffix_table() {
+        fn legacy(re: &Regex, s: &str) -> Option<(usize, usize)> {
+            let mut from = 0;
+            while let Some(m) = re.find_at(s, from) {
+                let (start, end) = (m.start(), m.end());
+                let mut pure = vec![(true, true, true); end - start + 1];
+                for q in (start..end).rev() {
+                    let (h, u, d) = pure[q + 1 - start];
+                    let c = s.as_bytes()[q];
+                    pure[q - start] = (
+                        h && c.is_ascii_hexdigit(),
+                        u && is_token_char(c),
+                        d && is_base64_std_char(c),
+                    );
+                }
+                for p in start..end.saturating_sub(31) {
+                    let (h, u, d) = pure[p - start];
+                    if (h || u || d)
+                        && end - p >= if h { 32 } else { 40 }
+                        && boundary_before(s, p)
+                        && keyword_before(s, p, 48)
+                    {
+                        return Some((p, end));
+                    }
+                }
+                from = end;
+            }
+            None
+        }
+        let rule = rules().iter().find(|r| r.kind == Kind::Blob).unwrap();
+        for prefix in ["", "key ", "secret = ", "ordinary ", "clé key "] {
+            for stem in ["abcdef", "abcdefghi", "abc-def_", "abc/def+", "abc==="] {
+                for repeats in [1, 5, 8, 20, 1000] {
+                    let input = format!("{prefix}{}", stem.repeat(repeats));
+                    assert_eq!(
+                        next_blob(&rule.re, &input, 0).map(|h| (h.start, h.end)),
+                        legacy(&rule.re, &input)
+                    );
+                }
+            }
+        }
+        assert!(matches!(
+            scrub_cow(
+                &"x".repeat(1_000_000),
+                &RedactOptions::default(),
+                &mut RedactStats::default()
+            ),
+            Cow::Borrowed(_)
+        ));
     }
 }
