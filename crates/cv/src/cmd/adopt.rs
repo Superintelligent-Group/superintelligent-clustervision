@@ -56,6 +56,7 @@ fn set_meta_model(path: &std::path::Path, model: &str) -> Result<()> {
     let mut meta: serde_json::Value = std::fs::read_to_string(path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
+        .filter(serde_json::Value::is_object)
         .unwrap_or_else(|| json!({"agentType": "general-purpose"}));
     if let Some(o) = meta.as_object_mut() {
         o.insert("model".into(), json!(model));
@@ -252,4 +253,29 @@ fn run(roots: &[PathBuf], a: &AdoptArgs) -> Result<()> {
         &h,
         &json!({"into": into.session_id, "dry_run": a.dry_run, "agents": done}),
     )
+}
+
+#[cfg(test)]
+mod metadata_tests {
+    use super::*;
+
+    #[test]
+    fn requested_model_is_written_even_when_existing_metadata_is_not_an_object() {
+        let world = cv_testkit::World::new("adopt-meta-model");
+        let path = world.base.join("agent.meta.json");
+        for original in ["null", "[]", "\"not metadata\"", "42", "not json"] {
+            std::fs::write(&path, original).unwrap();
+            set_meta_model(&path, "requested-model").unwrap();
+            let updated: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(updated["model"], "requested-model");
+            assert_eq!(updated["agentType"], "general-purpose");
+        }
+        std::fs::write(&path, r#"{"model":"old","description":"keep","extra":{"a":1}}"#).unwrap();
+        set_meta_model(&path, "requested-model").unwrap();
+        let updated: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            updated,
+            json!({"model":"requested-model","description":"keep","extra":{"a":1}})
+        );
+    }
 }
