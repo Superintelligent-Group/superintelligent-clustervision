@@ -6,20 +6,27 @@ explanations are not all supported by the implementation. Paths below are relati
 
 ## Current integration status (2026-10-13)
 
-The previous implementation batch converged as recorded below. The next batch is integrated
-through `b4446396`; its combined native/portable and desktop checks are still in progress.
-Do not read historical lane checks below as validation of this current combined source.
+The previous implementation batch converged as recorded below. The wider follow-up batch is
+implemented on `perf/excellence-next`; final convergence and matched semantic-search measurements
+are in progress. Historical lane checks below are not substitutes for current composition checks.
 Current changes remove catalog guard/identity waste, watch cursor copies and stale replacement
 positions, unbounded semantic-ranking and pack-recall candidate retention, semantic wire copies,
 Unicode snippet offsets, dataset input clobbering, Gemini checkpoint copies and Zed root-key copies.
+Harness-qualified cold or missing-ID lookups now discover only the requested harness, preserving
+prefix ambiguity and leaving full-fleet freshness unstamped.
 
-Splice Markdown/OpenSession export now stages checked bodies through shared writers; the earlier
-shared-output gap is addressed. Shared bounded header/title rendering and HTTP Markdown writer
-reuse are under refinement after a real checked-label failure and an oracle fixture that
-used inline text instead of a retained source span. Browser continuation recovery,
-complete server/native downloads and deferred folds/events are integrated; frontend interaction
-selftests report 67/67. Desktop export alias/concurrent-destination protection is integrated
-at `b4446396` and awaits combined desktop verification. These are active repairs/checks, not a ready release.
+Splice Markdown/OpenSession export stages checked bodies through shared writers. Complete
+unredacted Markdown exports use the same bounded staging in the CLI and HTTP, including bounded
+header/title projection; selected/redacted rendering retains its existing semantics. Browser
+continuation recovery, complete server/native downloads and deferred folds/events are integrated.
+Browser selftests pass 67/67; desktop checks and all six tests pass, including destination alias,
+concurrent-change and failed-publication controls. Shared rendering/search checks pass; the full
+native core run passes 1,193 tests and the affected portable batch passes eight. The real 32 MiB
+account-export owned-codec comparison passes in both configurations. Routine coverage uses
+2 MiB with an explicit deferred-text assertion; the identical 32 MiB control remains opt-in.
+The CLI malformed-row oracle was corrected to preserve Claude's existing skip behavior; fatal
+source-mutation staging remains a separate zero-publication check. Remaining CLI integration,
+packaging/build gates and the semantic comparison still need completion before pushing.
 
 Genuine Cursor IDE 3.24.12 read/edit/shell/failure/interruption/reopen capture is committed alongside
 the earlier CLI corpus, with a failed-command classification correction. Zed authored-thread
@@ -4809,7 +4816,8 @@ Rust targets/builds were started in the lane. Root owns the combined `pack_live_
 `unicode_lowercase_ranges`, and `dataset_file_publication` execution and broader convergence.
 The splice `--export md|json` ownership gap identified at this checkpoint is addressed by
 `f7c7c5f0`: checked sessions now flow through staged shared writers. Bounded header/title and
-HTTP Markdown writer refinements remain in progress; combined render oracles are under repair.
+HTTP and native complete Markdown now reuse those writers with bounded header/title staging;
+combined render and source-mutation controls pass.
 
 Native export destination review (2026-10-13): the first native save implementation could
 replace its own source pathname and overwrite a destination changed while the child ran.
