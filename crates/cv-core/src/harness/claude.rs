@@ -1276,19 +1276,31 @@ impl SubagentInfo {
 /// workflow tier (which on a heavy session is the *majority* of the agents) and drops the
 /// meta/journal sidecars that carry each agent's purpose and outcome. Newest first.
 pub fn subagent_tree(parent_path: &std::path::Path) -> Vec<SubagentInfo> {
-    subagent_tree_inner(parent_path, true)
+    subagent_tree_inner(parent_path, crate::SubagentDemand::Rich, &|_, _| true)
 }
 
 /// Token aggregation needs the full forest and its metadata order, without task descriptions or
 /// journaled return bodies. Unchanged child metadata reuses the versioned discovery scan cache.
 pub(crate) fn subagent_session_refs(parent_path: &std::path::Path) -> Vec<SessionRef> {
-    subagent_tree_inner(parent_path, false)
+    subagent_tree_inner(parent_path, crate::SubagentDemand::Sessions, &|_, _| true)
         .into_iter()
         .map(|s| s.session)
         .collect()
 }
 
-fn subagent_tree_inner(parent_path: &std::path::Path, rich: bool) -> Vec<SubagentInfo> {
+pub(crate) fn subagent_tree_filtered(
+    parent_path: &Path,
+    demand: crate::SubagentDemand,
+    select: &(impl Fn(&str, Option<&str>) -> bool + Sync),
+) -> Vec<SubagentInfo> {
+    subagent_tree_inner(parent_path, demand, select)
+}
+
+fn subagent_tree_inner(
+    parent_path: &Path,
+    demand: crate::SubagentDemand,
+    select: &(impl Fn(&str, Option<&str>) -> bool + Sync),
+) -> Vec<SubagentInfo> {
     let Some(base) = sidecar::subagents_dir(parent_path) else {
         return vec![];
     };
@@ -1296,7 +1308,7 @@ fn subagent_tree_inner(parent_path: &std::path::Path, rich: bool) -> Vec<Subagen
     let mut out: Vec<SubagentInfo> = Vec::new();
 
     // Tier 1: directly-spawned sub-agents at `subagents/agent-*.jsonl`.
-    out.extend(agents_in_dir(&base, None, rich));
+    out.extend(agents_in_dir(&base, None, demand, select));
 
     // Tier 2: workflow sub-agents at `subagents/workflows/<wf>/agent-*.jsonl`, grouped by run id,
     // each annotated with the result the workflow `journal.jsonl` recorded for its agentId.
@@ -1304,12 +1316,7 @@ fn subagent_tree_inner(parent_path: &std::path::Path, rich: bool) -> Vec<Subagen
         let wf_dirs: Vec<PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
         let groups = crate::par_flat_map(wf_dirs, |wf_dir| {
             let run_id = wf_dir.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
-            let journal = if rich {
-                sidecar::journal_results(&wf_dir)
-            } else {
-                JournalResults::new()
-            };
-            agents_in_dir(&wf_dir, Some((&run_id, &journal)), rich)
+            agents_in_dir(&wf_dir, Some(&run_id), demand, select)
         });
         out.extend(groups);
     }
@@ -1321,10 +1328,18 @@ fn subagent_tree_inner(parent_path: &std::path::Path, rich: bool) -> Vec<Subagen
 /// A run's journal as [`sidecar::journal_results`] reads it: `agentId → full result`.
 type JournalResults = std::collections::BTreeMap<String, Value>;
 
+#[cfg(test)]
+static FOREST_READS: std::sync::Mutex<Vec<(&'static str, PathBuf)>> = std::sync::Mutex::new(Vec::new());
+
 /// Scan one directory for `agent-*.jsonl` transcripts, pairing each with its `*.meta.json` sidecar
-/// and (for workflow dirs) the journaled result for its agentId. `wf` is `Some((run_id, journal))`
+/// and (for workflow dirs) the journaled result for its agentId. `wf` is `Some(run_id)`
 /// for a workflow dir, `None` for the top-level `subagents/` dir.
-fn agents_in_dir(dir: &std::path::Path, wf: Option<(&str, &JournalResults)>, rich: bool) -> Vec<SubagentInfo> {
+fn agents_in_dir(
+    dir: &Path,
+    wf: Option<&str>,
+    demand: crate::SubagentDemand,
+    select: &(impl Fn(&str, Option<&str>) -> bool + Sync),
+) -> Vec<SubagentInfo> {
     let mut paths: Vec<PathBuf> = Vec::new();
     if let Ok(rd) = fs::read_dir(dir) {
         for e in rd.flatten() {
@@ -1334,12 +1349,29 @@ fn agents_in_dir(dir: &std::path::Path, wf: Option<(&str, &JournalResults)>, ric
                 && p.file_name()
                     .and_then(|n| n.to_str())
                     .is_some_and(|n| n.starts_with("agent-"));
-            if is_agent {
+            if is_agent
+                && p.file_stem()
+                    .and_then(|id| id.to_str())
+                    .is_some_and(|id| select(id, wf))
+            {
                 paths.push(p);
             }
         }
     }
+    let rich = demand == crate::SubagentDemand::Rich;
+    let journal = if rich && wf.is_some() && !paths.is_empty() {
+        #[cfg(test)]
+        FOREST_READS
+            .lock()
+            .unwrap()
+            .push(("journal", dir.join("journal.jsonl")));
+        sidecar::journal_results(dir)
+    } else {
+        JournalResults::new()
+    };
     crate::par_discovery_filter_map(paths, |p| {
+        #[cfg(test)]
+        FOREST_READS.lock().unwrap().push(("transcript", p.clone()));
         let session = if rich {
             scan(&p).ok()?
         } else {
@@ -1347,14 +1379,14 @@ fn agents_in_dir(dir: &std::path::Path, wf: Option<(&str, &JournalResults)>, ric
             fs::File::open(&p).ok()?;
             cached_metadata(&p, false)?
         };
-        let meta = if rich {
-            read_meta(&p.with_extension("meta.json"))
-        } else {
-            (None, None, None)
+        let meta = match demand {
+            crate::SubagentDemand::Rich => read_meta(&p.with_extension("meta.json")),
+            crate::SubagentDemand::Tools => (read_agent_type(&p.with_extension("meta.json")), None, None),
+            crate::SubagentDemand::Sessions => (None, None, None),
         };
         let agent_id = session.id.strip_prefix("agent-").unwrap_or(&session.id).to_string();
         let (status, summary) = wf
-            .and_then(|(_, j)| j.get(&agent_id))
+            .and_then(|_| journal.get(&agent_id))
             .map(sidecar::result_summary)
             .unwrap_or((None, None));
         Some(SubagentInfo {
@@ -1362,16 +1394,29 @@ fn agents_in_dir(dir: &std::path::Path, wf: Option<(&str, &JournalResults)>, ric
             agent_type: meta.0,
             description: meta.1,
             tool_use_id: meta.2,
-            workflow: rich.then(|| wf.map(|(id, _)| id.to_string())).flatten(),
+            workflow: wf.map(str::to_owned),
             result_status: status,
             result_summary: summary,
         })
     })
 }
 
+/// Tool analytics demand the agent type, not the task description or spawning-call metadata.
+fn read_agent_type(path: &Path) -> Option<String> {
+    #[cfg(test)]
+    FOREST_READS.lock().unwrap().push(("metadata", path.to_path_buf()));
+    let source = JsonSource::capture(path).ok()?;
+    source
+        .read_document(|view| crate::affordance::input::field_string(view, "agentType"))
+        .ok()
+        .flatten()
+}
+
 /// Read an `agent-*.meta.json` sidecar → `(agentType, description, toolUseId)`. Any read/parse
 /// failure (or an absent file) is a clean `(None, None, None)`.
 fn read_meta(path: &std::path::Path) -> (Option<String>, Option<String>, Option<String>) {
+    #[cfg(test)]
+    FOREST_READS.lock().unwrap().push(("metadata", path.to_path_buf()));
     let Ok(txt) = fs::read_to_string(path) else {
         return (None, None, None);
     };
@@ -3193,6 +3238,48 @@ mod tests {
 
         let tree = subagent_tree(&parent);
         assert_eq!(tree.len(), 3, "two tiers: 1 direct + 2 workflow");
+
+        let before = FOREST_READS.lock().unwrap().len();
+        let tools = subagent_tree_filtered(&parent, crate::SubagentDemand::Tools, &|id, run| {
+            id == "agent-a222" && run == Some("wf_abc-123")
+        });
+        assert_eq!(tools.len(), 1);
+        let original = tree.iter().find(|s| s.agent_id() == "a222").unwrap();
+        assert_eq!(
+            serde_json::to_value(&tools[0].session).unwrap(),
+            serde_json::to_value(&original.session).unwrap()
+        );
+        assert_eq!(tools[0].agent_type, original.agent_type);
+        assert_eq!(tools[0].workflow, original.workflow);
+        assert!(tools[0].description.is_none() && tools[0].result_summary.is_none());
+        let reads: Vec<_> = FOREST_READS.lock().unwrap()[before..]
+            .iter()
+            .filter(|(_, path)| path.starts_with(&root))
+            .cloned()
+            .collect();
+        assert_eq!(
+            reads.len(),
+            2,
+            "one selected transcript and its agent-type metadata only: {reads:?}"
+        );
+        assert!(reads
+            .iter()
+            .all(|(kind, path)| *kind != "journal"
+                && path.file_name().unwrap().to_string_lossy().starts_with("agent-a222.")));
+        let before = FOREST_READS.lock().unwrap().len();
+        let sessions = subagent_tree_filtered(&parent, crate::SubagentDemand::Sessions, &|id, _| id == "agent-a111");
+        assert_eq!(sessions.len(), 1);
+        let reads: Vec<_> = FOREST_READS.lock().unwrap()[before..]
+            .iter()
+            .filter(|(_, path)| path.starts_with(&root))
+            .cloned()
+            .collect();
+        assert_eq!(reads, [("transcript", a1.clone())]);
+        let selected_rich = subagent_tree_filtered(&parent, crate::SubagentDemand::Rich, &|id, _| id == "agent-a222");
+        assert_eq!(
+            serde_json::to_value(&selected_rich[0]).unwrap(),
+            serde_json::to_value(original).unwrap()
+        );
 
         let refs: Vec<_> = tree.iter().map(|s| &s.session).collect();
         for _ in 0..2 {

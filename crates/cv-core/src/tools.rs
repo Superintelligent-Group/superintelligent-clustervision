@@ -88,8 +88,9 @@ impl ToolHistogram {
         idx: usize,
         cwd: Option<&std::path::Path>,
         scratch: &mut Vec<Event>,
+        tool: Option<&str>,
     ) -> anyhow::Result<()> {
-        events::extract_into(m, idx, cwd, scratch)?;
+        events::extract_into_for_tool(m, idx, cwd, tool, scratch)?;
         for event in scratch.iter() {
             self.note(event);
         }
@@ -111,7 +112,7 @@ impl ToolHistogram {
         let mut h = Self::default();
         let mut scratch = Vec::new();
         for (i, m) in msgs.into_iter().enumerate() {
-            h.note_message(m, i, cwd, &mut scratch)?;
+            h.note_message(m, i, cwd, &mut scratch, None)?;
         }
         Ok(h)
     }
@@ -119,10 +120,14 @@ impl ToolHistogram {
     /// Stream one transcript into its histogram, retaining only distinct tool counts. Unreadable
     /// transcripts return an error, including after a partial read; no partial histogram escapes.
     pub fn from_stream(adapter: &dyn crate::Adapter, r: &SessionRef) -> anyhow::Result<Self> {
+        Self::from_stream_selected(adapter, r, None)
+    }
+    fn from_stream_selected(adapter: &dyn crate::Adapter, r: &SessionRef, tool: Option<&str>) -> anyhow::Result<Self> {
         let mut sink = HistogramSink {
             cwd: r.cwd.clone(),
             msg_idx: 0,
             histogram: Self::default(),
+            tool: tool.map(str::to_owned),
             scratch: Vec::new(),
             fail: None,
         };
@@ -167,6 +172,7 @@ struct HistogramSink {
     cwd: Option<std::path::PathBuf>,
     msg_idx: usize,
     histogram: ToolHistogram,
+    tool: Option<String>,
     scratch: Vec<Event>,
     fail: Option<anyhow::Error>,
 }
@@ -184,10 +190,13 @@ impl MessageSink for HistogramSink {
     }
 
     fn message(&mut self, message: Message) -> Flow {
-        if let Err(error) = self
-            .histogram
-            .note_message(&message, self.msg_idx, self.cwd.as_deref(), &mut self.scratch)
-        {
+        if let Err(error) = self.histogram.note_message(
+            &message,
+            self.msg_idx,
+            self.cwd.as_deref(),
+            &mut self.scratch,
+            self.tool.as_deref(),
+        ) {
             self.fail = Some(error);
             return Flow::Stop;
         }
@@ -381,14 +390,25 @@ pub const ORCHESTRATOR: &str = "<orchestrator>";
 /// ([`ForestTools::agent`]), "which agents used tool T" ([`ForestTools::agents_using`]), and the
 /// aggregate across the whole forest ([`ForestTools::aggregate`]). A failed read in any agent returns an error; no partial forest is published.
 pub fn forest_tools(r: &SessionRef) -> anyhow::Result<ForestTools> {
+    forest_tools_selected(r, None, None, None)
+}
+
+/// Read only the selected agent/workflow's tool histograms. Agent prefixes retain the existing
+/// first-match precedence in newest-first forest order, with the orchestrator first.
+pub fn forest_tools_selected(
+    r: &SessionRef,
+    agent: Option<&str>,
+    workflow: Option<&str>,
+    tool: Option<&str>,
+) -> anyhow::Result<ForestTools> {
     let adapter =
         crate::harness::for_harness(r.harness).ok_or_else(|| anyhow::anyhow!("no adapter for {}", r.harness))?;
 
     let mut agents = Vec::new();
 
     // The orchestrator (the parent session) itself.
-    {
-        let histogram = ToolHistogram::from_stream(adapter.as_ref(), r)?;
+    if workflow.is_none() && matches_agent(agent, ORCHESTRATOR) {
+        let histogram = ToolHistogram::from_stream_selected(adapter.as_ref(), r, tool)?;
         agents.push(AgentTools {
             agent: ORCHESTRATOR.to_string(),
             agent_type: "orchestrator".to_string(),
@@ -398,8 +418,16 @@ pub fn forest_tools(r: &SessionRef) -> anyhow::Result<ForestTools> {
     }
 
     // Every sub-agent in the forest (direct + workflow), each its own histogram.
-    for s in crate::subagent_tree_of(r) {
-        let hist = ToolHistogram::from_stream(adapter.as_ref(), &s.session)?;
+    let mut subagents = selected_tool_agents(r, agent, workflow, crate::SubagentDemand::Tools)?;
+    if agent.is_some() {
+        if !agents.is_empty() {
+            subagents.clear();
+        } else {
+            subagents.truncate(1);
+        }
+    }
+    for s in subagents {
+        let hist = ToolHistogram::from_stream_selected(adapter.as_ref(), &s.session, tool)?;
         agents.push(AgentTools {
             agent: s.agent_id().to_string(),
             agent_type: s.agent_type.clone().unwrap_or_else(|| "agent".to_string()),
@@ -430,29 +458,14 @@ pub fn forest_timeline_selected(
         crate::harness::for_harness(r.harness).ok_or_else(|| anyhow::anyhow!("no adapter for {}", r.harness))?;
     let mut out: Vec<ToolEvent> = Vec::new();
 
-    let matches_agent = |id: &str| agent.is_none_or(|key| id == key || id.starts_with(key));
-    if workflow.is_none() && matches_agent(ORCHESTRATOR) {
+    if workflow.is_none() && matches_agent(agent, ORCHESTRATOR) {
         let mut sink = CallSink::new(r.cwd.clone());
         sink.tool = tool.map(str::to_owned);
         adapter.try_stream(r, &ParseOptions::lazy(), &mut sink)?;
         timeline_calls(ORCHESTRATOR, sink.rows, &mut out);
     }
 
-    let subagents = if agent == Some(ORCHESTRATOR) && workflow.is_none() {
-        Vec::new()
-    } else {
-        crate::subagent_tree_of(r)
-    };
-    anyhow::ensure!(
-        workflow.is_none_or(|run| subagents.iter().any(|s| s.workflow.as_deref() == Some(run))),
-        "no agents found for workflow {:?} in {}",
-        workflow.unwrap_or_default(),
-        r.id
-    );
-    for s in subagents {
-        if !matches_agent(s.agent_id()) || workflow.is_some_and(|run| s.workflow.as_deref() != Some(run)) {
-            continue;
-        }
+    for s in selected_tool_agents(r, agent, workflow, crate::SubagentDemand::Sessions)? {
         let mut sink = CallSink::new(s.session.cwd.clone());
         sink.tool = tool.map(str::to_owned);
         adapter.try_stream(&s.session, &ParseOptions::lazy(), &mut sink)?;
@@ -469,6 +482,41 @@ pub fn forest_timeline_selected(
         (None, None) => a.agent.cmp(&b.agent).then_with(|| a.msg_idx.cmp(&b.msg_idx)),
     });
     Ok(out)
+}
+
+fn matches_agent(agent: Option<&str>, id: &str) -> bool {
+    agent.is_none_or(|key| id == key || id.starts_with(key))
+}
+
+fn selected_tool_agents(
+    r: &SessionRef,
+    agent: Option<&str>,
+    workflow: Option<&str>,
+    demand: crate::SubagentDemand,
+) -> anyhow::Result<Vec<crate::SubagentInfo>> {
+    if agent == Some(ORCHESTRATOR) && workflow.is_none() {
+        return Ok(Vec::new());
+    }
+    let workflow_member = std::sync::atomic::AtomicBool::new(false);
+    let selected = crate::subagent_tree_filtered_of(r, demand, |id, run| {
+        let matches_workflow = workflow.is_none_or(|wanted| run == Some(wanted));
+        if matches_workflow {
+            workflow_member.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        matches_workflow && matches_agent(agent, id.strip_prefix("agent-").unwrap_or(id))
+    });
+    anyhow::ensure!(
+        workflow.is_none()
+            || if agent.is_some() {
+                workflow_member.load(std::sync::atomic::Ordering::Relaxed)
+            } else {
+                !selected.is_empty()
+            },
+        "no agents found for workflow {:?} in {}",
+        workflow.unwrap_or_default(),
+        r.id
+    );
+    Ok(selected)
 }
 
 #[cfg(test)]
@@ -503,6 +551,7 @@ mod tests {
             cwd: None,
             msg_idx: 0,
             histogram: ToolHistogram::default(),
+            tool: None,
             scratch: Vec::new(),
             fail: None,
         };
@@ -533,6 +582,7 @@ mod tests {
             cwd: Some("/discovery".into()),
             msg_idx: 0,
             histogram: ToolHistogram::default(),
+            tool: None,
             scratch: Vec::new(),
             fail: None,
         };
@@ -682,6 +732,18 @@ mod tests {
         let mut all = CallSink::new(None);
         assert_eq!(all.message(m.clone()), Flow::Stop);
         assert!(all.take_error().is_some());
+        let mut histogram = HistogramSink {
+            cwd: None,
+            msg_idx: 0,
+            histogram: ToolHistogram::default(),
+            tool: Some("Read".into()),
+            scratch: Vec::new(),
+            fail: None,
+        };
+        assert_eq!(histogram.message(m.clone()), Flow::Continue);
+        assert_eq!(histogram.histogram.total_calls, 1);
+        assert_eq!(histogram.histogram.tools.len(), 1);
+        assert_eq!(histogram.histogram.tools["Read"].reads, 1);
         let mut selected = CallSink::new(None);
         selected.tool = Some("Read".into());
         assert_eq!(selected.message(m), Flow::Continue);
@@ -793,6 +855,7 @@ mod tests {
             cwd: None,
             msg_idx: 0,
             histogram: ToolHistogram::default(),
+            tool: None,
             scratch: Vec::new(),
             fail: None,
         };

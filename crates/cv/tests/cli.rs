@@ -3014,6 +3014,21 @@ fn timeline_ids_reach_cat() {
     assert_eq!(selected.len(), 1, "{out}");
     assert_eq!(selected[0]["agent"], "first-agent");
     assert_eq!(selected[0]["tool_use_id"], "first-agent-edit");
+    let (across, _) = w.cv_ok(&["tools", "alphasess", "--across", "--json"]);
+    let all: serde_json::Value = serde_json::from_str(&across).unwrap();
+    let expected = all["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["agent"] == "first-agent")
+        .unwrap();
+    let (one, _) = w.cv_ok(&["tools", "alphasess", "--agent", "first", "--workflow", "wf_f", "--json"]);
+    assert_eq!(&serde_json::from_str::<serde_json::Value>(&one).unwrap(), expected);
+    let (out, _) = w.cv_ok(&["tools", "alphasess", "--workflow", "wf_f", "--tool", "Edit", "--json"]);
+    let selected: Vec<serde_json::Value> = serde_json::from_str(&out).unwrap();
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0]["agent"], "first-agent");
+    assert_eq!(selected[0]["calls"], 1);
     let (out, _) = w.cv_ok(&["tools", "alphasess", "--timeline", "--tool", "Read", "--json"]);
     let reads: Vec<serde_json::Value> = serde_json::from_str(&out).unwrap();
     assert_eq!(reads.len(), 2, "{out}");

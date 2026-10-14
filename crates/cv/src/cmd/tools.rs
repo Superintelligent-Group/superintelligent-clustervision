@@ -43,13 +43,9 @@ pub(crate) fn cmd_tools(
         return tools_timeline(&r, agent.as_deref(), workflow.as_deref(), tool.as_deref(), json);
     }
 
-    let mut forest = cv_core::tools::forest_tools(&r)?;
-    if let Some(full) = &workflow {
-        forest = forest.for_workflow(full);
-        if forest.agents.is_empty() {
-            bail!("no agents found for workflow {full:?} in {}", short_id(&r.id));
-        }
-    }
+    // --tool keeps its existing which-agent precedence over the single-agent histogram view.
+    let selected_agent = if tool.is_some() { None } else { agent.as_deref() };
+    let forest = cv_core::tools::forest_tools_selected(&r, selected_agent, workflow.as_deref(), tool.as_deref())?;
 
     // `--tool T`: which agents used it.
     if let Some(t) = &tool {

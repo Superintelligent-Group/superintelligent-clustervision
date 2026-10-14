@@ -327,6 +327,34 @@ where
 
 pub use harness::claude::SubagentInfo;
 
+/// Fields demanded from the sub-agent forest's metadata and workflow journals.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SubagentDemand {
+    /// Session references and workflow identity only.
+    Sessions,
+    /// Session references, workflow identity and agent type for tool analytics.
+    Tools,
+    /// Task descriptions, spawning call and journaled outcomes too.
+    Rich,
+}
+
+/// Select forest members by transcript identity and workflow before reading their bodies or
+/// optional metadata. Results preserve the full forest's newest-first ordering.
+pub fn subagent_tree_filtered_of(
+    r: &SessionRef,
+    demand: SubagentDemand,
+    select: impl Fn(&str, Option<&str>) -> bool + Sync,
+) -> Vec<SubagentInfo> {
+    if r.harness == Harness::Claude {
+        harness::claude::subagent_tree_filtered(&r.path, demand, &select)
+    } else {
+        subagent_tree_of(r)
+            .into_iter()
+            .filter(|s| select(&s.session.id, s.workflow.as_deref()))
+            .collect()
+    }
+}
+
 /// The full sub-agent **forest** a session spawned: directly-spawned (`Agent`/`Task`) sub-agents
 /// *and* `Workflow` sub-agents (which live a tier deeper), each enriched with its `*.meta.json`
 /// sidecar (agent type / task description / spawning tool_use) and, for workflow agents, the
@@ -533,7 +561,9 @@ fn find_subagent_session(id: &str, harness: Option<Harness>) -> Result<Option<Fo
     // Within the one parent, mirror `resolve_id`'s contract: exact match wins, a unique prefix
     // resolves, several distinct prefix hits are an ambiguity error.
     let mut hits: Vec<SessionRef> = Vec::new();
-    for s in subagent_tree_of(parent) {
+    for s in subagent_tree_filtered_of(parent, SubagentDemand::Sessions, |candidate, _| {
+        candidate.starts_with(id)
+    }) {
         if s.session.id == id {
             return Ok(harness::for_harness(s.session.harness).map(|a| (s.session, a)));
         }
@@ -557,7 +587,11 @@ pub fn one_agent_across(parents: &[SessionRef], id: &str) -> bool {
     let want = format!("agent-{}", id.strip_prefix("agent-").unwrap_or(id));
     let ids: std::collections::BTreeSet<String> = parents
         .iter()
-        .flat_map(subagent_tree_of)
+        .flat_map(|parent| {
+            subagent_tree_filtered_of(parent, SubagentDemand::Sessions, |candidate, _| {
+                candidate.starts_with(&want)
+            })
+        })
         .map(|s| s.session.id)
         .filter(|s| s.starts_with(&want))
         .collect();

@@ -775,7 +775,9 @@ fn show_subagents(r: &SessionRef, json: bool) -> Result<()> {
 /// One sub-agent of `parent` by its `agent-…` id, bare agentId, or a unique prefix of either — the
 /// resolution `cv show --agent` and `cv rewind --agent` share. No match / several → exit 2.
 pub(crate) fn resolve_subagent(parent: &SessionRef, agent_id: &str) -> Result<cv_core::SubagentInfo> {
-    let subs = cv_core::subagent_tree_of(parent);
+    let subs = cv_core::subagent_tree_filtered_of(parent, cv_core::SubagentDemand::Rich, |id, _| {
+        id.starts_with(agent_id) || id.strip_prefix("agent-").is_some_and(|bare| bare.starts_with(agent_id))
+    });
     // Match on the full session id (`agent-…`), the bare agentId, or a prefix of either.
     let matches: Vec<&cv_core::SubagentInfo> = subs
         .iter()
@@ -789,9 +791,8 @@ pub(crate) fn resolve_subagent(parent: &SessionRef, agent_id: &str) -> Result<cv
     match matches.as_slice() {
         [one] => Ok((*one).clone()),
         [] => usage(format!(
-            "no sub-agent matching {agent_id:?} under {} ({} sub-agent(s); try `cv show {} --subagents`)",
+            "no sub-agent matching {agent_id:?} under {} (try `cv show {} --subagents`)",
             short_id(&parent.id),
-            subs.len(),
             short_id(&parent.id),
         )),
         many => {

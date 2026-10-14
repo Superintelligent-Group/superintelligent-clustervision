@@ -222,11 +222,24 @@ pub fn extract(m: &Message, msg_idx: usize, cwd: Option<&Path>) -> Result<Vec<Ev
 }
 
 pub(crate) fn extract_into(m: &Message, msg_idx: usize, cwd: Option<&Path>, out: &mut Vec<Event>) -> Result<()> {
+    extract_into_for_tool(m, msg_idx, cwd, None, out)
+}
+
+pub(crate) fn extract_into_for_tool(
+    m: &Message,
+    msg_idx: usize,
+    cwd: Option<&Path>,
+    tool: Option<&str>,
+    out: &mut Vec<Event>,
+) -> Result<()> {
     let mut staged = Vec::new();
     let ts = m.timestamp.map(|t| t.timestamp());
     for b in &m.content {
         match b {
             Block::ToolUse { name, input, .. } => {
+                if tool.is_some_and(|selected| selected != name) {
+                    continue;
+                }
                 extract_call_into(name, input, msg_idx, ts, cwd, &mut staged)?;
             }
             Block::ToolResult {
@@ -235,6 +248,9 @@ pub(crate) fn extract_into(m: &Message, msg_idx: usize, cwd: Option<&Path>, out:
                 tool_name,
                 ..
             } => {
+                if tool.is_some_and(|selected| tool_name.as_deref() != Some(selected)) {
+                    continue;
+                }
                 // Never materialize a lazy span just for a 200-char detail — an unresolved span
                 // (a giant failed-command dump) simply contributes no detail.
                 let detail = content

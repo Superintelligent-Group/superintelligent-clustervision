@@ -600,11 +600,12 @@ fn subagent(harness: &str, parent: &str, agent: &str) -> (u16, Value) {
         Err((404, _)) => return err(404, "parent session not found"),
         Err(e) => return e,
     };
-    let Some(sr) = crate::subagent_tree_of(&r)
-        .into_iter()
-        .find(|s| s.session.id == agent || s.agent_id() == agent)
-        .map(|s| s.session)
-    else {
+    let Some(sr) = crate::subagent_tree_filtered_of(&r, crate::SubagentDemand::Sessions, |id, _| {
+        id == agent || id.strip_prefix("agent-") == Some(agent)
+    })
+    .into_iter()
+    .find(|s| s.session.id == agent || s.agent_id() == agent)
+    .map(|s| s.session) else {
         return err(404, "subagent not found");
     };
     match adapter.parse(&sr) {
