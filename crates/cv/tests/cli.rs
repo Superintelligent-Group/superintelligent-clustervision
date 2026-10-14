@@ -3236,7 +3236,12 @@ fn claude_portable_rewind_and_port_handle_proxy_records() {
     let before = fs::read(&source).unwrap();
     for command in ["rewind", "port"] {
         let out = w.base.join(command);
-        let mut args = vec![command, source.to_str().unwrap(), "--out", out.to_str().unwrap()];
+        let selector = if command == "rewind" {
+            source.to_str().unwrap()
+        } else {
+            "claude:proxy-source"
+        };
+        let mut args = vec![command, selector, "--out", out.to_str().unwrap()];
         if command == "rewind" {
             args.extend(["--to", "derived"]);
         } else {
@@ -3296,7 +3301,7 @@ fn claude_portable_rewind_and_port_handle_proxy_records() {
         let native_out = w.base.join(format!("{command}-native"));
         let mut native = vec![
             command,
-            source.to_str().unwrap(),
+            selector,
             "--out",
             native_out.to_str().unwrap(),
             "--thinking",
