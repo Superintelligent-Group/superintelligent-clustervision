@@ -36,8 +36,9 @@ corpus_guard() {
   for var in "$@"; do
     val="${!var:-}"
     [ -n "$val" ] || { echo "refusing: \$$var is unset" >&2; exit 1; }
-    mkdir -p "$val"
-    real="$(cd "$val" && pwd -P)"
+    # Resolve existing symlinks even when the final directory does not exist. A refusal
+    # must happen before mkdir: creating an outside path already violates this guard.
+    real="$(python3 -I -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$val")" || exit 1
     case "$real" in
       "$WORK"/*|"$WORK") ;;
       *) echo "refusing: \$$var=$real is outside the throwaway dir $WORK" >&2; exit 1 ;;
@@ -45,6 +46,7 @@ corpus_guard() {
     case "$real/" in
       "$REAL_HOME"/*) case "$WORK" in "$REAL_HOME"/*) ;; *) echo "refusing: \$$var under the real home" >&2; exit 1 ;; esac ;;
     esac
+    mkdir -p "$val" || exit 1
   done
 }
 

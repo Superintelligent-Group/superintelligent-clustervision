@@ -334,5 +334,27 @@ class ScrubCase(unittest.TestCase):
                 self.assertNotIn(secret, r.stderr + r.stdout)
 
 
+class GuardTests(unittest.TestCase):
+    def test_guard_refuses_outside_and_symlink_paths_without_creating_them(self):
+        with tempfile.TemporaryDirectory(prefix="cv-guard-control-") as root:
+            work = os.path.realpath(os.path.join(root, "work"))
+            outside = os.path.join(root, "outside")
+            os.mkdir(work)
+            os.mkdir(outside)
+            os.symlink(outside, os.path.join(work, "link"))
+            for path in (os.path.join(root, "refused"), os.path.join(work, "link", "refused")):
+                with self.subTest(path=path):
+                    result = subprocess.run(["bash", "-c", 'source "$1"; WORK="$2"; CHECK_DIR="$3"; corpus_guard CHECK_DIR',
+                                             "guard", os.path.join(HERE, "lib.sh"), work, path], capture_output=True, text=True)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("outside the throwaway", result.stderr)
+                    self.assertFalse(os.path.exists(path), "refusal created the forbidden directory")
+            allowed = os.path.join(work, "allowed", "nested")
+            result = subprocess.run(["bash", "-c", 'source "$1"; WORK="$2"; CHECK_DIR="$3"; corpus_guard CHECK_DIR',
+                                     "guard", os.path.join(HERE, "lib.sh"), work, allowed], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(os.path.isdir(allowed))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
