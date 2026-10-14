@@ -633,7 +633,15 @@ fn push_tool_former(m: &mut Message, tf: &Value) {
 
     // Result: a JSON string (or nested obj) plus a status/error flag.
     let status = tf.get("status").and_then(Value::as_str).unwrap_or("");
-    let is_error = status.eq_ignore_ascii_case("error") || tf.get("error").map(|e| !e.is_null()).unwrap_or(false);
+    // Native IDE terminal calls can finish successfully as a tool invocation while the
+    // command fails: 3.24.12 records status=completed and additionalData.status=error.
+    let command_failed = tf
+        .pointer("/additionalData/status")
+        .and_then(Value::as_str)
+        .is_some_and(|s| s.eq_ignore_ascii_case("error"));
+    let is_error = status.eq_ignore_ascii_case("error")
+        || command_failed
+        || tf.get("error").map(|e| !e.is_null()).unwrap_or(false);
     let result_text = tf
         .get("result")
         .and_then(|r| match r {
@@ -880,6 +888,35 @@ mod tests {
             old.get_status(StatementStatus::VmStep),
             bounded.get_status(StatementStatus::VmStep),
         );
+    }
+
+    #[test]
+    fn native_ide_failed_command_and_reopened_conversation() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/cursor/3.24.12-ide/Cursor/User");
+        let adapter = Cursor::with_user_dir(&root);
+        let refs = adapter.discover().unwrap();
+        assert_eq!(refs.len(), 1);
+        let session = adapter.parse(&refs[0]).unwrap();
+        assert_eq!(session.messages.len(), 44);
+        let users: Vec<_> = session.messages.iter().filter(|m| m.role == Role::User).collect();
+        assert_eq!(users.len(), 4);
+        assert!(users[3].text().unwrap().contains("We reopened the IDE after stopping"));
+        let results: Vec<_> = session
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|b| match b {
+                Block::ToolResult { content, is_error, .. } => Some((content, *is_error)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(results.len(), 17);
+        let failed: Vec<_> = results.iter().filter(|(_, error)| *error).collect();
+        assert_eq!(failed.len(), 1);
+        assert!(failed[0].0.contains("SyntaxError"));
+        assert!(results
+            .iter()
+            .any(|(text, error)| !error && text.contains("Ran 7 tests")));
     }
 
     #[test]

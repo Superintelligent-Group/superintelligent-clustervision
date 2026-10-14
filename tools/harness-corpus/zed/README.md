@@ -35,3 +35,26 @@ provider pointed at `key_proxy.py`, driven by `osascript`). Either way the data 
 whose keys are not plain identifiers is collapsed to `<key>`. On 2026-10-11 the installed app was
 1.16.1, but the newest thread was written on 2026-06-10, so the blob shape reflects older Zed builds
 (versions 0.2.0 and 0.3.0). The DDL is what 1.16.1 migrated to.
+
+## GUI automation attempt, 2026-10-13
+
+An explicitly authorized capture attempt used installed Zed 1.16.1 and a new
+synthetic scratch project. No Zed instance was running beforehand. The CLI
+`--user-data-dir` invocation launched the app without forwarding the argument
+(the scratch directory remained empty); direct invocation of the app's
+`Contents/MacOS/zed --user-data-dir <scratch>` correctly created isolated
+`config`, `db`, and `threads/threads.db` stores. The preliminary CLI-launched
+instance was closed before any agent interaction.
+
+The remaining obstruction was observability/control, not missing user permission.
+macOS accessibility scripting was enabled, but the GPUI window exposed only
+three titlebar buttons and a group; AXFocusedUIElement was the window itself.
+Both display and window-ID screenshot capture failed to create an image. Native
+View > Agent Panel, command-palette, and isolated-keymap attempts could send
+keystrokes but could not verify an agent message editor or provider prompt.
+The isolated threads table remained empty and the bounded local model proxy
+received zero calls. Both owned app instances were closed; no conversation
+corpus was claimed or added, and the existing snapshot remains schema evidence.
+
+A usable screenshot/GPUI accessibility path or an in-process native Zed test
+harness remains necessary for reliable authored-thread capture in this environment.

@@ -1,0 +1,16 @@
+# Genuine native Cursor IDE composer, authored in an isolated application profile.
+harness = "cursor"
+version = "3.24.12-ide"
+generated = "2026-10-13"
+model = "Cursor Grok 4.6 Medium (native default)"
+writer = "installed Cursor.app 3.24.12; native IDE agent UI driven through CDP on a newly launched isolated instance"
+user_turns = 4
+native_bubbles = 44
+tool_calls = 17
+scenarios = ["chat", "thinking", "read", "search", "write", "shell", "tool_results", "failed_command", "model_repair", "follow_up", "interruption", "reopen", "continue"]
+skipped = ["image", "compaction", "subagents", "mode_switch", "regenerate_response"]
+isolation = "--user-data-dir and --extensions-dir in a new scratch directory; synthetic project; existing IDE was not running"
+auth = "native app used existing account through its own authentication; no copied credentials, auth rows or settings retained"
+store = "SQLite backup of native global and workspace state.vscdb; only selected composer, bubbles, content blobs, composerHeaders and workspace mapping retained"
+scrub = "scratch and home paths; account/email scanner; toolCallBinary protobuf decoded, lengths rebuilt, re-encoded; opaque encrypted conversationState snapshots and encryption keys removed"
+limitations = "interruption/resumption is an observed UI lifecycle; the ordinary composer store has no independent interruption event. Retry coverage is model repair after a native failed shell result, not a regenerate-button capture. Read_file_v2 stores totalLinesInFile rather than file text. Native tokenCount values are zero placeholders."

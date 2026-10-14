@@ -1,4 +1,4 @@
-# Cursor Agent CLI corpus
+# Cursor native CLI and IDE corpora
 
 `2026.10.01-e373342` now has a genuine native scratch capture: one user task,
 Read/StrReplace/Shell calls and their results, generated on 2026-10-12.
@@ -79,3 +79,38 @@ when paths change and rebuilds content hashes/references; the common byte scrubb
 The CLI has no native logical update timestamp in the captured root: `updated_at`
 uses the freshest main DB/WAL modification time, an approximation. Optional ACP
 metadata is consulted once and recorded before opening, including absence.
+
+## Native IDE capture, 2026-10-13
+
+`3.24.12-ide` is a genuine freshly authored IDE composer, distinct from the CLI
+corpus. Cursor was not running before capture. It was launched with disposable
+`--user-data-dir`, `--extensions-dir`, `--disable-extensions`, `--sync off`, and
+`--remote-debugging-port` plus a synthetic Python scratch project. CDP attached
+only to that newly launched instance. The native application recognized its
+existing account without credential copying or reading token values.
+
+Four user turns exercised read/search/edit/shell, thinking and ordinary text,
+a Unicode follow-up, a model-authored syntax failure followed by its repair,
+a stopped response, graceful application quit/reopen, and continued conversation.
+There are 44 native bubbles and 17 tool calls (8 reads, 4 edits, 4 commands, 1 glob).
+The native failed command has `toolFormerData.status=completed`,
+`additionalData.status=error`, and `result.exitCode=1`; cv must mark that result
+as an error even though the tool invocation completed.
+
+Capture used SQLite backup after the application was closed. The committed
+copy retains only the selected composer's native rows, all native content blobs,
+its composerHeaders row, and the workspace composer mapping. Global ItemTable
+rows (including authentication and settings), unrelated drafts, caches and logs
+are excluded. Paths were scrubbed with the shared scanner. Base64 toolCallBinary
+protobufs were decoded and scrubbed using `codec.wire`, rebuilding lengths before
+re-encoding. Encryption keys were removed and opaque encrypted conversationState
+snapshots replaced with the native empty marker `~`; those encrypted alternate
+snapshots cannot be content-scrubbed and cv reads the ordinary composer/bubble
+records. No message, tool call or result was manufactured.
+
+The manifest distinguishes observed interruption/reopen from a persisted lifecycle
+event: this store does not record a dedicated stop event. Native model repair is
+covered; the regenerate-button action, image attachment, mode switch, compaction
+and subagents remain uncaptured. The store's zero tokenCount fields are native
+placeholders, not measured usage. Read_file_v2 results contain line counts rather
+than the file contents displayed to the model.

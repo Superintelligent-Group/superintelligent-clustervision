@@ -49,6 +49,10 @@ fn codex(version_dir: &Path) -> Box<dyn Adapter> {
 }
 
 fn cursor(version_dir: &Path) -> Box<dyn Adapter> {
+    let ide_user = version_dir.join("Cursor/User");
+    if ide_user.is_dir() {
+        return Box::new(cv_core::harness::cursor::Cursor::with_user_dir(&ide_user));
+    }
     Box::new(cv_core::harness::cursor::Cursor::with_cli_home(
         &version_dir.join(".cursor"),
     ))
