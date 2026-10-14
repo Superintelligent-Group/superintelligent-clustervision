@@ -243,7 +243,18 @@ pub(crate) fn cached_scan_many<F>(path: &Path, scan: F) -> Vec<SessionRef>
 where
     F: FnOnce() -> Vec<SessionRef>,
 {
-    cached_scan_inner(path, None, |_| (scan(), None))
+    cached_scan_inner(path, None, Default::default(), |_| (scan(), None))
+}
+
+/// Single-result metadata scan with auxiliary identities captured before the caller reads them.
+/// The existing primary cache retains and revalidates the complete baseline, including absence.
+pub(crate) fn cached_scan_with_reads<F>(path: &Path, reads: crate::source::ReadSet, scan: F) -> Option<SessionRef>
+where
+    F: FnOnce() -> Option<SessionRef>,
+{
+    cached_scan_inner(path, None, reads, |_| (scan().into_iter().collect(), None))
+        .into_iter()
+        .next()
 }
 
 /// Opt-in append metadata state. Exact hits retain their existing guards; a continuation is
@@ -252,7 +263,7 @@ pub(crate) fn cached_scan_continued<F>(path: &Path, version: &str, scan: F) -> O
 where
     F: FnOnce(Option<&crate::stream::Checkpoint>) -> (Option<SessionRef>, Option<ScanContinuation>),
 {
-    cached_scan_inner(path, Some(version), |from| {
+    cached_scan_inner(path, Some(version), Default::default(), |from| {
         let (reference, continuation) = scan(from);
         (reference.into_iter().collect(), continuation)
     })
@@ -260,11 +271,15 @@ where
     .next()
 }
 
-fn cached_scan_inner<F>(path: &Path, version: Option<&str>, scan: F) -> Vec<SessionRef>
+fn cached_scan_inner<F>(
+    path: &Path,
+    version: Option<&str>,
+    mut reads: crate::source::ReadSet,
+    scan: F,
+) -> Vec<SessionRef>
 where
     F: FnOnce(Option<&crate::stream::Checkpoint>) -> (Vec<SessionRef>, Option<ScanContinuation>),
 {
-    let mut reads = crate::source::ReadSet::default();
     reads.record(path);
     let Some((mtime_ns, size)) = stat_key(path) else {
         return scan(None).0;
@@ -570,6 +585,51 @@ pub(crate) fn fill_count(conn: &rusqlite::Connection, path: &Path, harness: crat
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auxiliary_scan_baselines_invalidate_changes_and_preserve_raced_stamps() {
+        let world = cv_testkit::World::in_process("scan-auxiliary-baselines");
+        let path = world.base.join("source");
+        let sidecar = world.base.join("state");
+        std::fs::write(&path, "unchanged primary").unwrap();
+        let baseline = || {
+            let mut reads = crate::source::ReadSet::default();
+            reads.record(&sidecar);
+            reads
+        };
+        let reference = |id| SessionRef::new(id, crate::Harness::Claude, &path);
+        assert_eq!(
+            cached_scan_with_reads(&path, baseline(), || Some(reference("absent")))
+                .unwrap()
+                .id,
+            "absent"
+        );
+        cached_scan_with_reads(&path, baseline(), || panic!("unchanged absent sidecar must hit"));
+        persist(false);
+        current_cache().entries.write().unwrap().clear();
+        cached_scan_with_reads(&path, baseline(), || panic!("persisted auxiliary baseline must hit"));
+        std::fs::write(&sidecar, "new title").unwrap();
+        assert_eq!(
+            cached_scan_with_reads(&path, baseline(), || Some(reference("present")))
+                .unwrap()
+                .id,
+            "present"
+        );
+        std::fs::write(&sidecar, "before race").unwrap();
+        cached_scan_with_reads(&path, baseline(), || {
+            std::fs::write(&sidecar, "after race").unwrap();
+            Some(reference("raced"))
+        });
+        assert!(!captured_reads(&path)
+            .unwrap()
+            .fresh(&mut crate::source::Probe::default()));
+        assert_eq!(
+            cached_scan_with_reads(&path, baseline(), || Some(reference("refreshed")))
+                .unwrap()
+                .id,
+            "refreshed"
+        );
+    }
 
     #[cfg(unix)]
     #[test]
