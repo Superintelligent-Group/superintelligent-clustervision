@@ -26,12 +26,9 @@ pub(crate) fn for_each_record(
     source: &JsonSource,
     mut accept: impl FnMut(Option<JsonView<'_>>, u64, bool, u64) -> Result<Flow>,
 ) -> Result<u64> {
+    source.check_metadata(file.metadata()?)?;
     source.check()?;
-    let len = file
-        .metadata()?
-        .len()
-        .checked_sub(offset)
-        .context("JSONL offset beyond source")?;
+    let len = source.len().checked_sub(offset).context("JSONL offset beyond source")?;
     let mut records = ranges::records(file, ranges::Range { offset, len })?;
     let mut skipped = 0;
     while let Some(record) = records.next() {
@@ -84,4 +81,42 @@ pub(crate) fn for_each_record(
     }
     source.check()?;
     Ok(skipped)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replaced_open_descriptor_is_rejected_before_any_record_callback() -> Result<()> {
+        let world = cv_testkit::World::in_process("checked_lines_descriptor");
+        let path = world.home.join("records.jsonl");
+        std::fs::write(&path, "{\"body\":\"old\"}\n")?;
+        let file = std::fs::File::open(&path)?;
+        std::fs::rename(&path, world.home.join("opened-old.jsonl"))?;
+        std::fs::write(&path, "{\"body\":\"new\"}\n")?;
+        let source = JsonSource::capture(&path)?;
+        assert_eq!(
+            file.metadata()?.len(),
+            source.len(),
+            "extent alone cannot detect replacement"
+        );
+        let mut callbacks = 0;
+        let result = for_each_record(&file, 0, &source, |_, _, _, _| {
+            callbacks += 1;
+            Ok(Flow::Continue)
+        });
+        assert!(result.is_err());
+        assert_eq!(callbacks, 0);
+        let fresh = std::fs::File::open(&path)?;
+        assert_eq!(
+            for_each_record(&fresh, source.len(), &source, |_, _, _, _| {
+                callbacks += 1;
+                Ok(Flow::Continue)
+            })?,
+            0
+        );
+        assert_eq!(callbacks, 0, "an EOF suffix remains valid");
+        Ok(())
+    }
 }
