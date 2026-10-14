@@ -664,7 +664,12 @@ mod tests {
             std::fs::write(&path, serde_json::to_vec(&serde_json::json!({"key":body})).unwrap()).unwrap();
             let source = crate::json::JsonSource::capture(&path).unwrap();
             let text = source
-                .read_document(|view| view.get("key")?.unwrap().source_text()?.context("key string"))
+                .read_document(|view| {
+                    let crate::Json::Source(range) = view.get("key")?.unwrap().to_json()? else {
+                        anyhow::bail!("fixture must retain checked source range");
+                    };
+                    Ok(crate::Text::Source(crate::lazy::SourceText::new(range)))
+                })
                 .unwrap();
             assert!(matches!(text, crate::Text::Source(_)));
             assert!(set.insert_source(&text, &resolver).unwrap());
@@ -710,7 +715,7 @@ mod tests {
         std::fs::write(&path, serde_json::to_vec(&serde_json::json!({"key":body})).unwrap()).unwrap();
         let source = crate::json::JsonSource::capture(&path).unwrap();
         let text = source
-            .read_document(|view| view.get("key")?.unwrap().text(true)?.context("key string"))
+            .read_document(|view| view.get("key")?.unwrap().source_text()?.context("key string"))
             .unwrap();
         assert!(matches!(text, crate::Text::Source(_)));
         let resolver = crate::lazy::Resolver::new(Some(path.clone()));
