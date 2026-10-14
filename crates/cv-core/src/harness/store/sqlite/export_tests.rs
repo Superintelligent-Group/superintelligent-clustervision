@@ -73,7 +73,8 @@ unsafe extern "C" fn trace(
         return 0;
     }
     let sql = unsafe { std::ffi::CStr::from_ptr(sql) }.to_string_lossy();
-    if sql.starts_with("INSERT OR REPLACE INTO session ")
+    if sql.starts_with("INSERT INTO session ")
+        || sql.starts_with("INSERT OR REPLACE INTO session ")
         || sql.starts_with("INSERT OR REPLACE INTO sessions ")
         || sql.starts_with("INSERT INTO session_message ")
         || sql.starts_with("INSERT INTO message ")
@@ -92,7 +93,9 @@ unsafe extern "C" fn trace(
         counts.runs.entry(key).or_default().push(runs);
         // Mutate after the first prepared row has been produced. A later demanded source
         // must fail inside the transaction, after schema/session/earlier row changes.
-        if sql.starts_with("INSERT INTO ") {
+        // Session metadata is traced for prepared-shape accounting, but mutation stays
+        // after a body row as before the v1 writer stopped using INSERT OR REPLACE.
+        if sql.starts_with("INSERT INTO ") && !sql.starts_with("INSERT INTO session ") {
             counts.row_calls += 1;
             if counts.row_calls == counts.mutate_at {
                 if let Some(path) = counts.mutate.take() {
