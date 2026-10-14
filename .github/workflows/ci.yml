@@ -21,9 +21,9 @@ jobs:
   test:
     name: build · test · clippy · fmt
     runs-on: ubuntu-latest
-    env:
-      CLUSTERVISION_HOME: ${{ runner.temp }}/cv-ci-home
     steps:
+      - name: Isolate cv state
+        run: echo "CLUSTERVISION_HOME=$RUNNER_TEMP/cv-ci-home" >> "$GITHUB_ENV"
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
         with:
@@ -137,7 +137,8 @@ jobs:
       # Native tests do not exercise the portable reader/sink implementations. These
       # controls cover cancellation attribution, prefix checks and SQLite decoding parity.
       - name: Portable reader and checked transport controls
-        run: cargo test -p clustervision-core --lib --no-default-features --features sqlite -- watch:: stream:: harness::claude:: harness::hermes:: --test-threads=2
+        run: |
+          cargo test -p clustervision-core --lib --no-default-features --features sqlite -- watch:: stream:: harness::claude:: harness::hermes:: --test-threads=2
 
       # cv-search's `semantic` feature (the embedding stack) is default-on, so the keyword-only
       # build is one nothing else compiles.
@@ -186,9 +187,9 @@ jobs:
   desktop:
     name: desktop app (app/src-tauri)
     runs-on: ubuntu-latest
-    env:
-      CLUSTERVISION_HOME: ${{ runner.temp }}/cv-desktop-home
     steps:
+      - name: Isolate cv state
+        run: echo "CLUSTERVISION_HOME=$RUNNER_TEMP/cv-desktop-home" >> "$GITHUB_ENV"
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
         with:
