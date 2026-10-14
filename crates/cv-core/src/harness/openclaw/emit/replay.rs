@@ -230,11 +230,10 @@ impl Native {
             if matches!(
                 key,
                 "id" | "parentId" | "targetId" | "appendParentId" | "firstKeptEntryId" | "fromId"
-            ) {
-                if value.is_string()? {
-                    if let Some(id) = value.resolve()?.as_str().and_then(|id| self.ids.get(id)) {
-                        return out.field(key, id);
-                    }
+            ) && value.is_string()?
+            {
+                if let Some(id) = value.resolve()?.as_str().and_then(|id| self.ids.get(id)) {
+                    return out.field(key, id);
                 }
             }
             if key == "message" && mode != ThinkingMode::Native && value.is_object()? {

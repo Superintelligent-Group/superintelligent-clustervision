@@ -1370,7 +1370,10 @@ mod tests {
                     assert_eq!(parsed[array][0][content], prompt);
                 }
                 expected.push(b'\n');
-                for query in [None, Some(crate::SessionQuery::parse("model:present")?)] {
+                for query in [
+                    None,
+                    Some(crate::SessionQuery::parse("model:present").map_err(anyhow::Error::msg)?),
+                ] {
                     let staged = stage_record(
                         &fixture,
                         &reference,
@@ -1428,7 +1431,7 @@ mod tests {
             let mut expected = Vec::new();
             assert!(write_record(&fixture.session, &mut expected, format, Some(&redact))?);
             expected.push(b'\n');
-            let query = crate::SessionQuery::parse("model:present")?;
+            let query = crate::SessionQuery::parse("model:present").map_err(anyhow::Error::msg)?;
             let staged = stage_record(
                 &fixture,
                 &reference,
@@ -1452,7 +1455,7 @@ mod tests {
             assert_eq!(value[array][1200][content], "distinct later system change");
         }
         std::fs::remove_file(&path)?;
-        let rejected = crate::SessionQuery::parse("model:absent")?;
+        let rejected = crate::SessionQuery::parse("model:absent").map_err(anyhow::Error::msg)?;
         assert!(stage_record(
             &fixture,
             &reference,

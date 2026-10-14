@@ -265,10 +265,7 @@ fn active_chain<'a>(conv: &Fields<'a>) -> Result<Vec<JsonView<'a>>> {
     })?;
     // Consuming the node entry proves finite traversal without truncating a legitimate
     // long branch. A cycle reaches an already consumed key and stops at that boundary.
-    loop {
-        let Some(node) = nodes.remove(&current) else {
-            break;
-        };
+    while let Some(node) = nodes.remove(&current) {
         chain.push(node);
         let parent = Fields::parse(node, &["parent"])?
             .map(|r| r.string("parent"))
