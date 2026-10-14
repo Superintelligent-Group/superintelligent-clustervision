@@ -22,7 +22,7 @@ reshaping. A bounded reader or completed export lane alone does not establish co
   convergence batch. No intermediate releases or repeated full gates while implementation moves.
   Explicitly requested rich output and format-required scans remain costs, not automatic defects.
 
-### Current implementation batch (2026-10-13)
+### Converged implementation batch (2026-10-13)
 
 Ember's latest steering is to drain per-harness waste with a wider Sol swarm and batched
 integration. Earlier numerical targets are investigation aids, not reasons to add machinery.
@@ -32,10 +32,40 @@ Prefer faster useful operations, less redundant work and simpler shared code.
 - Root combines the changes, builds once per required configuration, runs the relevant checks
   together, and distributes concrete failures back to owners. Repeat after repairs, not after
   every intermediate edit or cherry-pick. Broad release gates wait for a settled batch.
-- Active scope: OpenCode complete replay; OpenClaw trees/SQLite; Devin rows; Kimi/Kimi Code/Qwen
+- Integrated scope: OpenCode complete replay; OpenClaw trees/SQLite; Devin rows; Kimi/Kimi Code/Qwen
   discovery; Kimi reading; legacy Codex; Goose; Hermes; Zed; shared writer simplification.
 - Preserve exact format semantics, source freshness and useful output. Keep required navigation,
   requested rich metadata and native storage costs distinct from avoidable payload copies.
+
+### Batch convergence (Codex, 2026-10-13)
+
+The integrated source through `ace90afd` passes all-target clippy/build, minimal core and keyword-only
+search builds, standalone core Wasm, package verification, the release corpus parse budget, corpus
+tooling, manual build/names and dist planning. Browser syntax/selftest passes (19 modules, 63 checks);
+optimized wasm-pack and the separate desktop check/tests (5) pass. SQLite-only helper scoping then
+removes the new Wasm warnings, with a final standalone Wasm check passing.
+
+The native workspace run found two failures among 1,185 core tests: Kimi Code's new discovery
+fixture used the wrong wire directory, and Qwen selected replay lost physical-line checkpoint
+boundaries. Both focused native repairs pass; all remaining workspace, core integration and corpus
+suites pass. The affected portable batch passed 323 tests and found two empty-range errors in the
+shared JSONL wrapper. Handling blank physical rows before JSON projection fixes both; the two
+producer tests and expanded Qwen checkpoint test pass. Passing suites were not repeated wholesale.
+
+All existing native/portable live-heap groups, native SQLite checks, production FTS/semantic heap
+controls, staged CLI output and whole-operation prune/window/export/rehome controls pass. The
+recovered 32 MiB OpenCode shell doctor control reports 136,481 B requested live Rust heap and
+2,618,560 B separately measured SQLite heap, preserving its frozen report and source bytes.
+One local runner combined Cargo stderr with its JSON artifact report; after separating those,
+only the unexecuted window/export stages were run. Private logs are in `excellence-home/swarm-*`
+under the task worktrees; these are allocation/behavior checks, not a new hardware-counter or
+universal speed claim.
+
+Fresh Cursor IDE-authored sessions and fresh Zed-authored threads remain useful compatibility
+coverage: the committed Cursor capture is CLI-only, and Zed has a schema snapshot rather than
+fresh sessions. They do not block this implementation batch. Zed discovery's largest-string Serde
+scratch, native SQLite allocation floors, required navigation state and demanded rich metadata
+remain explicit limits in the inventory. Release version/tagging is separate and unchanged.
 
 ## Current priorities: whole operations (2026-10-12, user steering)
 
@@ -189,7 +219,7 @@ can decode a whole field first. Each bound must hold across the composed path.
 
 Reconciled against the integrated 2026-10-13 swarm: checked older-format reads, tree/SQLite
 replay, cold discovery and complete-record retention have landed across the remaining adapters.
-Combined checks are in progress; this table describes implementation, not a blanket performance
+Combined native/portable checks have converged; this table describes implementation, not a blanket performance
 or release claim. Required navigation state and demanded output are not themselves avoidable
 bloat. Earlier first-run listing and uniform scale targets remain unproven; prioritize useful
 operation costs and simple code over satisfying a historical number.
@@ -4556,7 +4586,7 @@ mismatch and nearby context. Complete metadata enrichment is tested rather than 
 an intentionally narrower projection.
 
 
-#### Recovered native shell doctor gate (2026-10-14, native lane)
+#### Recovered native shell doctor gate (2026-10-13, native lane)
 
 Historical shell lane commit `68066f8b` had not reached integration: the current selected-v2
 fixture gates assistant/tool payloads, so it did not supersede the ordinary native shell-output
