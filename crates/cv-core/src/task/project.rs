@@ -374,19 +374,26 @@ pub fn age_short(since: DateTime<Utc>, now: DateTime<Utc>) -> String {
 
 /// Resolve a task-id prefix (short id) to the unique matching task id.
 pub fn resolve_id<'m>(model: &'m TaskReadModel, prefix: &str) -> Result<&'m str, String> {
-    let matches: Vec<&str> = model
-        .tasks
-        .keys()
-        .filter(|id| id.starts_with(prefix))
-        .map(|s| s.as_str())
-        .collect();
-    match matches.as_slice() {
-        [one] => Ok(one),
-        [] => Err(format!("no task matches '{prefix}'")),
-        many => Err(format!(
-            "'{prefix}' is ambiguous ({} matches: {} ...)",
-            many.len(),
-            many[..many.len().min(3)].join(", ")
+    use std::ops::Bound;
+    // Prefix matches form one contiguous run in the task map. Seek that run and retain only
+    // the diagnostic's first three ids, while still counting every match for the same error.
+    let mut first = Vec::with_capacity(3);
+    let mut count = 0usize;
+    for (id, _) in model.tasks.range::<str, _>((Bound::Included(prefix), Bound::Unbounded)) {
+        if !id.starts_with(prefix) {
+            break;
+        }
+        count += 1;
+        if first.len() < 3 {
+            first.push(id.as_str());
+        }
+    }
+    match count {
+        0 => Err(format!("no task matches '{prefix}'")),
+        1 => Ok(first[0]),
+        _ => Err(format!(
+            "'{prefix}' is ambiguous ({count} matches: {} ...)",
+            first.join(", ")
         )),
     }
 }
@@ -452,6 +459,45 @@ mod tests {
         fn model(&self) -> TaskReadModel {
             TaskReducer::reduce(&self.events).unwrap()
         }
+    }
+
+    #[test]
+    fn ordered_prefix_resolution_preserves_exact_ambiguity_and_missing_diagnostics() {
+        let mut log = Log::new();
+        let task = log.open("author", None, None);
+        let template = log.model().tasks[&task].clone();
+        let mut model = TaskReadModel::default();
+        for id in ["aaa", "abc", "abc-1", "abc-2", "abc-3", "abc-4", "b", "éa", "éb", "z"] {
+            let mut task = template.clone();
+            task.task_id = id.into();
+            model.tasks.insert(id.into(), task);
+        }
+        let oracle = |prefix: &str| -> Result<&str, String> {
+            let ids: Vec<_> = model
+                .tasks
+                .keys()
+                .filter(|id| id.starts_with(prefix))
+                .map(String::as_str)
+                .collect();
+            match ids.as_slice() {
+                [] => Err(format!("no task matches '{prefix}'")),
+                [id] => Ok(*id),
+                _ => Err(format!(
+                    "'{prefix}' is ambiguous ({} matches: {} ...)",
+                    ids.len(),
+                    ids[..ids.len().min(3)].join(", ")
+                )),
+            }
+        };
+        for prefix in [
+            "", "a", "aaa", "ab", "abc", "abc-", "abc-3", "abcd", "b", "c", "é", "éa", "ê", "zz",
+        ] {
+            assert_eq!(resolve_id(&model, prefix), oracle(prefix), "{prefix}");
+        }
+        assert_eq!(
+            resolve_id(&TaskReadModel::default(), ""),
+            Err("no task matches ''".into())
+        );
     }
 
     #[test]

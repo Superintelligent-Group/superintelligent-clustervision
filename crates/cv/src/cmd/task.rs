@@ -702,7 +702,9 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
             let tags = tags.as_deref().map(parse_tags).unwrap_or_default();
             // Relations name other tasks: resolve every prefix BEFORE the open, so a typo refuses
             // the whole command instead of leaving a task opened with half its relations.
-            let (blocked_by, blocks) = {
+            let (blocked_by, blocks) = if blocked_by.is_empty() && blocks.is_empty() {
+                (blocked_by, blocks)
+            } else {
                 let outcome = replay_loud()?;
                 let res = |ids: Vec<String>| -> Result<Vec<String>> {
                     ids.iter()
@@ -1040,7 +1042,9 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
                 Some(b) => Some(task::parse_deadline(&b, now).map_err(|e| anyhow::anyhow!(e))?),
                 None => None,
             };
-            let blocks = {
+            let blocks = if blocks.is_empty() {
+                blocks
+            } else {
                 let outcome = replay_loud()?;
                 blocks
                     .iter()
@@ -1355,13 +1359,14 @@ fn render_show(
         }
     }
     let children = task::decisions_from_notes(model);
-    let selected: Vec<&cv_core::task::Note> = t
+    let mut shown: Vec<&cv_core::task::Note> = t
         .notes
         .iter()
+        .rev()
         .filter(|n| grep.is_none_or(|re| re.is_match(&n.text)))
+        .take(notes_last.unwrap_or(usize::MAX))
         .collect();
-    let skip = notes_last.map_or(0, |k| selected.len().saturating_sub(k));
-    let shown = &selected[skip..];
+    shown.reverse();
     if !t.notes.is_empty() && (brief || shown.len() != t.notes.len()) {
         out.push_str(&format!(
             "  notes:    {} of {} (newest last){}\n",
@@ -1525,6 +1530,73 @@ mod tests {
     }
 
     #[test]
+    fn show_note_tail_applies_grep_before_limit_and_preserves_chronological_order() {
+        let now: DateTime<Utc> = "2026-07-16T00:00:00Z".parse().unwrap();
+        let mut task = proj("notes", "2026-07-16T00:00:00Z");
+        for index in 0..10 {
+            task.notes.push(cv_core::task::Note {
+                event_id: format!("note-{index}"),
+                by: "author".into(),
+                ts: now,
+                text: format!("{} {index}", if index % 2 == 0 { "keep" } else { "skip" }),
+                session_ref: None,
+                post_close: false,
+            });
+        }
+        let model = TaskReadModel::default();
+        let grep = regex::Regex::new("keep").unwrap();
+        let output = render_show(&model, &task, false, Some(&grep), Some(2), now);
+        assert!(output.contains("2 of 10"));
+        assert!(output.find("keep 6").unwrap() < output.find("keep 8").unwrap());
+        assert!(!output.contains("keep 4") && !output.contains("skip 9"));
+        let empty = render_show(&model, &task, false, Some(&grep), Some(0), now);
+        assert!(empty.contains("0 of 10") && !empty.contains("keep"));
+    }
+
+    #[test]
+    fn sweep_observes_local_branch_names_without_inventing_namespace_aliases() {
+        let world = cv_testkit::World::new("task-sweep-branches");
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&world.base)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-b", "main"]);
+        git(&[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.test",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "base",
+        ]);
+        git(&["branch", "feature/compiler"]);
+        git(&["update-ref", "refs/remotes/origin/feature/remote-only", "HEAD"]);
+        git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        let branches = merged_branches(&world.base, "main").unwrap();
+        assert!(branches.contains("feature/compiler"));
+        assert!(!branches.contains("compiler"));
+        assert!(branches.contains("feature/remote-only") && branches.contains("origin/feature/remote-only"));
+        assert!(!branches.contains("main") && !branches.contains("origin/main"));
+        assert_eq!(
+            branch_tokens_in(["feature/compiler_", "_remote-only end"]),
+            branch_tokens("feature/compiler_\n_remote-only end")
+        );
+    }
+
+    #[test]
     fn task_row_shows_age_and_strips_ansi() {
         let t = proj("evil\u{1b}]0;pwn\u{7}title\u{1b}[31m!", "2026-07-13T00:00:00Z");
         let now: DateTime<Utc> = "2026-07-16T00:00:00Z".parse().unwrap();
@@ -1617,13 +1689,18 @@ fn merged_branches(repo: &Path, main: &str) -> Result<BTreeSet<String>> {
         }
         for line in String::from_utf8_lossy(&o.stdout).lines() {
             let name = line.trim();
-            if name.is_empty() || name.ends_with("/HEAD") {
+            if name.is_empty() || name.ends_with("/HEAD") || name == main {
                 continue;
             }
-            let short = name.split_once('/').map(|(_, rest)| rest).unwrap_or(name);
-            for n in [name, short] {
-                if n != main {
-                    out.insert(n.to_string());
+            if extra.is_empty() {
+                // Local branch namespaces are part of their names: feature/compiler does not
+                // establish that an unrelated branch called compiler was merged.
+                out.insert(name.to_string());
+            } else {
+                let short = name.split_once('/').map(|(_, rest)| rest).unwrap_or(name);
+                if short != main {
+                    out.insert(name.to_string());
+                    out.insert(short.to_string());
                 }
             }
         }
@@ -1649,8 +1726,15 @@ fn branch_like(name: &str) -> bool {
 }
 
 /// The branch-shaped tokens of a text (letters, digits and `-_./`), deduplicated.
+#[cfg(test)]
 fn branch_tokens(text: &str) -> BTreeSet<String> {
-    text.split(|c: char| !(c.is_alphanumeric() || matches!(c, '-' | '_' | '/' | '.')))
+    branch_tokens_in([text])
+}
+
+fn branch_tokens_in<'a>(texts: impl IntoIterator<Item = &'a str>) -> BTreeSet<String> {
+    texts
+        .into_iter()
+        .flat_map(|text| text.split(|c: char| !(c.is_alphanumeric() || matches!(c, '-' | '_' | '/' | '.'))))
         .map(|t| t.trim_matches(|c| matches!(c, '.' | '/')))
         .filter(|t| t.len() >= 3)
         .map(str::to_string)
@@ -1720,7 +1804,7 @@ fn cmd_sweep(repo: &Path, main: Option<String>, json: bool) -> Result<()> {
                 reasons.push(format!("issue path no longer exists ({})", tried.join(", ")));
             }
         }
-        let mentioned = branch_tokens(&format!("{}\n{}", t.title, t.body));
+        let mentioned = branch_tokens_in([t.title.as_str(), t.body.as_str()]);
         for b in mentioned
             .iter()
             .filter(|b| branch_like(b) && merged.contains(b.as_str()))
