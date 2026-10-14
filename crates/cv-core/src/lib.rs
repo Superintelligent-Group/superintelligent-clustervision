@@ -442,7 +442,7 @@ pub fn find_workflows_by_name(name: &str) -> Vec<(SessionRef, Workflow)> {
 /// direct agents and `subagents/workflows/<run>/`), in parallel; nothing is parsed.
 pub fn find_subagent_parents(agent_id: &str) -> Vec<SessionRef> {
     let want = format!("agent-{}", agent_id.strip_prefix("agent-").unwrap_or(agent_id));
-    let mut refs = sessions_for(Some(Harness::Claude));
+    let refs = sessions_for(Some(Harness::Claude));
     let mut out = par_filter_map(refs, move |r| {
         let base = harness::claude::sidecar::subagents_dir(&r.path)?;
         let has_match = |dir: &std::path::Path| {
@@ -469,7 +469,7 @@ pub fn find_subagent_parents(agent_id: &str) -> Vec<SessionRef> {
 /// recorded at least one workflow (the bounded set where the transcript-vs-state cross-check is
 /// meaningful), in parallel. For finding a swarm you remember by name that left no run record.
 pub fn find_ghost_launches_by_name(name: &str) -> Vec<(SessionRef, WorkflowLaunch)> {
-    let mut refs = sessions_for(Some(Harness::Claude));
+    let refs = sessions_for(Some(Harness::Claude));
     let name = name.to_string();
     let mut out: Vec<(SessionRef, WorkflowLaunch)> = par_filter_map(refs, move |r| {
         if !harness::claude_workflow::has_workflow_records(&r.path) {
