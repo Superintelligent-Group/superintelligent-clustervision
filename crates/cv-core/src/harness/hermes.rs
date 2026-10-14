@@ -845,7 +845,7 @@ fn stream_conn_with_reads(
             let mut decoded_content = None;
             let mut untyped_failed_turn = false;
             let content = if incremental_content {
-                if borrowed_text(row, idx("content")) == Some("text") {
+                if borrowed_text(row, idx("content")).is_some_and(|kind| kind == "text") {
                     let rowid = row.get::<_, i64>(idx("_content_rowid").unwrap())?;
                     let mut prepare = || -> Result<Option<String>> {
                         if let Some(source) = &checked_source {
@@ -1198,7 +1198,7 @@ fn generation_key(
     borrowed_text(row, index("role")).unwrap_or_default().hash(&mut hash);
     if incremental_content {
         let mut content_hash = hash.clone();
-        let present = if borrowed_text(row, index("content")) == Some("text") {
+        let present = if borrowed_text(row, index("content")).is_some_and(|kind| kind == "text") {
             // Use Option's own prefix, followed by str's bytes and terminator. This preserves
             // the pinned DefaultHasher's borrowed-String identity without owning the body.
             struct StringPrefix;
