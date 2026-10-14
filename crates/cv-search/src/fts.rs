@@ -334,9 +334,14 @@ pub fn index_all(dir: &Path, rebuild: bool, subagents: bool) -> Result<usize> {
     index_sessions(dir, cv_core::discover_all(), rebuild, subagents)
 }
 
-pub fn index_sessions(dir: &Path, refs: Vec<cv_core::SessionRef>, rebuild: bool, subagents: bool) -> Result<usize> {
+pub fn index_sessions(
+    dir: &Path,
+    refs: impl AsRef<[cv_core::SessionRef]>,
+    rebuild: bool,
+    subagents: bool,
+) -> Result<usize> {
     let _sources = cv_core::source::read_scope();
-    let swept = sweep(dir, refs, rebuild, subagents)?;
+    let swept = sweep_refs(dir, refs.as_ref(), rebuild, subagents)?;
     if !rebuild {
         eprintln!(
             "  ↳ index: {} changed/new ({} read from where the last pass stopped), {} removed, {} unchanged, {} errors",
@@ -582,7 +587,12 @@ fn preferred_index_copies(refs: Vec<cv_core::SessionRef>) -> Vec<cv_core::Sessio
 /// mark's. This relies on the adapter's immutable-prefix append contract, not a proof of the
 /// whole prefix's contents. Otherwise the session is read whole. New marks are stored only after the commit that
 /// holds their docs, so a crash between the two can never leave a mark ahead of the index.
+#[cfg(test)]
 pub(crate) fn sweep(dir: &Path, refs: Vec<cv_core::SessionRef>, rebuild: bool, subagents: bool) -> Result<Swept> {
+    sweep_refs(dir, &refs, rebuild, subagents)
+}
+
+fn sweep_refs(dir: &Path, refs: &[cv_core::SessionRef], rebuild: bool, subagents: bool) -> Result<Swept> {
     let (index, f) = open_or_create(dir)?;
     let total = refs.len();
     let copies = total - refs.iter().map(|r| &r.id).collect::<HashSet<_>>().len();
@@ -590,7 +600,7 @@ pub(crate) fn sweep(dir: &Path, refs: Vec<cv_core::SessionRef>, rebuild: bool, s
         index: &index,
         f: &f,
         dir,
-        refs: &refs,
+        refs,
         rebuild,
         subagents,
     };

@@ -107,7 +107,7 @@ pub fn index_all(dir: impl Into<Option<PathBuf>>, rebuild: bool, subagents: bool
 /// Update the index using an already discovered session inventory.
 pub fn index_sessions(
     dir: impl Into<Option<PathBuf>>,
-    refs: Vec<cv_core::SessionRef>,
+    refs: impl AsRef<[cv_core::SessionRef]>,
     rebuild: bool,
     subagents: bool,
 ) -> Result<usize> {
