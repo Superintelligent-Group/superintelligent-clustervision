@@ -399,8 +399,23 @@ fn consume(
                 message.materialize(&self.resolver)?;
                 self.inner.try_message(message)
             }
-            fn try_meta(&mut self, session: &Session) -> Result<()> {
-                self.inner.try_meta(session)
+            fn extra_projection(&self) -> crate::stream::ExtraProjection {
+                self.inner.extra_projection()
+            }
+            fn meta(&mut self, session: &Session) {
+                self.inner.meta(session);
+            }
+            fn take_error(&mut self) -> Option<anyhow::Error> {
+                self.inner.take_error()
+            }
+            fn dependency(&mut self, path: &Path) {
+                self.inner.dependency(path);
+            }
+            fn wants_checkpoint(&mut self, offset: u64) -> bool {
+                self.inner.wants_checkpoint(offset)
+            }
+            fn checkpoint(&mut self, checkpoint: &mut crate::stream::Checkpoint) {
+                self.inner.checkpoint(checkpoint);
             }
         }
         let mut owned = OwnedSink {
