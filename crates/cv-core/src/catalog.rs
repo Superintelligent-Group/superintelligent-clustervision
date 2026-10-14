@@ -1033,6 +1033,7 @@ mod imp {
             let count = || OPEN_COUNT.with(std::cell::Cell::get);
             let before = count();
             let context = crate::rows::SearchRowContext::new();
+            assert_eq!(count(), before, "empty response contexts do not initialize a catalog");
             let make = |id, harness| crate::rows::SearchRow {
                 id,
                 harness,

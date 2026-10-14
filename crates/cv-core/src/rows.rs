@@ -64,13 +64,13 @@ pub struct SearchRow<'a> {
 /// One search-response enrichment operation. Reuses catalog initialization and the exact-ID
 /// statement, without a daemon cache or a retained second collection of hit metadata.
 pub struct SearchRowContext {
-    catalog: Option<crate::catalog::Reader>,
+    catalog: std::cell::OnceCell<Option<crate::catalog::Reader>>,
 }
 
 impl SearchRowContext {
     pub fn new() -> Self {
         Self {
-            catalog: crate::catalog::Reader::open(),
+            catalog: std::cell::OnceCell::new(),
         }
     }
 }
@@ -95,6 +95,7 @@ impl SearchRow<'_> {
     pub fn to_json_with(&self, context: &SearchRowContext) -> Value {
         let cataloged = context
             .catalog
+            .get_or_init(crate::catalog::Reader::open)
             .as_ref()
             .and_then(|reader| reader.exact_session(self.id, Harness::parse(self.harness)));
         let mut row = match &cataloged {
