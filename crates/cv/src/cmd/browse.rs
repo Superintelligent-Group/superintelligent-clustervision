@@ -14,7 +14,7 @@ use cv_core::sanitize::sanitize_line;
 /// resolution, which needs the tantivy index cv-core cannot depend on.
 fn apply_query(refs: &mut Vec<SessionRef>, query: &Option<cv_core::SessionQuery>) -> Result<()> {
     let Some(q) = query else { return Ok(()) };
-    crate::cmd::query::filter_refs(refs, q, &crate::cmd::query::text_sets(q))
+    crate::cmd::query::filter_refs(refs, q, &crate::cmd::query::text_sets(q)?)
 }
 
 /// Session rows for `--json` listings: the SAME refs the table would print (the `exists()` guard —
@@ -181,7 +181,7 @@ fn select_refs(
             } else {
                 cv_core::query::WindowPresence::Existing
             };
-            cv_core::query::filter_refs_limited(refs, q, &crate::cmd::query::text_sets(q), limit, presence)?;
+            cv_core::query::filter_refs_limited(refs, q, &crate::cmd::query::text_sets(q)?, limit, presence)?;
         }
     }
     let total = refs.len();
