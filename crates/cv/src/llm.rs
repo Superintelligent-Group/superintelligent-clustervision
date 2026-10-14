@@ -175,7 +175,7 @@ fn build_prompt(session: &cv_core::Session, opts: &DigestOptions) -> Result<Stri
 struct TranscriptBudget {
     limit: usize,
     head: Vec<u8>,
-    tail: Vec<u8>,
+    tail: std::collections::VecDeque<u8>,
     truncated: bool,
 }
 const TRANSCRIPT_MARKER: &str = "\n\n[… transcript truncated …]\n\n";
@@ -184,7 +184,7 @@ impl TranscriptBudget {
         Self {
             limit,
             head: Vec::new(),
-            tail: Vec::new(),
+            tail: std::collections::VecDeque::new(),
             truncated: false,
         }
     }
@@ -193,11 +193,11 @@ impl TranscriptBudget {
         let capacity = usable - usable * 2 / 3;
         if bytes.len() >= capacity {
             self.tail.clear();
-            self.tail.extend_from_slice(&bytes[bytes.len() - capacity..]);
+            self.tail.extend(bytes[bytes.len() - capacity..].iter().copied());
         } else {
             let excess = (self.tail.len() + bytes.len()).saturating_sub(capacity);
             self.tail.drain(..excess);
-            self.tail.extend_from_slice(bytes);
+            self.tail.extend(bytes.iter().copied());
         }
     }
     fn finish(mut self) -> Result<(String, bool)> {
@@ -219,7 +219,7 @@ impl TranscriptBudget {
             .unwrap_or(self.tail.len());
         let mut output = String::from_utf8(self.head)?;
         output.push_str(TRANSCRIPT_MARKER);
-        output.push_str(std::str::from_utf8(&self.tail[start..])?);
+        output.push_str(std::str::from_utf8(&self.tail.make_contiguous()[start..])?);
         Ok((output, true))
     }
 }
