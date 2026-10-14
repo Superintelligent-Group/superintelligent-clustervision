@@ -545,6 +545,9 @@ pub(crate) fn parse_state(v: &Value) -> Workflow {
         }
     }
 
+    // The zero phase is inserted at most once; testing its ordered Vec for every unnumbered
+    // agent would repeatedly scan all declared phases.
+    let mut zero_phase = phase_order.contains(&0);
     // Agents grouped by phaseIndex (in spawn order).
     let mut by_phase: BTreeMap<u64, Vec<WorkflowAgent>> = BTreeMap::new();
     let mut orphan_agents: Vec<WorkflowAgent> = Vec::new();
@@ -562,8 +565,9 @@ pub(crate) fn parse_state(v: &Value) -> Workflow {
                         orphan_agents.push(agent);
                     } else {
                         by_phase.entry(0).or_default().push(agent);
-                        if !phase_order.contains(&0) {
+                        if !zero_phase {
                             phase_order.insert(0, 0);
+                            zero_phase = true;
                         }
                     }
                 } else {
@@ -676,6 +680,76 @@ pub struct WorkflowLaunch {
     pub journal_result_count: Option<usize>,
 }
 
+/// A selective prefilter only: the full Value codec still validates any candidate record.
+/// RawValue skips unrelated payloads without allocating them; wrong/duplicate selected fields
+/// conservatively admit the ordinary parser instead of hiding a potentially relevant receipt.
+fn pending_result(line: &str, is_pending: impl Fn(&str) -> bool) -> bool {
+    use serde::Deserialize;
+    use serde_json::value::RawValue;
+    #[derive(Deserialize)]
+    struct Top<'a> {
+        #[serde(borrow)]
+        message: Option<&'a RawValue>,
+    }
+    #[derive(Deserialize)]
+    struct Message<'a> {
+        #[serde(borrow)]
+        content: Option<&'a RawValue>,
+    }
+    #[derive(Deserialize)]
+    struct Block<'a> {
+        #[serde(borrow, rename = "type")]
+        kind: Option<&'a RawValue>,
+        #[serde(borrow)]
+        tool_use_id: Option<&'a RawValue>,
+    }
+    let scan = || -> serde_json::Result<bool> {
+        let top: Top<'_> = serde_json::from_str(line)?;
+        let Some(message) = top.message.filter(|value| value.get().starts_with('{')) else {
+            return Ok(false);
+        };
+        let message: Message<'_> = serde_json::from_str(message.get())?;
+        let Some(content) = message.content.filter(|value| value.get().starts_with('[')) else {
+            return Ok(false);
+        };
+        struct Blocks<'a, F>(&'a F);
+        impl<'de, F: Fn(&str) -> bool> serde::de::Visitor<'de> for Blocks<'_, F> {
+            type Value = bool;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("content blocks")
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut blocks: A) -> std::result::Result<bool, A::Error> {
+                let mut found = false;
+                while let Some(block) = blocks.next_element::<&RawValue>()? {
+                    if found || !block.get().starts_with('{') {
+                        continue;
+                    }
+                    let block: Block<'_> = serde_json::from_str(block.get()).map_err(serde::de::Error::custom)?;
+                    let kind = block
+                        .kind
+                        .map(|kind| serde_json::from_str::<String>(kind.get()))
+                        .transpose()
+                        .map_err(serde::de::Error::custom)?;
+                    if kind.as_deref() != Some("tool_result") {
+                        continue;
+                    }
+                    if let Some(id) = block.tool_use_id {
+                        if let Ok(id) = serde_json::from_str::<String>(id.get()) {
+                            found |= (self.0)(&id);
+                        }
+                    }
+                }
+                Ok(found)
+            }
+        }
+        let mut parser = serde_json::Deserializer::from_str(content.get());
+        let found = serde::Deserializer::deserialize_seq(&mut parser, Blocks(&is_pending))?;
+        parser.end()?;
+        Ok(found)
+    };
+    scan().unwrap_or(true)
+}
+
 /// Every `Workflow` tool invocation in a session's transcript, in order. Reads the `.jsonl`
 /// directly (cheap substring prefilter, then a JSON parse per candidate line).
 pub fn launches(session_path: &Path) -> Vec<WorkflowLaunch> {
@@ -689,16 +763,13 @@ pub fn launches(session_path: &Path) -> Vec<WorkflowLaunch> {
     let mut out: Vec<WorkflowLaunch> = Vec::new();
     for line in reader.lines() {
         let Ok(line) = line else { break };
-        // Prefilter, cheapest test first: a launch line names the tool; a result line is only
-        // worth parsing when we still await a pending tool_use_id AND that id appears. Matching
-        // on the bare "tool_use_id" literal would JSON-parse nearly every tool-result line of the
-        // transcript; scanning for pending ids on lines without "tool_use_id" would rescan huge
-        // result payloads. Pending ids are removed once resolved, so the set stays ≤ a few.
+        // Select actual result IDs before owning payloads. Scanning this whole line once for
+        // every pending launch grows quadratically when many receipts are outstanding.
         let is_launch = line.contains("\"Workflow\"");
         if !is_launch
             && (by_use_id.is_empty()
                 || !line.contains("tool_use_id")
-                || !by_use_id.keys().any(|id| line.contains(id.as_str())))
+                || !pending_result(&line, |id| by_use_id.contains_key(id)))
         {
             continue;
         }
@@ -742,8 +813,7 @@ pub fn launches(session_path: &Path) -> Vec<WorkflowLaunch> {
                     out.push(launch);
                 }
                 Some("tool_result") => {
-                    // Resolve (and retire) the pending launch — keeping the pending set small is
-                    // what keeps the prefilter above cheap.
+                    // Resolve and retire the matching launch with one indexed lookup.
                     if let Some(idx) = c
                         .get("tool_use_id")
                         .and_then(Value::as_str)
@@ -770,14 +840,13 @@ pub fn launches(session_path: &Path) -> Vec<WorkflowLaunch> {
 /// transcripts and journaled results produced before the crash, i.e. the harvestable work.
 pub fn ghost_launches(session_path: &Path) -> Vec<WorkflowLaunch> {
     let mut ghosts = compute_ghosts(launches(session_path), &workflows(session_path));
-    let mut orphans = orphan_scripts(session_path);
+    let mut orphans = OrphanScripts::new(orphan_scripts(session_path));
     for g in &mut ghosts {
         let Some(name) = g.name.as_deref() else { continue };
         // Consume one same-named orphan script per ghost (each launch persists its own script).
-        let Some(pos) = orphans.iter().position(|(n, _)| n == name) else {
+        let Some(rid) = orphans.take(name) else {
             continue;
         };
-        let (_, rid) = orphans.swap_remove(pos);
         if let Some(debris) = sidecar::workflow_run_dir(session_path, &rid) {
             g.debris_agents = Some(
                 fs::read_dir(&debris)
@@ -798,6 +867,50 @@ pub fn ghost_launches(session_path: &Path) -> Vec<WorkflowLaunch> {
     ghosts
 }
 
+/// Match the first same-named current Vec slot, preserving the prior swap_remove ordering.
+/// Each removal updates only its name bucket and the entry moved from the final slot.
+struct OrphanScripts {
+    entries: Vec<(String, String)>,
+    positions: std::collections::HashMap<String, std::collections::BTreeSet<usize>>,
+    #[cfg(test)]
+    lookups: usize,
+}
+impl OrphanScripts {
+    fn new(entries: Vec<(String, String)>) -> Self {
+        let mut positions: std::collections::HashMap<String, std::collections::BTreeSet<usize>> = Default::default();
+        for (index, (name, _)) in entries.iter().enumerate() {
+            positions.entry(name.clone()).or_default().insert(index);
+        }
+        Self {
+            entries,
+            positions,
+            #[cfg(test)]
+            lookups: 0,
+        }
+    }
+    fn take(&mut self, name: &str) -> Option<String> {
+        #[cfg(test)]
+        {
+            self.lookups += 1;
+        }
+        let position = self.positions.get_mut(name)?.pop_first()?;
+        let last = self.entries.len() - 1;
+        if position != last {
+            #[cfg(test)]
+            {
+                self.lookups += 1;
+            }
+            let moved = self
+                .positions
+                .get_mut(&self.entries[last].0)
+                .expect("indexed orphan name");
+            moved.remove(&last);
+            moved.insert(position);
+        }
+        Some(self.entries.swap_remove(position).1)
+    }
+}
+
 /// The pure matcher behind [`ghost_launches`]: each launch is accounted for by (a) having errored
 /// at launch (no run to record), (b) a state file for its `scriptPath`-embedded run family, or
 /// (c) consuming one same-named state file (multiset — N inline launches of one name need N
@@ -805,6 +918,7 @@ pub fn ghost_launches(session_path: &Path) -> Vec<WorkflowLaunch> {
 fn compute_ghosts(launches: Vec<WorkflowLaunch>, states: &[Workflow]) -> Vec<WorkflowLaunch> {
     use std::collections::HashMap;
     let ids: std::collections::HashSet<&str> = states.iter().map(|w| w.run_id.as_str()).collect();
+    let resumed: std::collections::HashSet<&str> = states.iter().filter_map(|w| w.resume_from.as_deref()).collect();
     let mut name_budget: HashMap<&str, usize> = HashMap::new();
     for w in states {
         if let Some(n) = &w.name {
@@ -824,7 +938,7 @@ fn compute_ghosts(launches: Vec<WorkflowLaunch>, states: &[Workflow]) -> Vec<Wor
             }
             if let Some(rf) = &l.resume_from {
                 // A resume's new run may keep the resumed family's id in `resume_from`.
-                if states.iter().any(|w| w.resume_from.as_deref() == Some(rf)) {
+                if resumed.contains(rf.as_str()) {
                     return false;
                 }
             }
@@ -1291,6 +1405,127 @@ mod tests {
         assert_eq!(reads, [wfdir.join("wf_aaa-111.json")]);
         *STATE_MATERIALIZATIONS.lock().unwrap() = (None, Vec::new());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn workflow_receipts_resolve_large_outstanding_fanout_in_original_launch_order() {
+        let world = cv_testkit::World::in_process("workflow-pending-fanout");
+        let path = world.base.join("session.jsonl");
+        let count = 1024;
+        let mut rows = String::new();
+        for n in 0..count {
+            rows.push_str(&format!("{}\n", json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":format!("pending-{n}"),"name":"Workflow","input":{"name":format!("workflow-{n}")}}]}})));
+        }
+        rows.push_str("malformed-json\n");
+        rows.push_str(&format!("{}\n", json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"unrelated","content":"pending-0 ".repeat(100000)}]}})));
+        for n in (0..count).rev() {
+            rows.push_str(&format!("{}\n", json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":format!("pending-{n}"),"is_error":n % 3 == 0,"content":"receipt"}]}})));
+        }
+        fs::write(&path, rows).unwrap();
+        let launches = launches(&path);
+        assert_eq!(launches.len(), count);
+        for (n, launch) in launches.iter().enumerate() {
+            assert_eq!(launch.name, Some(format!("workflow-{n}")));
+            assert_eq!(launch.errored, n % 3 == 0);
+        }
+    }
+
+    #[test]
+    fn pending_result_prefilter_bounds_lookups_independently_of_pending_launches() {
+        use std::cell::Cell;
+        for count in [64, 1024, 4096] {
+            let pending: BTreeMap<_, _> = (0..count).map(|n| (format!("pending-{n}"), n)).collect();
+            let line = json!({"message":{"content":[{"type":"tool_result","tool_use_id":"unrelated","content":"ordinary output"}]}}).to_string();
+            let lookups = Cell::new(0);
+            assert!(!pending_result(&line, |id| {
+                lookups.set(lookups.get() + 1);
+                pending.contains_key(id)
+            }));
+            assert_eq!(lookups.get(), 1);
+            let mut old_scans = 0;
+            assert!(!pending.keys().any(|id| {
+                old_scans += 1;
+                line.contains(id)
+            }));
+            assert_eq!(old_scans, count);
+        }
+        let large = json!({"message":{"content":[{"type":"tool_result","tool_use_id":"other","content":format!("pending-1 {}", "x".repeat(1100000))}]}}).to_string();
+        assert!(
+            !pending_result(&large, |id| id == "pending-1"),
+            "an ID quoted inside a tool body is not its receipt"
+        );
+        let duplicate = r#"{"message":{"content":[],"content":[{"type":"tool_result","tool_use_id":"pending-1"}]}}"#;
+        assert!(
+            pending_result(duplicate, |_| false),
+            "duplicate fields conservatively select the authoritative full codec"
+        );
+        let matching =
+            json!({"message":{"content":[{"type":"tool_result","tool_use_id":"pending-1","is_error":true}]}})
+                .to_string();
+        assert!(pending_result(&matching, |id| id == "pending-1"));
+    }
+
+    #[test]
+    fn orphan_index_preserves_swap_removal_order_and_bounds_lookup_work() {
+        let entries: Vec<_> = ["a", "b", "a", "c", "a", "b"]
+            .iter()
+            .enumerate()
+            .map(|(n, name)| (name.to_string(), n.to_string()))
+            .collect();
+        let mut expected = entries.clone();
+        let mut actual = OrphanScripts::new(entries);
+        for name in ["a", "b", "a", "c", "a", "b", "missing"] {
+            let old = expected
+                .iter()
+                .position(|(n, _)| n == name)
+                .map(|position| expected.swap_remove(position).1);
+            assert_eq!(actual.take(name), old);
+        }
+        for count in [64, 1024, 4096] {
+            let entries: Vec<_> = (0..count).map(|n| (format!("name-{n}"), format!("run-{n}"))).collect();
+            let mut actual = OrphanScripts::new(entries.clone());
+            let mut old = entries;
+            let mut comparisons = 0;
+            for n in (0..count).rev() {
+                let name = format!("name-{n}");
+                let position = old
+                    .iter()
+                    .position(|(candidate, _)| {
+                        comparisons += 1;
+                        candidate == &name
+                    })
+                    .unwrap();
+                assert_eq!(actual.take(&name), Some(old.swap_remove(position).1));
+            }
+            assert_eq!(comparisons, count * (count + 1) / 2);
+            assert!(actual.lookups <= 2 * count);
+        }
+    }
+
+    #[test]
+    fn ghost_resume_index_and_phase_zero_grouping_preserve_large_fanout() {
+        let count = 4096;
+        let mut states: Vec<_> = (0..count).map(|n| state(&format!("wf_{n}"), "same-name")).collect();
+        for (n, state) in states.iter_mut().enumerate() {
+            state.resume_from = Some(format!("resume-{n}"));
+        }
+        let launches: Vec<_> = (0..count)
+            .map(|n| {
+                let mut item = launch(Some("same-name"), None, false);
+                item.resume_from = Some(format!("resume-{n}"));
+                item
+            })
+            .collect();
+        assert!(compute_ghosts(launches, &states).is_empty());
+        let mut progress: Vec<_> = (1..=count)
+            .map(|n| json!({"type":"workflow_phase","index":n,"title":format!("phase-{n}")}))
+            .collect();
+        progress.extend((1..=count).map(|n| json!({"type":"workflow_agent","index":n,"phaseIndex":0})));
+        let workflow = parse_state(&json!({"workflowProgress":progress}));
+        assert_eq!(workflow.phases.len(), count + 1);
+        assert_eq!(workflow.phases[0].index, 0);
+        assert_eq!(workflow.phases[0].agents.len(), count);
+        assert!(workflow.orphan_agents.is_empty());
     }
 
     fn launch(name: Option<&str>, script_run_id: Option<&str>, errored: bool) -> WorkflowLaunch {
