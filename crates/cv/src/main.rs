@@ -1101,8 +1101,8 @@ fn main() {
     if let Err(e) = run() {
         // Caller mistakes (unknown/ambiguous id, removed command/flag, bad window) exit 2 with the
         // bare message; everything else is a real failure: the anyhow chain, exit 1.
-        if let Some(u) = e.downcast_ref::<UsageError>() {
-            eprintln!("{u}");
+        if e.downcast_ref::<UsageError>().is_some() {
+            eprintln!("{e:#}");
             std::process::exit(2);
         }
         eprintln!("Error: {e:?}");
