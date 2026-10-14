@@ -2238,7 +2238,7 @@ fn metadata_matches(doc: &TantivyDocument, fields: &Fields, harness: Option<&str
 pub fn newest_indexed_mtime(dir: &Path) -> Option<i64> {
     let (index, f) = open_existing(dir).ok()?;
     let (sigs, _) = read_indexed_sigs(&index, &f).ok()?;
-    sigs.values().map(|&(mt, _)| mt).max()
+    sigs.values().filter(|(_, size)| *size >= 0).map(|&(mt, _)| mt).max()
 }
 
 /// Whole days the index at `dir` lags the newest session file on disk, when ≥ 1 — the note a
@@ -4875,6 +4875,7 @@ mod tests {
         let (sigs, _, metadata, _) = read_indexed_metadata(&index, &f, true).unwrap();
         assert_eq!(sigs.get("repair"), Some(&(i64::MIN, i64::MIN)));
         assert!(!metadata.contains_key("repair"));
+        assert_eq!(newest_indexed_mtime(&dir), None);
         let input = dir.join("repair.jsonl");
         std::fs::write(&input, "{\"type\":\"user\",\"uuid\":\"u\",\"sessionId\":\"repair\",\"message\":{\"role\":\"user\",\"content\":\"current needle\"}}\n").unwrap();
         let reference = cv_core::SessionRef::new("repair", cv_core::Harness::Claude, &input);
