@@ -229,6 +229,7 @@ struct CallSink {
     msg_idx: usize,
     rows: Vec<(String, Event)>,
     fail: Option<anyhow::Error>,
+    tool: Option<String>,
 }
 
 impl CallSink {
@@ -238,6 +239,7 @@ impl CallSink {
             msg_idx: 0,
             rows: Vec::new(),
             fail: None,
+            tool: None,
         }
     }
 }
@@ -255,11 +257,17 @@ impl MessageSink for CallSink {
 
     fn message(&mut self, m: Message) -> Flow {
         for b in &m.content {
-            if let Block::ToolUse { id, .. } = b {
-                let mut one = Message::new(m.role);
-                one.timestamp = m.timestamp;
-                one.content = vec![b.clone()];
-                let rows = match events::extract(&one, self.msg_idx, self.cwd.as_deref()) {
+            if let Block::ToolUse { id, name, input, .. } = b {
+                if self.tool.as_deref().is_some_and(|tool| tool != name) {
+                    continue;
+                }
+                let rows = match events::extract_call(
+                    name,
+                    input,
+                    self.msg_idx,
+                    m.timestamp.map(|t| t.timestamp()),
+                    self.cwd.as_deref(),
+                ) {
                     Ok(rows) => rows,
                     Err(error) => {
                         self.fail = Some(error);
@@ -408,16 +416,46 @@ pub fn forest_tools(r: &SessionRef) -> anyhow::Result<ForestTools> {
 /// Streams each agent, collects its tool rows tagged with the agent id, then sorts by `(ts,
 /// agent, msg_idx)` so calls interleave in wall-clock order (untimestamped rows sort last, stably).
 pub fn forest_timeline(r: &SessionRef) -> anyhow::Result<Vec<ToolEvent>> {
+    forest_timeline_selected(r, None, None, None)
+}
+
+/// Compose timeline selectors before reading transcripts or decoding call arguments. Workflow
+/// must be a resolved run ID; agent keeps the existing exact-or-prefix timeline semantics.
+pub fn forest_timeline_selected(
+    r: &SessionRef,
+    agent: Option<&str>,
+    workflow: Option<&str>,
+    tool: Option<&str>,
+) -> anyhow::Result<Vec<ToolEvent>> {
     let adapter =
         crate::harness::for_harness(r.harness).ok_or_else(|| anyhow::anyhow!("no adapter for {}", r.harness))?;
     let mut out: Vec<ToolEvent> = Vec::new();
 
-    let mut sink = CallSink::new(r.cwd.clone());
-    adapter.try_stream(r, &ParseOptions::lazy(), &mut sink)?;
-    timeline_calls(ORCHESTRATOR, sink.rows, &mut out);
+    let matches_agent = |id: &str| agent.is_none_or(|key| id == key || id.starts_with(key));
+    if workflow.is_none() && matches_agent(ORCHESTRATOR) {
+        let mut sink = CallSink::new(r.cwd.clone());
+        sink.tool = tool.map(str::to_owned);
+        adapter.try_stream(r, &ParseOptions::lazy(), &mut sink)?;
+        timeline_calls(ORCHESTRATOR, sink.rows, &mut out);
+    }
 
-    for s in crate::subagent_tree_of(r) {
+    let subagents = if agent == Some(ORCHESTRATOR) && workflow.is_none() {
+        Vec::new()
+    } else {
+        crate::subagent_tree_of(r)
+    };
+    anyhow::ensure!(
+        workflow.is_none_or(|run| subagents.iter().any(|s| s.workflow.as_deref() == Some(run))),
+        "no agents found for workflow {:?} in {}",
+        workflow.unwrap_or_default(),
+        r.id
+    );
+    for s in subagents {
+        if !matches_agent(s.agent_id()) || workflow.is_some_and(|run| s.workflow.as_deref() != Some(run)) {
+            continue;
+        }
         let mut sink = CallSink::new(s.session.cwd.clone());
+        sink.tool = tool.map(str::to_owned);
         adapter.try_stream(&s.session, &ParseOptions::lazy(), &mut sink)?;
         timeline_calls(s.agent_id(), sink.rows, &mut out);
     }
@@ -623,6 +661,37 @@ mod tests {
                 ("c3".into(), "shell".into(), "command", 0)
             ]
         );
+    }
+
+    #[test]
+    fn selected_timeline_does_not_demand_excluded_call_arguments() {
+        let world = cv_testkit::World::in_process("timeline-selected-call");
+        let path = world.base.join("arguments.json");
+        std::fs::write(&path, b"{\"command\":\"ignored\"}").unwrap();
+        let excluded = crate::Json::source(&path, 0, std::fs::metadata(&path).unwrap().len()).unwrap();
+        std::fs::remove_file(path).unwrap();
+        let mut m = asst(vec![
+            Block::ToolUse {
+                id: "excluded".into(),
+                name: "Bash".into(),
+                namespace: None,
+                input: excluded,
+            },
+            with_id(tool_use("Read", json!({"file_path":"selected.rs"})), "selected"),
+        ]);
+        m.timestamp = Some(chrono::DateTime::from_timestamp(123, 0).unwrap());
+        let mut all = CallSink::new(None);
+        assert_eq!(all.message(m.clone()), Flow::Stop);
+        assert!(all.take_error().is_some());
+        let mut selected = CallSink::new(None);
+        selected.tool = Some("Read".into());
+        assert_eq!(selected.message(m), Flow::Continue);
+        let mut timeline = Vec::new();
+        timeline_calls(ORCHESTRATOR, selected.rows, &mut timeline);
+        assert_eq!(timeline.len(), 1);
+        assert_eq!(timeline[0].tool_use_id, "selected");
+        assert_eq!(timeline[0].ts, Some(123));
+        assert_eq!(timeline[0].msg_idx, 0);
     }
 
     #[test]

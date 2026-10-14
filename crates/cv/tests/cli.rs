@@ -2952,6 +2952,50 @@ fn timeline_ids_reach_cat() {
     assert_eq!(out.trim(), "edited ok");
     let (out, _) = w.cv_ok(&["cat", "alphasess", id, "--input"]);
     assert!(out.contains("/work/proj/src/widget.rs"), "{out}");
+
+    // Timeline mode composes the same workflow/tool selectors as histogram mode.
+    for (run, agent) in [("wf_first", "first-agent"), ("wf_second", "second-agent")] {
+        let states = w.proj.join("alphasess/workflows");
+        fs::create_dir_all(&states).unwrap();
+        fs::write(
+            states.join(format!("{run}.json")),
+            serde_json::json!({"runId":run,"workflowName":format!("{run}-name")}).to_string(),
+        )
+        .unwrap();
+        let dir = w.proj.join("alphasess/subagents/workflows").join(run);
+        fs::create_dir_all(&dir).unwrap();
+        let calls = serde_json::json!([
+            {"type":"tool_use","id":format!("{agent}-edit"),"name":"Edit","input":{"file_path":"selected.rs","old_string":"a","new_string":"b"}},
+            {"type":"tool_use","id":format!("{agent}-read"),"name":"Read","input":{"file_path":"selected.rs"}}
+        ]);
+        fs::write(
+            dir.join(format!("agent-{agent}.jsonl")),
+            cv_testkit::jsonl(&[assistant_line(agent, "2026-01-03T10:00:00Z", calls)]),
+        )
+        .unwrap();
+    }
+    let (out, _) = w.cv_ok(&[
+        "tools",
+        "alphasess",
+        "--timeline",
+        "--workflow",
+        "wf_f",
+        "--tool",
+        "Edit",
+        "--agent",
+        "first",
+        "--json",
+    ]);
+    let selected: Vec<serde_json::Value> = serde_json::from_str(&out).unwrap();
+    assert_eq!(selected.len(), 1, "{out}");
+    assert_eq!(selected[0]["agent"], "first-agent");
+    assert_eq!(selected[0]["tool_use_id"], "first-agent-edit");
+    let (out, _) = w.cv_ok(&["tools", "alphasess", "--timeline", "--tool", "Read", "--json"]);
+    let reads: Vec<serde_json::Value> = serde_json::from_str(&out).unwrap();
+    assert_eq!(reads.len(), 2, "{out}");
+    assert!(reads.iter().all(|event| event["tool"] == "Read"));
+    let (_, error) = w.cv_fails(&["tools", "alphasess", "--timeline", "--workflow", "absent"]);
+    assert!(error.contains("no workflow"), "{error}");
 }
 
 #[test]

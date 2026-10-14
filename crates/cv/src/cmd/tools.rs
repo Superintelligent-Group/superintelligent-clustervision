@@ -28,19 +28,24 @@ pub(crate) fn cmd_tools(
     let want = crate::util::parse_harness(&harness)?;
     let (r, _adapter) = crate::util::resolve(id, want)?;
 
-    if timeline {
-        return tools_timeline(&r, agent.as_deref(), json);
-    }
-
-    let mut forest = cv_core::tools::forest_tools(&r)?;
-    if let Some(run) = &workflow {
+    let workflow = if let Some(run) = &workflow {
         // Resolve a run-id *prefix* to the full id (the forest tags agents with the full run id),
         // so `--workflow wf_08eb66fa` matches `wf_08eb66fa-4b1`.
         let full = cv_core::workflow_of(&r, run)
             .map(|w| w.run_id)
             .with_context(|| format!("no workflow {run:?} in {}", short_id(&r.id)))?;
         // The orchestrator isn't part of any one workflow; restrict to the named run's agents.
-        forest = forest.for_workflow(&full);
+        Some(full)
+    } else {
+        None
+    };
+    if timeline {
+        return tools_timeline(&r, agent.as_deref(), workflow.as_deref(), tool.as_deref(), json);
+    }
+
+    let mut forest = cv_core::tools::forest_tools(&r)?;
+    if let Some(full) = &workflow {
+        forest = forest.for_workflow(full);
         if forest.agents.is_empty() {
             bail!("no agents found for workflow {full:?} in {}", short_id(&r.id));
         }
@@ -164,12 +169,14 @@ fn tools_across(forest: &ForestTools, json: bool) -> Result<()> {
 }
 
 /// The time-ordered tool-call timeline across the forest.
-fn tools_timeline(r: &cv_core::SessionRef, agent: Option<&str>, json: bool) -> Result<()> {
-    let mut events = cv_core::tools::forest_timeline(r)?;
-    if let Some(key) = agent {
-        // Match the orchestrator sentinel or a full/prefix agent id.
-        events.retain(|e| e.agent == key || e.agent.starts_with(key));
-    }
+fn tools_timeline(
+    r: &cv_core::SessionRef,
+    agent: Option<&str>,
+    workflow: Option<&str>,
+    tool: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    let events = cv_core::tools::forest_timeline_selected(r, agent, workflow, tool)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&events)?);
         return Ok(());

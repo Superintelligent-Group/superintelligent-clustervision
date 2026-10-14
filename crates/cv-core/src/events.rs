@@ -227,21 +227,7 @@ pub(crate) fn extract_into(m: &Message, msg_idx: usize, cwd: Option<&Path>, out:
     for b in &m.content {
         match b {
             Block::ToolUse { name, input, .. } => {
-                for (i, (kind, target)) in input
-                    .with_view(|view| classify_tool_view(name, view, cwd))?
-                    .into_iter()
-                    .enumerate()
-                {
-                    staged.push(Event {
-                        msg_idx,
-                        ts,
-                        kind,
-                        tool: Some(name.clone()),
-                        target,
-                        detail: None,
-                        call: i == 0,
-                    });
-                }
+                staged.extend(extract_call(name, input, msg_idx, ts, cwd)?);
             }
             Block::ToolResult {
                 content,
@@ -271,6 +257,30 @@ pub(crate) fn extract_into(m: &Message, msg_idx: usize, cwd: Option<&Path>, out:
     }
     out.extend(staged);
     Ok(())
+}
+
+/// Classify a borrowed call without cloning its possibly owned, oversized arguments.
+pub(crate) fn extract_call(
+    name: &str,
+    input: &crate::Json,
+    msg_idx: usize,
+    ts: Option<i64>,
+    cwd: Option<&Path>,
+) -> Result<Vec<Event>> {
+    Ok(input
+        .with_view(|view| classify_tool_view(name, view, cwd))?
+        .into_iter()
+        .enumerate()
+        .map(|(i, (kind, target))| Event {
+            msg_idx,
+            ts,
+            kind,
+            tool: Some(name.to_owned()),
+            target,
+            detail: None,
+            call: i == 0,
+        })
+        .collect())
 }
 
 /// Heuristic cross-harness classification of one tool invocation into `(kind, target)` rows.
