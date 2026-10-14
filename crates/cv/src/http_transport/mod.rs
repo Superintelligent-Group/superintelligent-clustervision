@@ -319,12 +319,6 @@ impl Server {
         self.listening_addr.clone()
     }
 
-    /// Returns the number of clients currently connected to the server.
-    pub fn num_connections(&self) -> usize {
-        unimplemented!()
-        //self.requests_receiver.lock().len()
-    }
-
     /// Blocks until an HTTP request has been submitted and returns it.
     pub fn recv(&self) -> IoResult<Request> {
         match self.messages.pop() {
@@ -435,6 +429,41 @@ mod deadline_tests {
             assert!(server.try_recv().unwrap().is_none());
         }
     }
+    #[test]
+    fn complete_fixed_and_chunked_bodies_reach_eof_without_a_socket_timeout() {
+        let server = server();
+        let addr = server.server_addr().to_ip().unwrap();
+        for (framing, body, expected) in [
+            ("Content-Length: 3", "abc".to_string(), "abc".to_string()),
+            ("Content-Length: 4096", "x".repeat(4096), "x".repeat(4096)),
+            (
+                "Transfer-Encoding: chunked",
+                "3\r\nabc\r\n0\r\n\r\n".to_string(),
+                "abc".to_string(),
+            ),
+        ] {
+            let mut client = TcpStream::connect(addr).unwrap();
+            client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            write!(
+                client,
+                "POST / HTTP/1.1\r\nHost: {addr}\r\n{framing}\r\nConnection: close\r\n\r\n{body}"
+            )
+            .unwrap();
+            let mut request = server.recv_timeout(Duration::from_secs(3)).unwrap().unwrap();
+            let mut actual = String::new();
+            request.as_reader().read_to_string(&mut actual).unwrap();
+            assert_eq!(actual, expected);
+            assert_eq!(request.as_reader().read(&mut [0; 1]).unwrap(), 0);
+            request.respond(Response::from_string("complete")).unwrap();
+            let mut response = String::new();
+            client.read_to_string(&mut response).unwrap();
+            assert!(
+                response.starts_with("HTTP/1.1 200") && response.ends_with("complete"),
+                "{response}"
+            );
+        }
+    }
+
     #[test]
     fn stalled_request_body_has_its_own_read_deadline() {
         let server = server();
