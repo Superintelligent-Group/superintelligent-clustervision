@@ -1763,29 +1763,68 @@ struct TreeNode {
     index: usize,
 }
 
-/// `resolveCanonicalParentId`: leaf controls are omitted from selected paths, so a parent link
-/// that lands on a marker follows through to the marker's own (normalized) parent.
-fn resolve_canonical_parent(
-    parent: Option<String>,
-    nodes: &[TreeNode],
-    by_id: &HashMap<String, usize>,
-) -> Option<String> {
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut current = parent;
-    while let Some(cur) = current {
-        if seen.contains(&cur) {
-            return Some(cur);
+/// Leaf-control chains are shared by many side entries. Resolve each stable suffix once.
+/// A repeated ID or newly filled missing target can change an earlier walk's meaning, so
+/// those malformed/forward-reference updates invalidate this operation-local memoization.
+#[derive(Default)]
+struct CanonicalParents {
+    resolved: HashMap<String, Option<String>>,
+    missing: HashSet<String>,
+    #[cfg(test)]
+    visits: usize,
+}
+impl CanonicalParents {
+    fn insert(&mut self, id: String, index: usize, by_id: &mut HashMap<String, usize>) {
+        if by_id.insert(id.clone(), index).is_some() || self.missing.contains(&id) {
+            self.resolved.clear();
+            self.missing.clear();
         }
-        let Some(&i) = by_id.get(&cur) else {
-            return Some(cur);
-        };
-        if !nodes[i].is_leaf_control {
-            return Some(cur);
-        }
-        seen.insert(cur.clone());
-        current = nodes[i].entry.parent_id.clone();
     }
-    None
+    fn resolve(
+        &mut self,
+        parent: Option<String>,
+        nodes: &[TreeNode],
+        by_id: &HashMap<String, usize>,
+    ) -> Option<String> {
+        let mut path = Vec::<String>::new();
+        let mut seen = HashMap::<String, usize>::new();
+        let mut current = parent;
+        let result = loop {
+            let Some(cur) = current else {
+                break None;
+            };
+            if let Some(result) = self.resolved.get(&cur) {
+                break result.clone();
+            }
+            if let Some(&start) = seen.get(&cur) {
+                // Starting on a cycle returns that starting ID. Prefixes return the first
+                // cycle entry they encounter; each cached cyclic node therefore keeps itself.
+                for id in path.iter().skip(start) {
+                    self.resolved.insert(id.clone(), Some(id.clone()));
+                }
+                path.truncate(start);
+                break Some(cur);
+            }
+            #[cfg(test)]
+            {
+                self.visits += 1;
+            }
+            let Some(&index) = by_id.get(&cur) else {
+                self.missing.insert(cur.clone());
+                break Some(cur);
+            };
+            if !nodes[index].is_leaf_control {
+                break Some(cur);
+            }
+            seen.insert(cur.clone(), path.len());
+            path.push(cur);
+            current = nodes[index].entry.parent_id.clone();
+        };
+        for id in path {
+            self.resolved.insert(id, result.clone());
+        }
+        result
+    }
 }
 
 /// `selectSessionTranscriptTreePathNodes`: the normalized path from `leaf` to the root, skipping
@@ -1819,6 +1858,7 @@ fn select_path(leaf: &Option<String>, nodes: &[TreeNode], by_id: &HashMap<String
 fn select_navigation(entries: &[Value], complete: bool) -> Vec<NavigationRow> {
     let mut nodes: Vec<TreeNode> = Vec::new();
     let mut by_id: HashMap<String, usize> = HashMap::new();
+    let mut parents = CanonicalParents::default();
     let mut leaf: Option<String> = None;
     let mut append_parent: Option<String> = None;
     let mut has_explicit_leaf_update = false;
@@ -1869,7 +1909,7 @@ fn select_navigation(entries: &[Value], complete: bool) -> Vec<NavigationRow> {
                 is_leaf_control: true,
                 index,
             };
-            by_id.insert(node.entry.id.clone(), nodes.len());
+            parents.insert(node.entry.id.clone(), nodes.len(), &mut by_id);
             nodes.push(node);
             continue;
         }
@@ -1891,7 +1931,7 @@ fn select_navigation(entries: &[Value], complete: bool) -> Vec<NavigationRow> {
             } else {
                 te.parent_id.clone()
             };
-            te.parent_id = resolve_canonical_parent(logical, &nodes, &by_id);
+            te.parent_id = parents.resolve(logical, &nodes, &by_id);
         }
         let node = TreeNode {
             entry: te,
@@ -1919,7 +1959,7 @@ fn select_navigation(entries: &[Value], complete: bool) -> Vec<NavigationRow> {
                 has_explicit_leaf_update = true;
             }
         }
-        by_id.insert(id, nodes.len());
+        parents.insert(id, nodes.len(), &mut by_id);
         nodes.push(node);
     }
 
@@ -2047,6 +2087,98 @@ mod tests {
     }
 
     #[cfg(feature = "sqlite")]
+    fn uncached_parent(parent: Option<String>, nodes: &[TreeNode], by_id: &HashMap<String, usize>) -> Option<String> {
+        let mut seen = HashSet::new();
+        let mut current = parent;
+        while let Some(id) = current {
+            if !seen.insert(id.clone()) {
+                return Some(id);
+            }
+            let Some(&index) = by_id.get(&id) else {
+                return Some(id);
+            };
+            if !nodes[index].is_leaf_control {
+                return Some(id);
+            }
+            current = nodes[index].entry.parent_id.clone();
+        }
+        None
+    }
+    fn parent_node(id: &str, parent: Option<&str>, control: bool) -> TreeNode {
+        TreeNode {
+            entry: TreeEntry {
+                id: id.into(),
+                parent_id: parent.map(str::to_owned),
+                leaf_id: None,
+                append_parent_id: None,
+                side: false,
+            },
+            is_leaf_control: control,
+            index: 0,
+        }
+    }
+    #[test]
+    fn canonical_parent_shared_chains_have_linear_visits_including_missing_targets_and_cycles() {
+        for terminal in [Some("root"), Some("absent"), None, Some("leaf-0")] {
+            let mut nodes = vec![parent_node("root", None, false)];
+            let mut by_id = HashMap::from([("root".to_owned(), 0)]);
+            let mut resolver = CanonicalParents::default();
+            for i in 0..4000 {
+                let id = format!("leaf-{i}");
+                let parent = if i == 0 {
+                    terminal.map(str::to_owned)
+                } else {
+                    Some(format!("leaf-{}", i - 1))
+                };
+                let node = parent_node(&id, parent.as_deref(), true);
+                resolver.insert(id, nodes.len(), &mut by_id);
+                nodes.push(node);
+            }
+            for i in (0..4000).rev() {
+                let parent = Some(format!("leaf-{i}"));
+                assert_eq!(
+                    resolver.resolve(parent.clone(), &nodes, &by_id),
+                    uncached_parent(parent, &nodes, &by_id)
+                );
+            }
+            assert!(
+                resolver.visits <= 4001,
+                "shared suffixes must be walked once: {}",
+                resolver.visits
+            );
+        }
+    }
+    #[test]
+    fn canonical_parent_cache_preserves_forward_targets_duplicate_ids_and_cycle_entry_points() {
+        let mut nodes = vec![
+            parent_node("a", Some("b"), true),
+            parent_node("b", Some("c"), true),
+            parent_node("c", Some("b"), true),
+        ];
+        let mut by_id = HashMap::from([("a".to_owned(), 0), ("b".to_owned(), 1), ("c".to_owned(), 2)]);
+        let mut resolver = CanonicalParents::default();
+        for id in ["a", "b", "c", "missing"] {
+            assert_eq!(
+                resolver.resolve(Some(id.into()), &nodes, &by_id),
+                uncached_parent(Some(id.into()), &nodes, &by_id)
+            );
+        }
+        for node in [
+            parent_node("b", Some("missing"), true),
+            parent_node("missing", Some("c"), true),
+            parent_node("c", None, false),
+        ] {
+            resolver.insert(node.entry.id.clone(), nodes.len(), &mut by_id);
+            nodes.push(node);
+            for id in ["a", "b", "c", "missing"] {
+                assert_eq!(
+                    resolver.resolve(Some(id.into()), &nodes, &by_id),
+                    uncached_parent(Some(id.into()), &nodes, &by_id)
+                );
+            }
+        }
+    }
+
     fn write_store(agents: &Path, session_id: &str, events: &[String]) -> PathBuf {
         let agent_dir = agents.join("main").join("agent");
         fs::create_dir_all(&agent_dir).unwrap();
