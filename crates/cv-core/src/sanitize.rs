@@ -12,7 +12,7 @@
 
 use std::borrow::Cow;
 
-/// Make `s` safe for a one-line terminal row: ESC-initiated sequences (CSI, OSC, DCS, SOS, PM,
+/// Make `s` safe for a one-line terminal row: ESC/C1-initiated sequences (CSI, OSC, DCS, SOS, PM,
 /// APC) are dropped entirely (parameters and all), `\n`/`\t`/`\r` become single spaces (render
 /// sites are one-line rows), and every other control character (C0, DEL, C1) is removed.
 /// Returns the input borrowed when it is already clean — the overwhelmingly common case.
@@ -26,6 +26,8 @@ pub fn sanitize_line(s: &str) -> Cow<'_, str> {
         match c {
             '\n' | '\t' | '\r' => out.push(' '),
             '\u{1b}' => skip_escape_sequence(&mut chars),
+            '\u{9b}' => skip_csi(&mut chars),
+            '\u{90}' | '\u{98}' | '\u{9d}' | '\u{9e}' | '\u{9f}' => skip_control_string(&mut chars),
             c if c.is_control() => {}
             c => out.push(c),
         }
@@ -39,26 +41,16 @@ pub fn sanitize_line(s: &str) -> Cow<'_, str> {
 fn skip_escape_sequence(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
     match chars.next() {
         // CSI: `ESC [`, then parameter/intermediate bytes until a final byte in `@`..=`~`.
-        Some('[') => {
-            for c in chars.by_ref() {
-                if ('\u{40}'..='\u{7e}').contains(&c) {
-                    break;
-                }
+        Some('[') => skip_csi(chars),
+        // String-carrying sequences have equivalent ESC and C1 spellings.
+        Some(']' | 'P' | 'X' | '^' | '_') => skip_control_string(chars),
+        // Character-set designation and other ESC sequences can have intermediate bytes.
+        Some(c) if (' '..='/').contains(&c) => {
+            while chars.peek().is_some_and(|c| (' '..='/').contains(c)) {
+                chars.next();
             }
-        }
-        // String-carrying sequences (OSC / DCS / SOS / PM / APC): terminated by BEL or ST
-        // (`ESC \`); a stray ESC aborts the string either way.
-        Some(']' | 'P' | 'X' | '^' | '_') => {
-            while let Some(c) = chars.next() {
-                if c == '\u{07}' {
-                    break;
-                }
-                if c == '\u{1b}' {
-                    if chars.peek() == Some(&'\\') {
-                        chars.next();
-                    }
-                    break;
-                }
+            if chars.peek().is_some_and(|c| ('0'..='~').contains(c)) {
+                chars.next();
             }
         }
         // Two-char sequence (`ESC c`, `ESC 7`, ...) — the second char was just consumed — or a
@@ -67,10 +59,43 @@ fn skip_escape_sequence(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
     }
 }
 
+fn skip_csi(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    for c in chars.by_ref() {
+        if ('@'..='~').contains(&c) {
+            break;
+        }
+    }
+}
+fn skip_control_string(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    while let Some(c) = chars.next() {
+        if c == '\u{07}' || c == '\u{9c}' {
+            break;
+        }
+        if c == '\u{1b}' {
+            if chars.peek() == Some(&'\\') {
+                chars.next();
+            }
+            break;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::sanitize_line;
     use std::borrow::Cow;
+
+    #[test]
+    fn intermediate_esc_and_c1_sequences_do_not_leak_payload_text() {
+        assert_eq!(sanitize_line("a\u{1b}(Bé\u{1b}#8z"), "aéz");
+        assert_eq!(sanitize_line("a\u{9b}31mred\u{9b}0mz"), "aredz");
+        for start in ['\u{90}', '\u{98}', '\u{9d}', '\u{9e}', '\u{9f}'] {
+            assert_eq!(sanitize_line(&format!("a{start}hidden\u{9c}z")), "az");
+            assert_eq!(sanitize_line(&format!("a{start}hidden\u{1b}\\z")), "az");
+            assert_eq!(sanitize_line(&format!("a{start}unterminated")), "a");
+        }
+        assert_eq!(sanitize_line("a\u{1b}(é"), "aé");
+    }
 
     #[test]
     fn clean_text_passes_through_borrowed() {
