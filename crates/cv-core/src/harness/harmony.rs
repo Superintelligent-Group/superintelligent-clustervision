@@ -133,15 +133,14 @@ pub fn decode_content(text: &str) -> Vec<Block> {
 /// Walk the text, emitting one [`HarmonyMsg`] per `<|message|>` body found. Tolerant: a `<|message|>`
 /// without a preceding `<|channel|>` still yields a channel-less message; a body without a stop token
 /// runs to the next structural token (or EOF).
-fn parse_messages(text: &str) -> Vec<HarmonyMsg<'_>> {
-    let mut out = Vec::new();
+fn parse_messages(text: &str) -> impl Iterator<Item = HarmonyMsg<'_>> {
     let mut pos = 0usize;
-
-    while pos < text.len() {
+    std::iter::from_fn(move || {
+        if pos >= text.len() {
+            return None;
+        }
         // Find the next message body anchor.
-        let Some(msg_rel) = text[pos..].find(T_MESSAGE) else {
-            break;
-        };
+        let msg_rel = text[pos..].find(T_MESSAGE)?;
         let msg_at = pos + msg_rel;
 
         // The header region is everything between the previous cut (`pos`) and this `<|message|>`.
@@ -157,27 +156,31 @@ fn parse_messages(text: &str) -> Vec<HarmonyMsg<'_>> {
             .map(|(rel, _)| body_start + rel)
             .unwrap_or(text.len());
 
-        out.push(HarmonyMsg {
+        // Advance before yielding; no intermediate message roster is retained.
+        pos = advance_past_stop(text, body_end);
+        Some(HarmonyMsg {
             channel,
             recipient,
             body: &text[body_start..body_end],
-        });
-
-        // Advance past the stop token (if any) so the next header region is clean.
-        pos = advance_past_stop(text, body_end);
-    }
-
-    out
+        })
+    })
 }
 
 /// Find the earliest body-terminating token in `s`, returning its byte offset and which token it was.
 /// Terminators: `<|end|>`, `<|return|>`, `<|call|>`, and a new `<|start|>` / `<|channel|>` (which
 /// begin the next message even without an explicit stop).
 fn earliest_stop(s: &str) -> Option<(usize, &'static str)> {
-    [T_END, T_RETURN, T_CALL, T_START, T_CHANNEL]
-        .into_iter()
-        .filter_map(|tok| s.find(tok).map(|i| (i, tok)))
-        .min_by_key(|(i, _)| *i)
+    let mut pos = 0;
+    while let Some(relative) = s[pos..].find("<|") {
+        pos += relative;
+        for token in [T_END, T_RETURN, T_CALL, T_START, T_CHANNEL] {
+            if s[pos..].starts_with(token) {
+                return Some((pos, token));
+            }
+        }
+        pos += 2;
+    }
+    None
 }
 
 /// Given the offset where a body ended in `text`, return the position to resume header-scanning from.
@@ -226,7 +229,7 @@ fn parse_header(header: &str) -> (Option<&str>, Option<&str>) {
         }
     }
 
-    (channel, extract_recipient(chan_val))
+    (channel, extract_recipient(header))
 }
 
 /// Extract a tool recipient from a header fragment: the token following `to=`, stopped at whitespace
@@ -272,6 +275,28 @@ fn parse_input(body: &str) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recipient_before_channel_is_a_tool_call() {
+        let text = "<|start|>assistant to=functions.read<|channel|>commentary<|message|>{\"path\":\"a\"}<|call|>";
+        let blocks = decode_content(text);
+        assert!(matches!(&blocks[0], Block::ToolUse { name, .. } if name == "read"));
+        if let Block::ToolUse { input, .. } = &blocks[0] {
+            assert_eq!(input.resolve().unwrap()["path"], "a");
+        }
+    }
+
+    #[test]
+    fn stop_scan_matches_each_terminator_and_preserves_unknown_controls() {
+        for token in [T_END, T_RETURN, T_CALL, T_START, T_CHANNEL] {
+            let body = format!("é<|unknown|>body{token}later<|end|>");
+            assert_eq!(earliest_stop(&body), Some(("é<|unknown|>body".len(), token)));
+        }
+        assert_eq!(earliest_stop("é<|unknown|><|message|>body"), None);
+        let text = "<|channel|>final<|message|>body<|end|>".repeat(256);
+        assert_eq!(parse_messages(&text).count(), 256);
+        assert_eq!(decode_content(&text).len(), 256);
+    }
 
     #[test]
     fn multi_channel_decodes_in_order() {
