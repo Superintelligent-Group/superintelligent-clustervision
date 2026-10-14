@@ -481,8 +481,14 @@ pub fn workflow_ghosts_of(r: &SessionRef) -> Vec<WorkflowLaunch> {
     }
 }
 
-/// One workflow run of a session by its `runId` (with or without the `wf_` prefix, or a unique
-/// prefix). `None` if the session has no such run.
+/// Resolve a workflow's ID/name selector without reading its undemanded rich bodies.
+pub fn workflow_id_of(r: &SessionRef, key: &str) -> Option<String> {
+    (r.harness == Harness::Claude)
+        .then(|| harness::claude_workflow::workflow_id(&r.path, key))
+        .flatten()
+}
+
+/// One workflow run by its run ID or unambiguous name; None when no run resolves.
 pub fn workflow_of(r: &SessionRef, run_id: &str) -> Option<Workflow> {
     match r.harness {
         Harness::Claude => harness::claude_workflow::workflow(&r.path, run_id),

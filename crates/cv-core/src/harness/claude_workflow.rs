@@ -253,10 +253,8 @@ fn workflows_dir(parent_path: &Path) -> Option<PathBuf> {
     sidecar::workflows_dir(parent_path)
 }
 
-/// Every workflow run a session launched, read from its `workflows/wf_*.json` state files (newest
-/// first). Each is a fully-structured [`Workflow`] (phases → agents → outcomes + script). Returns
-/// empty when the session spawned no workflows (or its sidecar dir is absent).
-pub fn workflows(parent_path: &Path) -> Vec<Workflow> {
+/// Enumerate state files in the same order for rich reads and checked selector projection.
+fn state_paths(parent_path: &Path) -> Vec<PathBuf> {
     let Some(dir) = workflows_dir(parent_path) else {
         return vec![];
     };
@@ -273,6 +271,12 @@ pub fn workflows(parent_path: &Path) -> Vec<Workflow> {
             }
         }
     }
+    paths
+}
+
+/// Every recorded workflow run, newest first; empty when the state directory is absent.
+pub fn workflows(parent_path: &Path) -> Vec<Workflow> {
+    let paths = state_paths(parent_path);
     let mut out = crate::par_filter_map(paths, |p| parse_state_file(&p));
     // Newest first, by file mtime (the JSON carries an ISO `timestamp` too, but mtime needs no parse).
     out.sort_by_key(|w| {
@@ -290,44 +294,85 @@ pub fn workflows(parent_path: &Path) -> Vec<Workflow> {
 /// unambiguously. Run ids accept the bare/`wf_`-prefixed form and unique prefixes; names accept an
 /// exact match (newest run wins when a name was re-run) and a unique name-prefix.
 pub fn workflow(parent_path: &Path, key: &str) -> Option<Workflow> {
+    let mut index = workflow_index(parent_path);
+    let selected = resolve_workflow_index(&index, key, |entry| (entry.1.as_str(), entry.2.as_deref()))?;
+    let (source, _, _) = index.swap_remove(selected);
+    #[cfg(test)]
+    STATE_MATERIALIZATIONS.lock().unwrap().push(source.path().to_path_buf());
+    source
+        .read_document(|view| Ok(parse_state(view.resolve()?.as_ref())))
+        .ok()
+}
+
+/// Resolve a workflow selector without owning script, progress, argument or return bodies.
+pub fn workflow_id(parent_path: &Path, key: &str) -> Option<String> {
+    let mut index = workflow_index(parent_path);
+    let selected = resolve_workflow_index(&index, key, |entry| (entry.1.as_str(), entry.2.as_deref()))?;
+    Some(index.swap_remove(selected).1)
+}
+
+fn workflow_index(parent_path: &Path) -> Vec<(crate::json::JsonSource, String, Option<String>)> {
+    let mut index = crate::par_filter_map(state_paths(parent_path), |path| {
+        let source = crate::json::JsonSource::capture(&path).ok()?;
+        let (id, name) = source
+            .read_document(|view| {
+                Ok((
+                    crate::affordance::input::field_string(view, "runId")?.unwrap_or_default(),
+                    crate::affordance::input::field_string(view, "workflowName")?,
+                ))
+            })
+            .ok()?;
+        Some((source, id, name))
+    });
+    // Keep the existing wire-ID-based mtime ordering, including repeated workflow names.
+    index.sort_by_key(|entry| {
+        std::cmp::Reverse(
+            workflows_dir(parent_path)
+                .map(|dir| dir.join(format!("{}.json", entry.1)))
+                .and_then(|path| fs::metadata(path).ok())
+                .and_then(|metadata| metadata.modified().ok()),
+        )
+    });
+    index
+}
+
+fn resolve_workflow_index<T>(
+    all: &[T],
+    key: &str,
+    identity: impl for<'a> Fn(&'a T) -> (&'a str, Option<&'a str>),
+) -> Option<usize> {
     let want = key.strip_prefix("wf_").unwrap_or(key);
-    let all = workflows(parent_path);
-
-    let mut hits: Vec<Workflow> = all
-        .iter()
-        .filter(|w| {
-            let id = w.run_id.strip_prefix("wf_").unwrap_or(&w.run_id);
-            id == want || w.run_id == key || id.starts_with(want)
-        })
-        .cloned()
-        .collect();
-    // Exact id match wins over a prefix collision.
-    if let Some(exact) = hits.iter().position(|w| {
-        let id = w.run_id.strip_prefix("wf_").unwrap_or(&w.run_id);
-        id == want || w.run_id == key
-    }) {
-        return Some(hits.swap_remove(exact));
+    let mut prefix = None;
+    let mut matches = 0;
+    for (i, entry) in all.iter().enumerate() {
+        let (run, _) = identity(entry);
+        let bare = run.strip_prefix("wf_").unwrap_or(run);
+        if bare == want || run == key {
+            return Some(i);
+        }
+        if bare.starts_with(want) {
+            prefix.get_or_insert(i);
+            matches += 1;
+        }
     }
-    if hits.len() == 1 {
-        return hits.pop();
+    if matches == 1 {
+        return prefix;
     }
-
-    // No id match → try the workflow NAME. `all` is newest-first, so the first exact-name hit is
-    // the newest run of a re-run name — the one you want when addressing by name.
-    if let Some(w) = all.iter().find(|w| w.name.as_deref() == Some(key)) {
-        return Some(w.clone());
+    if let Some(i) = all.iter().position(|entry| identity(entry).1 == Some(key)) {
+        return Some(i);
     }
-    let name_hits: Vec<&Workflow> = all
-        .iter()
-        .filter(|w| w.name.as_deref().is_some_and(|n| n.starts_with(key)))
-        .collect();
-    // A unique name-prefix — unique as a NAME, not as a run (re-runs of one name still resolve;
-    // `all` is newest-first so the first hit is the newest run of that name).
-    let distinct: std::collections::HashSet<&str> = name_hits.iter().filter_map(|w| w.name.as_deref()).collect();
-    if distinct.len() == 1 {
-        return name_hits.first().map(|w| (*w).clone());
+    let mut first = None;
+    let mut name = None;
+    for (i, entry) in all.iter().enumerate() {
+        if let Some(candidate) = identity(entry).1.filter(|name| name.starts_with(key)) {
+            if name.is_some_and(|name| name != candidate) {
+                return None;
+            }
+            first.get_or_insert(i);
+            name = Some(candidate);
+        }
     }
-    None
+    first
 }
 
 /// The `(name, run_id)` pairs readable from `workflows/scripts/*.js` **filenames** alone — the
@@ -452,10 +497,15 @@ pub fn workflows_named(parent_path: &Path, prefix: &str) -> Vec<Workflow> {
 /// Parse one `wf_<runId>.json` state file into a [`Workflow`]. Tolerant: a missing/odd field is an
 /// absent option, never a failure (the catalog/forest views degrade gracefully).
 fn parse_state_file(path: &Path) -> Option<Workflow> {
+    #[cfg(test)]
+    STATE_MATERIALIZATIONS.lock().unwrap().push(path.to_path_buf());
     let txt = fs::read_to_string(path).ok()?;
     let v: Value = serde_json::from_str(&txt).ok()?;
     Some(parse_state(&v))
 }
+
+#[cfg(test)]
+static STATE_MATERIALIZATIONS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
 
 /// Parse a workflow state `Value` into a [`Workflow`] (pure — the testable core of
 /// [`parse_state_file`]).
@@ -1150,6 +1200,37 @@ mod tests {
         // Unique name-prefix resolves; ambiguous prefix (two distinct names) does not.
         assert_eq!(workflow(&sess, "stark-kill-emit").unwrap().run_id, "wf_aaa-111");
         assert!(workflow(&sess, "stark-kill").is_none());
+        // Identity-only consumers preserve the rich reader's precedence and ambiguity, while
+        // neither projecting selectors nor resolving a missing selector materializes any state.
+        let before = STATE_MATERIALIZATIONS.lock().unwrap().len();
+        for key in [
+            "wf_aaa-111",
+            "aaa",
+            "stark-kill-emit-swarm",
+            "stark-kill-assurance-audit",
+            "stark-kill-emit",
+            "stark-kill",
+            "absent",
+        ] {
+            let expected = match key {
+                "wf_aaa-111" | "aaa" | "stark-kill-emit-swarm" | "stark-kill-emit" => Some("wf_aaa-111".to_owned()),
+                "stark-kill-assurance-audit" => Some(audit.run_id.clone()),
+                _ => None,
+            };
+            assert_eq!(workflow_id(&sess, key), expected);
+        }
+        assert!(STATE_MATERIALIZATIONS.lock().unwrap()[before..]
+            .iter()
+            .all(|path| !path.starts_with(&dir)));
+        let before = STATE_MATERIALIZATIONS.lock().unwrap().len();
+        let selected = workflow(&sess, "aaa").unwrap();
+        assert_eq!(selected.run_id, "wf_aaa-111");
+        let reads: Vec<_> = STATE_MATERIALIZATIONS.lock().unwrap()[before..]
+            .iter()
+            .filter(|path| path.starts_with(&dir))
+            .cloned()
+            .collect();
+        assert_eq!(reads, [wfdir.join("wf_aaa-111.json")]);
         std::fs::remove_dir_all(&dir).ok();
     }
 

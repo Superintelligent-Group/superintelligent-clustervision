@@ -31,9 +31,8 @@ pub(crate) fn cmd_tools(
     let workflow = if let Some(run) = &workflow {
         // Resolve a run-id *prefix* to the full id (the forest tags agents with the full run id),
         // so `--workflow wf_08eb66fa` matches `wf_08eb66fa-4b1`.
-        let full = cv_core::workflow_of(&r, run)
-            .map(|w| w.run_id)
-            .with_context(|| format!("no workflow {run:?} in {}", short_id(&r.id)))?;
+        let full =
+            cv_core::workflow_id_of(&r, run).with_context(|| format!("no workflow {run:?} in {}", short_id(&r.id)))?;
         // The orchestrator isn't part of any one workflow; restrict to the named run's agents.
         Some(full)
     } else {
