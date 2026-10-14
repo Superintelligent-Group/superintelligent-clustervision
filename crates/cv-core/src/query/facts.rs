@@ -134,6 +134,41 @@ impl ExtFacts for SessionFacts<'_> {
             .and_then(|f| f.models.get(needle))
             .map_or(Tri::Unknown, |m| Tri::of(if exact { m.exact } else { m.contains })))
     }
+    fn exact(&self, field: FieldId, needle: &str) -> anyhow::Result<Tri> {
+        Ok(Tri::of(match field {
+            FieldId::Tool => match self.reduced {
+                Some(facts) => facts.exact_tools.contains(needle),
+                None => self
+                    .events()?
+                    .iter()
+                    .any(|e| e.tool.as_deref().is_some_and(|value| value.to_lowercase() == needle)),
+            },
+            FieldId::Touched => match self.reduced {
+                Some(facts) => facts.exact_targets.contains(needle),
+                None => self.events()?.iter().any(|e| {
+                    matches!(e.kind, "file_edit" | "file_read")
+                        && e.target.as_deref().is_some_and(|value| value.to_lowercase() == needle)
+                }),
+            },
+            FieldId::Subtool => self.forest()?.agents.iter().any(|agent| {
+                agent.agent != crate::tools::ORCHESTRATOR
+                    && agent.histogram.tools.keys().any(|value| value.to_lowercase() == needle)
+            }),
+            FieldId::Agent => self.tree().iter().any(|info| {
+                info.agent_type
+                    .as_deref()
+                    .is_some_and(|value| value.to_lowercase() == needle)
+            }),
+            FieldId::Workflow => self.workflows().iter().any(|workflow| {
+                workflow.run_id.to_lowercase() == needle
+                    || workflow
+                        .name
+                        .as_deref()
+                        .is_some_and(|value| value.to_lowercase() == needle)
+            }),
+            _ => return Ok(Tri::Unknown),
+        }))
+    }
     fn text(&self, needle: &str) -> anyhow::Result<Tri> {
         Ok(Tri::of(self.text_sets.contains(needle, &self.session.id)))
     }
@@ -243,7 +278,9 @@ pub fn matches_full(
 struct ReducedFacts {
     models: HashMap<String, ModelMatch>,
     tools: HashSet<String>,
+    exact_tools: HashSet<String>,
     targets: HashSet<String>,
+    exact_targets: HashSet<String>,
     errors: bool,
     has_tools: bool,
     images: bool,
@@ -292,7 +329,9 @@ impl crate::spill::Record for PendingTarget {
 struct FactSink {
     facts: ReducedFacts,
     tools: Vec<String>,
+    exact_tools: Vec<String>,
     targets: Vec<String>,
+    exact_targets: Vec<String>,
     pending_targets: crate::spill::Ordered<PendingTarget>,
     events: bool,
     fail: Option<anyhow::Error>,
@@ -316,27 +355,45 @@ impl FactSink {
                 || !targets.is_empty()
                 || flags.iter().any(|f| matches!(f.as_str(), "errors" | "tools")),
             tools,
+            exact_tools: query.exact_needles(FieldId::Tool),
             targets,
+            exact_targets: query.exact_needles(FieldId::Touched),
             pending_targets: Default::default(),
             fail: None,
         }
     }
 
+    fn targets_settled(&self) -> bool {
+        self.facts.targets.len() == self.targets.len()
+            && self
+                .exact_targets
+                .iter()
+                .all(|needle| self.facts.exact_targets.contains(needle))
+    }
+
     fn note_target(&mut self, target: String) -> anyhow::Result<()> {
-        if self.facts.targets.len() == self.targets.len() {
+        if self.targets_settled() {
             return Ok(());
         }
-        // A match inside the target survives a later cwd prefix. Absolute paths are already final;
-        // only unmatched relative paths can acquire a new match when the final cwd arrives.
+        // Contains matches survive a later cwd prefix, but an exact relative-path match
+        // depends on the final cwd. Absolute paths are already final.
         let lowered = target.to_lowercase();
+        let absolute = std::path::Path::new(&target).is_absolute();
         for needle in &self.targets {
             if lowered.contains(needle) {
                 self.facts.targets.insert(needle.clone());
             }
         }
-        if self.facts.targets.len() == self.targets.len() {
+        if absolute {
+            for needle in &self.exact_targets {
+                if lowered == *needle {
+                    self.facts.exact_targets.insert(needle.clone());
+                }
+            }
+        }
+        if self.targets_settled() {
             self.pending_targets = Default::default();
-        } else if !std::path::Path::new(&target).is_absolute() {
+        } else if !absolute {
             self.pending_targets.push(PendingTarget(target))?;
         }
         Ok(())
@@ -353,6 +410,11 @@ impl FactSink {
             for needle in &self.targets {
                 if resolved.contains(needle) {
                     self.facts.targets.insert(needle.clone());
+                }
+            }
+            for needle in &self.exact_targets {
+                if resolved == *needle {
+                    self.facts.exact_targets.insert(needle.clone());
                 }
             }
         }
@@ -380,6 +442,11 @@ impl FactSink {
                         for needle in &self.tools {
                             if tool.contains(needle) {
                                 self.facts.tools.insert(needle.clone());
+                            }
+                        }
+                        for needle in &self.exact_tools {
+                            if tool == *needle {
+                                self.facts.exact_tools.insert(needle.clone());
                             }
                         }
                     }
@@ -1080,10 +1147,21 @@ mod tests {
             "NOT model:absent",
             "git:feature",
             "git:absent",
+            "git=featurebranch",
+            "git=feature",
+            "tool=edit",
+            "tool=edi",
+            "tool:bash OR tool=edit",
+            "tool=edi OR tool=bash",
             "tool:edit",
             "tool:bash",
             "tool:absent",
             "touched:/late/work/src/a.rs",
+            "touched=/late/work/./src/a.rs",
+            "touched=/late/work/../other.rs",
+            "touched=/absolute/λ.rs",
+            "touched=src/a.rs",
+            "touched:src/a.rs AND NOT touched=src/a.rs",
             "touched:/late/work/../other.rs",
             "touched:/absolute/λ.rs",
             "touched:/stale/discovery",
@@ -1125,6 +1203,71 @@ mod tests {
             let mut refs = vec![r.clone()];
             filter_refs(&mut refs, &query, &texts).unwrap();
             assert_eq!(!refs.is_empty(), expected, "filter: {source}");
+        }
+    }
+
+    #[test]
+    fn exact_target_facts_wait_for_final_cwd_even_after_contains_matches() {
+        let query = SessionQuery::parse("touched:a.rs AND touched=/late/a.rs").unwrap();
+        let mut sink = FactSink::new(&query);
+        sink.note_target("a.rs".into()).unwrap();
+        assert!(sink.facts.targets.contains("a.rs"));
+        assert!(sink.facts.exact_targets.is_empty());
+        assert_eq!(sink.pending_targets.len(), 1);
+        let mut shell = Session::new("facts", crate::Harness::Claude);
+        shell.cwd = Some("/late".into());
+        assert!(sink.finish(&shell).unwrap().exact_targets.contains("/late/a.rs"));
+
+        let query = SessionQuery::parse("touched=a.rs").unwrap();
+        let mut sink = FactSink::new(&query);
+        sink.note_target("a.rs".into()).unwrap();
+        assert!(sink.finish(&shell).unwrap().exact_targets.is_empty());
+    }
+
+    #[test]
+    fn forest_string_equality_preserves_whole_values() {
+        let world = cv_testkit::World::in_process("query-exact-forest");
+        let parent = world.write_session(
+            "forest",
+            &[serde_json::json!({"type":"user","message":{"role":"user","content":"parent"}})],
+        );
+        world.write_agent("forest", "one", &serde_json::json!({"agentType":"Explore-Deep"}), &[
+            serde_json::json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tool","name":"ReadFile","input":{"file_path":"a.rs"}}]}})
+        ]);
+        let workflows = parent.with_extension("").join("workflows");
+        std::fs::create_dir_all(&workflows).unwrap();
+        std::fs::write(
+            workflows.join("wf_one.json"),
+            serde_json::json!({"runId":"wf_one","workflowName":"Audit-Deep"}).to_string(),
+        )
+        .unwrap();
+        let r = SessionRef::new("forest", crate::Harness::Claude, parent);
+        let adapter = crate::harness::for_harness(r.harness).unwrap();
+        let full = adapter.parse(&r).unwrap();
+        for (source, expected) in [
+            ("agent:explore", true),
+            ("agent=explore", false),
+            ("agent=EXPLORE-DEEP", true),
+            ("subtool:read", true),
+            ("subtool=read", false),
+            ("subtool=READFILE", true),
+            ("workflow:audit", true),
+            ("workflow=audit", false),
+            ("workflow=AUDIT-DEEP", true),
+            ("workflow=wf_one", true),
+            ("workflow=wf_", false),
+        ] {
+            let query = SessionQuery::parse(source).unwrap();
+            assert_eq!(
+                matches_full(&query, &r, &full, &TextSets::empty()).unwrap(),
+                expected,
+                "full {source}"
+            );
+            assert_eq!(
+                matches_streamed(&query, adapter.as_ref(), &r, &TextSets::empty()).unwrap(),
+                expected,
+                "streamed {source}"
+            );
         }
     }
 

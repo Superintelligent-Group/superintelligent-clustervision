@@ -180,6 +180,37 @@ fn git_field_matches_branch() {
 }
 
 #[test]
+fn git_equality_matches_one_branch_or_remote() {
+    let mut session = sess(None, &[]);
+    session.git = Some(GitInfo {
+        branch: Some("Feature-Main".into()),
+        remote: Some("https://host/Repo".into()),
+        commit: None,
+    });
+    assert!(q("git:main").matches_session(&session));
+    assert!(!q("git=main").matches_session(&session));
+    assert!(q("git=FEATURE-MAIN").matches_session(&session));
+    assert!(q("git=https://host/repo").matches_session(&session));
+    assert!(!q("git=\"feature-main https://host/repo\"").matches_session(&session));
+}
+
+#[test]
+fn text_operators_match_full_text_schema_and_phrase_contract() {
+    for source in ["text=word", "content=word", "text>word"] {
+        assert!(SessionQuery::parse(source).unwrap_err().contains("only takes `:`"));
+    }
+    assert!(q("text:\"two words\"").needs_index());
+    let schema = schema_json();
+    let text = schema["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|field| field["name"] == "text")
+        .unwrap();
+    assert_eq!(text["ops"], serde_json::json!([":"]));
+}
+
+#[test]
 fn partially_resolved_models_fall_back_per_needle() {
     struct Fx;
     impl ExtFacts for Fx {

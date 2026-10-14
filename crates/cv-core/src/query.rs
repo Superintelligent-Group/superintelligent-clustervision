@@ -309,6 +309,11 @@ pub trait ExtFacts {
     fn text(&self, _needle: &str) -> anyhow::Result<Tri> {
         Ok(Tri::Unknown)
     }
+    /// Exact string predicates for event/forest fields. Existing substring resolvers remain
+    /// unchanged; implementations that cannot decide exactness must retain Unknown.
+    fn exact(&self, _field: FieldId, _needle: &str) -> anyhow::Result<Tri> {
+        Ok(Tri::Unknown)
+    }
     fn tool(&self, _name: &str) -> anyhow::Result<Tri> {
         Ok(Tri::Unknown)
     }
@@ -436,7 +441,13 @@ impl SessionQuery {
     /// pre-resolve external predicates (e.g. run one full-text search per distinct `text:` needle).
     pub fn needles(&self, field: FieldId) -> Vec<String> {
         let mut out = Vec::new();
-        collect_needles(&self.expr, field, &mut out);
+        collect_needles(&self.expr, field, None, &mut out);
+        out
+    }
+
+    pub(crate) fn exact_needles(&self, field: FieldId) -> Vec<String> {
+        let mut out = Vec::new();
+        collect_needles(&self.expr, field, Some(Op::Eq), &mut out);
         out
     }
 
@@ -464,10 +475,10 @@ impl SessionQuery {
     }
 }
 
-fn collect_needles(e: &Expr, field: FieldId, out: &mut Vec<String>) {
+fn collect_needles(e: &Expr, field: FieldId, op: Option<Op>, out: &mut Vec<String>) {
     match e {
         Expr::All => {}
-        Expr::Term(t) if t.field == field => {
+        Expr::Term(t) if t.field == field && op.is_none_or(|op| op == t.op) => {
             if let Val::Strs(v) = &t.val {
                 for s in v {
                     if !out.contains(s) {
@@ -477,8 +488,8 @@ fn collect_needles(e: &Expr, field: FieldId, out: &mut Vec<String>) {
             }
         }
         Expr::Term(_) => {}
-        Expr::Not(b) => collect_needles(b, field, out),
-        Expr::And(v) | Expr::Or(v) => v.iter().for_each(|e| collect_needles(e, field, out)),
+        Expr::Not(b) => collect_needles(b, field, op, out),
+        Expr::And(v) | Expr::Or(v) => v.iter().for_each(|e| collect_needles(e, field, op, out)),
     }
 }
 
@@ -588,6 +599,12 @@ fn eval_term(t: &Term, f: &Facts) -> anyhow::Result<Tri> {
         }
         FieldId::Git => match f.session {
             None => Tri::Unknown,
+            Some(s) if t.op == Op::Eq => Tri::of(s.git.as_ref().is_some_and(|g| {
+                [g.branch.as_deref(), g.remote.as_deref()]
+                    .into_iter()
+                    .flatten()
+                    .any(|value| val_hit(&t.val, Op::Eq, &value.to_lowercase()))
+            })),
             Some(s) => {
                 let hay = s.git.as_ref().map(|g| {
                     format!(
@@ -602,13 +619,43 @@ fn eval_term(t: &Term, f: &Facts) -> anyhow::Result<Tri> {
         },
         // External (index/events).
         FieldId::Text => or_over(&t.val, |n| f.ext.text(n))?,
-        FieldId::Tool => or_over(&t.val, |n| f.ext.tool(n))?,
-        FieldId::Touched => or_over(&t.val, |n| f.ext.touched(n))?,
+        FieldId::Tool => or_over(&t.val, |n| {
+            if t.op == Op::Eq {
+                f.ext.exact(t.field, n)
+            } else {
+                f.ext.tool(n)
+            }
+        })?,
+        FieldId::Touched => or_over(&t.val, |n| {
+            if t.op == Op::Eq {
+                f.ext.exact(t.field, n)
+            } else {
+                f.ext.touched(n)
+            }
+        })?,
         FieldId::Has => or_over(&t.val, |n| f.ext.has(n))?,
         // Forest (sub-agents / workflows / compaction).
-        FieldId::Subtool => or_over(&t.val, |n| f.ext.subtool(n))?,
-        FieldId::Agent => or_over(&t.val, |n| f.ext.agent_type(n))?,
-        FieldId::Workflow => or_over(&t.val, |n| f.ext.workflow(n))?,
+        FieldId::Subtool => or_over(&t.val, |n| {
+            if t.op == Op::Eq {
+                f.ext.exact(t.field, n)
+            } else {
+                f.ext.subtool(n)
+            }
+        })?,
+        FieldId::Agent => or_over(&t.val, |n| {
+            if t.op == Op::Eq {
+                f.ext.exact(t.field, n)
+            } else {
+                f.ext.agent_type(n)
+            }
+        })?,
+        FieldId::Workflow => or_over(&t.val, |n| {
+            if t.op == Op::Eq {
+                f.ext.exact(t.field, n)
+            } else {
+                f.ext.workflow(n)
+            }
+        })?,
         FieldId::Agents | FieldId::Workflows | FieldId::Compactions => match f.ext.count(t.field)? {
             Some(n) => num_match(t.op, &t.val, n),
             None => Tri::Unknown,
@@ -887,6 +934,9 @@ fn parse_term(w: &Word) -> Result<Expr, String> {
         // A known field → a real term. A retired field names its replacement. Anything else (a
         // bare `http://…`, `key:value` prose) falls back to a plain needle.
         if let Some(def) = field_for(field) {
+            if def.id == FieldId::Text && op != Op::Contains {
+                return Err("`text:` uses full-text search and only takes `:`; use `text:\"quoted phrase\"` for a phrase — see `cv query`".into());
+            }
             if !matches!(def.kind, Kind::Num | Kind::Date) && !matches!(op, Op::Contains | Op::Eq) {
                 return Err(format!(
                     "operator {} isn't valid on {} (string field) — see `cv query`",
@@ -1097,6 +1147,7 @@ pub fn reference() -> String {
     s.push_str("  a term is  field<op>value  — or a bare word, which matches title/cwd/id.\n");
     s.push_str("  (an unknown `key:value` word is a bare needle too — so URLs just work.)\n");
     s.push_str("  ops: ':' (contains) '=' (exact); for numbers/dates also > >= < <=\n");
+    s.push_str("  text: uses full-text search; only ':' is supported (quote a phrase for phrase search).\n");
     s.push_str("  values: word | \"quoted phrase\" | a,b,c (OR-list) | lo..hi (range, numbers & dates)\n");
     s.push_str("  quoting is literal: commas inside quotes are text, not an OR-list, and a fully-quoted\n");
     s.push_str("  word is always a needle. `field:YYYY-MM-DD` on a date field means that whole day.\n\n");
@@ -1147,7 +1198,9 @@ pub fn schema_json() -> serde_json::Value {
                 Kind::Path => "path",
                 Kind::Flag => "flag",
             };
-            let ops: Vec<&str> = if matches!(f.kind, Kind::Num | Kind::Date) {
+            let ops: Vec<&str> = if f.id == FieldId::Text {
+                vec![":"]
+            } else if matches!(f.kind, Kind::Num | Kind::Date) {
                 vec![":", "=", ">", ">=", "<", "<="]
             } else {
                 vec![":", "="]
