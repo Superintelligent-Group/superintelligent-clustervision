@@ -3751,8 +3751,10 @@ mod tests {
         let writer = Connection::open(&path)?;
         writer.execute("UPDATE sessions SET message_count=999", [])?;
         let adapter = Hermes::with_db(path.clone());
+        let mut imported = false;
         for reference in adapter.discover()? {
             let parsed = crate::stream::collect_with(&adapter, &reference, &ParseOptions::full())?;
+            imported |= parsed.messages.iter().any(|message| message.origin == Origin::Import);
             assert_eq!(
                 reference.message_count,
                 parsed.messages.iter().filter(|m| m.is_turn()).count(),
@@ -3769,6 +3771,10 @@ mod tests {
                 );
             }
         }
+        assert!(
+            imported,
+            "production discovery must include the native imported-session control"
+        );
         let changed: i64 = writer.query_row("SELECT COUNT(*) FROM sessions WHERE message_count<>999", [], |row| {
             row.get(0)
         })?;
