@@ -32,11 +32,29 @@ pub(super) fn transcript(
         }
         root.field_with("history", |w| {
             w.write_all(b"[")?;
-            for (i, msg) in session.messages.iter().enumerate() {
-                if i != 0 {
-                    w.write_all(b",")?;
+            let mut first = true;
+            for msg in &session.messages {
+                let mut write = |result| {
+                    if !first {
+                        w.write_all(b",")?;
+                    }
+                    first = false;
+                    item(w, msg, session.model.as_deref(), &resolver, mode, result)
+                };
+                let mut results = msg.content.iter().filter_map(|block| match block {
+                    Block::ToolResult {
+                        tool_use_id, content, ..
+                    } if msg.role == Role::Tool => Some((tool_use_id.as_str(), content)),
+                    _ => None,
+                });
+                if let Some(result) = results.next() {
+                    write(Some(result))?;
+                    for result in results {
+                        write(Some(result))?;
+                    }
+                } else {
+                    write(None)?;
                 }
-                item(w, msg, session.model.as_deref(), &resolver, mode)?;
             }
             w.write_all(b"]")?;
             Ok(())
@@ -52,6 +70,7 @@ fn item(
     model: Option<&str>,
     resolver: &Resolver,
     mode: crate::emit::ThinkingMode,
+    result: Option<(&str, &crate::lazy::Text)>,
 ) -> Result<()> {
     let mut item = ObjectWriter::new(w)?;
     item.field_with("message", |w| {
@@ -66,13 +85,7 @@ fn item(
             },
         )?;
         if msg.role == Role::Tool {
-            let result = msg.content.iter().find_map(|b| match b {
-                Block::ToolResult {
-                    tool_use_id, content, ..
-                } => Some((tool_use_id, content)),
-                _ => None,
-            });
-            message.field("toolCallId", result.map(|r| r.0.as_str()).unwrap_or(""))?;
+            message.field("toolCallId", result.map(|r| r.0).unwrap_or(""))?;
             message.field_with("content", |w| match result {
                 Some((_, content)) => text(w, content, resolver),
                 None => {
@@ -262,6 +275,61 @@ fn legacy_emit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cn_grouped_tool_results_emit_every_call_and_body() -> Result<()> {
+        let world = cv_testkit::World::in_process("continue_grouped_results");
+        let store = world.home.join(".continue");
+        fs::create_dir_all(store.join("sessions"))?;
+        let path = store.join("sessions/source.json");
+        let first = "first 雪\n\"\\".repeat(10_000);
+        let second = "second λ\n\"\\".repeat(10_000);
+        let doc = json!({"sessionId":"source","history":[{
+            "message":{"role":"assistant","content":"calls","toolCalls":[
+                {"id":"one","function":{"name":"Read","arguments":"{}"}},
+                {"id":"two","function":{"name":"Read","arguments":"{}"}}
+            ]},
+            "toolCallStates":[
+                {"toolCallId":"one","status":"done","output":[{"content":first}]},
+                {"toolCallId":"two","status":"done","output":[{"content":second}]}
+            ]
+        }]});
+        fs::write(&path, serde_json::to_vec(&doc)?)?;
+        let adapter = crate::harness::continuedev::Continue::with_root(&store);
+        let r = crate::SessionRef::new("source", Harness::Continue, &path);
+        let session = crate::stream::collect_with(&adapter, &r, &crate::stream::ParseOptions::lazy())?;
+        let grouped = session.messages.iter().find(|m| m.role == Role::Tool).unwrap();
+        assert_eq!(grouped.content.len(), 2);
+        let opts = crate::emit::EmitOptions {
+            new_id: Some("copy".into()),
+            ..Default::default()
+        };
+        let emitted = super::super::emit(&session, &store.join("sessions"), &opts)?;
+        let reparsed = crate::stream::collect_with(
+            &adapter,
+            &crate::SessionRef::new("copy", Harness::Continue, &emitted.path),
+            &crate::stream::ParseOptions::full(),
+        )?;
+        let outputs = reparsed
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|b| match b {
+                Block::ToolResult {
+                    tool_use_id, content, ..
+                } => Some((tool_use_id.as_str(), content.inline_str().unwrap())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(outputs, vec![("one", first.as_str()), ("two", second.as_str())]);
+        let native: Value = serde_json::from_slice(&fs::read(&emitted.path)?)?;
+        assert_eq!(native["history"].as_array().unwrap().len(), 3);
+        let before = fs::read(&emitted.path)?;
+        fs::write(&path, b"changed source")?;
+        assert!(super::super::emit(&session, &store.join("sessions"), &opts).is_err());
+        assert_eq!(fs::read(emitted.path)?, before);
+        Ok(())
+    }
+
     #[test]
     fn checked_native_writer_matches_owned_oracle_and_preserves_changed_source() -> Result<()> {
         let world = cv_testkit::World::in_process("checked-continuedev");
