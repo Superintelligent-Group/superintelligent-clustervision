@@ -279,8 +279,12 @@ fn output_with_stdin(mut cmd: Command, text: &str) -> std::process::Output {
         let writer = scope.spawn(move || input.write_all(text.as_bytes()));
         let output = child.wait_with_output().expect("cv should run");
         let written = writer.join().expect("stdin writer should finish");
-        if output.status.success() {
-            written.expect("successful cv should consume stdin");
+        if let Err(error) = written {
+            assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::BrokenPipe,
+                "stdin write failed: {error}"
+            );
         }
         output
     })
@@ -404,8 +408,22 @@ mod tests {
     }
 
     #[test]
+    fn stdin_runs_allow_a_successful_child_to_close_input_early() {
+        let world = World::new("early-stdin-close");
+        let mut command = world.command(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", "tests::duplex_child", "--ignored", "--nocapture"])
+            .env("CV_TESTKIT_DUPLEX_CHILD", "discard");
+        let output = output_with_stdin(command, &"i".repeat(2 * 1024 * 1024));
+        assert!(output.status.success(), "{:?}", output.status);
+    }
+
+    #[test]
     #[ignore = "subprocess fixture for stdin_runs_drain_output_before_input_is_consumed"]
     fn duplex_child() {
+        if std::env::var("CV_TESTKIT_DUPLEX_CHILD").as_deref() == Ok("discard") {
+            return;
+        }
         assert_eq!(std::env::var("CV_TESTKIT_DUPLEX_CHILD").as_deref(), Ok("1"));
         std::io::stdout().write_all(&vec![b'o'; 1024 * 1024]).unwrap();
         std::io::stderr().write_all(&vec![b'e'; 1024 * 1024]).unwrap();
