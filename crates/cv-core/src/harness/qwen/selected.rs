@@ -346,7 +346,7 @@ mod tests {
     fn checked_resume_keeps_selected_payloads_and_exact_skipped_checkpoint_state() {
         let world = cv_testkit::World::in_process("qwen_selected_resume");
         let home = world.home.join(".qwen");
-        let dir = home.join("projects/hash");
+        let dir = home.join("projects/hash/chats");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("session.jsonl");
         let payload = "雪\n\"\\".repeat(20_000);
