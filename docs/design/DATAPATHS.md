@@ -1,12 +1,12 @@
 # Store performance: the system we are optimizing
 
-Source audit: `c0f0044`, 2026-10-12; latest runtime integration is `a55662cf` (2026-10-13).
+Source audit: `c0f0044`, 2026-10-12; latest runtime integration is `79b4842c` (2026-10-14).
 This is the working model and tracker for the performance pass. Measurements in `PERF.md` remain historical observations; their causal
 explanations are not all supported by the implementation. Paths below are relative to `crates/`.
 
-## Current integration status (2026-10-13)
+## Current integration status (2026-10-14)
 
-The further reasonableness review is integrated through runtime `a55662cf`. This follows Ember's request to inspect algorithms, redundant work and
+The reasonableness review is integrated through runtime `79b4842c`. This follows Ember's request to inspect algorithms, redundant work and
 existing feature behavior broadly; instruction-count targets are not acceptance criteria.
 There is no version bump, tag or release in this work.
 
@@ -20,27 +20,68 @@ There is no version bump, tag or release in this work.
 | HTTP and MCP | Bound task request bodies, validate media types and JSON-RPC envelopes/arguments before execution, reject malformed observation filters, and cap polling sleeps to the remaining timeout. |
 | Browser features | Harness-qualified identity, stale-search guards, per-harness search merge, complete compare/splice histories, searchable full root inventory, and payload-sensitive rich comparisons. |
 
-The three concrete reader/arithmetic revisits below are implemented in this batch. Resident
-semantic-store/model reuse remains a separate lifecycle decision: one-shot commands would not
-benefit, and a server-owned handle needs explicit concurrency and freshness behavior. Existing
-branch/history navigation, required SQLite row allocation, strict Serde string scratch, explicitly
-requested rich output and checked stage I/O remain real costs. No universal speedup or complete
-elimination of waste is claimed.
+The implementation now closes the specific follow-ups previously listed here:
 
-LM Studio variants, OpenClaw index reuse, deferral matching and Continue usage/cost export are
-integrated. Continue reports unsupported cache-creation counts and rejects overflowing conversions
-before publication. Implementation and combined checks are complete, with evidence below. The earlier broad reader
-inventories remain applicable; this pass does not claim a fresh line-by-line audit of every adapter or a new hardware-counter campaign.
-The native Zed capture gap and live sharpened-child experiment below remain open.
+- Selected Claude agent/workflow consumers choose directories and files before child, journal
+  and rich workflow reads. Workflow identity resolution projects names/IDs; Devin still needs
+  its legacy tool-row identity inventory before selecting children.
+- Observation waits match retained messages incrementally. Initialization, byte-prefix scans,
+  message boundaries and projection chunks check cancellation/deadlines; unread tails remain
+  pending and source validation precedes cursor acceptance. Opaque discovery and an adapter's
+  indivisible parsing step still run until their next cooperative boundary.
+- HTTP/desktop semantic queries own one serialized, lazy store/model cache. Guarded store
+  replacement reloads vectors independently; model changes invalidate reuse. One-shot commands
+  keep their existing lifetime. Refresh-only row provenance is released after cold validation.
+- Task appends return the reducer state already validated under their write lock, eliminating
+  second/third journal replays and later-writer interference in receipts. The task journal still
+  replays once for admission; the inspected real log was 2.37 MB, not evidence for a new snapshot
+  protocol. Empty lane selections skip task replay; useful forests display task-log warnings,
+  and inbox loading failures have visible retries instead of stale successful tables.
+- Hermes ordinary UTF-8 rowid-table bodies use incremental SQLite handles, including strict text
+  validation and copied-generation hashes. Views, WITHOUT ROWID/UTF-16 databases, rich provider
+  metadata and other native columns retain their compatibility paths. Native allocation is
+  measured separately from Rust allocation; the giant-body control is now wired into CI.
 
-Two further source-established follow-ups remain in existing features: selected timelines still
-build a rich forest inventory before narrowing child/journal reads, and observation waits collect
-a watch tail before matching and cannot cancel an already active reader pass immediately. The
-filter and sleep fixes here do not eliminate those broader scans. Task coordination still replays
-its complete journal; snapshot/tail reuse needs evidence of task volume before adding that design.
-These are specific remaining work opportunities, not new release blockers or measured regressions.
+The native Zed capture gap and live sharpened-child experiment below remain open. Earlier reader
+inventories remain applicable; this is not a new line-by-line audit or hardware-counter campaign.
 
-### Current batch convergence
+### Completed continuation: consumers, service state and native cells (2026-10-14)
+
+Native workspace convergence passed through a combined baseline and scoped repairs: 1,245 core
+unit tests passed with the two known watch failures excluded; both then passed in the final
+103-test Claude/watch/stream/projection run. CLI unit/integration, all core integration/corpus,
+106 search tests and workspace doc tests passed. A fixture naming error and dropped cancellation
+diagnostics were fixed; interrupted tolerant Codex iteration now terminates. Final all-target
+clippy/build and formatting pass, alongside release parse, manual/names, corpus tooling, dist
+planning and semantic decoder heap checks. The failed baseline and repair logs remain separate.
+
+Secondary checks pass: 216 portable baseline checks plus all 34 final watch/stream controls;
+minimal core/search; desktop check and six tests; standalone Wasm and optimized wasm-pack;
+19 JavaScript syntax checks, 76 viewer selftests and the new inbox browser control. All three
+package archives and their internal core/search sources verify at `dee1068e`; the subsequent
+`79b4842c` changes only rustfmt layout in the MCP callback. Passing suites were not repeatedly
+rerun after unrelated repairs. Native evidence is under the task's `excellence-home/continue-*`;
+secondary revision/count provenance is `desktop-web-convergence-evidence/continue-dee1068e`.
+
+The exact ordinary-body Hermes control uses one 16/64 MiB TEXT row, separate processes for lazy
+collection, Facts doctor and full doctor, and independently enabled SQLite native accounting:
+
+| Payload | Previous native SQLite peak | Incremental native peak | Lean Rust peak (collection / Facts) |
+|---|---:|---:|---:|
+| 16 MiB | 16,955,584 B | 2,652,512 B | 140,383 / 140,475 B |
+| 64 MiB | 67,385,536 B | 2,849,120 B | 140,383 / 140,475 B |
+
+Native limits pass in all three modes. Full doctor intentionally owns its requested body
+(16,786,408 / 67,118,056 Rust peak bytes). Facts/full reports agree, and complete ordered message
+hashes match the retained pre-change binary on the same generated inputs. The native peak cap is
+8 MiB and largest individual SQLite allocation cap 1 MiB; the old whole-cell allocation violates
+both. The generated inputs were removed after the controls, with the report retained at
+`excellence-home/continue-hermes/HERMES-GIANT-REPORT.json`. The existing 8/32 MB row-scale
+history/prompt-only controls also pass with exact old/new hashes. No timing or universal native
+memory claim follows from these ordinary-body controls. The new giant-body and inbox controls
+are part of CI rather than one-off evidence.
+
+### Previous reasonableness batch convergence
 
 Runtime `da50dcbc` passes the full native workspace run (including 1,236 core unit tests),
 all-target clippy/build, formatting, corpus tools, release parse control, manual build/names,
