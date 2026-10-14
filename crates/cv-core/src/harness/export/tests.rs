@@ -223,6 +223,92 @@ fn real_downloads_exports_parse() {
     std::env::remove_var("CV_EXPORTS");
 }
 
+// Full-session composition, not a count-only or selected-prefix heap assertion.
+#[test]
+fn giant_account_archive_full_output_matches_owned_codec() {
+    use crate::stream::{CollectSink, ParseOptions};
+    use std::io::Write;
+
+    #[derive(Default)]
+    struct HashOutput {
+        digest: crate::digest::Sha256,
+        bytes: usize,
+    }
+    impl Write for HashOutput {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.digest.update(bytes);
+            self.bytes += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    fn source_hash(path: &Path) -> (usize, String) {
+        let mut hash = HashOutput::default();
+        std::io::copy(&mut std::fs::File::open(path).unwrap(), &mut hash).unwrap();
+        (hash.bytes, hash.digest.finish_hex())
+    }
+    fn output(session: &Session) -> (usize, String) {
+        let mut hash = HashOutput::default();
+        serde_json::to_writer(&mut hash, session).unwrap();
+        (hash.bytes, hash.digest.finish_hex())
+    }
+
+    let dir = std::env::temp_dir().join(format!("cv-export-full-output-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("conversations.json");
+    // Mixed Unicode and JSON escapes force real decoding; the final turn proves EOF coverage.
+    let pattern = "ordinary é😀\n\"quoted\"\t\\end ";
+    let body = pattern.repeat((32 << 20) / pattern.len());
+    for kind in [Kind::Claude, Kind::ChatGpt] {
+        let conv = match kind {
+            Kind::Claude => json!({"uuid":"selected", "name":"complete archive", "chat_messages":[
+                {"uuid":"u","sender":"human","text":"prompt"},
+                {"uuid":"a","sender":"assistant","content":[{"type":"text","text":body}]},
+                {"uuid":"final","sender":"human","text":"final EOF marker"}
+            ]}),
+            Kind::ChatGpt => json!({"conversation_id":"selected","title":"complete archive",
+            "current_node":"final","mapping":{
+                "u":{"parent":null,"message":{"author":{"role":"user"},"content":{"parts":["prompt"]}}},
+                "a":{"parent":"u","message":{"author":{"role":"assistant"},"content":{"parts":[body]}}},
+                "final":{"parent":"a","message":{"author":{"role":"user"},"content":{"parts":["final EOF marker"]}}},
+                "dead":{"parent":"u","message":{"author":{"role":"assistant"},"content":{"parts":["excluded branch"]}}}
+            }}),
+        };
+        let expected_ref = conv_ref(kind, &path, &conv).unwrap();
+        let unrelated = match kind {
+            Kind::Claude => json!({"uuid":"unrelated","chat_messages":[]}),
+            Kind::ChatGpt => json!({"conversation_id":"unrelated","mapping":{}}),
+        };
+        serde_json::to_writer(std::fs::File::create(&path).unwrap(), &json!([unrelated, conv])).unwrap();
+        let before = source_hash(&path);
+        let refs = discover_kind_in(kind, vec![path.clone()]);
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs.iter().find(|r| r.id == "selected").unwrap().message_count, 3);
+        let expected = parse_ref(kind, &expected_ref).unwrap();
+        assert_eq!(expected.messages.len(), 3);
+        assert_eq!(expected.messages.last().unwrap().text().unwrap(), "final EOF marker");
+        let expected_output = output(&expected);
+        assert!(expected_output.0 > 32 << 20);
+        for opts in [
+            ParseOptions::lazy(),
+            ParseOptions::bulk(),
+            ParseOptions::full(),
+            ParseOptions::complete(),
+        ] {
+            let mut sink = CollectSink::default();
+            let mut actual = native::stream(kind, &expected_ref, &opts, &mut sink).unwrap();
+            actual.messages = sink.messages;
+            actual.materialize().unwrap();
+            assert_eq!(actual.messages.len(), 3);
+            assert_eq!(output(&actual), expected_output, "full archive output differs");
+        }
+        assert_eq!(source_hash(&path), before);
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn native_archive_matches_owned_codec_across_modes_and_invalidation() {
     use crate::stream::{CollectSink, Flow, MessageSink, ParseOptions};
