@@ -442,6 +442,10 @@ impl JsonRange {
         })
     }
 
+    /// Reuse this range's original capture when building checked composite text. Recapturing
+    /// its path would discard the identity/dependency boundary that accepted these bytes.
+    pub(crate) fn captured_source(&self) -> &JsonSource { &self.source }
+
     /// Original transcript provenance; decoded argument ranges refer to private backing bytes.
     pub fn path(&self) -> &Path {
         &self.source.0.path
