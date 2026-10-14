@@ -712,30 +712,73 @@ fn rank(store: &Store, q: &[f32], k: usize) -> Vec<Hit> {
     rank_filtered(store, q, k, crate::SearchFilter::default())
 }
 
-fn rank_filtered(store: &Store, q: &[f32], k: usize, filter: crate::SearchFilter<'_>) -> Vec<Hit> {
-    let mut scored: Vec<(f32, usize)> = (0..store.meta.len())
-        .filter(|&i| {
-            let record = &store.meta[i];
-            filter.harness.is_none_or(|h| record.harness == h)
-                && filter
-                    .cwd
-                    .is_none_or(|needle| record.cwd.as_ref().is_some_and(|cwd| cwd.contains(needle)))
-        })
-        .map(|i| (cosine(q, store.vector(i)), i))
-        .collect();
+// The heap root is the worst retained hit. Borrow identity metadata rather than copying it
+// for every scored row; only the final requested hits own their public fields.
+struct RankedRow<'a> {
+    score: f32,
+    index: usize,
+    meta: &'a RecordMeta,
+}
+impl PartialEq for RankedRow<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == std::cmp::Ordering::Equal
+    }
+}
+impl Eq for RankedRow<'_> {}
+impl PartialOrd for RankedRow<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for RankedRow<'_> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        other
+            .score
+            .total_cmp(&self.score)
+            .then_with(|| self.meta.id.cmp(&other.meta.id))
+            .then_with(|| self.meta.harness.cmp(&other.meta.harness))
+    }
+}
+
+fn ranked_rows<'a>(store: &'a Store, q: &[f32], k: usize, filter: crate::SearchFilter<'_>) -> Vec<RankedRow<'a>> {
+    if k == 0 {
+        return Vec::new();
+    }
+    let mut winners = std::collections::BinaryHeap::new();
+    for (index, meta) in store.meta.iter().enumerate() {
+        if !filter.harness.is_none_or(|h| meta.harness == h)
+            || !filter
+                .cwd
+                .is_none_or(|needle| meta.cwd.as_ref().is_some_and(|cwd| cwd.contains(needle)))
+        {
+            continue;
+        }
+        let candidate = RankedRow {
+            score: cosine(q, store.vector(index)),
+            index,
+            meta,
+        };
+        if winners.len() < k {
+            winners.push(candidate);
+        } else if let Some(mut worst) = winners.peek_mut() {
+            if candidate < *worst {
+                *worst = candidate;
+            }
+        }
+        debug_assert!(winners.len() <= k);
+    }
     // Refreshing one source moves its vector row. Resolve ties by stable session identity,
     // so incremental and clean stores return the same ranking and top-k boundary.
-    scored.sort_unstable_by(|a, b| {
-        b.0.total_cmp(&a.0)
-            .then_with(|| store.meta[a.1].id.cmp(&store.meta[b.1].id))
-            .then_with(|| store.meta[a.1].harness.cmp(&store.meta[b.1].harness))
-    });
-    scored.truncate(k);
+    winners.into_sorted_vec()
+}
 
+fn rank_filtered(store: &Store, q: &[f32], k: usize, filter: crate::SearchFilter<'_>) -> Vec<Hit> {
+    let scored = ranked_rows(store, q, k, filter);
     scored
         .into_iter()
-        .map(|(score, i)| {
-            let r = &store.meta[i];
+        .map(|row| {
+            let score = row.score;
+            let r = &store.meta[row.index];
             Hit {
                 id: r.id.clone(),
                 harness: r.harness.clone(),
@@ -1665,6 +1708,82 @@ mod tests {
             s.meta.push(m);
         }
         s
+    }
+
+    #[test]
+    fn bounded_semantic_ranking_matches_exhaustive_order() {
+        let records = || {
+            (0..4096)
+                .map(|i| {
+                    let mut record = meta(&format!("session-{:04}", (i * 37) % 4096), None);
+                    record.harness = if i % 3 == 0 { "codex" } else { "claude" }.into();
+                    record.cwd = Some(format!("/repo/{}", i % 7));
+                    let vector = match i % 19 {
+                        0 => vec![0.0, 0.0],
+                        1 => vec![f32::NAN, 1.0],
+                        2 => vec![f32::INFINITY, 1.0],
+                        _ => vec![(i % 23) as f32 - 11.0, (i % 11) as f32 - 5.0],
+                    };
+                    (record, vector)
+                })
+                .collect::<Vec<_>>()
+        };
+        for reverse in [false, true] {
+            let store = store(if reverse {
+                records().into_iter().rev().collect()
+            } else {
+                records()
+            });
+            for filter in [
+                crate::SearchFilter::default(),
+                crate::SearchFilter {
+                    harness: Some("codex"),
+                    cwd: Some("/repo/2"),
+                },
+            ] {
+                let mut oracle: Vec<_> = store
+                    .meta
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, record)| {
+                        filter.harness.is_none_or(|h| record.harness == h)
+                            && filter
+                                .cwd
+                                .is_none_or(|needle| record.cwd.as_ref().is_some_and(|cwd| cwd.contains(needle)))
+                    })
+                    .map(|(i, record)| {
+                        (
+                            cosine(&[1.0, 0.0], store.vector(i)),
+                            record.id.as_str(),
+                            record.harness.as_str(),
+                        )
+                    })
+                    .collect();
+                oracle.sort_unstable_by(|a, b| {
+                    b.0.total_cmp(&a.0)
+                        .then_with(|| a.1.cmp(b.1))
+                        .then_with(|| a.2.cmp(b.2))
+                });
+                for limit in [0, 1, 7, 64, 4096, usize::MAX] {
+                    let ranked = ranked_rows(&store, &[1.0, 0.0], limit, filter);
+                    assert!(ranked.len() <= limit);
+                    let actual: Vec<_> = ranked
+                        .iter()
+                        .map(|row| (row.score.to_bits(), row.meta.id.as_str(), row.meta.harness.as_str()))
+                        .collect();
+                    let expected: Vec<_> = oracle
+                        .iter()
+                        .take(limit)
+                        .map(|row| (row.0.to_bits(), row.1, row.2))
+                        .collect();
+                    assert_eq!(actual, expected);
+                }
+            }
+        }
+        // No vector access is needed for zero demand, even if the caller's store is incomplete.
+        let mut incomplete = store(vec![(meta("unused", None), vec![1.0, 0.0])]);
+        incomplete.vectors.clear();
+        assert!(ranked_rows(&incomplete, &[1.0, 0.0], 0, crate::SearchFilter::default()).is_empty());
     }
 
     #[test]

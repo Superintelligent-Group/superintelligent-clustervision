@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Semantic search retains only requested ranking candidates, preserving exact score and identity order while avoiding full-store sorting.
+
 - Codex legacy reads and discovery use checked source views, retaining lazy bodies and bounded title prefixes with unchanged output and counts.
 - Kimi and Kimi Code retain checked bodies during lazy and complete reads, preserving usage, rotations, raw records and resume behavior.
 - Goose legacy reads retain checked text and arguments; lean reads omit undemanded native sidecars while preserving usage, model and turn kinds.
