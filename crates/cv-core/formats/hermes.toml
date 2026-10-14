@@ -48,7 +48,6 @@ date = "2026-10-11"
 "column.archived" = { status = "handled", note = "listed, flag in extra" }
 "column.pinned" = { status = "handled", note = "" }
 "column.origin_json" = { status = "handled", note = "imported_from" }
-"column.model_config" = { status = "handled", note = "_branched_from/_reset_from/_delegate_from" }
 "column.title_source" = { status = "handled", note = "" }
 "column.profile_name" = { status = "handled", note = "" }
 "column.transport_profile" = { status = "handled", note = "" }
