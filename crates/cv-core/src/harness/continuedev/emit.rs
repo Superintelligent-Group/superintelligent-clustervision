@@ -606,7 +606,11 @@ mod tests {
         }
         let mut owned = session.clone();
         assert!(owned.materialize().is_err());
-        crate::emit::project_owned_thinking_for_test(&mut owned, Harness::Continue, opts.thinking);
+        // The general owned projection helper expects materialized text. This
+        // oracle deliberately has an unreadable span, which Drop never demands.
+        for message in &mut owned.messages {
+            message.content.retain(|block| !matches!(block, Block::Thinking { .. }));
+        }
         owned.materialize()?;
         let oracle = legacy_emit(&owned, &world.base.join("span-oracle"), &opts)?;
         let new = super::super::emit(&session, &dest, &opts)?;
