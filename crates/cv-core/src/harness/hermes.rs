@@ -428,12 +428,13 @@ fn refs_conn(conn: &Connection, path: &Path, delegates_of: Option<&HashSet<Strin
     };
     for reference in &mut out {
         let mut count = TurnCount::default();
-        stream_conn_with_reads(
+        stream_conn_with_demand(
             conn,
             reference,
             &options,
             &mut count,
             &crate::source::ReadSet::default(),
+            true,
         )?;
         reference.message_count = count.0;
     }
