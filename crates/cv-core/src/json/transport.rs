@@ -16,15 +16,10 @@ pub(crate) struct SourceDescriptor {
 /// Structural state scales with distinct captured source identities and decoded arenas.
 /// One append arena is shared by all encoded arguments from a capture and survives transport.
 /// Different captured identities of a single path are deliberately separate accepted sources.
-type SourceKey = (
-    std::path::PathBuf,
-    super::Identity,
-    Option<std::sync::Arc<crate::source::ReadSet>>,
-);
-
 #[derive(Default)]
 pub(crate) struct SourceRegistry {
-    ids: HashMap<SourceKey, usize>,
+    ids: HashMap<JsonSource, usize>,
+    captured_ids: HashMap<usize, usize>,
     sources: Vec<JsonSource>,
     decoded_ids: HashMap<usize, usize>,
     decoded: Vec<std::sync::Arc<crate::harness::store::bytes::ByteSource>>,
@@ -38,16 +33,24 @@ impl SourceRegistry {
     /// Replace a source value with an explicit transport placeholder without resolving its bytes.
     pub(crate) fn detach(&mut self, value: &mut Json) -> Option<SourceDescriptor> {
         let Json::Source(range) = value else { return None };
-        let key = (
-            range.source.0.path.clone(),
-            range.source.0.identity.clone(),
-            range.source.0.reads.clone(),
-        );
-        let source = *self.ids.entry(key).or_insert_with(|| {
-            let id = self.sources.len();
-            self.sources.push(range.source.clone());
+        // Repeated descriptors from one capture share its Arc. Retained source owners keep
+        // pointer keys alive; independent equivalent captures still use structural equality.
+        let captured = std::sync::Arc::as_ptr(&range.source.0) as usize;
+        let source = if let Some(id) = self.captured_ids.get(&captured) {
+            *id
+        } else {
+            let id = *self.ids.entry(range.source.clone()).or_insert_with(|| {
+                let id = self.sources.len();
+                self.sources.push(range.source.clone());
+                id
+            });
+            // A structurally equivalent independent capture need not be retained. Cache only
+            // the Arc actually owned by the registry, so allocator pointer reuse stays safe.
+            if std::sync::Arc::ptr_eq(&range.source.0, &self.sources[id].0) {
+                self.captured_ids.insert(captured, id);
+            }
             id
-        });
+        };
         let decoded = range.decoded.as_ref().map(|bytes| {
             let key = std::sync::Arc::as_ptr(bytes) as usize;
             *self.decoded_ids.entry(key).or_insert_with(|| {
@@ -171,6 +174,22 @@ mod tests {
         let mut registry = SourceRegistry::default();
         let descriptor = registry.detach(&mut first).unwrap();
         registry.detach(&mut second).unwrap();
+        assert_eq!(registry.sources.len(), 1);
+        assert_eq!(
+            registry.captured_ids.len(),
+            1,
+            "only retained captures acquire fast keys"
+        );
+        let mut repeated = Json::Source(std::sync::Arc::new(registry.sources[0].range(0, 15).unwrap()));
+        let mut cloned = repeated.clone();
+        registry.detach(&mut repeated).unwrap();
+        let captures = registry.captured_ids.len();
+        registry.detach(&mut cloned).unwrap();
+        assert_eq!(
+            registry.captured_ids.len(),
+            captures,
+            "cloned source descriptor reuses its capture key"
+        );
         assert_eq!(registry.sources.len(), 1);
         std::fs::write(&path, r#"{"value":"new"}"#).unwrap();
         let restored = registry.restore(descriptor).unwrap();
