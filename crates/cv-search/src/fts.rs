@@ -2434,30 +2434,6 @@ pub fn text_search_indexed_filtered(
     ranked_search(&index, &f, &searcher, query, limit, filter, decisions)
 }
 
-// Production documents begin with id/kind. Inspect only that header before deciding
-// which stored document supplies display metadata; compatible reordered documents fall back.
-struct StoredHead {
-    fields: [Option<(Field, tantivy::schema::OwnedValue)>; 2],
-}
-impl tantivy::schema::document::DocumentDeserialize for StoredHead {
-    fn deserialize<'de, D: tantivy::schema::document::DocumentDeserializer<'de>>(
-        mut deserializer: D,
-    ) -> std::result::Result<Self, tantivy::schema::document::DeserializeError> {
-        Ok(Self {
-            fields: [deserializer.next_field()?, deserializer.next_field()?],
-        })
-    }
-}
-impl StoredHead {
-    fn kind(&self, kind: Field) -> Option<bool> {
-        self.fields
-            .iter()
-            .flatten()
-            .find(|(field, _)| *field == kind)
-            .map(|(_, value)| value.as_str() == Some(KIND_META))
-    }
-}
-
 fn ranked_search(
     index: &Index,
     f: &Fields,
@@ -2493,7 +2469,8 @@ fn ranked_search(
     let mut hits = Vec::with_capacity(ranked.len());
     for candidate in ranked {
         let (score, id) = (candidate.score, candidate.id);
-        let head: StoredHead = searcher.doc(candidate.addr).context("loading stored doc header")?;
+        let head: crate::session_collector::StoredHead<2> =
+            searcher.doc(candidate.addr).context("loading stored doc header")?;
         let load_candidate = || -> Result<TantivyDocument> {
             #[cfg(test)]
             decisions
@@ -2504,8 +2481,8 @@ fn ranked_search(
         // Preserve candidate-meta identity (including compatible duplicate metadata rows).
         // A body winner needs its current meta document; only legacy/missing/unreadable
         // metadata or a reordered header demands the complete candidate document.
-        let (is_meta, candidate_doc) = match head.kind(f.kind) {
-            Some(is_meta) => (is_meta, None),
+        let (is_meta, candidate_doc) = match head.value(f.kind) {
+            Some(kind) => (kind.as_str() == Some(KIND_META), None),
             None => {
                 let doc = load_candidate()?;
                 let is_meta = doc.get_first(f.kind).and_then(|v| v.as_str()) == Some(KIND_META);

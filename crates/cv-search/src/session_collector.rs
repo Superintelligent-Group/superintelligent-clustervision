@@ -10,17 +10,36 @@ use tantivy::schema::{Field, OwnedValue, Value};
 use tantivy::store::StoreReader;
 use tantivy::{DocAddress, DocId, Score, SegmentReader, TantivyDocument};
 
-/// cv emits id first. Read only that value, falling back for compatible indexes with a
-/// different stored-field order. Tantivy still decompresses the same bounded store block.
-struct FirstStoredField(Option<(Field, OwnedValue)>);
-impl DocumentDeserialize for FirstStoredField {
+/// cv emits id/kind first. Demand only the stored prefix needed for navigation,
+/// falling back at the call site for compatible indexes with different field order.
+/// Tantivy still decompresses the same bounded store block.
+pub(crate) struct StoredHead<const N: usize> {
+    fields: [Option<(Field, OwnedValue)>; N],
+}
+impl<const N: usize> DocumentDeserialize for StoredHead<N> {
     fn deserialize<'de, D: DocumentDeserializer<'de>>(mut deserializer: D) -> Result<Self, DeserializeError> {
-        Ok(Self(deserializer.next_field()?))
+        let mut fields = std::array::from_fn(|_| None);
+        for slot in &mut fields {
+            *slot = deserializer.next_field()?;
+            if slot.is_none() {
+                break;
+            }
+        }
+        Ok(Self { fields })
+    }
+}
+impl<const N: usize> StoredHead<N> {
+    pub(crate) fn value(&self, field: Field) -> Option<&OwnedValue> {
+        self.fields
+            .iter()
+            .flatten()
+            .find(|(f, _)| *f == field)
+            .map(|(_, value)| value)
     }
 }
 fn stored_id(store: &StoreReader, doc: DocId, id: Field) -> tantivy::Result<Option<String>> {
-    let first: FirstStoredField = store.get(doc)?;
-    if let Some((field, value)) = first.0 {
+    let mut first: StoredHead<1> = store.get(doc)?;
+    if let Some((field, value)) = first.fields[0].take() {
         if field == id {
             return Ok(if let OwnedValue::Str(id) = value {
                 Some(id)
