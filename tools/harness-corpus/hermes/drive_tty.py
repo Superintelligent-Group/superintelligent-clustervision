@@ -37,12 +37,12 @@ def main():
         os.environ.setdefault("LINES", "50")
         os.execvp(cmd[0], cmd)
     log = open(a.log, "ab")
-    deadline = time.time() + a.timeout
+    deadline = time.monotonic() + a.timeout
 
     def pump(quiet_for, at_least):
-        start = time.time()
-        last = time.time()
-        while time.time() < deadline:
+        start = time.monotonic()
+        last = time.monotonic()
+        while time.monotonic() < deadline:
             r, _, _ = select.select([fd], [], [], 0.25)
             if r:
                 try:
@@ -53,14 +53,16 @@ def main():
                     return False
                 log.write(b)
                 log.flush()
-                last = time.time()
-            elif time.time() - last >= quiet_for and time.time() - start >= at_least:
+                last = time.monotonic()
+            elif time.monotonic() - last >= quiet_for and time.monotonic() - start >= at_least:
                 return True
         return False
 
+    code = 0
     alive = pump(a.idle, a.startup)
     for line in a.line:
         if not alive:
+            code = 3
             break
         log.write(f"\n<<< {line}\n".encode())
         if a.paste:
@@ -80,21 +82,33 @@ def main():
             os.kill(pid, signal.SIGKILL)
             os.waitpid(pid, 0)
             sys.exit(3)
-    end = time.time() + 20
-    while time.time() < end:
-        done, _ = os.waitpid(pid, os.WNOHANG)
+    if time.monotonic() >= deadline:
+        code = 3
+    done, status = 0, 0
+    terminated_by_driver = False
+    end = time.monotonic() + 20
+    while time.monotonic() < end:
+        done, status = os.waitpid(pid, os.WNOHANG)
         if done:
             break
         pump(0.5, 0)
     else:
+        terminated_by_driver = True
         os.kill(pid, signal.SIGTERM)
         time.sleep(2)
         try:
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-    _, status = os.waitpid(pid, 0) if not done else (pid, 0)
-    sys.exit(0)
+    if not done:
+        _, status = os.waitpid(pid, 0)
+    if not terminated_by_driver:
+        result = os.waitstatus_to_exitcode(status)
+        if result:
+            code = code or (result if result > 0 else 3)
+    os.close(fd)
+    log.close()
+    sys.exit(code)
 
 
 if __name__ == "__main__":

@@ -53,9 +53,12 @@ def main():
 
     code = 0
     try:
-        for st in steps:
+        for index, st in enumerate(steps):
             if "sleep" in st:
                 if pump(st["sleep"]) is None:
+                    if any("expect" in later and not later.get("optional") for later in steps[index + 1:]):
+                        code = 3
+                        log.write(b"\n[tui_driver: child exited before remaining required expectations]\n")
                     break
             elif "expect" in st:
                 hit = pump(st.get("timeout", 10), re.compile(st["expect"]))
@@ -77,8 +80,12 @@ def main():
     finally:
         # Reap the owned child, escalating if it ignores SIGTERM. Blocking waitpid after
         # SIGTERM alone can strand the generator indefinitely.
-        done, _ = os.waitpid(pid, os.WNOHANG)
-        if not done:
+        done, status = os.waitpid(pid, os.WNOHANG)
+        if done:
+            result = os.waitstatus_to_exitcode(status)
+            if result:
+                code = code or (result if result > 0 else 3)
+        else:
             os.kill(pid, signal.SIGTERM)
             deadline = time.monotonic() + 1
             while time.monotonic() < deadline:

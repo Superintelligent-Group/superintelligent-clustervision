@@ -335,18 +335,42 @@ class ScrubCase(unittest.TestCase):
 
 
 class TuiTests(unittest.TestCase):
+    def test_hermes_driver_reports_early_exit_and_natural_failure(self):
+        with tempfile.TemporaryDirectory(prefix="cv-hermes-drive-") as directory:
+            for child, expected in [("pass", 3), ('import sys; print("ready",flush=True); sys.stdin.readline(); sys.exit(7)', 7)]:
+                with self.subTest(expected=expected):
+                    result = subprocess.run([sys.executable, "-I", os.path.join(HERE, "hermes", "drive_tty.py"),
+                                             "--log", os.path.join(directory, "output.log"), "--idle", "0.01", "--startup", "0.01",
+                                             "--min", "0.01", "--timeout", "5", "-l", "hello", "--", sys.executable, "-c", child],
+                                            capture_output=True, text=True, timeout=8)
+                    self.assertEqual(result.returncode, expected, result.stderr)
+
     def test_early_exit_does_not_satisfy_required_expect(self):
         with tempfile.TemporaryDirectory(prefix="cv-tui-control-") as directory:
             script = os.path.join(directory, "steps.json")
             log = os.path.join(directory, "output.log")
+            for steps in ([{"expect": "required-screen", "timeout": 0.1}],
+                          [{"sleep": 0.1}, {"expect": "required-screen"}],
+                          [{"expect": "optional", "optional": True}, {"expect": "required-screen"}]):
+                with self.subTest(steps=steps):
+                    with open(script, "w") as file:
+                        json.dump(steps, file)
+                    result = subprocess.run([sys.executable, "-I", os.path.join(HERE, "tui_driver.py"), log,
+                                             sys.executable, "-c", "pass"], env=dict(os.environ, TUI_SCRIPT=script),
+                                            capture_output=True, text=True, timeout=8)
+                    self.assertEqual(result.returncode, 3, result.stderr)
+                    with open(log) as file:
+                        self.assertIn("child exited before", file.read())
+
+    def test_natural_child_failure_is_not_reported_as_success(self):
+        with tempfile.TemporaryDirectory(prefix="cv-tui-status-") as directory:
+            script = os.path.join(directory, "steps.json")
             with open(script, "w") as file:
-                json.dump([{"expect": "required-screen", "timeout": 0.1}], file)
-            result = subprocess.run([sys.executable, "-I", os.path.join(HERE, "tui_driver.py"), log,
-                                     sys.executable, "-c", "pass"], env=dict(os.environ, TUI_SCRIPT=script),
-                                    capture_output=True, text=True, timeout=8)
-            self.assertEqual(result.returncode, 3, result.stderr)
-            with open(log) as file:
-                self.assertIn("child exited before", file.read())
+                json.dump([], file)
+            result = subprocess.run([sys.executable, "-I", os.path.join(HERE, "tui_driver.py"),
+                                     os.path.join(directory, "output.log"), sys.executable, "-c", "import sys; sys.exit(7)"],
+                                    env=dict(os.environ, TUI_SCRIPT=script), capture_output=True, text=True, timeout=8)
+            self.assertEqual(result.returncode, 7, result.stderr)
 
     def test_sigterm_ignoring_owned_child_is_reaped(self):
         with tempfile.TemporaryDirectory(prefix="cv-tui-stop-") as directory:
