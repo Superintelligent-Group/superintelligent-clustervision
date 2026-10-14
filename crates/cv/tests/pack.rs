@@ -110,8 +110,8 @@ fn pack_md_no_index_fallback_and_content() {
     // The cross-source rollup section exists and ranks the edited file.
     assert!(out.contains("## Files that keep appearing"), "{out}");
     assert!(out.contains("edit(s)"), "{out}");
-    // A pointer back into the full transcript.
-    assert!(out.contains("cv show wombatse"), "{out}");
+    // A qualified pointer back into the full transcript uses the supported range syntax.
+    assert!(out.contains("cv show claude:wombatsess --range 0..2"), "{out}");
     // The irrelevant session is NOT packed.
     assert!(
         !out.contains("quokkas"),
