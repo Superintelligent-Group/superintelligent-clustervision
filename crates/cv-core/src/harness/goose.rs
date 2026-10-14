@@ -377,7 +377,7 @@ fn fork_source(conn: &Connection, id: &str, created_at: Option<DateTime<Utc>>) -
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .ok()?;
-    if at >= created_at.timestamp() {
+    if ts_from_epoch(at)?.timestamp() >= created_at.timestamp() {
         return None;
     }
     let mut stmt = conn
@@ -386,13 +386,11 @@ fn fork_source(conn: &Connection, id: &str, created_at: Option<DateTime<Utc>>) -
              WHERE m.message_id = ?1 AND m.session_id != ?2",
         )
         .ok()?;
-    let holders: Vec<(String, Option<String>)> = stmt
+    let holders = stmt
         .query_map([first.as_str(), id], |row| Ok((row.get(0)?, row.get(1)?)))
         .ok()?
-        .flatten()
-        .collect();
+        .flatten();
     holders
-        .into_iter()
         .filter_map(|(sid, c)| Some((c.as_deref().and_then(parse_ts_text)?, sid)))
         .filter(|(c, _)| *c < created_at)
         .min()
@@ -1491,6 +1489,33 @@ mod tests {
             ],
             "one boundary, and the later tool-pair summary is not a compaction"
         );
+    }
+
+    #[test]
+    fn fork_lineage_normalizes_seconds_and_milliseconds() {
+        for milliseconds in [false, true] {
+            let conn = mk(SCHEMA);
+            for (id, created) in [
+                ("source", "2024-01-01 00:00:00"),
+                ("fork", "2024-01-03 00:00:00"),
+                ("later-fork", "2024-01-04 00:00:00"),
+            ] {
+                conn.execute(
+                    "INSERT INTO sessions (id,working_dir,created_at) VALUES (?1,'/repo',?2)",
+                    rusqlite::params![id, created],
+                )
+                .unwrap();
+                let at = 1704153600_i64 * if milliseconds { 1000 } else { 1 };
+                conn.execute("INSERT INTO messages (session_id,message_id,role,content_json,created_timestamp) VALUES (?1,'shared','user',?2,?3)", rusqlite::params![id,r#"[{"type":"text","text":"copied"}]"#,at]).unwrap();
+            }
+            let created = parse_ts_text("2024-01-03 00:00:00");
+            assert_eq!(fork_source(&conn, "fork", created).as_deref(), Some("source"));
+            assert_eq!(
+                fork_source(&conn, "later-fork", parse_ts_text("2024-01-04 00:00:00")).as_deref(),
+                Some("source")
+            );
+            assert!(fork_source(&conn, "source", parse_ts_text("2024-01-01 00:00:00")).is_none());
+        }
     }
 
     #[test]
