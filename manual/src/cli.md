@@ -184,8 +184,9 @@ N sessions, read like a chat log ("what was I doing last Tuesday, across all my 
 prints the shared [session row](#things-that-work-everywhere) with transcript-derived text
 (`title`) **raw** — the machine contract, not the sanitized terminal view. `--enrich` adds `git`
 (the branch the session *ran on*, read from the transcript — not the cwd's current branch) and
-`display_title`, the title with a fallback synthesized from the first real user turn (peeling a
-leading `<system-reminder>` block and skipping the `Caveat:` preamble, bare command wrappers and
+`display_title`: the row's `title` when it has one, else a title synthesized from the first real
+user turn (peeling a leading `<system-reminder>` block and skipping harness-injected turns such as
+Codex's AGENTS.md and environment context, the `Caveat:` preamble, bare command wrappers and
 tool-result turns); it is explicit `null` only when a session has neither. `title` itself is left
 untouched, so a consumer can tell "no title anywhere" from "not enriched". Enrichment costs one
 lazy transcript parse per emitted row — O(`--limit`), not the fleet — so plain `cv ls --json`
@@ -198,7 +199,7 @@ stays a catalog-only, milliseconds-warm read.
 - **A new session in a watched directory is seen on the next read.** Creating a session bumps its directory's mtime; the probe re-stats watched directories and re-discovers the affected harness before reading. A first session in a previously empty deeper directory can escape those watches and remain unseen until the time backstop forces full discovery — at most `CLUSTERVISION_MAX_STALE_SECS` after the last full sync, on the next read.
 - **A new storage root is seen too.** When a root appears that the catalog does not watch yet (a new agent under a `*` entry in `claude-roots`, or a line added to that file — see [Harnesses](harnesses.md#claude-code-sessions-outside-claude)), the probe re-discovers that harness.
 - **Changes to existing sessions are checked regardless of age.** The probe checks every recorded primary source's captured metadata identity, plus recorded auxiliary dependencies such as DB sidecars. An append to a quiet session therefore triggers re-discovery of its harness on the next read. These checks compare metadata identities, not content hashes.
-- **`--fresh` forces a full re-discovery** instead of trusting the probe. Consumers requiring a fresh inventory of the currently discoverable local sessions on each invocation can use `cv ls --json --fresh`, with `--limit` large enough for their desired enumeration (and `--enrich` when they need `git` and `display_title`). `CLUSTERVISION_MAX_STALE_SECS=0` has the same effect for every read.
+- **`--fresh` forces a full re-discovery** instead of trusting the probe: `cv ls --json --fresh --limit N` is a current inventory on every call. `CLUSTERVISION_MAX_STALE_SECS=0` has the same effect for every read.
 
 A row whose file was deleted since the probe is dropped at read time (the `stat` that also yields `size_bytes`), so a stale row never survives into the output.
 
@@ -540,7 +541,7 @@ cv blame src/ir.rs -L 42                  # who wrote *this line* (also `-L 42,8
 cv blame src/ir.rs --show                 # print the conversation around the best match
 ```
 
-Each matched commit prints the session, the message index of the nearest edit, and a copy-pasteable `cv show <id> --range A..B` centered on it. Time-correlation is honest about its limits: rebases and squashes shift commit times away from the edits that produced them, so matches are ranked, not asserted. Run [`cv index`](#cv-index) first to ingest events.
+Each matched commit prints the session, the message index of the nearest edit, and a copy-pasteable `cv show <id> --range A..B` centered on it. Rebases and squashes shift commit times away from the edits that produced them, so time-correlated matches are ranked, not asserted. Run [`cv index`](#cv-index) first to ingest events.
 
 Some matches are not heuristic. When a candidate session ran the commit itself through a tool — a `git commit` (or `merge`, `cherry-pick`, `revert`) whose output names the sha, or a `git push` that does — blame reads that straight out of the transcript and ranks it above every timed match, labeled `exact: commit created here` (or `exact: commit pushed here`). That line also carries a [`cv rewind`](#cv-rewind) hint, which resumes that agent as it was at the moment of the commit:
 
@@ -555,7 +556,7 @@ The candidates are the sessions with an edit on the file (plus, for sub-agents c
 
 ### `cv doctor`
 
-`cv doctor` compares byte-based estimates of stored transcript content with recorded prompt usage and compaction frequency. The source percentages describe transcript history, including content before compactions, rather than the currently loaded context.
+Why does this session's context keep filling up? `cv doctor` sizes the transcript's content by source, reads the prompt sizes the provider recorded, and pairs them with compaction frequency.
 
 ```sh
 cv doctor da9174f4
@@ -582,21 +583,22 @@ Transcript content by source (278.5k estimated token equivalents):
   assistant text     2%                           4.6k
 ```
 
-It then ranks stored tool-result payloads, breaks system reminders down by kind, and suggests sources to investigate. The "system reminders" bucket is [`MessageKind::InjectedContext`](architecture.md#the-unified-ir) — context the *harness* put into the model's input — so the number means the same thing on every harness, and the per-kind names come from the harness's own bag (`extra["claude"]["attachment_type"]` and friends).
+It then ranks the largest tool-result payloads, breaks the system reminders down by kind, and names the sources worth cutting. The "system reminders" bucket is [`MessageKind::InjectedContext`](architecture.md#the-unified-ir) — context the *harness* put into the model's input — so the number means the same thing on every harness, and the per-kind names come from the harness's own bag (`extra["claude"]["attachment_type"]` and friends).
 
-The attribution divides stored text/JSON bytes by 3.5, with a fixed image estimate. The thinking
-bucket includes plaintext plus opaque signature/encrypted payload bytes. Those bytes are not a
-measurement of hidden reasoning, provider tokenization, or the cost of replaying them on resume.
-The peak prompt is the largest prompt-usage count recorded in the transcript. The first nonzero
-prompt count is only a heuristic proxy for fixed system/tool overhead: it includes conversation,
-and a resumed transcript can begin with substantial history. Across sessions, doctor shows the
-largest such first-prompt count. Recorded usage can also have been rewritten by pruning.
+Sources are sized at 3.5 bytes per token (images at a fixed estimate) over the whole transcript,
+compacted history included, so the percentages say where the session's bytes went, not what the
+current window holds. Code-heavy sessions tokenize denser: on one 980k-token `claude-opus-5`
+session the API counted 2.8 bytes per token, so the estimates read about 20% low there. The
+thinking bucket counts signature and encrypted bytes as well as plaintext; on Claude it is mostly
+signatures. The first prompt is the first recorded prompt size: the system prompt and tools plus
+whatever conversation that turn carried (a resumed session starts with its history); with
+`--recent`, doctor shows the largest. The peak prompt is the largest recorded. Both are the
+provider's numbers unless `cv prune` rewrote them.
 
-JSON retains its existing names: `conversational` and per-tool/attachment values are cumulative
-estimated token equivalents; `thinking` includes opaque payload proxies; `peak_context` is recorded
-prompt usage; `fixed_overhead_est` is the first-prompt heuristic. `cv stats --tokens` instead sums
-recorded usage fields. Its `reasoning` counts only separately reported reasoning usage; zero can
-mean unavailable accounting, as Claude records no separate reasoning-token field.
+JSON keeps its field names: `conversational` and the per-tool/attachment values are the byte
+estimates (`thinking` included), `peak_context` is the peak recorded prompt and
+`fixed_overhead_est` the first. `cv stats --tokens` sums recorded usage instead; its `reasoning`
+is zero on Claude, which records no separate reasoning-token count.
 
 ---
 
@@ -626,23 +628,24 @@ cv cat <new-id> toolu_abc123                       # fetch a stashed original ba
 ```
 
 The defaults snip payloads over 2 KB and keep the last 25 turns verbatim. `--drop-thinking`
-flattens older thinking text and discards opaque provider payloads. Its reported token saving is
-an estimate from stored bytes, not measured reasoning-token use or verified post-resume context.
-`--window` and `--keep` drop whole turns (lossy in the new session; the source keeps everything):
+flattens older thinking text and discards signatures and encrypted payloads. On one 977k-token
+`claude-opus-5` session (Claude Code 2.1.299) it took the resumed request from 980k to 849k tokens,
+98% to 85% of the 1M window, as the API counted Claude Code's own request; prune's byte estimate
+had predicted 641k. `--window` and `--keep` drop whole turns (lossy in the new session; the source keeps everything):
 `--window` uses recorded prompt-usage deltas when available and byte estimates otherwise;
 `--keep A..B` selects by index. The flag spelled `--range` before 0.11.0 was renamed because
 it selects what to **keep**.
 
 By default prune also **revives** an already-maxed session: Claude Code's resume gate reads the
 last turn's recorded `usage` as the session's size *before* re-sending anything, so a session at
-the wall may refuse before making a new request. Revive rewrites usage that exceeds an estimated
-post-prune window size (everything after the last compaction boundary), using recorded-usage
-deltas and byte estimates. The rewritten count is metadata, not new provider-measured usage,
-and does not establish that a provider will accept the resumed request;
-`--no-revive` keeps the original records byte-for-byte. `--declassify` snips conversational
+the wall refuses to resume even after pruning made it fit. Revive rewrites recorded usage above
+the estimated post-prune window (everything after the last compaction boundary, sized from
+recorded-usage deltas and byte estimates) down to that estimate. The estimate can read low (641k
+for the 849k request above), so a session pruned to just under the window can pass the gate and
+then be refused by the API. `--no-revive` keeps the original records byte for byte. `--declassify` snips conversational
 *prose* dense in terms you supply (`--declassify-tokens`, `--declassify-tokens-file`); cv ships no
 term list. `--json` puts the report on stdout as one object (the human report stays on stderr),
-dry-run honest: paths written nowhere are `null`, with a `note` saying so.
+and under `--dry-run` the paths it would write are `null`, with a `note` saying so.
 
 Claude Code only for now (it operates on the raw JSONL to stay byte-faithful).
 

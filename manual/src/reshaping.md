@@ -1,24 +1,25 @@
 # Reshaping a lane: `distill`, `splice`, `rewind`, `adopt`
 
-A swarm root can run long-lived sub-agent lanes. Large transcripts can make continuation
-expensive, while a short handoff can omit facts the next agent needs. These commands let you
-select, shorten or move stored history. The right operation depends on what must survive:
-serialized size alone does not establish preserved reasoning or successful continuation.
+A swarm root runs many sub-agent lanes. A long lane reaches 500K–900K tokens of context, every
+tool round re-reads all of it, and the two usual moves are both bad: keep going (slow, expensive,
+near the ceiling) or hand off to a fresh successor through a prose brief (lossy; the successor
+relearns what the brief did not say). The transcript itself is the best record of what the lane
+knows; it is only too big, and most of its bulk is tool output that has already been acted on.
 
 The Reshape verbs produce a **new** session (or sub-agent) from an existing one; the source is never
 touched. Four of them are about lanes:
 
 | you want | verb |
 |---|---|
-| a shortened lane with selected history and retrieval sidecars | [`cv distill`](cli.md#cv-distill) |
+| the same lane, its old tool output moved to a sidecar, resumable | [`cv distill`](cli.md#cv-distill) |
 | the lane exactly as it stood at message N, to run variants | [`cv splice <id>:..N --session`](cli.md#cv-splice) |
 | the agent as of a past message or the commit it made, as a top-level session | [`cv rewind`](cli.md#cv-rewind) |
 | sub-agents of a dead root moved under a live one so it can `SendMessage` them | [`cv adopt`](cli.md#cv-adopt) |
 
-`cv prune` accepts a main session or a child transcript by ID or path. It lifts selected old
-payloads into a sidecar and writes a standalone session under a new ID, reporting both child
-and parent identities when applicable. It does not install a shortened child under a live parent;
-`cv adopt` moves existing child transcripts between parents.
+`cv prune` is the sibling for one long session, a main thread or a sub-agent transcript (by id or
+path): same transcript, bulky old tool payloads lifted into a sidecar, written as a standalone
+session under a new id. It never plants the result under a live parent; `cv adopt` moves child
+transcripts between parents.
 
 ## How Claude Code stores a sub-agent
 
@@ -37,10 +38,11 @@ work, and it has two consequences:
 
 - an agent belongs to **one root session id**; a root resumed with `--fork-session` runs under a new
   id and looks in a different `subagents/` dir;
-- reasoning records may contain readable text, signatures or opaque payloads. Opaque bytes do not
-  reveal the reasoning they represent or its token count. Preserving or dropping those bytes is
-  distinct from measuring the quality of a resumed lane. Explicit explanations in messages, notes
-  and commit messages remain useful context for any continuation.
+- **thinking is almost all signature-only** in these files: across 60 recent sub-agent transcripts,
+  5,496 of 5,585 thinking blocks carried no text. A lane's reasons survive any reshaping only where
+  the lane wrote them down: in its text, its `SendMessage`s, its notes and commit messages. A lane
+  prompt line such as "state each decision and its reason in your text or STATUS file" is what
+  makes a distill (or any handoff) keep the *why*.
 
 ## What `cv distill` keeps and drops
 
