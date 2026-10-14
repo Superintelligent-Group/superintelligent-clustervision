@@ -590,10 +590,11 @@ enum Cmd {
         /// Start at the source's first record instead (the whole history up to the cut).
         #[arg(long)]
         full: bool,
-        /// Reasoning policy: portable demotes plaintext and omits opaque signatures while repairing
-        /// tool IDs; native preserves source reasoning and identifiers for archival fidelity.
-        #[arg(long, default_value = "portable", value_parser = ["native", "portable"])]
-        thinking: String,
+        /// Reasoning policy. native keeps the source's reasoning and identifiers; portable demotes
+        /// plaintext thinking to text, removes signature-only reasoning and repairs tool IDs.
+        /// Default: native when every model the window records is `claude-*`, else portable.
+        #[arg(long, value_parser = ["native", "portable"])]
+        thinking: Option<String>,
         /// Report the window that would be written without writing anything.
         #[arg(long)]
         dry_run: bool,
@@ -725,7 +726,8 @@ enum Cmd {
         /// What to do with the model's reasoning on the way out: `native` keeps it where the target
         /// format holds it and drops it elsewhere, `text` keeps the turn by demoting thinking to
         /// text (a placeholder for provider-signed blobs, which have no text), `drop` omits it.
-        /// `portable` demotes all Claude reasoning and repairs tool IDs for API replay; other targets use text policy.
+        /// `portable` demotes plaintext Claude reasoning, removes signature-only reasoning and repairs tool IDs;
+        /// other targets use the text policy.
         #[arg(long, default_value = "native", value_parser = ["native", "text", "drop", "portable"])]
         thinking: String,
         /// Print the composed session instead of emitting it: md or json.
@@ -763,11 +765,12 @@ enum Cmd {
         /// format inherently cannot hold are still only reported under `⚠ lost`.
         #[arg(long)]
         strict: bool,
-        /// Portable (default) demotes reasoning and repairs tool IDs for Claude API replay; other
-        /// targets use the text policy. Native preserves archival fidelity where the target holds
-        /// it; text keeps unsupported reasoning as text/placeholders; drop omits reasoning.
-        #[arg(long, default_value = "portable", value_parser = ["native", "text", "drop", "portable"])]
-        thinking: String,
+        /// Native keeps reasoning where the target holds it; portable demotes plaintext thinking to
+        /// text, removes signature-only reasoning and repairs tool IDs (other targets: the text
+        /// policy); text keeps unsupported reasoning as text/placeholders; drop omits reasoning.
+        /// Default: native when every recorded model is `claude-*`, else portable.
+        #[arg(long, value_parser = ["native", "text", "drop", "portable"])]
+        thinking: Option<String>,
     },
     /// Print (or with --launch, run) the resume incantation for a session in its native harness.
     Resume {
@@ -850,7 +853,8 @@ enum Cmd {
         /// What to do with the model's reasoning on the way out: `native` keeps it where the target
         /// format holds it and drops it elsewhere, `text` keeps the turn by demoting thinking to
         /// text (a placeholder for provider-signed blobs, which have no text), `drop` omits it.
-        /// `portable` demotes all Claude reasoning and repairs tool IDs for API replay; other targets use text policy.
+        /// `portable` demotes plaintext Claude reasoning, removes signature-only reasoning and repairs tool IDs;
+        /// other targets use the text policy.
         #[arg(long, default_value = "native", value_parser = ["native", "text", "drop", "portable"])]
         thinking: String,
     },
@@ -1226,7 +1230,7 @@ fn run() -> Result<()> {
             no_context,
             strict,
             thinking,
-        } => port::cmd_port(&id, harness, cwd, out, no_context, strict, util::parse_thinking(&thinking)?),
+        } => port::cmd_port(&id, harness, cwd, out, no_context, strict, thinking.as_deref().map(util::parse_thinking).transpose()?),
         Cmd::Scry {
             harness,
             cwd,
@@ -1324,7 +1328,7 @@ fn run() -> Result<()> {
             full,
             dry_run,
             json,
-        } => compose::cmd_rewind(&id, harness, agent, at.as_deref(), out, to, full, thinking.parse()?, dry_run, json, BUILD_VERSION),
+        } => compose::cmd_rewind(&id, harness, agent, at.as_deref(), out, to, full, thinking.as_deref().map(str::parse).transpose()?, dry_run, json, BUILD_VERSION),
         Cmd::Config { add_export, rm_export } => config::cmd_config(add_export, rm_export),
         Cmd::Schema { json, commands } => schema::cmd_schema(&build_cli(), json, commands),
         Cmd::Formats {

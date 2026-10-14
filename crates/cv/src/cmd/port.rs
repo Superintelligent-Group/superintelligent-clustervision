@@ -1,10 +1,9 @@
-//! Claude replay defaults to `--thinking portable`: thinking plaintext becomes ordinary text,
-//! opaque/redacted reasoning becomes a placeholder, and illegal tool IDs receive one collision-free
-//! mapping at both endpoints. The source remains unchanged. `--thinking native` preserves archival
-//! format fidelity, including provider signatures and identifiers; it does not promise API acceptance.
-//! Model names are not signature provenance. Other targets use the existing text policy in portable
-//! mode. Other reshape commands retain their explicit policies; this is a rewind/port compatibility
-//! repair rather than a change to the core emitter's native default.
+//! Claude replay `--thinking` defaults to native when every recorded model is `claude-*` and to
+//! portable otherwise. Portable turns thinking plaintext into ordinary text, removes reasoning that
+//! has no plaintext (signature-only, redacted), and gives illegal tool IDs one collision-free
+//! mapping at both endpoints. The source remains unchanged. Native preserves archival format
+//! fidelity, including provider signatures and identifiers. Other targets use the text policy in
+//! portable mode.
 //! `cv port` / `cv resume` — producing a copy of a session that runs elsewhere (another harness,
 //! another working directory, or both), and launching one in its native harness.
 //!
@@ -35,7 +34,7 @@ pub(crate) fn cmd_port(
     out: Option<PathBuf>,
     no_context: bool,
     strict: bool,
-    thinking: cv_core::emit::ThinkingMode,
+    thinking: Option<cv_core::emit::ThinkingMode>,
 ) -> Result<()> {
     // The source harness rides on the id (`codex:019e…`); `--harness` is the TARGET.
     let (r, adapter) = resolve(id, None)?;
@@ -44,6 +43,15 @@ pub(crate) fn cmd_port(
         None => r.harness, // a pure rehome
     };
     let session = parse_for_emit(adapter.as_ref(), &r, to_h)?;
+    let thinking = thinking.unwrap_or_else(|| {
+        cv_core::emit::ThinkingMode::replay_default(
+            session
+                .model
+                .iter()
+                .chain(session.messages.iter().filter_map(|m| m.model.as_ref()))
+                .map(String::as_str),
+        )
+    });
     let new_cwd = cwd.clone();
     emit_session(
         &session,

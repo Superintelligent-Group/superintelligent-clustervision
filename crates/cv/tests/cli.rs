@@ -3363,6 +3363,12 @@ fn claude_portable_rewind_and_port_handle_proxy_records() {
         assert!(blocks
             .iter()
             .all(|b| b["type"] != "thinking" && b["type"] != "redacted_thinking"));
+        assert!(
+            blocks
+                .iter()
+                .all(|b| !b["text"].as_str().is_some_and(|t| t.starts_with("[thinking"))),
+            "reasoning without plaintext is removed, not replaced by placeholder text"
+        );
         for index in 0..3 {
             assert!(blocks.iter().any(|b| b["text"] == format!("reason {index}")));
         }
@@ -3398,4 +3404,89 @@ fn claude_portable_rewind_and_port_handle_proxy_records() {
         w.cv_ok(&native);
     }
     assert_eq!(fs::read(source).unwrap(), before);
+}
+
+/// A session whose every recorded model is `claude-*` keeps its signed reasoning by default:
+/// the signatures came from Anthropic, and rewriting them would only add noise to the resume.
+#[test]
+fn claude_rewind_and_port_default_to_native_for_genuine_claude_sessions() {
+    let w = World::new("claude-native-default");
+    let thinking = [
+        serde_json::json!({"type":"thinking","thinking":"","signature":"sig-a"}),
+        serde_json::json!({"type":"thinking","thinking":"plan","signature":"sig-b"}),
+    ];
+    let mut rows = vec![user_line("u", "2026-01-01T00:00:00Z", "continue")];
+    for (index, block) in thinking.iter().enumerate() {
+        let parent = if index == 0 {
+            "u".to_string()
+        } else {
+            format!("a{}", index - 1)
+        };
+        rows.push(
+            serde_json::json!({"type":"assistant","uuid":format!("a{index}"),"parentUuid":parent,
+            "message":{"role":"assistant","model":"claude-opus-5","content":[block]}}),
+        );
+    }
+    rows.push(serde_json::json!({"type":"assistant","uuid":"syn","parentUuid":"a1",
+        "message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"No response requested."}]}}));
+    rows.push(serde_json::json!({"type":"assistant","uuid":"call","parentUuid":"syn","message":{"role":"assistant","model":"claude-opus-5",
+        "content":[{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"command":"true"}}]}}));
+    rows.push(
+        serde_json::json!({"type":"user","uuid":"result","parentUuid":"call","message":{"role":"user",
+        "content":[{"type":"tool_result","tool_use_id":"toolu_01","content":"ok"}]}}),
+    );
+    let source = w.write_session("genuine-source", &rows);
+    let rewound = w.base.join("rewind");
+    let out = w.cv_ok(&[
+        "rewind",
+        source.to_str().unwrap(),
+        "--out",
+        rewound.to_str().unwrap(),
+        "--to",
+        "derived",
+        "--json",
+    ]);
+    let report: serde_json::Value = serde_json::from_str(&out.0).unwrap();
+    assert_eq!(report["thinking"], "native");
+    let written: Vec<serde_json::Value> = fs::read_to_string(rewound.join("derived.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let kept: Vec<_> = written
+        .iter()
+        .filter_map(|r| r.pointer("/message/content/0"))
+        .filter(|b| b["type"] == "thinking")
+        .cloned()
+        .collect();
+    assert_eq!(kept, thinking);
+    let ported = w.base.join("port");
+    w.cv_ok(&[
+        "port",
+        "claude:genuine-source",
+        "--out",
+        ported.to_str().unwrap(),
+        "--harness",
+        "claude",
+    ]);
+    let mut signatures = Vec::new();
+    for entry in fs::read_dir(&ported).unwrap() {
+        for file in fs::read_dir(entry.unwrap().path()).unwrap() {
+            let body = fs::read_to_string(file.unwrap().path()).unwrap();
+            for line in body.lines() {
+                let record: serde_json::Value = serde_json::from_str(line).unwrap();
+                for block in record
+                    .pointer("/message/content")
+                    .and_then(|c| c.as_array())
+                    .into_iter()
+                    .flatten()
+                {
+                    if block["type"] == "thinking" {
+                        signatures.push(block["signature"].clone());
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(signatures, ["sig-a", "sig-b"]);
 }

@@ -190,7 +190,7 @@ pub(crate) fn cmd_rewind(
     out: Option<PathBuf>,
     to: Option<String>,
     full: bool,
-    thinking: cv_core::emit::ThinkingMode,
+    thinking: Option<cv_core::emit::ThinkingMode>,
     dry_run: bool,
     json: bool,
     generator: &str,
@@ -291,6 +291,7 @@ pub(crate) fn cmd_rewind(
         human_bytes(res.bytes_written),
         res.omitted_lines,
     );
+    let _ = writeln!(h, "  thinking: {}", res.thinking);
     for w in &res.warnings {
         let _ = writeln!(h, "  ⚠ {w}");
     }

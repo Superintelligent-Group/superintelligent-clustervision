@@ -1,5 +1,6 @@
-//! Portable Claude replay projects final wire fields, including raw carrier/extra overrides.
-//! Model labels cannot authenticate signatures. Native emission remains archival fidelity.
+//! Portable Claude replay projects final wire fields, including raw carrier/extra overrides:
+//! plaintext thinking becomes text, reasoning without plaintext is removed (a record left empty
+//! goes too, its children relinked to its parent), and illegal tool IDs are remapped.
 use crate::harness::store::{
     bytes::{ByteSource, ByteStage},
     document::range::{Range, RangeSource},
@@ -14,7 +15,12 @@ use std::{
 #[derive(Default, Debug)]
 pub(crate) struct Changes {
     pub ids: usize,
+    /// Plaintext thinking blocks demoted to text.
     pub thinking: usize,
+    /// Signature-only and redacted thinking blocks removed.
+    pub dropped: usize,
+    /// Records removed because every block in them was removed; their children are relinked.
+    pub records: usize,
 }
 fn legal(id: &str) -> bool {
     !id.is_empty() && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
@@ -80,18 +86,55 @@ fn copy(source: &RangeSource, range: Range, output: &mut ByteStage) -> Result<()
     Ok(())
 }
 enum Replacement {
-    Id(Vec<u8>),
-    Thinking(Option<Range>),
+    Bytes(Vec<u8>),
+    Thinking(Range),
+    Remove,
+}
+/// Portable fate of one content block: plaintext thinking becomes text; reasoning with no
+/// plaintext (signature-only, redacted) has nothing to carry and is removed.
+enum Fate {
+    Keep,
+    Text(Range),
+    Drop,
+}
+fn fate(source: &RangeSource, block: Range, ty: Option<&str>, mode: crate::emit::ThinkingMode) -> Result<Fate> {
+    if mode != crate::emit::ThinkingMode::Portable {
+        return Ok(Fate::Keep);
+    }
+    Ok(match ty {
+        Some("thinking") => match source.get(block, "thinking")? {
+            Some(range) if source.kind(range)? == Some(b'"') && range.len > 2 => Fate::Text(range),
+            _ => Fate::Drop,
+        },
+        Some("redacted_thinking") => Fate::Drop,
+        _ => Fate::Keep,
+    })
+}
+/// Record links that may name a removed record; each is redirected to its nearest kept ancestor.
+const LINKS: [&str; 3] = ["parentUuid", "logicalParentUuid", "leafUuid"];
+fn surviving<'a>(removed: &'a HashMap<String, Option<String>>, mut id: &'a str) -> Option<&'a str> {
+    for _ in 0..=removed.len() {
+        match removed.get(id) {
+            None => return Some(id),
+            Some(Some(parent)) => id = parent,
+            Some(None) => return None,
+        }
+    }
+    None
 }
 
-/// Two passes reserve all valid IDs before allocation. Metadata scales with IDs and each record's
-/// selected spans. Unknown fields and tool payloads copy unchanged with bounded positioned reads.
+/// Two passes reserve all valid IDs (and find records left empty) before allocation. Metadata
+/// scales with IDs, removed records and each record's selected spans. Unknown fields and tool
+/// payloads copy unchanged with bounded positioned reads.
 pub(crate) fn normalize(bytes: ByteSource, mode: crate::emit::ThinkingMode) -> Result<(ByteStage, Changes)> {
     let bytes = Arc::new(bytes);
     let source = RangeSource::private(bytes.clone())?;
     let mut reserved = HashSet::new();
     let mut invalid = Vec::new();
     let mut seen = HashSet::new();
+    // Claude Code writes one content block per record, so a signature-only block usually empties
+    // its record. Such a record is removed and its children point at its parent instead.
+    let mut removed: HashMap<String, Option<String>> = HashMap::new();
     rows(&bytes, |row| {
         // A portable output must not silently carry invalid JSON around its repaired fields.
         let mut cursor = source.cursor(row)?;
@@ -100,8 +143,13 @@ pub(crate) fn normalize(bytes: ByteSource, mode: crate::emit::ThinkingMode) -> R
             return Ok(());
         }
         anyhow::ensure!(source.validate(row)?, "portable Claude replay encountered invalid JSON");
+        let (mut total, mut drops) = (0usize, 0usize);
         blocks(&source, row, |block| {
             let ty = string(&source, source.get(block, "type")?)?;
+            total += 1;
+            if matches!(fate(&source, block, ty.as_deref(), mode)?, Fate::Drop) {
+                drops += 1;
+            }
             let key = match ty.as_deref() {
                 Some("tool_use") => "id",
                 Some("tool_result") => "tool_use_id",
@@ -115,7 +163,13 @@ pub(crate) fn normalize(bytes: ByteSource, mode: crate::emit::ThinkingMode) -> R
                 invalid.push(id);
             }
             Ok(())
-        })
+        })?;
+        if total > 0 && drops == total {
+            if let Some(uuid) = string(&source, source.get(row, "uuid")?)? {
+                removed.insert(uuid, string(&source, source.get(row, "parentUuid")?)?);
+            }
+        }
+        Ok(())
     })?;
     let mut mapping = HashMap::new();
     let mut next = 0usize;
@@ -132,42 +186,81 @@ pub(crate) fn normalize(bytes: ByteSource, mode: crate::emit::ThinkingMode) -> R
     let mut output = ByteStage::new();
     let mut changes = Changes {
         ids: mapping.len(),
-        thinking: 0,
+        ..Changes::default()
     };
     rows(&bytes, |row| {
         let mut patches = Vec::new();
+        // (block, kept) for every content element, in order.
+        let mut elements: Vec<(Range, bool)> = Vec::new();
         blocks(&source, row, |block| {
             let ty = string(&source, source.get(block, "type")?)?;
-            match ty.as_deref() {
-                Some("tool_use") | Some("tool_result") => {
-                    let key = if ty.as_deref() == Some("tool_use") {
-                        "id"
-                    } else {
-                        "tool_use_id"
-                    };
-                    let range = source.get(block, key)?;
+            let fate = fate(&source, block, ty.as_deref(), mode)?;
+            elements.push((block, !matches!(fate, Fate::Drop)));
+            match (ty.as_deref(), fate) {
+                (_, Fate::Text(text)) => {
+                    changes.thinking += 1;
+                    patches.push((block, Replacement::Thinking(text)));
+                }
+                (Some(ty @ ("tool_use" | "tool_result")), _) => {
+                    let range = source.get(block, if ty == "tool_use" { "id" } else { "tool_use_id" })?;
                     if let Some(id) = string(&source, range)? {
                         if let Some(replacement) = mapping.get(&id) {
-                            patches.push((range.unwrap(), Replacement::Id(replacement.clone())));
+                            patches.push((range.unwrap(), Replacement::Bytes(replacement.clone())));
                         }
                     }
-                }
-                Some("thinking") | Some("redacted_thinking") if mode == crate::emit::ThinkingMode::Portable => {
-                    changes.thinking += 1;
-                    let text = if ty.as_deref() == Some("redacted_thinking") {
-                        None
-                    } else {
-                        match source.get(block, "thinking")? {
-                            Some(range) if source.kind(range)? == Some(b'"') && range.len > 2 => Some(range),
-                            _ => None,
-                        }
-                    };
-                    patches.push((block, Replacement::Thinking(text)));
                 }
                 _ => {}
             }
             Ok(())
         })?;
+        let drops = elements.iter().filter(|e| !e.1).count();
+        changes.dropped += drops;
+        if drops > 0 && drops == elements.len() {
+            changes.records += 1;
+            return Ok(());
+        }
+        if !removed.is_empty() {
+            for key in LINKS {
+                let range = source.get(row, key)?;
+                if let Some(link) = string(&source, range)? {
+                    if removed.contains_key(&link) {
+                        let target = surviving(&removed, &link);
+                        patches.push((range.unwrap(), Replacement::Bytes(serde_json::to_vec(&target)?)));
+                    }
+                }
+            }
+        }
+        // A removed element takes the separator after it; a trailing run takes the one before it.
+        let last_kept = elements.iter().rposition(|e| e.1);
+        for (i, (block, kept)) in elements.iter().enumerate() {
+            if *kept {
+                continue;
+            }
+            match last_kept {
+                Some(k) if i < k => {
+                    let len = elements[i + 1].0.offset - block.offset;
+                    patches.push((
+                        Range {
+                            offset: block.offset,
+                            len,
+                        },
+                        Replacement::Remove,
+                    ));
+                }
+                _ => {
+                    let from = last_kept.map_or(block.offset, |k| elements[k].0.offset + elements[k].0.len);
+                    let last = elements.last().unwrap().0;
+                    patches.push((
+                        Range {
+                            offset: from,
+                            len: last.offset + last.len - from,
+                        },
+                        Replacement::Remove,
+                    ));
+                    break;
+                }
+            }
+        }
         patches.sort_by_key(|p| p.0.offset);
         let mut position = row.offset;
         for (range, replacement) in patches {
@@ -180,16 +273,13 @@ pub(crate) fn normalize(bytes: ByteSource, mode: crate::emit::ThinkingMode) -> R
                 &mut output,
             )?;
             match replacement {
-                Replacement::Id(id) => output.write_all(&id)?,
+                Replacement::Bytes(bytes) => output.write_all(&bytes)?,
                 Replacement::Thinking(text) => {
                     output.write_all(b"{\"type\":\"text\",\"text\":")?;
-                    if let Some(text) = text {
-                        copy(&source, text, &mut output)?;
-                    } else {
-                        output.write_all(b"\"[thinking: opaque provider reasoning omitted for portable replay]\"")?;
-                    }
+                    copy(&source, text, &mut output)?;
                     output.write_all(b"}")?;
                 }
+                Replacement::Remove => {}
             }
             position = range.offset + range.len;
         }
@@ -234,26 +324,78 @@ mod tests {
         writeln!(stage, "{results}")?;
         writeln!(stage, "{calls}")?;
         let (stage, changes) = normalize(stage.finish()?, crate::emit::ThinkingMode::Portable)?;
-        assert_eq!((changes.ids, changes.thinking), (4, 3));
-        let output = stage.finish()?;
-        let rows: Vec<serde_json::Value> = BufReader::new(output.reader()?)
-            .lines()
-            .map(|row| serde_json::from_str(&row.unwrap()).unwrap())
-            .collect();
+        assert_eq!(
+            (changes.ids, changes.thinking, changes.dropped, changes.records),
+            (4, 1, 2, 0)
+        );
+        let rows = parsed(stage)?;
         let content = rows[1]["message"]["content"].as_array().unwrap();
         assert_eq!(content[0]["text"], body);
-        assert!(content[1]["text"].as_str().unwrap().contains("opaque"));
-        assert!(content[2]["text"].as_str().unwrap().contains("opaque"));
-        let ids: Vec<_> = content[3..].iter().map(|b| b["id"].as_str().unwrap()).collect();
+        assert_eq!(
+            content.len(),
+            6,
+            "signature-only and redacted reasoning are removed, not replaced"
+        );
+        let ids: Vec<_> = content[1..].iter().map(|b| b["id"].as_str().unwrap()).collect();
         assert!(ids.iter().all(|id| legal(id)));
         assert_eq!(ids.iter().collect::<HashSet<_>>().len(), 5);
         assert_eq!(ids[2], "cv_tool_0");
         for (result, id) in rows[0]["message"]["content"].as_array().unwrap().iter().zip(ids) {
             assert_eq!(result["tool_use_id"], id);
         }
-        assert_eq!(content[3]["input"], calls["message"]["content"][3]["input"]);
+        assert_eq!(content[1]["input"], calls["message"]["content"][3]["input"]);
         assert_eq!(rows[0]["message"]["content"][0]["content"], body);
         assert_eq!(rows[1]["unknown"], calls["unknown"]);
+        Ok(())
+    }
+    fn parsed(stage: ByteStage) -> Result<Vec<serde_json::Value>> {
+        let output = stage.finish()?;
+        let rows = BufReader::new(output.reader()?)
+            .lines()
+            .map(|row| serde_json::from_str(&row.unwrap()).unwrap())
+            .collect();
+        Ok(rows)
+    }
+    #[test]
+    fn portable_removes_records_left_empty_and_relinks_their_children() -> Result<()> {
+        let thinking = |uuid: &str, parent: &str| {
+            json!({"type":"assistant","uuid":uuid,"parentUuid":parent,"message":{"role":"assistant",
+                "content":[{"type":"thinking","thinking":"","signature":"opaque"}]}})
+        };
+        let mut stage = ByteStage::new();
+        writeln!(
+            stage,
+            "{}",
+            json!({"type":"user","uuid":"u1","parentUuid":null,"message":{"content":"go"}})
+        )?;
+        writeln!(stage, "{}", thinking("a1", "u1"))?;
+        writeln!(
+            stage,
+            "{}",
+            json!({"type":"assistant","uuid":"a2","parentUuid":"a1","message":{"content":[
+            {"type":"text","text":"kept"},{"type":"redacted_thinking","data":"x"},{"type":"thinking","thinking":"","signature":"s"}]}})
+        )?;
+        writeln!(stage, "{}", thinking("a3", "a2"))?;
+        writeln!(stage, "{}", thinking("a4", "a3"))?;
+        writeln!(
+            stage,
+            "{}",
+            json!({"type":"assistant","uuid":"a5","parentUuid":"a4","message":{"content":[
+            {"type":"redacted_thinking","data":"x"},{"type":"tool_use","id":"t","name":"Read","input":{}}]}})
+        )?;
+        let (stage, changes) = normalize(stage.finish()?, crate::emit::ThinkingMode::Portable)?;
+        assert_eq!((changes.thinking, changes.dropped, changes.records), (0, 6, 3));
+        let rows = parsed(stage)?;
+        let links: Vec<_> = rows
+            .iter()
+            .map(|r| (r["uuid"].as_str().unwrap(), r["parentUuid"].clone()))
+            .collect();
+        assert_eq!(links, [("u1", json!(null)), ("a2", json!("u1")), ("a5", json!("a2"))]);
+        assert_eq!(rows[1]["message"]["content"], json!([{"type":"text","text":"kept"}]));
+        assert_eq!(
+            rows[2]["message"]["content"],
+            json!([{"type":"tool_use","id":"t","name":"Read","input":{}}])
+        );
         Ok(())
     }
     #[test]

@@ -10,8 +10,9 @@
 //!
 //! Like [`crate::prune`], a rewind works on the **raw JSONL records**, never the IR: every
 //! Claude-specific fields survive, and lines that need no rewrite stay byte-identical. Portable
-//! replay additionally repairs illegal tool IDs and demotes all signed reasoning; native preserves
-//! archive fidelity. Model labels cannot prove a thinking signature is safe after a window cut. The derived
+//! replay additionally repairs illegal tool IDs, demotes plaintext reasoning to text and removes
+//! reasoning that has none; native preserves archive fidelity. The default is native when every
+//! model recorded in the window is `claude-*`, portable otherwise. The derived
 //! file is the contiguous record range `[start, cut]` of the source:
 //!
 //! * **cut** — a message index (the `cv show --range` counting), or a commit sha resolved to the
@@ -402,7 +403,8 @@ pub struct RewindOptions {
     pub new_id: Option<String>,
     pub dry_run: bool,
     /// Portable replay removes signed thinking and repairs tool IDs; native keeps archival bytes.
-    pub thinking: crate::emit::ThinkingMode,
+    /// `None`: [`crate::emit::ThinkingMode::replay_default`] over the models the window records.
+    pub thinking: Option<crate::emit::ThinkingMode>,
     /// Recorded in the provenance sidecar as `cv_version`.
     pub generator: String,
 }
@@ -455,6 +457,8 @@ pub struct RewindResult {
     /// worktree it had `cd`'d into, which is not where it resumes from.
     pub cut_cwd: Option<String>,
     pub warnings: Vec<String>,
+    /// The thinking policy applied (`native` or `portable`), chosen or defaulted.
+    pub thinking: &'static str,
     pub dry_run: bool,
 }
 
@@ -467,6 +471,8 @@ struct ScanSink {
     uuid_off: HashMap<String, u64>,
     stop_after: Option<usize>,
     evidence: Option<CommitEvidenceSink>,
+    /// Indices of messages whose recorded model is not `claude-*`.
+    foreign: Vec<usize>,
 }
 
 impl MessageSink for ScanSink {
@@ -485,6 +491,9 @@ impl MessageSink for ScanSink {
         }
         if m.kind == MessageKind::CompactionBoundary {
             self.boundaries.push(idx);
+        }
+        if crate::emit::ThinkingMode::replay_default(m.model.as_deref()) == crate::emit::ThinkingMode::Portable {
+            self.foreign.push(idx);
         }
         if let Some(id) = &m.id {
             self.uuid_off.insert(id.clone(), self.offsets[idx]);
@@ -602,7 +611,7 @@ fn rewind_session_after_scan(
     anyhow::ensure!(
         matches!(
             opts.thinking,
-            crate::emit::ThinkingMode::Native | crate::emit::ThinkingMode::Portable
+            None | Some(crate::emit::ThinkingMode::Native | crate::emit::ThinkingMode::Portable)
         ),
         "rewind --thinking supports native or portable"
     );
@@ -641,6 +650,7 @@ fn rewind_session_after_scan(
             e.stop_on_created = true;
             e
         }),
+        foreign: Vec::new(),
     };
     crate::harness::claude::stream_reader(
         &r.id,
@@ -716,6 +726,13 @@ fn rewind_session_after_scan(
         }
     };
     let start_msg_idx = scan.offsets.partition_point(|o| *o < start_off);
+    let thinking = opts
+        .thinking
+        .unwrap_or(if scan.foreign.iter().any(|i| (start_msg_idx..=cut_idx).contains(i)) {
+            crate::emit::ThinkingMode::Portable
+        } else {
+            crate::emit::ThinkingMode::Native
+        });
 
     // Pass 2 — one sequential read of the prefix: hash every byte, count lines, copy the window.
     let new_id = opts.new_id.clone().unwrap_or_else(new_uuid);
@@ -824,7 +841,7 @@ fn rewind_session_after_scan(
                 s
             }
         };
-        if opts.thinking == crate::emit::ThinkingMode::Portable {
+        if thinking == crate::emit::ThinkingMode::Portable {
             replay_stage.write_all(&out_line)?;
         } else if let Some(w) = writer.as_mut() {
             w.write_all(&out_line)?;
@@ -881,12 +898,16 @@ fn rewind_session_after_scan(
         ));
     }
 
-    if opts.thinking == crate::emit::ThinkingMode::Portable {
+    if thinking == crate::emit::ThinkingMode::Portable {
         let source = replay_stage.finish()?;
-        let (stage, changes) = crate::harness::claude::replay::normalize(source, opts.thinking)?;
+        let (stage, changes) = crate::harness::claude::replay::normalize(source, thinking)?;
         bytes_written = stage.len();
-        if changes.ids != 0 || changes.thinking != 0 {
-            warnings.push(format!("portable replay: remapped {} tool ID(s), demoted {} thinking block(s); opaque provider reasoning is omitted", changes.ids, changes.thinking));
+        lines_written -= changes.records;
+        if changes.ids + changes.thinking + changes.dropped != 0 {
+            warnings.push(format!(
+                "portable replay: remapped {} tool ID(s), demoted {} thinking block(s) to text, removed {} without plaintext ({} record(s) left empty)",
+                changes.ids, changes.thinking, changes.dropped, changes.records
+            ));
         }
         if let Some(w) = writer.as_mut() {
             stage.finish()?.copy_to(w)?;
@@ -923,6 +944,7 @@ fn rewind_session_after_scan(
         cwd: launch.or_else(|| cut_cwd.clone()),
         cut_cwd,
         warnings,
+        thinking: thinking.as_str(),
         dry_run: opts.dry_run,
     };
 
@@ -961,7 +983,7 @@ fn provenance(res: &RewindResult, opts: &RewindOptions) -> Value {
             "subagent": res.subagent,
         },
         "new_id": res.new_id,
-        "thinking": opts.thinking.as_str(),
+        "thinking": res.thinking,
         "cut": {
             "by": cut_by,
             "msg_idx": res.cut_msg_idx,
@@ -1223,6 +1245,7 @@ mod json_read_tests {
             uuid_off: HashMap::new(),
             stop_after: None,
             evidence: Some(CommitEvidenceSink::new(vec!["abcdef123".into()], None)),
+            foreign: Vec::new(),
         };
         assert_eq!(scan.message(message), Flow::Stop);
         assert!(scan.take_error().is_some());

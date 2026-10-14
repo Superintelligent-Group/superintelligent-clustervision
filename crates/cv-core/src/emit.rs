@@ -66,12 +66,11 @@ pub struct EmitOptions {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ThinkingMode {
     /// Structured thinking where the target holds it, dropped where it does not, reported as an
-    /// expected loss. The library default; the CLI port/rewind defaults to Portable.
+    /// expected loss. The library default; for the CLI's port/rewind default see [`Self::replay_default`].
     #[default]
     Native,
-    /// Claude replay: demote plaintext thinking, replace opaque reasoning with placeholders,
-    /// and repair illegal tool IDs. No signature provenance is inferred from model names.
-    /// Other targets use the existing text policy.
+    /// Claude replay: demote plaintext thinking to text, remove reasoning that has no plaintext
+    /// (signature-only, redacted), and repair illegal tool IDs. Other targets use the text policy.
     Portable,
     /// Never lose the turn. Where the target cannot hold thinking structurally, a block with text
     /// becomes a [`Block::Text`]; a signature-only / encrypted / redacted blob becomes a short
@@ -100,6 +99,20 @@ impl ThinkingMode {
             ThinkingMode::Portable => "portable",
             ThinkingMode::Text => "text",
             ThinkingMode::Drop => "drop",
+        }
+    }
+
+    /// The `cv rewind` / `cv port` default for a session: [`Self::Native`] when every recorded
+    /// model is `claude-*` (the signatures came from Anthropic and replay as they are),
+    /// [`Self::Portable`] otherwise. Claude Code's `<synthetic>` records name no model.
+    pub fn replay_default<'a>(models: impl IntoIterator<Item = &'a str>) -> Self {
+        let foreign = models
+            .into_iter()
+            .any(|m| m != "<synthetic>" && !m.starts_with("claude-"));
+        if foreign {
+            ThinkingMode::Portable
+        } else {
+            ThinkingMode::Native
         }
     }
 
@@ -279,7 +292,7 @@ pub(crate) fn thinking_fate_with_presence(
             return if has_text {
                 ThinkingFate::AsText
             } else {
-                ThinkingFate::Placeholder
+                ThinkingFate::Drop
             };
         }
         ThinkingMode::Text
@@ -3404,6 +3417,21 @@ mod tests {
         );
         let summary: Value = serde_json::from_str(&fs::read_to_string(res.path.join("summary.json")).unwrap()).unwrap();
         assert_eq!(summary["current_model_id"], json!("grok-code-fast-1"));
+    }
+
+    #[test]
+    fn replay_default_is_native_only_for_all_claude_models() {
+        use ThinkingMode::{Native, Portable};
+        assert_eq!(
+            ThinkingMode::replay_default(["claude-opus-5", "<synthetic>", "claude-fable-5-1"]),
+            Native
+        );
+        assert_eq!(ThinkingMode::replay_default([]), Native);
+        assert_eq!(
+            ThinkingMode::replay_default(["claude-opus-5", "grok-4.7-build"]),
+            Portable
+        );
+        assert_eq!(ThinkingMode::replay_default(["glm-5.3-flash"]), Portable);
     }
 
     /// The wire spellings the CLI parses (`--thinking <mode>`), and the default.

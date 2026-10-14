@@ -65,31 +65,36 @@ commands have it is in the [reference](reference.md)):
 | `--json` | machine output |
 | `--limit <n>` | how many rows/records |
 | `--all` | include what is hidden by default |
-| `--thinking <mode>` | reasoning policy: `portable` (rewind/port default), `native`, `text`, `drop`; rewind accepts portable/native |
+| `--thinking <mode>` | reasoning policy: `native`, `portable`, `text`, `drop`; rewind accepts native/portable |
 | `--strict` | fail if a loss the target format *could* have carried happens |
 
-**`--thinking` and replay compatibility.** Thinking blocks come in two shapes. A few
-carry plaintext. Most carry only a provider **signature** — an opaque, vendor-bound blob with no
-text at all (on one real 900-message session, 177 of 204). Storing that blob does not establish that
-a provider will accept it on replay. Signatures can depend on the preceding context; a model name
-does not prove validity after cutting or rehoming a session.
+**`--thinking` and replay.** Thinking blocks come in two shapes. A few carry plaintext. Most carry
+only a provider **signature** — an opaque, vendor-bound blob with no text at all (on one real
+900-message session, 177 of 204). A session recorded through a proxy carries the proxied model's
+reasoning and tool IDs, which the Anthropic API was never meant to read back.
 
-- `portable` (rewind/port default) — for Claude, readable reasoning becomes ordinary text and opaque
-  reasoning becomes a short placeholder. Illegal tool IDs receive collision-free replacements at
-  both ends of every call/result pair. Other port targets use the `text` policy.
+`cv rewind` and `cv port` choose per session: `native` when every recorded model is `claude-*`
+(rewind looks at the window it copies), `portable` otherwise. An explicit `--thinking` wins.
+
 - `native` — structured reasoning where the target holds it, dropped where it does not.
   An assistant turn whose only content was a signature blob disappears, reported as
-  `unrepresentable_turns`. This preserves native fidelity, including Claude tool IDs and signatures
-  that may be unsuitable for API replay. It remains the default for other emit commands and the library.
+  `unrepresentable_turns`. Claude output keeps its signatures and tool IDs byte for byte. The
+  default for the other emit commands and the library.
+- `portable` — for Claude, readable reasoning becomes ordinary text, reasoning without plaintext
+  (signature-only, redacted) is removed, and a record left empty goes too, its children relinked
+  to its parent. Illegal tool IDs receive collision-free replacements at both ends of every
+  call/result pair. Other port targets use the `text` policy.
 - `text` — preserve structured reasoning where supported; otherwise keep readable reasoning as text
   and opaque reasoning as a placeholder. This mode does not remove signatures from Claude output.
   Lost signatures are still reported.
 - `drop` — omit reasoning entirely, even where the target could hold it, for handing someone a
   session without your chain of thought.
 
-Claude exports repair illegal tool IDs in every non-native mode. Rewind supports only `portable`
-and `native`; other emit commands expose the full policy set. Portable output removes these known
-replay incompatibilities; it does not authenticate signatures or make a live API request.
+Claude exports repair illegal tool IDs in every non-native mode. Rewind supports only `native` and
+`portable`; other emit commands expose the full policy set. Checked live with Claude Code 2.1.299
+against `claude-opus-4-8`: `claude -p --resume <id> --fork-session` answered from a native rewind of
+a Claude session, a portable rewind of the same session, and a portable rewind of a proxied
+`grok-4.7-build` session, each cut on a tool result.
 
 Note that `cv prune --drop-thinking` is a different thing: it flattens old reasoning to shrink a
 session you intend to resume. It was spelled `--thinking` before 0.11.0, and was renamed precisely
@@ -671,9 +676,9 @@ parent's project dir. `claude --resume` only finds a session in the project dir 
 it is launched from, so with `--out` cv says where to copy it.
 
 The derived session uses the source's raw records `[start, cut]` with every `sessionId` rewritten
-and `parentUuid` chains untouched. Its default `--thinking portable` also demotes thinking and
-repairs illegal tool IDs for Claude API replay, including proxy-recorded sessions. Use
-`--thinking native` to preserve original reasoning and identifiers for archival fidelity.
+and `parentUuid` chains untouched. A window whose models are all `claude-*` is copied as is; any
+other model makes the rewind portable (above), which demotes or removes reasoning and repairs
+illegal tool IDs. `--thinking native|portable` overrides the choice; the report and `--json` name it.
 Next to it goes `<new-id>.rewind.json`, the provenance: source id, path, bytes and sha256 (of the prefix read — a live transcript keeps growing), the cut and start (message index, byte offset, line), the commit evidence, reasoning policy, how many lines of the source come after the cut, when, and which cv. The resume line `cd`s to the directory Claude files the session under (the launch dir), which is not always where the agent was working at the cut — cv prints both.
 
 Claude Code only (it copies raw records). The source is never modified.
@@ -766,10 +771,9 @@ cv port codex:019e75e0 --harness claude           # the source harness rides on 
 
 By default it writes into the target harness's *real* storage root, so the session shows up in that tool immediately. Point `--out` at a scratch directory for a safe dry run. If the target harness can't be emitted to, `cv` says so plainly and lists the harnesses that can. See [Cross-harness conversion](conversion.md) for the emit-target list and the gory IR details.
 
-The default `--thinking portable` prepares Claude output for replay by demoting reasoning and
-repairing illegal tool identifiers; other targets use the text policy described above.
-`--thinking native` preserves native reasoning instead. Expected reasoning losses still appear
-in the fidelity report, including with `--strict`.
+`--thinking` defaults to `native` when every model the source recorded is `claude-*` and to
+`portable` otherwise (see `--thinking` above). Expected reasoning losses still appear in the
+fidelity report, including with `--strict`.
 
 Without `--harness` the target is the source harness — a pure rehome. Rehoming rewrites the cwd
 baked into the target format (Claude's encoded project-dir name, Grok's percent-encoded path,
