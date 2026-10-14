@@ -193,11 +193,11 @@ SHELL_DOCTOR_EXPECTED = {
     "sessions": 1, "messages": 1, "compactions": 0, "auto_compactions": 0,
     "pre_tokens": [], "fixed_overhead_est": 0, "peak_context": 0,
     "conversational": {
-        "total": 9586986, "tool_results": 0, "thinking": 0, "assistant_text": 0,
+        "total": 13421804, "tool_results": 0, "thinking": 0, "assistant_text": 0,
         "user_text": 0, "tool_call_args": 0, "images": 0, "system_msgs": 0,
-        "system_reminders": 9586986,
+        "system_reminders": 13421804,
     },
-    "by_attachment": {"injected_context": 9586986},
+    "by_attachment": {"injected_context": 13421804},
     "tool_results_mcp": 0, "tool_results_builtin": 0, "by_tool": [],
 }
 
