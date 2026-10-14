@@ -138,7 +138,7 @@ fn count_text(view: JsonView<'_>) -> Result<Option<String>> {
     let (head, present) = crate::harness::store::document::text_head(&text, &crate::Resolver::new(None), 96, true)?;
     Ok(Some(if head.is_empty() && present { " ".into() } else { head }))
 }
-fn count_content(view: JsonView<'_>) -> Result<Value> {
+pub(super) fn count_content(view: JsonView<'_>) -> Result<Value> {
     if let Some(text) = count_text(view)? {
         return Ok(text.into());
     }
@@ -165,7 +165,7 @@ fn count_content(view: JsonView<'_>) -> Result<Value> {
 /// Value's title is text_parts(content).trim(), then truncate(..., 80). A title can contain
 /// arbitrarily long leading/trailing whitespace, so keep the first 81 characters and the last
 /// nonwhite position until the answer is determined; joined empty parts still add newlines.
-fn title(content: JsonView<'_>) -> Result<String> {
+pub(super) fn title(content: JsonView<'_>) -> Result<String> {
     let mut head = String::new();
     let mut chars = 0usize;
     let mut last_nonwhite = 0usize;

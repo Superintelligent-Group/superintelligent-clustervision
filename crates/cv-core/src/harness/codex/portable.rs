@@ -258,6 +258,52 @@ fn agent_text_fields(view: JsonView<'_>) -> Result<Option<(Value, Option<JsonVie
     Ok(Some((record_fields(&top, "event_msg", payload)?, body)))
 }
 
+/// Modern prompt/message discovery shares the bounded legacy content/title reducers. Separate
+/// title and counting skeletons preserve full joined-title whitespace without making the turn
+/// counter retain bodies or changing image/encrypted part presence.
+fn discovery_message_fields(view: JsonView<'_>, title_needed: bool) -> Result<Option<(Value, Value)>> {
+    let Some(top) = Fields::parse(view, &["type", "timestamp", "ordinal", "payload"])? else {
+        return Ok(None);
+    };
+    let ty = top.string("type")?.unwrap_or_default();
+    let Some(payload) = top.get("payload") else {
+        return Ok(None);
+    };
+    let Some(fields) = Fields::parse(payload, &["type", "role", "content", "message"])? else {
+        return Ok(None);
+    };
+    let sub = fields.string("type")?.unwrap_or_default();
+    let body_key = match (ty.as_str(), sub.as_str()) {
+        ("response_item", "message") => "content",
+        ("event_msg", "user_message") => "message",
+        _ => return Ok(None),
+    };
+    let mut count = Map::new();
+    count.insert("type".into(), sub.into());
+    if let Some(role) = fields.string("role")? {
+        count.insert("role".into(), role.into());
+    }
+    let mut title = count.clone();
+    if let Some(body) = fields.get(body_key) {
+        // Non-string event bodies are ignored by the dispatcher, unlike response content arrays.
+        if body_key == "content" || body.is_string()? {
+            count.insert(body_key.into(), legacy::count_content(body)?);
+            title.insert(
+                body_key.into(),
+                if title_needed {
+                    legacy::title(body)?.into()
+                } else {
+                    Value::Null
+                },
+            );
+        }
+    }
+    Ok(Some((
+        record_fields(&top, &ty, Value::Object(count))?,
+        record_fields(&top, &ty, Value::Object(title))?,
+    )))
+}
+
 fn record_fields(top: &Fields<'_>, ty: &str, payload: Value) -> Result<Value> {
     let mut record = Map::new();
     record.insert("type".into(), ty.into());
@@ -313,10 +359,13 @@ pub(super) fn scan(path: &Path, scan: &mut CodexScan, turns: &mut metadata::Turn
                     Some(record) => Some(record),
                     None => agent_text_fields(view)?,
                 };
-                Ok(projected.map(|(record, _)| record))
+                match projected {
+                    Some((record, _)) => Ok(Some((record.clone(), record))),
+                    None => discovery_message_fields(view, scan.title.is_none()),
+                }
             }) {
-                Ok(Some(value)) => {
-                    turns.feed_value(value, scan);
+                Ok(Some((value, title))) => {
+                    turns.feed_value_with_title(value, title, scan);
                     continue;
                 }
                 Ok(None) => {}
@@ -450,4 +499,39 @@ fn stream_at(rollout: &Rollout, id: &str, state: ResumeState, at: u64, sink: &mu
         sink.meta(&s);
     }
     Ok(s)
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+
+    #[test]
+    fn giant_discovery_messages_keep_bounded_exact_title_and_count_skeletons() -> Result<()> {
+        let world = cv_testkit::World::in_process("codex-discovery-message-facts");
+        let path = world.base.join("row.json");
+        let giant = "body λ\n".repeat(128 * 1024);
+        for content in [
+            serde_json::json!(giant),
+            serde_json::json!([{"text":"title"},{"text":" ".repeat(100_000)},{"text":giant}]),
+            serde_json::json!([{"text":" ".repeat(100_000)},{"type":"input_text","text":" tail λ "}]),
+            serde_json::json!([{"type":"encrypted_content","text":giant}]),
+            serde_json::json!([{"type":"input_image","image_url":giant}]),
+        ] {
+            let record = serde_json::json!({"type":"response_item","payload":{"type":"message","role":"user","content":content}});
+            fs::write(&path, serde_json::to_vec(&record)?)?;
+            let source = JsonSource::capture(&path)?;
+            let (count, title) = source.read_document(|view| Ok(discovery_message_fields(view, true)?.unwrap()))?;
+            assert!(serde_json::to_vec(&count)?.len() < 2000);
+            assert!(serde_json::to_vec(&title)?.len() < 2000);
+            let mut expected_scan = CodexScan::default();
+            let mut expected_turns = metadata::Turns::default();
+            expected_turns.feed_line(&record.to_string(), &mut expected_scan);
+            let mut actual_scan = CodexScan::default();
+            let mut actual_turns = metadata::Turns::default();
+            actual_turns.feed_value_with_title(count, title, &mut actual_scan);
+            assert_eq!(actual_scan, expected_scan);
+            assert_eq!(actual_turns.count(), expected_turns.count());
+        }
+        Ok(())
+    }
 }

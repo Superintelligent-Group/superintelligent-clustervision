@@ -292,8 +292,15 @@ impl Turns {
         };
         self.feed_value(value, scan);
     }
-    pub(super) fn feed_value(&mut self, mut value: Value, scan: &mut CodexScan) {
+    pub(super) fn feed_value(&mut self, value: Value, scan: &mut CodexScan) {
         scan.feed(&value);
+        self.feed_counts(value);
+    }
+    pub(super) fn feed_value_with_title(&mut self, value: Value, title: Value, scan: &mut CodexScan) {
+        scan.feed(&title);
+        self.feed_counts(value);
+    }
+    fn feed_counts(&mut self, mut value: Value) {
         reduce_bodies(&mut value);
         if !self.decided {
             self.responses.get_or_insert_with(TurnPass::default);
