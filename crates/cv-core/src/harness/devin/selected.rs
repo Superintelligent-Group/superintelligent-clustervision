@@ -33,6 +33,18 @@ impl Selected {
         if let Some(range) = self.cells.borrow().get(&(rowid, column)).copied() {
             return Ok(range);
         }
+        if column == "chat_message" {
+            // String row extraction rejects BLOB/NULL/scalar SQLite cells before JSON decoding.
+            // Incremental blob handles also accept BLOB, so preserve that typed acceptance here.
+            let kind: String = conn.query_row(
+                "SELECT typeof(chat_message) FROM message_nodes WHERE rowid=?1",
+                [rowid],
+                |row| row.get(0),
+            )?;
+            if kind != "text" {
+                return Err(crate::json::InvalidJson.into());
+            }
+        }
         let range = super::super::store::sqlite::append_cell(conn, "message_nodes", column, rowid, &self.arena)?;
         self.cells.borrow_mut().insert((rowid, column), range);
         Ok(range)

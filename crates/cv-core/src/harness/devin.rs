@@ -212,7 +212,7 @@ impl Adapter for Devin {
             let sink: &mut dyn MessageSink = &mut spawns;
             let conn = open_ro(&r.path)?;
             conn.read(|conn| {
-                let selected = (opts.spans && conn.prepare("SELECT rowid FROM message_nodes LIMIT 0").is_ok())
+                let selected = (opts.spans && super::store::sqlite::incremental_utf8_table(conn, "message_nodes"))
                     .then(|| selected::Selected::new(&r.path, conn.reads()))
                     .transpose()?;
                 stream_conn_selected(conn, r, sink, selected.as_ref())
@@ -1418,6 +1418,56 @@ mod tests {
         )?;
         assert!(large.materialize().is_err());
         let _ = selected;
+        Ok(())
+    }
+
+    #[test]
+    fn lazy_reads_fall_back_for_views_without_incremental_cells() -> Result<()> {
+        let world = cv_testkit::World::in_process("devin-view-fallback");
+        let path = world.base.join("sessions.db");
+        std::fs::copy(fixture(), &path)?;
+        let writer = Connection::open(&path)?;
+        writer.execute_batch(
+            "ALTER TABLE message_nodes RENAME TO stored_nodes; \
+            CREATE VIEW message_nodes AS SELECT * FROM stored_nodes;",
+        )?;
+        let adapter = Devin::with_root(&world.base);
+        for reference in adapter.discover()? {
+            let full = crate::stream::collect_with(&adapter, &reference, &ParseOptions::full())?;
+            let lazy = crate::stream::collect_with(&adapter, &reference, &ParseOptions::lazy_extra())?;
+            assert_eq!(
+                serde_json::to_value(lazy)?,
+                serde_json::to_value(full)?,
+                "{}",
+                reference.id
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn selected_cells_preserve_owned_text_type_and_invalid_utf8_acceptance() -> Result<()> {
+        let world = cv_testkit::World::in_process("devin-selected-cell-types");
+        let path = world.base.join("sessions.db");
+        std::fs::copy(fixture(), &path)?;
+        let writer = Connection::open(&path)?;
+        let adapter = Devin::with_root(&world.base);
+        let reference = SessionRef::new("fixture-beta", Harness::Devin, &path);
+        for cell in [
+            "CAST('{\"role\":\"assistant\",\"content\":\"blob body\"}' AS BLOB)",
+            "CAST(X'FF' AS TEXT)",
+            "'{invalid json'",
+            "'null'",
+        ] {
+            writer.execute_batch(&format!(
+                "UPDATE message_nodes SET chat_message={cell} \
+                WHERE session_id='fixture-beta' AND node_id=3;"
+            ))?;
+            let owned = crate::stream::collect_with(&adapter, &reference, &ParseOptions::full())?;
+            let mut selected = crate::stream::collect_with(&adapter, &reference, &ParseOptions::lazy_extra())?;
+            selected.materialize()?;
+            assert_eq!(serde_json::to_value(selected)?, serde_json::to_value(owned)?, "{cell}");
+        }
         Ok(())
     }
 
