@@ -204,14 +204,43 @@ pub(super) fn stream_for_discovery(path: &Path, sink: &mut dyn MessageSink) -> R
     stream_with_projection(path, sink, true)
 }
 fn stream_with_projection(path: &Path, sink: &mut dyn MessageSink, discovery: bool) -> Result<Session> {
+    replay(
+        path,
+        std::fs::File::open(path)?,
+        session_shell(path, sink),
+        ReplayState::default(),
+        0,
+        sink,
+        discovery,
+    )
+}
+
+pub(super) fn resume(
+    path: &Path,
+    file: std::fs::File,
+    session: Session,
+    state: ReplayState,
+    at: u64,
+    sink: &mut dyn MessageSink,
+) -> Result<Session> {
+    replay(path, file, session, state, at, sink, false)
+}
+
+fn replay(
+    path: &Path,
+    file: std::fs::File,
+    mut session: Session,
+    mut state: ReplayState,
+    at: u64,
+    sink: &mut dyn MessageSink,
+    discovery: bool,
+) -> Result<Session> {
     let source = JsonSource::capture(path)?;
-    let mut session = session_shell(path, sink);
     let parent = session.lineage.parent.is_some();
-    let mut state = ReplayState::default();
     let mut stopped = false;
-    let file = std::fs::File::open(path)?;
+    let prior_skipped = state.skipped;
     let skipped =
-        super::super::store::checked_lines::for_each_record(&file, 0, &source, |view, offset, complete, skipped| {
+        super::super::store::checked_lines::for_each_record(&file, at, &source, |view, offset, complete, skipped| {
             if let Some(view) = view {
                 if view.is_object()? {
                     let mut record = Map::new();
@@ -270,7 +299,7 @@ fn stream_with_projection(path: &Path, sink: &mut dyn MessageSink, discovery: bo
                     }
                 }
             }
-            state.skipped = skipped;
+            state.skipped = prior_skipped + skipped;
             if !stopped && complete && sink.wants_checkpoint(offset) {
                 let mut checkpoint = Checkpoint::new(offset);
                 checkpoint.put(
@@ -287,6 +316,80 @@ fn stream_with_projection(path: &Path, sink: &mut dyn MessageSink, discovery: bo
         })?;
     session.model = state.session_model.take();
     session.title = state.title.take().or(state.first_prompt.take());
-    super::super::note_skipped_lines(&mut session, skipped);
+    super::super::note_skipped_lines(&mut session, prior_skipped + skipped);
     Ok(session)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct Kept {
+        messages: Vec<Message>,
+        checkpoints: Vec<(usize, Checkpoint)>,
+    }
+    impl MessageSink for Kept {
+        fn message(&mut self, message: Message) -> Flow {
+            self.messages.push(message);
+            Flow::Continue
+        }
+        fn wants_checkpoint(&mut self, _: u64) -> bool {
+            true
+        }
+        fn checkpoint(&mut self, checkpoint: &mut Checkpoint) {
+            self.checkpoints.push((self.messages.len(), checkpoint.clone()));
+        }
+    }
+
+    #[test]
+    fn checked_resume_keeps_selected_payloads_and_exact_skipped_checkpoint_state() {
+        let world = cv_testkit::World::in_process("qwen_selected_resume");
+        let home = world.home.join(".qwen");
+        let dir = home.join("projects/hash");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.jsonl");
+        let payload = "雪\n\"\\".repeat(20_000);
+        let body = format!(
+            "bad json\n{}\nbad suffix\n{}\n{}\n{}",
+            serde_json::json!({"type":"user","uuid":"p","sessionId":"session","message":{"parts":[{"text":"start"}]}}),
+            serde_json::json!({"type":"assistant","uuid":"a","model":"model","message":{"parts":[{"text":payload},{"functionCall":{"id":"call","name":"Read","args":{"payload":payload}}}]}}),
+            serde_json::json!({"type":"tool_result","uuid":"r","message":{"parts":[{"functionResponse":{"id":"call","name":"Read","response":{"output":payload}}}]}}),
+            serde_json::json!({"type":"user","uuid":"tail","message":{"parts":[{"text":"partial physical tail"}]}})
+        );
+        std::fs::write(&path, &body).unwrap();
+        let adapter = Qwen::with_home(&home);
+        let r = SessionRef::new("session", Harness::Qwen, &path);
+        let mut full = Kept::default();
+        let shell = adapter.stream(&r, &ParseOptions::full(), &mut full).unwrap();
+        let (count, checkpoint) = full.checkpoints.iter().find(|(count, _)| *count == 1).unwrap();
+        let mut resumed = Kept::default();
+        let suffix = adapter
+            .resume(&r, &ParseOptions::lazy(), &mut resumed, checkpoint)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(suffix).unwrap(),
+            serde_json::to_value(shell).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&resumed.messages).unwrap(),
+            serde_json::to_value(&full.messages[*count..]).unwrap()
+        );
+        assert!(resumed
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .any(|b| matches!(b, Block::Text { text: Text::Source(_) })));
+        assert_eq!(
+            resumed.checkpoints.iter().map(|(_, cp)| cp).collect::<Vec<_>>(),
+            full.checkpoints
+                .iter()
+                .skip_while(|(_, cp)| cp.offset <= checkpoint.offset)
+                .map(|(_, cp)| cp)
+                .collect::<Vec<_>>()
+        );
+        std::fs::write(&path, format!("{body}\n")).unwrap();
+        assert!(serde_json::to_value(&resumed.messages).is_err());
+    }
 }

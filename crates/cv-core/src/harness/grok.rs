@@ -128,7 +128,7 @@ impl Adapter for Grok {
     fn resume(
         &self,
         r: &SessionRef,
-        _opts: &ParseOptions,
+        opts: &ParseOptions,
         sink: &mut dyn MessageSink,
         from: &Checkpoint,
     ) -> Result<Option<Session>> {
@@ -148,6 +148,10 @@ impl Adapter for Grok {
             let (s, enrich) = session_header(r);
             let mut spawns = crate::affordance::AffordanceSink::new(Harness::Grok, sink);
             spawns.meta(&s);
+            let source = opts
+                .spans
+                .then(|| crate::json::JsonSource::capture(&wire))
+                .transpose()?;
             Ok(Some(stream_history_at(
                 file,
                 &wire,
@@ -156,7 +160,7 @@ impl Adapter for Grok {
                 &enrich,
                 state.skipped,
                 &mut spawns,
-                None,
+                source.as_ref(),
             )?))
         })
     }
@@ -905,6 +909,54 @@ mod tests {
         super::super::note_skipped_lines(&mut s, skipped);
         s.messages = kept.messages;
         s
+    }
+
+    #[test]
+    fn checked_resume_retains_reasoning_arguments_results_and_source_identity() {
+        let world = cv_testkit::World::in_process("grok_selected_resume");
+        let dir = world.home.join(".grok/session");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("chat_history.jsonl");
+        let payload = "雪\n\"\\".repeat(20_000);
+        let body = format!(
+            "{}\nbad suffix\n{}\n{}\n{}\n",
+            serde_json::json!({"type":"user","content":"start"}),
+            serde_json::json!({"type":"reasoning","summary":[{"text":payload}],"encrypted_content":"opaque"}),
+            serde_json::json!({"type":"assistant","content":payload,"tool_calls":[{"id":"call","name":"Read","arguments":serde_json::json!({"payload":payload}).to_string()}]}),
+            serde_json::json!({"type":"tool_result","tool_call_id":"call","content":payload})
+        );
+        fs::write(&path, &body).unwrap();
+        let adapter = Grok::with_home(&world.home.join(".grok"));
+        let r = SessionRef::new("session", Harness::Grok, &dir);
+        let mut full = ResumeKeep::default();
+        let shell = adapter.stream(&r, &ParseOptions::full(), &mut full).unwrap();
+        let (count, checkpoint) = &full.checkpoints[0];
+        let mut resumed = ResumeKeep::default();
+        let suffix = adapter
+            .resume(&r, &ParseOptions::lazy(), &mut resumed, checkpoint)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(suffix).unwrap(),
+            serde_json::to_value(shell).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&resumed.messages).unwrap(),
+            serde_json::to_value(&full.messages[*count..]).unwrap()
+        );
+        assert!(resumed.messages.iter().flat_map(|m| &m.content).any(|b| matches!(
+            b,
+            Block::Thinking {
+                text: Text::Source(_),
+                ..
+            }
+        )));
+        assert_eq!(
+            resumed.checkpoints.iter().map(|(_, cp)| cp).collect::<Vec<_>>(),
+            full.checkpoints.iter().skip(1).map(|(_, cp)| cp).collect::<Vec<_>>()
+        );
+        fs::write(&path, format!("{body}\n")).unwrap();
+        assert!(serde_json::to_value(&resumed.messages).is_err());
     }
 
     #[test]

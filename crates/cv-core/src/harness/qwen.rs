@@ -130,7 +130,7 @@ impl Adapter for Qwen {
     fn resume(
         &self,
         r: &SessionRef,
-        _opts: &ParseOptions,
+        opts: &ParseOptions,
         sink: &mut dyn MessageSink,
         from: &Checkpoint,
     ) -> Result<Option<Session>> {
@@ -144,6 +144,9 @@ impl Adapter for Qwen {
             let mut file = std::fs::File::open(&r.path).with_context(|| format!("opening {}", r.path.display()))?;
             if from.offset > file.metadata()?.len() {
                 return Ok(None);
+            }
+            if opts.spans {
+                return selected::resume(&r.path, file, state.session, state.replay, from.offset, sink).map(Some);
             }
             file.seek(SeekFrom::Start(from.offset))
                 .with_context(|| format!("seeking {}", r.path.display()))?;
