@@ -1489,6 +1489,15 @@ fn serve_carries_the_inbox_and_guards_its_writes() {
     assert_eq!(raw_status(&raw), 403, "{raw}");
     let raw = raw_post(port, &path, body, &[("Content-Type", "application/json-invalid")]);
     assert_eq!(raw_status(&raw), 403, "lookalike MIME type was accepted: {raw}");
+    // A valid JSON prefix cannot hide an unfinished declared body.
+    let mut short = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    short.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    write!(short, "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: 4096\r\nConnection: close\r\n\r\n{body}").unwrap();
+    short.shutdown(std::net::Shutdown::Write).unwrap();
+    let mut raw = String::new();
+    short.read_to_string(&mut raw).unwrap();
+    assert_eq!(raw_status(&raw), 400, "unfinished body was accepted: {raw}");
+    assert_eq!(raw_json(&raw)["error"], "unreadable body");
     let mut oversized = body.to_string();
     oversized.push_str(&" ".repeat((1 << 20) + 1 - oversized.len()));
     let raw = raw_post(port, &path, &oversized, &[("Content-Type", "application/json")]);

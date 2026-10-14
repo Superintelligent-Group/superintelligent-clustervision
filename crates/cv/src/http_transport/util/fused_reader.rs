@@ -21,6 +21,9 @@ impl<R: Read> FusedReader<R> {
 
 impl<R: Read> Read for FusedReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
         match &mut self.inner {
             Some(r) => {
                 let l = r.read(buf)?;
@@ -34,6 +37,9 @@ impl<R: Read> Read for FusedReader<R> {
     }
 
     fn read_vectored(&mut self, bufs: &mut [IoSliceMut<'_>]) -> IoResult<usize> {
+        if bufs.iter().all(|buf| buf.is_empty()) {
+            return Ok(0);
+        }
         match &mut self.inner {
             Some(r) => {
                 let l = r.read_vectored(bufs)?;
@@ -44,5 +50,19 @@ impl<R: Read> Read for FusedReader<R> {
             }
             None => Ok(0),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn empty_reads_do_not_discard_the_request_body() {
+        let mut reader = FusedReader::new(std::io::Cursor::new(b"body"));
+        assert_eq!(reader.read(&mut []).unwrap(), 0);
+        assert_eq!(reader.read_vectored(&mut [IoSliceMut::new(&mut [])]).unwrap(), 0);
+        let mut body = String::new();
+        reader.read_to_string(&mut body).unwrap();
+        assert_eq!(body, "body");
     }
 }
