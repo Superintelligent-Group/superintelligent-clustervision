@@ -168,7 +168,6 @@ impl Adapter for Qwen {
 /// (`Storage.getGlobalTempDir()/getProjectHash(cwd)`, the sha256 of the cwd), so sub-agent
 /// transcripts, which share their parent's window, take none.
 fn scheduled_tasks(r: &SessionRef) -> Vec<crate::affordance::Affordance> {
-    use crate::affordance::{Affordance, Kind};
     let chats = r.path.parent();
     if chats.and_then(Path::file_name).is_none_or(|n| n != "chats") {
         return Vec::new();
@@ -187,44 +186,116 @@ fn scheduled_tasks(r: &SessionRef) -> Vec<crate::affordance::Affordance> {
         .join("tmp")
         .join(crate::digest::sha256_hex(cwd.as_bytes()))
         .join("scheduled_tasks.json");
-    let Some(Value::Array(tasks)) = std::fs::read_to_string(&file)
-        .ok()
-        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-    else {
+    let mut baseline = crate::source::ReadSet::default();
+    baseline.record(&file);
+    // The inventory's complete read set is this same file, already captured before the
+    // affordance pass by source::Probe::dependencies(Qwen). Cache hits require that exact
+    // baseline; the enclosing publication receipt revalidates it, so no dynamic guard is lost.
+    let Ok((inventory, _reads)) = crate::source::inventory("qwen-scheduled-tasks", &file, &baseline, || {
+        let inventory = std::fs::read_to_string(&file)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .map(TaskInventory::from_value)
+            .unwrap_or_default();
+        let retained = inventory.retained_bytes();
+        Ok((inventory, baseline.clone(), retained))
+    }) else {
         return Vec::new();
     };
-    let window = r.created_at.zip(r.updated_at);
-    let ours = |task: &Value| match task.get("sessionId").and_then(Value::as_str) {
-        Some(owner) => owner == r.id,
-        None => {
-            let created = task
-                .get("createdAt")
-                .and_then(Value::as_i64)
-                .and_then(chrono::DateTime::from_timestamp_millis);
-            matches!((created, window), (Some(c), Some((from, to))) if from <= c && c <= to)
-        }
-    };
-    tasks
-        .iter()
-        .filter(|t| ours(t))
-        .map(|t| {
-            let s = |k: &str| t.get(k).and_then(Value::as_str).unwrap_or("");
-            let mut summary = [s("id"), s("cron"), s("prompt")]
+    inventory.for_session(r)
+}
+
+#[derive(Default)]
+struct TaskInventory {
+    rows: Vec<crate::affordance::Affordance>,
+    owners: std::collections::HashMap<String, Vec<usize>>,
+    unowned: std::collections::BTreeMap<chrono::DateTime<chrono::Utc>, Vec<usize>>,
+}
+impl TaskInventory {
+    fn from_value(value: Value) -> Self {
+        use crate::affordance::{Affordance, Kind};
+        let Value::Array(tasks) = value else {
+            return Self::default();
+        };
+        let mut inventory = Self::default();
+        for task in tasks {
+            let index = inventory.rows.len();
+            if let Some(owner) = task.get("sessionId").and_then(Value::as_str) {
+                inventory.owners.entry(owner.to_string()).or_default().push(index);
+            } else {
+                let Some(created) = task
+                    .get("createdAt")
+                    .and_then(Value::as_i64)
+                    .and_then(chrono::DateTime::from_timestamp_millis)
+                else {
+                    continue;
+                };
+                inventory.unowned.entry(created).or_default().push(index);
+            }
+            let text = |key: &str| task.get(key).and_then(Value::as_str).unwrap_or("");
+            let mut summary = [text("id"), text("cron"), text("prompt")]
                 .into_iter()
-                .filter(|p| !p.is_empty())
+                .filter(|part| !part.is_empty())
                 .collect::<Vec<_>>()
                 .join(" · ");
-            if t.get("recurring").and_then(Value::as_bool) == Some(true) {
+            if task.get("recurring").and_then(Value::as_bool) == Some(true) {
                 summary.push_str(" · recurring");
             }
-            Affordance::store(
+            inventory.rows.push(Affordance::store(
                 Kind::Schedule,
                 "scheduled_tasks.json",
                 truncate(&summary, 120),
                 Vec::new(),
-            )
-        })
-        .collect()
+            ));
+        }
+        inventory
+    }
+    fn retained_bytes(&self) -> usize {
+        let rows = self.rows.iter().fold(
+            self.rows
+                .capacity()
+                .saturating_mul(std::mem::size_of::<crate::affordance::Affordance>()),
+            |bytes, row| {
+                bytes
+                    .saturating_add(row.summary.capacity())
+                    .saturating_add(row.tool.as_ref().map_or(0, String::capacity))
+            },
+        );
+        let owners = self.owners.iter().fold(
+            self.owners
+                .capacity()
+                .saturating_mul(std::mem::size_of::<(String, Vec<usize>)>() + 16),
+            |bytes, (owner, rows)| {
+                bytes
+                    .saturating_add(owner.capacity())
+                    .saturating_add(rows.capacity().saturating_mul(std::mem::size_of::<usize>()))
+            },
+        );
+        // Conservatively include B-tree node slack/link storage, not just populated indices.
+        let unowned = self.unowned.values().fold(
+            1024usize.saturating_add(self.unowned.len().saturating_mul(256)),
+            |bytes, rows| bytes.saturating_add(rows.capacity().saturating_mul(std::mem::size_of::<usize>())),
+        );
+        rows.saturating_add(owners)
+            .saturating_add(unowned)
+            .saturating_add(std::mem::size_of::<Self>())
+    }
+    fn for_session(&self, session: &SessionRef) -> Vec<crate::affordance::Affordance> {
+        let mut selected = self.owners.get(&session.id).cloned().unwrap_or_default();
+        if let Some((from, to)) = session
+            .created_at
+            .zip(session.updated_at)
+            .filter(|(from, to)| from <= to)
+        {
+            for rows in self.unowned.range(from..=to).map(|(_, rows)| rows) {
+                selected.extend_from_slice(rows);
+            }
+        }
+        // Explicit owners and overlapping time windows select disjoint subsets. Restore the
+        // original file order after the time index's chronological lookup.
+        selected.sort_unstable();
+        selected.into_iter().map(|index| self.rows[index].clone()).collect()
+    }
 }
 
 /// Whether a file under `~/.qwen/tmp` is one of the gemini-cli shapes: `logs.json`, a chat recording
@@ -988,6 +1059,89 @@ mod tests {
                 serde_json::to_value(scan_session_jsonl(&reference.path))?,
                 serde_json::to_value(oracle(&reference.path)?)?
             );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn scoped_task_inventory_revalidates_the_enclosing_dependency_file() -> Result<()> {
+        let world = cv_testkit::World::in_process("qwen-task-inventory-source-guard");
+        let home = world.home.join(".qwen");
+        let path = home.join("projects/hash/chats/session.jsonl");
+        fs::create_dir_all(path.parent().unwrap())?;
+        fs::write(&path, "{}\n")?;
+        let mut reference = SessionRef::new("session", Harness::Qwen, &path);
+        reference.cwd = Some(PathBuf::from("/project"));
+        let file = home
+            .join("tmp")
+            .join(crate::digest::sha256_hex(b"/project"))
+            .join("scheduled_tasks.json");
+        fs::create_dir_all(file.parent().unwrap())?;
+        fs::write(
+            &file,
+            serde_json::to_vec(&serde_json::json!([{"id":"first","sessionId":"session"}]))?,
+        )?;
+        let _scope = crate::source::read_scope();
+        let before = crate::source::Probe::default().snapshot(&reference);
+        assert_eq!(scheduled_tasks(&reference)[0].summary, "first");
+        assert_eq!(scheduled_tasks(&reference)[0].summary, "first");
+        fs::write(
+            &file,
+            serde_json::to_vec(&serde_json::json!([{"id":"changed schedule","sessionId":"session"}]))?,
+        )?;
+        assert!(!crate::source::unchanged(&reference, &before));
+        assert_eq!(scheduled_tasks(&reference)[0].summary, "changed schedule");
+        fs::remove_file(&file)?;
+        assert!(scheduled_tasks(&reference).is_empty());
+        fs::write(
+            &file,
+            serde_json::to_vec(&serde_json::json!([{"id":"recreated","sessionId":"session"}]))?,
+        )?;
+        assert_eq!(scheduled_tasks(&reference)[0].summary, "recreated");
+        Ok(())
+    }
+
+    #[test]
+    fn indexed_task_inventory_matches_file_order_owner_and_precise_windows() -> Result<()> {
+        use crate::affordance::{Affordance, Kind};
+        let tasks = (0..4096)
+            .map(|i| {
+                serde_json::json!({
+                    "id":format!("task-{i}"), "cron":"* * * * *", "prompt":"prompt λ",
+                    "sessionId":if i % 3 == 0 { Value::Null } else { Value::String(format!("owner-{}", i % 32)) },
+                    "createdAt":(4096-i)%97, "recurring": i%7 == 0,
+                })
+            })
+            .collect::<Vec<_>>();
+        let inventory = TaskInventory::from_value(Value::Array(tasks.clone()));
+        for owner in ["owner-0", "owner-17", "missing"] {
+            for window in [None, Some((0, 96)), Some((13, 49)), Some((49, 13))] {
+                let mut reference = SessionRef::new(owner, Harness::Qwen, "irrelevant");
+                if let Some((from, to)) = window {
+                    // Fractional milliseconds must not accidentally include the lower endpoint.
+                    reference.created_at =
+                        chrono::DateTime::from_timestamp_millis(from).map(|t| t + chrono::Duration::microseconds(500));
+                    reference.updated_at = chrono::DateTime::from_timestamp_millis(to);
+                }
+                // Frozen old filtering/label recipe, deliberately retaining the physical task
+                // sequence instead of consulting either new owner/time index.
+                let expected = tasks.iter().filter(|task| match task.get("sessionId").and_then(Value::as_str) {
+                    Some(owner) => owner == reference.id,
+                    None => matches!((task.get("createdAt").and_then(Value::as_i64).and_then(chrono::DateTime::from_timestamp_millis), reference.created_at.zip(reference.updated_at)),
+                        (Some(created),Some((from,to))) if from <= created && created <= to),
+                }).map(|task| {
+                    let text = |key: &str| task.get(key).and_then(Value::as_str).unwrap_or("");
+                    let mut summary = [text("id"),text("cron"),text("prompt")].into_iter()
+                        .filter(|text| !text.is_empty()).collect::<Vec<_>>().join(" · ");
+                    if task.get("recurring").and_then(Value::as_bool)==Some(true) { summary.push_str(" · recurring"); }
+                    Affordance::store(Kind::Schedule, "scheduled_tasks.json", truncate(&summary,120),Vec::new())
+                }).collect::<Vec<_>>();
+                assert_eq!(
+                    serde_json::to_value(inventory.for_session(&reference))?,
+                    serde_json::to_value(expected)?,
+                    "{owner}/{window:?}"
+                );
+            }
         }
         Ok(())
     }
