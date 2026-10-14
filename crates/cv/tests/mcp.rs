@@ -292,6 +292,25 @@ fn tool_calls_against_fixture_corpus() {
 }
 
 #[test]
+fn await_omen_timeout_caps_the_poll_sleep() {
+    let mut s = Server::spawn("poll-deadline");
+    // This would sleep for an hour before the repair. The protocol reader's ordinary
+    // response deadline verifies completion without a throughput/timing benchmark.
+    let (text, is_error) = s.call_tool(
+        1,
+        "await_omen",
+        json!({
+            "regex":"a message that never arrives", "timeout_secs":1, "interval_secs":3600,
+        }),
+    );
+    assert!(!is_error, "{text}");
+    let result: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(result["matched"], false);
+    assert_eq!(result["timed_out"], true);
+    assert_eq!(s.request(2, "ping", json!({}))["id"], 2);
+}
+
+#[test]
 fn invalid_envelopes_and_tool_parameters_do_not_execute() {
     let mut s = Server::spawn("invalid-envelopes");
     for request in [

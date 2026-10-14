@@ -707,12 +707,13 @@ fn await_omen(args: &Value, cancelled: &AtomicBool) -> anyhow::Result<String> {
                 "waited_secs": start.elapsed().as_secs(),
             }))?);
         }
+        let sleep_for = interval.min(timeout.saturating_sub(start.elapsed()));
         let sleep_start = Instant::now();
-        while sleep_start.elapsed() < interval {
+        while sleep_start.elapsed() < sleep_for {
             if cancelled.load(Ordering::Relaxed) {
                 anyhow::bail!("MCP client disconnected");
             }
-            std::thread::sleep((interval - sleep_start.elapsed().min(interval)).min(Duration::from_millis(100)));
+            std::thread::sleep((sleep_for - sleep_start.elapsed().min(sleep_for)).min(Duration::from_millis(100)));
         }
     }
 }
