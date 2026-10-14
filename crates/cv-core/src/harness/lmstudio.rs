@@ -76,7 +76,8 @@ impl Adapter for LmStudio {
     fn roots(&self) -> Vec<PathBuf> {
         // Detect the install even if no conversations dir exists yet.
         self.root
-            .clone()
+            .as_ref()
+            .map(|conversations| conversations.parent().unwrap_or(conversations).to_path_buf())
             .or_else(|| dirs::home_dir().map(|h| h.join(".lmstudio")).filter(|p| p.exists()))
             .into_iter()
             .collect()
@@ -559,7 +560,8 @@ fn projected_harmony(view: JsonView<'_>) -> Result<bool> {
 // ------------------------------------------------------------------------------------------------
 
 /// Emit `session` into LM Studio's native format: a single
-/// `<out_dir>/conversations/<ms-epoch>.conversation.json` file. The filename stem is the chat id
+/// `<out_dir>/conversations/<ms-epoch>.conversation.json` file (or directly under an explicit
+/// `conversations/` output directory). The filename stem is the chat id
 /// (also `createdAt`, ms-epoch), exactly as the parser expects.
 ///
 /// This is the inverse of [`parse`]. Each IR [`Message`] becomes one `messages[]` turn wrapped in

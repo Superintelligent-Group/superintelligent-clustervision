@@ -206,9 +206,12 @@ pub(super) fn emit(session: &Session, out_dir: &Path, opts: &crate::emit::EmitOp
         .new_id
         .clone()
         .unwrap_or_else(|| created.timestamp_millis().to_string());
-    let file_path = out_dir
-        .join("conversations")
-        .join(format!("{new_id}.conversation.json"));
+    let conversations = if out_dir.file_name().is_some_and(|name| name == "conversations") {
+        out_dir.to_path_buf()
+    } else {
+        out_dir.join("conversations")
+    };
+    let file_path = conversations.join(format!("{new_id}.conversation.json"));
     let title = super::super::wire::write::fallback_title(session, Harness::LmStudio, opts.thinking, &resolver)?
         .unwrap_or_else(|| "Untitled".into());
     let mut stage = BufWriter::with_capacity(64 * 1024, ByteStage::new());
@@ -358,6 +361,42 @@ fn legacy_emit(session: &Session, out_dir: &Path, opts: &crate::emit::EmitOption
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn primary_adapter_root_and_explicit_conversations_emit_into_discoverable_store() -> Result<()> {
+        let world = cv_testkit::World::in_process("lmstudio_root_composition");
+        let home = world.home.join(".lmstudio");
+        let conversations = home.join("conversations");
+        fs::create_dir_all(&conversations)?;
+        let adapter = LmStudio::with_root(&conversations);
+        assert_eq!(adapter.roots(), vec![home]);
+        let mut session = Session::new("source", Harness::LmStudio);
+        let mut prompt = Message::new(Role::User);
+        prompt.content.push(Block::Text {
+            text: "visible in the native store".into(),
+        });
+        session.messages.push(prompt);
+        for (root, id) in [
+            (adapter.roots()[0].clone(), "primary"),
+            (conversations.clone(), "explicit"),
+        ] {
+            let result = super::super::emit(
+                &session,
+                &root,
+                &crate::emit::EmitOptions {
+                    new_id: Some(id.into()),
+                    ..Default::default()
+                },
+            )?;
+            assert_eq!(result.path, conversations.join(format!("{id}.conversation.json")));
+            assert!(adapter
+                .discover()?
+                .iter()
+                .any(|reference| reference.id == id && reference.path == result.path));
+        }
+        assert!(!conversations.join("conversations").exists());
+        Ok(())
+    }
+
     #[test]
     fn complete_native_versions_roundtrip_selected_indices_roles_and_models() -> Result<()> {
         let world = cv_testkit::World::in_process("lmstudio_versions_roundtrip");
