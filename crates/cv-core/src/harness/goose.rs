@@ -387,7 +387,9 @@ fn fork_source(conn: &Connection, id: &str, created_at: Option<DateTime<Utc>>) -
         )
         .ok()?;
     let holders = stmt
-        .query_map([first.as_str(), id], |row| Ok((row.get(0)?, row.get(1)?)))
+        .query_map([first.as_str(), id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })
         .ok()?
         .flatten();
     holders
