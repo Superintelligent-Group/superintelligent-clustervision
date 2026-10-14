@@ -163,6 +163,14 @@ pub struct ReadScope {
     _sqlite: crate::harness::store::sqlite::ReadScope,
 }
 
+impl ReadScope {
+    /// Run a worker under this operation's inventory owner, restoring its prior thread context
+    /// even on panic. The guard remains owned by the caller for the complete operation.
+    pub fn run<T>(&self, operation: impl FnOnce() -> T) -> T {
+        self._inventory.run(operation)
+    }
+}
+
 pub fn read_scope() -> ReadScope {
     ReadScope {
         _inventory: scope::Context::operation(),

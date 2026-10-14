@@ -132,18 +132,22 @@ fn discover_all_with_catalog(mut catalog: Option<catalog::Reader>) -> Vec<Sessio
         }
     }
 
+    let inventory = source::inventory_context();
+    let run_job = |(a, known): (Box<dyn Adapter>, Vec<SessionRef>)| {
+        let discover = || discovery.run(|| run(a.as_ref(), known));
+        match &inventory {
+            Some(context) => context.run(discover),
+            None => discover(),
+        }
+    };
+
     #[cfg(feature = "parallel")]
     let results: Vec<_> = {
         use rayon::prelude::*;
-        jobs.into_par_iter()
-            .map(|(a, known)| discovery.run(|| run(a.as_ref(), known)))
-            .collect()
+        jobs.into_par_iter().map(run_job).collect()
     };
     #[cfg(not(feature = "parallel"))]
-    let results: Vec<_> = jobs
-        .into_iter()
-        .map(|(a, known)| discovery.run(|| run(a.as_ref(), known)))
-        .collect();
+    let results: Vec<_> = jobs.into_iter().map(run_job).collect();
 
     // Persist freshly-scanned metadata (pruning vanished files) so the next discovery reuses it.
     if catalog.is_none() {
@@ -337,6 +341,11 @@ where
     R: Send,
     F: Fn(T) -> Vec<R> + Sync + Send,
 {
+    let inventory = source::inventory_context();
+    let f = |item| match &inventory {
+        Some(context) => context.run(|| f(item)),
+        None => f(item),
+    };
     #[cfg(feature = "parallel")]
     {
         use rayon::prelude::*;

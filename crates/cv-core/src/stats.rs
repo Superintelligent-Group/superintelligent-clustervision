@@ -417,37 +417,36 @@ fn parse_chunk(
     refs: &[SessionRef],
     #[cfg(feature = "sqlite")] cache: Option<&usage_cache::Cache>,
 ) -> Vec<Result<Option<UsageBatch>>> {
+    let inventory = crate::source::inventory_context();
+    let parse = |r: &SessionRef| {
+        let load = || {
+            usage_hits(
+                r,
+                #[cfg(feature = "sqlite")]
+                cache,
+            )
+        };
+        match &inventory {
+            Some(context) => context.run(load),
+            None => load(),
+        }
+    };
     #[cfg(feature = "parallel")]
     {
         use rayon::prelude::*;
         // Indexed collection preserves input order even when workers finish out of order.
-        refs.par_iter()
-            .map(|r| {
-                usage_hits(
-                    r,
-                    #[cfg(feature = "sqlite")]
-                    cache,
-                )
-            })
-            .collect()
+        refs.par_iter().map(parse).collect()
     }
     #[cfg(not(feature = "parallel"))]
     {
-        refs.iter()
-            .map(|r| {
-                usage_hits(
-                    r,
-                    #[cfg(feature = "sqlite")]
-                    cache,
-                )
-            })
-            .collect()
+        refs.iter().map(parse).collect()
     }
 }
 
 impl TokenStats {
     /// Ordinary source parse failures are counted; temporary storage failures are returned.
     pub fn compute(refs: &[SessionRef]) -> Result<TokenStats> {
+        let _sources = crate::source::read_scope();
         let result = Self::compute_pass(refs, true);
         #[cfg(feature = "sqlite")]
         if result

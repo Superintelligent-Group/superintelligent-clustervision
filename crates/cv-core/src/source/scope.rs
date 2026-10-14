@@ -230,6 +230,45 @@ mod tests {
     }
 
     #[test]
+    fn public_scope_run_shares_first_load_and_restores_worker_context() {
+        let world = cv_testkit::World::in_process("source-inventory-explicit-workers");
+        let path = world.base.join("source");
+        std::fs::write(&path, "source").unwrap();
+        let reads = baseline(&path);
+        let parent = super::super::read_scope();
+        let calls = AtomicUsize::new(0);
+        std::thread::scope(|threads| {
+            for n in 0..4 {
+                let parent = &parent;
+                let calls = &calls;
+                let reads = &reads;
+                let path = &path;
+                threads.spawn(move || {
+                    let _prior = super::super::read_scope();
+                    inventory("explicit", path, reads, || Ok((n + 100usize, reads.clone(), 8))).unwrap();
+                    let value = parent
+                        .run(|| {
+                            inventory("explicit", path, reads, || {
+                                calls.fetch_add(1, Ordering::SeqCst);
+                                Ok((42usize, reads.clone(), 8))
+                            })
+                        })
+                        .unwrap()
+                        .0;
+                    assert_eq!(*value, 42);
+                    assert_eq!(
+                        *inventory::<usize>("explicit", path, reads, || panic!("worker context was not restored"))
+                            .unwrap()
+                            .0,
+                        n + 100
+                    );
+                });
+            }
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn parallel_first_demand_singleflights_and_separate_operations_stay_isolated() {
         let world = cv_testkit::World::in_process("source-inventory-singleflight");
         let path = world.base.join("source");
