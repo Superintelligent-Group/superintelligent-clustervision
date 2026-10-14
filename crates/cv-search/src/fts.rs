@@ -2434,6 +2434,30 @@ pub fn text_search_indexed_filtered(
     ranked_search(&index, &f, &searcher, query, limit, filter, decisions)
 }
 
+// Production documents begin with id/kind. Inspect only that header before deciding
+// which stored document supplies display metadata; compatible reordered documents fall back.
+struct StoredHead {
+    fields: [Option<(Field, tantivy::schema::OwnedValue)>; 2],
+}
+impl tantivy::schema::document::DocumentDeserialize for StoredHead {
+    fn deserialize<'de, D: tantivy::schema::document::DocumentDeserializer<'de>>(
+        mut deserializer: D,
+    ) -> std::result::Result<Self, tantivy::schema::document::DeserializeError> {
+        Ok(Self {
+            fields: [deserializer.next_field()?, deserializer.next_field()?],
+        })
+    }
+}
+impl StoredHead {
+    fn kind(&self, kind: Field) -> Option<bool> {
+        self.fields
+            .iter()
+            .flatten()
+            .find(|(field, _)| *field == kind)
+            .map(|(_, value)| value.as_str() == Some(KIND_META))
+    }
+}
+
 fn ranked_search(
     index: &Index,
     f: &Fields,
@@ -2469,27 +2493,48 @@ fn ranked_search(
     let mut hits = Vec::with_capacity(ranked.len());
     for candidate in ranked {
         let (score, id) = (candidate.score, candidate.id);
-        #[cfg(test)]
-        decisions
-            .winner_body_reads
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let hit_doc: TantivyDocument = searcher.doc(candidate.addr).context("loading stored doc")?;
-        // What describes the session — its current label, dates, preview — is on its meta doc; a
-        // body doc carries the label it was written under.
-        let is_meta = hit_doc.get_first(f.kind).and_then(|v| v.as_str()) == Some(KIND_META);
+        let head: StoredHead = searcher.doc(candidate.addr).context("loading stored doc header")?;
+        let load_candidate = || -> Result<TantivyDocument> {
+            #[cfg(test)]
+            decisions
+                .winner_body_reads
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            searcher.doc(candidate.addr).context("loading stored doc")
+        };
+        // Preserve candidate-meta identity (including compatible duplicate metadata rows).
+        // A body winner needs its current meta document; only legacy/missing/unreadable
+        // metadata or a reordered header demands the complete candidate document.
+        let (is_meta, candidate_doc) = match head.kind(f.kind) {
+            Some(is_meta) => (is_meta, None),
+            None => {
+                let doc = load_candidate()?;
+                let is_meta = doc.get_first(f.kind).and_then(|v| v.as_str()) == Some(KIND_META);
+                (is_meta, Some(doc))
+            }
+        };
         let doc = if is_meta {
-            hit_doc
+            match candidate_doc {
+                Some(doc) => doc,
+                None => load_candidate()?,
+            }
         } else {
-            match decisions.cached(&id) {
+            let metadata = match decisions.cached(&id) {
                 Some(MetadataDecision::Present { address, .. }) => {
                     #[cfg(test)]
                     decisions
                         .winner_metadata_reads
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    searcher.doc(address).unwrap_or(hit_doc)
+                    searcher.doc(address).ok()
                 }
-                Some(MetadataDecision::Missing) => hit_doc,
-                _ => meta_doc(searcher, f, &id).unwrap_or(hit_doc),
+                Some(MetadataDecision::Missing) => None,
+                _ => meta_doc(searcher, f, &id),
+            };
+            match metadata {
+                Some(doc) => doc,
+                None => match candidate_doc {
+                    Some(doc) => doc,
+                    None => load_candidate()?,
+                },
             }
         };
         let get_str =
@@ -3667,6 +3712,47 @@ mod tests {
     }
 
     #[test]
+    fn winner_header_projection_preserves_meta_and_legacy_fallback() {
+        use std::sync::{atomic::AtomicUsize, Arc};
+        let _home = IsolatedHome::new();
+        let dir = tmpdir();
+        let (index, f) = open_or_create(&dir).unwrap();
+        let mut writer = open_writer(&index, 15_000_000).unwrap();
+        for doc in [
+            tantivy::doc!(f.id => "current", f.kind => KIND_BODY, f.body => "needle", f.preview => "discarded".repeat(131072)),
+            tantivy::doc!(f.id => "current", f.kind => KIND_META, f.preview => "current preview", f.title => "current title"),
+            // Compatible documents place kind after the inspected header or omit it entirely.
+            tantivy::doc!(f.title => "reordered", f.id => "legacy", f.kind => KIND_BODY, f.body => "needle", f.preview => "legacy preview"),
+            tantivy::doc!(f.id => "missing-kind", f.title => "old", f.body => "needle", f.preview => "old preview"),
+            // Candidate metadata rows must not be replaced by another same-id metadata row.
+            tantivy::doc!(f.id => "duplicate-meta", f.kind => KIND_META, f.title => "needle", f.preview => "matching meta"),
+            tantivy::doc!(f.id => "duplicate-meta", f.kind => KIND_META, f.title => "unrelated", f.preview => "other meta"),
+        ] {
+            writer.add_document(doc).unwrap();
+        }
+        writer.commit().unwrap();
+        drop(writer);
+        let searcher = index.reader().unwrap().searcher();
+        let filter = crate::SearchFilter::default();
+        let expected = legacy_ranked_search(&dir, "needle", 10, filter, Arc::new(AtomicUsize::new(0))).unwrap();
+        let decisions = Arc::new(MetadataDecisions::new(&searcher, &f, filter));
+        let actual = ranked_search(&index, &f, &searcher, "needle", 10, filter, decisions).unwrap();
+        assert_eq!(
+            serde_json::to_value(&actual).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+        assert_eq!(
+            actual.iter().find(|hit| hit.id == "current").unwrap().snippet,
+            "current preview"
+        );
+        assert_eq!(
+            actual.iter().find(|hit| hit.id == "duplicate-meta").unwrap().snippet,
+            "matching meta"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn ranked_metadata_work_is_shared_across_many_segments() {
         use std::sync::{
             atomic::{AtomicUsize, Ordering},
@@ -3723,7 +3809,7 @@ mod tests {
         let reads = decisions.stored_reads.load(Ordering::Relaxed);
         assert_eq!(queries, 129);
         assert_eq!(reads, 128);
-        assert_eq!(decisions.winner_body_reads.load(Ordering::Relaxed), 5);
+        assert_eq!(decisions.winner_body_reads.load(Ordering::Relaxed), 1);
         assert_eq!(decisions.winner_metadata_reads.load(Ordering::Relaxed), 4);
         assert_eq!(decisions.cache.lock().unwrap().len(), 129);
         assert_eq!(legacy_queries.load(Ordering::Relaxed), 16 * 129 + 5);
