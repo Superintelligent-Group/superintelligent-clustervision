@@ -28,9 +28,9 @@ branch/history navigation, required SQLite row allocation, strict Serde string s
 requested rich output and checked stage I/O remain real costs. No universal speedup or complete
 elimination of waste is claimed.
 
-LM Studio variants, OpenClaw index reuse and deferral matching are integrated. The final bounded
-feature follow-up is faithful Continue usage/cost export, where the native reader already supports
-those fields. Combined validation remains to finish and record here. The earlier broad reader
+LM Studio variants, OpenClaw index reuse, deferral matching and Continue usage/cost export are
+integrated. Continue reports unsupported cache-creation counts and rejects overflowing conversions
+before publication. Implementation is settled; combined validation remains to finish and record here. The earlier broad reader
 inventories remain applicable; this pass does not claim a fresh line-by-line audit of every adapter or a new hardware-counter campaign.
 The native Zed capture gap and live sharpened-child experiment below remain open.
 

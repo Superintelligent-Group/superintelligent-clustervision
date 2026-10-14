@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Continue exports preserve native usage and cost, report unsupported cache-creation counts, and reject overflowing conversions before publishing.
+
 - LM Studio complete rehomes preserve selected and alternate native versions, sparse indices, roles and distinct alternate models.
 - OpenClaw discovery reuses each directory’s session index and projects transcript metadata without owning unrelated payloads.
 - Deferral matching reuses task word sets within each command and constructs shared-word output only for the winning match.
