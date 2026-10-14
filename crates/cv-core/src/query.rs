@@ -548,9 +548,13 @@ fn eval_term(t: &Term, f: &Facts) -> anyhow::Result<Tri> {
             Val::Strs(names) => Tri::of(names.iter().any(|n| Harness::parse(n) == Some(f.r.harness))),
             _ => Tri::False,
         },
-        FieldId::Cwd => str_contains_any(&t.val, f.r.cwd.as_ref().map(|p| p.to_string_lossy().to_lowercase())),
+        FieldId::Cwd => str_match(
+            t.op,
+            &t.val,
+            f.r.cwd.as_ref().map(|p| p.to_string_lossy().to_lowercase()),
+        ),
         FieldId::Title => str_match(t.op, &t.val, f.r.title.as_deref().map(str::to_lowercase)),
-        FieldId::Id => str_contains_any(&t.val, Some(f.r.id.to_lowercase())),
+        FieldId::Id => str_match(t.op, &t.val, Some(f.r.id.to_lowercase())),
         FieldId::Msgs => num_match(t.op, &t.val, f.r.message_count as u64),
         FieldId::Created => date_match(t.op, &t.val, f.r.created_at.or(f.r.updated_at)),
         FieldId::Updated => date_match(t.op, &t.val, f.r.updated_at.or(f.r.created_at)),
@@ -616,7 +620,7 @@ fn eval_term(t: &Term, f: &Facts) -> anyhow::Result<Tri> {
 fn or_over(val: &Val, mut g: impl FnMut(&str) -> anyhow::Result<Tri>) -> anyhow::Result<Tri> {
     let mut acc = Tri::False;
     for n in as_strs(val) {
-        match g(&n)? {
+        match g(n)? {
             Tri::True => return Ok(Tri::True),
             Tri::Unknown => acc = Tri::Unknown,
             Tri::False => {}
@@ -625,10 +629,10 @@ fn or_over(val: &Val, mut g: impl FnMut(&str) -> anyhow::Result<Tri>) -> anyhow:
     Ok(acc)
 }
 
-fn as_strs(val: &Val) -> Vec<String> {
+fn as_strs(val: &Val) -> &[String] {
     match val {
-        Val::Strs(v) => v.clone(),
-        _ => vec![],
+        Val::Strs(v) => v,
+        _ => &[],
     }
 }
 
@@ -769,7 +773,7 @@ fn lex(input: &str) -> Result<Vec<Tok>, String> {
                 i += 1;
                 continue;
             }
-            if !in_quote && (c.is_whitespace() || c == '(' || c == ')') {
+            if !in_quote && (c.is_whitespace() || c == '(' || c == ')' || c == '|') {
                 break;
             }
             w.push(c);

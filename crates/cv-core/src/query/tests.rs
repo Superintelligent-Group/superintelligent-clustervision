@@ -61,6 +61,45 @@ fn or_pipe_and_keyword_equivalent() {
 }
 
 #[test]
+fn compact_pipe_is_an_operator_but_quoted_pipe_is_literal() {
+    for source in [
+        "harness:claude|harness:codex",
+        "harness:claude |harness:codex",
+        "(harness:claude)|harness:codex",
+    ] {
+        assert_eq!(q(source).expr, q("harness:claude OR harness:codex").expr, "{source}");
+    }
+    let r = refx("alpha", Harness::Claude, None, Some("a|b"), 1);
+    assert!(q("title=\"a|b\"").prefilter(&r));
+    assert!(q("\"a|b\"").prefilter(&r));
+    for source in ["|harness:claude", "harness:claude|", "harness:claude||harness:codex"] {
+        assert!(SessionQuery::parse(source).is_err(), "{source}");
+    }
+}
+
+#[test]
+fn catalog_string_equality_differs_from_contains() {
+    let r = refx(
+        "Alpha-long",
+        Harness::Claude,
+        Some("/Repo/child"),
+        Some("Exact Title"),
+        1,
+    );
+    for field in ["id", "cwd", "title"] {
+        let (part, whole) = match field {
+            "id" => ("alpha", "ALPHA-LONG"),
+            "cwd" => ("/repo", "/REPO/CHILD"),
+            _ => ("title", "exact title"),
+        };
+        assert!(q(&format!("{field}:\"{part}\"")).prefilter(&r));
+        assert!(!q(&format!("{field}=\"{part}\"")).prefilter(&r));
+        assert!(q(&format!("{field}=\"{whole}\"")).prefilter(&r));
+    }
+    assert!(!q("cwd=/repo").prefilter(&refx("alpha", Harness::Claude, None, None, 1)));
+}
+
+#[test]
 fn comma_list_is_or() {
     let query = q("harness:claude,codex");
     assert!(query.prefilter(&refx("a", Harness::Claude, None, None, 1)));
