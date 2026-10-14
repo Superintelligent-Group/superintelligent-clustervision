@@ -62,11 +62,11 @@ pub struct EmitOptions {
 /// unrepresentable in a store that cannot hold the signature, and vanishes (the fidelity report
 /// names it `unrepresentable_turns`), taking the conversation's user/assistant alternation with it.
 ///
-/// Spelled `native` / `text` / `drop` on the wire ([`ThinkingMode::parse`], [`std::str::FromStr`]).
+/// Spelled `native` / `text` / `drop` / `portable` on the wire ([`ThinkingMode::parse`], [`std::str::FromStr`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ThinkingMode {
     /// Structured thinking where the target holds it, dropped where it does not, reported as an
-    /// expected loss. The default, and what every port did before this mode existed.
+    /// expected loss. The library default; the CLI port/rewind defaults to Portable.
     #[default]
     Native,
     /// Claude replay: demote plaintext thinking, replace opaque reasoning with placeholders,

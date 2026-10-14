@@ -723,7 +723,8 @@ enum Cmd {
         /// What to do with the model's reasoning on the way out: `native` keeps it where the target
         /// format holds it and drops it elsewhere, `text` keeps the turn by demoting thinking to
         /// text (a placeholder for provider-signed blobs, which have no text), `drop` omits it.
-        #[arg(long, default_value = "native", value_parser = ["native", "text", "drop"])]
+        /// `portable` demotes all Claude reasoning and repairs tool IDs for API replay; other targets use text policy.
+        #[arg(long, default_value = "native", value_parser = ["native", "text", "drop", "portable"])]
         thinking: String,
         /// Print the composed session instead of emitting it: md or json.
         #[arg(long)]
@@ -847,7 +848,8 @@ enum Cmd {
         /// What to do with the model's reasoning on the way out: `native` keeps it where the target
         /// format holds it and drops it elsewhere, `text` keeps the turn by demoting thinking to
         /// text (a placeholder for provider-signed blobs, which have no text), `drop` omits it.
-        #[arg(long, default_value = "native", value_parser = ["native", "text", "drop"])]
+        /// `portable` demotes all Claude reasoning and repairs tool IDs for API replay; other targets use text policy.
+        #[arg(long, default_value = "native", value_parser = ["native", "text", "drop", "portable"])]
         thinking: String,
     },
 
