@@ -562,8 +562,13 @@ pub(crate) fn cmd_dataset(
         .as_ref()
         .map(crate::cmd::query::text_sets)
         .unwrap_or_else(crate::cmd::query::TextSets::empty);
-    let mut writer: Box<dyn Write> = match &out {
-        Some(p) => Box::new(std::io::BufWriter::new(fs::File::create(p)?)),
+    // File exports stage the whole operation before opening the destination. In particular,
+    // --out must never truncate a transcript before discovery or source validation.
+    let sources = cv_core::discover_all();
+    let mut extra_sources = Vec::new();
+    let mut stage = cv_core::bytes::ByteStage::new();
+    let mut writer: Box<dyn Write + '_> = match &out {
+        Some(_) => Box::new(std::io::BufWriter::new(&mut stage)),
         None => Box::new(std::io::BufWriter::new(std::io::stdout())),
     };
 
@@ -582,13 +587,13 @@ pub(crate) fn cmd_dataset(
         skipped: &mut skipped,
     };
 
-    'outer: for r in cv_core::discover_all() {
+    'outer: for r in &sources {
         if let Some(w) = want {
             if r.harness != w {
                 continue;
             }
         }
-        if ctx.emit_ref(&r)? == Flow::LimitHit {
+        if ctx.emit_ref(r)? == Flow::LimitHit {
             break;
         }
         // `--subagents`: a Claude session fans out into a forest of sub-agent transcripts (both
@@ -598,6 +603,9 @@ pub(crate) fn cmd_dataset(
         // misses them misses most of the matching turns. Walk the forest and emit each match too.
         if subagents && r.harness == cv_core::ir::Harness::Claude {
             for info in cv_core::harness::claude::subagent_tree(&r.path) {
+                if out.is_some() {
+                    extra_sources.push(info.session.path.clone());
+                }
                 if ctx.emit_ref(&info.session)? == Flow::LimitHit {
                     break 'outer;
                 }
@@ -605,9 +613,65 @@ pub(crate) fn cmd_dataset(
         }
     }
     writer.flush()?;
+    drop(writer);
+    if let Some(path) = &out {
+        publish_dataset(
+            stage,
+            path,
+            sources
+                .iter()
+                .map(|r| r.path.as_path())
+                .chain(extra_sources.iter().map(|p| p.as_path())),
+        )?;
+    }
     let dest = out.as_ref().map(|p| format!(" to {}", p.display())).unwrap_or_default();
     let forest = if subagents { " (incl. sub-agent forest)" } else { "" };
     eprintln!("✦ {format}: wrote {emitted} record(s){dest}{forest} ({skipped} skipped)");
+    Ok(())
+}
+
+/// Preserve ordinary output-file permissions and links while rejecting transcript inode aliases
+/// before truncation. Input/transform failures have already completed against private staging.
+fn publish_dataset<'a>(
+    stage: cv_core::bytes::ByteStage,
+    path: &std::path::Path,
+    inputs: impl Iterator<Item = &'a std::path::Path>,
+) -> Result<()> {
+    use std::io::Write;
+    let bytes = stage.finish()?;
+    let mut destination = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let target = destination.metadata()?;
+        for input in inputs {
+            if let Ok(source) = fs::metadata(input) {
+                anyhow::ensure!(
+                    source.dev() != target.dev() || source.ino() != target.ino(),
+                    "dataset output aliases source transcript: {}",
+                    input.display()
+                );
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let target = fs::canonicalize(path)?;
+        for input in inputs {
+            anyhow::ensure!(
+                fs::canonicalize(input).ok().as_ref() != Some(&target),
+                "dataset output aliases source transcript: {}",
+                input.display()
+            );
+        }
+    }
+    destination.set_len(0)?;
+    bytes.copy_to(&mut destination)?;
+    destination.flush()?;
     Ok(())
 }
 

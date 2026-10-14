@@ -944,6 +944,62 @@ fn dataset_emits_parseable_jsonl() {
     assert!(err.contains("unknown format"), "{err}");
 }
 
+#[test]
+fn dataset_file_publication_matches_stdout_and_preserves_transcript_aliases() {
+    let w = World::new("dataset-file-publication");
+    standard_corpus(&w);
+    let (expected, _) = w.cv_ok(&["dataset"]);
+    let output = w.base.join("training.jsonl");
+    fs::write(&output, b"previous artifact").unwrap();
+    let (stdout, _) = w.cv_ok(&["dataset", "--out", output.to_str().unwrap()]);
+    assert!(stdout.is_empty());
+    assert_eq!(fs::read(&output).unwrap(), expected.as_bytes());
+
+    let source = w.transcript("alphasess");
+    let original = fs::read(&source).unwrap();
+    // A limit cannot make an unselected source safe to overwrite.
+    let (_, error) = w.cv_fails(&["dataset", "--limit", "1", "--out", source.to_str().unwrap()]);
+    assert!(error.contains("aliases source transcript"), "{error}");
+    assert_eq!(fs::read(&source).unwrap(), original);
+    assert_eq!(w.cv_ok(&["dataset"]).0, expected);
+
+    #[cfg(unix)]
+    {
+        let hardlink = w.base.join("source-hardlink.jsonl");
+        fs::hard_link(&source, &hardlink).unwrap();
+        let symlink = w.base.join("source-symlink.jsonl");
+        std::os::unix::fs::symlink(&source, &symlink).unwrap();
+        for alias in [&hardlink, &symlink] {
+            let (_, error) = w.cv_fails(&["dataset", "--out", alias.to_str().unwrap()]);
+            assert!(error.contains("aliases source transcript"), "{error}");
+            assert_eq!(fs::read(alias).unwrap(), original);
+        }
+        assert!(symlink.is_symlink());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn dataset_file_publication_preserves_existing_output_links_and_permissions() {
+    use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
+    let w = World::new("dataset-file-links");
+    standard_corpus(&w);
+    let (expected, _) = w.cv_ok(&["dataset"]);
+    let target = w.base.join("target.jsonl");
+    fs::write(&target, b"previous artifact").unwrap();
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+    let hardlink = w.base.join("output-hardlink.jsonl");
+    fs::hard_link(&target, &hardlink).unwrap();
+    let output = w.base.join("output-symlink.jsonl");
+    symlink(&target, &output).unwrap();
+    let inode = fs::metadata(&target).unwrap().ino();
+    w.cv_ok(&["dataset", "--out", output.to_str().unwrap()]);
+    assert!(output.is_symlink());
+    assert_eq!(fs::metadata(&target).unwrap().ino(), inode);
+    assert_eq!(fs::metadata(&target).unwrap().permissions().mode() & 0o777, 0o600);
+    assert_eq!(fs::read(&hardlink).unwrap(), expected.as_bytes());
+}
+
 // ───────────────────────────── events / touched ─────────────────────────────
 
 #[test]

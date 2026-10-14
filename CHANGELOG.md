@@ -8,6 +8,8 @@
 
 - Watch cursors promptly forget vanished sessions during equal-sized fleet replacements, including unreadable replacements, so reappearing sessions start fresh.
 - Pack fallback recall retains only requested candidates, preserves stable ranking, and centers Unicode snippets on their original source matches.
+- Dataset file exports stage before publication and reject transcript inode aliases, preserving source sessions and existing outputs when transformation fails.
+
 - Pack fallback recall retains only requested candidates and preserves stable ranking; live search and pack center Unicode snippets on original source matches.
 
 - Codex legacy reads and discovery use checked source views, retaining lazy bodies and bounded title prefixes with unchanged output and counts.
