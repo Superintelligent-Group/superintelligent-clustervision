@@ -74,6 +74,34 @@ not automatically unresolved implementation defects. Qwen still lacks local flee
 Historical follow-ups below are superseded where later implementation records say so; the reader
 and consumer inventories are the current cost map.
 
+### Concrete revisits from the release assessment (2026-10-13)
+
+The completed batch does not exhaust avoidable work. A read-only review of `5bef874d` identifies
+these source-established opportunities; their incremental whole-operation benefit is unmeasured:
+
+- **Hermes lean reads:** `harness/hermes.rs::stream_conn_with_reads` enables checked backing only
+  for `complete && spans`. Ordinary lazy/facts reads still own content strings and construct raw
+  provider extras through `MsgRow::into_message`. Extend the existing checked-body path and respect
+  metadata demand, preserving acceptance, deduplication and first-class reasoning facts. This is
+  avoidable body/extra ownership, distinct from required native SQLite allocation.
+- **Gemini display text:** `harness/gemini/lean/view.rs::emit` owns projected `displayContent`, then
+  `gemini.rs` derives another owned display string. Preserve the rich display-text contract while
+  investigating removal of that transient copy, including composite display values.
+- **Semantic query arithmetic:** `semantic.rs::cosine` recomputes the query norm for every eligible
+  vector. Hoisting the invariant requires exact score/ranking and zero/nonfinite controls; no
+  measured speedup is claimed yet.
+- **Repeated semantic queries:** each call loads the store and model. Guarded reuse could benefit
+  resident consumers; initialization attribution and lifecycle complexity need measurement before
+  adding a persistent cache. The existing 16K-row whole-command evidence does not isolate this cost.
+
+These are performance follow-ups, not demonstrated correctness blockers. Existing measured
+tradeoffs also remain: the mixed escaped Cline port control costs 5.68% more instructions, and
+Hermes's prompt-only exact spill control costs about 50% more CPU than its unbounded predecessor.
+Both bought bounded memory; neither justifies claiming every operation became faster. First-run
+fleet discovery still performs substantial content extraction. The release consequence to explain
+is the one-time full-text index rebuild; read-only search directs stale-schema users to `cv index`.
+This assessment does not authorize or perform a release.
+
 ## Completion criteria carried across the work
 
 The objective covers the composed system: discovery and identity lookup; record interpretation
@@ -311,7 +339,7 @@ operation costs and simple code over satisfying a historical number.
 | OpenCode SQLite | Indexed selected parts and checked complete native records; guarded DB/WAL/journal dependencies and faithful native replay | Encoded input validation/spill costs; demanded metadata; exports do not clone external linked child/shell stores; native SQLite and demanded output costs remain |
 | Cursor SQLite | CLI/ACP reachable-message replay and IDE composer projections; selected strings, Lexical rich text and structured results share private backing | Encoded rich-text CPU cost, owned identifiers/full metadata, WITHOUT ROWID fallback |
 | Devin SQLite | Compact forest, incremental checked message/metadata cells, reused compaction backing and bounded history-path inspection | Native SQL evaluation; navigation descriptors; prefix prompts/demanded rich extras; non-rowid owned fallback |
-| Hermes SQLite | Indexed rows, bounded exact prompt suppression, transactional exports and checked ordinary/multimodal complete bodies; sidecars decoded once | Raw native extras remain owned; giant output rows/FTS dominate native memory; prompt-only CPU tradeoff remains documented |
+| Hermes SQLite | Indexed rows, bounded exact prompt suppression, transactional exports and checked ordinary/multimodal complete bodies; sidecars decoded once | Ordinary lean reads still own bodies/extras: a concrete revisit above. Giant output rows/FTS allocate natively; prompt-only CPU tradeoff remains documented |
 | Goose SQLite / legacy | Selected rows and framed legacy payload views; lean demand avoids unrelated sidecars | Full demanded metadata and explicit owned output remain; decoding/staging costs differ by shape |
 | OpenClaw JSONL / SQLite | Flat/tree/SQLite checked payload replay shares branch selection; cells copied incrementally, compressed events staged in bounded chunks | O(events) navigation/backing; codec workspace; demanded complete/control/system metadata; native-cell and non-rowid fallbacks |
 | Zed SQLite | Incremental blobs decoded once; lazy messages use checked selected text/arguments and skip discarded attachment bodies | Typed discovery counts avoid message trees; largest decoded string still grows Serde scratch; decoded spill, requested metadata and WITHOUT ROWID native-cell fallback |
