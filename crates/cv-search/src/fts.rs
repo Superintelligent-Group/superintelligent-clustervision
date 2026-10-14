@@ -954,37 +954,40 @@ fn run_jobs(writer: &mut Writer, f: &Fields, jobs: Vec<Job>, consumer: &str) -> 
     let wake = Condvar::new();
     let (tx, rx) = mpsc::sync_channel::<Out>(2 * workers);
     let admission = std::sync::Arc::clone(&writer.admission);
+    let sources = cv_core::source::read_scope();
 
     std::thread::scope(|scope| -> Result<Ran> {
         for _ in 0..workers {
             let tx = tx.clone();
-            let (queue, wake, admission) = (&queue, &wake, &admission);
-            scope.spawn(move || loop {
-                let group = {
-                    let mut q = queue.lock().unwrap();
-                    loop {
-                        if q.stopped || q.groups.is_empty() {
-                            break None;
+            let (queue, wake, admission, sources) = (&queue, &wake, &admission, &sources);
+            scope.spawn(move || {
+                sources.run(|| loop {
+                    let group = {
+                        let mut q = queue.lock().unwrap();
+                        loop {
+                            if q.stopped || q.groups.is_empty() {
+                                break None;
+                            }
+                            if let Some(at) = q.next_fitting() {
+                                let group = q.groups.remove(at);
+                                q.in_flight += job_cost(&group);
+                                break Some(group);
+                            }
+                            q = wake.wait(q).unwrap();
                         }
-                        if let Some(at) = q.next_fitting() {
-                            let group = q.groups.remove(at);
-                            q.in_flight += job_cost(&group);
-                            break Some(group);
+                    };
+                    let Some(group) = group else { return };
+                    let _reservation = GroupReservation {
+                        queue,
+                        wake,
+                        bytes: job_cost(&group),
+                    };
+                    for job in group {
+                        if !run_job(job, f, &tx, admission) {
+                            return; // the writer is gone
                         }
-                        q = wake.wait(q).unwrap();
                     }
-                };
-                let Some(group) = group else { return };
-                let _reservation = GroupReservation {
-                    queue,
-                    wake,
-                    bytes: job_cost(&group),
-                };
-                for job in group {
-                    if !run_job(job, f, &tx, admission) {
-                        return; // the writer is gone
-                    }
-                }
+                })
             });
         }
         drop(tx);
