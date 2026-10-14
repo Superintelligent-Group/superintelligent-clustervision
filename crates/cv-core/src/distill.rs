@@ -638,12 +638,9 @@ impl<'a> MessageText<'a> {
             .resolved
             .get_or_insert_with(|| (0..self.message.content.len()).map(|_| None).collect());
         if resolved[index].is_none() {
-            // Span's best-effort fallback is the existing materialize_text contract. Source
-            // descriptors remain checked and never substitute empty text on failure.
-            resolved[index] = Some(match text {
-                crate::Text::Source(_) => text.try_resolve(self.resolver)?.into_owned(),
-                _ => text.resolve(self.resolver).into_owned(),
-            });
+            // Malformed legacy escapes retain their raw/lossy fallback, but failed source
+            // reads must propagate for both Span and checked Source carriers.
+            resolved[index] = Some(text.try_resolve(self.resolver)?.into_owned());
         }
         Ok(resolved[index].as_deref().expect("resolved demanded text"))
     }
@@ -676,7 +673,7 @@ fn validate_analysis_sources(session: &Session) -> anyhow::Result<()> {
                 Block::ToolResult { content, .. } => Some(content),
                 _ => None,
             };
-            if let Some(text @ crate::Text::Source(_)) = text {
+            if let Some(text) = text.filter(|text| text.is_span()) {
                 text.try_for_each_chunk(&resolver, 64 * 1024, |_| Ok(()))?;
             }
         }
@@ -2049,7 +2046,7 @@ facts text",
     }
 
     #[test]
-    fn full_analysis_preserves_legacy_span_token_fallbacks() -> anyhow::Result<()> {
+    fn full_analysis_preserves_malformed_span_text_but_rejects_failed_sources() -> anyhow::Result<()> {
         let world = cv_testkit::World::new("distill-legacy-spans");
         let path = world.base.join("span.txt");
         let opts = DistillOptions {
@@ -2075,6 +2072,14 @@ facts text",
                     }),
                 }],
             ));
+            if body.is_none() {
+                assert!(legacy_products::distill(&source, &opts).is_err());
+                assert!(distill(&source, &opts).is_err());
+                assert!(prepare_distill(&source, &opts).is_err());
+                assert!(distill_pack(&source, &opts).is_err());
+                assert!(findings(&source, &opts).is_err());
+                continue;
+            }
             let expected = legacy_products::distill(&source, &opts)?;
             same_products(&distill(&source, &opts)?, &expected);
             let pack = distill_pack(&source, &opts)?;
@@ -2425,6 +2430,7 @@ facts text",
     #[test]
     fn findings_preserve_embedded_markdown_without_importing_incoming_sections() -> anyhow::Result<()> {
         let mut source = Session::new("markdown-findings", Harness::Claude);
+        source.title = Some("Markdown findings".into());
         let own = "A decision.\n### source subsection\nStill my own words.\n## 3. Facts (mined from tool inputs and outputs)\nNot extracted facts.\n### [pretend] · agent said\nStill source text.";
         source.messages = vec![
             msg(
@@ -2603,6 +2609,31 @@ facts text",
         let actual = distill_pack(&source, &Default::default())?;
         assert_eq!(actual.stats.recorded_context_tokens, Some(1234));
         Ok(())
+    }
+    #[test]
+    fn findings_reject_missing_legacy_thinking_sources_even_when_omitted() {
+        let world = cv_testkit::World::new("findings-missing-span");
+        let mut source = Session::new("missing-span", Harness::Claude);
+        source.messages.push(msg(
+            Role::Assistant,
+            MessageKind::Reply,
+            vec![
+                text("visible finding"),
+                Block::Thinking {
+                    text: crate::Text::Span(crate::Span {
+                        source: Some(world.base.join("missing.txt")),
+                        offset: 0,
+                        len: 10,
+                        escaped: false,
+                    }),
+                    signature: None,
+                    encrypted: None,
+                    redacted: false,
+                },
+            ],
+        ));
+        assert!(findings(&source, &Default::default()).is_err());
+        assert!(distill_pack(&source, &Default::default()).is_err());
     }
 }
 
