@@ -174,7 +174,7 @@ fn write_database(
         .as_deref()
         .map(|m| json!({ "id": m, "providerID": "clustervision" }).to_string());
     let mut session_insert = tx.prepare(
-        "INSERT OR REPLACE INTO session \
+        "INSERT INTO session \
          (id, project_id, slug, directory, title, version, model, time_created, time_updated) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
     )?;
@@ -401,6 +401,27 @@ mod legacy;
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::*;
+    #[test]
+    fn reused_v1_session_id_rejects_without_altering_history() -> Result<()> {
+        let mut connection = rusqlite::Connection::open_in_memory()?;
+        let mut session = Session::new("original", crate::Harness::Claude);
+        let mut message = crate::Message::new(Role::User);
+        message.content.push(Block::Text {
+            text: "original body".into(),
+        });
+        session.messages.push(message);
+        let options = EmitOptions::default();
+        write_database(&session, &options, "fixed", "/fixture", "project", &mut connection)?;
+        let before = crate::harness::store::sqlite::export_tests::logical(&connection, crate::Harness::OpenCode)?;
+        session.title = Some("replacement".into());
+        assert!(write_database(&session, &options, "fixed", "/changed", "project", &mut connection).is_err());
+        assert_eq!(
+            before,
+            crate::harness::store::sqlite::export_tests::logical(&connection, crate::Harness::OpenCode)?
+        );
+        Ok(())
+    }
+
     #[test]
     fn checked_transactional_rows_match_legacy_and_roll_back() -> Result<()> {
         crate::harness::store::sqlite::export_tests::exercise(
