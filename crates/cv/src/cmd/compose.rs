@@ -715,6 +715,10 @@ impl EmitCtx<'_> {
     /// Parse one ref and stream it as a record if it passes the filters. Returns [`Flow::LimitHit`]
     /// once `--limit` records have been emitted.
     fn emit_ref(&mut self, r: &cv_core::ir::SessionRef) -> Result<Flow> {
+        if self.limit.is_some_and(|limit| *self.emitted >= limit) {
+            return Ok(Flow::LimitHit);
+        }
+
         // Catalog-cheap prefilter (everything but `model:`) prunes before we pay to parse.
         if let Some(q) = self.query {
             if !q.prefilter(r) {

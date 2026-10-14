@@ -956,6 +956,13 @@ fn dataset_emits_parseable_jsonl() {
     }
     assert!(err.contains("wrote 2 record(s)"), "{err}");
 
+    let (empty, report) = w.cv_ok(&["dataset", "--limit", "0"]);
+    assert!(
+        empty.is_empty(),
+        "a zero record limit must not publish the first record: {empty}"
+    );
+    assert!(report.contains("wrote 0 record(s)"), "{report}");
+
     // sharegpt shape + redaction scrubs the planted secret from the dataset too.
     let (out, _) = w.cv_ok(&["dataset", "--format", "sharegpt", "--redact"]);
     assert!(!out.contains(SECRET), "dataset --redact leaked the secret:\n{out}");
