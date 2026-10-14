@@ -634,32 +634,42 @@ fn jsonl_key_facts(path: &Path, session_id: &str, dependency: &mut dyn FnMut(&Pa
     let Ok(Value::Object(index)) = serde_json::from_str::<Value>(&text) else {
         return KeyFacts::default();
     };
-    let sid_of = |e: &Value| e.get("sessionId").and_then(Value::as_str).map(str::to_string);
-    let Some((key, entry)) = index.iter().find(|(_, e)| sid_of(e).as_deref() == Some(session_id)) else {
+    let Some((key, entry)) = index
+        .iter()
+        .find(|(_, e)| e.get("sessionId").and_then(Value::as_str) == Some(session_id))
+    else {
         return KeyFacts::default();
     };
     let spawned_by = entry.get("spawnedBy").and_then(Value::as_str).map(str::to_string);
     let parent = spawned_by.as_ref().and_then(|by| {
-        let first = index.get(by).and_then(sid_of);
-        let mut candidates: Vec<PathBuf> = first.iter().map(|sid| dir.join(format!("{sid}.jsonl"))).collect();
-        dependency(dir);
-        if let Ok(rd) = fs::read_dir(dir) {
-            let mut rest: Vec<PathBuf> = rd
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| {
-                    p.file_name()
-                        .and_then(|n| n.to_str())
-                        .is_some_and(is_primary_transcript_name)
-                })
-                .collect();
-            rest.sort();
-            candidates.extend(rest);
+        let first = index
+            .get(by)
+            .and_then(|e| e.get("sessionId"))
+            .and_then(Value::as_str)
+            .map(|sid| dir.join(format!("{sid}.jsonl")));
+        // The preferred current window wins regardless of directory membership. Avoid
+        // enumerating/sorting every historical transcript when it already records this child.
+        if let Some(first) = first.as_ref().filter(|p| p.as_path() != path) {
+            dependency(first);
+            if names_child_file(first, key).unwrap_or(false) {
+                return Some(session_id_from_filename(first));
+            }
         }
-        let mut seen = HashSet::new();
+        dependency(dir);
+        let mut candidates: Vec<PathBuf> = fs::read_dir(dir)
+            .ok()?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.as_path() != path && Some(p) != first.as_ref())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(is_primary_transcript_name)
+            })
+            .collect();
+        candidates.sort();
         candidates
             .into_iter()
-            .filter(|p| p.as_path() != path && seen.insert(p.clone()))
             .find(|p| {
                 dependency(p);
                 names_child_file(p, key).unwrap_or(false)
@@ -3298,6 +3308,50 @@ mod tests {
         assert!(adapter
             .stream(&reference, &ParseOptions::full(), &mut ChangeParent(parent))
             .is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn preferred_jsonl_parent_avoids_global_candidate_inventory_and_preserves_fallback_order() -> Result<()> {
+        let world = cv_testkit::World::in_process("openclaw-parent-preferred-order");
+        let dir = &world.base;
+        let child = dir.join("child.jsonl");
+        let preferred = dir.join("preferred.jsonl");
+        let key = "agent:main:subagent:child";
+        fs::write(
+            dir.join("sessions.json"),
+            serde_json::json!({"parent-key":{"sessionId":"preferred"},
+            key:{"sessionId":"child","spawnedBy":"parent-key"}})
+            .to_string(),
+        )?;
+        fs::write(&child, "{}")?;
+        fs::write(&preferred, serde_json::json!({"childSessionKey":key}).to_string())?;
+        for i in 0..300 {
+            fs::write(dir.join(format!("unrelated-{i:04}.jsonl")), "{}")?;
+        }
+        fs::write(
+            dir.join("a-earlier.jsonl"),
+            serde_json::json!({"childSessionKey":key}).to_string(),
+        )?;
+        let mut consulted = Vec::new();
+        let facts = jsonl_key_facts(&child, "child", &mut |p| consulted.push(p.to_path_buf()));
+        assert_eq!(facts.parent.as_deref(), Some("preferred"));
+        assert_eq!(consulted, vec![dir.join("sessions.json"), preferred.clone()]);
+        // The missing/unmatched preferred path stays a dependency; fallback candidates retain
+        // their lexicographic precedence and the child's own path is never consulted.
+        fs::write(&preferred, "unrelated")?;
+        consulted.clear();
+        let facts = jsonl_key_facts(&child, "child", &mut |p| consulted.push(p.to_path_buf()));
+        assert_eq!(facts.parent.as_deref(), Some("a-earlier"));
+        assert_eq!(
+            consulted,
+            vec![
+                dir.join("sessions.json"),
+                preferred,
+                dir.clone(),
+                dir.join("a-earlier.jsonl")
+            ]
+        );
         Ok(())
     }
 
