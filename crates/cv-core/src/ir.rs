@@ -357,6 +357,13 @@ impl Session {
         crate::lazy::Resolver::new(self.source_path.clone())
     }
 
+    /// Capture the session's primary and retained auxiliary sources before a multi-message
+    /// demand. Check `ReadSet::fresh` with a new `source::Probe` before publishing its output,
+    /// so a later message cannot conceal a change to an earlier message's source.
+    pub fn source_reads(&self) -> crate::source::ReadSet {
+        crate::source::session_reads(self)
+    }
+
     /// Resolve every lazy content [`Span`](crate::lazy::Span) in place, so the session owns all its
     /// content inline. Whole-session consumers (cross-harness emit building output in memory, JSON
     /// serialization) call this; streaming consumers resolve per-block instead. After it, every
@@ -685,19 +692,7 @@ impl Message {
     /// inline. Streaming consumers call this per message (peak = one message) instead of holding a
     /// whole materialized session.
     pub fn materialize(&mut self, resolver: &crate::lazy::Resolver) -> anyhow::Result<()> {
-        for block in &mut self.content {
-            let text = match block {
-                Block::Text { text } | Block::Thinking { text, .. } => Some(text),
-                Block::ToolResult { content, .. } => Some(content),
-                _ => None,
-            };
-            if let Some(text) = text {
-                if let crate::lazy::Text::Source(source) = text {
-                    *text = crate::lazy::Text::Inline(source.try_resolve()?);
-                }
-            }
-        }
-        self.materialize_text(resolver);
+        self.try_materialize_text(resolver)?;
         for block in &mut self.content {
             if let Block::ToolUse { input, .. } = block {
                 input.make_owned()?;
@@ -1194,6 +1189,33 @@ pub fn home_rel(p: &std::path::Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn full_materialization_rejects_missing_span_sources_without_erasing_text() {
+        let world = cv_testkit::World::in_process("materialize-span-failure");
+        let path = world.base.join("gone.txt");
+        let span = crate::Text::Span(crate::Span {
+            source: None,
+            offset: 0,
+            len: 4,
+            escaped: false,
+        });
+        let mut session = Session::new("session", Harness::Claude);
+        session.source_path = Some(path.clone());
+        let mut message = Message::new(Role::Assistant);
+        message.content.push(Block::Text { text: span.clone() });
+        session.messages.push(message);
+        assert!(session.materialize().is_err());
+        assert!(matches!(&session.messages[0].content[0], Block::Text { text } if text == &span));
+
+        std::fs::write(&path, "text").unwrap();
+        let reads = session.source_reads();
+        session.materialize().unwrap();
+        assert!(reads.fresh(&mut crate::source::Probe::default()));
+        assert!(matches!(&session.messages[0].content[0], Block::Text { text } if text.inline_str() == Some("text")));
+        std::fs::remove_file(&path).unwrap();
+        assert!(!reads.fresh(&mut crate::source::Probe::default()));
+    }
 
     #[test]
     fn checked_text_materialization_preserves_lazy_arguments_and_reports_failed_text() {
