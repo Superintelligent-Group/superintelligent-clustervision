@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- Discovery, filtering and search preserve exact identities, auxiliary-file freshness, malformed-cache recovery, and errors instead of silently accepting incomplete results.
+- Claude workflow revival streams selected histories and recovers valid siblings when another journal is incomplete.
+- Codex, Grok and Qwen skip unused discovery and record payloads while preserving duplicate-key acceptance, Unicode text, system prompts and terminal errors.
+- Kimi discovery tracks auxiliary metadata; Kimi Code preserves model switches across resumed reads and avoids repeated header scans.
+- LM Studio exports preserve empty completions carrying token usage and maintain selected and alternate version identities.
+- Hermes exports preserve modern schema metadata and reasoning modes; replay suppression compares large prompt bodies without owning complete strings.
+- Devin projects navigation from incremental SQLite cells, avoiding whole-body native allocations during metadata reads.
+- OpenCode discovers custom database names, checks WAL changes, preserves unknown records and refuses conflicting native session identifiers.
+- Cursor, Cline and Roo retain native timestamps, errors and model choices; Continue preserves unrelated index entries during export.
+- Shared readers bound mapped validation, propagate checked materialization failures, and avoid duplicate string encoding during JSON exports.
+- Account imports preserve multipart payloads and traverse valid long branches without arbitrary truncation.
+- Task inboxes project brief text without copying rich histories; aliases, unread cursors, reopen receipts and terminal output retain consistent semantics.
+- MCP cancellation targets individual requests, releases their resources and keeps unrelated work and the connection running.
+- HTTP rejects malformed framing, headers, authorities and numeric parameters; bounded request handling avoids payload-sized discard buffers.
+- LLM generation bounds selected prompt content, verifies sources, rejects empty provider responses and accurately describes configured remote destinations.
+- Search reuses catalog readers across results, repairs malformed metadata, preserves Unicode snippets and avoids copying complete semantic previews.
+- Unsupported semantic subagent indexing fails before writing indexes, with instructions for the supported separate indexing operations.
+- Prune, rewind and adoption validate source aliases, native identifiers and publication boundaries before replacing outputs.
+- Distill derives findings from structured records, preserves transitive tool dependencies and shares bounded token estimation across output modes.
+- Markdown preserves literal newlines and safe fences; HTML uses checked payload reads, and redaction covers complete records and system text.
+- Browser requests retain operation ownership, expose retryable failures, and preserve complete bounded ZIP imports across native and Wasm readers.
+- Test helpers isolate ambient configuration and drain subprocess pipes concurrently; build provenance recognizes linked worktrees and release archives.
+
 - Hermes reads ordinary SQLite text bodies incrementally, avoiding whole-cell native allocations while preserving copied-session deduplication and compatibility schemas.
 
 - Selected agent and workflow views skip unrelated child files, journals and workflow bodies while preserving identity resolution and ordering.

@@ -19,33 +19,35 @@ rewrite. Read reports cover no-change paths too. Counts of commits or lines are 
 | Scope | Source review / implementation state |
 |---|---|
 | Claude and workflows | Full adapter/discovery/resume/fork/adopt/emission/sidecar/CLI read complete; checked name lookup, partial-journal recovery and streamed revival integrated. |
-| Codex, Grok, Qwen | Full pass continuing; lean duplicate acceptance, bounded discovery, stopped-reader work and token arithmetic integrated; native emission/UTF8 parity pending. |
+| Codex, Grok, Qwen | Full production pass reported; duplicate-key acceptance, bounded discovery, stopped-reader work, token arithmetic, native emission and UTF8 parity integrated. |
 | Gemini, Harmony, formats | Full pass reported; routing, linear terminator scan, streaming census and registry preservation integrated; harness-scoped census follows shared discovery. |
 | Cursor, Cline, Roo, Continue, Cline SDK | Full pass reported; timestamp/error/model parity, index preservation and root dedup integrated. |
 | OpenCode, Zed | Full pass reported; native DB routing/WAL guards, opaque records, collision rejection, stable order and branch fallback integrated. |
-| Hermes, Devin | Full pass continuing; Devin sparse metadata/cache facts integrated, Hermes modern native export underway. |
-| Kimi, Kimi Code, LM Studio | Full pass underway across discovery dependencies, metadata, native paths and exports. |
-| Goose, OpenClaw | Full pass underway; native record/compaction replay and multiple tool-result preservation being implemented. |
-| Wire codecs, account exports, OpenSession, ingest, IR JSON | Full pass underway; selected payloads, multipart backing, input sniffing and cross-field source guards being repaired. |
-| IR, lazy text, JSON and private transport | Full pass underway; checked full materialization and bounded mapped validation integrated; canonical prefix demands under review. |
-| Source guards, projections, sanitization | Full pass underway; custom SQLite source classification integrated; exact prefix and freshness contracts being examined. |
+| Hermes, Devin | Full production pass reported; native export, sparse metadata, bounded cell navigation and exact replay keys integrated; count-only discovery projection finishing. |
+| Kimi, Kimi Code, LM Studio | Full production pass reported; auxiliary freshness, typed configuration, one-pass headers, model switches, terminal IO and usage-only native completions integrated. |
+| Goose, OpenClaw | Full production pass reported; Goose fork timestamps integrated; complete OpenClaw record/compaction replay and grouped tool-result preservation ready for integration. |
+| Wire codecs, account exports, OpenSession, ingest, IR JSON | Full production pass reported; selected payloads, multipart backing, strict sniffing, cross-field source guards and shared checked string output integrated. |
+| IR, lazy text, JSON and private transport | Full production pass reported; checked materialization, bounded mapped validation, overflow checks and positioned canonical prefix writing integrated. |
+| Source guards, projections, sanitization | Full production pass reported; custom SQLite source classification, exact escaped-key matching, shared source checks and terminal sanitization integrated. |
 | Shared store, SQLite snapshots, spill and locks | Full production read reported; Unix unlinked-path ownership and cold snapshot directory identity repaired. Existing framing/ordering/lock contracts retained. |
-| Streaming, watch, resume and top-level dispatch | Full pass underway after adapter work; duplicate concrete identities and scoped discovery being repaired. |
+| Streaming, watch, resume and top-level dispatch | Full production pass reported; preferred-copy cursors, scoped discovery, terminal IO propagation and interrupted-reader termination integrated. |
 | Query, catalog, discovery cache and config | Full pass reported; strict predicates/date endpoints, error propagation, auxiliary guards, malformed counts and preserving config updates integrated. |
-| Search and CLI search | Full pass continuing; malformed-index repair, Unicode snippets, document-specific fallback filters and streamed result JSON integrated. |
-| Tasks and task HTTP/CLI | Full pass continuing; aliases/unread history, reopen receipts, safe identity handling, sweep names and bounded selections integrated. |
-| Events, affordances, stats, lanes, tools, hooks, compaction | Full production pass reported, final findings underway; parent-scoped stops/conflicts, indexed pairing/patch dedup and demand selection integrated. |
+| Search and CLI search | Full production pass reported; malformed-index repair, Unicode snippets, fallback filters, bounded previews, streamed JSON and exact refresh summaries integrated. |
+| Tasks and task HTTP/CLI | Full production pass reported; aliases/unread history, reopen receipts, safe identities, cursor semantics, brief inbox projection and terminal boundaries integrated. |
+| Events, affordances, stats, lanes, tools, hooks, compaction | Full production pass reported; parent-scoped stops/conflicts, indexed pairing/patch dedup and demand selection integrated. |
 | Prune, rewind, restamp, loom, adopt, port, compose | Full pass reported; source-alias/resource publication, native IDs, option validation and window accounting integrated. |
-| Emit/preparation/fidelity/thinking, Markdown, HTML, redaction | Full pass underway; checked lazy rendering, replay scrubbing and bounded secret matching being repaired. |
-| Distill, dataset, doctor, pack and recipes | Full pass continuing; visibility, lazy whitespace parity and pack budgeting/ranking fixes integrated; distill repair pending. |
+| Emit/preparation/fidelity/thinking, Markdown, HTML, redaction | Full production pass reported; checked lazy rendering, complete-record/system scrubbing, bounded secret matching and literal Markdown newlines integrated. |
+| Distill, dataset, doctor, pack and recipes | Full production pass reported; visibility, whitespace parity, structured findings, tool closure and pack ranking integrated; missing dataset system prompts being repaired. |
 | Remaining CLI dispatch, archive, show, cat, browse, share, live, schema, blame, utilities | Full pass reported; guarded share publication, archive names, scoped identities, bounded durations and usage errors integrated. |
-| HTTP transport, API, MCP, LLM | Full pass continuing; strict framing, bounded discard and prompt budgets integrated; lazy LLM egress and protocol paths under review. |
-| Web, Wasm and desktop | Full pass reported; shared fallible bounded ZIP extraction and asynchronous feature ownership repairs integrated; combined browser/native/Wasm checks pending. |
-| Testkit, tools, build, CI, packaging/release automation | Full pass continuing; ambient-state/duplex helpers, corpus path guards, provenance and browser-gate evidence checks integrated. No release actions. |
+| HTTP transport, API, MCP, LLM | Full production pass reported; strict framing/headers/authorities, bounded admission/input lifetimes, request cancellation, prompt budgets and checked LLM egress integrated. |
+| Web, Wasm and desktop | Full production pass reported; bounded ZIP extraction and asynchronous feature ownership repairs integrated. Browser 87/87, ZIP 11/11 and desktop 6/6 pass; final Wasm pending. |
+| Testkit, tools, build, CI, packaging/release automation | Full production pass reported; ambient-state/duplex helpers, corpus guards, provenance and mandatory browser/Wasm gate evidence repaired. Final packaging pending; no release actions. |
 
-First combined compile found a test placed outside its module and a missed fallible-query caller;
-both repairs are integrated. Further combined builds, scoped behavior tests and cross-feature
-composition remain pending. The previous published batch's CI run `38509340378` passed; that is
+Combined native builds have converged through successive source batches. The first two scoped
+core batches passed 412 and 742 controls with eight failures; fixes and independent oracle repairs
+are integrated. Search passed 112 controls; testkit passed three. Later affected core/CLI batches
+are exercising new cohorts and have exposed additional fixture/composition repairs. Full native,
+portable, memory and publication gates remain pending; these partial counts are not a final pass. The previous published batch's CI run `38509340378` passed; that is
 baseline evidence, not validation of this new branch. Do not mark this review complete until the
 in-progress scopes and their actionable findings are drained and the composed changes converge.
 
