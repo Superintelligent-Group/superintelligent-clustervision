@@ -324,12 +324,13 @@ mod imp {
         };
         let Ok(rows) = stmt.query_map([h.map(Harness::as_str)], |row| {
             let name: String = row.get(0)?;
-            let id: String = row.get(1)?;
-            let path: String = row.get(2)?;
-            Ok(Harness::parse(&name).map(|harness| SessionRef {
+            let Some(harness) = Harness::parse(&name) else {
+                return Ok(None);
+            };
+            Ok(Some(SessionRef {
                 harness,
-                id,
-                path: PathBuf::from(path),
+                id: row.get(1)?,
+                path: PathBuf::from(row.get::<_, String>(2)?),
                 cwd: None,
                 title: None,
                 created_at: None,
@@ -1013,6 +1014,30 @@ mod imp {
                 assert_eq!(scoped.len(), 1);
                 assert_eq!(scoped[0].path, full.path);
             }
+        }
+
+        #[test]
+        fn primary_inventory_preserves_empty_unknown_and_error_fallbacks() {
+            let w = cv_testkit::World::in_process("catalog-primary-errors");
+            let conn = open().unwrap();
+            assert!(primary_refs_in(&conn, None).is_empty());
+            let r = db_ref(Harness::Claude, w.base.join("session.jsonl"));
+            sync(std::slice::from_ref(&r));
+            // Newer binaries' unknown rows are skipped before decoding identity columns,
+            // matching the full row reader even if their column representation differs.
+            conn.execute(
+                "INSERT INTO sessions(harness,id,path) VALUES('future-harness',X'01',X'02')",
+                [],
+            )
+            .unwrap();
+            let projected = primary_refs_in(&conn, None);
+            let full = all_sessions_in(&conn).unwrap();
+            assert_eq!(projected.len(), 1);
+            assert_eq!(projected[0].path, full[0].path);
+            assert!(primary_refs_in(&conn, Some(Harness::Codex)).is_empty());
+            conn.execute_batch("DROP TABLE sessions").unwrap();
+            assert!(primary_refs_in(&conn, None).is_empty());
+            assert!(primary_refs_in(&conn, Some(Harness::Claude)).is_empty());
         }
 
         #[test]
