@@ -219,10 +219,11 @@ fn stream_thread_with_source(
     let has = |c: &str| cols.contains(c);
     let sql = format!(
         "SELECT summary, updated_at, {created}, {parent}, {folders}, {order}, data_type, {rowid}, \
-         CASE WHEN typeof(data) = 'blob' THEN length(data) ELSE 0 END, typeof(data) FROM threads WHERE id = ?1",
+         CASE WHEN typeof(data) = 'blob' THEN length(data) ELSE 0 END, typeof(data), {branch} FROM threads WHERE id = ?1",
         rowid = if rowid { "_rowid_" } else { "NULL" },
         created = if has("created_at") { "created_at" } else { "NULL" },
         parent = if has("parent_id") { "parent_id" } else { "NULL" },
+        branch = if has("worktree_branch") { "worktree_branch" } else { "NULL" },
         folders = if has("folder_paths") { "folder_paths" } else { "NULL" },
         order = if has("folder_paths_order") {
             "folder_paths_order"
@@ -242,6 +243,11 @@ fn stream_thread_with_source(
     let data_type = row.get::<_, Option<String>>(6).ok().flatten();
     let rowid = row.get::<_, Option<i64>>(7).ok().flatten();
     let data_len = row.get::<_, i64>(8).unwrap_or(0);
+    let branch = row
+        .get::<_, Option<String>>(10)
+        .ok()
+        .flatten()
+        .filter(|s| !s.is_empty());
     // Both passes read the same SQLite cell under one read snapshot. Validate the complete
     // document before emitting any message, including malformed ignored fields.
     let is_blob = row.get::<_, String>(9).is_ok_and(|kind| kind == "blob");
@@ -278,6 +284,9 @@ fn stream_thread_with_source(
         // The row exists but its blob wouldn't decode — surface that instead of erroring, so one
         // corrupt thread never breaks listings or bulk exports.
         zed.insert("undecodable_blob".into(), Value::Bool(true));
+    }
+    if let Some(branch) = branch {
+        git.get_or_insert_with(GitInfo::default).branch.get_or_insert(branch);
     }
     if let Some(p) = parent.filter(|p| !p.is_empty()) {
         parent_thread_id = Some(p);
@@ -1363,6 +1372,25 @@ mod tests {
         let s = parse_thread(&c, &sref("t")).unwrap();
         assert_eq!(s.messages.len(), 4);
         assert_eq!(s.cwd.as_deref(), Some(Path::new("/Users/u/proj")));
+    }
+
+    #[test]
+    fn worktree_branch_fills_missing_snapshot_branch() {
+        let c = mk(SCHEMA);
+        for (id, thread, expected) in [
+            ("missing", serde_json::json!({"messages":[]}), "isolated-branch"),
+            (
+                "snapshot",
+                serde_json::json!({"initial_project_snapshot":{"worktree_snapshots":[{"git_state":{"current_branch":"snapshot-branch","head_sha":"commit"}}]},"messages":[]}),
+                "snapshot-branch",
+            ),
+        ] {
+            insert(&c, id, "branch", "json", &serde_json::to_vec(&thread).unwrap());
+            c.execute("UPDATE threads SET worktree_branch='isolated-branch' WHERE id=?1", [id])
+                .unwrap();
+            let session = parse_thread(&c, &sref(id)).unwrap();
+            assert_eq!(session.git.unwrap().branch.as_deref(), Some(expected));
+        }
     }
 
     #[test]
