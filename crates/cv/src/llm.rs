@@ -70,7 +70,7 @@ enum Provider {
     Anthropic {
         key: String,
     },
-    /// A local OpenAI-compatible server (LM Studio, Ollama, vLLM, …). No API key; free + offline.
+    /// A configured OpenAI-compatible server (LM Studio, Ollama, vLLM, …).
     LmStudio {
         base: String,
     },
@@ -102,7 +102,9 @@ fn egress_notice(provider: &Provider, model: &str, approx_bytes: usize) {
     let kb = approx_bytes.div_ceil(1024);
     match provider {
         Provider::LmStudio { base } => {
-            eprintln!("✦ sending ~{kb} KB to local model {model} at {base} (stays on this machine)");
+            eprintln!(
+                "✦ sending ~{kb} KB of transcript to model {model} at {base} (configured OpenAI-compatible server)"
+            );
         }
         _ => {
             eprintln!(
@@ -340,6 +342,7 @@ fn call_model(provider: &Provider, model: &str, prompt: &str) -> Result<String> 
 fn extract_openai_text(v: &Value, who: &str) -> Result<String> {
     v["choices"][0]["message"]["content"]
         .as_str()
+        .filter(|text| !text.is_empty())
         .map(str::to_string)
         .ok_or_else(|| anyhow!("{who} response missing message content: {v}"))
 }
@@ -877,6 +880,7 @@ mod tests {
             json!({"choices": []}),
             json!({"choices": [{"message": {}}]}),
             json!({"choices": [{"message": {"content": null}}]}),
+            json!({"choices": [{"message": {"content": ""}, "finish_reason":"content_filter"}]}),
             json!({"choices": [{"message": {"content": 42}}]}),
             json!({"error": {"message": "rate limited"}}),
         ] {
