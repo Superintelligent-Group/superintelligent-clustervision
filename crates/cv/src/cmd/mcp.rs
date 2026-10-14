@@ -236,9 +236,15 @@ pub(crate) fn cmd_mcp(tree: clap::Command) -> anyhow::Result<()> {
                 continue;
             }
         };
-        let id = req.get("id").cloned();
-        let method = req.get("method").and_then(Value::as_str).unwrap_or("").to_string();
-        let params = req.get("params").cloned();
+        let (method, params, id) = match request_frame(req) {
+            Ok(frame) => frame,
+            Err(error) => {
+                if resp_tx.send(Pending::control(Response::Json(error))).is_err() {
+                    break;
+                }
+                continue;
+            }
+        };
 
         if cancelled.load(Ordering::Relaxed) {
             break;
@@ -340,6 +346,49 @@ pub(crate) fn cmd_mcp(tree: clap::Command) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Validate the protocol envelope before admission or execution, then transfer ownership
+/// of the payload rather than cloning large tool argument trees.
+fn request_frame(req: Value) -> Result<(String, Option<Value>, Option<Value>), Value> {
+    let id = req
+        .get("id")
+        .filter(|id| id.is_null() || id.is_string() || id.is_number());
+    let valid = req.is_object()
+        && req.get("jsonrpc").and_then(Value::as_str) == Some("2.0")
+        && req.get("method").is_some_and(Value::is_string)
+        && req
+            .get("id")
+            .is_none_or(|value| value.is_null() || value.is_string() || value.is_number())
+        && req
+            .get("params")
+            .is_none_or(|params| params.is_object() || params.is_array());
+    if !valid {
+        return Err(error_response(
+            id.cloned().unwrap_or(Value::Null),
+            -32600,
+            "Invalid Request",
+        ));
+    }
+    let Value::Object(mut fields) = req else { unreachable!() };
+    let Some(Value::String(method)) = fields.remove("method") else {
+        unreachable!()
+    };
+    Ok((method, fields.remove("params"), fields.remove("id")))
+}
+
+fn tool_call_params(params: Option<Value>) -> anyhow::Result<(String, Value)> {
+    let Some(Value::Object(mut fields)) = params else {
+        anyhow::bail!(InvalidParams("tools/call params must be an object".into()));
+    };
+    let Some(Value::String(name)) = fields.remove("name") else {
+        anyhow::bail!(InvalidParams("tools/call name must be a string".into()));
+    };
+    let args = fields.remove("arguments").unwrap_or_else(|| json!({}));
+    if !args.is_object() {
+        anyhow::bail!(InvalidParams("tools/call arguments must be an object".into()));
+    }
+    Ok((name, args))
+}
+
 fn handle(method: &str, params: Option<Value>, id: Option<Value>, cancelled: &AtomicBool) -> Option<Response> {
     let _reads = cv_core::source::read_scope();
     // A request without an `id` is a JSON-RPC *notification*: the method still runs (a
@@ -354,12 +403,12 @@ fn handle(method: &str, params: Option<Value>, id: Option<Value>, cancelled: &At
         "notifications/initialized" | "notifications/cancelled" => None,
         "tools/list" => Some(ok_response(id, json!({ "tools": tool_list() }))),
         "tools/call" => {
-            let params = params.unwrap_or(Value::Null);
-            let name = params.get("name").and_then(Value::as_str).unwrap_or("").to_string();
-            let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
-
-            // A panicking tool costs its own reply, not the server.
-            let result = std::panic::catch_unwind(move || call_tool(&name, &args, cancelled));
+            // A panicking tool costs its own reply, not the server. Parameter validation
+            // shares that error path and never launches a command for malformed arguments.
+            let result = std::panic::catch_unwind(move || {
+                let (name, args) = tool_call_params(params)?;
+                call_tool(&name, &args, cancelled)
+            });
 
             match result {
                 Ok(Ok(ToolOutput::Text(text))) => Some(ok_response(id, tool_text_result(&text, false))),
@@ -1266,6 +1315,20 @@ mod admission_tests {
             })
         ));
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn large_tool_arguments_transfer_ownership_from_frame_to_execution() {
+        let request = json!({"jsonrpc":"2.0", "id":1, "method":"tools/call", "params":{"name":"show", "arguments":{"id":"x".repeat(2 * 1024 * 1024)}}});
+        let original = request["params"]["arguments"]["id"].as_str().unwrap().as_ptr();
+        let (method, params, id) = request_frame(request).unwrap();
+        assert_eq!(method, "tools/call");
+        assert_eq!(id, Some(json!(1)));
+        let (name, args) = tool_call_params(params).unwrap();
+        assert_eq!(name, "show");
+        let transferred = args["id"].as_str().unwrap();
+        assert_eq!(transferred.len(), 2 * 1024 * 1024);
+        assert_eq!(transferred.as_ptr(), original, "large request payload was cloned");
     }
 
     #[test]

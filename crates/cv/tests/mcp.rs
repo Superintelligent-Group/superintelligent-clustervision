@@ -292,6 +292,39 @@ fn tool_calls_against_fixture_corpus() {
 }
 
 #[test]
+fn invalid_envelopes_and_tool_parameters_do_not_execute() {
+    let mut s = Server::spawn("invalid-envelopes");
+    for request in [
+        json!(null),
+        json!([]),
+        json!(42),
+        json!({"jsonrpc":"2.0", "id":11}),
+        json!({"jsonrpc":"2.0", "id":{}, "method":"ping"}),
+        json!({"jsonrpc":"1.0", "id":12, "method":"tools/call", "params":{"name":"task_open", "arguments":{"title":"must not exist"}}}),
+        json!({"jsonrpc":"2.0", "id":13, "method":false}),
+        json!({"jsonrpc":"2.0", "id":14, "method":"ping", "params":false}),
+    ] {
+        s.send(&request);
+        let response = s.recv();
+        assert_eq!(response["error"]["code"], -32600, "request {request}: {response}");
+    }
+    for params in [
+        json!([]),
+        json!({}),
+        json!({"name":false}),
+        json!({"name":"task_open", "arguments":[]}),
+    ] {
+        let response = s.request(20, "tools/call", params);
+        assert_eq!(response["error"]["code"], -32602, "{response}");
+    }
+    // Malformed notifications remain response-free; the next response belongs to this ping.
+    s.send(&json!({"jsonrpc":"2.0", "method":"tools/call", "params":{"name":"task_open", "arguments":false}}));
+    assert_eq!(s.request(21, "ping", json!({}))["id"], 21);
+    let (tasks, _) = s.world.cv_ok(&["task", "list", "--json"]);
+    assert!(!tasks.contains("must not exist"), "invalid request executed: {tasks}");
+}
+
+#[test]
 fn protocol_error_handling() {
     let mut s = Server::spawn("errors");
     s.request(1, "initialize", json!({}));
