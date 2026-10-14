@@ -78,6 +78,9 @@ fn part(ty: Option<String>, text: bool, call: Option<(bool, bool)>, result: bool
 
 /// The legacy checked reader uses the same witness/codec classification as SQLite discovery.
 pub(super) fn view(role: &str, content: Option<JsonView<'_>>) -> Result<bool> {
+    view_hidden(role, content, false)
+}
+fn view_hidden(role: &str, content: Option<JsonView<'_>>, hidden: bool) -> Result<bool> {
     let Some(content) = content else {
         return Ok(false);
     };
@@ -114,7 +117,7 @@ pub(super) fn view(role: &str, content: Option<JsonView<'_>>) -> Result<bool> {
             ));
         }
     }
-    Ok(fold.turn(role, false))
+    Ok(fold.turn(role, hidden))
 }
 
 fn accepted<'a>(text: &'a str, index: &'a document::Index) -> Option<Raw<'a>> {
@@ -159,4 +162,65 @@ pub(super) fn cell(role: &str, content: &str, metadata: Option<&str>) -> bool {
         .and_then(|m| accepted(m, &index))
         .is_some_and(|m| fields(m, &["userVisible"])[0].is_some_and(|flag| flag.get() == "false"));
     fold.turn(role, hidden)
+}
+
+/// Large native cells reuse the checked selected reader, with an arena scoped to one row.
+/// Tiny rows keep the borrowed cursor path; the common byte-source budget bounds that choice.
+pub(super) fn incremental(
+    conn: &Connection,
+    source: &crate::json::JsonSource,
+    rowid: i64,
+    role: &str,
+    metadata: bool,
+) -> Result<bool> {
+    use super::super::store::{
+        bytes::{ByteSource, MEMORY_LIMIT},
+        sqlite as sql,
+    };
+    use crate::json::InvalidJson;
+    let body_len = sql::with_cell_reader(conn, "messages", "content_json", rowid, |_, len| Ok(len))?;
+    let meta_len = if metadata {
+        sql::with_cell_reader(conn, "messages", "metadata_json", rowid, |_, len| Ok(len))?
+    } else {
+        0
+    };
+    if body_len <= MEMORY_LIMIT && meta_len <= MEMORY_LIMIT {
+        let sql = format!(
+            "SELECT content_json, {} FROM messages WHERE _rowid_ = ?1",
+            if metadata { "metadata_json" } else { "NULL" }
+        );
+        return Ok(conn.query_row(&sql, [rowid], |row| {
+            let body = row.get_ref(0)?.as_str().ok();
+            let meta = row.get_ref(1)?.as_str().ok();
+            Ok(body.is_some_and(|body| cell(role, body, meta)))
+        })?);
+    }
+    // JsonSource remembers its first decoded arena; give this dropped row its own capture
+    // so the first giant cell does not stay retained until the end of discovery.
+    let row_source = crate::json::JsonSource::capture(source.path())?;
+    let source = &row_source;
+    let arena = std::sync::Arc::new(ByteSource::arena()?);
+    let body = sql::append_cell(conn, "messages", "content_json", rowid, &arena)?;
+    let hidden = if metadata {
+        let meta = sql::append_cell(conn, "messages", "metadata_json", rowid, &arena)?;
+        match source.read_backing_value(std::sync::Arc::clone(&arena), meta.0, meta.1, |view| {
+            Ok(Fields::parse(view, &["userVisible"])?
+                .and_then(|fields| fields.get("userVisible"))
+                .map(|flag| flag.as_bool())
+                .transpose()?
+                .flatten()
+                == Some(false))
+        }) {
+            Ok(hidden) => hidden,
+            Err(error) if error.is::<InvalidJson>() => false,
+            Err(error) => return Err(error),
+        }
+    } else {
+        false
+    };
+    match source.read_backing_value(arena, body.0, body.1, |view| view_hidden(role, Some(view), hidden)) {
+        Ok(turn) => Ok(turn),
+        Err(error) if error.is::<InvalidJson>() => Ok(false),
+        Err(error) => Err(error),
+    }
 }

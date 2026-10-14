@@ -320,26 +320,54 @@ fn discover_db(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
         let updated: Option<String> = row.get(4).ok().flatten();
         Ok((id, title, wd, created, updated))
     })?;
-    // One borrowed cursor pass counts actual codec turns across all sessions, including
-    // visibility, malformed/empty records, controls and errors. Bodies are never copied.
+    // One cursor pass counts actual codec turns across all sessions. Eligible native stores
+    // read large cells incrementally; tiny/in-memory/UTF-16/virtual stores keep the typed cursor.
     let metadata = if columns(conn, "messages").contains("metadata_json") {
         "metadata_json"
     } else {
         "NULL"
     };
+    let source = if db.is_file() && super::store::sqlite::incremental_utf8_table(conn, "messages") {
+        Some(crate::json::JsonSource::capture(db)?)
+    } else {
+        None
+    };
+    let content_select = if source.is_some() {
+        "typeof(content_json)"
+    } else {
+        "content_json"
+    };
+    let metadata_select = if source.is_some() {
+        format!("typeof({metadata})")
+    } else {
+        metadata.to_owned()
+    };
+    let rowid_select = if source.is_some() { "_rowid_" } else { "NULL" };
     let mut counts = HashMap::<String, usize>::new();
     let mut count_stmt = conn.prepare(&format!(
-        "SELECT session_id, role, content_json, {metadata} FROM messages"
+        "SELECT session_id, role, {content_select}, {metadata_select}, {rowid_select} FROM messages"
     ))?;
     let mut messages = count_stmt.query([])?;
     while let Some(row) = messages.next()? {
-        let content = row.get_ref(2).ok().and_then(|v| v.as_str().ok());
         let role = row.get_ref(1).ok().and_then(|v| v.as_str().ok()).unwrap_or("user");
-        let metadata = row.get_ref(3).ok().and_then(|v| v.as_str().ok());
-        if content.is_some_and(|content| count::cell(role, content, metadata)) {
+        let turn = if let Some(source) = &source {
+            if row.get_ref(2)?.as_str()? != "text" {
+                false
+            } else {
+                count::incremental(conn, source, row.get(4)?, role, row.get_ref(3)?.as_str()? == "text")?
+            }
+        } else {
+            let content = row.get_ref(2).ok().and_then(|v| v.as_str().ok());
+            let metadata = row.get_ref(3).ok().and_then(|v| v.as_str().ok());
+            content.is_some_and(|content| count::cell(role, content, metadata))
+        };
+        if turn {
             let id: String = row.get(0)?;
             *counts.entry(id).or_default() += 1;
         }
+    }
+    if let Some(source) = source {
+        source.check()?;
     }
     let mut out = Vec::new();
     for row in rows.flatten() {
@@ -1911,6 +1939,51 @@ mod tests {
                 reference.id
             );
         }
+    }
+
+    #[test]
+    fn native_discovery_spooled_large_cells_match_parse_and_small_cell_counts() -> Result<()> {
+        let world = cv_testkit::World::in_process("goose-native-discovery-cells");
+        let path = world.base.join("sessions.db");
+        let conn = Connection::open(&path)?;
+        conn.execute_batch(SCHEMA)?;
+        conn.execute("INSERT INTO sessions(id,working_dir) VALUES ('large','/synthetic')", [])?;
+        let giant = "雪\n".repeat(super::super::store::bytes::MEMORY_LIMIT);
+        for (i, (body, meta)) in [
+            (
+                serde_json::json!([{"type":"text","text":giant}]).to_string(),
+                "{}".to_owned(),
+            ),
+            (
+                serde_json::json!([{"type":"text","text":"visible"}]).to_string(),
+                serde_json::json!({"userVisible":0,"ignored":giant}).to_string(),
+            ),
+            (
+                serde_json::json!([{"type":"text","text":giant}]).to_string(),
+                serde_json::json!({"userVisible":false,"ignored":giant}).to_string(),
+            ),
+            (
+                format!(
+                    "[{{\"type\":\"text\",\"text\":{},\"ignored\":1e999}}]",
+                    serde_json::to_string(&giant)?
+                ),
+                "{}".to_owned(),
+            ),
+            (r#"[{"type":"text","text":"small"}]"#.to_owned(), "{}".to_owned()),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            conn.execute("INSERT INTO messages(session_id,role,content_json,created_timestamp,metadata_json) VALUES ('large','user',?1,?2,?3)",rusqlite::params![body,i as i64,meta])?;
+        }
+        let refs = discover_db(&conn, &path)?;
+        assert_eq!(refs[0].message_count, 3);
+        let parsed = parse_db(&conn, &sref("large"))?;
+        assert_eq!(
+            refs[0].message_count,
+            parsed.messages.iter().filter(|m| m.is_turn()).count()
+        );
+        Ok(())
     }
 
     #[test]
