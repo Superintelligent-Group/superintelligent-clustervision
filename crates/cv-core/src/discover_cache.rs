@@ -210,7 +210,7 @@ fn admit_loaded(
     entry: Entry,
     key: (u64, u64),
     reads: &crate::source::ReadSet,
-) -> Option<Vec<SessionRef>> {
+) -> Option<(Vec<SessionRef>, crate::source::ReadSet)> {
     let mut entries = cache.entries.write().unwrap();
     let entry = entries.entry(path.to_path_buf()).or_insert(entry);
     if (entry.mtime_ns, entry.size) != key {
@@ -219,7 +219,7 @@ fn admit_loaded(
     entry
         .payload
         .known()
-        .and_then(|(refs, captured)| (captured == reads).then(|| refs.clone()))
+        .and_then(|(refs, captured)| captured.includes(reads).then(|| (refs.clone(), captured.clone())))
 }
 
 /// `(mtime_ns, size)` for `path`, or `None` if it can't be stat'd (then callers just scan).
@@ -278,10 +278,10 @@ where
             .get(path)
             .filter(|entry| entry.mtime_ns == mtime_ns && entry.size == size)
             .and_then(|entry| entry.payload.known())
-            .and_then(|(refs, captured)| (captured == &reads).then(|| refs.clone()))
+            .and_then(|(refs, captured)| captured.includes(&reads).then(|| (refs.clone(), captured.clone())))
     };
-    if let Some(refs) = candidate {
-        if reads.fresh(&mut crate::source::Probe::default()) {
+    if let Some((refs, captured)) = candidate {
+        if captured.fresh(&mut crate::source::Probe::default()) {
             return refs;
         }
     }
@@ -302,8 +302,8 @@ where
             // scan/count update must win over the older SQL snapshot, including on return.
             entry.payload.parsed();
             let candidate = admit_loaded(&cache, path, entry, (mtime_ns, size), &reads);
-            if let Some(refs) = candidate {
-                if reads.fresh(&mut crate::source::Probe::default()) {
+            if let Some((refs, captured)) = candidate {
+                if captured.fresh(&mut crate::source::Probe::default()) {
                     return refs;
                 }
             }
@@ -595,6 +595,22 @@ mod tests {
             assert!(prior.is_none());
             (Some(r.clone()), Some(state()))
         });
+        cached_scan_continued(&path, version, |_| {
+            panic!("unchanged primary and dependency must hit process cache")
+        });
+        persist(false);
+        current_cache().entries.write().unwrap().clear();
+        cached_scan_continued(&path, version, |_| {
+            panic!("persisted exact hit must retain auxiliary guards")
+        });
+        // A dependency-only change forces complete metadata discovery, even with identical
+        // primary bytes and no opportunity for append continuation.
+        std::fs::write(&aux, "replacement auxiliary").unwrap();
+        cached_scan_continued(&path, version, |prior| {
+            assert!(prior.is_none());
+            (Some(r.clone()), Some(state()))
+        });
+        cached_scan_continued(&path, version, |_| panic!("refreshed auxiliary must hit"));
         std::fs::write(&path, "first\nsecond\n").unwrap();
         cached_scan_continued(&path, version, |prior| {
             assert_eq!(prior.unwrap().offset, 6);
@@ -843,7 +859,7 @@ mod tests {
         reads.record(&path);
         let actual = admit_loaded(&cache, &path, old_sql, key, &reads).unwrap();
         assert_eq!(
-            actual[0].message_count, 7,
+            actual.0[0].message_count, 7,
             "newer process count wins on admission AND return"
         );
     }

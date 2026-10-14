@@ -193,6 +193,16 @@ impl ReadSet {
         }
     }
 
+    /// Captured reads may include auxiliary sources beyond a caller's primary baseline.
+    pub(crate) fn includes(&self, baseline: &Self) -> bool {
+        self.known
+            && baseline.known
+            && baseline
+                .entries
+                .iter()
+                .all(|(path, entry)| self.entries.get(path) == Some(entry))
+    }
+
     /// Revalidate exactly the paths captured by this consumer, including absence and identity.
     pub fn fresh(&self, probe: &mut Probe) -> bool {
         self.known
