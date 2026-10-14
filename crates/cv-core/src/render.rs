@@ -441,7 +441,7 @@ mod tests {
             };
             assert!(writer.changed);
             assert!(result.is_err());
-            assert!(writer.stage.len() > 0);
+            assert!(!writer.stage.is_empty());
             // No finished ByteSource exists for publication after an error.
         }
     }

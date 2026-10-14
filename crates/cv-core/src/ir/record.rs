@@ -294,6 +294,27 @@ fn same_envelope(a: &Message, b: &Message) -> bool {
                 .filter(|(key, _)| key.as_str() != crate::harness::claude::CARRIER_KEY))
 }
 
+#[cfg(any(feature = "sqlite", test))]
+pub(crate) fn same_message(a: &Message, b: &Message) -> bool {
+    same_envelope(a, b)
+        && a.content.len() == b.content.len()
+        && a.content.iter().zip(&b.content).all(|(a, b)| same_block(a, b))
+}
+#[cfg(any(feature = "sqlite", test))]
+pub(crate) fn same_except_first_text(a: &Message, b: &Message) -> bool {
+    same_envelope(a, b)
+        && a.content.len() == b.content.len()
+        && matches!(
+            (a.content.first(), b.content.first()),
+            (Some(Block::Text { .. }), Some(Block::Text { .. }))
+        )
+        && a.content
+            .iter()
+            .skip(1)
+            .zip(b.content.iter().skip(1))
+            .all(|(a, b)| same_block(a, b))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,24 +367,4 @@ mod tests {
             }
         }
     }
-}
-#[cfg(any(feature = "sqlite", test))]
-pub(crate) fn same_message(a: &Message, b: &Message) -> bool {
-    same_envelope(a, b)
-        && a.content.len() == b.content.len()
-        && a.content.iter().zip(&b.content).all(|(a, b)| same_block(a, b))
-}
-#[cfg(any(feature = "sqlite", test))]
-pub(crate) fn same_except_first_text(a: &Message, b: &Message) -> bool {
-    same_envelope(a, b)
-        && a.content.len() == b.content.len()
-        && matches!(
-            (a.content.first(), b.content.first()),
-            (Some(Block::Text { .. }), Some(Block::Text { .. }))
-        )
-        && a.content
-            .iter()
-            .skip(1)
-            .zip(b.content.iter().skip(1))
-            .all(|(a, b)| same_block(a, b))
 }
