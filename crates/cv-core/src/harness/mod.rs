@@ -388,40 +388,69 @@ impl dyn Adapter + '_ {
 // (A previous `Adapter::emit`/`can_emit` pair had zero call sites and drifted out of sync with the
 // real dispatcher, with `can_emit` returning `false` for supported targets.)
 
+/// Registration order: [`all`]'s order, which listings and discovery observe.
+const ORDER: [Harness; Harness::COUNT] = [
+    Harness::Claude,
+    Harness::Codex,
+    Harness::Grok,
+    Harness::OpenCode,
+    Harness::Gemini,
+    Harness::OpenClaw,
+    Harness::Kimi,
+    Harness::KimiCode,
+    Harness::Qwen,
+    Harness::LmStudio,
+    Harness::Cline,
+    Harness::Roo,
+    Harness::Continue,
+    Harness::ChatGptExport,
+    Harness::ClaudeExport,
+    Harness::OpenSession,
+    Harness::Hermes,
+    Harness::Cursor,
+    Harness::Goose,
+    Harness::Zed,
+    Harness::Devin,
+];
+
 /// All registered adapters.
 pub fn all() -> Vec<Box<dyn Adapter>> {
-    let mut adapters: Vec<Box<dyn Adapter>> = vec![
-        Box::new(claude::Claude::detect()),
-        Box::new(codex::Codex::detect()),
-        Box::new(grok::Grok::detect()),
-        Box::new(opencode::OpenCode::detect()),
-        Box::new(gemini::Gemini::detect()),
-        Box::new(openclaw::OpenClaw::detect()),
-        Box::new(kimi::Kimi::detect()),
-        Box::new(kimi_code::KimiCode::detect()),
-        Box::new(qwen::Qwen::detect()),
-        Box::new(lmstudio::LmStudio::detect()),
-        Box::new(cline::Cline::detect()),
-        Box::new(roo::Roo::detect()),
-        Box::new(continuedev::Continue::detect()),
-        Box::new(export::ChatGptExport),
-        Box::new(export::ClaudeExport),
-        Box::new(opensession::OpenSession),
-    ];
-    #[cfg(feature = "sqlite")]
-    {
-        adapters.push(Box::new(hermes::Hermes::detect()));
-        adapters.push(Box::new(cursor::Cursor::detect()));
-        adapters.push(Box::new(goose::Goose::detect()));
-        adapters.push(Box::new(zed::Zed::detect()));
-        adapters.push(Box::new(devin::Devin::detect()));
-    }
-    adapters
+    ORDER.into_iter().filter_map(for_harness).collect()
 }
 
-/// The adapter for a specific harness, if registered.
+/// The adapter for a specific harness, if registered. Detects only that adapter: detection stats
+/// roots and reads config, so a per-session lookup must not detect the other twenty.
 pub fn for_harness(h: Harness) -> Option<Box<dyn Adapter>> {
-    all().into_iter().find(|a| a.harness() == h)
+    Some(match h {
+        Harness::Claude => Box::new(claude::Claude::detect()),
+        Harness::Codex => Box::new(codex::Codex::detect()),
+        Harness::Grok => Box::new(grok::Grok::detect()),
+        Harness::OpenCode => Box::new(opencode::OpenCode::detect()),
+        Harness::Gemini => Box::new(gemini::Gemini::detect()),
+        Harness::OpenClaw => Box::new(openclaw::OpenClaw::detect()),
+        Harness::Kimi => Box::new(kimi::Kimi::detect()),
+        Harness::KimiCode => Box::new(kimi_code::KimiCode::detect()),
+        Harness::Qwen => Box::new(qwen::Qwen::detect()),
+        Harness::LmStudio => Box::new(lmstudio::LmStudio::detect()),
+        Harness::Cline => Box::new(cline::Cline::detect()),
+        Harness::Roo => Box::new(roo::Roo::detect()),
+        Harness::Continue => Box::new(continuedev::Continue::detect()),
+        Harness::ChatGptExport => Box::new(export::ChatGptExport),
+        Harness::ClaudeExport => Box::new(export::ClaudeExport),
+        Harness::OpenSession => Box::new(opensession::OpenSession),
+        #[cfg(feature = "sqlite")]
+        Harness::Hermes => Box::new(hermes::Hermes::detect()),
+        #[cfg(feature = "sqlite")]
+        Harness::Cursor => Box::new(cursor::Cursor::detect()),
+        #[cfg(feature = "sqlite")]
+        Harness::Goose => Box::new(goose::Goose::detect()),
+        #[cfg(feature = "sqlite")]
+        Harness::Zed => Box::new(zed::Zed::detect()),
+        #[cfg(feature = "sqlite")]
+        Harness::Devin => Box::new(devin::Devin::detect()),
+        #[cfg(not(feature = "sqlite"))]
+        Harness::Hermes | Harness::Cursor | Harness::Goose | Harness::Zed | Harness::Devin => return None,
+    })
 }
 
 /// Assert the IR-v2 nesting invariant on a parsed session (`docs/INTERFACE-V2.md` §4), so every
@@ -459,6 +488,17 @@ pub(crate) fn assert_no_flat_keys(s: &Session) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn registration_order_names_every_harness_once_and_each_adapter_is_its_own() {
+        let mut seen = std::collections::HashSet::new();
+        assert!(ORDER.iter().all(|h| seen.insert(*h)), "ORDER repeats a harness");
+        for h in ORDER {
+            if let Some(adapter) = for_harness(h) {
+                assert_eq!(adapter.harness(), h);
+            }
+        }
+    }
 
     #[test]
     fn ts_from_value_handles_all_shapes() {

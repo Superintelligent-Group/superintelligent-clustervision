@@ -392,6 +392,8 @@ pub struct Probe {
     // The map key owns the path once; outer None is unavailable, inner None is absent.
     entries: HashMap<PathBuf, Option<Option<FileState>>>,
     directories: HashMap<PathBuf, Option<std::sync::Arc<Vec<PathBuf>>>>,
+    // Adapters resolved once per operation: detection stats roots, so not once per session.
+    adapters: HashMap<Harness, Option<Box<dyn crate::harness::Adapter>>>,
 }
 
 impl Probe {
@@ -453,7 +455,17 @@ impl Probe {
     /// Collect the currently declared session-local dependencies. Plain file transcripts have
     /// an empty set; shared databases depend on WAL and rollback journals even when absent.
     pub fn dependencies(&mut self, r: &SessionRef) -> Option<Stamp> {
-        self.dependencies_from(r, &primary_path(r))
+        let primary = self.primary_path(r);
+        self.dependencies_from(r, &primary)
+    }
+
+    /// [`primary_path`] with this operation's adapter registry.
+    pub fn primary_path(&mut self, r: &SessionRef) -> PathBuf {
+        self.adapters
+            .entry(r.harness)
+            .or_insert_with(|| crate::harness::for_harness(r.harness))
+            .as_ref()
+            .map_or_else(|| r.path.clone(), |adapter| adapter.resume_source(r))
     }
 
     fn dependencies_from(&mut self, r: &SessionRef, primary: &Path) -> Option<Stamp> {
@@ -696,7 +708,8 @@ impl Probe {
     }
 
     pub fn snapshot(&mut self, r: &SessionRef) -> Snapshot {
-        self.snapshot_from(r, &primary_path(r))
+        let primary = self.primary_path(r);
+        self.snapshot_from(r, &primary)
     }
 
     /// Capture the concrete adapter's append source while retaining its logical session key
