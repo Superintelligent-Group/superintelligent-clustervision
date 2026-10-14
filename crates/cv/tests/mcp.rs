@@ -757,3 +757,39 @@ fn admission_shutdown_after_eof_or_output_failure_cancels_long_poll() {
         }
     }
 }
+
+#[test]
+fn cancellation_targets_one_typed_request_and_preserves_connection() {
+    let mut s = Server::spawn("request-cancellation");
+    s.request(100, "initialize", json!({}));
+    for id in [json!(1), json!("1")] {
+        s.send(&json!({"jsonrpc":"2.0", "id":id, "method":"tools/call", "params":{
+            "name":"await_omen", "arguments":{"regex":"NEVER_MATCHES", "cwd_contains":"/nowhere",
+            "timeout_secs":120, "interval_secs":3600}}}));
+    }
+    s.send(&json!({"jsonrpc":"2.0", "method":"notifications/cancelled", "params":{"requestId":1}}));
+    let cancelled = s.recv();
+    assert_eq!(cancelled["id"], json!(1), "{cancelled}");
+    assert_eq!(cancelled["result"]["isError"], true, "{cancelled}");
+    assert!(cancelled["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("MCP request cancelled"));
+
+    // The numeric ID can immediately be reused, while the distinct string ID stays active.
+    s.send(&json!({"jsonrpc":"2.0", "id":1, "method":"tools/call", "params":{
+        "name":"task_list", "arguments":{}}}));
+    let completed = s.recv();
+    assert_eq!(completed["id"], json!(1), "{completed}");
+    assert_eq!(completed["result"]["isError"], false, "{completed}");
+    let ping = s.request(101, "ping", json!({}));
+    assert_eq!(ping["result"], json!({}), "{ping}");
+    s.send(&json!({"jsonrpc":"2.0", "method":"notifications/cancelled", "params":{"requestId":"1"}}));
+    let cancelled = s.recv();
+    assert_eq!(cancelled["id"], json!("1"), "{cancelled}");
+    assert_eq!(cancelled["result"]["isError"], true, "{cancelled}");
+    assert!(cancelled["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("MCP request cancelled"));
+}

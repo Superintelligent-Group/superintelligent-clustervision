@@ -57,6 +57,90 @@ fn cli() -> Option<&'static CliTools> {
     CLI.get().and_then(Option::as_ref)
 }
 
+/// A request stops on either explicit cancellation or connection shutdown.
+#[derive(Clone, Copy)]
+pub(crate) struct Cancellation<'a> {
+    connection: &'a AtomicBool,
+    request: Option<&'a AtomicBool>,
+}
+impl<'a> Cancellation<'a> {
+    pub(crate) fn connection(connection: &'a AtomicBool) -> Self {
+        Self {
+            connection,
+            request: None,
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn request(connection: &'a AtomicBool, request: &'a AtomicBool) -> Self {
+        Self {
+            connection,
+            request: Some(request),
+        }
+    }
+    pub(crate) fn is_cancelled(self) -> bool {
+        self.connection.load(Ordering::Relaxed) || self.request.is_some_and(|request| request.load(Ordering::Relaxed))
+    }
+    pub(crate) fn check(self) -> anyhow::Result<()> {
+        anyhow::ensure!(!self.connection.load(Ordering::Relaxed), "MCP client disconnected");
+        anyhow::ensure!(
+            !self.request.is_some_and(|request| request.load(Ordering::Relaxed)),
+            "MCP request cancelled"
+        );
+        Ok(())
+    }
+}
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum RequestKey {
+    String(String),
+    Number(String),
+}
+impl RequestKey {
+    fn of(value: &Value) -> Option<Self> {
+        match value {
+            Value::String(value) => Some(Self::String(value.clone())),
+            Value::Number(value) => Some(Self::Number(
+                value
+                    .as_i64()
+                    .map(|value| value.to_string())
+                    .or_else(|| value.as_u64().map(|value| value.to_string()))
+                    .unwrap_or_else(|| value.as_f64().unwrap().to_string()),
+            )),
+            _ => None,
+        }
+    }
+}
+type Requests = Arc<Mutex<std::collections::HashMap<RequestKey, Arc<AtomicBool>>>>;
+struct RequestRegistration {
+    requests: Requests,
+    key: Option<RequestKey>,
+    signal: Arc<AtomicBool>,
+}
+impl RequestRegistration {
+    fn register(requests: &Requests, id: Option<&Value>) -> Result<Self, ()> {
+        let key = id.and_then(RequestKey::of);
+        let signal = Arc::new(AtomicBool::new(false));
+        if let Some(key) = &key {
+            let mut entries = requests.lock().unwrap();
+            if entries.contains_key(key) {
+                return Err(());
+            }
+            entries.insert(key.clone(), signal.clone());
+        }
+        Ok(Self {
+            requests: requests.clone(),
+            key,
+            signal,
+        })
+    }
+}
+impl Drop for RequestRegistration {
+    fn drop(&mut self) {
+        if let Some(key) = &self.key {
+            self.requests.lock().unwrap().remove(key);
+        }
+    }
+}
+
 const PROTOCOL_VERSION: &str = "2025-06-18";
 
 /// A request handler's stack. Tool bodies parse whole transcripts; give them main's room.
@@ -175,6 +259,7 @@ pub(crate) fn cmd_mcp(tree: clap::Command) -> anyhow::Result<()> {
     let cancelled = Arc::new(AtomicBool::new(false));
     let writer_cancelled = cancelled.clone();
     let (resp_tx, resp_rx) = mpsc::sync_channel::<Pending>(RESPONSE_QUEUE);
+    let requests: Requests = Arc::new(Mutex::new(std::collections::HashMap::new()));
     let ordinary = Admission::new(ORDINARY_CALLS);
     let polls = Admission::new(BLOCKING_POLLS);
     let (done_tx, done_rx) = mpsc::channel::<()>();
@@ -246,6 +331,18 @@ pub(crate) fn cmd_mcp(tree: clap::Command) -> anyhow::Result<()> {
         if cancelled.load(Ordering::Relaxed) {
             break;
         }
+        if method == "notifications/cancelled" {
+            if let Some(key) = params
+                .as_ref()
+                .and_then(|params| params.get("requestId"))
+                .and_then(RequestKey::of)
+            {
+                if let Some(request) = requests.lock().unwrap().get(&key) {
+                    request.store(true, Ordering::Relaxed);
+                }
+            }
+            continue;
+        }
         // Protocol/control bursts retain their replies, without starting handler threads.
         if method != "tools/call" {
             if let Some(response) = handle(&method, params, id, &cancelled) {
@@ -274,6 +371,20 @@ pub(crate) fn cmd_mcp(tree: clap::Command) -> anyhow::Result<()> {
             }
             continue;
         };
+        let registration = match RequestRegistration::register(&requests, id.as_ref()) {
+            Ok(registration) => registration,
+            Err(()) => {
+                let response = Response::Json(error_response(
+                    id.unwrap_or(Value::Null),
+                    -32600,
+                    "request ID is already outstanding",
+                ));
+                if resp_tx.send(Pending::control(response)).is_err() {
+                    break;
+                }
+                continue;
+            }
+        };
         // Completed thread handles do not accumulate with request history.
         let mut i = 0;
         while i < handlers.len() {
@@ -298,13 +409,21 @@ pub(crate) fn cmd_mcp(tree: clap::Command) -> anyhow::Result<()> {
         let spawned = std::thread::Builder::new().stack_size(HANDLER_STACK).spawn(move || {
             let _execution = permit.clone();
             let panic_id = id.clone();
-            let result =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle(&method, params, id, &cancelled)));
+            let token = Cancellation {
+                connection: &cancelled,
+                request: Some(&registration.signal),
+            };
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                handle_cancelled(&method, params, id, token)
+            }));
             let response = match result {
                 Ok(response) => response,
                 Err(_) => panic_id
                     .map(|id| Response::Json(error_response(id, -32603, "internal error: the request panicked"))),
             };
+            // Retire the ID before publication so a client can reuse it as soon as
+            // it receives the completed response.
+            drop(registration);
             if let Some(response) = response {
                 enqueue_tool_response(&tx, response, permit, &cancelled);
             }
@@ -387,6 +506,15 @@ fn tool_call_params(params: Option<Value>) -> anyhow::Result<(String, Value)> {
 }
 
 fn handle(method: &str, params: Option<Value>, id: Option<Value>, cancelled: &AtomicBool) -> Option<Response> {
+    handle_cancelled(method, params, id, Cancellation::connection(cancelled))
+}
+
+fn handle_cancelled(
+    method: &str,
+    params: Option<Value>,
+    id: Option<Value>,
+    cancelled: Cancellation<'_>,
+) -> Option<Response> {
     let _reads = cv_core::source::read_scope();
     // A request without an `id` is a JSON-RPC *notification*: the method still runs (a
     // notification tools/call may have side effects worth performing), but per spec the server
@@ -632,7 +760,7 @@ enum ToolOutput {
     Text(String),
     Command(super::mcp_tools::CommandOutput),
 }
-fn call_tool(name: &str, args: &Value, cancelled: &AtomicBool) -> anyhow::Result<ToolOutput> {
+fn call_tool(name: &str, args: &Value, cancelled: Cancellation<'_>) -> anyhow::Result<ToolOutput> {
     match name {
         "await_omen" => await_omen(args, cancelled).map(ToolOutput::Text),
         "observe_stream" => observe_stream(args, cancelled).map(ToolOutput::Text),
@@ -650,7 +778,7 @@ fn call_tool(name: &str, args: &Value, cancelled: &AtomicBool) -> anyhow::Result
         }
         // Everything else is a CLI-generated command tool: shell out to `cv`.
         other => match cli() {
-            Some(c) if c.find(other).is_some() => c.call(other, args, cancelled).map(ToolOutput::Command),
+            Some(c) if c.find(other).is_some() => c.call_cancelled(other, args, cancelled).map(ToolOutput::Command),
             Some(_) => anyhow::bail!("unknown tool: {other}"),
             None => anyhow::bail!("unknown tool: {other} (the command tools failed to register at startup)"),
         },
@@ -659,7 +787,7 @@ fn call_tool(name: &str, args: &Value, cancelled: &AtomicBool) -> anyhow::Result
 
 /// Block until a newly-emitted message matches `regex` (or `timeout_secs` elapses). The polling loop
 /// runs on its request's own thread, so blocking is fine.
-fn await_omen(args: &Value, cancelled: &AtomicBool) -> anyhow::Result<String> {
+fn await_omen(args: &Value, cancelled: Cancellation<'_>) -> anyhow::Result<String> {
     let pattern = arg_str(args, "regex")?.ok_or_else(|| InvalidParams("`regex` is required".into()))?;
     let re = regex::Regex::new(pattern).with_context(|| format!("invalid regex: {pattern:?}"))?;
     let filter = Filter {
@@ -670,15 +798,11 @@ fn await_omen(args: &Value, cancelled: &AtomicBool) -> anyhow::Result<String> {
     let interval = Duration::from_secs(arg_usize(args, "interval_secs", 2)?.max(1) as u64);
 
     // Only react to activity from now on (not the existing backlog).
-    if cancelled.load(Ordering::Relaxed) {
-        anyhow::bail!("MCP client disconnected");
-    }
+    cancelled.check()?;
     let start = Instant::now();
     let expired = std::cell::Cell::new(false);
     let watcher = Watcher::try_with_discovery(filter, false, cv_core::discover_all, || {
-        if cancelled.load(Ordering::Relaxed) {
-            anyhow::bail!("MCP client disconnected");
-        }
+        cancelled.check()?;
         if start.elapsed() >= timeout {
             expired.set(true);
             anyhow::bail!("observation deadline reached");
@@ -691,9 +815,7 @@ fn await_omen(args: &Value, cancelled: &AtomicBool) -> anyhow::Result<String> {
         Err(error) => return Err(error),
     };
     loop {
-        if cancelled.load(Ordering::Relaxed) {
-            anyhow::bail!("MCP client disconnected");
-        }
+        cancelled.check()?;
         if let Some(matched) = await_poll(&mut watcher, &re, cancelled, start, timeout)? {
             return Ok(serde_json::to_string_pretty(&matched)?);
         }
@@ -703,9 +825,7 @@ fn await_omen(args: &Value, cancelled: &AtomicBool) -> anyhow::Result<String> {
         let sleep_for = interval.min(timeout.saturating_sub(start.elapsed()));
         let sleep_start = Instant::now();
         while sleep_start.elapsed() < sleep_for {
-            if cancelled.load(Ordering::Relaxed) {
-                anyhow::bail!("MCP client disconnected");
-            }
+            cancelled.check()?;
             std::thread::sleep((sleep_for - sleep_start.elapsed().min(sleep_for)).min(Duration::from_millis(100)));
         }
     }
@@ -722,15 +842,13 @@ fn omen_timeout(start: Instant) -> anyhow::Result<String> {
 fn await_poll(
     watcher: &mut Watcher,
     re: &regex::Regex,
-    cancelled: &AtomicBool,
+    cancelled: Cancellation<'_>,
     start: Instant,
     timeout: Duration,
 ) -> anyhow::Result<Option<Value>> {
     let expired = std::cell::Cell::new(false);
     let check = || {
-        if cancelled.load(Ordering::Relaxed) {
-            anyhow::bail!("MCP client disconnected");
-        }
+        cancelled.check()?;
         if start.elapsed() >= timeout {
             expired.set(true);
             anyhow::bail!("observation deadline reached");
@@ -777,9 +895,9 @@ fn await_poll(
 /// history. Read-only. Sessions come from the catalog fast path (`cv_core::sessions`, ~ms) rather
 /// than a stat-the-fleet scan (~s), because this is *polled*; the catalog's staleness probe
 /// re-stats the most recently updated transcripts, and an actively tailed session is one of them.
-fn observe_stream(args: &Value, cancelled: &AtomicBool) -> anyhow::Result<String> {
+fn observe_stream(args: &Value, cancelled: Cancellation<'_>) -> anyhow::Result<String> {
     let check = || {
-        anyhow::ensure!(!cancelled.load(Ordering::Relaxed), "MCP client disconnected");
+        cancelled.check()?;
         Ok(())
     };
     check()?;
@@ -1423,7 +1541,7 @@ mod admission_tests {
         let matched = await_poll(
             &mut watcher,
             &regex::Regex::new("BUILD PASSED").unwrap(),
-            &AtomicBool::new(false),
+            Cancellation::connection(&AtomicBool::new(false)),
             Instant::now(),
             Duration::from_secs(30),
         )
@@ -1452,7 +1570,7 @@ mod admission_tests {
         assert!(await_poll(
             &mut resumed,
             &regex::Regex::new(".*").unwrap(),
-            &AtomicBool::new(true),
+            Cancellation::connection(&AtomicBool::new(true)),
             Instant::now(),
             Duration::from_secs(30)
         )
@@ -1460,7 +1578,7 @@ mod admission_tests {
         assert!(await_poll(
             &mut resumed,
             &regex::Regex::new(".*").unwrap(),
-            &AtomicBool::new(false),
+            Cancellation::connection(&AtomicBool::new(false)),
             Instant::now(),
             Duration::ZERO
         )
@@ -1471,13 +1589,13 @@ mod admission_tests {
     #[test]
     fn disconnected_poll_does_not_enter_watcher() {
         let cancelled = AtomicBool::new(true);
-        let error = await_omen(&json!({"regex":"never"}), &cancelled).unwrap_err();
+        let error = await_omen(&json!({"regex":"never"}), Cancellation::connection(&cancelled)).unwrap_err();
         assert_eq!(error.to_string(), "MCP client disconnected");
     }
 
     #[test]
     fn disconnected_observer_does_not_enter_watcher() {
-        let error = observe_stream(&json!({}), &AtomicBool::new(true)).unwrap_err();
+        let error = observe_stream(&json!({}), Cancellation::connection(&AtomicBool::new(true))).unwrap_err();
         assert_eq!(error.to_string(), "MCP client disconnected");
     }
 

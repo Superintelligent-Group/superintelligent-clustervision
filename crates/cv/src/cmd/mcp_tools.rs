@@ -138,12 +138,21 @@ impl CliTools {
     }
 
     /// Run the generated CLI unchanged, retaining operation-owned bounded output.
+    #[cfg(test)]
     pub fn call(&self, tool: &str, args: &Value, cancelled: &std::sync::atomic::AtomicBool) -> Result<CommandOutput> {
+        self.call_cancelled(tool, args, super::mcp::Cancellation::connection(cancelled))
+    }
+    pub fn call_cancelled(
+        &self,
+        tool: &str,
+        args: &Value,
+        cancelled: super::mcp::Cancellation<'_>,
+    ) -> Result<CommandOutput> {
         let cmd = self
             .find(tool)
             .ok_or_else(|| anyhow!("unknown generated tool: {tool}"))?;
         let argv = build_argv(cmd, args)?;
-        run_command(&self.bin, &argv, cancelled)
+        run_command_cancelled(&self.bin, &argv, cancelled)
             .with_context(|| format!("running {} {}", self.bin.display(), argv.join(" ")))
     }
 }
@@ -197,13 +206,22 @@ impl Drop for Child {
         let _ = self.0.wait();
     }
 }
+#[cfg(test)]
 pub(super) fn run_command(
     bin: &std::path::Path,
     argv: &[String],
     cancelled: &std::sync::atomic::AtomicBool,
 ) -> Result<CommandOutput> {
+    run_command_cancelled(bin, argv, super::mcp::Cancellation::connection(cancelled))
+}
+
+fn run_command_cancelled(
+    bin: &std::path::Path,
+    argv: &[String],
+    cancelled: super::mcp::Cancellation<'_>,
+) -> Result<CommandOutput> {
     use std::process::{Command, Stdio};
-    use std::sync::atomic::Ordering;
+    cancelled.check()?;
     std::thread::scope(|scope| {
         let mut child = Child(
             Command::new(bin)
@@ -234,9 +252,9 @@ pub(super) fn run_command(
         let mut failure = None;
         let mut collector_panic = None;
         while stdout.is_none() || stderr.is_none() {
-            if cancelled.load(Ordering::Relaxed) {
+            if cancelled.is_cancelled() {
                 let _ = child.0.kill();
-                failure.get_or_insert_with(|| anyhow!("MCP client disconnected"));
+                failure.get_or_insert_with(|| cancelled.check().unwrap_err());
             }
             match rx.recv_timeout(std::time::Duration::from_millis(10)) {
                 Ok((is_stdout, result)) => {
@@ -274,9 +292,7 @@ pub(super) fn run_command(
         let stdout = stdout.context("stdout collector stopped")??;
         let stderr = stderr.context("stderr collector stopped")??;
         let status = loop {
-            if cancelled.load(Ordering::Relaxed) {
-                anyhow::bail!("MCP client disconnected");
-            }
+            cancelled.check()?;
             if let Some(status) = child.0.try_wait()? {
                 break status;
             }
@@ -817,6 +833,7 @@ mod transport_tests {
             pid_path.display().to_string().replace('\'', "'\\''")
         );
         let cancelled = std::sync::atomic::AtomicBool::new(false);
+        let connection = std::sync::atomic::AtomicBool::new(false);
         std::thread::scope(|scope| {
             scope.spawn(|| {
                 for _ in 0..2000 {
@@ -827,7 +844,15 @@ mod transport_tests {
                 }
                 cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
             });
-            assert!(run_command(std::path::Path::new("/bin/sh"), &["-c".into(), script], &cancelled).is_err());
+            let error = run_command_cancelled(
+                std::path::Path::new("/bin/sh"),
+                &["-c".into(), script],
+                super::super::mcp::Cancellation::request(&connection, &cancelled),
+            )
+            .err()
+            .expect("cancelled child must fail");
+            assert!(error.to_string().contains("MCP request cancelled"), "{error:#}");
+            assert!(!connection.load(std::sync::atomic::Ordering::Relaxed));
         });
         let pid: i32 = std::fs::read_to_string(&pid_path).unwrap().trim().parse().unwrap();
         assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
