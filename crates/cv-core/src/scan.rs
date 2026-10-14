@@ -139,6 +139,12 @@ pub struct LiveSearch {
 /// Trade-off, stated plainly: a match beyond a session's capped head is missed here; finding those
 /// is the index's job (`cv index`).
 pub fn live_search(query: &str, want: Option<Harness>, limit: usize) -> Result<LiveSearch> {
+    if limit == 0 {
+        return Ok(LiveSearch {
+            hits: Vec::new(),
+            truncated: false,
+        });
+    }
     let _sources = crate::source::read_scope();
     let needle = query.to_lowercase();
     let mut out = LiveSearch {
@@ -210,7 +216,7 @@ pub fn lowercase_source_range(source: &str, range: std::ops::Range<usize>) -> st
 /// A one-line excerpt of `hay` around `pos`, with ~40 bytes of lead-in and lead-out.
 pub fn snippet(hay: &str, pos: usize, len: usize) -> String {
     let start = pos.saturating_sub(40);
-    let end = (pos + len + 40).min(hay.len());
+    let end = pos.saturating_add(len).saturating_add(40).min(hay.len());
     let s = &hay[floor_char(hay, start)..ceil_char(hay, end)];
     truncate(&s.replace('\n', " "), 120)
 }
@@ -236,6 +242,24 @@ pub fn ceil_char(s: &str, mut i: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_live_window_skips_sources_and_snippets_saturate_extreme_positions() {
+        let world = cv_testkit::World::in_process("live-empty-window");
+        world.write_session(
+            "match",
+            &[serde_json::json!({"type":"user", "message":{"role":"user", "content":"match"}})],
+        );
+        let results = live_search("match", Some(Harness::Claude), 0).unwrap();
+        assert!(results.hits.is_empty());
+        assert!(!results.truncated);
+        assert!(
+            !world.cv_home.join("catalog.db").exists(),
+            "zero window performed discovery/count work"
+        );
+        assert_eq!(snippet("short", usize::MAX, usize::MAX), "");
+        assert_eq!(snippet("short", 0, usize::MAX), "short");
+    }
 
     #[test]
     fn unicode_lowercase_ranges_preserve_source_matches_and_context() {
