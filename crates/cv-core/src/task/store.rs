@@ -95,6 +95,13 @@ pub struct TaskStore {
     dir: PathBuf,
 }
 
+/// The state validated and committed while holding the append lock. Carry it to callers rather
+/// than replaying again after unlocking, when another writer may already have changed the log.
+pub(super) struct Committed {
+    pub events: Vec<TaskEvent>,
+    pub model: TaskReadModel,
+}
+
 impl TaskStore {
     /// The default store at [`super::tasks_dir`].
     pub fn default_store() -> TaskStore {
@@ -163,7 +170,10 @@ impl TaskStore {
     /// leaves the log unchanged; I/O failure or a crash may leave a completed prefix of the batch.
     /// `cv task done --note-file F` orders the evidence note before the terminal event.
     pub fn append_agent_events(&self, events: Vec<TaskEvent>) -> Result<Vec<TaskEvent>> {
-        self.append_all(events)
+        if events.is_empty() {
+            return Ok(events);
+        }
+        Ok(self.append_committed(events)?.events)
     }
 
     /// The locked CAS: replay → apply candidate → append. Returns the appended event.
@@ -173,16 +183,14 @@ impl TaskStore {
     /// the log is incomplete — a stale binary must not write against an incomplete model, so the
     /// append is refused with the problem named instead of being validated against a lie.
     fn append(&self, event: TaskEvent) -> Result<TaskEvent> {
-        let mut out = self.append_all(vec![event])?;
+        let mut out = self.append_committed(vec![event])?.events;
         Ok(out.pop().expect("one event in, one out"))
     }
 
     /// [`Self::append`] for a batch: admit and serialize every candidate before repairing EOF
     /// framing or writing. The lock covers the entire replay, repair and append.
-    fn append_all(&self, events: Vec<TaskEvent>) -> Result<Vec<TaskEvent>> {
-        if events.is_empty() {
-            return Ok(events);
-        }
+    pub(super) fn append_committed(&self, events: Vec<TaskEvent>) -> Result<Committed> {
+        debug_assert!(!events.is_empty());
         fs::create_dir_all(&self.dir).with_context(|| format!("creating tasks dir {}", self.dir.display()))?;
         let _lock = FileLock::acquire(self.lock_path())?;
 
@@ -253,7 +261,10 @@ impl TaskStore {
             .with_context(|| format!("appending to task log {}", self.events_path().display()))?;
         f.flush()
             .with_context(|| format!("flushing task log {}", self.events_path().display()))?;
-        Ok(events)
+        Ok(Committed {
+            events,
+            model: reducer.into_model(),
+        })
     }
 
     /// Read raw events as `(1-based line number, event)` pairs. Interior unparseable lines are

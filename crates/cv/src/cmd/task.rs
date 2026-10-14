@@ -593,22 +593,20 @@ fn note_arg(note: Option<String>, note_file: Option<PathBuf>) -> Result<Option<S
     Ok(Some(text).filter(|t| !t.trim().is_empty()))
 }
 
-/// Append several events as ONE unit ([`task::append_events`]): all land or none does. One
-/// confirmation line per event, each with its own task's state after the batch.
+/// Append several events after validating the whole batch ([`task::append_events`]). One
+/// confirmation line per event, each with its task's state at the batch's commit boundary.
 fn append_batch(events: Vec<TaskEvent>) -> Result<()> {
     let store = TaskStore::default_store();
     let report = task::append_events(&store, events, Vec::new())?;
     for w in report.replay_warnings.iter().chain(&report.warnings) {
         eprintln!("⚠ {}", sanitize_line(w));
     }
-    let after = store.replay()?;
     for ev in &report.events {
-        let state = after
-            .model
-            .tasks
+        let state = report
+            .effective_states
             .get(&ev.task_id)
-            .map(task::effective_display)
-            .unwrap_or_else(|| "?".into());
+            .map(String::as_str)
+            .unwrap_or("?");
         println!("✦ {} {} → {}", ev.kind.tag(), prefix(&ev.task_id, 13), state);
     }
     Ok(())

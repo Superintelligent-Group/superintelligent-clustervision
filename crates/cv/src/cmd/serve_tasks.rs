@@ -244,13 +244,13 @@ fn act(id: &str, verb: &str, who: &str, body: &Value) -> Result<Value> {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
     };
-    let appended = match verb {
+    let (appended, state, warnings) = match verb {
         "resolve" => {
             let accept = body.get("accept_default").and_then(Value::as_bool).unwrap_or(false);
             let confirm = body.get("confirm").and_then(Value::as_bool).unwrap_or(false);
             let answer = task_ops::Answer::from_flags(text("choice"), accept, confirm)?;
             let out = task_ops::resolve(&store, &outcome.model, &by, &id, answer, text("note"), false)?;
-            vec![out.event]
+            (vec![out.event], out.effective_state, out.replay_warnings)
         }
         "done" => {
             let out = task::append(
@@ -263,7 +263,7 @@ fn act(id: &str, verb: &str, who: &str, body: &Value) -> Result<Value> {
                 },
                 Vec::new(),
             )?;
-            vec![out.event]
+            (vec![out.event], out.effective_state, out.replay_warnings)
         }
         "note" => {
             let Some(t) = text("text") else {
@@ -279,7 +279,7 @@ fn act(id: &str, verb: &str, who: &str, body: &Value) -> Result<Value> {
                 },
                 Vec::new(),
             )?;
-            vec![out.event]
+            (vec![out.event], out.effective_state, out.replay_warnings)
         }
         "discuss" => {
             // One unit: the note and the `discuss` tag land together.
@@ -305,7 +305,7 @@ fn act(id: &str, verb: &str, who: &str, body: &Value) -> Result<Value> {
                 ],
                 Vec::new(),
             )?;
-            out.events
+            (out.events, out.effective_state, out.replay_warnings)
         }
         "claim" => {
             let out = task::append(
@@ -317,11 +317,11 @@ fn act(id: &str, verb: &str, who: &str, body: &Value) -> Result<Value> {
                 },
                 Vec::new(),
             )?;
-            vec![out.event]
+            (vec![out.event], out.effective_state, out.replay_warnings)
         }
         "release" => {
             let out = task::append(&store, Some(&id), &by, TaskEventKind::Released {}, Vec::new())?;
-            vec![out.event]
+            (vec![out.event], out.effective_state, out.replay_warnings)
         }
         "reopen" => {
             if !t.state.is_terminal() {
@@ -393,21 +393,16 @@ fn act(id: &str, verb: &str, who: &str, body: &Value) -> Result<Value> {
                     session_ref: None,
                 },
             ));
-            task::append_events(&store, events, Vec::new())?.events
+            let out = task::append_events(&store, events, Vec::new())?;
+            (out.events, out.effective_state, out.replay_warnings)
         }
         other => bail!("unknown action {other:?}"),
     };
-    let after = task::replay()?;
-    let state = after
-        .model
-        .tasks
-        .get(&appended.last().map(|e| e.task_id.clone()).unwrap_or(id.clone()))
-        .map(task::effective_display);
     Ok(json!({
         "ok": true,
         "by": by,
         "events": appended,
         "task_state": state,
-        "warnings": after.warnings,
+        "warnings": warnings,
     }))
 }

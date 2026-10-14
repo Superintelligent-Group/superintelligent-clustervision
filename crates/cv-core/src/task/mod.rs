@@ -79,18 +79,17 @@ pub fn require_actor(explicit: Option<String>, flag: &str) -> anyhow::Result<Str
 #[derive(Debug)]
 pub struct AppendOutcome {
     pub event: TaskEvent,
-    /// `None` only if the appended event's task vanished from the replay (should not happen —
-    /// the append CAS validated against it).
+    /// The task's state at this append's commit boundary, before any later concurrent writes.
     pub effective_state: Option<String>,
     /// The caller's carried-in advisory warnings — the set MCP ships in its JSON reply.
     pub warnings: Vec<String>,
-    /// Warnings from the post-append replay (log corruption etc.) — kept separate so surfaces
-    /// that already showed the pre-append replay's warnings don't double-report.
+    /// Kept for compatibility. Successful nonempty appends validated the log strictly under the
+    /// lock, so they have no replay warnings; later writes cannot change their result.
     pub replay_warnings: Vec<String>,
 }
 
 /// The one agent-facing append path shared by the CLI and MCP: append the event through the
-/// store's CAS, then replay for the task's new state.
+/// store's CAS and report the task state from that same commit boundary.
 pub fn append(
     store: &TaskStore,
     task_id: Option<&str>,
@@ -98,19 +97,19 @@ pub fn append(
     kind: TaskEventKind,
     warnings: Vec<String>,
 ) -> anyhow::Result<AppendOutcome> {
-    let event = store.append_agent_event(new_event(task_id, from, kind))?;
-    let outcome = store.replay()?;
-    let proj = outcome.model.tasks.get(&event.task_id);
+    let mut committed = store.append_committed(vec![new_event(task_id, from, kind)])?;
+    let event = committed.events.pop().expect("one committed event");
+    let proj = committed.model.tasks.get(&event.task_id);
     Ok(AppendOutcome {
         effective_state: proj.map(effective_display),
         event,
         warnings,
-        replay_warnings: outcome.warnings,
+        replay_warnings: Vec::new(),
     })
 }
 
 /// [`append`] for several events the caller built with [`new_event`], appended as ONE unit
-/// ([`TaskStore::append_agent_events`]): all land or none does. Later events may name the task
+/// ([`TaskStore::append_agent_events`]): all candidates are validated before writing. Later events may name the task
 /// the FIRST one opens (`cv task decide`: the `opened` id must be known before the
 /// `tagged`/`posed`/`resolved` that follow it are built). The outcome's `effective_state` is the
 /// LAST event's task after the batch; `events` holds all of them in append order.
@@ -119,17 +118,32 @@ pub fn append_events(
     candidates: Vec<TaskEvent>,
     warnings: Vec<String>,
 ) -> anyhow::Result<BatchOutcome> {
-    let events = store.append_agent_events(candidates)?;
-    let outcome = store.replay()?;
-    let effective_state = events
-        .last()
-        .and_then(|e| outcome.model.tasks.get(&e.task_id))
-        .map(effective_display);
+    if candidates.is_empty() {
+        return Ok(BatchOutcome {
+            events: candidates,
+            effective_state: None,
+            effective_states: Default::default(),
+            warnings,
+            replay_warnings: store.replay()?.warnings,
+        });
+    }
+    let committed = store.append_committed(candidates)?;
+    let events = committed.events;
+    let mut effective_states = std::collections::BTreeMap::new();
+    for event in &events {
+        if let Some(task) = committed.model.tasks.get(&event.task_id) {
+            effective_states
+                .entry(event.task_id.clone())
+                .or_insert_with(|| effective_display(task));
+        }
+    }
+    let effective_state = events.last().and_then(|e| effective_states.get(&e.task_id)).cloned();
     Ok(BatchOutcome {
         events,
         effective_state,
+        effective_states,
         warnings,
-        replay_warnings: outcome.warnings,
+        replay_warnings: Vec::new(),
     })
 }
 
@@ -139,6 +153,8 @@ pub struct BatchOutcome {
     pub events: Vec<TaskEvent>,
     /// The last event's task, after the batch.
     pub effective_state: Option<String>,
+    /// Each touched task's state after the whole batch, captured under the append lock.
+    pub effective_states: std::collections::BTreeMap<String, String>,
     pub warnings: Vec<String>,
     pub replay_warnings: Vec<String>,
 }
@@ -157,6 +173,90 @@ pub fn tasks_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::default_endpoint;
+
+    #[test]
+    fn append_reports_the_committed_batch_states_and_preserves_empty_read_warnings() {
+        use super::*;
+        let world = cv_testkit::World::new("task-committed-reports");
+        let store = TaskStore::at(world.base.join("tasks"));
+        let open = |title: &str| {
+            new_event(
+                None,
+                "agent:author",
+                TaskEventKind::Opened {
+                    title: title.into(),
+                    body: String::new(),
+                    repo: None,
+                    issue: None,
+                    channel: None,
+                    assignee: None,
+                },
+            )
+        };
+        let first = open("first");
+        let second = open("second");
+        let claim = new_event(
+            Some(&first.task_id),
+            "agent:worker",
+            TaskEventKind::Claimed {
+                assignee: "agent:worker".into(),
+            },
+        );
+        let candidates = vec![first.clone(), second.clone(), claim];
+        let report = append_events(&store, candidates.clone(), vec!["caller advisory".into()]).unwrap();
+        assert_eq!(report.events, candidates);
+        assert_eq!(report.effective_state.as_deref(), Some("claimed"));
+        assert_eq!(report.effective_states[&first.task_id], "claimed");
+        assert_eq!(report.effective_states[&second.task_id], "open");
+        assert_eq!(report.effective_states.len(), 2);
+        assert_eq!(report.warnings, ["caller advisory"]);
+        assert!(report.replay_warnings.is_empty());
+
+        let done = append(
+            &store,
+            Some(&first.task_id),
+            "agent:worker",
+            TaskEventKind::Done {
+                observed: Some("completed".into()),
+                check: None,
+            },
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(done.effective_state.as_deref(), Some("done"));
+        assert_eq!(report.effective_states[&first.task_id], "claimed");
+        let model = store.replay().unwrap().model;
+        assert_eq!(effective_display(&model.tasks[&first.task_id]), "done");
+        assert_eq!(effective_display(&model.tasks[&second.task_id]), "open");
+
+        use std::io::Write;
+        let path = store.dir().join("events.jsonl");
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"malformed historical row\n")
+            .unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let empty = append_events(&store, Vec::new(), Vec::new()).unwrap();
+        assert!(empty.events.is_empty());
+        assert!(empty.effective_state.is_none());
+        assert!(empty.effective_states.is_empty());
+        assert_eq!(empty.replay_warnings.len(), 1);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(append(
+            &store,
+            Some(&second.task_id),
+            "agent:author",
+            TaskEventKind::Done {
+                observed: None,
+                check: None,
+            },
+            Vec::new()
+        )
+        .is_err());
+        assert_eq!(std::fs::read(path).unwrap(), before);
+    }
 
     /// All env cases live in ONE test: `set_var` is process-global and lib tests run in
     /// parallel threads, so sequencing inside a single test is the serialization.
