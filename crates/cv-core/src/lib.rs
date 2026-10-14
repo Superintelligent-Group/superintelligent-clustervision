@@ -89,7 +89,7 @@ fn discover_all_with_catalog(mut catalog: Option<catalog::Reader>) -> Vec<Sessio
     let mut known = std::collections::HashMap::<Harness, Vec<SessionRef>>::new();
     for r in catalog
         .as_ref()
-        .and_then(catalog::Reader::all_sessions)
+        .map(catalog::Reader::primary_sessions)
         .unwrap_or_default()
     {
         known.entry(r.harness).or_default().push(r);

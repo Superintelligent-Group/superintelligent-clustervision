@@ -311,11 +311,32 @@ mod imp {
 
     /// Bracket known primary sources before discovery. New uncached paths stay unknown until
     /// a later scoped pass; never bless an identity sampled after its metadata was read.
-    pub(super) fn primary_refs_in(conn: &Connection, h: Harness) -> Vec<SessionRef> {
-        let Ok(mut stmt) = conn.prepare(&format!("SELECT {REF_COLUMNS} FROM sessions WHERE harness=?1")) else {
+    pub(super) fn primary_refs_in(conn: &Connection, h: Option<Harness>) -> Vec<SessionRef> {
+        // Source selection uses only harness, ID and path. Do not decode title/cwd/time metadata
+        // that discovery will replace; this inventory exists solely to bracket primary reads.
+        let sql = if h.is_some() {
+            "SELECT harness,id,path FROM sessions WHERE harness=?1 ORDER BY rowid"
+        } else {
+            "SELECT harness,id,path FROM sessions WHERE ?1 IS NULL ORDER BY rowid"
+        };
+        let Ok(mut stmt) = conn.prepare(sql) else {
             return Default::default();
         };
-        let Ok(rows) = stmt.query_map([h.as_str()], row_to_ref) else {
+        let Ok(rows) = stmt.query_map([h.map(Harness::as_str)], |row| {
+            let name: String = row.get(0)?;
+            let id: String = row.get(1)?;
+            let path: String = row.get(2)?;
+            Ok(Harness::parse(&name).map(|harness| SessionRef {
+                harness,
+                id,
+                path: PathBuf::from(path),
+                cwd: None,
+                title: None,
+                created_at: None,
+                updated_at: None,
+                message_count: 0,
+            }))
+        }) else {
             return Default::default();
         };
         rows.filter_map(Result::transpose)
@@ -928,17 +949,18 @@ mod imp {
         let escaped = id.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
         let like = format!("{escaped}%");
         let Ok(mut stmt) = conn.prepare(&format!(
-            "SELECT {REF_COLUMNS} FROM sessions WHERE id=?1 OR id LIKE ?2 ESCAPE '\\'
+            "SELECT {REF_COLUMNS} FROM sessions
+             WHERE (id=?1 OR id LIKE ?2 ESCAPE '\\')
+             AND (?3 IS NULL OR harness=?3)
              ORDER BY (id=?1) DESC",
         )) else {
             return Vec::new();
         };
-        let rows = stmt.query_map(params![id, like], row_to_ref);
+        let rows = stmt.query_map(params![id, like, harness.map(Harness::as_str)], row_to_ref);
         let Ok(rows) = rows else { return Vec::new() };
-        rows.flatten()
-            .flatten()
-            .filter(|r| harness.is_none_or(|want| r.harness == want))
-            .collect()
+        // SQLite LIKE folds ASCII case. The candidate query is deliberately a superset;
+        // enforce the same literal, case-sensitive prefix contract as uncataloged resolution.
+        rows.flatten().flatten().filter(|r| r.id.starts_with(id)).collect()
     }
 
     #[cfg(test)]
@@ -956,6 +978,74 @@ mod imp {
                 updated_at: None,
                 message_count: 0,
             }
+        }
+
+        #[test]
+        fn primary_inventory_omits_metadata_and_preserves_source_selection() {
+            let w = cv_testkit::World::in_process("catalog-primary-inventory");
+            let refs: Vec<_> = crate::harness::all()
+                .into_iter()
+                .enumerate()
+                .map(|(i, a)| {
+                    let mut r = db_ref(a.harness(), w.base.join(format!("sessions/{i}/session")));
+                    r.id = "session".into();
+                    r.title = Some("unused title".repeat(1024));
+                    r.cwd = Some(w.base.join("unused-cwd"));
+                    r.message_count = 123;
+                    r
+                })
+                .collect();
+            sync(&refs);
+            let reader = Reader::open().unwrap();
+            let projected = reader.primary_sessions();
+            assert_eq!(projected.len(), refs.len());
+            for (full, lean) in refs.iter().zip(&projected) {
+                assert_eq!(
+                    (&full.id, full.harness, &full.path),
+                    (&lean.id, lean.harness, &lean.path)
+                );
+                assert!(lean.title.is_none() && lean.cwd.is_none());
+                assert_eq!(lean.message_count, 0);
+                let a = crate::harness::for_harness(full.harness).unwrap();
+                assert_eq!(a.resume_source(full), a.resume_source(lean));
+                let conn = open().unwrap();
+                let scoped = primary_refs_in(&conn, Some(full.harness));
+                assert_eq!(scoped.len(), 1);
+                assert_eq!(scoped[0].path, full.path);
+            }
+        }
+
+        #[test]
+        fn lookup_matches_literal_case_sensitive_prefixes() {
+            let w = cv_testkit::World::in_process("catalog-literal-prefix");
+            let ids = ["Alpha", "alpha", "a_%\\literal", "aXYliteral", "λ_session", "λ_other"];
+            let refs: Vec<_> = ids
+                .into_iter()
+                .enumerate()
+                .map(|(i, id)| {
+                    let mut r = db_ref(Harness::Claude, w.base.join(format!("{i}.jsonl")));
+                    r.id = id.into();
+                    r
+                })
+                .collect();
+            let mut foreign = refs[0].clone();
+            foreign.harness = Harness::Codex;
+            foreign.path = w.base.join("foreign.jsonl");
+            sync(&refs);
+            sync(&[foreign]);
+            for prefix in ["A", "a", "a_%\\", "λ_", "λ_s", ""] {
+                let actual: std::collections::BTreeSet<_> = lookup(prefix, Some(Harness::Claude))
+                    .into_iter()
+                    .map(|r| r.id)
+                    .collect();
+                let expected = refs
+                    .iter()
+                    .filter(|r| r.id.starts_with(prefix))
+                    .map(|r| r.id.clone())
+                    .collect();
+                assert_eq!(actual, expected, "prefix {prefix:?}");
+            }
+            assert_eq!(lookup("Alpha", None).len(), 2);
         }
 
         #[test]

@@ -137,10 +137,21 @@ impl Reader {
         }
     }
 
+    pub(crate) fn primary_sessions(&self) -> Vec<SessionRef> {
+        #[cfg(feature = "sqlite")]
+        {
+            super::imp::primary_refs_in(&self.conn.lock().unwrap(), None)
+        }
+        #[cfg(not(feature = "sqlite"))]
+        {
+            Vec::new()
+        }
+    }
+
     pub(crate) fn capture_primary_reads(&self, a: &dyn crate::Adapter) -> super::PrimaryReads {
         #[cfg(feature = "sqlite")]
         {
-            let refs = super::imp::primary_refs_in(&self.conn.lock().unwrap(), a.harness());
+            let refs = super::imp::primary_refs_in(&self.conn.lock().unwrap(), Some(a.harness()));
             super::capture_primary_reads_from(a, &refs)
         }
         #[cfg(not(feature = "sqlite"))]

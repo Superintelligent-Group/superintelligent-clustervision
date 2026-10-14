@@ -318,6 +318,8 @@ pub trait Adapter: Send + Sync {
     /// File whose immutable-prefix byte positions this adapter checkpoints. Directory-backed
     /// stores override this with their transcript file; side stores remain freshness dependencies.
     /// Consumers must use this same file for size, identity, sampled guards, and primary read state.
+    /// Source selection depends only on the ref's harness, id and path: discovery may supply a
+    /// projected ref without title, cwd, timestamps or counts when bracketing primary reads.
     fn resume_source(&self, r: &SessionRef) -> PathBuf {
         r.path.clone()
     }
