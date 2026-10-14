@@ -308,8 +308,8 @@ fn latest_of(stamps: [Option<f64>; 3]) -> Option<DateTime<Utc>> {
 }
 
 /// One `SessionRef` per CONVERSATION. Excluded: delegate sub-agent runs
-/// (`model_config._delegate_from` — Hermes's own picker hides them too, and cv has no sub-agent
-/// forest for Hermes yet, so they are reachable only through their parent's markers; follow-up) and
+/// (`model_config._delegate_from` — Hermes's own picker hides them too; [`subagent_refs`] reaches
+/// them through their parent) and
 /// compression ANCESTORS — a session that ended in compression and has a continuation is listed
 /// once, as its tip, whose parse merges the whole chain (Hermes lists the root and resumes to the
 /// tip; cv's `parse` walks upward from the ref, so the tip is the one to list). Archived and hidden

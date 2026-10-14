@@ -445,10 +445,25 @@ fn discover_conn(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
     Ok(out)
 }
 
+/// A parent's completion receipt records the tool call that launched this child. The same
+/// projection serves parsed lineage and the forest, including older tool-only subagents.
+fn spawning_call(conn: &Connection, session_id: &str, agent: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT json_extract(chat_message, '$.tool_call_id') FROM message_nodes \
+         WHERE session_id = ?1 AND CASE WHEN json_valid(chat_message) THEN \
+             json_extract(chat_message, '$.role') = 'tool' AND \
+             json_extract(chat_message, '$.metadata.extensions.\"subagent/agent_id\"') = ?2 \
+         ELSE 0 END",
+        rusqlite::params![session_id, agent],
+        |row| row.get::<_, String>(0),
+    )
+    .ok()
+}
+
 /// The sub-agent chains a session's `subagent_heads` table names — the same rows [`discover_conn`]
 /// turns into `<session_id>/<agent_id>` child refs — as the forest [`crate::subagent_tree_of`]
-/// surfaces. `agent_id` is the child's `agent_type`; Devin records no per-agent description or
-/// spawning tool_use id.
+/// surfaces. `agent_id` is the child's `agent_type`; a completion receipt provides its spawning
+/// tool call. Devin records no per-agent description.
 pub fn subagent_tree(db: &Path, session_id: &str) -> Vec<crate::harness::claude::SubagentInfo> {
     let Ok(conn) = open_ro(db) else {
         return Vec::new();
@@ -492,9 +507,9 @@ pub fn subagent_tree(db: &Path, session_id: &str) -> Vec<crate::harness::claude:
             if let Some(session) = child_ref(db, session_id, &agent, head, updated, &forest, &parent) {
                 out.push(crate::harness::claude::SubagentInfo {
                     session,
+                    tool_use_id: spawning_call(conn, session_id, &agent),
                     agent_type: Some(agent),
                     description: None,
-                    tool_use_id: None,
                     workflow: None,
                     result_status: None,
                     result_summary: None,
@@ -648,17 +663,7 @@ fn stream_session(
     // For a child, the tool call that spawned it: the parent's `tool` row carrying
     // `subagent/agent_id` — its `tool_call_id` names the spawning call. One indexed query;
     // absent on sessions without a completion row.
-    let spawned_by = agent.and_then(|a| {
-        conn.query_row(
-            "SELECT json_extract(chat_message, '$.tool_call_id') FROM message_nodes \
-             WHERE session_id = ?1 AND json_valid(chat_message) \
-             AND json_extract(chat_message, '$.role') = 'tool' \
-             AND json_extract(chat_message, '$.metadata.extensions.\"subagent/agent_id\"') = ?2",
-            rusqlite::params![session_id, a],
-            |row| row.get::<_, String>(0),
-        )
-        .ok()
-    });
+    let spawned_by = agent.and_then(|a| spawning_call(conn, session_id, a));
 
     // Keep only navigation facts; arbitrary node metadata belongs to the selected row replay.
     let has_node_metadata = columns(conn, "message_nodes").contains("metadata");
@@ -1492,7 +1497,9 @@ mod tests {
         let refs = discover_conn(&conn, &path)?;
         let child = refs.iter().find(|r| r.id == "fixture-alpha/sidekick").unwrap();
         assert_eq!(child.message_count, 6);
-        assert_eq!(subagent_tree(&path, "fixture-alpha").len(), 1);
+        let tree = subagent_tree(&path, "fixture-alpha");
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].tool_use_id.as_deref(), Some("spawn-call"));
         let parsed = parse_db(&conn, child)?;
         assert_eq!(parsed.lineage.parent.as_deref(), Some("fixture-alpha"));
         assert_eq!(parsed.lineage.spawned_by_tool_use.as_deref(), Some("spawn-call"));
