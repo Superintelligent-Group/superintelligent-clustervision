@@ -1969,6 +1969,11 @@ mod tests {
                 ),
                 "{}".to_owned(),
             ),
+            (
+                serde_json::json!([{"type":"text","text":giant}]).to_string(),
+                String::new(),
+            ),
+            (String::new(), serde_json::json!({"ignored":giant}).to_string()),
             (r#"[{"type":"text","text":"small"}]"#.to_owned(), "{}".to_owned()),
         ]
         .into_iter()
@@ -1977,7 +1982,7 @@ mod tests {
             conn.execute("INSERT INTO messages(session_id,role,content_json,created_timestamp,metadata_json) VALUES ('large','user',?1,?2,?3)",rusqlite::params![body,i as i64,meta])?;
         }
         let refs = discover_db(&conn, &path)?;
-        assert_eq!(refs[0].message_count, 3);
+        assert_eq!(refs[0].message_count, 4);
         let parsed = parse_db(&conn, &sref("large"))?;
         assert_eq!(
             refs[0].message_count,

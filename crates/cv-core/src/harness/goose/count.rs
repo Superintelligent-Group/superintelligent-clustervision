@@ -179,6 +179,9 @@ pub(super) fn incremental(
     };
     use crate::json::InvalidJson;
     let body_len = sql::with_cell_reader(conn, "messages", "content_json", rowid, |_, len| Ok(len))?;
+    if body_len == 0 {
+        return Ok(false);
+    }
     let meta_len = if metadata {
         sql::with_cell_reader(conn, "messages", "metadata_json", rowid, |_, len| Ok(len))?
     } else {
@@ -201,7 +204,7 @@ pub(super) fn incremental(
     let source = &row_source;
     let arena = std::sync::Arc::new(ByteSource::arena()?);
     let body = sql::append_cell(conn, "messages", "content_json", rowid, &arena)?;
-    let hidden = if metadata {
+    let hidden = if metadata && meta_len != 0 {
         let meta = sql::append_cell(conn, "messages", "metadata_json", rowid, &arena)?;
         match source.read_backing_value(std::sync::Arc::clone(&arena), meta.0, meta.1, |view| {
             Ok(Fields::parse(view, &["userVisible"])?
