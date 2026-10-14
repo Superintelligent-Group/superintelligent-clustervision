@@ -278,10 +278,15 @@ fn load_store(path: &Path) -> Result<Store> {
         "corrupt embedding store {} (vector length mismatch, dim {dim}) — re-run `cv index --semantic`",
         path.display()
     );
-    // Take isolates the JSON parser from the binary vectors. from_reader also consumes and
-    // validates trailing JSON whitespace, preserving the old from_slice acceptance contract.
-    let meta: MetaBlock =
-        serde_json::from_reader((&mut input).take(meta_len)).context("parsing embedding store metadata")?;
+    // Slice parsing avoids serde's per-byte Read overhead. Own only the declared metadata
+    // extent, then release its wire buffer before allocating the final vector block.
+    let meta: MetaBlock = {
+        let mut wire = vec![0u8; usize::try_from(meta_len).context("embedding metadata length overflow")?];
+        input
+            .read_exact(&mut wire)
+            .context("reading embedding store metadata")?;
+        serde_json::from_slice(&wire).context("parsing embedding store metadata")?
+    };
     if meta.records.len() != count {
         bail!(
             "corrupt embedding store {} ({} records, {} vector bytes, dim {dim}) — re-run `cv index --semantic`",
