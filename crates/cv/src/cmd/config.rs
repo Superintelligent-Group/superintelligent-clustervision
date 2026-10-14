@@ -62,3 +62,19 @@ pub(crate) fn cmd_config(add_export: Option<PathBuf>, rm_export: Option<PathBuf>
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn requested_update_rejects_malformed_config_without_overwriting_it() {
+        let _world = cv_testkit::World::in_process("config-cli-malformed");
+        let path = cv_core::config::save(&cv_core::config::Config::default()).unwrap();
+        let original = "exports = [broken";
+        std::fs::write(&path, original).unwrap();
+        assert!(cmd_config(Some(PathBuf::from("/new")), None).is_err());
+        assert!(cmd_config(None, Some(PathBuf::from("/old"))).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+}
