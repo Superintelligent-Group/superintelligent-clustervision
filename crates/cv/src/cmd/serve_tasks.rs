@@ -240,7 +240,7 @@ fn event_lines(outcome: &task::ReplayOutcome, filter: &EventFilter) -> Result<St
         );
     }
     let mut out = String::new();
-    for ev in task_ops::select_events(outcome, filter) {
+    for ev in task_ops::select_events(outcome, filter)? {
         out.push_str(&serde_json::to_string(&task_ops::event_json(ev, &outcome.model))?);
         out.push('\n');
     }

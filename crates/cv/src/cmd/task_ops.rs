@@ -120,9 +120,9 @@ pub(crate) fn pose_events(from: &str, spec: &DecisionSpec) -> Result<Vec<TaskEve
     Ok(candidates)
 }
 
-/// Pose a decision: [`pose_events`] appended as ONE unit (`TaskStore::append_agent_events`), so
-/// a decision is never left half-posed. Returns the events in append order and the advisory
-/// warnings.
+/// Pose a decision with the whole candidate batch validated before writing; a rejected event
+/// leaves no half-posed decision. I/O failure may leave a completed prefix. Returns append-order
+/// events and advisory warnings.
 pub(crate) fn pose(store: &TaskStore, from: &str, spec: DecisionSpec) -> Result<(Vec<TaskEvent>, Vec<String>)> {
     let out = task::append_events(store, pose_events(from, &spec)?, Vec::new())?;
     let mut warnings = out.replay_warnings;
@@ -225,12 +225,40 @@ impl Since {
         Ok(Since { ts: Some(ts), id: None })
     }
 
-    fn admits(&self, ev: &TaskEvent) -> bool {
-        match (&self.id, self.ts) {
-            (Some(id), _) => ev.id.as_str() > id.as_str(),
-            (None, Some(ts)) => ev.ts >= ts,
-            (None, None) => true,
+    fn start(&self, events: &[TaskEvent]) -> Result<usize> {
+        let Some(cursor) = &self.id else { return Ok(0) };
+        let needle: String = cursor
+            .chars()
+            .filter(|c| *c != '-')
+            .map(|c| c.to_ascii_lowercase())
+            .collect();
+        let mut found: Option<(usize, &str)> = None;
+        for (position, event) in events.iter().enumerate() {
+            let matches = event
+                .id
+                .chars()
+                .filter(|c| *c != '-')
+                .map(|c| c.to_ascii_lowercase())
+                .take(needle.len())
+                .eq(needle.chars());
+            if !matches {
+                continue;
+            }
+            if let Some((_, previous)) = found {
+                if previous == event.id.as_str() {
+                    bail!("event cursor {cursor:?} occurs more than once in the log; use a timestamp bound instead");
+                }
+                bail!("event cursor {cursor:?} is ambiguous; pass a full event id");
+            }
+            found = Some((position, event.id.as_str()));
         }
+        found
+            .map(|(position, _)| position + 1)
+            .with_context(|| format!("no task event matches cursor {cursor:?}"))
+    }
+
+    fn admits_time(&self, ev: &TaskEvent) -> bool {
+        self.id.is_some() || self.ts.is_none_or(|ts| ev.ts >= ts)
     }
 }
 
@@ -269,11 +297,13 @@ pub(crate) fn kind_tag(s: &str) -> String {
 }
 
 /// The events matching `f`, log order.
-pub(crate) fn select_events<'a>(outcome: &'a ReplayOutcome, f: &EventFilter) -> Vec<&'a TaskEvent> {
-    outcome
+pub(crate) fn select_events<'a>(outcome: &'a ReplayOutcome, f: &EventFilter) -> Result<Vec<&'a TaskEvent>> {
+    let start = f.since.start(&outcome.events)?;
+    Ok(outcome
         .events
         .iter()
-        .filter(|ev| f.since.admits(ev))
+        .skip(start)
+        .filter(|ev| f.since.admits_time(ev))
         .filter(|ev| f.kinds.is_empty() || f.kinds.iter().any(|k| k == ev.kind.tag()))
         .filter(|ev| f.by.as_deref().is_none_or(|b| task::same_actor(&ev.by, b)))
         .filter(|ev| !f.not_by.as_deref().is_some_and(|b| task::same_actor(&ev.by, b)))
@@ -287,7 +317,7 @@ pub(crate) fn select_events<'a>(outcome: &'a ReplayOutcome, f: &EventFilter) -> 
                     .is_some_and(|t| t.assignee.as_deref().is_some_and(|have| task::same_actor(have, a)))
             })
         })
-        .collect()
+        .collect())
 }
 
 /// One event as a JSON line: the event's own wire fields, plus the task's `title` and current
@@ -656,6 +686,7 @@ mod tests {
                         ..Default::default()
                     }
                 )
+                .unwrap()
                 .len(),
                 1
             );
@@ -667,6 +698,7 @@ mod tests {
                 ..Default::default()
             }
         )
+        .unwrap()
         .is_empty());
     }
 
@@ -703,6 +735,101 @@ mod tests {
         assert_eq!(kind_tag("Resolve"), "resolved");
         assert_eq!(kind_tag("done"), "done");
         assert_eq!(kind_tag("bogus"), "bogus");
+    }
+
+    #[test]
+    fn event_cursors_follow_log_order_exclude_prefix_matches_and_refuse_ambiguous_positions() {
+        let now: DateTime<Utc> = "2026-10-01T12:00:00Z".parse().unwrap();
+        let ids = [
+            "01a0f000-0000-7000-8000-000000000001",
+            "01a0f100-0000-7000-8000-000000000002",
+            "01a0e000-0000-7000-8000-000000000003",
+        ];
+        let mut events = Vec::new();
+        for (index, id) in ids.into_iter().enumerate() {
+            let kind = if index == 0 {
+                TaskEventKind::Opened {
+                    title: "polling".into(),
+                    body: String::new(),
+                    repo: None,
+                    issue: None,
+                    channel: None,
+                    assignee: None,
+                }
+            } else {
+                TaskEventKind::Noted {
+                    text: format!("note {index}"),
+                    session_ref: None,
+                }
+            };
+            events.push(TaskEvent {
+                id: id.into(),
+                task_id: ids[0].into(),
+                by: "author".into(),
+                ts: now + chrono::Duration::seconds(index as i64),
+                kind,
+            });
+        }
+        let mut outcome = ReplayOutcome {
+            model: task::TaskReducer::reduce(&events).unwrap(),
+            events,
+            warnings: Vec::new(),
+            quarantined: 0,
+        };
+        let filter = |cursor: &str| EventFilter {
+            since: Since::parse(Some(cursor), now).unwrap(),
+            ..Default::default()
+        };
+        for cursor in [
+            ids[1].to_string(),
+            ids[1].replace('-', "").to_uppercase(),
+            "01a0f10000007".into(),
+        ] {
+            let got = select_events(&outcome, &filter(&cursor)).unwrap();
+            assert_eq!(
+                got.iter().map(|event| event.id.as_str()).collect::<Vec<_>>(),
+                [ids[2]],
+                "{cursor}"
+            );
+        }
+        let got = select_events(
+            &outcome,
+            &EventFilter {
+                since: Since {
+                    ts: Some(now + chrono::Duration::seconds(2)),
+                    id: None,
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(got.iter().map(|event| event.id.as_str()).collect::<Vec<_>>(), [ids[2]]);
+        let got = select_events(
+            &outcome,
+            &EventFilter {
+                kinds: vec!["noted".into()],
+                ..filter(ids[0])
+            },
+        )
+        .unwrap();
+        assert_eq!(got.len(), 2, "cursor resolution precedes kind filtering");
+        assert!(select_events(&outcome, &filter("01a0f20000007"))
+            .unwrap_err()
+            .to_string()
+            .contains("no task event"));
+        let mut extra = outcome.events[1].clone();
+        extra.id = "01a0f000-0000-7000-8000-000000000004".into();
+        outcome.events.push(extra);
+        assert!(select_events(&outcome, &filter("01a0f00000007"))
+            .unwrap_err()
+            .to_string()
+            .contains("ambiguous"));
+        outcome.events.pop();
+        outcome.events.push(outcome.events[1].clone());
+        assert!(select_events(&outcome, &filter(ids[1]))
+            .unwrap_err()
+            .to_string()
+            .contains("more than once"));
     }
 
     #[test]

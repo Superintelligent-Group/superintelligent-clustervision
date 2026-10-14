@@ -290,8 +290,8 @@ pub(crate) enum TaskCmd {
         check_file: Option<PathBuf>,
         #[arg(long = "check-http", hide = true)]
         check_http: Option<String>,
-        /// A closing note (`-` = stdin), appended with the `done` as ONE unit: the note, then the
-        /// done — both land or neither does.
+        /// A closing note (`-` = stdin), validated with the `done` before appending: the note,
+        /// then the done.
         #[arg(long, conflicts_with = "note_file")]
         note: Option<String>,
         /// The closing note from a file (`-` for stdin).
@@ -396,7 +396,7 @@ pub(crate) enum TaskCmd {
         blocks: Vec<String>,
         /// Resolve it on its default NOW, on the decider's behalf (by you, the poser), with a veto
         /// window: work proceeds, and their inbox shows it under "made for you (veto?)" until they
-        /// `--confirm` or choose otherwise. Lands in the same unit as the pose: both or neither.
+        /// `--confirm` or choose otherwise. Validated in the same batch as the pose.
         #[arg(long)]
         provisional: bool,
         /// Acting endpoint recorded in `by`. Default: $CV_ENDPOINT.
@@ -612,8 +612,8 @@ fn append_batch(events: Vec<TaskEvent>) -> Result<()> {
     Ok(())
 }
 
-/// Close a task with an optional note first, as ONE unit (the note, then `close`): both land or
-/// neither does, so a lane cannot lose its evidence by ordering.
+/// Close with an optional note first. Validate both candidates before writing either, so a
+/// refused close leaves the log unchanged and evidence precedes completion when appended.
 fn close_with_note(id: &str, from: &str, note: Option<String>, close: TaskEventKind) -> Result<()> {
     let Some(text) = note else {
         return append_and_report(Some(id), from, close);
@@ -714,8 +714,8 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
                 (res(blocked_by)?, res(blocks)?)
             };
             let from = from_or_cv(from);
-            // One unit: the task, its tags and its relations land together or not at all — a
-            // refused tag (a bare `decision`) or a refused relation leaves no half-opened task.
+            // Validate the task, tags and relations together before writing: a refused tag
+            // (a bare `decision`) or relation leaves no half-opened task.
             let opened = task::new_event(
                 None,
                 &from,
@@ -1066,8 +1066,8 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
                 blocks,
                 provisional,
             };
-            // One unit: the pose and (with --provisional) its resolution land together or not at
-            // all — never a posed-but-unresolved decision left owed.
+            // Validate the pose and (with --provisional) resolution before writing; candidate
+            // refusal leaves no posed-but-unresolved decision owed.
             let store = TaskStore::default_store();
             let from = from_or_cv(from);
             let (events, warnings) = task_ops::pose(&store, &from, spec)?;
@@ -1407,7 +1407,7 @@ fn render_show(
 /// `cv task events`: one line per event, JSON by default (the poll surface),
 /// `--text` for people. The next cursor (the last event id) goes to stderr so stdout stays pure.
 fn print_events(outcome: &cv_core::task::ReplayOutcome, f: &EventFilter, text: bool) -> Result<()> {
-    let events = task_ops::select_events(outcome, f);
+    let events = task_ops::select_events(outcome, f)?;
     let plen = prefix_len(&outcome.model);
     for ev in &events {
         if text {
