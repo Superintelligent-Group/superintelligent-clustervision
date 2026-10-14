@@ -710,7 +710,7 @@ pub fn rewind_session(r: &SessionRef, opts: &RewindOptions) -> Result<RewindResu
                 if source_session_id.is_none() {
                     source_session_id = v.get("sessionId").and_then(Value::as_str).map(String::from);
                 }
-                let mut modified = subagent && normalize_subagent_record(&mut v);
+                let modified = subagent && normalize_subagent_record(&mut v);
                 if phase == Phase::Closing && !closes_open_call(&v) {
                     phase = Phase::Done;
                     omitted_lines += 1;
