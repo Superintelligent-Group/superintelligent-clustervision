@@ -176,7 +176,7 @@ fn global_storage_roots() -> Vec<PathBuf> {
     for base in bases {
         for editor in editors {
             let gs = base.join(editor).join("User").join("globalStorage");
-            if gs.is_dir() {
+            if gs.is_dir() && !out.contains(&gs) {
                 out.push(gs);
             }
         }
@@ -581,6 +581,7 @@ fn message_with_blocks(
         };
 
     let mut m = Message::new(role);
+    m.timestamp = v.get("ts").and_then(Value::as_i64).and_then(super::ts_from_epoch);
     // A `system` message carries the system prompt (rare in Cline; it stores raw Anthropic turns).
     if role == Role::System {
         m.kind = MessageKind::SystemPrompt;
@@ -1056,6 +1057,55 @@ fn ui_message_times(dir: &Path) -> Result<UiTimes> {
 mod tests {
     use super::*;
     use crate::harness::Parse;
+
+    #[test]
+    fn editor_roots_do_not_repeat_default_xdg_stores() {
+        let world = cv_testkit::World::in_process("cline-root-alias");
+        let storage = world.home.join(".config/Code/User/globalStorage");
+        fs::create_dir_all(storage.join(CLINE_EXT_IDS[0]).join("tasks")).unwrap();
+        fs::create_dir_all(storage.join(ROO_EXT_IDS[0]).join("tasks")).unwrap();
+        assert_eq!(global_storage_roots(), vec![storage.clone()]);
+        assert_eq!(
+            task_roots(CLINE_EXT_IDS, ".cline"),
+            vec![storage.join(CLINE_EXT_IDS[0]).join("tasks")]
+        );
+        assert_eq!(
+            task_roots(ROO_EXT_IDS, ".roo"),
+            vec![storage.join(ROO_EXT_IDS[0]).join("tasks")]
+        );
+    }
+
+    #[test]
+    fn transcript_timestamps_survive_tool_reclassification_and_condensation() {
+        let world = cv_testkit::World::in_process("cline-native-times");
+        let dir = world.base.join("1717000000000");
+        fs::create_dir(&dir).unwrap();
+        let records = json!([
+            {"role":"user","ts":1717000000007_i64,"content":"prompt"},
+            {"role":"assistant","ts":1717000000011_i64,"content":[{"type":"tool_use","id":"c","name":"read","input":{}}]},
+            {"role":"user","ts":1717000000022_i64,"content":[{"type":"tool_result","tool_use_id":"c","content":"done"}]},
+            {"role":"user","ts":1717000000033_i64,"content":"summary","isSummary":true,"condenseId":"x"}
+        ]);
+        let wire = serde_json::to_string(&records).unwrap();
+        fs::write(dir.join("api_conversation_history.json"), &wire).unwrap();
+        fs::write(dir.join("ui_messages.json"), r#"[{"ts":1717000000001}]"#).unwrap();
+        for harness in [Harness::Cline, Harness::Roo] {
+            let owned = parse_history_str("1717000000000", &wire, harness, None);
+            assert_eq!(owned.messages[0].timestamp.unwrap().timestamp_millis(), 1717000000007);
+            assert_eq!(owned.messages[2].role, Role::Tool);
+            assert_eq!(owned.messages[2].timestamp.unwrap().timestamp_millis(), 1717000000022);
+            assert_eq!(owned.messages[3].kind, MessageKind::CompactionBoundary);
+            assert_eq!(owned.messages[3].timestamp, owned.messages[4].timestamp);
+            for opts in [ParseOptions::full(), ParseOptions::lazy(), ParseOptions::complete()] {
+                let mut sink = CollectSink::default();
+                stream_task_dir(&dir, "1717000000000", harness, &opts, &mut sink).unwrap();
+                assert_eq!(
+                    serde_json::to_value(&sink.messages).unwrap(),
+                    serde_json::to_value(&owned.messages).unwrap()
+                );
+            }
+        }
+    }
 
     #[test]
     fn native_task_views_match_owned_messages_metadata_and_invalid_record_boundaries() {
