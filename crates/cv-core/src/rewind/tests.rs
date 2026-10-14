@@ -602,3 +602,35 @@ fn rewind_prefix_receipt_accepts_appends_and_rejects_source_mutations() {
         cleanup(&dir);
     }
 }
+
+#[test]
+fn rewind_rejects_output_ids_that_escape_the_output_directory() {
+    let dir = tmpdir();
+    let source = dir.join(format!("{SID}.jsonl"));
+    write_jsonl(&source, &[rec("user", "u", None, text("user", "original"))]);
+    let reference = SessionRef::from_path(&source, Harness::Claude);
+    let original = std::fs::read(&source).unwrap();
+    for id in [
+        "",
+        ".",
+        "..",
+        "../victim",
+        "/tmp/victim",
+        "nested/child",
+        "nested\\child",
+        "bad\0id",
+    ] {
+        let error = rewind_session(
+            &reference,
+            &RewindOptions {
+                new_id: Some(id.into()),
+                ..opts(CutAt::End, &dir)
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("filename component"), "{error}");
+        assert_eq!(std::fs::read(&source).unwrap(), original);
+    }
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+    cleanup(&dir);
+}

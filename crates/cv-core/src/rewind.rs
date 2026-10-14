@@ -618,6 +618,9 @@ fn rewind_session_after_scan(
     opts: &RewindOptions,
     after_scan: impl FnOnce() -> Result<()>,
 ) -> Result<RewindResult> {
+    if let Some(id) = &opts.new_id {
+        crate::restamp::validate_output_id(id)?;
+    }
     if r.harness != Harness::Claude {
         bail!(
             "cv rewind currently supports Claude Code sessions only (got {})",

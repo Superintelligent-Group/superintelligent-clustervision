@@ -422,6 +422,9 @@ fn select_kept_turns(
 
 /// Prune `src_path` (a Claude `<id>.jsonl`) into a new session. Returns what happened.
 pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult> {
+    if let Some(id) = &opts.new_id {
+        crate::restamp::validate_output_id(id)?;
+    }
     let reference = crate::ir::SessionRef::from_path(src_path, crate::ir::Harness::Claude);
     let subagent = crate::rewind::is_subagent(&reference);
     let source = crate::json::JsonSource::capture(src_path)?;

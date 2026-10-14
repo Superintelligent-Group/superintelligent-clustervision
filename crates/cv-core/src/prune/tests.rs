@@ -2528,3 +2528,34 @@ fn parent_prune_keeps_embedded_sidechains_out_of_own_turns() -> Result<()> {
     assert_eq!(std::fs::read(parent)?, mixed);
     Ok(())
 }
+
+#[test]
+fn prune_rejects_output_ids_that_escape_or_alias_resource_directories() {
+    let dir = tmpdir();
+    let source = fixture(&dir, "original payload");
+    let original = std::fs::read(&source).unwrap();
+    for id in [
+        "",
+        ".",
+        "..",
+        "../victim",
+        "/tmp/victim",
+        "nested/child",
+        "nested\\child",
+        "bad\0id",
+    ] {
+        let error = prune_session(
+            &source,
+            &PruneOptions {
+                new_id: Some(id.into()),
+                copy_resources: true,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("filename component"), "{error}");
+        assert_eq!(std::fs::read(&source).unwrap(), original);
+    }
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+    std::fs::remove_dir_all(&dir).ok();
+}
