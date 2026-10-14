@@ -292,6 +292,31 @@ fn tool_calls_against_fixture_corpus() {
 }
 
 #[test]
+fn malformed_observation_strings_are_rejected_instead_of_widening_filters() {
+    let mut s = Server::spawn("string-arguments");
+    for (tool, args) in [
+        ("observe_stream", json!({"harness":false})),
+        ("observe_stream", json!({"harness":"not-a-harness"})),
+        ("observe_stream", json!({"cwd_contains":42})),
+        ("observe_stream", json!({"since_cursor":{}})),
+        ("await_omen", json!({"regex":false})),
+        ("await_omen", json!({"regex":"never", "cwd_contains":[]})),
+        ("await_omen", json!({})),
+    ] {
+        let response = s.request(1, "tools/call", json!({"name":tool, "arguments":args}));
+        assert_eq!(response["error"]["code"], -32602, "{tool}: {response}");
+    }
+    let (text, error) = s.call_tool(
+        2,
+        "observe_stream",
+        json!({"harness":null, "cwd_contains":"", "since_cursor":null}),
+    );
+    assert!(!error, "{text}");
+    let baseline: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(baseline["baseline"], true);
+}
+
+#[test]
 fn await_omen_timeout_caps_the_poll_sleep() {
     let mut s = Server::spawn("poll-deadline");
     // This would sleep for an hour before the repair. The protocol reader's ordinary

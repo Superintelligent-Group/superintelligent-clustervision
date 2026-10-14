@@ -663,11 +663,11 @@ fn call_tool(name: &str, args: &Value, cancelled: &AtomicBool) -> anyhow::Result
 /// Block until a newly-emitted message matches `regex` (or `timeout_secs` elapses). The polling loop
 /// runs on its request's own thread, so blocking is fine.
 fn await_omen(args: &Value, cancelled: &AtomicBool) -> anyhow::Result<String> {
-    let pattern = arg_str(args, "regex").context("`regex` is required")?;
+    let pattern = arg_str(args, "regex")?.ok_or_else(|| InvalidParams("`regex` is required".into()))?;
     let re = regex::Regex::new(pattern).with_context(|| format!("invalid regex: {pattern:?}"))?;
     let filter = Filter {
         harness: parse_harness(args)?,
-        cwd_contains: arg_str(args, "cwd_contains").map(str::to_string),
+        cwd_contains: arg_str(args, "cwd_contains")?.map(str::to_string),
     };
     let timeout = Duration::from_secs(arg_usize(args, "timeout_secs", 120)? as u64);
     let interval = Duration::from_secs(arg_usize(args, "interval_secs", 2)?.max(1) as u64);
@@ -732,11 +732,11 @@ fn await_omen(args: &Value, cancelled: &AtomicBool) -> anyhow::Result<String> {
 fn observe_stream(args: &Value) -> anyhow::Result<String> {
     let filter = Filter {
         harness: parse_harness(args)?,
-        cwd_contains: arg_str(args, "cwd_contains").map(str::to_string),
+        cwd_contains: arg_str(args, "cwd_contains")?.map(str::to_string),
     };
     let max_messages = arg_usize(args, "max_messages", 50)?.max(1);
     let char_cap = arg_usize(args, "char_cap", 16_000)?.max(1);
-    let prev = arg_str(args, "since_cursor").and_then(Cursor::decode);
+    let prev = arg_str(args, "since_cursor")?.and_then(Cursor::decode);
     let baseline = prev.is_none();
     let mut watcher = match prev {
         Some(c) => Watcher::from_cursor(filter, c, cv_core::sessions),
@@ -821,8 +821,12 @@ fn message_text(m: &cv_core::Message) -> anyhow::Result<String> {
     Ok(output)
 }
 
-fn arg_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
-    args.get(key).and_then(Value::as_str).filter(|s| !s.is_empty())
+fn arg_str<'a>(args: &'a Value, key: &str) -> anyhow::Result<Option<&'a str>> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok((!value.is_empty()).then_some(value.as_str())),
+        Some(value) => Err(InvalidParams(format!("`{key}` must be a string, got {value}")).into()),
+    }
 }
 
 /// A malformed caller-supplied argument. Mapped to JSON-RPC `-32602 Invalid params` at the
@@ -859,14 +863,15 @@ fn arg_usize(args: &Value, key: &str, default: usize) -> anyhow::Result<usize> {
 }
 
 fn parse_harness(args: &Value) -> anyhow::Result<Option<Harness>> {
-    match arg_str(args, "harness") {
+    match arg_str(args, "harness")? {
         None => Ok(None),
         Some(s) => match Harness::parse(s) {
             Some(h) => Ok(Some(h)),
-            None => anyhow::bail!(
+            None => Err(InvalidParams(format!(
                 "unknown harness: {s:?} (expected one of {})",
                 Harness::ALL.iter().map(|h| h.as_str()).collect::<Vec<_>>().join(", ")
-            ),
+            ))
+            .into()),
         },
     }
 }
