@@ -575,6 +575,7 @@ pub(crate) fn cmd_dataset(
     let text_sets = query
         .as_ref()
         .map(crate::cmd::query::text_sets)
+        .transpose()?
         .unwrap_or_else(crate::cmd::query::TextSets::empty);
     // File exports stage the whole operation before opening the destination. In particular,
     // --out must never truncate a transcript before discovery or source validation.
