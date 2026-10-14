@@ -84,6 +84,7 @@ impl Adapter for LmStudio {
     }
 
     fn discover(&self) -> Result<Vec<SessionRef>> {
+        let _cache_scope = crate::discover_cache::read::Context::current().enter();
         let Some(root) = &self.root else {
             return Ok(vec![]);
         };
@@ -97,10 +98,14 @@ impl Adapter for LmStudio {
             if !is_conversation_file(&path) {
                 continue;
             }
-            match scan(&path) {
-                Ok(Some(r)) => out.push(r),
-                Ok(None) => {}
-                Err(e) => eprintln!("cv: skipping {}: {e:#}", path.display()),
+            if let Some(reference) = crate::discover_cache::cached_scan(&path, || match scan(&path) {
+                Ok(reference) => reference,
+                Err(error) => {
+                    eprintln!("cv: skipping {}: {error:#}", path.display());
+                    None
+                }
+            }) {
+                out.push(reference);
             }
         }
         Ok(out)
@@ -1885,6 +1890,50 @@ mod tests {
         });
         assert!(result.is_err());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn repeated_discovery_reuses_unchanged_documents_and_refreshes_changed_files() -> Result<()> {
+        let world = cv_testkit::World::in_process("lmstudio-discovery-cache");
+        let context = crate::discover_cache::read::Context::current();
+        let _scope = context.enter();
+        let store = world.home.join("conversations");
+        fs::create_dir_all(&store)?;
+        for index in 0..8 {
+            fs::write(
+                store.join(format!("{index}.conversation.json")),
+                serde_json::to_vec(&json!({"messages": (0..128).map(|turn| json!({
+                    "versions":[{"role":"user","content":format!("prompt {index} {turn}")}]
+                })).collect::<Vec<_>>()}))?,
+            )?;
+        }
+        let adapter = LmStudio::with_root(&store);
+        let first = adapter.discover()?;
+        assert_eq!(first.len(), 8);
+        for reference in &first {
+            let direct = scan(&reference.path)?.unwrap();
+            assert_eq!(serde_json::to_value(reference)?, serde_json::to_value(&direct)?);
+            assert_eq!(reference.message_count, 128);
+            let hit = crate::discover_cache::cached_scan(&reference.path, || {
+                panic!("discovery must have cached every unchanged conversation")
+            })
+            .unwrap();
+            assert_eq!(serde_json::to_value(hit)?, serde_json::to_value(reference)?);
+        }
+        assert_eq!(adapter.discover()?.len(), 8);
+        let changed = store.join("0.conversation.json");
+        fs::write(&changed, r#"{"name":"changed","messages":[{},{}]}"#)?;
+        let refreshed = adapter.discover()?;
+        let reference = refreshed.iter().find(|reference| reference.id == "0").unwrap();
+        assert_eq!(reference.title.as_deref(), Some("changed"));
+        assert_eq!(reference.message_count, 2);
+        fs::write(&changed, "not JSON")?;
+        assert_eq!(adapter.discover()?.len(), 7);
+        fs::write(&changed, r#"{"name":"repaired","messages":[]}"#)?;
+        assert_eq!(adapter.discover()?.len(), 8);
+        fs::remove_file(changed)?;
+        assert_eq!(adapter.discover()?.len(), 7);
+        Ok(())
     }
 
     #[test]
