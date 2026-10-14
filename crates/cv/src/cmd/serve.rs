@@ -1,8 +1,8 @@
 //! `cv serve` — one local HTTP server: the read API at `/api/*` (`cv_core::api::route_json`, plus
 //! the two tantivy routes `/api/search` and `/api/stats`), the task inbox page at `/inbox` with
 //! the routes its buttons use (`serve_tasks`), and, with `--web <dir>`, the browser dashboard from
-//! `/`. Without `--web`, `/` is the inbox. A lightweight *synchronous* server ([`tiny_http`]) with a
-//! small worker pool: the workload is a handful of pollers, and simplicity wins.
+//! `/`. Without `--web`, `/` is the inbox. A small *synchronous* server ([`crate::http`]), one
+//! thread per connection: the workload is a handful of pollers, and simplicity wins.
 //!
 //! The transcript corpus is sensitive (it can contain secrets) and the inbox writes identity-bearing
 //! events, so both are locked to local callers: the `Host` header must name this machine (defeats
@@ -13,13 +13,13 @@
 //! `$CV_SERVE_TOKEN`) gates every `/api/*` request; a non-loopback bind demands one (or an explicit
 //! `--insecure-expose`). `OPTIONS` preflight is answered with a 204.
 
-use crate::http_transport::{Header, Method, Request, Response, Server};
+use crate::http::{Request, Response};
 use anyhow::Result;
 use cv_core::Harness;
 use serde_json::{json, Value};
 use std::io::Read;
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use super::serve_tasks;
 
@@ -91,11 +91,11 @@ fn run(
     who: Option<String>,
     open: bool,
 ) -> Result<()> {
-    let server = Server::http((host, port)).map_err(|e| anyhow::anyhow!("failed to bind {host}:{port}: {e}"))?;
+    let listener = TcpListener::bind((host, port)).map_err(|e| anyhow::anyhow!("failed to bind {host}:{port}: {e}"))?;
     // `--port 0` binds an ephemeral port; the banner below must carry the REAL bound port so
     // callers (test harnesses, scripts) can parse the address instead of racing to guess a free
     // one. For a fixed port this is the same number.
-    let port = server.server_addr().to_ip().map_or(port, |a| a.port());
+    let port = listener.local_addr().map_or(port, |a| a.port());
     // Canonicalize the web root once so per-request path-traversal checks are cheap and robust.
     let web_root = web_root.and_then(|d| match d.canonicalize() {
         Ok(c) => Some(c),
@@ -128,55 +128,37 @@ fn run(
         }
     }
 
-    let server = Arc::new(server);
-    let ctx = Arc::new(Ctx {
+    let ctx = Ctx {
         bind_host: host.to_string(),
         web_root,
         token,
         default_who: who,
         semantic_search: cv_search::SemanticSearch::default(),
-    });
-    let mut workers = Vec::new();
-    // A handful of workers is plenty for dashboard polling; they share the listener.
-    for _ in 0..4 {
-        let server = Arc::clone(&server);
-        let ctx = Arc::clone(&ctx);
-        workers.push(std::thread::spawn(move || {
-            for request in server.incoming_requests() {
-                // A panicking handler must cost one response, not a worker for the process's life.
-                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle(request, &ctx)));
-                if outcome.is_err() {
-                    eprintln!("cv serve: request handler panicked; worker continuing");
-                }
-            }
-        }));
-    }
-    for w in workers {
-        // If a worker panics we keep serving on the others, but join here so `run` blocks forever.
-        let _ = w.join();
-    }
-    Ok(())
+    };
+    crate::http::serve(listener, crate::http::Limits::default(), move |request| {
+        handle(request, &ctx)
+    })
 }
 
 /// Handle one request: any error becomes a JSON error response.
-fn handle(mut request: Request, ctx: &Ctx) {
+fn handle(request: &mut Request<'_>, ctx: &Ctx) {
     // DNS-rebinding guard: a hostile page can point its own domain at 127.0.0.1 and fetch us
     // same-origin, but it can't forge the Host header — reject anything that isn't our own name.
-    if !host_allowed(header_value(&request, "Host").as_deref(), &ctx.bind_host) {
-        let _ = request.respond(json_response(403, &json!({"error": "forbidden host"}), None, &[]));
+    if !host_allowed(header_value(request, "Host").as_deref(), &ctx.bind_host) {
+        request.respond(json_response(403, &json!({"error": "forbidden host"}), None, &[]));
         return;
     }
     // Echoed on API responses only when the Origin is on the local allow-list; never `*`.
-    let raw_origin = header_value(&request, "Origin");
+    let raw_origin = header_value(request, "Origin");
     let origin = allowed_origin(raw_origin.as_deref(), &ctx.bind_host);
 
-    let method = request.method().clone();
+    let method = request.method().to_string();
     let raw_url = request.url().to_string();
 
     // CORS preflight: a 204, CORS-tagged only for allowed origins. Unauthenticated by design —
     // browsers strip credentials from preflights, and it discloses nothing.
-    if method == Method::Options {
-        let _ = request.respond(no_content(origin.as_deref()));
+    if method == "OPTIONS" {
+        request.respond(no_content(origin.as_deref()));
         return;
     }
 
@@ -193,11 +175,11 @@ fn handle(mut request: Request, ctx: &Ctx) {
         .collect();
     let parts: Vec<&str> = segments.iter().map(String::as_str).collect();
     let is_api = parts.first() == Some(&"api");
-    let post = method == Method::Post;
+    let post = method == "POST";
 
     // GET reads anything; POST is only ever an inbox write (`/api/task/<id>/<verb>`).
-    if !(method == Method::Get || (post && matches!(parts.as_slice(), ["api", "task", _, _]))) {
-        let _ = request.respond(json_response(
+    if !(method == "GET" || (post && matches!(parts.as_slice(), ["api", "task", _, _]))) {
+        request.respond(json_response(
             405,
             &json!({"error": "method not allowed"}),
             origin.as_deref(),
@@ -211,7 +193,7 @@ fn handle(mut request: Request, ctx: &Ctx) {
         let page = matches!(parts.as_slice(), ["inbox"] | ["inbox.html"])
             || (ctx.web_root.is_none() && matches!(parts.as_slice(), [] | ["index.html"]));
         if page {
-            let _ = request.respond(text_response(
+            request.respond(text_response(
                 200,
                 "text/html; charset=utf-8",
                 serve_tasks::PAGE.as_bytes().to_vec(),
@@ -219,17 +201,17 @@ fn handle(mut request: Request, ctx: &Ctx) {
             return;
         }
         if let Some(root) = &ctx.web_root {
-            let _ = request.respond(static_file(root, &segments));
+            request.respond(static_file(root, &segments));
             return;
         }
     }
 
     if let Some(token) = &ctx.token {
-        let authed = header_value(&request, "Authorization")
+        let authed = header_value(request, "Authorization")
             .and_then(|v| v.strip_prefix("Bearer ").map(str::to_string))
             .is_some_and(|t| t == *token);
         if !authed {
-            let _ = request.respond(json_response(
+            request.respond(json_response(
                 401,
                 &json!({"error": "missing or invalid bearer token"}),
                 origin.as_deref(),
@@ -244,7 +226,7 @@ fn handle(mut request: Request, ctx: &Ctx) {
     // is refused outright rather than merely denied the response.
     let mut body = Value::Null;
     if post {
-        let json_ct = header_value(&request, "Content-Type").is_some_and(|ct| {
+        let json_ct = header_value(request, "Content-Type").is_some_and(|ct| {
             ct.split(';')
                 .next()
                 .unwrap_or("")
@@ -252,7 +234,7 @@ fn handle(mut request: Request, ctx: &Ctx) {
                 .eq_ignore_ascii_case("application/json")
         });
         if !json_ct || (raw_origin.is_some() && origin.is_none()) {
-            let _ = request.respond(json_response(
+            request.respond(json_response(
                 403,
                 &json!({"error": "a write must be application/json from a local origin"}),
                 origin.as_deref(),
@@ -263,13 +245,8 @@ fn handle(mut request: Request, ctx: &Ctx) {
         // Capped: a note is a paragraph, not an upload.
         let mut buf = String::new();
         const BODY_LIMIT: u64 = 1 << 20;
-        if request
-            .as_reader()
-            .take(BODY_LIMIT + 1)
-            .read_to_string(&mut buf)
-            .is_err()
-        {
-            let _ = request.respond(json_response(
+        if request.by_ref().take(BODY_LIMIT + 1).read_to_string(&mut buf).is_err() {
+            request.respond(json_response(
                 400,
                 &json!({"error": "unreadable body"}),
                 origin.as_deref(),
@@ -278,7 +255,7 @@ fn handle(mut request: Request, ctx: &Ctx) {
             return;
         }
         if buf.len() as u64 > BODY_LIMIT {
-            let _ = request.respond(json_response(
+            request.respond(json_response(
                 413,
                 &json!({"error": "body exceeds 1 MiB limit"}),
                 origin.as_deref(),
@@ -290,7 +267,7 @@ fn handle(mut request: Request, ctx: &Ctx) {
             match serde_json::from_str::<Value>(&buf) {
                 Ok(v) => body = v,
                 Err(e) => {
-                    let _ = request.respond(json_response(
+                    request.respond(json_response(
                         400,
                         &json!({"error": format!("body is not JSON: {e}")}),
                         origin.as_deref(),
@@ -305,7 +282,7 @@ fn handle(mut request: Request, ctx: &Ctx) {
     let q = cv_core::api::Query::parse(query);
     match serve_tasks::route(post, &parts, &q, &body, ctx.default_who.as_deref()) {
         Some(serve_tasks::Answer::Json(status, v)) => {
-            let _ = request.respond(json_response(
+            request.respond(json_response(
                 status,
                 &v,
                 origin.as_deref(),
@@ -314,14 +291,12 @@ fn handle(mut request: Request, ctx: &Ctx) {
         }
         Some(serve_tasks::Answer::Ndjson(lines)) => {
             let mut resp = text_response(200, "application/x-ndjson; charset=utf-8", lines.into_bytes());
-            for h in cors_headers(origin.as_deref()) {
-                resp.add_header(h);
-            }
-            resp.add_header(header("Cache-Control", "no-store"));
-            let _ = request.respond(resp);
+            cors_headers(&mut resp, origin.as_deref());
+            resp.add_header("Cache-Control", "no-store");
+            request.respond(resp);
         }
         None if post => {
-            let _ = request.respond(json_response(
+            request.respond(json_response(
                 404,
                 &json!({"error": "no such route"}),
                 origin.as_deref(),
@@ -333,26 +308,18 @@ fn handle(mut request: Request, ctx: &Ctx) {
                 match result {
                     Ok(download) => match download.body.reader() {
                         Ok(reader) => {
-                            let mut response = Response::new(
-                                crate::http_transport::StatusCode(200),
-                                Vec::new(),
-                                reader,
-                                usize::try_from(download.bytes).ok(),
-                                None,
-                            );
-                            response.add_header(header("Content-Type", download.content_type));
-                            response.add_header(header(
+                            let mut response = Response::stream(200, reader, download.bytes);
+                            response.add_header("Content-Type", download.content_type);
+                            response.add_header(
                                 "Content-Disposition",
                                 &format!("attachment; filename=\"{}\"", download.filename),
-                            ));
-                            response.add_header(header("Cache-Control", "no-store"));
-                            for h in cors_headers(origin.as_deref()) {
-                                response.add_header(h);
-                            }
-                            let _ = request.respond(response);
+                            );
+                            response.add_header("Cache-Control", "no-store");
+                            cors_headers(&mut response, origin.as_deref());
+                            request.respond(response);
                         }
                         Err(error) => {
-                            let _ = request.respond(json_response(
+                            request.respond(json_response(
                                 500,
                                 &json!({"error":error.to_string()}),
                                 origin.as_deref(),
@@ -361,7 +328,7 @@ fn handle(mut request: Request, ctx: &Ctx) {
                         }
                     },
                     Err((status, error)) => {
-                        let _ = request.respond(json_response(status, &error, origin.as_deref(), &[]));
+                        request.respond(json_response(status, &error, origin.as_deref(), &[]));
                     }
                 }
                 return;
@@ -371,10 +338,10 @@ fn handle(mut request: Request, ctx: &Ctx) {
                     match stage.body.reader() {
                         Ok(reader) => {
                             let response = staged_response(&stage, reader, origin.as_deref());
-                            let _ = request.respond(response);
+                            request.respond(response);
                         }
                         Err(error) => {
-                            let _ = request.respond(json_response(
+                            request.respond(json_response(
                                 500,
                                 &json!({"error":format!("staged response failed: {error}")}),
                                 origin.as_deref(),
@@ -385,7 +352,7 @@ fn handle(mut request: Request, ctx: &Ctx) {
                     return;
                 }
                 Err(error) => {
-                    let _ = request.respond(json_response(
+                    request.respond(json_response(
                         500,
                         &json!({"error":format!("staged response failed: {error:#}")}),
                         origin.as_deref(),
@@ -396,18 +363,14 @@ fn handle(mut request: Request, ctx: &Ctx) {
                 Ok(None) => {}
             }
             let (status, body, extra) = route(&parts, query, &ctx.semantic_search);
-            let _ = request.respond(json_response(status, &body, origin.as_deref(), &extra));
+            request.respond(json_response(status, &body, origin.as_deref(), &extra));
         }
     }
 }
 
 /// First value of a (case-insensitively named) request header, if present.
-fn header_value(request: &Request, name: &'static str) -> Option<String> {
-    request
-        .headers()
-        .iter()
-        .find(|h| h.field.equiv(name))
-        .map(|h| h.value.as_str().to_string())
+fn header_value(request: &Request<'_>, name: &'static str) -> Option<String> {
+    request.header(name).map(str::to_string)
 }
 
 /// The hostname part of a `Host` header or URL authority: strips a `:port`, unbrackets IPv6.
@@ -734,7 +697,7 @@ fn index_miss_note() -> Option<String> {
 }
 
 /// A header-safe rendering of a note: header values are a byte channel with no escaping, so keep
-/// them printable ASCII on one line (`tiny_http` refuses anything else, which would drop the note).
+/// them printable ASCII on one line ([`Response::add_header`] drops anything else, and the note with it).
 fn header_safe(s: &str) -> String {
     s.chars()
         .map(|c| if (' '..='~').contains(&c) { c } else { ' ' })
@@ -759,7 +722,7 @@ fn ok(value: Value) -> (u16, Value) {
 /// missing file falls back to `index.html` (so client-side deep links work), and only a missing
 /// index is a 404. The `Content-Type` is inferred from the extension; static assets are not
 /// CORS-tagged (same-origin) — only the JSON API is.
-fn static_file(root: &Path, segments: &[String]) -> Response<std::io::Cursor<Vec<u8>>> {
+fn static_file(root: &Path, segments: &[String]) -> Response<'static> {
     let index = root.join("index.html");
     let resolved = if segments.is_empty() {
         index.clone()
@@ -827,9 +790,9 @@ fn content_type_for(path: &Path) -> &'static str {
 }
 
 /// A raw-bytes response with a `Content-Type` and no CORS headers (static assets are same-origin).
-fn text_response(status: u16, content_type: &str, body: Vec<u8>) -> Response<std::io::Cursor<Vec<u8>>> {
-    let mut resp = Response::from_data(body).with_status_code(status);
-    resp.add_header(header("Content-Type", content_type));
+fn text_response(status: u16, content_type: &str, body: Vec<u8>) -> Response<'static> {
+    let mut resp = Response::bytes(status, body);
+    resp.add_header("Content-Type", content_type);
     resp
 }
 
@@ -845,16 +808,14 @@ fn json_response(
     body: &Value,
     origin: Option<&str>,
     extra: &[(&'static str, String)],
-) -> Response<std::io::Cursor<Vec<u8>>> {
+) -> Response<'static> {
     let data = serde_json::to_vec(body).unwrap_or_else(|_| b"{\"error\":\"serialize failed\"}".to_vec());
-    let mut resp = Response::from_data(data).with_status_code(status);
-    for h in cors_headers(origin) {
-        resp.add_header(h);
-    }
+    let mut resp = Response::bytes(status, data);
+    cors_headers(&mut resp, origin);
     for (field, value) in extra {
-        resp.add_header(header(field, value));
+        resp.add_header(field, value);
     }
-    resp.add_header(header("Content-Type", "application/json"));
+    resp.add_header("Content-Type", "application/json");
     resp
 }
 
@@ -906,27 +867,17 @@ fn staged_response<'a>(
     stage: &cv_core::api::StagedJson,
     reader: Box<dyn std::io::Read + 'a>,
     origin: Option<&str>,
-) -> Response<Box<dyn std::io::Read + 'a>> {
-    let mut response = Response::new(
-        crate::http_transport::StatusCode(stage.status),
-        Vec::new(),
-        reader,
-        usize::try_from(stage.bytes).ok(),
-        None,
-    );
-    response.add_header(header("Content-Type", "application/json"));
-    for h in cors_headers(origin) {
-        response.add_header(h);
-    }
+) -> Response<'a> {
+    let mut response = Response::stream(stage.status, reader, stage.bytes);
+    response.add_header("Content-Type", "application/json");
+    cors_headers(&mut response, origin);
     response
 }
 
 /// A 204 No Content, CORS-tagged for `origin` when one was allowed — for `OPTIONS` preflight.
-fn no_content(origin: Option<&str>) -> Response<std::io::Empty> {
+fn no_content(origin: Option<&str>) -> Response<'static> {
     let mut resp = Response::empty(204);
-    for h in cors_headers(origin) {
-        resp.add_header(h);
-    }
+    cors_headers(&mut resp, origin);
     resp
 }
 
@@ -937,21 +888,14 @@ const EXPOSED_HEADERS: &str = "X-Cv-Search-Source, X-Cv-Search-Note, Content-Dis
 
 /// CORS headers echoing the one allowed `origin` — an unlisted origin gets none (the browser then
 /// refuses to share the response with it). `Vary: Origin` keeps caches from mixing the two.
-fn cors_headers(origin: Option<&str>) -> Vec<Header> {
-    let mut headers = vec![header("Vary", "Origin")];
+fn cors_headers(response: &mut Response<'_>, origin: Option<&str>) {
+    response.add_header("Vary", "Origin");
     if let Some(o) = origin {
-        headers.push(header("Access-Control-Allow-Origin", o));
-        headers.push(header("Access-Control-Allow-Methods", "GET, POST, OPTIONS"));
-        headers.push(header("Access-Control-Allow-Headers", "Authorization, Content-Type"));
-        headers.push(header("Access-Control-Expose-Headers", EXPOSED_HEADERS));
+        response.add_header("Access-Control-Allow-Origin", o);
+        response.add_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+        response.add_header("Access-Control-Allow-Headers", "Authorization, Content-Type");
+        response.add_header("Access-Control-Expose-Headers", EXPOSED_HEADERS);
     }
-    headers
-}
-
-fn header(field: &str, value: &str) -> Header {
-    // These are all static, valid headers; the parse cannot fail in practice.
-    Header::from_bytes(field.as_bytes(), value.as_bytes())
-        .unwrap_or_else(|_| Header::from_bytes(&b"X-Invalid"[..], &b"1"[..]).unwrap())
 }
 
 #[cfg(test)]
@@ -979,24 +923,12 @@ mod staged_tests {
                         let stage = cv_core::api::route_staged(&parts, "start=0&end=1").unwrap().unwrap();
                         let reader = stage.body.reader().unwrap();
                         staged_response(&stage, reader, None)
-                            .raw_print(
-                                std::io::sink(),
-                                crate::http_transport::HTTPVersion(1, 1),
-                                &[],
-                                false,
-                                None,
-                            )
+                            .write_to(std::io::sink(), false, false)
                             .unwrap();
                     } else {
                         let (status, value) = cv_core::api::route_json(&parts, "start=0&end=1");
                         json_response(status, &value, None, &[])
-                            .raw_print(
-                                std::io::sink(),
-                                crate::http_transport::HTTPVersion(1, 1),
-                                &[],
-                                false,
-                                None,
-                            )
+                            .write_to(std::io::sink(), false, false)
                             .unwrap();
                     }
                     let heap = cv_testkit::heap::end(baseline);
@@ -1013,6 +945,7 @@ mod staged_tests {
 #[cfg(test)]
 mod semantic_service_tests {
     use super::*;
+
 
     #[test]
     fn semantic_route_uses_service_owned_state_and_observes_replacement() {

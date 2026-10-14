@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `cv serve` runs on a small built-in server: idle connections close after 5 s, excess connections get 503, and accept errors no longer stop serving.
 - OpenSession preserves optional opaque principals through reads and transformations; mixed-source compositions retain attribution only when every source agrees.
 - Claude rewind and port default to portable replay, preserving readable reasoning as text and consistently repairing illegal tool identifiers; native fidelity remains selectable.
 - Backend reads and exports index repeated membership and lineage lookups; account multipart reads keep bounded descriptors and discovery reuses guarded metadata.
