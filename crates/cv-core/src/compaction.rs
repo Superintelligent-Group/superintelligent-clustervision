@@ -287,7 +287,6 @@ pub fn row(boundaries: &[Compaction], n: usize) -> Value {
 /// returning demanded summary read errors.
 pub fn detect_in_session(session: &Session, keep_summaries: bool) -> anyhow::Result<Vec<Compaction>> {
     let mut sink = CompactionSink::new(keep_summaries);
-    sink.summary_preview = preview;
     sink.resolver = Some(crate::lazy::Resolver::new(session.source_path.clone()));
     for m in &session.messages {
         sink.try_message(m.clone())?;
