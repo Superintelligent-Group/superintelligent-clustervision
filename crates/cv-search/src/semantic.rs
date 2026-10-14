@@ -231,7 +231,59 @@ fn save_store(path: &Path, store: &Store) -> Result<()> {
 }
 
 /// Load a store: the binary format, or (transparently) a legacy all-JSON store.
+// Parsing the metadata validates the complete declared binary extent. Vector contents are
+// arbitrary f32 bits; defer their ownership until a consumer actually needs retained vectors.
+struct VectorBacking {
+    input: std::io::BufReader<std::fs::File>,
+    bytes: usize,
+    file_len: u64,
+    path: PathBuf,
+}
+impl VectorBacking {
+    fn check_extent(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.input.get_ref().metadata()?.len() == self.file_len,
+            "embedding store changed length during read: {}",
+            self.path.display()
+        );
+        Ok(())
+    }
+    fn decode(mut self) -> Result<Vec<f32>> {
+        use std::io::Read;
+        #[cfg(test)]
+        VECTOR_DECODES.with(|count| count.set(count.get() + 1));
+        let mut vectors = Vec::with_capacity(self.bytes / 4);
+        let mut wire = [0u8; 16 * 1024];
+        let mut remaining = self.bytes;
+        while remaining != 0 {
+            let bytes = remaining.min(wire.len());
+            self.input
+                .read_exact(&mut wire[..bytes])
+                .context("reading embedding vectors")?;
+            vectors.extend(wire[..bytes].as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)));
+            remaining -= bytes;
+        }
+        let mut tail = [0u8; 1];
+        anyhow::ensure!(
+            self.input.read(&mut tail)? == 0,
+            "embedding store grew during read: {}",
+            self.path.display()
+        );
+        Ok(vectors)
+    }
+}
+#[cfg(test)]
+thread_local! { static VECTOR_DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
 fn load_store(path: &Path) -> Result<Store> {
+    let (mut store, vectors) = load_store_metadata(path)?;
+    if let Some(vectors) = vectors {
+        store.vectors = vectors.decode()?;
+    }
+    Ok(store)
+}
+
+fn load_store_metadata(path: &Path) -> Result<(Store, Option<VectorBacking>)> {
     use std::io::Read;
     let file = std::fs::File::open(path)
         .with_context(|| format!("reading embedding store {} — run `embed_all` first", path.display()))?;
@@ -243,7 +295,7 @@ fn load_store(path: &Path) -> Result<Store> {
         // Legacy JSON keeps its existing owned decoder, but does not need another full wire copy.
         let prefixed = std::io::Cursor::new(first).chain(input);
         let legacy: LegacyStore = serde_json::from_reader(prefixed).context("parsing legacy JSON embedding store")?;
-        return Ok(legacy.into());
+        return Ok((legacy.into(), None));
     }
     let mut header = [0u8; 24];
     header[0] = first[0];
@@ -295,32 +347,22 @@ fn load_store(path: &Path) -> Result<Store> {
             expected_bytes
         );
     }
-    // Decode into the final allocation through a bounded wire buffer. Query and refresh no
-    // longer retain an additional complete encoded vector block alongside these floats.
-    let mut vectors = Vec::with_capacity(expected_bytes / 4);
-    let mut wire = [0u8; 16 * 1024];
-    let mut remaining = expected_bytes;
-    while remaining != 0 {
-        let bytes = remaining.min(wire.len());
-        input
-            .read_exact(&mut wire[..bytes])
-            .context("reading embedding vectors")?;
-        vectors.extend(wire[..bytes].as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)));
-        remaining -= bytes;
-    }
-    anyhow::ensure!(
-        input.read(&mut first)? == 0,
-        "embedding store grew during read: {}",
-        path.display()
-    );
-    Ok(Store {
-        model: meta.model,
-        projection: meta.projection,
-        model_reads: meta.model_reads,
-        dim,
-        meta: meta.records,
-        vectors,
-    })
+    Ok((
+        Store {
+            model: meta.model,
+            projection: meta.projection,
+            model_reads: meta.model_reads,
+            dim,
+            meta: meta.records,
+            vectors: Vec::new(),
+        },
+        Some(VectorBacking {
+            input,
+            bytes: expected_bytes,
+            file_len,
+            path: path.to_owned(),
+        }),
+    ))
 }
 
 // ---- embedding -------------------------------------------------------------------------------
@@ -519,17 +561,20 @@ fn refresh(
     mut save: impl FnMut(&Path, &Store) -> Result<()>,
 ) -> Result<usize> {
     let refs = canonical_refs(refs);
-    let mut old = if path.exists() {
-        load_store(path)?
+    let (mut old, vector_backing) = if path.exists() {
+        load_store_metadata(path)?
     } else {
-        Store {
-            model: model.into(),
-            projection,
-            model_reads: None,
-            dim: 0,
-            meta: vec![],
-            vectors: vec![],
-        }
+        (
+            Store {
+                model: model.into(),
+                projection,
+                model_reads: None,
+                dim: 0,
+                meta: vec![],
+                vectors: vec![],
+            },
+            None,
+        )
     };
     let compatible = old.model == model
         && old.projection == projection
@@ -566,8 +611,18 @@ fn refresh(
         }
     }
     drop(lookup);
+    if let Some(backing) = vector_backing.as_ref() {
+        backing.check_extent()?;
+    }
     if changed.is_empty() && keep.iter().all(|&v| v) && compatible {
         return Ok(old.meta.len());
+    }
+    // Only retained rows need old vectors. Unchanged, all-replaced and empty refreshes
+    // validate the binary extent but never decode or allocate its unused float payload.
+    if keep.iter().any(|&kept| kept) {
+        if let Some(backing) = vector_backing {
+            old.vectors = backing.decode()?;
+        }
     }
     // Compact retained vectors within their existing allocation, preserving old row order.
     let mut retained = Vec::with_capacity(refs.len());
@@ -1609,6 +1664,111 @@ mod tests {
         )
         .unwrap();
         assert_eq!(load_store(&path).unwrap().meta.len(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn semantic_refresh_decodes_only_vectors_needed_for_composition() {
+        let dir = std::env::temp_dir().join(format!("cv-semantic-deferred-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("vectors.bin");
+        let refs: Vec<_> = ["a", "b"]
+            .into_iter()
+            .map(|id| {
+                let input = dir.join(format!("{id}.jsonl"));
+                std::fs::write(&input, id).unwrap();
+                fixture_ref(&input, id)
+            })
+            .collect();
+        let encode = |bodies: &[String]| -> Result<Vec<Vec<f32>>> {
+            Ok(bodies.iter().map(|body| vec![body.len() as f32; 256]).collect())
+        };
+        refresh(
+            &path,
+            &refs,
+            "fake",
+            1,
+            ReadSet::default(),
+            |r| fake_doc(r, None),
+            encode,
+            save_store,
+        )
+        .unwrap();
+        let original = std::fs::read(&path).unwrap();
+        VECTOR_DECODES.with(|count| count.set(0));
+        refresh(
+            &path,
+            &refs,
+            "fake",
+            1,
+            ReadSet::default(),
+            |_| panic!("unchanged source must not parse"),
+            |_| panic!("unchanged must not encode"),
+            |_, _| panic!("unchanged must not save"),
+        )
+        .unwrap();
+        assert_eq!(VECTOR_DECODES.with(|count| count.get()), 0);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        // Even unused vector bytes must have the exact declared extent before early return.
+        std::fs::write(&path, &original[..original.len() - 1]).unwrap();
+        assert!(refresh(
+            &path,
+            &refs,
+            "fake",
+            1,
+            ReadSet::default(),
+            |_| panic!("corrupt store must fail before parsing"),
+            |_| panic!("corrupt store must not encode"),
+            |_, _| panic!("corrupt store must not save")
+        )
+        .is_err());
+        assert_eq!(VECTOR_DECODES.with(|count| count.get()), 0);
+        std::fs::write(&path, &original).unwrap();
+        // Retaining a while changing b needs one decode, preserving the former row's bits.
+        std::fs::write(&refs[1].path, "changed body").unwrap();
+        refresh(
+            &path,
+            &refs,
+            "fake",
+            1,
+            ReadSet::default(),
+            |r| fake_doc(r, None),
+            encode,
+            save_store,
+        )
+        .unwrap();
+        assert_eq!(VECTOR_DECODES.with(|count| count.get()), 1);
+        let composed = load_store(&path).unwrap();
+        assert!(composed.vector(0).iter().all(|&v| v == 1.0));
+        assert!(composed.vector(1).iter().all(|&v| v == 12.0));
+        // A new embedding space replaces all rows and has no consumer of old vectors.
+        VECTOR_DECODES.with(|count| count.set(0));
+        refresh(
+            &path,
+            &refs,
+            "new-model",
+            1,
+            ReadSet::default(),
+            |r| fake_doc(r, None),
+            encode,
+            save_store,
+        )
+        .unwrap();
+        assert_eq!(VECTOR_DECODES.with(|count| count.get()), 0);
+        refresh(
+            &path,
+            &[],
+            "new-model",
+            1,
+            ReadSet::default(),
+            |_| panic!("empty refresh must not parse"),
+            |_| panic!("empty must not encode"),
+            save_store,
+        )
+        .unwrap();
+        assert_eq!(VECTOR_DECODES.with(|count| count.get()), 0);
+        let empty = load_store(&path).unwrap();
+        assert!(empty.meta.is_empty() && empty.vectors.is_empty());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
