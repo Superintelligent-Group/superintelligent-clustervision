@@ -439,22 +439,7 @@ fn message_est_resolved(m: &Message, resolver: &crate::Resolver) -> anyhow::Resu
         return Ok(0);
     }
     m.content.iter().try_fold(0u64, |sum, block| {
-        // Public callers can still supply legacy, best-effort spans. Preserve their old
-        // materialize fallback independently of the checked Source carrier contract.
-        let legacy_span = match block {
-            Block::Text { text } | Block::Thinking { text, .. } => matches!(text, crate::Text::Span(_)),
-            Block::ToolResult { content, .. } => matches!(content, crate::Text::Span(_)),
-            _ => false,
-        };
-        let tokens = if legacy_span {
-            let mut owned = Message::new(m.role);
-            owned.content.push(block.clone());
-            owned.materialize(resolver)?;
-            block_est(&owned.content[0])?
-        } else {
-            crate::ir::est_tokens_resolved(block, BYTES_PER_TOKEN, resolver)?
-        };
-        Ok(sum + tokens)
+        Ok(sum + crate::ir::est_tokens_resolved(block, BYTES_PER_TOKEN, resolver)?)
     })
 }
 
