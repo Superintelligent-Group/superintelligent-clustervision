@@ -321,7 +321,8 @@ impl Session {
 
     /// The best title for a machine listing: the explicit [`title`](Session::title) when present,
     /// otherwise one synthesized from the first user message that reads as a real prompt — skipping
-    /// the `Caveat:` command preamble, bare `<system-reminder>`/command-wrapper turns, and peeling a
+    /// harness-injected turns ([`MessageKind::InjectedContext`]: AGENTS.md instructions, environment
+    /// context), the `Caveat:` command preamble, bare `<system-reminder>`/command-wrapper turns, and peeling a
     /// leading `<system-reminder>` block off an otherwise-real turn (tool results are [`Role::Tool`],
     /// already excluded). `None` only when a session carries no explicit title and no user prose.
     ///
@@ -341,7 +342,7 @@ impl Session {
         let resolver = self.resolver();
         self.messages
             .iter()
-            .filter(|m| m.role == Role::User)
+            .filter(|m| m.role == Role::User && m.kind != MessageKind::InjectedContext)
             .find_map(|m| {
                 let mut s = String::new();
                 for b in &m.content {
@@ -1560,6 +1561,11 @@ mod tests {
         assert_eq!(s.synth_title().as_deref(), Some("explicit"));
         // Without one, the first meaningful user turn is synthesized (reminder peeled).
         s.title = None;
+        assert_eq!(s.synth_title().as_deref(), Some("ask about otters"));
+        // A harness-injected turn (Codex's AGENTS.md / environment context) is never the title.
+        let mut injected = user("# AGENTS.md instructions for /work");
+        injected.kind = MessageKind::InjectedContext;
+        s.messages.insert(0, injected);
         assert_eq!(s.synth_title().as_deref(), Some("ask about otters"));
         // A session with no user prose stays None.
         s.messages = vec![user("<system-reminder>only noise</system-reminder>")];

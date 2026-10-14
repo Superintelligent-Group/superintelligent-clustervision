@@ -108,11 +108,12 @@ impl TitleUsers {
             fallback: None,
         }
     }
-    fn finish(self, mut session: cv_core::Session) -> (cv_core::Session, Option<String>) {
+    /// `listed` is the row's own `title`: when the listing has one, `display_title` is that title.
+    fn finish(self, mut session: cv_core::Session, listed: Option<&str>) -> (cv_core::Session, Option<String>) {
         session.messages = self.candidates.messages;
-        let title = session
-            .title
-            .clone()
+        let title = listed
+            .map(str::to_string)
+            .or_else(|| session.title.clone())
             .or(self.fallback)
             .or_else(|| session.synth_title());
         (session, title)
@@ -120,7 +121,7 @@ impl TitleUsers {
 }
 impl cv_core::MessageSink for TitleUsers {
     fn message(&mut self, m: cv_core::Message) -> cv_core::Flow {
-        if m.role != cv_core::Role::User || self.fallback.is_some() {
+        if m.role != cv_core::Role::User || m.kind == cv_core::MessageKind::InjectedContext || self.fallback.is_some() {
             return cv_core::Flow::Continue;
         }
         self.deferred |= m.content.iter().any(|block| {
@@ -146,7 +147,7 @@ impl cv_core::MessageSink for TitleUsers {
 fn enrich_head(adapter: &dyn cv_core::Adapter, r: &SessionRef) -> Option<(cv_core::Session, Option<String>)> {
     let mut users = TitleUsers::new(r.harness);
     let session = cv_core::stream::stream_counted(adapter, r, &cv_core::ParseOptions::lazy(), &mut users).ok()?;
-    Some(users.finish(session))
+    Some(users.finish(session, r.title.as_deref()))
 }
 
 /// Select the requested listing window. Text listings retain their exact-total contract;
@@ -700,7 +701,7 @@ mod enrich_tests {
                 });
                 let mut baseline = metadata.clone();
                 baseline.messages = old.0;
-                let (actual, title) = reduced.finish(metadata);
+                let (actual, title) = reduced.finish(metadata, None);
                 assert_eq!(title, baseline.synth_title());
                 assert_eq!(actual.title, baseline.title);
                 assert_eq!(actual.git.unwrap().branch.as_deref(), Some("late branch"));
@@ -723,7 +724,7 @@ mod enrich_tests {
         }
         let mut baseline = Session::new("noise", Harness::Claude);
         baseline.messages = old.0;
-        let (actual, title) = reduced.finish(Session::new("noise", Harness::Claude));
+        let (actual, title) = reduced.finish(Session::new("noise", Harness::Claude), None);
         assert_eq!(title, baseline.synth_title());
         assert_eq!(title, None);
         assert!(actual.messages.is_empty());

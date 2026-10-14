@@ -209,6 +209,37 @@ fn ls_json_zero_limit_validates_inputs_without_creating_a_catalog() {
     assert!(!err.is_empty());
 }
 
+/// Codex rows on the committed corpus: `display_title` is the row's `title`, never the injected
+/// AGENTS.md or environment-context turn that opens every rollout.
+#[test]
+fn ls_json_enrich_codex_display_title_is_the_listed_title() {
+    fn copy(from: &std::path::Path, to: &std::path::Path) {
+        fs::create_dir_all(to).unwrap();
+        for entry in fs::read_dir(from).unwrap() {
+            let path = entry.unwrap().path();
+            let target = to.join(path.file_name().unwrap());
+            if path.is_dir() {
+                copy(&path, &target);
+            } else {
+                fs::copy(&path, &target).unwrap();
+            }
+        }
+    }
+    let corpus = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../cv-core/tests/corpus/codex");
+    for version in fs::read_dir(&corpus).unwrap() {
+        let version = version.unwrap().path();
+        let w = World::new("lsjsonenrich-codex");
+        copy(&version.join(".codex"), &w.home.join(".codex"));
+        let (out, _) = w.cv_ok(&["ls", "--json", "--enrich", "--harness", "codex", "--limit", "100"]);
+        let rows: Vec<serde_json::Value> = serde_json::from_str(out.trim()).expect("pure JSON");
+        assert!(!rows.is_empty(), "{}", version.display());
+        for row in &rows {
+            assert!(row["title"].is_string(), "{row}");
+            assert_eq!(row["display_title"], row["title"], "{}: {row}", version.display());
+        }
+    }
+}
+
 #[test]
 fn ls_json_enrich_adds_git_branch_and_synthesized_title() {
     let w = World::new("lsjsonenrich");
