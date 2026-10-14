@@ -359,7 +359,7 @@ mod tests {
     #[test]
     fn ordered_publication_preserves_suffix_dedup_and_rolls_back_failures() {
         use crate::events::{
-            Provenance, events_for, needs_ingest, record_from_with_source, record_spooled_with_source,
+            events_for, needs_ingest, record_from_with_source, record_spooled_with_source, Provenance,
         };
         use crate::{Harness, SessionRef};
         let world = cv_testkit::World::in_process("event-spool-transaction");
