@@ -43,18 +43,10 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      # Best-effort: build the WASM ingest module into web/pkg/.
-      # If the crate isn't present yet (or the build fails), we still deploy the
-      # static site, which runs in demo mode with the bundled sample dataset.
+      # Archive import requires the WASM ingest module. A failed build must retain the
+      # previous deployment instead of publishing a viewer with that feature missing.
       - name: Build cv-web (WASM)
-        id: wasm
-        continue-on-error: true
-        run: |
-          if [ -f crates/cv-web/Cargo.toml ]; then
-            wasm-pack build crates/cv-web --target web --out-dir ../../web/pkg --no-default-features
-          else
-            echo "crates/cv-web not present yet; skipping WASM build (site will run in demo mode)."
-          fi
+        run: wasm-pack build crates/cv-web --target web --out-dir ../../web/pkg -- --no-default-features
 
       # The manual's command reference and MCP roster are generated from the built binary
       # (tools/mdbook-cv.py reads `cv schema --commands --json` and `cv mcp`'s tools/list).
