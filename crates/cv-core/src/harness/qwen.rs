@@ -186,23 +186,55 @@ fn scheduled_tasks(r: &SessionRef) -> Vec<crate::affordance::Affordance> {
         .join("tmp")
         .join(crate::digest::sha256_hex(cwd.as_bytes()))
         .join("scheduled_tasks.json");
+    let read = || {
+        std::fs::read_to_string(&file)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .unwrap_or(Value::Null)
+    };
+    if !crate::source::inventory_scoped() {
+        // A single session needs one linear filter, not a time index for unrelated owners.
+        return task_rows_for_session(read(), r);
+    }
     let mut baseline = crate::source::ReadSet::default();
     baseline.record(&file);
     // The inventory's complete read set is this same file, already captured before the
     // affordance pass by source::Probe::dependencies(Qwen). Cache hits require that exact
     // baseline; the enclosing publication receipt revalidates it, so no dynamic guard is lost.
     let Ok((inventory, _reads)) = crate::source::inventory("qwen-scheduled-tasks", &file, &baseline, || {
-        let inventory = std::fs::read_to_string(&file)
-            .ok()
-            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-            .map(TaskInventory::from_value)
-            .unwrap_or_default();
+        let inventory = TaskInventory::from_value(read());
         let retained = inventory.retained_bytes();
         Ok((inventory, baseline.clone(), retained))
     }) else {
         return Vec::new();
     };
     inventory.for_session(r)
+}
+
+fn task_affordance(task: &Value) -> crate::affordance::Affordance {
+    let text = |key: &str| task.get(key).and_then(Value::as_str).unwrap_or("");
+    let mut summary = [text("id"), text("cron"), text("prompt")]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ");
+    if task.get("recurring").and_then(Value::as_bool) == Some(true) {
+        summary.push_str(" · recurring");
+    }
+    crate::affordance::Affordance::store(
+        crate::affordance::Kind::Schedule,
+        "scheduled_tasks.json",
+        truncate(&summary, 120),
+        Vec::new(),
+    )
+}
+fn task_rows_for_session(value: Value, session: &SessionRef) -> Vec<crate::affordance::Affordance> {
+    let Value::Array(tasks) = value else { return Vec::new() };
+    tasks.into_iter().filter(|task| match task.get("sessionId").and_then(Value::as_str) {
+        Some(owner) => owner == session.id,
+        None => matches!((task.get("createdAt").and_then(Value::as_i64).and_then(chrono::DateTime::from_timestamp_millis), session.created_at.zip(session.updated_at)),
+            (Some(created), Some((from,to))) if from <= created && created <= to),
+    }).map(|task| task_affordance(&task)).collect()
 }
 
 #[derive(Default)]
@@ -213,7 +245,6 @@ struct TaskInventory {
 }
 impl TaskInventory {
     fn from_value(value: Value) -> Self {
-        use crate::affordance::{Affordance, Kind};
         let Value::Array(tasks) = value else {
             return Self::default();
         };
@@ -232,21 +263,7 @@ impl TaskInventory {
                 };
                 inventory.unowned.entry(created).or_default().push(index);
             }
-            let text = |key: &str| task.get(key).and_then(Value::as_str).unwrap_or("");
-            let mut summary = [text("id"), text("cron"), text("prompt")]
-                .into_iter()
-                .filter(|part| !part.is_empty())
-                .collect::<Vec<_>>()
-                .join(" · ");
-            if task.get("recurring").and_then(Value::as_bool) == Some(true) {
-                summary.push_str(" · recurring");
-            }
-            inventory.rows.push(Affordance::store(
-                Kind::Schedule,
-                "scheduled_tasks.json",
-                truncate(&summary, 120),
-                Vec::new(),
-            ));
+            inventory.rows.push(task_affordance(&task));
         }
         inventory
     }
@@ -1136,6 +1153,11 @@ mod tests {
                     if task.get("recurring").and_then(Value::as_bool)==Some(true) { summary.push_str(" · recurring"); }
                     Affordance::store(Kind::Schedule, "scheduled_tasks.json", truncate(&summary,120),Vec::new())
                 }).collect::<Vec<_>>();
+                assert_eq!(
+                    serde_json::to_value(task_rows_for_session(Value::Array(tasks.clone()), &reference))?,
+                    serde_json::to_value(&expected)?,
+                    "standalone {owner}/{window:?}"
+                );
                 assert_eq!(
                     serde_json::to_value(inventory.for_session(&reference))?,
                     serde_json::to_value(expected)?,
