@@ -210,8 +210,10 @@ fn item(
     item.field_with("contextItems", |w| {
         w.write_all(b"[")?;
         let mut first = true;
-        for b in &msg.content {
-            if msg.role != Role::Tool {
+        // Grouped tool results each become one native item, with no context items.
+        // Checking the role before traversing avoids rescanning R blocks for R items.
+        if msg.role != Role::Tool {
+            for b in &msg.content {
                 if let Block::File { path, source, mime } = b {
                     if !first {
                         w.write_all(b",")?;
@@ -650,4 +652,42 @@ mod tests {
         assert_eq!(fs::read(index)?, index_before);
         Ok(())
     }
+}
+#[test]
+fn wide_grouped_tool_results_preserve_each_item_and_empty_context() -> Result<()> {
+    let world = cv_testkit::World::in_process("continue-wide-grouped-results");
+    for count in [1, 128, 8192] {
+        let mut session = Session::new("source", Harness::Continue);
+        let mut tool = Message::new(Role::Tool);
+        let mut expected = Vec::new();
+        for index in 0..count {
+            let id = format!("call-{index}");
+            let body = format!("result-{index}\nλ");
+            expected.push(json!({"message":{"role":"tool","toolCallId":id,"content":body},"contextItems":[]}));
+            tool.content.push(Block::ToolResult {
+                tool_use_id: id,
+                content: body.into(),
+                is_error: false,
+                tool_name: None,
+                status: None,
+                details: None,
+            });
+        }
+        // Tool attachments/prose were already omitted by the native writer; the
+        // shortcut must preserve that policy rather than copy user context rules.
+        tool.content.push(Block::File {
+            path: Some("ignored.txt".into()),
+            source: None,
+            mime: None,
+        });
+        tool.content.push(Block::Text {
+            text: "ignored prose".into(),
+        });
+        session.messages.push(tool);
+        let path = world.base.join(format!("wide-{count}.json"));
+        transcript(&session, "copy", None, None, &path, crate::emit::ThinkingMode::Native)?;
+        let actual: Value = serde_json::from_slice(&fs::read(path)?)?;
+        assert_eq!(actual, json!({"sessionId":"copy","history":expected}));
+    }
+    Ok(())
 }
