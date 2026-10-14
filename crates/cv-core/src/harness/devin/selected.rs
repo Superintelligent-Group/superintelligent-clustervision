@@ -1,7 +1,7 @@
 //! Selected Devin rows keep bodies/arguments in guarded backing, while the established mapper
 //! still owns precisely the metadata its consumers demand.
 use super::*;
-use crate::harness::store::bytes::ByteSource;
+use crate::harness::store::{bytes::ByteSource, document::Fields};
 use crate::json::{JsonSource, JsonView};
 use std::sync::Arc;
 
@@ -73,14 +73,11 @@ impl Selected {
         self.read(conn, rowid, |view| node(view, nid, created, metadata, tools))
     }
 }
-fn fields(view: JsonView<'_>, keys: &[&str]) -> Result<Value> {
-    let mut map = serde_json::Map::new();
-    for key in keys {
-        if let Some(value) = view.get(key)? {
-            map.insert((*key).into(), value.resolve()?.into_owned());
-        }
-    }
-    Ok(Value::Object(map))
+fn fields(view: JsonView<'_>, keys: &[&'static str]) -> Result<Value> {
+    let Some(fields) = Fields::parse(view, keys)? else {
+        return Ok(Value::Object(Default::default()));
+    };
+    Ok(Value::Object(fields.project(keys)?))
 }
 fn metadata(view: JsonView<'_>) -> Result<Value> {
     let mut out = fields(
@@ -89,22 +86,28 @@ fn metadata(view: JsonView<'_>) -> Result<Value> {
             "created_at",
             "is_user_input",
             "generation_model",
-            "metrics",
             "finish_reason",
             "request_id",
             "telemetry",
             "num_tokens",
         ],
     )?;
+    if let Some(metrics) = view.get("metrics")? {
+        out["metrics"] = fields(
+            metrics,
+            &[
+                "input_tokens",
+                "output_tokens",
+                "cache_read_tokens",
+                "cache_creation_tokens",
+            ],
+        )?;
+    }
     if let Some(ext) = view.get("extensions")? {
         let mut reduced = fields(
             ext,
             &[
                 "subagent/handoff",
-                "chisel/tool_result_meta",
-                "chisel/tool_failure",
-                "chisel/terminal_output",
-                "chisel/tool_call_timing",
                 "affogato/cog-context",
                 "chisel/user_question_answers",
                 "subagent/profile_name",
@@ -115,6 +118,24 @@ fn metadata(view: JsonView<'_>) -> Result<Value> {
                 "agent-ext/rules-loaded",
             ],
         )?;
+        // These extension objects are reduced by node_to_message. Selecting the same fields
+        // here avoids owning embedded terminal output or unrelated producer telemetry first.
+        for (key, keys) in [
+            ("chisel/tool_result_meta", &["success", "kind"][..]),
+            ("chisel/tool_failure", &["reason"][..]),
+            ("chisel/tool_call_timing", &["duration_ms"][..]),
+        ] {
+            if let Some(value) = ext.get(key)? {
+                reduced[key] = fields(value, keys)?;
+            }
+        }
+        if let Some(terminal) = ext.get("chisel/terminal_output")? {
+            let mut value = fields(terminal, &["cwd"])?;
+            if let Some(exit) = terminal.get("exit")? {
+                value["exit"] = fields(exit, &["exit_code", "terminal_id"])?;
+            }
+            reduced["chisel/terminal_output"] = value;
+        }
         if let Some(undo) = ext
             .get("chisel/undo")?
             .and_then(|v| v.array().transpose())
@@ -354,12 +375,25 @@ mod tests {
         let base = json!({"role":"assistant","message_id":"id","content":body,"thinking":{"thinking":body,"signature":"sig"},"tool_calls":[{"id":"call","name":"Read","arguments":{"z":1,"a":body}}],"metadata":{"created_at":"2026-10-13T12:00:00Z","is_user_input":true,"generation_model":"model","metrics":{"input_tokens":7,"output_tokens":3},"extensions":{"chisel/terminal_output":{"cwd":"/cwd","exit":{"exit_code":1,"terminal_id":"term"}},"chisel/tool_result_meta":{"success":false,"kind":"shell"},"chisel/undo":[{"kind":"restore_file","path":"/file","original_content":body}],"agent-ext/skills-loaded":{"skills":[{"name":"n","path":"p","description":body}]},"chisel/tool_call_content":{"call":{"title":"t","kind":"k","status":"s","rawInput":body}},"subagent/handoff":true,"subagent/agent_id":"sidekick","unknown":body,"subagent/handoff_history":body}}});
         for role in ["assistant", "tool", "user", "system", "unknown"] {
             let mut value = base.clone();
+            value["metadata"]["metrics"]["discarded_samples"] = json!(body);
+            value["metadata"]["extensions"]["chisel/terminal_output"]["stdout"] = json!(body);
+            value["metadata"]["extensions"]["chisel/terminal_output"]["exit"]["discarded"] = json!(body);
+            value["metadata"]["extensions"]["chisel/tool_result_meta"]["discarded"] = json!(body);
+            value["metadata"]["extensions"]["chisel/tool_failure"] = json!({"reason":"failed", "discarded":body});
+            value["metadata"]["extensions"]["chisel/tool_call_timing"] = json!({"duration_ms":3, "discarded":body});
             value["role"] = json!(role);
             value["tool_call_id"] = json!("call");
             std::fs::write(&path, serde_json::to_vec(&value)?)?;
             let source = JsonSource::capture(&path)?;
             let mut names = HashMap::from([("call".into(), "Read".into())]);
             let metadata = json!({"summarized_from":1,"num_tokens_preceding":9,"is_system_prefix":false});
+            let projected =
+                source.read_range_value(0, source.len(), |view| super::metadata(view.get("metadata")?.unwrap()))?;
+            assert_eq!(projected["metrics"], json!({"input_tokens":7,"output_tokens":3}));
+            assert_eq!(
+                projected["extensions"]["chisel/terminal_output"],
+                json!({"cwd":"/cwd","exit":{"exit_code":1,"terminal_id":"term"}})
+            );
             let old = node_to_message(7, 1000, &value, Some(&metadata), &mut names);
             let mut selected =
                 source.read_range_value(0, source.len(), |view| node(view, 7, 1000, Some(&metadata), &mut names))?;
