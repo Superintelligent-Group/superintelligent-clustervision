@@ -62,10 +62,24 @@ impl Payload<'_> {
             match text {
                 Text::Inline(s) => info.feed(s),
                 Text::Source(source) => {
-                    let _ = source.try_for_each_chunk(4096, |part| {
-                        info.feed(part);
-                        Ok(())
-                    });
+                    let mut prefix = info.clone();
+                    let determined = source
+                        .try_prefix_with_truncation(4096)
+                        .ok()
+                        .is_some_and(|(text, truncated)| {
+                            prefix.feed(&text);
+                            prefix.complete() || !truncated
+                        });
+                    if determined {
+                        info = prefix;
+                    } else {
+                        // Leading whitespace can hide the classification marker beyond the
+                        // bounded prefix. Preserve the complete fallback for that case.
+                        let _ = source.try_for_each_chunk(4096, |part| {
+                            info.feed(part);
+                            Ok(())
+                        });
+                    }
                 }
                 Text::Span(sp) => {
                     // Ordinary prompts need only a short prefix. Fall back to a bounded scan
@@ -389,4 +403,48 @@ fn part_block(raw: Raw<'_>, ctx: Context<'_>, out: &mut Vec<Block>) -> Result<bo
     }
     // Presence is authoritative even when the value is scalar or functionCall wins dispatch.
     Ok(obj.fields.contains_key("functionResponse"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retained_prompt_inspection_matches_owned_prefix_and_whitespace_fallback() {
+        let dir = cv_testkit::temp_dir("gemini-inspect-prefix");
+        let path = dir.join("text.json");
+        let resolver = Resolver::new(None);
+        let payload = Payload {
+            content: std::cell::RefCell::new(Vec::new()),
+            results: std::cell::RefCell::new(Vec::new()),
+            inputs: std::cell::RefCell::new(Vec::new()),
+            thoughts: None,
+            display_text: std::cell::RefCell::new(None),
+            tool_response: false,
+            resolver: &resolver,
+        };
+        for body in [
+            "ordinary é\n".repeat(8192),
+            format!("{}<hook_context>context", " ".repeat(8192)),
+            " ".repeat(8192),
+            "short".into(),
+        ] {
+            let bytes = serde_json::to_vec(&body).unwrap();
+            std::fs::write(&path, &bytes).unwrap();
+            let json = crate::Json::source(&path, 0, bytes.len() as u64).unwrap();
+            let text = json.with_view(|view| Ok(view.source_text()?.unwrap())).unwrap();
+            let actual = payload.inspect(std::iter::once(&text));
+            let mut expected = TextInfo::default();
+            expected.feed(&body);
+            assert_eq!(actual.head, expected.head);
+            assert_eq!(actual.trimmed, expected.trimmed);
+            assert_eq!(actual.has_text, expected.has_text);
+            assert_eq!(payload.is_hook(&text), body.trim_start().starts_with("<hook_context>"));
+            std::fs::write(&path, "{} ").unwrap();
+            if matches!(text, Text::Source(_)) {
+                assert!(text.try_resolve(&resolver).is_err());
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
