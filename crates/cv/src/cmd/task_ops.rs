@@ -399,7 +399,7 @@ pub(crate) fn event_text(ev: &TaskEvent, model: &TaskReadModel, plen: usize) -> 
             .unwrap_or_default(),
         TaskEventKind::Abandoned { reason } => sanitize_line(reason).to_string(),
         TaskEventKind::Claimed { assignee } => sanitize_line(assignee).to_string(),
-        TaskEventKind::Tagged { tags } => format!("#{}", tags.join(" #")),
+        TaskEventKind::Tagged { tags } => format!("#{}", sanitize_line(&tags.join(" #"))),
         TaskEventKind::Posed { default_choice, .. } => format!("default: {}", sanitize_line(default_choice)),
         TaskEventKind::StatusSet { text } => format!("STATUS: {}", first_line(text, 100)),
         _ => String::new(),
@@ -408,7 +408,7 @@ pub(crate) fn event_text(ev: &TaskEvent, model: &TaskReadModel, plen: usize) -> 
         "{}  {:<16} {}  {:<24} {}{}",
         fmt_local(ev.ts, "%m-%d %H:%M"),
         ev.kind.tag(),
-        ev.task_id.get(..plen).unwrap_or(&ev.task_id),
+        sanitize_line(ev.task_id.get(..plen).unwrap_or(&ev.task_id)),
         truncate(&sanitize_line(&ev.by), 24),
         title,
         if detail.is_empty() {
@@ -456,7 +456,7 @@ pub(crate) fn render_inbox_text(page: &task::InboxPage) -> String {
             out.push_str(&format!(
                 "{} {}  {:>4}  {:10} {}\n",
                 if i.stale { "⏰" } else { "  " },
-                i.short,
+                sanitize_line(&i.short),
                 i.age,
                 i.effective_state,
                 sanitize_line(&i.title)
@@ -561,7 +561,7 @@ pub(crate) fn render_inbox_md(page: &task::InboxPage) -> String {
             n += 1;
             out.push_str(&format!("### {n}. {}\n\n", md_inline(&i.title)));
             let mut facts = vec![
-                format!("`{}`", i.short),
+                format!("`{}`", md_inline(&i.short)),
                 i.effective_state.clone(),
                 format!(
                     "{} {} ago by {}",
@@ -593,11 +593,11 @@ pub(crate) fn render_inbox_md(page: &task::InboxPage) -> String {
                         "- **made for you:** {} — by {} · confirm: `cv task resolve {} --confirm --from {who}` · or veto with `--choice`\n",
                         md_inline(&r.choice),
                         md_inline(&r.by),
-                        i.short
+                        md_inline(&i.short)
                     )),
                     None => out.push_str(&format!(
                         "- resolve: `cv task resolve {} --accept-default --from {who}`\n",
-                        i.short
+                        md_inline(&i.short)
                     )),
                 }
                 out.push('\n');
@@ -656,6 +656,25 @@ fn md_block(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn event_text_sanitizes_record_identifiers_and_tags_while_json_keeps_wire_values() {
+        let mut event = task::new_event(
+            Some("ta\nsk\x1b[31m"),
+            "author",
+            TaskEventKind::Tagged {
+                tags: vec!["danger\x1b[31mcolor\x1b[0m".into()],
+            },
+        );
+        event.ts = "2026-10-01T12:00:00Z".parse().unwrap();
+        let model = TaskReadModel::default();
+        let text = event_text(&event, &model, usize::MAX);
+        assert_eq!(text.lines().count(), 1);
+        assert!(text.contains("ta sk") && text.contains("#dangercolor") && !text.contains('\x1b'));
+        let json = event_json(&event, &model);
+        assert_eq!(json["task_id"], event.task_id);
+        assert_eq!(json["tags"][0], "danger\x1b[31mcolor\x1b[0m");
+    }
 
     #[test]
     fn inbox_brief_projection_preserves_full_text_without_cloning_rich_payloads() {

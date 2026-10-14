@@ -574,11 +574,11 @@ fn append_event(task_id: Option<&str>, from: &str, kind: TaskEventKind) -> Resul
     println!(
         "✦ {} {} → {}",
         report.event.kind.tag(),
-        prefix(&report.event.task_id, 13),
+        sanitize_line(prefix(&report.event.task_id, 13)),
         state
     );
     if matches!(report.event.kind, TaskEventKind::Opened { .. }) {
-        println!("{}", report.event.task_id);
+        println!("{}", sanitize_line(&report.event.task_id));
     }
     Ok(report.event.task_id)
 }
@@ -607,7 +607,12 @@ fn append_batch(events: Vec<TaskEvent>) -> Result<()> {
             .get(&ev.task_id)
             .map(String::as_str)
             .unwrap_or("?");
-        println!("✦ {} {} → {}", ev.kind.tag(), prefix(&ev.task_id, 13), state);
+        println!(
+            "✦ {} {} → {}",
+            ev.kind.tag(),
+            sanitize_line(prefix(&ev.task_id, 13)),
+            state
+        );
     }
     Ok(())
 }
@@ -640,7 +645,7 @@ fn task_row(r: &TaskRow, now: DateTime<Utc>, plen: usize, blocked: bool) -> Stri
     let assignee = r.assignee.as_deref().unwrap_or("-");
     format!(
         "{:<plen$}  {:>4}  {:16} {:20} {}{}",
-        prefix(&r.id, plen),
+        sanitize_line(prefix(&r.id, plen)),
         task::age_short(r.last_ts.unwrap_or(now), now),
         r.effective_state,
         sanitize_line(assignee),
@@ -660,13 +665,13 @@ fn task_row_tsv(r: &TaskRow, now: DateTime<Utc>) -> String {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     [
-        r.id.clone(),
+        cell(&r.id),
         r.effective_state.clone(),
         cell(r.assignee.as_deref().unwrap_or("")),
         cell(&repo),
         task::age_short(r.last_ts.unwrap_or(now), now),
         cell(&r.title),
-        r.blocked_by.join(","),
+        cell(&r.blocked_by.join(",")),
     ]
     .join("\t")
 }
@@ -845,8 +850,8 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
                 let Some(st) = &t.status else {
                     bail!(
                         "no STATUS pinned on {} — `cv task status {} --file F` pins one",
-                        prefix(&id, 13),
-                        prefix(&id, 13)
+                        sanitize_line(prefix(&id, 13)),
+                        sanitize_line(prefix(&id, 13))
                     );
                 };
                 for line in st.text.lines() {
@@ -1083,14 +1088,18 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
                 TaskEventKind::Opened { assignee, .. } => assignee.clone().unwrap_or_default(),
                 _ => String::new(),
             };
-            println!("✦ decision {} posed for {}", prefix(&id, 13), sanitize_line(&for_who));
+            println!(
+                "✦ decision {} posed for {}",
+                sanitize_line(prefix(&id, 13)),
+                sanitize_line(&for_who)
+            );
             if events
                 .iter()
                 .any(|e| matches!(&e.kind, TaskEventKind::Resolved { provisional: true, .. }))
             {
                 println!(
                     "✦ resolved {} provisionally on the default (by {}) — {} can --confirm or veto",
-                    prefix(&id, 13),
+                    sanitize_line(prefix(&id, 13)),
                     sanitize_line(&from),
                     sanitize_line(&for_who)
                 );
@@ -1121,8 +1130,8 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
                 None => bail!(
                     "a resolution records WHO decided: this decision is for {owner} — if that is you,\n  \
                      cv task resolve {short} {answer} --from {owner}\n  (or `export CV_ENDPOINT={owner}` once)",
-                    owner = t.assignee.as_deref().unwrap_or("<you>"),
-                    short = prefix(&id, 13),
+                    owner = sanitize_line(t.assignee.as_deref().unwrap_or("<you>")),
+                    short = sanitize_line(prefix(&id, 13)),
                     answer = match &choice {
                         Some(c) => format!("--choice {c:?}"),
                         None if confirm => "--confirm".into(),
@@ -1142,7 +1151,7 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
             {
                 println!(
                     "✦ resolved {} → {} (by {}){}",
-                    prefix(&id, 13),
+                    sanitize_line(prefix(&id, 13)),
                     sanitize_line(choice),
                     sanitize_line(&from),
                     if *provisional {
@@ -1225,7 +1234,7 @@ fn render_show(
     // (G5): titles, notes, endpoints, and branch names are all untrusted.
     out.push_str(&format!(
         "task {}  [{}]  {}\n",
-        t.task_id,
+        sanitize_line(&t.task_id),
         task::effective_display(t),
         t.kind()
     ));
@@ -1270,7 +1279,7 @@ fn render_show(
         }
     }
     if let Some(repo) = &t.repo {
-        out.push_str(&format!("  repo:     {}\n", repo.display()));
+        out.push_str(&format!("  repo:     {}\n", sanitize_line(&repo.to_string_lossy())));
     }
     if let Some(issue) = &t.issue {
         out.push_str(&format!("  issue:    {}\n", sanitize_line(issue)));
@@ -1287,11 +1296,14 @@ fn render_show(
         match model.tasks.get(b) {
             Some(bt) => out.push_str(&format!(
                 "  blocked by: {} [{}] {}\n",
-                prefix(b, plen),
+                sanitize_line(prefix(b, plen)),
                 task::effective_display(bt),
                 sanitize_line(&bt.title)
             )),
-            None => out.push_str(&format!("  blocked by: {} [unknown task]\n", prefix(b, plen))),
+            None => out.push_str(&format!(
+                "  blocked by: {} [unknown task]\n",
+                sanitize_line(prefix(b, plen))
+            )),
         }
     }
     if task::is_blocked(model, t) {
@@ -1300,7 +1312,7 @@ fn render_show(
     for other in task::blocks(model, &t.task_id) {
         out.push_str(&format!(
             "  blocks:   {} [{}] {}\n",
-            prefix(&other.task_id, plen),
+            sanitize_line(prefix(&other.task_id, plen)),
             task::effective_display(other),
             sanitize_line(&other.title)
         ));
@@ -1349,14 +1361,14 @@ fn render_show(
                 if r.provisional {
                     out.push_str(&format!(
                         "    veto?:    cv task resolve {} --confirm --from {owner} · or --choice \"<option>\"\n",
-                        prefix(&t.task_id, plen),
+                        sanitize_line(prefix(&t.task_id, plen)),
                         owner = sanitize_line(t.assignee.as_deref().unwrap_or("<you>"))
                     ));
                 }
             }
             None if !t.state.is_terminal() => out.push_str(&format!(
                 "    resolve:  cv task resolve {} --accept-default --from {}\n",
-                prefix(&t.task_id, plen),
+                sanitize_line(prefix(&t.task_id, plen)),
                 sanitize_line(t.assignee.as_deref().unwrap_or("<you>"))
             )),
             None => {}
@@ -1386,7 +1398,7 @@ fn render_show(
     for note in shown {
         let split = children
             .get(&note.event_id)
-            .map(|c| format!("  → split into {}", prefix(c, plen)))
+            .map(|c| format!("  → split into {}", sanitize_line(prefix(c, plen))))
             .unwrap_or_default();
         let late = if note.post_close { " (after close)" } else { "" };
         if brief {
@@ -1421,7 +1433,11 @@ fn print_events(outcome: &cv_core::task::ReplayOutcome, f: &EventFilter, text: b
         }
     }
     match events.last() {
-        Some(last) => eprintln!("# {} event(s) · next: --since {}", events.len(), last.id),
+        Some(last) => eprintln!(
+            "# {} event(s) · next: --since {}",
+            events.len(),
+            sanitize_line(&last.id)
+        ),
         None => eprintln!("# no events"),
     }
     Ok(())
@@ -1597,6 +1613,35 @@ mod tests {
         assert_eq!(
             branch_tokens_in(["feature/compiler_", "_remote-only end"]),
             branch_tokens("feature/compiler_\n_remote-only end")
+        );
+    }
+
+    #[test]
+    fn task_id_path_and_blocker_rendering_strip_controls_without_changing_json() {
+        let mut task = proj("title", "2026-07-13T00:00:00Z");
+        task.task_id = "\x1b[31mta\nsk\x1b[0m".into();
+        task.repo = Some(PathBuf::from("/tmp/repo\x1b[31mcolor\x1b[0m"));
+        task.blocked_by = vec!["bad\tblock\x1b[31m".into()];
+        let row = TaskRow::full(&task);
+        let now: DateTime<Utc> = "2026-07-16T00:00:00Z".parse().unwrap();
+        let rendered = task_row(&row, now, usize::MAX, true);
+        assert_eq!(rendered.lines().count(), 1);
+        assert!(!rendered.contains('\x1b'));
+        let tsv = task_row_tsv(&row, now);
+        assert_eq!(tsv.lines().count(), 1);
+        let cells: Vec<_> = tsv.split('\t').collect();
+        assert_eq!(cells.len(), 7);
+        assert_eq!(cells[0], "ta sk");
+        assert_eq!(cells[6], "bad block");
+        let mut model = TaskReadModel::default();
+        model.tasks.insert(task.task_id.clone(), task.clone());
+        let shown = render_show(&model, &task, false, None, None, now);
+        assert!(shown.starts_with("task ta sk  [open]"), "{shown}");
+        assert!(shown.contains("/tmp/repocolor") && !shown.contains('\x1b'));
+        assert_eq!(
+            serde_json::to_value(&row).unwrap()["id"],
+            task.task_id,
+            "JSON preserves original identifiers"
         );
     }
 
@@ -1840,13 +1885,13 @@ fn cmd_sweep(repo: &Path, main: Option<String>, json: bool) -> Result<()> {
     println!(
         "# probably done — {} candidate(s) in {} (observed: {} branch(es) merged into {main}); nothing was closed\n",
         rows.len(),
-        repo.display(),
+        sanitize_line(&repo.to_string_lossy()),
         merged.len()
     );
     for r in &rows {
         println!(
             "{:<plen$}  {:16} {}",
-            prefix(r.task_id, plen),
+            sanitize_line(prefix(r.task_id, plen)),
             r.state,
             sanitize_line(r.title)
         );
