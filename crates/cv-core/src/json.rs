@@ -1338,11 +1338,8 @@ impl<'a> JsonView<'a> {
     }
     /// Canonicalize with source-identity-specific replacements selected from this capture.
     /// Replacements never change acceptance: the producer must validate the complete original.
-    pub(crate) fn write_canonical_replacing(
-        self,
-        replacements: &[(Json, Value)],
-        writer: &mut impl Write,
-    ) -> Result<()> {
+    /// The replacement [`Self::write_canonical_replacing`] would write for this exact node.
+    pub(crate) fn replacement(self, replacements: &[(Json, Value)]) -> Result<Option<&Value>> {
         let owner = match self.0 {
             View::Owned(_) => None,
             #[cfg(feature = "mmap")]
@@ -1362,11 +1359,22 @@ impl<'a> JsonView<'a> {
                         && same_backing
                         && span == Some((range.offset, range.len))
                     {
-                        serde_json::to_writer(writer, replacement)?;
-                        return Ok(());
+                        return Ok(Some(replacement));
                     }
                 }
             }
+        }
+        Ok(None)
+    }
+
+    pub(crate) fn write_canonical_replacing(
+        self,
+        replacements: &[(Json, Value)],
+        writer: &mut impl Write,
+    ) -> Result<()> {
+        if let Some(replacement) = self.replacement(replacements)? {
+            serde_json::to_writer(writer, replacement)?;
+            return Ok(());
         }
         if self.is_object()? {
             writer.write_all(b"{")?;

@@ -501,9 +501,9 @@ enum Cmd {
         /// Hard-drop payloads (no sidecar, irreversible) instead of stashing them for retrieval.
         #[arg(long)]
         drop: bool,
-        /// Also flatten the OLDEST assistant reasoning (thinking blocks) — recent thinking (within
-        /// --keep-last) stays verbatim. On a long session the chain-of-thought dominates the loaded
-        /// context; flattening the old reasoning is the biggest lever for shrinking it. Lossless.
+        /// Also omit the OLDEST assistant reasoning (thinking blocks) — recent thinking (within
+        /// --keep-last) stays verbatim. Omitted blocks leave no marker; `cv cat <new-id>
+        /// <record-uuid>#think<i>` returns each from the sidecar. Lossless.
         ///
         /// Renamed from `--thinking` in 0.11.0: that spelling now names the emit-side
         /// `--thinking <native|text|drop>`, and one word may not mean two things.

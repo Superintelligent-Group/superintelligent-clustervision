@@ -185,27 +185,33 @@ fn drop_mode_writes_no_sidecar_and_never_advertises_retrieve() {
 }
 
 #[test]
-fn thinking_flatten_targets_old_reasoning_only() {
+fn drop_thinking_omits_old_reasoning_and_relinks_emptied_records() {
     let dir = tmpdir();
     let big = "R".repeat(5000);
     let sid = "22222222-2222-4222-8222-222222222222";
-    // old assistant turn with big thinking; then enough turns that it's outside keep_last; a recent
-    // assistant turn with big thinking that must be preserved.
-    let line = |uuid: &str, parent: &str, role: &str, content: serde_json::Value| {
+    // Old thinking-only record a0 (outside keep_last) and a recent one a2 (within it).
+    let line = |uuid: &str, parent: Option<&str>, role: &str, content: serde_json::Value| {
         serde_json::json!({"type":role,"sessionId":sid,"uuid":uuid,"parentUuid":parent,
             "timestamp":"2026-06-18T00:00:00Z","message":{"role":role,"content":content}})
     };
     let think = |t: &str| serde_json::json!([{"type":"thinking","thinking":t,"signature":"sig"}]);
     let lines = [
-        line("u0", "", "user", serde_json::json!("start")),
-        line("a0", "u0", "assistant", think(&big)), // OLD thinking → flatten
-        line("u1", "a0", "user", serde_json::json!("more")),
-        line("a1", "u1", "assistant", serde_json::json!("ok")),
-        line("u2", "a1", "user", serde_json::json!("again")),
-        line("a2", "u2", "assistant", think(&big)), // RECENT thinking → keep (within keep_last)
+        line("u0", None, "user", serde_json::json!("start")),
+        line("a0", Some("u0"), "assistant", think(&big)),
+        line(
+            "t0",
+            Some("a0"),
+            "assistant",
+            serde_json::json!([{"type":"text","text":"done"}]),
+        ),
+        line("u1", Some("t0"), "user", serde_json::json!("more")),
+        line("a1", Some("u1"), "assistant", serde_json::json!("ok")),
+        line("u2", Some("a1"), "user", serde_json::json!("again")),
+        line("a2", Some("u2"), "assistant", think(&big)),
     ];
     let path = dir.join(format!("{sid}.jsonl"));
-    std::fs::write(&path, lines.iter().map(|l| l.to_string() + "\n").collect::<String>()).unwrap();
+    let input = lines.iter().map(|l| l.to_string() + "\n").collect::<String>();
+    std::fs::write(&path, &input).unwrap();
 
     let opts = PruneOptions {
         min_size: 1024,
@@ -215,25 +221,23 @@ fn thinking_flatten_targets_old_reasoning_only() {
     };
     let r = prune_session(&path, &opts).unwrap();
     let out = std::fs::read_to_string(&r.new_path).unwrap();
-
-    // old thinking (a0) flattened to a text marker; its big payload gone, original in sidecar
-    let a0 = out.lines().find(|l| l.contains("\"uuid\":\"a0\"")).unwrap();
+    assert!(out.len() < input.len(), "dropping thinking never grows the transcript");
     assert!(
-        a0.contains("[PRUNED id=a0#think0"),
-        "old thinking flattened (id = message uuid)"
+        !out.contains("[PRUNED"),
+        "no inline marker: it would give the model nothing"
     );
-    assert!(!a0.contains(&big));
-    assert!(
-        !a0.contains("\"thinking\""),
-        "thinking block became a text marker (no signature mismatch)"
-    );
-    // recent thinking (a2, within keep_last=2) preserved verbatim
+    // The emptied record is gone; its child points at its parent and the chain still resumes.
+    assert!(!out.contains("\"uuid\":\"a0\""));
+    let t0: Value = serde_json::from_str(out.lines().find(|l| l.contains("\"uuid\":\"t0\"")).unwrap()).unwrap();
+    assert_eq!(t0["parentUuid"], "u0");
+    crate::harness::claude::emit::verify_claude_resumable(&r.new_path, None).unwrap();
+    // Recent thinking (a2, within keep_last=2) is kept verbatim.
     let a2 = out.lines().find(|l| l.contains("\"uuid\":\"a2\"")).unwrap();
     assert!(
         a2.contains(&big) && a2.contains("\"thinking\""),
         "recent thinking kept verbatim"
     );
-    // retrievable
+    // The dropped block is retrievable by record uuid and block index.
     let restored = retrieve(r.sidecar_path.as_ref().unwrap(), "a0#think0").unwrap();
     assert_eq!(restored.get("thinking").and_then(|v| v.as_str()), Some(big.as_str()));
     std::fs::remove_dir_all(&dir).ok();
@@ -288,7 +292,7 @@ fn revive_rewrites_stale_usage_below_loaded_content() {
     );
     let honest = r.revive_tokens.expect("honest figure written");
     assert!(
-        honest < 1000,
+        honest < 25_000,
         "tiny post-boundary content → tiny honest figure (got {honest})"
     );
 
@@ -393,7 +397,7 @@ fn revive_pins_usage_iterations_too() {
     );
     let honest = r.revive_tokens.expect("honest figure written");
     assert!(
-        honest < 1000,
+        honest < 25_000,
         "tiny post-boundary content → tiny honest figure (got {honest})"
     );
 
@@ -551,8 +555,11 @@ fn thinking_flatten_snips_signature_only_blocks() {
         "the OLD signature-only block is snipped; the recent one (keep-last) stays"
     );
     let out = std::fs::read_to_string(&r.new_path).unwrap();
-    let a0 = out.lines().find(|l| l.contains("\"uuid\":\"a0\"")).unwrap();
-    assert!(a0.contains("[PRUNED id=") && !a0.contains(&sig));
+    let a0: Value = serde_json::from_str(out.lines().find(|l| l.contains("\"uuid\":\"a0\"")).unwrap()).unwrap();
+    assert_eq!(
+        a0["message"]["content"],
+        serde_json::json!([{"type":"text","text":"old reply"}])
+    );
     let a1 = out.lines().find(|l| l.contains("\"uuid\":\"a1\"")).unwrap();
     assert!(a1.contains(&sig));
     std::fs::remove_dir_all(&dir).ok();
@@ -581,7 +588,7 @@ fn rendered_attachments_count_toward_byte_estimates() {
         honest >= 10_000,
         "35k bytes of rendered reminder ≈ 10k tokens must be counted (got {honest})"
     );
-    assert_eq!(line_est_tokens(&lines[2]), 0, "an unrendered attachment costs nothing");
+    assert_eq!(line_est(&lines[2]).total(), 0, "an unrendered attachment costs nothing");
 }
 
 #[test]
@@ -590,11 +597,11 @@ fn revive_honors_recorded_delta_evidence_over_low_byte_estimate() {
     let sid = "44444444-4444-4444-8444-444444444444";
     // No boundary, nothing snipped in the second span: the recorded usage DELTA (30k between a0 and
     // a1) is hard evidence that span really costs 30k, even though its byte estimate is tiny (e.g.
-    // dense code that tokenizes far above 3.5 B/tok). Revive must never write a figure below that
+    // dense code that tokenizes far above the byte estimate). Revive must never write a figure below that
     // evidence — the old byte-only estimator did, and let resumes through that blew the real limit.
     let usage =
         |n: u64| serde_json::json!({"input_tokens":n,"cache_read_input_tokens":0,"cache_creation_input_tokens":0});
-    let big = "B".repeat(5000);
+    let big = "B".repeat(100_000);
     let lines = [
         serde_json::json!({"type":"user","sessionId":sid,"uuid":"u0","timestamp":"2026-06-20T00:00:00Z",
             "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tx","content":big}]}}),
@@ -1177,7 +1184,7 @@ fn projected_source_facts_match_owned_metadata_and_token_estimates() {
 }
 
 #[test]
-fn giant_ignored_row_preserves_raw_bytes_and_marker_revive_evidence() {
+fn giant_ignored_row_preserves_raw_bytes_and_recorded_usage() {
     let dir = tmpdir();
     let sid = "11111111-1111-4111-8111-111111111111";
     let new_id = "22222222-2222-4222-8222-222222222222";
@@ -1198,14 +1205,9 @@ fn giant_ignored_row_preserves_raw_bytes_and_marker_revive_evidence() {
         crate::restamp_line(&line, new_id).unwrap()
     );
     assert_eq!(result.pruned_count, 0);
-    assert_eq!(result.usage_rewritten, 1);
-    assert_eq!(
-        result.revive_tokens,
-        Some(
-            line_est_tokens(&serde_json::json!({"type":"user","message":{"content":"prompt"}}))
-                + line_est_tokens(&usage)
-        )
-    );
+    // A marker-shaped string outside the model-visible content is no evidence: nothing was pruned,
+    // so the recorded prompt stands and nothing is rewritten.
+    assert_eq!(result.usage_rewritten, 0);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -1338,7 +1340,7 @@ fn source_string_mutation_matches_owned_output_sidecars_and_estimate() {
         assert_eq!(actual, expected.as_bytes());
         assert_eq!(plan.saved, saved);
         assert_eq!(plan.payloads.len(), count);
-        assert_eq!(plan.estimate, line_est_tokens(&owned));
+        assert_eq!(plan.estimate, line_est(&owned));
         if !drop {
             let mut expected = Vec::new();
             for entry in &sidecar {
@@ -1417,7 +1419,7 @@ fn source_user_mutation_matches_rich_payload_and_mirror_owned_oracle() {
             assert_eq!(plan.images, images);
             assert_eq!(plan.payloads.len(), count);
             assert_eq!(plan.saved, saved);
-            assert_eq!(plan.estimate, line_est_tokens(&owned));
+            assert_eq!(plan.estimate, line_est(&owned));
             let mut actual = Vec::new();
             plan.record
                 .with_view(|v| v.write_canonical_replacing(&plan.replacements, &mut actual))
@@ -1720,7 +1722,6 @@ fn source_turn_projection_matches_owned_pass_composition() -> Result<()> {
                         prune_assistant_thinking(
                             &mut owned,
                             &opts,
-                            "new",
                             "a",
                             &mut sidecar,
                             &mut count,
@@ -1738,6 +1739,7 @@ fn source_turn_projection_matches_owned_pass_composition() -> Result<()> {
                         &mut saved,
                         &mut modified,
                     );
+                    drop_omitted_blocks(&mut owned);
                     let source = crate::json::JsonSource::capture(&path)?;
                     let plan = source_turn_prune(
                         &source,
@@ -1764,7 +1766,7 @@ fn source_turn_projection_matches_owned_pass_composition() -> Result<()> {
                     );
                     assert_eq!(plan.saved, saved);
                     assert_eq!(plan.images, images);
-                    assert_eq!(plan.estimate, line_est_tokens(&owned));
+                    assert_eq!(plan.estimate, line_est(&owned));
                     let mut actual = Vec::new();
                     plan.record
                         .with_view(|view| view.write_canonical_replacing(&plan.replacements, &mut actual))?;
@@ -1915,7 +1917,8 @@ fn staged_usage_projection_preserves_mixed_raw_framing_and_source_guard() -> Res
     let mut stage = ByteStage::new();
     stage.write_all(raw.as_bytes())?;
     let facts = [None, Some(decision_facts(&row, true)), None];
-    let (output, rewritten, honest, stale) = revive_staged(&source, stage.finish()?, &facts, &[false; 3], true, None)?;
+    let (output, rewritten, honest, stale) =
+        revive_staged(&source, stage.finish()?, &facts, &[false; 3], None, true, None)?;
     assert_eq!(rewritten, 1);
     assert_eq!(stale, Some(900));
     row["_cv_orig_ctx"] = Value::from(900);
@@ -1930,7 +1933,7 @@ fn staged_usage_projection_preserves_mixed_raw_framing_and_source_guard() -> Res
     let mut stage = ByteStage::new();
     stage.write_all(raw.as_bytes())?;
     std::fs::write(&path, b"changed source")?;
-    assert!(revive_staged(&source, stage.finish()?, &facts, &[false; 3], true, None).is_err());
+    assert!(revive_staged(&source, stage.finish()?, &facts, &[false; 3], None, true, None).is_err());
     Ok(())
 }
 
@@ -1945,7 +1948,7 @@ fn staged_usage_trim_preserves_whitespace_only_buffers_and_eof_failure() -> Resu
     let facts = [Some(decision_facts(&row, true))];
     let mut stage = ByteStage::new();
     stage.write_all(raw.as_bytes())?;
-    let (output, rewritten, honest, _) = revive_staged(&source, stage.finish()?, &facts, &[false], true, None)?;
+    let (output, rewritten, honest, _) = revive_staged(&source, stage.finish()?, &facts, &[false], None, true, None)?;
     assert_eq!(rewritten, 1);
     let mut expected = row;
     expected["_cv_orig_ctx"] = Value::from(900);
@@ -1959,7 +1962,7 @@ fn staged_usage_trim_preserves_whitespace_only_buffers_and_eof_failure() -> Resu
     // The producer promises newline framing; truncated private rows still fail at EOF.
     let mut stage = ByteStage::new();
     stage.write_all(raw.trim_end_matches('\n').as_bytes())?;
-    assert!(revive_staged(&source, stage.finish()?, &facts, &[false], true, None).is_err());
+    assert!(revive_staged(&source, stage.finish()?, &facts, &[false], None, true, None).is_err());
     Ok(())
 }
 

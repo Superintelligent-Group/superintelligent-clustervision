@@ -33,11 +33,10 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::sync::OnceLock;
 
-/// Bytes per token for distilled content. Prune's 3.5 suits prose; a distilled pack is dense with
-/// shas, paths, hosts and code, and measured on three real lanes (resumed with Claude Code, harness
-/// overhead subtracted) it ran 2.2–2.4 characters per token. The arithmetic is
-/// [`crate::ir::est_tokens`]'s, shared with `doctor`; only the constant is distill's.
-const BYTES_PER_TOKEN: f64 = 2.4;
+/// A distilled pack is dense with shas, paths, hosts and code: measured on three real lanes
+/// (resumed with Claude Code, harness overhead subtracted) it ran 2.2–2.4 bytes per token, so it is
+/// priced like tool-call JSON. Blocks use the shared [`crate::ir::est_tokens`].
+const PACK_KIND: crate::ir::TokenKind = crate::ir::TokenKind::ToolInput;
 
 /// Knobs for [`distill`].
 #[derive(Debug, Clone)]
@@ -413,11 +412,11 @@ fn attachment_type(m: &Message) -> Option<&str> {
 }
 
 fn est(s: &str) -> u64 {
-    est_tokens_bytes(s.len(), BYTES_PER_TOKEN)
+    est_tokens_bytes(s.len(), PACK_KIND)
 }
 
 fn block_est(b: &Block) -> anyhow::Result<u64> {
-    est_tokens(b, BYTES_PER_TOKEN)
+    est_tokens(b)
 }
 
 #[cfg(test)]
@@ -440,7 +439,7 @@ fn message_est_resolved(m: &Message, resolver: &crate::Resolver) -> anyhow::Resu
         return Ok(0);
     }
     m.content.iter().try_fold(0u64, |sum, block| {
-        Ok(sum + crate::ir::est_tokens_resolved(block, BYTES_PER_TOKEN, resolver)?)
+        Ok(sum + crate::ir::est_tokens_resolved(block, resolver)?)
     })
 }
 
@@ -2458,7 +2457,7 @@ facts text",
         assert!(distilled.stats.pack_est_tokens > original);
         assert_eq!(
             distilled.stats.pack_est_tokens,
-            est_tokens_bytes(distilled.head_md.len(), BYTES_PER_TOKEN)
+            est_tokens_bytes(distilled.head_md.len(), PACK_KIND)
         );
         assert_eq!(distilled.stats.tail_est_tokens, tail);
         assert_eq!(

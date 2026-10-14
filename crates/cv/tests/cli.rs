@@ -655,6 +655,57 @@ fn export_formats() {
 
 // ───────────────────────────── prune --json ─────────────────────────────
 
+/// `--drop-thinking` omits old reasoning outright: a thinking-only record goes, its child is
+/// relinked, the transcript only shrinks, and `cv cat` still returns the dropped block.
+#[test]
+fn prune_drop_thinking_omits_blocks_and_keeps_them_retrievable() {
+    let w = World::new("prunedropthinking");
+    let record = |uuid: &str, parent: Option<&str>, role: &str, content: serde_json::Value| {
+        serde_json::json!({"type": role, "uuid": uuid, "parentUuid": parent, "sessionId": "thinksrc",
+            "timestamp": "2026-01-01T10:00:00Z", "cwd": "/work/proj",
+            "message": {"role": role, "model": "claude-opus-5", "content": content}})
+    };
+    let reasoning = "weighing the options ".repeat(40);
+    let source = w.write_session(
+        "thinksrc",
+        &[
+            record("u1", None, "user", serde_json::json!("plan it")),
+            record(
+                "a1",
+                Some("u1"),
+                "assistant",
+                serde_json::json!([
+                {"type": "thinking", "thinking": reasoning, "signature": "s".repeat(600)}]),
+            ),
+            record(
+                "a2",
+                Some("a1"),
+                "assistant",
+                serde_json::json!([{"type": "text", "text": "planned"}]),
+            ),
+            record("u2", Some("a2"), "user", serde_json::json!("go on")),
+            record(
+                "a3",
+                Some("u2"),
+                "assistant",
+                serde_json::json!([{"type": "text", "text": "going"}]),
+            ),
+        ],
+    );
+    let (out, _) = w.cv_ok(&["prune", "thinksrc", "--drop-thinking", "--keep-last", "1", "--json"]);
+    let report: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+    let new_id = report["new_id"].as_str().unwrap();
+    let path = source.with_file_name(format!("{new_id}.jsonl"));
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(text.len() < fs::read_to_string(&source).unwrap().len());
+    assert!(!text.contains("\"thinking\"") && !text.contains("[PRUNED"), "{text}");
+    assert!(!text.contains("\"uuid\":\"a1\""), "the emptied record is removed");
+    let (reached, threaded, _) = chain_walk(&path);
+    assert_eq!(reached, threaded, "a dangling parent truncates the resumed context");
+    let (cat, _) = w.cv_ok(&["cat", new_id, "a1#think0"]);
+    assert!(cat.contains("weighing the options"), "{cat}");
+}
+
 #[test]
 fn prune_json_emits_machine_readable_report() {
     let w = World::new("prunejson");
@@ -3245,12 +3296,12 @@ fn doctor_labels_payload_estimates_and_recorded_usage_without_changing_accountin
     );
     let (human, _) = w.cv_ok(&["doctor", "accounting"]);
     assert!(
-        human.contains("Transcript content by source (104 estimated token equivalents)"),
+        human.contains("Transcript content by source (138 estimated token equivalents)"),
         "{human}"
     );
     assert!(human.contains("totals include history across compactions"), "{human}");
     assert!(
-        human.contains("thinking includes opaque signature/encrypted bytes; not measured reasoning tokens"),
+        human.contains("thinking is mostly signature bytes; requests carry them, and most models count them"),
         "{human}"
     );
     assert!(
@@ -3264,8 +3315,8 @@ fn doctor_labels_payload_estimates_and_recorded_usage_without_changing_accountin
     let report: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(report["fixed_overhead_est"], 60000);
     assert_eq!(report["peak_context"], 60000);
-    assert_eq!(report["conversational"]["thinking"], 100);
-    assert_eq!(report["conversational"]["total"], 104);
+    assert_eq!(report["conversational"]["thinking"], 110);
+    assert_eq!(report["conversational"]["total"], 138);
 }
 
 #[test]

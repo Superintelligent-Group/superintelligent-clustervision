@@ -118,11 +118,11 @@ fn print_report(rep: &Report, label: &str, n_targets: usize) {
     let total = rep.conv_total().max(1);
     println!(
         "\nTranscript content by source ({} estimated token equivalents):\n\
-         (text/JSON bytes ÷ 3.5; images use a fixed estimate; totals include history across compactions)",
+         (an estimate: bytes at calibrated per-kind rates, ~2.2–2.5 bytes/token, images ~3k; totals include history across compactions)",
         fmt_tok(rep.conv_total())
     );
     if rep.thinking > 0 {
-        println!("(thinking includes opaque signature/encrypted bytes; not measured reasoning tokens)");
+        println!("(thinking is mostly signature bytes; requests carry them, and most models count them)");
     }
     let mut rows: Vec<(&str, u64)> = vec![
         ("tool results", rep.tool_results),
