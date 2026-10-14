@@ -982,26 +982,82 @@ pub(crate) fn redaction_summary(st: &cv_core::redact::RedactStats) -> String {
 
 // ---------- show --tree ----------
 
-fn print_tree(r: &SessionRef, adapter: &dyn Adapter) -> Result<()> {
-    let session = adapter.parse(r)?;
+struct TreeRow {
+    id: Option<String>,
+    parent: Option<String>,
+    line: String,
+}
 
-    println!("# {}", session.label());
-    println!("{} · {} · {} msg", session.harness, session.id, session.messages.len());
-    println!();
-
-    // Threaded view only if at least one message carries a parent_id.
-    let has_threading = session.messages.iter().any(|m| m.parent_id.is_some());
-    if has_threading {
-        render_tree_dag(&session);
-    } else {
-        for (i, m) in session.messages.iter().enumerate() {
-            println!("{:>4}. {}", i + 1, tree_line(m));
+fn read_tree(r: &SessionRef, adapter: &dyn Adapter) -> Result<(Session, Vec<TreeRow>, Option<String>)> {
+    struct TreeSink {
+        rows: Vec<TreeRow>,
+        resolver: cv_core::Resolver,
+        first_user_seen: bool,
+        first_user: Option<String>,
+        error: Option<anyhow::Error>,
+    }
+    impl cv_core::MessageSink for TreeSink {
+        fn meta(&mut self, session: &Session) {
+            self.resolver = session.resolver();
+        }
+        fn take_error(&mut self) -> Option<anyhow::Error> {
+            self.error.take()
+        }
+        fn message(&mut self, m: Message) -> cv_core::Flow {
+            let result = (|| -> Result<()> {
+                if !self.first_user_seen && m.role == Role::User {
+                    self.first_user_seen = true;
+                    self.first_user = cv_core::render::message_label(&m, &self.resolver)?;
+                }
+                let preview = cv_core::render::message_text_preview(&m, &self.resolver, 80)?;
+                let line = tree_line_with_preview(&m, preview);
+                self.rows.push(TreeRow {
+                    id: m.id,
+                    parent: m.parent_id,
+                    line,
+                });
+                Ok(())
+            })();
+            if let Err(error) = result {
+                self.error = Some(error);
+                return cv_core::Flow::Stop;
+            }
+            cv_core::Flow::Continue
         }
     }
+    let mut sink = TreeSink {
+        rows: Vec::new(),
+        resolver: cv_core::Resolver::new(Some(r.path.clone())),
+        first_user_seen: false,
+        first_user: None,
+        error: None,
+    };
+    let (session, guard) =
+        cv_core::stream::stream_counted_guarded(adapter, r, &cv_core::ParseOptions::facts(), &mut sink)?;
+    if let Some(error) = sink.error {
+        return Err(error);
+    }
+    guard.verify(r)?;
+    Ok((session, sink.rows, sink.first_user))
+}
 
-    // The second dimension: the sub-agent forest this session spawned. Claude sessions fan out
-    // into directly-spawned (`Agent`/`Task`) sub-agents and `Workflow` sub-agents (grouped by run
-    // id, with the orchestrator's journaled outcome) — invisible to flat message threading.
+fn print_tree(r: &SessionRef, adapter: &dyn Adapter) -> Result<()> {
+    let (session, rows, first_user) = read_tree(r, adapter)?;
+    println!(
+        "# {}",
+        cv_core::label_from(session.title.as_deref(), first_user.as_deref())
+    );
+    println!("{} · {} · {} msg", session.harness, session.id, rows.len());
+    println!();
+    if rows.iter().any(|row| row.parent.is_some()) {
+        walk_tree(&rows, |index, depth| {
+            println!("{}• {}", "  ".repeat(depth), rows[index].line)
+        });
+    } else {
+        for (i, row) in rows.iter().enumerate() {
+            println!("{:>4}. {}", i + 1, row.line);
+        }
+    }
     render_subagent_forest(r);
     Ok(())
 }
@@ -1067,45 +1123,47 @@ fn subagent_line(s: &cv_core::SubagentInfo) -> String {
 }
 
 /// Render messages as an indented DAG by `parent_id`. Roots (no/unknown parent) sit at depth 0.
-fn render_tree_dag(session: &Session) {
-    use std::collections::HashMap;
-    // children: parent_id -> ordered list of child message indices.
-    let mut by_id: HashMap<&str, usize> = HashMap::new();
-    for (i, m) in session.messages.iter().enumerate() {
-        if let Some(id) = &m.id {
+fn walk_tree(rows: &[TreeRow], mut visit: impl FnMut(usize, usize)) {
+    let mut by_id = std::collections::HashMap::new();
+    for (i, row) in rows.iter().enumerate() {
+        if let Some(id) = &row.id {
             by_id.insert(id.as_str(), i);
         }
     }
-    let mut children: HashMap<Option<usize>, Vec<usize>> = HashMap::new();
-    for (i, m) in session.messages.iter().enumerate() {
-        let parent = m
-            .parent_id
+    let mut children = vec![Vec::new(); rows.len()];
+    let mut roots = Vec::new();
+    for (i, row) in rows.iter().enumerate() {
+        let parent = row
+            .parent
             .as_deref()
-            .and_then(|p| by_id.get(p).copied())
+            .and_then(|id| by_id.get(id).copied())
             .filter(|&p| p != i);
-        children.entry(parent).or_default().push(i);
-    }
-
-    fn walk(
-        node: Option<usize>,
-        depth: usize,
-        session: &Session,
-        children: &std::collections::HashMap<Option<usize>, Vec<usize>>,
-    ) {
-        if let Some(kids) = children.get(&node) {
-            for &c in kids {
-                let indent = "  ".repeat(depth);
-                println!("{indent}• {}", tree_line(&session.messages[c]));
-                walk(Some(c), depth + 1, session, children);
-            }
+        match parent {
+            Some(parent) => children[parent].push(i),
+            None => roots.push(i),
         }
     }
-    walk(None, 0, session, &children);
+    let mut visited = vec![false; rows.len()];
+    let mut stack = Vec::new();
+    // Preserve ordinary root order; then cover disconnected parent cycles in transcript order.
+    for root in roots.into_iter().chain(0..rows.len()) {
+        if visited[root] {
+            continue;
+        }
+        stack.push((root, 0));
+        while let Some((index, depth)) = stack.pop() {
+            if std::mem::replace(&mut visited[index], true) {
+                continue;
+            }
+            visit(index, depth);
+            stack.extend(children[index].iter().rev().map(|&child| (child, depth + 1)));
+        }
+    }
 }
 
 /// One-line preview of a message for the tree: role (with its kind when that says more than the
 /// role), markers for tool turns / sub-agent spawns, and a text preview.
-fn tree_line(m: &Message) -> String {
+fn tree_line_with_preview(m: &Message, preview: Option<String>) -> String {
     let role = turn_label(m);
     let mut tags = Vec::new();
     let has_tool_use = m.content.iter().any(|b| matches!(b, Block::ToolUse { .. }));
@@ -1130,7 +1188,7 @@ fn tree_line(m: &Message) -> String {
         tags.push("↳ sub-agent".to_string());
     }
 
-    let preview = m.text().map(|t| truncate(&t, 80)).unwrap_or_else(|| {
+    let preview = preview.unwrap_or_else(|| {
         if has_tool_use {
             m.content
                 .iter()
@@ -1653,6 +1711,76 @@ fn md_message(m: &Message) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lazy_tree_rows_preserve_owned_previews_and_first_user_label() -> Result<()> {
+        let world = cv_testkit::World::in_process("tree-row-projection");
+        let text = "🌙\\\"\n".repeat(30000);
+        let path = world.write_session("tree-preview", &[
+            serde_json::json!({"type":"user","uuid":"u","message":{"role":"user","content":text}}),
+            serde_json::json!({"type":"assistant","uuid":"a","parentUuid":"u","message":{"role":"assistant","content":[{"type":"text","text":text},{"type":"tool_use","id":"call","name":"Agent","input":{"prompt":text}}]}}),
+            serde_json::json!({"type":"user","uuid":"r","parentUuid":"a","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call","content":text}]}}),
+        ]);
+        let r = SessionRef::new("tree-preview", Harness::Claude, path);
+        let adapter = cv_core::harness::for_harness(Harness::Claude).unwrap();
+        let owned = adapter.parse(&r)?;
+        let (session, rows, first_user) = read_tree(&r, adapter.as_ref())?;
+        assert_eq!(rows.len(), owned.messages.len());
+        assert_eq!(
+            cv_core::label_from(session.title.as_deref(), first_user.as_deref()),
+            owned.label()
+        );
+        for (row, message) in rows.iter().zip(&owned.messages) {
+            assert_eq!(row.id, message.id);
+            assert_eq!(row.parent, message.parent_id);
+            assert_eq!(
+                row.line,
+                tree_line_with_preview(message, message.text().map(|text| truncate(&text, 80)))
+            );
+            assert!(row.line.len() < 512);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn iterative_tree_walk_preserves_roots_and_covers_cycles_and_deep_chains() {
+        let row = |id: &str, parent: Option<&str>| TreeRow {
+            id: Some(id.into()),
+            parent: parent.map(str::to_owned),
+            line: String::new(),
+        };
+        let rows = vec![
+            row("root", None),
+            row("a", Some("root")),
+            row("b", Some("root")),
+            row("c", Some("a")),
+            row("self", Some("self")),
+            row("missing", Some("absent")),
+            row("cycle1", Some("cycle2")),
+            row("cycle2", Some("cycle1")),
+            row("tail", Some("cycle2")),
+        ];
+        let mut order = Vec::new();
+        walk_tree(&rows, |index, depth| order.push((index, depth)));
+        assert_eq!(
+            order,
+            [(0, 0), (1, 1), (3, 2), (2, 1), (4, 0), (5, 0), (6, 0), (7, 1), (8, 2)]
+        );
+        let rows = (0..5000)
+            .map(|i| TreeRow {
+                id: Some(i.to_string()),
+                parent: (i > 0).then(|| (i - 1).to_string()),
+                line: String::new(),
+            })
+            .collect::<Vec<_>>();
+        let mut count = 0;
+        walk_tree(&rows, |index, depth| {
+            assert_eq!(index, count);
+            assert_eq!(depth, count);
+            count += 1;
+        });
+        assert_eq!(count, rows.len());
+    }
 
     #[test]
     fn checked_markdown_download_keeps_lazy_leaves_and_native_holdback_output() -> Result<()> {

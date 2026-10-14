@@ -44,8 +44,23 @@ pub fn write_markdown(s: &Session, out: &mut impl Write, resolver: &crate::Resol
 /// The exact label projection of a message's concatenated plain text, retaining at most 73
 /// scalars. Complete checked demands preserve whitespace-only rejection and late source errors.
 pub fn message_label(m: &Message, resolver: &crate::Resolver) -> anyhow::Result<Option<String>> {
+    plain_text_preview(m, resolver, 72, true)
+}
+
+/// Exact character-bounded preview of concatenated plain-text blocks, including whitespace-only
+/// text. Checked demands scan discarded tails without retaining them.
+pub fn message_text_preview(m: &Message, resolver: &crate::Resolver, chars: usize) -> anyhow::Result<Option<String>> {
+    plain_text_preview(m, resolver, chars, false)
+}
+
+fn plain_text_preview(
+    m: &Message,
+    resolver: &crate::Resolver,
+    chars: usize,
+    require_meaningful: bool,
+) -> anyhow::Result<Option<String>> {
     let mut head = String::new();
-    let mut remaining = 73;
+    let mut remaining = chars.saturating_add(1);
     let mut nonempty = false;
     let mut meaningful = false;
     let mut append = |part: &str| {
@@ -69,7 +84,7 @@ pub fn message_label(m: &Message, resolver: &crate::Resolver) -> anyhow::Result<
             })?;
         }
     }
-    Ok(meaningful.then(|| truncate(&head, 72)))
+    Ok((if require_meaningful { meaningful } else { nonempty }).then(|| truncate(&head, chars)))
 }
 
 /// Write one Markdown section, preserving the owned renderer's exact formatting.
@@ -386,6 +401,10 @@ mod tests {
             assert_eq!(
                 message_label(&m, &crate::Resolver::new(None)).unwrap(),
                 m.text().filter(|t| !t.trim().is_empty()).map(|t| truncate(&t, 72))
+            );
+            assert_eq!(
+                message_text_preview(&m, &crate::Resolver::new(None), 80).unwrap(),
+                m.text().map(|t| truncate(&t, 80))
             );
         }
         let text = format!("{}🌙", " ".repeat(100000));

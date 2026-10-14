@@ -1241,6 +1241,23 @@ fn show_tree_renders() {
     let (out, _) = w.cv_ok(&["show", "alphasess", "--tree"]);
     assert!(out.contains("# alpha adventures"), "{out}");
     assert!(out.contains("3 msg"), "{out}");
+    w.write_session(
+        "cycle-tree",
+        &[
+            claude::with(
+                user_line("c1", "2026-01-01T10:00:00Z", "first-cycle"),
+                serde_json::json!({"parentUuid":"c2"}),
+            ),
+            claude::with(
+                user_line("c2", "2026-01-01T10:01:00Z", "second-cycle"),
+                serde_json::json!({"parentUuid":"c1"}),
+            ),
+        ],
+    );
+    let (out, _) = w.cv_ok(&["show", "cycle-tree", "--tree"]);
+    assert!(out.contains("2 msg"), "{out}");
+    assert!(out.contains("• user  first-cycle"), "{out}");
+    assert!(out.contains("• user  second-cycle"), "{out}");
 }
 
 // ───────────────────────────── stats / ls --asc ─────────────────────────────
