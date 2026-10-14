@@ -243,6 +243,10 @@ fn cmd_search_live(query: &str, want: Option<Harness>, limit: usize, json: bool)
 }
 
 pub(crate) fn cmd_index(semantic: bool, rebuild: bool, subagents: bool) -> Result<()> {
+    if semantic && subagents {
+        return crate::util::usage("--semantic indexes top-level sessions; --subagents currently applies only to full-text indexing. Run `cv index --subagents` and `cv index --semantic` separately.");
+    }
+
     eprintln!(
         "✦ {} full-text index{}…",
         if rebuild { "rebuilding" } else { "updating" },
@@ -274,6 +278,17 @@ pub(crate) fn cmd_index(semantic: bool, rebuild: bool, subagents: bool) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unsupported_semantic_forest_combination_fails_before_index_work() {
+        for rebuild in [false, true] {
+            let error = cmd_index(true, rebuild, true).unwrap_err();
+            assert!(error.is::<crate::util::UsageError>());
+            assert!(error.to_string().contains("top-level"));
+            assert!(error.to_string().contains("cv index --subagents"));
+            assert!(error.to_string().contains("cv index --semantic"));
+        }
+    }
+
     #[test]
     fn streamed_search_json_preserves_exact_pretty_row_array() {
         for rows in [
