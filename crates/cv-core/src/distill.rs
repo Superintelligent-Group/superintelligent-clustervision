@@ -29,7 +29,7 @@ use crate::ir::{
 use regex::Regex;
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::sync::OnceLock;
 
@@ -218,23 +218,30 @@ struct Entry {
     body: String,
 }
 
+struct Mentions {
+    first: usize,
+    count: usize,
+}
+type Counts = HashMap<String, Mentions>;
+
 #[derive(Default)]
 struct Facts {
     commits: Vec<(usize, String, String, String)>, // idx, branch, sha, subject
-    branches: Vec<(String, usize)>,                // name, mentions (first-seen order)
-    hosts: Vec<(String, usize)>,
-    paths: Vec<(String, usize)>,
+    branches: Counts,                              // name, mentions and first-seen order
+    hosts: Counts,
+    paths: Counts,
     gates: Vec<(usize, String, String)>,  // idx, label, verdict
     tips: Vec<(usize, String, String)>,   // idx, branch, sha — latest observation wins
     heads: Vec<(usize, String, String)>,  // idx, "host:dir [ref]", "sha subject" — from `git log` output
     errors: Vec<(usize, String, String)>, // idx, label, first error line
 }
 
-fn bump(v: &mut Vec<(String, usize)>, key: &str) {
-    if let Some(e) = v.iter_mut().find(|(k, _)| k == key) {
-        e.1 += 1;
+fn bump(counts: &mut Counts, key: &str) {
+    if let Some(mentions) = counts.get_mut(key) {
+        mentions.count += 1;
     } else {
-        v.push((key.to_string(), 1));
+        let first = counts.len();
+        counts.insert(key.to_owned(), Mentions { first, count: 1 });
     }
 }
 
@@ -1078,7 +1085,7 @@ fn analyze(session: &Session, opts: &DistillOptions, demand: Demand) -> anyhow::
         .iter()
         .rev()
         .find_map(|m| m.usage.as_ref().map(|u| u.prompt_tokens()))
-        .filter(|t| *t > 0);
+        .filter(|tokens| *tokens > 0);
 
     let stats = DistillStats {
         source_id: session.id.clone(),
@@ -1237,16 +1244,13 @@ fn scan_result_facts(
     if is_error {
         // A failed command's output often starts with whatever it printed before failing; the
         // diagnostic is the first error-shaped line, else the last line.
-        let lines: Vec<&str> = out
+        let meaningful = |line: &&str| !line.is_empty() && !line.starts_with("Exit code");
+        let line = out
             .lines()
             .map(str::trim)
-            .filter(|l| !l.is_empty() && !l.starts_with("Exit code"))
-            .collect();
-        let line = lines
-            .iter()
-            .find(|l| error_line_re().is_match(l))
-            .or(lines.last())
-            .copied()
+            .filter(meaningful)
+            .find(|line| error_line_re().is_match(line))
+            .or_else(|| out.lines().rev().map(str::trim).find(meaningful))
             .unwrap_or("");
         let line = truncate(line.trim(), 200);
         f.errors.push((i, label.to_string(), line.clone()));
@@ -1280,12 +1284,13 @@ fn scan_result_facts(
 }
 
 fn render_facts(h: &mut String, f: &Facts) {
-    let list = |v: &Vec<(String, usize)>, max: usize| -> String {
-        let mut v: Vec<&(String, usize)> = v.iter().collect();
-        v.sort_by_key(|e| std::cmp::Reverse(e.1));
-        v.iter()
+    let list = |counts: &Counts, max: usize| -> String {
+        let mut values: Vec<_> = counts.iter().collect();
+        values.sort_by_key(|(_, mentions)| (std::cmp::Reverse(mentions.count), mentions.first));
+        values
+            .iter()
             .take(max)
-            .map(|(k, n)| format!("`{k}` ×{n}"))
+            .map(|(key, mentions)| format!("`{key}` ×{}", mentions.count))
             .collect::<Vec<_>>()
             .join(" · ")
     };
@@ -1300,8 +1305,9 @@ fn render_facts(h: &mut String, f: &Facts) {
     if !f.tips.is_empty() {
         // The newest observation per branch (a commit it made, or a `refs/heads` listing).
         let mut latest: Vec<&(usize, String, String)> = Vec::new();
+        let mut seen = HashSet::new();
         for t in f.tips.iter().rev() {
-            if !latest.iter().any(|x| x.1 == t.1) {
+            if seen.insert(&t.1) {
                 latest.push(t);
             }
         }
@@ -1319,8 +1325,9 @@ fn render_facts(h: &mut String, f: &Facts) {
     if !f.heads.is_empty() {
         // The newest `git log` head per repository (host:dir, or host:dir [ref]).
         let mut latest: Vec<&(usize, String, String)> = Vec::new();
+        let mut seen = HashSet::new();
         for t in f.heads.iter().rev() {
-            if !latest.iter().any(|x| x.1 == t.1) {
+            if seen.insert(&t.1) {
                 latest.push(t);
             }
         }
@@ -2539,6 +2546,49 @@ facts text",
             source.messages.len()
         );
         Ok(())
+    }
+    #[test]
+    fn facts_keep_first_seen_ties_and_latest_observations_without_linear_lookup() {
+        let mut facts = Facts::default();
+        for path in ["z", "a", "z", "b", "b", "a", "b"] {
+            bump(&mut facts.paths, path);
+        }
+        facts.tips = vec![
+            (1, "main".into(), "old".into()),
+            (2, "feature".into(), "feature-sha".into()),
+            (3, "main".into(), "new".into()),
+        ];
+        let mut rendered = String::new();
+        render_facts(&mut rendered, &facts);
+        assert!(
+            rendered.contains("**Paths most referenced**: `b` ×3 · `z` ×2 · `a` ×2"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("`feature` @ `feature-sha` [2] · `main` @ `new` [3]"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("`old`"));
+        let output = format!(
+            "{}error: first diagnostic\nerror: second diagnostic\nExit code 1\n",
+            "progress\n".repeat(10000)
+        );
+        assert_eq!(
+            scan_result_facts(0, "Bash", &Value::Null, "command", &output, true, &mut facts),
+            "✗ error: first diagnostic"
+        );
+        assert_eq!(
+            scan_result_facts(
+                1,
+                "Bash",
+                &Value::Null,
+                "command",
+                "progress\nlast detail\nExit code 1",
+                true,
+                &mut facts
+            ),
+            "✗ last detail"
+        );
     }
 }
 
