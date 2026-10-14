@@ -16,25 +16,37 @@ fn derived_usage_total_saturates_instead_of_panicking_or_wrapping() {
 }
 
 fn normalized(path: &Path) -> Result<Vec<u8>> {
+    let rows: Vec<Value> = fs::read_to_string(path)?
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<std::result::Result<_, _>>()?;
     let mut ids = HashMap::new();
+    for value in &rows {
+        if value["type"] == "session" {
+            continue;
+        }
+        let Some(id) = value["id"].as_str() else {
+            continue;
+        };
+        assert_eq!(id.len(), 8);
+        assert!(id.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert!(!ids.contains_key(id));
+        ids.insert(id.to_owned(), format!("{:08x}", ids.len() + 1));
+    }
     let mut output = Vec::new();
-    for line in fs::read_to_string(path)?.lines() {
-        let mut value: Value = serde_json::from_str(line)?;
+    for mut value in rows {
         if value["type"] != "session" {
-            let Some(id) = value["id"].as_str().map(str::to_owned) else {
-                serde_json::to_writer(&mut output, &value)?;
-                output.push(b'\n');
-                continue;
-            };
-            assert_eq!(id.len(), 8);
-            assert!(id.bytes().all(|b| b.is_ascii_hexdigit()));
-            assert!(!ids.contains_key(&id));
-            let replacement = format!("{:08x}", ids.len() + 1);
-            ids.insert(id, replacement.clone());
-            *value.get_mut("id").unwrap() = json!(replacement);
-            if let Some(parent) = value["parentId"].as_str() {
-                let replacement = ids.get(parent).unwrap().clone();
-                *value.get_mut("parentId").unwrap() = json!(replacement);
+            for field in [
+                "id",
+                "parentId",
+                "targetId",
+                "appendParentId",
+                "firstKeptEntryId",
+                "fromId",
+            ] {
+                if let Some(replacement) = value.get(field).and_then(Value::as_str).and_then(|id| ids.get(id)) {
+                    value[field] = json!(replacement);
+                }
             }
         }
         serde_json::to_writer(&mut output, &value)?;
@@ -575,11 +587,18 @@ fn native_complete_export_preserves_records_branch_links_and_one_compaction_pair
                 }
                 if mode != ThinkingMode::Native {
                     if let Some(parts) = expected.pointer_mut("/message/content").and_then(Value::as_array_mut) {
-                        for part in parts.iter_mut() {
-                            if part["type"] == "thinking" && mode == ThinkingMode::Text {
-                                *part = json!({"type":"text","text":part["thinking"]});
-                            }
-                        }
+                        // Text mode retains native reasoning when this target can hold it.
+                        assert_eq!(
+                            crate::emit::thinking_fate_with_presence(
+                                Harness::OpenClaw,
+                                ThinkingMode::Text,
+                                true,
+                                Some("sig"),
+                                None,
+                                false
+                            ),
+                            ThinkingFate::Keep
+                        );
                         if mode == ThinkingMode::Drop {
                             parts.retain(|part| part["type"] != "thinking");
                         }
