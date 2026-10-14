@@ -193,9 +193,10 @@ pub fn prepare_distill(session: &Session, opts: &DistillOptions) -> anyhow::Resu
     analyze(session, opts, Demand::Full)
 }
 
-/// Serialize elided outputs through the shared bounded JSONL stage before opening the sidecar.
-/// Inputs and content are borrowed from the existing elision roster; no artifact-sized copy is made.
-pub fn write_sidecar(path: &std::path::Path, elided: &[Elided]) -> anyhow::Result<()> {
+/// Serialize elided outputs through the shared bounded JSONL stage, then publish the sidecar
+/// whole under `claim`. Inputs and content are borrowed from the existing elision roster; no
+/// artifact-sized copy is made.
+pub fn write_sidecar(path: &std::path::Path, elided: &[Elided], claim: crate::publish::Claim) -> anyhow::Result<()> {
     let mut stage = crate::harness::store::JsonlStage::new();
     for entry in elided {
         stage.push(crate::prune::BorrowedSidecarEntry::text(
@@ -205,7 +206,7 @@ pub fn write_sidecar(path: &std::path::Path, elided: &[Elided]) -> anyhow::Resul
             &entry.content,
         ))?;
     }
-    stage.publish(path)
+    stage.publish(path, claim)
 }
 
 // ── analysis ─────────────────────────────────────────────────────────────────────────────────
@@ -2001,7 +2002,7 @@ facts text",
             );
             assert!(pack.elided.is_empty());
             let sidecar = world.base.join(format!("sidecar-{keep_last}.jsonl"));
-            write_sidecar(&sidecar, &actual.elided)?;
+            write_sidecar(&sidecar, &actual.elided, crate::publish::Claim::New)?;
             let expected_bytes: String = expected
                 .elided
                 .iter()

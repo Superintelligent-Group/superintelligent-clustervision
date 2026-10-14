@@ -45,10 +45,14 @@ pub(crate) fn cmd_pack(
     harness: Option<String>,
     limit: usize,
     out: Option<PathBuf>,
+    force: bool,
     thinking: cv_core::emit::ThinkingMode,
 ) -> Result<()> {
     if !matches!(format, "md" | "prompt" | "session") {
         bail!("unknown format {format:?} (use md, prompt, or session)");
+    }
+    if let (Some(path), "md" | "prompt") = (&out, format) {
+        crate::util::user_file_claim(path, force)?;
     }
     let to_h = match (format, &harness) {
         ("session", Some(s)) => Some(Harness::parse(s).with_context(|| format!("unknown target harness: {s}"))?),
@@ -94,8 +98,8 @@ pub(crate) fn cmd_pack(
 
     // 3. EMIT.
     match format {
-        "md" => write_text(&md_bundle(task, &sources, &rollup), out, "context pack"),
-        "prompt" => write_text(&prompt_bundle(task, &sources, &rollup), out, "context prompt"),
+        "md" => write_text(&md_bundle(task, &sources, &rollup), out, force, "context pack"),
+        "prompt" => write_text(&prompt_bundle(task, &sources, &rollup), out, force, "context prompt"),
         _ => emit_pack_session(task, &sources, &rollup, to_h.expect("validated above"), out, thinking),
     }
 }
@@ -917,10 +921,10 @@ fn emit_pack_session(
 }
 
 /// Write a text bundle to `--out` (with a stderr note) or stdout.
-fn write_text(text: &str, out: Option<PathBuf>, what: &str) -> Result<()> {
+fn write_text(text: &str, out: Option<PathBuf>, force: bool, what: &str) -> Result<()> {
     match out {
         Some(path) => {
-            std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
+            crate::util::write_user_file(&path, text.as_bytes(), force)?;
             eprintln!("✦ wrote {what} → {}", path.display());
         }
         None => print!("{text}"),

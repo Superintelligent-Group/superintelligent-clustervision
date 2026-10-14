@@ -1129,14 +1129,18 @@ fn dataset_file_publication_matches_stdout_and_preserves_transcript_aliases() {
     let (expected, _) = w.cv_ok(&["dataset"]);
     let output = w.base.join("training.jsonl");
     fs::write(&output, b"previous artifact").unwrap();
-    let (stdout, _) = w.cv_ok(&["dataset", "--out", output.to_str().unwrap()]);
+    let (_, code, _, error) = w.cv(&["dataset", "--out", output.to_str().unwrap()]);
+    assert_eq!(code, 2, "{error}");
+    assert!(error.contains("already exists"), "{error}");
+    assert_eq!(fs::read(&output).unwrap(), b"previous artifact");
+    let (stdout, _) = w.cv_ok(&["dataset", "--out", output.to_str().unwrap(), "--force"]);
     assert!(stdout.is_empty());
     assert_eq!(fs::read(&output).unwrap(), expected.as_bytes());
 
+    // Even --force never replaces one of the dataset's own source transcripts.
     let source = w.transcript("alphasess");
     let original = fs::read(&source).unwrap();
-    // A limit cannot make an unselected source safe to overwrite.
-    let (_, error) = w.cv_fails(&["dataset", "--limit", "1", "--out", source.to_str().unwrap()]);
+    let (_, error) = w.cv_fails(&["dataset", "--limit", "1", "--out", source.to_str().unwrap(), "--force"]);
     assert!(error.contains("aliases source transcript"), "{error}");
     assert_eq!(fs::read(&source).unwrap(), original);
     assert_eq!(w.cv_ok(&["dataset"]).0, expected);
@@ -1148,7 +1152,7 @@ fn dataset_file_publication_matches_stdout_and_preserves_transcript_aliases() {
         let symlink = w.base.join("source-symlink.jsonl");
         std::os::unix::fs::symlink(&source, &symlink).unwrap();
         for alias in [&hardlink, &symlink] {
-            let (_, error) = w.cv_fails(&["dataset", "--out", alias.to_str().unwrap()]);
+            let (_, error) = w.cv_fails(&["dataset", "--out", alias.to_str().unwrap(), "--force"]);
             assert!(error.contains("aliases source transcript"), "{error}");
             assert_eq!(fs::read(alias).unwrap(), original);
         }
@@ -1156,10 +1160,12 @@ fn dataset_file_publication_matches_stdout_and_preserves_transcript_aliases() {
     }
 }
 
+/// `--force` replaces the name: a symlink there becomes the new file (its target untouched), the
+/// old inode's other hard links keep the old bytes, and the replaced file's permissions carry over.
 #[cfg(unix)]
 #[test]
-fn dataset_file_publication_preserves_existing_output_links_and_permissions() {
-    use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
+fn dataset_file_publication_replaces_the_name_not_the_linked_file() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
     let w = World::new("dataset-file-links");
     standard_corpus(&w);
     let (expected, _) = w.cv_ok(&["dataset"]);
@@ -1170,12 +1176,43 @@ fn dataset_file_publication_preserves_existing_output_links_and_permissions() {
     fs::hard_link(&target, &hardlink).unwrap();
     let output = w.base.join("output-symlink.jsonl");
     symlink(&target, &output).unwrap();
-    let inode = fs::metadata(&target).unwrap().ino();
-    w.cv_ok(&["dataset", "--out", output.to_str().unwrap()]);
-    assert!(output.is_symlink());
-    assert_eq!(fs::metadata(&target).unwrap().ino(), inode);
-    assert_eq!(fs::metadata(&target).unwrap().permissions().mode() & 0o777, 0o600);
-    assert_eq!(fs::read(&hardlink).unwrap(), expected.as_bytes());
+    w.cv_ok(&["dataset", "--out", output.to_str().unwrap(), "--force"]);
+    assert!(!output.is_symlink());
+    assert_eq!(fs::read(&output).unwrap(), expected.as_bytes());
+    assert_eq!(fs::metadata(&output).unwrap().permissions().mode() & 0o777, 0o600);
+    assert_eq!(fs::read(&target).unwrap(), b"previous artifact");
+    w.cv_ok(&["dataset", "--out", target.to_str().unwrap(), "--force"]);
+    assert_eq!(fs::read(&target).unwrap(), expected.as_bytes());
+    assert_eq!(fs::read(&hardlink).unwrap(), b"previous artifact");
+}
+
+/// Files the user names (`distill --pack`, `share --out`) are refused when taken (exit 2,
+/// untouched) and replaced whole with `--force`.
+#[test]
+fn named_output_files_are_refused_unless_forced() {
+    let w = World::new("named-outputs");
+    standard_corpus(&w);
+    let pack = w.base.join("pack.md");
+    let html = w.base.join("shared.html");
+    for (path, args) in [
+        (&pack, vec!["distill", "alphasess", "--pack"]),
+        (&html, vec!["share", "alphasess", "--out"]),
+    ] {
+        fs::write(path, b"keep me").unwrap();
+        let mut argv = args.clone();
+        argv.push(path.to_str().unwrap());
+        let (_, code, _, error) = w.cv(&argv);
+        assert_eq!(code, 2, "{argv:?}: {error}");
+        assert!(error.contains("--force"), "{error}");
+        assert_eq!(fs::read(path).unwrap(), b"keep me", "{argv:?}");
+        argv.push("--force");
+        let (ok, _, _, error) = w.cv(&argv);
+        assert!(ok, "{argv:?}: {error}");
+        assert_ne!(fs::read(path).unwrap(), b"keep me", "{argv:?}");
+    }
+    assert!(!fs::read_dir(&w.base)
+        .unwrap()
+        .any(|e| e.unwrap().file_name().to_string_lossy().starts_with(".cv-")));
 }
 
 // ───────────────────────────── events / touched ─────────────────────────────

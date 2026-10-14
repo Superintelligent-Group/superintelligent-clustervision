@@ -166,7 +166,7 @@ pub(super) fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Res
         parent = Some(entry_id);
     }
 
-    lines.publish(&file_path)?;
+    lines.publish(&file_path, opts.claim())?;
 
     // sessions.json index: merge-or-create.
     let index_path = sessions_dir.join("sessions.json");

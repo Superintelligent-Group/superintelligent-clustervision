@@ -71,7 +71,8 @@ fn gemini_register_project(global_tmp: &Path, cwd: &str) -> Result<Option<String
     let slug_dir = global_tmp.join(&slug);
     fs::create_dir_all(&slug_dir).with_context(|| format!("creating Gemini project {}", slug_dir.display()))?;
     let marker = slug_dir.join(MARKER);
-    fs::write(&marker, cwd).with_context(|| format!("writing Gemini project marker {}", marker.display()))?;
+    crate::publish::publish_reader(&marker, "stage", cwd.as_bytes(), crate::publish::Claim::Replace)
+        .with_context(|| format!("writing Gemini project marker {}", marker.display()))?;
     // Record the projects.json fast-path mapping too (best-effort).
     if let Some(parent) = global_tmp.parent() {
         let projects_json = parent.join("projects.json");
@@ -94,7 +95,8 @@ fn gemini_register_project(global_tmp: &Path, cwd: &str) -> Result<Option<String
             m.insert(cwd.to_string(), json!(slug));
         }
         if let Ok(s) = serde_json::to_string_pretty(&doc) {
-            let _ = fs::write(&projects_json, s);
+            let _ =
+                crate::publish::publish_reader(&projects_json, "stage", s.as_bytes(), crate::publish::Claim::Replace);
         }
     }
     Ok(Some(slug))

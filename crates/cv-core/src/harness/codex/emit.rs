@@ -315,7 +315,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
         }
     }
 
-    lines.publish(&file_path)?;
+    lines.publish(&file_path, opts.claim())?;
 
     Ok(EmitResult {
         path: file_path,
@@ -516,7 +516,7 @@ mod staged_tests {
             let mut stage = JsonlStage::new();
             push_text(&mut stage, "fixed", role, content_type, event_type, text)?;
             let path = world.base.join(role);
-            stage.publish(&path)?;
+            stage.publish(&path, crate::publish::Claim::New)?;
             let expected = format!(
                 "{}\n{}\n",
                 serde_json::to_string(&codex_response_item(

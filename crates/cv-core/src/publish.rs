@@ -196,37 +196,13 @@ fn links_unsupported(e: &io::Error) -> bool {
 
 /// Rename `from` to `to` unless `to` exists, answering `AlreadyExists` if it does.
 fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
+    #[cfg(target_vendor = "apple")]
+    let flag = libc::RENAME_EXCL;
+    #[cfg(target_os = "linux")]
+    let flag = libc::RENAME_NOREPLACE;
     #[cfg(any(target_vendor = "apple", target_os = "linux"))]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        let from_c = std::ffi::CString::new(from.as_os_str().as_bytes())?;
-        let to_c = std::ffi::CString::new(to.as_os_str().as_bytes())?;
-        // SAFETY: both arguments are NUL-terminated paths that outlive the call.
-        #[cfg(target_vendor = "apple")]
-        let status = unsafe { libc::renamex_np(from_c.as_ptr(), to_c.as_ptr(), libc::RENAME_EXCL) } as i64;
-        // SAFETY: as above; renameat2 takes two directory fds, two paths and a flag word.
-        #[cfg(target_os = "linux")]
-        let status = unsafe {
-            libc::syscall(
-                libc::SYS_renameat2,
-                libc::AT_FDCWD,
-                from_c.as_ptr(),
-                libc::AT_FDCWD,
-                to_c.as_ptr(),
-                libc::RENAME_NOREPLACE,
-            )
-        } as i64;
-        if status == 0 {
-            return Ok(());
-        }
-        let error = io::Error::last_os_error();
-        let flag_unsupported = matches!(
-            error.raw_os_error(),
-            Some(code) if [libc::EINVAL, libc::ENOSYS, libc::ENOTSUP, libc::EOPNOTSUPP].contains(&code)
-        );
-        if !flag_unsupported {
-            return Err(error);
-        }
+    if let Some(result) = rename_with(from, to, flag) {
+        return result;
     }
     // Best effort: a writer claiming `to` between this check and the rename is replaced.
     match std::fs::symlink_metadata(to) {
@@ -235,6 +211,146 @@ fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
         Err(e) => return Err(e),
     }
     std::fs::rename(from, to)
+}
+
+/// `renamex_np` / `renameat2` with `flag`; `None` when this filesystem or kernel rejects the flag.
+#[cfg(any(target_vendor = "apple", target_os = "linux"))]
+fn rename_with(from: &Path, to: &Path, flag: libc::c_uint) -> Option<io::Result<()>> {
+    use std::os::unix::ffi::OsStrExt;
+    let (from_c, to_c) = match (
+        std::ffi::CString::new(from.as_os_str().as_bytes()),
+        std::ffi::CString::new(to.as_os_str().as_bytes()),
+    ) {
+        (Ok(from), Ok(to)) => (from, to),
+        (Err(e), _) | (_, Err(e)) => return Some(Err(e.into())),
+    };
+    // SAFETY: both arguments are NUL-terminated paths that outlive the call.
+    #[cfg(target_vendor = "apple")]
+    let status = unsafe { libc::renamex_np(from_c.as_ptr(), to_c.as_ptr(), flag) } as i64;
+    // SAFETY: as above; renameat2 takes two directory fds, two paths and a flag word.
+    #[cfg(target_os = "linux")]
+    let status = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD,
+            from_c.as_ptr(),
+            libc::AT_FDCWD,
+            to_c.as_ptr(),
+            flag,
+        )
+    } as i64;
+    if status == 0 {
+        return Some(Ok(()));
+    }
+    let error = io::Error::last_os_error();
+    let unsupported = matches!(
+        error.raw_os_error(),
+        Some(code) if [libc::EINVAL, libc::ENOSYS, libc::ENOTSUP, libc::EOPNOTSUPP].contains(&code)
+    );
+    (!unsupported).then_some(Err(error))
+}
+
+/// Publish everything `bytes` yields at `destination` (see [`Staged`]). A new file is created
+/// 0666 before the umask; a file it replaces keeps its permission bits. With [`Claim::Replace`]
+/// the name moves to the new file: a symlink there is replaced rather than followed, and other
+/// hard links keep the old bytes.
+pub fn publish_reader(destination: &Path, tag: &str, mut bytes: impl io::Read, claim: Claim) -> Result<()> {
+    let replaced = match claim {
+        Claim::Replace => std::fs::metadata(destination).ok().filter(|m| m.is_file()),
+        Claim::New => None,
+    };
+    let mut staged = Staged::beside(destination, tag, 0o666)?;
+    if let Some(metadata) = replaced {
+        staged.file().set_permissions(metadata.permissions())?;
+    }
+    io::copy(&mut bytes, &mut staged).with_context(|| format!("writing {}", destination.display()))?;
+    staged.publish(destination, claim)?;
+    Ok(())
+}
+
+/// A directory built under a private name beside its destination, then published whole: never
+/// merged into an existing directory. Dropped unpublished, it is removed.
+pub struct StagedDir {
+    path: PathBuf,
+}
+
+impl StagedDir {
+    pub fn beside(destination: &Path, tag: &str) -> Result<Self> {
+        let dir = destination
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let path = dir.join(format!(".cv-{tag}-{}.tmp", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&path).with_context(|| format!("creating a temporary in {}", dir.display()))?;
+        Ok(Self { path })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// [`Claim::New`] refuses an existing name. [`Claim::Replace`] swaps the directories in one
+    /// step where the platform can (`RENAME_SWAP`, `RENAME_EXCHANGE`); elsewhere it moves the old
+    /// one aside first, so the name is briefly absent but never half merged. The replaced tree is
+    /// then deleted.
+    pub fn publish(mut self, destination: &Path, claim: Claim) -> Result<()> {
+        let context = || format!("publishing {}", destination.display());
+        let exists = std::fs::symlink_metadata(destination).is_ok();
+        let staged = std::mem::take(&mut self.path);
+        if claim == Claim::New || !exists {
+            let claimed = rename_no_replace(&staged, destination);
+            if let Err(e) = claimed {
+                self.path = staged;
+                if e.kind() == io::ErrorKind::AlreadyExists {
+                    return Err(Exists {
+                        path: destination.to_owned(),
+                        hint: "",
+                    }
+                    .into());
+                }
+                return Err(e).with_context(context);
+            }
+            sync_parent(destination);
+            return Ok(());
+        }
+        #[cfg(target_vendor = "apple")]
+        let swapped = rename_with(&staged, destination, libc::RENAME_SWAP);
+        #[cfg(target_os = "linux")]
+        let swapped = rename_with(&staged, destination, libc::RENAME_EXCHANGE);
+        #[cfg(not(any(target_vendor = "apple", target_os = "linux")))]
+        let swapped: Option<io::Result<()>> = None;
+        let old = match swapped {
+            // The staged name now holds the replaced tree.
+            Some(Ok(())) => staged,
+            Some(Err(e)) => {
+                self.path = staged;
+                return Err(e).with_context(context);
+            }
+            None => {
+                let aside = staged.with_extension("replaced");
+                if let Err(e) = std::fs::rename(destination, &aside) {
+                    self.path = staged;
+                    return Err(e).with_context(context);
+                }
+                if let Err(e) = std::fs::rename(&staged, destination) {
+                    let _ = std::fs::rename(&aside, destination);
+                    self.path = staged;
+                    return Err(e).with_context(context);
+                }
+                aside
+            }
+        };
+        sync_parent(destination);
+        std::fs::remove_dir_all(&old).with_context(|| format!("removing the replaced {}", old.display()))
+    }
+}
+
+impl Drop for StagedDir {
+    fn drop(&mut self) {
+        if !self.path.as_os_str().is_empty() {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
 }
 
 fn sync_parent(path: &Path) {

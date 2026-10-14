@@ -284,6 +284,7 @@ mod tests {
             assert_serialized_equal(&materialized, &expected)?;
             let options = EmitOptions {
                 new_id: Some("00000000-0000-0000-0000-000000000001".into()),
+                force: true, // this test emits the same pinned id again
                 ..Default::default()
             };
             let (old, old_report) = super::super::emit_report(

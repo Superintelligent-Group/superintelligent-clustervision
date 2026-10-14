@@ -51,6 +51,20 @@ pub struct EmitOptions {
     /// With `None`, the emitter writes a main-thread session: `isSidechain` false where present,
     /// no `agentId` — a span lifted from a sub-agent transcript joins the main thread.
     pub sidechain_of: Option<(String, String)>,
+    /// Replace a session file that already holds the emitted name, by atomic rename. Without it a
+    /// taken name (a pinned `new_id` emitted twice) is refused with [`crate::publish::Exists`].
+    pub force: bool,
+}
+
+impl EmitOptions {
+    /// How an emitter claims the session files it names.
+    pub(crate) fn claim(&self) -> crate::publish::Claim {
+        if self.force {
+            crate::publish::Claim::Replace
+        } else {
+            crate::publish::Claim::New
+        }
+    }
 }
 
 /// What [`emit`] does with the model's reasoning.
@@ -3249,6 +3263,55 @@ mod tests {
     /// carried into an `attachment` record a few lines away), so `target_holds(Claude, "text")` is
     /// rightly true and the loss is rightly unexpected. If that gap is ever closed, point this test
     /// at another real one rather than weakening the check.
+    /// Every emitter claims its session files: a pinned id emitted twice is refused with nothing
+    /// written over the first (a symlink or hard link there included); `force` replaces by rename.
+    #[test]
+    fn a_taken_session_name_is_refused_unless_forced_for_every_emitter() {
+        for &target in supported_targets() {
+            if matches!(target, Harness::Hermes | Harness::OpenCode) {
+                continue; // SQLite rows, not staged files
+            }
+            // A file, or a session directory of files (Grok, Cline, Roo).
+            let snapshot = |path: &Path| -> Vec<(PathBuf, Vec<u8>)> {
+                if path.is_file() {
+                    return vec![(path.to_owned(), std::fs::read(path).unwrap())];
+                }
+                let mut files: Vec<_> = std::fs::read_dir(path)
+                    .unwrap()
+                    .map(|e| e.unwrap().path())
+                    .filter(|p| p.is_file())
+                    .map(|p| {
+                        let bytes = std::fs::read(&p).unwrap();
+                        (p, bytes)
+                    })
+                    .collect();
+                files.sort();
+                files
+            };
+            let out = temp_dir();
+            let pinned = EmitOptions {
+                new_id: Some("pinned-session".into()),
+                ..Default::default()
+            };
+            let session = sample_session(Harness::Claude);
+            let first = emit(&session, target, &out, &pinned).unwrap();
+            let before = snapshot(&first.path);
+            let error = emit(&session, target, &out, &pinned).unwrap_err();
+            assert!(
+                error.downcast_ref::<crate::publish::Exists>().is_some(),
+                "{target}: {error:#}"
+            );
+            assert_eq!(snapshot(&first.path), before, "{target}");
+            let forced = EmitOptions { force: true, ..pinned };
+            assert_eq!(
+                emit(&session, target, &out, &forced).unwrap().path,
+                first.path,
+                "{target}"
+            );
+            std::fs::remove_dir_all(&out).ok();
+        }
+    }
+
     #[test]
     fn strict_fails_on_unexpected_loss() {
         let s = sample_session(Harness::OpenCode); // foreign source → Claude cross-harness path

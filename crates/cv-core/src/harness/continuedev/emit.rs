@@ -17,6 +17,7 @@ pub(super) fn transcript(
     cwd: Option<&str>,
     path: &Path,
     mode: crate::emit::ThinkingMode,
+    claim: crate::publish::Claim,
 ) -> Result<()> {
     let resolver = Resolver::new(session.source_path.clone());
     let mut stage = BufWriter::with_capacity(64 * 1024, ByteStage::new());
@@ -62,7 +63,7 @@ pub(super) fn transcript(
         root.finish()?;
     }
     let stage = stage.into_inner().map_err(|e| e.into_error())?;
-    publish_stage(stage, path)
+    publish_stage(stage, path, claim)
 }
 /// Continue's OpenAI usage counts include cache reads in the prompt total.
 pub(super) fn native_usage(usage: &Usage, model: Option<&str>) -> Result<Map<String, Value>> {
@@ -338,6 +339,7 @@ mod tests {
         )?;
         let opts = crate::emit::EmitOptions {
             new_id: Some("copy".into()),
+            force: true, // this test emits the same pinned id again
             ..Default::default()
         };
         let (emitted, report) = crate::emit::emit_report(&session, Harness::Continue, &store.join("sessions"), &opts)?;
@@ -418,6 +420,7 @@ mod tests {
         assert_eq!(grouped.content.len(), 2);
         let opts = crate::emit::EmitOptions {
             new_id: Some("copy".into()),
+            force: true, // this test emits the same pinned id again
             ..Default::default()
         };
         let emitted = super::super::emit(&session, &store.join("sessions"), &opts)?;
@@ -583,6 +586,7 @@ mod tests {
         let opts = crate::emit::EmitOptions {
             new_id: Some("fixed".into()),
             thinking: crate::emit::ThinkingMode::Drop,
+            force: true, // this test emits the same pinned id again
             ..Default::default()
         };
         let dest = world.base.join("new");
@@ -685,7 +689,15 @@ fn wide_grouped_tool_results_preserve_each_item_and_empty_context() -> Result<()
         });
         session.messages.push(tool);
         let path = world.base.join(format!("wide-{count}.json"));
-        transcript(&session, "copy", None, None, &path, crate::emit::ThinkingMode::Native)?;
+        transcript(
+            &session,
+            "copy",
+            None,
+            None,
+            &path,
+            crate::emit::ThinkingMode::Native,
+            crate::publish::Claim::New,
+        )?;
         let actual: Value = serde_json::from_slice(&fs::read(path)?)?;
         assert_eq!(actual, json!({"sessionId":"copy","history":expected}));
     }

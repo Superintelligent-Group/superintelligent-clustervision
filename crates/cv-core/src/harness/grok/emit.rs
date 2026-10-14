@@ -204,12 +204,12 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
     }
     // Checked source production completes before any destination file or directory is touched.
     fs::create_dir_all(&session_dir).with_context(|| format!("creating {}", session_dir.display()))?;
-    fs::write(&summary_path, serde_json::to_string_pretty(&summary)?)
-        .with_context(|| format!("writing {}", summary_path.display()))?;
+    let summary = serde_json::to_string_pretty(&summary)?;
+    crate::publish::publish_reader(&summary_path, "stage", summary.as_bytes(), opts.claim())?;
     let chat_path = session_dir.join("chat_history.jsonl");
-    lines.publish(&chat_path)?;
+    lines.publish(&chat_path, opts.claim())?;
     if !updates.is_empty() {
-        updates.publish(&session_dir.join("updates.jsonl"))?;
+        updates.publish(&session_dir.join("updates.jsonl"), opts.claim())?;
     }
 
     Ok(EmitResult {

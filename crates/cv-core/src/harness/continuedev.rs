@@ -306,6 +306,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &crate::emit::EmitOptions) 
         cwd_str.as_deref(),
         &file_path,
         opts.thinking,
+        opts.claim(),
     )?;
 
     // ── index: sessions.json (merge-or-create) ──
@@ -329,7 +330,8 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &crate::emit::EmitOptions) 
     entries.push(Value::Object(entry));
     let mut stage = super::store::bytes::ByteStage::new();
     serde_json::to_writer_pretty(&mut stage, &entries)?;
-    super::store::publish_stage(stage, &index_path)?;
+    // Continue's own index: cv's update replaces it whole.
+    super::store::publish_stage(stage, &index_path, crate::publish::Claim::Replace)?;
 
     Ok(super::EmitResult {
         path: file_path,
@@ -814,7 +816,14 @@ mod tests {
         assert!(emit(&session, &dir, &reserved).is_err());
         assert_eq!(fs::read_to_string(&index).unwrap(), "[]");
         fs::write(&index, r#"[{"sessionId":"other","custom":{"retain":true}}]"#).unwrap();
-        emit(&session, &dir, &opts).unwrap();
+        // `fixed.json` is taken: refused without force, replaced (and indexed) with it.
+        assert!(emit(&session, &dir, &opts)
+            .unwrap_err()
+            .downcast_ref::<crate::publish::Exists>()
+            .is_some());
+        assert_eq!(fs::read_to_string(&transcript).unwrap(), "original transcript");
+        let forced = crate::emit::EmitOptions { force: true, ..opts };
+        emit(&session, &dir, &forced).unwrap();
         let merged: Value = serde_json::from_slice(&fs::read(&index).unwrap()).unwrap();
         assert_eq!(merged[0]["custom"]["retain"], true);
         assert_eq!(merged[1]["sessionId"], "fixed");

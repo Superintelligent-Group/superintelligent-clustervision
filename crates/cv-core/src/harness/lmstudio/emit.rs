@@ -317,7 +317,7 @@ pub(super) fn emit(session: &Session, out_dir: &Path, opts: &crate::emit::EmitOp
     }
     let stage = stage.into_inner().map_err(|e| e.into_error())?;
     fs::create_dir_all(file_path.parent().unwrap())?;
-    publish_stage(stage, &file_path)?;
+    publish_stage(stage, &file_path, opts.claim())?;
     Ok(EmitResult {
         path: file_path,
         new_id,
@@ -782,6 +782,7 @@ mod tests {
         let opts = crate::emit::EmitOptions {
             new_id: Some("fixed".into()),
             thinking: crate::emit::ThinkingMode::Drop,
+            force: true, // this test emits the same pinned id again
             ..Default::default()
         };
         let dest = world.base.join("new");

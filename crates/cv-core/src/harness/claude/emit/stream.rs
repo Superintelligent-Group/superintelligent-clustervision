@@ -759,9 +759,9 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
     if opts.thinking != ThinkingMode::Native {
         let source = lines.into_source()?;
         let (stage, _) = crate::harness::claude::replay::normalize(source, opts.thinking)?;
-        crate::harness::store::publish_stage(stage, &file_path)?;
+        crate::harness::store::publish_stage(stage, &file_path, opts.claim())?;
     } else {
-        lines.publish(&file_path)?;
+        lines.publish(&file_path, opts.claim())?;
     }
     let resume = match (&c.agent, &cwd) {
         (Some(agent), _) => format!(

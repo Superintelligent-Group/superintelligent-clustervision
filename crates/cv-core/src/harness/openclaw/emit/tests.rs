@@ -381,7 +381,7 @@ fn checked_openclaw_late_source_failure_cannot_publish_staged_records() -> Resul
         })
         .unwrap_err();
     assert!(error.to_string().contains("source changed"), "{error}");
-    assert!(stage.publish(&destination).is_err());
+    assert!(stage.publish(&destination, crate::publish::Claim::Replace).is_err());
     assert_eq!(fs::read_to_string(&destination)?, "original transcript");
     Ok(())
 }

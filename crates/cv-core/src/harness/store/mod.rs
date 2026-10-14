@@ -85,7 +85,7 @@ pub(crate) fn write_jsonl(path: &Path, lines: &[Value]) -> Result<()> {
     for value in lines {
         stage.push(value)?;
     }
-    stage.publish(path)
+    stage.publish(path, crate::publish::Claim::Replace)
 }
 
 pub(crate) mod checked_lines;

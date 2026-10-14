@@ -845,7 +845,7 @@ pub fn emit_with_harness(
     let task_dir = out_dir.join("tasks").join(&new_id);
     fs::create_dir_all(&task_dir).with_context(|| format!("creating {}", task_dir.display()))?;
     let history_path = task_dir.join("api_conversation_history.json");
-    super::store::publish_stage(stage, &history_path)?;
+    super::store::publish_stage(stage, &history_path, opts.claim())?;
 
     // ── task_metadata.json (cwd + model hints; sidecar the parser falls back to for cwd) ──
     let mut meta = Map::new();
@@ -857,8 +857,8 @@ pub fn emit_with_harness(
         meta.insert("model_usage".into(), json!([{ "model_id": model }]));
     }
     let meta_path = task_dir.join("task_metadata.json");
-    fs::write(&meta_path, serde_json::to_string_pretty(&Value::Object(meta))?)
-        .with_context(|| format!("writing {}", meta_path.display()))?;
+    let meta = serde_json::to_string_pretty(&Value::Object(meta))?;
+    crate::publish::publish_reader(&meta_path, "stage", meta.as_bytes(), opts.claim())?;
 
     // ── ui_messages.json (minimal event log carrying created/updated timestamps) ──
     let created_ms = created.timestamp_millis();
@@ -877,8 +877,8 @@ pub fn emit_with_harness(
         ui.push(json!({ "ts": updated_ms, "type": "say", "say": "completion_result", "text": "" }));
     }
     let ui_path = task_dir.join("ui_messages.json");
-    fs::write(&ui_path, serde_json::to_string_pretty(&Value::Array(ui))?)
-        .with_context(|| format!("writing {}", ui_path.display()))?;
+    let ui = serde_json::to_string_pretty(&Value::Array(ui))?;
+    crate::publish::publish_reader(&ui_path, "stage", ui.as_bytes(), opts.claim())?;
 
     let resume = match &cwd {
         Some(c) => format!(
