@@ -134,9 +134,9 @@ pub fn read_ledger() -> Vec<LaneEvent> {
 }
 
 /// The latest `stop` per bare agent id — what [`status_of`] consults.
-fn ledger_stops(rows: &[LaneEvent]) -> HashMap<String, DateTime<Utc>> {
+fn ledger_stops(rows: &[LaneEvent], session_id: &str) -> HashMap<String, DateTime<Utc>> {
     let mut m: HashMap<String, DateTime<Utc>> = HashMap::new();
-    for r in rows.iter().filter(|r| r.event == "stop") {
+    for r in rows.iter().filter(|r| r.event == "stop" && r.session_id == session_id) {
         let e = m.entry(r.agent_id.clone()).or_insert(r.ts);
         *e = (*e).max(r.ts);
     }
@@ -740,7 +740,11 @@ fn lane_of(
 pub fn lanes_of(parent: &SessionRef) -> Result<Vec<Lane>> {
     let subs = crate::subagent_tree_of(parent);
     let notices = task_notices(&parent.path);
-    let ledger = ledger_stops(&read_ledger());
+    let ledger = if parent.harness == crate::ir::Harness::Claude {
+        ledger_stops(&read_ledger(), &parent.id)
+    } else {
+        HashMap::new()
+    };
     let mut lanes = crate::par_filter_map(subs, |s| Some(lane_of(s, &notices, &ledger)))
         .into_iter()
         .collect::<Result<Vec<_>>>()?;
@@ -1101,8 +1105,20 @@ mod tests {
             cwd: None,
             last_text: None,
         };
-        let stops = ledger_stops(&[row(10, "start"), row(20, "stop"), row(30, "stop"), row(5, "stop")]);
+        let mut unrelated = row(200, "stop");
+        unrelated.session_id = "another-parent".into();
+        let stops = ledger_stops(
+            &[
+                row(10, "start"),
+                row(20, "stop"),
+                row(30, "stop"),
+                row(5, "stop"),
+                unrelated,
+            ],
+            "s",
+        );
         assert_eq!(stops.get("a1").copied(), DateTime::from_timestamp(30, 0));
+        assert!(ledger_stops(&[row(300, "stop")], "another-parent").is_empty());
     }
 
     #[test]
