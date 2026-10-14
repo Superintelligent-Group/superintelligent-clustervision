@@ -1147,9 +1147,14 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 }
 
 fn preview(s: &str, max_chars: usize) -> String {
-    let t: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    let t: String = t.chars().take(max_chars).collect();
-    if s.chars().count() > max_chars {
+    let t: String = s
+        .split_whitespace()
+        .flat_map(|word| std::iter::once(' ').chain(word.chars()))
+        .skip(1)
+        .take(max_chars)
+        .collect();
+    // The established ellipsis predicate uses original text length, not normalized length.
+    if s.chars().nth(max_chars).is_some() {
         format!("{t}…")
     } else {
         t
@@ -2414,6 +2419,32 @@ mod tests {
         drop(search);
         assert_eq!(drops.load(Ordering::Relaxed), 2);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn semantic_preview_bounds_normalization_without_changing_wire_text() {
+        let oracle = |s: &str, max_chars| {
+            let joined = s.split_whitespace().collect::<Vec<_>>().join(" ");
+            let head: String = joined.chars().take(max_chars).collect();
+            if s.chars().count() > max_chars {
+                format!("{head}…")
+            } else {
+                head
+            }
+        };
+        for text in [
+            String::new(),
+            " \n\t".repeat(3000),
+            "a  b\n c".into(),
+            "é🙂\u{2003}雪 ".repeat(3000),
+            "word".repeat(17000),
+            "a ".repeat(17000),
+        ] {
+            for limit in [0, 1, 2, 5, 200, 1024] {
+                assert_eq!(preview(&text, limit), oracle(&text, limit));
+                assert!(preview(&text, limit).chars().count() <= limit + 1);
+            }
+        }
     }
 
     #[test]
