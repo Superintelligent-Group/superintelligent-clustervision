@@ -1642,6 +1642,29 @@ mod tests {
             assert_eq!(read(i)?.lineage.forked_from.as_deref(), Some("family-000"));
         }
         assert_eq!(FORK_HOLDER_ROWS.with(|rows| rows.get()), 240);
+        // Exercise the real multi-session consumer without a test-provided source scope.
+        // One worker makes the existing thread-local SQL counter observable while still
+        // traversing TokenStats' production parallel worker boundary.
+        let references: Vec<_> = (1..80)
+            .map(|i| SessionRef::new(format!("family-{i:03}"), Harness::Goose, &path))
+            .collect();
+        let stats_control = || -> Result<()> {
+            assert!(!crate::source::inventory_scoped());
+            FORK_HOLDER_ROWS.with(|rows| rows.set(0));
+            let stats = crate::stats::TokenStats::compute(&references)?;
+            assert_eq!(stats.sessions, 79);
+            assert_eq!(stats.failed, 0);
+            assert_eq!(FORK_HOLDER_ROWS.with(|rows| rows.get()), 80);
+            assert!(!crate::source::inventory_scoped());
+            Ok(())
+        };
+        #[cfg(feature = "parallel")]
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()?
+            .install(stats_control)?;
+        #[cfg(not(feature = "parallel"))]
+        stats_control()?;
         // A later operation observes changed holder metadata rather than keeping the old minimum.
         let conn = Connection::open(&path)?;
         conn.execute(
