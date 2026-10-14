@@ -741,30 +741,27 @@ fn await_poll(
         Ok(())
     };
     let mut matched = None;
-    let result = watcher.try_poll_messages(
-        &check,
-        |kind, reference, message| {
-            let resolver = cv_core::Resolver::new(Some(reference.path.clone()));
-            let text = cv_core::projection::searchable_text_checked(&message, &resolver, &check)?;
-            if let Some(hit) = re.find(&text) {
-                check()?;
-                let snippet_start = hit.start().saturating_sub(80);
-                let snippet_end = hit.end().saturating_add(80).min(text.len());
-                matched = Some(json!({
-                    "matched": true,
-                    "harness": reference.harness.as_str(), "id": reference.id,
-                    "cwd": reference.cwd.as_ref().map(|p| p.to_string_lossy()),
-                    "role": cv_core::render::role_label(message.role),
-                    "matched_text": &text[floor_char(&text, snippet_start)..ceil_char(&text, snippet_end)],
-                    "event": match kind { cv_core::watch::EventKind::New => "new_session", _ => "appended" },
-                }));
-                Ok(cv_core::Flow::Stop)
-            } else {
-                check()?;
-                Ok(cv_core::Flow::Continue)
-            }
-        },
-    );
+    let result = watcher.try_poll_messages(&check, |kind, reference, message| {
+        let resolver = cv_core::Resolver::new(Some(reference.path.clone()));
+        let text = cv_core::projection::searchable_text_checked(&message, &resolver, &check)?;
+        if let Some(hit) = re.find(&text) {
+            check()?;
+            let snippet_start = hit.start().saturating_sub(80);
+            let snippet_end = hit.end().saturating_add(80).min(text.len());
+            matched = Some(json!({
+                "matched": true,
+                "harness": reference.harness.as_str(), "id": reference.id,
+                "cwd": reference.cwd.as_ref().map(|p| p.to_string_lossy()),
+                "role": cv_core::render::role_label(message.role),
+                "matched_text": &text[floor_char(&text, snippet_start)..ceil_char(&text, snippet_end)],
+                "event": match kind { cv_core::watch::EventKind::New => "new_session", _ => "appended" },
+            }));
+            Ok(cv_core::Flow::Stop)
+        } else {
+            check()?;
+            Ok(cv_core::Flow::Continue)
+        }
+    });
     match result {
         Err(_) if expired.get() => Ok(None),
         Err(error) => Err(error),
