@@ -244,6 +244,37 @@ fn ls_json_enrich_adds_git_branch_and_synthesized_title() {
     assert!(rows[0]["size_bytes"].as_u64().unwrap() > 0, "{out}");
 }
 
+#[test]
+fn ls_json_fresh_enumerates_a_previously_empty_project_and_drops_deleted_rows() {
+    let w = World::new("ls-json-fresh-consumer");
+    standard_corpus(&w);
+    let empty_project = w.proj.parent().unwrap().join("-work-new-project");
+    std::fs::create_dir_all(&empty_project).unwrap();
+    let (out, _) = w.cv_ok(&["ls", "--json"]);
+    assert_eq!(serde_json::from_str::<Vec<serde_json::Value>>(&out).unwrap().len(), 2);
+
+    w.write_session(
+        "new-project-session",
+        &[serde_json::json!({
+            "type":"user", "uuid":"new-u", "sessionId":"new-project-session",
+            "timestamp":"2026-10-14T12:00:00Z", "cwd":"/work/new-project",
+            "gitBranch":"consumer-fresh", "message":{"role":"user","content":"a new project"}
+        })],
+    );
+    let new_path = empty_project.join("new-project-session.jsonl");
+    std::fs::rename(w.proj.join("new-project-session.jsonl"), &new_path).unwrap();
+    std::fs::remove_file(w.proj.join("betasess.jsonl")).unwrap();
+
+    let (out, _) = w.cv_ok(&["ls", "--json", "--fresh", "--enrich", "--limit", "100"]);
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&out).unwrap();
+    assert_eq!(rows.len(), 2, "{out}");
+    assert!(!rows.iter().any(|row| row["id"] == "betasess"), "{out}");
+    let added = rows.iter().find(|row| row["id"] == "new-project-session").unwrap();
+    assert_eq!(added["size_bytes"], std::fs::metadata(new_path).unwrap().len());
+    assert_eq!(added["git"]["branch"], "consumer-fresh");
+    assert_eq!(added["display_title"], "a new project");
+}
+
 // ───────────────────────────── search ─────────────────────────────
 
 #[test]
