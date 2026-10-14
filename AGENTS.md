@@ -6,8 +6,8 @@ the read API, tasks, lanes, watch), `cv-search` (tantivy), `cv-web` (wasm), `cv-
 harness). The shape it is converging on is `docs/INTERFACE-V2.md` "The shape"; a new concept is a
 `--kind`, a `--sort`, a selector or a route on the one API, never a new command family.
 
-Current open work: `docs/design/DATAPATHS.md` (audited data paths, design and performance tracker).
-`docs/design/PERF-HANDOFF.md` is the earlier brief; use the audit's corrections to its assumptions.
+Datapath design and open gaps: `docs/design/DATAPATHS.md`; goal, budgets and measured numbers:
+`docs/design/PERF.md`. Measurements go in commit messages, never committed result files.
 
 ## Rules
 
