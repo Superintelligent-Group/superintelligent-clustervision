@@ -1,5 +1,5 @@
 use std::io::Result as IoResult;
-use std::io::{Read, Write};
+use std::io::{BufRead, Read, Write};
 
 use std::sync::mpsc::channel;
 use std::sync::mpsc::{Receiver, Sender};
@@ -110,17 +110,40 @@ impl<W: Write + Send> Iterator for SequentialWriterBuilder<W> {
     }
 }
 
+impl<R: Read + Send> SequentialReader<R> {
+    fn reader(&mut self) -> IoResult<&mut R> {
+        if matches!(self.inner, SequentialReaderInner::Waiting(_)) {
+            let SequentialReaderInner::Waiting(receiver) = mem::replace(&mut self.inner, SequentialReaderInner::Empty)
+            else {
+                unreachable!()
+            };
+            let reader = receiver.recv().map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "previous request reader closed")
+            })?;
+            self.inner = SequentialReaderInner::MyTurn(reader);
+        }
+        match &mut self.inner {
+            SequentialReaderInner::MyTurn(reader) => Ok(reader),
+            _ => Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "request reader closed",
+            )),
+        }
+    }
+}
 impl<R: Read + Send> Read for SequentialReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
-        let mut reader = match self.inner {
-            SequentialReaderInner::MyTurn(ref mut reader) => return reader.read(buf),
-            SequentialReaderInner::Waiting(ref mut recv) => recv.recv().unwrap(),
-            SequentialReaderInner::Empty => unreachable!(),
-        };
-
-        let result = reader.read(buf);
-        self.inner = SequentialReaderInner::MyTurn(reader);
-        result
+        self.reader()?.read(buf)
+    }
+}
+impl<R: BufRead + Send> BufRead for SequentialReader<R> {
+    fn fill_buf(&mut self) -> IoResult<&[u8]> {
+        self.reader()?.fill_buf()
+    }
+    fn consume(&mut self, bytes: usize) {
+        if let Ok(reader) = self.reader() {
+            reader.consume(bytes);
+        }
     }
 }
 
@@ -156,8 +179,9 @@ where
                 self.next.send(reader).ok();
             }
             SequentialReaderInner::Waiting(recv) => {
-                let reader = recv.recv().unwrap();
-                self.next.send(reader).ok();
+                if let Ok(reader) = recv.recv() {
+                    self.next.send(reader).ok();
+                }
             }
             SequentialReaderInner::Empty => (),
         }

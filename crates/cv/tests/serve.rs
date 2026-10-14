@@ -1350,6 +1350,40 @@ fn serve_stats() {
 }
 
 #[test]
+fn request_headers_are_bounded_and_buffering_preserves_body_and_pipeline() {
+    let w = world("header-bounds");
+    let (port, _server) = spawn_serve(&w);
+    for fields in [
+        format!("X-Large: {}\r\n", "x".repeat(9000)),
+        "X-Small: x\r\n".repeat(129),
+        format!("X-Block: {}\r\n", "x".repeat(7000)).repeat(10),
+    ] {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        write!(
+            stream,
+            "GET /api/sessions HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{fields}Connection: close\r\n\r\n"
+        )
+        .unwrap();
+        let mut raw = String::new();
+        let _ = stream.read_to_string(&mut raw);
+        assert_eq!(raw_status(&raw), 431, "oversized headers accepted: {raw}");
+    }
+    // A single buffered packet contains headers, body and the following request. The body
+    // bytes must remain in the same sequential reader, rather than disappear in header scratch.
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    write!(stream, "GET /api/health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: 4\r\n\r\nbodyGET /api/health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n").unwrap();
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw).unwrap();
+    assert_eq!(
+        raw.matches("HTTP/1.1 200").count(),
+        2,
+        "buffered body/pipeline lost: {raw}"
+    );
+}
+
+#[test]
 fn request_body_framing_rejects_ambiguous_or_unsupported_headers() {
     let w = world("request-framing");
     let (port, _server) = spawn_serve(&w);

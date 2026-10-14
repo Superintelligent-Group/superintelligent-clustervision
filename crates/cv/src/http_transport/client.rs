@@ -2,7 +2,7 @@ use ascii::AsciiString;
 
 use std::io::Error as IoError;
 use std::io::Result as IoResult;
-use std::io::{BufReader, BufWriter, ErrorKind, Read};
+use std::io::{BufRead, BufReader, BufWriter, ErrorKind, Read};
 
 use std::net::SocketAddr;
 use std::str::FromStr;
@@ -40,6 +40,7 @@ pub struct ClientConnection {
 #[derive(Debug)]
 enum ReadError {
     WrongRequestLine,
+    HeadersTooLarge,
     WrongHeader(HTTPVersion),
     /// the client sent an unrecognized `Expect` header
     ExpectationFailed(HTTPVersion),
@@ -74,28 +75,28 @@ impl ClientConnection {
     ///
     /// Reads until `CRLF` is reached. The next read will start
     ///  at the first byte of the new line.
-    fn read_next_line(&mut self) -> IoResult<AsciiString> {
-        let mut buf = Vec::new();
-        let mut prev_byte_was_cr = false;
-
-        loop {
-            let byte = self.next_header_source.by_ref().bytes().next();
-
-            let byte = match byte {
-                Some(b) => b?,
-                None => return Err(IoError::new(ErrorKind::ConnectionAborted, "Unexpected EOF")),
-            };
-
-            if byte == b'\n' && prev_byte_was_cr {
-                buf.pop(); // removing the '\r'
-                return AsciiString::from_ascii(buf)
-                    .map_err(|_| IoError::new(ErrorKind::InvalidInput, "Header is not in ASCII"));
-            }
-
-            prev_byte_was_cr = byte == b'\r';
-
-            buf.push(byte);
+    fn read_next_line(&mut self) -> Result<AsciiString, ReadError> {
+        const MAX_LINE: u64 = 8192;
+        let mut bytes = Vec::new();
+        self.next_header_source
+            .by_ref()
+            .take(MAX_LINE + 1)
+            .read_until(b'\n', &mut bytes)
+            .map_err(ReadError::ReadIoError)?;
+        if bytes.len() as u64 > MAX_LINE {
+            return Err(ReadError::HeadersTooLarge);
         }
+        if bytes.is_empty() {
+            return Err(ReadError::ReadIoError(IoError::new(
+                ErrorKind::ConnectionAborted,
+                "Unexpected EOF",
+            )));
+        }
+        if !bytes.ends_with(b"\r\n") {
+            return Err(ReadError::WrongRequestLine);
+        }
+        bytes.truncate(bytes.len() - 2);
+        AsciiString::from_ascii(bytes).map_err(|_| ReadError::WrongRequestLine)
     }
 
     /// Reads a request from the stream.
@@ -104,7 +105,7 @@ impl ClientConnection {
         let (method, path, version, headers) = {
             // reading the request line
             let (method, path, version) = {
-                let line = self.read_next_line().map_err(ReadError::ReadIoError)?;
+                let line = self.read_next_line()?;
 
                 parse_request_line(
                     line.as_str().trim(), // TODO: remove this conversion
@@ -114,12 +115,17 @@ impl ClientConnection {
             // getting all headers
             let headers = {
                 let mut headers = Vec::new();
+                let mut bytes = 0usize;
                 loop {
-                    let line = self.read_next_line().map_err(ReadError::ReadIoError)?;
+                    let line = self.read_next_line()?;
 
                     if line.is_empty() {
                         break;
                     };
+                    bytes += line.len() + 2;
+                    if bytes > 64 * 1024 || headers.len() >= 128 {
+                        return Err(ReadError::HeadersTooLarge);
+                    }
                     headers.push(match FromStr::from_str(line.as_str().trim()) {
                         // TODO: remove this conversion
                         Ok(h) => h,
@@ -181,6 +187,14 @@ impl Iterator for ClientConnection {
 
         loop {
             let rq = match self.read() {
+                Err(ReadError::HeadersTooLarge) => {
+                    let writer = self.sink.next().unwrap();
+                    Response::new_empty(StatusCode(431))
+                        .raw_print(writer, HTTPVersion(1, 1), &[], false, None)
+                        .ok();
+                    return None;
+                }
+
                 Err(ReadError::WrongRequestLine) => {
                     let writer = self.sink.next().unwrap();
                     let response = Response::new_empty(StatusCode(400));
