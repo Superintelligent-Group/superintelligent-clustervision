@@ -208,7 +208,7 @@ impl Adapter for KimiCode {
             if opts.spans {
                 stream_projected(&file, &wire, 0, s, Ctx::new(opts), 0, sink)
             } else {
-                Ok(stream_wire(BufReader::new(file), &wire, 0, s, Ctx::new(opts), 0, sink))
+                stream_wire(BufReader::new(file), &wire, 0, s, Ctx::new(opts), 0, sink)
             }
         })
     }
@@ -265,7 +265,7 @@ impl Adapter for KimiCode {
                     state.ctx.restore(opts),
                     state.skipped,
                     sink,
-                )
+                )?
             };
             Ok(Some(session))
         })
@@ -422,9 +422,9 @@ fn stream_wire(
     mut ctx: Ctx<'_>,
     prior_skipped: u64,
     sink: &mut dyn MessageSink,
-) -> Session {
+) -> Result<Session> {
     ctx.init_model(s.model.as_deref());
-    let skipped = super::for_each_json_line_at(reader, at, |v, offset, complete, skipped| {
+    let skipped = super::try_for_each_json_line_at(reader, at, |v, offset, complete, skipped| {
         let flow = ctx.record(&v, sink);
         // Pending steps are amended by subsequent parts/results/usage; EOF flush is provisional.
         // Only a complete record with no held step can preserve an immutable emitted prefix.
@@ -432,7 +432,7 @@ fn stream_wire(
             checkpoint_wire(&ctx, wire, offset, prior_skipped + skipped, sink);
         }
         flow
-    });
+    })?;
     if !ctx.stopped {
         ctx.flush_step(sink);
     }
@@ -443,7 +443,7 @@ fn stream_wire(
             .insert("protocol_version".into(), Value::String(pv));
     }
     super::note_skipped_lines(&mut s, prior_skipped + skipped);
-    s
+    Ok(s)
 }
 
 fn stream_projected(
@@ -468,24 +468,9 @@ fn stream_projected(
         },
     )?;
     let mut skipped = prior_skipped;
-    let mut known_offset = true;
     while let Some(record) = records.next() {
-        let (range, complete) = match record {
-            Ok(record) => record,
-            Err(_) => {
-                skipped += 1;
-                known_offset = false;
-                continue;
-            }
-        };
-        let range = match ranges::trim(file, range) {
-            Ok(range) => range,
-            Err(_) => {
-                skipped += 1;
-                known_offset = false;
-                continue;
-            }
-        };
+        let (range, complete) = record?;
+        let range = ranges::trim(file, range)?;
         if range.len == 0 {
             continue;
         }
@@ -501,7 +486,7 @@ fn stream_projected(
             break;
         }
         let offset = records.offset();
-        if known_offset && complete && ctx.step.is_none() && sink.wants_checkpoint(offset) {
+        if complete && ctx.step.is_none() && sink.wants_checkpoint(offset) {
             checkpoint_wire(&ctx, wire, offset, skipped, sink);
         }
     }
@@ -1837,6 +1822,52 @@ fn push_parts(m: &mut Message, content: Option<&Value>) {
 mod tests {
     use super::*;
     use crate::harness::Parse;
+
+    #[test]
+    fn owned_wire_io_failure_cannot_flush_a_provisional_step_or_publish_metadata() -> Result<()> {
+        struct FailingReader(std::io::Cursor<Vec<u8>>);
+        impl std::io::Read for FailingReader {
+            fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+                if self.0.position() == self.0.get_ref().len() as u64 {
+                    return Err(std::io::Error::other("synthetic terminal wire read failure"));
+                }
+                self.0.read(bytes)
+            }
+        }
+        impl std::io::BufRead for FailingReader {
+            fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+                if self.0.position() == self.0.get_ref().len() as u64 {
+                    return Err(std::io::Error::other("synthetic terminal wire read failure"));
+                }
+                std::io::BufRead::fill_buf(&mut self.0)
+            }
+            fn consume(&mut self, n: usize) {
+                std::io::BufRead::consume(&mut self.0, n);
+            }
+        }
+        let body = concat!(
+            "{\"type\":\"context.append_message\",\"message\":{\"role\":\"user\",\"content\":\"stable prefix\"}}\n",
+            "{\"type\":\"context.append_loop_event\",\"event\":{\"type\":\"content.part\",\"stepUuid\":\"pending\",\"part\":{\"type\":\"text\",\"text\":\"provisional reply\"}}}\n"
+        );
+        let opts = ParseOptions::full();
+        let mut kept = Kept::default();
+        let result = stream_wire(
+            FailingReader(std::io::Cursor::new(body.as_bytes().to_vec())),
+            Path::new("synthetic/wire.jsonl"),
+            0,
+            Session::new("synthetic", Harness::KimiCode),
+            Ctx::new(&opts),
+            0,
+            &mut kept,
+        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("synthetic terminal wire read failure"));
+        assert_eq!(kept.messages.len(), 1);
+        assert_eq!(kept.messages[0].text().as_deref(), Some("stable prefix"));
+        Ok(())
+    }
 
     #[test]
     fn model_bindings_follow_native_request_order_and_survive_every_suffix() -> Result<()> {
