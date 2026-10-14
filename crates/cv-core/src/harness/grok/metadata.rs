@@ -400,7 +400,6 @@ mod tests {
                         .get("locations")?
                         .unwrap()
                         .array()?
-                        .into_iter()
                         .map(|v| v.and_then(|v| v.string_field("path")))
                         .collect::<Result<Vec<_>>>()?,
                 ));

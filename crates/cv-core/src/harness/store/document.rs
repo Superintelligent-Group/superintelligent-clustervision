@@ -359,15 +359,9 @@ impl<'a> Record<'a> {
     pub fn get(&self, key: &str) -> Option<Raw<'a>> {
         self.fields.get(key).copied()
     }
+    #[cfg(test)]
     pub fn value(&self, key: &str) -> Option<Value> {
         serde_json::from_str(self.get(key)?.get()).ok()
-    }
-    /// Materialize only named fields after strict validation at the source boundary.
-    pub fn project(&self, keys: &[&str]) -> Result<serde_json::Map<String, Value>> {
-        keys.iter()
-            .filter_map(|key| self.get(key).map(|raw| (*key, raw)))
-            .map(|(key, raw)| Ok((key.to_string(), serde_json::from_str(raw.get())?)))
-            .collect()
     }
     pub fn string(&self, key: &str) -> Option<String> {
         serde_json::from_str(self.fields.get(key)?.get()).ok()
