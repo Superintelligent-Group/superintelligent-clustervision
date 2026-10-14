@@ -126,6 +126,8 @@ fn project_payload(
         "id",
         "call_id",
         "namespace",
+        "author",
+        "recipient",
         "status",
         "internal_chat_message_metadata_passthrough",
     ] {
@@ -172,6 +174,36 @@ fn project_payload(
             let blocks = blocks(content, spans)?;
             let surrogate = content_prefix(content)?;
             p.insert("content".into(), if blocks.is_empty() {Value::Array(Vec::new())} else {serde_json::json!([{"type":"input_text","text":if surrogate.is_empty() {"selected"} else {&surrogate}}])});
+            Ok(Some(Projection::Blocks {
+                record: make_record(p)?,
+                blocks,
+            }))
+        }
+        ("response_item", "agent_message") => {
+            let mut blocks = Vec::new();
+            let mut skeleton = Vec::new();
+            if let Some(parts) = payload.get("content").map(JsonView::array).transpose()?.flatten() {
+                for part in parts {
+                    let part = part?;
+                    let ty = part
+                        .get("type")?
+                        .map(|v| v.resolve())
+                        .transpose()?
+                        .and_then(|v| v.as_str().map(str::to_string))
+                        .unwrap_or_default();
+                    if ty == "encrypted_content" {
+                        skeleton.push(serde_json::json!({"type":"encrypted_content"}));
+                    } else if ty == "input_text" {
+                        if let Some(text) = part.get("text")?.map(|v| body_text(v, spans)).transpose()?.flatten() {
+                            if selected_nonempty(&text)? {
+                                blocks.push(Block::Text { text });
+                                skeleton.push(serde_json::json!({"type":"input_text","text":"selected"}));
+                            }
+                        }
+                    }
+                }
+            }
+            p.insert("content".into(), skeleton.into());
             Ok(Some(Projection::Blocks {
                 record: make_record(p)?,
                 blocks,

@@ -2748,6 +2748,11 @@ mod tests {
                     );
                 }
             }
+            records
+                .push(serde_json::json!({"type":"inter_agent_communication_metadata","payload":{"trigger_turn":true}}));
+            for author in ["/root", "/root/worker"] {
+                records.push(serde_json::json!({"type":"response_item","ordinal":2,"payload":{"type":"agent_message","author":author,"recipient":"/root","content":[{"type":"input_text","text":giant},{"type":"encrypted_content","encrypted_content":giant},{"type":"output_text","text":"ignored"}],"internal_chat_message_metadata_passthrough":metadata}}));
+            }
             records.push(serde_json::json!({"type":"turn_context","payload":{"model":"late"}}));
             let path = world.base.join(format!("rollout-{events}.jsonl"));
             std::fs::write(
