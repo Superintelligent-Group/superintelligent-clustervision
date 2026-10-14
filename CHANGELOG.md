@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- OpenSession preserves optional opaque principals through reads and transformations; mixed-source compositions retain attribution only when every source agrees.
+- Claude rewind and port default to portable replay, preserving readable reasoning as text and consistently repairing illegal tool identifiers; native fidelity remains selectable.
 - Backend reads and exports index repeated membership and lineage lookups; account multipart reads keep bounded descriptors and discovery reuses guarded metadata.
 - Indexing and watch space large resume snapshots by retained state size, reducing repeated serialization while allowing longer append rereads.
 - Goose, Hermes and Devin discovery count canonical turns while bounding ordinary large SQLite cells, including SQLite’s native allocations.
