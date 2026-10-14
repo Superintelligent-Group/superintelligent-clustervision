@@ -2662,7 +2662,8 @@ fn make_snippet(body: &str, query: &str) -> String {
     let lc = body.to_lowercase();
     for term in query_terms(query) {
         if let Some(pos) = lc.find(&term) {
-            return window(body, pos, term.len());
+            let source = cv_core::scan::lowercase_source_range(body, pos..pos + term.len());
+            return window(body, source.start, source.len());
         }
     }
     head(body, 200)
@@ -4745,6 +4746,21 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&sdir).ok();
+    }
+
+    #[test]
+    fn indexed_snippet_maps_casefold_offsets_to_original_unicode() {
+        let body = format!("{}target {}", "İ".repeat(200), "tail ".repeat(100));
+        let pos = body.find("target").unwrap();
+        assert_eq!(make_snippet(&body, "target"), window(&body, pos, 6));
+        assert!(make_snippet(&body, "target").contains("target"));
+        for (body, query, original) in [
+            ("İstanbul", "i", "İ"),
+            ("ΟΣ next", "ος", "ΟΣ"),
+            ("ΟΣΑ next", "οσα", "ΟΣΑ"),
+        ] {
+            assert_eq!(make_snippet(body, query), window(body, 0, original.len()));
+        }
     }
 
     #[test]
