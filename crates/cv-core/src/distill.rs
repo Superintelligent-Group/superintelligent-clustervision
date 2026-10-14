@@ -1084,8 +1084,7 @@ fn analyze(session: &Session, opts: &DistillOptions, demand: Demand) -> anyhow::
     let recorded_context_tokens = msgs
         .iter()
         .rev()
-        .find_map(|m| m.usage.as_ref().map(|u| u.prompt_tokens()))
-        .filter(|tokens| *tokens > 0);
+        .find_map(|m| m.usage.as_ref().map(|u| u.prompt_tokens()).filter(|tokens| *tokens > 0));
 
     let stats = DistillStats {
         source_id: session.id.clone(),
@@ -2589,6 +2588,21 @@ facts text",
             ),
             "✗ last detail"
         );
+    }
+    #[test]
+    fn context_accounting_uses_the_last_nonzero_recorded_prompt() -> anyhow::Result<()> {
+        let mut source = lane();
+        source.messages[0].usage = Some(crate::ir::Usage {
+            input_tokens: Some(1234),
+            ..Default::default()
+        });
+        source.messages.last_mut().unwrap().usage = Some(crate::ir::Usage {
+            output_tokens: Some(9),
+            ..Default::default()
+        });
+        let actual = distill_pack(&source, &Default::default())?;
+        assert_eq!(actual.stats.recorded_context_tokens, Some(1234));
+        Ok(())
     }
 }
 
