@@ -3211,6 +3211,45 @@ mod tests {
     }
 
     #[test]
+    fn selected_content_dispatch_preserves_tool_response_presence() {
+        let dir = std::env::temp_dir().join(format!("cv-gemini-dispatch-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let adapter = Gemini { roots: vec![] };
+        let response =
+            serde_json::json!({"functionResponse":{"id":"call","name":"read","response":{"output":"result"}}});
+        let cases = [
+            Value::Null,
+            serde_json::json!([]),
+            serde_json::json!([response]),
+            serde_json::json!([response, {"text":"mixed prompt"}]),
+            serde_json::json!(["", response]),
+            serde_json::json!([{ "functionResponse":null, "text":"presence is authoritative" }]),
+            serde_json::json!([{ "functionResponse":false, "functionCall":{"id":"call","name":"read","args":{}} }]),
+            response.clone(),
+        ];
+        for modern in [false, true] {
+            let path = dir.join(if modern { "session.jsonl" } else { "session.json" });
+            let reference = SessionRef::new("source", Harness::Gemini, path.clone());
+            for content in &cases {
+                let record = serde_json::json!({"id":"u", "type":"user", "content":content});
+                let text = if modern {
+                    format!("{{\"sessionId\":\"source\",\"projectHash\":\"x\"}}\n{record}\n")
+                } else {
+                    serde_json::json!({"sessionId":"source", "messages":[record]}).to_string()
+                };
+                fs::write(&path, &text).unwrap();
+                let expected = parse_all_str(&text, Some(path.clone())).remove(0);
+                for opts in [ParseOptions::lazy(), ParseOptions::lazy_extra(), checked_complete()] {
+                    let mut actual = crate::stream::collect_with(&adapter, &reference, &opts).unwrap();
+                    actual.materialize().unwrap();
+                    assert_eq!(as_json(&actual), as_json(&expected), "content={content}");
+                }
+            }
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn selected_display_content_matches_owned_shapes_and_demand_modes() {
         let dir = std::env::temp_dir().join(format!("cv-gemini-display-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();

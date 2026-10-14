@@ -209,16 +209,12 @@ pub(super) fn emit(
         }
     }
     let mut content = Vec::new();
-    let raw_content = rec.fields.get("content").copied();
-    if let Some(raw) = raw_content {
-        content_blocks(raw, ctx, &mut content)?;
-    }
-    let tool_response = raw_content.and_then(|r| array(r)).is_some_and(|parts| {
-        !parts.is_empty()
-            && parts
-                .iter()
-                .all(|p| Record::parse(*p).is_some_and(|p| p.fields.contains_key("functionResponse")))
-    });
+    let tool_response = rec
+        .fields
+        .get("content")
+        .map(|raw| content_blocks(*raw, ctx, &mut content))
+        .transpose()?
+        .unwrap_or(false);
     let mut results = Vec::new();
     let mut inputs = Vec::new();
     if let Some(calls) = rec.fields.get("toolCalls") {
@@ -304,30 +300,33 @@ fn result_text(raw: Raw<'_>, ctx: Context<'_>) -> Result<Option<Text>> {
     Ok(tool_result_text(Some(&serde_json::from_str::<Value>(raw.get())?)).map(Text::from))
 }
 
-fn content_blocks(raw: Raw<'_>, ctx: Context<'_>, out: &mut Vec<Block>) -> Result<()> {
+// Return the codec's nonempty-array/all-functionResponse classification while dispatching.
+fn content_blocks(raw: Raw<'_>, ctx: Context<'_>, out: &mut Vec<Block>) -> Result<bool> {
     if let Some(text) = string_text(raw, ctx) {
         if !text.is_empty() {
             out.push(Block::Text { text });
         }
     } else if let Some(parts) = array(raw) {
+        let mut tool_response = !parts.is_empty();
         for part in parts {
-            part_block(part, ctx, out)?;
+            tool_response &= part_block(part, ctx, out)?;
         }
+        return Ok(tool_response);
     } else {
         part_block(raw, ctx, out)?;
     }
-    Ok(())
+    Ok(false)
 }
 
-fn part_block(raw: Raw<'_>, ctx: Context<'_>, out: &mut Vec<Block>) -> Result<()> {
+fn part_block(raw: Raw<'_>, ctx: Context<'_>, out: &mut Vec<Block>) -> Result<bool> {
     if let Some(text) = string_text(raw, ctx) {
         if !text.is_empty() {
             out.push(Block::Text { text });
         }
-        return Ok(());
+        return Ok(false);
     }
     let Some(obj) = Record::parse(raw) else {
-        return Ok(());
+        return Ok(false);
     };
     if let Some(fc) = obj.fields.get("functionCall").filter(|r| r.get().starts_with('{')) {
         if let Some(fc) = Record::parse(*fc) {
@@ -388,5 +387,6 @@ fn part_block(raw: Raw<'_>, ctx: Context<'_>, out: &mut Vec<Block>) -> Result<()
             });
         }
     }
-    Ok(())
+    // Presence is authoritative even when the value is scalar or functionCall wins dispatch.
+    Ok(obj.fields.contains_key("functionResponse"))
 }

@@ -40,22 +40,11 @@ pub(crate) fn emit(
         thoughts = blocks;
     }
     let mut content = Vec::new();
-    let mut tool_response = false;
-    if let Some(raw) = rec.get("content") {
-        content_blocks(raw, output, &mut content)?;
-        if let Some(parts) = raw.array()? {
-            let mut count = 0;
-            tool_response = true;
-            for part in parts {
-                count += 1;
-                if part?.get("functionResponse")?.is_none() {
-                    tool_response = false;
-                    break;
-                }
-            }
-            tool_response &= count != 0;
-        }
-    }
+    let tool_response = rec
+        .get("content")
+        .map(|raw| content_blocks(raw, output, &mut content))
+        .transpose()?
+        .unwrap_or(false);
     let mut results = Vec::new();
     let mut inputs = Vec::new();
     if let Some(calls) = rec.get("toolCalls").map(JsonView::array).transpose()?.flatten() {
@@ -98,19 +87,24 @@ pub(crate) fn emit(
     Ok(emit_record_message_with(harness, &meta, st, Some(&payload), sink))
 }
 
-fn content_blocks(view: JsonView<'_>, output: output::Output<'_>, out: &mut Vec<Block>) -> Result<()> {
+// Return the codec's nonempty-array/all-functionResponse classification while dispatching.
+fn content_blocks(view: JsonView<'_>, output: output::Output<'_>, out: &mut Vec<Block>) -> Result<bool> {
     if let Some(text) = view.text(true)? {
         if !text.is_empty() {
             out.push(Block::Text { text });
         }
     } else if let Some(parts) = view.array()? {
+        let mut present = false;
+        let mut tool_response = true;
         for part in parts {
-            part_block(part?, output, out)?;
+            present = true;
+            tool_response &= part_block(part?, output, out)?;
         }
+        return Ok(present && tool_response);
     } else {
         part_block(view, output, out)?;
     }
-    Ok(())
+    Ok(false)
 }
 
 fn object_field<'a>(fields: &Fields<'a>, key: &str) -> Result<Option<JsonView<'a>>> {
@@ -120,12 +114,12 @@ fn object_field<'a>(fields: &Fields<'a>, key: &str) -> Result<Option<JsonView<'a
     }
 }
 
-fn part_block(view: JsonView<'_>, output: output::Output<'_>, out: &mut Vec<Block>) -> Result<()> {
+fn part_block(view: JsonView<'_>, output: output::Output<'_>, out: &mut Vec<Block>) -> Result<bool> {
     if let Some(text) = view.text(true)? {
         if !text.is_empty() {
             out.push(Block::Text { text });
         }
-        return Ok(());
+        return Ok(false);
     }
     let Some(obj) = Fields::parse(
         view,
@@ -139,7 +133,7 @@ fn part_block(view: JsonView<'_>, output: output::Output<'_>, out: &mut Vec<Bloc
         ],
     )?
     else {
-        return Ok(());
+        return Ok(false);
     };
     if let Some(fc) = object_field(&obj, "functionCall")? {
         if let Some(fc) = Fields::parse(fc, &["name", "id", "args"])? {
@@ -203,5 +197,6 @@ fn part_block(view: JsonView<'_>, output: output::Output<'_>, out: &mut Vec<Bloc
             });
         }
     }
-    Ok(())
+    // Presence is authoritative even when the value is scalar or functionCall wins dispatch.
+    Ok(obj.get("functionResponse").is_some())
 }
