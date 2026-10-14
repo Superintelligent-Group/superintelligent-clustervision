@@ -52,6 +52,35 @@ impl ExactStrings {
         self.insert_text(Cow::Borrowed(text))
     }
 
+    /// Decode a checked key without owning its complete body. Non-inline keys stage once
+    /// into the existing disk backend; no slot is published until the producer succeeds.
+    #[cfg(feature = "sqlite")]
+    pub(crate) fn insert_source(&mut self, text: &crate::Text, resolver: &crate::lazy::Resolver) -> Result<bool> {
+        if let Some(text) = text.inline_str() {
+            return self.insert_text(Cow::Borrowed(text));
+        }
+        self.spill_memory()?;
+        let hasher = self.hashes.build_hasher();
+        self.spill.as_mut().unwrap().insert_stream(
+            |visit| text.try_for_each_chunk(resolver, APPEND_BYTES, |chunk| visit(chunk.as_bytes())),
+            hasher,
+        )
+    }
+
+    fn spill_memory(&mut self) -> Result<()> {
+        if self.spill.is_some() {
+            return Ok(());
+        }
+        let mut disk = Disk::new(self.memory.len())?;
+        for old in &self.memory {
+            disk.insert(old.as_bytes(), self.hash(old))?;
+        }
+        self.spill = Some(disk);
+        self.memory = HashSet::new();
+        self.bytes = 0;
+        Ok(())
+    }
+
     fn insert_text(&mut self, text: Cow<'_, str>) -> Result<bool> {
         if self.spill.is_none() && self.memory.contains(text.as_ref()) {
             return Ok(false);
@@ -73,13 +102,7 @@ impl ExactStrings {
             })
             .saturating_add(slots.saturating_mul(std::mem::size_of::<String>() + 16));
         if self.spill.is_none() && estimated > self.limit {
-            let mut disk = Disk::new(self.memory.len())?;
-            for old in &self.memory {
-                disk.insert(old.as_bytes(), self.hash(old))?;
-            }
-            self.spill = Some(disk);
-            self.memory = HashSet::new();
-            self.bytes = 0;
+            self.spill_memory()?;
         }
         let hash = self.hash(&text);
         match &mut self.spill {
@@ -106,7 +129,11 @@ impl ExactStrings {
 
     fn hash(&self, text: &str) -> u64 {
         let mut hasher = self.hashes.build_hasher();
-        hasher.write(text.as_bytes());
+        // Fixed write boundaries make even hashers whose write calls are significant
+        // produce the same hash for arbitrary decoded source chunk partitions.
+        for chunk in text.as_bytes().chunks(COMPARE_BYTES) {
+            hasher.write(chunk);
+        }
         hasher.finish()
     }
 }
@@ -259,6 +286,7 @@ struct Disk {
     end: u64,
     flushed: u64,
     pending: Vec<u8>,
+    failed: bool,
 }
 impl Disk {
     fn new(len: usize) -> Result<Self> {
@@ -279,9 +307,11 @@ impl Disk {
             end: 0,
             flushed: 0,
             pending: Vec::with_capacity(APPEND_BYTES),
+            failed: false,
         })
     }
     fn find(&mut self, text: &[u8], hash: u64) -> Result<(u64, bool)> {
+        anyhow::ensure!(!self.failed, "exact set backing failed");
         let mut bucket = hash & (self.capacity - 1);
         for _ in 0..self.capacity {
             let slot = Slot::read(&mut self.index, bucket)?;
@@ -372,6 +402,112 @@ impl Disk {
         self.len += 1;
         Ok(true)
     }
+
+    #[cfg(any(feature = "sqlite", test))]
+    fn flush_pending(&mut self) -> Result<()> {
+        if !self.pending.is_empty() {
+            self.data.seek(SeekFrom::Start(self.flushed))?;
+            self.data.write_all(&self.pending).context("flushing exact set keys")?;
+            self.flushed += self.pending.len() as u64;
+            self.pending.clear();
+        }
+        Ok(())
+    }
+
+    #[cfg(any(feature = "sqlite", test))]
+    fn discard_suffix(&mut self, start: u64) -> Result<()> {
+        let result = self.data.set_len(start).context("discarding unpublished exact set key");
+        if result.is_err() {
+            self.failed = true;
+        }
+        self.flushed = start;
+        self.pending.clear();
+        result
+    }
+
+    #[cfg(any(feature = "sqlite", test))]
+    fn equal_ranges(&mut self, slot: Slot, start: u64, len: u64) -> Result<bool> {
+        let mut left = [0; COMPARE_BYTES];
+        let mut right = [0; COMPARE_BYTES];
+        let mut offset = 0;
+        while offset < len {
+            let count = (len - offset).min(COMPARE_BYTES as u64) as usize;
+            read_page_at(&mut self.data, &mut left[..count], slot.offset - 1 + offset)?;
+            read_page_at(&mut self.data, &mut right[..count], start + offset)?;
+            if left[..count] != right[..count] {
+                return Ok(false);
+            }
+            offset += count as u64;
+        }
+        Ok(true)
+    }
+
+    /// Stage one decoded key in the same append file as retained keys. Errors and duplicates
+    /// discard only unpublished bytes; complete source validation precedes exact membership.
+    #[cfg(any(feature = "sqlite", test))]
+    fn insert_stream(
+        &mut self,
+        produce: impl FnOnce(&mut dyn FnMut(&[u8]) -> Result<()>) -> Result<()>,
+        hasher: impl Hasher,
+    ) -> Result<bool> {
+        anyhow::ensure!(!self.failed, "exact set backing failed");
+        self.flush_pending()?;
+        let start = self.end;
+        let result = (|| {
+            let mut hash = ChunkHash::new(hasher);
+            let mut len = 0u64;
+            produce(&mut |chunk| {
+                len = len
+                    .checked_add(chunk.len() as u64)
+                    .context("exact set key length overflow")?;
+                start.checked_add(len).context("exact set key extent overflow")?;
+                hash.write(chunk);
+                self.append(chunk)
+            })?;
+            self.flush_pending()?;
+            let hash = hash.finish();
+            let mut bucket = hash & (self.capacity - 1);
+            for _ in 0..self.capacity {
+                let slot = Slot::read(&mut self.index, bucket)?;
+                if slot.offset == 0 {
+                    if self.len >= self.capacity / 2 {
+                        self.grow()?;
+                        bucket = hash & (self.capacity - 1);
+                        while Slot::read(&mut self.index, bucket)?.offset != 0 {
+                            bucket = (bucket + 1) & (self.capacity - 1);
+                        }
+                    }
+                    Slot {
+                        hash,
+                        offset: start.checked_add(1).context("spill offset overflow")?,
+                        len,
+                    }
+                    .write(&mut self.index, bucket)?;
+                    self.end = start + len;
+                    self.len += 1;
+                    return Ok(true);
+                }
+                if slot.hash == hash && slot.len == len && self.equal_ranges(slot, start, len)? {
+                    return Ok(false);
+                }
+                bucket = (bucket + 1) & (self.capacity - 1);
+            }
+            bail!("exact set index is full")
+        })();
+        match result {
+            Ok(true) => Ok(true),
+            Ok(false) => {
+                self.discard_suffix(start)?;
+                Ok(false)
+            }
+            Err(error) => {
+                if let Err(cleanup) = self.discard_suffix(start) {
+                    return Err(error.context(format!("exact set rollback also failed: {cleanup}")));
+                }
+                Err(error)
+            }
+        }
+    }
     fn grow(&mut self) -> Result<()> {
         let capacity = self.capacity.checked_mul(2).context("spill capacity overflow")?;
         let mut index = Index::new(capacity)?;
@@ -393,9 +529,123 @@ impl Disk {
     }
 }
 
+#[cfg(any(feature = "sqlite", test))]
+struct ChunkHash<H> {
+    hasher: H,
+    pending: Vec<u8>,
+}
+#[cfg(any(feature = "sqlite", test))]
+impl<H: Hasher> ChunkHash<H> {
+    fn new(hasher: H) -> Self {
+        Self {
+            hasher,
+            pending: Vec::with_capacity(COMPARE_BYTES),
+        }
+    }
+    fn write(&mut self, mut bytes: &[u8]) {
+        while !bytes.is_empty() {
+            if self.pending.is_empty() && bytes.len() >= COMPARE_BYTES {
+                self.hasher.write(&bytes[..COMPARE_BYTES]);
+                bytes = &bytes[COMPARE_BYTES..];
+            } else {
+                let count = (COMPARE_BYTES - self.pending.len()).min(bytes.len());
+                self.pending.extend_from_slice(&bytes[..count]);
+                bytes = &bytes[count..];
+                if self.pending.len() == COMPARE_BYTES {
+                    self.hasher.write(&self.pending);
+                    self.pending.clear();
+                }
+            }
+        }
+    }
+    fn finish(mut self) -> u64 {
+        if !self.pending.is_empty() {
+            self.hasher.write(&self.pending);
+        }
+        self.hasher.finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[derive(Default)]
+    struct CollisionHash;
+    impl Hasher for CollisionHash {
+        fn write(&mut self, _: &[u8]) {}
+        fn finish(&self) -> u64 {
+            7
+        }
+    }
+
+    #[test]
+    fn streamed_keys_preserve_collisions_partitions_and_failed_source_rollback() {
+        let mut disk = Disk::new(0).unwrap();
+        assert!(disk.insert(b"existing", 7).unwrap());
+        let giant = "key\0λ🌙".repeat(300_000).into_bytes();
+        let stream = |disk: &mut Disk, bytes: &[u8], chunk: usize| {
+            disk.insert_stream(
+                |visit| {
+                    for part in bytes.chunks(chunk) {
+                        visit(part)?;
+                    }
+                    Ok(())
+                },
+                CollisionHash,
+            )
+        };
+        assert!(stream(&mut disk, &giant, 19).unwrap());
+        let retained_end = disk.end;
+        assert!(!stream(&mut disk, &giant, 65536).unwrap());
+        assert_eq!(disk.end, retained_end);
+        assert_eq!(disk.data.metadata().unwrap().len(), retained_end);
+        let mut different = giant.clone();
+        *different.last_mut().unwrap() ^= 1;
+        assert!(stream(&mut disk, &different, 8001).unwrap());
+        assert!(!stream(&mut disk, b"existing", 1).unwrap());
+        let retained_end = disk.end;
+        let error = disk
+            .insert_stream(
+                |visit| {
+                    visit(&giant)?;
+                    anyhow::bail!("source changed after decoded output")
+                },
+                CollisionHash,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("source changed"));
+        assert_eq!(disk.end, retained_end);
+        assert_eq!(disk.data.metadata().unwrap().len(), retained_end);
+        assert!(disk.find(&giant, 7).unwrap().1);
+        assert!(stream(&mut disk, b"after failure", 3).unwrap());
+        assert!(stream(&mut disk, b"", 1).unwrap());
+        assert!(!stream(&mut disk, b"", 3).unwrap());
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn checked_source_insertion_matches_inline_keys_and_rejects_stale_sources() {
+        let world = cv_testkit::World::in_process("exact-checked-source");
+        let path = world.home.join("key.json");
+        let body = "key\0λ🌙\n".repeat(200_000);
+        std::fs::write(&path, serde_json::to_vec(&serde_json::json!({"key":body})).unwrap()).unwrap();
+        let source = crate::json::JsonSource::capture(&path).unwrap();
+        let text = source
+            .read_document(|view| view.get("key")?.unwrap().text(true)?.context("key string"))
+            .unwrap();
+        assert!(matches!(text, crate::Text::Source(_)));
+        let resolver = crate::lazy::Resolver::new(Some(path.clone()));
+        let mut set = ExactStrings::default();
+        assert!(set.insert_borrowed("retained before spill").unwrap());
+        assert!(set.insert_source(&text, &resolver).unwrap());
+        assert!(!set.insert_borrowed(&body).unwrap());
+        assert!(!set.insert_source(&text, &resolver).unwrap());
+        std::fs::write(&path, "changed backing").unwrap();
+        assert!(set.insert_source(&text, &resolver).is_err());
+        assert!(set.contains(&body).unwrap());
+        assert!(set.contains("retained before spill").unwrap());
+        assert!(set.insert_borrowed("after stale source").unwrap());
+    }
     #[test]
     fn collisions_growth_empty_and_binary_keys_match_hash_set() {
         let mut disk = Disk::new(0).unwrap();
