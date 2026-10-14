@@ -221,33 +221,57 @@ fn block(view: JsonView<'_>) -> Result<Option<Block>> {
                 let text = value.source_text()?.context("Claude projected string")?;
                 match &mut block {
                     Block::Text { text: target } | Block::Thinking { text: target, .. } => *target = text,
-                    Block::ToolResult { content, details, .. } => {
-                        *content = text;
-                        // The derived path/size demand needs the actual stub; ordinary giant output
-                        // is never decoded into an owned string just to look for this prefix.
-                        let prefix = borrowed::view_prefix(value, true)?;
-                        if prefix.starts_with("<persisted-output>") {
-                            let decoded = value.resolve()?;
-                            *details = decoded
-                                .as_str()
-                                .and_then(persisted_output)
-                                .map(|(path, size)| serde_json::json!({"persistedOutput":{"path":path,"size":size}}));
-                        }
-                    }
+                    Block::ToolResult { content, .. } => *content = text,
                     _ => {}
                 }
             }
         }
     }
     if let Block::ToolResult { content, details, .. } = &mut block {
-        if details.is_none() {
-            *details = content
-                .inline_str()
-                .and_then(persisted_output)
-                .map(|(path, size)| serde_json::json!({"persistedOutput":{"path":path,"size":size}}));
-        }
+        *details = persisted_details(content)?;
     }
     Ok(Some(block))
+}
+
+/// Coerced content arrays have checked composite text rather than an inline string. Detect
+/// the marker on that same text, without decoding ordinary giant results just to inspect a head.
+fn persisted_details(content: &Text) -> Result<Option<Value>> {
+    let resolver = crate::Resolver::new(None);
+    let decoded = if let Some(inline) = content.inline_str() {
+        std::borrow::Cow::Borrowed(inline)
+    } else {
+        #[derive(Debug)]
+        struct PrefixComplete;
+        impl std::fmt::Display for PrefixComplete {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("persisted-output prefix complete")
+            }
+        }
+        impl std::error::Error for PrefixComplete {}
+        let mut prefix = String::new();
+        let result = content.try_for_each_chunk(&resolver, 64, |part| {
+            for c in part.chars() {
+                if prefix.is_empty() && c.is_whitespace() {
+                    continue;
+                }
+                prefix.push(c);
+                if prefix.len() >= 64 {
+                    return Err(PrefixComplete.into());
+                }
+            }
+            Ok(())
+        });
+        match result {
+            Ok(()) => {}
+            Err(error) if error.is::<PrefixComplete>() => {}
+            Err(error) => return Err(error),
+        }
+        if !prefix.starts_with("<persisted-output>") {
+            return Ok(None);
+        }
+        content.try_resolve(&resolver)?
+    };
+    Ok(persisted_output(&decoded).map(|(path, size)| serde_json::json!({"persistedOutput":{"path":path,"size":size}})))
 }
 
 pub(super) fn stream(
@@ -547,6 +571,7 @@ mod tests {
             json!({"type":"assistant","message":{"content":[{"type":"thinking","thinking":body,"signature":"sig"},{"type":"tool_use","id":"call","name":"custom","input":{"body":body}}]}}),
             json!({"type":"user","toolUseResult":{"agentId":"agent","status":"finished","stdout":body},"message":{"content":[{"type":"tool_result","tool_use_id":"call","content":body,"is_error":true}]}}),
             json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"call","content":[{"type":"text","text":format!("<persisted-output>\nOutput too large (66KB). Full output saved to: /tmp/output.txt\n\nPreview:\n{body}\n</persisted-output>") }]}]}}),
+            json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"call","content":[{"type":"text","text":"\u{2003}".repeat(30000)}, {"type":"text","text":format!("<persisted-output>\nOutput too large (66KB). Full output saved to: /tmp/output.txt\n\nPreview:\n{body}\n</persisted-output>") }]}]}}),
             json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"call","content":format!("\u{2003}<persisted-output>\nOutput too large (66KB). Full output saved to: /tmp/output.txt\n\nPreview:\n{body}\n</persisted-output>")}]}}),
             json!({"type":"assistant","isApiErrorMessage":true,"errorDetails":{"body":body},"requestId":"request","message":{"model":"<synthetic>","content":[{"type":"text","text":body}]}}),
             json!({"type":"user","message":{"content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":body}},{"type":"document","title":"pdf","source":{"type":"file","file_id":"file"}}]}}),
