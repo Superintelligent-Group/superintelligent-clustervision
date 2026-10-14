@@ -516,27 +516,27 @@ mod tests {
         assert_eq!(comps[0].summary_msg_idx, Some(1));
         assert_eq!(comps[0].summary, None, "count-only mode keeps no summary text");
     }
-}
-#[test]
-fn queued_unlinked_summaries_pair_latest_once_and_preserve_duplicate_id_links() {
-    let mut sink = CompactionSink::new(false);
-    for i in 0..1000 {
-        sink.try_message(boundary(&format!("b{i}"), "auto", 100)).unwrap();
+    #[test]
+    fn queued_unlinked_summaries_pair_latest_once_and_preserve_duplicate_id_links() {
+        let mut sink = CompactionSink::new(false);
+        for i in 0..1000 {
+            sink.try_message(boundary(&format!("b{i}"), "auto", 100)).unwrap();
+        }
+        for _ in 0..1000 {
+            sink.try_message(summary("unknown", "summary")).unwrap();
+        }
+        assert!(sink.pending.is_empty() && sink.unpaired.is_empty());
+        let rows = sink.into_boundaries().unwrap();
+        for (i, row) in rows.iter().enumerate() {
+            assert_eq!(row.summary_msg_idx, Some(1999 - i));
+        }
+        let mut sink = CompactionSink::new(false);
+        sink.try_message(boundary("duplicate", "auto", 100)).unwrap();
+        sink.try_message(boundary("duplicate", "manual", 200)).unwrap();
+        sink.try_message(summary("duplicate", "newest")).unwrap();
+        sink.try_message(summary("unknown", "oldest")).unwrap();
+        let rows = sink.into_boundaries().unwrap();
+        assert_eq!(rows[0].summary_msg_idx, Some(3));
+        assert_eq!(rows[1].summary_msg_idx, Some(2));
     }
-    for _ in 0..1000 {
-        sink.try_message(summary("unknown", "summary")).unwrap();
-    }
-    assert!(sink.pending.is_empty() && sink.unpaired.is_empty());
-    let rows = sink.into_boundaries().unwrap();
-    for (i, row) in rows.iter().enumerate() {
-        assert_eq!(row.summary_msg_idx, Some(1999 - i));
-    }
-    let mut sink = CompactionSink::new(false);
-    sink.try_message(boundary("duplicate", "auto", 100)).unwrap();
-    sink.try_message(boundary("duplicate", "manual", 200)).unwrap();
-    sink.try_message(summary("duplicate", "newest")).unwrap();
-    sink.try_message(summary("unknown", "oldest")).unwrap();
-    let rows = sink.into_boundaries().unwrap();
-    assert_eq!(rows[0].summary_msg_idx, Some(3));
-    assert_eq!(rows[1].summary_msg_idx, Some(2));
 }
