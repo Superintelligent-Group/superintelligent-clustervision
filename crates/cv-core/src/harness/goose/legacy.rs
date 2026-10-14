@@ -215,48 +215,11 @@ fn note(view: JsonView<'_>, header: bool, session: &mut SessionRef) -> Result<()
         return Ok(());
     }
     let Some(fields) = Fields::parse(view, &["role", "content"])? else {
-        // Value::get on scalars/arrays defaults the role to user.
-        session.message_count += 1;
         return Ok(());
     };
-    let conversational = match fields.get("role") {
-        Some(role) if role.is_string()? => equals(role, "user")? || equals(role, "assistant")?,
-        _ => true,
-    };
-    if !conversational {
-        return Ok(());
-    }
-    let mut only_results = false;
-    if let Some(items) = fields.get("content").map(|v| v.array()).transpose()?.flatten() {
-        for item in items {
-            let result = match Fields::parse(item?, &["type"])? {
-                Some(fields) => fields
-                    .get("type")
-                    .map(|v| equals(v, "toolResponse"))
-                    .transpose()?
-                    .unwrap_or(false),
-                None => false,
-            };
-            if !result {
-                only_results = false;
-                break;
-            }
-            only_results = true;
-        }
-    }
-    session.message_count += usize::from(!only_results);
+    let role = fields.string("role")?.unwrap_or_else(|| "user".into());
+    session.message_count += usize::from(super::count::view(&role, fields.get("content"))?);
     Ok(())
-}
-fn equals(view: JsonView<'_>, expected: &str) -> Result<bool> {
-    let mut offset = 0usize;
-    let mut equal = true;
-    let string = view.for_each_str_chunk(|part| {
-        let end = offset.saturating_add(part.len());
-        equal &= expected.as_bytes().get(offset..end) == Some(part.as_bytes());
-        offset = end;
-        Ok(())
-    })?;
-    Ok(string && equal && offset == expected.len())
 }
 
 #[cfg(test)]
@@ -492,21 +455,7 @@ mod tests {
             .next()
             .and_then(|l| serde_json::from_str(l).ok())
             .unwrap_or(Value::Null);
-        // The contract count (`SessionRef::message_count`): user + assistant turns, with a user line
-        // that is only tool results read as the Tool turn `stream_legacy` makes of it.
-        let count = lines
-            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-            .filter(|m| {
-                let role = m.get("role").and_then(Value::as_str).unwrap_or("user");
-                let only_tool_results = m.get("content").and_then(Value::as_array).is_some_and(|items| {
-                    !items.is_empty()
-                        && items
-                            .iter()
-                            .all(|i| i.get("type").and_then(Value::as_str) == Some("toolResponse"))
-                });
-                matches!(role, "user" | "assistant") && !only_tool_results
-            })
-            .count();
+        let count = owned_messages(text.as_bytes()).iter().filter(|m| m.is_turn()).count();
         let title = header
             .get("description")
             .and_then(Value::as_str)

@@ -7,7 +7,7 @@
 pub(crate) mod range;
 
 use crate::lazy::INLINE_MAX;
-#[cfg(feature = "mmap")]
+#[cfg(any(feature = "mmap", feature = "sqlite"))]
 use anyhow::Context;
 use anyhow::Result;
 use serde_json::Value;
@@ -199,7 +199,7 @@ pub(crate) fn accepts_value_at_depth(raw: Raw<'_>, depth: usize) -> bool {
 
 /// Select a bounded schema roster without allocating ignored keys or descendant payloads.
 /// Keys obey Value's final-duplicate rule; complete acceptance remains the caller's boundary.
-#[cfg(feature = "mmap")]
+#[cfg(any(feature = "mmap", feature = "sqlite"))]
 pub(crate) fn select_fields<'a>(raw: Raw<'a>, keys: &[&str]) -> Option<Vec<Option<Raw<'a>>>> {
     select_fields_with(raw, keys, false).ok().flatten()
 }
@@ -207,7 +207,7 @@ pub(crate) fn select_fields<'a>(raw: Raw<'a>, keys: &[&str]) -> Option<Vec<Optio
 pub(crate) fn select_unique_fields<'a>(raw: Raw<'a>, keys: &[&str]) -> Result<Option<Vec<Option<Raw<'a>>>>> {
     select_fields_with(raw, keys, true)
 }
-#[cfg(feature = "mmap")]
+#[cfg(any(feature = "mmap", feature = "sqlite"))]
 fn select_fields_with<'a>(raw: Raw<'a>, keys: &[&str], unique: bool) -> Result<Option<Vec<Option<Raw<'a>>>>> {
     use anyhow::Context;
     let b = raw.get().as_bytes();

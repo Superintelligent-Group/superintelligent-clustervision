@@ -125,6 +125,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+mod count;
 mod legacy;
 mod project;
 use project::{decode_content_view, project_metadata};
@@ -319,29 +320,31 @@ fn discover_db(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
         let updated: Option<String> = row.get(4).ok().flatten();
         Ok((id, title, wd, created, updated))
     })?;
-    // `message_count` is the contract's user + assistant turns (`SessionRef::message_count`), so the
-    // COUNT applies the same three rules `stream_db` does when it builds the IR: a `user` row whose
-    // every content item is a `toolResponse` is a Tool turn (`build_message`), and a row Goose hides
-    // from the user (`metadata_json.userVisible = false`: the `<turn-context>` block, compaction
-    // leftovers) is a System turn (`apply_metadata`). A corrupt JSON cell counts as not a turn
-    // rather than aborting the query (`json_valid` first, as the Devin adapter does).
-    let msg_cols = columns(conn, "messages");
-    let visible = if msg_cols.contains("metadata_json") {
-        " AND COALESCE(CASE WHEN json_valid(metadata_json) \
-           THEN json_extract(metadata_json, '$.userVisible') END, 1) != 0"
+    // One borrowed cursor pass counts actual codec turns across all sessions, including
+    // visibility, malformed/empty records, controls and errors. Bodies are never copied.
+    let metadata = if columns(conn, "messages").contains("metadata_json") {
+        "metadata_json"
     } else {
-        ""
+        "NULL"
     };
-    let count_sql = format!(
-        "SELECT COUNT(*) FROM messages WHERE session_id = ?1 AND (role = 'assistant' \
-         OR (role = 'user' AND CASE WHEN json_valid(content_json) THEN EXISTS (\
-             SELECT 1 FROM json_each(content_json) \
-             WHERE json_extract(value, '$.type') IS NOT 'toolResponse') ELSE 0 END)){visible}"
-    );
+    let mut counts = HashMap::<String, usize>::new();
+    let mut count_stmt = conn.prepare(&format!(
+        "SELECT session_id, role, content_json, {metadata} FROM messages"
+    ))?;
+    let mut messages = count_stmt.query([])?;
+    while let Some(row) = messages.next()? {
+        let content = row.get_ref(2).ok().and_then(|v| v.as_str().ok());
+        let role = row.get_ref(1).ok().and_then(|v| v.as_str().ok()).unwrap_or("user");
+        let metadata = row.get_ref(3).ok().and_then(|v| v.as_str().ok());
+        if content.is_some_and(|content| count::cell(role, content, metadata)) {
+            let id: String = row.get(0)?;
+            *counts.entry(id).or_default() += 1;
+        }
+    }
     let mut out = Vec::new();
     for row in rows.flatten() {
         let (id, title, wd, created, updated) = row;
-        let count: i64 = conn.query_row(&count_sql, [&id], |r| r.get(0)).unwrap_or(0);
+        let count = counts.remove(&id).unwrap_or(0);
         out.push(SessionRef {
             id,
             harness: Harness::Goose,
@@ -352,7 +355,7 @@ fn discover_db(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
                 .map(|t| crate::ir::truncate(&t, 80)),
             created_at: created.as_deref().and_then(parse_ts_text),
             updated_at: updated.as_deref().and_then(parse_ts_text),
-            message_count: count.max(0) as usize,
+            message_count: count,
         });
     }
     Ok(out)
@@ -1789,6 +1792,125 @@ mod tests {
             details.as_ref().and_then(|d| d.pointer("/_meta/subagent_session_id")),
             Some(&Value::from("20261011_7"))
         );
+    }
+
+    #[test]
+    fn discovery_count_matches_full_codec_turns_for_shapes_visibility_and_corruption() {
+        let conn = mk(SCHEMA);
+        let giant = "雪λ\n".repeat(20000);
+        let mut cases = vec![
+            ("user", "null".to_owned(), None),
+            ("assistant", "[]".to_owned(), None),
+            (
+                "user",
+                r#"["scalar",1,null,{"type":"text","text":"accepted"}]"#.to_owned(),
+                None,
+            ),
+            ("user", r#""bare prompt""#.to_owned(), None),
+            ("user", r#""""#.to_owned(), None),
+            (
+                "assistant",
+                r#"[{"type":"toolResponse","toolResult":null}]"#.to_owned(),
+                None,
+            ),
+            (
+                "user",
+                r#"[{"type":"toolResponse","toolResult":null}]"#.to_owned(),
+                None,
+            ),
+            ("user", r#"[{"type":"toolResponse"}]"#.to_owned(), None),
+            (
+                "user",
+                r#"[{"type":"text","text":""}]"#.to_owned(),
+                Some(r#"{"userVisible":0}"#),
+            ),
+            (
+                "user",
+                r#"[{"type":"text","text":"x"}]"#.to_owned(),
+                Some(r#"{"userVisible":false}"#),
+            ),
+            (
+                "assistant",
+                r#"[{"type":"text","text":"x"}]"#.to_owned(),
+                Some(r#"{"userVisible":false,"userVisible":true}"#),
+            ),
+            (
+                "user",
+                r#"[{"type":"text","text":"x"}]"#.to_owned(),
+                Some(r#"{"userVisible":true,"userVisible":false}"#),
+            ),
+            (
+                "user",
+                r#"[{"type":"text","text":"x","ignored":1e999}]"#.to_owned(),
+                None,
+            ),
+            (
+                "user",
+                r#"[{"type":"text","text":"x","ignored":"\ud800"}]"#.to_owned(),
+                None,
+            ),
+            (
+                "assistant",
+                r#"[{"type":"error"},{"type":"text","text":"also text"}]"#.to_owned(),
+                None,
+            ),
+            (
+                "other",
+                r#"[{"type":"text","text":"unknown role defaults user"}]"#.to_owned(),
+                Some("malformed"),
+            ),
+            (
+                "assistant",
+                r#"[{"type":"text","type":"toolResponse","toolResult":null}]"#.to_owned(),
+                None,
+            ),
+        ];
+        for ty in [
+            "systemNotification",
+            "actionRequired",
+            "toolConfirmationRequest",
+            "error",
+            "thinking",
+            "redactedThinking",
+            "image",
+            "document",
+            "tool_use",
+            "tool_result",
+        ] {
+            cases.push((
+                "assistant",
+                serde_json::json!([{"type":ty,"text":giant,"data":giant,"ignored":giant}]).to_string(),
+                None,
+            ));
+        }
+        for call in [
+            serde_json::json!(null),
+            serde_json::json!({"status":"error","error":giant}),
+            serde_json::json!({"value":null}),
+            serde_json::json!({"value":{"arguments":{"body":giant}}}),
+        ] {
+            cases.push((
+                "assistant",
+                serde_json::json!([{"type":"toolRequest","toolCall":call}]).to_string(),
+                None,
+            ));
+        }
+        for (i, (role, body, metadata)) in cases.iter().enumerate() {
+            let id = format!("shape-{i}");
+            conn.execute("INSERT INTO sessions(id,working_dir) VALUES (?1,'/synthetic')", [&id])
+                .unwrap();
+            conn.execute("INSERT INTO messages(session_id,role,content_json,created_timestamp,metadata_json) VALUES (?1,?2,?3,1,?4)",
+                rusqlite::params![id,role,body,metadata]).unwrap();
+        }
+        for reference in discover_db(&conn, Path::new("sessions.db")).unwrap() {
+            let parsed = parse_db(&conn, &sref(&reference.id)).unwrap();
+            assert_eq!(
+                reference.message_count,
+                parsed.messages.iter().filter(|m| m.is_turn()).count(),
+                "{}",
+                reference.id
+            );
+        }
     }
 
     #[test]
