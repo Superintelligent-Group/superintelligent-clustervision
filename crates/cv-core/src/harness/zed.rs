@@ -1293,9 +1293,11 @@ mod tests {
         assert_eq!(session.model.as_deref(), Some("zed.dev/claude-sonnet-4-thinking"));
         assert_eq!(sink.messages.len(), 4);
         assert_eq!(sink.messages[0].text().as_deref(), Some("why is test_foo flaky?"));
+        // A live WAL store is read through a private snapshot (cv never touches its -shm), so
+        // even an unchecked second pass sees the snapshot, not the writer's later commit.
         assert_eq!(
             parse_thread(&reader, &sref("t")).unwrap().model.as_deref(),
-            Some("openai/gpt-5-mini")
+            Some("zed.dev/claude-sonnet-4-thinking")
         );
         // The internal SQLite snapshot remains consistent, but publication through the real
         // adapter must reject a source changed by a callback rather than recapture its identity.

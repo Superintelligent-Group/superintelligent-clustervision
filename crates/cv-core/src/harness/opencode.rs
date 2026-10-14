@@ -2848,6 +2848,42 @@ mod tests {
         );
     }
 
+    /// Reading a running OpenCode's store writes nothing there: discovery plus a full stream of
+    /// every session leave each file's inode, size, mtime and bytes (`-shm` included) unchanged,
+    /// both with WAL frames pending and after a checkpoint, and the WAL-only rows are read.
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn reading_a_live_wal_store_writes_nothing_in_it() {
+        use crate::harness::store::sqlite::{live_store, store_state};
+        let dir = std::env::temp_dir().join(format!("cv-opencode-live-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        let db = dir.join("opencode.db");
+        drop(make_db(&db, true));
+        let writer = live_store(&db, "SELECT 1");
+        seed_session(&writer, "ses_live", true);
+        assert!(fs::metadata(dir.join("opencode.db-wal")).unwrap().len() > 0);
+        for checkpointed in [false, true] {
+            if checkpointed {
+                writer.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+            }
+            let before = store_state(&dir);
+            let adapter = OpenCode::with_db(db.clone());
+            let refs = adapter.discover().unwrap();
+            assert_eq!(refs.len(), 1);
+            for reference in &refs {
+                let mut session = crate::stream::collect_with(&adapter, reference, &ParseOptions::lazy()).unwrap();
+                session.materialize().unwrap();
+                assert!(session
+                    .messages
+                    .iter()
+                    .any(|m| m.text().as_deref() == Some("Reverted.")));
+            }
+            assert_eq!(store_state(&dir), before, "checkpointed: {checkpointed}");
+        }
+        drop(writer);
+        fs::remove_dir_all(dir).ok();
+    }
+
     #[cfg(feature = "sqlite")]
     #[test]
     fn v2_projection_preserves_malformed_cell_failure_policy() {

@@ -1,7 +1,17 @@
 //! SQLite plumbing for the database-backed stores (Cursor, Devin, Goose, Hermes, OpenClaw,
-//! OpenCode, Zed). One invariant lives here so no adapter can get it wrong: **cv opens a harness's
-//! database read-only** (`SQLITE_OPEN_READ_ONLY | SQLITE_OPEN_NO_MUTEX`) and never takes a write
-//! lock on a live store — a WAL-mode database being written by its harness stays readable.
+//! OpenCode, Zed). One invariant lives here so no adapter can get it wrong: **cv never writes a
+//! harness's store**, not even its coordination files. Opening `SQLITE_OPEN_READ_ONLY` is not
+//! enough for that: a WAL reader records its read mark in the `-shm` wal-index (and creates
+//! `-wal`/`-shm` when they are missing), which rewrites a file in the harness home. So
+//! [`open_ro`] chooses, from the database header and its sidecars:
+//! - rollback-journal mode: the original, read-only (readers only take advisory locks);
+//! - WAL mode with no WAL frames (`-wal` absent or empty) and no `-journal`: the original with
+//!   `immutable=1`, so SQLite opens no `-wal`/`-shm` and takes no locks;
+//! - WAL mode with frames: a private snapshot of the database and its `-wal` (never `-shm`,
+//!   which SQLite rebuilds in the private directory), so committed WAL-only rows stay visible.
+//!
+//! Every path's identity is captured before and checked after each read ([`ReadConnection::read`]),
+//! so a harness write during a read is an error, not a torn result.
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags};
@@ -164,12 +174,11 @@ fn sidecar(path: &Path, suffix: &str) -> std::path::PathBuf {
     name.into()
 }
 
-/// SQLite may create WAL/SHM even with READ_ONLY. Missing WAL auxiliaries therefore use a
-/// checked private copy; existing live auxiliaries keep ordinary SQLite locking/read semantics.
-/// Auxiliary existence is sampled: this cannot prevent a different process from deleting live
-/// SHM between that sample and SQLite opening it. cv does not remove harness sidecars.
-/// An operation-local LRU retains at most 256 MiB of copied DB/WAL/journal bytes, or one larger
-/// backing alone. Weak lookup reuses active readers without increasing idle disk retention.
+/// Open a harness database without writing anything in its directory (see the module docs).
+/// Snapshots of WAL-mode stores with frames live in a private directory; an operation-local LRU
+/// retains at most 256 MiB of copied DB/WAL/journal bytes, or one larger backing alone. Weak
+/// lookup reuses active readers without increasing idle disk retention. `std::fs::copy` clones
+/// on APFS (0.01 s for a 267 MB store) and copies elsewhere (0.26 s for the same file here).
 pub(crate) fn open_ro(path: &Path) -> Result<ReadConnection> {
     open_ro_with_copy_check(path, |_| Ok(()))
 }
@@ -193,9 +202,11 @@ fn open_ro_with_copy_check(path: &Path, copied: impl FnOnce(&Path) -> Result<()>
         Err(error) => return Err(error.into()),
     }
     check_reads(&reads)?;
-    let cold = &header[..16] == b"SQLite format 3\0"
-        && (header[18] == 2 || header[19] == 2)
-        && (!sidecar(&path, "-wal").exists() || !sidecar(&path, "-shm").exists());
+    let wal_mode = &header[..16] == b"SQLite format 3\0" && (header[18] == 2 || header[19] == 2);
+    let has_frames = std::fs::metadata(sidecar(&path, "-wal")).is_ok_and(|m| m.len() > 0);
+    let has_journal = sidecar(&path, "-journal").exists();
+    let immutable = wal_mode && !has_frames && !has_journal;
+    let cold = wal_mode && !immutable;
     let scope = cold.then(reader_scope);
     let snapshot = if let Some(scope) = scope.as_ref() {
         let mut cache = scope
@@ -264,10 +275,12 @@ fn open_ro_with_copy_check(path: &Path, copied: impl FnOnce(&Path) -> Result<()>
         None
     };
     let backing = snapshot.as_ref().map_or(path.as_path(), |s| s.database.as_path());
-    let connection = Connection::open_with_flags(
-        backing,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let connection = if immutable {
+        Connection::open_with_flags(immutable_uri(backing), flags | OpenFlags::SQLITE_OPEN_URI)
+    } else {
+        Connection::open_with_flags(backing, flags)
+    }
     .with_context(|| format!("opening {}", path.display()))?;
     check_reads(&reads)?;
     Ok(ReadConnection {
@@ -276,6 +289,22 @@ fn open_ro_with_copy_check(path: &Path, copied: impl FnOnce(&Path) -> Result<()>
         _snapshot: snapshot,
         _scope: scope,
     })
+}
+
+/// `file:<path>?immutable=1`, with the URI's reserved characters percent-encoded.
+fn immutable_uri(path: &Path) -> String {
+    const RESERVED: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS.add(b'%').add(b'?').add(b'#').add(b' ');
+    #[cfg(unix)]
+    let encoded = {
+        use std::os::unix::ffi::OsStrExt;
+        percent_encoding::percent_encode(path.as_os_str().as_bytes(), RESERVED).to_string()
+    };
+    #[cfg(not(unix))]
+    let encoded = {
+        let text = format!("/{}", path.to_string_lossy().replace('\\', "/"));
+        percent_encoding::utf8_percent_encode(&text, RESERVED).to_string()
+    };
+    format!("file:{encoded}?immutable=1")
 }
 
 /// Copy a snapshot's immutable TEXT/BLOB cell into an operation-owned arena using bounded
@@ -403,6 +432,47 @@ pub(crate) fn table_exists(conn: &Connection, name: &str) -> bool {
     .is_ok()
 }
 
+/// Every file in a store directory: name, inode, size, mtime and bytes (`-shm` included).
+#[cfg(test)]
+pub(crate) fn store_state(dir: &Path) -> Vec<(std::ffi::OsString, u64, u64, std::time::SystemTime, Vec<u8>)> {
+    let mut files: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            let metadata = entry.metadata().unwrap();
+            #[cfg(unix)]
+            let inode = std::os::unix::fs::MetadataExt::ino(&metadata);
+            #[cfg(not(unix))]
+            let inode = 0;
+            let bytes = if metadata.is_file() {
+                std::fs::read(entry.path()).unwrap()
+            } else {
+                Vec::new()
+            };
+            (
+                entry.file_name(),
+                inode,
+                metadata.len(),
+                metadata.modified().unwrap(),
+                bytes,
+            )
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+/// A running harness: WAL mode, `sql`'s frames not checkpointed, its connection kept open.
+#[cfg(test)]
+pub(crate) fn live_store(database: &Path, sql: &str) -> Connection {
+    let writer = Connection::open(database).unwrap();
+    writer
+        .execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;")
+        .unwrap();
+    writer.execute_batch(sql).unwrap();
+    writer
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -474,18 +544,15 @@ mod tests {
         Ok(())
     }
 
+    /// WAL frames are read through a private snapshot (reused within an operation, removed
+    /// after it) and nothing in the store directory changes, `-shm` bytes included.
     #[test]
-    fn cold_wal_is_private_and_reused() {
+    fn live_wal_snapshot_is_private_reused_and_writes_nothing_in_the_store() {
         let _serial = SNAPSHOT_TEST.lock().unwrap();
         let (directory, database) = fixture();
-        {
-            let writer = Connection::open(&database).unwrap();
-            writer
-                .execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE t(x); INSERT INTO t VALUES(7);")
-                .unwrap();
-        }
-        assert!(!sidecar(&database, "-wal").exists());
-        assert!(!sidecar(&database, "-shm").exists());
+        let writer = live_store(&database, "CREATE TABLE t(x); INSERT INTO t VALUES(7);");
+        let before = super::store_state(&directory);
+        assert!(std::fs::metadata(sidecar(&database, "-wal")).unwrap().len() > 0);
         let first = open_ro(&database).unwrap();
         assert_eq!(
             first
@@ -498,8 +565,6 @@ mod tests {
             first._snapshot.as_ref().unwrap(),
             second._snapshot.as_ref().unwrap()
         ));
-        assert!(!sidecar(&database, "-wal").exists());
-        assert!(!sidecar(&database, "-shm").exists());
         assert!(second.execute("INSERT INTO t VALUES(8)", []).is_err());
         let private_directory = first._snapshot.as_ref().unwrap().directory.clone();
         let scope = read_scope();
@@ -515,6 +580,8 @@ mod tests {
         assert!(private_directory.exists());
         drop(scope);
         assert!(!private_directory.exists());
+        assert_eq!(super::store_state(&directory), before);
+        drop(writer);
         std::fs::remove_dir_all(directory).unwrap();
     }
 
@@ -522,12 +589,7 @@ mod tests {
     fn retained_backing_keeps_lease_after_its_connection_and_cache_finish() {
         let _serial = SNAPSHOT_TEST.lock().unwrap();
         let (directory, database) = fixture();
-        {
-            let writer = Connection::open(&database).unwrap();
-            writer
-                .execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE t(x);")
-                .unwrap();
-        }
+        let _writer = live_store(&database, "CREATE TABLE t(x);");
         let reader = open_ro(&database).unwrap();
         let backing = std::sync::Arc::clone(reader._snapshot.as_ref().unwrap());
         let private = backing.directory.clone();
@@ -543,14 +605,9 @@ mod tests {
     fn interleaved_databases_reuse_active_snapshots_and_cleanup_operation() {
         let _serial = SNAPSHOT_TEST.lock().unwrap();
         let (directory, database) = fixture();
-        {
-            let writer = Connection::open(&database).unwrap();
-            writer
-                .execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE t(x);")
-                .unwrap();
-        }
+        let _writer = live_store(&database, "CREATE TABLE t(x);");
         let second_database = directory.join("other.db");
-        std::fs::copy(&database, &second_database).unwrap();
+        let _second_writer = live_store(&second_database, "CREATE TABLE t(x);");
         let scope = read_scope();
         let first = open_ro(&database).unwrap();
         let first_backing = first._snapshot.as_ref().unwrap().directory.clone();
@@ -613,21 +670,13 @@ mod tests {
     fn cached_snapshot_rebuilds_after_source_change() {
         let _serial = SNAPSHOT_TEST.lock().unwrap();
         let (directory, database) = fixture();
-        {
-            let writer = Connection::open(&database).unwrap();
-            writer
-                .execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE t(x); INSERT INTO t VALUES(7);")
-                .unwrap();
-        }
+        let writer = live_store(&database, "CREATE TABLE t(x); INSERT INTO t VALUES(7);");
         let scope = read_scope();
         let first = open_ro(&database).unwrap();
         let old_backing = first._snapshot.as_ref().unwrap().directory.clone();
         let old_reads = first.reads().clone();
         drop(first);
-        {
-            let writer = Connection::open(&database).unwrap();
-            writer.execute("UPDATE t SET x=8", []).unwrap();
-        }
+        writer.execute("UPDATE t SET x=8", []).unwrap();
         let mut copied = false;
         let second = open_ro_with_copy_check(&database, |_| {
             copied = true;
@@ -652,16 +701,10 @@ mod tests {
     fn copy_race_rejects_source_change_and_removes_private_backing() {
         let _serial = SNAPSHOT_TEST.lock().unwrap();
         let (directory, database) = fixture();
-        {
-            let writer = Connection::open(&database).unwrap();
-            writer
-                .execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE t(x);")
-                .unwrap();
-        }
+        let writer = live_store(&database, "CREATE TABLE t(x);");
         let mut private = None;
         let result = open_ro_with_copy_check(&database, |copied| {
             private = copied.parent().map(Path::to_path_buf);
-            let writer = Connection::open(&database)?;
             writer.execute("INSERT INTO t VALUES(9)", [])?;
             Ok(())
         });
@@ -670,24 +713,34 @@ mod tests {
         std::fs::remove_dir_all(directory).unwrap();
     }
 
+    /// A WAL-mode store without frames (checkpointed while its harness runs, or closed) is read
+    /// in place with `immutable=1`: no copy, no `-wal`/`-shm` created, nothing changed.
     #[test]
-    fn live_wal_reads_original_without_copying() {
+    fn frameless_wal_reads_the_original_immutably_and_writes_nothing() {
         let (directory, database) = fixture();
-        let writer = Connection::open(&database).unwrap();
-        writer
-            .execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE t(x); INSERT INTO t VALUES(7);")
-            .unwrap();
-        let reader = open_ro_with_copy_check(&database, |_| panic!("live WAL was copied")).unwrap();
-        assert!(reader._snapshot.is_none());
-        assert_eq!(
-            reader
-                .read(|r| Ok(r.query_row("SELECT x FROM t", [], |row| row.get::<_, i64>(0))?))
-                .unwrap(),
-            7
+        let writer = live_store(
+            &database,
+            "CREATE TABLE t(x); INSERT INTO t VALUES(7); PRAGMA wal_checkpoint(TRUNCATE);",
         );
-        assert!(reader.reads().fresh(&mut crate::source::Probe::default()));
-        drop(reader);
+        assert!(sidecar(&database, "-shm").exists());
+        let read = || {
+            let before = super::store_state(&directory);
+            let reader = open_ro_with_copy_check(&database, |_| panic!("a frameless WAL was copied")).unwrap();
+            assert!(reader._snapshot.is_none());
+            assert_eq!(
+                reader
+                    .read(|r| Ok(r.query_row("SELECT x FROM t", [], |row| row.get::<_, i64>(0))?))
+                    .unwrap(),
+                7
+            );
+            assert!(reader.execute("INSERT INTO t VALUES(8)", []).is_err());
+            drop(reader);
+            assert_eq!(super::store_state(&directory), before);
+        };
+        read();
         drop(writer);
+        assert!(!sidecar(&database, "-wal").exists() && !sidecar(&database, "-shm").exists());
+        read();
         std::fs::remove_dir_all(directory).unwrap();
     }
 
