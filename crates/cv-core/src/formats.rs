@@ -604,6 +604,19 @@ fn census_session(
     Ok(sample)
 }
 
+fn unseen_carried_types(manifest: &Manifest, records: &BTreeMap<String, RecordStat>) -> Vec<String> {
+    let seen: BTreeSet<&str> = records
+        .keys()
+        .filter_map(|wire| manifest.lookup(wire).map(|(key, _)| key))
+        .collect();
+    manifest
+        .types
+        .iter()
+        .filter(|(key, entry)| entry.status == Status::Carried && !seen.contains(key.as_str()))
+        .map(|(key, _)| key.clone())
+        .collect()
+}
+
 /// Parse the `recent` most recent sessions per harness in format-complete mode and tally what
 /// they hold against the manifests.
 pub fn census(harness: Option<Harness>, recent: usize) -> Census {
@@ -640,17 +653,7 @@ pub fn census(harness: Option<Harness>, recent: usize) -> Census {
         if let Some(m) = &manifest {
             // A manifest type is "unseen" when no record in the sample resolves to it — compared
             // through `lookup`, not by key equality, for the same reason.
-            c.unseen_manifest_types = m
-                .types
-                .iter()
-                .filter(|(_, e)| e.status == Status::Carried)
-                .filter(|(t, _)| {
-                    !c.records
-                        .keys()
-                        .any(|seen| m.lookup(seen).is_some_and(|(k, _)| k == t.as_str()))
-                })
-                .map(|(t, _)| t.clone())
-                .collect();
+            c.unseen_manifest_types = unseen_carried_types(m, &c.records);
         }
         out.harnesses.insert(name.to_string(), c);
     }
@@ -660,6 +663,62 @@ pub fn census(harness: Option<Harness>, recent: usize) -> Census {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unseen_carried_types_matches_nested_lookup_oracle_on_wide_vocabulary() {
+        let mut manifest: Manifest = toml::from_str(r#"harness = "test""#).unwrap();
+        let mut records = BTreeMap::new();
+        for index in 0..256 {
+            let key = format!("record.kind-{index}");
+            manifest.types.insert(
+                key,
+                TypeEntry {
+                    status: Status::Carried,
+                    note: String::new(),
+                },
+            );
+            if index % 2 == 0 {
+                records.insert(
+                    format!("kind-{index}"),
+                    RecordStat {
+                        count: 1,
+                        first_seen: PathBuf::new(),
+                        status: Some(Status::Carried),
+                        new: false,
+                    },
+                );
+            }
+        }
+        manifest.types.insert(
+            "record.family.*".into(),
+            TypeEntry {
+                status: Status::Carried,
+                note: String::new(),
+            },
+        );
+        records.insert(
+            "family.member".into(),
+            RecordStat {
+                count: 1,
+                first_seen: PathBuf::new(),
+                status: Some(Status::Carried),
+                new: false,
+            },
+        );
+        let expected: Vec<_> = manifest
+            .types
+            .iter()
+            .filter(|(_, entry)| entry.status == Status::Carried)
+            .filter(|(key, _)| {
+                !records
+                    .keys()
+                    .any(|wire| manifest.lookup(wire).is_some_and(|(found, _)| found == key.as_str()))
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        assert_eq!(unseen_carried_types(&manifest, &records), expected);
+        assert_eq!(expected.len(), 128);
+    }
 
     #[test]
     fn lookup_prefers_exact_entries_then_the_most_specific_family() {
