@@ -33,8 +33,8 @@ def main():
     screen = bytearray()  # text since the last matched expect
 
     def pump(seconds, pattern=None):
-        end = time.time() + seconds
-        while time.time() < end:
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
             r, _, _ = select.select([fd], [], [], 0.1)
             if r:
                 try:
@@ -52,28 +52,45 @@ def main():
         return False
 
     code = 0
-    for st in steps:
-        if "sleep" in st:
-            if pump(st["sleep"]) is None:
-                break
-        elif "expect" in st:
-            hit = pump(st.get("timeout", 10), re.compile(st["expect"]))
-            if hit is None:
-                break
-            if hit and "then" in st:
-                os.write(fd, st["then"].encode())
-            if not hit and not st.get("optional"):
-                log.write(f"\n[tui_driver: timed out waiting for {st['expect']!r}]\n".encode())
-                code = 3
-                break
-        elif "send" in st:
-            os.write(fd, st["send"].encode())
-    pump(2)
     try:
-        os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
-    os.waitpid(pid, 0)
+        for st in steps:
+            if "sleep" in st:
+                if pump(st["sleep"]) is None:
+                    break
+            elif "expect" in st:
+                hit = pump(st.get("timeout", 10), re.compile(st["expect"]))
+                if hit is None:
+                    if not st.get("optional"):
+                        log.write(f"\n[tui_driver: child exited before {st['expect']!r}]\n".encode())
+                        code = 3
+                        break
+                    continue
+                if hit and "then" in st:
+                    os.write(fd, st["then"].encode())
+                if not hit and not st.get("optional"):
+                    log.write(f"\n[tui_driver: timed out waiting for {st['expect']!r}]\n".encode())
+                    code = 3
+                    break
+            elif "send" in st:
+                os.write(fd, st["send"].encode())
+        pump(2)
+    finally:
+        # Reap the owned child, escalating if it ignores SIGTERM. Blocking waitpid after
+        # SIGTERM alone can strand the generator indefinitely.
+        done, _ = os.waitpid(pid, os.WNOHANG)
+        if not done:
+            os.kill(pid, signal.SIGTERM)
+            deadline = time.monotonic() + 1
+            while time.monotonic() < deadline:
+                done, _ = os.waitpid(pid, os.WNOHANG)
+                if done:
+                    break
+                time.sleep(0.02)
+            if not done:
+                os.kill(pid, signal.SIGKILL)
+                os.waitpid(pid, 0)
+        os.close(fd)
+        log.close()
     sys.exit(code)
 
 

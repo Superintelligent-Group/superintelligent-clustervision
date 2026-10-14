@@ -334,6 +334,32 @@ class ScrubCase(unittest.TestCase):
                 self.assertNotIn(secret, r.stderr + r.stdout)
 
 
+class TuiTests(unittest.TestCase):
+    def test_early_exit_does_not_satisfy_required_expect(self):
+        with tempfile.TemporaryDirectory(prefix="cv-tui-control-") as directory:
+            script = os.path.join(directory, "steps.json")
+            log = os.path.join(directory, "output.log")
+            with open(script, "w") as file:
+                json.dump([{"expect": "required-screen", "timeout": 0.1}], file)
+            result = subprocess.run([sys.executable, "-I", os.path.join(HERE, "tui_driver.py"), log,
+                                     sys.executable, "-c", "pass"], env=dict(os.environ, TUI_SCRIPT=script),
+                                    capture_output=True, text=True, timeout=8)
+            self.assertEqual(result.returncode, 3, result.stderr)
+            with open(log) as file:
+                self.assertIn("child exited before", file.read())
+
+    def test_sigterm_ignoring_owned_child_is_reaped(self):
+        with tempfile.TemporaryDirectory(prefix="cv-tui-stop-") as directory:
+            script = os.path.join(directory, "steps.json")
+            with open(script, "w") as file:
+                json.dump([{"expect": "ready"}, {"expect": "never", "timeout": 0.02}], file)
+            child = 'import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); print("ready",flush=True); time.sleep(60)'
+            result = subprocess.run([sys.executable, "-I", os.path.join(HERE, "tui_driver.py"),
+                                     os.path.join(directory, "output.log"), sys.executable, "-c", child],
+                                    env=dict(os.environ, TUI_SCRIPT=script), capture_output=True, text=True, timeout=8)
+            self.assertEqual(result.returncode, 3, result.stderr)
+
+
 class SnapshotTests(unittest.TestCase):
     def test_existing_versions_are_refused_before_opening_stores(self):
         with tempfile.TemporaryDirectory(prefix="cv-snapshot-refusal-") as directory:
