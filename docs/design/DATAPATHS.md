@@ -4779,3 +4779,22 @@ Rust targets/builds were started in the lane. Root owns the combined `pack_live_
 `unicode_lowercase_ranges`, and `dataset_file_publication` execution and broader convergence.
 Remaining confirmed shared-output gap: splice `--export md|json` materializes selected bodies
 before rendering complete Strings; the shared Json/Text consumer lane has that handoff.
+
+
+Native export destination review (2026-10-13): the first native save implementation could
+replace its own source pathname and overwrite a destination changed while the child ran.
+Native save now resolves the selected primary source, canonicalizes the destination parent,
+rejects source-path/subtree replacement and symlink destinations, rejects multiply-linked
+existing files on Unix, and compares destination size/time/Unix inode+ctime+mode before
+publication. Initially absent destinations publish with an atomic no-clobber hard link;
+existing regular destinations use rename after the comparison. Output remains private 0600
+on Unix, including replacement exports, and RAII removes only owned staging files.
+The native fake-child oracle additionally exercises source alias, symlink/hardlink refusal,
+permissions, an existing concurrent writer and a newly appearing destination. No local build
+was run; root owns the desktop gate. The existing-file comparison/rename has the ordinary
+portable check-to-rename race; it is not an OS compare-and-swap transaction. Primary-source
+alias protection does not enumerate all dynamically accessed companion files.
+
+Browser server errors lack attachment Content-Disposition and open as a separate JSON error
+tab; the viewer/cache remains intact. Successful responses alone receive download attachment
+headers in the coordinated backend. No error HTML is serialized into a client export Blob.

@@ -149,12 +149,55 @@ impl Drop for ExportStage {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct ExportDestination {
+    len: u64,
+    modified: std::time::SystemTime,
+    #[cfg(unix)]
+    identity: (u64, u64, i64, i64, u32),
+}
+fn export_destination(path: &std::path::Path) -> Result<Option<ExportDestination>, String> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("checking export destination: {e}")),
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err("export destination must be a regular file, not a symlink or directory".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.nlink() != 1 {
+            return Err("export destination has other hard links; choose a separate file".into());
+        }
+    }
+    Ok(Some(ExportDestination {
+        len: metadata.len(),
+        modified: metadata
+            .modified()
+            .map_err(|e| format!("checking destination modification time: {e}"))?,
+        #[cfg(unix)]
+        identity: {
+            use std::os::unix::fs::MetadataExt;
+            (
+                metadata.dev(),
+                metadata.ino(),
+                metadata.ctime(),
+                metadata.ctime_nsec(),
+                metadata.mode(),
+            )
+        },
+    }))
+}
+
 fn export_to_path(
     binary: &std::path::Path,
     harness: &str,
     id: &str,
     format: &str,
     destination: &std::path::Path,
+    source: &std::path::Path,
 ) -> Result<(), String> {
     let cli_format = match format {
         "markdown" => "md",
@@ -165,8 +208,19 @@ fn export_to_path(
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| std::path::Path::new("."));
-    let stage = ExportStage::create(parent)?;
-    let mut errors = ExportStage::create(parent)?;
+    let parent = parent
+        .canonicalize()
+        .map_err(|e| format!("resolving export directory: {e}"))?;
+    let destination = parent.join(destination.file_name().ok_or("export destination has no filename")?);
+    let source = source
+        .canonicalize()
+        .map_err(|e| format!("resolving transcript source: {e}"))?;
+    if destination == source || (source.is_dir() && destination.starts_with(&source)) {
+        return Err("export destination would replace transcript source; choose a separate file".into());
+    }
+    let before = export_destination(&destination)?;
+    let stage = ExportStage::create(&parent)?;
+    let mut errors = ExportStage::create(&parent)?;
     let status = Command::new(binary)
         .args(["export", "--harness", harness, "--format", cli_format, "--", id])
         .stdin(std::process::Stdio::null())
@@ -185,7 +239,15 @@ fn export_to_path(
         return Err(format!("cv export failed ({status}): {}", message.trim()));
     }
     stage.file.sync_all().map_err(|e| format!("finishing export: {e}"))?;
-    std::fs::rename(&stage.path, destination).map_err(|e| format!("saving export: {e}"))
+    if export_destination(&destination)? != before {
+        return Err("export destination changed during export; choose the destination again".into());
+    }
+    if before.is_none() {
+        // Atomic no-clobber publication: a newly appearing destination is never replaced.
+        std::fs::hard_link(&stage.path, &destination).map_err(|e| format!("saving export: {e}"))
+    } else {
+        std::fs::rename(&stage.path, &destination).map_err(|e| format!("saving export: {e}"))
+    }
 }
 
 #[tauri::command]
@@ -217,7 +279,12 @@ async fn export_session(app: AppHandle, harness: String, id: String, format: Str
             return Ok(false);
         };
         let destination = picked.into_path().map_err(|e| format!("resolving save path: {e}"))?;
-        export_to_path(&cv_binary(), &harness, &id, &format, &destination)?;
+        let kind = cv_core::Harness::parse(&harness).ok_or("unknown source harness")?;
+        let (reference, _) = cv_core::find(&id, Some(kind))
+            .map_err(|e| format!("finding transcript source: {e}"))?
+            .ok_or("transcript source not found")?;
+        let primary = cv_core::source::primary_path(&reference);
+        export_to_path(&cv_binary(), &harness, &id, &format, &destination, &primary)?;
         Ok(true)
     })
     .await
@@ -564,7 +631,7 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let error = export_to_path(&script, "claude", "session", "opensession", &destination).unwrap_err();
+        let error = export_to_path(&script, "claude", "session", "opensession", &destination, &script).unwrap_err();
         assert!(error.contains("broken source"));
         assert_eq!(
             std::fs::read_to_string(&destination).unwrap(),
@@ -572,9 +639,56 @@ mod tests {
         );
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 2, "private stages removed");
         std::fs::write(&script, "#!/bin/sh\nprintf 'complete export'\n").unwrap();
-        export_to_path(&script, "claude", "session", "opensession", &destination).unwrap();
+        export_to_path(&script, "claude", "session", "opensession", &destination, &script).unwrap();
         assert_eq!(std::fs::read_to_string(&destination).unwrap(), "complete export");
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 2, "success stages removed");
+        assert_eq!(
+            std::fs::metadata(&destination).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(
+            export_to_path(&script, "claude", "session", "opensession", &script, &script)
+                .unwrap_err()
+                .contains("transcript source")
+        );
+        let alias = root.join("alias");
+        std::os::unix::fs::symlink(&destination, &alias).unwrap();
+        assert!(
+            export_to_path(&script, "claude", "session", "opensession", &alias, &script)
+                .unwrap_err()
+                .contains("symlink")
+        );
+        std::fs::remove_file(&alias).unwrap();
+        std::fs::hard_link(&destination, &alias).unwrap();
+        assert!(
+            export_to_path(&script, "claude", "session", "opensession", &alias, &script)
+                .unwrap_err()
+                .contains("hard links")
+        );
+        std::fs::remove_file(&alias).unwrap();
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nprintf 'concurrent writer' > \"${0%/*}/session.json\"\nprintf 'complete export'\n",
+        )
+        .unwrap();
+        assert!(
+            export_to_path(&script, "claude", "session", "opensession", &destination, &script)
+                .unwrap_err()
+                .contains("changed during export")
+        );
+        assert_eq!(std::fs::read_to_string(&destination).unwrap(), "concurrent writer");
+        std::fs::remove_file(&destination).unwrap();
+        assert!(
+            export_to_path(&script, "claude", "session", "opensession", &destination, &script)
+                .unwrap_err()
+                .contains("changed during export")
+        );
+        assert_eq!(std::fs::read_to_string(&destination).unwrap(), "concurrent writer");
+        assert_eq!(
+            std::fs::read_dir(&root).unwrap().count(),
+            2,
+            "all failed publication stages removed"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
