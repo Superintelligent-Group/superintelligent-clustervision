@@ -1080,12 +1080,12 @@ pub fn est_tokens_bytes(len: usize, bytes_per_token: f64) -> u64 {
     (len as f64 / bytes_per_token).ceil() as u64
 }
 
-/// The context-token cost of one block, byte-estimated at `bytes_per_token`. A ceiling per field,
-/// summed: text as-is; thinking as its plaintext PLUS the signature / encrypted blob (both are
-/// re-sent to the API, and Claude Code often records signature-only thinking, so counting only
-/// `text` reads zero); a tool call as its `input` JSON; a tool result as its content; an image as
-/// [`IMAGE_TOKENS`]; a file reference as nothing. The one definition `doctor`, `distill` and `stats`
-/// share — change what a block costs here, nowhere else.
+/// Stored payload token equivalents for one block, byte-estimated at `bytes_per_token`.
+/// A ceiling per field, summed: text as-is; thinking plaintext PLUS signature/encrypted bytes;
+/// tool-call input JSON; tool-result content; a fixed [`IMAGE_TOKENS`] image estimate; no cost for
+/// a file reference. Opaque signatures/encrypted blobs are payload-size proxies, not measured
+/// provider reasoning tokens or validated resume costs. Shared by doctor and distill estimates;
+/// provider-reported usage statistics use [`Usage`] instead.
 pub fn est_tokens(block: &Block, bytes_per_token: f64) -> anyhow::Result<u64> {
     est_tokens_with(block, bytes_per_token, |text| Ok(text.len()))
 }

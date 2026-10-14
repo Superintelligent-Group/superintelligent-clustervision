@@ -1,13 +1,14 @@
 //! Compaction doctor: attribute a session's context-window pressure to its sources.
 //!
-//! Powers both `cv doctor` (CLI rendering) and the `doctor` MCP tool. Walks a session's typed
-//! blocks and tallies context tokens by source — tool results (ranked per tool, MCP vs builtin),
-//! thinking (plaintext PLUS the signature/encrypted blob, both re-sent to the API), assistant/user
-//! text, images, the system reminders Claude Code appends per turn (hook output, edited-file
-//! notices, queued task notifications, CLAUDE.md, … — itemized by attachment kind) — plus
-//! compaction frequency/triggers and a usage-derived size of the fixed system+tools overhead. That
-//! fixed block (base prompt, skills, MCP tool schemas) can't be itemized: the transcript records
-//! the conversation, not the system block, so it's only *sized* from token usage, not broken down.
+//! Powers both `cv doctor` (CLI rendering) and the `doctor` MCP tool. Attributes stored transcript
+//! content using decoded text/JSON bytes divided by 3.5 and a fixed image estimate. Thinking includes
+//! plaintext, signatures and encrypted blobs as payload-size proxies; opaque bytes do not establish
+//! provider reasoning tokens or their cost on resume. Totals span transcript history, including
+//! compactions, rather than describing the currently loaded model context.
+//!
+//! Recorded prompt usage supplies peak sizing and the first-prompt heuristic for fixed overhead.
+//! The first prompt also contains conversation; fixed system/tool overhead is not separately
+//! measured or itemized. Recorded usage may itself have been rewritten by a transcript transform.
 
 use crate::compaction::CompactionSink;
 use crate::ir::{est_tokens_resolved, is_mcp_tool, Block, Message, MessageKind, Role};
@@ -16,7 +17,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 
-/// Claude tokenizer ≈ 3.3–3.7 bytes/token.
+/// Heuristic conversion for stored text/JSON payloads, not a provider tokenizer.
 const BYTES_PER_TOKEN: f64 = 3.5;
 
 /// The bucket name for an injected-context turn: the harness's own attachment kind when it recorded
@@ -44,9 +45,10 @@ pub struct ToolStat {
 pub struct Report {
     pub sessions: u64,
     pub messages: u64,
-    // measured conversational content, by source
+    // Estimated token equivalents of cumulative stored content, by source
     pub user_text: u64,
     pub assistant_text: u64,
+    /// Stored thinking text plus opaque signature/encrypted payload byte estimates.
     pub thinking: u64,
     pub tool_call_args: u64,
     pub tool_results: u64,
@@ -62,8 +64,8 @@ pub struct Report {
     pub auto_compactions: u64,
     pub pre_tokens: Vec<u64>,
     // usage-derived context sizing
-    pub startup_ctx: u64, // worst per-session first-turn total context (≈ fixed overhead)
-    pub peak_ctx: u64,    // largest total context observed across turns
+    pub startup_ctx: u64, // maximum first nonzero recorded prompt usage; includes conversation
+    pub peak_ctx: u64,    // maximum recorded prompt usage across turns
 }
 
 impl Report {
@@ -85,7 +87,7 @@ impl Report {
         }
     }
 
-    /// Total measured conversational tokens across all sources.
+    /// Total estimated token equivalents across stored transcript history, including compactions.
     pub fn conv_total(&self) -> u64 {
         self.user_text
             + self.assistant_text
@@ -107,6 +109,11 @@ impl Report {
     }
 
     /// The machine-readable diagnosis — `cv doctor --json` and the MCP `doctor` tool share this.
+    /// Existing field names are retained: `conversational` and tool/attachment values are cumulative
+    /// byte-based estimates, not measured provider tokens or a current-window breakdown. `thinking`
+    /// includes opaque payloads. `peak_context` is maximum recorded prompt usage;
+    /// `fixed_overhead_est` is the maximum first nonzero prompt usage across sessions and includes
+    /// conversation, so it is only a heuristic proxy for unitemized fixed overhead.
     pub fn to_json(&self) -> Value {
         let tools: Vec<Value> = self
             .by_tool
@@ -153,7 +160,7 @@ pub struct SessionPass<'a> {
     /// [`finish`](SessionPass::finish): a call can stream past after its result (a resumed
     /// transcript re-copies history), so the id is resolved against the whole session.
     unnamed: HashMap<String, u64>,
-    /// The first turn's total context (≈ system + tools + rules + first message).
+    /// First nonzero recorded prompt usage, including conversation.
     startup: Option<u64>,
     compactions: CompactionSink,
     error: Option<anyhow::Error>,

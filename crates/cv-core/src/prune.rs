@@ -80,13 +80,11 @@ pub struct PruneOptions {
     /// default — `claude --resume` doesn't need it, and for big sessions it can be hundreds of MB /
     /// thousands of files. Turn on if you want cv's forest features to work on the pruned session.
     pub copy_resources: bool,
-    /// After pruning, rewrite the trailing `message.usage` records to an **honest** post-prune token
-    /// count. Claude Code's resume gate reads the last turn's recorded `usage` (input + cache — from
-    /// its `iterations` array when present, since 2.1.277) as the session's current size *before it
-    /// re-sends anything* — so an already-maxed session refuses to resume even when the (now pruned)
-    /// content would fit. This recomputes the real size of the loaded window and corrects the stale
-    /// number (top level and iterations alike), so the gate lets you back in. Off by default — it
-    /// edits recorded metadata, not just content. The source is still never touched (new id only).
+    /// After pruning, rewrite trailing `message.usage` records using an estimated post-prune
+    /// prompt size. Claude Code's resume gate reads recorded usage before sending a new request
+    /// (including `iterations` when present). Recorded-usage deltas and byte estimates inform the
+    /// replacement; it is not provider-measured new usage and does not verify resume acceptance.
+    /// Off by default at the core level. Only the new transcript's metadata is changed.
     pub revive: bool,
     /// Sliding window: keep only the NEWEST conversational turns whose content sums to **≤ this many
     /// tokens**, dropping older turns entirely (lossy — but the source session is never touched, so it
@@ -154,17 +152,18 @@ pub struct PruneResult {
     pub new_size: u64,
     #[serde(rename = "tokens_freed")]
     pub est_context_tokens_saved: u64,
-    /// `--revive`: how many `message.usage` records were corrected.
+    /// `--revive`: how many `message.usage` records were rewritten with estimates.
     #[serde(skip)]
     pub usage_rewritten: usize,
     /// `--window`/`--range`: conversational turns dropped from the head/tail by the selection (0 if
     /// neither was used). The kept turns form the new session; the source keeps everything.
     pub dropped_turns: usize,
-    /// `--window`: the real content-token size of the kept tail, from Claude's recorded `usage`
-    /// (the figure the API will report on resume, ± system overhead). `None` for `--range`, or when
-    /// the session had no usage records and the byte-estimate fallback was used.
+    /// `--window`: kept-tail size inferred from recorded prompt-usage deltas. The legacy field
+    /// name does not imply measured usage after pruning or predict a provider's resumed request.
+    /// `None` for `--range`, or when byte estimates substitute for absent usage records.
     pub window_real_tokens: Option<u64>,
-    /// `--revive`: the honest post-prune context-token figure written (None if revive off / nothing to do).
+    /// `--revive`: estimated prompt size written to usage metadata; not a new provider measurement.
+    /// `None` when revival is disabled or no rewrite is needed.
     #[serde(skip)]
     pub revive_tokens: Option<u64>,
     /// `--revive`: the stale figure it replaced — the largest pre-revive usage total in the loaded window.
@@ -266,20 +265,15 @@ const SINGLETON_RECORDS: &[&str] = &[
     "continued-in",
 ];
 
-/// Size a `--window` tail by Claude's OWN recorded token counts — no estimator. Returns
-/// `(turn to keep from, real content-token size of that tail, overshoot)`, or `None` if the session
-/// has no `usage` records (then the caller falls back to a byte estimate). `overshoot` is set when
-/// even the single newest turn exceeds the budget — we keep that turn anyway (an empty session
-/// wouldn't be a session), and the caller must warn.
+/// Size a `--window` tail using recorded Claude prompt-usage deltas. Returns
+/// `(turn to keep from, inferred tail size, overshoot)`, or `None` if usage is absent (then the
+/// caller uses byte estimates). If the newest turn alone exceeds the budget, keep it and warn.
 ///
-/// Why this is exact (not a guess): within the last compaction segment, a turn's recorded `usage`
-/// (input + cache) IS the real context size at that point, monotonically increasing. The standalone
-/// size of the tail kept from turn S is therefore `usage_end - usage[S-1]` — the shared prefix
-/// cancels — so we pick the **largest tail whose real size ≤ budget**. Capped at the last segment so
-/// the cancellation holds (older segments were compacted away and aren't a clean prefix). This is
-/// the same arithmetic that predicts a resume exactly: a 250k-byte-estimate tail that loads as 373k
-/// real is just `usage_end - usage[cutoff]`, which no byte ratio can know but the recorded numbers
-/// do. Sidechain lines are skipped entirely — their usage measures a different context.
+/// Within one compaction segment, subtract the preceding prompt count from the end count to
+/// estimate the tail contribution. This assumes comparable, growing prompts with a shared prefix;
+/// it does not measure the standalone request after rewriting or guarantee its size on resume.
+/// Older compaction segments cannot be treated as a clean shared prefix. Sidechain usage belongs
+/// to a different prompt and is excluded from this main-thread calculation.
 fn usage_window_cutoff(parsed: &[Option<Value>], budget: u64) -> Option<(usize, u64, bool)> {
     // Per main-thread turn that carries a usage record: (turn index, cumulative usage, starts a new
     // compaction segment). Cumulative usage is monotonic WITHIN a segment but resets across a
@@ -2090,25 +2084,13 @@ fn fact_est_tokens(v: &Value) -> u64 {
         .unwrap_or_else(|| line_est_tokens(v))
 }
 
-/// Rewrite the trailing `message.usage` token counts to an honest post-prune figure (`--revive`).
-///
-/// Claude Code's resume gate reads the **last turn's recorded `usage`** (input + cache tokens) as the
-/// session's current context size — and it does so *before* re-sending anything to the API. After a
-/// prune the real content is small, but that recorded number is still the pre-prune total, so the gate
-/// refuses to resume a session that would actually fit (the "979.7k / context limit reached" wall).
-/// Concretely (2.1.278): it takes the last non-synthetic assistant record's usage — preferring the
-/// last request entry of `usage.iterations` over the top-level counters — adds a byte estimate of
-/// everything recorded after it, and if that is ≥ context window − max-output reserve (≤ 20k) −
-/// 3k it yields a synthesized `Prompt is too long` (no `errorDetails`, no request) instead of
-/// calling the API. So the pin has to land in `iterations` too — see [`pin_usage`].
-///
-/// We recompute the honest size of the **loaded window** — everything after the last compaction
-/// boundary, which is what Claude actually re-sends on resume — and rewrite every usage record in that
-/// window that still over-reports, pinning it to the honest figure with the cache counters zeroed (a
-/// fresh resume has no live cache anyway). The honest figure combines recorded-usage **deltas** (real
-/// evidence, span by span — see [`honest_window_tokens`]) with byte estimates, always preferring the
-/// **higher** supported figure so the gate errs on the safe side: it must never be talked into loading
-/// a session that would blow the real limit. Returns `(records rewritten, honest tokens, stale max)`.
+/// Rewrite trailing recorded usage using an estimated post-prune prompt size (`--revive`).
+/// Claude Code checks saved usage before making another provider request. The estimate combines
+/// recorded-usage deltas across transcript spans with byte estimates for the content after the last
+/// compaction boundary, preferring available recorded evidence. Trailing records that exceed this
+/// estimate are rewritten (including nested iteration usage). This changes saved gate metadata;
+/// it neither measures the new request nor verifies provider acceptance or behavior on resume.
+/// Returns `(records rewritten, estimated tokens written, prior maximum recorded tokens)`.
 fn revive_staged(
     source: &crate::json::JsonSource,
     output: ByteSource,

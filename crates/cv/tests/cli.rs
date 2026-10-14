@@ -635,7 +635,7 @@ fn prune_json_emits_machine_readable_report() {
 
     // Dry run first: stdout is ONE JSON object; nothing written means honest nulls + a note,
     // and the fixture dir is untouched.
-    let (out, _) = w.cv_ok(&[
+    let (out, human) = w.cv_ok(&[
         "prune",
         "prunesrc",
         "--min-size",
@@ -645,6 +645,12 @@ fn prune_json_emits_machine_readable_report() {
         "--dry-run",
         "--json",
     ]);
+    assert!(human.contains("token equivalents removed (byte estimate)"), "{human}");
+    assert!(
+        human.contains("no recorded usage required an estimated-window rewrite"),
+        "{human}"
+    );
+    assert!(!human.contains("resume gate will let you back in"), "{human}");
     let v: serde_json::Value = serde_json::from_str(out.trim()).expect("stdout must be pure JSON");
     assert_eq!(v["source_id"], "prunesrc", "{out}");
     assert_eq!(v["dry_run"], true, "{out}");
@@ -2938,4 +2944,51 @@ fn timeline_ids_reach_cat() {
     assert_eq!(out.trim(), "edited ok");
     let (out, _) = w.cv_ok(&["cat", "alphasess", id, "--input"]);
     assert!(out.contains("/work/proj/src/widget.rs"), "{out}");
+}
+
+#[test]
+fn doctor_labels_payload_estimates_and_recorded_usage_without_changing_accounting() {
+    let w = World::new("doctor-accounting-labels");
+    w.write_session(
+        "accounting",
+        &[
+            user_line("u", "2026-01-01T10:00:00Z", "hello"),
+            claude::with(
+                assistant_line(
+                    "a",
+                    "2026-01-01T10:01:00Z",
+                    serde_json::json!([
+                        {"type":"thinking", "thinking":"", "signature":"s".repeat(350)},
+                        {"type":"text", "text":"reply"}
+                    ]),
+                ),
+                serde_json::json!({"message":{"usage":{
+                    "input_tokens":100, "cache_read_input_tokens":59900, "output_tokens":20
+                }}}),
+            ),
+        ],
+    );
+    let (human, _) = w.cv_ok(&["doctor", "accounting"]);
+    assert!(
+        human.contains("Transcript content by source (104 estimated token equivalents)"),
+        "{human}"
+    );
+    assert!(human.contains("totals include history across compactions"), "{human}");
+    assert!(
+        human.contains("thinking includes opaque signature/encrypted bytes; not measured reasoning tokens"),
+        "{human}"
+    );
+    assert!(
+        human.contains("First prompt: 60.0k recorded (includes conversation; heuristic proxy for fixed overhead)"),
+        "{human}"
+    );
+    assert!(human.contains("Peak prompt:  60.0k recorded in transcript"), "{human}");
+    assert!(!human.contains("before any conversation"), "{human}");
+    assert!(!human.contains("lower the thinking budget"), "{human}");
+    let (json, _) = w.cv_ok(&["doctor", "accounting", "--json"]);
+    let report: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(report["fixed_overhead_est"], 60000);
+    assert_eq!(report["peak_context"], 60000);
+    assert_eq!(report["conversational"]["thinking"], 100);
+    assert_eq!(report["conversational"]["total"], 104);
 }

@@ -61,12 +61,12 @@ pub(crate) fn cmd_prune(
 
     let mut v = serde_json::to_value(&res)?;
     v["harness"] = r.harness.as_str().into();
-    // revived: false when revive is off or the recorded usage was already honest; else the
-    // stale → honest rewrite detail (what the human report prints as "revived: …k → …k").
+    // Existing JSON names describe a metadata rewrite: recorded_tokens_after is the estimate
+    // written into usage, not new provider-measured prompt usage or verified resume acceptance.
     v["revived"] = match (res.revive_tokens, res.revive_old_tokens) {
-        (Some(honest), Some(stale)) => serde_json::json!({
-            "recorded_tokens_before": stale,
-            "recorded_tokens_after": honest,
+        (Some(estimated), Some(recorded)) => serde_json::json!({
+            "recorded_tokens_before": recorded,
+            "recorded_tokens_after": estimated,
             "usage_records_rewritten": res.usage_rewritten,
         }),
         _ => serde_json::Value::Bool(false),
@@ -93,7 +93,7 @@ pub(crate) fn cmd_prune(
     );
     let _ = writeln!(
         h,
-        "  {} payload(s) snipped ({} image(s)) · {} → {} on disk (−{:.0}%) · ~{} context tokens freed",
+        "  {} payload(s) snipped ({} image(s)) · {} → {} on disk (−{:.0}%) · ~{} token equivalents removed (byte estimate)",
         res.pruned_count,
         res.image_blocks,
         human_bytes(res.original_size),
@@ -104,7 +104,7 @@ pub(crate) fn cmd_prune(
     if res.dropped_turns > 0 {
         let sized = match res.window_real_tokens {
             Some(real) => format!(
-                " · kept ~{}k REAL tokens (Claude's recorded counts; resume loads ≈ this + ~30k overhead)",
+                " · kept ~{}k tokens by recorded-usage deltas (new prompt size and system overhead unmeasured)",
                 real / 1000
             ),
             None => " (sized by byte estimate — no usage records)".to_string(),
@@ -117,20 +117,17 @@ pub(crate) fn cmd_prune(
     }
     if revive {
         match (res.revive_tokens, res.revive_old_tokens) {
-            (Some(honest), Some(stale)) => {
+            (Some(estimated), Some(recorded)) => {
                 let _ = writeln!(
                     h,
-                    "  revived: recorded context {}k → {}k across {} usage record(s) — resume gate will let you back in",
-                    stale / 1000,
-                    honest / 1000,
+                    "  revived: rewrote recorded context {}k → estimated {}k across {} usage record(s) — resume acceptance unverified",
+                    recorded / 1000,
+                    estimated / 1000,
                     res.usage_rewritten,
                 );
             }
             _ => {
-                let _ = writeln!(
-                    h,
-                    "  revive: recorded usage already honest (≤ loaded content) — nothing to rewrite"
-                );
+                let _ = writeln!(h, "  revive: no recorded usage required an estimated-window rewrite");
             }
         }
     }

@@ -1,10 +1,9 @@
 //! `cv doctor` — diagnose why a session's context window keeps filling (and compacting).
 //!
 //! The analysis engine lives in [`cv_core::doctor`] (shared with the `doctor` MCP tool); this module
-//! resolves the target session(s) and renders the report. Attributes context pressure to its
-//! sources — tool results (split MCP vs builtin, ranked per tool), thinking, messages, images — and
-//! sizes the fixed system+tools overhead from token usage. With no <id>, analyzes the most recent
-//! session(s) for the current directory.
+//! resolves the target session(s) and renders stored-payload estimates, recorded prompt usage,
+//! and compaction evidence. First-prompt usage is only a heuristic overhead proxy. With no <id>,
+//! analyzes the most recent session(s) for the current directory.
 
 use anyhow::{Context, Result};
 use cv_core::doctor::Report;
@@ -105,28 +104,29 @@ fn print_report(rep: &Report, label: &str, n_targets: usize) {
         );
     }
 
-    // Fixed overhead + peak, from usage.
+    // Recorded prompt usage and byte-based attribution are different sources of evidence.
     if rep.startup_ctx > 0 {
         println!(
-            "Overhead:    ~{} of fixed context every turn before any conversation\n             \
-             (base prompt + CLAUDE.md/rules + skills + MCP tool schemas — sized from token usage,\n             \
-             not itemizable: the transcript records the conversation, not the system block)",
+            "First prompt: {} recorded (includes conversation; heuristic proxy for fixed overhead)",
             fmt_tok(rep.startup_ctx)
         );
     }
     if rep.peak_ctx > 0 {
-        println!("Peak window: {} observed", fmt_tok(rep.peak_ctx));
+        println!("Peak prompt:  {} recorded in transcript", fmt_tok(rep.peak_ctx));
     }
 
-    // Where the conversational growth goes (measured).
     let total = rep.conv_total().max(1);
     println!(
-        "\nConversational context by source ({} measured):",
+        "\nTranscript content by source ({} estimated token equivalents):\n\
+         (text/JSON bytes ÷ 3.5; images use a fixed estimate; totals include history across compactions)",
         fmt_tok(rep.conv_total())
     );
+    if rep.thinking > 0 {
+        println!("(thinking includes opaque signature/encrypted bytes; not measured reasoning tokens)");
+    }
     let mut rows: Vec<(&str, u64)> = vec![
         ("tool results", rep.tool_results),
-        ("thinking", rep.thinking),
+        ("thinking payload", rep.thinking),
         ("assistant text", rep.assistant_text),
         ("user text", rep.user_text),
         ("tool-call args", rep.tool_call_args),
@@ -154,7 +154,7 @@ fn print_report(rep: &Report, label: &str, n_targets: usize) {
     tools.sort_by_key(|t| std::cmp::Reverse(t.1.result_tokens));
     let shown: Vec<_> = tools.iter().filter(|(_, s)| s.result_tokens > 0).take(8).collect();
     if !shown.is_empty() {
-        println!("\nTop context consumers (tool results):");
+        println!("\nLargest stored tool-result payloads (estimated):");
         for (name, s) in &shown {
             let tag = if s.is_mcp { " [MCP]" } else { "" };
             println!(
@@ -202,8 +202,7 @@ fn verdict(rep: &Report) -> String {
     let mcp = rep.mcp_tool_results();
     let mut parts: Vec<String> = Vec::new();
 
-    // Tool output is the lever to pull when it's the single largest source (even below 50%) or
-    // when tool results + call args together dominate the window.
+    // Tool output is a possible lever when it dominates estimated transcript content.
     let tool_activity = rep.tool_results + rep.tool_call_args;
     let tool_results_is_top =
         rep.tool_results >= rep.thinking && rep.tool_results >= rep.assistant_text && rep.tool_results >= rep.user_text;
@@ -212,7 +211,7 @@ fn verdict(rep: &Report) -> String {
         t.sort_by_key(|e| std::cmp::Reverse(e.1.result_tokens));
         let top: Vec<String> = t.iter().take(2).map(|(n, _)| (*n).clone()).collect();
         parts.push(format!(
-            "tool output is the biggest lever ({:.0}% of context, {:.0}% with tool-call args), led by {} — \
+            "tool output is the biggest estimated transcript source ({:.0}%, {:.0}% with tool-call args), led by {} — \
              trim verbose output, scope reads/greps, or `cv prune` old tool payloads",
             100.0 * rep.tool_results as f64 / total as f64,
             100.0 * tool_activity as f64 / total as f64,
@@ -221,20 +220,22 @@ fn verdict(rep: &Report) -> String {
     }
     if mcp > 0 && mcp * 2 >= rep.tool_results {
         parts.push(format!(
-            "MCP tools are {:.0}% of tool output — disabling unused MCP servers would free real room",
+            "MCP tools are {:.0}% of estimated tool output — review verbose results and unused tool schemas",
             100.0 * mcp as f64 / rep.tool_results.max(1) as f64
         ));
     }
-    // ~25% of a 200k window is a heavy constant tax.
+    // A large first prompt merits inspection, but cannot isolate fixed system overhead.
     if rep.startup_ctx >= 50_000 {
         parts.push(format!(
-            "fixed overhead is ~{} before any conversation (leaner CLAUDE.md / fewer MCP servers \
-             cuts this every turn)",
+            "first recorded prompt is {} including conversation — inspect initial history, CLAUDE.md and MCP schemas",
             fmt_tok(rep.startup_ctx)
         ));
     }
     if rep.thinking * 4 >= total && rep.thinking > 0 {
-        parts.push("extended thinking is a large share — lower the thinking budget if you don't need it".into());
+        parts.push(
+            "stored thinking payloads are a large estimated share; opaque bytes do not establish reasoning-token cost"
+                .into(),
+        );
     }
     // System reminders (the attachments Claude Code appends per turn) at ≥ 10% are a real, and
     // steerable, share: background-task notifications, edited-file notices and hook stdout.
@@ -243,7 +244,7 @@ fn verdict(rep: &Report) -> String {
         kinds.sort_by_key(|k| std::cmp::Reverse(*k.1));
         let top: Vec<String> = kinds.iter().take(2).map(|(k, _)| format!("`{k}`")).collect();
         parts.push(format!(
-            "system reminders are {:.0}% of context ({}) — quiet hook stdout, fewer concurrent \
+            "system reminders are {:.0}% of estimated transcript content ({}) — quiet hook stdout, fewer concurrent \
              background tasks, or `cv prune` old turns",
             100.0 * rep.attachments as f64 / total as f64,
             top.join(" + ")
@@ -251,9 +252,10 @@ fn verdict(rep: &Report) -> String {
     }
     if parts.is_empty() {
         if rep.compactions == 0 {
-            return "nothing alarming — context use looks balanced and the session hasn't compacted.".into();
+            return "estimated transcript sources look balanced and the session has no recorded compactions.".into();
         }
-        return "context use is fairly balanced; compaction is driven by overall conversation length more than any one source.".into();
+        return "estimated transcript sources look balanced; recorded compactions do not isolate a single cause."
+            .into();
     }
     parts.join("; ")
 }

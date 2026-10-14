@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Doctor and prune distinguish stored-payload estimates, recorded prompt usage, and rewritten resume metadata; opaque thinking payloads no longer imply measured reasoning tokens.
 - Harness-qualified session lookups discover only that harness on catalog misses, preserving prefix ambiguity and leaving unrelated store freshness unchanged.
 - Semantic stores decode through bounded buffers, avoiding a second complete vector allocation during search and refresh.
 - Transcript downloads export complete remote sessions through server or native file staging while preserving paged browsing.

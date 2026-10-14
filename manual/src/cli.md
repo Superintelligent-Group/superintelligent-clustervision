@@ -542,7 +542,7 @@ The candidates are the sessions with an edit on the file (plus, for sub-agents c
 
 ### `cv doctor`
 
-Why does this session's context keep filling up? `cv doctor` attributes context pressure by source, sizes the fixed system+tools overhead from recorded token usage, and pairs it with compaction frequency.
+`cv doctor` compares byte-based estimates of stored transcript content with recorded prompt usage and compaction frequency. The source percentages describe transcript history, including content before compactions, rather than the currently loaded context.
 
 ```sh
 cv doctor da9174f4
@@ -555,11 +555,13 @@ cv doctor da9174f4 --json
 # compaction doctor — session 406247d8
 
 Compaction:  never compacted across 650 message(s) — healthy ✅
-Overhead:    ~261.2k of fixed context every turn before any conversation
-Peak window: 284.9k observed
+First prompt: 261.2k recorded (includes conversation; heuristic proxy for fixed overhead)
+Peak prompt:  284.9k recorded in transcript
 
-Conversational context by source (278.5k measured):
-  thinking          42%  ██████████               117.9k
+Transcript content by source (278.5k estimated token equivalents):
+(text/JSON bytes ÷ 3.5; images use a fixed estimate; totals include history across compactions)
+(thinking includes opaque signature/encrypted bytes; not measured reasoning tokens)
+  thinking payload   42%  ██████████               117.9k
   tool-call args    26%  ██████                   71.6k
   tool results      20%  █████                    55.6k
   system reminders   9%  ██                       23.9k
@@ -567,9 +569,21 @@ Conversational context by source (278.5k measured):
   assistant text     2%                           4.6k
 ```
 
-It then ranks the top tool-result consumers, breaks the system reminders down by kind, and ends with a verdict naming the lever that would actually help. The "system reminders" bucket is [`MessageKind::InjectedContext`](architecture.md#the-unified-ir) — context the *harness* put into the model's input — so the number means the same thing on every harness, and the per-kind names come from the harness's own bag (`extra["claude"]["attachment_type"]` and friends).
+It then ranks stored tool-result payloads, breaks system reminders down by kind, and suggests sources to investigate. The "system reminders" bucket is [`MessageKind::InjectedContext`](architecture.md#the-unified-ir) — context the *harness* put into the model's input — so the number means the same thing on every harness, and the per-kind names come from the harness's own bag (`extra["claude"]["attachment_type"]` and friends).
 
-The fixed overhead is *sized*, not itemized, and the report says so: the transcript records the conversation, not the system block, so cv infers the block's size from usage counts rather than pretending to enumerate it.
+The attribution divides stored text/JSON bytes by 3.5, with a fixed image estimate. The thinking
+bucket includes plaintext plus opaque signature/encrypted payload bytes. Those bytes are not a
+measurement of hidden reasoning, provider tokenization, or the cost of replaying them on resume.
+The peak prompt is the largest prompt-usage count recorded in the transcript. The first nonzero
+prompt count is only a heuristic proxy for fixed system/tool overhead: it includes conversation,
+and a resumed transcript can begin with substantial history. Across sessions, doctor shows the
+largest such first-prompt count. Recorded usage can also have been rewritten by pruning.
+
+JSON retains its existing names: `conversational` and per-tool/attachment values are cumulative
+estimated token equivalents; `thinking` includes opaque payload proxies; `peak_context` is recorded
+prompt usage; `fixed_overhead_est` is the first-prompt heuristic. `cv stats --tokens` instead sums
+recorded usage fields. Its `reasoning` counts only separately reported reasoning usage; zero can
+mean unavailable accounting, as Claude records no separate reasoning-token field.
 
 ---
 
@@ -598,18 +612,20 @@ cv prune 3b829648 --declassify --declassify-tokens-file terms.txt
 cv cat <new-id> toolu_abc123                       # fetch a stashed original back out
 ```
 
-The defaults snip payloads over 2 KB and keep the last 25 turns verbatim. `--drop-thinking` is the
-biggest lever on a long Claude session, because the chain-of-thought *signatures* dominate the
-loaded context (Claude keeps a ~600-byte signature per thinking turn even when the reasoning text
-is omitted): it took one 976k-token session from ~98% to ~36% of a 1M window. `--window` and
-`--keep` drop whole turns (lossy in the new session; the source keeps everything): `--window` by a
-real-token budget sized from Claude's own recorded `usage`, `--keep A..B` by index — the flag that
-was spelled `--range` before 0.11.0, renamed because it selects what to **keep**.
+The defaults snip payloads over 2 KB and keep the last 25 turns verbatim. `--drop-thinking`
+flattens older thinking text and discards opaque provider payloads. Its reported token saving is
+an estimate from stored bytes, not measured reasoning-token use or verified post-resume context.
+`--window` and `--keep` drop whole turns (lossy in the new session; the source keeps everything):
+`--window` uses recorded prompt-usage deltas when available and byte estimates otherwise;
+`--keep A..B` selects by index. The flag spelled `--range` before 0.11.0 was renamed because
+it selects what to **keep**.
 
 By default prune also **revives** an already-maxed session: Claude Code's resume gate reads the
 last turn's recorded `usage` as the session's size *before* re-sending anything, so a session at
-the wall refuses to resume even after pruning made it fit. Revive rewrites those stale records to
-the honest size of the loaded window (everything after the last compaction boundary);
+the wall may refuse before making a new request. Revive rewrites usage that exceeds an estimated
+post-prune window size (everything after the last compaction boundary), using recorded-usage
+deltas and byte estimates. The rewritten count is metadata, not new provider-measured usage,
+and does not establish that a provider will accept the resumed request;
 `--no-revive` keeps the original records byte-for-byte. `--declassify` snips conversational
 *prose* dense in terms you supply (`--declassify-tokens`, `--declassify-tokens-file`); cv ships no
 term list. `--json` puts the report on stdout as one object (the human report stays on stderr),

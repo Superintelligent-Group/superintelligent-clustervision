@@ -117,7 +117,8 @@ pub struct TokenRow {
     pub cache_read: u64,
     pub cache_write: u64,
     pub output: u64,
-    /// Subset of `output`.
+    /// Separately reported subset of `output`; missing reasoning usage contributes zero.
+    /// Zero therefore does not establish absence of reasoning (Claude reports no separate field).
     pub reasoning: u64,
     /// Summed provider-reported cost; `None` when no message in the row reported one.
     pub cost_usd: Option<f64>,
