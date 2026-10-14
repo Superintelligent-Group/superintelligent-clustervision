@@ -263,7 +263,7 @@ mod tests {
                 .unwrap();
         });
         assert_eq!(
-            *inventory("first", &path, &reads, || panic!("outer context changed"))
+            *inventory::<usize>("first", &path, &reads, || panic!("outer context changed"))
                 .unwrap()
                 .0,
             42
