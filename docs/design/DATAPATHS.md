@@ -1,8 +1,39 @@
 # Store performance: the system we are optimizing
 
-Source audit: `c0f0044`, 2026-10-12; updated through the first pass and the ongoing `perf/excellence-pass`.
+Source audit: `c0f0044`, 2026-10-12; current integration is `perf/excellence-next` (2026-10-13).
 This is the working model and tracker for the performance pass. Measurements in `PERF.md` remain historical observations; their causal
 explanations are not all supported by the implementation. Paths below are relative to `crates/`.
+
+## Current integration status (2026-10-13)
+
+The previous implementation batch converged as recorded below. The next batch is integrated
+through `b4446396`; its combined native/portable and desktop checks are still in progress.
+Do not read historical lane checks below as validation of this current combined source.
+Current changes remove catalog guard/identity waste, watch cursor copies and stale replacement
+positions, unbounded semantic-ranking and pack-recall candidate retention, semantic wire copies,
+Unicode snippet offsets, dataset input clobbering, Gemini checkpoint copies and Zed root-key copies.
+
+Splice Markdown/OpenSession export now stages checked bodies through shared writers; the earlier
+shared-output gap is addressed. Shared bounded header/title rendering and HTTP Markdown writer
+reuse are under refinement after a real checked-label failure and an oracle fixture that
+used inline text instead of a retained source span. Browser continuation recovery,
+complete server/native downloads and deferred folds/events are integrated; frontend interaction
+selftests report 67/67. Desktop export alias/concurrent-destination protection is integrated
+at `b4446396` and awaits combined desktop verification. These are active repairs/checks, not a ready release.
+
+Genuine Cursor IDE 3.24.12 read/edit/shell/failure/interruption/reopen capture is committed alongside
+the earlier CLI corpus, with a failed-command classification correction. Zed authored-thread
+capture remains an evidence gap: the isolated GUI attempt could not observe/control the GPUI
+agent editor or obtain screenshots, and produced no threads or model calls. See
+[the Zed capture record](../../tools/harness-corpus/zed/README.md).
+
+Remaining measured or source-established costs include strict Zed discovery Serde string scratch,
+Hermes raw reasoning/provider extras and native row/FTS allocation, format-required history/branch
+navigation, explicit rich metadata, single selected-message output size and private stage I/O.
+These need concrete consumer counterexamples before further representation changes; they are
+not automatically unresolved implementation defects. Qwen still lacks local fleet evidence.
+Historical follow-ups below are superseded where later implementation records say so; the reader
+and consumer inventories are the current cost map.
 
 ## Completion criteria carried across the work
 
@@ -22,7 +53,7 @@ reshaping. A bounded reader or completed export lane alone does not establish co
   convergence batch. No intermediate releases or repeated full gates while implementation moves.
   Explicitly requested rich output and format-required scans remain costs, not automatic defects.
 
-### Converged implementation batch (2026-10-13)
+### Integrated adapter batch and convergence policy (2026-10-13)
 
 Ember's latest steering is to drain per-harness waste with a wider Sol swarm and batched
 integration. Earlier numerical targets are investigation aids, not reasons to add machinery.
@@ -37,7 +68,7 @@ Prefer faster useful operations, less redundant work and simpler shared code.
 - Preserve exact format semantics, source freshness and useful output. Keep required navigation,
   requested rich metadata and native storage costs distinct from avoidable payload copies.
 
-### Batch convergence (Codex, 2026-10-13)
+### Previous batch convergence (Codex, 2026-10-13)
 
 The integrated source through `ace90afd` passes all-target clippy/build, minimal core and keyword-only
 search builds, standalone core Wasm, package verification, the release corpus parse budget, corpus
@@ -61,11 +92,10 @@ only the unexecuted window/export stages were run. Private logs are in `excellen
 under the task worktrees; these are allocation/behavior checks, not a new hardware-counter or
 universal speed claim.
 
-Fresh Cursor IDE-authored sessions and fresh Zed-authored threads remain useful compatibility
-coverage: the committed Cursor capture is CLI-only, and Zed has a schema snapshot rather than
-fresh sessions. They do not block this implementation batch. Zed discovery's largest-string Serde
+The later batch adds genuine Cursor IDE-authored coverage. Fresh Zed-authored threads remain
+unavailable after the documented GUI observability attempt. Zed discovery's largest-string Serde
 scratch, native SQLite allocation floors, required navigation state and demanded rich metadata
-remain explicit limits in the inventory. Release version/tagging is separate and unchanged.
+remain explicit limits. Release version/tagging is separate.
 
 ## Current priorities: whole operations (2026-10-12, user steering)
 
@@ -219,8 +249,8 @@ can decode a whole field first. Each bound must hold across the composed path.
 
 Reconciled against the integrated 2026-10-13 swarm: checked older-format reads, tree/SQLite
 replay, cold discovery and complete-record retention have landed across the remaining adapters.
-Combined native/portable checks have converged; this table describes implementation, not a blanket performance
-or release claim. Required navigation state and demanded output are not themselves avoidable
+The previous batch converged; checks for the next integrated batch are running. This table
+describes implementation, not a blanket performance or release claim. Required navigation state and demanded output are not themselves avoidable
 bloat. Earlier first-run listing and uniform scale targets remain unproven; prioritize useful
 operation costs and simple code over satisfying a historical number.
 
@@ -247,7 +277,7 @@ operation costs and simple code over satisfying a historical number.
 | OpenClaw JSONL / SQLite | Flat/tree/SQLite checked payload replay shares branch selection; cells copied incrementally, compressed events staged in bounded chunks | O(events) navigation/backing; codec workspace; demanded complete/control/system metadata; native-cell and non-rowid fallbacks |
 | Zed SQLite | Incremental blobs decoded once; lazy messages use checked selected text/arguments and skip discarded attachment bodies | Typed discovery counts avoid message trees; largest decoded string still grows Serde scratch; decoded spill, requested metadata and WITHOUT ROWID native-cell fallback |
 | LM Studio | Schema-selected document/turn views, selected lazy text spans and incremental variants; mapped or positioned sources | Bounded discovery title prefixes; Harmony decoding and arbitrary demanded output/metadata remain owned |
-| ChatGPT / Claude account exports | Bounded metadata cache and positioned source views; selected-conversation replay | Branch descriptors, joined text, selected owned output and sender/empty-archive compatibility edges |
+| ChatGPT / Claude account exports | Bounded metadata cache and positioned source views; selected-conversation replay | Branch descriptors, joined text and selected owned output; sender/empty-archive corrections have focused source oracles |
 | OpenSession | Shared source validation/views and per-message IR projection | Selected authoritative rich fields remain owned; giant serialization proof separate from count/discovery |
 
 Registry: `cv-core/src/harness/mod.rs`; implementations under `cv-core/src/harness/`.
@@ -259,16 +289,16 @@ Compressed, encoded, scanned, decoded and emitted bytes must be labeled separate
 | Operation | Actual work | Optimization boundary |
 |---|---|---|
 | Warm ls/stats | Catalog probe, metadata rows, sort/filter | Preserve cheap path; measure discovery separately |
-| Full discovery | Scans + cache persistence + catalog replacement/watch construction | Metadata reducers instead of collect-to-count; dependency-aware caching |
+| Full discovery | Projected counts/metadata + cache persistence + catalog replacement/watch construction | Required content validation, dependency inventory and exact totals still scan demanded sources |
 | Text windows / last N | Lazy range or deque, selected messages materialized | Already useful bounds; giant selected output is still output-sized |
 | JSON show / MCP show | CLI show/export stages resolved frames and envelopes in bounded spill storage; EOF metadata retained. MCP stages selected windows | CLI Last retains lazy tail descriptors; owned adapter extras and redaction trees remain; MCP client payload size and subprocess startup |
 | Affordance view | Facts projection into classified rows; checked bounded text summaries | Unprojected adapters retain rich extras; side stores and result rows; escaped validation still traverses the whole field |
 | Doctor | Facts projection; checked text lengths and JSON writer counts | Attribution state, unsupported adapter rich/fallback parsing and demanded structured arguments |
 | Query text predicate | Exact index-only matching IDs; cheap tri-state evaluation before parse | Mixed predicates still parse when cheap facts cannot decide |
 | Other rich predicates | Predicate-sized streamed tool/model facts and shared source probes | Distinct unresolved relative paths retained until final cwd; compaction uses its existing separate boundary |
-| FTS | Chunked text, bounded event spool and byte-capacity permits held through Tantivy document consumption; counts/checkpoints and one catalog connection per sweep | Writer arenas coexist with admitted documents; giant escaped-body composition proof pending |
-| Semantic indexing | Shares discovery inventory; source/model identity enables unchanged-vector reuse and deferred model load; atomic streamed save | Fallible lazy text projections and final end-to-end cost proof; vector store still grows with session count |
-| API pagination / HTTP windows | Verified page checkpoints and head metadata cache; selected HTTP JSON stages bounded frames through shared window selection | Desktop Value responses, full-session routes, browser JSON parsing and demanded metadata remain owned |
+| FTS | Chunked text, bounded event spool and byte-capacity permits held through Tantivy document consumption; counts/checkpoints and one catalog connection per sweep | Writer arenas coexist with admitted documents; prior giant plain/escaped composition controls are recorded below |
+| Semantic indexing | Shares discovery inventory; source/model identity enables unchanged-vector reuse and deferred model load; atomic streamed save | Requested vector-store storage grows with session count; ranking candidate retention is now limited by requested result count |
+| API pagination / HTTP windows | Verified page checkpoints and head metadata cache; selected HTTP JSON stages bounded frames through shared window selection | Window JSON parsing, demanded metadata and individual visible-message payloads remain; complete downloads use staged native writers |
 | Watch | Verified checkpoints and bounded EOF metadata reused across tail polls | Strict source identity and dependencies; replay-only formats retain fallback parsing |
 | Archive | Verified suffix read; bounded message spool and guarded canonical prefix copy; checked streaming payload output | Complete replacement artifact still writes O(output bytes); metadata width remains owned |
 | Dataset | Streamed selection and bounded output staging; late predicates retain source descriptors in private spools | Bounded slice decoding reduces matched-query spool CPU; demanded owned producer fields remain |
@@ -508,7 +538,8 @@ is flat across source sizes:
 These are no-mmap allocation probes through the document source activation; they exclude C,
 allocator overhead and process footprint and make no timing claim. Small raw serialization
 oracles pass in both configurations; giant full-output/hash composition and the Claude sender
-count/empty-archive error corrections remain separate pending checks.
+count/empty-archive corrections now have focused acceptance/count source oracles; giant
+full-output/hash composition remains separate evidence coverage.
 
 Token statistics have a separate retention counterexample. On 16k/64k native usage calls,
 current aggregation peaks at 6,743,774/26,955,998 B for duplicated Claude response blocks and
@@ -2431,8 +2462,8 @@ This preserves prior invalid/mutated-source failure behavior rather than silentl
 Needed text consequently undergoes validation and later resolution: this is an ownership change,
 not a CPU improvement claim. Findings still renders/extracts the same full head (including
 embedded Markdown behavior); demanded own words can produce output-sized allocations. Rich
-extra fields can remain owned by full-fidelity parsing. Known Write content length projection is
-separate remaining work; no partial Value or second analysis engine was introduced.
+extra fields can remain owned by full-fidelity parsing. Known Write content length projection is completed by the subsequent ordinary distill/pack
+demand change below; no partial Value or second analysis engine was introduced.
 
 The complete caller recipe allocation control has nine Claude messages, with eight ignored
 Thinking fields totaling 16/64 MiB and constant demanded prose. Legacy parse/materialize plus
@@ -3964,14 +3995,14 @@ clippy caught one test-only attribute blank line; its corrected run passes. Pack
 extracted same-version dependencies both identify the final source revision. These are local gates;
 Linux CI and installation are recorded separately when completed. No release or version change.
 
-The complete supported-emitter audit distinguishes the checked Claude/Codex/Gemini, Cline/Roo and
+At source `2a2d35f9`, the complete supported-emitter audit distinguished the checked Claude/Codex/Gemini, Cline/Roo and
 Continue/LM Studio writers from the remaining Grok/OpenClaw/Qwen JSONL and
 OpenCode/Hermes SQLite writers. The latter still retain all decoded session payloads; SQLite's
 need for a contiguous current row does not require that retention. Both SQL emitters also issue
 repeated inserts without an export-wide transaction or prepared-statement reuse. OpenClaw makes
 an unused clone of every unchanged block and eagerly computes the first-user fallback even when
-an explicit title exists. These are concrete follow-ups, not claims that completed paths need
-universal remeasurement. The existing OpenCode writer targets v1 tables while the reader supports
+an explicit title exists. These were concrete follow-ups; later JSONL/SQL writer, OpenClaw and native OpenCode
+records below close them. This historical audit is not a current outstanding-work list. The existing OpenCode writer targets v1 tables while the reader supports
 v2; native v2 resumability needs source evidence independently of our own round-trip reader.
 
 The remaining metadata inventory names actual contracts: Gemini `displayContent`/`display_text`
@@ -4212,7 +4243,8 @@ compacted rows, tool results, native raw reasoning, multimodal sentinel content 
 classification (including large whitespace prefixes). Main-file changes and WAL-only changes
 reject retained arena sources. Complete mode keeps all rows and bypasses both display and
 replay dedup. Small content, multimodal/provider wrappers, raw reasoning and other Hermes
-extras retain their existing owned contracts; large native extras remain outstanding ownership.
+extras retain their existing owned contracts; their demand and native-memory boundaries are
+reviewed in the later residual harness ownership record.
 
 [HERMES-COMPLETE-EVIDENCE.json](HERMES-COMPLETE-EVIDENCE.json) records one actual same-target
 parse_for_emit → emit_report operation with an ordinary 8,650,752-byte body, against the
@@ -4223,7 +4255,7 @@ rises from 68,492,967 to 86,168,179 bytes because the shared quoted carrier is c
 decoded. SQLite native peak remains about 129.5 MB: the giant output row and FTS dominate
 this one-row operation. This is a concrete retained-body improvement with an allocation/I/O
 tradeoff, not a speed claim or an operation-wide constant-memory result. Required row-sized
-output staging, SQLite/FTS native memory and owned raw extras remain future work.
+output staging, SQLite/FTS native memory and owned raw extras remain explicit cost boundaries.
 
 ### Checked complete flat OpenClaw rehome (Sol, 2026-10-13)
 
@@ -4369,7 +4401,7 @@ the stub answer and succeeded idle marker. This is stronger than our own reader 
 No external model calls or real-store writes occurred. Private synthetic evidence is under
 `/Users/ember/dev/cv-worktrees/native-opencode-v2-final-native-{0,1,2}/`.
 
-Known typed complete replay is a separate follow-up: the existing OpenCode complete reader carries
+At this historical checkpoint, typed complete replay remained a follow-up (now integrated through checked native carriers and guarded overlays): the existing OpenCode complete reader carries
 idle/unknown rows but has no complete raw skeleton for ordinary rows. Enabling checked same-target
 preparation without preserving shell/skill/compaction/model-change types and unknown native fields
 would merely compare equally lossy output against the old owned path. That follow-up must preserve complete native records through checked backing and current-IR
@@ -4387,8 +4419,8 @@ unique ordered sequence numbers, and start continued messages at **21**, after i
 **17**. Evidence lives in `native-opencode-v2-sequence-native-{0,1,2}` under the private worktrees
 root. V2 explicit IDs now match native's exact `startsWith("ses")` predicate before a transaction;
 invalid IDs fail without publishing rows. Existing v1 ID behavior is unchanged. Attachment base64
-preservation remains part of the complete native-row replay follow-up, rather than a claimed
-capability of the generic foreign IR attachment projection.
+preservation was part of the subsequent complete native-row replay, now integrated; generic
+foreign IR attachments retain their separate fidelity contract.
 
 Grok/Qwen classifier follow-up (2026-10-13): bounded retained state alone had left an
 unnecessary full traversal in Grok's 16-character representative and Qwen's 80-character
@@ -4688,11 +4720,9 @@ returning during an active request, exactly-once append and terminal pager remov
 `NODE_PATH=/Users/ember/tools/playwright/node_modules SELFTEST_CHANNEL=chrome node
 tools/web-selftest.mjs` passes 64/64. No Rust change; root owns the combined build gate.
 
-Remaining frontend limits observed directly in source: collapsed tool/thinking/quiet bodies
-and event rows still generate DOM eagerly; PAGE bounds message count, not single-message
-payload size. Transcript exports currently serialize the loaded page subset without stating
-that limitation. These need separate coherent demand/render/export changes and user-facing
-checks, rather than treating current paging as complete DOM or payload boundedness.
+The later complete-export and demand-rendered-fold changes below address this audit's eager
+closed-body/event DOM and silent page-subset export defects. PAGE still bounds message count,
+not single-message payload size; event retrieval remains eager.
 ### Full session HTTP downloads reuse native staged exports (2026-10-13, next_transport)
 
 The paged browser previously serialized its loaded message prefix for Markdown/OpenSession
@@ -4777,9 +4807,9 @@ across all files or protection of undiscovered harness sidecars.
 Lane commits: `8966f4ef`, `6d2affa6`, `2b0dcb6f`. Formatting and whitespace checks pass; no new
 Rust targets/builds were started in the lane. Root owns the combined `pack_live_recall`,
 `unicode_lowercase_ranges`, and `dataset_file_publication` execution and broader convergence.
-Remaining confirmed shared-output gap: splice `--export md|json` materializes selected bodies
-before rendering complete Strings; the shared Json/Text consumer lane has that handoff.
-
+The splice `--export md|json` ownership gap identified at this checkpoint is addressed by
+`f7c7c5f0`: checked sessions now flow through staged shared writers. Bounded header/title and
+HTTP Markdown writer refinements remain in progress; combined render oracles are under repair.
 
 Native export destination review (2026-10-13): the first native save implementation could
 replace its own source pathname and overwrite a destination changed while the child ran.
