@@ -70,25 +70,53 @@ where
     /// or unblock() was issued
     pub fn pop_timeout(&self, timeout: Duration) -> Option<T> {
         let mut queue = self.queue.lock().unwrap();
-        let mut duration = timeout;
+        let start = Instant::now();
         loop {
             match queue.pop_front() {
                 Some(Control::Elem(value)) => return Some(value),
                 Some(Control::Unblock) => return None,
                 None => (),
             }
-            let now = Instant::now();
-            let (_queue, result) = self.condvar.wait_timeout(queue, timeout).unwrap();
-            queue = _queue;
-            let sleep_time = now.elapsed();
-            duration = if duration > sleep_time {
-                duration - sleep_time
-            } else {
-                Duration::from_millis(0)
-            };
-            if result.timed_out() || (duration.as_secs() == 0 && duration.subsec_nanos() < 1_000_000) {
+            let remaining = timeout.saturating_sub(start.elapsed());
+            if remaining.is_zero() {
+                return None;
+            }
+            let (next_queue, result) = self.condvar.wait_timeout(queue, remaining).unwrap();
+            queue = next_queue;
+            if result.timed_out() {
                 return None;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn unrelated_wakeups_do_not_restart_receive_timeout() {
+        let queue = MessagesQueue::<usize>::with_capacity(1);
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let notifier_queue = queue.clone();
+        let notifier_stop = stop.clone();
+        let notifier = std::thread::spawn(move || {
+            while !notifier_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                notifier_queue.condvar.notify_all();
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        });
+        let (tx, rx) = std::sync::mpsc::channel();
+        let receiving = queue.clone();
+        let reader = std::thread::spawn(move || {
+            tx.send(receiving.pop_timeout(Duration::from_millis(30))).unwrap();
+        });
+        let result = rx.recv_timeout(Duration::from_secs(2));
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        notifier.join().unwrap();
+        reader.join().unwrap();
+        assert_eq!(result.unwrap(), None, "wakeups extended the receive deadline");
+        queue.push(7);
+        assert_eq!(queue.pop_timeout(Duration::ZERO), Some(7));
+        assert_eq!(queue.pop_timeout(Duration::ZERO), None);
     }
 }
