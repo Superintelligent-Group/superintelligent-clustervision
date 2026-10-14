@@ -922,7 +922,7 @@ mod tests {
             "{}\nbad suffix\n{}\n{}\n{}\n",
             serde_json::json!({"type":"user","content":"start"}),
             serde_json::json!({"type":"reasoning","summary":[{"text":payload}],"encrypted_content":"opaque"}),
-            serde_json::json!({"type":"assistant","content":payload,"tool_calls":[{"id":"call","name":"Read","arguments":serde_json::json!({"payload":payload}).to_string()}]}),
+            serde_json::json!({"type":"assistant","content":payload,"tool_calls":[{"id":"call","name":"Read","arguments":serde_json::json!({"payload":payload}).to_string()},{"id":"structured","name":"Read","arguments":{"payload":payload}}]}),
             serde_json::json!({"type":"tool_result","tool_call_id":"call","content":payload})
         );
         fs::write(&path, &body).unwrap();
@@ -955,6 +955,11 @@ mod tests {
             resumed.checkpoints.iter().map(|(_, cp)| cp).collect::<Vec<_>>(),
             full.checkpoints.iter().skip(1).map(|(_, cp)| cp).collect::<Vec<_>>()
         );
+        assert!(resumed
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .any(|b| matches!(b, Block::ToolUse { id, input: crate::Json::Source(_), .. } if id == "structured")));
         fs::write(&path, format!("{body}\n")).unwrap();
         assert!(serde_json::to_value(&resumed.messages).is_err());
     }

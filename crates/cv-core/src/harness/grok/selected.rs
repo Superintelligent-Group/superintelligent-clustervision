@@ -98,11 +98,12 @@ pub(super) fn message(
                     metadata.insert(key.into(), value.resolve()?.into_owned());
                 }
             }
-            inputs.push(match call.get("arguments")? {
-                Some(value) if value.is_string()? => value.encoded_argument()?,
-                Some(value) => openai::parse_arguments(Some(value.resolve()?.as_ref())).into(),
-                None => serde_json::json!({}).into(),
-            });
+            inputs.push(
+                call.get("arguments")?
+                    .map(JsonView::encoded_argument)
+                    .transpose()?
+                    .unwrap_or_else(|| serde_json::json!({}).into()),
+            );
             small.push(Value::Object(metadata));
         }
         record.insert("tool_calls".into(), Value::Array(small));
