@@ -272,6 +272,7 @@ impl Adapter for OpenCode {
             let meta: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
 
             let mut s = Session {
+                source_stamp: None,
                 id: r.id.clone(),
                 harness: Harness::OpenCode,
                 cwd: meta.get("directory").and_then(Value::as_str).map(PathBuf::from),
@@ -782,6 +783,7 @@ mod db {
             bag.insert(k.clone(), v.clone());
         }
         let mut s = Session {
+            source_stamp: None,
             id: r.id.clone(),
             harness: Harness::OpenCode,
             principal: None,

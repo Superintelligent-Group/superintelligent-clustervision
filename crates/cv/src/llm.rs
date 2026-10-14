@@ -595,6 +595,7 @@ mod tests {
 
     fn sample_session() -> Session {
         Session {
+            source_stamp: None,
             id: "test-session".to_string(),
             harness: Harness::Claude,
             cwd: None,

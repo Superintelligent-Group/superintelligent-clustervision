@@ -610,6 +610,7 @@ mod tests {
         });
 
         Session {
+            source_stamp: None,
             id: "orig-id".into(),
             harness,
             cwd: Some(PathBuf::from("/Users/test/project")),
@@ -1990,6 +1991,7 @@ mod tests {
         });
 
         Session {
+            source_stamp: None,
             id: "img-id".into(),
             harness: Harness::Grok,
             cwd: Some(PathBuf::from("/Users/test/project")),

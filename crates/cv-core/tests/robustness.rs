@@ -70,6 +70,7 @@ fn sample_session(harness: Harness) -> Session {
     });
 
     Session {
+        source_stamp: None,
         id: "orig-id".into(),
         harness,
         cwd: Some(PathBuf::from("/Users/test/project")),

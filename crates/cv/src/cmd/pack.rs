@@ -369,6 +369,7 @@ fn build_source(hit: &cv_search::Hit, task: &str, llm_model: Option<&Option<Stri
     // Optional abstractive pass over just this span (never the whole session).
     let llm_digest = llm_model.and_then(|model| {
         let mut mini = Session {
+            source_stamp: None,
             id: hit.id.clone(),
             harness: r.harness,
             cwd: hit.cwd.as_ref().map(PathBuf::from),
@@ -888,6 +889,7 @@ fn emit_pack_session(
     });
 
     let session = Session {
+        source_stamp: None,
         id: format!("pack-{}", now.timestamp()),
         harness: to_h,
         cwd: std::env::current_dir().ok(),

@@ -488,6 +488,7 @@ mod tests {
     #[test]
     fn detects_boundaries_and_pairs_summaries_by_parent_uuid() {
         let session = Session {
+            source_stamp: None,
             id: "s".into(),
             harness: Harness::Claude,
             cwd: None,
@@ -539,6 +540,7 @@ mod tests {
         let mut sum = summary("ignored", "ADJACENT SUMMARY");
         sum.parent_id = None;
         let session = Session {
+            source_stamp: None,
             id: "s".into(),
             harness: Harness::Claude,
             cwd: None,
@@ -563,6 +565,7 @@ mod tests {
     #[test]
     fn keep_summaries_false_detects_but_drops_text() {
         let session = Session {
+            source_stamp: None,
             id: "s".into(),
             harness: Harness::Claude,
             cwd: None,

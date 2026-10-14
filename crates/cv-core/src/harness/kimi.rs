@@ -332,6 +332,7 @@ fn session_header(
     wire: Option<&Path>,
 ) -> (Session, WireEnrich) {
     let mut s = Session {
+        source_stamp: None,
         id: r.id.clone(),
         harness: Harness::Kimi,
         cwd: r.cwd.clone(),

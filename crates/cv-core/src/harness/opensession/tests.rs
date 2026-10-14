@@ -277,6 +277,7 @@ fn every_field_session() -> Session {
     }];
 
     let mut s = Session {
+        source_stamp: None,
         id: "s1".into(),
         harness: Harness::Claude,
         cwd: Some(PathBuf::from("/work/proj")),

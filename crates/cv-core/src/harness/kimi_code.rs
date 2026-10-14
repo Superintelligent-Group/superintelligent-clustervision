@@ -282,6 +282,7 @@ fn session_header(r: &SessionRef) -> (Session, PathBuf) {
     let header = peek_header(&wire);
 
     let mut s = Session {
+        source_stamp: None,
         id: r.id.clone(),
         harness: Harness::KimiCode,
         principal: None,

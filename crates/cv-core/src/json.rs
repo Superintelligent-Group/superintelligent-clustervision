@@ -98,6 +98,15 @@ struct Identity {
     changed: (i64, i64),
 }
 impl Identity {
+    fn admits(&self, later: &Identity) -> bool {
+        if later.len == self.len {
+            return later == self;
+        }
+        #[cfg(unix)]
+        return later.len > self.len && later.device == self.device && later.inode == self.inode;
+        #[cfg(not(unix))]
+        return later.len > self.len;
+    }
     fn read(path: &Path) -> Result<Self> {
         let metadata = std::fs::metadata(path).with_context(|| format!("reading JSON source {}", path.display()))?;
         Self::from_metadata(metadata)
@@ -169,6 +178,20 @@ impl JsonSource {
             );
         }
         Ok(())
+    }
+    /// [`Self::capture`] without the dependency check: one stat, for a parse-time stamp.
+    pub(crate) fn capture_identity(path: &Path) -> Result<Self> {
+        Self::capture_guarded(path, None)
+    }
+    /// The file `metadata` describes is this source unchanged, or this source only grown: the
+    /// append contract resume marks also rely on. On unix the device and inode must match; an
+    /// unchanged length must match exactly (mtime and ctime included). An in-place rewrite that
+    /// also grows the file keeps its inode and is not detected here.
+    pub(crate) fn admits_metadata(&self, metadata: Metadata) -> bool {
+        Identity::from_metadata(metadata).is_ok_and(|later| self.0.identity.admits(&later))
+    }
+    pub(crate) fn admits(&self, later: &JsonSource) -> bool {
+        self.0.path == later.0.path && self.0.identity.admits(&later.0.identity)
     }
     pub(crate) fn path(&self) -> &Path {
         &self.0.path

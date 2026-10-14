@@ -753,6 +753,7 @@ mod tests {
         });
 
         Session {
+            source_stamp: None,
             id: "abc123".into(),
             harness: Harness::Claude,
             cwd: Some("/home/<user>/proj".into()),

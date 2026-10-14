@@ -706,6 +706,7 @@ mod tests {
 
     fn session(messages: Vec<Message>) -> Session {
         Session {
+            source_stamp: None,
             id: "t".into(),
             harness: Harness::Claude,
             cwd: None,

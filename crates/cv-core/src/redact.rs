@@ -742,6 +742,7 @@ mod tests {
 
     fn empty_session() -> Session {
         Session {
+            source_stamp: None,
             id: "t".into(),
             harness: Harness::Claude,
             cwd: None,

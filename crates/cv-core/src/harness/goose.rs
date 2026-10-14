@@ -632,6 +632,7 @@ fn stream_db_opts_with_reads(
     };
 
     let s = Session {
+        source_stamp: None,
         id: r.id.clone(),
         harness: Harness::Goose,
         cwd: wd

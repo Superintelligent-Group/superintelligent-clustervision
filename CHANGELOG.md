@@ -6,6 +6,7 @@
 - `cv prune --to` refuses an existing session or sidecar name (exit 2, nothing written); `--force` replaces it by atomic rename, never truncating in place.
 - Prune, rewind, adopt, share and archive outputs publish fsynced, without needing hard links (FAT, exFAT); rewind outputs keep the source's permissions.
 - Rewind, adopt and share exit 2 when their output name is already taken.
+- A transcript replaced or rewritten after parsing fails its first lazy content read instead of silently returning the replacement's bytes.
 - OpenSession preserves optional opaque principals through reads and transformations; mixed-source compositions retain attribution only when every source agrees.
 - Claude rewind and port default to portable replay, preserving readable reasoning as text and consistently repairing illegal tool identifiers; native fidelity remains selectable.
 - Backend reads and exports index repeated membership and lineage lookups; account multipart reads keep bounded descriptors and discovery reuses guarded metadata.

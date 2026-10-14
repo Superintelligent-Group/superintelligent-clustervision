@@ -293,6 +293,7 @@ fn stream_thread_with_source(
     }
 
     let mut s = Session {
+        source_stamp: None,
         id: r.id.clone(),
         harness: Harness::Zed,
         cwd: cwd

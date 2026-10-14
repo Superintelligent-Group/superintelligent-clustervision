@@ -938,6 +938,7 @@ fn stream_session(
         (None, t) => t.or_else(|| r.title.clone()),
     };
     let mut s = Session {
+        source_stamp: None,
         id: r.id.clone(),
         harness: Harness::Devin,
         cwd: wd

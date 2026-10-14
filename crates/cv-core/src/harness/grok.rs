@@ -323,6 +323,7 @@ fn session_header(r: &SessionRef) -> (Session, HashMap<String, ToolEnrich>) {
         .unwrap_or(Value::Null);
 
     let mut s = Session {
+        source_stamp: None,
         id: r.id.clone(),
         harness: Harness::Grok,
         cwd: summary

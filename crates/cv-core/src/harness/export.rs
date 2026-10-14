@@ -264,6 +264,7 @@ fn parse_ref(kind: Kind, r: &SessionRef) -> Result<Session> {
         .find(|v| conv_id(v).as_deref() == Some(r.id.as_str()))
         .with_context(|| format!("conversation {} not found in {}", r.id, r.path.display()))?;
     let mut s = Session {
+        source_stamp: None,
         id: r.id.clone(),
         harness: kind.harness(),
         cwd: None,

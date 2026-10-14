@@ -154,6 +154,7 @@ fn assembled(
     );
 
     Session {
+        source_stamp: None,
         id,
         harness,
         cwd,
@@ -195,6 +196,7 @@ mod tests {
             messages.push(m);
         }
         Session {
+            source_stamp: None,
             id: id.to_string(),
             harness,
             cwd: Some("/tmp/a".into()),

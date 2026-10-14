@@ -532,6 +532,7 @@ fn msgs_counts_user_assistant_only_in_matches_session() {
 
 fn sess(primary: Option<&str>, turn_models: &[Option<&str>]) -> Session {
     Session {
+        source_stamp: None,
         id: "s".into(),
         harness: Harness::Claude,
         cwd: None,

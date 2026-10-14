@@ -422,6 +422,7 @@ pub(super) fn resumable_session(session: &Session, d: &Distilled, opts: &Distill
     let mut messages = vec![first];
     messages.append(&mut tail);
     let output = Session {
+        source_stamp: None,
         id: session.id.clone(),
         harness: session.harness,
         cwd: session.cwd.clone(),

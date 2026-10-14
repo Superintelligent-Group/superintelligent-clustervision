@@ -319,18 +319,41 @@ impl<'de> Deserialize<'de> for Text {
     }
 }
 
+/// The identity a session's primary source had when its spans were parsed (or, for a resolver
+/// built before the parse, when the resolver was built). Spans carry offsets, not identities; this
+/// is what lets a resolver tell a file that only grew from one that was replaced.
+#[derive(Clone, Debug)]
+pub struct SourceStamp(crate::json::JsonSource);
+impl SourceStamp {
+    /// `None` when `path` cannot be stat'ed now; resolution then reports that failure itself.
+    pub fn capture(path: &Path) -> Option<Self> {
+        crate::json::JsonSource::capture_identity(path).ok().map(Self)
+    }
+    /// Whether this stamps `path` (spelled however the caller spells it).
+    pub fn is_for(&self, path: &Path) -> bool {
+        std::path::absolute(path).is_ok_and(|path| path == self.0.path())
+    }
+}
+
 /// Resolves [`Span`]s against their source file(s). Memory-maps each source on first use (with the
 /// `mmap` feature) so resolving slices pages on demand rather than reading the whole file; without
 /// `mmap` (e.g. wasm32) it falls back to a positioned ranged read.
+///
+/// The primary source is held to its [`SourceStamp`]: a demand fails (checked) or resolves empty
+/// (unchecked) unless the file is the stamped one, unchanged or only appended to. That catches a
+/// file replaced under its name (a new inode) or rewritten at the same length after the parse, on
+/// the first demand. An in-place rewrite that also grows the file keeps the inode and passes, the
+/// same limit resume marks document.
 pub struct Resolver {
     primary: Option<PathBuf>,
+    stamp: Option<SourceStamp>,
     #[cfg(feature = "mmap")]
     maps: std::cell::RefCell<std::collections::HashMap<PathBuf, Option<memmap2::Mmap>>>,
     #[cfg(feature = "mmap")]
     checked_maps: std::cell::RefCell<std::collections::HashMap<PathBuf, CheckedMap>>,
 }
 
-/// A capture at demand time, not a stamp from when a Span was originally parsed.
+/// A capture at demand time; [`Resolver::admit`] holds it to the parse-time stamp.
 struct CheckedSource {
     captured: crate::json::JsonSource,
     path: PathBuf,
@@ -473,10 +496,19 @@ impl<R: std::io::Seek> std::io::Seek for DemandReader<'_, R> {
 }
 
 impl Resolver {
-    /// A resolver rooted at a session's primary source (its `source_path`).
+    /// A resolver rooted at a session's primary source (its `source_path`), stamped now. Build it
+    /// before the parse whose spans it resolves; after a parse, use [`crate::Session::resolver`],
+    /// which carries the parse-time stamp.
     pub fn new(primary: Option<PathBuf>) -> Self {
+        let stamp = primary.as_deref().and_then(SourceStamp::capture);
+        Self::stamped(primary, stamp)
+    }
+
+    /// A resolver whose primary is held to `stamp` (none: the primary is not held to anything).
+    pub fn stamped(primary: Option<PathBuf>, stamp: Option<SourceStamp>) -> Self {
         Resolver {
             primary,
+            stamp,
             #[cfg(feature = "mmap")]
             maps: std::cell::RefCell::new(std::collections::HashMap::new()),
             #[cfg(feature = "mmap")]
@@ -491,8 +523,23 @@ impl Resolver {
     fn checked_source(&self, sp: &Span) -> anyhow::Result<CheckedSource> {
         use anyhow::Context;
         let source = CheckedSource::open(self.path_for(sp).context("Text span has no source path")?)?;
+        if let Some(stamp) = self.stamp.as_ref().filter(|stamp| stamp.0.path() == source.path) {
+            anyhow::ensure!(
+                stamp.0.admits(&source.captured),
+                "Text source {} was replaced or rewritten after it was parsed",
+                source.path.display()
+            );
+        }
         source.bounds(sp)?;
         Ok(source)
+    }
+
+    /// Unchecked reads: an opened file the primary's stamp does not admit reads as absent.
+    fn admit(&self, path: &Path, file: &std::fs::File) -> bool {
+        match self.stamp.as_ref().filter(|stamp| stamp.is_for(path)) {
+            Some(stamp) => file.metadata().is_ok_and(|metadata| stamp.0.admits_metadata(metadata)),
+            None => true,
+        }
     }
 
     #[cfg(feature = "mmap")]
@@ -514,7 +561,7 @@ impl Resolver {
             );
         }
         let cached = maps.get(&source.path).unwrap();
-        // A Resolver remembers its first checked demand. Span itself carries no historical stamp.
+        // The first checked demand is remembered; later demands must see that same file.
         cached.captured.check_metadata(source.file.metadata()?)?;
         source.captured.check_metadata(cached.file.metadata()?)?;
         source.check()?;
@@ -532,7 +579,6 @@ impl Resolver {
 
     /// Checked text materialization. Inline/native unescaped text can borrow; escaped output
     /// retains the historical raw lossy fallback for malformed JSON escapes.
-    /// Source identity is captured at first demand, not when an old Span was parsed.
     pub fn try_resolve<'a>(&'a self, sp: &Span) -> anyhow::Result<Cow<'a, str>> {
         let source = self.checked_source(sp)?;
         let state = DemandState::default();
@@ -823,7 +869,8 @@ impl Resolver {
     #[cfg(not(feature = "mmap"))]
     fn ranged_reader(&self, sp: &Span) -> Option<std::io::BufReader<std::fs::File>> {
         use std::io::Seek;
-        let file = std::fs::File::open(self.path_for(sp)?).ok()?;
+        let path = self.path_for(sp)?;
+        let file = std::fs::File::open(path).ok().filter(|file| self.admit(path, file))?;
         let end = sp.offset.checked_add(sp.len)?;
         if end > file.metadata().ok()?.len() {
             return None;
@@ -841,6 +888,7 @@ impl Resolver {
             if !maps.contains_key(&path) {
                 let m = std::fs::File::open(&path)
                     .ok()
+                    .filter(|f| self.admit(&path, f))
                     .and_then(|f| unsafe { memmap2::Mmap::map(&f).ok() });
                 maps.insert(path.clone(), m);
             }
@@ -863,7 +911,7 @@ impl Resolver {
     fn raw_bytes<'a>(&'a self, sp: &Span) -> Option<Cow<'a, [u8]>> {
         use std::io::{Read, Seek, SeekFrom};
         let path = self.path_for(sp)?;
-        let mut f = std::fs::File::open(path).ok()?;
+        let mut f = std::fs::File::open(path).ok().filter(|f| self.admit(path, f))?;
         f.seek(SeekFrom::Start(sp.offset)).ok()?;
         let end = sp.offset.checked_add(sp.len)?;
         if end > f.metadata().ok()?.len() {
@@ -1692,6 +1740,58 @@ mod tests {
         assert!(prefix.chars().all(char::is_whitespace));
         #[cfg(feature = "mmap")]
         assert!(matches!(resolver.try_resolve(&span).unwrap(), Cow::Borrowed(_)));
+    }
+
+    /// A transcript renamed over after the parse, before any demand, must not resolve: the
+    /// session's spans point into the file that was parsed, not into its replacement.
+    #[test]
+    fn a_file_replaced_after_the_parse_fails_the_first_demand_and_growth_does_not() {
+        use crate::ir::{Block, Harness, SessionRef};
+        use std::io::Write;
+        let world = cv_testkit::World::new("lazy-parse-stamp");
+        let path = world.proj.join("stamped.jsonl");
+        let line = |fill: &str| {
+            serde_json::json!({"type": "user", "uuid": fill, "sessionId": "stamped",
+                "message": {"role": "user", "content": fill.repeat(10_000)}})
+            .to_string()
+                + "\n"
+        };
+        let parse = || {
+            let adapter = crate::harness::claude::Claude::with_config_dir(&world.proj);
+            let reference = SessionRef::new("stamped", Harness::Claude, path.clone());
+            crate::stream::collect_with(&adapter, &reference, &crate::stream::ParseOptions::lazy()).unwrap()
+        };
+        let first_text = |session: &crate::Session| match &session.messages[0].content[0] {
+            Block::Text { text } => text.clone(),
+            other => panic!("{other:?}"),
+        };
+        std::fs::write(&path, line("A")).unwrap();
+        let session = parse();
+        assert!(first_text(&session).is_span());
+        let replacement = world.base.join("replacement");
+        std::fs::write(&replacement, line("B")).unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        let error = session.clone().materialize().unwrap_err();
+        assert!(error.to_string().contains("replaced or rewritten"), "{error:#}");
+        let resolver = session.resolver();
+        assert!(!first_text(&session).resolve(&resolver).contains('B'));
+        // An unguarded streaming sink's resolver is built before the parse: same answer.
+        let early = Resolver::new(Some(path.clone()));
+        let session = parse();
+        std::fs::write(&replacement, line("C")).unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        assert!(first_text(&session).try_resolve(&early).is_err());
+        // A live transcript only grows: appending after the parse still resolves.
+        std::fs::write(&path, line("A")).unwrap();
+        let mut session = parse();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(line("D").as_bytes())
+            .unwrap();
+        session.materialize().unwrap();
+        assert_eq!(&*first_text(&session), "A".repeat(10_000));
     }
 
     #[cfg(feature = "mmap")]

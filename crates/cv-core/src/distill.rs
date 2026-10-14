@@ -1611,6 +1611,7 @@ fn session_with_tail(session: &Session, d: &Distilled, keep_last: usize, mut tai
     let mut messages = vec![first];
     messages.append(&mut tail);
     let output = Session {
+        source_stamp: None,
         id: session.id.clone(),
         harness: session.harness,
         cwd: session.cwd.clone(),
@@ -2317,6 +2318,7 @@ facts text",
         ));
         msgs.push(msg(Role::Assistant, MessageKind::Reply, vec![call("z1", "ls", "List")]));
         Session {
+            source_stamp: None,
             id: "agent-test".into(),
             harness: Harness::Claude,
             cwd: None,

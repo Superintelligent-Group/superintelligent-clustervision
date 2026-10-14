@@ -941,6 +941,7 @@ fn stream_resumable_inner(
         }
         None => adapter.try_stream(r, opts, &mut counting)?,
     };
+    let session = counting.stamp_session(session);
     // A resumed pass that read too little to take one still passed through `from`.
     let last = counting
         .last
@@ -1008,6 +1009,9 @@ struct Counting<'a> {
     amortized: bool,
     spacing: u64,
     last: Option<Checkpoint>,
+    /// The primary's identity before the adapter opened it: a file replaced at any later point is
+    /// not the one this pass's spans point into.
+    stamp: Option<crate::lazy::SourceStamp>,
 }
 
 impl<'a> Counting<'a> {
@@ -1026,7 +1030,21 @@ impl<'a> Counting<'a> {
             amortized: false,
             spacing: every.unwrap_or(0),
             last: None,
+            stamp: crate::lazy::SourceStamp::capture(&r.path),
         }
+    }
+
+    /// `s` was read from this pass's primary and carries no stamp of its own.
+    fn should_stamp(&self, s: &Session) -> bool {
+        let primary = |stamp: &crate::lazy::SourceStamp| s.source_path.as_deref().is_some_and(|p| stamp.is_for(p));
+        s.source_stamp.is_none() && self.stamp.as_ref().is_some_and(primary)
+    }
+
+    fn stamp_session(&self, mut session: Session) -> Session {
+        if self.should_stamp(&session) {
+            session.source_stamp = self.stamp.clone();
+        }
+        session
     }
 
     fn space_after(&mut self, cp: &Checkpoint) {
@@ -1070,7 +1088,15 @@ impl MessageSink for Counting<'_> {
         self.inner.dependency(path);
     }
     fn meta(&mut self, s: &Session) {
-        if !self.failed {
+        if self.failed {
+            return;
+        }
+        // A sink that builds its resolver from the meta session (`session.resolver()`) holds the
+        // primary to the pre-parse stamp. Streamed meta sessions hold no messages, so this copy
+        // is of the header only; one that does hold messages is passed on as it is.
+        if s.messages.is_empty() && self.should_stamp(s) {
+            self.inner.meta(&self.stamp_session(s.clone()));
+        } else {
             self.inner.meta(s);
         }
     }
@@ -1136,6 +1162,7 @@ fn stream_with_counter(
 ) -> Result<(Session, Option<CompletedCounter>)> {
     let mut counting = Counting::new(r, sink, None);
     let session = adapter.try_stream(r, opts, &mut counting)?;
+    let session = counting.stamp_session(session);
     let counted = (!counting.stopped).then_some((counting.turns, counting.affordances, counting.dependencies));
     Ok((session, counted))
 }

@@ -785,6 +785,7 @@ fn stream_conn_with_demand(
     }
 
     let s = Session {
+        source_stamp: None,
         id: r.id.clone(),
         harness: Harness::Hermes,
         cwd: cwd

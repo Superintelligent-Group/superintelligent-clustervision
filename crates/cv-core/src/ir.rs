@@ -198,6 +198,10 @@ pub struct Session {
     /// Where this session was read from on disk.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_path: Option<PathBuf>,
+    /// `source_path`'s identity when this session's spans were parsed; [`Session::resolver`]
+    /// holds the file to it. Set by the stream layer, never serialized.
+    #[serde(skip)]
+    pub source_stamp: Option<crate::lazy::SourceStamp>,
     /// Harness-specific session facts, nested under the harness name — `extra["claude"]["custom_title"]`,
     /// `extra["codex"]["history_mode"]` — never flat. Shared concepts have first-class fields
     /// (`system_prompt`, `lineage`, …). See `docs/INTERFACE-V2.md` §4.
@@ -272,6 +276,7 @@ impl Session {
             lineage: Lineage::default(),
             messages: Vec::new(),
             source_path: None,
+            source_stamp: None,
             extra: serde_json::Map::new(),
         }
     }
@@ -369,9 +374,13 @@ impl Session {
     }
 
     /// A [`Resolver`](crate::lazy::Resolver) for this session's lazy content spans, rooted at its
-    /// `source_path`. Streaming consumers create one and resolve each block as it passes.
+    /// `source_path` and held to its parse-time [`source_stamp`](Self::source_stamp), so a file
+    /// replaced after the parse fails the first demand. Without a stamp it stamps the file now.
     pub fn resolver(&self) -> crate::lazy::Resolver {
-        crate::lazy::Resolver::new(self.source_path.clone())
+        match &self.source_stamp {
+            Some(stamp) => crate::lazy::Resolver::stamped(self.source_path.clone(), Some(stamp.clone())),
+            None => crate::lazy::Resolver::new(self.source_path.clone()),
+        }
     }
 
     /// Capture the session's primary and retained auxiliary sources before a multi-message
