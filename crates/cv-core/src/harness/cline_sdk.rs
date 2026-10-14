@@ -289,7 +289,13 @@ pub(crate) fn stream_with_options(
         if let Some(error) = sink.take_error() {
             return Err(error);
         }
-        let row = path.parent().and_then(|d| manifest(d, sid));
+        // Child sessions deliberately do not inherit the lead's row metadata. Keep the
+        // dependency guard, but avoid decoding the same growing manifest for every child.
+        let row = if lead {
+            path.parent().and_then(|d| manifest(d, sid))
+        } else {
+            None
+        };
         let origin = doc.get("origin");
         {
             let bag = s.harness_extra_mut(Harness::Cline);
@@ -757,6 +763,54 @@ mod tests {
         let mut s = stream(&r.path, &r.id, &mut sink).unwrap();
         s.messages = sink.messages;
         s
+    }
+
+    #[test]
+    fn child_fanout_ignores_large_lead_metadata_but_keeps_dependency() {
+        let world = cv_testkit::World::in_process("cline-child-manifest-fanout");
+        let dir = world.base.join("lead");
+        fs::create_dir(&dir).unwrap();
+        let manifest = dir.join("lead.json");
+        write(
+            &dir,
+            "lead.json",
+            json!({"cwd":"/lead-only", "model":"lead-only", "metadata":{"title":"lead-only","large_usage": "x".repeat(4 * 1024 * 1024)}}),
+        );
+        #[derive(Default)]
+        struct ChildSink {
+            messages: Vec<Message>,
+            dependencies: Vec<PathBuf>,
+        }
+        impl MessageSink for ChildSink {
+            fn message(&mut self, message: Message) -> Flow {
+                self.messages.push(message);
+                Flow::Continue
+            }
+            fn dependency(&mut self, path: &Path) {
+                self.dependencies.push(path.to_path_buf());
+            }
+        }
+        for index in 0..128 {
+            let stem = format!("agent_{index}");
+            let path = dir.join(format!("{stem}.messages.json"));
+            write(
+                &dir,
+                &format!("{stem}.messages.json"),
+                json!({
+                    "origin":{"parentThreadId":"lead","subagent":stem},
+                    "messages":[{"role":"user","content":"child task"},{"role":"assistant","content":"child reply","modelInfo":{"id":"child-model"}}]
+                }),
+            );
+            let mut sink = ChildSink::default();
+            let session =
+                stream_with_options(&path, &format!("lead/{stem}"), &ParseOptions::full(), &mut sink).unwrap();
+            assert!(sink.dependencies.contains(&manifest));
+            assert_eq!(session.cwd, None);
+            assert_eq!(session.model.as_deref(), Some("child-model"));
+            assert_eq!(session.title.as_deref(), Some("child task"));
+            assert_eq!(session.lineage.parent.as_deref(), Some("lead"));
+            assert_eq!(sink.messages[0].origin, Origin::Subagent);
+        }
     }
 
     #[test]
