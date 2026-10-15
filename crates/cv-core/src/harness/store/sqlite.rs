@@ -431,6 +431,12 @@ impl Cells {
         Ok((len != 0).then_some(Cell(offset, len)))
     }
 
+    /// The captured store and the arena its cells are copied into, where a decoder composes text
+    /// that is checked against the store like the cells themselves.
+    pub(crate) fn out(&self) -> (&crate::json::JsonSource, &std::sync::Arc<super::bytes::ByteSource>) {
+        (&self.source, &self.arena)
+    }
+
     /// Decode `cell` with `f`. None when the cell is not exactly one JSON value; every other
     /// error is a source failure.
     pub(crate) fn read<T>(
