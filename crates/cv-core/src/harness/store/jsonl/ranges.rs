@@ -217,7 +217,7 @@ pub(crate) trait At {
 }
 impl At for fs::File {
     fn read_at(&self, bytes: &mut [u8], at: u64) -> io::Result<usize> {
-        file_read_at(self, bytes, at)
+        crate::harness::store::bytes::read_at(self, bytes, at)
     }
 }
 impl At for [u8] {
@@ -232,24 +232,6 @@ impl At for [u8] {
 impl At for memmap2::Mmap {
     fn read_at(&self, bytes: &mut [u8], at: u64) -> io::Result<usize> {
         self[..].read_at(bytes, at)
-    }
-}
-fn file_read_at(file: &fs::File, bytes: &mut [u8], at: u64) -> io::Result<usize> {
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::FileExt::read_at(file, bytes, at)
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::FileExt;
-        file.seek_read(bytes, at)
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let mut file = file.try_clone()?;
-        use std::io::Seek;
-        file.seek(std::io::SeekFrom::Start(at))?;
-        file.read(bytes)
     }
 }
 pub(crate) fn read_exact_at<S: At + ?Sized>(file: &S, mut bytes: &mut [u8], mut at: u64) -> io::Result<()> {
