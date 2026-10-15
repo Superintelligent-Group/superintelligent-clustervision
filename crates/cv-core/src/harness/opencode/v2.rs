@@ -33,6 +33,7 @@ use crate::stream::ParseOptions;
 use anyhow::Result;
 use serde_json::{json, Map, Value};
 
+#[cfg(feature = "sqlite")]
 pub(super) fn tag_complete(messages: &mut [Message], id: &str, ty: &str) {
     if let Some(primary) = messages.first_mut() {
         primary
@@ -45,6 +46,7 @@ pub(super) fn tag_complete(messages: &mut [Message], id: &str, ty: &str) {
             .insert("record_owner".into(), json!(id));
     }
 }
+#[cfg(feature = "sqlite")]
 pub(super) fn attach_complete(messages: &mut [Message], id: &str, ty: &str, data: crate::Json) {
     tag_complete(messages, id, ty);
     let mut identity = Map::new();
@@ -53,6 +55,7 @@ pub(super) fn attach_complete(messages: &mut [Message], id: &str, ty: &str, data
     crate::ir::CompleteRecord::attach_replay(messages, Harness::OpenCode, data, identity);
 }
 
+#[cfg(feature = "sqlite")]
 pub(super) fn known_type(ty: &str) -> bool {
     matches!(
         ty,

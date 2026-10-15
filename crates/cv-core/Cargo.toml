@@ -79,6 +79,11 @@ parallel = ["dep:rayon"]
 # Diagnostic example only: count requested Rust allocations separately from clean timing runs.
 probe-heap = []
 
+# The golden corpus reads every harness's store, SQLite and zstd ones included.
+[[test]]
+name = "corpus"
+required-features = ["sqlite"]
+
 [dev-dependencies]
 syn = { version = "2", features = ["full"] }
 cv-testkit = { path = "../cv-testkit" }

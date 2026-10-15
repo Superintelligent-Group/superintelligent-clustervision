@@ -1820,6 +1820,7 @@ mod tests {
         }
         None
     }
+    #[cfg(feature = "sqlite")]
     fn parent_node(id: &str, parent: Option<&str>, control: bool) -> TreeNode {
         TreeNode {
             entry: TreeEntry {
@@ -1833,6 +1834,7 @@ mod tests {
             index: 0,
         }
     }
+    #[cfg(feature = "sqlite")]
     #[test]
     fn canonical_parent_shared_chains_have_linear_visits_including_missing_targets_and_cycles() {
         for terminal in [Some("root"), Some("absent"), None, Some("leaf-0")] {
@@ -1864,6 +1866,7 @@ mod tests {
             );
         }
     }
+    #[cfg(feature = "sqlite")]
     #[test]
     fn canonical_parent_cache_preserves_forward_targets_duplicate_ids_and_cycle_entry_points() {
         let mut nodes = vec![
@@ -1895,6 +1898,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "sqlite")]
     fn write_store(agents: &Path, session_id: &str, events: &[String]) -> PathBuf {
         let agent_dir = agents.join("main").join("agent");
         fs::create_dir_all(&agent_dir).unwrap();

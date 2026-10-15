@@ -2518,6 +2518,7 @@ mod tests {
 
     /// Discovery under a handoff hands each rollout it decoded over once, never a plain one; a
     /// read of the same unchanged source on that thread uses those bytes, a changed one decodes.
+    #[cfg(feature = "sqlite")]
     #[test]
     fn discovery_hands_decoded_rollouts_to_the_reads_of_the_same_source() {
         let _world = crate::test_world("codex-handoff");
