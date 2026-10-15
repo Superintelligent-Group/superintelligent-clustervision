@@ -17,6 +17,7 @@
 mod source;
 pub use source::SourceText;
 
+use crate::harness::store::json::{complete_escape_prefix, decode_body, unescape_body, validate_body};
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::borrow::Cow;
@@ -550,7 +551,7 @@ impl Resolver {
             if !sp.escaped {
                 String::from_utf8_lossy(bytes)
             } else if sp.len <= 64 * 1024 {
-                Cow::Owned(unescape_json_body(bytes))
+                Cow::Owned(unescape_body(bytes))
             } else {
                 let mut reader = DemandReader {
                     inner: std::io::Cursor::new(bytes),
@@ -648,7 +649,7 @@ impl Resolver {
         };
         let end = complete_utf8_prefix(&bytes, usize::try_from(max_raw)?);
         let output = if sp.escaped {
-            Cow::Owned(unescape_json_body(&bytes[..complete_escape_prefix(&bytes[..end])]))
+            Cow::Owned(unescape_body(&bytes[..complete_escape_prefix(&bytes[..end])]))
         } else {
             match bytes {
                 Cow::Borrowed(bytes) => String::from_utf8_lossy(&bytes[..end]),
@@ -794,7 +795,11 @@ fn fold_body<R: std::io::BufRead + std::io::Seek, T>(
     use std::io::{Read, SeekFrom};
     if escaped {
         let mut body = reader.by_ref().take(len);
-        if decode_json_body(&mut body, &mut |text| add(&mut output, text)).is_ok() {
+        let decoded = decode_body(&mut body, &mut |text| {
+            add(&mut output, text);
+            true
+        });
+        if decoded.is_ok() {
             return output;
         }
         reset(&mut output);
@@ -819,7 +824,7 @@ fn stream_body<R: std::io::BufRead + std::io::Seek>(
     f: &mut impl FnMut(&str) -> bool,
 ) -> Result<(), ()> {
     use std::io::{Read, SeekFrom};
-    let decode = escaped && validate_value_json_body(&mut reader.by_ref().take(len)).unwrap_or(false);
+    let decode = escaped && validate_body(&mut reader.by_ref().take(len), true).unwrap_or(false);
     reader.seek(SeekFrom::Start(start)).map_err(|_| ())?;
     let mut output = ChunkOutput {
         text: String::with_capacity(
@@ -832,7 +837,7 @@ fn stream_body<R: std::io::BufRead + std::io::Seek>(
     };
     let mut body = reader.by_ref().take(len);
     if decode {
-        decode_json_body_control(&mut body, &mut |text| output.push(text))?;
+        decode_body(&mut body, &mut |text| output.push(text))?;
     } else {
         stream_lossy_utf8_until(&mut body, &mut |text| output.push(text));
     }
@@ -940,195 +945,6 @@ fn stream_lossy_utf8_until(reader: &mut impl std::io::BufRead, f: &mut impl FnMu
     }
 }
 
-/// Decode complete JSON-body windows through serde's optimized string parser. At most one
-/// incomplete escape or UTF-8 scalar carries into the next fixed-size source window.
-/// Returns whether the valid body contained an escape. Callbacks may run before a later malformed
-/// window or read error returns `Err`: callers must discard or reset their accumulated result on
-/// failure. This primitive does not publish transactional output or stop before validating EOF.
-pub(crate) fn decode_json_body(reader: &mut impl std::io::BufRead, f: &mut impl FnMut(&str)) -> Result<bool, ()> {
-    decode_json_body_control(reader, &mut |text| {
-        f(text);
-        true
-    })
-}
-
-/// Decode a body already accepted by strict Value-compatible validation, stopping when the
-/// callback returns false. Ok after an intentional stop does NOT validate the unread suffix.
-/// Callers must retain/recheck their source identity and discard callback effects on Err.
-/// Reads ahead at most one window; an intentional stop is not a resumable decoder checkpoint.
-pub(crate) fn decode_validated_json_body_until(
-    reader: &mut impl std::io::BufRead,
-    f: &mut impl FnMut(&str) -> bool,
-) -> Result<(), ()> {
-    decode_json_body_control(reader, f).map(|_| ())
-}
-
-fn decode_json_body_control(reader: &mut impl std::io::BufRead, f: &mut impl FnMut(&str) -> bool) -> Result<bool, ()> {
-    json_body_windows(reader, &mut |quoted| {
-        let mut decoder = serde_json::Deserializer::from_slice(quoted);
-        let keep_going = decoder.deserialize_str(JsonWindow(f)).map_err(|_| ())?;
-        decoder.end().map_err(|_| ())?;
-        Ok(keep_going)
-    })
-}
-
-/// Validate string syntax in bounded windows without requiring Unicode surrogate pairs.
-/// Like serde's IgnoredAny/RawValue, this accepts lone UTF-16 escapes. Value-compatible
-/// acceptance belongs to a separate boundary; callbacks never receive this validation view.
-pub(crate) fn validate_json_body_syntax(reader: &mut impl std::io::BufRead) -> Result<(), ()> {
-    json_body_windows(reader, &mut |quoted| {
-        serde_json::from_slice::<&serde_json::value::RawValue>(quoted).map_err(|_| ())?;
-        Ok(true)
-    })
-    .map(|_| ())
-}
-
-/// Transactional streaming preflight needs acceptance, not decoded text. Strings without
-/// Unicode escapes have identical RawValue/Value acceptance and need no decode scratch.
-/// Unicode windows retain serde's strict string decoder, including surrogate pairing.
-pub(crate) fn validate_value_json_body(reader: &mut impl std::io::BufRead) -> Result<bool, ()> {
-    json_body_windows(reader, &mut |quoted| {
-        if memchr::memmem::find(quoted, b"\\u").is_some() {
-            let mut decoder = serde_json::Deserializer::from_slice(quoted);
-            decoder
-                .deserialize_str(JsonWindow(&mut |_: &str| true))
-                .map_err(|_| ())?;
-            decoder.end().map_err(|_| ())?;
-        } else {
-            serde_json::from_slice::<&serde_json::value::RawValue>(quoted).map_err(|_| ())?;
-        }
-        Ok(true)
-    })
-}
-
-fn json_body_windows(
-    reader: &mut impl std::io::BufRead,
-    visit: &mut impl FnMut(&[u8]) -> Result<bool, ()>,
-) -> Result<bool, ()> {
-    const WINDOW: usize = 64 * 1024;
-    let mut raw = Vec::with_capacity(WINDOW);
-    let mut quoted = Vec::with_capacity(WINDOW + 2);
-    let mut has_escape = false;
-    loop {
-        while raw.len() < WINDOW {
-            let bytes = reader.fill_buf().map_err(|_| ())?;
-            if bytes.is_empty() {
-                break;
-            }
-            let n = (WINDOW - raw.len()).min(bytes.len());
-            raw.extend_from_slice(&bytes[..n]);
-            reader.consume(n);
-        }
-        let eof = raw.len() < WINDOW;
-        if raw.is_empty() {
-            return Ok(has_escape);
-        }
-        let mut end = if eof {
-            raw.len()
-        } else {
-            complete_json_window_prefix(&raw)
-        };
-        if !eof && raw[end - 1] >= 0x80 {
-            let mut tail = end.saturating_sub(4);
-            while tail > 0 && (raw[tail] & 0xc0) == 0x80 {
-                tail -= 1;
-            }
-            if let Err(e) = std::str::from_utf8(&raw[tail..end]) {
-                if e.error_len().is_none() {
-                    end = tail + e.valid_up_to();
-                }
-            }
-        }
-        has_escape |= raw[..end].contains(&b'\\');
-        quoted.clear();
-        quoted.push(b'"');
-        quoted.extend_from_slice(&raw[..end]);
-        quoted.push(b'"');
-        if !visit(&quoted)? {
-            return Ok(has_escape);
-        }
-        raw.drain(..end);
-        if eof {
-            return Ok(has_escape);
-        }
-    }
-}
-
-/// The callback borrows serde's decode scratch; neither pass needs an owned decoded String.
-struct JsonWindow<'a, F>(&'a mut F);
-
-impl<'de, F: FnMut(&str) -> bool> Visitor<'de> for JsonWindow<'_, F> {
-    type Value = bool;
-
-    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.write_str("a JSON string window")
-    }
-
-    fn visit_str<E: de::Error>(self, s: &str) -> Result<bool, E> {
-        Ok((self.0)(s))
-    }
-}
-
-/// Only the last escape can cross a window cut. Twelve bytes cover a surrogate pair;
-/// back up over a preceding backslash run so the tail scanner retains its escape parity.
-fn complete_json_window_prefix(raw: &[u8]) -> usize {
-    let mut start = raw.len().saturating_sub(12);
-    while start > 0 && raw[start - 1] == b'\\' {
-        start -= 1;
-    }
-    start + complete_escape_prefix(&raw[start..])
-}
-
-/// The longest prefix of `raw` (a JSON string body) that ends on a *complete* escape sequence —
-/// i.e. doesn't cut a `\x` or `\uXXXX` in half. Truncating to this length keeps the prefix
-/// parseable by [`unescape_json_body`] instead of tripping its lossy raw fallback.
-fn complete_escape_prefix(raw: &[u8]) -> usize {
-    let mut i = 0usize;
-    while i < raw.len() {
-        if raw[i] != b'\\' {
-            let Some(next) = memchr::memchr(b'\\', &raw[i..]) else {
-                break;
-            };
-            i += next;
-        }
-        // An escape starts here: 2 bytes (`\n`, `\"`, …), 6 (`\uXXXX`), or 12 (a `\uD8xx\uDCxx`
-        // surrogate pair — a cut between the halves would leave an unparseable lone surrogate).
-        if raw.get(i + 1) == Some(&b'u') {
-            if i + 6 > raw.len() {
-                return i; // incomplete at the cut — keep everything before it
-            }
-            let high_surrogate = std::str::from_utf8(&raw[i + 2..i + 6])
-                .ok()
-                .and_then(|h| u16::from_str_radix(h, 16).ok())
-                .is_some_and(|h| (0xD800..0xDC00).contains(&h));
-            let needed = if high_surrogate { 12 } else { 6 };
-            if i + needed > raw.len() {
-                return i;
-            }
-            i += needed;
-        } else {
-            if i + 2 > raw.len() {
-                return i;
-            }
-            i += 2;
-        }
-    }
-    raw.len()
-}
-
-/// Unescape a JSON string *body* (the bytes between the quotes) into its text, by re-quoting and
-/// letting `serde_json` parse it — correct for all JSON escapes. Falls back to a lossy decode.
-fn unescape_json_body(raw: &[u8]) -> String {
-    if !raw.contains(&b'\\') {
-        return String::from_utf8_lossy(raw).into_owned();
-    }
-    let mut quoted = Vec::with_capacity(raw.len() + 2);
-    quoted.push(b'"');
-    quoted.extend_from_slice(raw);
-    quoted.push(b'"');
-    serde_json::from_slice::<String>(&quoted).unwrap_or_else(|_| String::from_utf8_lossy(raw).into_owned())
-}
-
 #[cfg(test)]
 mod tests {
     #[test]
@@ -1187,38 +1003,6 @@ mod tests {
     }
 
     #[test]
-    fn validation_preflight_matches_string_decoder_acceptance() {
-        use std::io::{BufReader, Cursor};
-        let codes = [0, 0x41, 0xd7ff, 0xd800, 0xdbff, 0xdc00, 0xdfff, 0xe000, 0xffff];
-        let mut cases = vec![
-            b"a\xff".to_vec(),
-            b"a\\q".to_vec(),
-            b"\\u123".to_vec(),
-            b"\\n\\t".to_vec(),
-        ];
-        for high in codes {
-            cases.push(format!("a\\u{high:04x}z").into_bytes());
-            for low in codes {
-                cases.push(format!("a\\u{high:04x}\\u{low:04x}z").into_bytes());
-            }
-            for slashes in 0..8 {
-                cases.push(format!("{}u{high:04x}", "\\".repeat(slashes)).into_bytes());
-            }
-        }
-        for raw in cases {
-            for window in 1..20 {
-                let mut validate = BufReader::with_capacity(window, Cursor::new(&raw));
-                let mut decode = BufReader::with_capacity(window, Cursor::new(&raw));
-                assert_eq!(
-                    validate_value_json_body(&mut validate).is_ok(),
-                    decode_json_body(&mut decode, &mut |_| {}).is_ok(),
-                    "raw={raw:?}, window={window}"
-                );
-            }
-        }
-    }
-
-    #[test]
     fn checked_lengths_match_owned_decode_and_malformed_fallback() {
         let dir = CheckedTestDir::new();
         let path = dir.path().join("length");
@@ -1237,7 +1021,7 @@ mod tests {
                 source: None,
             };
             let expected = if escaped {
-                unescape_json_body(&raw)
+                unescape_body(&raw)
             } else {
                 String::from_utf8_lossy(&raw).into_owned()
             }
@@ -1342,7 +1126,7 @@ mod tests {
                 source: None,
             };
             let expected = if escaped {
-                unescape_json_body(raw)
+                unescape_body(raw)
             } else {
                 String::from_utf8_lossy(raw).into_owned()
             };
@@ -1624,55 +1408,9 @@ mod tests {
     }
 
     #[test]
-    fn validated_decoder_stops_after_one_bounded_window() {
-        use std::io::Cursor;
-        let body = "\\ud83c\\udf19\\n".repeat(100_000);
-        // Independent full-value acceptance establishes the stoppable primitive's precondition.
-        let expected: String = serde_json::from_str(&format!("\"{body}\"")).unwrap();
-        let mut reader = Cursor::new(body.as_bytes());
-        let mut output = String::new();
-        decode_validated_json_body_until(&mut reader, &mut |text| {
-            output.push_str(text);
-            false
-        })
-        .unwrap();
-        assert!(reader.position() <= 65_536);
-        assert!(reader.position() < body.len() as u64);
-        assert!(!output.is_empty());
-        assert!(expected.starts_with(&output));
-        let mut full_reader = Cursor::new(body.as_bytes());
-        let mut full = String::new();
-        decode_validated_json_body_until(&mut full_reader, &mut |text| {
-            full.push_str(text);
-            true
-        })
-        .unwrap();
-        assert_eq!(full, expected);
-        assert_eq!(full_reader.position(), body.len() as u64);
-    }
-
-    #[test]
     fn oversized_chunk_budget_still_emits_a_small_field() {
         assert_eq!(chunked_body(b"a\\nb", true, 1, usize::MAX), "a\nb");
         assert_eq!(chunked_body(b"\xff", false, 1, usize::MAX), "\u{fffd}");
-    }
-
-    #[test]
-    fn json_window_tail_matches_complete_escape_scan() {
-        let bodies = [
-            r#"plain\\\\\\\"\n\u0041\uD834\uDD1Etail"#.to_owned(),
-            format!("{}uD834\\uDD1E", "\\".repeat(101)),
-            format!("{}uD834\\uDD1E", "\\".repeat(100)),
-        ];
-        for body in bodies {
-            for end in 0..=body.len() {
-                assert_eq!(
-                    complete_json_window_prefix(&body.as_bytes()[..end]),
-                    complete_escape_prefix(&body.as_bytes()[..end]),
-                    "{body:?}, cut {end}"
-                );
-            }
-        }
     }
 
     #[test]
@@ -1723,7 +1461,7 @@ mod tests {
         for raw in bodies {
             for escaped in [false, true] {
                 let expected = if escaped {
-                    unescape_json_body(raw)
+                    unescape_body(raw)
                 } else {
                     String::from_utf8_lossy(raw).into_owned()
                 };
@@ -1753,7 +1491,7 @@ mod tests {
                     .collect();
                 for escaped in [false, true] {
                     let expected = if escaped {
-                        unescape_json_body(&raw)
+                        unescape_body(&raw)
                     } else {
                         String::from_utf8_lossy(&raw).into_owned()
                     };
@@ -1849,14 +1587,10 @@ mod tests {
                 escaped: true,
             };
             // Independent old whole-body parser remains the prefix resolver's oracle.
-            assert_eq!(
-                resolver.try_resolve(&span).unwrap(),
-                unescape_json_body(raw),
-                "body {i}"
-            );
+            assert_eq!(resolver.try_resolve(&span).unwrap(), unescape_body(raw), "body {i}");
             assert_eq!(
                 resolver.try_resolved_len(&span).unwrap(),
-                unescape_json_body(raw).len(),
+                unescape_body(raw).len(),
                 "length {i}"
             );
             let literal = Span {
@@ -2043,38 +1777,6 @@ mod tests {
         assert_eq!(serde_json::to_string(&t).unwrap(), "\"hello\"");
         let back: Text = serde_json::from_str("\"hello\"").unwrap();
         assert_eq!(back, Text::Inline("hello".into()));
-    }
-
-    #[test]
-    fn unescape_handles_escapes() {
-        assert_eq!(unescape_json_body(b"a\\nb"), "a\nb");
-        assert_eq!(unescape_json_body(b"plain"), "plain");
-        assert_eq!(unescape_json_body(b"quote \\\" mark"), "quote \" mark");
-    }
-
-    #[test]
-    fn complete_escape_prefix_never_splits_an_escape() {
-        // Plain text: the whole slice survives.
-        assert_eq!(complete_escape_prefix(b"hello"), 5);
-        // Complete escapes survive whole.
-        assert_eq!(complete_escape_prefix(b"a\\nb"), 4);
-        assert_eq!(complete_escape_prefix(b"a\\u0041b"), 8);
-        // A trailing half escape is cut *before* the backslash.
-        assert_eq!(complete_escape_prefix(b"abc\\"), 3);
-        assert_eq!(complete_escape_prefix(b"abc\\u00"), 3);
-        // A high surrogate keeps its partner or is dropped entirely.
-        assert_eq!(complete_escape_prefix(b"x\\uD834\\uDD1E"), 13);
-        assert_eq!(complete_escape_prefix(b"x\\uD834"), 1);
-        assert_eq!(complete_escape_prefix(b"x\\uD834\\uDD"), 1);
-        // …and every kept prefix actually unescapes cleanly.
-        for raw in [&b"abc\\"[..], b"abc\\u00", b"x\\uD834", b"a\\nb\\"] {
-            let keep = complete_escape_prefix(raw);
-            let requoted = [b"\"", &raw[..keep], b"\""].concat();
-            assert!(
-                serde_json::from_slice::<String>(&requoted).is_ok(),
-                "prefix of {raw:?} must stay parseable"
-            );
-        }
     }
 
     /// `resolve_prefix` reads only the head of a span — including backing an escaped cut up to a

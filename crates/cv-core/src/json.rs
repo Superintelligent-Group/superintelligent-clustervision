@@ -23,7 +23,6 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Number, Value};
 use std::borrow::Cow;
 use std::fs::Metadata;
-use std::io::Cursor;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1375,7 +1374,7 @@ impl<'a> JsonView<'a> {
                 None => Ok(false),
             },
             View::Source(source) if source.raw.get().starts_with('"') => {
-                decode_string(source.raw, &mut f)?;
+                decode_string(source.raw.get(), &mut f)?;
                 Ok(true)
             }
             View::Source(_) => Ok(false),
@@ -1607,17 +1606,15 @@ impl Write for CountWriter {
         Ok(())
     }
 }
-fn decode_string(raw: Raw<'_>, f: &mut impl FnMut(&str) -> Result<()>) -> Result<()> {
-    let body = &raw.get()[1..raw.get().len() - 1];
-    // Validated unescaped text is borrowed directly. A callback can choose its own bounded scan.
+/// Decode a validated JSON string (quotes included): unescaped text is borrowed whole, escaped
+/// text goes through the one body codec in bounded windows.
+fn decode_string(quoted: &str, f: &mut impl FnMut(&str) -> Result<()>) -> Result<()> {
+    let body = &quoted[1..quoted.len() - 1];
     if !body.as_bytes().contains(&b'\\') {
         return f(body);
     }
-    if memchr::memmem::find(body.as_bytes(), b"\\u").is_none() {
-        return decode_ascii_escapes(body, f);
-    }
     let mut error = None;
-    let decoded = crate::lazy::decode_validated_json_body_until(&mut Cursor::new(body.as_bytes()), &mut |text| {
+    let decoded = crate::harness::store::json::decode_body(&mut body.as_bytes(), &mut |text| {
         error = f(text).err();
         error.is_none()
     });
@@ -1625,52 +1622,6 @@ fn decode_string(raw: Raw<'_>, f: &mut impl FnMut(&str) -> Result<()>) -> Result
         return Err(error);
     }
     anyhow::ensure!(decoded.is_ok(), "validated JSON string failed decoding");
-    Ok(())
-}
-/// Strictly validated strings need only the eight ASCII escape mappings here. Unicode
-/// escapes retain serde's surrogate-aware decoder; raw UTF-8 stays on character boundaries.
-fn decode_ascii_escapes(body: &str, f: &mut impl FnMut(&str) -> Result<()>) -> Result<()> {
-    const WINDOW: usize = 64 * 1024;
-    // Valid JSON escapes never decode to more bytes than their encoded body. Preserve the
-    // WINDOW chunk boundaries without reserving a full window for every tiny/medium field.
-    let mut decoded = Vec::with_capacity(WINDOW.min(body.len()));
-    let mut cursor = 0;
-    loop {
-        let slash = memchr::memchr(b'\\', &body.as_bytes()[cursor..]).map(|n| cursor + n);
-        let end = slash.unwrap_or(body.len());
-        while cursor < end {
-            let mut cut = (cursor + WINDOW - decoded.len()).min(end);
-            while !body.is_char_boundary(cut) {
-                cut -= 1;
-            }
-            decoded.extend_from_slice(&body.as_bytes()[cursor..cut]);
-            cursor = cut;
-            if decoded.len() == WINDOW || cursor < end {
-                f(std::str::from_utf8(&decoded)?)?;
-                decoded.clear();
-            }
-        }
-        let Some(slash) = slash else { break };
-        if decoded.len() == WINDOW {
-            f(std::str::from_utf8(&decoded)?)?;
-            decoded.clear();
-        }
-        decoded.push(match body.as_bytes()[slash + 1] {
-            b'"' => b'"',
-            b'\\' => b'\\',
-            b'/' => b'/',
-            b'b' => 8,
-            b'f' => 12,
-            b'n' => b'\n',
-            b'r' => b'\r',
-            b't' => b'\t',
-            _ => anyhow::bail!("validated JSON string failed decoding"),
-        });
-        cursor = slash + 2;
-    }
-    if !decoded.is_empty() {
-        f(std::str::from_utf8(&decoded)?)?;
-    }
     Ok(())
 }
 fn write_raw(raw: Raw<'_>, writer: &mut impl Write) -> Result<()> {
@@ -1713,7 +1664,7 @@ fn write_raw(raw: Raw<'_>, writer: &mut impl Write) -> Result<()> {
             } else {
                 writer.write_all(b"\"")?;
                 let mut scratch = Vec::new();
-                decode_string(raw, &mut |text| {
+                decode_string(raw.get(), &mut |text| {
                     scratch.clear();
                     serde_json::to_writer(&mut scratch, text)?;
                     writer.write_all(&scratch[1..scratch.len() - 1])?;
@@ -1848,7 +1799,7 @@ mod tests {
 
     #[cfg(feature = "mmap")]
     #[test]
-    fn ascii_escape_chunks_match_serde_and_propagate_callback_failure() {
+    fn escaped_string_chunks_match_serde_and_propagate_callback_failure() {
         for prefix in [0, 1, 7, 65530, 65531, 65532, 65533, 65534, 65535, 65536] {
             let wanted = format!(
                 "{}😀\n\t\r\u{8}\u{c}\\\"/é{}",
@@ -1857,19 +1808,17 @@ mod tests {
             );
             let encoded = serde_json::to_string(&wanted).unwrap();
             let mut actual = String::new();
-            decode_ascii_escapes(&encoded[1..encoded.len() - 1], &mut |chunk| {
+            decode_string(&encoded, &mut |chunk| {
                 assert!(chunk.len() <= 65536);
                 actual.push_str(chunk);
                 Ok(())
             })
             .unwrap();
             assert_eq!(actual, wanted);
-            assert!(
-                decode_ascii_escapes(&encoded[1..encoded.len() - 1], &mut |_| anyhow::bail!("sink failure"))
-                    .unwrap_err()
-                    .to_string()
-                    .contains("sink failure")
-            );
+            assert!(decode_string(&encoded, &mut |_| anyhow::bail!("sink failure"))
+                .unwrap_err()
+                .to_string()
+                .contains("sink failure"));
         }
     }
 

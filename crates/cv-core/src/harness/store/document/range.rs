@@ -435,9 +435,9 @@ impl Read for SyntaxReader<'_> {
                         len: string.len - 2,
                     })?;
                     let valid = if self.strict_strings {
-                        crate::lazy::validate_value_json_body(&mut body).is_ok()
+                        super::super::json::validate_body(&mut body, true).is_ok()
                     } else {
-                        crate::lazy::validate_json_body_syntax(&mut body).is_ok()
+                        super::super::json::validate_body(&mut body, false).is_ok()
                     };
                     if let Some(kind) = body.read_error {
                         return Err(io::Error::new(kind, "reading JSON string syntax"));
@@ -518,7 +518,7 @@ impl RangeSource {
                             len: string.len - 2,
                         };
                         let mut body = self.cursor(body)?;
-                        let valid = crate::lazy::validate_value_json_body(&mut body).is_ok();
+                        let valid = super::super::json::validate_body(&mut body, true).is_ok();
                         if let Some(kind) = body.read_error {
                             return Err(io::Error::new(kind, "reading JSON string").into());
                         }
@@ -586,7 +586,10 @@ impl RangeSource {
             len: string.len - 2,
         };
         let mut cursor = self.cursor(body)?;
-        let decoded = crate::lazy::decode_json_body(&mut cursor, &mut visit);
+        let decoded = super::super::json::decode_body(&mut cursor, &mut |text| {
+            visit(text);
+            true
+        });
         if let Some(kind) = cursor.read_error {
             return Err(io::Error::new(kind, "reading JSON string").into());
         }
@@ -633,7 +636,7 @@ impl RangeSource {
         };
         let mut cursor = self.cursor(body)?;
         let mut callback_error = None;
-        let decoded = crate::lazy::decode_validated_json_body_until(&mut cursor, &mut |part| {
+        let decoded = super::super::json::decode_body(&mut cursor, &mut |part| {
             callback_error = visit(part).err();
             callback_error.is_none()
         });
@@ -643,7 +646,9 @@ impl RangeSource {
         if let Some(error) = callback_error {
             return Err(error);
         }
-        decoded.map_err(|_| anyhow::anyhow!("validated JSON string failed decoding"))
+        decoded
+            .map(|_| ())
+            .map_err(|_| anyhow::anyhow!("validated JSON string failed decoding"))
     }
     pub fn key_matches(&self, string: Range, key: &str) -> Result<bool> {
         // An escaped ASCII byte needs at most six encoded bytes; surrogate pairs encode one
