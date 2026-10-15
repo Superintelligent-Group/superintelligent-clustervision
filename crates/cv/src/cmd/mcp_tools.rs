@@ -391,8 +391,11 @@ fn property_schema(cmd: &CommandSpec, a: &ArgSpec) -> Value {
         p.insert("default".into(), default_value(a, d));
     }
     if a.multiple {
+        // Advertised as a typed array (hosts reject untyped properties); a bare value is
+        // still accepted on input and repeats the flag once.
         let description = p.remove("description").unwrap();
-        json!({"description": description, "anyOf": [p, {"type": "array", "items": p}]})
+        p.remove("default");
+        json!({"description": description, "type": "array", "items": p})
     } else {
         Value::Object(p)
     }
@@ -753,9 +756,8 @@ mod tests {
                 ] {
                     let descriptor = tool_descriptor(tools.find(tool).unwrap());
                     let property = &descriptor["inputSchema"]["properties"][arg];
-                    assert_eq!(property["anyOf"][0]["type"], "string");
-                    assert_eq!(property["anyOf"][1]["type"], "array");
-                    assert_eq!(property["anyOf"][1]["items"]["type"], "string");
+                    assert_eq!(property["type"], "array");
+                    assert_eq!(property["items"]["type"], "string");
                 }
             })
             .unwrap()
