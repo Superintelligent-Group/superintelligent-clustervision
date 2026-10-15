@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- New-name publication fails safely when neither hard links nor exclusive rename are supported, instead of risking overwriting a concurrent writer.
+
 - Kimi deferred wire outputs retain their parsed source identity and reject replaced files before the first read.
 
 - Hook settings and skills publish by atomic replacement, preserving existing readers, permissions, and dotfile symlinks.
