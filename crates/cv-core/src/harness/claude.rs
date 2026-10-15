@@ -238,6 +238,10 @@ impl Adapter for Claude {
     fn store_affordances(&self, r: &SessionRef) -> Vec<crate::affordance::Affordance> {
         task_list(&r.path, &r.id).into_iter().collect()
     }
+
+    fn copied_before(&self, r: &SessionRef, sink: &mut dyn MessageSink) -> Option<chrono::DateTime<chrono::Utc>> {
+        fork::copied_before(&r.path, sink)
+    }
 }
 
 /// What a checkpoint's adapter state means: bump when the session the stream accumulates, or what

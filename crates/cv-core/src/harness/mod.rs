@@ -303,6 +303,15 @@ pub trait Adapter: Send + Sync {
         Vec::new()
     }
 
+    /// The instant before which `r`'s turns were copied from another session rather than taken in
+    /// this one: a Claude `--fork-session` copy keeps its source's records and their timestamps.
+    /// A consumer that attributes each turn once (the search index) skips those; views keep them.
+    /// Default: nothing copied (Codex lean passes already drop a rollout's inherited prefix).
+    /// Paths the answer depends on are reported to `sink`.
+    fn copied_before(&self, _r: &SessionRef, _sink: &mut dyn MessageSink) -> Option<DateTime<Utc>> {
+        None
+    }
+
     /// The version of the state this adapter puts in a [`Checkpoint`], when its
     /// [`stream`](Adapter::stream) offers checkpoints at all (only on an append-only transcript
     /// file). It is part of every stored mark's version, so changing what the state holds, or what

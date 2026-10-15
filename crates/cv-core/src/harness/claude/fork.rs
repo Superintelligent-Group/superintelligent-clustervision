@@ -36,6 +36,9 @@ struct Head {
     boundary: bool,
     /// The head looks copied (see the module docs).
     copied: bool,
+    /// The newest time written before the first `uuid` record: in a fork, when the fork began, so
+    /// every record older than it was copied.
+    began: Option<DateTime<Utc>>,
 }
 
 /// The head through the record codec's byte source: at most [`HEAD_LINES`] physical lines,
@@ -69,6 +72,7 @@ fn head(path: &Path) -> Option<Head> {
                     at,
                     boundary,
                     copied: boundary || older,
+                    began: newest,
                 });
                 return Ok(Flow::Stop);
             }
@@ -116,6 +120,13 @@ fn holds(path: &Path, needle: &str) -> bool {
         reader.consume(n);
         window.drain(..window.len() - (needle.len() - 1).min(window.len()));
     }
+}
+
+/// When the fork at `path` began, so its records written earlier are its source's copied turns;
+/// `None` unless a source is found ([`source_tracked`]).
+pub(super) fn copied_before(path: &Path, sink: &mut dyn crate::MessageSink) -> Option<DateTime<Utc>> {
+    source_tracked(path, sink)?;
+    head(path)?.began
 }
 
 /// The session id `path` was forked from, when its head says it is a fork and a sibling holds the
@@ -208,6 +219,7 @@ mod tests {
                     at,
                     boundary,
                     copied: boundary || matches!((at,newest), (Some(a),Some(n)) if a<n),
+                    began: newest,
                 });
             }
             if let Some(a) = at {
@@ -250,7 +262,7 @@ mod tests {
             )
             .into_bytes(),
         );
-        let observe = |head: Option<Head>| head.map(|h| (h.uuid, h.at, h.boundary, h.copied));
+        let observe = |head: Option<Head>| head.map(|h| (h.uuid, h.at, h.boundary, h.copied, h.began));
         for (i, bytes) in cases.iter().enumerate() {
             fs::write(&path, bytes).unwrap();
             assert_eq!(observe(head(&path)), observe(legacy_head(&path)), "case {i}");

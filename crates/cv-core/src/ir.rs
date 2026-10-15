@@ -496,6 +496,22 @@ impl MessageKind {
         }
     }
 
+    /// Is this turn part of the exchange itself: what the person asked, what the model replied
+    /// or ran, what came back, what a sub-agent was handed or returned, an unanswered error?
+    /// Everything else is context around it (injected instructions, the system prompt, notices,
+    /// compaction summaries restating earlier turns) or bookkeeping.
+    pub fn is_exchange(self) -> bool {
+        matches!(
+            self,
+            MessageKind::Prompt
+                | MessageKind::Reply
+                | MessageKind::ToolResult
+                | MessageKind::SubagentSpawn
+                | MessageKind::SubagentReturn
+                | MessageKind::Error
+        )
+    }
+
     /// Was this turn part of what the model actually saw or said (as opposed to a harness-side
     /// notice, marker or carrier)? Prompts, replies, tool results, injected context and the
     /// system prompt are; everything else is bookkeeping around the conversation.
