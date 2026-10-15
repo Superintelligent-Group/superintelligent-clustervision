@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `cv search`, `ls` and `show` work in a home they may not write (a sandbox deny-write rule): the index and catalog open read-only.
 - Listing beside a live Claude transcript reads only its appended bytes: a discovery pass raced by the writer is kept, not repeated from byte 0.
 
 - Large text spanned from a whole-document `.json` transcript fails its demand once the file changes, grown or not; only `.jsonl` logs may grow.

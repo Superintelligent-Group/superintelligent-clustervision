@@ -109,6 +109,39 @@ mod imp {
     pub(crate) fn open_at(path: &Path) -> Option<Connection> {
         #[cfg(test)]
         OPEN_COUNT.with(|n| n.set(n.get() + 1));
+        open_writable(path).or_else(|| open_read_only(path))
+    }
+
+    /// A catalog this process may not write (a sandbox denying writes to the home, a read-only
+    /// copy) still answers reads: its rows serve, and every write fails and is dropped like any
+    /// other catalog error. `mode=ro` reads a WAL catalog through an existing `-shm`; with none and
+    /// no way to create one, `immutable=1` is the only read SQLite allows, and it does not see
+    /// commits a writer elsewhere makes later. Only a catalog of the current interpretation
+    /// serves, since migrating one is a write.
+    fn open_read_only(path: &Path) -> Option<Connection> {
+        use rusqlite::OpenFlags;
+        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let file = path
+            .to_string_lossy()
+            .replace('%', "%25")
+            .replace('?', "%3f")
+            .replace('#', "%23");
+        let version = crate::discover_cache::INTERPRETATION_VERSION.to_string();
+        ["mode=ro", "immutable=1"].into_iter().find_map(|query| {
+            let conn = Connection::open_with_flags(format!("file:{file}?{query}"), flags).ok()?;
+            conn.busy_timeout(Duration::from_secs(5)).ok()?;
+            let stored: String = conn
+                .query_row(
+                    "SELECT value FROM catalog_meta WHERE key='discovery_version'",
+                    [],
+                    |row| row.get(0),
+                )
+                .ok()?;
+            (stored == version).then_some(conn)
+        })
+    }
+
+    fn open_writable(path: &Path) -> Option<Connection> {
         let mut conn = Connection::open(path).ok()?;
         // WAL + a busy timeout so concurrent cv processes don't error each other out.
         conn.busy_timeout(Duration::from_secs(5)).ok()?;
@@ -1357,6 +1390,47 @@ mod imp {
             assert_eq!(
                 serde_json::to_value(&refreshed).unwrap(),
                 serde_json::to_value(crate::discover_all()).unwrap()
+            );
+        }
+
+        /// A home the process may not write (a sandbox's deny-write rule) still serves its catalog:
+        /// the listing comes off the existing rows on the warm route, never a full discovery.
+        #[cfg(unix)]
+        #[test]
+        fn read_only_home_serves_the_catalog_without_discovery() {
+            use std::os::unix::fs::PermissionsExt;
+            let w = crate::test_world("reader-read-only");
+            let path = w.home.join(".claude/projects/-reader/alpha.jsonl");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "{\"type\":\"user\",\"uuid\":\"u\",\"sessionId\":\"alpha\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n").unwrap();
+            let old = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+            for dir in path
+                .parent()
+                .unwrap()
+                .ancestors()
+                .take_while(|dir| dir.starts_with(&w.home))
+            {
+                std::fs::File::open(dir)
+                    .unwrap()
+                    .set_times(std::fs::FileTimes::new().set_modified(old))
+                    .unwrap();
+            }
+            let discovered = crate::discover_all();
+            let set_mode = |mode: u32| {
+                for entry in std::fs::read_dir(&w.cv_home).unwrap() {
+                    let path = entry.unwrap().path();
+                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode & 0o666)).unwrap();
+                }
+                std::fs::set_permissions(&w.cv_home, std::fs::Permissions::from_mode(mode)).unwrap();
+            };
+            set_mode(0o555);
+            let read = std::panic::catch_unwind(crate::sessions_impl);
+            set_mode(0o755);
+            let (listed, full) = read.unwrap();
+            assert!(!full, "a read-only catalog must serve the warm route");
+            assert_eq!(
+                serde_json::to_value(listed).unwrap(),
+                serde_json::to_value(discovered).unwrap()
             );
         }
 

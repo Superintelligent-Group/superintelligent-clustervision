@@ -175,7 +175,10 @@ fn open_or_create(dir: &Path) -> Result<(Index, Fields)> {
 /// failure during a search must not wipe an index that took an hour to build. A stale-schema index
 /// is an error pointing at `cv index` (whose path is the one allowed to rebuild).
 fn open_existing(dir: &Path) -> Result<(Index, Fields)> {
-    let index = Index::open_in_dir(dir).with_context(|| format!("opening tantivy index at {}", dir.display()))?;
+    let directory = tantivy::directory::MmapDirectory::open(dir)
+        .map(|inner| ReadDir(inner, dir.to_path_buf()))
+        .with_context(|| format!("opening tantivy index at {}", dir.display()))?;
+    let index = Index::open(directory).with_context(|| format!("opening tantivy index at {}", dir.display()))?;
     if !schema_current(&index.schema()) {
         anyhow::bail!(
             "full-text index at {} was built by an older cv — run `cv index` to rebuild it",
@@ -184,6 +187,66 @@ fn open_existing(dir: &Path) -> Result<(Index, Fields)> {
     }
     let fields = fields_of(&index.schema())?;
     Ok((index, fields))
+}
+
+/// The index directory as a query opens it. tantivy holds `.tantivy-meta.lock` while a reader
+/// opens its segments, so a writer's garbage collection cannot delete a file between the listing
+/// and the open, and it takes that lock by opening the file for writing, which a sandbox that
+/// denies writes to the home refuses. A reader needs no write for it: a shared lock on the lock
+/// file opened read-only still excludes the writer's exclusive one, and readers no longer queue
+/// behind each other. With no lock file no writer has run in this directory. A query asks for no
+/// other lock (the writer lock belongs to `cv index`), so any other is refused.
+#[derive(Clone, Debug)]
+struct ReadDir(tantivy::directory::MmapDirectory, PathBuf);
+
+impl tantivy::Directory for ReadDir {
+    fn get_file_handle(
+        &self,
+        path: &Path,
+    ) -> Result<std::sync::Arc<dyn tantivy::directory::FileHandle>, tantivy::directory::error::OpenReadError> {
+        self.0.get_file_handle(path)
+    }
+    fn delete(&self, path: &Path) -> Result<(), tantivy::directory::error::DeleteError> {
+        self.0.delete(path)
+    }
+    fn exists(&self, path: &Path) -> Result<bool, tantivy::directory::error::OpenReadError> {
+        self.0.exists(path)
+    }
+    fn open_write(
+        &self,
+        path: &Path,
+    ) -> Result<tantivy::directory::WritePtr, tantivy::directory::error::OpenWriteError> {
+        self.0.open_write(path)
+    }
+    fn atomic_read(&self, path: &Path) -> Result<Vec<u8>, tantivy::directory::error::OpenReadError> {
+        self.0.atomic_read(path)
+    }
+    fn atomic_write(&self, path: &Path, data: &[u8]) -> std::io::Result<()> {
+        self.0.atomic_write(path, data)
+    }
+    fn sync_directory(&self) -> std::io::Result<()> {
+        self.0.sync_directory()
+    }
+    fn watch(&self, callback: tantivy::directory::WatchCallback) -> tantivy::Result<tantivy::directory::WatchHandle> {
+        self.0.watch(callback)
+    }
+    fn acquire_lock(
+        &self,
+        lock: &tantivy::directory::Lock,
+    ) -> Result<tantivy::directory::DirectoryLock, tantivy::directory::error::LockError> {
+        use tantivy::directory::{error::LockError, DirectoryLock};
+        if lock.filepath != tantivy::directory::META_LOCK.filepath {
+            return Err(LockError::LockBusy);
+        }
+        match std::fs::File::open(self.1.join(&lock.filepath)) {
+            Ok(file) => {
+                file.lock_shared().map_err(LockError::wrap_io_error)?;
+                Ok(DirectoryLock::from(Box::new(file)))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(DirectoryLock::from(Box::new(()))),
+            Err(error) => Err(LockError::wrap_io_error(error)),
+        }
+    }
 }
 
 const COMMIT_EVERY: usize = 256;
@@ -2810,11 +2873,17 @@ pub fn text_search_indexed_filtered(
     filter: crate::SearchFilter<'_>,
 ) -> Result<Vec<Hit>> {
     if !dir.join("meta.json").exists() {
-        anyhow::bail!("no full-text index at {} — run `index_all` first", dir.display());
+        anyhow::bail!("no full-text index at {}; build it with `cv index`", dir.display());
     }
     // Read-only open: a transient failure here must surface as an error, never as a wiped index.
-    let (index, f) = open_existing(dir)?;
-    let reader = index.reader().context("opening index reader")?;
+    let unusable = || {
+        format!(
+            "the full-text index at {} is unusable; rebuild it with `cv index`",
+            dir.display()
+        )
+    };
+    let (index, f) = open_existing(dir).with_context(unusable)?;
+    let reader = index.reader().with_context(unusable)?;
     let searcher = reader.searcher();
 
     let decisions = std::sync::Arc::new(MetadataDecisions::new(&searcher, &f, filter));
@@ -3087,16 +3156,6 @@ fn window(body: &str, pos: usize, len: usize) -> String {
     } else {
         s
     }
-}
-
-/// Remove a single session from the index by id (handy for incremental updates).
-#[allow(dead_code)]
-pub fn delete(dir: &Path, id: &str) -> Result<()> {
-    let (index, f) = open_existing(dir)?;
-    let mut writer = open_writer(&index, 15_000_000)?;
-    writer.delete_term(Term::from_field_text(f.id, id));
-    writer.commit()?;
-    Ok(())
 }
 
 fn head(s: &str, max_chars: usize) -> String {
@@ -3922,7 +3981,7 @@ mod tests {
         assert!(text_search_ids_batch(&absent, &["alpha"]).is_err());
 
         // Many matching chunks and unique sessions: membership enumerates the entire match set.
-        let (index, f) = open_existing(&dir).unwrap();
+        let (index, f) = open_or_create(&dir).unwrap();
         let mut writer = open_writer(&index, 15_000_000).unwrap();
         for _ in 0..300 {
             let mut doc = TantivyDocument::default();
@@ -5343,7 +5402,7 @@ mod tests {
         let reference = cv_core::SessionRef::new("repair", cv_core::Harness::Claude, &input);
         let result = sweep(&dir, vec![reference], false, false).unwrap();
         assert_eq!((result.changed, result.errors), (1, 0));
-        let (index, f) = open_existing(&dir).unwrap();
+        let (index, f) = open_or_create(&dir).unwrap();
         assert!(read_indexed_metadata(&index, &f, true).unwrap().3.is_empty());
         let hit = text_search_indexed(&dir, "needle", 1).unwrap().remove(0);
         assert_eq!(hit.title.as_deref(), Some("current needle"));
@@ -7126,7 +7185,7 @@ mod tests {
         )];
         sweep(&dir, refs.clone(), false, false).unwrap();
         let before = observe(&dir, &refs, &["zqwarm".into()]);
-        let (index, _) = open_existing(&dir).unwrap();
+        let (index, _) = open_or_create(&dir).unwrap();
         let _writer_lock = open_writer(&index, 15_000_000).unwrap();
         let swept = sweep(&dir, refs.clone(), false, false).unwrap();
         assert_eq!(
@@ -7148,7 +7207,7 @@ mod tests {
         )];
         sweep(&dir, refs.clone(), false, false).unwrap();
         write_claude(&home.home, "warm", "zqchanged warm source");
-        let (index, f) = open_existing(&dir).unwrap();
+        let (index, f) = open_or_create(&dir).unwrap();
         let planner = SweepPlanner {
             index: &index,
             f: &f,
@@ -7191,7 +7250,7 @@ mod tests {
             write_claude(&home.home, "warm", "zqwarm"),
         )];
         sweep(&dir, refs.clone(), false, false).unwrap();
-        let (index, f) = open_existing(&dir).unwrap();
+        let (index, f) = open_or_create(&dir).unwrap();
         {
             let mut writer = open_writer(&index, 15_000_000).unwrap();
             for _ in 1..TIER_FANOUT {
@@ -7250,7 +7309,7 @@ mod tests {
         if cpu {
             return;
         }
-        let (index, _) = open_existing(&dir).unwrap();
+        let (index, _) = open_or_create(&dir).unwrap();
         let started = std::time::Instant::now();
         for _ in 0..20 {
             let mut writer = open_writer(&index, 50_000_000).unwrap();
