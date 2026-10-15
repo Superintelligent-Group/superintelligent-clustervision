@@ -260,45 +260,6 @@ pub(crate) fn logical(connection: &Connection, target: Harness) -> Result<Value>
     })
 }
 
-/// [`exercise_with`] against a legacy emitter's output: every emission's logical rows equal it.
-pub(crate) fn exercise(
-    target: Harness,
-    legacy: fn(&Session, &Path, &crate::emit::EmitOptions) -> Result<crate::harness::EmitResult>,
-    direct: fn(&Session, &Path, &crate::emit::EmitOptions) -> Result<crate::harness::EmitResult>,
-    writer: impl Fn(&Session, &crate::emit::EmitOptions, &mut Connection) -> Result<()>,
-) -> Result<()> {
-    exercise_with(
-        target,
-        |world, session, mode, options| {
-            let mut owned = session.clone();
-            owned.materialize()?;
-            crate::emit::project_owned_thinking_for_test(&mut owned, target, mode);
-            let old = legacy(&owned, &world.base.join(format!("old-{target}-{mode}")), options)?;
-            let old = Connection::open(&old.path)?;
-            if target == Harness::OpenCode {
-                // This oracle exercises existing v1 stores; fresh exports now bootstrap native v2.
-                let mut ddl =
-                    old.prepare("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type DESC,name")?;
-                let schema = ddl
-                    .query_map([], |row| row.get::<_, String>(0))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                for kind in ["direct", "dispatch"] {
-                    let directory = world.base.join(format!("{kind}-{target}-{mode}"));
-                    std::fs::create_dir_all(&directory)?;
-                    let connection = Connection::open(directory.join("opencode.db"))?;
-                    for statement in &schema {
-                        connection.execute_batch(statement)?;
-                    }
-                }
-            }
-            Ok(Some(logical(&old, target)?))
-        },
-        |_, _| Ok(()),
-        direct,
-        writer,
-    )
-}
-
 /// [`exercise_with`] against frozen goldens (`tests/fixtures/emit-frozen/<name>.json`): the
 /// SHA-256 of each thinking mode's logical rows, frozen from the retired legacy emitter.
 pub(crate) fn exercise_frozen(
@@ -310,7 +271,6 @@ pub(crate) fn exercise_frozen(
     let mut frozen = crate::emit::grok_qwen_tests::Frozen::new(name);
     exercise_with(
         target,
-        |_, _, _, _| Ok(None),
         |mode, rows| {
             let digest = crate::digest::sha256_hex(&serde_json::to_vec(rows)?);
             frozen
@@ -324,17 +284,11 @@ pub(crate) fn exercise_frozen(
     frozen.check()
 }
 
-/// Emit the shared fixture in every thinking mode through `direct`, the dispatcher and the
-/// connection `writer`, which must agree with each other and with `expected` (when it gives
-/// rows), then check that every source and SQL failure rolls the transaction back.
+/// Emit the shared fixture in every thinking mode through the connection `writer`, `direct` and
+/// the dispatcher, which must agree, hand each mode's rows to `observe`, then check that every
+/// source and SQL failure rolls the transaction back.
 fn exercise_with(
     target: Harness,
-    mut expected: impl FnMut(
-        &cv_testkit::World,
-        &Session,
-        crate::emit::ThinkingMode,
-        &crate::emit::EmitOptions,
-    ) -> Result<Option<Value>>,
     mut observe: impl FnMut(crate::emit::ThinkingMode, &Value) -> Result<()>,
     direct: fn(&Session, &Path, &crate::emit::EmitOptions) -> Result<crate::harness::EmitResult>,
     writer: impl Fn(&Session, &crate::emit::EmitOptions, &mut Connection) -> Result<()>,
@@ -347,19 +301,6 @@ fn exercise_with(
             thinking: mode,
             ..Default::default()
         };
-        let old = expected(&world, &session, mode, &options)?;
-        let direct_result = direct(&session, &world.base.join(format!("direct-{target}-{mode}")), &options)?;
-        let dispatch_result = crate::emit::emit(
-            &session,
-            target,
-            &world.base.join(format!("dispatch-{target}-{mode}")),
-            &options,
-        )?;
-        let rows = logical(&Connection::open(direct_result.path)?, target)?;
-        let old = old.unwrap_or_else(|| rows.clone());
-        assert_eq!(rows, old);
-        observe(mode, &rows)?;
-        assert_eq!(logical(&Connection::open(dispatch_result.path)?, target)?, old);
         let mut new = Connection::open_in_memory()?;
         let hooks = Hooks::new(&mut new, None);
         writer(&session, &options, hooks.connection)?;
@@ -379,7 +320,33 @@ fn exercise_with(
             "prepared inserts must retain advancing execution counters"
         );
         drop(hooks);
-        assert_eq!(logical(&new, target)?, old, "row oracle {target} {mode}");
+        let rows = logical(&new, target)?;
+        observe(mode, &rows)?;
+        if target == Harness::OpenCode {
+            // This oracle exercises existing v1 stores (the writer's schema); fresh exports now
+            // bootstrap native v2.
+            let mut ddl = new.prepare("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type DESC,name")?;
+            let schema = ddl
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for kind in ["direct", "dispatch"] {
+                let directory = world.base.join(format!("{kind}-{target}-{mode}"));
+                std::fs::create_dir_all(&directory)?;
+                let connection = Connection::open(directory.join("opencode.db"))?;
+                for statement in &schema {
+                    connection.execute_batch(statement)?;
+                }
+            }
+        }
+        let direct_result = direct(&session, &world.base.join(format!("direct-{target}-{mode}")), &options)?;
+        let dispatch_result = crate::emit::emit(
+            &session,
+            target,
+            &world.base.join(format!("dispatch-{target}-{mode}")),
+            &options,
+        )?;
+        assert_eq!(logical(&Connection::open(direct_result.path)?, target)?, rows);
+        assert_eq!(logical(&Connection::open(dispatch_result.path)?, target)?, rows);
     }
     let options = crate::emit::EmitOptions {
         new_id: Some("fixed".into()),
