@@ -181,13 +181,10 @@ impl JsonSource {
     pub(crate) fn capture_identity(path: &Path) -> Result<Self> {
         Self::capture_guarded(path, None)
     }
-    /// The file `metadata` describes is this source unchanged, or this source only grown: the
-    /// append contract resume marks also rely on. On unix the device and inode must match; an
-    /// unchanged length must match exactly (mtime and ctime included). An in-place rewrite that
-    /// also grows the file keeps its inode and is not detected here.
-    pub(crate) fn admits_metadata(&self, metadata: Metadata) -> bool {
-        Identity::from_metadata(metadata).is_ok_and(|later| self.0.identity.admits(&later))
-    }
+    /// `later` is this source unchanged, or this source only grown: the append contract resume
+    /// marks also rely on. On unix the device and inode must match; an unchanged length must
+    /// match exactly (mtime and ctime included). An in-place rewrite that also grows the file
+    /// keeps its inode and is not detected here.
     pub(crate) fn admits(&self, later: &JsonSource) -> bool {
         self.0.path == later.0.path && self.0.identity.admits(&later.0.identity)
     }
@@ -2005,7 +2002,9 @@ mod tests {
                 };
                 assert!(span.escaped);
                 assert_eq!(
-                    crate::lazy::Resolver::new(Some(fixture.path.clone())).resolve(&span),
+                    crate::lazy::Resolver::new(Some(fixture.path.clone()))
+                        .try_resolve(&span)
+                        .unwrap(),
                     body
                 );
                 let argument = fields.get("input").unwrap().argument(true)?;

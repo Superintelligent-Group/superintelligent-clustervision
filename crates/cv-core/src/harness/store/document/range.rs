@@ -982,7 +982,12 @@ mod tests {
             panic!("large string must remain a span")
         };
         assert!(span.escaped);
-        assert_eq!(crate::lazy::Resolver::new(Some(path.clone())).resolve(&span), body);
+        assert_eq!(
+            crate::lazy::Resolver::new(Some(path.clone()))
+                .try_resolve(&span)
+                .unwrap(),
+            body
+        );
         std::fs::remove_file(path).unwrap();
     }
     #[test]

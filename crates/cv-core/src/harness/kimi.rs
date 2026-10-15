@@ -1800,7 +1800,7 @@ mod tests {
         let text = e.output(&e.tool_results["plain"]);
         assert!(!text.as_span().unwrap().escaped);
         let resolver = crate::lazy::Resolver::new(None);
-        let resolved = text.resolve(&resolver);
+        let resolved = text.try_resolve(&resolver).unwrap();
         assert_eq!(resolved.as_ref(), output);
         #[cfg(feature = "mmap")]
         assert!(matches!(resolved, std::borrow::Cow::Borrowed(_)));
@@ -1862,7 +1862,7 @@ mod tests {
             for (id, (output, is_error, extras)) in &expected {
                 let result = &e.tool_results[id];
                 let actual = e.output(result);
-                assert_eq!(actual.resolve(&resolver).as_ref(), output, "{id}");
+                assert_eq!(actual.try_resolve(&resolver).unwrap().as_ref(), output, "{id}");
                 assert_eq!(result.is_error, *is_error);
                 assert_eq!(e.extras(result), *extras);
                 assert_eq!(actual.is_span(), spans && id == "giant");

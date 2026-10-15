@@ -111,16 +111,6 @@ impl Text {
         }
     }
 
-    /// Resolve to the text, borrowing the inline string or (for a span) reading it from `resolver`.
-    /// Cheap for inline and for unescaped spans (borrows the mmap); allocates only to unescape.
-    pub fn resolve<'a>(&'a self, resolver: &'a Resolver) -> Cow<'a, str> {
-        match self {
-            Text::Inline(s) => Cow::Borrowed(s),
-            Text::Span(sp) => resolver.resolve(sp),
-            Text::Source(source) => Cow::Owned(source.try_resolve().unwrap_or_default()),
-        }
-    }
-
     /// Resolve demanded text, reporting unavailable, changed or unreadable sources.
     pub fn try_resolve<'a>(&'a self, resolver: &'a Resolver) -> anyhow::Result<Cow<'a, str>> {
         match self {
@@ -138,22 +128,6 @@ impl Text {
             Text::Source(source) => Ok(Cow::Owned(
                 source.try_prefix(usize::try_from(max_raw).unwrap_or(usize::MAX))?,
             )),
-        }
-    }
-
-    /// Resolve at most the first `max_raw` raw bytes — the head of the content. Cheap and bounded:
-    /// a giant paste never materializes past the cap. Inline text borrows in full (already in
-    /// memory); a span reads only its prefix. Used to synthesize a short title without paying for a
-    /// multi-megabyte first message.
-    pub fn resolve_prefix<'a>(&'a self, resolver: &'a Resolver, max_raw: u64) -> Cow<'a, str> {
-        match self {
-            Text::Inline(s) => Cow::Borrowed(s),
-            Text::Span(sp) => resolver.resolve_prefix(sp, max_raw),
-            Text::Source(source) => Cow::Owned(
-                source
-                    .try_prefix(usize::try_from(max_raw).unwrap_or(usize::MAX))
-                    .unwrap_or_default(),
-            ),
         }
     }
 
@@ -348,8 +322,6 @@ pub struct Resolver {
     primary: Option<PathBuf>,
     stamp: Option<SourceStamp>,
     #[cfg(feature = "mmap")]
-    maps: std::cell::RefCell<std::collections::HashMap<PathBuf, Option<memmap2::Mmap>>>,
-    #[cfg(feature = "mmap")]
     checked_maps: std::cell::RefCell<std::collections::HashMap<PathBuf, CheckedMap>>,
 }
 
@@ -510,8 +482,6 @@ impl Resolver {
             primary,
             stamp,
             #[cfg(feature = "mmap")]
-            maps: std::cell::RefCell::new(std::collections::HashMap::new()),
-            #[cfg(feature = "mmap")]
             checked_maps: std::cell::RefCell::new(std::collections::HashMap::new()),
         }
     }
@@ -532,14 +502,6 @@ impl Resolver {
         }
         source.bounds(sp)?;
         Ok(source)
-    }
-
-    /// Unchecked reads: an opened file the primary's stamp does not admit reads as absent.
-    fn admit(&self, path: &Path, file: &std::fs::File) -> bool {
-        match self.stamp.as_ref().filter(|stamp| stamp.is_for(path)) {
-            Some(stamp) => file.metadata().is_ok_and(|metadata| stamp.0.admits_metadata(metadata)),
-            None => true,
-        }
     }
 
     #[cfg(feature = "mmap")]
@@ -728,8 +690,7 @@ impl Resolver {
                 state: &state,
                 since_check: 0,
             };
-            if stream_body_checked(&mut reader, 0, sp.len, sp.escaped, chunk.max(1), &mut callback).is_err()
-                && !state.failed()
+            if stream_body(&mut reader, 0, sp.len, sp.escaped, chunk.max(1), &mut callback).is_err() && !state.failed()
             {
                 state.fail(anyhow::anyhow!("Text source changed while decoding"));
             }
@@ -742,184 +703,13 @@ impl Resolver {
                 state: &state,
                 since_check: 0,
             };
-            if stream_body_checked(&mut reader, sp.offset, sp.len, sp.escaped, chunk.max(1), &mut callback).is_err()
+            if stream_body(&mut reader, sp.offset, sp.len, sp.escaped, chunk.max(1), &mut callback).is_err()
                 && !state.failed()
             {
                 state.fail(anyhow::anyhow!("Text source changed while decoding"));
             }
         }
         state.finish(&source)
-    }
-
-    /// Resolve a span to its text. Borrows the mapped bytes for unescaped spans; allocates only to
-    /// UTF-8-decode or JSON-unescape. (The result borrows only from `self`, so a caller-built
-    /// temporary `Span` — e.g. a capped copy — works fine.)
-    pub fn resolve<'a>(&'a self, sp: &Span) -> Cow<'a, str> {
-        if sp.escaped && sp.len > 64 * 1024 {
-            // Owned output can retract an invalid decode, unlike streaming callbacks.
-            // At <=64KiB the old one-pass decoder's temporary memory is already bounded.
-            return Cow::Owned(self.fold_span(sp, String::new(), append_materialized, String::clear));
-        }
-        match self.raw_bytes(sp) {
-            None => Cow::Borrowed(""),
-            Some(bytes) if sp.escaped => Cow::Owned(unescape_json_body(&bytes)),
-            Some(Cow::Borrowed(b)) => String::from_utf8_lossy(b),
-            Some(Cow::Owned(b)) => Cow::Owned(String::from_utf8_lossy(&b).into_owned()),
-        }
-    }
-
-    /// Length in decoded UTF-8 bytes, with the same JSON and lossy fallback as [`Self::resolve`].
-    /// Counts without allocating the whole text; decoder scratch stays bounded by source windows.
-    pub fn resolved_len(&self, sp: &Span) -> usize {
-        #[cfg(feature = "mmap")]
-        if !sp.escaped {
-            let Some(bytes) = self.raw_bytes(sp) else { return 0 };
-            if let Ok(text) = std::str::from_utf8(&bytes) {
-                return text.len();
-            }
-        }
-        self.fold_span(
-            sp,
-            0usize,
-            |len, text| *len = len.saturating_add(text.len()),
-            |len| *len = 0,
-        )
-    }
-
-    fn fold_span<T>(&self, sp: &Span, output: T, add: impl FnMut(&mut T, &str), reset: impl FnMut(&mut T)) -> T {
-        #[cfg(feature = "mmap")]
-        {
-            let Some(bytes) = self.raw_bytes(sp) else { return output };
-            let mut reader = std::io::Cursor::new(bytes.as_ref());
-            fold_body(&mut reader, 0, sp.len, sp.escaped, output, add, reset)
-        }
-        #[cfg(not(feature = "mmap"))]
-        {
-            let Some(mut reader) = self.ranged_reader(sp) else {
-                return output;
-            };
-            fold_body(&mut reader, sp.offset, sp.len, sp.escaped, output, add, reset)
-        }
-    }
-
-    /// Resolve at most the first `max_raw` **raw** bytes of `sp` — for consumers that only need the
-    /// head of a giant field (listing labels, snippet scans, embedding heads) and must never
-    /// materialize the whole thing. For an escaped span the cut is backed up to the last *complete*
-    /// JSON escape sequence so truncation can't corrupt the unescape. A cut within a valid UTF-8
-    /// scalar backs up to its start, using at most three lookahead bytes to distinguish a cap from
-    /// malformed source text. Malformed bytes retain the full resolver's lossy behavior.
-    pub fn resolve_prefix<'a>(&'a self, sp: &Span, max_raw: u64) -> Cow<'a, str> {
-        if sp.len <= max_raw {
-            return self.resolve(sp);
-        }
-        let capped = Span {
-            len: max_raw,
-            ..sp.clone()
-        };
-        let with_lookahead = Span {
-            len: max_raw.saturating_add(3).min(sp.len),
-            ..sp.clone()
-        };
-        // A readable cap remains useful even when the source ends before the requested lookahead.
-        match self.raw_bytes(&with_lookahead).or_else(|| self.raw_bytes(&capped)) {
-            None => Cow::Borrowed(""),
-            Some(bytes) if sp.escaped => {
-                let end = complete_utf8_prefix(&bytes, usize::try_from(max_raw).unwrap_or(usize::MAX));
-                let keep = complete_escape_prefix(&bytes[..end]);
-                Cow::Owned(unescape_json_body(&bytes[..keep]))
-            }
-            Some(Cow::Borrowed(b)) => {
-                let keep = complete_utf8_prefix(b, usize::try_from(max_raw).unwrap_or(usize::MAX));
-                String::from_utf8_lossy(&b[..keep])
-            }
-            Some(Cow::Owned(b)) => {
-                let keep = complete_utf8_prefix(&b, usize::try_from(max_raw).unwrap_or(usize::MAX));
-                Cow::Owned(String::from_utf8_lossy(&b[..keep]).into_owned())
-            }
-        }
-    }
-
-    /// Feed the span's text without materializing the whole field. Pieces end on char boundaries
-    /// and contain at most `chunk` bytes plus the rest of one Unicode scalar. Escaped bodies are
-    /// validated before decoding so malformed JSON retains `resolve`'s raw, lossy fallback.
-    /// The non-mmap path reads through a fixed-size source window, even for unescaped spans.
-    pub fn for_each_chunk(&self, sp: &Span, chunk: usize, mut f: impl FnMut(&str)) {
-        #[cfg(feature = "mmap")]
-        {
-            if let Some(bytes) = self.raw_bytes(sp) {
-                if !sp.escaped {
-                    if let Ok(s) = std::str::from_utf8(&bytes) {
-                        emit_chunks(s, chunk.max(1), &mut f);
-                        return;
-                    }
-                }
-                let mut reader = std::io::Cursor::new(bytes.as_ref());
-                stream_body(&mut reader, 0, sp.len, sp.escaped, chunk.max(1), &mut f);
-            }
-        }
-        #[cfg(not(feature = "mmap"))]
-        {
-            let Some(mut reader) = self.ranged_reader(sp) else {
-                return;
-            };
-            stream_body(&mut reader, sp.offset, sp.len, sp.escaped, chunk.max(1), &mut f);
-        }
-    }
-
-    #[cfg(not(feature = "mmap"))]
-    fn ranged_reader(&self, sp: &Span) -> Option<std::io::BufReader<std::fs::File>> {
-        use std::io::Seek;
-        let path = self.path_for(sp)?;
-        let file = std::fs::File::open(path).ok().filter(|file| self.admit(path, file))?;
-        let end = sp.offset.checked_add(sp.len)?;
-        if end > file.metadata().ok()?.len() {
-            return None;
-        }
-        let mut reader = std::io::BufReader::with_capacity(64 * 1024, file);
-        reader.seek(std::io::SeekFrom::Start(sp.offset)).ok()?;
-        Some(reader)
-    }
-
-    #[cfg(feature = "mmap")]
-    fn raw_bytes<'a>(&'a self, sp: &Span) -> Option<Cow<'a, [u8]>> {
-        let path = self.path_for(sp)?.to_path_buf();
-        {
-            let mut maps = self.maps.borrow_mut();
-            if !maps.contains_key(&path) {
-                let m = std::fs::File::open(&path)
-                    .ok()
-                    .filter(|f| self.admit(&path, f))
-                    .and_then(|f| unsafe { memmap2::Mmap::map(&f).ok() });
-                maps.insert(path.clone(), m);
-            }
-        }
-        let maps = self.maps.borrow();
-        let mmap = maps.get(&path)?.as_ref()?;
-        let start = usize::try_from(sp.offset).ok()?;
-        let end = start.checked_add(usize::try_from(sp.len).ok()?)?;
-        if end > mmap.len() {
-            return None;
-        }
-        let slice: &[u8] = &mmap[start..end];
-        // SAFETY: the backing Mmap is owned by `self.maps` for `self`'s lifetime `'a` and entries are
-        // never removed, so the slice stays valid for `'a`.
-        let slice: &'a [u8] = unsafe { std::mem::transmute::<&[u8], &'a [u8]>(slice) };
-        Some(Cow::Borrowed(slice))
-    }
-
-    #[cfg(not(feature = "mmap"))]
-    fn raw_bytes<'a>(&'a self, sp: &Span) -> Option<Cow<'a, [u8]>> {
-        use std::io::{Read, Seek, SeekFrom};
-        let path = self.path_for(sp)?;
-        let mut f = std::fs::File::open(path).ok().filter(|f| self.admit(path, f))?;
-        f.seek(SeekFrom::Start(sp.offset)).ok()?;
-        let end = sp.offset.checked_add(sp.len)?;
-        if end > f.metadata().ok()?.len() {
-            return None;
-        }
-        let mut buf = vec![0u8; usize::try_from(sp.len).ok()?];
-        f.read_exact(&mut buf).ok()?;
-        Some(Cow::Owned(buf))
     }
 }
 
@@ -972,20 +762,6 @@ pub fn json_string_span(raw: &RawValue, within: &[u8], base_off: u64) -> Option<
 /// on the `raw_value` feature surface directly.
 pub use serde_json::value::RawValue;
 
-/// Preserve the zero-allocation mapped path for ordinary UTF-8 spans.
-#[cfg(feature = "mmap")]
-fn emit_chunks(s: &str, chunk: usize, f: &mut impl FnMut(&str)) {
-    let mut start = 0;
-    while start < s.len() {
-        let mut end = start.saturating_add(chunk).min(s.len());
-        while !s.is_char_boundary(end) {
-            end += 1;
-        }
-        f(&s[start..end]);
-        start = end;
-    }
-}
-
 /// Keep compressed results compact, then grow geometrically from fixed capacities rather than
 /// from the escape-dependent size of the first decoded source window.
 fn append_materialized(output: &mut String, text: &str) {
@@ -1032,46 +808,9 @@ fn fold_body<R: std::io::BufRead + std::io::Seek, T>(
 }
 
 /// Decode using a bounded output buffer and, when necessary, a validation pass. Validation
-/// cannot emit: a malformed escape at EOF makes the existing resolver return the *entire* raw
-/// body, including otherwise valid escapes at its head.
+/// cannot emit: a malformed escape at EOF makes the resolver return the *entire* raw body,
+/// including otherwise valid escapes at its head.
 fn stream_body<R: std::io::BufRead + std::io::Seek>(
-    reader: &mut R,
-    start: u64,
-    len: u64,
-    escaped: bool,
-    chunk: usize,
-    f: &mut impl FnMut(&str),
-) {
-    use std::io::{Read, SeekFrom};
-    let decode = if escaped {
-        let mut body = reader.by_ref().take(len);
-        validate_value_json_body(&mut body).unwrap_or(false)
-    } else {
-        false
-    };
-    if reader.seek(SeekFrom::Start(start)).is_err() {
-        return;
-    }
-    let mut output = ChunkOutput {
-        // A large requested chunk need not allocate beyond this field's possible lossy length.
-        text: String::with_capacity(
-            chunk
-                .saturating_add(3)
-                .min(usize::try_from(len).unwrap_or(usize::MAX).saturating_mul(3)),
-        ),
-        chunk,
-        f,
-    };
-    let mut body = reader.by_ref().take(len);
-    if decode {
-        let _ = decode_json_body(&mut body, &mut |s| output.push(s));
-    } else {
-        stream_lossy_utf8(&mut body, &mut |s| output.push(s));
-    }
-    output.flush();
-}
-
-fn stream_body_checked<R: std::io::BufRead + std::io::Seek>(
     reader: &mut R,
     start: u64,
     len: u64,
@@ -1082,7 +821,7 @@ fn stream_body_checked<R: std::io::BufRead + std::io::Seek>(
     use std::io::{Read, SeekFrom};
     let decode = escaped && validate_value_json_body(&mut reader.by_ref().take(len)).unwrap_or(false);
     reader.seek(SeekFrom::Start(start)).map_err(|_| ())?;
-    let mut output = CheckedChunkOutput {
+    let mut output = ChunkOutput {
         text: String::with_capacity(
             chunk
                 .saturating_add(3)
@@ -1101,12 +840,12 @@ fn stream_body_checked<R: std::io::BufRead + std::io::Seek>(
     Ok(())
 }
 
-struct CheckedChunkOutput<'a, F> {
+struct ChunkOutput<'a, F> {
     text: String,
     chunk: usize,
     f: &'a mut F,
 }
-impl<F: FnMut(&str) -> bool> CheckedChunkOutput<'_, F> {
+impl<F: FnMut(&str) -> bool> ChunkOutput<'_, F> {
     fn push(&mut self, mut text: &str) -> bool {
         while !text.is_empty() {
             let mut end = (self.chunk - self.text.len()).min(text.len());
@@ -1128,35 +867,6 @@ impl<F: FnMut(&str) -> bool> CheckedChunkOutput<'_, F> {
         let keep_going = (self.f)(&self.text);
         self.text.clear();
         keep_going
-    }
-}
-
-struct ChunkOutput<'a, F> {
-    text: String,
-    chunk: usize,
-    f: &'a mut F,
-}
-
-impl<F: FnMut(&str)> ChunkOutput<'_, F> {
-    fn push(&mut self, mut s: &str) {
-        while !s.is_empty() {
-            let mut end = (self.chunk - self.text.len()).min(s.len());
-            while !s.is_char_boundary(end) {
-                end += 1;
-            }
-            self.text.push_str(&s[..end]);
-            s = &s[end..];
-            if self.text.len() >= self.chunk {
-                self.flush();
-            }
-        }
-    }
-
-    fn flush(&mut self) {
-        if !self.text.is_empty() {
-            (self.f)(&self.text);
-            self.text.clear();
-        }
     }
 }
 
@@ -1526,7 +1236,12 @@ mod tests {
                 escaped,
                 source: None,
             };
-            let expected = resolver.resolve(&span).len();
+            let expected = if escaped {
+                unescape_json_body(&raw)
+            } else {
+                String::from_utf8_lossy(&raw).into_owned()
+            }
+            .len();
             assert_eq!(resolver.try_resolved_len(&span).unwrap(), expected);
             assert_eq!(Text::Span(span).try_decoded_len(&resolver).unwrap(), expected);
         }
@@ -1626,14 +1341,12 @@ mod tests {
                 escaped,
                 source: None,
             };
-            let expected = resolver.resolve(&span);
+            let expected = if escaped {
+                unescape_json_body(raw)
+            } else {
+                String::from_utf8_lossy(raw).into_owned()
+            };
             assert_eq!(resolver.try_resolve(&span).unwrap(), expected);
-            for cap in 0..=raw.len() + 1 {
-                assert_eq!(
-                    resolver.try_resolve_prefix(&span, cap as u64).unwrap(),
-                    resolver.resolve_prefix(&span, cap as u64)
-                );
-            }
             for chunk in [0, 1, 2, 7, 65536] {
                 let mut text = String::new();
                 resolver
@@ -1774,7 +1487,7 @@ mod tests {
         let error = session.clone().materialize().unwrap_err();
         assert!(error.to_string().contains("replaced or rewritten"), "{error:#}");
         let resolver = session.resolver();
-        assert!(!first_text(&session).resolve(&resolver).contains('B'));
+        assert!(first_text(&session).try_resolve(&resolver).is_err());
         // An unguarded streaming sink's resolver is built before the parse: same answer.
         let early = Resolver::new(Some(path.clone()));
         let session = parse();
@@ -1859,13 +1572,11 @@ mod tests {
             since_check: 0,
         };
         let mut calls = 0;
-        assert!(
-            stream_body_checked(&mut reader, 0, body.len() as u64, true, 8192, &mut |_| {
-                calls += 1;
-                true
-            })
-            .is_err()
-        );
+        assert!(stream_body(&mut reader, 0, body.len() as u64, true, 8192, &mut |_| {
+            calls += 1;
+            true
+        })
+        .is_err());
         assert_eq!(calls, 0);
         let error = state.finish(&source).unwrap_err();
         assert_eq!(error.to_string(), "injected Text read failure");
@@ -1878,7 +1589,9 @@ mod tests {
             assert!(!s.is_empty());
             assert!(s.len() <= chunk.max(1).saturating_add(3), "chunk {chunk}: {s:?}");
             result.push_str(s);
-        });
+            true
+        })
+        .unwrap();
         result
     }
 
@@ -2069,10 +1782,13 @@ mod tests {
         let expected: String = serde_json::from_str(&format!("\"{raw}\"")).unwrap();
         for chunk in [0, 1, 2, 3, 7, 65536] {
             let mut got = String::new();
-            resolver.for_each_chunk(&span, chunk, |s| {
-                assert!(s.len() <= chunk.max(1).saturating_add(3));
-                got.push_str(s);
-            });
+            resolver
+                .try_for_each_chunk(&span, chunk, |s| {
+                    assert!(s.len() <= chunk.max(1usize).saturating_add(3));
+                    got.push_str(s);
+                    Ok(())
+                })
+                .unwrap();
             assert_eq!(got, expected);
         }
         let invalid = Span {
@@ -2080,7 +1796,12 @@ mod tests {
             ..span.clone()
         };
         let mut calls = 0;
-        resolver.for_each_chunk(&invalid, 1, |_| calls += 1);
+        assert!(resolver
+            .try_for_each_chunk(&invalid, 1, |_| {
+                calls += 1;
+                Ok(())
+            })
+            .is_err());
         assert_eq!(calls, 0);
         drop(resolver);
         std::fs::remove_dir_all(dir).unwrap();
@@ -2128,9 +1849,13 @@ mod tests {
                 escaped: true,
             };
             // Independent old whole-body parser remains the prefix resolver's oracle.
-            assert_eq!(resolver.resolve(&span), unescape_json_body(raw), "body {i}");
             assert_eq!(
-                resolver.resolved_len(&span),
+                resolver.try_resolve(&span).unwrap(),
+                unescape_json_body(raw),
+                "body {i}"
+            );
+            assert_eq!(
+                resolver.try_resolved_len(&span).unwrap(),
                 unescape_json_body(raw).len(),
                 "length {i}"
             );
@@ -2139,7 +1864,7 @@ mod tests {
                 ..span.clone()
             };
             assert_eq!(
-                resolver.resolved_len(&literal),
+                resolver.try_resolved_len(&literal).unwrap(),
                 String::from_utf8_lossy(raw).len(),
                 "literal length {i}"
             );
@@ -2163,8 +1888,8 @@ mod tests {
                     ..span.clone()
                 },
             ] {
-                assert_eq!(resolver.resolve(&invalid), "", "body {i}: {invalid:?}");
-                assert_eq!(resolver.resolved_len(&invalid), 0, "length {i}: {invalid:?}");
+                assert!(resolver.try_resolve(&invalid).is_err(), "body {i}: {invalid:?}");
+                assert!(resolver.try_resolved_len(&invalid).is_err(), "length {i}: {invalid:?}");
             }
         }
         let path = dir.join("ordinary");
@@ -2176,10 +1901,10 @@ mod tests {
             len: 16,
             escaped: false,
         };
-        assert_eq!(resolver.resolve(&ordinary), "ordinary é text");
-        assert_eq!(resolver.resolved_len(&ordinary), 16);
+        assert_eq!(resolver.try_resolve(&ordinary).unwrap(), "ordinary é text");
+        assert_eq!(resolver.try_resolved_len(&ordinary).unwrap(), 16);
         #[cfg(feature = "mmap")]
-        assert!(matches!(resolver.resolve(&ordinary), Cow::Borrowed(_)));
+        assert!(matches!(resolver.try_resolve(&ordinary).unwrap(), Cow::Borrowed(_)));
         drop(resolver);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -2199,7 +1924,7 @@ mod tests {
             len: raw.len() as u64,
             escaped: true,
         };
-        let text = resolver.resolve(&span).into_owned();
+        let text = resolver.try_resolve(&span).unwrap().into_owned();
         assert_eq!(text, "a".repeat(10923));
         assert!(
             text.capacity() < 2 * text.len(),
@@ -2292,7 +2017,10 @@ mod tests {
     #[test]
     fn chunk_output_capacity_is_independent_of_field_size() {
         let mut bytes = 0;
-        let mut accept = |s: &str| bytes += s.len();
+        let mut accept = |s: &str| {
+            bytes += s.len();
+            true
+        };
         let mut output = ChunkOutput {
             text: String::with_capacity(10),
             chunk: 7,
@@ -2369,16 +2097,27 @@ mod tests {
         let full_len = std::fs::metadata(&path).unwrap().len();
 
         // Unescaped: plain byte cap.
-        assert_eq!(resolver.resolve_prefix(&span(full_len, false), 8), "line one");
+        assert_eq!(
+            resolver.try_resolve_prefix(&span(full_len, false), 8).unwrap(),
+            "line one"
+        );
         // Cap ≥ len: identical to a full resolve.
         assert_eq!(
-            resolver.resolve_prefix(&span(full_len, true), full_len + 10),
-            resolver.resolve(&span(full_len, true))
+            resolver
+                .try_resolve_prefix(&span(full_len, true), full_len + 10)
+                .unwrap(),
+            resolver.try_resolve(&span(full_len, true)).unwrap()
         );
         // Escaped, cut mid-`\n` (raw bytes 9 ends between '\' and 'n'): backs up to byte 8.
-        assert_eq!(resolver.resolve_prefix(&span(full_len, true), 9), "line one");
+        assert_eq!(
+            resolver.try_resolve_prefix(&span(full_len, true), 9).unwrap(),
+            "line one"
+        );
         // Escaped, cut after the complete escape: the newline survives.
-        assert_eq!(resolver.resolve_prefix(&span(full_len, true), 14), "line one\nline");
+        assert_eq!(
+            resolver.try_resolve_prefix(&span(full_len, true), 14).unwrap(),
+            "line one\nline"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -2442,18 +2181,18 @@ mod tests {
                         offset += chunk.valid().len() + chunk.invalid().len();
                     }
                     assert_eq!(
-                        resolver.resolve_prefix(&span, cap as u64),
+                        resolver.try_resolve_prefix(&span, cap as u64).unwrap(),
                         String::from_utf8_lossy(&body[..keep]),
                         "body {i}, cap {cap}, escaped {escaped}"
                     );
                 }
                 if i == 0 {
-                    assert!(resolver.resolve_prefix(&span, 1024).trim().is_empty());
-                    assert_eq!(resolver.resolve(&span), valid);
+                    assert!(resolver.try_resolve_prefix(&span, 1024).unwrap().trim().is_empty());
+                    assert_eq!(resolver.try_resolve(&span).unwrap(), valid);
                 }
             }
         }
-        // Requested lookahead past the file must not erase an otherwise readable prefix.
+        // A span the source cannot hold fails even when the requested prefix is readable.
         let path = dir.join("short-source");
         std::fs::write(&path, b"\xe2\x80").unwrap();
         let resolver = Resolver::new(Some(path));
@@ -2463,7 +2202,7 @@ mod tests {
             len: 8,
             escaped: false,
         };
-        assert_eq!(resolver.resolve_prefix(&span, 1), "\u{fffd}");
+        assert!(resolver.try_resolve_prefix(&span, 1).is_err());
         drop(resolver);
         std::fs::remove_dir_all(dir).unwrap();
     }

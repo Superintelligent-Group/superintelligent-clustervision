@@ -691,11 +691,14 @@ impl Demand<'_> {
                     // Ordinary prompts need only a short prefix. Fall back to a bounded scan
                     // when leading whitespace hides the classification marker beyond it.
                     let mut prefix = info.clone();
-                    prefix.feed(&self.resolver.resolve_prefix(sp, 4096));
+                    prefix.feed(&self.resolver.try_resolve_prefix(sp, 4096).unwrap_or_default());
                     if prefix.complete() || sp.len <= 4096 {
                         info = prefix;
                     } else {
-                        self.resolver.for_each_chunk(sp, 4096, |s| info.feed(s));
+                        let _ = self.resolver.try_for_each_chunk(sp, 4096, |s| {
+                            info.feed(s);
+                            Ok(())
+                        });
                     }
                 }
             }

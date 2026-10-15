@@ -3229,7 +3229,7 @@ mod tests {
             escaped: true,
         };
         let resolver = cv_core::Resolver::new(None);
-        let expected = resolver.resolve(&span).into_owned();
+        let expected = resolver.try_resolve(&span).unwrap().into_owned();
         let f = fields_of(&build_schema()).unwrap();
         let r = cv_core::SessionRef::new("fallback", cv_core::Harness::Claude, dir.join("primary.jsonl"));
         let mut bodies = Vec::new();

@@ -350,7 +350,7 @@ impl Session {
                         if !s.is_empty() {
                             s.push('\n');
                         }
-                        s.push_str(&text.resolve_prefix(&resolver, HEAD));
+                        s.push_str(&text.try_resolve_prefix(&resolver, HEAD).unwrap_or_default());
                     }
                 }
                 meaningful_prompt(&s)
@@ -758,13 +758,10 @@ impl Message {
                 Block::ToolResult { content, .. } => content,
                 _ => continue,
             };
-            if let crate::lazy::Text::Source(source) = slot {
-                if let Ok(owned) = source.try_resolve() {
-                    *slot = crate::lazy::Text::Inline(owned);
+            if !matches!(slot, crate::lazy::Text::Inline(_)) {
+                if let Ok(owned) = slot.try_resolve(resolver) {
+                    *slot = crate::lazy::Text::Inline(owned.into_owned());
                 }
-            } else if slot.is_span() {
-                let owned = slot.resolve(resolver).into_owned();
-                *slot = crate::lazy::Text::Inline(owned);
             }
         }
     }
