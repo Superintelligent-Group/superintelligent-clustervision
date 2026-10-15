@@ -19,7 +19,8 @@ Datapath design and open gaps: `docs/design/DATAPATHS.md`; goal, budgets and mea
   `~/.claude`, `~/.codex`, and every other harness home. Transcripts are read-only. Set a scratch
   `CLUSTERVISION_HOME` for cargo tests too: adapter parse helpers can update the counts catalog.
 - Work in your own git worktree with your own `CARGO_TARGET_DIR`; two worktrees sharing a target
-  dir corrupt each other's builds. Never `git stash`. Never kill processes by pattern; stop only
+  dir corrupt each other's builds. Set `RUSTC_WRAPPER=sccache` so parallel worktrees share compiled
+  dependencies instead of each building the whole tree. Never `git stash`. Never kill processes by pattern; stop only
   PIDs you started.
 - Never run an unfiltered `cargo test -p <crate>` for exploration; filter to what you changed. The
   one full `cargo test --workspace` before pushing is the gate.
