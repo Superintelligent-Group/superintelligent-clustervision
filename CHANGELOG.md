@@ -17,6 +17,8 @@
 - HTTP body framing errors now close the connection; malformed chunks cannot recover during draining and execute a pipelined request.
 - Resume guard sampling preserves open transcript read positions on Unix.
 
+- Correct search defaults and fallback semantics, document affordance views and MCP window exceptions, and point the prompt-row schema to the current command.
+- MCP task tools use the actual CLI flags; generated schemas describe repeatable arguments, and the command reference shows their correct spellings.
 - Positioned (no-mmap) builds resolve large transcript text from a live, growing session, as mapped builds do; a replaced or shrunk file still fails.
 - `cv index` decodes each compressed Codex rollout once: discovery hands its decoded bytes to the sweep beside it (cold index: 15% fewer instructions).
 - Watch cursors and Kimi, Kimi Code and Qwen checkpoints serialize in a stable order: the same state always yields the same bytes.

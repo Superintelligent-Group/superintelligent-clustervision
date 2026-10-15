@@ -240,7 +240,13 @@ A piped `cv show` with no window selector will not spray a whole giant transcrip
 
 #### Views
 
-`--subagents`, `--agent`, `--tree` and `--kind` replace the transcript with one view of the same session. `--kind` takes the kinds that have a view — `prompt`/`answer` and `compaction_boundary`/`compaction_summary` — and exits 2 on anything else or on two views at once.
+`--subagents`, `--agent`, `--tree` and `--kind` select views of the same session.
+`--kind` accepts three families: `prompt,answer`; `compaction_boundary,compaction_summary`;
+and affordances such as `plan`, `goal`, `schedule`, `background_job`, `skill`, `hook`,
+`question`, `approval`, `checkpoint`, `branch`, `fork`, `model_change`, `subagent_spawn`,
+and `subagent_return` (`affordances` selects all of them). Unknown kinds or a mix of
+families exit 2. Prompt and affordance rows accept message windows; compaction rows
+cover the whole session. These row views print whole rows and reject `--max-bytes`.
 
 #### The threading: `--tree`
 
