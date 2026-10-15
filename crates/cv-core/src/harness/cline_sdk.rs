@@ -217,7 +217,7 @@ fn scan(path: &Path, sid: &str) -> Option<SessionRef> {
 fn first_view_text(content: Option<JsonView<'_>>, path: &Path) -> Result<Option<String>> {
     let Some(content) = content else { return Ok(None) };
     let resolver = crate::lazy::Resolver::new(Some(path.to_path_buf()));
-    if let Some(text) = content.text(true)? {
+    if let Some(text) = content.lazy_text(true)? {
         return Ok(text_summary(std::iter::once(text), &resolver, true));
     }
     let Some(mut parts) = content.array()? else {
@@ -229,7 +229,7 @@ fn first_view_text(content: Option<JsonView<'_>>, path: &Path) -> Result<Option<
         match next.and_then(|v| Fields::parse(v, &["text"])).and_then(|record| {
             record
                 .and_then(|r| r.get("text"))
-                .map(|v| v.text(true))
+                .map(|v| v.lazy_text(true))
                 .transpose()
                 .map(Option::flatten)
         }) {
@@ -432,10 +432,10 @@ fn result_text(c: Option<&Value>) -> String {
     }
 }
 
+/// The message codec, the only decoder of `messages[]`: Anthropic blocks through the family's view
+/// codec with [`JsonView::lazy_text`], except a `tool_result`, which names its tool and may hold
+/// plain result objects.
 fn view_message(view: JsonView<'_>, spans: bool, lead: bool, prompted: &mut bool) -> Result<Option<Message>> {
-    if !spans {
-        return Ok(message(view.resolve()?.as_ref(), lead, prompted));
-    }
     let keys = ["id", "role", "ts", "modelInfo", "metrics", "metadata", "content"];
     let Some(record) = Fields::parse(view, &keys)? else {
         return Ok(None);
@@ -443,7 +443,7 @@ fn view_message(view: JsonView<'_>, spans: bool, lead: bool, prompted: &mut bool
     let meta = Value::Object(record.project(&keys[..keys.len() - 1])?);
     let mut blocks = Vec::new();
     if let Some(content) = record.get("content") {
-        if let Some(text) = content.text(true)? {
+        if let Some(text) = content.lazy_text(spans)? {
             blocks.push(Block::Text { text });
         } else if let Some(items) = content.array()? {
             for view in items {
@@ -458,7 +458,7 @@ fn view_message(view: JsonView<'_>, spans: bool, lead: bool, prompted: &mut bool
                     == Some("tool_result")
                 {
                     let part = part.unwrap();
-                    let text = part.get("content").map(|v| v.text(true)).transpose()?.flatten();
+                    let text = part.get("content").map(|v| v.lazy_text(spans)).transpose()?.flatten();
                     let content = if let Some(text) = text {
                         text
                     } else {
@@ -472,38 +472,19 @@ fn view_message(view: JsonView<'_>, spans: bool, lead: bool, prompted: &mut bool
                         status: None,
                         details: None,
                     });
-                } else if let Some(block) = anthropic::block_from_view(view, &anthropic::ANTHROPIC, true)? {
+                } else if let Some(block) = anthropic::block_from_view_with(
+                    view,
+                    &anthropic::ANTHROPIC,
+                    spans,
+                    &mut |v| v.lazy_text(spans),
+                    if spans { 0 } else { u64::MAX },
+                )? {
                     blocks.push(block);
                 }
             }
         }
     }
     Ok(message_with_blocks(&meta, blocks, lead, prompted))
-}
-
-fn message(v: &Value, lead: bool, prompted: &mut bool) -> Option<Message> {
-    let mut blocks = Vec::new();
-    match v.get("content") {
-        Some(Value::String(s)) => blocks.push(Block::Text { text: s.clone().into() }),
-        Some(Value::Array(items)) => {
-            for it in items {
-                if it.get("type").and_then(Value::as_str) == Some("tool_result") {
-                    blocks.push(Block::ToolResult {
-                        tool_use_id: it.get("tool_use_id").and_then(Value::as_str).unwrap_or("").to_string(),
-                        content: result_text(it.get("content")).into(),
-                        is_error: it.get("is_error").and_then(Value::as_bool).unwrap_or(false),
-                        tool_name: it.get("name").and_then(Value::as_str).map(str::to_string),
-                        status: None,
-                        details: None,
-                    });
-                } else if let Some(b) = anthropic::block_from(it, &anthropic::ANTHROPIC) {
-                    blocks.push(b);
-                }
-            }
-        }
-        _ => {}
-    }
-    message_with_blocks(v, blocks, lead, prompted)
 }
 
 fn message_with_blocks(v: &Value, blocks: Vec<Block>, lead: bool, prompted: &mut bool) -> Option<Message> {

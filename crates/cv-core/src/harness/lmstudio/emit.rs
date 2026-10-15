@@ -325,60 +325,14 @@ pub(super) fn emit(session: &Session, out_dir: &Path, opts: &crate::emit::EmitOp
     })
 }
 #[cfg(test)]
-fn legacy_emit(session: &Session, out_dir: &Path, opts: &crate::emit::EmitOptions) -> Result<EmitResult> {
-    let session = crate::emit::materialized_session(session)?;
-    let session = session.as_ref();
-    let created = session.created_at.or(session.updated_at).unwrap_or_else(Utc::now);
-    let created_ms = created.timestamp_millis();
-
-    // The id (filename stem) is the ms-epoch createdAt unless explicitly overridden.
-    let new_id = opts.new_id.clone().unwrap_or_else(|| created_ms.to_string());
-
-    let conv_dir = out_dir.join("conversations");
-    fs::create_dir_all(&conv_dir).with_context(|| format!("creating {}", conv_dir.display()))?;
-    let file_path = conv_dir.join(format!("{new_id}.conversation.json"));
-
-    let mut messages: Vec<Value> = Vec::new();
-    for msg in &session.messages {
-        if let Some(version) = emit_version(session, msg, created)? {
-            messages.push(json!({
-                "versions": [version],
-                "currentlySelected": 0,
-            }));
-        }
-    }
-
-    let mut root = Map::new();
-    let title = session
-        .title
-        .clone()
-        .or_else(|| session.first_user_text())
-        .map(|t| crate::ir::truncate(&t, 80))
-        .unwrap_or_else(|| "Untitled".to_string());
-    root.insert("name".into(), json!(title));
-    root.insert("createdAt".into(), json!(created_ms));
-    root.insert("messages".into(), Value::Array(messages));
-    root.insert("tokenCount".into(), json!(0));
-    root.insert("pinned".into(), json!(false));
-
-    // Preserve any system prompt the source carried (parse puts it on `Session::system_prompt`).
-    if let Some(sp) = &session.system_prompt {
-        root.insert("systemPrompt".into(), json!(sp));
-    }
-
-    fs::write(&file_path, serde_json::to_string_pretty(&Value::Object(root))?)
-        .with_context(|| format!("writing {}", file_path.display()))?;
-
-    Ok(EmitResult {
-        path: file_path,
-        new_id,
-        resume_hint: Some("open the chat in LM Studio".to_string()),
-    })
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
+    use crate::emit::grok_qwen_tests::Frozen;
+
+    /// One emitted conversation, frozen: its length and SHA-256.
+    fn digest(bytes: &[u8]) -> Value {
+        json!([bytes.len(), crate::digest::sha256_hex(bytes)])
+    }
     #[test]
     fn primary_adapter_root_and_explicit_conversations_emit_into_discoverable_store() -> Result<()> {
         let world = crate::test_world("lmstudio_root_composition");
@@ -639,7 +593,7 @@ mod tests {
     }
 
     #[test]
-    fn checked_native_writer_matches_owned_oracle_and_preserves_changed_source() -> Result<()> {
+    fn checked_native_writer_matches_frozen_output_and_preserves_changed_source() -> Result<()> {
         let world = crate::test_world("checked-lmstudio");
         let path = world.base.join("source.jsonl");
         let mut rows = [
@@ -684,8 +638,7 @@ mod tests {
                 redacted: false,
             });
         }
-        let mut owned = lazy.clone();
-        owned.materialize()?;
+        let mut frozen = Frozen::new("lmstudio-emit");
         for mode in [
             crate::emit::ThinkingMode::Native,
             crate::emit::ThinkingMode::Text,
@@ -696,18 +649,11 @@ mod tests {
                 thinking: mode,
                 ..Default::default()
             };
-            let mut oracle = owned.clone();
-            crate::emit::project_owned_thinking_for_test(&mut oracle, Harness::LmStudio, mode);
-            let old = legacy_emit(&oracle, &world.base.join(format!("old-{mode:?}")), &opts)?;
             let new = super::super::emit(&lazy, &world.base.join(format!("new-{mode:?}")), &opts)?;
-            let old = fs::read(old.path)?;
             let new = fs::read(new.path)?;
-            assert!(
-                old == new,
-                "wire mismatch {mode:?} at {:?}",
-                old.iter().zip(&new).position(|(a, b)| a != b)
-            );
+            frozen.insert(format!("{mode:?}"), digest(&new));
         }
+        frozen.check()?;
         let dest = world.base.join("mutation");
         fs::create_dir_all(&dest)?;
         let opts = crate::emit::EmitOptions {
@@ -760,7 +706,7 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn dropped_source_failure_matches_direct_owned_error_contract() -> Result<()> {
+    fn dropped_source_failure_preserves_published_files_and_drop_never_reads_thinking() -> Result<()> {
         let world = crate::test_world("dropped-source-LmStudio");
         let path = world.base.join("thinking.json");
         fs::write(&path, serde_json::to_vec(&"private thought".repeat(3000))?)?;
@@ -791,12 +737,10 @@ mod tests {
         let index = dest.join("sessions.json");
         let index_before = fs::read(&index).ok();
         fs::remove_file(&path)?;
-        assert!(legacy_emit(&session, &world.base.join("old"), &opts).is_err());
         assert!(super::super::emit(&session, &dest, &opts).is_err());
         assert_eq!(fs::read(&emitted.path)?, before);
         assert_eq!(fs::read(&index).ok(), index_before);
-        // Drop does not demand legacy raw spans. Project the owned oracle before
-        // checked materialization, which correctly rejects an unprojected invalid span.
+        // Drop never demands the thinking text, so an unreadable span is never read.
         fs::write(&path, b"short")?;
         if let Block::Thinking { text, .. } = &mut session.messages[0].content[0] {
             *text = crate::Text::Span(crate::lazy::Span {
@@ -806,17 +750,11 @@ mod tests {
                 escaped: true,
             });
         }
-        let mut owned = session.clone();
-        assert!(owned.materialize().is_err());
-        // The general owned projection helper expects materialized text. This
-        // oracle deliberately has an unreadable span, which Drop never demands.
-        for message in &mut owned.messages {
-            message.content.retain(|block| !matches!(block, Block::Thinking { .. }));
-        }
-        owned.materialize()?;
-        let oracle = legacy_emit(&owned, &world.base.join("span-oracle"), &opts)?;
+        assert!(session.clone().materialize().is_err());
         let new = super::super::emit(&session, &dest, &opts)?;
-        assert_eq!(fs::read(oracle.path)?, fs::read(new.path)?);
+        let mut frozen = Frozen::new("lmstudio-emit-drop");
+        frozen.insert("unreadable span", digest(&fs::read(new.path)?));
+        frozen.check()?;
         assert_eq!(fs::read(&emitted.path)?, before);
         assert_eq!(fs::read(index).ok(), index_before);
         Ok(())
