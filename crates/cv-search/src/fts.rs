@@ -4330,9 +4330,7 @@ mod tests {
                     .unwrap();
             }
             writer.commit().unwrap();
-            // Join the merge/GC thread the commit started, or it can still be writing the index
-            // when the directory is removed ("Directory not empty").
-            writer.wait_merging_threads().unwrap();
+            drop(writer);
             for filter in [
                 crate::SearchFilter {
                     harness: Some("codex"),
@@ -6900,7 +6898,8 @@ mod tests {
         doc.add_text(old.get_field("title").unwrap(), "obsolete");
         writer.add_document(doc).unwrap();
         writer.commit().unwrap();
-        drop(writer);
+        // A raw tantivy writer: join its post-commit GC as `ingest::Writer` does on drop.
+        writer.wait_merging_threads().unwrap();
         drop(index);
         // A query cannot silently trust old stale postings, and never clears them.
         assert!(open_existing(&dir).err().unwrap().to_string().contains("cv index"));

@@ -123,7 +123,8 @@ impl Document for AdmittedDocument {
 
 /// Every write path, including single-session/test indexing, uses the same raw-document budget.
 pub(super) struct Writer {
-    inner: IndexWriter<AdmittedDocument>,
+    /// `None` only while [`Drop`] closes it.
+    inner: Option<IndexWriter<AdmittedDocument>>,
     pub(super) admission: Arc<Admission>,
     #[cfg(test)]
     fail_after: Mutex<Option<usize>>,
@@ -140,7 +141,7 @@ impl Writer {
         #[cfg(not(all(test, feature = "probe-heap")))]
         let limit = DOCUMENT_BYTES;
         Ok(Self {
-            inner,
+            inner: Some(inner),
             admission: Admission::new(limit),
             #[cfg(test)]
             fail_after: Mutex::new(None),
@@ -156,7 +157,7 @@ impl Writer {
             anyhow::ensure!(*remaining != 0, "injected index consumer failure");
             *remaining -= 1;
         }
-        self.inner.add_document(document).map_err(Into::into)
+        (**self).add_document(document).map_err(Into::into)
     }
     #[cfg(test)]
     pub(super) fn document_limit(&mut self, bytes: usize) {
@@ -166,22 +167,29 @@ impl Writer {
     pub(super) fn fail_after(&self, documents: usize) {
         *self.fail_after.lock().unwrap() = Some(documents);
     }
-    /// Close the writer and join the merge/GC work its commits started.
-    #[cfg(test)]
-    pub(super) fn wait_merging_threads(self) -> Result<()> {
-        self.inner.wait_merging_threads().map_err(Into::into)
+}
+
+/// tantivy's `IndexWriter` drop joins its indexing workers but not the segment updater, whose
+/// post-commit garbage collection (and any merge) can still be writing the directory after the
+/// writer is gone: a test removing the directory then failed with "Directory not empty", and a
+/// process could exit mid-GC. Every writer joins that work as it closes.
+impl Drop for Writer {
+    fn drop(&mut self) {
+        if let Some(inner) = self.inner.take() {
+            let _ = inner.wait_merging_threads();
+        }
     }
 }
 
 impl Deref for Writer {
     type Target = IndexWriter<AdmittedDocument>;
     fn deref(&self) -> &Self::Target {
-        &self.inner
+        self.inner.as_ref().expect("an open writer")
     }
 }
 impl DerefMut for Writer {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner
+        self.inner.as_mut().expect("an open writer")
     }
 }
 
