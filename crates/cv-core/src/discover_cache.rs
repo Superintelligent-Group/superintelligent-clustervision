@@ -76,6 +76,7 @@ pub(crate) struct ScanContinuation {
 }
 
 struct Entry {
+    #[cfg(feature = "sqlite")]
     mtime_ns: u64,
     size: u64,
     payload: Payload,
@@ -198,37 +199,30 @@ fn admit_loaded(
     cache: &Cache,
     path: &Path,
     entry: Entry,
-    key: (u64, u64),
     reads: &crate::source::ReadSet,
 ) -> Option<(Vec<SessionRef>, crate::source::ReadSet)> {
     let mut entries = cache.entries.write().unwrap();
     let entry = entries.entry(path.to_path_buf()).or_insert(entry);
-    if (entry.mtime_ns, entry.size) != key {
-        return None;
-    }
     entry
         .payload
         .known()
         .and_then(|(refs, captured)| captured.includes(reads).then(|| (refs.clone(), captured.clone())))
 }
 
-/// `(mtime_ns, size)` for `path`, or `None` if it can't be stat'd (then callers just scan).
-fn stat_key(path: &Path) -> Option<(u64, u64)> {
-    let m = std::fs::metadata(path).ok()?;
-    let mtime = m
-        .modified()
-        .ok()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_nanos() as u64;
-    Some((mtime, m.len()))
+/// The persisted key a capture of `path` would use now.
+#[cfg(all(test, feature = "sqlite"))]
+pub(crate) fn stat_key(path: &Path) -> Option<(u64, u64)> {
+    let mut reads = crate::source::ReadSet::default();
+    reads.record(path);
+    reads.signature(path)
 }
 
-/// Return cached refs for `path` when its `(mtime, size)` is unchanged; otherwise run `scan`, cache
-/// any non-empty result, and return it. One file may map to several sessions (e.g. Gemini logs).
+/// Return cached refs for `path` when its captured identity (and every auxiliary read) is
+/// unchanged; otherwise run `scan`, cache any non-empty result, and return it. One file may map
+/// to several sessions (e.g. Gemini logs).
 ///
-/// The stat happens **before** the scan, so a write racing the scan leaves a too-old `(mtime, size)`
-/// in the cache — which misses next time and re-scans. The safe direction.
+/// The capture happens **before** the scan, so a write racing the scan leaves a too-old stamp in
+/// the cache, which misses next time and re-scans. The safe direction.
 pub(crate) fn cached_scan_many<F>(path: &Path, scan: F) -> Vec<SessionRef>
 where
     F: FnOnce() -> Vec<SessionRef>,
@@ -279,8 +273,11 @@ fn cached_scan_inner<F>(
 where
     F: FnOnce(Option<&crate::stream::Checkpoint>) -> (Vec<SessionRef>, Option<ScanContinuation>),
 {
+    // One capture decides freshness: the path's full identity, inside the read set. Its
+    // `(mtime, size)` only keys the persisted rows.
     reads.record(path);
-    let Some((mtime_ns, size)) = stat_key(path) else {
+    #[cfg_attr(not(feature = "sqlite"), allow(unused_variables))]
+    let Some(key @ (_, size)) = reads.signature(path) else {
         return scan(None).0;
     };
     let context = read::Context::current();
@@ -290,7 +287,6 @@ where
         let entries = cache.entries.read().unwrap();
         entries
             .get(path)
-            .filter(|entry| entry.mtime_ns == mtime_ns && entry.size == size)
             .and_then(|entry| entry.payload.known())
             .and_then(|(refs, captured)| captured.includes(&reads).then(|| (refs.clone(), captured.clone())))
     };
@@ -304,9 +300,7 @@ where
     if !cache.entries.read().unwrap().contains_key(path) {
         #[cfg(test)]
         context.note_lookup();
-        let loaded = context
-            .with_connection(|conn| load_entry(conn, path, (mtime_ns, size)))
-            .flatten();
+        let loaded = context.with_connection(|conn| load_entry(conn, path, key)).flatten();
         // A lazy standalone open may migrate interpretation; clear before retaining this scan.
         clear_invalidated(&cache);
         if let Some(mut entry) = loaded {
@@ -315,7 +309,7 @@ where
             // Decode outside locks, then choose the actual current process entry. A concurrent
             // scan/count update must win over the older SQL snapshot, including on return.
             entry.payload.parsed();
-            let candidate = admit_loaded(&cache, path, entry, (mtime_ns, size), &reads);
+            let candidate = admit_loaded(&cache, path, entry, &reads);
             if let Some((refs, captured)) = candidate {
                 if captured.fresh(&mut crate::source::Probe::default()) {
                     return refs;
@@ -384,7 +378,8 @@ where
         entries.insert(
             path.to_path_buf(),
             Entry {
-                mtime_ns,
+                #[cfg(feature = "sqlite")]
+                mtime_ns: key.0,
                 size,
                 payload: Payload::Parsed {
                     refs: refs.clone(),
@@ -918,7 +913,7 @@ mod tests {
         let cache = current_cache();
         let mut reads = crate::source::ReadSet::default();
         reads.record(&path);
-        let actual = admit_loaded(&cache, &path, old_sql, key, &reads).unwrap();
+        let actual = admit_loaded(&cache, &path, old_sql, &reads).unwrap();
         assert_eq!(
             actual.0[0].message_count, 7,
             "newer process count wins on admission AND return"

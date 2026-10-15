@@ -227,6 +227,12 @@ impl ReadSet {
         }
     }
 
+    /// The `(mtime_ns, len)` recorded for an existing `path`, the key persisted caches index by.
+    pub(crate) fn signature(&self, path: &Path) -> Option<(u64, u64)> {
+        let state = self.entries.get(&absolute(path)?)?.state.as_ref()?;
+        Some((state.modified_ns, state.len))
+    }
+
     /// Paths whose original stamps this read set retains. Dependency notifications can replay
     /// these paths while guarded projections/publication continue to carry the original set.
     pub(crate) fn paths(&self) -> impl Iterator<Item = &Path> {
