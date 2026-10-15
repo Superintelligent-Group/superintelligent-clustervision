@@ -1,6 +1,6 @@
 //! Bounded event retention between a source pass and atomic catalog publication.
 use super::{Event, EventSink};
-use crate::spill::{Ordered, Record, Rows};
+use crate::spill::{Ordered, Record};
 use crate::stream::{Checkpoint, Flow, MessageSink};
 use crate::{Message, Session};
 use anyhow::{Context, Result};
@@ -80,7 +80,8 @@ impl EventSpool {
     fn push(&mut self, event: Event) -> Result<()> {
         self.ordered.push(event)
     }
-    pub(super) fn rows(self) -> Result<Rows<Event>> {
+    #[cfg(any(test, feature = "sqlite"))]
+    pub(super) fn rows(self) -> Result<impl Iterator<Item = Result<Event>>> {
         self.ordered.rows()
     }
 }

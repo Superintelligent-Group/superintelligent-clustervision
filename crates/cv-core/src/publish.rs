@@ -156,7 +156,7 @@ impl Write for Staged {
 impl Drop for Staged {
     fn drop(&mut self) {
         // Close first: some platforms cannot unlink an open file.
-        drop(self.file.take());
+        self.file = None;
         if !self.path.as_os_str().is_empty() {
             let _ = std::fs::remove_file(&self.path);
         }

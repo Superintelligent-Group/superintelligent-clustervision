@@ -236,6 +236,7 @@ impl ByteSource {
         }
     }
 
+    #[cfg(any(test, feature = "sqlite"))]
     pub(crate) fn read(mut input: impl std::io::Read) -> std::io::Result<Self> {
         use std::io::Write;
         let mut stage = ByteStage::new();
@@ -250,25 +251,18 @@ impl ByteSource {
         stage.finish()
     }
     /// Prefer native contiguous parsing. Mapping never outlives this exclusively owned source.
+    #[cfg(feature = "mmap")]
     pub(crate) fn with_bytes<T>(&self, f: impl FnOnce(&[u8]) -> T) -> std::io::Result<Option<T>> {
         match &self.bytes {
             Bytes::Memory(bytes) => Ok(Some(f(bytes))),
             Bytes::Arena { .. } => Ok(None),
             Bytes::File(spill) => {
-                #[cfg(feature = "mmap")]
-                {
-                    let file = spill.file.as_ref().unwrap();
-                    if file.metadata()?.len() == 0 {
-                        return Ok(Some(f(&[])));
-                    }
-                    // Only this operation owns the backing descriptor; it is never mutated.
-                    if let Ok(map) = unsafe { memmap2::Mmap::map(file) } {
-                        return Ok(Some(f(&map)));
-                    }
+                let file = spill.file.as_ref().unwrap();
+                if file.metadata()?.len() == 0 {
+                    return Ok(Some(f(&[])));
                 }
-                #[cfg(not(feature = "mmap"))]
-                let _ = (spill, f);
-                Ok(None)
+                // Only this operation owns the backing descriptor; it is never mutated.
+                Ok(unsafe { memmap2::Mmap::map(file) }.ok().map(|map| f(&map)))
             }
         }
     }
@@ -317,7 +311,7 @@ impl<F: std::borrow::Borrow<std::fs::File>> std::io::Read for FileReader<F> {
         };
         #[cfg(not(any(unix, windows)))]
         let n = {
-            use std::io::{Read, Seek, SeekFrom};
+            use std::io::{Seek, SeekFrom};
             let mut file = backing_file.try_clone()?;
             file.seek(SeekFrom::Start(self.position))?;
             file.read(bytes)?

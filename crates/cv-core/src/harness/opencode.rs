@@ -359,6 +359,8 @@ impl Adapter for OpenCode {
         if self.db.as_ref() == Some(&r.path) || db::is_db_ref(r) {
             return db::todos(r).into_iter().collect();
         }
+        #[cfg(not(feature = "sqlite"))]
+        let _ = r;
         Vec::new()
     }
 }

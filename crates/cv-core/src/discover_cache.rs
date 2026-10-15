@@ -82,6 +82,7 @@ struct Entry {
     /// Private reducer state, independent of mutable published refs; decode only on append.
     continuation: Option<String>,
     /// Scanned this run and not yet written back to sqlite.
+    #[cfg(feature = "sqlite")]
     dirty: bool,
 }
 
@@ -247,6 +248,7 @@ where
 }
 
 /// [`cached_scan_many`] with auxiliary identities captured before the caller reads them.
+#[cfg(feature = "sqlite")]
 pub(crate) fn cached_scan_many_with_reads<F>(path: &Path, reads: crate::source::ReadSet, scan: F) -> Vec<SessionRef>
 where
     F: FnOnce() -> Vec<SessionRef>,
@@ -389,6 +391,7 @@ where
                     reads,
                 },
                 continuation,
+                #[cfg(feature = "sqlite")]
                 dirty: true,
             },
         );
@@ -436,11 +439,8 @@ fn persistence_cache(path: &Path, prune: bool) -> Option<Arc<Cache>> {
 /// *full* [`crate::discover_all`] (the stat-per-row cost belongs on the slow path; per-harness
 /// probe refreshes skip it). Best-effort: a failed flush just means a re-scan next run.
 pub(crate) fn persist(prune: bool) {
-    if persistence_cache(&read::Context::current().path(), prune).is_none() {
-        return;
-    }
-    #[cfg(feature = "sqlite")]
-    {
+    if persistence_cache(&read::Context::current().path(), prune).is_some() {
+        #[cfg(feature = "sqlite")]
         read::Context::current().with_connection_mut(|conn| persist_in(conn, prune));
     }
 }
