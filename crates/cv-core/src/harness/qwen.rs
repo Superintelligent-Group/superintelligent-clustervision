@@ -500,7 +500,7 @@ struct ReplayState {
     /// `functionCall` ids of `agent` calls: their `tool_result` is a sub-agent's return.
     spawn_calls: BTreeSet<String>,
     /// `functionCall` id → the tool's name (unwrapped from `tool_call`), for the results.
-    call_names: std::collections::HashMap<String, String>,
+    call_names: std::collections::BTreeMap<String, String>,
     skipped: u64,
 }
 
@@ -648,7 +648,7 @@ mod tests {
 
     #[test]
     fn growing_call_maps_amortize_production_checkpoints_and_preserve_delayed_results() -> Result<()> {
-        use crate::stream::stream_resumable_amortized;
+        use crate::stream::stream_counted;
         let world = crate::test_world("qwen-growing-call-checkpoints");
         let home = world.home.join(".qwen");
         let path = home.join("projects/hash/chats/session.jsonl");
@@ -677,8 +677,17 @@ mod tests {
             let adapter = Qwen::with_home(&home);
             let r = SessionRef::new("session", Harness::Qwen, &path);
             let mut full = Kept::default();
-            let done =
-                stream_resumable_amortized(&adapter, &r, &ParseOptions::lazy(), &mut full, cadence, None)?.unwrap();
+            let done = stream_counted(
+                &adapter,
+                &r,
+                &ParseOptions::lazy(),
+                &mut full,
+                crate::stream::Pass {
+                    every: Some(cadence),
+                    amortized: true,
+                    ..Default::default()
+                },
+            )?;
             assert!(!full.checkpoints.is_empty());
             let copied = full
                 .checkpoints
@@ -698,9 +707,18 @@ mod tests {
             for index in [0, full.checkpoints.len() - 1] {
                 let (count, cp) = &full.checkpoints[index];
                 let mut rest = Kept::default();
-                let resumed =
-                    stream_resumable_amortized(&adapter, &r, &ParseOptions::lazy(), &mut rest, cadence, Some(cp))?
-                        .unwrap();
+                let resumed = stream_counted(
+                    &adapter,
+                    &r,
+                    &ParseOptions::lazy(),
+                    &mut rest,
+                    crate::stream::Pass {
+                        from: Some(cp),
+                        every: Some(cadence),
+                        amortized: true,
+                        ..Default::default()
+                    },
+                )?;
                 assert_eq!(
                     serde_json::to_value(&resumed.session)?,
                     serde_json::to_value(&done.session)?

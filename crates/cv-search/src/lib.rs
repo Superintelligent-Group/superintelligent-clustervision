@@ -217,8 +217,15 @@ pub fn semantic_search_filtered(
 pub(crate) fn read_corpus_doc(r: &cv_core::SessionRef) -> Result<(Doc, cv_core::source::ReadSet)> {
     let adapter = cv_core::harness::for_harness(r.harness).with_context(|| format!("no adapter for {}", r.harness))?;
     let mut sink = semantic_corpus::DocSink::new(cv_core::Resolver::new(Some(r.path.clone())));
-    let meta = cv_core::stream::stream_counted(&*adapter, r, &cv_core::ParseOptions::lazy(), &mut sink)
-        .with_context(|| format!("reading semantic corpus session {} ({})", r.id, r.harness))?;
+    let meta = cv_core::stream::stream_counted(
+        &*adapter,
+        r,
+        &cv_core::ParseOptions::lazy(),
+        &mut sink,
+        cv_core::stream::Pass::RECORD,
+    )
+    .with_context(|| format!("reading semantic corpus session {} ({})", r.id, r.harness))?
+    .session;
     let title = cv_core::label_from(meta.title.as_deref(), sink.first_user_text.as_deref());
     Ok((
         Doc {

@@ -226,7 +226,14 @@ fn a_full_parse_fills_a_not_counted_catalog_row() {
     let (r, adapter) = cv_core::find(id, Some(Harness::Codex)).unwrap().expect("resolves");
     // A stream that stops early (`cv show --range 0..1`) read a prefix: it proves nothing.
     let mut head = |_m: cv_core::Message| cv_core::Flow::Stop;
-    cv_core::stream::stream_counted(adapter.as_ref(), &r, &cv_core::ParseOptions::lazy(), &mut head).unwrap();
+    cv_core::stream::stream_counted(
+        adapter.as_ref(),
+        &r,
+        &cv_core::ParseOptions::lazy(),
+        &mut head,
+        cv_core::stream::Pass::RECORD,
+    )
+    .unwrap();
     assert_eq!(
         row(cv_core::sessions()).message_count,
         0,
@@ -234,7 +241,14 @@ fn a_full_parse_fills_a_not_counted_catalog_row() {
     );
     // A stream that reaches the end (`cv show`, `cv index`) fills the row with the parse's count.
     let mut all = |_m: cv_core::Message| cv_core::Flow::Continue;
-    cv_core::stream::stream_counted(adapter.as_ref(), &r, &cv_core::ParseOptions::lazy(), &mut all).unwrap();
+    cv_core::stream::stream_counted(
+        adapter.as_ref(),
+        &r,
+        &cv_core::ParseOptions::lazy(),
+        &mut all,
+        cv_core::stream::Pass::RECORD,
+    )
+    .unwrap();
     assert_eq!(row(cv_core::sessions()).message_count, 5, "the streamed count");
     // `parse` (Codex's whole-text path) agrees, and a filled row is never rewritten.
     let parsed = adapter.parse(&r).unwrap();

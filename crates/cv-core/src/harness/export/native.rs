@@ -690,17 +690,17 @@ pub(super) fn chatgpt_text(
                 Ok(())
             });
         }
-        let mut first = None;
+        let mut first = None::<Text>;
         let mut joined = None::<String>;
         for view in parts {
             let Some(text) = view?.lazy_text(spans)? else { continue };
             if let Some(buffer) = &mut joined {
                 buffer.push('\n');
-                buffer.push_str(&text.resolve(resolver));
+                buffer.push_str(&text.try_resolve(resolver)?);
             } else if let Some(previous) = first.take() {
-                let mut buffer = Text::resolve(&previous, resolver).into_owned();
+                let mut buffer = previous.try_resolve(resolver)?.into_owned();
                 buffer.push('\n');
-                buffer.push_str(&text.resolve(resolver));
+                buffer.push_str(&text.try_resolve(resolver)?);
                 joined = Some(buffer);
             } else {
                 first = Some(text);

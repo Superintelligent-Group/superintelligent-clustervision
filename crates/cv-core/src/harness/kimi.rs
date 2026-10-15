@@ -84,7 +84,7 @@ use crate::stream::{Checkpoint, Flow, MessageSink, ParseOptions};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -389,7 +389,7 @@ fn context_flavor(opts: &ParseOptions) -> [bool; 4] {
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 struct ContextState {
-    call_names: HashMap<String, String>,
+    call_names: BTreeMap<String, String>,
     status_index: usize,
     first_user_seen: bool,
     checkpoints: u64,
@@ -933,7 +933,7 @@ fn peek_system_prompt(transcript: &Path) -> Option<String> {
     prompt
 }
 
-fn note_call_names(message: &Message, names: &mut HashMap<String, String>) {
+fn note_call_names(message: &Message, names: &mut BTreeMap<String, String>) {
     for block in &message.content {
         if let Block::ToolUse { id, name, .. } = block {
             if !id.is_empty() && !name.is_empty() {
@@ -1460,7 +1460,7 @@ mod tests {
         v: &Value,
         enrich: &WireEnrich,
         complete: bool,
-        names: &mut HashMap<String, String>,
+        names: &mut BTreeMap<String, String>,
     ) -> Option<Message> {
         let m = record::message(v.into(), None, enrich, complete, names).unwrap()?;
         note_call_names(&m, names);
@@ -1552,8 +1552,17 @@ mod tests {
                 );
             }
             let mut amortized = ResumeKeep::default();
-            crate::stream::stream_resumable_amortized(&adapter, &reference, &options, &mut amortized, 1024, None)?
-                .unwrap();
+            crate::stream::stream_counted(
+                &adapter,
+                &reference,
+                &options,
+                &mut amortized,
+                crate::stream::Pass {
+                    every: Some(1024),
+                    amortized: true,
+                    ..Default::default()
+                },
+            )?;
             assert_eq!(
                 materialized(&amortized.messages, &reference),
                 materialized(&full.messages, &reference)
@@ -1567,15 +1576,19 @@ mod tests {
             assert!(snapshot_bytes as u64 <= fs::metadata(dir.join("context.jsonl"))?.len() * 4);
             for (count, checkpoint) in &amortized.checkpoints {
                 let mut suffix = ResumeKeep::default();
-                assert!(crate::stream::stream_resumable_amortized(
+                assert!(crate::stream::stream_counted(
                     &adapter,
                     &reference,
                     &options,
                     &mut suffix,
-                    1024,
-                    Some(checkpoint)
-                )?
-                .is_some());
+                    crate::stream::Pass {
+                        from: Some(checkpoint),
+                        every: Some(1024),
+                        amortized: true,
+                        ..Default::default()
+                    }
+                )
+                .is_ok());
                 assert_eq!(
                     materialized(&suffix.messages, &reference),
                     materialized(&full.messages[*count..], &reference)
@@ -1800,7 +1813,7 @@ mod tests {
         let text = e.output(&e.tool_results["plain"]);
         assert!(!text.as_span().unwrap().escaped);
         let resolver = crate::lazy::Resolver::new(None);
-        let resolved = text.resolve(&resolver);
+        let resolved = text.try_resolve(&resolver).unwrap();
         assert_eq!(resolved.as_ref(), output);
         #[cfg(feature = "mmap")]
         assert!(matches!(resolved, std::borrow::Cow::Borrowed(_)));
@@ -1862,7 +1875,7 @@ mod tests {
             for (id, (output, is_error, extras)) in &expected {
                 let result = &e.tool_results[id];
                 let actual = e.output(result);
-                assert_eq!(actual.resolve(&resolver).as_ref(), output, "{id}");
+                assert_eq!(actual.try_resolve(&resolver).unwrap().as_ref(), output, "{id}");
                 assert_eq!(result.is_error, *is_error);
                 assert_eq!(e.extras(result), *extras);
                 assert_eq!(actual.is_span(), spans && id == "giant");
@@ -2028,7 +2041,7 @@ mod tests {
     #[test]
     fn user_bare_string_and_list() {
         let bare: Value = serde_json::from_str(r#"{"role":"user","content":"hello"}"#).unwrap();
-        let m = context_message(&bare, &WireEnrich::default(), false, &mut HashMap::new()).unwrap();
+        let m = context_message(&bare, &WireEnrich::default(), false, &mut BTreeMap::new()).unwrap();
         assert_eq!(m.role, Role::User);
         assert_eq!(m.text().as_deref(), Some("hello"));
 
@@ -2036,7 +2049,7 @@ mod tests {
             r#"{"role":"user","content":[{"type":"text","text":"hi"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AAA","id":null}}]}"#,
         )
         .unwrap();
-        let m = context_message(&list, &WireEnrich::default(), false, &mut HashMap::new()).unwrap();
+        let m = context_message(&list, &WireEnrich::default(), false, &mut BTreeMap::new()).unwrap();
         assert_eq!(m.text().as_deref(), Some("hi"));
         assert!(matches!(
             m.content[1],
@@ -2051,7 +2064,7 @@ mod tests {
     fn assistant_think_and_tool_calls() {
         let line = r#"{"role":"assistant","content":[{"type":"think","think":"reasoning","encrypted":"BLOB"},{"type":"text","text":"Let me look."}],"tool_calls":[{"type":"function","id":"tool_1","function":{"name":"Shell","arguments":"{\"command\":\"cat .gitmodules\"}"}}]}"#;
         let v: Value = serde_json::from_str(line).unwrap();
-        let mut call_names = HashMap::new();
+        let mut call_names = BTreeMap::new();
         let m = context_message(&v, &WireEnrich::default(), false, &mut call_names).unwrap();
         assert_eq!(m.role, Role::Assistant);
         assert_eq!((m.kind, m.origin), (MessageKind::Reply, Origin::Model));
@@ -2086,7 +2099,7 @@ mod tests {
         let line =
             r#"{"role":"tool","content":"<system>Command executed successfully.</system>","tool_call_id":"tool_1"}"#;
         let v: Value = serde_json::from_str(line).unwrap();
-        let mut call_names = HashMap::from([("tool_1".to_string(), "Shell".to_string())]);
+        let mut call_names = BTreeMap::from([("tool_1".to_string(), "Shell".to_string())]);
         let m = context_message(&v, &WireEnrich::default(), false, &mut call_names).unwrap();
         assert_eq!(m.role, Role::Tool);
         assert_eq!((m.kind, m.origin), (MessageKind::ToolResult, Origin::Harness));
@@ -2113,7 +2126,7 @@ mod tests {
         let wire = temp.base.join("wire.jsonl");
         fs::write(&wire, r#"{"message":{"type":"ToolResult","payload":{"tool_call_id":"tool_1","return_value":{"is_error":true,"output":"boom","extras":{"k":"v"}}}}}"#).unwrap();
         let enrich = read_wire_enrichment(&wire, false);
-        let m = context_message(&v, &enrich, false, &mut HashMap::new()).unwrap();
+        let m = context_message(&v, &enrich, false, &mut BTreeMap::new()).unwrap();
         match &m.content[0] {
             Block::ToolResult {
                 content,
@@ -2134,19 +2147,19 @@ mod tests {
     #[test]
     fn internal_roles_skipped() {
         let cp: Value = serde_json::from_str(r#"{"role":"_checkpoint","id":3}"#).unwrap();
-        assert!(context_message(&cp, &WireEnrich::default(), false, &mut HashMap::new()).is_none());
+        assert!(context_message(&cp, &WireEnrich::default(), false, &mut BTreeMap::new()).is_none());
         // … but under `complete` a checkpoint rides along as a carrier naming its record type
-        let c = context_message(&cp, &WireEnrich::default(), true, &mut HashMap::new()).unwrap();
+        let c = context_message(&cp, &WireEnrich::default(), true, &mut BTreeMap::new()).unwrap();
         assert_eq!((c.kind, c.origin), (MessageKind::Carrier, Origin::Harness));
         assert_eq!(c.extra[crate::harness::claude::CARRIER_KEY], cp);
         assert_eq!(c.extra["kimi"]["record_type"], "_checkpoint");
         // `_usage` is never a message, even under `complete`: it folds onto the message before it
         let us: Value = serde_json::from_str(r#"{"role":"_usage","token_count":7291}"#).unwrap();
         for complete in [false, true] {
-            assert!(context_message(&us, &WireEnrich::default(), complete, &mut HashMap::new()).is_none());
+            assert!(context_message(&us, &WireEnrich::default(), complete, &mut BTreeMap::new()).is_none());
         }
         let sp: Value = serde_json::from_str(r#"{"role":"_system_prompt","content":"You are Kimi."}"#).unwrap();
-        let m = context_message(&sp, &WireEnrich::default(), false, &mut HashMap::new()).unwrap();
+        let m = context_message(&sp, &WireEnrich::default(), false, &mut BTreeMap::new()).unwrap();
         assert_eq!(m.role, Role::System);
         assert_eq!(m.kind, MessageKind::SystemPrompt);
         assert_eq!(m.origin, Origin::Harness);
@@ -2190,7 +2203,7 @@ mod tests {
         ];
         for (line, kind, origin) in cases {
             let v: Value = serde_json::from_str(line).unwrap();
-            let m = context_message(&v, &WireEnrich::default(), false, &mut HashMap::new()).unwrap();
+            let m = context_message(&v, &WireEnrich::default(), false, &mut BTreeMap::new()).unwrap();
             assert_eq!(m.role, Role::User, "{line}");
             assert_eq!((m.kind, m.origin), (kind, origin), "{line}");
         }

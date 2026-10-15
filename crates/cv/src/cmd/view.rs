@@ -363,7 +363,14 @@ fn session_json_window(
         next: None,
         error: None,
     };
-    let mut session = cv_core::stream::stream_counted(adapter, r, &cv_core::ParseOptions::lazy_extra(), &mut sink)?;
+    let mut session = cv_core::stream::stream_counted(
+        adapter,
+        r,
+        &cv_core::ParseOptions::lazy_extra(),
+        &mut sink,
+        cv_core::stream::Pass::RECORD,
+    )?
+    .session;
     if sink.tail.is_some() {
         let start = sink.seen - sink.messages.len();
         for (i, m) in std::mem::take(&mut sink.messages).into_iter().enumerate() {
@@ -504,16 +511,12 @@ fn staged_session_json_inner(
         next: None,
         error: None,
     };
-    let (session, guard) = if checked {
-        let (session, guard) =
-            cv_core::stream::stream_counted_guarded(adapter, r, &cv_core::ParseOptions::lazy_extra(), &mut sink)?;
-        (session, Some(guard))
-    } else {
-        (
-            cv_core::stream::stream_counted(adapter, r, &cv_core::ParseOptions::lazy_extra(), &mut sink)?,
-            None,
-        )
+    let pass = cv_core::stream::Pass {
+        guard: checked,
+        ..cv_core::stream::Pass::RECORD
     };
+    let read = cv_core::stream::stream_counted(adapter, r, &cv_core::ParseOptions::lazy_extra(), &mut sink, pass)?;
+    let (session, guard) = (read.session, read.guard);
     if let Some(error) = sink.error.take() {
         return Err(error);
     }
@@ -1040,12 +1043,16 @@ fn read_tree(r: &SessionRef, adapter: &dyn Adapter) -> Result<(Session, Vec<Tree
         first_user: None,
         error: None,
     };
-    let (session, guard) =
-        cv_core::stream::stream_counted_guarded(adapter, r, &cv_core::ParseOptions::facts(), &mut sink)?;
+    let pass = cv_core::stream::Pass {
+        guard: true,
+        ..cv_core::stream::Pass::RECORD
+    };
+    let read = cv_core::stream::stream_counted(adapter, r, &cv_core::ParseOptions::facts(), &mut sink, pass)?;
+    let session = read.session;
     if let Some(error) = sink.error {
         return Err(error);
     }
-    guard.verify(r)?;
+    read.guard.expect("guarded pass").verify(r)?;
     Ok((session, sink.rows, sink.first_user))
 }
 
@@ -1618,12 +1625,11 @@ fn stream_session_render_inner<W: std::io::Write>(
     } else {
         ParseOptions::bulk()
     };
-    let guard = if checked {
-        Some(cv_core::stream::stream_counted_guarded(adapter, r, &parse_opts, &mut sink)?.1)
-    } else {
-        cv_core::stream::stream_counted(adapter, r, &parse_opts, &mut sink)?;
-        None
+    let pass = cv_core::stream::Pass {
+        guard: checked,
+        ..cv_core::stream::Pass::RECORD
     };
+    let guard = cv_core::stream::stream_counted(adapter, r, &parse_opts, &mut sink, pass)?.guard;
     sink.finish_tail();
     sink.flush_header(); // short sessions (no assistant turn / < HOLDBACK msgs) flush here
     sink.result?;
@@ -1940,11 +1946,23 @@ mod tests {
             }
         }
         let mut rich = cv_core::stream::CollectSink::default();
-        let (_, expected_counts) =
-            cv_core::stream::stream_counting(adapter.as_ref(), &r, &cv_core::ParseOptions::lazy_extra(), &mut rich)?;
+        let expected_counts = cv_core::stream::stream_counted(
+            adapter.as_ref(),
+            &r,
+            &cv_core::ParseOptions::lazy_extra(),
+            &mut rich,
+            Default::default(),
+        )?
+        .counted;
         let mut facts = FactsCollect(Default::default());
-        let (_, actual_counts) =
-            cv_core::stream::stream_counting(adapter.as_ref(), &r, &cv_core::ParseOptions::lazy_extra(), &mut facts)?;
+        let actual_counts = cv_core::stream::stream_counted(
+            adapter.as_ref(),
+            &r,
+            &cv_core::ParseOptions::lazy_extra(),
+            &mut facts,
+            Default::default(),
+        )?
+        .counted;
         assert_eq!(rich.messages.len(), facts.0.messages.len());
         let expected_counts = expected_counts.unwrap();
         let actual_counts = actual_counts.unwrap();
@@ -2015,10 +2033,22 @@ mod tests {
         let adapter = cv_core::harness::for_harness(Harness::Cursor).unwrap();
         let mut rich = cv_core::stream::CollectSink::default();
         let mut lazy = cv_core::stream::CollectSink::default();
-        let (_, old) =
-            cv_core::stream::stream_counting(adapter.as_ref(), &r, &cv_core::ParseOptions::full(), &mut rich)?;
-        let (_, new) =
-            cv_core::stream::stream_counting(adapter.as_ref(), &r, &cv_core::ParseOptions::lazy_extra(), &mut lazy)?;
+        let old = cv_core::stream::stream_counted(
+            adapter.as_ref(),
+            &r,
+            &cv_core::ParseOptions::full(),
+            &mut rich,
+            Default::default(),
+        )?
+        .counted;
+        let new = cv_core::stream::stream_counted(
+            adapter.as_ref(),
+            &r,
+            &cv_core::ParseOptions::lazy_extra(),
+            &mut lazy,
+            Default::default(),
+        )?
+        .counted;
         let (old, new) = (old.unwrap(), new.unwrap());
         assert_eq!(old.turns, new.turns);
         assert_eq!(old.counts, new.counts);

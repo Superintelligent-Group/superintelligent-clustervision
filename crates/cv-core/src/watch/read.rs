@@ -521,9 +521,16 @@ fn read_inner<'a>(
         stop_after_selection,
     };
     let mut resumed = from.is_some();
-    let done = match stream::stream_resumable_amortized(adapter, r, &opts, &mut sink, CHECKPOINT_EVERY, from)? {
-        Some(done) => done,
-        None => {
+    let pass = |from| stream::Pass {
+        from,
+        every: Some(CHECKPOINT_EVERY),
+        amortized: true,
+        ..Default::default()
+    };
+    let done = match stream::stream_counted(adapter, r, &opts, &mut sink, pass(from)) {
+        Ok(done) => done,
+        Err(error) if !error.is::<stream::Declined>() => return Err(error),
+        Err(_) => {
             resumed = false;
             let output = sink.output.take();
             let check = sink.check.take();
@@ -544,8 +551,7 @@ fn read_inner<'a>(
                 last: None,
                 stop_after_selection,
             };
-            stream::stream_resumable_amortized(adapter, r, &opts, &mut sink, CHECKPOINT_EVERY, None)?
-                .context("adapter declined a whole read")?
+            stream::stream_counted(adapter, r, &opts, &mut sink, pass(None))?
         }
     };
     let complete = done.counted.is_some();

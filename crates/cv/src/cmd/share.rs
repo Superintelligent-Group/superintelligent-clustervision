@@ -79,7 +79,13 @@ fn share_session(
         count: 0,
         result: Ok(()),
     };
-    let (_, guard) = cv_core::stream::stream_counted_guarded(adapter, r, &ParseOptions::bulk(), &mut sink)?;
+    let pass = cv_core::stream::Pass {
+        guard: true,
+        ..cv_core::stream::Pass::RECORD
+    };
+    let guard = cv_core::stream::stream_counted(adapter, r, &ParseOptions::bulk(), &mut sink, pass)?
+        .guard
+        .expect("guarded pass");
     sink.finish(env!("CARGO_PKG_VERSION"));
 
     let count = sink.count;

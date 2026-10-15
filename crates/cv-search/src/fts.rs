@@ -946,7 +946,7 @@ impl PlanState {
         let fts_fresh = fts_is_fresh(r, existing.get(&r.id), mtime, size, || {
             dependencies_fresh && dependencies.primary_fresh(r, &source.dependencies)
         }) && metadata.get(&r.id) == Some(&DiscoveryMetadata::new(r, prov));
-        let events = event_sync.needs_ingest_with_provenance(r, &source, prov, probe);
+        let events = event_sync.needs_ingest(r, &source, prov, probe);
         // Unchanged on every axis → skip entirely (no re-parse beyond the metadata scan).
         if fts_fresh
             && !events
@@ -1634,8 +1634,14 @@ fn job_pass(
         .map(|(_, done, reads)| (done, reads))
     } else {
         let opts = cv_core::ParseOptions::lazy();
-        cv_core::stream::stream_resumable_amortized(adapter, &job.r, &opts, event_sink, CHECKPOINT_EVERY, from)?
-            .map(|done| (done, cv_core::source::ReadSet::default()))
+        resumed(cv_core::stream::stream_counted(
+            adapter,
+            &job.r,
+            &opts,
+            event_sink,
+            amortized(from),
+        ))?
+        .map(|done| (done, cv_core::source::ReadSet::default()))
     };
     let Some((done, reads)) = done else { return Ok(None) };
     #[cfg(test)]
@@ -1657,6 +1663,25 @@ fn job_pass(
     }))
 }
 
+/// An amortized resumable pass from `from` (see [`cv_core::stream::Pass`]).
+fn amortized(from: Option<&cv_core::stream::Checkpoint>) -> cv_core::stream::Pass<'_> {
+    cv_core::stream::Pass {
+        from,
+        every: Some(CHECKPOINT_EVERY),
+        amortized: true,
+        ..Default::default()
+    }
+}
+
+/// `Ok(None)` when the adapter declined to resume (it touched nothing).
+fn resumed(read: Result<cv_core::stream::Streamed>) -> Result<Option<cv_core::stream::Streamed>> {
+    match read {
+        Ok(done) => Ok(Some(done)),
+        Err(error) if error.is::<cv_core::stream::Declined>() => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 /// Where a session's chunk docs go: the sweep's writer thread, or (tests) straight into a writer.
 type DocOut<'a> = dyn FnMut(TantivyDocument) -> Result<()> + 'a;
 
@@ -1676,7 +1701,7 @@ fn index_session(
     events: Option<&mut dyn cv_core::MessageSink>,
     prov: cv_core::events::Provenance,
     from: Option<&cv_core::stream::Checkpoint>,
-) -> Result<Option<(usize, cv_core::stream::Resumed, cv_core::source::ReadSet)>> {
+) -> Result<Option<(usize, cv_core::stream::Streamed, cv_core::source::ReadSet)>> {
     let opts = cv_core::ParseOptions::lazy();
     let mut sink = match from {
         Some(cp) => ChunkSink::resume(out, f, r, mtime, size, prov, cp).context("checkpoint without fts state")?,
@@ -1685,9 +1710,21 @@ fn index_session(
     let done = match events {
         Some(es) => {
             let mut tee = cv_core::TeeSink::new(&mut sink, es);
-            cv_core::stream::stream_resumable_amortized(adapter, r, &opts, &mut tee, CHECKPOINT_EVERY, from)?
+            resumed(cv_core::stream::stream_counted(
+                adapter,
+                r,
+                &opts,
+                &mut tee,
+                amortized(from),
+            ))?
         }
-        None => cv_core::stream::stream_resumable_amortized(adapter, r, &opts, &mut sink, CHECKPOINT_EVERY, from)?,
+        None => resumed(cv_core::stream::stream_counted(
+            adapter,
+            r,
+            &opts,
+            &mut sink,
+            amortized(from),
+        ))?,
     };
     let Some(done) = done else { return Ok(None) };
     sink.finish()?;
@@ -2946,7 +2983,14 @@ fn live_snippet(path: &str, harness: &str, query: &str) -> Option<String> {
         error: None,
         failed: false,
     };
-    cv_core::stream::stream_counted(&*adapter, &sref, &ParseOptions::lazy(), &mut acc).ok()?;
+    cv_core::stream::stream_counted(
+        &*adapter,
+        &sref,
+        &ParseOptions::lazy(),
+        &mut acc,
+        cv_core::stream::Pass::RECORD,
+    )
+    .ok()?;
     Some(make_snippet(acc.head.as_str(), query))
 }
 
@@ -3083,10 +3127,7 @@ mod tests {
         let hits = text_search(&dir, "Inspect", copies + 10).unwrap();
         assert_eq!(hits.len(), copies);
         for (n, r) in refs.iter().enumerate() {
-            assert!(!cv_core::events::needs_ingest(
-                r,
-                cv_core::events::file_mtime_ns(&r.path)
-            ));
+            assert!(!cv_core::events::needs_ingest(r));
             assert!(cv_core::catalog::AffordanceTable::load().counts(r).is_some());
             if n < copies {
                 let events = cv_core::events::events_for("claude", &r.id, None);
@@ -3192,10 +3233,7 @@ mod tests {
             let hits = text_search(&dir, &format!("zqmixed{n}"), 30).unwrap();
             assert_eq!(hits.len(), 1);
             assert_eq!(hits[0].id, r.id);
-            assert!(!cv_core::events::needs_ingest(
-                r,
-                cv_core::events::file_mtime_ns(&r.path)
-            ));
+            assert!(!cv_core::events::needs_ingest(r));
             assert!(cv_core::catalog::AffordanceTable::load().counts(r).is_some());
         }
         assert_eq!(sweep(&dir, refs, false, false).unwrap().changed, 0);
@@ -3326,8 +3364,9 @@ mod tests {
         assert_eq!(index.reader().unwrap().searcher().num_docs(), 0);
         assert!(cv_core::events::SyncTable::load().needs_ingest(
             &r,
-            cv_core::events::file_mtime_ns(&r.path),
-            std::fs::metadata(&r.path).unwrap().len() as i64
+            &cv_core::source::Probe::default().snapshot(&r),
+            &Default::default(),
+            &mut cv_core::source::Probe::default()
         ));
         assert!(cv_core::resume::MarkTable::load().get(&r).is_none());
         assert!(cv_core::catalog::AffordanceTable::load().counts(&r).is_none());
@@ -3531,7 +3570,7 @@ mod tests {
             escaped: true,
         };
         let resolver = cv_core::Resolver::new(None);
-        let expected = resolver.resolve(&span).into_owned();
+        let expected = resolver.try_resolve(&span).unwrap().into_owned();
         let f = fields_of(&build_schema()).unwrap();
         let r = cv_core::SessionRef::new("fallback", cv_core::Harness::Claude, dir.join("primary.jsonl"));
         let mut bodies = Vec::new();
@@ -4451,7 +4490,12 @@ mod tests {
         assert!(cv_core::catalog::AffordanceTable::load()
             .counts_with_source(&r, &base)
             .is_some());
-        assert!(!cv_core::events::SyncTable::load().needs_ingest_with_source(&r, &base));
+        assert!(!cv_core::events::SyncTable::load().needs_ingest(
+            &r,
+            &base,
+            &Default::default(),
+            &mut cv_core::source::Probe::default()
+        ));
         let changed = refresh();
         assert_eq!((changed.changed, changed.resumed), (1, 0));
         assert!(text_search(&dir, "zanzibar", 10).unwrap().is_empty());
@@ -4500,10 +4544,7 @@ mod tests {
         let appended = refresh(false);
         assert_eq!((appended.changed, appended.resumed), (1, 1));
         let source = cv_core::source::Probe::default().snapshot(&r);
-        assert!(!cv_core::events::needs_ingest(
-            &r,
-            cv_core::events::file_mtime_ns(&r.path)
-        ));
+        assert!(!cv_core::events::needs_ingest(&r));
         let counts = cv_core::catalog::AffordanceTable::load()
             .counts_with_source(&r, &source)
             .unwrap();
@@ -5021,12 +5062,12 @@ mod tests {
             primary,
             "child append leaves directory signature unchanged"
         );
-        assert!(cv_core::events::needs_ingest(&r, primary.0));
+        assert!(cv_core::events::needs_ingest(&r));
         assert!(cv_core::catalog::AffordanceTable::load().stale(&r));
         assert_eq!(sweep(&dir, vec![r.clone()], false, false).unwrap().changed, 1);
         assert_eq!(text_search(&dir, "zqafterchild", 10).unwrap().len(), 1);
         assert_eq!(cv_core::events::events_for("grok", &r.id, Some("file_read")).len(), 1);
-        assert!(!cv_core::events::needs_ingest(&r, primary.0));
+        assert!(!cv_core::events::needs_ingest(&r));
         assert!(!cv_core::catalog::AffordanceTable::load().stale(&r));
         for d in [dir, sdir] {
             std::fs::remove_dir_all(d).ok();
@@ -5049,10 +5090,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cv_core::offsets::file_sig(&agent), primary);
-        assert!(cv_core::events::needs_ingest(&r, primary.0));
+        assert!(cv_core::events::needs_ingest(&r));
         assert!(cv_core::catalog::AffordanceTable::load().stale(&r));
         cv_core::events::ingest_ref(&r).unwrap();
-        assert!(!cv_core::events::needs_ingest(&r, primary.0));
+        assert!(!cv_core::events::needs_ingest(&r));
         assert!(
             cv_core::catalog::AffordanceTable::load().stale(&r),
             "events refresh cannot refresh counts"
@@ -5091,12 +5132,12 @@ mod tests {
         writer.execute_batch("INSERT INTO messages(session_id,role,content,timestamp) VALUES('wal-session','user','zqafterwal',1002);
             INSERT INTO messages(session_id,role,tool_calls,timestamp) VALUES('wal-session','assistant','[{\"id\":\"c\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"/repo/new.rs\\\"}\"}}]',1003);").unwrap();
         assert_eq!(cv_core::offsets::file_sig(&db), primary, "write stayed in WAL");
-        assert!(cv_core::events::needs_ingest(&r, primary.0));
+        assert!(cv_core::events::needs_ingest(&r));
         assert!(cv_core::catalog::AffordanceTable::load().stale(&r));
         assert_eq!(sweep(&dir, vec![r.clone()], false, false).unwrap().changed, 1);
         assert_eq!(text_search(&dir, "zqafterwal", 10).unwrap().len(), 1);
         assert_eq!(cv_core::events::events_for("hermes", &r.id, Some("file_read")).len(), 1);
-        assert!(!cv_core::events::needs_ingest(&r, primary.0));
+        assert!(!cv_core::events::needs_ingest(&r));
         assert!(!cv_core::catalog::AffordanceTable::load().stale(&r));
         for d in [dir, sdir] {
             std::fs::remove_dir_all(d).ok();
@@ -5581,10 +5622,7 @@ mod tests {
             assert!(!read_indexed_sigs(&index, &f).unwrap().0.contains_key(&r.id));
             assert!(cv_core::catalog::AffordanceTable::load().counts(&r).is_none());
             assert!(cv_core::events::events_for(r.harness.as_str(), &r.id, None).is_empty());
-            assert!(cv_core::events::needs_ingest(
-                &r,
-                cv_core::events::file_mtime_ns(&r.path)
-            ));
+            assert!(cv_core::events::needs_ingest(&r));
             assert!(cv_core::resume::MarkTable::load().get(&r).is_none());
             std::fs::remove_dir_all(dir).unwrap();
         }
@@ -5688,10 +5726,7 @@ mod tests {
         assert!(!read_indexed_sigs(&index, &f).unwrap().0.contains_key(&r.id));
         assert!(cv_core::catalog::AffordanceTable::load().counts(&r).is_none());
         assert!(cv_core::events::events_for(r.harness.as_str(), &r.id, None).is_empty());
-        assert!(cv_core::events::needs_ingest(
-            &r,
-            cv_core::events::file_mtime_ns(&r.path)
-        ));
+        assert!(cv_core::events::needs_ingest(&r));
         assert!(cv_core::resume::MarkTable::load().get(&r).is_none());
         std::fs::remove_dir_all(dir).ok();
     }
@@ -5856,15 +5891,9 @@ mod tests {
             DELETE FROM source_dependencies WHERE consumer='events';",
         )
         .unwrap();
-        assert!(cv_core::events::needs_ingest(
-            &parent,
-            cv_core::offsets::file_sig(&parent.path).0
-        ));
+        assert!(cv_core::events::needs_ingest(&parent));
         let child = cv_core::subagent_tree_of(&parent).remove(0).session;
-        assert!(cv_core::events::needs_ingest(
-            &child,
-            cv_core::offsets::file_sig(&child.path).0
-        ));
+        assert!(cv_core::events::needs_ingest(&child));
 
         // The production `--subagents` sweep: parent and agent are both FTS-fresh, events-stale.
         assert_eq!(
@@ -5874,17 +5903,14 @@ mod tests {
         );
         let changed = sweep(&dir, vec![parent.clone()], false, true).unwrap().changed;
         assert_eq!(changed, 0, "catalog-only pass must not rewrite tantivy docs");
-        assert!(!cv_core::events::needs_ingest(
-            &parent,
-            cv_core::offsets::file_sig(&parent.path).0
-        ));
+        assert!(!cv_core::events::needs_ingest(&parent));
         let child_source = cv_core::source::Probe::default().snapshot(&child);
         let child_provenance = cv_core::events::Provenance {
             parent_id: Some(parent.id.clone()),
             agent_id: Some("kid2".into()),
             workflow: None,
         };
-        assert!(!cv_core::events::SyncTable::load().needs_ingest_with_provenance(
+        assert!(!cv_core::events::SyncTable::load().needs_ingest(
             &child,
             &child_source,
             &child_provenance,
@@ -6590,10 +6616,7 @@ mod tests {
         )
         .unwrap();
         for r in &refs {
-            assert!(!cv_core::events::needs_ingest(
-                r,
-                cv_core::events::file_mtime_ns(&r.path)
-            ));
+            assert!(!cv_core::events::needs_ingest(r));
         }
         let reread = sweep(&dir, refs.clone(), false, false).unwrap();
         assert_eq!((reread.changed, reread.resumed), (refs.len(), 0));
@@ -6649,10 +6672,7 @@ mod tests {
                 format!("{:?}", cv_core::events::events_for(r.harness.as_str(), &r.id, None)),
                 *expected
             );
-            assert!(cv_core::events::needs_ingest(
-                r,
-                cv_core::events::file_mtime_ns(&r.path)
-            ));
+            assert!(cv_core::events::needs_ingest(r));
             assert!(cv_core::resume::MarkTable::load().get(r).is_none());
             let source = cv_core::source::Probe::default().snapshot(r);
             assert!(
@@ -6666,10 +6686,7 @@ mod tests {
         let retry = sweep(&dir, refs.clone(), false, false).unwrap();
         assert_eq!((retry.resumed, retry.errors), (0, 0));
         for r in &refs {
-            assert!(!cv_core::events::needs_ingest(
-                r,
-                cv_core::events::file_mtime_ns(&r.path)
-            ));
+            assert!(!cv_core::events::needs_ingest(r));
         }
         let words = some_words(&refs);
         assert_eq!(observe(&dir, &refs, &words), whole_sweep(&refs, &words));

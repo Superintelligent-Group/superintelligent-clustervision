@@ -1711,7 +1711,7 @@ mod tests {
         assert!(content.is_span(), "giant fco output should be a span");
         let resolver = s.resolver();
         assert_eq!(
-            content.resolve(&resolver),
+            content.try_resolve(&resolver).unwrap(),
             body.as_str(),
             "span must resolve to the exact output"
         );
@@ -2468,7 +2468,7 @@ mod tests {
             panic!()
         };
         assert!(is_error);
-        let resolved = content.resolve(&s.resolver()).into_owned();
+        let resolved = content.try_resolve(&s.resolver()).unwrap().into_owned();
         assert!(
             resolved.starts_with("boom line\n"),
             "prefix stripped from the span: {:?}",

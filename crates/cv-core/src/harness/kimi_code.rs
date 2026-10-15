@@ -100,7 +100,7 @@ use crate::stream::{Checkpoint, Flow, MessageSink, ParseOptions};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -365,7 +365,7 @@ struct ResumeState {
 #[derive(serde::Deserialize)]
 struct SavedCtx {
     model_bindings: ModelBindings,
-    call_names: HashMap<String, String>,
+    call_names: BTreeMap<String, String>,
     seen_prompts: std::collections::BTreeSet<u64>,
     protocol_version: Option<String>,
     facts: Map<String, Value>,
@@ -803,7 +803,7 @@ struct Ctx<'a> {
     step: Option<StepBuf>,
     model_bindings: ModelBindings,
     /// `toolCallId` → tool name, so a result can name its tool (`Block::ToolResult::tool_name`).
-    call_names: HashMap<String, String>,
+    call_names: BTreeMap<String, String>,
     /// Hashes of system prompts already surfaced (a re-bind with the same prompt is bookkeeping).
     /// Ordered so later checkpoints remain identical after restoring this state.
     seen_prompts: std::collections::BTreeSet<u64>,
@@ -821,7 +821,7 @@ impl<'a> Ctx<'a> {
             opts,
             step: None,
             model_bindings: ModelBindings::default(),
-            call_names: HashMap::new(),
+            call_names: BTreeMap::new(),
             seen_prompts: std::collections::BTreeSet::new(),
             protocol_version: None,
             facts: Map::new(),
@@ -2120,8 +2120,17 @@ mod tests {
                 );
             }
             let mut amortized = Kept::default();
-            crate::stream::stream_resumable_amortized(&adapter, &reference, &options, &mut amortized, 1024, None)?
-                .unwrap();
+            crate::stream::stream_counted(
+                &adapter,
+                &reference,
+                &options,
+                &mut amortized,
+                crate::stream::Pass {
+                    every: Some(1024),
+                    amortized: true,
+                    ..Default::default()
+                },
+            )?;
             assert_eq!(
                 serde_json::to_value(&amortized.messages)?,
                 serde_json::to_value(&full.messages)?
@@ -2135,15 +2144,19 @@ mod tests {
             assert!(snapshot_bytes as u64 <= fs::metadata(main_wire(&dir))?.len() * 4);
             for (count, checkpoint) in &amortized.checkpoints {
                 let mut suffix = Kept::default();
-                assert!(crate::stream::stream_resumable_amortized(
+                assert!(crate::stream::stream_counted(
                     &adapter,
                     &reference,
                     &options,
                     &mut suffix,
-                    1024,
-                    Some(checkpoint)
-                )?
-                .is_some());
+                    crate::stream::Pass {
+                        from: Some(checkpoint),
+                        every: Some(1024),
+                        amortized: true,
+                        ..Default::default()
+                    }
+                )
+                .is_ok());
                 assert_eq!(
                     serde_json::to_value(suffix.messages)?,
                     serde_json::to_value(&full.messages[*count..])?

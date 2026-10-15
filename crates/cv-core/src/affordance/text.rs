@@ -570,7 +570,7 @@ mod tests {
                 len: raw.len() as u64,
                 escaped: true,
             });
-            let full = span.resolve(&resolver);
+            let full = span.try_resolve(&resolver).unwrap();
             let inline = Text::Inline(full.to_string());
             assert_eq!(
                 starts_with(&span, &resolver, "<task-notification>").unwrap(),
@@ -604,7 +604,7 @@ mod tests {
                 len: full.len() as u64,
                 escaped,
             });
-            assert!(span.resolve_prefix(&resolver, 256).trim().is_empty());
+            assert!(span.try_resolve_prefix(&resolver, 256).unwrap().trim().is_empty());
             assert_eq!(
                 starts_with(&span, &resolver, "<task-notification>").unwrap(),
                 full.trim_start().starts_with("<task-notification>")

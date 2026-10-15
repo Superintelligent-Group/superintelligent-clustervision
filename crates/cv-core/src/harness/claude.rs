@@ -2399,7 +2399,7 @@ mod tests {
             Block::Text { text } => {
                 assert!(text.is_span(), "large content should be a span");
                 let resolver = s.resolver();
-                assert_eq!(text.resolve(&resolver), big.as_str());
+                assert_eq!(text.try_resolve(&resolver).unwrap(), big.as_str());
             }
             _ => panic!("expected text block"),
         }

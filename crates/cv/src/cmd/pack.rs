@@ -470,7 +470,7 @@ fn best_window_and_ingest(
     r: &cv_core::SessionRef,
     task: &str,
 ) -> Result<(Excerpt, Option<(usize, usize)>)> {
-    if !cv_core::events::needs_ingest(r, cv_core::events::file_mtime_ns(&r.path)) {
+    if !cv_core::events::needs_ingest(r) {
         return best_window(adapter, r, task);
     }
     let source = cv_core::source::Probe::default().snapshot(r);
@@ -1071,10 +1071,7 @@ mod tests {
         assert_eq!(adapter.calls.load(Ordering::Relaxed), session.messages.len());
         assert_eq!(format!("{:?}", rows(&r)), expected_rows);
         assert_eq!(event_facts(&rows(&r)), expected_facts);
-        assert!(!cv_core::events::needs_ingest(
-            &r,
-            cv_core::events::file_mtime_ns(&path)
-        ));
+        assert!(!cv_core::events::needs_ingest(&r));
         let conn = rusqlite::Connection::open(world.cv_home.join("catalog.db"))?;
         conn.execute_batch("CREATE TABLE pack_event_writes(n INTEGER); INSERT INTO pack_event_writes VALUES(0); CREATE TRIGGER count_pack_events AFTER INSERT ON events BEGIN UPDATE pack_event_writes SET n=n+1; END;")?;
         adapter.calls.store(0, Ordering::Relaxed);
@@ -1098,7 +1095,7 @@ mod tests {
             adapter.mutate = Some(mutation.clone());
             assert_eq!(best_window_and_ingest(&adapter, &r, "chosen")?, expected);
             assert_eq!(format!("{:?}", rows(&r)), expected_rows);
-            assert!(cv_core::events::needs_ingest(&r, cv_core::events::file_mtime_ns(&path)));
+            assert!(cv_core::events::needs_ingest(&r));
         }
         adapter.mutate = None;
         // Publication failure rolls back rows without failing the successful excerpt.
@@ -1108,7 +1105,7 @@ mod tests {
         )?;
         assert_eq!(best_window_and_ingest(&adapter, &r, "chosen")?, expected);
         assert_eq!(format!("{:?}", rows(&r)), expected_rows);
-        assert!(cv_core::events::needs_ingest(&r, cv_core::events::file_mtime_ns(&path)));
+        assert!(cv_core::events::needs_ingest(&r));
         std::fs::write(&path, b"{broken transcript")?;
         assert!(best_window_and_ingest(&adapter, &r, "chosen").is_err());
         assert_eq!(format!("{:?}", rows(&r)), expected_rows);
@@ -1161,7 +1158,7 @@ mod tests {
         });
         assert!(best_window_and_ingest(&ExcerptFixture(vec![unreadable]), &r, "chosen").is_err());
         assert!(rows(&r).is_empty());
-        assert!(cv_core::events::needs_ingest(&r, cv_core::events::file_mtime_ns(&path)));
+        assert!(cv_core::events::needs_ingest(&r));
         Ok(())
     }
 
