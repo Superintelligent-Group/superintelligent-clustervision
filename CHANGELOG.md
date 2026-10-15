@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Ported project context files publish only after copying succeeds; failed copies leave no partial destination and preserve existing files.
+
 - HTTP overload shedding bounds retained sockets and drain work, preventing rejected clients from bypassing connection limits.
 
 - HTTP body framing errors now close the connection; malformed chunks cannot recover during draining and execute a pipelined request.
