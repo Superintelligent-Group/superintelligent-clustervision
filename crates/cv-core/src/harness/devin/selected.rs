@@ -521,7 +521,7 @@ mod tests {
 
     #[test]
     fn selected_mapper_matches_owned_value_and_compaction() -> Result<()> {
-        let world = cv_testkit::World::in_process("devin-selected-node");
+        let world = crate::test_world("devin-selected-node");
         let path = world.base.join("body.json");
         let body = "λ\nquoted \"body\"".repeat(10000);
         let base = json!({"role":"assistant","message_id":"id","content":body,"thinking":{"thinking":body,"signature":"sig"},"tool_calls":[{"id":"call","name":"Read","arguments":{"z":1,"a":body}}],"metadata":{"created_at":"2026-10-13T12:00:00Z","is_user_input":true,"generation_model":"model","metrics":{"input_tokens":7,"output_tokens":3},"extensions":{"chisel/terminal_output":{"cwd":"/cwd","exit":{"exit_code":1,"terminal_id":"term"}},"chisel/tool_result_meta":{"success":false,"kind":"shell"},"chisel/undo":[{"kind":"restore_file","path":"/file","original_content":body}],"agent-ext/skills-loaded":{"skills":[{"name":"n","path":"p","description":body}]},"chisel/tool_call_content":{"call":{"title":"t","kind":"k","status":"s","rawInput":body}},"subagent/handoff":true,"subagent/agent_id":"sidekick","unknown":body,"subagent/handoff_history":body}}});

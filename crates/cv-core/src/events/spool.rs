@@ -331,7 +331,7 @@ mod tests {
     fn standalone_ingest_reports_sql_failure_and_keeps_prior_publication() {
         use crate::events::{events_for, ingest_ref, needs_ingest};
         use crate::{Harness, SessionRef};
-        let world = cv_testkit::World::in_process("event-spool-ingest-error");
+        let world = crate::test_world("event-spool-ingest-error");
         let record = serde_json::json!({"type":"assistant","uuid":"a1","sessionId":"ingest", "message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Edit","input":{"file_path":"/repo/old.rs"}}]}});
         let path = world.write_session("ingest", &[record]);
         let r = SessionRef::new("ingest", Harness::Claude, &path);
@@ -362,7 +362,7 @@ mod tests {
             events_for, needs_ingest, record_from_with_source, record_spooled_with_source, Provenance,
         };
         use crate::{Harness, SessionRef};
-        let world = cv_testkit::World::in_process("event-spool-transaction");
+        let world = crate::test_world("event-spool-transaction");
         let path = world.proj.join("events.jsonl");
         fs::write(&path, b"original source").unwrap();
         let r = SessionRef::new("events", Harness::Claude, &path);

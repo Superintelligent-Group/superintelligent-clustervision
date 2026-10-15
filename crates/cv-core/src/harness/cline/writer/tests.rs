@@ -93,7 +93,7 @@ fn fixture() -> Result<Session> {
 
 #[test]
 fn checked_cline_roo_match_frozen_pretty_all_modes() -> Result<()> {
-    let world = cv_testkit::World::in_process("cline-checked-wire");
+    let world = crate::test_world("cline-checked-wire");
     let session = fixture()?;
     for harness in [Harness::Cline, Harness::Roo] {
         for mode in ThinkingMode::ALL {
@@ -139,7 +139,7 @@ fn checked_cline_roo_match_frozen_pretty_all_modes() -> Result<()> {
 
 #[test]
 fn checked_cline_guarded_failure_preserves_all_destination_files() -> Result<()> {
-    let world = cv_testkit::World::in_process("cline-checked-guard");
+    let world = crate::test_world("cline-checked-guard");
     for text_leaf in [true, false] {
         let path = world.base.join(format!("leaf-{text_leaf}.json"));
         let raw = serde_json::to_vec(&if text_leaf {

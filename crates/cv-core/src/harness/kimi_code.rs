@@ -117,9 +117,9 @@ pub struct KimiCode {
 
 impl KimiCode {
     pub fn detect() -> Self {
-        let root = std::env::var_os("KIMI_CODE_HOME")
+        let root = crate::env::var_os("KIMI_CODE_HOME")
             .map(PathBuf::from)
-            .or_else(|| dirs::home_dir().map(|h| h.join(".kimi-code")))
+            .or_else(|| crate::env::home_dir().map(|h| h.join(".kimi-code")))
             .filter(|p| p.exists());
         KimiCode { root }
     }
@@ -1874,7 +1874,7 @@ mod tests {
 
     #[test]
     fn model_bindings_follow_native_request_order_and_survive_every_suffix() -> Result<()> {
-        let world = cv_testkit::World::in_process("kimi_code_model_bindings");
+        let world = crate::test_world("kimi_code_model_bindings");
         let home = world.home.join(".kimi-code");
         let dir = home.join("sessions/wd_test/session_models");
         let path = main_wire(&dir);
@@ -1958,7 +1958,7 @@ mod tests {
 
     #[test]
     fn one_header_pass_preserves_independent_first_fields_and_record_limit() -> Result<()> {
-        let world = cv_testkit::World::in_process("kimi_code_header_fields");
+        let world = crate::test_world("kimi_code_header_fields");
         let path = world.home.join("wire.jsonl");
         let ignored = "unused payload ".repeat(20_000);
         let cases = [
@@ -2012,7 +2012,7 @@ mod tests {
 
     #[test]
     fn discovery_refreshes_state_and_cwd_fallbacks_without_wire_append() -> Result<()> {
-        let world = cv_testkit::World::in_process("kimi_code_aux_discovery");
+        let world = crate::test_world("kimi_code_aux_discovery");
         let context = crate::discover_cache::read::Context::current();
         let _scope = context.enter();
         let home = world.home.join(".kimi-code");
@@ -2058,7 +2058,7 @@ mod tests {
 
     #[test]
     fn checked_discovery_kimi_code_matches_owned_steps_titles_and_state() -> Result<()> {
-        let world = cv_testkit::World::in_process("kimi-code-discovery-selected");
+        let world = crate::test_world("kimi-code-discovery-selected");
         let dir = world.base.join("session-id");
         fs::create_dir_all(&dir)?;
         let wire = main_wire(&dir);
@@ -2173,7 +2173,7 @@ mod tests {
 
     #[test]
     fn checked_complete_bodies_keep_raw_envelopes_and_guarded_replay() {
-        let world = cv_testkit::World::in_process("kimi_code_checked_complete");
+        let world = crate::test_world("kimi_code_checked_complete");
         let dir = world.home.join(".kimi-code/sessions/wd_test/session_checked");
         fs::create_dir_all(dir.join("agents/main")).unwrap();
         let path = main_wire(&dir);
@@ -2225,7 +2225,7 @@ mod tests {
 
     #[test]
     fn growing_call_name_checkpoints_preserve_late_and_duplicate_result_suffixes() -> Result<()> {
-        let world = cv_testkit::World::in_process("kimi-code-growing-call-state");
+        let world = crate::test_world("kimi-code-growing-call-state");
         let dir = world.home.join("session_calls");
         fs::create_dir_all(dir.join("agents/main"))?;
         let names = (0..96)
@@ -2337,7 +2337,7 @@ mod tests {
 
     #[test]
     fn resume_checkpoints_match_old_corpus_and_every_selected_suffix() {
-        let world = cv_testkit::World::in_process("kimi_code_resume_corpus");
+        let world = crate::test_world("kimi_code_resume_corpus");
         let adapter = KimiCode::with_home(&world.home.join(".kimi-code"));
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/kimi-code");
         let mut files = 0;
@@ -2421,7 +2421,7 @@ mod tests {
 
     #[test]
     fn lazy_finalized_payloads_resolve_like_original_step_dispatch() {
-        let world = cv_testkit::World::in_process("kimi_code_source_payloads");
+        let world = crate::test_world("kimi_code_source_payloads");
         let body = "雪\n\"".repeat(6000);
         let output = format!("{body}\noutput_path: first\n{body}\noutput_path: /scratch/result.log\n");
         let records = [
@@ -2467,7 +2467,7 @@ mod tests {
 
     #[test]
     fn giant_two_part_results_match_owned_dispatch() {
-        let world = cv_testkit::World::in_process("kimi_code_giant_composite");
+        let world = crate::test_world("kimi_code_giant_composite");
         let adapter = KimiCode::with_home(&world.home.join(".kimi-code"));
         for bytes in [2 * 1024 * 1024, 8 * 1024 * 1024] {
             for escaped in [false, true] {
@@ -2501,7 +2501,7 @@ mod tests {
     #[test]
     fn resume_replays_partial_records_and_unfinished_steps_with_exact_diagnostics() {
         use std::io::Write as _;
-        let world = cv_testkit::World::in_process("kimi_code_partial_resume");
+        let world = crate::test_world("kimi_code_partial_resume");
         let prefix = concat!(
             "{\"type\":\"metadata\",\"protocol_version\":\"2\"}\n",
             "{\"type\":\"context.append_message\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\r\n",
@@ -2565,7 +2565,7 @@ mod tests {
     #[test]
     fn resume_append_reads_only_new_callbacks_and_keeps_catalog_fallbacks_current() {
         use std::io::Write as _;
-        let world = cv_testkit::World::in_process("kimi_code_append_read_work");
+        let world = crate::test_world("kimi_code_append_read_work");
         let line = "{\"type\":\"context.append_message\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n";
         let mut r = resume_fixture(&world, line.repeat(20_000).as_bytes());
         let adapter = KimiCode::with_home(&world.home.join(".kimi-code"));
@@ -2735,7 +2735,7 @@ mod tests {
 
     #[test]
     fn subagent_discovery_reuses_histories_and_preserves_numeric_order_and_current_parent() -> Result<()> {
-        let world = cv_testkit::World::in_process("kimi-code-subagent-cache");
+        let world = crate::test_world("kimi-code-subagent-cache");
         let context = crate::discover_cache::read::Context::current();
         let _scope = context.enter();
         let parent = world.home.join("session_parent");

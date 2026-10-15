@@ -61,7 +61,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
     summary.insert("next_trace_turn".into(), json!(0));
     summary.insert("chat_format_version".into(), json!(1));
     summary.insert("agent_name".into(), json!("grok-build"));
-    if let Some(home) = std::env::var_os("HOME") {
+    if let Some(home) = crate::env::var_os("HOME") {
         summary.insert(
             "grok_home".into(),
             json!(format!("{}/.grok", Path::new(&home).to_string_lossy())),

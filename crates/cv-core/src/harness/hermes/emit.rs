@@ -640,7 +640,7 @@ mod tests {
             8,
             "one synthetic boundary accompanies the seven native rows"
         );
-        let world = cv_testkit::World::in_process("hermes-modern-export");
+        let world = crate::test_world("hermes-modern-export");
         for (name, old_schema) in [("fresh", false), ("historical", true)] {
             let directory = world.base.join(name);
             std::fs::create_dir_all(&directory)?;

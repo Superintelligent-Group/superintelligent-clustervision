@@ -442,7 +442,7 @@ mod window_tests {
 
     #[test]
     fn heap_machine_windows_match_stable_rank_presence_and_ties() {
-        let world = cv_testkit::World::in_process("heap_json_windows");
+        let world = crate::test_world("heap_json_windows");
         let present = world.base.join("present");
         std::fs::write(&present, "fixture").unwrap();
         let refs: Vec<_> = (0..65)
@@ -501,7 +501,7 @@ mod window_tests {
     #[test]
     #[ignore = "isolated diagnostic; run with --test-threads=1 and --nocapture"]
     fn listing_rank_heap_control() {
-        let world = cv_testkit::World::in_process("listing_rank_heap");
+        let world = crate::test_world("listing_rank_heap");
         let present = world.base.join("present");
         std::fs::write(&present, "fixture").unwrap();
         for count in [20_000, 100_000] {
@@ -533,7 +533,7 @@ mod window_tests {
 
     #[test]
     fn small_heap_window_reports_shuffled_and_natural_run_work() {
-        let world = cv_testkit::World::in_process("heap_inventory_work");
+        let world = crate::test_world("heap_inventory_work");
         let present = world.base.join("present");
         std::fs::write(&present, "fixture").unwrap();
         for count in [20_000, 100_000] {
@@ -570,7 +570,7 @@ mod window_tests {
 
     #[test]
     fn machine_windows_match_full_filter_sort_limit_with_missing_paths_and_ties() {
-        let world = cv_testkit::World::in_process("json_query_windows");
+        let world = crate::test_world("json_query_windows");
         let mut refs: Vec<_> = (0..6)
             .map(|i| {
                 let path = world.write_session(
@@ -780,7 +780,7 @@ mod enrich_tests {
 
     #[test]
     fn enrich_deferred_source_mutation_keeps_later_fallback() {
-        let world = cv_testkit::World::in_process("enrich_source_mutation");
+        let world = crate::test_world("enrich_source_mutation");
         let make_adapter = |id: &str| {
             let primary = world.base.join(format!("{id}.jsonl"));
             std::fs::write(&primary, "primary").unwrap();
@@ -831,7 +831,7 @@ mod enrich_tests {
 
     #[test]
     fn enrich_deferred_span_uses_eof_source_path_and_preserves_counts() {
-        let world = cv_testkit::World::in_process("enrich_span_source");
+        let world = crate::test_world("enrich_span_source");
         let primary = world.base.join("primary.jsonl");
         std::fs::write(&primary, "wrong source").unwrap();
         let body = world.base.join("resolved.txt");

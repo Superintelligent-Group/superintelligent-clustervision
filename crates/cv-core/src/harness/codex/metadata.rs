@@ -365,7 +365,7 @@ mod tests {
 
     #[test]
     fn discovery_logical_counts_match_parsed_and_streamed_codex_fixtures() {
-        let _world = cv_testkit::World::in_process("codex-discovery-logical-counts");
+        let _world = crate::test_world("codex-discovery-logical-counts");
         let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex");
         let adapter = Codex { roots: Vec::new() };
         let mut checked = 0;
@@ -404,7 +404,7 @@ mod tests {
 
     #[test]
     fn legacy_array_discovery_counts_tool_reasoning_and_subagent_turns() {
-        let world = cv_testkit::World::in_process("codex-legacy-array-counts");
+        let world = crate::test_world("codex-legacy-array-counts");
         let path = world.base.join("rollout-array.json");
         let items = serde_json::json!([
             {"type":"message","role":"developer","content":"instructions"},

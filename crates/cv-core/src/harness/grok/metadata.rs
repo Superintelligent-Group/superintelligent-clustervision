@@ -287,7 +287,7 @@ mod tests {
     use super::*;
     #[test]
     fn checkpoint_keys_and_literal_hook_selection_match_both_backends() -> Result<()> {
-        let world = cv_testkit::World::in_process("grok-positioned-affordances");
+        let world = crate::test_world("grok-positioned-affordances");
         let path = world.base.join("rows.jsonl");
         let body = "ignored ".repeat(20000);
         fs::write(&path,format!("{{\"prompt_index\":7,\"file_snapshots\":{{\"b\":\"{body}\",\"a\":false,\"\\u0062\":null}},\"after_snapshots\":\"{body}\"}}"))?;
@@ -337,7 +337,7 @@ mod tests {
     }
     #[test]
     fn positioned_metadata_matches_mapped_fields_titles_and_whole_utf8_policy() -> Result<()> {
-        let world = cv_testkit::World::in_process("grok-positioned-metadata");
+        let world = crate::test_world("grok-positioned-metadata");
         let path = world.base.join("history.jsonl");
         let body = "雪\n\"body\"".repeat(30000);
         let cases = [

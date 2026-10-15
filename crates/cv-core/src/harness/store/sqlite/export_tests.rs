@@ -266,7 +266,7 @@ pub(crate) fn exercise(
     direct: fn(&Session, &Path, &crate::emit::EmitOptions) -> Result<crate::harness::EmitResult>,
     writer: impl Fn(&Session, &crate::emit::EmitOptions, &mut Connection) -> Result<()>,
 ) -> Result<()> {
-    let world = cv_testkit::World::in_process("sqlite-export-oracle");
+    let world = crate::test_world("sqlite-export-oracle");
     let (session, path) = fixture(&world)?;
     for mode in crate::emit::ThinkingMode::ALL {
         let options = crate::emit::EmitOptions {
@@ -446,7 +446,7 @@ pub(crate) fn exercise(
 pub(crate) fn exercise_v2(
     writer: impl Fn(&Session, &crate::emit::EmitOptions, &mut Connection) -> Result<()>,
 ) -> Result<()> {
-    let world = cv_testkit::World::in_process("sqlite-v2-export-oracle");
+    let world = crate::test_world("sqlite-v2-export-oracle");
     let (session, path) = fixture(&world)?;
     for mode in crate::emit::ThinkingMode::ALL {
         let options = crate::emit::EmitOptions {

@@ -325,7 +325,7 @@ fn summarize(h: &CorpusHarness, version_dir: &Path) -> Value {
 #[test]
 fn every_corpus_version_reads_as_its_golden_summary() {
     // In-process world: discovery's scan cache lives in $CLUSTERVISION_HOME, never the real one.
-    let _w = World::in_process("corpus");
+    let _w = World::in_process("corpus", cv_core::env::Env::enter_isolated);
     let regen = std::env::var_os("CV_REGEN_CORPUS").is_some();
     let known: Vec<&str> = HARNESSES.iter().map(|h| h.name).collect();
     for dir in subdirs(&corpus_root()) {
@@ -377,7 +377,7 @@ fn every_corpus_version_reads_as_its_golden_summary() {
 /// adapter's lazy-extra interpretation against its full reader, including child sessions.
 #[test]
 fn doctor_lazy_report_matches_full_corpus() -> anyhow::Result<()> {
-    let _world = World::in_process("corpus-doctor");
+    let _world = World::in_process("corpus-doctor", cv_core::env::Env::enter_isolated);
     let mut checked = 0;
     for harness in HARNESSES {
         for version in subdirs(&corpus_root().join(harness.name)) {
@@ -458,7 +458,7 @@ fn no_corpus_file_carries_a_secret_or_a_real_path() {
 #[test]
 fn claude_corpus_workflow_runs_read_as_recorded() {
     use cv_core::harness::{claude, claude_workflow};
-    let _w = World::in_process("corpus-workflows");
+    let _w = World::in_process("corpus-workflows", cv_core::env::Env::enter_isolated);
     let regen = std::env::var_os("CV_REGEN_CORPUS").is_some();
     let mut failures = Vec::new();
     for v in subdirs(&corpus_root().join("claude")) {
@@ -704,7 +704,7 @@ const PERSISTED: &[(&str, &[&str])] = &[
 
 #[test]
 fn every_persisted_affordance_surfaces_in_the_view() {
-    let _w = World::in_process("corpus-affordances");
+    let _w = World::in_process("corpus-affordances", cv_core::env::Env::enter_isolated);
     let mut missing = Vec::new();
     for h in HARNESSES {
         for v in subdirs(&corpus_root().join(h.name)) {
@@ -814,7 +814,7 @@ fn query_facts_match_collected_corpus() {
         h
     }
 
-    let world = World::in_process("query_corpus_oracle");
+    let world = World::in_process("query_corpus_oracle", cv_core::env::Env::enter_isolated);
     let mut checked = HashMap::<&str, usize>::new();
     for harness in HARNESSES {
         for version in subdirs(&corpus_root().join(harness.name)) {

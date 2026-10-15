@@ -320,7 +320,7 @@ mod tests {
     use super::*;
     #[test]
     fn cn_usage_cost_and_partial_fields_roundtrip_without_invented_counts() -> Result<()> {
-        let world = cv_testkit::World::in_process("continue_usage_cost");
+        let world = crate::test_world("continue_usage_cost");
         let store = world.home.join(".continue");
         fs::create_dir_all(store.join("sessions"))?;
         let path = store.join("sessions/source.json");
@@ -396,7 +396,7 @@ mod tests {
 
     #[test]
     fn cn_grouped_tool_results_emit_every_call_and_body() -> Result<()> {
-        let world = cv_testkit::World::in_process("continue_grouped_results");
+        let world = crate::test_world("continue_grouped_results");
         let store = world.home.join(".continue");
         fs::create_dir_all(store.join("sessions"))?;
         let path = store.join("sessions/source.json");
@@ -452,7 +452,7 @@ mod tests {
 
     #[test]
     fn checked_native_writer_matches_owned_oracle_and_preserves_changed_source() -> Result<()> {
-        let world = cv_testkit::World::in_process("checked-continuedev");
+        let world = crate::test_world("checked-continuedev");
         let path = world.base.join("source.jsonl");
         let mut rows = [
             json!({"type":"user","message":{"role":"user","content":[{"type":"thinking","thinking":"user thought","signature":"user-sig"},{"type":"text","text":" \n"},{"type":"text","text":"λ prompt".repeat(3000)}]}}),
@@ -527,7 +527,7 @@ mod tests {
     }
     #[test]
     fn late_argument_source_failure_preserves_published_files() -> Result<()> {
-        let world = cv_testkit::World::in_process("late-argument-Continue");
+        let world = crate::test_world("late-argument-Continue");
         let source = world.base.join("arguments.json");
         fs::write(&source, br#"{"path":"old"}"#)?;
         let input = crate::Json::source(&source, 0, fs::metadata(&source)?.len())?;
@@ -565,7 +565,7 @@ mod tests {
     }
     #[test]
     fn dropped_source_failure_matches_direct_owned_error_contract() -> Result<()> {
-        let world = cv_testkit::World::in_process("dropped-source-Continue");
+        let world = crate::test_world("dropped-source-Continue");
         let path = world.base.join("thinking.json");
         fs::write(&path, serde_json::to_vec(&"private thought".repeat(3000))?)?;
         let text = crate::Json::source(&path, 0, fs::metadata(&path)?.len())?
@@ -627,7 +627,7 @@ mod tests {
     }
     #[test]
     fn ignored_user_argument_source_failure_preserves_transcript_and_index() -> Result<()> {
-        let world = cv_testkit::World::in_process("ignored-continue-arguments");
+        let world = crate::test_world("ignored-continue-arguments");
         let path = world.base.join("arguments.json");
         fs::write(&path, b"{}")?;
         let mut session = Session::new("synthetic", Harness::Claude);
@@ -659,7 +659,7 @@ mod tests {
 }
 #[test]
 fn wide_grouped_tool_results_preserve_each_item_and_empty_context() -> Result<()> {
-    let world = cv_testkit::World::in_process("continue-wide-grouped-results");
+    let world = crate::test_world("continue-wide-grouped-results");
     for count in [1, 128, 8192] {
         let mut session = Session::new("source", Harness::Continue);
         let mut tool = Message::new(Role::Tool);

@@ -1447,7 +1447,7 @@ mod tests {
     /// prefix, result details and side-store rows. Streaming must preserve all of those in order.
     #[test]
     fn streamed_read_matches_full_session_and_side_store() {
-        let _world = cv_testkit::World::in_process("affordance-stream");
+        let _world = crate::test_world("affordance-stream");
         struct Fixture {
             text_path: std::path::PathBuf,
         }
@@ -1567,7 +1567,7 @@ mod tests {
                 Ok(Session::new(&r.id, r.harness))
             }
         }
-        let world = cv_testkit::World::in_process("affordance-source-text-rows");
+        let world = crate::test_world("affordance-source-text-rows");
         let path = world.base.join("original");
         for case in 0..3 {
             std::fs::write(&path, "snapshot provenance").unwrap();

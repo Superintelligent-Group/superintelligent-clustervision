@@ -1412,7 +1412,7 @@ mod db {
         use super::*;
         #[test]
         fn publication_owns_writer_before_authority_read_and_rejects_intervening_change() {
-            let world = cv_testkit::World::in_process("event-authority-lock");
+            let world = crate::test_world("event-authority-lock");
             let path = world.base.join("source.jsonl");
             std::fs::write(&path, "source").unwrap();
             let r = SessionRef::new("lock", crate::Harness::Claude, path);
@@ -1950,7 +1950,7 @@ mod tests {
     #[cfg(feature = "sqlite")]
     #[test]
     fn published_event_authority_tracks_copy_provenance_and_cwd_atomically() {
-        let world = cv_testkit::World::in_process("events-authority");
+        let world = crate::test_world("events-authority");
         let fixture = |name: &str, target: &str| {
             let path = world.base.join(format!("{name}.jsonl"));
             let line = serde_json::json!({"type":"assistant","uuid":"a","sessionId":"shared",
@@ -2068,7 +2068,7 @@ mod tests {
     #[cfg(feature = "sqlite")]
     #[test]
     fn event_source_selection_is_newest_qualified_and_direct_on_identical_copy() {
-        let world = cv_testkit::World::in_process("events-copy-selection");
+        let world = crate::test_world("events-copy-selection");
         let old_path = world.base.join("older.jsonl");
         let new_path = world.base.join("newer.jsonl");
         std::fs::write(&old_path, []).unwrap();
@@ -2128,7 +2128,7 @@ mod tests {
     #[cfg(feature = "sqlite")]
     #[test]
     fn event_forest_selection_keeps_unique_children_of_nonpreferred_parent_copies() {
-        let world = cv_testkit::World::in_process("events-forest-selection");
+        let world = crate::test_world("events-forest-selection");
         let mut parents = Vec::new();
         for (name, timestamp) in [("older", 1), ("newer", 2)] {
             let dir = world.base.join(name);
@@ -2165,7 +2165,7 @@ mod tests {
     #[cfg(feature = "sqlite")]
     #[test]
     fn guarded_empty_events_reuse_requires_known_size_and_source_identity() {
-        let world = cv_testkit::World::in_process("events-empty");
+        let world = crate::test_world("events-empty");
         let path = world.cv_home.join("empty.jsonl");
         std::fs::write(&path, []).unwrap();
         let r = SessionRef::new("empty", crate::Harness::Claude, &path);
@@ -2219,7 +2219,7 @@ mod tests {
     #[cfg(feature = "sqlite")]
     #[test]
     fn ingest_and_query_roundtrip_in_temp_catalog() {
-        let world = cv_testkit::World::in_process("events-roundtrip");
+        let world = crate::test_world("events-roundtrip");
         let home = &world.cv_home;
 
         let sdir = home.join("sessions");
@@ -2361,7 +2361,7 @@ mod tests {
     #[cfg(feature = "sqlite")]
     #[test]
     fn v1_catalog_migrates_by_drop_and_lazy_reingest() {
-        let world = cv_testkit::World::in_process("events-migration");
+        let world = crate::test_world("events-migration");
         let home = &world.cv_home;
 
         const V1_DDL: &str = "CREATE TABLE events(

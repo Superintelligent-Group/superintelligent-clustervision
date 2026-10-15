@@ -729,7 +729,7 @@ mod selected_media_tests {
     use super::*;
     #[test]
     fn owned_codec_returns_changed_text_errors_instead_of_panicking() -> anyhow::Result<()> {
-        let world = cv_testkit::World::in_process("anthropic-owned-source-error");
+        let world = crate::test_world("anthropic-owned-source-error");
         let path = world.base.join("text.json");
         let raw = serde_json::to_vec(&"large text ".repeat(10000))?;
         std::fs::write(&path, &raw)?;
@@ -760,7 +760,7 @@ mod selected_media_tests {
     }
     #[test]
     fn wide_composite_results_preserve_empty_parts_image_precedence_and_guard() -> anyhow::Result<()> {
-        let world = cv_testkit::World::in_process("wire-wide-result");
+        let world = crate::test_world("wire-wide-result");
         let path = world.base.join("result.json");
         let mut parts = Vec::new();
         for i in 0..8192 {
@@ -792,7 +792,7 @@ mod selected_media_tests {
 
     #[test]
     fn composite_result_projection_matches_owned_codec_without_joined_body_ownership() -> anyhow::Result<()> {
-        let world = cv_testkit::World::in_process("wire-composite-result");
+        let world = crate::test_world("wire-composite-result");
         let path = world.base.join("result.json");
         let body = "λ\n\"result\"".repeat(20000);
         let value = json!({"type":"tool_result","tool_use_id":"call","is_error":true,"content":[{"text":""},{"text":body,"ignored":body},{"type":"image_url","text":"ignored image text"},{"text":""},{"text":body}],"ignored":body});
@@ -828,7 +828,7 @@ mod selected_media_tests {
     }
     #[test]
     fn flat_media_projection_matches_owned_codec_with_large_ignored_payloads() -> anyhow::Result<()> {
-        let world = cv_testkit::World::in_process("wire-flat-media");
+        let world = crate::test_world("wire-flat-media");
         let path = world.base.join("part.json");
         for quirks in [OPENCLAW, GOOSE] {
             for ty in ["image", "document"] {

@@ -107,7 +107,7 @@ pub(crate) fn cmd_pack(
 /// `CV_PACK_LLM` unset/empty/`0` → no LLM. `1`/`true` → provider default model. Anything else is
 /// taken as the model id.
 fn llm_from_env() -> Option<Option<String>> {
-    let v = std::env::var("CV_PACK_LLM").ok()?;
+    let v = cv_core::env::var("CV_PACK_LLM").ok()?;
     let v = v.trim();
     match v {
         "" | "0" | "false" => None,
@@ -1012,7 +1012,7 @@ mod tests {
 
     #[test]
     fn shared_pack_pass_matches_two_pass_excerpt_rows_and_facts_with_cold_and_warm_counts() -> Result<()> {
-        let world = cv_testkit::World::in_process("pack-shared-real");
+        let world = crate::test_world("pack-shared-real");
         let path = world.base.join("real.opensession.json");
         let mut session = Session::new("real", Harness::OpenSession);
         session.cwd = Some(world.base.clone());
@@ -1117,7 +1117,7 @@ mod tests {
 
     #[test]
     fn optional_event_extraction_failure_keeps_excerpt_and_never_publishes_partial_rows() -> Result<()> {
-        let world = cv_testkit::World::in_process("pack-event-failure");
+        let world = crate::test_world("pack-event-failure");
         let path = world.base.join("source");
         std::fs::write(&path, "source")?;
         let r = cv_core::SessionRef::new("event-failure", Harness::OpenSession, &path);

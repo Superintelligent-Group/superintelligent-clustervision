@@ -841,7 +841,7 @@ mod parent_tests {
 
     #[test]
     fn emitted_forward_parent_fanout_matches_owned_native_oracle() -> Result<()> {
-        let world = cv_testkit::World::in_process("claude-parent-fanout");
+        let world = crate::test_world("claude-parent-fanout");
         let mut session = crate::Session::new("original", Harness::Claude);
         session.created_at = chrono::DateTime::from_timestamp(1, 0);
         let mut root = Message::new(Role::User);

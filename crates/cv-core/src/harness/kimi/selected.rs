@@ -149,7 +149,7 @@ mod tests {
 
     #[test]
     fn checked_bodies_match_owned_rotation_usage_and_source_replay() {
-        let world = cv_testkit::World::in_process("kimi_selected_bodies");
+        let world = crate::test_world("kimi_selected_bodies");
         let home = world.home.join(".kimi");
         let dir = home.join("sessions/hash/session");
         fs::create_dir_all(&dir).unwrap();

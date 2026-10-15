@@ -57,7 +57,7 @@ pub struct Grok {
 
 impl Grok {
     pub fn detect() -> Self {
-        let root = dirs::home_dir().map(|h| h.join(".grok").join("sessions"));
+        let root = crate::env::home_dir().map(|h| h.join(".grok").join("sessions"));
         Grok {
             root: root.filter(|p| p.exists()),
         }
@@ -919,7 +919,7 @@ mod tests {
 
     #[test]
     fn enrichment_many_locations_keeps_first_seen_order_per_call() {
-        let world = cv_testkit::World::in_process("grok-many-tool-locations");
+        let world = crate::test_world("grok-many-tool-locations");
         let dir = world.base.join("session");
         fs::create_dir_all(&dir).unwrap();
         let mut rows = Vec::new();
@@ -944,7 +944,7 @@ mod tests {
 
     #[test]
     fn checked_resume_retains_reasoning_arguments_results_and_source_identity() {
-        let world = cv_testkit::World::in_process("grok_selected_resume");
+        let world = crate::test_world("grok_selected_resume");
         let dir = world.home.join(".grok/session");
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("chat_history.jsonl");
@@ -997,7 +997,7 @@ mod tests {
 
     #[test]
     fn resume_corpus_keeps_grouping_enrichment_and_exact_suffixes() {
-        let world = cv_testkit::World::in_process("grok_resume_corpus");
+        let world = crate::test_world("grok_resume_corpus");
         let adapter = Grok::with_home(&world.home.join(".grok"));
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/grok");
         let mut files = 0;
@@ -1056,7 +1056,7 @@ mod tests {
     #[test]
     fn resume_replays_eof_reasoning_and_partial_records_and_reads_only_appends() {
         use std::io::Write as _;
-        let world = cv_testkit::World::in_process("grok_reasoning_resume");
+        let world = crate::test_world("grok_reasoning_resume");
         let dir = world.home.join(".grok/sessions/group/session");
         fs::create_dir_all(&dir).unwrap();
         fs::write(

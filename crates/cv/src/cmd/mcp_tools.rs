@@ -216,11 +216,11 @@ fn run_command_cancelled(
     argv: &[String],
     cancelled: super::mcp::Cancellation<'_>,
 ) -> Result<CommandOutput> {
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     cancelled.check()?;
     std::thread::scope(|scope| {
         let mut child = Child(
-            Command::new(bin)
+            cv_core::env::command(bin)
                 .args(argv)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
@@ -832,6 +832,7 @@ mod transport_tests {
             staged = quote(&dir.join("pid.staged")),
             pid = quote(&pid_path),
         );
+
         let cancelled = std::sync::atomic::AtomicBool::new(false);
         let connection = std::sync::atomic::AtomicBool::new(false);
         std::thread::scope(|scope| {

@@ -714,7 +714,7 @@ mod tests {
 
     #[test]
     fn indexed_archive_selection_preserves_first_duplicate_and_archive_order() -> Result<()> {
-        let world = cv_testkit::World::in_process("export-indexed-selection");
+        let world = crate::test_world("export-indexed-selection");
         let path = world.base.join("conversations.json");
         let mut values = Vec::new();
         for i in (0..4096).rev() {

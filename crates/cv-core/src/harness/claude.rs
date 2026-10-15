@@ -68,18 +68,18 @@ impl Claude {
     /// dir itself, may start with `~`, and may hold path segments that are exactly `*`; each stands
     /// for every entry of the directory before it (`~/.agents/*/claude`, `~/.agents/*/instances/*/claude`).
     pub fn detect() -> Self {
-        let home = dirs::home_dir();
+        let home = crate::env::home_dir();
         let mut entries: Vec<PathBuf> = Vec::new();
         entries.extend(
-            std::env::var_os("CLAUDE_CONFIG_DIR")
+            crate::env::var_os("CLAUDE_CONFIG_DIR")
                 .filter(|v| !v.is_empty())
                 .map(|d| PathBuf::from(d).join("projects")),
         );
         entries.extend(home.as_ref().map(|h| h.join(".claude").join("projects")));
-        if let Some(list) = std::env::var_os("CLUSTERVISION_CLAUDE_ROOTS") {
+        if let Some(list) = crate::env::var_os("CLUSTERVISION_CLAUDE_ROOTS") {
             entries.extend(std::env::split_paths(&list).filter(|p| !p.as_os_str().is_empty()));
         }
-        let cv_home = std::env::var_os("CLUSTERVISION_HOME")
+        let cv_home = crate::env::var_os("CLUSTERVISION_HOME")
             .map(PathBuf::from)
             .or_else(|| home.as_ref().map(|h| h.join(".clustervision")));
         if let Some(text) = cv_home.and_then(|d| fs::read_to_string(d.join("claude-roots")).ok()) {
@@ -1974,7 +1974,7 @@ mod tests {
     #[test]
     fn subagent_tree_discovers_both_tiers_with_meta_and_journal() {
         use std::io::Write;
-        let _world = cv_testkit::World::in_process("claude-subagent-ref-projection");
+        let _world = crate::test_world("claude-subagent-ref-projection");
         // Lay out a parent session with one directly-spawned sub-agent and one workflow holding
         // two agents (one journaled done, one a string return), mirroring the real on-disk shape.
         let root = std::env::temp_dir().join(format!("cv-subtree-{}", uuid::Uuid::new_v4()));
@@ -2153,7 +2153,7 @@ mod tests {
 
     #[test]
     fn native_json_inputs_preserve_values_modes_and_exact_ranges() {
-        let world = cv_testkit::World::in_process("claude-json-inputs");
+        let world = crate::test_world("claude-json-inputs");
         let path = world.proj.join("source.jsonl");
         let big = serde_json::to_string(&"a\nβ".repeat(INLINE_MAX)).unwrap();
         let inputs = vec![
@@ -2223,7 +2223,7 @@ mod tests {
 
     #[test]
     fn native_json_inputs_keep_owned_fallback_last_wins_and_invalid_tail() {
-        let world = cv_testkit::World::in_process("claude-json-input-fallback");
+        let world = crate::test_world("claude-json-input-fallback");
         let path = world.proj.join("source.jsonl");
         let text = concat!(
             r#"{"type":"assistant","uuid":"duplicate","message":{"role":"assistant","content":[{"type":"tool_use","id":"t","name":"custom_tool","input":{"old":1},"input":{"winner":2}}]}}"#,
@@ -2252,7 +2252,7 @@ mod tests {
 
     #[test]
     fn native_json_inputs_reject_changed_source_and_resume_exact_ranges() {
-        let world = cv_testkit::World::in_process("claude-json-input-errors");
+        let world = crate::test_world("claude-json-input-errors");
         let path = world.proj.join("source.jsonl");
         let padding = "x".repeat(INLINE_MAX);
         let line = |id: &str| {
@@ -2320,7 +2320,7 @@ mod tests {
 
     #[test]
     fn native_json_inputs_check_completion_only_after_source_publication() {
-        let world = cv_testkit::World::in_process("claude-json-input-completion");
+        let world = crate::test_world("claude-json-input-completion");
         let path = world.proj.join("source.jsonl");
         let record = |input: Value| {
             serde_json::json!({

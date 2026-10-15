@@ -1406,7 +1406,7 @@ mod tests {
 
     #[test]
     fn selected_rows_preserve_corpus_chains_metadata_and_wal_guards() -> Result<()> {
-        let world = cv_testkit::World::in_process("devin-selected-corpus");
+        let world = crate::test_world("devin-selected-corpus");
         let path = world.base.join("sessions.db");
         std::fs::copy(fixture(), &path)?;
         let adapter = Devin::with_root(&world.base);
@@ -1463,7 +1463,7 @@ mod tests {
 
     #[test]
     fn checked_navigation_matches_owned_prefix_model_heads_and_ignored_giant_cells() -> Result<()> {
-        let world = cv_testkit::World::in_process("devin-native-navigation");
+        let world = crate::test_world("devin-native-navigation");
         let path = world.base.join("sessions.db");
         std::fs::copy(fixture(), &path)?;
         let writer = Connection::open(&path)?;
@@ -1504,7 +1504,7 @@ mod tests {
 
     #[test]
     fn lazy_reads_fall_back_for_views_without_incremental_cells() -> Result<()> {
-        let world = cv_testkit::World::in_process("devin-view-fallback");
+        let world = crate::test_world("devin-view-fallback");
         let path = world.base.join("sessions.db");
         std::fs::copy(fixture(), &path)?;
         let writer = Connection::open(&path)?;
@@ -1528,7 +1528,7 @@ mod tests {
 
     #[test]
     fn selected_cells_preserve_owned_text_type_and_invalid_utf8_acceptance() -> Result<()> {
-        let world = cv_testkit::World::in_process("devin-selected-cell-types");
+        let world = crate::test_world("devin-selected-cell-types");
         let path = world.base.join("sessions.db");
         std::fs::copy(fixture(), &path)?;
         let writer = Connection::open(&path)?;
@@ -1554,7 +1554,7 @@ mod tests {
 
     #[test]
     fn corrupt_abandoned_rows_do_not_hide_tool_only_subagent_heads() -> Result<()> {
-        let world = cv_testkit::World::in_process("devin-corrupt-tool-head");
+        let world = crate::test_world("devin-corrupt-tool-head");
         let path = world.base.join("sessions.db");
         std::fs::copy(fixture(), &path)?;
         let conn = Connection::open(&path)?;
@@ -1636,7 +1636,7 @@ mod tests {
 
     #[test]
     fn discovery_counts_only_canonical_prompts_and_replies_on_each_chain() -> Result<()> {
-        let world = cv_testkit::World::in_process("devin-canonical-discovery-count");
+        let world = crate::test_world("devin-canonical-discovery-count");
         let path = world.base.join("sessions.db");
         std::fs::copy(fixture(), &path)?;
         let writer = Connection::open(&path)?;

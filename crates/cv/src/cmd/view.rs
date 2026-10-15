@@ -1736,7 +1736,7 @@ mod tests {
 
     #[test]
     fn lazy_tree_rows_preserve_owned_previews_and_first_user_label() -> Result<()> {
-        let world = cv_testkit::World::in_process("tree-row-projection");
+        let world = crate::test_world("tree-row-projection");
         let text = "🌙\\\"\n".repeat(30000);
         let path = world.write_session("tree-preview", &[
             serde_json::json!({"type":"user","uuid":"empty","message":{"role":"user","content":""}}),
@@ -1808,7 +1808,7 @@ mod tests {
 
     #[test]
     fn checked_markdown_download_keeps_lazy_leaves_and_native_holdback_output() -> Result<()> {
-        let world = cv_testkit::World::in_process("download-markdown-holdback");
+        let world = crate::test_world("download-markdown-holdback");
         let text = " \n🌙\\\"".repeat(16384);
         let mut records = Vec::new();
         for i in 0..25 {
@@ -1862,7 +1862,7 @@ mod tests {
 
     #[test]
     fn staged_full_download_rejects_changed_dynamic_dependencies() -> Result<()> {
-        let world = cv_testkit::World::in_process("download-source-guard");
+        let world = crate::test_world("download-source-guard");
         let path = world.write_session(
             "download-guard",
             &[serde_json::json!({"type":"user", "uuid":"u", "message":{"role":"user", "content":"complete"}})],
@@ -1909,7 +1909,7 @@ mod tests {
 
     #[test]
     fn selected_extra_demand_preserves_owned_windows_acceptance_and_eof() -> Result<()> {
-        let world = cv_testkit::World::in_process("window-extra-demand");
+        let world = crate::test_world("window-extra-demand");
         let path = world.base.join("source.jsonl");
         let huge = "escaped λ\n\"".repeat(10000);
         let rows = [
@@ -1984,7 +1984,7 @@ mod tests {
 
     #[test]
     fn cursor_rich_lazy_windows_preserve_owned_fields_acceptance_counts_and_eof() -> Result<()> {
-        let world = cv_testkit::World::in_process("cursor-rich-window");
+        let world = crate::test_world("cursor-rich-window");
         let path = world.base.join("state.vscdb");
         let root = serde_json::json!({"name":"composer title","createdAt":1,"lastUpdatedAt":2,"unifiedMode":"agent",
             "subagentInfo":{"parentComposerId":"parent","toolCallId":"spawn","subagentTypeName":"researcher"},
@@ -2102,7 +2102,7 @@ mod tests {
     #[test]
     #[ignore = "isolated allocator measurement; run alone with --test-threads=1"]
     fn staged_json_selected_payload_heap() {
-        let world = cv_testkit::World::in_process("staged-json-heap");
+        let world = crate::test_world("staged-json-heap");
         let path = world.base.join("arguments.json");
         let mut file = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
         file.write_all(b"{\"argument\":\"").unwrap();
@@ -2176,7 +2176,7 @@ mod tests {
 
     #[test]
     fn rendered_source_text_matches_owned_and_returns_source_error_before_rendering() {
-        let world = cv_testkit::World::in_process("render-checked-source-text");
+        let world = crate::test_world("render-checked-source-text");
         let path = world.base.join("text.json");
         let body = "actual🌙\n".repeat(1024);
         let wire = serde_json::to_vec(&body).unwrap();
@@ -2248,7 +2248,7 @@ mod tests {
 
     #[test]
     fn source_show_preview_matches_owned_unicode_and_fails_without_continuation() {
-        let world = cv_testkit::World::in_process("show-json-boundary");
+        let world = crate::test_world("show-json-boundary");
         let path = world.base.join("arguments.json");
         let value = serde_json::json!({"argument": "月🌙é\n\"\\".repeat(100_000), "tail": "HIDDEN_TAIL"});
         let bytes = serde_json::to_vec(&value).unwrap();
@@ -2451,7 +2451,7 @@ mod tests {
 
     #[test]
     fn json_windows_match_full_parse_with_late_metadata_and_extras() {
-        let _world = cv_testkit::World::in_process("json_windows_match_full_parse_with_late_metadata_and_extras");
+        let _world = crate::test_world("json_windows_match_full_parse_with_late_metadata_and_extras");
         let home = temp_home("json-window");
         let r = claude_fixture(&home);
         let mut f = std::fs::OpenOptions::new().append(true).open(&r.path).unwrap();
@@ -2480,7 +2480,7 @@ mod tests {
 
     #[test]
     fn staged_budget_rejects_giant_second_message_with_exact_continuation_and_eof_metadata() {
-        let _world = cv_testkit::World::in_process("staged-budget-giant-reject");
+        let _world = crate::test_world("staged-budget-giant-reject");
         struct Replay;
         impl Adapter for Replay {
             fn harness(&self) -> Harness {
@@ -2523,7 +2523,7 @@ mod tests {
 
     #[test]
     fn json_window_discards_large_messages_but_reads_the_eof_shell() {
-        let _world = cv_testkit::World::in_process("json_window_discards_large_messages_but_reads_the_eof_shell");
+        let _world = crate::test_world("json_window_discards_large_messages_but_reads_the_eof_shell");
         struct Large;
         impl Adapter for Large {
             fn harness(&self) -> Harness {
@@ -2578,7 +2578,7 @@ mod tests {
 
     #[test]
     fn gemini_json_windows_preserve_lazy_content_and_replayed_metadata() {
-        let _world = cv_testkit::World::in_process("gemini_json_windows_preserve_lazy_content_and_replayed_metadata");
+        let _world = crate::test_world("gemini_json_windows_preserve_lazy_content_and_replayed_metadata");
         let home = temp_home("gemini-json-window");
         std::fs::create_dir_all(home.join("chats")).unwrap();
         let adapter = cv_core::harness::gemini::Gemini::with_home(&home);
@@ -2974,7 +2974,7 @@ mod tests {
     /// `None` — overrides the discovery title).
     #[test]
     fn codex_windowed_render_is_byte_identical_to_the_full_parse() {
-        let _world = cv_testkit::World::in_process("codex_windowed_render_is_byte_identical_to_the_full_parse");
+        let _world = crate::test_world("codex_windowed_render_is_byte_identical_to_the_full_parse");
         let home = temp_home("codex");
 
         let path = home.join("rollout-r.jsonl");

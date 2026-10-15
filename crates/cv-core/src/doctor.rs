@@ -307,7 +307,7 @@ mod tests {
 
     #[test]
     fn unreadable_text_cannot_be_published_as_zero_tokens() {
-        let world = cv_testkit::World::in_process("doctor-checked-text");
+        let world = crate::test_world("doctor-checked-text");
         let path = world.base.join("payload.json");
         let wire = serde_json::to_vec(&"🌙\n".repeat(8192)).unwrap();
         std::fs::write(&path, &wire).unwrap();

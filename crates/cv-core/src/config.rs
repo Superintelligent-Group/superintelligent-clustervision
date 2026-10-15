@@ -24,10 +24,8 @@ pub struct Config {
 /// Back-compat: if the legacy `…/claurdvoyant` dir still exists and the new one hasn't been created,
 /// keep using it — so registered export sources survive the rename without a manual move.
 pub fn config_dir() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .filter(|p| !p.as_os_str().is_empty())
-        .or_else(|| dirs::home_dir().map(|h| h.join(".config")))?;
+    let base = crate::env::Env::current().config_home()?;
+
     let new = base.join("clustervision");
     let legacy = base.join("claurdvoyant");
     Some(if !new.exists() && legacy.exists() { legacy } else { new })
@@ -96,7 +94,7 @@ mod tests {
 
     #[test]
     fn updates_preserve_unknown_keys_and_reject_malformed_existing_files() {
-        let _world = cv_testkit::World::in_process("config-update-preservation");
+        let _world = crate::test_world("config-update-preservation");
         assert!(load_for_update().unwrap().exports.is_empty());
         let path = save(&Config::default()).unwrap();
         std::fs::write(&path, "exports = ['/old']\nfuture = 42\n[extension]\nlabel = 'keep'\n").unwrap();
@@ -119,7 +117,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_symlinked_config_is_replaced_at_its_target() {
-        let world = cv_testkit::World::in_process("config-symlink");
+        let world = crate::test_world("config-symlink");
         let path = save(&Config::default()).unwrap();
         let dotfile = world.base.join("dotfiles-config.toml");
         std::fs::rename(&path, &dotfile).unwrap();

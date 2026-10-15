@@ -369,7 +369,7 @@ mod tests {
 
     #[test]
     fn checked_source_reductions_match_inline_and_fail_after_early_stop_mutation() {
-        let world = cv_testkit::World::in_process("affordance-source-reductions");
+        let world = crate::test_world("affordance-source-reductions");
         let path = world.base.join("source.json");
         let body = format!(
             "{}Permission to use Bash {} denied<summary>α🌙\nsummary</summary>",

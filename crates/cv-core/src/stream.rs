@@ -1399,7 +1399,7 @@ mod tests {
 
     #[test]
     fn wrappers_forward_read_sets_and_counter_checkpoints_keep_the_prefix() {
-        let w = cv_testkit::World::in_process("read-set-wrappers");
+        let w = crate::test_world("read-set-wrappers");
         let path = w.base.join("session.jsonl");
         std::fs::write(&path, "primary").unwrap();
         let extra = w.base.join("external.txt");
@@ -1574,7 +1574,7 @@ mod tests {
 
     #[test]
     fn failed_streams_never_finish_counts_or_publish_cache_or_marks() {
-        let w = cv_testkit::World::in_process("fallible-stream-publication");
+        let w = crate::test_world("fallible-stream-publication");
         let path = w.base.join("session.jsonl");
         std::fs::write(&path, "scratch primary").unwrap();
         let r = transcript(crate::Harness::Codex, path);
@@ -1662,7 +1662,7 @@ mod tests {
 
     #[test]
     fn built_in_stream_boundary_and_nested_guard_return_the_original_error() {
-        let w = cv_testkit::World::in_process("built-in-fallible-stream");
+        let w = crate::test_world("built-in-fallible-stream");
         let dir = w.base.join("projects/group/chats");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("q.jsonl");
@@ -1763,7 +1763,7 @@ mod tests {
     /// state. Compression and rewind remain IR markers; legacy Gemini replay declines resume.
     #[test]
     fn qwen_record_checkpoints_preserve_state_and_partial_eof_records() {
-        let w = cv_testkit::World::in_process("qwen-record-resume");
+        let w = crate::test_world("qwen-record-resume");
         let dir = w.base.join("projects/group/chats");
         std::fs::create_dir_all(&dir).unwrap();
         let r = transcript(crate::Harness::Qwen, dir.join("s1.jsonl"));

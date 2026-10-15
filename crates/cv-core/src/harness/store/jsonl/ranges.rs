@@ -160,7 +160,7 @@ mod tests {
     #[cfg(not(feature = "mmap"))]
     #[test]
     fn optional_small_records_drop_giant_bytes_and_resume_after_window_boundaries() {
-        let world = cv_testkit::World::in_process("positioned-small-record-cache");
+        let world = crate::test_world("positioned-small-record-cache");
         let path = world.base.join("rows.jsonl");
         let bytes = format!("{}\n{}\nsmall\r\npartial", "a".repeat(65535), "b".repeat(65537));
         fs::write(&path, &bytes).unwrap();

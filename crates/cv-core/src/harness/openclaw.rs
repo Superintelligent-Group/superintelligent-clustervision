@@ -144,13 +144,13 @@ impl OpenClaw {
         let mut roots = Vec::new();
         // `OPENCLAW_STATE_DIR` overrides the state dir wholesale (`src/config/state-dir.ts`
         // `resolveStateDir`); otherwise `~/.openclaw` (and the elide-home variant).
-        let override_dir = std::env::var_os("OPENCLAW_STATE_DIR")
+        let override_dir = crate::env::var_os("OPENCLAW_STATE_DIR")
             .filter(|v| !v.is_empty())
             .map(PathBuf::from);
         for base in [
             override_dir,
-            dirs::home_dir().map(|h| h.join(".openclaw")),
-            dirs::home_dir().map(|h| h.join("elide-home").join(".openclaw")),
+            crate::env::home_dir().map(|h| h.join(".openclaw")),
+            crate::env::home_dir().map(|h| h.join("elide-home").join(".openclaw")),
         ]
         .into_iter()
         .flatten()
@@ -3540,7 +3540,7 @@ mod tests {
 
     #[test]
     fn bounded_parent_scan_matches_lexical_policy_across_boundaries_and_utf8_failures() -> Result<()> {
-        let world = cv_testkit::World::in_process("openclaw-parent-scan");
+        let world = crate::test_world("openclaw-parent-scan");
         let path = world.base.join("parent.jsonl");
         let key = "agent:main:subagent:child-λ";
         for marker in [
@@ -3564,7 +3564,7 @@ mod tests {
 
     #[test]
     fn selected_child_bodies_and_owned_completion_guard_parent_lookup_dependencies() -> Result<()> {
-        let world = cv_testkit::World::in_process("openclaw-parent-source-guard");
+        let world = crate::test_world("openclaw-parent-source-guard");
         let dir = world.base.join("agents/main/sessions");
         fs::create_dir_all(&dir)?;
         let path = dir.join("child.jsonl");
@@ -3606,7 +3606,7 @@ mod tests {
 
     #[test]
     fn jsonl_key_inventory_matches_value_first_key_and_final_duplicate_precedence() -> Result<()> {
-        let world = cv_testkit::World::in_process("openclaw-json-key-duplicates");
+        let world = crate::test_world("openclaw-json-key-duplicates");
         let path = world.base.join("sessions.json");
         for text in [
             r#"{"z":{"sessionId":"same","spawnedBy":"first"},"a":{"sessionId":"same","spawnedBy":"second"}}"#,
@@ -3644,7 +3644,7 @@ mod tests {
 
     #[test]
     fn jsonl_key_inventory_reads_once_per_scope_and_keeps_negative_dependency_guards() -> Result<()> {
-        let world = cv_testkit::World::in_process("openclaw-json-key-scope");
+        let world = crate::test_world("openclaw-json-key-scope");
         let dir = world.base.join("agents/main/sessions");
         fs::create_dir_all(&dir)?;
         let adapter = OpenClaw::with_state_dir(&world.base);
@@ -3703,7 +3703,7 @@ mod tests {
     #[cfg(feature = "sqlite")]
     #[test]
     fn sqlite_scoped_parent_fallback_keys_both_parameters_under_nocase() -> Result<()> {
-        let world = cv_testkit::World::in_process("openclaw-nocase-parent-scope");
+        let world = crate::test_world("openclaw-nocase-parent-scope");
         let path = world.base.join("sessions.db");
         let conn = rusqlite::Connection::open(&path)?;
         conn.execute_batch(
@@ -3776,7 +3776,7 @@ mod tests {
     #[cfg(feature = "sqlite")]
     #[test]
     fn sqlite_parent_window_scan_runs_once_per_scope_and_preserves_negative_groups() -> Result<()> {
-        let world = cv_testkit::World::in_process("openclaw-sql-parent-scope");
+        let world = crate::test_world("openclaw-sql-parent-scope");
         let dir = world.base.join("agents/main/agent");
         fs::create_dir_all(&dir)?;
         let path = dir.join("openclaw-agent.sqlite");
@@ -3866,7 +3866,7 @@ mod tests {
 
     #[test]
     fn preferred_jsonl_parent_avoids_global_candidate_inventory_and_preserves_fallback_order() -> Result<()> {
-        let world = cv_testkit::World::in_process("openclaw-parent-preferred-order");
+        let world = crate::test_world("openclaw-parent-preferred-order");
         let dir = &world.base;
         let child = dir.join("child.jsonl");
         let preferred = dir.join("preferred.jsonl");

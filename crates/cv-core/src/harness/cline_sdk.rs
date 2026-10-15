@@ -70,13 +70,13 @@ use std::path::{Path, PathBuf};
 pub fn session_roots(home: &Path, env: bool) -> Vec<PathBuf> {
     let mut out = Vec::new();
     if env {
-        if let Some(d) = std::env::var_os("CLINE_SESSION_DATA_DIR") {
+        if let Some(d) = crate::env::var_os("CLINE_SESSION_DATA_DIR") {
             out.push(PathBuf::from(d));
         }
-        if let Some(d) = std::env::var_os("CLINE_DATA_DIR") {
+        if let Some(d) = crate::env::var_os("CLINE_DATA_DIR") {
             out.push(PathBuf::from(d).join("sessions"));
         }
-        if let Some(d) = std::env::var_os("CLINE_DIR") {
+        if let Some(d) = crate::env::var_os("CLINE_DIR") {
             out.push(PathBuf::from(d).join("data").join("sessions"));
         }
     }
@@ -767,7 +767,7 @@ mod tests {
 
     #[test]
     fn child_fanout_ignores_large_lead_metadata_but_keeps_dependency() {
-        let world = cv_testkit::World::in_process("cline-child-manifest-fanout");
+        let world = crate::test_world("cline-child-manifest-fanout");
         let dir = world.base.join("lead");
         fs::create_dir(&dir).unwrap();
         let manifest = dir.join("lead.json");
@@ -974,7 +974,7 @@ mod tests {
     #[cfg(feature = "sqlite")]
     #[test]
     fn wide_team_log_preserves_first_order_final_states_and_idle_duplicates() {
-        let world = cv_testkit::World::in_process("cline-wide-team-log");
+        let world = crate::test_world("cline-wide-team-log");
         let path = world.base.join("teams.db");
         let count = 10_000;
         {

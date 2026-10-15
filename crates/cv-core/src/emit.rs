@@ -577,7 +577,7 @@ mod tests {
 
     #[test]
     fn native_source_validation_checks_complete_record_without_lazy_blocks() -> Result<()> {
-        let world = cv_testkit::World::in_process("emit-complete-source");
+        let world = crate::test_world("emit-complete-source");
         let path = world.base.join("record.json");
         fs::write(&path, br#"{"type":"assistant","unknown":"original"}"#)?;
         let mut session = Session::new("complete-source", Harness::OpenCode);
@@ -796,7 +796,7 @@ mod tests {
     #[test]
     fn claude_checked_writer_matches_legacy_payloads_metadata_and_resumability() -> Result<()> {
         use crate::harness::claude::emit::emit_legacy;
-        let world = cv_testkit::World::in_process("claude-checked-legacy");
+        let world = crate::test_world("claude-checked-legacy");
         let text_path = world.base.join("text.json");
         let args_path = world.base.join("args.json");
         fs::write(&text_path, serde_json::to_vec(&"a\"\\\nλ".repeat(5000))?)?;
@@ -978,7 +978,7 @@ mod tests {
 
     #[test]
     fn claude_checked_writer_type_and_content_only_overrides_match_old_dispatch() -> Result<()> {
-        let world = cv_testkit::World::in_process("claude-extra-overrides");
+        let world = crate::test_world("claude-extra-overrides");
         for (case, role, override_content) in [
             (0, Role::Assistant, false),
             (1, Role::User, false),
@@ -1034,7 +1034,7 @@ mod tests {
 
     #[test]
     fn claude_checked_writer_source_failure_preserves_destination_in_every_mode() -> Result<()> {
-        let world = cv_testkit::World::in_process("claude-checked-failure");
+        let world = crate::test_world("claude-checked-failure");
         let source = world.base.join("body.json");
         fs::write(&source, serde_json::to_vec(&"checked body".repeat(3000))?)?;
         let text = crate::Json::source(&source, 0, fs::metadata(&source)?.len())?
@@ -3697,7 +3697,7 @@ mod tests {
     }
     #[test]
     fn claude_portable_projects_raw_extra_and_carrier_content() -> Result<()> {
-        let world = cv_testkit::World::in_process("claude-portable-overrides");
+        let world = crate::test_world("claude-portable-overrides");
         let mut session = Session::new("raw", Harness::Claude);
         let mut call = Message::new(Role::Assistant);
         call.id = Some("call".into());
@@ -3761,7 +3761,7 @@ mod tests {
     }
     #[test]
     fn claude_drop_filters_raw_reasoning_before_survival_and_parent_relinking() -> Result<()> {
-        let world = cv_testkit::World::in_process("claude-drop-overrides");
+        let world = crate::test_world("claude-drop-overrides");
         let mut session = Session::new("raw-drop", Harness::Claude);
         for (id, parent, raw) in [
             (

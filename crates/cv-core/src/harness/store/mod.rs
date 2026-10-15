@@ -74,10 +74,7 @@ impl<'de> serde::Deserialize<'de> for DiscardValue {
 /// `~/.local/share`. The base of every XDG-shaped store (opencode, devin, goose, zed); `None` only
 /// when there is no home directory at all.
 pub(crate) fn xdg_data_dir() -> Option<PathBuf> {
-    std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .or_else(|| dirs::home_dir().map(|h| h.join(".local/share")))
+    crate::env::Env::current().data_home()
 }
 
 /// Write `lines` as JSONL (one compact JSON value per line) to `path`, replacing the file.

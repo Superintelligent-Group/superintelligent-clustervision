@@ -78,7 +78,9 @@ where
         active.fetch_add(1, Ordering::AcqRel);
         let slot = Slot(Arc::clone(&active));
         let handler = Arc::clone(&handler);
+        let env = cv_core::env::Env::scoped();
         let spawned = std::thread::Builder::new().name("cv-serve-conn".into()).spawn(move || {
+            let _env = env.map(cv_core::env::Env::reenter);
             let _slot = slot;
             connection(stream, limits, &*handler);
         });

@@ -214,7 +214,7 @@ mod tests {
 
     #[test]
     fn selected_indexes_preserve_value_precedence_and_tolerant_fallback() -> Result<()> {
-        let world = cv_testkit::World::in_process("openclaw-discovery-index");
+        let world = crate::test_world("openclaw-discovery-index");
         let dir = world.base.join("sessions");
         fs::create_dir_all(&dir)?;
         let path = dir.join("sessions.json");
@@ -249,7 +249,7 @@ mod tests {
 
     #[test]
     fn discovery_reuses_one_index_snapshot_and_rejects_changed_or_created_indexes() -> Result<()> {
-        let world = cv_testkit::World::in_process("openclaw-discovery-index-reuse");
+        let world = crate::test_world("openclaw-discovery-index-reuse");
         let dir = world.base.join("sessions");
         fs::create_dir_all(&dir)?;
         let path = dir.join("sessions.json");
@@ -308,7 +308,7 @@ mod tests {
 
     #[test]
     fn projected_transcript_discovery_preserves_owned_scan_and_inventory_metadata() -> Result<()> {
-        let world = cv_testkit::World::in_process("openclaw-discovery-transcript");
+        let world = crate::test_world("openclaw-discovery-transcript");
         let sessions = world.base.join("agents/main/sessions");
         fs::create_dir_all(&sessions)?;
         let index_bytes = serde_json::to_vec(&json!({

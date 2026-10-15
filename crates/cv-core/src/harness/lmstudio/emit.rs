@@ -381,7 +381,7 @@ mod tests {
     use super::*;
     #[test]
     fn primary_adapter_root_and_explicit_conversations_emit_into_discoverable_store() -> Result<()> {
-        let world = cv_testkit::World::in_process("lmstudio_root_composition");
+        let world = crate::test_world("lmstudio_root_composition");
         let home = world.home.join(".lmstudio");
         let conversations = home.join("conversations");
         fs::create_dir_all(&conversations)?;
@@ -417,7 +417,7 @@ mod tests {
 
     #[test]
     fn usage_only_selected_and_alternate_completions_roundtrip_without_text() -> Result<()> {
-        let world = cv_testkit::World::in_process("lmstudio_empty_completions");
+        let world = crate::test_world("lmstudio_empty_completions");
         let path = world.home.join("source.conversation.json");
         let completion = |model: &str, stats: Value, timestamp: &str| {
             json!({"type":"multiStep","role":"assistant","steps":[{
@@ -492,7 +492,7 @@ mod tests {
 
     #[test]
     fn complete_native_versions_roundtrip_selected_indices_roles_and_models() -> Result<()> {
-        let world = cv_testkit::World::in_process("lmstudio_versions_roundtrip");
+        let world = crate::test_world("lmstudio_versions_roundtrip");
         let path = world.home.join("source.conversation.json");
         let payload = "edited 雪\n\"\\".repeat(10_000);
         let assistant = |text: &str, model: &str| {
@@ -576,7 +576,7 @@ mod tests {
 
     #[test]
     fn an_unparsed_selected_turn_cannot_attach_its_alternates_to_the_previous_turn() -> Result<()> {
-        let world = cv_testkit::World::in_process("lmstudio_orphan_group");
+        let world = crate::test_world("lmstudio_orphan_group");
         let path = world.home.join("source.conversation.json");
         fs::write(
             &path,
@@ -610,7 +610,7 @@ mod tests {
 
     #[test]
     fn malformed_or_orphaned_variant_metadata_falls_back_to_independent_turns() -> Result<()> {
-        let world = cv_testkit::World::in_process("lmstudio_variant_fallback");
+        let world = crate::test_world("lmstudio_variant_fallback");
         let mut session = Session::new("source", Harness::LmStudio);
         let mut primary = Message::new(Role::User);
         primary.content.push(Block::Text { text: "primary".into() });
@@ -640,7 +640,7 @@ mod tests {
 
     #[test]
     fn checked_native_writer_matches_owned_oracle_and_preserves_changed_source() -> Result<()> {
-        let world = cv_testkit::World::in_process("checked-lmstudio");
+        let world = crate::test_world("checked-lmstudio");
         let path = world.base.join("source.jsonl");
         let mut rows = [
             json!({"type":"user","message":{"role":"user","content":[{"type":"thinking","thinking":"user thought","signature":"user-sig"},{"type":"text","text":" \n"},{"type":"text","text":"λ prompt".repeat(3000)}]}}),
@@ -723,7 +723,7 @@ mod tests {
     }
     #[test]
     fn late_argument_source_failure_preserves_published_files() -> Result<()> {
-        let world = cv_testkit::World::in_process("late-argument-LmStudio");
+        let world = crate::test_world("late-argument-LmStudio");
         let source = world.base.join("arguments.json");
         fs::write(&source, br#"{"path":"old"}"#)?;
         let input = crate::Json::source(&source, 0, fs::metadata(&source)?.len())?;
@@ -761,7 +761,7 @@ mod tests {
     }
     #[test]
     fn dropped_source_failure_matches_direct_owned_error_contract() -> Result<()> {
-        let world = cv_testkit::World::in_process("dropped-source-LmStudio");
+        let world = crate::test_world("dropped-source-LmStudio");
         let path = world.base.join("thinking.json");
         fs::write(&path, serde_json::to_vec(&"private thought".repeat(3000))?)?;
         let text = crate::Json::source(&path, 0, fs::metadata(&path)?.len())?

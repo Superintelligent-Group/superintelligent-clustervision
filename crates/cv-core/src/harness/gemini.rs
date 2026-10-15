@@ -64,7 +64,7 @@ pub struct Gemini {
 
 impl Gemini {
     pub fn detect() -> Self {
-        let roots = dirs::home_dir()
+        let roots = crate::env::home_dir()
             .map(|h| {
                 vec![
                     h.join(".gemini").join("tmp"),
@@ -2065,7 +2065,7 @@ mod tests {
     #[cfg(not(feature = "mmap"))]
     #[test]
     fn portable_legacy_views_preserve_wrapper_acceptance_and_independent_children() {
-        let world = cv_testkit::World::in_process("gemini-legacy-acceptance");
+        let world = crate::test_world("gemini-legacy-acceptance");
         let path = world.base.join("source.json");
         let large = serde_json::to_string(&"x\nβ".repeat(6000)).unwrap();
         let message = format!("{{\"type\":\"gemini\",\"id\":\"a\",\"toolCalls\":[{{\"name\":\"custom\",\"args\":{{\"payload\":{large}}}}}]}}");
@@ -2128,7 +2128,7 @@ mod tests {
 
     #[test]
     fn native_json_arguments_keep_real_values_and_exact_ranges() {
-        let world = cv_testkit::World::in_process("gemini-json-inputs");
+        let world = crate::test_world("gemini-json-inputs");
         let chats = world.base.join("chats");
         fs::create_dir_all(&chats).unwrap();
         let big = serde_json::to_string(&"x\nβ".repeat(crate::lazy::INLINE_MAX)).unwrap();
@@ -2201,7 +2201,7 @@ mod tests {
 
     #[test]
     fn native_json_arguments_survive_set_replacement_rewind_and_invalid_lines() {
-        let world = cv_testkit::World::in_process("gemini-json-replay");
+        let world = crate::test_world("gemini-json-replay");
         let chats = world.base.join("chats");
         fs::create_dir_all(&chats).unwrap();
         let path = chats.join("session-source.jsonl");
@@ -2239,7 +2239,7 @@ mod tests {
 
     #[test]
     fn selected_composite_results_and_thoughts_match_owned_and_keep_source_guards() {
-        let world = cv_testkit::World::in_process("gemini-selected-results");
+        let world = crate::test_world("gemini-selected-results");
         let chats = world.base.join("chats");
         fs::create_dir_all(&chats).unwrap();
         let body = "escaped\n\"quote\" β😀".repeat(7000);
@@ -2298,7 +2298,7 @@ mod tests {
 
     #[test]
     fn native_json_source_mutation_stops_before_paired_result_and_at_completion() {
-        let world = cv_testkit::World::in_process("gemini-json-errors");
+        let world = crate::test_world("gemini-json-errors");
         let chats = world.base.join("chats");
         fs::create_dir_all(&chats).unwrap();
         struct Delete {
@@ -2349,7 +2349,7 @@ mod tests {
 
     #[test]
     fn native_json_arguments_feed_consumers_and_fail_when_detached_source_changes() {
-        let world = cv_testkit::World::in_process("gemini-json-consumers");
+        let world = crate::test_world("gemini-json-consumers");
         let chats = world.base.join("chats");
         fs::create_dir_all(&chats).unwrap();
         let path = chats.join("session-source.jsonl");

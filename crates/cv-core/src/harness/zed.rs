@@ -90,16 +90,16 @@ impl Zed {
 fn threads_db() -> Option<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     // XDG override first (portable, and what Zed's `paths::data_dir` honours on Linux).
-    if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
+    if let Some(xdg) = crate::env::var_os("XDG_DATA_HOME") {
         candidates.push(PathBuf::from(xdg).join("zed/threads/threads.db"));
     }
-    if let Some(h) = dirs::home_dir() {
+    if let Some(h) = crate::env::home_dir() {
         candidates.push(h.join("Library/Application Support/Zed/threads/threads.db"));
         candidates.push(h.join(".local/share/zed/threads/threads.db"));
         // Flatpak install keeps the same layout under the app sandbox.
         candidates.push(h.join(".var/app/dev.zed.Zed/data/zed/threads/threads.db"));
     }
-    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+    if let Some(local) = crate::env::var_os("LOCALAPPDATA") {
         candidates.push(PathBuf::from(local).join("Zed").join("threads").join("threads.db"));
     }
     candidates.into_iter().find(|p| p.exists())
@@ -1488,7 +1488,7 @@ mod tests {
 
     #[test]
     fn stream_equals_parse_on_synthetic_db() {
-        let _world = cv_testkit::World::in_process("zed-stream-parse");
+        let _world = crate::test_world("zed-stream-parse");
         // The corpus-wide invariant, asserted here on a fixture so it runs without real data:
         // parse() and collect(stream()) are the same bytes.
         let dir = std::env::temp_dir().join(format!("cv-zed-test-{}", uuid::Uuid::new_v4()));

@@ -40,7 +40,7 @@ pub struct Qwen {
 
 impl Qwen {
     pub fn detect() -> Self {
-        match dirs::home_dir() {
+        match crate::env::home_dir() {
             Some(h) => Qwen::with_home(&h.join(".qwen")),
             None => Qwen {
                 root: None,
@@ -1033,7 +1033,7 @@ mod tests {
 
     #[test]
     fn checked_discovery_qwen_matches_owned_replay_with_giant_system_payloads() -> Result<()> {
-        let world = cv_testkit::World::in_process("qwen-discovery-selected");
+        let world = crate::test_world("qwen-discovery-selected");
         let body = "body λ\n".repeat(512 * 1024);
         let oracle = |path: &Path| -> Result<Option<SessionRef>> {
             let mut messages = 0;
@@ -1147,7 +1147,7 @@ mod tests {
 
     #[test]
     fn scoped_task_inventory_revalidates_the_enclosing_dependency_file() -> Result<()> {
-        let world = cv_testkit::World::in_process("qwen-task-inventory-source-guard");
+        let world = crate::test_world("qwen-task-inventory-source-guard");
         let home = world.home.join(".qwen");
         let path = home.join("projects/hash/chats/session.jsonl");
         fs::create_dir_all(path.parent().unwrap())?;
@@ -1185,7 +1185,7 @@ mod tests {
 
     #[test]
     fn scoped_first_task_query_is_linear_and_repeat_initializes_time_index() -> Result<()> {
-        let world = cv_testkit::World::in_process("qwen-lazy-task-time-index");
+        let world = crate::test_world("qwen-lazy-task-time-index");
         let home = world.home.join(".qwen");
         let mut reference = SessionRef::new("owner", Harness::Qwen, home.join("projects/hash/chats/session.jsonl"));
         reference.cwd = Some(PathBuf::from("/project"));

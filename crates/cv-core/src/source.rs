@@ -1042,7 +1042,7 @@ pub fn update(_consumer: &str, _updates: &[Update]) {}
 mod tests {
     #[test]
     fn arbitrary_opencode_database_names_retain_wal_and_journal_guards() {
-        let w = cv_testkit::World::in_process("source-opencode-arbitrary-db");
+        let w = crate::test_world("source-opencode-arbitrary-db");
         let path = w.base.join("custom-store");
         std::fs::write(&path, b"SQLite format 3\0remaining database bytes").unwrap();
         let r = SessionRef::new("session", Harness::OpenCode, &path);
@@ -1068,7 +1068,7 @@ mod tests {
 
     #[test]
     fn grok_dependency_kind_projects_only_exact_subagents_and_keeps_acceptance() {
-        let world = cv_testkit::World::in_process("grok-dependency-kind");
+        let world = crate::test_world("grok-dependency-kind");
         let group = world.base.join("sessions");
         let session = group.join("child");
         std::fs::create_dir_all(&session).unwrap();
@@ -1099,7 +1099,7 @@ mod tests {
 
     #[test]
     fn impossible_child_absence_invalidates_when_parent_becomes_directory() {
-        let world = cv_testkit::World::in_process("not-directory-absence");
+        let world = crate::test_world("not-directory-absence");
         let parent = world.base.join("parent");
         let child = parent.join("child");
         std::fs::write(&parent, "a file").unwrap();
@@ -1115,7 +1115,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn primary_identity_rejects_restored_tuple_rewrites_and_replacements() {
-        let w = cv_testkit::World::in_process("primary-identity");
+        let w = crate::test_world("primary-identity");
         // Include the canonical delimiter in the filename to exercise JSON escaping.
         let path = w.base.join("plain,\"entries\":.jsonl");
         std::fs::write(&path, "old body").unwrap();
@@ -1173,7 +1173,7 @@ mod tests {
 
     #[test]
     fn primary_identity_legacy_and_malformed_records_miss_without_decoding_inventory() {
-        let w = cv_testkit::World::in_process("primary-legacy");
+        let w = crate::test_world("primary-legacy");
         let path = w.base.join("primary.jsonl");
         std::fs::write(&path, "body").unwrap();
         let r = SessionRef::new("s", Harness::Claude, &path);
@@ -1194,7 +1194,7 @@ mod tests {
 
     #[test]
     fn sqlite_journal_creation_rewrite_and_removal_invalidate_inventory() {
-        let world = cv_testkit::World::in_process("source-sqlite-journal");
+        let world = crate::test_world("source-sqlite-journal");
         let db = world.base.join("sessions.db");
         std::fs::write(&db, "fixture").unwrap();
         let journal = world.base.join("sessions.db-journal");
@@ -1230,7 +1230,7 @@ mod tests {
 
     #[test]
     fn typed_publication_matches_serialized_inventory_and_preserves_wire() {
-        let world = cv_testkit::World::in_process("source-typed-publication");
+        let world = crate::test_world("source-typed-publication");
         let storage = world.base.join("storage");
         for dir in ["session/project", "message/sid", "part/mid"] {
             std::fs::create_dir_all(storage.join(dir)).unwrap();
@@ -1287,7 +1287,7 @@ mod tests {
 
     #[test]
     fn cursor_cli_metadata_creation_and_rewrite_invalidate_consumers() {
-        let world = cv_testkit::World::in_process("cursor-cli-source-metadata");
+        let world = crate::test_world("cursor-cli-source-metadata");
         let path = world.base.join("store.db");
         std::fs::write(&path, "database").unwrap();
         let r = crate::SessionRef::new("cli:session", crate::Harness::Cursor, &path);
@@ -1309,7 +1309,7 @@ mod tests {
 
     #[test]
     fn selected_directory_primary_grows_without_blessing_metadata_changes() {
-        let w = cv_testkit::World::in_process("source-directory-primary");
+        let w = crate::test_world("source-directory-primary");
         let session = w.base.join("session");
         let agent = session.join("agents/agent-child");
         std::fs::create_dir_all(&agent).unwrap();
@@ -1342,7 +1342,7 @@ mod tests {
 
     #[test]
     fn serialized_consumer_reads_survive_growth_and_reject_dependency_changes() {
-        let w = cv_testkit::World::in_process("source-read-state");
+        let w = crate::test_world("source-read-state");
         let path = w.base.join("plain.jsonl");
         std::fs::write(&path, "primary").unwrap();
         let r = crate::SessionRef::new("test", crate::Harness::Codex, &path);
@@ -1400,7 +1400,7 @@ mod tests {
             assert!(!Table::load("relative").fresh(&r, base.primary, &base.dependencies));
             return;
         }
-        let w = cv_testkit::World::in_process("relative-source-reads");
+        let w = crate::test_world("relative-source-reads");
         std::fs::write(w.base.join("primary.jsonl"), "primary").unwrap();
         std::fs::write(w.base.join("external.txt"), "before").unwrap();
         std::fs::create_dir(w.base.join("other")).unwrap();
@@ -1419,7 +1419,7 @@ mod tests {
 
     #[test]
     fn dynamic_reads_capture_absence_and_reject_changes_during_a_pass() {
-        let w = cv_testkit::World::in_process("dynamic-reads");
+        let w = crate::test_world("dynamic-reads");
         let path = w.base.join("plain.jsonl");
         std::fs::write(&path, "primary").unwrap();
         let r = SessionRef {
@@ -1457,7 +1457,7 @@ mod tests {
 
     #[test]
     fn unrecorded_and_version_one_baselines_reread_once() {
-        let w = cv_testkit::World::in_process("read-set-upgrade");
+        let w = crate::test_world("read-set-upgrade");
         let path = w.base.join("plain.jsonl");
         std::fs::write(&path, "primary").unwrap();
         let r = SessionRef {
@@ -1486,7 +1486,7 @@ mod tests {
 
     #[test]
     fn dependency_baselines_are_per_consumer_and_revalidated_at_publication() {
-        let w = cv_testkit::World::in_process("source-baselines");
+        let w = crate::test_world("source-baselines");
         let path = w.base.join("sessions.db");
         std::fs::write(&path, "database").unwrap();
         let r = SessionRef {
@@ -1535,7 +1535,7 @@ mod tests {
     }
     #[test]
     fn scoped_children_track_wire_state_and_opencode_parts() {
-        let w = cv_testkit::World::in_process("source-children");
+        let w = crate::test_world("source-children");
         let session = w.base.join("session_test");
         std::fs::create_dir_all(session.join("agents/main")).unwrap();
         std::fs::write(session.join("state.json"), "before").unwrap();
@@ -1600,7 +1600,7 @@ mod tests {
     #[test]
     #[allow(deprecated)]
     fn counts_publish_captured_primary_and_legacy_record_stays_stale() {
-        let w = cv_testkit::World::in_process("source-counts-publish");
+        let w = crate::test_world("source-counts-publish");
         let path = w.base.join("plain.jsonl");
         std::fs::write(&path, "before").unwrap();
         let r = SessionRef {
@@ -1644,7 +1644,7 @@ mod tests {
     }
     #[test]
     fn failed_stamp_publication_cannot_reuse_an_older_baseline() {
-        let w = cv_testkit::World::in_process("source-publication-failure");
+        let w = crate::test_world("source-publication-failure");
         let path = w.base.join("sessions.db");
         std::fs::write(&path, "database").unwrap();
         let r = SessionRef {

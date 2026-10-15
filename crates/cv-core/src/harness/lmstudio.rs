@@ -61,7 +61,7 @@ impl LmStudio {
     }
 
     pub fn detect() -> Self {
-        let root = dirs::home_dir().map(|h| h.join(".lmstudio").join("conversations"));
+        let root = crate::env::home_dir().map(|h| h.join(".lmstudio").join("conversations"));
         LmStudio {
             root: root.filter(|p| p.exists()),
         }
@@ -78,7 +78,11 @@ impl Adapter for LmStudio {
         self.root
             .as_ref()
             .map(|conversations| conversations.parent().unwrap_or(conversations).to_path_buf())
-            .or_else(|| dirs::home_dir().map(|h| h.join(".lmstudio")).filter(|p| p.exists()))
+            .or_else(|| {
+                crate::env::home_dir()
+                    .map(|h| h.join(".lmstudio"))
+                    .filter(|p| p.exists())
+            })
             .into_iter()
             .collect()
     }
@@ -1470,7 +1474,7 @@ mod tests {
 
     #[test]
     fn harmony_absence_hint_preserves_owned_and_encoded_marker_oracles() -> Result<()> {
-        let world = cv_testkit::World::in_process("lm-harmony-absence");
+        let world = crate::test_world("lm-harmony-absence");
         let path = world.base.join("text.json");
         for marker in [
             "ordinary λ",
@@ -1895,7 +1899,7 @@ mod tests {
 
     #[test]
     fn repeated_discovery_reuses_unchanged_documents_and_refreshes_changed_files() -> Result<()> {
-        let world = cv_testkit::World::in_process("lmstudio-discovery-cache");
+        let world = crate::test_world("lmstudio-discovery-cache");
         let context = crate::discover_cache::read::Context::current();
         let _scope = context.enter();
         let store = world.home.join("conversations");
@@ -1939,7 +1943,7 @@ mod tests {
 
     #[test]
     fn discovery_scan_matches_whole_value_metadata() {
-        let _world = cv_testkit::World::in_process("lmstudio-scan");
+        let _world = crate::test_world("lmstudio-scan");
         let dir = std::env::temp_dir().join(format!("cv-lmstudio-scan-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("sample.conversation.json");

@@ -116,7 +116,7 @@ mod tests {
     use super::*;
     #[test]
     fn positioned_context_visit_matches_owned_rotation_offsets_and_failures() -> Result<()> {
-        let world = cv_testkit::World::in_process("kimi-positioned-records");
+        let world = crate::test_world("kimi-positioned-records");
         let a = world.base.join("context_1.jsonl");
         let b = world.base.join("context.jsonl");
         let prefix = "\u{2003}{\"role\":\"user\",\"content\":\"prompt λ\"}\r\n\ninvalid-json\n";

@@ -170,7 +170,7 @@ mod checked_tests {
     }
     #[test]
     fn checked_gemini_matches_legacy_pretty_all_modes_and_fields() -> Result<()> {
-        let world = cv_testkit::World::in_process("gemini-wire-oracle");
+        let world = crate::test_world("gemini-wire-oracle");
         let mut session = Session::new("source", Harness::Claude);
         let ts = "2026-10-12T12:00:00Z".parse()?;
         session.created_at = Some(ts);
@@ -290,7 +290,7 @@ mod checked_tests {
     }
     #[test]
     fn checked_gemini_guarded_text_json_fail_before_transcript_publication() -> Result<()> {
-        let world = cv_testkit::World::in_process("gemini-guarded-publication");
+        let world = crate::test_world("gemini-guarded-publication");
         for text_leaf in [true, false] {
             let source = world.base.join(format!("leaf-{text_leaf}.json"));
             let wire = if text_leaf {
@@ -337,7 +337,7 @@ mod checked_tests {
     }
     #[test]
     fn checked_gemini_cross_harness_preparation_preserves_full_metadata_and_owned_defaults() -> Result<()> {
-        let world = cv_testkit::World::in_process("gemini-preparation");
+        let world = crate::test_world("gemini-preparation");
         let source = world.base.join("source.jsonl");
         let wire = json!({"type":"assistant","uuid":"a","sessionId":"source","timestamp":"2026-10-12T12:00:00Z","cwd":"/synthetic/gemini",
             "message":{"role":"assistant","model":"source-model","content":[{"type":"text","text":"metadata body λ".repeat(2000)}],"usage":{"input_tokens":7,"output_tokens":3}},

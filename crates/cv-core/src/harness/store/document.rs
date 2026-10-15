@@ -605,7 +605,7 @@ pub(crate) fn text_summary<T: std::borrow::Borrow<crate::lazy::Text>>(
 mod tests {
     #[test]
     fn checked_text_heads_preserve_classification_boundaries_and_source_errors() -> Result<()> {
-        let world = cv_testkit::World::in_process("checked-text-heads");
+        let world = crate::test_world("checked-text-heads");
         let path = world.base.join("text.json");
         let resolver = crate::lazy::Resolver::new(None);
         for body in [

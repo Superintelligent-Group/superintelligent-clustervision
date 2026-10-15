@@ -789,7 +789,7 @@ mod tests {
 
     #[test]
     fn checked_openclaw_selected_matches_owned_payloads_metadata_and_corrupt_rows() -> Result<()> {
-        let world = cv_testkit::World::in_process("openclaw-selected");
+        let world = crate::test_world("openclaw-selected");
         let path = world.base.join("source.jsonl");
         let content = json!([
             {"type":"text","text":"λ\n".repeat(1000)},
@@ -841,7 +841,7 @@ mod tests {
 
     #[test]
     fn checked_openclaw_selected_retained_source_and_stop_reject_mutation() -> Result<()> {
-        let world = cv_testkit::World::in_process("openclaw-selected-guard");
+        let world = crate::test_world("openclaw-selected-guard");
         let path = world.base.join("source.jsonl");
         fs::write(
             &path,
@@ -881,7 +881,7 @@ mod tests {
 
     #[test]
     fn checked_openclaw_selection_keeps_original_identity_and_race_error() -> Result<()> {
-        let world = cv_testkit::World::in_process("openclaw-selection-identity");
+        let world = crate::test_world("openclaw-selection-identity");
         let path = world.base.join("source.jsonl");
         let flat = b"{\"type\":\"message\",\"id\":\"u\",\"message\":{\"role\":\"user\",\"content\":\"original\"}}\n";
         let tree = b"{\"type\":\"leaf\",\"leafId\":\"new\"}\n{\"type\":\"message\",\"id\":\"new\",\"message\":{\"role\":\"user\",\"content\":\"replacement\"}}\n";
@@ -907,7 +907,7 @@ mod tests {
 
     #[test]
     fn checked_openclaw_owned_and_tree_stop_reject_original_source_replacement() -> Result<()> {
-        let world = cv_testkit::World::in_process("openclaw-owned-tree-identity");
+        let world = crate::test_world("openclaw-owned-tree-identity");
         let path = world.base.join("source.jsonl");
         for tree in [false, true] {
             let mut bytes =
@@ -947,7 +947,7 @@ mod tests {
 
     #[test]
     fn formatted_leaf_controls_select_the_same_visible_branch() -> Result<()> {
-        let world = cv_testkit::World::in_process("openclaw-formatted-leaf");
+        let world = crate::test_world("openclaw-formatted-leaf");
         let path = world.base.join("tree.jsonl");
         let original =
             fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/openclaw/branchy-v4.jsonl"))?;
@@ -1005,7 +1005,7 @@ mod tests {
 
     #[test]
     fn checked_openclaw_tree_replays_compact_navigation_with_exact_owned_parity() -> Result<()> {
-        let world = cv_testkit::World::in_process("openclaw-tree-parity");
+        let world = crate::test_world("openclaw-tree-parity");
         let path = world.base.join("tree.jsonl");
         let adapter = OpenClaw { roots: vec![] };
         for fixture in ["branchy-v4.jsonl", "reset-and-side-entries.jsonl", "v3-full.jsonl"] {
@@ -1098,7 +1098,7 @@ mod control_tests {
 
     #[test]
     fn checked_control_and_custom_bodies_match_owned_without_payload_trees() -> Result<()> {
-        let world = cv_testkit::World::in_process("openclaw-checked-controls");
+        let world = crate::test_world("openclaw-checked-controls");
         let path = world.base.join("controls.jsonl");
         let adapter = OpenClaw { roots: vec![] };
         let giant = "escaped λ\n".repeat(10000);

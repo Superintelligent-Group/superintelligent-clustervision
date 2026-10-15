@@ -1503,7 +1503,7 @@ fn retrieve_legacy_oracle(path: &Path, id: &str) -> Result<Value> {
 
 #[test]
 fn retrieve_projection_matches_typed_legacy_acceptance_and_error_semantics() {
-    let world = cv_testkit::World::in_process("retrieve-projection-oracle");
+    let world = crate::test_world("retrieve-projection-oracle");
     let path = world.base.join("session.flat.jsonl");
     let row = |input: &str, content: &str, tail: &str| {
         format!(
@@ -1581,7 +1581,7 @@ fn retrieve_projection_matches_typed_legacy_acceptance_and_error_semantics() {
 
 #[test]
 fn retrieve_bounds_available_ids_and_rejects_captured_source_changes() {
-    let world = cv_testkit::World::in_process("retrieve-source-guard");
+    let world = crate::test_world("retrieve-source-guard");
     let path = world.base.join("session.flat.jsonl");
     let mut out = std::fs::File::create(&path).unwrap();
     for i in 0..40 {
@@ -1610,7 +1610,7 @@ fn retrieve_bounds_available_ids_and_rejects_captured_source_changes() {
 
 #[test]
 fn retrieve_giant_unselected_fields_return_only_requested_content() {
-    let world = cv_testkit::World::in_process("retrieve-giant-unselected");
+    let world = crate::test_world("retrieve-giant-unselected");
     let path = world.base.join("session.flat.jsonl");
     let mut out = std::fs::File::create(&path).unwrap();
     let chunk = "ignored-🌙\\n\\\"\\\\".repeat(4096);
@@ -1659,7 +1659,7 @@ fn retrieve_giant_unselected_fields_return_only_requested_content() {
 
 #[test]
 fn source_turn_projection_matches_owned_pass_composition() -> Result<()> {
-    let world = cv_testkit::World::in_process("prune-turn-projection");
+    let world = crate::test_world("prune-turn-projection");
     for (case, mut original) in [
         serde_json::json!({"type":"assistant","uuid":"a","sessionId":"old","parentUuid":"p","message":{"content":[
             {"type":"thinking","thinking":"reason\r\nsecond λ\n","signature":"signature","unknown":{"keep":true}},
@@ -1795,7 +1795,7 @@ fn source_turn_projection_matches_owned_pass_composition() -> Result<()> {
 
 #[test]
 fn source_declassify_matches_case_and_line_semantics_across_chunks() -> Result<()> {
-    let world = cv_testkit::World::in_process("prune-declassify-chunks");
+    let world = crate::test_world("prune-declassify-chunks");
     let options = PruneOptions {
         declassify_tokens: vec![
             "alpha".into(),
@@ -1841,7 +1841,7 @@ fn source_declassify_matches_case_and_line_semantics_across_chunks() -> Result<(
 
 #[test]
 fn large_noop_declassification_preserves_raw_duplicate_ids_and_spacing() -> Result<()> {
-    let world = cv_testkit::World::in_process("prune-noop-turn-source");
+    let world = crate::test_world("prune-noop-turn-source");
     let path = world.base.join("source.jsonl");
     let raw = format!("  {{\"type\":\"assistant\",\"sessionId\":\"first\",\"sessionId\":\"old\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":{}}}]}}}}  ",
         serde_json::to_string(&"BENIGN prose\n".repeat(131072))?);
@@ -1866,7 +1866,7 @@ fn large_noop_declassification_preserves_raw_duplicate_ids_and_spacing() -> Resu
 
 #[test]
 fn source_usage_projection_matches_owned_order_and_iterations() -> Result<()> {
-    let world = cv_testkit::World::in_process("prune-usage-projection");
+    let world = crate::test_world("prune-usage-projection");
     for (index, original_ctx) in [
         None,
         Some(Value::Null),
@@ -1908,7 +1908,7 @@ fn source_usage_projection_matches_owned_order_and_iterations() -> Result<()> {
 
 #[test]
 fn staged_usage_projection_preserves_mixed_raw_framing_and_source_guard() -> Result<()> {
-    let world = cv_testkit::World::in_process("prune-usage-staged");
+    let world = crate::test_world("prune-usage-staged");
     let path = world.base.join("source.jsonl");
     let mut row = serde_json::json!({"type":"assistant","message":{"content":[{"type":"text","text":"small"}],"usage":{"input_tokens":900,"output_tokens":7}}});
     let raw = format!("invalid {{ \r\n  {row}  \r\nlast raw row\n");
@@ -1939,7 +1939,7 @@ fn staged_usage_projection_preserves_mixed_raw_framing_and_source_guard() -> Res
 
 #[test]
 fn staged_usage_trim_preserves_whitespace_only_buffers_and_eof_failure() -> Result<()> {
-    let world = cv_testkit::World::in_process("prune-usage-trim-buffers");
+    let world = crate::test_world("prune-usage-trim-buffers");
     let path = world.base.join("source.jsonl");
     let row = serde_json::json!({"type":"assistant","message":{"content":[{"type":"text","text":"small"}],"usage":{"input_tokens":900,"output_tokens":7}}});
     let raw = format!("{}{}{}\r\n", " ".repeat(2 * 65536), row, "\t".repeat(2 * 65536));
@@ -1997,7 +1997,7 @@ fn linked_tool_input_projection_matches_frozen_owned_lookup() -> Result<()> {
         }
         Ok(result)
     }
-    let world = cv_testkit::World::in_process("prune-linked-input");
+    let world = crate::test_world("prune-linked-input");
     let path = world.base.join("source.jsonl");
     let raw = format!(
         "{{\"type\":\"assistant\",\"ignored\":{},\"message\":{{\"content\":[\
@@ -2134,7 +2134,7 @@ fn unicode_sigma_classes_and_chunked_matching_equal_std() -> Result<()> {
 
 #[test]
 fn unicode_declassification_source_preserves_stats_and_pending_branches() -> Result<()> {
-    let world = cv_testkit::World::in_process("prune-unicode-context");
+    let world = crate::test_world("prune-unicode-context");
     let options = PruneOptions {
         declassify_tokens: [
             "",
@@ -2198,7 +2198,7 @@ fn unicode_declassification_source_preserves_stats_and_pending_branches() -> Res
 
 #[test]
 fn sigma_insensitive_tokens_keep_exact_hits_across_context_boundaries() -> Result<()> {
-    let world = cv_testkit::World::in_process("prune-sigma-demand");
+    let world = crate::test_world("prune-sigma-demand");
     let options = PruneOptions {
         declassify_tokens: ["alpha", "βeta", "🙂", "Σ", "A", "", "alpha", "Alpha"]
             .into_iter()
@@ -2382,7 +2382,7 @@ fn native_child_fixture(base: &Path, big: &str) -> Result<(PathBuf, PathBuf, Vec
 
 #[test]
 fn subagent_prune_counts_own_turns_and_emits_standalone_without_touching_parent() -> Result<()> {
-    let world = cv_testkit::World::in_process("prune-native-child");
+    let world = crate::test_world("prune-native-child");
     for size in [4096, 1100000] {
         let base = world.base.join(size.to_string());
         let (parent, child, parent_before) = native_child_fixture(&base, &"x".repeat(size))?;
@@ -2452,7 +2452,7 @@ fn subagent_prune_counts_own_turns_and_emits_standalone_without_touching_parent(
 
 #[test]
 fn subagent_prune_keep_window_and_usage_match_standalone_turn_semantics() -> Result<()> {
-    let world = cv_testkit::World::in_process("prune-native-child-window");
+    let world = crate::test_world("prune-native-child-window");
     let (parent, child, _) = native_child_fixture(&world.base, &"x".repeat(4096))?;
     for (label, keep_range, window) in [("keep", Some((3, None)), None), ("window", None, Some(20))] {
         let opts = PruneOptions {
@@ -2514,7 +2514,7 @@ fn subagent_prune_keep_window_and_usage_match_standalone_turn_semantics() -> Res
 
 #[test]
 fn parent_prune_keeps_embedded_sidechains_out_of_own_turns() -> Result<()> {
-    let world = cv_testkit::World::in_process("prune-embedded-child");
+    let world = crate::test_world("prune-embedded-child");
     let (parent, child, before) = native_child_fixture(&world.base, &"x".repeat(4096))?;
     let embedded = std::fs::read(&child)?;
     let mut mixed = before;

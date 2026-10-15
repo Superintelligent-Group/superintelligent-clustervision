@@ -176,7 +176,7 @@ const SPECS: &[Spec] = &[
 
 /// Claude Code's config dir: `$CLAUDE_CONFIG_DIR`, else `~/.claude`.
 fn claude_config_dir() -> Option<PathBuf> {
-    std::env::var_os("CLAUDE_CONFIG_DIR")
+    cv_core::env::var_os("CLAUDE_CONFIG_DIR")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
         .or_else(|| crate::util::dirs_home().map(|h| h.join(".claude")))
@@ -505,7 +505,7 @@ pub(crate) fn status() -> (Vec<(Scope, usize, PathBuf)>, Policy) {
     }
     let env = POLICY_ENV
         .iter()
-        .map(|k| (*k, std::env::var(k).ok().or_else(|| env_block.get(*k).cloned())))
+        .map(|k| (*k, cv_core::env::var(k).ok().or_else(|| env_block.get(*k).cloned())))
         .collect();
     (
         scopes,

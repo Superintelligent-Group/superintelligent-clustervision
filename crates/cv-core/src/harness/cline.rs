@@ -75,7 +75,7 @@ impl Cline {
     pub fn detect() -> Self {
         Cline {
             roots: task_roots(CLINE_EXT_IDS, ".cline"),
-            sdk_roots: dirs::home_dir()
+            sdk_roots: crate::env::home_dir()
                 .map(|h| super::cline_sdk::session_roots(&h, true))
                 .unwrap_or_default(),
         }
@@ -143,7 +143,7 @@ pub fn task_roots(ext_ids: &[&str], dotdir: &str) -> Vec<PathBuf> {
             }
         }
     }
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = crate::env::home_dir() {
         let tasks = home.join(dotdir).join("tasks");
         if tasks.is_dir() {
             out.push(tasks);
@@ -157,18 +157,18 @@ fn global_storage_roots() -> Vec<PathBuf> {
     let editors = ["Code", "Code - Insiders", "Cursor", "VSCodium"];
     let mut bases: Vec<PathBuf> = Vec::new();
 
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = crate::env::home_dir() {
         // macOS
         bases.push(home.join("Library").join("Application Support"));
         // Linux / XDG
         bases.push(home.join(".config"));
     }
     // Windows
-    if let Some(appdata) = std::env::var_os("APPDATA") {
+    if let Some(appdata) = crate::env::var_os("APPDATA") {
         bases.push(PathBuf::from(appdata));
     }
     // Allow $XDG_CONFIG_HOME to override the Linux default.
-    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
+    if let Some(xdg) = crate::env::var_os("XDG_CONFIG_HOME") {
         bases.push(PathBuf::from(xdg));
     }
 
@@ -1100,7 +1100,7 @@ mod tests {
 
     #[test]
     fn editor_roots_do_not_repeat_default_xdg_stores() {
-        let world = cv_testkit::World::in_process("cline-root-alias");
+        let world = crate::test_world("cline-root-alias");
         let storage = world.home.join(".config/Code/User/globalStorage");
         fs::create_dir_all(storage.join(CLINE_EXT_IDS[0]).join("tasks")).unwrap();
         fs::create_dir_all(storage.join(ROO_EXT_IDS[0]).join("tasks")).unwrap();
@@ -1117,7 +1117,7 @@ mod tests {
 
     #[test]
     fn emitted_model_metadata_round_trips_for_cline_and_roo() {
-        let world = cv_testkit::World::in_process("cline-model-metadata");
+        let world = crate::test_world("cline-model-metadata");
         let mut source = Session::new("source", Harness::Claude);
         source.model = Some("selected-model".into());
         let mut user = Message::new(Role::User);
@@ -1144,7 +1144,7 @@ mod tests {
 
     #[test]
     fn transcript_timestamps_survive_tool_reclassification_and_condensation() {
-        let world = cv_testkit::World::in_process("cline-native-times");
+        let world = crate::test_world("cline-native-times");
         let dir = world.base.join("1717000000000");
         fs::create_dir(&dir).unwrap();
         let records = json!([

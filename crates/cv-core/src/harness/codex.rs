@@ -131,10 +131,10 @@ impl Codex {
     pub fn detect() -> Self {
         // Codex resolves its home as `$CODEX_HOME`, else `~/.codex` (codex-rs/utils/home-dir/src/lib.rs
         // `find_codex_home`); honour the same override so a test home (or a relocated store) is read.
-        let codex_home = std::env::var_os("CODEX_HOME")
+        let codex_home = crate::env::var_os("CODEX_HOME")
             .map(PathBuf::from)
             .filter(|p| !p.as_os_str().is_empty())
-            .or_else(|| dirs::home_dir().map(|h| h.join(".codex")));
+            .or_else(|| crate::env::home_dir().map(|h| h.join(".codex")));
         codex_home.map_or(Codex { roots: Vec::new() }, |c| Codex::with_home(&c))
     }
 
@@ -2405,7 +2405,7 @@ mod tests {
 
     #[test]
     fn native_rows_match_owned_unicode_trim_and_whole_row_utf8_acceptance() {
-        let world = cv_testkit::World::in_process("codex-native-row-acceptance");
+        let world = crate::test_world("codex-native-row-acceptance");
         let path = world.base.join("rollout-unicode.jsonl");
         let giant = "雪\n".repeat(64 * 1024);
         let mut bytes = format!(
@@ -2442,7 +2442,7 @@ mod tests {
 
     #[test]
     fn plain_discovery_bounded_transport_matches_owned_metadata_counts() {
-        let world = cv_testkit::World::in_process("codex-discovery-bounded-transport");
+        let world = crate::test_world("codex-discovery-bounded-transport");
         let path = world.base.join("rollout-discovery.jsonl");
         let giant = "body λ\n".repeat(64 * 1024);
         let records = [
@@ -2494,7 +2494,7 @@ mod tests {
 
     #[test]
     fn rollout_duplicate_projection_fields_match_full_value_dispatch() {
-        let world = cv_testkit::World::in_process("codex-duplicate-projection-fields");
+        let world = crate::test_world("codex-duplicate-projection-fields");
         let path = world.base.join("rollout-duplicates.jsonl");
         let giant = "payload λ".repeat(crate::lazy::INLINE_MAX + 1);
         let lines = [
@@ -2590,7 +2590,7 @@ mod tests {
 
     #[test]
     fn portable_records_match_old_buffered_oracle_in_all_modes() {
-        let world = cv_testkit::World::in_process("codex-portable-oracle");
+        let world = crate::test_world("codex-portable-oracle");
         let giant = "月🌙é\n\t\"\\".repeat(2048);
         let mut records = vec![
             serde_json::json!({"type":"session_meta", "timestamp":"2026-10-01T00:00:00Z",
@@ -2699,7 +2699,7 @@ mod tests {
 
     #[test]
     fn selected_giant_bodies_match_owned_dispatch_in_native_and_positioned_paths() {
-        let world = cv_testkit::World::in_process("codex-selected-bodies");
+        let world = crate::test_world("codex-selected-bodies");
         let giant = "月🌙é\n\t\"\\".repeat(2048);
         let metadata = serde_json::json!({"create_time":1234.5,"turn_id":"turn"});
         for events in [false, true] {
@@ -2785,7 +2785,7 @@ mod tests {
 
     #[test]
     fn portable_corrupt_raw_records_match_old_buffered_rejections() {
-        let world = cv_testkit::World::in_process("codex-portable-corrupt");
+        let world = crate::test_world("codex-portable-corrupt");
         let path = world.base.join("rollout-corrupt.jsonl");
         let mut raw = br#"{"type":"compacted","payload":{"guardian_history":""#.to_vec();
         raw.extend(std::iter::repeat_n(b'x', 8192));
@@ -2824,7 +2824,7 @@ mod tests {
     #[cfg(feature = "sqlite")]
     #[test]
     fn portable_decoded_text_keeps_source_identity_and_rejects_mid_read_changes() {
-        let world = cv_testkit::World::in_process("codex-portable-source-change");
+        let world = crate::test_world("codex-portable-source-change");
         let text = "output\n\"🌙\\".repeat(8192);
         let record = serde_json::json!({"type":"response_item","payload":{
             "type":"function_call_output","call_id":"call","output":text}})
@@ -2869,7 +2869,7 @@ mod tests {
 
     #[test]
     fn portable_native_corpus_matches_old_buffered_oracle() {
-        let _world = cv_testkit::World::in_process("codex-portable-corpus");
+        let _world = crate::test_world("codex-portable-corpus");
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/codex");
         let mut files = 0;
         for entry in WalkDir::new(&root).into_iter().filter_map(|entry| entry.ok()) {
@@ -2913,7 +2913,7 @@ mod tests {
 
     #[test]
     fn buffered_resume_native_corpus_and_options_match_old_exact_suffixes() {
-        let world = cv_testkit::World::in_process("codex_buffered_resume_corpus");
+        let world = crate::test_world("codex_buffered_resume_corpus");
         let adapter = Codex::with_home(&world.home.join(".codex"));
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/codex");
         let mut files = 0;
@@ -2969,7 +2969,7 @@ mod tests {
     #[test]
     fn checked_complete_resume_rejects_old_flavors_and_preserves_current_suffix() {
         use std::io::Write as _;
-        let world = cv_testkit::World::in_process("codex-complete-resume-flavor");
+        let world = crate::test_world("codex-complete-resume-flavor");
         let path = world.base.join("rollout-complete.jsonl");
         fs::write(
             &path,
@@ -3030,7 +3030,7 @@ mod tests {
     #[test]
     fn buffered_resume_replays_pending_usage_partial_eof_and_declines_before_callbacks() {
         use std::io::Write as _;
-        let world = cv_testkit::World::in_process("codex_buffered_resume_pending");
+        let world = crate::test_world("codex_buffered_resume_pending");
         let path = world.base.join("rollout-pending.jsonl");
         let prefix = concat!(
             "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s\",\"model\":\"test\"}}\r\n",
@@ -3103,7 +3103,7 @@ mod tests {
     #[test]
     fn buffered_resume_append_work_excludes_stable_prefix_and_revalidates_detector() {
         use std::io::Write as _;
-        let world = cv_testkit::World::in_process("codex_buffered_resume_append");
+        let world = crate::test_world("codex_buffered_resume_append");
         let path = world.base.join("rollout-append.jsonl");
         let line = "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"hello\"}}\n";
         fs::write(&path, line.repeat(20_000)).unwrap();
@@ -4169,7 +4169,7 @@ mod tests {
     #[cfg(feature = "sqlite")]
     #[test]
     fn zstd_compressed_rollouts_are_discovered_scanned_and_parsed() {
-        let _world = cv_testkit::World::in_process("codex-zstd");
+        let _world = crate::test_world("codex-zstd");
         let lines = fixture_lines("zstd_compressed_rollouts_are_discovered_scanned_and_parsed.jsonl");
         let raw = lines.join("\n") + "\n";
         let zst = zstd::encode_all(raw.as_bytes(), 1).unwrap();

@@ -468,7 +468,7 @@ mod tests {
 
     #[test]
     fn checked_legacy_items_match_owned_full_and_complete_oracles() {
-        let world = cv_testkit::World::in_process("codex-legacy-checked");
+        let world = crate::test_world("codex-legacy-checked");
         let path = world.base.join("rollout-legacy.json");
         let giant = "🌙\n\\\"".repeat(8192);
         let metadata = json!({"create_time":1234.5,"turn_id":"turn"});
@@ -557,7 +557,7 @@ mod tests {
 
     #[test]
     fn checked_legacy_discovery_titles_and_counts_match_owned_oracle() {
-        let world = cv_testkit::World::in_process("codex-legacy-discovery");
+        let world = crate::test_world("codex-legacy-discovery");
         let path = world.base.join("rollout-legacy.json");
         let whitespace = " \t\n\u{2003}".repeat(8192);
         let tail = "🌙\n\\\"".repeat(8192);
@@ -608,7 +608,7 @@ mod tests {
 
     #[test]
     fn checked_legacy_acceptance_stop_and_source_failures_are_preserved() {
-        let world = cv_testkit::World::in_process("codex-legacy-acceptance");
+        let world = crate::test_world("codex-legacy-acceptance");
         let path = world.base.join("rollout-legacy.json");
         let valid_prefix = r#"{"items":[{"type":"message","content":"visible"}],"ignored":"#;
         let deep = format!("{valid_prefix}{}0{} }}", "[".repeat(130), "]".repeat(130));

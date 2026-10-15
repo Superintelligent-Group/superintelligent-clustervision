@@ -158,7 +158,7 @@ fn data_dir() -> Option<PathBuf> {
 /// `opencode.db` (release channels), else the newest `opencode-<channel>.db`.
 #[cfg(feature = "sqlite")]
 fn resolve_db(data: &Path) -> Option<PathBuf> {
-    if let Some(v) = std::env::var_os("OPENCODE_DB") {
+    if let Some(v) = crate::env::var_os("OPENCODE_DB") {
         if v == ":memory:" {
             return None;
         }
@@ -2304,7 +2304,7 @@ mod tests {
 
     #[test]
     fn projected_v2_shell_matches_owned_command_output_priority_and_canonical_fallback() {
-        let world = cv_testkit::World::in_process("opencode-shell-projection");
+        let world = crate::test_world("opencode-shell-projection");
         let path = world.base.join("shell.json");
         let body = "escaped\n\" λ🌙".repeat(6000);
         let command = serde_json::to_string(&body).unwrap();
@@ -2388,7 +2388,7 @@ mod tests {
     #[cfg(feature = "sqlite")]
     #[test]
     fn sqlite_v2_shell_projection_preserves_modes_corpus_and_source_errors() {
-        let world = cv_testkit::World::in_process("opencode-shell-db");
+        let world = crate::test_world("opencode-shell-db");
         let db = world.base.join("opencode.db");
         let connection = rusqlite::Connection::open(&db).unwrap();
         connection.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE session_v2(id TEXT PRIMARY KEY,directory TEXT,title TEXT,time_created INTEGER,time_updated INTEGER); CREATE TABLE session_message(id TEXT PRIMARY KEY,session_id TEXT,type TEXT,seq INTEGER,data TEXT); INSERT INTO session_v2 VALUES('session','/synthetic','shell',1,1);").unwrap();

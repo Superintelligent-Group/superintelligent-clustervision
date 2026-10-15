@@ -196,7 +196,7 @@ fn fixture(base: &Path) -> Result<Session> {
 
 #[test]
 fn checked_openclaw_matches_frozen_records_index_and_all_modes() -> Result<()> {
-    let world = cv_testkit::World::in_process("openclaw-checked-wire");
+    let world = crate::test_world("openclaw-checked-wire");
     let session = fixture(&world.base)?;
     for mode in ThinkingMode::ALL {
         let options = EmitOptions {
@@ -231,7 +231,7 @@ fn checked_openclaw_matches_frozen_records_index_and_all_modes() -> Result<()> {
 
 #[test]
 fn checked_openclaw_borrowed_wrapper_matches_replay_definition_and_none() -> Result<()> {
-    let world = cv_testkit::World::in_process("openclaw-checked-deferred");
+    let world = crate::test_world("openclaw-checked-deferred");
     let session = fixture(&world.base)?;
     let Block::ToolUse { input, .. } = &session.messages[1].content[4] else {
         unreachable!()
@@ -255,7 +255,7 @@ fn checked_openclaw_borrowed_wrapper_matches_replay_definition_and_none() -> Res
 
 #[test]
 fn checked_openclaw_title_policy_matches_explicit_and_first_user_legacy() -> Result<()> {
-    let world = cv_testkit::World::in_process("openclaw-title-policy");
+    let world = crate::test_world("openclaw-title-policy");
     for title in [None, Some(""), Some("   "), Some("explicit λ")] {
         for meaningful in [false, true] {
             let mut session = Session::new("source", Harness::Claude);
@@ -308,7 +308,7 @@ fn checked_openclaw_title_policy_matches_explicit_and_first_user_legacy() -> Res
 
 #[test]
 fn checked_openclaw_source_failure_preserves_transcript_and_index_even_for_ignored_fields() -> Result<()> {
-    let world = cv_testkit::World::in_process("openclaw-source-guard");
+    let world = crate::test_world("openclaw-source-guard");
     for ignored in [false, true] {
         let mut session = fixture(&world.base)?;
         if ignored {
@@ -339,7 +339,7 @@ fn checked_openclaw_source_failure_preserves_transcript_and_index_even_for_ignor
 #[test]
 fn checked_openclaw_late_source_failure_cannot_publish_staged_records() -> Result<()> {
     use std::io::Write;
-    let world = cv_testkit::World::in_process("openclaw-source-race");
+    let world = crate::test_world("openclaw-source-race");
     let session = fixture(&world.base)?;
     let source = world.base.join("input.json");
     let replacement = world.base.join("replacement.json");
@@ -389,7 +389,7 @@ fn checked_openclaw_late_source_failure_cannot_publish_staged_records() -> Resul
 #[test]
 fn checked_openclaw_complete_preparation_preserves_ir_wire_report_and_late_failure() -> Result<()> {
     use crate::stream::ParseOptions;
-    let world = cv_testkit::World::in_process("openclaw-complete-preparation");
+    let world = crate::test_world("openclaw-complete-preparation");
     let source = world.base.join("source.jsonl");
     let rows = [
         json!({"type":"session","version":4,"cwd":"/synthetic","timestamp":"2026-10-12T12:00:00Z","parentSession":"parent"}),
@@ -460,7 +460,7 @@ fn checked_openclaw_complete_preparation_preserves_ir_wire_report_and_late_failu
 
 #[test]
 fn tool_export_preserves_every_result_structured_details_and_images() -> Result<()> {
-    let world = cv_testkit::World::in_process("openclaw-tool-export");
+    let world = crate::test_world("openclaw-tool-export");
     let mut source = Session::new("tools", Harness::Claude);
     source.created_at = Some("2026-10-14T12:00:00Z".parse()?);
     let mut tool = Message::new(Role::Tool);
@@ -512,7 +512,7 @@ fn tool_export_preserves_every_result_structured_details_and_images() -> Result<
 #[test]
 fn native_complete_export_preserves_records_branch_links_and_one_compaction_pair() -> Result<()> {
     use crate::stream::ParseOptions;
-    let world = cv_testkit::World::in_process("openclaw-native-complete-export");
+    let world = crate::test_world("openclaw-native-complete-export");
     let original =
         fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/openclaw/branchy-v4.jsonl"))?;
     let mut rows = original

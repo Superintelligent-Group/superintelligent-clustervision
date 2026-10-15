@@ -94,23 +94,18 @@ struct Cache {
 /// Bump when discovery changes the interpretation of unchanged source bytes.
 #[cfg(feature = "sqlite")]
 pub(crate) const INTERPRETATION_VERSION: u32 = 4;
-#[derive(Default)]
-struct CacheStore {
-    // Retain the current catalog as before; other homes survive only while operations use them.
-    current: Option<(PathBuf, Arc<Cache>)>,
-    active: HashMap<PathBuf, std::sync::Weak<Cache>>,
-}
-static CACHE: OnceLock<RwLock<CacheStore>> = OnceLock::new();
+/// Every live cache by catalog. Each environment ([`crate::env`]) retains its current catalog's;
+/// other homes survive only while operations use them.
+static CACHE: OnceLock<RwLock<HashMap<PathBuf, std::sync::Weak<Cache>>>> = OnceLock::new();
 fn cache_for(path: &Path) -> Arc<Cache> {
-    let mut caches = CACHE.get_or_init(Default::default).write().unwrap();
-    caches.active.retain(|_, cache| cache.strong_count() != 0);
-    if let Some(cache) = caches.active.get(path).and_then(std::sync::Weak::upgrade) {
-        caches.current = Some((path.to_path_buf(), cache.clone()));
-        return cache;
-    }
-    let cache = Arc::new(load());
-    caches.active.insert(path.to_path_buf(), Arc::downgrade(&cache));
-    caches.current = Some((path.to_path_buf(), cache.clone()));
+    let mut active = CACHE.get_or_init(Default::default).write().unwrap();
+    active.retain(|_, cache| cache.strong_count() != 0);
+    let cache = active.get(path).and_then(std::sync::Weak::upgrade).unwrap_or_else(|| {
+        let cache = Arc::new(load());
+        active.insert(path.to_path_buf(), Arc::downgrade(&cache));
+        cache
+    });
+    *crate::env::Env::current().retained().lock().unwrap() = Some(Arc::new((path.to_path_buf(), cache.clone())));
     cache
 }
 #[cfg(all(test, feature = "sqlite"))]
@@ -119,13 +114,7 @@ fn current_cache() -> Arc<Cache> {
 }
 fn existing_cache(path: &Path) -> Option<Arc<Cache>> {
     let key = read::catalog_key(path);
-    let caches = CACHE.get()?.read().ok()?;
-    if let Some((path, cache)) = &caches.current {
-        if *path == key {
-            return Some(cache.clone());
-        }
-    }
-    caches.active.get(&key)?.upgrade()
+    CACHE.get()?.read().ok()?.get(&key)?.upgrade()
 }
 
 #[cfg(feature = "sqlite")]
@@ -147,7 +136,7 @@ fn clear_invalidated(cache: &Cache) {
 
 /// One-time nudge about the pre-0.9.12 JSON cache this module replaced.
 fn note_legacy_json() {
-    let Some(path) = dirs::cache_dir().map(|d| d.join("clustervision").join("discover.json")) else {
+    let Some(path) = crate::env::cache_dir().map(|d| d.join("clustervision").join("discover.json")) else {
         return;
     };
     if path.exists() {
@@ -596,7 +585,7 @@ mod tests {
 
     #[test]
     fn auxiliary_scan_baselines_invalidate_changes_and_preserve_raced_stamps() {
-        let world = cv_testkit::World::in_process("scan-auxiliary-baselines");
+        let world = crate::test_world("scan-auxiliary-baselines");
         let path = world.base.join("source");
         let sidecar = world.base.join("state");
         std::fs::write(&path, "unchanged primary").unwrap();
@@ -642,7 +631,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn continuation_checks_auxiliary_identity_and_does_not_publish_raced_passes() {
-        let w = cv_testkit::World::in_process("scan-continuation-freshness");
+        let w = crate::test_world("scan-continuation-freshness");
         let path = w.base.join("s.jsonl");
         let aux = w.base.join("dependency");
         std::fs::write(&path, "first\n").unwrap();
@@ -736,7 +725,7 @@ mod tests {
 
     #[test]
     fn lazy_payload_preserves_demand_guards_count_updates_and_malformed_fallback() {
-        let w = cv_testkit::World::in_process("scan-lazy");
+        let w = crate::test_world("scan-lazy");
         let mut conn = crate::catalog::open_db().unwrap();
         let paths: Vec<_> = ["valid", "invalid", "stale", "invalid-reads"]
             .map(|name| w.base.join(name))
@@ -833,7 +822,7 @@ mod tests {
 
     #[test]
     fn interpretation_upgrade_rejects_persisted_and_process_scan_rows() {
-        let w = cv_testkit::World::in_process("scan-interpretation");
+        let w = crate::test_world("scan-interpretation");
         let path = w.base.join("unchanged.jsonl");
         std::fs::write(&path, "unchanged").unwrap();
         let old = SessionRef {
@@ -915,7 +904,7 @@ mod tests {
     }
     #[test]
     fn concurrent_count_update_wins_over_loaded_sql_snapshot() {
-        let world = cv_testkit::World::in_process("scan-admission-count");
+        let world = crate::test_world("scan-admission-count");
         let path = world.base.join("source");
         std::fs::write(&path, "metadata").unwrap();
         let reference = SessionRef::new("counted", crate::Harness::Claude, path.clone());
@@ -938,7 +927,7 @@ mod tests {
 
     #[test]
     fn failed_flush_retries_and_prunes_newly_vanished_entries() {
-        let w = cv_testkit::World::in_process("scan-persist-retry");
+        let w = crate::test_world("scan-persist-retry");
         let path = w.base.join("retry.jsonl");
         std::fs::write(&path, "data").unwrap();
         let r = SessionRef {
@@ -997,7 +986,7 @@ mod tests {
 
     #[test]
     fn discovery_mutation_keeps_original_identity_and_forces_rescan() {
-        let w = cv_testkit::World::in_process("scan-mutation");
+        let w = crate::test_world("scan-mutation");
         let path = w.base.join("raced.jsonl");
         std::fs::write(&path, "before").unwrap();
         let r = SessionRef {

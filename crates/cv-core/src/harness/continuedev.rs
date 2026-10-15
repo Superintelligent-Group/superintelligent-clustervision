@@ -57,9 +57,9 @@ pub struct Continue {
 
 impl Continue {
     pub fn detect() -> Self {
-        let root = std::env::var_os("CONTINUE_GLOBAL_DIR")
+        let root = crate::env::var_os("CONTINUE_GLOBAL_DIR")
             .map(PathBuf::from)
-            .or_else(|| dirs::home_dir().map(|h| h.join(".continue")));
+            .or_else(|| crate::env::home_dir().map(|h| h.join(".continue")));
         let sessions = root.map(|r| r.join("sessions")).filter(|p| p.exists());
         Continue { sessions }
     }
@@ -791,7 +791,7 @@ mod tests {
 
     #[test]
     fn export_preserves_existing_files_when_index_is_unusable() {
-        let world = cv_testkit::World::in_process("continue-index-export-error");
+        let world = crate::test_world("continue-index-export-error");
         let dir = world.base.join("sessions");
         fs::create_dir(&dir).unwrap();
         let transcript = dir.join("fixed.json");
@@ -939,7 +939,7 @@ mod tests {
 
     #[test]
     fn encoded_arguments_survive_minimum_message_deferred_staging() {
-        let world = cv_testkit::World::in_process("continue-encoded-minimum-staging");
+        let world = crate::test_world("continue-encoded-minimum-staging");
         let path = world.base.join("session.json");
         let argument = serde_json::to_string(&json!({"payload":"x".repeat(8192)})).unwrap();
         let history = (0..3).map(|i| json!({"message":{"role":"assistant","usage":{"model":(i == 2).then_some("present")},"toolCalls":[{"id":i.to_string(),"function":{"name":"read","arguments":argument}}]}})).collect::<Vec<_>>();
@@ -1400,7 +1400,7 @@ mod tests {
 
     #[test]
     fn discovery_scan_matches_whole_value_metadata() {
-        let _world = cv_testkit::World::in_process("continue-scan");
+        let _world = crate::test_world("continue-scan");
         let dir = std::env::temp_dir().join(format!("cv-continue-scan-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("s.json");
@@ -1459,7 +1459,7 @@ mod tests {
 
     #[test]
     fn discovery_scan_preserves_index_precedence_and_unindexed_fallback() {
-        let _world = cv_testkit::World::in_process("continue-scan-index");
+        let _world = crate::test_world("continue-scan-index");
         let dir = std::env::temp_dir().join(format!("cv-continue-index-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         fs::write(

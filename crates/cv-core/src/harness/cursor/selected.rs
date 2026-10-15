@@ -518,7 +518,7 @@ mod tests {
     }
     #[test]
     fn retained_giant_identity_and_model_match_owned_ide_without_dropping_bubble() {
-        let world = cv_testkit::World::in_process("cursor-giant-metadata");
+        let world = crate::test_world("cursor-giant-metadata");
         let id = "bubble-🌙".repeat(crate::lazy::INLINE_MAX);
         let model = "native-model-🌙".repeat(crate::lazy::INLINE_MAX);
         assert!(id.len() > crate::lazy::INLINE_MAX && model.len() > crate::lazy::INLINE_MAX);
@@ -536,7 +536,7 @@ mod tests {
 
     #[test]
     fn facts_match_owned_ide_messages_doctor_modes_and_affordances() {
-        let world = cv_testkit::World::in_process("cursor-ide-facts");
+        let world = crate::test_world("cursor-ide-facts");
         let big = "日本語\n".repeat(8192);
         let root = json!({"name":"composer","createdAt":1,"lastUpdatedAt":2,"unifiedMode":"agent","subagentInfo":{"parentComposerId":"parent","toolCallId":"spawn","subagentTypeName":"researcher","ignored":big},"modelConfig":{"modelName":"fallback","ignored":big},"fullConversationHeadersOnly":[{"bubbleId":"user"},{"bubbleId":"assistant"}],"conversation":[{"type":1,"text":"must not emit"}],"ignored":big});
         let user = json!({"bubbleId":"user","type":1,"text":"question","unifiedMode":99});
@@ -624,7 +624,7 @@ mod tests {
     }
     #[test]
     fn facts_preserve_array_authority_argument_fallback_and_lexical_results() {
-        let world = cv_testkit::World::in_process("cursor-ide-facts-edges");
+        let world = crate::test_world("cursor-ide-facts-edges");
         let mut bubbles = Vec::new();
         for raw in ["true", "null", "17", "\"literal\"", " ", "{"] {
             bubbles.push(json!({"type":2,"toolFormerData":{"rawArgs":raw,"params":"[1,2]","result":{"z":2,"a":1},"status":"error"},"modelInfo":{"modelName":null},"modelType":"must-not-fallback"}));
@@ -688,7 +688,7 @@ mod tests {
     }
     #[test]
     fn rich_lazy_acceptance_omits_invalid_external_fields_without_shifting_owned_output() {
-        let world = cv_testkit::World::in_process("cursor-rich-lazy-validation");
+        let world = crate::test_world("cursor-rich-lazy-validation");
         let root = r#"{"name":"title","modelConfig":{"modelName":"fallback"},"fullConversationHeadersOnly":[{"bubbleId":"first"},{"bubbleId":"bad-escape"},{"bubbleId":"bad-number"},{"bubbleId":"bad-type"},{"bubbleId":"missing"},{"bubbleId":"last"}]}"#;
         let (conn,r)=fixture(&world.base,root,&[
             ("first",br#"{"bubbleId":"first","type":1,"text":"first","unifiedMode":99}"#),
@@ -712,7 +712,7 @@ mod tests {
 
     #[test]
     fn cold_wal_adapter_preserves_original_sidecars_and_journal_guard() {
-        let world = cv_testkit::World::in_process("cursor-ide-cold-wal");
+        let world = crate::test_world("cursor-ide-cold-wal");
         let root = json!({"conversation":[{"type":1,"text":"日本語\n".repeat(4096)}]});
         let (conn, r) = fixture(&world.base, &root.to_string(), &[]);
         conn.execute_batch("PRAGMA journal_mode=WAL").unwrap();
@@ -749,7 +749,7 @@ mod tests {
     }
     #[test]
     fn ide_facts_guard_later_demands_and_intentional_stop() {
-        let world = cv_testkit::World::in_process("cursor-ide-facts-guard");
+        let world = crate::test_world("cursor-ide-facts-guard");
         let root = json!({"conversation":[{"type":1,"text":"日本語\n".repeat(4096)}]});
         let (conn, r) = fixture(&world.base, &root.to_string(), &[]);
         let mut sink = CollectSink::default();

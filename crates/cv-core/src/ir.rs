@@ -1348,7 +1348,7 @@ pub fn human_bytes(n: u64) -> String {
 /// `~/dev/x` for a path under `$HOME`, the full path otherwise. `$HOME` (not `dirs::home_dir`) so a
 /// test or a daemon running under a redirected home agrees with the CLI.
 pub fn home_rel(p: &std::path::Path) -> String {
-    if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
+    if let Some(home) = crate::env::var_os("HOME").map(std::path::PathBuf::from) {
         if let Ok(rest) = p.strip_prefix(&home) {
             return format!("~/{}", rest.display());
         }
@@ -1388,7 +1388,7 @@ mod tests {
 
     #[test]
     fn full_materialization_rejects_missing_span_sources_without_erasing_text() {
-        let world = cv_testkit::World::in_process("materialize-span-failure");
+        let world = crate::test_world("materialize-span-failure");
         let path = world.base.join("gone.txt");
         let span = crate::Text::Span(crate::Span {
             source: None,
@@ -1415,7 +1415,7 @@ mod tests {
 
     #[test]
     fn checked_text_materialization_preserves_lazy_arguments_and_reports_failed_text() {
-        let world = cv_testkit::World::in_process("checked-message-text");
+        let world = crate::test_world("checked-message-text");
         let path = world.base.join("text.json");
         let body = "exact🌙\n\"".repeat(1024);
         let wire = serde_json::to_vec(&body).unwrap();

@@ -127,7 +127,7 @@ impl Adapter for RootedExport {
 /// enumerating thousands of conversations across multi-MB files takes seconds).
 pub(crate) fn export_dirs() -> Vec<PathBuf> {
     let mut dirs = crate::config::load().exports;
-    if let Ok(spec) = std::env::var("CV_EXPORTS") {
+    if let Ok(spec) = crate::env::var("CV_EXPORTS") {
         dirs.extend(spec.split(':').filter(|s| !s.is_empty()).map(PathBuf::from));
     }
     dirs.retain(|p| p.exists());

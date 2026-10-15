@@ -219,7 +219,7 @@ mod tests {
 
     #[test]
     fn projected_heads_match_value_validation_and_physical_line_limits() {
-        let w = cv_testkit::World::in_process("fork-head-projection");
+        let w = crate::test_world("fork-head-projection");
         let path = w.base.join("head.jsonl");
         let uuid = r#"{"uuid":"shared","timestamp":"2026-09-19T00:00:00Z"}"#;
         let queued = r#"{"timestamp":"2026-09-19T01:00:00Z"}"#;

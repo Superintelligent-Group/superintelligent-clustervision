@@ -657,7 +657,7 @@ mod tests {
 
     #[test]
     fn materialized_read_sets_keep_original_text_and_argument_guards() {
-        let world = cv_testkit::World::in_process("watch-source-guards");
+        let world = crate::test_world("watch-source-guards");
         let path = world.home.join("source.json");
         let sidecar = world.home.join("optional-meta.json");
         let body = serde_json::to_vec(&"text".repeat(4096)).unwrap();

@@ -227,7 +227,7 @@ mod tests {
     use super::*;
     #[test]
     fn projected_discovery_preserves_header_count_and_whole_utf8_policy() {
-        let world = cv_testkit::World::in_process("goose-legacy-discovery");
+        let world = crate::test_world("goose-legacy-discovery");
         let path = world.base.join("legacy.jsonl");
         let observe = |r: Option<SessionRef>| serde_json::to_value(r).unwrap();
         let cases: Vec<Vec<u8>> = vec![
@@ -322,7 +322,7 @@ mod tests {
 
     #[test]
     fn selected_stream_preserves_legacy_acceptance_order_and_rich_demand() {
-        let world = cv_testkit::World::in_process("goose-legacy-stream");
+        let world = crate::test_world("goose-legacy-stream");
         let path = world.base.join("legacy.jsonl");
         let giant = "雪\n\"".repeat(30_000);
         let header =
@@ -386,7 +386,7 @@ mod tests {
 
     #[test]
     fn selected_stream_retains_checked_bodies_and_stops_before_later_records() {
-        let world = cv_testkit::World::in_process("goose-legacy-stop");
+        let world = crate::test_world("goose-legacy-stop");
         let path = world.base.join("legacy.jsonl");
         let giant = "\n雪".repeat(30_000);
         let first = serde_json::json!({"role":"assistant","content":[{"type":"text","text":giant},{"type":"toolRequest","id":"tool","toolCall":{"value":{"name":"shell","arguments":{"command":giant}}}}]});

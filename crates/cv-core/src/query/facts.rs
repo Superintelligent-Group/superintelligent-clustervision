@@ -885,7 +885,7 @@ mod tests {
     #[cfg(feature = "sqlite")]
     #[test]
     fn limited_window_publishes_only_demanded_counts_and_reuses_them() {
-        let world = cv_testkit::World::in_process("query_window_work");
+        let world = crate::test_world("query_window_work");
         let refs: Vec<_> = (0..3)
             .map(|i| {
                 let block = if i == 0 {
@@ -956,7 +956,7 @@ mod tests {
 
     #[test]
     fn limited_window_reads_needed_candidates_and_ignores_lower_ranked_errors() {
-        let world = cv_testkit::World::in_process("query_window_errors");
+        let world = crate::test_world("query_window_errors");
         let good = world.write_session(
             "good",
             &[serde_json::json!({
@@ -990,7 +990,7 @@ mod tests {
 
     #[test]
     fn limited_window_presence_preserves_ascending_preselection_and_boolean_shortcircuit() {
-        let world = cv_testkit::World::in_process("query_window_presence");
+        let world = crate::test_world("query_window_presence");
         let missing = missing_source();
         let path = world.home.join("present-unreadable.jsonl");
         std::fs::create_dir(&path).unwrap();
@@ -1015,7 +1015,7 @@ mod tests {
 
     #[test]
     fn parallel_filter_keeps_input_order_and_does_not_prune_on_error() {
-        let world = cv_testkit::World::in_process("parallel_query_order");
+        let world = crate::test_world("parallel_query_order");
         let refs: Vec<_> = (0..35)
             .map(|i| {
                 let id = format!("ordered-{i}");
@@ -1105,7 +1105,7 @@ mod tests {
 
     #[test]
     fn streamed_facts_match_collection_with_late_metadata_and_boolean_queries() {
-        let world = cv_testkit::World::in_process("streamed_query_facts");
+        let world = crate::test_world("streamed_query_facts");
         let payload = "rich escaped\n\"🌙\"".repeat(400);
         let path = world.write_session("facts", &[
             serde_json::json!({"type":"assistant","uuid":"early","message":{"role":"assistant", "model":"EarlyModel",
@@ -1241,7 +1241,7 @@ mod tests {
 
     #[test]
     fn forest_string_equality_preserves_whole_values() {
-        let world = cv_testkit::World::in_process("query-exact-forest");
+        let world = crate::test_world("query-exact-forest");
         let parent = world.write_session(
             "forest",
             &[serde_json::json!({"type":"user","message":{"role":"user","content":"parent"}})],
@@ -1362,7 +1362,7 @@ mod tests {
 
     #[test]
     fn streamed_compaction_facts_preserve_full_detector_validation() {
-        let world = cv_testkit::World::in_process("streamed_compaction_validation");
+        let world = crate::test_world("streamed_compaction_validation");
         let path = world.transcript("invalid-sidecar");
         // A record that is not a serde Value (here an overflowing number in a sidecar nobody
         // reads) is rejected by every demand, so the lazy IR and the detector agree.
@@ -1382,7 +1382,7 @@ mod tests {
     }
     #[test]
     fn unreadable_json_facts_and_filter_errors_are_not_negative_matches() {
-        let world = cv_testkit::World::in_process("query_json_failures");
+        let world = crate::test_world("query_json_failures");
         let path = world.home.join("input.json");
         let body = r#"{"file_path":"a.rs","command":"git commit","plan":["step"]}"#;
         std::fs::write(&path, body).unwrap();

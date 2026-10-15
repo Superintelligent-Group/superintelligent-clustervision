@@ -100,9 +100,9 @@ pub struct Kimi {
 
 impl Kimi {
     pub fn detect() -> Self {
-        let root = std::env::var_os("KIMI_SHARE_DIR")
+        let root = crate::env::var_os("KIMI_SHARE_DIR")
             .map(PathBuf::from)
-            .or_else(|| dirs::home_dir().map(|h| h.join(".kimi")))
+            .or_else(|| crate::env::home_dir().map(|h| h.join(".kimi")))
             .filter(|p| p.exists());
         match root {
             Some(r) => Kimi::with_home(&r),
@@ -1656,7 +1656,7 @@ mod tests {
 
     #[test]
     fn discovery_refreshes_titles_registry_rotations_and_wire_without_live_append() -> Result<()> {
-        let world = cv_testkit::World::in_process("kimi_aux_discovery");
+        let world = crate::test_world("kimi_aux_discovery");
         let context = crate::discover_cache::read::Context::current();
         let _scope = context.enter();
         let home = world.home.join(".kimi");
@@ -1714,7 +1714,7 @@ mod tests {
 
     #[test]
     fn checked_discovery_kimi_matches_owned_segments_titles_and_wire_bounds() -> Result<()> {
-        let world = cv_testkit::World::in_process("kimi-discovery-selected");
+        let world = crate::test_world("kimi-discovery-selected");
         let dir = world.base.join("session");
         fs::create_dir_all(&dir)?;
         let live = dir.join("context.jsonl");
@@ -1812,7 +1812,7 @@ mod tests {
 
     #[test]
     fn growing_call_name_checkpoints_preserve_late_and_duplicate_result_suffixes() -> Result<()> {
-        let world = cv_testkit::World::in_process("kimi-growing-call-state");
+        let world = crate::test_world("kimi-growing-call-state");
         let dir = world.home.join("session");
         fs::create_dir_all(&dir)?;
         let names = (0..96)
@@ -1927,7 +1927,7 @@ mod tests {
 
     #[test]
     fn resume_corpus_replays_usage_rotation_prefixes_and_exact_suffixes() {
-        let world = cv_testkit::World::in_process("kimi_resume_corpus");
+        let world = crate::test_world("kimi_resume_corpus");
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/kimi");
         let mut files = 0;
         let mut resumes = 0;
@@ -2004,7 +2004,7 @@ mod tests {
     #[test]
     fn resume_anchors_replay_large_pending_messages_and_usage_without_payload_state() {
         use std::io::Write as _;
-        let world = cv_testkit::World::in_process("kimi_pending_anchor");
+        let world = crate::test_world("kimi_pending_anchor");
         let home = world.home.join(".kimi");
         let dir = home.join("sessions/hash/session");
         fs::create_dir_all(&dir).unwrap();
@@ -2068,7 +2068,7 @@ mod tests {
     #[test]
     fn resume_rotated_prefix_branch_and_partial_eof_match_old_acceptance() {
         use std::io::Write as _;
-        let world = cv_testkit::World::in_process("kimi_rotated_anchor");
+        let world = crate::test_world("kimi_rotated_anchor");
         let home = world.home.join(".kimi");
         let dir = home.join("sessions/hash/session");
         fs::create_dir_all(&dir).unwrap();
@@ -2250,7 +2250,7 @@ mod tests {
 
     #[test]
     fn wire_spans_preserve_all_stream_modes() {
-        let world = cv_testkit::World::in_process("kimi-wire-modes");
+        let world = crate::test_world("kimi-wire-modes");
         let dir = world.base.join("session");
         fs::create_dir_all(&dir).unwrap();
         fs::write(
@@ -2335,7 +2335,7 @@ mod tests {
 
     #[test]
     fn model_config_uses_top_level_toml_semantics_in_session_headers() -> Result<()> {
-        let world = cv_testkit::World::in_process("kimi_toml_model");
+        let world = crate::test_world("kimi_toml_model");
         let home = world.home.join(".kimi");
         let session = home.join("sessions/hash/session");
         fs::create_dir_all(&session)?;
@@ -2800,7 +2800,7 @@ mod tests {
     /// session's own format; it parses as its own session under the parent.
     #[test]
     fn subagent_discovery_reuses_histories_and_refreshes_auxiliary_and_parent_metadata() -> Result<()> {
-        let world = cv_testkit::World::in_process("kimi-subagent-cache");
+        let world = crate::test_world("kimi-subagent-cache");
         let context = crate::discover_cache::read::Context::current();
         let _scope = context.enter();
         let parent = world.home.join("parent");

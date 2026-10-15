@@ -52,8 +52,9 @@ jobs:
       - name: Build (default features)
         run: cargo build --workspace --all-targets
 
-      # One process per test, so the testkit's process-wide environment lock stops serializing
-      # the suite. nextest does not run doctests; the second line keeps them.
+      # One process per test (a test that hangs or aborts takes only itself down). nextest does
+      # not run doctests; the second line keeps them.
+
       - name: Install cargo-nextest
         run: |
           curl --proto '=https' --tlsv1.2 -LsSf -o "$RUNNER_TEMP/nextest.tgz" \

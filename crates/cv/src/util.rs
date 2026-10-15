@@ -339,7 +339,7 @@ pub(crate) fn dim_cwd(p: Option<&Path>) -> String {
 }
 
 pub(crate) fn dirs_home() -> Option<std::path::PathBuf> {
-    std::env::var_os("HOME").map(std::path::PathBuf::from)
+    cv_core::env::var_os("HOME").map(std::path::PathBuf::from)
 }
 
 // ---------- compose-family reports ----------

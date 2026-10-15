@@ -199,7 +199,7 @@ mod tests {
     }
 
     fn check(path: &Path, bytes: &[u8]) {
-        let world = cv_testkit::World::in_process("claude-discovery-oracle");
+        let world = crate::test_world("claude-discovery-oracle");
         let file = world.base.join(path.file_name().unwrap());
         fs::write(&file, bytes).unwrap();
         assert_eq!(
@@ -212,7 +212,7 @@ mod tests {
 
     #[test]
     fn continuation_replays_partial_and_valid_unterminated_records() {
-        let world = cv_testkit::World::in_process("claude-metadata-resume-tails");
+        let world = crate::test_world("claude-metadata-resume-tails");
         let path = world.base.join("s.jsonl");
         let prefix = "{\"type\":\"summary\",\"cwd\":\"/metadata\",\"timestamp\":\"2026-02-01T00:00:00Z\"}\n{\"type\":\"ai-title\",\"aiTitle\":\"AI\"}\n";
         let tails = [
@@ -276,7 +276,7 @@ mod tests {
     #[test]
     fn cached_continuation_is_persisted_and_rejects_rewrites_replacements_and_corruption() {
         use std::io::Write;
-        let world = cv_testkit::World::in_process("claude-metadata-cache-resume");
+        let world = crate::test_world("claude-metadata-cache-resume");
         let path = world.base.join("s.jsonl");
         let prefix = format!("{{\"type\":\"summary\",\"cwd\":\"/metadata\"}}\n{{\"type\":\"assistant\",\"message\":{{\"content\":\"{}\"}}}}\n", "ignored".repeat(32768));
         fs::write(&path, &prefix).unwrap();
@@ -353,7 +353,7 @@ mod tests {
     #[test]
     fn cached_checkpoint_is_independent_of_counts_and_rejects_invalid_states() {
         use std::io::Write;
-        let world = cv_testkit::World::in_process("claude-metadata-state-guards");
+        let world = crate::test_world("claude-metadata-state-guards");
         let path = world.base.join("s.jsonl");
         let mut text = String::from("{\"type\":\"ai-title\",\"aiTitle\":\"initial\"}\n");
         fs::write(&path, &text).unwrap();

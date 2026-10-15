@@ -68,10 +68,10 @@ pub struct Hit {
 /// existing `~/.claurdvoyant` (kept only if the new dir hasn't been created) — so a previously-built
 /// index/embedding store isn't orphaned by the rename.
 pub fn home_dir() -> PathBuf {
-    if let Some(v) = std::env::var_os("CLUSTERVISION_HOME").or_else(|| std::env::var_os("CLAURDVOYANT_HOME")) {
+    if let Some(v) = cv_core::env::var_os("CLUSTERVISION_HOME").or_else(|| cv_core::env::var_os("CLAURDVOYANT_HOME")) {
         return PathBuf::from(v);
     }
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = cv_core::env::home_dir() else {
         return PathBuf::from(".");
     };
     let new = home.join(".clustervision");

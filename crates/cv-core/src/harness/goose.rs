@@ -157,15 +157,15 @@ impl Goose {
 /// exists (so discovery degrades to empty rather than erroring on machines without Goose).
 fn sessions_dir() -> Option<PathBuf> {
     // 1. Explicit test/CI override used by Goose itself: `$GOOSE_PATH_ROOT/data`.
-    if let Some(root) = std::env::var_os("GOOSE_PATH_ROOT") {
+    if let Some(root) = crate::env::var_os("GOOSE_PATH_ROOT") {
         let p = PathBuf::from(root).join("data").join("sessions");
         if p.exists() {
             return Some(p);
         }
     }
-    let home = dirs::home_dir();
+    let home = crate::env::home_dir();
     // 2. XDG (honour an explicit $XDG_DATA_HOME even on macOS for portability).
-    if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
+    if let Some(xdg) = crate::env::var_os("XDG_DATA_HOME") {
         let p = PathBuf::from(xdg).join("goose").join("sessions");
         if p.exists() {
             return Some(p);
@@ -180,7 +180,7 @@ fn sessions_dir() -> Option<PathBuf> {
     }
     // Windows: `%APPDATA%\Block\goose\data\sessions` (etcetera 0.11's Windows strategy yields one
     // vendor segment); older etcetera doubled it (`Block\Block\goose`). Probe both.
-    if let Some(appdata) = std::env::var_os("APPDATA") {
+    if let Some(appdata) = crate::env::var_os("APPDATA") {
         let appdata = PathBuf::from(appdata);
         candidates.push(appdata.join("Block").join("goose").join("data").join("sessions"));
         candidates.push(
@@ -1659,7 +1659,7 @@ mod tests {
 
     #[test]
     fn fork_scoped_custom_nocase_ids_preserve_sql_current_holder_exclusion() -> Result<()> {
-        let world = cv_testkit::World::in_process("goose-nocase-fork-scope");
+        let world = crate::test_world("goose-nocase-fork-scope");
         let path = world.base.join("sessions.db");
         let conn = Connection::open(&path)?;
         conn.execute_batch(&SCHEMA.replace(
@@ -1695,7 +1695,7 @@ mod tests {
 
     #[test]
     fn fork_family_holder_rows_are_scanned_once_per_read_scope_and_fresh_between_scopes() -> Result<()> {
-        let world = cv_testkit::World::in_process("goose-fork-family-scope");
+        let world = crate::test_world("goose-fork-family-scope");
         let path = world.base.join("sessions.db");
         let conn = Connection::open(&path)?;
         conn.execute_batch(SCHEMA)?;
@@ -1749,7 +1749,7 @@ mod tests {
         rayon::ThreadPoolBuilder::new()
             .num_threads(1)
             .build()?
-            .install(stats_control)?;
+            .install(crate::env::carry(stats_control))?;
         #[cfg(not(feature = "parallel"))]
         stats_control()?;
         // A later operation observes changed holder metadata rather than keeping the old minimum.
@@ -2158,7 +2158,7 @@ mod tests {
 
     #[test]
     fn native_discovery_spooled_large_cells_match_parse_and_small_cell_counts() -> Result<()> {
-        let world = cv_testkit::World::in_process("goose-native-discovery-cells");
+        let world = crate::test_world("goose-native-discovery-cells");
         let path = world.base.join("sessions.db");
         let conn = Connection::open(&path)?;
         conn.execute_batch(SCHEMA)?;

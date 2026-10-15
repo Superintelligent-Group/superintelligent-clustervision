@@ -326,7 +326,7 @@ mod tests {
     #[test]
     fn checked_views_match_owned_parts_and_all_argument_shapes() {
         use crate::json::JsonSource;
-        let world = cv_testkit::World::in_process("openai_checked_views");
+        let world = crate::test_world("openai_checked_views");
         let path = world.home.join("selected.json");
         let long = "é\n\"\\".repeat(10_000);
         let parts = json!([

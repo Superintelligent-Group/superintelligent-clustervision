@@ -168,7 +168,7 @@ mod tests {
 
     #[test]
     fn ignored_records_and_empty_parts_create_no_decoded_body_backing() -> Result<()> {
-        let world = cv_testkit::World::in_process("grok-ignored-selected-body");
+        let world = crate::test_world("grok-ignored-selected-body");
         let path = world.base.join("rows.json");
         let body = "雪\\n".repeat(128 * 1024);
         for record in [

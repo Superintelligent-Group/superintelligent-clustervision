@@ -1437,7 +1437,7 @@ mod tests {
     #[test]
     fn checked_mapped_demands_expose_only_one_validation_window() {
         use std::io::BufRead;
-        let world = cv_testkit::World::in_process("checked-demand-window");
+        let world = crate::test_world("checked-demand-window");
         let path = world.base.join("source");
         let mut body = "x".repeat(super::DEMAND_WINDOW - 1);
         body.push_str("🌙tail");

@@ -102,7 +102,7 @@ mod tests {
 
     #[test]
     fn selected_title_matches_full_text_join_without_part_roster() -> anyhow::Result<()> {
-        let world = cv_testkit::World::in_process("wire-title-parts");
+        let world = crate::test_world("wire-title-parts");
         let path = world.base.join("content.json");
         let mut many = vec![serde_json::json!({"text":""}); 4096];
         many.push(serde_json::json!({"text":"late"}));

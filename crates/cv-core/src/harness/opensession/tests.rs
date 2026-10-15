@@ -73,7 +73,7 @@ fn round_trips_committed_codex_session_through_a_document() {
 }
 
 fn round_trip_native_corpus(harness: Harness, corpus_path: &str) {
-    let _world = cv_testkit::World::in_process("opensession-native-corpus");
+    let _world = crate::test_world("opensession-native-corpus");
     let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/corpus")
         .join(corpus_path);
@@ -388,11 +388,10 @@ fn discovers_documents_in_registered_sources() {
     std::fs::write(dir.join("settings.json"), json!({ "theme": "dark" }).to_string()).unwrap();
     std::fs::write(dir.join("notes.txt"), "not json").unwrap();
 
-    std::env::set_var("XDG_CONFIG_HOME", dir.join("no-config"));
-    std::env::set_var("CV_EXPORTS", &dir);
+    let env =
+        crate::env::Env::from_vars([("XDG_CONFIG_HOME", dir.join("no-config")), ("CV_EXPORTS", dir.clone())]).enter();
     let refs = OpenSession.discover().unwrap();
-    std::env::remove_var("CV_EXPORTS");
-    std::env::remove_var("XDG_CONFIG_HOME");
+    drop(env);
 
     let mut ids: Vec<&str> = refs.iter().map(|r| r.id.as_str()).collect();
     ids.sort();
@@ -799,7 +798,7 @@ mod projection_schema {
 
 #[test]
 fn opaque_principal_round_trips_in_owned_positioned_and_checked_json_paths() -> Result<()> {
-    let world = cv_testkit::World::in_process("opensession-principal");
+    let world = crate::test_world("opensession-principal");
     let path = world.base.join("session.opensession.json");
     for principal in [
         json!("opaque-owner"),
@@ -838,7 +837,7 @@ fn opaque_principal_round_trips_in_owned_positioned_and_checked_json_paths() -> 
 
 #[test]
 fn principal_absent_and_null_are_omitted_unknown_fields_do_not_crash() -> Result<()> {
-    let world = cv_testkit::World::in_process("opensession-unspecified-principal");
+    let world = crate::test_world("opensession-unspecified-principal");
     let path = world.base.join("session.opensession.json");
     let baseline = json!({"id":"no-principal","harness":"opensession","messages":[]});
     let expected = serde_json::to_value(from_str(&baseline.to_string())?)?;

@@ -489,7 +489,7 @@ mod tests {
 
     #[test]
     fn selected_system_bodies_match_owned_scalar_join_metadata_and_empty_errors() -> Result<()> {
-        let world = cv_testkit::World::in_process("qwen-selected-system-bodies");
+        let world = crate::test_world("qwen-selected-system-bodies");
         let path = world.base.join("system.jsonl");
         let giant = "body λ\n".repeat(128 * 1024);
         let cases = [
@@ -580,7 +580,7 @@ mod tests {
 
     #[test]
     fn discovery_content_keeps_only_bounded_title_and_tool_facts() -> Result<()> {
-        let world = cv_testkit::World::in_process("qwen-discovery-content-facts");
+        let world = crate::test_world("qwen-discovery-content-facts");
         let path = world.base.join("record.json");
         let giant = "雪\n".repeat(128 * 1024);
         let record = serde_json::json!({"message":{"parts":[
@@ -611,7 +611,7 @@ mod tests {
 
     #[test]
     fn stopped_selected_replay_matches_owned_final_facts_and_source_failures() -> Result<()> {
-        let world = cv_testkit::World::in_process("qwen-stopped-selected-facts");
+        let world = crate::test_world("qwen-stopped-selected-facts");
         let path = world.base.join("session.jsonl");
         let giant = "payload λ\n".repeat(128 * 1024);
         let rows = [
@@ -647,7 +647,7 @@ mod tests {
     #[test]
     fn growing_call_maps_amortize_production_checkpoints_and_preserve_delayed_results() -> Result<()> {
         use crate::stream::stream_resumable_amortized;
-        let world = cv_testkit::World::in_process("qwen-growing-call-checkpoints");
+        let world = crate::test_world("qwen-growing-call-checkpoints");
         let home = world.home.join(".qwen");
         let path = home.join("projects/hash/chats/session.jsonl");
         std::fs::create_dir_all(path.parent().unwrap())?;
@@ -729,7 +729,7 @@ mod tests {
 
     #[test]
     fn checked_resume_keeps_selected_payloads_and_exact_skipped_checkpoint_state() {
-        let world = cv_testkit::World::in_process("qwen_selected_resume");
+        let world = crate::test_world("qwen_selected_resume");
         let home = world.home.join(".qwen");
         let dir = home.join("projects/hash/chats");
         std::fs::create_dir_all(&dir).unwrap();

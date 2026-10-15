@@ -1000,7 +1000,7 @@ fn run_jobs(writer: &mut Writer, f: &Fields, jobs: Vec<Job>, consumer: &str) -> 
         for _ in 0..workers {
             let tx = tx.clone();
             let (queue, wake, admission, sources) = (&queue, &wake, &admission, &sources);
-            scope.spawn(move || {
+            scope.spawn(cv_core::env::carry(move || {
                 sources.run(|| loop {
                     let group = {
                         let mut q = queue.lock().unwrap();
@@ -1028,7 +1028,7 @@ fn run_jobs(writer: &mut Writer, f: &Fields, jobs: Vec<Job>, consumer: &str) -> 
                         }
                     }
                 })
-            });
+            }));
         }
         drop(tx);
 
@@ -1241,8 +1241,10 @@ fn run_job(job: Job, f: &Fields, tx: &std::sync::mpsc::SyncSender<Out>, admissio
     let out = match result {
         Ok(p) => {
             #[cfg(test)]
-            if let Some(hook) = AFTER_PASS.lock().unwrap().as_mut() {
-                hook(&adapter.resume_source(&job.r));
+            if let Some((source, hook)) = AFTER_PASS.lock().unwrap().as_mut() {
+                if *source == adapter.resume_source(&job.r) {
+                    hook(source);
+                }
             }
             let mark = version.as_deref().and_then(|v| {
                 let cp = p.last?;
@@ -1321,11 +1323,12 @@ struct JobPass {
     source: Option<std::fs::File>,
 }
 
-/// Tests: runs between a pass and the mark taken for it, with the resume source's path.
+/// Tests: runs between a pass over this resume source and the mark taken for it (keyed by the
+/// source, so a parallel test's sweep never runs it).
 #[cfg(test)]
 type AfterPass = Box<dyn FnMut(&std::path::Path) + Send>;
 #[cfg(test)]
-static AFTER_PASS: std::sync::Mutex<Option<AfterPass>> = std::sync::Mutex::new(None);
+static AFTER_PASS: std::sync::Mutex<Option<(PathBuf, AfterPass)>> = std::sync::Mutex::new(None);
 
 /// Count actual adapter callbacks, not the cumulative counts restored from a checkpoint.
 #[cfg(test)]
@@ -3398,28 +3401,23 @@ mod tests {
         d
     }
 
-    /// Indexing tees events into the catalog, whose path comes from the process-global
-    /// `CLUSTERVISION_HOME`. Tests that index MUST isolate it to a temp dir — otherwise they write to
-    /// (and read from) the shared real catalog, racing each other and the other crates' test binaries.
-    /// This RAII guard serializes those tests on one lock AND points the catalog at a private temp
-    /// home for the test's duration; both are released (and the home removed) on drop.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
+    /// Indexing tees events into the catalog, whose path comes from `CLUSTERVISION_HOME`. Tests
+    /// that index point it at a private temp home on their own thread for the guard's lifetime
+    /// (and remove the home on drop), never at the shared real catalog.
     struct IsolatedHome {
-        _lock: std::sync::MutexGuard<'static, ()>,
+        _scope: cv_core::env::Scope,
         home: std::path::PathBuf,
     }
     impl IsolatedHome {
         fn new() -> Self {
-            let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             let home = tmpdir();
-            std::env::set_var("CLUSTERVISION_HOME", &home);
-            IsolatedHome { _lock: lock, home }
+            let scope = (*cv_core::env::Env::current()).clone().enter();
+            scope.set("CLUSTERVISION_HOME", &home);
+            IsolatedHome { _scope: scope, home }
         }
     }
     impl Drop for IsolatedHome {
         fn drop(&mut self) {
-            std::env::remove_var("CLUSTERVISION_HOME");
             std::fs::remove_dir_all(&self.home).ok();
         }
     }
@@ -6021,12 +6019,13 @@ mod tests {
 
     fn whole_sweep_with_work(refs: &[cv_core::SessionRef], words: &[String]) -> (Vec<String>, SweepWork) {
         let (dir, home) = (tmpdir(), tmpdir());
-        let prior = std::env::var_os("CLUSTERVISION_HOME");
-        std::env::set_var("CLUSTERVISION_HOME", &home);
+        let scope = (*cv_core::env::Env::current()).clone().enter();
+        scope.set("CLUSTERVISION_HOME", &home);
         let swept = sweep(&dir, refs.to_vec(), false, false).unwrap();
         assert_eq!((swept.resumed, swept.errors), (0, 0));
         let seen = observe(&dir, refs, words);
-        std::env::set_var("CLUSTERVISION_HOME", prior.unwrap());
+        drop(scope);
+
         for d in [dir, home] {
             std::fs::remove_dir_all(d).ok();
         }
@@ -6619,9 +6618,12 @@ mod tests {
         std::fs::write(&replacement, body("zqnewword")).unwrap();
         let r = sref("renamed", "renamed", path.to_string_lossy().into_owned());
         let pending = replacement.clone();
-        *AFTER_PASS.lock().unwrap() = Some(Box::new(move |source| {
-            let _ = std::fs::rename(&pending, source);
-        }));
+        *AFTER_PASS.lock().unwrap() = Some((
+            path.clone(),
+            Box::new(move |source| {
+                let _ = std::fs::rename(&pending, source);
+            }),
+        ));
         let first = sweep(&dir, vec![r.clone()], false, false);
         *AFTER_PASS.lock().unwrap() = None;
         first.unwrap();

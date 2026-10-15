@@ -198,7 +198,8 @@ fn parse_ref_finds_conversation_in_file_and_sniffs_kind() {
 #[ignore]
 fn real_downloads_exports_parse() {
     // discovery is opt-in; point it at Downloads for this machine-specific probe.
-    std::env::set_var("CV_EXPORTS", dirs::home_dir().unwrap().join("Downloads"));
+    let env = crate::env::Env::from_process().enter();
+    env.set("CV_EXPORTS", dirs::home_dir().unwrap().join("Downloads"));
     for kind in [Kind::ChatGpt, Kind::Claude] {
         let refs = discover_kind(kind);
         eprintln!("{:?}: {} conversation(s)", kind, refs.len());
@@ -220,7 +221,6 @@ fn real_downloads_exports_parse() {
             assert!(!s.messages.is_empty());
         }
     }
-    std::env::remove_var("CV_EXPORTS");
 }
 
 // Full-session composition, not a count-only or selected-prefix heap assertion. The routine
@@ -559,7 +559,7 @@ fn native_chatgpt_fallback_keeps_insertion_order_and_final_duplicate_value() {
 
 #[test]
 fn multipart_chatgpt_read_keeps_lazy_payloads_and_breaks_parent_cycles() -> Result<()> {
-    let world = cv_testkit::World::in_process("account-multipart-cycle");
+    let world = crate::test_world("account-multipart-cycle");
     let path = world.base.join("conversations.json");
     let body = "λ\n\"escaped\"".repeat(20000);
     let conversation = json!({"conversation_id":"multi","title":"explicit","current_node":"reply","mapping":{
@@ -601,7 +601,7 @@ fn multipart_chatgpt_read_keeps_lazy_payloads_and_breaks_parent_cycles() -> Resu
 
 #[test]
 fn wide_chatgpt_parts_preserve_filtered_join_and_source_guard() -> Result<()> {
-    let world = cv_testkit::World::in_process("account-wide-parts");
+    let world = crate::test_world("account-wide-parts");
     let path = world.base.join("parts.json");
     let mut parts = Vec::new();
     for i in 0..8192 {

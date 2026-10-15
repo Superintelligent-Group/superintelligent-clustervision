@@ -51,19 +51,19 @@ pub struct Cursor {
 impl Cursor {
     pub fn detect() -> Self {
         // CURSOR_USER_DIR overrides the platform default (used by tests / non-mac).
-        let user_dir = std::env::var_os("CURSOR_USER_DIR")
+        let user_dir = crate::env::var_os("CURSOR_USER_DIR")
             .map(PathBuf::from)
             .or_else(default_user_dir)
             .filter(|p| p.exists());
-        let cli_home = std::env::var_os("CURSOR_CONFIG_DIR")
+        let cli_home = crate::env::var_os("CURSOR_CONFIG_DIR")
             .filter(|value| !value.to_string_lossy().trim().is_empty())
             .map(PathBuf::from)
             .or_else(|| {
-                std::env::var_os("XDG_CONFIG_HOME")
+                crate::env::var_os("XDG_CONFIG_HOME")
                     .filter(|value| !value.to_string_lossy().trim().is_empty())
                     .map(|base| PathBuf::from(base).join("cursor"))
             })
-            .or_else(|| dirs::home_dir().map(|home| home.join(".cursor")))
+            .or_else(|| crate::env::home_dir().map(|home| home.join(".cursor")))
             .filter(|path| path.is_dir());
         Cursor { user_dir, cli_home }
     }
@@ -116,15 +116,15 @@ impl Cursor {
 
 /// Default macOS/Linux/Windows location of `Cursor/User`.
 fn default_user_dir() -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
+    let home = crate::env::home_dir()?;
     #[cfg(target_os = "macos")]
     let base = home.join("Library/Application Support");
     #[cfg(target_os = "windows")]
-    let base = std::env::var_os("APPDATA")
+    let base = crate::env::var_os("APPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join("AppData/Roaming"));
     #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-    let base = std::env::var_os("XDG_CONFIG_HOME")
+    let base = crate::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join(".config"));
     Some(base.join("Cursor").join("User"))
@@ -904,7 +904,7 @@ mod tests {
     fn native_ide_failed_command_and_reopened_conversation() {
         use crate::harness::Parse;
 
-        let _world = cv_testkit::World::in_process("cursor-native-ide");
+        let _world = crate::test_world("cursor-native-ide");
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/cursor/3.24.12-ide/Cursor/User");
         let adapter = Cursor::with_user_dir(&root);
         let refs = adapter.discover().unwrap();

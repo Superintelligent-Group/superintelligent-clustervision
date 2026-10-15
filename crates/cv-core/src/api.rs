@@ -750,7 +750,7 @@ mod tests {
 
     #[test]
     fn complete_session_json_retains_full_owned_parity_and_rejects_source_changes() {
-        let world = cv_testkit::World::in_process("owned-api-source-guard");
+        let world = crate::test_world("owned-api-source-guard");
         let path = world.write_session(
             "full",
             &[json!({"type":"user", "uuid":"u", "message":{"role":"user", "content":"owned text"}})],
@@ -798,7 +798,7 @@ mod tests {
 
     #[test]
     fn staged_message_windows_match_value_response_bytes() {
-        let world = cv_testkit::World::in_process("api-staged-windows");
+        let world = crate::test_world("api-staged-windows");
         let body = "月🌙é\n\"\\".repeat(4000);
         world.write_session("staged",&[
             json!({"type":"assistant","sessionId":"staged","uuid":"a","message":{"role":"assistant","content":[{"type":"text","text":body},{"type":"tool_use","id":"c","name":"tool","input":{"z":body,"a":2}}]}}),
@@ -829,7 +829,7 @@ mod tests {
 
     #[test]
     fn selected_json_window_reports_read_errors_and_skipped_values_stay_lazy() {
-        let world = cv_testkit::World::in_process("api_json_failure");
+        let world = crate::test_world("api_json_failure");
         let path = world.home.join("input.json");
         let body = r#"{"command":"git status"}"#;
         std::fs::write(&path, body).unwrap();
@@ -863,7 +863,7 @@ mod tests {
     fn pagination_prefix_replay_read_work() {
         use crate::Adapter as _;
         use std::io::Write as _;
-        let world = cv_testkit::World::in_process("api_page_read_work");
+        let world = crate::test_world("api_page_read_work");
         let path = world.transcript("pages");
         let mut file = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
         let records = 20_000usize;

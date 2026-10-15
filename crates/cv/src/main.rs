@@ -18,6 +18,12 @@ mod http;
 mod llm;
 mod util;
 
+/// A hermetic world whose environment this thread's library calls read (see `cv_core::env`).
+#[cfg(test)]
+fn test_world(tag: &str) -> cv_testkit::InProcess<cv_core::env::Scope> {
+    cv_testkit::World::in_process(tag, cv_core::env::Env::enter_isolated)
+}
+
 // Crate-root re-exports for `blame.rs`, which renders conversation windows via the same
 // streaming renderer `cv show` uses.
 pub(crate) use cmd::view::{show_header, show_message, stream_session_render, RenderOpts};

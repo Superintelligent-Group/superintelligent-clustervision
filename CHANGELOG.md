@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- cv-core reads its environment through `cv_core::env`, resolved once per process; callers enter another per thread instead of mutating the process.
 - Native builds decode zstd (Codex rollouts, Zed and OpenClaw blobs) with libzstd: a cold index of compressed rollouts takes 39% fewer instructions.
 - A copied or moved `CLUSTERVISION_HOME` keeps its full-text index: baselines follow an identity stored in the index, not its path.
 - Devin, OpenCode, Hermes, Zed and Goose discovery reuse cached results while their database, WAL and journal are unchanged.

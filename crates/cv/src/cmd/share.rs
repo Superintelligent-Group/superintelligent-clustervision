@@ -290,7 +290,7 @@ mod tests {
                 anyhow::bail!("source failed after a message from {}", r.id)
             }
         }
-        let world = cv_testkit::World::in_process("share-failed-read");
+        let world = crate::test_world("share-failed-read");
         let source = world.base.join("source.jsonl");
         std::fs::write(&source, "source").unwrap();
         let reference = cv_core::SessionRef::new("failed", Harness::Claude, &source);
@@ -351,7 +351,7 @@ mod tests {
 
     #[test]
     fn source_share_matches_owned_and_rejects_deleted_or_changed_arguments() {
-        let world = cv_testkit::World::in_process("share-json-boundary");
+        let world = crate::test_world("share-json-boundary");
         let path = world.base.join("arguments.json");
         let value =
             serde_json::json!({"command": "echo \"月🌙é\"\n".repeat(300), "api_key": "sk-abcDEF1234567890ghijkl"});

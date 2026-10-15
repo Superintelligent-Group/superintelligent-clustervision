@@ -567,7 +567,7 @@ mod discovery_tests {
 
     #[test]
     fn giant_discovery_messages_keep_bounded_exact_title_and_count_skeletons() -> Result<()> {
-        let world = cv_testkit::World::in_process("codex-discovery-message-facts");
+        let world = crate::test_world("codex-discovery-message-facts");
         let path = world.base.join("row.json");
         let giant = "body λ\n".repeat(128 * 1024);
         for content in [

@@ -89,7 +89,7 @@ mod tests {
 
     #[test]
     fn replaced_open_descriptor_is_rejected_before_any_record_callback() -> Result<()> {
-        let world = cv_testkit::World::in_process("checked_lines_descriptor");
+        let world = crate::test_world("checked_lines_descriptor");
         let path = world.home.join("records.jsonl");
         std::fs::write(&path, "{\"body\":\"old\"}\n")?;
         let file = std::fs::File::open(&path)?;

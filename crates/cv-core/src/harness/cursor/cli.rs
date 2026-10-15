@@ -759,7 +759,7 @@ mod tests {
     }
     #[test]
     fn acp_sidecar_creation_change_and_identity_invalidate() {
-        let world = cv_testkit::World::in_process("cursor-acp");
+        let world = crate::test_world("cursor-acp");
         let dir = &world.base;
         std::fs::create_dir_all(dir).unwrap();
         let (conn, mut reference) = fixture(
@@ -796,7 +796,7 @@ mod tests {
     }
     #[test]
     fn updated_time_observes_active_wal() {
-        let world = cv_testkit::World::in_process("cursor-cli-wal-time");
+        let world = crate::test_world("cursor-cli-wal-time");
         std::fs::create_dir_all(&world.base).unwrap();
         let (conn, mut reference) = fixture(Vec::new(), &[]);
         reference.path = world.base.join("store.db");
@@ -822,7 +822,7 @@ mod tests {
     }
     #[test]
     fn cold_wal_adapter_preserves_original_sidecars_and_journal_guard() {
-        let world = cv_testkit::World::in_process("cursor-cli-cold-wal");
+        let world = crate::test_world("cursor-cli-cold-wal");
         let record = json!({"role":"user","content":"日本語\n".repeat(4096)})
             .to_string()
             .into_bytes();
@@ -861,7 +861,7 @@ mod tests {
     }
     #[test]
     fn selected_large_fields_match_owned_messages_and_dataset() {
-        let world = cv_testkit::World::in_process("cursor-cli-selected");
+        let world = crate::test_world("cursor-cli-selected");
         let big = "日本語\n".repeat(4096);
         let records = [
             json!({"role":"user","content":[{"type":"text","text":big}],"providerOptions":{"cursor":{"requestId":"request"}}}),
@@ -921,7 +921,7 @@ mod tests {
     }
     #[test]
     fn selected_schema_edges_and_ignored_invalid_values_match_owned_acceptance() {
-        let world = cv_testkit::World::in_process("cursor-cli-selected-edges");
+        let world = crate::test_world("cursor-cli-selected-edges");
         let cases = [
             r#"{"role":"user","content":"first","content":"last","providerOptions":{"cursor":{"requestContextCompleteness":false,"isSummary":true}}}"#,
             r#"{"role":"developer","content":[{"type":"text","text":""},{"type":"unknown","opaque":7},{"type":"redacted-reasoning","text":null},{"type":"image","mimeType":false},{"type":"file","filename":"a"}]}"#,
@@ -956,7 +956,7 @@ mod tests {
     }
     #[test]
     fn facts_preserve_doctor_compaction_affordance_and_session_facts() {
-        let world = cv_testkit::World::in_process("cursor-cli-facts");
+        let world = crate::test_world("cursor-cli-facts");
         let big = "日本語\n".repeat(8192);
         let values = [
             json!({"role":"user","content":"question"}),
@@ -1022,7 +1022,7 @@ mod tests {
     }
     #[test]
     fn wal_guard_survives_lazy_blob_arguments_and_intentional_stop() {
-        let world = cv_testkit::World::in_process("cursor-cli-guard");
+        let world = crate::test_world("cursor-cli-guard");
         let record=json!({"role":"assistant","content":[{"type":"tool-call","toolCallId":"call","toolName":"Read","args":{"body":"x".repeat(8192)}},{"type":"text","text":"日本語\n".repeat(4096)}]}).to_string().into_bytes();
         let (conn, reference) = disk_fixture(field(1, &[1; 32]), &[(1, record)], &world.base.join("source"));
         let mut retained = CollectSink::default();

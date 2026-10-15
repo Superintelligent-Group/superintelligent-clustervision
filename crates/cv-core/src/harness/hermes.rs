@@ -180,9 +180,9 @@ pub struct Hermes {
 impl Hermes {
     pub fn detect() -> Self {
         // HERMES_HOME overrides ~/.hermes.
-        let home = std::env::var_os("HERMES_HOME")
+        let home = crate::env::var_os("HERMES_HOME")
             .map(PathBuf::from)
-            .or_else(|| dirs::home_dir().map(|h| h.join(".hermes")));
+            .or_else(|| crate::env::home_dir().map(|h| h.join(".hermes")));
         match home {
             Some(home) => Self::with_home(&home),
             None => Hermes { dbs: Vec::new() },
@@ -2243,7 +2243,7 @@ mod tests {
 
     #[test]
     fn incremental_content_matches_typed_view_for_cells_notices_and_generations() -> Result<()> {
-        let world = cv_testkit::World::in_process("hermes-incremental-content");
+        let world = crate::test_world("hermes-incremental-content");
         let path = world.base.join("native.db");
         let writer = Connection::open(&path)?;
         writer.execute_batch(&fixture("schema-v30.sql"))?;
@@ -2341,7 +2341,7 @@ mod tests {
 
     #[test]
     fn complete_checked_preparation_preserves_owned_rows_and_fidelity() -> Result<()> {
-        let world = cv_testkit::World::in_process("hermes-complete-preparation");
+        let world = crate::test_world("hermes-complete-preparation");
         let path = world.base.join("state.db");
         let writer = Connection::open(&path)?;
         writer.execute_batch(&fixture("schema-v14.sql"))?;
@@ -2429,7 +2429,7 @@ mod tests {
 
     #[test]
     fn complete_checked_multimodal_matches_owned_acceptance_and_guards_sources() -> Result<()> {
-        let world = cv_testkit::World::in_process("hermes-checked-multimodal");
+        let world = crate::test_world("hermes-checked-multimodal");
         let path = world.base.join("state.db");
         let writer = Connection::open(&path)?;
         writer.execute_batch(&fixture("schema-v14.sql"))?;
@@ -2490,7 +2490,7 @@ mod tests {
 
     #[test]
     fn lean_checked_reads_preserve_facts_dedup_and_actual_consumers() -> Result<()> {
-        let world = cv_testkit::World::in_process("hermes-lean-checked");
+        let world = crate::test_world("hermes-lean-checked");
         let path = world.base.join("state.db");
         let writer = Connection::open(&path)?;
         writer.execute_batch(&fixture("schema-v30.sql"))?;
@@ -2996,11 +2996,6 @@ mod tests {
     /// invisible. Synthesizes a minimal `~/.hermes`-shaped tree under a temp `HERMES_HOME`.
     #[test]
     fn discovers_top_level_and_profile_dbs() {
-        // Mutating process env (HERMES_HOME) is not thread-safe; serialize against the other
-        // env-touching tests in this binary.
-        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = ENV_LOCK.lock().unwrap();
-
         let home = std::env::temp_dir().join(format!("cv-hermes-profiles-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(home.join("profiles/hermes-x")).unwrap();
@@ -3029,12 +3024,12 @@ mod tests {
         mk_db(&home.join("profiles/state-snapshots/old/state.db"), "snapshot-session");
 
         // Point the adapter at our synthetic home and discover.
-        std::env::set_var("HERMES_HOME", &home);
+        let env = crate::env::Env::from_vars([("HERMES_HOME", &home)]).enter();
         let hermes = Hermes::detect();
         // Two readable DBs: top-level + the one profile (snapshot is depth-2, skipped).
         assert_eq!(hermes.dbs.len(), 2, "should bind top-level + profile DB only");
         let refs = hermes.discover().unwrap();
-        std::env::remove_var("HERMES_HOME");
+        drop(env);
 
         let ids: HashSet<&str> = refs.iter().map(|r| r.id.as_str()).collect();
         assert!(ids.contains("top-session"), "top-level session must be discovered");
@@ -3595,7 +3590,7 @@ mod tests {
             let bytes = ARENA_WRITE_OBSERVER.with(|observer| observer.borrow_mut().take().unwrap());
             Ok((result, bytes))
         }
-        let world = cv_testkit::World::in_process("hermes-discovery-body-demand");
+        let world = crate::test_world("hermes-discovery-body-demand");
         let path = world.base.join("state.db");
         let writer = Connection::open(&path)?;
         writer.execute_batch(&fixture("schema-v30.sql"))?;
@@ -3625,7 +3620,7 @@ mod tests {
 
     #[test]
     fn count_demand_preserves_parser_acceptance_without_copying_plain_assistant_bodies() -> Result<()> {
-        let world = cv_testkit::World::in_process("hermes-count-demand");
+        let world = crate::test_world("hermes-count-demand");
         let path = world.base.join("state.db");
         let writer = Connection::open(&path)?;
         writer.execute_batch(&fixture("schema-v30.sql"))?;
@@ -3699,7 +3694,7 @@ mod tests {
 
     #[test]
     fn checked_giant_prompts_dedup_exactly_and_reset_after_a_reply() -> Result<()> {
-        let world = cv_testkit::World::in_process("hermes-checked-prompt-dedup");
+        let world = crate::test_world("hermes-checked-prompt-dedup");
         let path = world.base.join("state.db");
         let writer = Connection::open(&path)?;
         writer.execute_batch(&fixture("schema-v30.sql"))?;
@@ -3756,7 +3751,7 @@ mod tests {
 
     #[test]
     fn discovery_turn_counts_match_native_display_and_compression_replay() -> Result<()> {
-        let world = cv_testkit::World::in_process("hermes-discovery-turn-counts");
+        let world = crate::test_world("hermes-discovery-turn-counts");
         let path = world.base.join("state.db");
         std::fs::copy(
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hermes/state-v30.db"),
