@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- HTTP overload shedding bounds retained sockets and drain work, preventing rejected clients from bypassing connection limits.
+
 - HTTP body framing errors now close the connection; malformed chunks cannot recover during draining and execute a pipelined request.
 
 - Positioned (no-mmap) builds resolve large transcript text from a live, growing session, as mapped builds do; a replaced or shrunk file still fails.

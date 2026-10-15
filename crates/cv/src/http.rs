@@ -98,7 +98,6 @@ fn shedder(capacity: usize) -> std::sync::mpsc::SyncSender<TcpStream> {
     let (tx, rx) = std::sync::mpsc::sync_channel::<TcpStream>(capacity);
     let spawned = std::thread::Builder::new().name("cv-serve-shed".into()).spawn(move || {
         let mut lingering: Vec<(TcpStream, Instant)> = Vec::new();
-        let mut scratch = [0u8; 4096];
         loop {
             let next = if lingering.is_empty() {
                 rx.recv().ok()
@@ -112,16 +111,7 @@ fn shedder(capacity: usize) -> std::sync::mpsc::SyncSender<TcpStream> {
                 let _ = stream.shutdown(Shutdown::Write);
                 lingering.push((stream, Instant::now() + LINGER));
             }
-            lingering.retain(|(stream, until)| {
-                let open = loop {
-                    match (&*stream).read(&mut scratch) {
-                        Ok(0) => break false,
-                        Ok(_) => continue,
-                        Err(e) => break e.kind() == io::ErrorKind::WouldBlock,
-                    }
-                };
-                open && Instant::now() < *until
-            });
+            reap_shed(&mut lingering, capacity);
         }
     });
     if let Err(e) = spawned {
@@ -129,6 +119,22 @@ fn shedder(capacity: usize) -> std::sync::mpsc::SyncSender<TcpStream> {
         eprintln!("cv serve: no thread to answer excess connections ({e})");
     }
     tx
+}
+
+fn reap_shed(lingering: &mut Vec<(TcpStream, Instant)>, capacity: usize) {
+    // The input queue alone does not bound retained descriptors when arrivals outrun LINGER.
+    lingering.truncate(capacity);
+    lingering.retain(|(stream, until)| {
+        if Instant::now() >= *until {
+            return false;
+        }
+        // A continuously sending peer cannot monopolize the sole shedder's cleanup pass.
+        const QUANTUM: u64 = 64 * 1024;
+        match io::copy(&mut stream.take(QUANTUM), &mut io::sink()) {
+            Ok(read) => read == QUANTUM,
+            Err(error) => error.kind() == io::ErrorKind::WouldBlock,
+        }
+    });
 }
 
 /// One admitted connection; dropping it (thread end, panic or failed spawn) frees its place.
@@ -604,6 +610,26 @@ fn reason(status: u16) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shed_connections_cannot_accumulate_past_capacity() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut peers = Vec::new();
+        let mut lingering = Vec::new();
+        for _ in 0..3 {
+            let peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+            let (stream, _) = listener.accept().unwrap();
+            stream.set_nonblocking(true).unwrap();
+            peers.push(peer);
+            lingering.push((stream, Instant::now() + LINGER));
+        }
+        reap_shed(&mut lingering, 1);
+        assert_eq!(lingering.len(), 1, "rejected connections bypassed the connection cap");
+        for peer in &mut peers[1..] {
+            assert_eq!(peer.read(&mut [0]).unwrap(), 0, "excess socket was not closed");
+        }
+    }
 
     /// A server with `limits` whose handler echoes the body length, or panics on `/panic`.
     fn spawn(limits: Limits) -> u16 {
