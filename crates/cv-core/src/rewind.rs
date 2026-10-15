@@ -951,8 +951,7 @@ fn rewind_session_after_scan(
         // Provenance first: a published transcript always has the receipt that explains it.
         let published = provenance_file.publish(&res.provenance_path, Claim::New)?;
         if let Err(error) = transcript.publish(&res.new_path, Claim::New) {
-            crate::publish::retract(&res.provenance_path, &published);
-            return Err(error);
+            return Err(crate::publish::retract(&res.provenance_path, &published, error));
         }
     }
     Ok(res)

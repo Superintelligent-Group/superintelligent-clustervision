@@ -162,22 +162,50 @@ impl Drop for Staged {
     }
 }
 
-/// Undo a publication whose companion then failed: remove `destination` only while it still names
-/// the inode `published` refers to, never a file someone else put there since.
-pub fn retract(destination: &Path, published: &File) {
+/// Undo a publication whose companion then failed, returning `cause` with any failure to undo it.
+/// Only the file `published` refers to is removed, never one someone else has put there since: the
+/// name is moved to a private one in one step, and what it held is removed only if it is that file;
+/// another writer's file is put back without replacing a newer one. Without inode identity (off
+/// Unix) nothing can be checked, so nothing is removed and the error says so.
+pub fn retract(destination: &Path, published: &File, cause: anyhow::Error) -> anyhow::Error {
+    match retract_racing(destination, published, || {}) {
+        Ok(()) => cause,
+        Err(e) => cause.context(format!("{} is left published: {e:#}", destination.display())),
+    }
+}
+
+/// [`retract`], running `race` between looking at the name and taking it.
+fn retract_racing(destination: &Path, published: &File, race: impl FnOnce()) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        let (Ok(ours), Ok(named)) = (published.metadata(), std::fs::symlink_metadata(destination)) else {
-            return;
-        };
-        if ours.dev() != named.dev() || ours.ino() != named.ino() {
-            return;
+        let ours = published.metadata()?;
+        let is_ours = |m: &std::fs::Metadata| m.dev() == ours.dev() && m.ino() == ours.ino();
+        match std::fs::symlink_metadata(destination) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.into()),
+            Ok(named) if !is_ours(&named) => return Ok(()),
+            Ok(_) => {}
         }
+        race();
+        // The name can change hands after that look; the rename takes exactly what it holds now.
+        let aside = destination.with_file_name(format!(".cv-retract-{}.tmp", uuid::Uuid::new_v4()));
+        match std::fs::rename(destination, &aside) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            taken => taken.context("retracting it")?,
+        }
+        let held = std::fs::symlink_metadata(&aside).with_context(|| format!("checking {}", aside.display()))?;
+        if is_ours(&held) {
+            return std::fs::remove_file(&aside).with_context(|| format!("removing {}", aside.display()));
+        }
+        rename_no_replace(&aside, destination)
+            .with_context(|| format!("another writer's file is kept at {}", aside.display()))
     }
     #[cfg(not(unix))]
-    let _ = published;
-    let _ = std::fs::remove_file(destination);
+    {
+        let _ = (destination, published, race);
+        anyhow::bail!("this platform cannot check that the name still holds the published file")
+    }
 }
 
 /// The filesystem cannot make a hard link here (as opposed to the name being taken or the caller
@@ -446,13 +474,7 @@ mod tests {
     fn temporaries(dir: &Path) -> usize {
         std::fs::read_dir(dir)
             .unwrap()
-            .filter(|e| {
-                e.as_ref()
-                    .unwrap()
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(".cv-test-")
-            })
+            .filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with(".cv-"))
             .count()
     }
 
@@ -591,6 +613,25 @@ mod tests {
         }
     }
 
+    /// Another writer replaces the published name after retract has looked at it: retract still
+    /// removes nothing but its own file.
+    #[cfg(unix)]
+    #[test]
+    fn retract_never_removes_a_file_that_replaced_its_own() {
+        let world = cv_testkit::World::new("publish-retract-race");
+        let path = world.base.join("out");
+        let file = staged(&world.base, b"ours").publish(&path, Claim::New).unwrap();
+        let replace = || {
+            staged(&world.base, b"theirs")
+                .publish(&path, Claim::Replace)
+                .map(drop)
+                .unwrap()
+        };
+        retract_racing(&path, &file, replace).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"theirs");
+        assert_eq!(temporaries(&world.base), 0);
+    }
+
     #[cfg(unix)]
     #[test]
     fn mode_is_kept_and_retract_removes_only_its_own_inode() {
@@ -606,11 +647,13 @@ mod tests {
         assert_eq!(mode_of(&file), umask_applied);
         std::fs::remove_file(&path).unwrap();
         std::fs::write(&path, "someone else").unwrap();
-        retract(&path, &file);
+        let cause = || anyhow::anyhow!("companion failed");
+        assert_eq!(format!("{:#}", retract(&path, &file, cause())), "companion failed");
         assert_eq!(std::fs::read(&path).unwrap(), b"someone else");
         std::fs::remove_file(&path).unwrap();
         let file = staged(dir, b"ours").publish(&path, Claim::New).unwrap();
-        retract(&path, &file);
+        assert_eq!(format!("{:#}", retract(&path, &file, cause())), "companion failed");
         assert!(!path.exists());
+        assert_eq!(temporaries(dir), 0);
     }
 }

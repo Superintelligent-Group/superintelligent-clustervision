@@ -979,10 +979,10 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
             .map(|(p, staged)| staged.publish(p, claim).map(|file| (p, file)))
             .transpose()?;
         if let Err(error) = transcript.publish(&new_path, claim) {
-            if let Some((p, file)) = &sidecar_published {
-                crate::publish::retract(p, file);
-            }
-            return Err(error);
+            return Err(match &sidecar_published {
+                Some((p, file)) => crate::publish::retract(p, file, error),
+                None => error,
+            });
         }
         if opts.force && sidecar_out.is_none() {
             // The replaced session's own sidecar would answer `cv cat <new-id>` with its payloads.

@@ -308,10 +308,10 @@ fn execute_after_stage(
         .transpose()?;
     if let Some(staged) = transcript {
         if let Err(error) = staged.publish(&p.dest, claim) {
-            if let Some((destination, file)) = &metadata {
-                crate::publish::retract(destination, file);
-            }
-            return Err(error);
+            return Err(match &metadata {
+                Some((destination, file)) => crate::publish::retract(destination, file, error),
+                None => error,
+            });
         }
     }
     Ok(Adopted {

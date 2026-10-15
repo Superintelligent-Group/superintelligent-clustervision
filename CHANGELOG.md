@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- A failed prune, rewind or adopt retracts its companion file only if it is still cv's own, on every platform, and reports a failed retract.
+
 - Replacing a directory without atomic swap no longer deletes the new tree when restoring the old one fails; both are kept and named.
 
 - Prune, restamp and resume verification treat a line of Unicode spaces as a malformed record, as the reader does; only JSON whitespace makes a line blank.
