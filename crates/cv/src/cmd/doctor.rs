@@ -53,7 +53,13 @@ pub(crate) fn cmd_doctor(id: Option<String>, harness: Option<String>, recent: us
             cv_core::find(&r.id, Some(r.harness))?.with_context(|| format!("could not load session {}", r.id))?;
         // Count decoded text in bounded chunks and request only attribution metadata facts.
         let mut pass = rep.session(Some(rr.path.clone()));
-        cv_core::stream::stream_counted(adapter.as_ref(), &rr, &cv_core::ParseOptions::facts(), &mut pass)?;
+        cv_core::stream::stream_counted(
+            adapter.as_ref(),
+            &rr,
+            &cv_core::ParseOptions::facts(),
+            &mut pass,
+            cv_core::stream::Pass::RECORD,
+        )?;
         pass.finish()?;
         if label.is_empty() {
             label = crate::short_id(&rr.id);

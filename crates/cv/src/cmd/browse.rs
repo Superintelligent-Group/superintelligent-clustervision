@@ -146,7 +146,15 @@ impl cv_core::MessageSink for TitleUsers {
 /// Read all metadata/counts through EOF, retaining only the title's deferred candidate suffix.
 fn enrich_head(adapter: &dyn cv_core::Adapter, r: &SessionRef) -> Option<(cv_core::Session, Option<String>)> {
     let mut users = TitleUsers::new(r.harness);
-    let session = cv_core::stream::stream_counted(adapter, r, &cv_core::ParseOptions::lazy(), &mut users).ok()?;
+    let session = cv_core::stream::stream_counted(
+        adapter,
+        r,
+        &cv_core::ParseOptions::lazy(),
+        &mut users,
+        cv_core::stream::Pass::RECORD,
+    )
+    .ok()?
+    .session;
     Some(users.finish(session, r.title.as_deref()))
 }
 
@@ -762,8 +770,15 @@ mod enrich_tests {
         let (actual, title) = enrich_head(adapter, reference).unwrap();
         let published = cv_core::catalog::AffordanceTable::load().counts(reference);
         let mut old = OldUsers::default();
-        let mut baseline =
-            cv_core::stream::stream_counted(adapter, reference, &cv_core::ParseOptions::lazy(), &mut old).unwrap();
+        let mut baseline = cv_core::stream::stream_counted(
+            adapter,
+            reference,
+            &cv_core::ParseOptions::lazy(),
+            &mut old,
+            cv_core::stream::Pass::RECORD,
+        )
+        .unwrap()
+        .session;
         baseline.messages = old.0;
         assert_eq!(published, cv_core::catalog::AffordanceTable::load().counts(reference));
         assert_eq!(title, baseline.synth_title());
@@ -818,9 +833,15 @@ mod enrich_tests {
         let (actual, title) = enrich_head(&adapter, &reference).unwrap();
         let (old_reference, old_adapter) = make_adapter("oracle");
         let mut old = OldUsers::default();
-        let mut baseline =
-            cv_core::stream::stream_counted(&old_adapter, &old_reference, &cv_core::ParseOptions::lazy(), &mut old)
-                .unwrap();
+        let mut baseline = cv_core::stream::stream_counted(
+            &old_adapter,
+            &old_reference,
+            &cv_core::ParseOptions::lazy(),
+            &mut old,
+            cv_core::stream::Pass::RECORD,
+        )
+        .unwrap()
+        .session;
         baseline.messages = old.0;
         assert_eq!(title, baseline.synth_title());
         assert_eq!(title.as_deref(), Some("later fallback"));

@@ -2120,8 +2120,17 @@ mod tests {
                 );
             }
             let mut amortized = Kept::default();
-            crate::stream::stream_resumable_amortized(&adapter, &reference, &options, &mut amortized, 1024, None)?
-                .unwrap();
+            crate::stream::stream_counted(
+                &adapter,
+                &reference,
+                &options,
+                &mut amortized,
+                crate::stream::Pass {
+                    every: Some(1024),
+                    amortized: true,
+                    ..Default::default()
+                },
+            )?;
             assert_eq!(
                 serde_json::to_value(&amortized.messages)?,
                 serde_json::to_value(&full.messages)?
@@ -2135,15 +2144,19 @@ mod tests {
             assert!(snapshot_bytes as u64 <= fs::metadata(main_wire(&dir))?.len() * 4);
             for (count, checkpoint) in &amortized.checkpoints {
                 let mut suffix = Kept::default();
-                assert!(crate::stream::stream_resumable_amortized(
+                assert!(crate::stream::stream_counted(
                     &adapter,
                     &reference,
                     &options,
                     &mut suffix,
-                    1024,
-                    Some(checkpoint)
-                )?
-                .is_some());
+                    crate::stream::Pass {
+                        from: Some(checkpoint),
+                        every: Some(1024),
+                        amortized: true,
+                        ..Default::default()
+                    }
+                )
+                .is_ok());
                 assert_eq!(
                     serde_json::to_value(suffix.messages)?,
                     serde_json::to_value(&full.messages[*count..])?

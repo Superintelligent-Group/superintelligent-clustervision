@@ -118,7 +118,8 @@ pub(super) fn selected(
     if fs::metadata(&primary).is_ok_and(|metadata| metadata.is_file()) {
         sink.capture(&primary)?;
     }
-    let (mut session, counted) = crate::stream::stream_counting(adapter, reference, options, &mut sink)?;
+    let read = crate::stream::stream_counted(adapter, reference, options, &mut sink, Default::default())?;
+    let (mut session, counted) = (read.session, read.counted);
     if let Some(counted) = &counted {
         sink.reads.merge(&counted.dependencies);
     }

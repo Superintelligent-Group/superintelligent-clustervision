@@ -1631,16 +1631,6 @@ mod tests {
             crate::affordance::Counts::new()
         });
         assert!(crate::catalog::AffordanceTable::load().stale(&r));
-        crate::stream::Counted {
-            turns: 1,
-            dependencies: ReadSet::default(),
-            counts: crate::affordance::Counts::new(),
-        }
-        .record(&r);
-        assert!(
-            crate::catalog::AffordanceTable::load().stale(&r),
-            "no before-read snapshot"
-        );
     }
     #[test]
     fn failed_stamp_publication_cannot_reuse_an_older_baseline() {

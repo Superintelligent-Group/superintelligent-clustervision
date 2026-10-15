@@ -1,6 +1,6 @@
 //! Byte marks: where a pass over a grown append-only transcript picks back up.
 //!
-//! A pass that streams through [`stream::stream_resumable`](crate::stream::stream_resumable)
+//! A pass that streams through [`stream::stream_counted`](crate::stream::stream_counted) with checkpoints
 //! takes [`Checkpoint`]s as it goes; its last one, stored here as a **mark** per transcript file,
 //! lets the next pass over the same file (grown by an append) read only what came after it. A
 //! mark passes its guards when the file's device/inode identity matches, it is at least `offset`

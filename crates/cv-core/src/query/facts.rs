@@ -570,7 +570,8 @@ fn reduce_streamed(
         .iter()
         .any(|flag| crate::affordance::Kind::parse(flag).is_some());
     let source = probe.snapshot(r);
-    let (session, counted) = crate::stream::stream_counting(adapter, r, &crate::ParseOptions::lazy(), &mut sink)?;
+    let read = crate::stream::stream_counted(adapter, r, &crate::ParseOptions::lazy(), &mut sink, Default::default())?;
+    let (session, counted) = (read.session, read.counted);
     if affordances {
         sink.facts.counts = counted.as_ref().map(|c| c.counts.clone());
     }

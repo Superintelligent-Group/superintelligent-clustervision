@@ -577,22 +577,19 @@ pub fn stage_record(
         failed: false,
     };
     let counted_query = query.is_some_and(crate::SessionQuery::needs_counted);
-    let source = counted_query.then(|| crate::source::Probe::default().snapshot(r));
-    let read = if counted_query {
-        crate::stream::stream_counting(adapter, r, &crate::ParseOptions::lazy(), &mut sink)
-    } else {
-        crate::stream::stream_counted(adapter, r, &crate::ParseOptions::lazy(), &mut sink)
-            .map(|session| (session, None))
-    };
+    let read = crate::stream::stream_counted(
+        adapter,
+        r,
+        &crate::ParseOptions::lazy(),
+        &mut sink,
+        crate::stream::Pass::RECORD,
+    );
     let (session, counted) = match read {
-        Ok(done) => done,
+        Ok(done) => (done.session, done.counted),
         Err(error) if sink.failed => return Err(error),
         Err(error) => return Err(InputError(error).into()),
     };
-    let counts = counted.as_ref().map(|c| c.counts.clone());
-    if let Some(counted) = counted {
-        counted.record_with_source(r, source.as_ref().expect("counted source"));
-    }
+    let counts = counted.filter(|_| counted_query).map(|c| c.counts);
     if sink.messages < min_messages {
         return Ok(None);
     }

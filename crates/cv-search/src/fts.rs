@@ -1422,8 +1422,14 @@ fn job_pass(
         .map(|(_, done, reads)| (done, reads))
     } else {
         let opts = cv_core::ParseOptions::lazy();
-        cv_core::stream::stream_resumable_amortized(adapter, &job.r, &opts, event_sink, CHECKPOINT_EVERY, from)?
-            .map(|done| (done, cv_core::source::ReadSet::default()))
+        resumed(cv_core::stream::stream_counted(
+            adapter,
+            &job.r,
+            &opts,
+            event_sink,
+            amortized(from),
+        ))?
+        .map(|done| (done, cv_core::source::ReadSet::default()))
     };
     let Some((done, reads)) = done else { return Ok(None) };
     #[cfg(test)]
@@ -1445,6 +1451,25 @@ fn job_pass(
     }))
 }
 
+/// An amortized resumable pass from `from` (see [`cv_core::stream::Pass`]).
+fn amortized(from: Option<&cv_core::stream::Checkpoint>) -> cv_core::stream::Pass<'_> {
+    cv_core::stream::Pass {
+        from,
+        every: Some(CHECKPOINT_EVERY),
+        amortized: true,
+        ..Default::default()
+    }
+}
+
+/// `Ok(None)` when the adapter declined to resume (it touched nothing).
+fn resumed(read: Result<cv_core::stream::Streamed>) -> Result<Option<cv_core::stream::Streamed>> {
+    match read {
+        Ok(done) => Ok(Some(done)),
+        Err(error) if error.is::<cv_core::stream::Declined>() => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 /// Where a session's chunk docs go: the sweep's writer thread, or (tests) straight into a writer.
 type DocOut<'a> = dyn FnMut(TantivyDocument) -> Result<()> + 'a;
 
@@ -1464,7 +1489,7 @@ fn index_session(
     events: Option<&mut dyn cv_core::MessageSink>,
     prov: cv_core::events::Provenance,
     from: Option<&cv_core::stream::Checkpoint>,
-) -> Result<Option<(usize, cv_core::stream::Resumed, cv_core::source::ReadSet)>> {
+) -> Result<Option<(usize, cv_core::stream::Streamed, cv_core::source::ReadSet)>> {
     let opts = cv_core::ParseOptions::lazy();
     let mut sink = match from {
         Some(cp) => ChunkSink::resume(out, f, r, mtime, size, prov, cp).context("checkpoint without fts state")?,
@@ -1473,9 +1498,21 @@ fn index_session(
     let done = match events {
         Some(es) => {
             let mut tee = cv_core::TeeSink::new(&mut sink, es);
-            cv_core::stream::stream_resumable_amortized(adapter, r, &opts, &mut tee, CHECKPOINT_EVERY, from)?
+            resumed(cv_core::stream::stream_counted(
+                adapter,
+                r,
+                &opts,
+                &mut tee,
+                amortized(from),
+            ))?
         }
-        None => cv_core::stream::stream_resumable_amortized(adapter, r, &opts, &mut sink, CHECKPOINT_EVERY, from)?,
+        None => resumed(cv_core::stream::stream_counted(
+            adapter,
+            r,
+            &opts,
+            &mut sink,
+            amortized(from),
+        ))?,
     };
     let Some(done) = done else { return Ok(None) };
     sink.finish()?;
@@ -2734,7 +2771,14 @@ fn live_snippet(path: &str, harness: &str, query: &str) -> Option<String> {
         error: None,
         failed: false,
     };
-    cv_core::stream::stream_counted(&*adapter, &sref, &ParseOptions::lazy(), &mut acc).ok()?;
+    cv_core::stream::stream_counted(
+        &*adapter,
+        &sref,
+        &ParseOptions::lazy(),
+        &mut acc,
+        cv_core::stream::Pass::RECORD,
+    )
+    .ok()?;
     Some(make_snippet(acc.head.as_str(), query))
 }
 

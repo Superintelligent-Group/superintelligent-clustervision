@@ -336,9 +336,12 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
                 }
             }
             let mut sink = CheckpointSink::default();
-            let done =
-                cv_core::stream::stream_resumable(adapter, r, &opts, &mut sink, a.chunk_bytes as u64, from.as_ref())?
-                    .context("adapter declined this fixture checkpoint")?;
+            let pass = cv_core::stream::Pass {
+                from: from.as_ref(),
+                every: Some(a.chunk_bytes as u64),
+                ..Default::default()
+            };
+            let done = cv_core::stream::stream_counted(adapter, r, &opts, &mut sink, pass)?;
             out.messages = sink.messages;
             let counted = done.counted.context("whole diagnostic pass must count")?;
             out.detail = json!({"checkpoint":done.last,"counts":counted.counts,"turns":counted.turns,

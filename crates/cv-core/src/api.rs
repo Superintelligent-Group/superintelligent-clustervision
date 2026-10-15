@@ -276,12 +276,16 @@ fn lookup(harness: &str, id: &str) -> Result<(SessionRef, Box<dyn crate::Adapter
 // but retain its operation receipt until JSON projection finishes and is safe to publish.
 fn complete_session_json(adapter: &dyn crate::Adapter, reference: &SessionRef) -> anyhow::Result<Value> {
     let mut sink = crate::stream::CollectSink::default();
-    let (mut session, guard) =
-        crate::stream::stream_counted_guarded(adapter, reference, &crate::ParseOptions::full(), &mut sink)?;
+    let pass = crate::stream::Pass {
+        guard: true,
+        ..crate::stream::Pass::RECORD
+    };
+    let read = crate::stream::stream_counted(adapter, reference, &crate::ParseOptions::full(), &mut sink, pass)?;
+    let mut session = read.session;
     session.messages = sink.messages;
     session.materialize()?;
     let output = serde_json::to_value(&session)?;
-    guard.verify(reference)?;
+    read.guard.expect("guarded pass").verify(reference)?;
     Ok(output)
 }
 

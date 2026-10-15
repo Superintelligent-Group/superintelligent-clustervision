@@ -982,13 +982,15 @@ fn query_facts_match_collected_corpus() {
                 // Presence queries cannot reveal count inflation: compare the entire tiny counter
                 // against the old row collector, including this adapter's own side stores.
                 let mut discard = cv_core::stream::Discard;
-                let (_, counted) = cv_core::stream::stream_counting(
+                let counted = cv_core::stream::stream_counted(
                     adapter.as_ref(),
                     &r,
                     &cv_core::ParseOptions::lazy(),
                     &mut discard,
+                    Default::default(),
                 )
-                .unwrap();
+                .unwrap()
+                .counted;
                 assert_eq!(
                     counted.unwrap().counts,
                     counts,
