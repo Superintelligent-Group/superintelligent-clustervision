@@ -69,11 +69,6 @@ impl RangeSource {
         source.check_identity()?;
         Ok(source)
     }
-    /// File-backed positioned sources expose their read-only descriptor without reopening it.
-    pub(crate) fn file(&self) -> Option<&File> {
-        self.file.as_ref()
-    }
-
     pub(crate) fn decoded(
         captured: crate::json::JsonSource,
         bytes: &std::sync::Arc<crate::harness::store::bytes::ByteSource>,

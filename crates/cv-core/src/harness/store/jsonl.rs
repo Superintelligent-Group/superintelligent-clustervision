@@ -82,6 +82,28 @@ pub(crate) struct Line<'v> {
     pub complete: bool,
     /// The Value-compatible record, or None for a blank, non-UTF-8 or rejected line.
     pub view: Option<crate::json::JsonView<'v>>,
+    /// Nothing but ASCII whitespace: a `None` view on any other line is a rejected record.
+    pub blank: bool,
+}
+
+/// Every record of a whole JSONL file through [`for_each_line`], for sidecar and discovery
+/// reducers that keep no offsets: the file is captured, opened against the capture, and its
+/// identity rechecked at the end. Blank and rejected lines are skipped.
+pub(crate) fn for_each_record(
+    path: &Path,
+    mut visit: impl FnMut(crate::json::JsonView<'_>) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let source = crate::json::JsonSource::capture(path)?;
+    let file = File::open(path)?;
+    source.check_metadata(file.metadata()?)?;
+    for_each_line(&source, &file, 0, source.len(), |line| {
+        if let Some(view) = line.view {
+            visit(view)?;
+        }
+        Ok(crate::stream::Flow::Continue)
+    })?;
+    source.check_metadata(file.metadata()?)?;
+    source.check()
 }
 
 /// Records of `from..to` in a captured JSONL source, each physical line once. This is the byte
@@ -140,7 +162,8 @@ pub(crate) fn for_each_line(
             let range = trim_ascii(file, raw)?;
             let at = range.offset;
             let mut visited = false;
-            let read = (range.len != 0).then(|| {
+            let blank = range.len == 0;
+            let read = (!blank).then(|| {
                 source.read_positioned_range_value(&context, at, range.len, |view| {
                     visited = true;
                     visit(Line {
@@ -148,6 +171,7 @@ pub(crate) fn for_each_line(
                         end,
                         complete,
                         view: Some(view),
+                        blank,
                     })
                 })
             });
@@ -163,6 +187,7 @@ pub(crate) fn for_each_line(
                         end,
                         complete,
                         view: None,
+                        blank,
                     })
                 },
                 Ok,
@@ -192,10 +217,8 @@ fn in_memory(
         .count();
     let trimmed = &bytes[lead..bytes.len() - tail];
     let at = start + lead as u64;
-    if let Some(text) = (!trimmed.is_empty())
-        .then(|| std::str::from_utf8(trimmed).ok())
-        .flatten()
-    {
+    let blank = trimmed.is_empty();
+    if let Some(text) = (!blank).then(|| std::str::from_utf8(trimmed).ok()).flatten() {
         let mut visited = false;
         match source.read_record(at, text, |view| {
             visited = true;
@@ -204,6 +227,7 @@ fn in_memory(
                 end,
                 complete,
                 view: Some(view),
+                blank,
             })
         }) {
             Err(error) if !visited && error.downcast_ref::<crate::json::InvalidJson>().is_some() => {}
@@ -215,6 +239,7 @@ fn in_memory(
         end,
         complete,
         view: None,
+        blank,
     })
 }
 
