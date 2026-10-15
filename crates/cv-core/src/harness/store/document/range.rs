@@ -1,6 +1,7 @@
 //! Positioned, bounded input windows for source-backed JSON. Offsets count consumed bytes, never
 //! underlying reads or serde lookahead. The same structural scanner works on bytes and files.
 
+use super::super::bytes::read_at;
 use anyhow::{Context, Result};
 use std::fs::File;
 use std::io::{self, BufRead, Read};
@@ -355,28 +356,6 @@ impl Read for Cursor<'_> {
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
-fn read_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::FileExt;
-        file.read_at(buf, offset)
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::FileExt;
-        file.seek_read(buf, offset)
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        use std::io::{Seek, SeekFrom};
-        // Files are unavailable on wasm32-unknown-unknown. Keep its build portable without
-        // introducing OS-specific APIs; native supported platforms use independent positions.
-        let mut cloned = file.try_clone()?;
-        cloned.seek(SeekFrom::Start(offset))?;
-        cloned.read(buf)
-    }
-}
-
 /// A grammar-only view: quoted tokens are independently validated in bounded windows, then
 /// represented by an empty string. The original source and all consumer values remain intact.
 /// Keeping punctuation, numbers and literals lets serde retain authority over JSON grammar.

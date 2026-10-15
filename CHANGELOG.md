@@ -15,6 +15,7 @@
 - HTTP overload shedding bounds retained sockets and drain work, preventing rejected clients from bypassing connection limits.
 
 - HTTP body framing errors now close the connection; malformed chunks cannot recover during draining and execute a pipelined request.
+- Resume guard sampling preserves open transcript read positions on Unix.
 
 - Positioned (no-mmap) builds resolve large transcript text from a live, growing session, as mapped builds do; a replaced or shrunk file still fails.
 - `cv index` decodes each compressed Codex rollout once: discovery hands its decoded bytes to the sweep beside it (cold index: 15% fewer instructions).
