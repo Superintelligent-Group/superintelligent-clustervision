@@ -119,6 +119,31 @@ pub(crate) fn for_each_line(
     file: &File,
     from: u64,
     to: u64,
+    visit: impl FnMut(Line<'_>) -> anyhow::Result<crate::stream::Flow>,
+) -> anyhow::Result<()> {
+    lines(source, file, None, from, to, visit)
+}
+
+/// [`for_each_line`] over the source's private decoded bytes (a decompressed copy, `len` bytes
+/// long, at the start of `backing`): views keep the original's provenance, offsets are decoded.
+pub(crate) fn for_each_decoded_line(
+    source: &crate::json::JsonSource,
+    backing: &std::sync::Arc<super::bytes::ByteSource>,
+    len: u64,
+    from: u64,
+    visit: impl FnMut(Line<'_>) -> anyhow::Result<crate::stream::Flow>,
+) -> anyhow::Result<()> {
+    lines(source, &backing.file()?, Some((backing, len)), from, len, visit)
+}
+
+type Decoded<'b> = Option<(&'b std::sync::Arc<super::bytes::ByteSource>, u64)>;
+
+fn lines(
+    source: &crate::json::JsonSource,
+    file: &File,
+    decoded: Decoded<'_>,
+    from: u64,
+    to: u64,
     mut visit: impl FnMut(Line<'_>) -> anyhow::Result<crate::stream::Flow>,
 ) -> anyhow::Result<()> {
     use crate::stream::Flow;
@@ -134,13 +159,22 @@ pub(crate) fn for_each_line(
         let mut start = 0;
         for end in memchr::memchr_iter(b'\n', bytes).map(|i| i + 1) {
             let line = &bytes[start..end - 1];
-            if in_memory(source, from + start as u64, from + end as u64, true, line, &mut visit)? == Flow::Stop {
+            let (at, end) = (from + start as u64, from + end as u64);
+            if in_memory(source, decoded, at, end, true, line, &mut visit)? == Flow::Stop {
                 return Ok(());
             }
-            start = end;
+            start = end as usize - from as usize;
         }
         if start < bytes.len() {
-            in_memory(source, from + start as u64, to, false, &bytes[start..], &mut visit)?;
+            in_memory(
+                source,
+                decoded,
+                from + start as u64,
+                to,
+                false,
+                &bytes[start..],
+                &mut visit,
+            )?;
         }
         return Ok(());
     }
@@ -152,28 +186,35 @@ pub(crate) fn for_each_line(
         },
     )?;
     frames.keep_small_records(64 * 1024);
-    let context = document::range::RangeSource::from_captured(source.clone())?;
+    let context = match decoded {
+        Some((backing, _)) => document::range::RangeSource::decoded(source.clone(), backing)?,
+        None => document::range::RangeSource::from_captured(source.clone())?,
+    };
     while let Some(frame) = frames.next() {
         let (raw, complete) = frame?;
         let end = frames.offset();
         let flow = if let Some(bytes) = frames.small_record() {
-            in_memory(source, raw.offset, end, complete, bytes, &mut visit)?
+            in_memory(source, decoded, raw.offset, end, complete, bytes, &mut visit)?
         } else {
             let range = trim_ascii(file, raw)?;
             let at = range.offset;
             let mut visited = false;
             let blank = range.len == 0;
-            let read = (!blank).then(|| {
-                source.read_positioned_range_value(&context, at, range.len, |view| {
-                    visited = true;
-                    visit(Line {
-                        at,
-                        end,
-                        complete,
-                        view: Some(view),
-                        blank,
-                    })
+            let mut view = |view: crate::json::JsonView<'_>| {
+                visited = true;
+                visit(Line {
+                    at,
+                    end,
+                    complete,
+                    view: Some(view),
+                    blank,
                 })
+            };
+            let read = (!blank).then(|| match decoded {
+                Some((backing, len)) => {
+                    source.read_positioned_decoded_value(&context, backing, len, at, range.len, &mut view)
+                }
+                None => source.read_positioned_range_value(&context, at, range.len, &mut view),
             });
             match read {
                 Some(Err(error)) if !visited && error.downcast_ref::<crate::json::InvalidJson>().is_some() => None,
@@ -203,6 +244,7 @@ pub(crate) fn for_each_line(
 /// One line whose bytes are in memory (mapped, or read as a small positioned record).
 fn in_memory(
     source: &crate::json::JsonSource,
+    decoded: Decoded<'_>,
     start: u64,
     end: u64,
     complete: bool,
@@ -220,7 +262,7 @@ fn in_memory(
     let blank = trimmed.is_empty();
     if let Some(text) = (!blank).then(|| std::str::from_utf8(trimmed).ok()).flatten() {
         let mut visited = false;
-        match source.read_record(at, text, |view| {
+        let view = |view: crate::json::JsonView<'_>| {
             visited = true;
             visit(Line {
                 at,
@@ -229,7 +271,12 @@ fn in_memory(
                 view: Some(view),
                 blank,
             })
-        }) {
+        };
+        let read = match decoded {
+            Some((backing, len)) => source.read_decoded_record(backing, len, at, text, view),
+            None => source.read_record(at, text, view),
+        };
+        match read {
             Err(error) if !visited && error.downcast_ref::<crate::json::InvalidJson>().is_some() => {}
             flow => return flow,
         }

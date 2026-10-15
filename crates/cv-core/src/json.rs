@@ -271,6 +271,39 @@ impl JsonSource {
         self.range(offset, text.len() as u64)?
             .with_native_view(raw, Validation::Cached, f)
     }
+    /// [`Self::read_record`] over this source's private decoded bytes (`decoded_len` of them), an
+    /// in-memory copy of one record at `offset`. Decoded bytes are immutable: the reader checks
+    /// the original when it decodes and when its pass ends, never per record.
+    pub(crate) fn read_decoded_record<T>(
+        &self,
+        backing: &Arc<crate::harness::store::bytes::ByteSource>,
+        decoded_len: u64,
+        offset: u64,
+        text: &str,
+        f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>,
+    ) -> Result<T> {
+        let index = document::Index::default();
+        let raw = Raw::new(text, &index);
+        if !document::validate(raw) {
+            return Err(InvalidJson.into());
+        }
+        self.decoded_range(backing.clone(), decoded_len, offset, text.len() as u64)?
+            .with_native_view(raw, Validation::Cached, f)
+    }
+    /// [`Self::read_positioned_range_value`] over this source's private decoded bytes, with a
+    /// context made by `RangeSource::decoded` over the same backing.
+    pub(crate) fn read_positioned_decoded_value<T>(
+        &self,
+        context: &RangeSource,
+        backing: &Arc<crate::harness::store::bytes::ByteSource>,
+        decoded_len: u64,
+        offset: u64,
+        len: u64,
+        f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>,
+    ) -> Result<T> {
+        self.decoded_range(backing.clone(), decoded_len, offset, len)?
+            .with_positioned_view(context, Validation::Value, f)
+    }
     /// Reuse one checked original-source positioned context for many typed records.
     #[cfg(not(feature = "mmap"))]
     pub(crate) fn read_positioned_range_syntax<T>(
@@ -363,48 +396,6 @@ impl JsonSource {
                 view.source_text()?.context("constructed JSON string")
             })
         }
-    }
-
-    /// Project a range of this source's private decoded bytes that the producer already mapped
-    /// and UTF-8 checked. Decoded bytes are immutable, so the producer checks the original's
-    /// identity when it decodes and when its pass ends, not per record; retained children keep
-    /// the backing and check the original again whenever they are resolved.
-    #[cfg(feature = "mmap")]
-    pub(crate) fn read_decoded_value<T>(
-        &self,
-        backing: &Arc<crate::harness::store::bytes::ByteSource>,
-        decoded_len: u64,
-        offset: u64,
-        text: &str,
-        f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>,
-    ) -> Result<T> {
-        self.read_decoded(backing, decoded_len, offset, text, Validation::Value, f)
-    }
-    /// Syntax-only counterpart of [`read_decoded_value`](Self::read_decoded_value).
-    #[cfg(feature = "mmap")]
-    pub(crate) fn read_decoded_syntax<T>(
-        &self,
-        backing: &Arc<crate::harness::store::bytes::ByteSource>,
-        decoded_len: u64,
-        offset: u64,
-        text: &str,
-        f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>,
-    ) -> Result<T> {
-        self.read_decoded(backing, decoded_len, offset, text, Validation::Syntax, f)
-    }
-    #[cfg(feature = "mmap")]
-    fn read_decoded<T>(
-        &self,
-        backing: &Arc<crate::harness::store::bytes::ByteSource>,
-        decoded_len: u64,
-        offset: u64,
-        text: &str,
-        validation: Validation,
-        f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>,
-    ) -> Result<T> {
-        let range = self.decoded_range(backing.clone(), decoded_len, offset, text.len() as u64)?;
-        let index = document::Index::default();
-        range.with_native_view(Raw::new(text, &index), validation, f)
     }
 
     fn backing_range(
