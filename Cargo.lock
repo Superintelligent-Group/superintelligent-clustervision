@@ -447,6 +447,7 @@ dependencies = [
  "serde_json",
  "tantivy",
  "uuid",
+ "zstd",
 ]
 
 [[package]]

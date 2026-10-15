@@ -98,8 +98,13 @@ pub fn default_embeddings_path() -> PathBuf {
 
 /// Discover, parse, and update the full-text index at its default location. Incremental by default
 /// (only changed/new sessions are rewritten; vanished ones are reaped); `rebuild = true` clears and
-/// rebuilds from scratch. Returns the number of sessions discovered.
-pub fn index_all(dir: impl Into<Option<PathBuf>>, rebuild: bool, subagents: bool) -> Result<usize> {
+/// rebuilds from scratch. Returns the number of sessions discovered, and their refs. Each compressed
+/// rollout is decoded once: discovery hands its decoded bytes to the sweep running beside it.
+pub fn index_all(
+    dir: impl Into<Option<PathBuf>>,
+    rebuild: bool,
+    subagents: bool,
+) -> Result<(usize, Vec<cv_core::SessionRef>)> {
     let dir = dir.into().unwrap_or_else(default_tantivy_dir);
     fts::index_all(&dir, rebuild, subagents)
 }
