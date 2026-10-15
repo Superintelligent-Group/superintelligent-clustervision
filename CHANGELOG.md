@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Search matches the exchange; injected instructions, system prompts and hooks are `--kind context`; fork copies hit their source once. The index rebuilds once.
 - `cv search` with no usable index errors at once naming the cause and fix, never scanning unasked; `--scan` (`/api/search?scan=1`) asks for the live scan.
 - `cv search`, `ls` and `show` work in a home they may not write (a sandbox deny-write rule): the index and catalog open read-only.
 - Listing beside a live Claude transcript reads only its appended bytes: a discovery pass raced by the writer is kept, not repeated from byte 0.

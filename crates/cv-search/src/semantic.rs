@@ -2214,7 +2214,8 @@ mod tests {
                 "horizontal",
                 crate::SearchFilter {
                     harness: Some("codex"),
-                    cwd: Some("resident")
+                    cwd: Some("resident"),
+                    ..Default::default()
                 }
             )
             .unwrap()[0]
@@ -2496,6 +2497,7 @@ mod tests {
                 crate::SearchFilter {
                     harness: Some("codex"),
                     cwd: Some("/repo/2"),
+                    ..Default::default()
                 },
             ] {
                 let mut oracle: Vec<_> = store
@@ -2589,14 +2591,17 @@ mod tests {
             crate::SearchFilter {
                 harness: Some("codex"),
                 cwd: None,
+                ..Default::default()
             },
             crate::SearchFilter {
                 harness: None,
                 cwd: Some("mixed.Path/proj"),
+                ..Default::default()
             },
             crate::SearchFilter {
                 harness: Some("codex"),
                 cwd: Some("mixed.Path/proj"),
+                ..Default::default()
             },
         ] {
             let hits = rank_filtered(&store, &[1.0, 0.0], 1, filter);
@@ -2610,7 +2615,8 @@ mod tests {
             1,
             crate::SearchFilter {
                 harness: None,
-                cwd: Some("MIXED")
+                cwd: Some("MIXED"),
+                ..Default::default()
             }
         )
         .is_empty());

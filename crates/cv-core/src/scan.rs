@@ -86,6 +86,11 @@ impl MessageSink for CapSink {
                 }
             }
         }
+        // Only the exchange is matched, as the index matches it: injected instruction files and
+        // system prompts open nearly every session's head and would answer every query.
+        if !m.kind.is_exchange() {
+            return Flow::Continue;
+        }
         for b in &m.content {
             let result = match b {
                 Block::Text { text } | Block::Thinking { text, .. } => self.push_text(text),

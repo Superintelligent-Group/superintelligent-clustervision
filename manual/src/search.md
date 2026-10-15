@@ -42,12 +42,21 @@ it runs, then caches it. `--subagents` folds the sub-agent/workflow forest in to
 
 ### What gets indexed
 
-Each session is indexed from its **entire textual content**, not
-just metadata: the title, every message's text and thinking blocks, tool-call
-names and their JSON inputs, tool results, and referenced file paths — all
-stored in searchable chunks and ranked as one session. Alongside the body, the index stores
-the session `id`, its `harness`, the working directory (`cwd`, tokenized so path
-fragments are searchable), the `title`, and created/updated timestamps.
+Each session is indexed from its **entire textual content**, not just metadata:
+the title, every message's text and thinking blocks, tool-call names and their JSON
+inputs, tool results, and referenced file paths — all stored in searchable chunks and
+ranked as one session. Alongside the body, the index stores the session `id`, its
+`harness`, the working directory (`cwd`, tokenized so path fragments are searchable),
+the `title`, and created/updated timestamps.
+
+The text is kept in two parts. The **exchange** is what the person asked, what the model
+replied and ran, what came back, and what sub-agents were handed and returned. The
+**context** is what surrounds it: injected instruction files (`CLAUDE.md`, `AGENTS.md`),
+system prompts, skill bodies, hook output, harness notices and compaction summaries. The
+context is near-identical across hundreds of sessions, so a query matches the exchange by
+default and the context only when asked (`--kind context`, or `--kind all` for both). A
+turn a fork copied from its source (a Claude `--fork-session` copy) is matched in the
+source alone, so one exchange is one hit.
 
 ### Where the index lives
 
@@ -72,8 +81,8 @@ claude    a1f3c2d9  2026-05-21  Rust tantivy index
           … We built a full text search engine with <b>tantivy</b> and BM25 scoring.
 ```
 
-Bare terms search across the title, body, and cwd. The query supports tantivy's
-full syntax:
+Bare terms search across the title, the exchange, and cwd (`--kind context` searches the
+context instead, `--kind all` both). The query supports tantivy's full syntax:
 
 - **Fielded filters** — `harness:claude foo` restricts to a harness.
 - **Phrases** — `"formal verification"` matches the exact phrase.

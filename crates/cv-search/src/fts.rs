@@ -13,7 +13,11 @@
 //! - `cwd`        TEXT   | STORED  — tokenized so path fragments are searchable
 //! - `title`      TEXT   | STORED  — on the meta doc the current label; on a body doc the label
 //!   when it was written (so a title term still matches a conjunctive query on that chunk)
-//! - `body`       TEXT             — the big searchable blob, body docs only; **indexed but not stored**
+//! - `body`       TEXT             — the session's own exchange (prompts, replies, tool calls and
+//!   results, sub-agent hand-offs, errors), body docs only; **indexed but not stored**
+//! - `context`    TEXT             — what surrounds the exchange (injected instruction files,
+//!   system prompts, hook output, notices, compaction summaries), in body docs of its own so
+//!   each field stays one contiguous run; matched only when a query asks ([`crate::Scope`])
 //! - `first_msg`  i64 INDEXED | STORED — body docs: the index of the first message they hold
 //! - `path`       STRING | STORED  — source file, so a hit can be snippeted by re-reading just
 //!   that one session live (no full stored body — keeps the index lean)
@@ -54,6 +58,7 @@ struct Fields {
     cwd: Field,
     title: Field,
     body: Field,
+    context: Field,
     path: Field,
     preview: Field,
     created_at: Field,
@@ -79,6 +84,7 @@ fn build_schema() -> Schema {
     b.add_text_field("cwd", TEXT | STORED);
     b.add_text_field("title", TEXT | STORED);
     b.add_text_field("body", TEXT);
+    b.add_text_field("context", TEXT); // what surrounds the exchange: searched only when asked
     b.add_text_field("path", STRING | STORED);
     b.add_text_field("preview", STORED); // stored-only: never searched, just the snippet fallback
     b.add_i64_field("created_at", INDEXED | STORED);
@@ -102,6 +108,7 @@ fn fields_of(schema: &Schema) -> Result<Fields> {
         cwd: get("cwd")?,
         title: get("title")?,
         body: get("body")?,
+        context: get("context")?,
         path: get("path")?,
         preview: get("preview")?,
         created_at: get("created_at")?,
@@ -130,6 +137,7 @@ fn schema_current(schema: &Schema) -> bool {
         "workflow",
         "size",
         "discovery_metadata",
+        "context",
     ]
     .iter()
     .all(|f| schema.get_field(f).is_ok())
@@ -1553,7 +1561,7 @@ const CHECKPOINT_AT_MOST: u64 = 8 * CHUNK_BYTES as u64;
 
 /// The version of what a mark's `fts` layer and the docs behind it mean, part of every mark's
 /// version: bump it when [`FtsState`], the doc layout or [`CHECKPOINT_EVERY`] changes.
-const RESUME_TAG: &str = "fts2";
+const RESUME_TAG: &str = "fts3";
 
 /// The checkpoint `job` can resume from: the source grew, its sampled mark still matches, and
 /// its state covers every consumer this pass feeds. Growth is interpreted under the adapter's
@@ -1770,6 +1778,7 @@ fn index_session(
         Some(cp) => ChunkSink::resume(out, f, r, mtime, size, prov, cp).context("checkpoint without fts state")?,
         None => ChunkSink::new(out, f, r, mtime, size, prov),
     };
+    sink.copied_before = adapter.copied_before(r, &mut sink);
     let done = match events {
         Some(es) => {
             let mut tee = cv_core::TeeSink::new(&mut sink, es);
@@ -1885,6 +1894,14 @@ struct ChunkSink<'w> {
     msgs: usize,
     /// The index of the message that put the first byte into `buf`.
     buf_first: usize,
+    /// `buf` holds context (the `context` field) rather than the exchange (`body`); the other
+    /// bucket waits in `other`/`other_first`, so each stays one contiguous run of its own text.
+    in_context: bool,
+    other: String,
+    other_first: usize,
+    /// Turns stamped before this were copied from another session ([`cv_core::Adapter::copied_before`]),
+    /// which indexes them: they count as messages and add no text.
+    copied_before: Option<chrono::DateTime<chrono::Utc>>,
     /// A chunk was flushed since the last checkpoint: take the next one offered.
     boundary_due: bool,
     /// Where the last checkpoint was taken (the file offset).
@@ -1953,6 +1970,10 @@ impl<'w> ChunkSink<'w> {
             buf: String::new(),
             msgs: 0,
             buf_first: 0,
+            in_context: false,
+            other: String::new(),
+            other_first: 0,
+            copied_before: None,
             boundary_due: false,
             last_checkpoint: 0,
             preview: String::new(),
@@ -2052,16 +2073,34 @@ impl<'w> ChunkSink<'w> {
             return;
         }
         let mut doc = self.doc(KIND_BODY);
-        doc.add_text(self.f.body, &self.buf);
+        doc.add_text(if self.in_context { self.f.context } else { self.f.body }, &self.buf);
         doc.add_i64(self.f.first_msg, self.buf_first as i64);
         self.emit(doc);
         self.buf.clear();
     }
 
+    /// Make `buf` the exchange's or the context's buffer.
+    fn switch_to(&mut self, context: bool) {
+        if self.in_context != context {
+            std::mem::swap(&mut self.buf, &mut self.other);
+            std::mem::swap(&mut self.buf_first, &mut self.other_first);
+            self.in_context = context;
+        }
+    }
+
+    /// Flush both buffers: every doc then lies before the point this is called at.
+    fn flush_both(&mut self) {
+        self.flush();
+        let context = self.in_context;
+        self.switch_to(!context);
+        self.flush();
+        self.switch_to(context);
+    }
+
     /// Flush the trailing buffer, then write the meta doc — the session's freshness signature,
     /// current label and preview, one per session — propagating any deferred error.
     fn finish(&mut self) -> Result<()> {
-        self.flush();
+        self.flush_both();
         if !self.failed && self.err.is_none() {
             let mut doc = self.doc(KIND_META);
             if !self.preview.is_empty() {
@@ -2084,7 +2123,9 @@ impl<'w> ChunkSink<'w> {
 impl<'w> ChunkSink<'w> {
     /// Append at UTF-8 boundaries, flushing before an inline field can exceed two chunks.
     fn push_chunk(&mut self, s: &str) {
-        self.extend_preview(s);
+        if !self.in_context {
+            self.extend_preview(s);
+        }
         self.push_body(s);
     }
 
@@ -2274,7 +2315,7 @@ impl std::io::Write for JsonChunks<'_, '_> {
             std::str::from_utf8(bytes).map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         // Formatter fragments can split a word. Carry its state across writes so the preview
         // stays identical to extend_preview on the former single serialized string.
-        if self.preview_chars < PREVIEW_CHARS {
+        if self.preview_chars < PREVIEW_CHARS && !self.sink.in_context {
             for c in s.chars() {
                 if self.preview_chars >= PREVIEW_CHARS {
                     break;
@@ -2342,7 +2383,7 @@ impl cv_core::MessageSink for ChunkSink<'_> {
     /// A checkpoint is a body-doc boundary: every doc lies wholly before it or after it, so a
     /// pass resumed there replaces exactly the docs from its message on.
     fn checkpoint(&mut self, cp: &mut cv_core::stream::Checkpoint) {
-        self.flush();
+        self.flush_both();
         self.boundary_due = false;
         self.last_checkpoint = cp.offset;
         cp.put(
@@ -2387,8 +2428,13 @@ impl cv_core::MessageSink for ChunkSink<'_> {
                 }
             }
         }
-        for b in &m.content {
-            self.append_block(&r, b);
+        // A turn copied from another session is that session's hit, not this one's.
+        let copied = matches!((m.timestamp, self.copied_before), (Some(at), Some(before)) if at < before);
+        if !copied {
+            self.switch_to(!m.kind.is_exchange());
+            for b in &m.content {
+                self.append_block(&r, b);
+            }
         }
         self.resolver = r;
         self.msgs += 1;
@@ -2778,8 +2824,18 @@ pub(crate) fn index_refs_with_subagents(dir: &Path, refs: &[cv_core::SessionRef]
     Ok(sweep(dir, refs.to_vec(), false, true)?.changed)
 }
 
-fn parse_text_query(index: &Index, f: &Fields, query: &str) -> Result<Box<dyn tantivy::query::Query>> {
-    let mut parser = QueryParser::for_index(index, vec![f.title, f.body, f.cwd]);
+fn parse_text_query(
+    index: &Index,
+    f: &Fields,
+    query: &str,
+    scope: crate::Scope,
+) -> Result<Box<dyn tantivy::query::Query>> {
+    let fields = match scope {
+        crate::Scope::Exchange => vec![f.title, f.body, f.cwd],
+        crate::Scope::Context => vec![f.context],
+        crate::Scope::All => vec![f.title, f.body, f.cwd, f.context],
+    };
+    let mut parser = QueryParser::for_index(index, fields);
     parser.set_conjunction_by_default();
     parser
         .parse_query(query)
@@ -2811,7 +2867,7 @@ pub fn text_search_ids_batch(dir: &Path, queries: &[&str]) -> Result<Vec<Result<
 }
 
 fn matching_ids(index: &Index, f: &Fields, searcher: &tantivy::Searcher, query: &str) -> Result<HashSet<String>> {
-    let parsed = parse_text_query(index, f, query)?;
+    let parsed = parse_text_query(index, f, query, crate::Scope::Exchange)?;
     searcher
         .search(&parsed, &crate::session_collector::SessionIds(f.id))
         .context("matching session IDs")
@@ -2819,7 +2875,7 @@ fn matching_ids(index: &Index, f: &Fields, searcher: &tantivy::Searcher, query: 
 
 /// Add live snippets to selected ranked hits. Only these source transcripts are read; unavailable
 /// sources keep their stored preview, with the same moved-file annotation as [`text_search`].
-pub fn enrich_text_snippets(dir: &Path, query: &str, hits: &mut [Hit]) -> Result<()> {
+pub fn enrich_text_snippets(dir: &Path, query: &str, scope: crate::Scope, hits: &mut [Hit]) -> Result<()> {
     if hits.is_empty() {
         return Ok(());
     }
@@ -2830,7 +2886,7 @@ pub fn enrich_text_snippets(dir: &Path, query: &str, hits: &mut [Hit]) -> Result
         let doc = meta_doc(&searcher, &f, &hit.id);
         let path = doc.as_ref().and_then(|d| d.get_first(f.path)).and_then(|v| v.as_str());
         if let Some(snippet) = path
-            .and_then(|p| live_snippet(p, &hit.harness, query))
+            .and_then(|p| live_snippet(p, &hit.harness, query, scope))
             .filter(|s| !s.is_empty())
         {
             hit.snippet = snippet;
@@ -2855,7 +2911,7 @@ pub fn enrich_text_snippets(dir: &Path, query: &str, hits: &mut [Hit]) -> Result
 /// `harness:claude`, phrases `"foo bar"`, and booleans `a AND b` work too.
 pub fn text_search(dir: &Path, query: &str, limit: usize) -> Result<Vec<Hit>> {
     let mut hits = text_search_indexed(dir, query, limit)?;
-    enrich_text_snippets(dir, query, &mut hits)?;
+    enrich_text_snippets(dir, query, crate::Scope::Exchange, &mut hits)?;
     Ok(hits)
 }
 
@@ -2899,7 +2955,7 @@ fn ranked_search(
     filter: crate::SearchFilter<'_>,
     decisions: std::sync::Arc<MetadataDecisions>,
 ) -> Result<Vec<Hit>> {
-    let parsed = parse_text_query(index, f, query)?;
+    let parsed = parse_text_query(index, f, query, filter.scope)?;
 
     // Collect sessions rather than chunks. Each segment's top `limit` sessions contains every
     // possible global winner, even when one session has arbitrarily many matching chunks.
@@ -3011,7 +3067,7 @@ const SNIPPET_SCAN_CAP: usize = 256 * 1024;
 /// [`SNIPPET_SCAN_CAP`] here — the old `bulk()` + materialize path owned the whole record before
 /// the cap check could run. Trade-off: a term that only occurs *beyond* the cap inside one giant
 /// field now falls back to the head/preview snippet (it already did for terms in later messages).
-fn live_snippet(path: &str, harness: &str, query: &str) -> Option<String> {
+fn live_snippet(path: &str, harness: &str, query: &str, scope: crate::Scope) -> Option<String> {
     use cv_core::{Block, Flow, Message, MessageSink, ParseOptions, SessionRef};
     let h = cv_core::Harness::parse(harness)?;
     let adapter = cv_core::harness::for_harness(h)?;
@@ -3031,6 +3087,8 @@ fn live_snippet(path: &str, harness: &str, query: &str) -> Option<String> {
         resolver: cv_core::Resolver,
         error: Option<anyhow::Error>,
         failed: bool,
+        scope: crate::Scope,
+        copied_before: Option<chrono::DateTime<chrono::Utc>>,
     }
     impl MessageSink for Acc {
         fn take_error(&mut self) -> Option<anyhow::Error> {
@@ -3043,6 +3101,11 @@ fn live_snippet(path: &str, harness: &str, query: &str) -> Option<String> {
         fn message(&mut self, m: Message) -> Flow {
             if self.failed || self.error.is_some() {
                 return Flow::Stop;
+            }
+            // The snippet comes from the text the hit matched in: this scope, this session's own turns.
+            let copied = matches!((m.timestamp, self.copied_before), (Some(at), Some(before)) if at < before);
+            if copied || !self.scope.holds(m.kind) {
+                return Flow::Continue;
             }
             for b in &m.content {
                 if self.head.full() {
@@ -3109,6 +3172,8 @@ fn live_snippet(path: &str, harness: &str, query: &str) -> Option<String> {
         resolver: cv_core::Resolver::new(Some(PathBuf::from(path))),
         error: None,
         failed: false,
+        scope,
+        copied_before: adapter.copied_before(&sref, &mut cv_core::stream::Discard),
     };
     cv_core::stream::stream_counted(
         &*adapter,
@@ -4044,7 +4109,7 @@ mod tests {
                     logical_bytes += store.get_document_bytes(doc).unwrap().len();
                 }
             }
-            let giant = parse_text_query(&index, &f, "giantproof").unwrap();
+            let giant = parse_text_query(&index, &f, "giantproof", crate::Scope::Exchange).unwrap();
             let addr = searcher
                 .search(&giant, &TopDocs::with_limit(1).order_by_score())
                 .unwrap()[0]
@@ -4058,7 +4123,7 @@ mod tests {
             return;
         }
         let query_text = std::env::var("CV_SEARCH_ID_PROBE_QUERY").unwrap_or_else(|_| "needle".into());
-        let query = parse_text_query(&index, &f, &query_text).unwrap();
+        let query = parse_text_query(&index, &f, &query_text, crate::Scope::Exchange).unwrap();
         let matched = searcher.search(&query, &tantivy::collector::Count).unwrap();
         let mut full = crate::session_collector::TopSessions::new(f.id, 20);
         full.full_documents = true;
@@ -4111,7 +4176,7 @@ mod tests {
         // Exhaustive chunk oracle establishes both scores and best-document selection without
         // sharing the bounded collector implementation.
         let searcher = index.reader().unwrap().searcher();
-        let query = parse_text_query(&index, &f, "needle").unwrap();
+        let query = parse_text_query(&index, &f, "needle", crate::Scope::Exchange).unwrap();
         let mut all: Vec<_> = searcher
             .search(
                 &query,
@@ -4159,7 +4224,7 @@ mod tests {
         let reader = index.reader().context("opening index reader")?;
         let searcher = reader.searcher();
 
-        let parsed = parse_text_query(&index, &f, query)?;
+        let parsed = parse_text_query(&index, &f, query, crate::Scope::Exchange)?;
 
         // Collect sessions rather than chunks. Each segment's top `limit` sessions contains every
         // possible global winner, even when one session has arbitrarily many matching chunks.
@@ -4272,10 +4337,12 @@ mod tests {
                 crate::SearchFilter {
                     harness: Some("codex"),
                     cwd: None,
+                    ..Default::default()
                 },
                 crate::SearchFilter {
                     harness: None,
                     cwd: Some("wanted"),
+                    ..Default::default()
                 },
             ] {
                 let hits = text_search_indexed_filtered(&dir, "needle", 1, filter).unwrap();
@@ -4370,6 +4437,7 @@ mod tests {
         let filter = crate::SearchFilter {
             harness: Some("codex"),
             cwd: Some("current/proj"),
+            ..Default::default()
         };
         let legacy_queries = Arc::new(AtomicUsize::new(0));
         let expected = legacy_ranked_search(&dir, "needle", 10, filter, legacy_queries.clone()).unwrap();
@@ -4401,7 +4469,8 @@ mod tests {
             3,
             crate::SearchFilter {
                 harness: Some("codex"),
-                cwd: Some("CURRENT")
+                cwd: Some("CURRENT"),
+                ..Default::default()
             }
         )
         .unwrap()
@@ -4426,14 +4495,17 @@ mod tests {
             crate::SearchFilter {
                 harness: Some("codex"),
                 cwd: None,
+                ..Default::default()
             },
             crate::SearchFilter {
                 harness: None,
                 cwd: Some("mixed.Path/proj"),
+                ..Default::default()
             },
             crate::SearchFilter {
                 harness: Some("codex"),
                 cwd: Some("mixed.Path/proj"),
+                ..Default::default()
             },
         ] {
             let hits = text_search_indexed_filtered(&dir, "needle", 1, filter).unwrap();
@@ -4448,7 +4520,8 @@ mod tests {
                 1,
                 crate::SearchFilter {
                     harness: None,
-                    cwd: Some(cwd)
+                    cwd: Some(cwd),
+                    ..Default::default()
                 }
             )
             .unwrap()
@@ -4473,7 +4546,7 @@ mod tests {
         for r in &refs {
             write_claude(&sdir, &r.id, "common replacementbody");
         }
-        enrich_text_snippets(&dir, "common", &mut hits[..1]).unwrap();
+        enrich_text_snippets(&dir, "common", crate::Scope::Exchange, &mut hits[..1]).unwrap();
         assert!(hits[0].snippet.contains("replacementbody"));
         assert_eq!(hits[1].snippet, untouched);
         assert!(hits[1].snippet.contains("originalbody"));
@@ -5330,10 +5403,10 @@ mod tests {
         assert!(body.len() > SNIPPET_SCAN_CAP);
         let p = write_claude(&sdir, "giant", &body);
 
-        let snip = live_snippet(&p, "claude", "zqearly").expect("snippet");
+        let snip = live_snippet(&p, "claude", "zqearly", crate::Scope::Exchange).expect("snippet");
         assert!(snip.contains("zqearly"), "in-cap term should window: {snip:?}");
 
-        let snip = live_snippet(&p, "claude", "zqlate").expect("snippet");
+        let snip = live_snippet(&p, "claude", "zqlate", crate::Scope::Exchange).expect("snippet");
         assert!(
             !snip.contains("zqlate") && snip.starts_with("zqearly"),
             "beyond-cap term must fall back to the head, got: {snip:?}"
@@ -7646,6 +7719,91 @@ mod tests {
         });
         let report_path = std::env::var_os("CV_COMPACTION_CONTROL_REPORT").unwrap();
         std::fs::write(report_path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+    }
+
+    /// The committed Claude corpus indexed through the production path: every session of
+    /// `.claude/projects/-home-corpus-project`, the CLAUDE.md copy injected into each, and the
+    /// `fork_session` pair (`b3a058ca` copies `e3418e9d`'s turns, then asks its own).
+    fn corpus_index() -> (IsolatedHome, PathBuf) {
+        let home = IsolatedHome::new();
+        let project = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../cv-core/tests/corpus/claude/2.1.296/.claude/projects/-home-corpus-project");
+        let refs: Vec<_> = std::fs::read_dir(&project)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|x| x == "jsonl"))
+            .map(|p| cv_core::SessionRef::new(p.file_stem().unwrap().to_str().unwrap(), cv_core::Harness::Claude, &p))
+            .collect();
+        assert_eq!(refs.len(), 18);
+        let dir = home.home.join("tantivy");
+        index_refs(&dir, &refs, false).unwrap();
+        (home, dir)
+    }
+
+    fn corpus_hits(dir: &Path, query: &str, scope: crate::Scope) -> Vec<String> {
+        let filter = crate::SearchFilter {
+            scope,
+            ..Default::default()
+        };
+        let mut ids: Vec<_> = text_search_indexed_filtered(dir, query, 100, filter)
+            .unwrap()
+            .into_iter()
+            .map(|h| h.id[..8].to_string())
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// An instruction file the harness injects into every session is context, not an exchange:
+    /// by default it hits only where the exchange itself says it (`dfa91e7c`'s reply quotes it),
+    /// and asked for, it is one hit per session that carried it, never per copy.
+    #[test]
+    fn corpus_injected_instructions_are_context_not_hits() {
+        let (_home, dir) = corpus_index();
+        let phrase = "\"corpus test repository\"";
+        assert_eq!(corpus_hits(&dir, phrase, crate::Scope::Exchange), ["dfa91e7c"]);
+        // 18 transcripts hold it; the fork's copy is its source's, so 17 sessions carried it.
+        let carried = corpus_hits(&dir, phrase, crate::Scope::Context);
+        assert_eq!(carried.len(), 17);
+        assert!(!carried.contains(&"b3a058ca".to_string()));
+        assert_eq!(corpus_hits(&dir, phrase, crate::Scope::All), carried);
+        // A snippet comes from the text its scope matched: the injected environment for a
+        // context hit, the reply for an exchange hit.
+        let snippet = |scope| {
+            let filter = crate::SearchFilter {
+                scope,
+                ..Default::default()
+            };
+            let mut hits = text_search_indexed_filtered(&dir, "dfa91e7c OR repository", 100, filter).unwrap();
+            hits.retain(|h| h.id.starts_with("dfa91e7c"));
+            enrich_text_snippets(&dir, "repository", scope, &mut hits).unwrap();
+            hits.remove(0).snippet
+        };
+        assert!(snippet(crate::Scope::Context).contains("git repository"));
+        let reply = snippet(crate::Scope::Exchange);
+        assert!(
+            reply.contains("corpus test repository") && !reply.contains("git repository"),
+            "{reply}"
+        );
+    }
+
+    /// A `--fork-session` copy carries its source's turns; each is the source's hit alone, and
+    /// the fork's own turns are the fork's.
+    #[test]
+    fn corpus_fork_inherited_turns_hit_their_source_once() {
+        let (_home, dir) = corpus_index();
+        assert_eq!(
+            corpus_hits(&dir, "\"Bonjour, mon ami\"", crate::Scope::Exchange),
+            ["e3418e9d"]
+        );
+        assert_eq!(
+            corpus_hits(&dir, "\"Which language did you use first\"", crate::Scope::All),
+            ["e3418e9d"]
+        );
+        assert_eq!(
+            corpus_hits(&dir, "\"Say goodbye in three words\"", crate::Scope::Exchange),
+            ["b3a058ca"]
+        );
     }
 
     /// Regression for the live-staleness disclosure: a session that grows after indexing must be

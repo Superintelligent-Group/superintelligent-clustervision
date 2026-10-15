@@ -504,7 +504,7 @@ fn stats(query: &str) -> (u16, Value) {
     ok(cv_core::stats::CorpusStats::compute(&refs).to_json())
 }
 
-/// `GET /api/search?q=&limit=&harness=&cwd=&semantic=1&scan=1` — full-text (or `semantic=1`) search over
+/// `GET /api/search?q=&limit=&harness=&cwd=&kind=&semantic=1&scan=1` — full-text (or `semantic=1`) search over
 /// the whole corpus, as the JSON array of rows `cv search --json` emits: the §3 session row plus
 /// `score`, `snippet` and the sub-agent provenance trio, shaped by [`cv_core::rows::SearchRow`].
 ///
@@ -552,6 +552,16 @@ fn search(query: &str, semantic_search: &cv_search::SemanticSearch) -> Reply {
             .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
     };
     let (semantic, scan) = (flag("semantic"), flag("scan"));
+    let scope = match params.get("kind") {
+        None => cv_search::Scope::Exchange,
+        Some(kind) => match cv_search::Scope::parse(&kind) {
+            Some(scope) => scope,
+            None => {
+                let (status, body) = err(400, &format!("unknown kind {kind:?}: exchange, context or all"));
+                return (status, body, Vec::new());
+            }
+        },
+    };
 
     let (mut hits, source, mut note) = if semantic {
         match semantic_search.search(
@@ -560,6 +570,7 @@ fn search(query: &str, semantic_search: &cv_search::SemanticSearch) -> Reply {
             cv_search::SearchFilter {
                 harness: want.map(|h| h.as_str()),
                 cwd: cwd.as_deref(),
+                ..Default::default()
             },
         ) {
             Ok(hits) => (hits, "semantic", None),
@@ -589,6 +600,7 @@ fn search(query: &str, semantic_search: &cv_search::SemanticSearch) -> Reply {
             cv_search::SearchFilter {
                 harness: want.map(|h| h.as_str()),
                 cwd: cwd.as_deref(),
+                scope,
             },
         ) {
             Ok(hits) => (hits, "index", None),
@@ -615,7 +627,7 @@ fn search(query: &str, semantic_search: &cv_search::SemanticSearch) -> Reply {
         });
         hits.truncate(limit);
         if source == "index" {
-            if let Err(e) = cv_search::enrich_text_snippets(None, &q, &mut hits) {
+            if let Err(e) = cv_search::enrich_text_snippets(None, &q, scope, &mut hits) {
                 note = Some(format!("live snippets unavailable ({e:#}); showing indexed previews"));
             }
         }

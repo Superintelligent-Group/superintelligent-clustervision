@@ -198,7 +198,7 @@ curl 'http://127.0.0.1:7777/api/sessions?harness=claude&limit=2'
 
 Full-text (or `semantic=1`) search over the whole corpus, as the array of rows `cv search --json`
 emits: the session row plus `score`, `snippet` and the sub-agent provenance trio. Params: `q`
-(required, non-empty), `limit`, `harness`, `cwd`, `semantic=1`, `scan=1`. With no usable index it is
+(required, non-empty), `limit`, `harness`, `cwd`, `kind` (`exchange`, `context` or `all`, as `cv search --kind`), `semantic=1`, `scan=1`. With no usable index it is
 a `503` naming the cause and the fix, as `cv search` errors; `scan=1` asks for the same head-capped
 live scan `cv search --scan` runs. The response header `X-Cv-Search-Source` is `index` | `semantic`
 | `live`, with a human sentence in `X-Cv-Search-Note` whenever the answer may be partial (a stale

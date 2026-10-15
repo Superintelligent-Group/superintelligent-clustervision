@@ -273,6 +273,12 @@ enum Cmd {
         /// error that names its cause.
         #[arg(long, conflicts_with = "semantic")]
         scan: bool,
+        /// Which text to match: `exchange` (default: what the person asked, what the model
+        /// replied and ran, what came back), `context` (what surrounds it: injected instruction
+        /// files, system prompts, skill bodies, hook output, notices, compaction summaries), or
+        /// `all`. Context repeats across sessions, so it is matched only when asked for.
+        #[arg(long, value_name = "exchange|context|all", conflicts_with_all = ["semantic", "scan"])]
+        kind: Option<String>,
         /// Emit the hits as one JSON array instead of the table — the same hits in the same
         /// order (--harness/--limit/--semantic respected): a session row (`id, harness, path, cwd,
         /// title, created_at, updated_at, message_count, size_bytes`) plus `score`, `snippet`, and
@@ -1186,8 +1192,9 @@ fn run() -> Result<()> {
             limit,
             semantic,
             scan,
+            kind,
             json,
-        } => search::cmd_search(&query, harness, limit, semantic, scan, json),
+        } => search::cmd_search(&query, harness, limit, semantic, scan, kind, json),
         Cmd::Show {
             id,
             harness,

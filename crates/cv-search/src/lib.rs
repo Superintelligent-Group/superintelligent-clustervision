@@ -160,6 +160,41 @@ pub fn text_search_indexed(dir: impl Into<Option<PathBuf>>, query: &str, limit: 
 pub struct SearchFilter<'a> {
     pub harness: Option<&'a str>,
     pub cwd: Option<&'a str>,
+    /// Which text a full-text query matches; semantic search ignores it.
+    pub scope: Scope,
+}
+
+/// Which of a session's text a full-text query matches. A session's own exchange by default:
+/// what the person asked, what the model replied and ran, what came back
+/// ([`cv_core::MessageKind::is_exchange`]). The context around it (injected instruction files,
+/// system prompts, skill bodies, hook output, notices, compaction summaries) is the same in many
+/// sessions and would dilute every answer, so it is matched only when asked for, and turns a fork
+/// copied from its source are matched in the source alone.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Scope {
+    #[default]
+    Exchange,
+    Context,
+    All,
+}
+
+impl Scope {
+    pub fn parse(s: &str) -> Option<Scope> {
+        match s {
+            "exchange" => Some(Scope::Exchange),
+            "context" => Some(Scope::Context),
+            "all" => Some(Scope::All),
+            _ => None,
+        }
+    }
+    /// Whether a turn of `kind` is in this scope.
+    pub fn holds(self, kind: cv_core::MessageKind) -> bool {
+        match self {
+            Scope::Exchange => kind.is_exchange(),
+            Scope::Context => !kind.is_exchange(),
+            Scope::All => true,
+        }
+    }
 }
 
 /// Rank the requested number of matching sessions, applying filters before the ranking cutoff.
@@ -173,8 +208,13 @@ pub fn text_search_indexed_filtered(
 }
 
 /// Generate live snippets for only the selected displayed hits.
-pub fn enrich_text_snippets(dir: impl Into<Option<PathBuf>>, query: &str, hits: &mut [Hit]) -> Result<()> {
-    fts::enrich_text_snippets(&dir.into().unwrap_or_else(default_tantivy_dir), query, hits)
+pub fn enrich_text_snippets(
+    dir: impl Into<Option<PathBuf>>,
+    query: &str,
+    scope: Scope,
+    hits: &mut [Hit],
+) -> Result<()> {
+    fts::enrich_text_snippets(&dir.into().unwrap_or_else(default_tantivy_dir), query, scope, hits)
 }
 
 /// Discover, parse, and embed every session, persisting vectors to the default store.

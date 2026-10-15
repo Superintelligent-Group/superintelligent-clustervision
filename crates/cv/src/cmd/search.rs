@@ -13,9 +13,17 @@ pub(crate) fn cmd_search(
     limit: usize,
     semantic: bool,
     scan: bool,
+    kind: Option<String>,
     json: bool, // emit the hits as one JSON array (session rows + score/snippet/provenance) instead of the table
 ) -> Result<()> {
     let want = parse_harness(&harness)?;
+    let scope = match kind.as_deref() {
+        None => cv_search::Scope::Exchange,
+        Some(k) => match cv_search::Scope::parse(k) {
+            Some(scope) => scope,
+            None => return crate::util::usage(format!("unknown --kind {k:?}: exchange, context or all")),
+        },
+    };
 
     // Semantic search: embed the query and rank stored vectors. Requires `cv index --semantic`.
     if semantic {
@@ -25,11 +33,11 @@ pub(crate) fn cmd_search(
             limit,
             cv_search::SearchFilter {
                 harness: want.map(|h| h.as_str()),
-                cwd: None,
+                ..Default::default()
             },
         )
         .context("semantic search failed (run `cv index --semantic` first?)")?;
-        render_search_hits(hits, want, limit, query, "semantic", json)?;
+        render_search_hits(hits, want, limit, query, "semantic", scope, json)?;
         return Ok(());
     }
 
@@ -54,9 +62,10 @@ pub(crate) fn cmd_search(
     let filter = cv_search::SearchFilter {
         harness: want.map(|h| h.as_str()),
         cwd: None,
+        scope,
     };
     match cv_search::text_search_indexed_filtered(None, query, limit, filter) {
-        Ok(hits) => render_search_hits(hits, want, limit, query, "index", json),
+        Ok(hits) => render_search_hits(hits, want, limit, query, "index", scope, json),
         Err(e) if cv_search::is_invalid_text_query(&e) => crate::util::usage(format!("{e:#}")),
         Err(e) => Err(
             e.context("full-text search needs the index (or pass --scan for a slow live scan of each session's head)")
@@ -83,12 +92,13 @@ fn render_search_hits(
     limit: usize,
     query: &str,
     source: &str,
+    scope: cv_search::Scope,
     json: bool,
 ) -> Result<()> {
     hits.retain(|h| want.is_none_or(|w| h.harness == w.as_str()));
     hits.truncate(limit);
     if source == "index" {
-        cv_search::enrich_text_snippets(None, query, &mut hits)?;
+        cv_search::enrich_text_snippets(None, query, scope, &mut hits)?;
     }
     // How far the index trails the corpus right now — named on both hits and misses (a hit list
     // can be missing rows, not only an empty one). Under --json it goes to stderr, keeping stdout
