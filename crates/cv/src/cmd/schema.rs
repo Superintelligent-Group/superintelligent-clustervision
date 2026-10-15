@@ -223,6 +223,12 @@ fn arg_json(a: &clap::Arg) -> Value {
         "required": a.is_required_set(),
     });
     let obj = v.as_object_mut().expect("json object");
+    if let Some(long) = a.get_long() {
+        obj.insert("long".into(), json!(long));
+    }
+    if matches!(a.get_action(), clap::ArgAction::Append) || a.get_num_args().is_some_and(|n| n.max_values() > 1) {
+        obj.insert("multiple".into(), json!(true));
+    }
     if takes_values {
         let possible: Vec<String> = a
             .get_possible_values()

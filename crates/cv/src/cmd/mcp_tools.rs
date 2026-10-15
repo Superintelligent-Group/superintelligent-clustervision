@@ -40,8 +40,12 @@ const WINDOW_SELECTORS: [&str; 6] = ["first", "last", "range", "around", "max_by
 /// One argument of one command, as `cv schema --commands --json` describes it.
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct ArgSpec {
-    /// clap's argument id: snake_case, and the long flag is its kebab-case spelling.
+    /// clap's argument id, also the MCP property name.
     pub name: String,
+    #[serde(default)]
+    pub long: Option<String>,
+    #[serde(default)]
+    pub multiple: bool,
     pub kind: ArgKind,
     #[serde(default)]
     pub value_type: String,
@@ -77,9 +81,9 @@ pub(crate) struct CommandSpec {
 }
 
 impl ArgSpec {
-    /// The long flag clap derives from the argument id (`max_bytes` → `--max-bytes`).
+    /// clap's actual spelling; older specs may only carry the argument id.
     pub fn long_flag(&self) -> String {
-        format!("--{}", self.name.replace('_', "-"))
+        format!("--{}", self.long.clone().unwrap_or_else(|| self.name.replace('_', "-")))
     }
 }
 
@@ -386,7 +390,12 @@ fn property_schema(cmd: &CommandSpec, a: &ArgSpec) -> Value {
         // Typed to match the property, so a client that pre-fills defaults sends a valid value.
         p.insert("default".into(), default_value(a, d));
     }
-    Value::Object(p)
+    if a.multiple {
+        let description = p.remove("description").unwrap();
+        json!({"description": description, "anyOf": [p, {"type": "array", "items": p}]})
+    } else {
+        Value::Object(p)
+    }
 }
 
 /// clap's value type → a JSON-schema scalar. Paths are strings on the wire; anything cv's schema
@@ -686,6 +695,73 @@ mod tests {
     }
 
     // -- argv construction -------------------------------------------------
+
+    #[test]
+    fn generated_task_flags_and_repeatable_arguments_round_trip_through_clap() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let tree = crate::build_cli();
+                let tools = CliTools::from_tree(&tree).unwrap();
+                for (name, args, expected) in [
+                    (
+                        "task_block",
+                        json!({"id":"a", "by_task":"b"}),
+                        vec!["task", "block", "a", "--by", "b"],
+                    ),
+                    (
+                        "task_supersede",
+                        json!({"id":"a", "by_task":"b"}),
+                        vec!["task", "supersede", "a", "--by", "b"],
+                    ),
+                    (
+                        "task_decide",
+                        json!({"title":"question", "for_who":"ember", "default":"a", "options":["b", "c"]}),
+                        vec![
+                            "task",
+                            "decide",
+                            "question",
+                            "--for",
+                            "ember",
+                            "--default",
+                            "a",
+                            "--option",
+                            "b",
+                            "--option",
+                            "c",
+                        ],
+                    ),
+                    (
+                        "splice",
+                        json!({"specs":["a:..2", "b:2.."]}),
+                        vec!["splice", "a:..2", "b:2..", "--json"],
+                    ),
+                ] {
+                    let cmd = tools.find(name).unwrap();
+                    let argv = build_argv(cmd, &args).unwrap();
+                    assert_eq!(argv, expected);
+                    tree.clone()
+                        .try_get_matches_from(std::iter::once("cv".to_owned()).chain(argv))
+                        .unwrap();
+                }
+                for (tool, arg) in [
+                    ("task_decide", "options"),
+                    ("task_open", "blocked_by"),
+                    ("splice", "specs"),
+                    ("adopt", "agents"),
+                    ("distill", "with"),
+                ] {
+                    let descriptor = tool_descriptor(tools.find(tool).unwrap());
+                    let property = &descriptor["inputSchema"]["properties"][arg];
+                    assert_eq!(property["anyOf"][0]["type"], "string");
+                    assert_eq!(property["anyOf"][1]["type"], "array");
+                    assert_eq!(property["anyOf"][1]["items"]["type"], "string");
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
 
     #[test]
     fn show_without_a_selector_gets_the_mcp_window_defaults() {

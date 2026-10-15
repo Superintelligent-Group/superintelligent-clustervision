@@ -51,7 +51,7 @@ cv schema --commands --json
 
 prints: clap's own introspection of the command tree — every visible command and
 subcommand with its group, `about`, and each argument's kind (`flag` / `option` /
-`positional`), value type, possible values, default, help text and required-ness. Each
+`positional`), actual long flag, repeatability, value type, possible values, default, help text and required-ness. Each
 command in the **Read**, **Reshape**, **Export** and **System** groups, and every `cv task`
 subcommand, becomes one MCP tool:
 
@@ -64,8 +64,10 @@ subcommand, becomes one MCP tool:
   default as `default`;
 - **required arguments land in the schema's `required` list** (an argument in a one-of
   group, like `task resolve`'s `choice` / `accept_default` / `confirm`, is not required alone);
-- a **list value** repeats a repeatable option (`blocked_by: ["a", "b"]`) or fills a repeatable
-  positional (`splice`'s `specs`).
+- repeatable arguments advertise **a scalar or an array**: a list repeats the actual CLI option
+  (`options: ["a", "b"]` becomes `--option a --option b`) or fills a repeatable positional
+  (`splice`'s `specs`). Property names stay unchanged when the CLI flag differs:
+  `for_who` maps to `--for`, and `by_task` to `--by`.
 
 A call runs the same `cv` executable as `cv <command> <args…> --json`, and its stdout comes
 back as the tool result. The `--json` is appended only for commands that have the flag (so `cat`,
