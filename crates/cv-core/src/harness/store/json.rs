@@ -342,22 +342,27 @@ fn json_body_windows(
     reader: &mut impl std::io::BufRead,
     visit: &mut impl FnMut(&[u8]) -> Result<bool, ()>,
 ) -> Result<bool, ()> {
-    const WINDOW: usize = 64 * 1024;
-    // Sized by what the reader offers, never past one window: a short body costs its length.
-    let mut raw = Vec::new();
-    let mut quoted = Vec::new();
+    // serde decodes an escaped window into its own scratch, so a decode holds two windows.
+    const WINDOW: usize = 32 * 1024;
+    // One buffer: an opening quote, then at most one window of body. Its capacity follows what
+    // the reader offers, so a short body costs its length and a long one one window.
+    let mut buf = vec![b'"'];
     let mut has_escape = false;
     loop {
-        while raw.len() < WINDOW {
+        while buf.len() - 1 < WINDOW {
             let bytes = reader.fill_buf().map_err(|_| ())?;
             if bytes.is_empty() {
                 break;
             }
-            let n = (WINDOW - raw.len()).min(bytes.len());
-            raw.reserve_exact(n);
-            raw.extend_from_slice(&bytes[..n]);
+            let n = (WINDOW + 1 - buf.len()).min(bytes.len());
+            let needed = buf.len() + n + 1;
+            if needed > buf.capacity() {
+                buf.reserve_exact(needed.max(2 * buf.capacity()).min(WINDOW + 2) - buf.len());
+            }
+            buf.extend_from_slice(&bytes[..n]);
             reader.consume(n);
         }
+        let raw = &buf[1..];
         let eof = raw.len() < WINDOW;
         if raw.is_empty() {
             return Ok(has_escape);
@@ -365,7 +370,7 @@ fn json_body_windows(
         let mut end = if eof {
             raw.len()
         } else {
-            complete_json_window_prefix(&raw)
+            complete_json_window_prefix(raw)
         };
         if !eof && raw[end - 1] >= 0x80 {
             let mut tail = end.saturating_sub(4);
@@ -379,15 +384,24 @@ fn json_body_windows(
             }
         }
         has_escape |= raw[..end].contains(&b'\\');
-        quoted.clear();
-        quoted.reserve_exact(end + 2);
-        quoted.push(b'"');
-        quoted.extend_from_slice(&raw[..end]);
-        quoted.push(b'"');
-        if !visit(&quoted)? {
+        // Close the quote in place over the first carried byte, then restore it.
+        let close = end + 1;
+        let carried = buf.get(close).copied();
+        match carried {
+            Some(_) => buf[close] = b'"',
+            None => buf.push(b'"'),
+        }
+        let keep_going = visit(&buf[..close + 1]);
+        match carried {
+            Some(byte) => buf[close] = byte,
+            None => {
+                buf.pop();
+            }
+        }
+        if !keep_going? {
             return Ok(has_escape);
         }
-        raw.drain(..end);
+        buf.drain(1..close);
         if eof {
             return Ok(has_escape);
         }
