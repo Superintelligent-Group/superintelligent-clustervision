@@ -40,6 +40,13 @@ embeddings; that step downloads a small embedding model (~30 MB) the first time
 it runs, then caches it. `--subagents` folds the sub-agent/workflow forest in too
 (off by default — it can add hundreds of MB).
 
+A session that cannot be read (its transcript changed under the pass twice, or a
+read failed) stays out of the index until a later pass; `cv index` warns with the
+count and still exits 0 once the rest is committed. `--json` lists each such
+session's id and reason; `--strict` makes any of them exit 1. A persisted tool
+output the indexer cannot open (another user's file) only drops that output: the
+session is indexed with a note naming it.
+
 ### What gets indexed
 
 Each session is indexed from its **entire textual content**, not just metadata:

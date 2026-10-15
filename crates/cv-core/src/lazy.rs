@@ -36,11 +36,36 @@ pub fn read_head(path: &Path, max_bytes: usize) -> Option<String> {
     Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
-/// Read an optional persisted output head. Only an absent source is optional; other source/read
-/// failures are errors. Identity is captured for this demand, without a historical source stamp.
-pub fn read_head_checked(path: &Path, max_bytes: usize) -> anyhow::Result<Option<String>> {
+/// A persisted output's head as one demand found it.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PersistedHead {
+    /// No file at the path: the output was never kept, or was cleaned up.
+    Absent,
+    Text(String),
+    /// The file exists but cannot be read here (permissions, not a regular file): a session that
+    /// references it degrades to its transcript, the reason noted, rather than failing.
+    Unreadable(String),
+}
+
+impl PersistedHead {
+    /// The text a reader indexes for this output: its head, a note naming why it is missing, or
+    /// nothing when it is absent.
+    pub fn indexed_text(&self, path: &str) -> Option<String> {
+        match self {
+            Self::Absent => None,
+            Self::Text(text) => Some(text.clone()),
+            Self::Unreadable(reason) => Some(format!("[persisted output {path} unreadable: {reason}]")),
+        }
+    }
+}
+
+/// Read an optional persisted output head. Absence and a file that cannot be opened are answers;
+/// a change while it is read is an error. Identity is captured for this demand, without a
+/// historical source stamp.
+pub fn read_head_checked(path: &Path, max_bytes: usize) -> anyhow::Result<PersistedHead> {
     use std::io::Read;
     let path = std::path::absolute(path)?;
+    let unreadable = |error: &dyn std::fmt::Display| PersistedHead::Unreadable(format!("{error:#}"));
     let captured = match crate::json::JsonSource::capture(&path) {
         Ok(captured) => captured,
         Err(error)
@@ -48,19 +73,24 @@ pub fn read_head_checked(path: &Path, max_bytes: usize) -> anyhow::Result<Option
                 .downcast_ref::<std::io::Error>()
                 .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
         {
-            return Ok(None)
+            return Ok(PersistedHead::Absent)
         }
-        Err(error) => return Err(error),
+        Err(error) => return Ok(unreadable(&error)),
     };
     // Absence is optional only at initial capture. Disappearance while opening/reading a source
     // already observed present is a failed demand, like any other mid-demand mutation.
-    let source = CheckedSource::open_captured(path, captured)?;
+    let file = match std::fs::File::open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Ok(unreadable(&error)),
+        Err(error) => return Err(error.into()),
+    };
+    let source = CheckedSource::opened(path, captured, file)?;
     let len = usize::try_from(source.len.min(u64::try_from(max_bytes).unwrap_or(u64::MAX)))?;
     let mut bytes = vec![0; len];
     let result = source.file.try_clone()?.read_exact(&mut bytes);
     source.check()?;
     result?;
-    Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
+    Ok(PersistedHead::Text(String::from_utf8_lossy(&bytes).into_owned()))
 }
 
 /// Content at or below this many bytes is stored inline; larger content becomes a lazy [`Span`].
@@ -342,6 +372,9 @@ impl CheckedSource {
     fn open_captured(path: PathBuf, captured: crate::json::JsonSource) -> anyhow::Result<Self> {
         use anyhow::Context;
         let file = std::fs::File::open(&path).with_context(|| format!("opening Text source {}", path.display()))?;
+        Self::opened(path, captured, file)
+    }
+    fn opened(path: PathBuf, captured: crate::json::JsonSource, file: std::fs::File) -> anyhow::Result<Self> {
         let metadata = file.metadata()?;
         let len = metadata.len();
         captured.check_metadata(metadata)?;
@@ -1158,11 +1191,35 @@ mod tests {
     fn checked_optional_head_distinguishes_absence_from_read_failure() {
         let dir = CheckedTestDir::new();
         let path = dir.path().join("text");
-        assert_eq!(read_head_checked(&path, 8).unwrap(), None);
-        assert!(read_head_checked(dir.path(), 8).is_err());
+        assert_eq!(read_head_checked(&path, 8).unwrap(), PersistedHead::Absent);
+        assert!(matches!(
+            read_head_checked(dir.path(), 8).unwrap(),
+            PersistedHead::Unreadable(_)
+        ));
         std::fs::write(&path, b"a\xffb").unwrap();
         for cap in 0..5 {
-            assert_eq!(read_head_checked(&path, cap).unwrap(), read_head(&path, cap));
+            assert_eq!(
+                read_head_checked(&path, cap).unwrap(),
+                PersistedHead::Text(read_head(&path, cap).unwrap())
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+            // Root reads it anyway; everyone else gets a noted, unreadable output.
+            if std::fs::File::open(&path).is_err() {
+                let head = read_head_checked(&path, 8).unwrap();
+                assert!(
+                    matches!(&head, PersistedHead::Unreadable(reason) if reason.contains("ermission")),
+                    "{head:?}"
+                );
+                assert!(head
+                    .indexed_text("/p")
+                    .unwrap()
+                    .starts_with("[persisted output /p unreadable: "));
+            }
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         }
         let captured = crate::json::JsonSource::capture(&path).unwrap();
         std::fs::remove_file(&path).unwrap();

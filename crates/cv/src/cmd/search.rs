@@ -262,7 +262,7 @@ fn cmd_search_live(query: &str, want: Option<Harness>, limit: usize, json: bool)
     Ok(())
 }
 
-pub(crate) fn cmd_index(semantic: bool, rebuild: bool, subagents: bool) -> Result<()> {
+pub(crate) fn cmd_index(semantic: bool, rebuild: bool, subagents: bool, strict: bool, json: bool) -> Result<()> {
     if semantic && subagents {
         return crate::util::usage("--semantic indexes top-level sessions; --subagents currently applies only to full-text indexing. Run `cv index --subagents` and `cv index --semantic` separately.");
     }
@@ -272,25 +272,45 @@ pub(crate) fn cmd_index(semantic: bool, rebuild: bool, subagents: bool) -> Resul
         if rebuild { "rebuilding" } else { "updating" },
         if subagents { " (+ sub-agent forest)" } else { "" }
     );
-    let (n, refs) = cv_search::index_all(None, rebuild, subagents)?;
-    println!(
-        "indexed {n} top-level session(s) → {}{}",
-        cv_search::default_tantivy_dir().display(),
-        if subagents {
-            " (sub-agent transcripts folded in)"
-        } else {
-            ""
-        }
-    );
+    let (indexed, refs) = cv_search::index_all(None, rebuild, subagents, strict)?;
+    let dir = cv_search::default_tantivy_dir();
+    if !json {
+        println!(
+            "indexed {} top-level session(s) → {}{}",
+            indexed.total,
+            dir.display(),
+            if subagents {
+                " (sub-agent transcripts folded in)"
+            } else {
+                ""
+            }
+        );
+    }
+    let mut embedded = None;
     if semantic {
         eprintln!("✦ refreshing semantic vectors (downloads a small model on first use)…");
         let e = cv_search::embed_sessions(None, &refs)?;
-        println!(
-            "embedded {e} session(s) → {}",
-            cv_search::default_embeddings_path().display()
-        );
+        if !json {
+            println!(
+                "embedded {e} session(s) → {}",
+                cv_search::default_embeddings_path().display()
+            );
+        }
+        embedded = Some(e);
     }
-    println!("events: extracted on the same pass → try `cv events <id>` / `cv touched <path>`");
+    if json {
+        let mut out = serde_json::json!({
+            "indexed": indexed.total,
+            "path": dir,
+            "unreadable": indexed.unreadable,
+        });
+        if let Some(e) = embedded {
+            out["embedded"] = e.into();
+        }
+        println!("{}", serde_json::to_string_pretty(&out)?);
+    } else {
+        println!("events: extracted on the same pass → try `cv events <id>` / `cv touched <path>`");
+    }
     Ok(())
 }
 
@@ -300,7 +320,7 @@ mod tests {
     #[test]
     fn unsupported_semantic_forest_combination_fails_before_index_work() {
         for rebuild in [false, true] {
-            let error = cmd_index(true, rebuild, true).unwrap_err();
+            let error = cmd_index(true, rebuild, true, false, false).unwrap_err();
             assert!(error.is::<crate::util::UsageError>());
             assert!(error.to_string().contains("top-level"));
             assert!(error.to_string().contains("cv index --subagents"));

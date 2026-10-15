@@ -404,9 +404,14 @@ const CHUNK_BYTES: usize = if cfg!(all(test, not(feature = "probe-heap"))) {
 /// **Decode once:** discovery runs beside the sweep and hands over each rollout it decodes in
 /// full; [`sweep_decoded`] reads it at once from those bytes, so a cold index decodes every
 /// compressed rollout once. Returns the discovered refs too.
-pub fn index_all(dir: &Path, rebuild: bool, subagents: bool) -> Result<(usize, Vec<cv_core::SessionRef>)> {
+pub fn index_all(
+    dir: &Path,
+    rebuild: bool,
+    subagents: bool,
+    strict: bool,
+) -> Result<(Indexed, Vec<cv_core::SessionRef>)> {
     let (swept, refs) = sweep_all(dir, rebuild, subagents)?;
-    Ok((report(swept, rebuild)?, refs))
+    Ok((report(swept, rebuild, strict)?, refs))
 }
 
 /// Discovery beside [`sweep_decoded`], then the full sweep over what discovery found.
@@ -493,11 +498,29 @@ pub fn index_sessions(
     subagents: bool,
 ) -> Result<usize> {
     let _sources = cv_core::source::read_scope();
-    report(sweep_refs(dir, refs.as_ref(), rebuild, subagents)?, rebuild)
+    Ok(report(sweep_refs(dir, refs.as_ref(), rebuild, subagents)?, rebuild, false)?.total)
 }
 
-/// Say what a sweep did; fail when any session failed.
-fn report(swept: Swept, rebuild: bool) -> Result<usize> {
+/// A session a sweep could not read, and why.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct Unreadable {
+    pub id: String,
+    pub harness: String,
+    pub reason: String,
+}
+
+/// What `cv index` committed.
+#[derive(Debug)]
+pub struct Indexed {
+    /// Top-level sessions seen.
+    pub total: usize,
+    /// Sessions left out of the index this pass (a later pass retries each).
+    pub unreadable: Vec<Unreadable>,
+}
+
+/// Say what a sweep did. A session that cannot be read is a warning when the index committed
+/// the rest; an unwritable catalog, a pass that read nothing, or any failure under `strict` fail.
+fn report(swept: Swept, rebuild: bool, strict: bool) -> Result<Indexed> {
     if !rebuild {
         eprintln!(
             "  ↳ index: {} changed/new ({} read from where the last pass stopped), {} removed, {} unchanged, {} errors",
@@ -510,13 +533,28 @@ fn report(swept: Swept, rebuild: bool) -> Result<usize> {
             );
         }
     }
+    let unread = swept.unreadable.len();
     anyhow::ensure!(
-        swept.errors == 0,
+        swept.errors == unread,
         "index incomplete: {} session(s) failed: {}; retry cv index",
-        swept.errors,
+        swept.errors - unread,
         swept.first_error.as_deref().unwrap_or("unknown error")
     );
-    Ok(swept.total)
+    if let Some(first) = swept.unreadable.first() {
+        let summary = format!(
+            "{unread} session(s) could not be read and stay out of the index until a later pass (first: {} ({}): {})",
+            first.id, first.harness, first.reason
+        );
+        anyhow::ensure!(
+            !strict && swept.changed + swept.unchanged != 0,
+            "index incomplete: {summary}"
+        );
+        eprintln!("cv: warning: {summary}");
+    }
+    Ok(Indexed {
+        total: swept.total,
+        unreadable: swept.unreadable,
+    })
 }
 
 /// Successful-sweep delivered callbacks and document submissions, not input scans or timings.
@@ -542,7 +580,10 @@ pub(crate) struct Swept {
     pub unchanged: usize,
     /// Sessions whose parse or event publication failed (successful independent work is kept).
     pub errors: usize,
+    /// The first event publication failure.
     first_error: Option<String>,
+    /// Sessions that could not be read, of [`Self::errors`].
+    pub unreadable: Vec<Unreadable>,
     /// Sessions reaped because their files are gone.
     pub removed: usize,
     /// Sessions read only from their mark on.
@@ -859,8 +900,9 @@ fn sweep_refs(dir: &Path, refs: &[cv_core::SessionRef], rebuild: bool, subagents
         unchanged,
         removed,
         resumed: ran.resumed,
-        errors: ran.errors,
+        errors: ran.errors + ran.unreadable.len(),
         first_error: ran.first_error,
+        unreadable: ran.unreadable,
         #[cfg(test)]
         admission: writer.admission.stats(),
         #[cfg(test)]
@@ -1164,8 +1206,11 @@ fn body_hash(mut hash: u64, bytes: &[u8]) -> u64 {
 struct Ran {
     #[cfg(test)]
     work: SweepWork,
+    /// Event publications that failed: the catalog could not be written.
     errors: usize,
     first_error: Option<String>,
+    /// Sessions whose read failed: each stays out of the index until a later pass reads it.
+    unreadable: Vec<Unreadable>,
     /// Sessions whose FTS docs were rewritten.
     changed: usize,
     /// Sessions read from their mark on.
@@ -1420,12 +1465,10 @@ fn run_fed(
                     }
                 }
                 Out::Failed { job, err } => {
-                    ran.errors += 1;
-                    ran.first_error.get_or_insert_with(|| {
-                        cv_core::ir::truncate(
-                            &format!("parse failed for {} ({}): {err:#}", job.r.id, job.r.harness),
-                            512,
-                        )
+                    ran.unreadable.push(Unreadable {
+                        id: job.r.id.clone(),
+                        harness: job.r.harness.to_string(),
+                        reason: cv_core::ir::truncate(&format!("{err:#}"), 512),
                     });
                     // The session drops out of the index (and its skip-set entry) until a later
                     // run parses it whole — never frozen in as a truncated body stamped fresh.
@@ -1506,7 +1549,7 @@ fn run_job(
 
 /// Read `job`'s session, sending its docs as they come; what the writer records once it is read.
 fn job_out(
-    job: Job,
+    mut job: Job,
     f: &Fields,
     tx: &std::sync::mpsc::SyncSender<Out>,
     admission: &std::sync::Arc<Admission>,
@@ -1519,9 +1562,17 @@ fn job_out(
         Some(cp) => job_pass(&job, f, tx, admission, adapter, Some(cp)).transpose(),
         None => None,
     };
-    let result = resumed.unwrap_or_else(|| {
-        job_pass(&job, f, tx, admission, adapter, None).and_then(|p| p.context("a whole pass never declines"))
-    });
+    let whole = |job: &Job| {
+        job_pass(job, f, tx, admission, adapter, None).and_then(|p| p.context("a whole pass never declines"))
+    };
+    let mut result = resumed.unwrap_or_else(|| whole(&job));
+    // A source that changed under the pass (a writer, a rewrite) is retried once, whole; the
+    // retry's first doc deletes whatever the failed pass sent. A failure on unchanged sources is
+    // the session's own and is reported.
+    if result.is_err() && !cv_core::source::unchanged(&job.r, &job.source) {
+        job.existing |= job.fts;
+        result = whole(&job);
+    }
     match result {
         Ok(p) => {
             #[cfg(test)]
@@ -1613,6 +1664,12 @@ type AfterPass = Box<dyn FnMut(&std::path::Path) + Send>;
 #[cfg(test)]
 static AFTER_PASS: std::sync::Mutex<Option<(PathBuf, AfterPass)>> = std::sync::Mutex::new(None);
 
+/// Tests: runs before each pass over this resume source; an error it returns is that pass's.
+#[cfg(test)]
+type BeforePass = Box<dyn FnMut(&std::path::Path) -> Result<()> + Send>;
+#[cfg(test)]
+static BEFORE_PASS: std::sync::Mutex<Option<(PathBuf, BeforePass)>> = std::sync::Mutex::new(None);
+
 /// Count actual adapter callbacks, not the cumulative counts restored from a checkpoint.
 #[cfg(test)]
 struct CallbackCounter<'a> {
@@ -1653,6 +1710,12 @@ fn job_pass(
     from: Option<&cv_core::stream::Checkpoint>,
 ) -> Result<Option<JobPass>> {
     let first = from.and_then(|cp| cp.messages()).unwrap_or(0);
+    #[cfg(test)]
+    if let Some((source, hook)) = BEFORE_PASS.lock().unwrap().as_mut() {
+        if *source == adapter.resume_source(&job.r) {
+            hook(source)?;
+        }
+    }
     let source = std::fs::File::open(adapter.resume_source(&job.r)).ok();
     let mut events = match from {
         None => cv_core::events::SpoolingSink::new(job.r.cwd.clone()),
@@ -2265,13 +2328,17 @@ impl<'w> ChunkSink<'w> {
                 if let Some(p) = b.persisted_output_path() {
                     self.dependencies.record(Path::new(p));
                     match cv_core::lazy::read_head_checked(std::path::Path::new(p), PERSISTED_INDEX_CAP) {
-                        Ok(Some(t)) => {
-                            for piece in t.as_bytes().chunks(CHUNK_BYTES) {
-                                self.push_chunk(&String::from_utf8_lossy(piece));
+                        Ok(head) => {
+                            if let cv_core::lazy::PersistedHead::Unreadable(reason) = &head {
+                                eprintln!("cv-search: {} indexed without {p}: {reason}", self.id);
                             }
-                            self.push_chunk("\n");
+                            if let Some(t) = head.indexed_text(p) {
+                                for piece in t.as_bytes().chunks(CHUNK_BYTES) {
+                                    self.push_chunk(&String::from_utf8_lossy(piece));
+                                }
+                                self.push_chunk("\n");
+                            }
                         }
-                        Ok(None) => {}
                         Err(error) => {
                             if !self.failed && self.err.is_none() {
                                 self.err = Some(error.context("reading persisted search output"));
@@ -3126,11 +3193,12 @@ fn live_snippet(path: &str, harness: &str, query: &str, scope: crate::Scope) -> 
                             let remaining = self.head.remaining();
                             if remaining > 0 {
                                 match cv_core::lazy::read_head_checked(std::path::Path::new(p), remaining) {
-                                    Ok(Some(t)) => {
-                                        self.head.push(&t);
-                                        self.head.push("\n");
+                                    Ok(head) => {
+                                        if let Some(t) = head.indexed_text(p) {
+                                            self.head.push(&t);
+                                            self.head.push("\n");
+                                        }
                                     }
-                                    Ok(None) => {}
                                     Err(error) => {
                                         self.error = Some(error);
                                         return Flow::Stop;
@@ -7083,6 +7151,153 @@ mod tests {
         );
         let unchanged = sweep(&dir, vec![r], false, false).unwrap();
         assert_eq!((unchanged.changed, unchanged.work.callbacks), (0, 0));
+        for d in [dir, sdir] {
+            std::fs::remove_dir_all(d).ok();
+        }
+    }
+
+    /// A pass that fails while its source changes is read again, whole, once; one that fails on
+    /// unchanged sources is reported, the rest of the index committed, and a later pass retries.
+    #[cfg(unix)]
+    #[test]
+    fn a_pass_failing_on_a_changed_source_is_retried_and_one_on_an_unchanged_source_reported() {
+        use std::io::Write;
+        let _home = IsolatedHome::new();
+        let (dir, sdir) = (tmpdir(), tmpdir());
+        let line = |i: usize, word: &str| {
+            format!(
+                "{}\n",
+                serde_json::json!({"type": "user", "uuid": format!("u{i}"), "sessionId": "s",
+                    "message": {"role": "user", "content": format!("message {i} {word}")}})
+            )
+        };
+        let flaky = sdir.join("flaky.jsonl");
+        let steady = sdir.join("steady.jsonl");
+        std::fs::write(&flaky, line(0, "zqfirst")).unwrap();
+        std::fs::write(&steady, line(0, "zqsteady")).unwrap();
+        let refs = vec![
+            sref("flaky", "flaky", flaky.to_string_lossy().into_owned()),
+            sref("steady", "steady", steady.to_string_lossy().into_owned()),
+        ];
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hook = |grow: bool| -> BeforePass {
+            let calls = calls.clone();
+            Box::new(move |source| {
+                if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    if grow {
+                        let mut file = std::fs::OpenOptions::new().append(true).open(source)?;
+                        file.write_all(line(1, "zqappended").as_bytes())?;
+                    }
+                    anyhow::bail!("injected read failure");
+                }
+                Ok(())
+            })
+        };
+        *BEFORE_PASS.lock().unwrap() = Some((flaky.clone(), hook(true)));
+        let swept = sweep(&dir, refs.clone(), false, false);
+        *BEFORE_PASS.lock().unwrap() = None;
+        let swept = swept.unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2, "one retry");
+        assert_eq!((swept.changed, swept.errors), (2, 0));
+        assert_eq!(text_search(&dir, "zqappended", 10).unwrap().len(), 1);
+
+        // Unchanged sources: no retry; the failure is a warning, not the pass's.
+        std::fs::write(&flaky, line(0, "zqrewritten")).unwrap();
+        std::fs::write(&steady, format!("{}{}", line(0, "zqsteady"), line(1, "zqmore"))).unwrap();
+        calls.store(0, std::sync::atomic::Ordering::SeqCst);
+        *BEFORE_PASS.lock().unwrap() = Some((flaky.clone(), hook(false)));
+        let swept = sweep(&dir, refs.clone(), false, false);
+        *BEFORE_PASS.lock().unwrap() = None;
+        let swept = swept.unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1, "no retry");
+        assert_eq!(swept.unreadable.len(), 1);
+        assert_eq!(swept.unreadable[0].id, "flaky");
+        assert!(swept.unreadable[0].reason.contains("injected read failure"));
+        assert_eq!(text_search(&dir, "zqmore", 10).unwrap().len(), 1, "the rest committed");
+        assert!(
+            text_search(&dir, "zqfirst", 10).unwrap().is_empty(),
+            "never a stale body"
+        );
+        let indexed = report(swept, false, false).unwrap();
+        assert_eq!(indexed.unreadable.len(), 1);
+        let swept = sweep(&dir, refs, false, false).unwrap();
+        assert_eq!((swept.changed, swept.errors), (1, 0), "a later pass retries it");
+        assert_eq!(text_search(&dir, "zqrewritten", 10).unwrap().len(), 1);
+        for d in [dir, sdir] {
+            std::fs::remove_dir_all(d).ok();
+        }
+    }
+
+    #[test]
+    fn report_fails_only_for_an_unwritable_catalog_a_pass_that_read_nothing_or_strict() {
+        let unreadable = || Unreadable {
+            id: "s".into(),
+            harness: "claude".into(),
+            reason: "Permission denied".into(),
+        };
+        let swept = |changed: usize, unchanged: usize, publication: usize| Swept {
+            total: 2,
+            changed,
+            unchanged,
+            errors: 1 + publication,
+            first_error: (publication != 0).then(|| "event publication failed".into()),
+            unreadable: vec![unreadable()],
+            ..Default::default()
+        };
+        assert_eq!(report(swept(1, 0, 0), true, false).unwrap().unreadable.len(), 1);
+        assert_eq!(report(swept(0, 1, 0), true, false).unwrap().total, 2);
+        for (error, expected) in [
+            (report(swept(1, 0, 0), true, true).unwrap_err(), "could not be read"),
+            (report(swept(0, 0, 0), true, false).unwrap_err(), "could not be read"),
+            (
+                report(swept(1, 0, 1), true, false).unwrap_err(),
+                "event publication failed",
+            ),
+        ] {
+            assert!(error.to_string().contains(expected), "{error:#}");
+        }
+        assert_eq!(report(Swept::default(), true, true).unwrap().total, 0);
+    }
+
+    /// A persisted tool output the indexer cannot open (another user's file) leaves its session
+    /// indexed: the transcript's text, and a note naming the output and why it is missing.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_persisted_output_degrades_its_session_instead_of_failing_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let _home = IsolatedHome::new();
+        let (dir, sdir) = (tmpdir(), tmpdir());
+        let output = sdir.join("tool-results").join("big.txt");
+        std::fs::create_dir_all(output.parent().unwrap()).unwrap();
+        std::fs::write(&output, "zqhiddenoutput").unwrap();
+        std::fs::set_permissions(&output, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::File::open(&output).is_ok() {
+            return; // root reads anything
+        }
+        let stub = format!(
+            "<persisted-output>\nOutput too large (66KB). Full output saved to: {}\n\nPreview (first 2KB):\nzqpreview\n</persisted-output>",
+            output.display()
+        );
+        let path = sdir.join("s.jsonl");
+        let lines = [
+            serde_json::json!({"type": "assistant", "uuid": "a", "sessionId": "s", "message": {"role": "assistant",
+                "content": [{"type": "tool_use", "id": "t", "name": "Bash", "input": {"command": "big"}}]}}),
+            serde_json::json!({"type": "user", "uuid": "u", "sessionId": "s", "message": {"role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "t", "content": stub}]}}),
+        ];
+        std::fs::write(&path, lines.iter().map(|l| format!("{l}\n")).collect::<String>()).unwrap();
+        let swept = sweep(
+            &dir,
+            vec![sref("s", "s", path.to_string_lossy().into_owned())],
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!((swept.changed, swept.errors), (1, 0));
+        assert_eq!(text_search(&dir, "zqpreview", 10).unwrap().len(), 1);
+        assert_eq!(text_search(&dir, "unreadable", 10).unwrap().len(), 1);
+        assert!(text_search(&dir, "zqhiddenoutput", 10).unwrap().is_empty());
+        std::fs::set_permissions(&output, std::fs::Permissions::from_mode(0o644)).unwrap();
         for d in [dir, sdir] {
             std::fs::remove_dir_all(d).ok();
         }

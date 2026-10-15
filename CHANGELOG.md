@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `cv index` exits 0 when only some sessions are unreadable: it retries a changed source once, warns with the count; `--json` lists them, `--strict` fails.
+
+- A persisted tool output cv cannot open (another user's file) no longer fails its session's indexing: the session is indexed with a note.
+
 - Untitled sessions are titled by their first prompt everywhere (index and scan hits, labels, Markdown, share, archive), never injected AGENTS.md or environment context.
 - Semantic vectors embed the exchange only, not injected context or fork copies; `cv index --semantic` re-embeds once. `/api/search?semantic=1&kind=context` is a 400.
 - Search matches the exchange; injected instructions, system prompts and hooks are `--kind context`; fork copies hit their source once. The index rebuilds once.

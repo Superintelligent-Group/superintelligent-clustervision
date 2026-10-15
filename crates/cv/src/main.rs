@@ -1003,6 +1003,13 @@ enum Cmd {
         /// hundreds of transcripts to ingest. Without it, only top-level sessions are indexed.
         #[arg(long)]
         subagents: bool,
+        /// Fail (exit 1) when any session cannot be read. By default such sessions are warnings:
+        /// the index commits the rest and a later pass retries them.
+        #[arg(long)]
+        strict: bool,
+        /// Print the result as JSON: `{indexed, path, unreadable: [{id, harness, reason}]}`.
+        #[arg(long)]
+        json: bool,
     },
     /// View the user config (`~/.config/clustervision/config.toml`) and manage the export-source index.
     /// With no flag, prints the config path + registered export sources. Account data exports
@@ -1275,7 +1282,9 @@ fn run() -> Result<()> {
             semantic,
             rebuild,
             subagents,
-        } => search::cmd_index(semantic, rebuild, subagents),
+            strict,
+            json,
+        } => search::cmd_index(semantic, rebuild, subagents, strict, json),
         Cmd::Events {
             id,
             harness,

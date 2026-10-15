@@ -91,11 +91,12 @@ impl DocSink {
                         if let Some(path) = block.persisted_output_path() {
                             self.reads.record(std::path::Path::new(path));
                             match cv_core::lazy::read_head_checked(std::path::Path::new(path), self.body.remaining()) {
-                                Ok(Some(text)) => {
-                                    self.body.push(&text);
-                                    self.body.push("\n");
+                                Ok(head) => {
+                                    if let Some(text) = head.indexed_text(path) {
+                                        self.body.push(&text);
+                                        self.body.push("\n");
+                                    }
                                 }
-                                Ok(None) => {}
                                 Err(error) => {
                                     self.error = Some(error);
                                     return;
@@ -304,7 +305,7 @@ mod tests {
     }
 
     #[test]
-    fn semantic_optional_output_absence_is_allowed_but_present_read_failure_is_not() {
+    fn semantic_optional_output_absent_or_unreadable_leaves_the_session_readable() {
         let dir = std::env::temp_dir().join(format!("cv-semantic-output-error-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
         let block = |path: &std::path::Path| Block::ToolResult {
@@ -319,12 +320,18 @@ mod tests {
         absent.message(message(Role::Assistant, vec![block(&dir.join("missing"))]));
         assert!(absent.take_error().is_none());
         assert_eq!(absent.body.as_str(), "stub\n");
+        // Not a regular file: the output is noted as unreadable and the session read on.
         let mut unreadable = sink();
         assert!(matches!(
             unreadable.message(message(Role::Assistant, vec![block(&dir)])),
-            Flow::Stop
+            Flow::Continue
         ));
-        assert!(unreadable.take_error().is_some());
+        assert!(unreadable.take_error().is_none());
+        assert!(
+            unreadable.body.as_str().contains("unreadable"),
+            "{}",
+            unreadable.body.as_str()
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

@@ -3814,3 +3814,34 @@ fn show_and_doctor_read_a_session_its_writer_is_appending_to() {
         }
     });
 }
+
+/// `cv index --json` names what it indexed and what it could not read; a session whose persisted
+/// tool output belongs to another user is indexed without it, so even `--strict` succeeds.
+#[cfg(unix)]
+#[test]
+fn index_json_reports_unreadable_sessions_and_an_unreadable_tool_output_only_degrades() {
+    use std::os::unix::fs::PermissionsExt;
+    let w = World::new("index-unreadable-output");
+    let output = w.base.join("elsewhere").join("tool-results").join("big.txt");
+    fs::create_dir_all(output.parent().unwrap()).unwrap();
+    fs::write(&output, "hidden").unwrap();
+    fs::set_permissions(&output, fs::Permissions::from_mode(0o000)).unwrap();
+    let stub = format!(
+        "<persisted-output>\nOutput too large (66KB). Full output saved to: {}\n\nPreview (first 2KB):\nzqpreview\n</persisted-output>",
+        output.display()
+    );
+    w.write_session(
+        "degraded",
+        &[
+            user_line("u1", "2026-01-01T10:00:00Z", "run the big command"),
+            claude::tool_result("u2", "2026-01-01T10:01:00Z", "t1", &stub),
+        ],
+    );
+    let (json, _) = w.cv_ok(&["index", "--json", "--strict"]);
+    let report: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(report["indexed"], 1, "{report}");
+    assert_eq!(report["unreadable"], serde_json::json!([]), "{report}");
+    let (hits, _) = w.cv_ok(&["search", "zqpreview"]);
+    assert!(hits.contains("degraded"), "{hits}");
+    fs::set_permissions(&output, fs::Permissions::from_mode(0o644)).unwrap();
+}

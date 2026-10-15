@@ -98,15 +98,17 @@ pub fn default_embeddings_path() -> PathBuf {
 
 /// Discover, parse, and update the full-text index at its default location. Incremental by default
 /// (only changed/new sessions are rewritten; vanished ones are reaped); `rebuild = true` clears and
-/// rebuilds from scratch. Returns the number of sessions discovered, and their refs. Each compressed
+/// rebuilds from scratch. Returns what it indexed (the sessions it could not read included; `strict`
+/// makes any of them an error), and the discovered refs. Each compressed
 /// rollout is decoded once: discovery hands its decoded bytes to the sweep running beside it.
 pub fn index_all(
     dir: impl Into<Option<PathBuf>>,
     rebuild: bool,
     subagents: bool,
-) -> Result<(usize, Vec<cv_core::SessionRef>)> {
+    strict: bool,
+) -> Result<(fts::Indexed, Vec<cv_core::SessionRef>)> {
     let dir = dir.into().unwrap_or_else(default_tantivy_dir);
-    fts::index_all(&dir, rebuild, subagents)
+    fts::index_all(&dir, rebuild, subagents, strict)
 }
 
 /// Update the index using an already discovered session inventory.
@@ -230,6 +232,7 @@ pub fn embed_sessions(path: impl Into<Option<PathBuf>>, refs: &[cv_core::Session
     semantic::embed_sessions(&path.into().unwrap_or_else(default_embeddings_path), refs)
 }
 
+pub use fts::{Indexed, Unreadable};
 /// Explicit lazy semantic state for a long-lived service. One-shot search remains stateless.
 #[cfg(feature = "semantic")]
 pub use semantic::SemanticSearch;
