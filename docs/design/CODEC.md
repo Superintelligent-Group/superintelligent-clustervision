@@ -3,7 +3,9 @@
 "Never materialize" was built as extra decoders beside each adapter's owned one (Claude had
 five: owned Value, typed borrowed, positioned "portable", lean, facts), plus parity tests that
 those paths agree. The rule now: **a wire format has one decoder, parameterized by demand; a
-build differs only in its byte source.** Claude is done (0.17); every other family ports to this.
+build differs only in its byte source.** Claude, the Anthropic documents (cline, roo, cline_sdk)
+and the other documents (lmstudio, opensession, the exports) are done (0.17); every other family
+ports to this.
 
 **Byte source.** `store::jsonl::for_each_line(source, file, from, to, visit)` yields each
 physical line once as a `Line { at, end, complete, view }`, with `view: Option<JsonView>` (None
@@ -47,11 +49,12 @@ Grok/Qwen ones were (frozen goldens in `tests/fixtures/emit-frozen/`, `Frozen` +
 
 | family | adapters | to delete | legacy emitter oracle |
 |---|---|---|---|
-| Anthropic JSONL | cline, roo, cline_sdk | small: move onto `lazy_text` and `for_each_line` | `cline/writer/legacy.rs` |
 | OpenAI JSONL | codex (`selected`, `portable`, `lean`: ~1.2K, 17 cfg), grok (`selected` ~160, 13 cfg), qwen (`selected` ~470), kimi (`selected` ~140), kimi_code, hermes, continue | ~2.5K; needs an `openai::part_from_view` twin of `block_from_view_with` | `hermes/emit/legacy.rs` |
 | Gemini JSON/JSONL | gemini (`lean` ~400, 18 cfg) | ~0.6K | `gemini/emit/legacy.rs` |
 | SQLite stores | opencode, cursor (`selected` ~650), devin (`selected` ~500), goose, zed, openclaw (`selected` ~750) | ~2K: rows already are the byte source; the decoder is the cell's view | `opencode/emit/legacy.rs`, `openclaw/emit_legacy.rs` |
-| documents | lmstudio, opensession, exports | small | `distill/legacy_products.rs` (all) |
 
-`codex`, `cursor` and `goose` `legacy` modules are real format readers, not oracles. A port
+`codex`, `cursor` and `goose` `legacy` modules are real format readers, not oracles. Documents have
+no line source: their byte source is `JsonSource::read_document`/`read_archive`, and an owned view
+(`(&Value).into()`) serves their string entry points. `anthropic::block_from_view`'s owned-Value
+branch is the last extra block decoder; it goes with the zed, openclaw and goose ports. A port
 whose dump differs must explain each difference in its commit; Claude's named ones are in git.

@@ -469,14 +469,21 @@ fn claude_message(view: JsonView<'_>, spans: bool) -> Result<Option<Message>> {
     if let Some(parts) = r.get("content").map(JsonView::array).transpose()?.flatten() {
         for view in parts {
             let view = view?;
-            let Some(mut block) = anthropic::block_from_view(view, &anthropic::CLAUDE_AI, spans)? else {
+            let Some(mut block) = anthropic::block_from_view_with(
+                view,
+                &anthropic::CLAUDE_AI,
+                spans,
+                &mut |v| v.lazy_text(spans),
+                if spans { 0 } else { u64::MAX },
+            )?
+            else {
                 continue;
             };
             match &mut block {
                 Block::ToolResult { content, .. } | Block::Thinking { text: content, .. } if content.is_empty() => {
                     if let Some(text) = Fields::parse(view, &["text"])?
                         .and_then(|r| r.get("text"))
-                        .map(|v| v.text(spans))
+                        .map(|v| v.lazy_text(spans))
                         .transpose()?
                         .flatten()
                     {
@@ -491,7 +498,7 @@ fn claude_message(view: JsonView<'_>, spans: bool) -> Result<Option<Message>> {
     if content.is_empty() {
         if let Some(text) = r
             .get("text")
-            .map(|v| v.text(spans))
+            .map(|v| v.lazy_text(spans))
             .transpose()?
             .flatten()
             .filter(|s| !s.is_empty())
@@ -671,7 +678,7 @@ pub(super) fn chatgpt_text(
                 return Ok(Text::default());
             };
             let Some(second) = selected.next().transpose()? else {
-                return Ok(first.text(true)?.unwrap());
+                return Ok(first.lazy_text(true)?.unwrap());
             };
             return crate::harness::store::text::append(source, &source.decoded_backing()?, |builder| {
                 for (i, part) in [Ok(first), Ok(second)].into_iter().chain(selected).enumerate() {
@@ -686,7 +693,7 @@ pub(super) fn chatgpt_text(
         let mut first = None;
         let mut joined = None::<String>;
         for view in parts {
-            let Some(text) = view?.text(spans)? else { continue };
+            let Some(text) = view?.lazy_text(spans)? else { continue };
             if let Some(buffer) = &mut joined {
                 buffer.push('\n');
                 buffer.push_str(&text.resolve(resolver));
@@ -702,7 +709,7 @@ pub(super) fn chatgpt_text(
         return Ok(joined.map(Text::Inline).or(first).unwrap_or_default());
     }
     Ok(r.get("text")
-        .map(|v| v.text(spans))
+        .map(|v| v.lazy_text(spans))
         .transpose()?
         .flatten()
         .unwrap_or_default())
