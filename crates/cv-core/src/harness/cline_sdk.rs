@@ -197,7 +197,7 @@ fn scan(path: &Path, sid: &str) -> Option<SessionRef> {
                     if !first_user && record.string("role")?.as_deref() == Some("user") {
                         first_user = true;
                         if r.title.is_none() {
-                            r.title = first_view_text(record.get("content"), path)?;
+                            r.title = super::wire::text_title(record.get("content"))?;
                         }
                     }
                 }
@@ -214,40 +214,6 @@ fn scan(path: &Path, sid: &str) -> Option<SessionRef> {
         })
         .ok()
 }
-fn first_view_text(content: Option<JsonView<'_>>, path: &Path) -> Result<Option<String>> {
-    let Some(content) = content else { return Ok(None) };
-    let resolver = crate::lazy::Resolver::new(Some(path.to_path_buf()));
-    if let Some(text) = content.lazy_text(true)? {
-        return Ok(text_summary(std::iter::once(text), &resolver, true));
-    }
-    let Some(mut parts) = content.array()? else {
-        return Ok(None);
-    };
-    let mut error = None;
-    let texts = std::iter::from_fn(|| loop {
-        let next = parts.next()?;
-        match next.and_then(|v| Fields::parse(v, &["text"])).and_then(|record| {
-            record
-                .and_then(|r| r.get("text"))
-                .map(|v| v.lazy_text(true))
-                .transpose()
-                .map(Option::flatten)
-        }) {
-            Ok(Some(text)) => return Some(text),
-            Ok(None) => {}
-            Err(e) => {
-                error = Some(e);
-                return None;
-            }
-        }
-    });
-    let title = text_summary(texts, &resolver, true);
-    if let Some(error) = error {
-        return Err(error);
-    }
-    Ok(title)
-}
-
 /// Read one messages file into `sink`, returning the session with empty `messages`.
 pub fn stream(path: &Path, id: &str, sink: &mut dyn MessageSink) -> Result<Session> {
     stream_with_options(path, id, &ParseOptions::full(), sink)
