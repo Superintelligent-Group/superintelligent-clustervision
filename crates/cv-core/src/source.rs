@@ -80,6 +80,13 @@ struct FileState {
     identity: Option<(u64, u64, i64, i64)>,
 }
 
+impl FileState {
+    /// Length and file (device, inode), the terms of [`crate::json::same_or_grown`].
+    fn extent(&self) -> (u64, Option<(u64, u64)>) {
+        (self.len, self.identity.map(|(device, inode, ..)| (device, inode)))
+    }
+}
+
 /// Exact serialized primary and auxiliary metadata records, not a content digest.
 #[derive(Serialize, Deserialize)]
 struct Records {
@@ -259,11 +266,25 @@ impl ReadSet {
 
     /// Revalidate exactly the paths captured by this consumer, including absence and identity.
     pub fn fresh(&self, probe: &mut Probe) -> bool {
+        self.fresh_or_grown(None, probe)
+    }
+
+    /// [`Self::fresh`], except that `primary`, an append-only transcript, may also have grown
+    /// under [`crate::json::same_or_grown`]: a pass that read inside its captured length still
+    /// describes that prefix.
+    pub(crate) fn fresh_or_grown(&self, primary: Option<&Path>, probe: &mut Probe) -> bool {
+        let primary = primary.and_then(absolute);
         self.known
-            && self
-                .entries
-                .values()
-                .all(|entry| probe.entry(&entry.path).as_ref() == Some(entry))
+            && self.entries.values().all(|entry| {
+                let now = probe.entry(&entry.path);
+                now.as_ref() == Some(entry)
+                    || primary.as_ref() == Some(&entry.path)
+                        && entry
+                            .state
+                            .as_ref()
+                            .zip(now.and_then(|now| now.state))
+                            .is_some_and(|(then, now)| crate::json::same_or_grown(false, then.extent(), now.extent()))
+            })
     }
 }
 

@@ -457,6 +457,68 @@ mod tests {
         );
     }
 
+    /// A pass that races its writer still publishes what it read, so each later pass reads only
+    /// what was appended since: discovery of a live transcript costs its appended bytes.
+    #[cfg(unix)]
+    #[test]
+    fn discovery_beside_a_live_writer_reads_each_appended_byte_about_once() {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let world = crate::test_world("claude-metadata-live-writer");
+        let path = world.base.join("s.jsonl");
+        let record = |i: usize| {
+            format!(
+                "{{\"type\":\"user\",\"timestamp\":\"2026-02-01T00:00:00Z\",\"message\":{{\"content\":\"{}\"}}}}\n",
+                format!("turn {i:08} ").repeat(48)
+            )
+        };
+        fs::write(&path, (0..4096).map(record).collect::<String>()).unwrap();
+        let stop = AtomicBool::new(false);
+        let frames = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+                for i in 4096.. {
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    // Two writes: readers see a partial last line between them.
+                    let line = record(i);
+                    let (head, tail) = line.split_at(line.len() / 2);
+                    file.write_all(head.as_bytes()).unwrap();
+                    file.write_all(tail.as_bytes()).unwrap();
+                    std::thread::sleep(std::time::Duration::from_micros(200));
+                }
+            });
+            // Stops the writer however this closure exits, so a failed pass cannot hang the scope.
+            struct Stop<'a>(&'a AtomicBool);
+            impl Drop for Stop<'_> {
+                fn drop(&mut self) {
+                    self.0.store(true, Ordering::Relaxed);
+                }
+            }
+            let _stop = Stop(&stop);
+            FRAMED.with(|frames| frames.borrow_mut().clear());
+            for _ in 0..8 {
+                cached_metadata(&path, false).expect("a growing transcript stays listed");
+            }
+            FRAMED.with(|frames| frames.borrow().clone())
+        });
+        assert_eq!(frames.first().map(|frame| frame.0), Some(0));
+        assert!(
+            frames[1..].iter().all(|&(offset, _)| offset > 0),
+            "every later pass resumes: {frames:?}"
+        );
+        // Passes overlap only by the partial record each one replays.
+        let read: u64 = frames.iter().map(|&(_, len)| len).sum();
+        let bound = fs::metadata(&path).unwrap().len() + (frames.len() * record(0).len()) as u64;
+        assert!(read <= bound, "read {read} bytes for a {bound}-byte bound: {frames:?}");
+        let bytes = fs::read(&path).unwrap();
+        assert_eq!(
+            serde_json::to_value(cached_metadata(&path, false).unwrap()).unwrap(),
+            serde_json::to_value(owned(&path, &bytes)).unwrap()
+        );
+    }
+
     #[test]
     fn discovery_projection_preserves_owned_record_semantics() {
         let mut cases = vec![

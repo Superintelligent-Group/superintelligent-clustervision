@@ -3609,3 +3609,58 @@ fn claude_rewind_and_port_default_to_native_for_genuine_claude_sessions() {
     }
     assert_eq!(signatures, ["sig-a", "sig-b"]);
 }
+
+/// A writer appending to a session while `cv` reads it is the normal state of a live transcript:
+/// `show` and `doctor` read the prefix they captured, and listing keeps the session.
+#[test]
+fn show_and_doctor_read_a_session_its_writer_is_appending_to() {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let w = World::new("live-writer");
+    let turn = |i: usize| {
+        let ts = format!("2026-01-01T10:{:02}:{:02}Z", (i / 60) % 60, i % 60);
+        [
+            user_line(&format!("u{i}"), &ts, &format!("prompt {i} {}", "context ".repeat(600))),
+            assistant_line(
+                &format!("a{i}"),
+                &ts,
+                serde_json::json!([{"type": "text", "text": format!("reply {i} {}", "detail ".repeat(600))}]),
+            ),
+        ]
+    };
+    let path = w.write_session("livesess", &(0..300).flat_map(turn).collect::<Vec<_>>());
+    let stop = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+            for i in 300.. {
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                for line in turn(i) {
+                    // Two writes: readers see a partial last line between them.
+                    let line = format!("{line}\n");
+                    let (head, tail) = line.split_at(line.len() / 2);
+                    file.write_all(head.as_bytes()).unwrap();
+                    file.write_all(tail.as_bytes()).unwrap();
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        });
+        // Stops the writer however this closure exits, so a failed assertion cannot hang the scope.
+        struct Stop<'a>(&'a AtomicBool);
+        impl Drop for Stop<'_> {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Relaxed);
+            }
+        }
+        let _stop = Stop(&stop);
+        for _ in 0..3 {
+            let (prompts, _) = w.cv_ok(&["show", "livesess", "--kind", "prompt"]);
+            assert!(prompts.contains("prompt 299 "), "the captured prefix is shown");
+            w.cv_ok(&["doctor", "livesess"]);
+            let (rows, _) = w.cv_ok(&["ls", "--json"]);
+            assert!(rows.contains("\"livesess\""), "{rows}");
+        }
+    });
+}

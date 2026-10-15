@@ -336,13 +336,14 @@ where
             previous = entry.continuation.as_ref().map(|state| (entry.size, state.clone()));
         }
     }
+    // A continuation may end past its row's size: a pass that raced an append read the bytes
+    // its own capture held. The head's identity and sampled bytes are what admit it.
     let prior = previous.and_then(|(old_size, text)| {
         if old_size >= size {
             return None;
         }
         let prior: ScanContinuation = serde_json::from_str(&text).ok()?;
-        (prior.head.offset <= old_size
-            && prior.checkpoint.offset == prior.head.offset
+        (prior.checkpoint.offset == prior.head.offset
             && prior.dependencies.fresh(&mut crate::source::Probe::default())
             && prior.head.holds(path, size, version?))
         .then_some(prior)
@@ -357,24 +358,32 @@ where
         }
         reads.merge(&state.dependencies);
     }
+    // A primary that only grew during the pass (`json::same_or_grown`) still holds what it read;
+    // refusing that state restarted every pass over a live transcript from byte 0.
+    let primary = version.map(|_| path);
     let continuation = continuation
         .filter(|state| {
             Some(state.head.version.as_str()) == version
                 && state.head.offset == state.checkpoint.offset
-                && state.head.offset <= size
-                && reads.fresh(&mut crate::source::Probe::default())
+                && reads.fresh_or_grown(primary, &mut crate::source::Probe::default())
                 && state.dependencies.fresh(&mut crate::source::Probe::default())
         })
         .and_then(|state| serde_json::to_string(&state).ok());
     // Only cache hits — empty results are cheap to recompute (a failed name/content check that never
     // read the file) and caching them would bloat the table with every non-transcript path.
     if !refs.is_empty() {
-        // Keep filesystem probes outside the cache lock. A raced pass cannot publish an
-        // authoritative append state or displace a newer row; its caller still gets its result.
-        if version.is_some() && !reads.fresh(&mut crate::source::Probe::default()) {
+        // Keep filesystem probes outside the cache lock. A pass raced by anything but growth of
+        // its append-only primary publishes nothing, and one raced by growth never displaces a
+        // newer row; its caller still gets its result.
+        let mut probe = crate::source::Probe::default();
+        let grown = version.is_some() && !reads.fresh(&mut probe);
+        if grown && !reads.fresh_or_grown(primary, &mut probe) {
             return refs;
         }
         let mut entries = cache.entries.write().unwrap();
+        if grown && entries.get(path).is_some_and(|entry| entry.size > size) {
+            return refs;
+        }
         entries.insert(
             path.to_path_buf(),
             Entry {
