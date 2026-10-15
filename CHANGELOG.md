@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Large text spanned from a whole-document `.json` transcript fails its demand once the file changes, grown or not; only `.jsonl` logs may grow.
 - Reading a live session no longer fails with "JSON source changed" when its writer appends: `.jsonl` sources may grow; truncation and rewrites still fail.
 
 - A failed prune, rewind or adopt retracts its companion file only if it is still cv's own, on every platform, and reports a failed retract.

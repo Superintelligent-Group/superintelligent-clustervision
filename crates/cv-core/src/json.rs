@@ -105,15 +105,27 @@ struct Identity {
     #[cfg(unix)]
     changed: (i64, i64),
 }
+/// The one growth rule for an append-only source, in every consumer: `later` is the captured
+/// file unchanged, or the same file (device and inode on unix) only longer. Truncation, a
+/// replacement and a same-length rewrite are changes. Readers stay inside the captured length,
+/// so bytes appended after a capture are never read under it. An in-place rewrite that also grows
+/// the file keeps its inode and is not detected here.
+pub(crate) fn same_or_grown(
+    unchanged: bool,
+    (len, file): (u64, Option<(u64, u64)>),
+    (later_len, later_file): (u64, Option<(u64, u64)>),
+) -> bool {
+    unchanged || (later_len > len && later_file == file)
+}
 impl Identity {
-    fn admits(&self, later: &Identity) -> bool {
-        if later.len == self.len {
-            return later == self;
-        }
+    fn file(&self) -> Option<(u64, u64)> {
         #[cfg(unix)]
-        return later.len > self.len && later.device == self.device && later.inode == self.inode;
+        return Some((self.device, self.inode));
         #[cfg(not(unix))]
-        return later.len > self.len;
+        return None;
+    }
+    fn admits(&self, later: &Identity) -> bool {
+        same_or_grown(later == self, (self.len, self.file()), (later.len, later.file()))
     }
     fn read(path: &Path) -> Result<Self> {
         let metadata = std::fs::metadata(path).with_context(|| format!("reading JSON source {}", path.display()))?;
@@ -179,7 +191,7 @@ impl JsonSource {
         self.check_reads()
     }
     /// Whether the file as observed now still carries every byte captured: identical, or for an
-    /// append-only log the same file grown.
+    /// append-only log the same file grown ([`same_or_grown`]).
     fn holds(&self, now: &Identity) -> bool {
         if self.0.appendable {
             self.0.identity.admits(now)
@@ -201,12 +213,10 @@ impl JsonSource {
     pub(crate) fn capture_identity(path: &Path) -> Result<Self> {
         Self::capture_guarded(path, None)
     }
-    /// `later` is this source unchanged, or this source only grown: the append contract resume
-    /// marks also rely on. On unix the device and inode must match; an unchanged length must
-    /// match exactly (mtime and ctime included). An in-place rewrite that also grows the file
-    /// keeps its inode and is not detected here.
+    /// `later` is a capture of the same path that still carries every byte of this one: identical,
+    /// or for an append-only log the same file grown ([`same_or_grown`]).
     pub(crate) fn admits(&self, later: &JsonSource) -> bool {
-        self.0.path == later.0.path && self.0.identity.admits(&later.0.identity)
+        self.0.path == later.0.path && self.holds(&later.0.identity)
     }
     pub(crate) fn path(&self) -> &Path {
         &self.0.path
