@@ -5,6 +5,7 @@
 - cv-core reads its environment through `cv_core::env`, resolved once per process; callers enter another per thread instead of mutating the process.
 - Native builds decode zstd (Codex rollouts, Zed and OpenClaw blobs) with libzstd: a cold index of compressed rollouts takes 39% fewer instructions.
 - A copied or moved `CLUSTERVISION_HOME` keeps its full-text index: baselines follow an identity stored in the index, not its path.
+- Gemini recordings read through one message codec; a 314 MB session's lazy read takes 3.4x fewer instructions. Positioned builds keep large text as checked source.
 - Devin, OpenCode, Hermes, Zed and Goose discovery reuse cached results while their database, WAL and journal are unchanged.
 - Compressed Codex rollouts read from one mapping of their decoded bytes: first listing and `show` use about half the instructions.
 - `ls -q has:` and unchanged `cv index` detect only the adapter a session needs, once per operation: 2.9x and 1.7x fewer instructions.

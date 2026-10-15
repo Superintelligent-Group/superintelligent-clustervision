@@ -20,8 +20,6 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
     stream::emit(session, out_dir, opts)
 }
 
-#[cfg(test)]
-mod legacy;
 mod stream;
 
 /// Bind `cwd` to a slug dir under gemini's `<globalTemp>` (=`out_dir`), replicating
@@ -169,8 +167,9 @@ mod checked_tests {
         }
     }
     #[test]
-    fn checked_gemini_matches_legacy_pretty_all_modes_and_fields() -> Result<()> {
+    fn checked_gemini_matches_frozen_pretty_all_modes_and_fields() -> Result<()> {
         let world = crate::test_world("gemini-wire-oracle");
+        let mut frozen = crate::emit::grok_qwen_tests::Frozen::new("gemini-fixture");
         let mut session = Session::new("source", Harness::Claude);
         let ts = "2026-10-12T12:00:00Z".parse()?;
         session.created_at = Some(ts);
@@ -266,16 +265,17 @@ mod checked_tests {
                 thinking: mode,
                 ..Default::default()
             };
-            let mut projected = session.clone();
-            crate::emit::project_owned_thinking_for_test(&mut projected, Harness::Gemini, mode);
-            let before = legacy::emit(&projected, &world.base.join(format!("legacy-{mode}")), &opts)?;
             let after = crate::emit::emit(
                 &session,
                 Harness::Gemini,
                 &world.base.join(format!("checked-{mode}")),
                 &opts,
             )?;
-            assert_eq!(normalized(&before.path)?, normalized(&after.path)?, "{mode}");
+            let bytes = normalized(&after.path)?;
+            frozen.insert(
+                mode.to_string(),
+                json!([bytes.len(), crate::digest::sha256_hex(&bytes)]),
+            );
             // Original serialized order/whitespace is already serde's pretty normalization.
             let raw = fs::read(&after.path)?;
             let parsed: Value = serde_json::from_slice(&raw)?;
@@ -286,7 +286,7 @@ mod checked_tests {
                 "retained source"
             );
         }
-        Ok(())
+        frozen.check()
     }
     #[test]
     fn checked_gemini_guarded_text_json_fail_before_transcript_publication() -> Result<()> {

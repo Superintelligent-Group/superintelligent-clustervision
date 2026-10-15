@@ -453,10 +453,6 @@ impl<'a> Iterator for ArrayIter<'a> {
         Some(Raw(&self.raw.get()[start..end], self.raw.1))
     }
 }
-/// Retained descriptors are reserved for replay/navigation that genuinely needs random access.
-pub(crate) fn array(raw: Raw<'_>) -> Option<Vec<Raw<'_>>> {
-    Some(array_iter(raw)?.collect())
-}
 
 fn whitespace(b: &[u8], i: &mut usize) {
     while b.get(*i).is_some_and(u8::is_ascii_whitespace) {
@@ -661,7 +657,7 @@ mod tests {
             for (key, raw) in actual.fields {
                 let value: Value = serde_json::from_str(raw.get()).unwrap();
                 assert_eq!(value, expected[&key]);
-                if let Some(items) = array(raw) {
+                if let Some(items) = array_iter(raw).map(Iterator::collect::<Vec<_>>) {
                     assert_eq!(items.len(), value.as_array().unwrap().len());
                     for (raw, expected) in items.into_iter().zip(value.as_array().unwrap()) {
                         assert_eq!(serde_json::from_str::<Value>(raw.get()).unwrap(), *expected);

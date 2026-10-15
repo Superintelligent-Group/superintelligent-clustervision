@@ -640,15 +640,20 @@ impl JsonRange {
     ) -> Result<T> {
         let base = raw.get().as_ptr() as usize;
         let index = document::Index::default();
-        let raw = if matches!(validation, Validation::Cached) {
-            raw
-        } else {
-            let syntax: &crate::lazy::RawValue = serde_json::from_str(raw.get()).map_err(|_| InvalidJson)?;
-            let checked = Raw::new(syntax.get(), &index);
-            if matches!(validation, Validation::Value) && !document::accepts_value(checked) {
-                return Err(InvalidJson.into());
+        let raw = match validation {
+            Validation::Cached => raw,
+            // One pass accepting exactly Value's language, indexing long fields as it goes.
+            Validation::Value => {
+                let checked = Raw::new(raw.get().trim_matches(&[' ', '\n', '\t', '\r'][..]), &index);
+                if !document::validate(checked) {
+                    return Err(InvalidJson.into());
+                }
+                checked
             }
-            checked
+            Validation::Syntax => {
+                let syntax: &crate::lazy::RawValue = serde_json::from_str(raw.get()).map_err(|_| InvalidJson)?;
+                Raw::new(syntax.get(), &index)
+            }
         };
         f(JsonView(View::Source(SourceView { raw, range: self, base })))
     }
