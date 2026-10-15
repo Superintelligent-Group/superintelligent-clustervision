@@ -431,6 +431,41 @@ impl Cells {
         Ok((len != 0).then_some(Cell(offset, len)))
     }
 
+    /// The BLOB `select(column)` put at column `i` of `row`, passed through `decode` (a
+    /// decompressor, say) into the arena: the decoded bytes are the cell. None for a cell that is
+    /// not a BLOB or is empty; a `decode` failure is an error.
+    pub(crate) fn blob(
+        &self,
+        conn: &Connection,
+        table: &str,
+        column: &str,
+        row: &rusqlite::Row<'_>,
+        i: usize,
+        decode: impl FnOnce(&mut dyn std::io::BufRead, &mut dyn std::io::Write) -> Result<()>,
+    ) -> Result<Option<Cell>> {
+        use rusqlite::types::ValueRef;
+        let (offset, len) = if self.incremental {
+            if row.get_ref(i + 1)?.as_str_or_null()? != Some("blob") {
+                return Ok(None);
+            }
+            let blob = conn.blob_open(rusqlite::DatabaseName::Main, table, column, row.get(i)?, true)?;
+            if blob.is_empty() {
+                return Ok(None);
+            }
+            let mut blob = std::io::BufReader::with_capacity(64 * 1024, blob);
+            self.arena.append(|writer| decode(&mut blob, writer))?
+        } else {
+            let ValueRef::Blob(mut bytes) = row.get_ref(i)? else {
+                return Ok(None);
+            };
+            if bytes.is_empty() {
+                return Ok(None);
+            }
+            self.arena.append(|writer| decode(&mut bytes, writer))?
+        };
+        Ok((len != 0).then_some(Cell(offset, len)))
+    }
+
     /// The captured store and the arena its cells are copied into, where a decoder composes text
     /// that is checked against the store like the cells themselves.
     pub(crate) fn out(&self) -> (&crate::json::JsonSource, &std::sync::Arc<super::bytes::ByteSource>) {
