@@ -144,13 +144,14 @@ jobs:
 
       # Warnings are errors in every feature configuration, not only the default one.
       - name: Lint cv-core for wasm config (no default features)
-        run: cargo clippy -p clustervision-core --no-default-features -- -D warnings
+        run: cargo clippy -p clustervision-core --no-default-features --all-targets -- -D warnings
 
-      # Native tests do not exercise the portable reader/sink implementations. These
-      # controls cover cancellation attribution, prefix checks and SQLite decoding parity.
-      - name: Portable reader and checked transport controls
+      # Native tests do not exercise the positioned (no-mmap) build: its lazy text, source
+      # identity and every reader, then the corpus golden read through them.
+      - name: Positioned build readers, lazy text and source identity
         run: |
-          cargo test -p clustervision-core --lib --no-default-features --features sqlite -- watch:: stream:: harness::claude:: harness::hermes:: --test-threads=2
+          cargo nextest run --profile ci -p clustervision-core --lib --no-default-features --features sqlite -E 'test(/^(lazy|source|json|watch|stream|harness)::/)'
+          cargo nextest run --profile ci -p clustervision-core --test corpus --no-default-features --features sqlite
 
       # cv-search's `semantic` feature (the embedding stack) is default-on, so the keyword-only
       # build is one nothing else compiles.
