@@ -158,7 +158,15 @@ impl Adapter for Codex {
             }
         }
         Ok(crate::par_discovery_filter_map(paths, |path| {
-            crate::discover_cache::cached_scan(&path, || match scan(&path) {
+            let scanned = || match is_zst_path(&path) {
+                // Decoded in full: an index running beside discovery streams these same bytes.
+                true => crate::handoff::decode_and_offer(
+                    || super::store::zst::content_size(&path),
+                    || scan_rollout(&path, FULL_SCAN_CAP),
+                ),
+                false => scan(&path),
+            };
+            crate::discover_cache::cached_scan(&path, || match scanned() {
                 Ok(r) => Some(r),
                 Err(e) => {
                     eprintln!("cv: skipping {}: {e:#}", path.display());
@@ -521,17 +529,40 @@ pub(crate) fn count_prefix_checked(r: &SessionRef, len: u64, check: &mut dyn FnM
 
 /// A rollout's bytes for one read: the plain file, or a `.jsonl.zst` decoded once into one
 /// private arena whose lazy children keep the compressed original's provenance.
-struct Rollout {
+#[derive(Clone)]
+pub(crate) struct Rollout {
     source: JsonSource,
-    file: fs::File,
+    file: Arc<fs::File>,
     decoded: Option<Arc<ByteSource>>,
     len: u64,
+}
+
+thread_local! {
+    /// A rollout discovery already decoded, standing in for decoding it again (see
+    /// [`crate::handoff`]).
+    static DECODED: std::cell::RefCell<Option<Rollout>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` with `rollout` standing in for a decode of its unchanged source on this thread.
+pub(crate) fn with_decoded<T>(rollout: &Rollout, f: impl FnOnce() -> T) -> T {
+    struct Restore(Option<Rollout>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            DECODED.with(|decoded| *decoded.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(DECODED.with(|decoded| decoded.replace(Some(rollout.clone()))));
+    f()
 }
 
 impl Rollout {
     fn open(path: &Path) -> Result<Self> {
         let source = JsonSource::capture(path)?;
-        let file = fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+        let decoded = DECODED.with(|decoded| decoded.borrow().as_ref().filter(|r| r.source == source).cloned());
+        if let Some(rollout) = decoded {
+            return Ok(rollout);
+        }
+        let file = Arc::new(fs::File::open(path).with_context(|| format!("opening {}", path.display()))?);
         source.check_metadata(file.metadata()?)?;
         if !is_zst_path(path) {
             return Ok(Self {
@@ -1021,9 +1052,15 @@ fn scan(path: &Path) -> Result<SessionRef> {
 
 /// [`scan`] with an explicit full-scan cap (tests exercise the sampled path on a small file).
 fn scan_capped(path: &Path, full_scan_cap: u64) -> Result<SessionRef> {
+    scan_rollout(path, full_scan_cap).map(|(r, _)| r)
+}
+
+/// [`scan_capped`], keeping the rollout when it was decoded.
+fn scan_rollout(path: &Path, full_scan_cap: u64) -> Result<(SessionRef, Option<Rollout>)> {
     const SAMPLE: u64 = 1 << 20; // 1 MiB head, 1 MiB tail
 
     let mut s = CodexScan::default();
+    let mut decoded = None;
     if !is_jsonl_path(path) {
         s = legacy::scan(path)?;
     } else {
@@ -1065,6 +1102,7 @@ fn scan_capped(path: &Path, full_scan_cap: u64) -> Result<SessionRef> {
             s.message_count = 0;
         }
         rollout.source.check()?;
+        decoded = rollout.decoded.is_some().then_some(rollout);
     }
 
     if s.id.is_empty() {
@@ -1077,7 +1115,7 @@ fn scan_capped(path: &Path, full_scan_cap: u64) -> Result<SessionRef> {
             .to_string();
     }
 
-    Ok(SessionRef {
+    let r = SessionRef {
         id: s.id,
         harness: Harness::Codex,
         path: path.to_path_buf(),
@@ -1086,7 +1124,8 @@ fn scan_capped(path: &Path, full_scan_cap: u64) -> Result<SessionRef> {
         created_at: s.created_at,
         updated_at: s.updated_at,
         message_count: s.message_count,
-    })
+    };
+    Ok((r, decoded))
 }
 
 #[cfg(test)]
@@ -2474,6 +2513,62 @@ mod tests {
         let mut st = cx.stream(r, &ParseOptions::lazy(), &mut sink).unwrap();
         st.messages = sink.messages;
         assert_eq!(serde_json::to_value(&s).unwrap(), serde_json::to_value(&st).unwrap());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Discovery under a handoff hands each rollout it decoded over once, never a plain one; a
+    /// read of the same unchanged source on that thread uses those bytes, a changed one decodes.
+    #[test]
+    fn discovery_hands_decoded_rollouts_to_the_reads_of_the_same_source() {
+        let _world = crate::test_world("codex-handoff");
+        let raw = fixture_lines("zstd_compressed_rollouts_are_discovered_scanned_and_parsed.jsonl").join("\n") + "\n";
+        let root = std::env::temp_dir().join(format!("cv-codex-handoff-{}", uuid::Uuid::new_v4()));
+        let day = root.join("sessions").join("2026").join("08").join("01");
+        std::fs::create_dir_all(&day).unwrap();
+        let cold = day.join("rollout-2026-08-01T10-00-00-cold-1.jsonl.zst");
+        std::fs::write(&cold, zstd::encode_all(raw.as_bytes(), 1).unwrap()).unwrap();
+        std::fs::write(
+            day.join("rollout-2026-08-01T11-00-00-warm-2.jsonl"),
+            raw.replace("cold-1", "warm-2"),
+        )
+        .unwrap();
+        let cx = Codex {
+            roots: vec![root.join("sessions")],
+        };
+        let (handoff, decoded) = crate::handoff::channel(1);
+        let refs = crate::handoff::within(&Some(handoff), || cx.discover().unwrap());
+        assert_eq!(refs.len(), 2);
+        let (r, bytes) = decoded.recv().expect("the compressed rollout is handed over");
+        assert!(decoded.recv().is_none(), "once, and never the plain rollout");
+        assert_eq!((r.path.as_path(), r.message_count), (cold.as_path(), 2));
+
+        let arena = |rollout: Rollout| rollout.decoded.unwrap();
+        let handed = bytes.run(|| arena(Rollout::open(&cold).unwrap()));
+        assert!(Arc::ptr_eq(
+            &handed,
+            &bytes.run(|| arena(Rollout::open(&cold).unwrap()))
+        ));
+        assert!(
+            !Arc::ptr_eq(&handed, &arena(Rollout::open(&cold).unwrap())),
+            "only inside run"
+        );
+        let read = |opts: &ParseOptions| {
+            let mut sink = crate::stream::CollectSink::default();
+            let mut session = cx.stream(&r, opts, &mut sink).unwrap();
+            session.messages = sink.messages;
+            serde_json::to_value(session).unwrap()
+        };
+        assert_eq!(bytes.run(|| read(&ParseOptions::full())), read(&ParseOptions::full()));
+
+        std::fs::write(
+            &cold,
+            zstd::encode_all(raw.replace("answer", "reply").as_bytes(), 1).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            !Arc::ptr_eq(&handed, &bytes.run(|| arena(Rollout::open(&cold).unwrap()))),
+            "a changed source decodes"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 

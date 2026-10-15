@@ -20,7 +20,6 @@ pub(crate) mod text;
 
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
-#[cfg(feature = "sqlite")]
 pub(crate) mod zst;
 
 /// `$XDG_DATA_HOME` when set to an absolute path (the spec says a relative value is ignored), else
