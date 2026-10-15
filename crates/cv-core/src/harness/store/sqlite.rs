@@ -370,6 +370,81 @@ pub(crate) fn append_cell(
     )?
 }
 
+/// A store's JSON cells as views: rows already are the byte source. Each cell a read selects is
+/// copied once into the source's operation-owned arena (an incremental read by rowid where the
+/// table allows one, else the row's own bytes), validated once, and handed to the format's one
+/// decoder as a [`JsonView`](crate::json::JsonView). The demand decides what the decoder
+/// resolves, never which code runs.
+pub(crate) struct Cells {
+    source: crate::json::JsonSource,
+    arena: std::sync::Arc<super::bytes::ByteSource>,
+    incremental: bool,
+}
+
+/// One cell's bytes in a [`Cells`] arena.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Cell(u64, u64);
+
+impl Cells {
+    /// Cells of `table` in the database at `path`, guarded by the reader's dependencies.
+    pub(crate) fn new(conn: &Connection, path: &Path, reads: &crate::source::ReadSet, table: &str) -> Result<Self> {
+        let source = crate::json::JsonSource::capture_with_reads(path, reads)?;
+        Ok(Self {
+            arena: source.decoded_backing()?,
+            source,
+            incremental: incremental_utf8_table(conn, table),
+        })
+    }
+
+    /// What a query selects for `column` so [`Cells::cell`] can read it from columns `i` and
+    /// `i + 1`: the rowid and the cell's type when reads are incremental, else the cell itself.
+    pub(crate) fn select(&self, column: &str) -> String {
+        if self.incremental {
+            format!("rowid, typeof({column})")
+        } else {
+            format!("{column}, NULL")
+        }
+    }
+
+    /// The cell `select(column)` put at column `i` of `row`. None for a cell that is not TEXT,
+    /// is empty or is not UTF-8 (UTF-8 is checked when it is read).
+    pub(crate) fn cell(
+        &self,
+        conn: &Connection,
+        table: &str,
+        column: &str,
+        row: &rusqlite::Row<'_>,
+        i: usize,
+    ) -> Result<Option<Cell>> {
+        use rusqlite::types::ValueRef;
+        let (offset, len) = if self.incremental {
+            if row.get_ref(i + 1)?.as_str_or_null()? != Some("text") {
+                return Ok(None);
+            }
+            append_cell(conn, table, column, row.get(i)?, &self.arena)?
+        } else {
+            let ValueRef::Text(bytes) = row.get_ref(i)? else {
+                return Ok(None);
+            };
+            self.arena.append(|writer| Ok(writer.write_all(bytes)?))?
+        };
+        Ok((len != 0).then_some(Cell(offset, len)))
+    }
+
+    /// Decode `cell` with `f`. None when the cell is not exactly one JSON value; every other
+    /// error is a source failure.
+    pub(crate) fn read<T>(
+        &self,
+        cell: Cell,
+        f: impl for<'a> FnOnce(crate::json::JsonView<'a>) -> Result<T>,
+    ) -> Result<Option<T>> {
+        match self.source.read_backing_value(self.arena.clone(), cell.0, cell.1, f) {
+            Err(error) if error.downcast_ref::<crate::json::InvalidJson>().is_some() => Ok(None),
+            result => result.map(Some),
+        }
+    }
+}
+
 /// Incremental TEXT bytes use the database's encoding. Ordinary UTF-8 rowid tables support
 /// bounded reads; views, virtual/WITHOUT ROWID tables and UTF-16 stores retain their typed reader.
 pub(crate) fn incremental_utf8_table(conn: &Connection, table: &str) -> bool {
