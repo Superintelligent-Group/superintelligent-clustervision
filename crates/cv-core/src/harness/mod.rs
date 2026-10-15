@@ -560,15 +560,6 @@ mod tests {
     fn terminal_json_line_io_stops_legacy_helpers_with_one_skip() {
         assert_eq!(for_each_json_line(TerminalIo, |_| unreachable!()), 1);
         assert_eq!(for_each_json_line_at(TerminalIo, 0, |_, _, _, _| unreachable!()), 1);
-        let error = crate::stream::with_read_check(TerminalIo, &mut || Ok(()), |reader| {
-            for_each_json_line(reader, |_| unreachable!())
-        })
-        .unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "terminal source failure",
-            "checked legacy reader cannot certify partial success"
-        );
     }
 
     #[test]

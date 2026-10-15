@@ -3,7 +3,7 @@
 "Never materialize" was built as extra decoders beside each adapter's owned one (Claude had
 five: owned Value, typed borrowed, positioned "portable", lean, facts), plus parity tests that
 those paths agree. The rule now: **a wire format has one decoder, parameterized by demand; a
-build differs only in its byte source.** Claude is done (0.17); every other family ports to this.
+build differs only in its byte source.** Claude and the OpenAI JSONL family (Codex, Grok, Qwen, Kimi, Kimi Code, Continue) are done (0.17); every other family ports to this.
 
 **Byte source.** `store::jsonl::for_each_line(source, file, from, to, visit)` yields each
 physical line once as a `Line { at, end, complete, view }`, with `view: Option<JsonView>` (None

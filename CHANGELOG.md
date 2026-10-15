@@ -22,7 +22,7 @@
 - Rewind, adopt and share exit 2 when their output name is already taken.
 - A transcript replaced or rewritten after parsing fails its first lazy content read instead of silently returning the replacement's bytes.
 - Claude transcripts parse through one record codec in every mode and build, using about 20% fewer instructions; malformed records get one acceptance rule everywhere.
-- Grok reads through one record codec per file in every mode; a bad line is one skipped record, never a retracted file.
+- Codex, Grok, Qwen, Kimi, Kimi Code and Continue read through one record codec per format: a cold Codex index takes 13% fewer instructions; bad lines skip individually.
 - OpenSession preserves optional opaque principals through reads and transformations; mixed-source compositions retain attribution only when every source agrees.
 - The first fleet read after an upgrade that invalidates the catalog prints one stderr note that it is re-discovering, suggesting `cv index`.
 - `ls --json --enrich` `display_title` uses the row's `title` when present and never picks harness-injected turns such as Codex AGENTS.md instructions.
