@@ -430,6 +430,23 @@ impl Request<'_> {
 /// The request body, de-chunked; it ends at the framed length, and a short body is an error.
 impl Read for Request<'_> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        if self.broken {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        self.read_body(buf).inspect_err(|_| {
+            // Framing cannot recover after consuming malformed bytes. In particular, the
+            // post-response drain must never turn an errored chunk into another request.
+            self.broken = true;
+            self.keep_alive = false;
+        })
+    }
+}
+
+impl Request<'_> {
+    fn read_body(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let bad = |what: &str| io::Error::new(io::ErrorKind::InvalidData, what.to_string());
         let src = &mut *self.src;
         let left = match &mut self.head.framing {
@@ -663,6 +680,21 @@ mod tests {
         assert!(exchange(port, b"GET / HTTP/2.0\r\n\r\n").starts_with("HTTP/1.1 505"));
         let long = format!("GET /{} HTTP/1.1\r\n\r\n", "a".repeat(MAX_LINE));
         assert!(exchange(port, long.as_bytes()).starts_with("HTTP/1.1 414"));
+    }
+
+    #[test]
+    fn malformed_body_cannot_resume_parsing_a_pipeline() {
+        let port = spawn(quick());
+        for broken_chunk in ["zz\r\n", "1\r\nxBAD\r\n"] {
+            let request = format!(
+                "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n{broken_chunk}\r\n0\r\n\r\n\
+                 GET / HTTP/1.1\r\nConnection: close\r\n\r\n"
+            );
+            let out = exchange(port, request.as_bytes());
+            assert!(out.starts_with("HTTP/1.1 400"), "{out}");
+            assert_eq!(out.matches("HTTP/1.1 ").count(), 1, "{out}");
+            assert!(out.contains("Connection: close\r\n"), "{out}");
+        }
     }
 
     #[test]
