@@ -3,9 +3,7 @@
 "Never materialize" was built as extra decoders beside each adapter's owned one (Claude had
 five: owned Value, typed borrowed, positioned "portable", lean, facts), plus parity tests that
 those paths agree. The rule now: **a wire format has one decoder, parameterized by demand; a
-build differs only in its byte source.** Claude, the OpenAI JSONL family (Codex, Grok, Qwen,
-Kimi, Kimi Code, Continue), Gemini, and the JSON documents (cline, roo, cline_sdk, lmstudio,
-opensession, the exports) are done (0.17); the SQLite stores port to this.
+build differs only in its byte source.** Every family is on it as of 0.17.
 
 **Byte source.** `store::jsonl::for_each_line(source, file, from, to, visit)` yields each
 physical line once as a `Line { at, end, complete, view }`, with `view: Option<JsonView>` (None
@@ -42,17 +40,11 @@ A port is checked once, before deleting the old paths, with a scratch dump of ev
 (span descriptors included), checkpoint and session over real sessions in every demand,
 byte-identical before and after; that tool is not committed.
 
-**Migration**, smallest blast radius first. Each lane ports one family, deletes its extra
-decoders and their parity tests, and retires that family's test-only legacy emitter the way the
-Grok/Qwen ones were (frozen goldens in `tests/fixtures/emit-frozen/`, `Frozen` + `entry` in
-`emit/grok_qwen_tests.rs`). Estimates are deletable product lines (extra decoders, `mmap` arms).
-
-| family | adapters | to delete | legacy emitter oracle |
-|---|---|---|---|
-| SQLite stores | opencode, cursor (`selected` ~650), devin (`selected` ~500), goose, zed, openclaw (`selected` ~750), hermes | ~2K: rows already are the byte source; the decoder is the cell's view | `opencode/emit/legacy.rs`, `openclaw/emit_legacy.rs`, `hermes/emit/legacy.rs` |
-
-`codex`, `cursor` and `goose` `legacy` modules are real format readers, not oracles. Documents have
-no line source: their byte source is `JsonSource::read_document`/`read_archive`, and an owned view
-(`(&Value).into()`) serves their string entry points. `anthropic::block_from_view`'s owned-Value
-branch is the last extra block decoder; it goes with the zed, openclaw and goose ports. A port
-whose dump differs must explain each difference in its commit; Claude's named ones are in git.
+**Byte sources by family.** JSONL (Claude, the OpenAI family, Gemini's jsonl era): `for_each_line`.
+JSON documents (Gemini's document era, cline, roo, cline_sdk, lmstudio, opensession, the exports):
+`JsonSource::read_document`/`read_archive`, with an owned view (`(&Value).into()`) for string entry
+points. SQLite stores (opencode, cursor, devin, goose, zed, openclaw, hermes): `store::sqlite::Cells`,
+each cell copied once into the source's arena, validated once, then viewed. `codex`, `cursor` and
+`goose` `legacy` modules are readers of older formats, not oracles. Test-only legacy emitters are
+retired to frozen goldens (`tests/fixtures/emit-frozen/`, `Frozen` in `emit/grok_qwen_tests.rs`).
+A change whose dump differs must explain each difference in its commit; the ports' are in git.
