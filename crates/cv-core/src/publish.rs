@@ -8,9 +8,8 @@
 //! - [`Claim::New`] refuses any existing name, a dangling symlink included, with [`Exists`]. It
 //!   hard-links the temporary to the destination. Where the filesystem has no hard links (FAT,
 //!   exFAT, some network mounts) it renames without replacing instead: `renamex_np(RENAME_EXCL)`
-//!   on macOS, `renameat2(RENAME_NOREPLACE)` on Linux. On other platforms, or on a filesystem that
-//!   rejects that flag too, it checks the name and then renames: best effort, since a writer that
-//!   claims the same name inside that window is replaced.
+//!   on macOS, `renameat2(RENAME_NOREPLACE)` on Linux. Without either exclusive operation it fails
+//!   closed: checking a name before an ordinary rename could overwrite a concurrent writer.
 //! - [`Claim::Replace`] renames over the destination. The name moves to the new inode; a reader
 //!   holding the old one keeps the old bytes, and a symlink at the destination is replaced, not
 //!   followed.
@@ -201,16 +200,24 @@ fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
     #[cfg(target_os = "linux")]
     let flag = libc::RENAME_NOREPLACE;
     #[cfg(any(target_vendor = "apple", target_os = "linux"))]
-    if let Some(result) = rename_with(from, to, flag) {
+    let exclusive = |from: &Path, to: &Path| rename_with(from, to, flag);
+    #[cfg(not(any(target_vendor = "apple", target_os = "linux")))]
+    let exclusive = |_: &Path, _: &Path| None;
+    rename_no_replace_using(from, to, exclusive)
+}
+
+fn rename_no_replace_using(
+    from: &Path,
+    to: &Path,
+    exclusive: impl FnOnce(&Path, &Path) -> Option<io::Result<()>>,
+) -> io::Result<()> {
+    if let Some(result) = exclusive(from, to) {
         return result;
     }
-    // Best effort: a writer claiming `to` between this check and the rename is replaced.
-    match std::fs::symlink_metadata(to) {
-        Ok(_) => return Err(io::Error::from(io::ErrorKind::AlreadyExists)),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e),
-    }
-    std::fs::rename(from, to)
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "filesystem does not support an atomic exclusive rename; destination left untouched",
+    ))
 }
 
 /// `renamex_np` / `renameat2` with `flag`; `None` when this filesystem or kernel rejects the flag.
@@ -388,6 +395,25 @@ pub fn mode_of(source: &File) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_claim_fails_closed_without_an_exclusive_rename() {
+        let world = cv_testkit::World::new("publish-no-exclusive-rename");
+        for directory in [false, true] {
+            let from = world.base.join(if directory { "directory" } else { "file" });
+            let to = from.with_extension("published");
+            if directory {
+                std::fs::create_dir(&from).unwrap();
+            } else {
+                std::fs::write(&from, "complete staged output").unwrap();
+            }
+            let error = rename_no_replace_using(&from, &to, |_, _| None)
+                .expect_err("no exclusive operation means no safe new-name claim");
+            assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+            assert!(from.exists());
+            assert!(!to.exists());
+        }
+    }
 
     fn staged(dir: &Path, bytes: &[u8]) -> Staged {
         let mut staged = Staged::create(dir, "test", 0o644).unwrap();

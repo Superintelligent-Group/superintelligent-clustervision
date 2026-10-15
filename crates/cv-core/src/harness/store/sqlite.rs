@@ -3,12 +3,14 @@
 //! harness's store**, not even its coordination files. Opening `SQLITE_OPEN_READ_ONLY` is not
 //! enough for that: a WAL reader records its read mark in the `-shm` wal-index (and creates
 //! `-wal`/`-shm` when they are missing), which rewrites a file in the harness home. So
-//! [`open_ro`] chooses, from the database header and its sidecars:
-//! - rollback-journal mode: the original, read-only (readers only take advisory locks);
-//! - WAL mode with no WAL frames (`-wal` absent or empty) and no `-journal`: the original with
+//! [`open_ro`] chooses from the database's sidecars:
+//! - no WAL frames (`-wal` absent or empty) and no `-journal`: the original with
 //!   `immutable=1`, so SQLite opens no `-wal`/`-shm` and takes no locks;
-//! - WAL mode with frames: a private snapshot of the database and its `-wal` (never `-shm`,
+//! - otherwise: a private snapshot of the database and its `-wal`/`-journal` (never `-shm`,
 //!   which SQLite rebuilds in the private directory), so committed WAL-only rows stay visible.
+//!
+//! This also protects a rollback-mode source that switches to WAL during an operation: an
+//! ordinary read-only connection could create coordination files before the after-read check.
 //!
 //! Every path's identity is captured before and checked after each read ([`ReadConnection::read`]),
 //! so a harness write during a read is an error, not a torn result.
@@ -207,7 +209,6 @@ pub(crate) fn open_ro(path: &Path) -> Result<ReadConnection> {
 }
 
 fn open_ro_with_copy_check(path: &Path, copied: impl FnOnce(&Path) -> Result<()>) -> Result<ReadConnection> {
-    use std::io::Read;
     use std::sync::Arc;
     let path = if path.is_absolute() {
         path.to_path_buf()
@@ -218,19 +219,10 @@ fn open_ro_with_copy_check(path: &Path, copied: impl FnOnce(&Path) -> Result<()>
     reads.record(&path);
     reads.record(&sidecar(&path, "-wal"));
     reads.record(&sidecar(&path, "-journal"));
-    let mut header = [0; 20];
-    match std::fs::File::open(&path)?.read_exact(&mut header) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => header.fill(0),
-        Err(error) => return Err(error.into()),
-    }
-    check_reads(&reads)?;
-    let wal_mode = &header[..16] == b"SQLite format 3\0" && (header[18] == 2 || header[19] == 2);
     let has_frames = std::fs::metadata(sidecar(&path, "-wal")).is_ok_and(|m| m.len() > 0);
     let has_journal = sidecar(&path, "-journal").exists();
-    let immutable = wal_mode && !has_frames && !has_journal;
-    let cold = wal_mode && !immutable;
-    let scope = cold.then(reader_scope);
+    let immutable = !has_frames && !has_journal;
+    let scope = (!immutable).then(reader_scope);
     let snapshot = if let Some(scope) = scope.as_ref() {
         let mut cache = scope
             .cache
@@ -687,6 +679,33 @@ mod tests {
     use super::*;
 
     static SNAPSHOT_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn rollback_reader_cannot_create_wal_sidecars_after_a_mode_change() {
+        let (directory, database) = fixture();
+        Connection::open(&database)
+            .unwrap()
+            .execute_batch("CREATE TABLE t(x); INSERT INTO t VALUES(1);")
+            .unwrap();
+        let reader = open_ro(&database).unwrap();
+        let result = reader.read(|connection| {
+            // The harness switches mode after the reader's before-operation guard. Closing
+            // its connection checkpoints the WAL and removes its coordination sidecars.
+            let writer = Connection::open(&database)?;
+            writer.execute_batch("PRAGMA journal_mode=WAL; INSERT INTO t VALUES(2);")?;
+            drop(writer);
+            let before = store_state(&directory);
+            let _: rusqlite::Result<i64> = connection.query_row("SELECT count(*) FROM t", [], |row| row.get(0));
+            assert!(
+                store_state(&directory) == before,
+                "read-only connection wrote harness sidecars"
+            );
+            Ok(())
+        });
+        assert!(result.is_err(), "changed source must also fail freshness");
+        drop(reader);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     fn fixture() -> (std::path::PathBuf, std::path::PathBuf) {
         let directory = std::env::temp_dir().join(format!("cv-cold-wal-test-{}", uuid::Uuid::new_v4()));

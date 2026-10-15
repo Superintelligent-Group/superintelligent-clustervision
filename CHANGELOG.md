@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- SQLite readers cannot create harness WAL sidecars when a rollback-mode database switches to WAL during a read.
+
+- New-name publication fails safely when neither hard links nor exclusive rename are supported, instead of risking overwriting a concurrent writer.
+
+- Kimi deferred wire outputs retain their parsed source identity and reject replaced files before the first read.
+
+- Hook settings and skills publish by atomic replacement, preserving existing readers, permissions, and dotfile symlinks.
+
+- Ported project context files publish only after copying succeeds; failed copies leave no partial destination and preserve existing files.
+
+- HTTP overload shedding bounds retained sockets and drain work, preventing rejected clients from bypassing connection limits.
+
+- HTTP body framing errors now close the connection; malformed chunks cannot recover during draining and execute a pipelined request.
+
 - Positioned (no-mmap) builds resolve large transcript text from a live, growing session, as mapped builds do; a replaced or shrunk file still fails.
 - `cv index` decodes each compressed Codex rollout once: discovery hands its decoded bytes to the sweep beside it (cold index: 15% fewer instructions).
 - Watch cursors and Kimi, Kimi Code and Qwen checkpoints serialize in a stable order: the same state always yields the same bytes.
