@@ -175,6 +175,60 @@ pub(crate) fn for_each_line(
     Ok(())
 }
 
+/// Records a first [`for_each_line`] pass kept by range (a line's, or a value inside one, from
+/// `JsonView::source_range`), read again from the same descriptor in any order: for formats
+/// whose later records replace earlier ones, so selection must reach EOF before decoding.
+/// Mapped builds borrow every range from one mapping; positioned builds read a small range into
+/// one buffer and leave a giant one in place, exactly as [`for_each_line`] does.
+pub(crate) struct Records<'s> {
+    source: &'s crate::json::JsonSource,
+    file: &'s File,
+    #[cfg(feature = "mmap")]
+    map: Option<memmap2::Mmap>,
+    context: Option<document::range::RangeSource>,
+    buffer: Vec<u8>,
+}
+
+impl<'s> Records<'s> {
+    pub(crate) fn new(source: &'s crate::json::JsonSource, file: &'s File) -> Self {
+        Self {
+            source,
+            file,
+            #[cfg(feature = "mmap")]
+            map: unsafe { memmap2::Mmap::map(file) }.ok(),
+            context: None,
+            buffer: Vec::new(),
+        }
+    }
+
+    pub(crate) fn read<T>(
+        &mut self,
+        at: u64,
+        len: u64,
+        f: impl FnOnce(crate::json::JsonView<'_>) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        #[cfg(feature = "mmap")]
+        if let Some(map) = &self.map {
+            let bytes = usize::try_from(at)
+                .ok()
+                .zip(usize::try_from(at + len).ok())
+                .and_then(|(from, to)| map.get(from..to))
+                .ok_or_else(|| anyhow::anyhow!("record range outside its source"))?;
+            return self.source.read_record(at, std::str::from_utf8(bytes)?, f);
+        }
+        if len <= 64 * 1024 {
+            self.buffer.resize(len as usize, 0);
+            ranges::read_exact_at(self.file, &mut self.buffer, at)?;
+            return self.source.read_record(at, std::str::from_utf8(&self.buffer)?, f);
+        }
+        if self.context.is_none() {
+            self.context = Some(document::range::RangeSource::from_captured(self.source.clone())?);
+        }
+        let context = self.context.as_ref().expect("context was just made");
+        self.source.read_positioned_range_value(context, at, len, f)
+    }
+}
+
 /// One line whose bytes are in memory (mapped, or read as a small positioned record).
 fn in_memory(
     source: &crate::json::JsonSource,
