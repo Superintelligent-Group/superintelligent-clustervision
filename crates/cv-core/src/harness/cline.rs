@@ -1179,18 +1179,10 @@ mod tests {
                     opts.spans
                 );
                 if opts.spans {
-                    assert!(actual.messages.iter().flat_map(|m| &m.content).any(|block| {
-                        // Mapped builds span the history file; positioned builds check it as a source.
-                        match block {
-                            Block::Text {
-                                text: crate::Text::Span(span),
-                            } => span.source.as_deref() == Some(history.as_path()),
-                            Block::Text {
-                                text: crate::Text::Source(source),
-                            } => source.path() == std::path::absolute(&history).unwrap(),
-                            _ => false,
-                        }
-                    }));
+                    assert!(actual.messages.iter().flat_map(|m| &m.content).any(|block| matches!(
+                        block,
+                        Block::Text { text: crate::Text::Span(span) } if span.source.as_deref() == Some(history.as_path())
+                    )));
                 }
                 actual.materialize().unwrap();
                 assert_eq!(

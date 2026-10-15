@@ -998,19 +998,13 @@ impl<'a> JsonView<'a> {
     }
     /// Transcript text by the codec's span rule: a string whose *decoded* length exceeds
     /// INLINE_MAX stays in the source when `spans` is demanded, and anything else is inline.
-    /// Mapped builds describe it as a [`Span`](crate::lazy::Span) of the session's primary file;
-    /// positioned builds as a checked source text. None for a nonstring.
+    /// Both builds describe it as a [`Span`](crate::lazy::Span) of the session's primary file,
+    /// held to the session's parse-time stamp (same file, only grown). None for a nonstring.
     pub(crate) fn lazy_text(self, spans: bool) -> Result<Option<crate::lazy::Text>> {
         if !self.is_string()? {
             return Ok(None);
         }
-        if spans && self.exceeds_inline()? {
-            #[cfg(feature = "mmap")]
-            return self.text(true);
-            #[cfg(not(feature = "mmap"))]
-            return self.source_text();
-        }
-        self.text(false)
+        self.text(spans && self.exceeds_inline()?)
     }
     /// [`lazy_text`](Self::lazy_text) for a store whose strings live in many files or cells:
     /// text that stays in the source is a checked source text naming its own bytes, never a span

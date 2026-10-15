@@ -2,13 +2,14 @@
 
 ## Unreleased
 
+- Positioned (no-mmap) builds resolve large transcript text from a live, growing session, as mapped builds do; a replaced or shrunk file still fails.
 - `cv index` decodes each compressed Codex rollout once: discovery hands its decoded bytes to the sweep beside it (cold index: 15% fewer instructions).
 - Watch cursors and Kimi, Kimi Code and Qwen checkpoints serialize in a stable order: the same state always yields the same bytes.
 - OpenCode skips message and part cells that are not TEXT, UTF-8 JSON (2.x counts them as skipped lines) instead of failing the session.
 - OpenClaw: lazy reads skip an empty `event_json` row instead of failing; store discovery no longer holds whole transcripts in memory.
 - Native builds decode zstd (Codex rollouts, Zed and OpenClaw blobs) with libzstd: a cold index of compressed rollouts takes 39% fewer instructions.
 - A copied or moved `CLUSTERVISION_HOME` keeps its full-text index: baselines follow an identity stored in the index, not its path.
-- Gemini recordings read through one message codec; a 314 MB session's lazy read takes 3.4x fewer instructions. Positioned builds keep large text as checked source.
+- Gemini recordings read through one message codec; a 314 MB session's lazy read takes 3.4x fewer instructions.
 - Devin, OpenCode, Hermes, Zed and Goose discovery reuse cached results while their database, WAL and journal are unchanged.
 - Compressed Codex rollouts read from one mapping of their decoded bytes: first listing and `show` use about half the instructions.
 - `ls -q has:` and unchanged `cv index` detect only the adapter a session needs, once per operation: 2.9x and 1.7x fewer instructions.
