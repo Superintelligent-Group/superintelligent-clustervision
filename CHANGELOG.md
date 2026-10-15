@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- SQLite readers cannot create harness WAL sidecars when a rollback-mode database switches to WAL during a read.
+
 - New-name publication fails safely when neither hard links nor exclusive rename are supported, instead of risking overwriting a concurrent writer.
 
 - Kimi deferred wire outputs retain their parsed source identity and reject replaced files before the first read.
