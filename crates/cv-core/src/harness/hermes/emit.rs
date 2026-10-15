@@ -556,27 +556,8 @@ fn tool_calls(blocks: &[Block]) -> Result<Option<String>> {
 }
 
 #[cfg(test)]
-mod legacy;
-
-#[cfg(test)]
 mod tests {
     use super::*;
-    // Keep the old content codec as the byte oracle, applying only intentional schema/policy
-    // changes here. The native replay controls below check those changed semantics independently.
-    fn historical_wire_oracle(session: &Session, directory: &Path, options: &EmitOptions) -> Result<EmitResult> {
-        let result = legacy::emit(session, directory, options)?;
-        let connection = rusqlite::Connection::open(&result.path)?;
-        reconcile_columns(&connection)?;
-        if options.thinking == ThinkingMode::Drop {
-            connection.execute_batch(
-                "UPDATE messages SET reasoning=NULL, reasoning_content=NULL, \
-                reasoning_details=NULL, codex_reasoning_items=NULL;",
-            )?;
-        }
-        update_message_count(&connection, &result.new_id)?;
-        Ok(result)
-    }
-
     fn parsed(connection: &rusqlite::Connection, options: &crate::stream::ParseOptions) -> Result<Session> {
         super::super::parse_conn_with(
             connection,
@@ -754,10 +735,10 @@ mod tests {
     }
 
     #[test]
-    fn checked_transactional_rows_match_legacy_and_roll_back() -> Result<()> {
-        crate::harness::store::sqlite::export_tests::exercise(
+    fn checked_transactional_rows_match_frozen_and_roll_back() -> Result<()> {
+        crate::harness::store::sqlite::export_tests::exercise_frozen(
             Harness::Hermes,
-            historical_wire_oracle,
+            "hermes-export",
             emit,
             |session, options, connection| write_database(session, options, "fixed", connection),
         )

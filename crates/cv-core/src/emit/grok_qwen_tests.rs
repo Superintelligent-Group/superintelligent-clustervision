@@ -241,14 +241,14 @@ fn compare(frozen: &mut Frozen, session: &Session, target: Harness, mode: Thinki
 
 /// Emitted-output goldens per test under `tests/fixtures/emit-frozen/`, frozen from the
 /// pre-streaming emitters. `CV_REGEN_CORPUS=1` rewrites them; explain every diff in the commit.
-struct Frozen(std::collections::BTreeMap<String, Value>, &'static str);
+pub(crate) struct Frozen(pub(crate) std::collections::BTreeMap<String, Value>, &'static str);
 
 impl Frozen {
-    fn new(name: &'static str) -> Self {
+    pub(crate) fn new(name: &'static str) -> Self {
         Self(Default::default(), name)
     }
 
-    fn check(self) -> Result<()> {
+    pub(crate) fn check(self) -> Result<()> {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/fixtures/emit-frozen/{}.json", self.1));
         let rows: Vec<String> = (self.0.iter())
             .map(|(label, entry)| {
