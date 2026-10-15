@@ -283,7 +283,11 @@ impl ReadSet {
                             .state
                             .as_ref()
                             .zip(now.and_then(|now| now.state))
-                            .is_some_and(|(then, now)| crate::json::same_or_grown(false, then.extent(), now.extent()))
+                            .is_some_and(|(then, now)| {
+                                crate::json::same_or_grown(false, then.extent(), now.extent())
+                                    || then.extent() == now.extent()
+                                        && crate::json::append_in_flight(&entry.path, then.extent())
+                            })
             })
     }
 }

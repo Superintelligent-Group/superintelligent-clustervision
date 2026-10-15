@@ -117,6 +117,21 @@ pub(crate) fn same_or_grown(
 ) -> bool {
     unchanged || (later_len > len && later_file == file)
 }
+/// A write updates a file's timestamps before its length (Linux's write path does), so for an
+/// instant an append in flight looks like a same-length rewrite. Before calling an observation of
+/// `path` at its captured `extent` with other timestamps a rewrite, look again: an append's
+/// length grows within milliseconds, a rewrite's does not.
+pub(crate) fn append_in_flight(path: &Path, extent: (u64, Option<(u64, u64)>)) -> bool {
+    #[cfg(unix)]
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        if Identity::read(path).is_ok_and(|now| same_or_grown(false, extent, (now.len, now.file()))) {
+            return true;
+        }
+    }
+    let _ = (path, extent);
+    false
+}
 impl Identity {
     fn file(&self) -> Option<(u64, u64)> {
         #[cfg(unix)]
@@ -194,7 +209,8 @@ impl JsonSource {
     /// append-only log the same file grown ([`same_or_grown`]).
     fn holds(&self, now: &Identity) -> bool {
         if self.0.appendable {
-            self.0.identity.admits(now)
+            let then = (self.0.identity.len, self.0.identity.file());
+            self.0.identity.admits(now) || ((now.len, now.file()) == then && append_in_flight(&self.0.path, then))
         } else {
             *now == self.0.identity
         }
@@ -1889,6 +1905,24 @@ mod tests {
             let error = source.check().unwrap_err();
             assert!(error.to_string().contains("JSON source changed"), "{label}: {error}");
         }
+    }
+
+    /// Linux stamps a write's mtime before it extends the file: an observer can see new timestamps
+    /// at the captured length while an append is in flight. That is growth, not a rewrite.
+    #[cfg(unix)]
+    #[test]
+    fn append_only_log_seen_mid_write_at_its_captured_length_is_growth() {
+        let (_fixture, path) = log_fixture("live.jsonl", b"{\"a\":1}\n");
+        let source = JsonSource::capture(&path).unwrap();
+        let file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        file.set_modified(SystemTime::UNIX_EPOCH).unwrap();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(3));
+                std::io::Write::write_all(&mut &file, b"{\"b\":2}\n").unwrap();
+            });
+            source.check().unwrap();
+        });
     }
 
     #[test]
