@@ -1,4 +1,5 @@
 use super::*;
+use crate::emit::grok_qwen_tests::Frozen;
 use crate::emit::{EmitOptions, ThinkingMode};
 
 fn fixture() -> Result<Session> {
@@ -95,6 +96,7 @@ fn fixture() -> Result<Session> {
 fn checked_cline_roo_match_frozen_pretty_all_modes() -> Result<()> {
     let world = crate::test_world("cline-checked-wire");
     let session = fixture()?;
+    let mut frozen = Frozen::new("cline-roo-fixture");
     for harness in [Harness::Cline, Harness::Roo] {
         for mode in ThinkingMode::ALL {
             let options = EmitOptions {
@@ -102,14 +104,6 @@ fn checked_cline_roo_match_frozen_pretty_all_modes() -> Result<()> {
                 thinking: mode,
                 ..Default::default()
             };
-            let mut owned = session.clone();
-            crate::emit::project_owned_thinking_for_test(&mut owned, harness, mode);
-            let before = legacy::emit(
-                &owned,
-                &world.base.join(format!("old-{harness}-{mode}")),
-                &options,
-                harness,
-            )?;
             let after = crate::emit::emit(
                 &session,
                 harness,
@@ -122,7 +116,10 @@ fn checked_cline_roo_match_frozen_pretty_all_modes() -> Result<()> {
                 "ui_messages.json",
             ] {
                 let raw = fs::read(after.path.join(name))?;
-                assert_eq!(raw, fs::read(before.path.join(name))?, "{harness}/{mode}/{name}");
+                frozen.insert(
+                    format!("{harness}-{mode}-{name}"),
+                    json!([raw.len(), crate::digest::sha256_hex(&raw)]),
+                );
                 let parsed: Value = serde_json::from_slice(&raw)?;
                 assert_eq!(raw, serde_json::to_vec_pretty(&parsed)?);
                 assert!(!raw.ends_with(b"\n"));
@@ -134,7 +131,7 @@ fn checked_cline_roo_match_frozen_pretty_all_modes() -> Result<()> {
                 .contains(if harness == Harness::Roo { "Roo Code" } else { "Cline" }));
         }
     }
-    Ok(())
+    frozen.check()
 }
 
 #[test]
