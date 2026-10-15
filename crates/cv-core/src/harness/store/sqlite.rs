@@ -472,6 +472,25 @@ impl Cells {
         (&self.source, &self.arena)
     }
 
+    /// The cell at `rowid` of `table.column`, TEXT or BLOB bytes as stored, for a store that
+    /// locates its rows itself (by key). None when empty.
+    pub(crate) fn row(&self, conn: &Connection, table: &str, column: &str, rowid: i64) -> Result<Option<Cell>> {
+        let (offset, len) = append_cell(conn, table, column, rowid, &self.arena)?;
+        Ok((len != 0).then_some(Cell(offset, len)))
+    }
+
+    /// Bytes a format derives as a cell of their own: a BLOB in the store's own encoding rule, or
+    /// a JSON string holding a JSON document. None when empty.
+    pub(crate) fn append(&self, write: impl FnOnce(&mut dyn std::io::Write) -> Result<()>) -> Result<Option<Cell>> {
+        let (offset, len) = self.arena.append(write)?;
+        Ok((len != 0).then_some(Cell(offset, len)))
+    }
+
+    /// Recheck the store and the reader's dependencies (once, when a read ends).
+    pub(crate) fn check(&self) -> Result<()> {
+        self.source.check()
+    }
+
     /// Decode `cell` with `f`. None when the cell is not exactly one JSON value; every other
     /// error is a source failure.
     pub(crate) fn read<T>(
