@@ -313,16 +313,20 @@ fn search_fallback_messaging_and_index_path() {
     let w = World::new("search");
     standard_corpus(&w);
 
-    // No index yet: a live scan with an explicit note, that still finds the content.
-    let (out, err) = w.cv_ok(&["search", "zebrafish"]);
-    assert!(err.contains("no index yet"), "want live-scan note, got stderr:\n{err}");
-    assert!(err.contains("scanning live"), "{err}");
+    // No index yet: an error naming the cause and both ways forward, never an unasked scan.
+    let (out, err) = w.cv_fails(&["search", "zebrafish"]);
+    assert!(err.contains("no full-text index") && err.contains("cv index"), "{err}");
+    assert!(err.contains("--scan"), "{err}");
+    assert!(out.is_empty(), "{out}");
+    // `--scan` asks for the live scan, which announces itself and still finds the content.
+    let (out, err) = w.cv_ok(&["search", "zebrafish", "--scan"]);
+    assert!(err.contains("scanning transcripts live"), "{err}");
     assert!(out.contains("alphases"), "{out}");
     assert!(out.to_lowercase().contains("zebrafish"), "snippet expected:\n{out}");
 
     // A stale legacy sqlite index gets a cleanup nudge.
     fs::write(w.cv_home.join("index.sqlite"), b"stale").unwrap();
-    let (_, err) = w.cv_ok(&["search", "zebrafish"]);
+    let (_, err) = w.cv_ok(&["search", "zebrafish", "--scan"]);
     assert!(
         err.contains("legacy sqlite index no longer used"),
         "want legacy-index note, got stderr:\n{err}"
@@ -333,10 +337,7 @@ fn search_fallback_messaging_and_index_path() {
     let (out, _) = w.cv_ok(&["index"]);
     assert!(out.contains("indexed 2 top-level session(s)"), "{out}");
     let (out, err) = w.cv_ok(&["search", "zebrafish"]);
-    assert!(
-        !err.contains("scanning live"),
-        "indexed search must not live-scan:\n{err}"
-    );
+    assert!(!err.contains("scanning"), "indexed search must not live-scan:\n{err}");
     assert!(out.contains("alphases"), "{out}");
 
     // The index is authoritative: a miss is a miss (with the index hint), not a fallback.
@@ -354,11 +355,11 @@ fn search_json_emits_machine_readable_hits() {
     let w = World::new("searchjson");
     standard_corpus(&w);
 
-    // Live-scan path (no index yet): the note stays on stderr; stdout is exactly one JSON
+    // Live-scan path (`--scan`): the note stays on stderr; stdout is exactly one JSON
     // array with the FULL session id (the table truncates to "alphases"), the snippet the
     // table would print, and an explicit null score (a live scan has none).
-    let (out, err) = w.cv_ok(&["search", "zebrafish", "--json"]);
-    assert!(err.contains("scanning live"), "{err}");
+    let (out, err) = w.cv_ok(&["search", "zebrafish", "--json", "--scan"]);
+    assert!(err.contains("scanning transcripts live"), "{err}");
     let rows: Vec<serde_json::Value> = serde_json::from_str(out.trim()).expect("stdout must be pure JSON");
     assert_eq!(rows.len(), 1, "{out}");
     assert_eq!(rows[0]["id"], "alphasess", "full id, not the 8-char prefix:\n{out}");
@@ -379,13 +380,13 @@ fn search_json_emits_machine_readable_hits() {
     );
 
     // A live-scan miss is an empty array — valid JSON, no prose on stdout.
-    let (out, _) = w.cv_ok(&["search", "xyzzyplugh", "--json"]);
+    let (out, _) = w.cv_ok(&["search", "xyzzyplugh", "--json", "--scan"]);
     let rows: Vec<serde_json::Value> = serde_json::from_str(out.trim()).unwrap();
     assert!(rows.is_empty(), "{out}");
 
     // --limit bounds the array; the "stopped at" footer moves to stderr, keeping stdout pure.
     // ("the" appears in both fixture sessions on the live path.)
-    let (out, err) = w.cv_ok(&["search", "the", "--json", "--limit", "1"]);
+    let (out, err) = w.cv_ok(&["search", "the", "--json", "--limit", "1", "--scan"]);
     let rows: Vec<serde_json::Value> = serde_json::from_str(out.trim()).unwrap();
     assert_eq!(rows.len(), 1, "{out}");
     assert!(err.contains("stopped at 1"), "{err}");
@@ -394,7 +395,7 @@ fn search_json_emits_machine_readable_hits() {
     // the index.
     w.cv_ok(&["index"]);
     let (out, err) = w.cv_ok(&["search", "zebrafish", "--json"]);
-    assert!(!err.contains("scanning live"), "{err}");
+    assert!(!err.contains("scanning"), "{err}");
     let rows: Vec<serde_json::Value> = serde_json::from_str(out.trim()).expect("stdout must be pure JSON");
     assert_eq!(rows.len(), 1, "{out}");
     assert_eq!(rows[0]["id"], "alphasess", "{out}");
@@ -467,6 +468,89 @@ fn search_discloses_index_staleness() {
     w.cv_ok(&["index"]);
     let (_, err) = w.cv_ok(&["search", "zebrafish", "--json"]);
     assert!(!err.contains("behind"), "{err}");
+}
+
+/// A sandbox that denies writes to the cv home (here the home made read-only, as a deny-write
+/// profile makes it) still searches, lists and shows from the index and catalog it finds there.
+/// Text appended after indexing proves which answered: a live scan would find it, the index does
+/// not, and nothing announces a scan.
+#[cfg(unix)]
+#[test]
+fn read_only_home_answers_from_the_index() {
+    use std::os::unix::fs::PermissionsExt;
+    let w = World::new("searchro");
+    standard_corpus(&w);
+    w.cv_ok(&["index"]);
+    let mut lines = fs::read_to_string(w.transcript("betasess")).unwrap();
+    lines.push_str(&format!("{}\n", user_line("b9", "2026-03-02T09:00:00Z", "zqlatecomer")));
+    fs::write(w.transcript("betasess"), lines).unwrap();
+    let set_mode = |mode: u32| {
+        let mut dirs = vec![w.cv_home.clone()];
+        while let Some(dir) = dirs.pop() {
+            for entry in fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    dirs.push(path.clone());
+                    fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+                } else {
+                    fs::set_permissions(&path, fs::Permissions::from_mode(mode & 0o666)).unwrap();
+                }
+            }
+        }
+        fs::set_permissions(&w.cv_home, fs::Permissions::from_mode(mode)).unwrap();
+    };
+    set_mode(0o555);
+    let found = w.cv(&["search", "zebrafish", "--json"]);
+    let late = w.cv(&["search", "zqlatecomer"]);
+    let listed = w.cv(&["ls", "--json"]);
+    let shown = w.cv(&["show", "alphasess"]);
+    set_mode(0o755);
+
+    let (ok, _, out, err) = found;
+    assert!(ok, "{err}");
+    let rows: Vec<serde_json::Value> = serde_json::from_str(out.trim()).unwrap();
+    assert_eq!(rows.len(), 1, "{out}");
+    assert_eq!(rows[0]["id"], "alphasess");
+    assert!(
+        rows[0]["score"].as_f64().is_some(),
+        "an indexed hit carries its score: {out}"
+    );
+    assert!(!err.contains("scanning") && !err.contains("unusable"), "{err}");
+    let (ok, _, out, err) = late;
+    assert!(
+        ok && out.contains("no matches"),
+        "the index answered, not a scan:\n{out}\n{err}"
+    );
+    let (ok, _, out, err) = listed;
+    assert!(ok, "{err}");
+    assert_eq!(
+        serde_json::from_str::<Vec<serde_json::Value>>(&out).unwrap().len(),
+        2,
+        "{out}"
+    );
+    let (ok, _, out, err) = shown;
+    assert!(ok && out.contains("zebrafish"), "{out}\n{err}");
+}
+
+/// An index that exists but cannot be opened fails at once, naming its path, the cause and both
+/// ways forward; it never turns into a scan of every transcript.
+#[test]
+fn unusable_index_fails_fast_with_the_cause() {
+    let w = World::new("searchbad");
+    standard_corpus(&w);
+    let index = w.cv_home.join("tantivy");
+    fs::create_dir_all(&index).unwrap();
+    fs::write(index.join("meta.json"), b"{not json").unwrap();
+    let started = std::time::Instant::now();
+    let (out, err) = w.cv_fails(&["search", "zebrafish"]);
+    assert!(started.elapsed() < std::time::Duration::from_secs(20), "{err}");
+    assert!(out.is_empty(), "{out}");
+    assert!(
+        err.contains("unusable") && err.contains(&*index.to_string_lossy()),
+        "{err}"
+    );
+    assert!(err.contains("cv index") && err.contains("--scan"), "{err}");
+    assert!(!err.contains("scanning"), "{err}");
 }
 
 // ───────────────────────────── show windows ─────────────────────────────
@@ -1659,8 +1743,9 @@ fn extra_claude_roots_are_listed_and_read() {
     assert!(out.contains("zebrafish"), "the default root still works:\n{out}");
     let (out, _) = w.cv_ok(&["ls"]);
     assert!(out.contains("3 session(s)"), "{out}");
+    w.cv_ok(&["index"]);
     let (out, _) = w.cv_ok(&["search", "narwhals"]);
-    assert!(out.contains("seatsess"), "{out}");
+    assert!(out.contains("seatsess"), "the index covers the extra root:\n{out}");
 
     let roots = w.base.join("elsewhere");
     let (ok, _, out, err) = w.cv_env(

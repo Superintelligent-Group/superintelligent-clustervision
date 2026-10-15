@@ -1211,18 +1211,22 @@ const SEARCH_ROW_KEYS: [&str; 14] = [
     "workflow",
 ];
 
-/// `/api/search` over a world with NO full-text index — i.e. the degraded path, which is the one
-/// a hermetic test can drive (building a tantivy index needs a real corpus under the *test
-/// process*'s `$HOME`, which these tests deliberately don't have; the indexed path is verified
-/// against the real 6,873-session archive by hand). It must still answer, in the same row shape,
-/// and SAY it degraded.
+/// `/api/search` over a world with NO full-text index: a 503 naming the cause and the fix unless
+/// the caller asks for the live scan (`scan=1`), which answers in the same row shape and SAYS it
+/// is a scan.
 #[test]
 fn serve_search() {
     let w = world("search");
     let (port, _reaper) = spawn_serve(&w);
 
+    // No index and no `scan=1`: the cause and both ways forward, never an unasked scan.
+    let (status, v) = get_json(port, "/api/search?q=zebrafish");
+    assert_eq!(status, 503, "{v}");
+    let error = v["error"].as_str().unwrap();
+    assert!(error.contains("cv index") && error.contains("scan=1"), "{v}");
+
     // A word only `alphasess` says. One row, and the row is the §3 search row.
-    let raw = raw_get(port, "/api/search?q=zebrafish");
+    let raw = raw_get(port, "/api/search?scan=1&q=zebrafish");
     assert_eq!(raw_status(&raw), 200, "{raw}");
     let v = raw_json(&raw);
     let arr = v.as_array().expect("array");
@@ -1244,7 +1248,10 @@ fn serve_search() {
     // …and it says which door answered, so the UI can tell the user the result is partial.
     assert_eq!(header_of(&raw, "X-Cv-Search-Source").as_deref(), Some("live"), "{raw}");
     let note = header_of(&raw, "X-Cv-Search-Note").unwrap_or_default();
-    assert!(note.contains("no index"), "the degrade must be stated: {raw}");
+    assert!(
+        note.contains("scanned transcripts live"),
+        "the scan must be stated: {raw}"
+    );
 
     // An empty or missing query is a caller mistake, not "every session".
     for path in ["/api/search", "/api/search?q=", "/api/search?limit=5"] {
@@ -1254,27 +1261,27 @@ fn serve_search() {
     }
 
     // harness: a filter, and a typo is a clear 400 (same as /api/sessions).
-    let (status, v) = get_json(port, "/api/search?q=zebrafish&harness=claude");
+    let (status, v) = get_json(port, "/api/search?scan=1&q=zebrafish&harness=claude");
     assert_eq!(status, 200);
     assert_eq!(v.as_array().unwrap().len(), 1, "{v}");
-    let (status, v) = get_json(port, "/api/search?q=zebrafish&harness=codex");
+    let (status, v) = get_json(port, "/api/search?scan=1&q=zebrafish&harness=codex");
     assert_eq!(status, 200);
     assert!(v.as_array().unwrap().is_empty(), "{v}");
-    let (status, v) = get_json(port, "/api/search?q=zebrafish&harness=warpdrive");
+    let (status, v) = get_json(port, "/api/search?scan=1&q=zebrafish&harness=warpdrive");
     assert_eq!(status, 400);
     assert!(v["error"].as_str().unwrap().contains("unknown harness"), "{v}");
 
     // cwd: a substring of the row's cwd, matching /api/sessions?cwd=.
-    let (_, v) = get_json(port, "/api/search?q=zebrafish&cwd=%2Fwork%2Fproj");
+    let (_, v) = get_json(port, "/api/search?scan=1&q=zebrafish&cwd=%2Fwork%2Fproj");
     assert_eq!(v.as_array().unwrap().len(), 1, "{v}");
-    let (_, v) = get_json(port, "/api/search?q=zebrafish&cwd=nowhere");
+    let (_, v) = get_json(port, "/api/search?scan=1&q=zebrafish&cwd=nowhere");
     assert!(v.as_array().unwrap().is_empty(), "{v}");
 
     // A needle both fixtures contain ("plea(se)" / "(se)venteen"), so `limit` bites — and the
     // truncation is stated rather than silently looking like the whole answer.
-    let (_, v) = get_json(port, "/api/search?q=se");
+    let (_, v) = get_json(port, "/api/search?scan=1&q=se");
     assert_eq!(v.as_array().unwrap().len(), 2, "{v}");
-    let raw = raw_get(port, "/api/search?q=se&limit=1");
+    let raw = raw_get(port, "/api/search?scan=1&q=se&limit=1");
     assert_eq!(raw_json(&raw).as_array().unwrap().len(), 1);
     assert!(
         header_of(&raw, "X-Cv-Search-Note")
@@ -1284,7 +1291,7 @@ fn serve_search() {
     );
 
     // A miss is an empty array, never an error.
-    let (status, v) = get_json(port, "/api/search?q=pangolin");
+    let (status, v) = get_json(port, "/api/search?scan=1&q=pangolin");
     assert_eq!(status, 200);
     assert!(v.as_array().unwrap().is_empty(), "{v}");
 
@@ -1293,7 +1300,7 @@ fn serve_search() {
     let raw = raw_request(
         port,
         "GET",
-        "/api/search?q=zebrafish",
+        "/api/search?scan=1&q=zebrafish",
         &[("Origin", "http://localhost:5173")],
     );
     let exposed = header_of(&raw, "Access-Control-Expose-Headers").unwrap_or_default();
@@ -1382,13 +1389,16 @@ fn live_search_filters_cwd_before_spending_the_result_budget() {
         w.write_session(id, &[json!({"type":"user", "uuid":id, "cwd":format!("/work/{id}"), "message":{"role":"user", "content":"sharedneedle"}})]);
     }
     let (port, _server) = spawn_serve(&w);
-    let (_, first) = get_json(port, "/api/search?q=sharedneedle&limit=1");
+    let (_, first) = get_json(port, "/api/search?scan=1&q=sharedneedle&limit=1");
     let target = if first[0]["id"] == "alphasess" {
         "betasess"
     } else {
         "alphasess"
     };
-    let (status, filtered) = get_json(port, &format!("/api/search?q=sharedneedle&limit=1&cwd=/work/{target}"));
+    let (status, filtered) = get_json(
+        port,
+        &format!("/api/search?scan=1&q=sharedneedle&limit=1&cwd=/work/{target}"),
+    );
     assert_eq!(status, 200, "{filtered}");
     assert_eq!(
         filtered.as_array().unwrap().len(),
@@ -1396,7 +1406,7 @@ fn live_search_filters_cwd_before_spending_the_result_budget() {
         "nonmatching hit exhausted live limit: {filtered}"
     );
     assert_eq!(filtered[0]["id"], target);
-    assert_eq!(get_json(port, "/api/search?q=sharedneedle&limit=0").1, json!([]));
+    assert_eq!(get_json(port, "/api/search?scan=1&q=sharedneedle&limit=0").1, json!([]));
 }
 
 #[test]

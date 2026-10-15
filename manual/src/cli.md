@@ -326,7 +326,7 @@ claude    da9174f4  2026-05-28  the flux inference refactor
           … so the new flux inference path replaces the old type-walker …
 ```
 
-By default `cv` uses the tantivy full-text index if you've built one (real tokenization + BM25, instant). With no index it does a live scan and nudges you to run [`cv index`](#cv-index). When an index exists it's authoritative — no matches means no matches, not "scan harder."
+`cv search` answers from the tantivy full-text index (real tokenization + BM25, instant), and the index is authoritative: no matches means no matches, not "scan harder." With no index, or one it cannot open, it fails at once naming the cause and the fix ([`cv index`](#cv-index)); `--scan` asks for a slow, head-capped live scan instead and says so on stderr.
 
 `--semantic` ranks by *meaning* using stored embeddings (`cv index --semantic` first; a small
 model downloads on first use). Unlike full-text it does **not** silently degrade: with no

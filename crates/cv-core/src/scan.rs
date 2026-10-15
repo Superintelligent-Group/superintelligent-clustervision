@@ -1,11 +1,10 @@
-//! The no-index live scan: substring search over the corpus with no search index at all.
+//! The live scan: substring search over the corpus with no search index at all.
 //!
-//! This is the *degraded* path — `cv search` takes it before `cv index` has ever run, and `cv serve`'s
-//! `/api/search` takes it when the tantivy index is missing or unreadable, so a fresh machine and
-//! a broken index both still answer a query instead of erroring. It is slower than the index by
-//! orders of magnitude (it streams every session) and it only sees each session's capped head, so
-//! callers say so: the CLI prints a `(no index yet — scanning live…)` note, the daemon sets
-//! `X-Cv-Search-Source: live`.
+//! Only an explicit request takes it: `cv search --scan` and `cv serve`'s `/api/search?scan=1`
+//! (`cv pack` before any `cv index`). A missing or unusable index is an error naming the fix,
+//! never this. It is slower than the index by orders of magnitude (it streams every session) and
+//! only sees each session's capped head, so callers say so: the CLI prints a note on stderr, the
+//! daemon sets `X-Cv-Search-Source: live`.
 //!
 //! Streaming discipline: each session streams into [`CapSink`], which keeps at most
 //! [`LIVE_HAY_BYTES`] of searchable text and drops every message as it passes. Peak memory per

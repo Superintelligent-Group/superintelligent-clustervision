@@ -1,5 +1,5 @@
 # Product lines per crate (tools/check-size.py). Raise a number only as a reviewed decision.
-cv 19167
+cv 19174
 cv-core 79464
 cv-search 4706
 cv-testkit 450

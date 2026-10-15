@@ -12,6 +12,7 @@ pub(crate) fn cmd_search(
     harness: Option<String>,
     limit: usize,
     semantic: bool,
+    scan: bool,
     json: bool, // emit the hits as one JSON array (session rows + score/snippet/provenance) instead of the table
 ) -> Result<()> {
     let want = parse_harness(&harness)?;
@@ -43,29 +44,24 @@ pub(crate) fn cmd_search(
         }
     }
 
-    // Preferred path: the tantivy full-text index (real tokenization + BM25). Authoritative when
-    // present — an empty result means "no match", not "fall back to a live scan".
-    if cv_search::default_tantivy_dir().exists() {
-        match cv_search::text_search_indexed_filtered(
-            None,
-            query,
-            limit,
-            cv_search::SearchFilter {
-                harness: want.map(|h| h.as_str()),
-                cwd: None,
-            },
-        ) {
-            Ok(hits) => {
-                render_search_hits(hits, want, limit, query, "index", json)?;
-                return Ok(());
-            }
-            Err(e) if cv_search::is_invalid_text_query(&e) => return crate::util::usage(format!("{e:#}")),
-            Err(e) => eprintln!("(tantivy index unavailable: {e:#}; scanning live)"),
-        }
-    } else {
-        eprintln!("(no index yet — scanning live; run `cv index` for instant search)");
+    // The index answers every full-text search: an empty result means "no match", and an index
+    // that is missing or unusable is an error naming the cause and the fix, never a silent scan
+    // of every transcript (minutes on a large corpus, and only each session's head).
+    if scan {
+        eprintln!("(--scan: scanning transcripts live, head-capped; `cv index` makes search instant)");
+        return cmd_search_live(query, want, limit, json);
     }
-    cmd_search_live(query, want, limit, json)
+    let filter = cv_search::SearchFilter {
+        harness: want.map(|h| h.as_str()),
+        cwd: None,
+    };
+    match cv_search::text_search_indexed_filtered(None, query, limit, filter) {
+        Ok(hits) => render_search_hits(hits, want, limit, query, "index", json),
+        Err(e) if cv_search::is_invalid_text_query(&e) => crate::util::usage(format!("{e:#}")),
+        Err(e) => Err(
+            e.context("full-text search needs the index (or pass --scan for a slow live scan of each session's head)")
+        ),
+    }
 }
 
 /// Where the retired sqlite FTS index used to live: `$CLUSTERVISION_HOME/index.sqlite` or

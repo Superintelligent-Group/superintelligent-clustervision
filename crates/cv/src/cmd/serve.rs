@@ -504,7 +504,7 @@ fn stats(query: &str) -> (u16, Value) {
     ok(cv_core::stats::CorpusStats::compute(&refs).to_json())
 }
 
-/// `GET /api/search?q=&limit=&harness=&cwd=&semantic=1` — full-text (or `semantic=1`) search over
+/// `GET /api/search?q=&limit=&harness=&cwd=&semantic=1&scan=1` — full-text (or `semantic=1`) search over
 /// the whole corpus, as the JSON array of rows `cv search --json` emits: the §3 session row plus
 /// `score`, `snippet` and the sub-agent provenance trio, shaped by [`cv_core::rows::SearchRow`].
 ///
@@ -513,12 +513,12 @@ fn stats(query: &str) -> (u16, Value) {
 /// the whole archive instantly off the tantivy index `cv index` maintains. Same index, same rows,
 /// through the other door.
 ///
-/// **Degradation, and saying so.** With no index (or an unreadable one) this does not error — it
-/// takes the same head-capped live scan `cv search` falls back to ([`cv_core::scan::live_search`]),
-/// which is slower and only sees each session's capped head. Which path answered rides on
-/// `X-Cv-Search-Source` (`index` | `semantic` | `live`), with a human sentence in `X-Cv-Search-Note`
-/// whenever the answer is degraded or truncated, so the UI can tell the user rather than silently
-/// showing a worse result. Both headers are CORS-exposed. The body stays exactly the CLI's array.
+/// **The index answers, or says why not.** A missing or unusable index is a 503 naming the cause
+/// and the fix, as `cv search` errors; `scan=1` asks for the head-capped live scan instead
+/// ([`cv_core::scan::live_search`]). Which path answered rides on `X-Cv-Search-Source` (`index` |
+/// `semantic` | `live`), with a human sentence in `X-Cv-Search-Note` whenever the answer may be
+/// partial (a stale index, a live scan, a truncation). Both headers are CORS-exposed. The body
+/// stays exactly the CLI's array.
 fn search(query: &str, semantic_search: &cv_search::SemanticSearch) -> Reply {
     let params = Query::parse(query);
     // An empty query would mean "every session", which is `/api/sessions`' job; searching for
@@ -546,9 +546,12 @@ fn search(query: &str, semantic_search: &cv_search::SemanticSearch) -> Reply {
         }
     };
     let cwd = params.get("cwd");
-    let semantic = params
-        .get("semantic")
-        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+    let flag = |name| {
+        params
+            .get(name)
+            .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+    };
+    let (semantic, scan) = (flag("semantic"), flag("scan"));
 
     let (mut hits, source, mut note) = if semantic {
         match semantic_search.search(
@@ -570,9 +573,15 @@ fn search(query: &str, semantic_search: &cv_search::SemanticSearch) -> Reply {
                 return (s, v, Vec::new());
             }
         }
-    } else if cv_search::default_tantivy_dir().exists() {
-        // The index is authoritative when present — an empty result means "no match", never
-        // "fall back to a live scan".
+    } else if scan {
+        (
+            Vec::new(),
+            "live",
+            Some("scan=1: scanned transcripts live, head-capped".into()),
+        )
+    } else {
+        // The index is authoritative: an empty result means "no match", and a missing or unusable
+        // index is an error naming the cause and the fix, never a silent scan of every transcript.
         match cv_search::text_search_indexed_filtered(
             None,
             &q,
@@ -587,18 +596,14 @@ fn search(query: &str, semantic_search: &cv_search::SemanticSearch) -> Reply {
                 let (status, body) = err(400, &format!("invalid search query: {error:#}"));
                 return (status, body, Vec::new());
             }
-            Err(e) => (
-                Vec::new(),
-                "live",
-                Some(format!("tantivy index unavailable ({e:#}); scanned live")),
-            ),
+            Err(error) => {
+                let (status, body) = err(
+                    503,
+                    &format!("{error:#} (or add scan=1 for a slow live scan of each session's head)"),
+                );
+                return (status, body, Vec::new());
+            }
         }
-    } else {
-        (
-            Vec::new(),
-            "live",
-            Some("no index yet — scanned live; run `cv index` for instant, full-transcript search".into()),
-        )
     };
 
     if source != "live" {

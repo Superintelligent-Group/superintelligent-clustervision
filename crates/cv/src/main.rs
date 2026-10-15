@@ -268,6 +268,11 @@ enum Cmd {
         /// to have been run; downloads a small embedding model on first use.
         #[arg(long)]
         semantic: bool,
+        /// Scan the transcripts live instead of reading the index: slow, matches only each
+        /// session's head, and is never taken unasked. Without it a missing or unusable index is an
+        /// error that names its cause.
+        #[arg(long, conflicts_with = "semantic")]
+        scan: bool,
         /// Emit the hits as one JSON array instead of the table — the same hits in the same
         /// order (--harness/--limit/--semantic respected): a session row (`id, harness, path, cwd,
         /// title, created_at, updated_at, message_count, size_bytes`) plus `score`, `snippet`, and
@@ -1180,8 +1185,9 @@ fn run() -> Result<()> {
             harness,
             limit,
             semantic,
+            scan,
             json,
-        } => search::cmd_search(&query, harness, limit, semantic, json),
+        } => search::cmd_search(&query, harness, limit, semantic, scan, json),
         Cmd::Show {
             id,
             harness,

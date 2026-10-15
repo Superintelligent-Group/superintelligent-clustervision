@@ -87,13 +87,17 @@ full-text and semantic mode.
 
 ### How `cv search` resolves
 
-`cv search` prefers the tantivy index when it exists — and when present it's
-*authoritative*: an empty result means "no match", not "go scan everything."
-When the index is missing or unreadable, it scans sessions live and says so on stderr.
-That fallback is case-insensitive substring matching over only the first 256 KiB of
-searchable content per session, in discovery order; it does not interpret Tantivy
-operators or rank by BM25. Build or repair the index with `cv index` for full-transcript
-search. Invalid indexed query syntax is an error, not a reason to scan live.
+`cv search` answers from the tantivy index, and the index is *authoritative*: an empty
+result means "no match", not "go scan everything." A missing or unusable index is an error
+that names the index path, the cause and the fix (`cv index`); it never silently turns into a
+scan of every transcript, which takes minutes on a large corpus. Reading needs no write: a
+home the process may not write (a sandbox's deny-write rule, a read-only copy) is searched,
+listed and shown from the index and catalog already there.
+
+`--scan` asks for the live scan instead, and says so on stderr: case-insensitive substring
+matching over only the first 256 KiB of searchable content per session, in discovery order,
+with no Tantivy operators and no BM25 ranking. Invalid query syntax is an error, never a
+reason to scan.
 
 > Older releases also kept a SQLite full-text index as a middle tier; it's
 > retired (tantivy is canonical). If a stale `index.sqlite` lingers in your
