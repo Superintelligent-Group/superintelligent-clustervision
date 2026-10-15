@@ -156,20 +156,7 @@ fn block_from_fields(item: &Value, q: &Quirks, text: &mut dyn FnMut(&'static str
     }
 }
 
-/// A schema projection shared by mapped and portable document readers. Whole value acceptance
-/// happens at their source boundary; only decoded metadata and demanded composite text are owned.
-pub(crate) fn block_from_view(
-    view: crate::json::JsonView<'_>,
-    q: &Quirks,
-    spans: bool,
-) -> anyhow::Result<Option<Block>> {
-    if !spans {
-        return Ok(block_from(view.resolve()?.as_ref(), q));
-    }
-    block_from_view_with(view, q, true, &mut |v| v.text(true), 0)
-}
-
-/// [`block_from_view`] with the caller's text rule for content strings, `spans` for tool
+/// A content block from a view, with the caller's text rule for content strings, `spans` for tool
 /// arguments, and the size above which a source-backed tool-result array becomes checked joined
 /// text rather than being coerced inline. Unselected fields are never decoded, in every demand.
 pub(crate) fn block_from_view_with(
@@ -775,7 +762,9 @@ mod selected_media_tests {
         std::fs::write(&path, serde_json::to_vec(&value)?)?;
         let source = crate::json::JsonSource::capture(&path)?;
         let block = source
-            .read_range_value(0, source.len(), |view| block_from_view(view, &ANTHROPIC, true))?
+            .read_range_value(0, source.len(), |view| {
+                block_from_view_with(view, &ANTHROPIC, true, &mut |v| v.text(true), 0)
+            })?
             .unwrap();
         assert_eq!(
             serde_json::to_value(&block)?,
@@ -799,7 +788,9 @@ mod selected_media_tests {
         std::fs::write(&path, serde_json::to_vec(&value)?)?;
         let source = crate::json::JsonSource::capture(&path)?;
         let block = source
-            .read_range_value(0, source.len(), |view| block_from_view(view, &ANTHROPIC, true))?
+            .read_range_value(0, source.len(), |view| {
+                block_from_view_with(view, &ANTHROPIC, true, &mut |v| v.text(true), 0)
+            })?
             .unwrap();
         assert!(matches!(
             &block,
@@ -818,7 +809,9 @@ mod selected_media_tests {
             serde_json::to_value(block_from(&value, &ANTHROPIC))?
         );
         let block = source
-            .read_range_value(0, source.len(), |view| block_from_view(view, &ANTHROPIC, true))?
+            .read_range_value(0, source.len(), |view| {
+                block_from_view_with(view, &ANTHROPIC, true, &mut |v| v.text(true), 0)
+            })?
             .unwrap();
         std::fs::write(&path, b"changed after selected join")?;
         if let Block::ToolResult { content, .. } = block {
@@ -836,8 +829,9 @@ mod selected_media_tests {
                     let value = json!({"type":ty,"mimeType":"image/png","data":data,"name":"attachment","unknown":"x".repeat(200000)});
                     std::fs::write(&path, serde_json::to_vec(&value)?)?;
                     let source = crate::json::JsonSource::capture(&path)?;
-                    let selected =
-                        source.read_range_value(0, source.len(), |view| block_from_view(view, &quirks, true))?;
+                    let selected = source.read_range_value(0, source.len(), |view| {
+                        block_from_view_with(view, &quirks, true, &mut |v| v.text(true), 0)
+                    })?;
                     assert_eq!(
                         serde_json::to_value(selected)?,
                         serde_json::to_value(block_from(&value, &quirks))?

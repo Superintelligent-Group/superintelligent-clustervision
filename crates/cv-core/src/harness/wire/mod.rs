@@ -44,6 +44,7 @@ pub(crate) fn coerce_text(v: Option<&Value>) -> String {
 
 /// The text parts of a `content` field only (no placeholders): for titles and cwd sniffing, where
 /// `[image]` would be noise.
+#[cfg(test)]
 pub(crate) fn text_parts(v: Option<&Value>) -> String {
     match v {
         Some(Value::String(s)) => s.clone(),
