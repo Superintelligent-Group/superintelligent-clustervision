@@ -28,6 +28,7 @@
 
 - HTTP body framing errors now close the connection; malformed chunks cannot recover during draining and execute a pipelined request.
 - Resume guard sampling preserves open transcript read positions on Unix.
+- Every indexed `cv search` answer, hit or miss, names how many sessions the index trails and by how long (stderr under `--json`; `X-Cv-Search-Note`).
 
 - Correct search defaults and fallback semantics, document affordance views and MCP window exceptions, and point the prompt-row schema to the current command.
 - MCP task tools use the actual CLI flags; generated schemas describe repeatable arguments, and the command reference shows their correct spellings.
