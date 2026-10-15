@@ -3807,7 +3807,9 @@ mod tests {
                     .unwrap();
             }
             writer.commit().unwrap();
-            drop(writer);
+            // Join the merge/GC thread the commit started, or it can still be writing the index
+            // when the directory is removed ("Directory not empty").
+            writer.wait_merging_threads().unwrap();
             for filter in [
                 crate::SearchFilter {
                     harness: Some("codex"),
