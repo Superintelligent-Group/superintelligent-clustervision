@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Hook settings and skills publish by atomic replacement, preserving existing readers, permissions, and dotfile symlinks.
+
 - Ported project context files publish only after copying succeeds; failed copies leave no partial destination and preserve existing files.
 
 - HTTP overload shedding bounds retained sockets and drain work, preventing rejected clients from bypassing connection limits.
