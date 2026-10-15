@@ -1734,7 +1734,7 @@ impl<'a> Ctx<'a> {
 
 /// Decode only bounded metadata; text/thinking payloads retain the validated wire source.
 fn part_view(part: JsonView<'_>) -> Result<Option<Block>> {
-    openai::part_view(part, &openai::KIMI_CODE)
+    openai::part_from_view(part, &openai::KIMI_CODE, &mut |v| v.source_text())
 }
 
 /// Keep only candidate output-path lines while scanning decoded chunks. Last matching line wins,

@@ -28,11 +28,11 @@ pub(super) fn message(
             } else {
                 Message::of_kind(Role::Assistant, MessageKind::Reply, Origin::Model)
             };
-            m.content = openai::blocks_view(fields.get("content"), &openai::KIMI)?;
+            m.content = openai::blocks_from_view(fields.get("content"), &openai::KIMI, &mut |v| v.source_text())?;
             if role == "assistant" {
                 if let Some(calls) = fields.get("tool_calls").map(|v| v.array()).transpose()?.flatten() {
                     for call in calls {
-                        m.content.push(openai::tool_call_view(call?)?);
+                        m.content.push(openai::tool_call_from_view(call?, true)?);
                     }
                 }
             } else {

@@ -1012,7 +1012,7 @@ fn stream_conn_with_demand(
                             let mut calls = Vec::new();
                             if let Some(array) = view.array()? {
                                 for call in array {
-                                    calls.push(openai::tool_call_view(call?)?);
+                                    calls.push(openai::tool_call_from_view(call?, true)?);
                                 }
                             }
                             Ok(calls)
@@ -1936,7 +1936,9 @@ fn multimodal_blocks(view: crate::json::JsonView<'_>) -> Result<Option<Vec<Block
     };
     let mut blocks = Vec::new();
     for part in parts {
-        blocks.extend(openai::part_view(part?, &openai::HERMES)?);
+        blocks.extend(openai::part_from_view(part?, &openai::HERMES, &mut |v| {
+            v.source_text()
+        })?);
     }
     Ok((array || !blocks.is_empty()).then_some(blocks))
 }
