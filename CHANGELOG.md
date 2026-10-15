@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Kimi deferred wire outputs retain their parsed source identity and reject replaced files before the first read.
+
 - Hook settings and skills publish by atomic replacement, preserving existing readers, permissions, and dotfile symlinks.
 
 - Ported project context files publish only after copying succeeds; failed copies leave no partial destination and preserve existing files.

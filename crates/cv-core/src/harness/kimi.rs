@@ -79,7 +79,7 @@ use super::wire::openai;
 use super::Adapter;
 use crate::ir::*;
 use crate::json::{JsonSource, JsonView};
-use crate::lazy::{Span, Text, INLINE_MAX};
+use crate::lazy::{Text, INLINE_MAX};
 use crate::stream::{Checkpoint, Flow, MessageSink, ParseOptions};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -969,7 +969,6 @@ struct WireEnrich {
     statuses: Vec<WireStatus>,
     first_timestamp: Option<DateTime<Utc>>,
     file: Option<fs::File>,
-    path: PathBuf,
     spans: bool,
 }
 
@@ -982,7 +981,7 @@ struct WireRange {
 struct WireToolResult {
     is_error: bool,
     output: Option<WireRange>,
-    output_escaped: bool,
+    lazy_output: Option<Text>,
     extras: Option<WireRange>,
 }
 
@@ -998,17 +997,12 @@ impl WireEnrich {
     }
 
     fn output(&self, result: &WireToolResult) -> Text {
+        if let Some(text) = &result.lazy_output {
+            return text.clone();
+        }
         let Some(range) = result.output else {
             return String::new().into();
         };
-        if self.spans && range.len.saturating_sub(2) > INLINE_MAX {
-            return Text::Span(Span {
-                source: Some(self.path.clone()),
-                offset: range.offset + 1,
-                len: range.len as u64 - 2,
-                escaped: result.output_escaped,
-            });
-        }
         self.read(range)
             .and_then(|b| serde_json::from_slice::<String>(&b).ok())
             .unwrap_or_default()
@@ -1032,7 +1026,6 @@ struct WireStatus {
 /// enriches nothing.
 fn read_wire_enrichment(wire: &Path, spans: bool) -> WireEnrich {
     let mut e = WireEnrich {
-        path: wire.to_path_buf(),
         spans,
         ..WireEnrich::default()
     };
@@ -1093,10 +1086,13 @@ fn wire_record(e: &mut WireEnrich, view: JsonView<'_>) -> Result<()> {
                     };
                     let output_view = string("output").or_else(|| string("message"));
                     let output = output_view.map(range).transpose()?;
-                    let output_escaped = match output_view {
-                        Some(v) => v.string_may_contain_ascii(b'\\')?,
-                        None => false,
-                    };
+                    // Wire output is auxiliary: the session's primary stamp cannot protect
+                    // its offsets. Retain the wire's captured identity with deferred text.
+                    let lazy_output = output_view
+                        .filter(|_| e.spans && output.is_some_and(|r| r.len.saturating_sub(2) > INLINE_MAX))
+                        .map(JsonView::source_text)
+                        .transpose()?
+                        .flatten();
                     let extras = get("extras")
                         .filter(|v| !v.is_null().unwrap_or(false))
                         .map(range)
@@ -1107,7 +1103,7 @@ fn wire_record(e: &mut WireEnrich, view: JsonView<'_>) -> Result<()> {
                         WireToolResult {
                             is_error,
                             output,
-                            output_escaped,
+                            lazy_output,
                             extras,
                         },
                     );
@@ -1797,7 +1793,26 @@ mod tests {
     }
 
     #[test]
-    fn plain_wire_output_span_borrows_without_decoding() {
+    fn wire_output_replacement_before_first_demand_is_rejected() {
+        let world = cv_testkit::World::new("kimi-wire-replaced");
+        let path = world.base.join("wire.jsonl");
+        let wire = |letter: &str| {
+            serde_json::json!({"message":{"type":"ToolResult","payload":{
+                "tool_call_id":"call", "return_value":{"output":letter.repeat(20_000)}
+            }}})
+            .to_string()
+        };
+        fs::write(&path, wire("a")).unwrap();
+        let e = read_wire_enrichment(&path, true);
+        let text = e.output(&e.tool_results["call"]);
+        let replacement = world.base.join("replacement");
+        fs::write(&replacement, wire("b")).unwrap();
+        fs::rename(&replacement, &path).unwrap();
+        assert!(text.try_resolve(&crate::Resolver::new(None)).is_err());
+    }
+
+    #[test]
+    fn plain_wire_output_retains_checked_source() {
         let world = cv_testkit::World::new("kimi-wire-plain");
         let path = world.base.join("wire.jsonl");
         let output = "plain 雪".repeat(2000);
@@ -1811,12 +1826,10 @@ mod tests {
         .unwrap();
         let e = read_wire_enrichment(&path, true);
         let text = e.output(&e.tool_results["plain"]);
-        assert!(!text.as_span().unwrap().escaped);
+        assert!(matches!(&text, Text::Source(source) if source.path() == path));
         let resolver = crate::lazy::Resolver::new(None);
         let resolved = text.try_resolve(&resolver).unwrap();
         assert_eq!(resolved.as_ref(), output);
-        #[cfg(feature = "mmap")]
-        assert!(matches!(resolved, std::borrow::Cow::Borrowed(_)));
     }
 
     #[test]
@@ -1878,9 +1891,9 @@ mod tests {
                 assert_eq!(actual.try_resolve(&resolver).unwrap().as_ref(), output, "{id}");
                 assert_eq!(result.is_error, *is_error);
                 assert_eq!(e.extras(result), *extras);
-                assert_eq!(actual.is_span(), spans && id == "giant");
-                if let Some(span) = actual.as_span() {
-                    assert_eq!(span.source.as_ref(), Some(&path));
+                assert_eq!(matches!(actual, Text::Source(_)), spans && id == "giant");
+                if let Text::Source(source) = actual {
+                    assert_eq!(source.path(), path);
                 }
             }
             assert_eq!(e.statuses.len(), 2);
