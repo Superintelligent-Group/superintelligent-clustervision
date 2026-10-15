@@ -466,6 +466,57 @@ impl Cells {
         Ok((len != 0).then_some(Cell(offset, len)))
     }
 
+    /// A TEXT cell holding a plain string (not JSON), copied into the arena as one JSON string so
+    /// the decoder views it like any other string. None for a cell that is not TEXT, is empty or
+    /// is not UTF-8.
+    pub(crate) fn text(
+        &self,
+        conn: &Connection,
+        table: &str,
+        column: &str,
+        row: &rusqlite::Row<'_>,
+        i: usize,
+    ) -> Result<Option<Cell>> {
+        let mut valid = false;
+        let (offset, len) = self.arena.append(|writer| {
+            super::text::generate_string(writer, |builder| {
+                valid = self.chunks(conn, table, column, row, i, |chunk| builder.push(chunk))?;
+                Ok(())
+            })
+        })?;
+        Ok((valid && len > 2).then_some(Cell(offset, len)))
+    }
+
+    /// Visit the UTF-8 chunks of the TEXT cell `select(column)` put at column `i` of `row`
+    /// without copying it anywhere. False for a cell that is not TEXT or is not UTF-8.
+    pub(crate) fn chunks(
+        &self,
+        conn: &Connection,
+        table: &str,
+        column: &str,
+        row: &rusqlite::Row<'_>,
+        i: usize,
+        mut visit: impl FnMut(&str) -> Result<()>,
+    ) -> Result<bool> {
+        use rusqlite::types::ValueRef;
+        if self.incremental {
+            if row.get_ref(i + 1)?.as_str_or_null()? != Some("text") {
+                return Ok(false);
+            }
+            return with_cell_reader(conn, table, column, row.get(i)?, |reader, _| {
+                for_each_utf8(reader, &mut visit)
+            });
+        }
+        let ValueRef::Text(bytes) = row.get_ref(i)? else {
+            return Ok(false);
+        };
+        let Ok(text) = std::str::from_utf8(bytes) else {
+            return Ok(false);
+        };
+        visit(text)?;
+        Ok(true)
+    }
+
     /// The captured store and the arena its cells are copied into, where a decoder composes text
     /// that is checked against the store like the cells themselves.
     pub(crate) fn out(&self) -> (&crate::json::JsonSource, &std::sync::Arc<super::bytes::ByteSource>) {

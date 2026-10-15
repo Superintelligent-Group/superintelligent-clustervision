@@ -428,7 +428,7 @@ fn update_message_count(conn: &rusqlite::Connection, id: &str) -> Result<()> {
 /// must instead be JSON-quoted, or its next parse could change type (e.g. "null" → Null).
 fn extra_column<'a>(bag: Option<&'a serde_json::Map<String, Value>>, key: &str) -> Option<std::borrow::Cow<'a, str>> {
     bag.and_then(|bag| bag.get(key)).map(|value| match value {
-        Value::String(raw) if !super::accepted_json(raw) => std::borrow::Cow::Borrowed(raw.as_str()),
+        Value::String(raw) if serde_json::from_str::<Value>(raw).is_err() => std::borrow::Cow::Borrowed(raw.as_str()),
         value => std::borrow::Cow::Owned(value.to_string()),
     })
 }
@@ -561,7 +561,7 @@ mod tests {
     fn parsed(connection: &rusqlite::Connection, options: &crate::stream::ParseOptions) -> Result<Session> {
         super::super::parse_conn_with(
             connection,
-            &crate::SessionRef::new("fixed", Harness::Hermes, ":memory:"),
+            &crate::SessionRef::new("fixed", Harness::Hermes, connection.path().expect("file store")),
             options,
         )
     }
@@ -583,7 +583,9 @@ mod tests {
 
     #[test]
     fn modern_native_exports_preserve_display_compaction_identity_and_sparse_metadata() -> Result<()> {
-        let source = rusqlite::Connection::open_in_memory()?;
+        let store = std::env::temp_dir().join(format!("cv-hermes-export-source-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&store)?;
+        let source = rusqlite::Connection::open(store.join("state.db"))?;
         source.execute_batch(include_str!("../../../tests/fixtures/hermes/schema-v30.sql"))?;
         reconcile_columns(&source)?;
         source.execute_batch(
@@ -702,7 +704,8 @@ mod tests {
             }))?;
             session.messages.push(message);
         }
-        let mut output = rusqlite::Connection::open_in_memory()?;
+        let store = crate::test_world("hermes-thinking-drop");
+        let mut output = rusqlite::Connection::open(store.base.join("state.db"))?;
         write_database(
             &session,
             &EmitOptions {
