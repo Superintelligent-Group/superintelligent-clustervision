@@ -852,7 +852,7 @@ mod db {
     }
 
     /// Persist `events` as the complete event set for session `r` (one transaction: delete prior
-    /// rows, insert, stamp `event_sync` with the `(mtime_ns, size)` signature — captured by the
+    /// rows, insert, stamp `event_sync` and the source baseline from `source`, captured by the
     /// caller **before** streaming, so content appended mid-parse reads as stale next time).
     /// Idempotent — a re-ingest of an unchanged session rewrites identical rows. Best-effort: any
     /// sqlite error leaves the previous state and returns quietly.
@@ -861,33 +861,9 @@ mod db {
     /// batch-INSERT shape makes cross-session duplicates impossible by construction, and
     /// duplicates *within* this batch — same `(msg_idx, kind, target)`, matching the old index's
     /// `COALESCE(target,'')` semantics — are dropped by the in-memory set below.
-    pub fn record(r: &SessionRef, events: &[Event], mtime_ns: i64, size: i64) {
-        record_with(r, events, mtime_ns, size, &Provenance::default());
-    }
-
-    /// [`record`], additionally stamping sub-agent `prov`enance onto the `event_sessions` row so the
-    /// stored events are attributable to the orchestrator that spawned the agent. A top-level
-    /// session passes an empty [`Provenance`] (this is exactly what [`record`] does); the columns
-    /// stay NULL and existing queries are unaffected.
-    pub fn record_with(r: &SessionRef, events: &[Event], mtime_ns: i64, size: i64, prov: &Provenance) {
-        record_from(r, 0, events, mtime_ns, size, prov);
-    }
-
-    /// [`record_with`] for a pass that resumed at message `from`: only the rows of messages
-    /// `from` and later are replaced by `events` (all of which are), the earlier ones stay as the
-    /// pass that read them stored them. The same dedup rule, within the new rows.
-    /// `mtime_ns` and `size` must have been captured before the source read, never after it.
-    /// This legacy API leaves source freshness stale; [`record_from_with_source`] carries
-    /// their before-read snapshot and can publish auxiliary freshness.
-    pub fn record_from(r: &SessionRef, from: usize, events: &[Event], mtime_ns: i64, size: i64, prov: &Provenance) {
-        let source = crate::source::Snapshot {
-            primary: (mtime_ns, size),
-            dependencies: None,
-        };
-        record_from_inner(r, from, events.iter().map(Ok), false, mtime_ns, size, prov, &source);
-    }
-
-    /// Record a completed pass and its captured dependencies atomically with the event rows.
+    ///
+    /// From `from`, only the rows of messages `from` and later are replaced; the earlier ones
+    /// stay as the pass that read them stored them.
     pub fn record_from_with_source(
         r: &SessionRef,
         from: usize,
@@ -895,16 +871,9 @@ mod db {
         source: &crate::source::Snapshot,
         prov: &Provenance,
     ) {
-        record_from_inner(
-            r,
-            from,
-            events.iter().map(Ok),
-            false,
-            source.primary.0,
-            source.primary.1,
-            prov,
-            source,
-        );
+        if let Some(mut conn) = open() {
+            let _ = record_from_in(&mut conn, r, from, events.iter().map(Ok), false, prov, source);
+        }
     }
 
     /// Publish a completed ordered batch with bounded row/target retention in one transaction.
@@ -929,32 +898,7 @@ mod db {
         prov: &Provenance,
     ) -> Result<()> {
         let rows = events.rows()?;
-        record_from_in(
-            conn,
-            r,
-            from,
-            rows,
-            true,
-            source.primary.0,
-            source.primary.1,
-            prov,
-            source,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn record_from_inner<E: std::borrow::Borrow<Event>>(
-        r: &SessionRef,
-        from: usize,
-        events: impl IntoIterator<Item = Result<E>>,
-        ordered: bool,
-        mtime_ns: i64,
-        size: i64,
-        prov: &Provenance,
-        source: &crate::source::Snapshot,
-    ) -> Option<()> {
-        let mut conn = open()?;
-        record_from_in(&mut conn, r, from, events, ordered, mtime_ns, size, prov, source).ok()
+        record_from_in(conn, r, from, rows, true, prov, source)
     }
 
     // Acquire write ownership before reading authority. A deferred WAL transaction can read
@@ -972,18 +916,16 @@ mod db {
         Ok(tx)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn record_from_in<E: std::borrow::Borrow<Event>>(
         conn: &mut Connection,
         r: &SessionRef,
         from: usize,
         events: impl IntoIterator<Item = Result<E>>,
         ordered: bool,
-        mtime_ns: i64,
-        size: i64,
         prov: &Provenance,
         source: &crate::source::Snapshot,
     ) -> Result<()> {
+        let (mtime_ns, size) = source.primary;
         let tx = publication_transaction(conn, r, from, prov)?;
         let harness = r.harness.as_str();
         tx.execute(
@@ -1485,9 +1427,8 @@ mod db {
 
 #[cfg(feature = "sqlite")]
 pub use db::{
-    catalog_has_events, edits_touching_file, events_for, ingest_all, ingest_ref, ingest_subagent, needs_ingest, record,
-    record_from, record_from_with_source, record_spooled_with_source, record_with, sessions_editing, sessions_touching,
-    SyncTable,
+    catalog_has_events, edits_touching_file, events_for, ingest_all, ingest_ref, ingest_subagent, needs_ingest,
+    record_from_with_source, record_spooled_with_source, sessions_editing, sessions_touching, SyncTable,
 };
 
 /// No-op fallbacks without sqlite: extraction still works (the sink is pure), persistence and
@@ -1522,8 +1463,6 @@ mod db_stub {
             false
         }
     }
-    pub fn record(_r: &SessionRef, _events: &[Event], _mtime_ns: i64, _size: i64) {}
-    pub fn record_with(_r: &SessionRef, _events: &[Event], _mtime_ns: i64, _size: i64, _prov: &Provenance) {}
     pub fn record_from_with_source(
         _r: &SessionRef,
         _from: usize,
@@ -1540,15 +1479,6 @@ mod db_stub {
         _prov: &Provenance,
     ) -> Result<()> {
         Ok(())
-    }
-    pub fn record_from(
-        _r: &SessionRef,
-        _from: usize,
-        _events: &[Event],
-        _mtime_ns: i64,
-        _size: i64,
-        _prov: &Provenance,
-    ) {
     }
     pub fn ingest_ref(_r: &SessionRef) -> Result<usize> {
         Ok(0)
@@ -1577,9 +1507,8 @@ mod db_stub {
 }
 #[cfg(not(feature = "sqlite"))]
 pub use db_stub::{
-    catalog_has_events, edits_touching_file, events_for, ingest_all, ingest_ref, ingest_subagent, needs_ingest, record,
-    record_from, record_from_with_source, record_spooled_with_source, record_with, sessions_editing, sessions_touching,
-    SyncTable,
+    catalog_has_events, edits_touching_file, events_for, ingest_all, ingest_ref, ingest_subagent, needs_ingest,
+    record_from_with_source, record_spooled_with_source, sessions_editing, sessions_touching, SyncTable,
 };
 
 #[cfg(test)]
