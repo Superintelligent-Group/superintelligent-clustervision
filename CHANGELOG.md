@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `cv index` decodes each compressed Codex rollout once: discovery hands its decoded bytes to the sweep beside it (cold index: 15% fewer instructions).
 - OpenCode skips message and part cells that are not TEXT, UTF-8 JSON (2.x counts them as skipped lines) instead of failing the session.
 - OpenClaw: lazy reads skip an empty `event_json` row instead of failing; store discovery no longer holds whole transcripts in memory.
 - Native builds decode zstd (Codex rollouts, Zed and OpenClaw blobs) with libzstd: a cold index of compressed rollouts takes 39% fewer instructions.

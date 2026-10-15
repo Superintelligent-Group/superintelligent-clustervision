@@ -252,8 +252,7 @@ pub(crate) fn cmd_index(semantic: bool, rebuild: bool, subagents: bool) -> Resul
         if rebuild { "rebuilding" } else { "updating" },
         if subagents { " (+ sub-agent forest)" } else { "" }
     );
-    let refs = cv_core::discover_all();
-    let n = cv_search::index_sessions(None, &refs, rebuild, subagents)?;
+    let (n, refs) = cv_search::index_all(None, rebuild, subagents)?;
     println!(
         "indexed {n} top-level session(s) → {}{}",
         cv_search::default_tantivy_dir().display(),

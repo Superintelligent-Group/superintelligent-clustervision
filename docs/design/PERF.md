@@ -53,8 +53,8 @@ fake HOME, 5,421 sessions (claude 38 GB; codex 40 GB, 3,923 of 4,483 rollouts `.
 
 A live "nothing changed" index also re-reads whatever ember's running sessions appended, so its
 range is the live write rate. The compressed path's floor is ruzstd's decode: 18.1-18.6 G for
-the 412 MB rollout with ruzstd 0.8.3 or 0.9.1 (C `zstd -dc`: 4.7 G). A cold index still decodes
-each rollout twice, once in discovery and once in the stream pass (about 4 T of its 12.8 T).
+the 412 MB rollout with ruzstd 0.8.3 or 0.9.1 (C `zstd -dc`: 4.7 G). A cold index decodes each
+rollout once since 0.17: discovery hands its decoded bytes to the sweep running beside it.
 A full build from an empty home, frozen: 21.6 T, 737 s -> 12.9 T, 866 s, footprint 565 -> 715 MB.
 Live: 13.5 T, 966 s, RSS 3.4 GB, footprint 759 MB. `has:` now pays for the Claude tool-results
 inventory (a stat per file), which 0.16.1 did not check.

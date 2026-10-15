@@ -329,9 +329,90 @@ const CHUNK_BYTES: usize = if cfg!(all(test, not(feature = "probe-heap"))) {
 /// with provenance (parent id / agent id / workflow run). Off by default — the forest can be
 /// hundreds of transcripts (~900 MB) — and folded-in sub-agent docs carry the provenance fields so
 /// a hit knows which agent of which workflow of which parent it came from.
-pub fn index_all(dir: &Path, rebuild: bool, subagents: bool) -> Result<usize> {
-    let _sources = cv_core::source::read_scope();
-    index_sessions(dir, cv_core::discover_all(), rebuild, subagents)
+///
+/// **Decode once:** discovery runs beside the sweep and hands over each rollout it decodes in
+/// full; [`sweep_decoded`] reads it at once from those bytes, so a cold index decodes every
+/// compressed rollout once. Returns the discovered refs too.
+pub fn index_all(dir: &Path, rebuild: bool, subagents: bool) -> Result<(usize, Vec<cv_core::SessionRef>)> {
+    let (swept, refs) = sweep_all(dir, rebuild, subagents)?;
+    Ok((report(swept, rebuild)?, refs))
+}
+
+/// Discovery beside [`sweep_decoded`], then the full sweep over what discovery found.
+fn sweep_all(dir: &Path, rebuild: bool, subagents: bool) -> Result<(Swept, Vec<cv_core::SessionRef>)> {
+    let sources = cv_core::source::read_scope();
+    let (handoff, decoded) = cv_core::handoff::channel(DECODED_WINDOW);
+    let (early, refs) = std::thread::scope(|scope| {
+        let sources = &sources;
+        let discovery = scope.spawn(cv_core::env::carry(move || {
+            sources.run(|| cv_core::discover_all_handing_off(handoff))
+        }));
+        let early = sweep_decoded(dir, rebuild, decoded);
+        let refs = discovery
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        (early, refs)
+    });
+    let early = early?;
+    let mut swept = sweep_refs(dir, &refs, rebuild && early.is_none(), subagents)?;
+    if let Some(early) = early {
+        // Early sessions are fresh to the full plan; count them where they were read. Their
+        // failures stayed stale, and the full plan read them again.
+        swept.changed += early.changed;
+        swept.unchanged = swept.unchanged.saturating_sub(early.changed);
+        #[cfg(test)]
+        {
+            swept.early = early.changed;
+        }
+    }
+    Ok((swept, refs))
+}
+
+/// Sweep the sessions discovery hands over decoded while it goes on: each planned on arrival
+/// against the index as it stood and read from the bytes discovery decoded, then committed, so
+/// the full plan finds them fresh. A second copy of an id is left to the full plan, which picks
+/// the preferred copy (rewriting the early one's docs and events if it was not). `None` when
+/// discovery decoded nothing, which opens no writer.
+fn sweep_decoded(dir: &Path, rebuild: bool, decoded: cv_core::handoff::Receiver) -> Result<Option<Ran>> {
+    let Some(first) = decoded.recv() else {
+        return Ok(None);
+    };
+    let (index, f) = open_or_create(dir)?;
+    let mut writer = open_writer(&index, 50_000_000)?;
+    if rebuild {
+        writer.delete_all_documents().context("clearing index")?;
+        writer.commit().context("commit after clear")?;
+    }
+    let mut state = PlanState::load(&index, &f, dir, rebuild)?;
+    let consumer = state.consumer.clone();
+    let ran = run_fed(&mut writer, &f, &consumer, available_workers(), move |feed| {
+        let top = cv_core::events::Provenance::default();
+        let mut ids = HashSet::new();
+        let mut next = Some(first);
+        while let Some(handed) = next {
+            // Plan what discovery handed over meanwhile as one batch.
+            let mut jobs = Vec::new();
+            let mut item = Some(handed);
+            while let Some((r, bytes)) = item {
+                if ids.insert(r.id.clone()) {
+                    if let (_, Some(mut job)) = state.job(&r, &top) {
+                        job.decoded = Some(bytes);
+                        jobs.push(job);
+                    }
+                }
+                item = decoded.try_recv();
+            }
+            if !jobs.is_empty() {
+                feed.push(jobs)?;
+            }
+            next = decoded.recv();
+        }
+        Ok(())
+    })?;
+    writer.commit().context("committing index")?;
+    cv_core::resume::update(&ran.marks);
+    cv_core::source::update(&consumer, &ran.dependencies);
+    Ok(Some(ran))
 }
 
 pub fn index_sessions(
@@ -341,7 +422,11 @@ pub fn index_sessions(
     subagents: bool,
 ) -> Result<usize> {
     let _sources = cv_core::source::read_scope();
-    let swept = sweep_refs(dir, refs.as_ref(), rebuild, subagents)?;
+    report(sweep_refs(dir, refs.as_ref(), rebuild, subagents)?, rebuild)
+}
+
+/// Say what a sweep did; fail when any session failed.
+fn report(swept: Swept, rebuild: bool) -> Result<usize> {
     if !rebuild {
         eprintln!(
             "  ↳ index: {} changed/new ({} read from where the last pass stopped), {} removed, {} unchanged, {} errors",
@@ -395,6 +480,9 @@ pub(crate) struct Swept {
     admission: (usize, usize, usize, usize),
     #[cfg(test)]
     work: SweepWork,
+    /// Sessions read early, from bytes discovery decoded.
+    #[cfg(test)]
+    early: usize,
     #[cfg(all(test, feature = "probe-heap"))]
     bodies: HashMap<String, BodySummary>,
 }
@@ -478,6 +566,8 @@ struct Job {
     prov: cv_core::events::Provenance,
     /// Where the last pass over this file left off, if it left a mark.
     mark: Option<cv_core::resume::MarkHead>,
+    /// The bytes discovery already decoded for it, read instead of decoding again.
+    decoded: Option<cv_core::handoff::Decoded>,
 }
 
 /// What a sweep worker hands the writer thread, in order per session.
@@ -707,6 +797,8 @@ fn sweep_refs(dir: &Path, refs: &[cv_core::SessionRef], rebuild: bool, subagents
             writer_opened: true,
             ..ran.work
         },
+        #[cfg(test)]
+        early: 0,
         #[cfg(all(test, feature = "probe-heap"))]
         bodies: ran.bodies,
     })
@@ -746,23 +838,7 @@ impl SweepPlanner<'_> {
             rebuild,
             subagents,
         } = *self;
-        // id → (mtime, size) for every live doc — the incremental skip-set — plus the set of ids that
-        // are folded-in sub-agent docs (they carry `parent_id`), which the reap below must leave alone
-        // on a plain (no --subagents) refresh.
-        let (existing, folded, metadata, duplicate_meta) = if rebuild {
-            Default::default()
-        } else {
-            read_indexed_metadata(index, f, true)
-                .context("reading prior index metadata (use cv index --rebuild to replace corrupt metadata)")?
-        };
-        // One query each for the event skip-table and the affordance counts `has:<kind>` reads.
-        let event_sync = cv_core::events::SyncTable::load();
-        let affordances = cv_core::catalog::AffordanceTable::load();
-        let marks = cv_core::resume::MarkTable::load();
-        let consumer = source_consumer(dir)?;
-        let dependencies = cv_core::source::Table::load(&consumer);
-        let mut probe = cv_core::source::Probe::default();
-
+        let mut state = PlanState::load(index, f, dir, rebuild)?;
         let mut seen: HashSet<String> = HashSet::new();
         let mut jobs: Vec<Job> = Vec::new();
         let mut unchanged = 0;
@@ -789,53 +865,117 @@ impl SweepPlanner<'_> {
             .collect();
         for (r, prov) in preferred_index_candidates(candidates) {
             seen.insert(r.id.clone());
-            let source = probe.snapshot(r);
-            let (mtime, size) = source.primary;
-            let dependencies_fresh = dependencies.auxiliary_fresh_with_probe(
-                r,
-                existing.get(&r.id).copied().unwrap_or(source.primary),
-                &source.dependencies,
-                &mut probe,
-            );
-            let fts_fresh = fts_is_fresh(r, existing.get(&r.id), mtime, size, || {
-                dependencies_fresh && dependencies.primary_fresh(r, &source.dependencies)
-            }) && metadata.get(&r.id) == Some(&DiscoveryMetadata::new(r, prov));
+            let (fts_fresh, job) = state.job(r, prov);
             unchanged += usize::from(fts_fresh);
-            let events = event_sync.needs_ingest_with_provenance(r, &source, prov, &mut probe);
-            // Unchanged on every axis → skip entirely (no re-parse beyond the metadata scan).
-            if fts_fresh
-                && !events
-                && (prov.parent_id.is_some() || affordances.counts_with_probe(r, &source, &mut probe).is_some())
-            {
-                continue;
-            }
-            jobs.push(Job {
-                r: r.clone(),
-                mtime,
-                size,
-                fts: !fts_fresh,
-                events,
-                existing: existing.contains_key(&r.id),
-                grew: !duplicate_meta.contains(&r.id)
-                    && existing
-                        .get(&r.id)
-                        .is_some_and(|&(_, old_size)| old_size > 0 && size > old_size)
-                    && (!events || event_sync.can_resume(r, prov)),
-                prov: prov.clone(),
-                mark: marks.get(r).cloned(),
-                source,
-                dependencies_fresh,
-            });
+            jobs.extend(job);
         }
-        jobs.retain(|j| cv_core::harness::for_harness(j.r.harness).is_some());
-
-        let missing = missing_ids(&existing, &seen, &folded, subagents);
+        let missing = missing_ids(&state.existing, &seen, &state.folded, subagents);
         Ok(SweepPlan {
             unchanged,
             jobs,
             missing,
-            consumer,
+            consumer: state.consumer,
         })
+    }
+}
+
+/// What planning compares each candidate with: the index's docs and the catalog's tables, read
+/// once per plan.
+struct PlanState {
+    /// id → (mtime, size) for every live doc — the incremental skip-set.
+    existing: HashMap<String, (i64, i64)>,
+    /// Ids of folded-in sub-agent docs (they carry `parent_id`), which a plain (no --subagents)
+    /// refresh must not reap.
+    folded: HashSet<String>,
+    metadata: HashMap<String, DiscoveryMetadata>,
+    duplicate_meta: HashSet<String>,
+    event_sync: cv_core::events::SyncTable,
+    affordances: cv_core::catalog::AffordanceTable,
+    marks: cv_core::resume::MarkTable,
+    consumer: String,
+    dependencies: cv_core::source::Table,
+    probe: cv_core::source::Probe,
+}
+
+impl PlanState {
+    fn load(index: &Index, f: &Fields, dir: &Path, rebuild: bool) -> Result<Self> {
+        let (existing, folded, metadata, duplicate_meta) = if rebuild {
+            Default::default()
+        } else {
+            read_indexed_metadata(index, f, true)
+                .context("reading prior index metadata (use cv index --rebuild to replace corrupt metadata)")?
+        };
+        let consumer = source_consumer(dir)?;
+        Ok(Self {
+            existing,
+            folded,
+            metadata,
+            duplicate_meta,
+            // One query each for the event skip-table and the affordance counts `has:<kind>` reads.
+            event_sync: cv_core::events::SyncTable::load(),
+            affordances: cv_core::catalog::AffordanceTable::load(),
+            marks: cv_core::resume::MarkTable::load(),
+            dependencies: cv_core::source::Table::load(&consumer),
+            consumer,
+            probe: cv_core::source::Probe::default(),
+        })
+    }
+
+    /// Whether `r`'s docs are fresh, and the job reading it, unless it is unchanged on every
+    /// axis or no adapter reads its harness.
+    fn job(&mut self, r: &cv_core::SessionRef, prov: &cv_core::events::Provenance) -> (bool, Option<Job>) {
+        let Self {
+            existing,
+            metadata,
+            duplicate_meta,
+            event_sync,
+            affordances,
+            marks,
+            dependencies,
+            probe,
+            ..
+        } = self;
+        let source = probe.snapshot(r);
+        let (mtime, size) = source.primary;
+        let dependencies_fresh = dependencies.auxiliary_fresh_with_probe(
+            r,
+            existing.get(&r.id).copied().unwrap_or(source.primary),
+            &source.dependencies,
+            probe,
+        );
+        let fts_fresh = fts_is_fresh(r, existing.get(&r.id), mtime, size, || {
+            dependencies_fresh && dependencies.primary_fresh(r, &source.dependencies)
+        }) && metadata.get(&r.id) == Some(&DiscoveryMetadata::new(r, prov));
+        let events = event_sync.needs_ingest_with_provenance(r, &source, prov, probe);
+        // Unchanged on every axis → skip entirely (no re-parse beyond the metadata scan).
+        if fts_fresh
+            && !events
+            && (prov.parent_id.is_some() || affordances.counts_with_probe(r, &source, probe).is_some())
+        {
+            return (fts_fresh, None);
+        }
+        let job = Job {
+            r: r.clone(),
+            mtime,
+            size,
+            fts: !fts_fresh,
+            events,
+            existing: existing.contains_key(&r.id),
+            grew: !duplicate_meta.contains(&r.id)
+                && existing
+                    .get(&r.id)
+                    .is_some_and(|&(_, old_size)| old_size > 0 && size > old_size)
+                && (!events || event_sync.can_resume(r, prov)),
+            prov: prov.clone(),
+            mark: marks.get(r).cloned(),
+            source,
+            dependencies_fresh,
+            decoded: None,
+        };
+        (
+            fts_fresh,
+            cv_core::harness::for_harness(r.harness).is_some().then_some(job),
+        )
     }
 }
 
@@ -844,6 +984,9 @@ impl SweepPlanner<'_> {
 /// Retain it until every adapter's parser working set has an independently enforced bound.
 const IN_FLIGHT_BYTES: u64 = 2 << 30;
 
+/// Decoded bytes discovery may hand to [`sweep_decoded`] ahead of it (a larger rollout alone).
+const DECODED_WINDOW: u64 = 2 << 30;
+
 /// The worker queue admits logical-session groups, largest first. Planning chooses one
 /// preferred copy per ID; group reservations bound concurrent source bytes.
 struct Queue {
@@ -851,6 +994,8 @@ struct Queue {
     in_flight: u64,
     draining: bool,
     stopped: bool,
+    /// No more groups will arrive.
+    closed: bool,
 }
 
 /// Return the largest waiting group that fits. The workload is finite, so a large waiting
@@ -892,7 +1037,11 @@ struct Shutdown<'a> {
 }
 impl Shutdown<'_> {
     fn stop(&self) {
-        self.queue.lock().unwrap().stopped = true;
+        let mut q = self.queue.lock().unwrap();
+        q.stopped = true;
+        // Waiting jobs may hold decoded sources discovery is waiting to see freed.
+        q.groups.clear();
+        drop(q);
         self.admission.close();
         self.wake.notify_all();
     }
@@ -957,39 +1106,73 @@ struct Ran {
     bodies: HashMap<String, BodySummary>,
 }
 
+fn available_workers() -> usize {
+    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4)
+}
+
 /// Run every job on a pool of workers, writing on this thread.
 fn run_jobs(writer: &mut Writer, f: &Fields, jobs: Vec<Job>, consumer: &str) -> Result<Ran> {
-    use std::sync::{mpsc, Condvar, Mutex};
     if jobs.is_empty() {
         return Ok(Ran::default());
     }
-    let changing: Vec<_> = jobs.iter().filter(|j| j.fts).map(|j| j.r.clone()).collect();
-    anyhow::ensure!(
-        cv_core::source::invalidate(consumer, &changing),
-        "invalidating old search dependency baselines"
-    );
-    let mut by_id: HashMap<String, usize> = HashMap::new();
-    let mut groups: Vec<Vec<Job>> = Vec::new();
-    for j in jobs {
-        match by_id.get(&j.r.id) {
-            Some(&g) => groups[g].push(j),
-            None => {
-                by_id.insert(j.r.id.clone(), groups.len());
-                groups.push(vec![j]);
+    let workers = available_workers().min(jobs.len());
+    run_fed(writer, f, consumer, workers, |feed| feed.push(jobs))
+}
+
+/// Where a sweep's jobs enter its worker queue, all at once or as they are planned.
+struct Feed<'a> {
+    queue: &'a std::sync::Mutex<Queue>,
+    wake: &'a std::sync::Condvar,
+    consumer: &'a str,
+}
+
+impl Feed<'_> {
+    /// Queue `jobs`, invalidating the old dependency baselines of those that rewrite docs first.
+    /// Fails once the sweep stopped.
+    fn push(&self, jobs: Vec<Job>) -> Result<()> {
+        let changing: Vec<_> = jobs.iter().filter(|j| j.fts).map(|j| j.r.clone()).collect();
+        anyhow::ensure!(
+            cv_core::source::invalidate(self.consumer, &changing),
+            "invalidating old search dependency baselines"
+        );
+        let mut by_id: HashMap<String, usize> = HashMap::new();
+        let mut groups: Vec<Vec<Job>> = Vec::new();
+        for j in jobs {
+            match by_id.get(&j.r.id) {
+                Some(&g) => groups[g].push(j),
+                None => {
+                    by_id.insert(j.r.id.clone(), groups.len());
+                    groups.push(vec![j]);
+                }
             }
         }
+        let mut q = self.queue.lock().unwrap();
+        anyhow::ensure!(!q.stopped, "index sweep stopped");
+        q.groups.extend(groups);
+        // Smallest last, since workers pop from the end: the largest sessions start first.
+        q.groups.sort_by_key(|g| job_cost(g));
+        drop(q);
+        self.wake.notify_all();
+        Ok(())
     }
-    // Smallest last, since workers pop from the end: the largest sessions start first.
-    groups.sort_by_key(|g| job_cost(g));
-    let workers = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
-        .min(groups.len());
+}
+
+/// Run the jobs `feed` queues on `workers` workers, writing on this thread, until `feed` returns
+/// and its jobs are done.
+fn run_fed(
+    writer: &mut Writer,
+    f: &Fields,
+    consumer: &str,
+    workers: usize,
+    feed: impl FnOnce(&Feed) -> Result<()> + Send,
+) -> Result<Ran> {
+    use std::sync::{mpsc, Condvar, Mutex};
     let queue = Mutex::new(Queue {
-        groups,
+        groups: Vec::new(),
         in_flight: 0,
         draining: false,
         stopped: false,
+        closed: false,
     });
     let wake = Condvar::new();
     let (tx, rx) = mpsc::sync_channel::<Out>(2 * workers);
@@ -997,15 +1180,23 @@ fn run_jobs(writer: &mut Writer, f: &Fields, jobs: Vec<Job>, consumer: &str) -> 
     let sources = cv_core::source::read_scope();
 
     std::thread::scope(|scope| -> Result<Ran> {
+        let (queue, wake) = (&queue, &wake);
+        let sources = &sources;
+        let fed = scope.spawn(cv_core::env::carry(move || {
+            let fed = sources.run(|| feed(&Feed { queue, wake, consumer }));
+            queue.lock().unwrap().closed = true;
+            wake.notify_all();
+            fed
+        }));
         for _ in 0..workers {
             let tx = tx.clone();
-            let (queue, wake, admission, sources) = (&queue, &wake, &admission, &sources);
+            let admission = &admission;
             scope.spawn(cv_core::env::carry(move || {
                 sources.run(|| loop {
                     let group = {
                         let mut q = queue.lock().unwrap();
                         loop {
-                            if q.stopped || q.groups.is_empty() {
+                            if q.stopped || (q.closed && q.groups.is_empty()) {
                                 break None;
                             }
                             if let Some(at) = q.next_fitting() {
@@ -1033,8 +1224,8 @@ fn run_jobs(writer: &mut Writer, f: &Fields, jobs: Vec<Job>, consumer: &str) -> 
         drop(tx);
 
         let mut shutdown = Shutdown {
-            queue: &queue,
-            wake: &wake,
+            queue,
+            wake,
             admission: &admission,
             complete: false,
         };
@@ -1192,9 +1383,10 @@ fn run_jobs(writer: &mut Writer, f: &Fields, jobs: Vec<Job>, consumer: &str) -> 
                 }
             }
         }
-        match failure {
-            Some(e) => Err(e),
-            None => {
+        let fed = fed.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        match failure.map_or(fed, Err) {
+            Err(e) => Err(e),
+            Ok(()) => {
                 shutdown.complete = true;
                 Ok(ran)
             }
@@ -1224,21 +1416,42 @@ fn resumed_docs(f: &Fields, id: &str, n: usize) -> tantivy::query::BooleanQuery 
 }
 
 /// Read one job and send what it found; `false` when the writer hung up.
-fn run_job(job: Job, f: &Fields, tx: &std::sync::mpsc::SyncSender<Out>, admission: &std::sync::Arc<Admission>) -> bool {
+fn run_job(
+    mut job: Job,
+    f: &Fields,
+    tx: &std::sync::mpsc::SyncSender<Out>,
+    admission: &std::sync::Arc<Admission>,
+) -> bool {
     let Some(adapter) = cv_core::harness::for_harness(job.r.harness) else {
         return true;
     };
-    let version = cv_core::resume::version(adapter.as_ref(), RESUME_TAG);
+    // Bytes discovery decoded stay alive for this pass only.
+    let out = match job.decoded.take() {
+        Some(decoded) => decoded.run(|| job_out(job, f, tx, admission, adapter.as_ref())),
+        None => job_out(job, f, tx, admission, adapter.as_ref()),
+    };
+    tx.send(out).is_ok()
+}
+
+/// Read `job`'s session, sending its docs as they come; what the writer records once it is read.
+fn job_out(
+    job: Job,
+    f: &Fields,
+    tx: &std::sync::mpsc::SyncSender<Out>,
+    admission: &std::sync::Arc<Admission>,
+    adapter: &dyn cv_core::Adapter,
+) -> Out {
+    let version = cv_core::resume::version(adapter, RESUME_TAG);
     let from = version.as_deref().and_then(|v| resumable_from(&job, v));
     // A resume the adapter declines touched nothing: read the session whole instead.
     let resumed = match &from {
-        Some(cp) => job_pass(&job, f, tx, admission, adapter.as_ref(), Some(cp)).transpose(),
+        Some(cp) => job_pass(&job, f, tx, admission, adapter, Some(cp)).transpose(),
         None => None,
     };
     let result = resumed.unwrap_or_else(|| {
-        job_pass(&job, f, tx, admission, adapter.as_ref(), None).and_then(|p| p.context("a whole pass never declines"))
+        job_pass(&job, f, tx, admission, adapter, None).and_then(|p| p.context("a whole pass never declines"))
     });
-    let out = match result {
+    match result {
         Ok(p) => {
             #[cfg(test)]
             if let Some((source, hook)) = AFTER_PASS.lock().unwrap().as_mut() {
@@ -1262,8 +1475,7 @@ fn run_job(job: Job, f: &Fields, tx: &std::sync::mpsc::SyncSender<Out>, admissio
             }
         }
         Err(err) => Out::Failed { job, err },
-    };
-    tx.send(out).is_ok()
+    }
 }
 
 /// Minimum checkpoint spacing: 4 MiB in production (2 KiB in tests). Checkpoints also require
@@ -2813,6 +3025,7 @@ mod tests {
             dependencies_fresh: true,
             prov: Default::default(),
             mark: None,
+            decoded: None,
         }
     }
 
@@ -2930,6 +3143,7 @@ mod tests {
             in_flight: 0,
             draining: false,
             stopped: false,
+            closed: true,
         };
         assert_eq!(queue.next_fitting(), Some(2));
         let large = queue.groups.pop().unwrap();
@@ -2985,6 +3199,94 @@ mod tests {
             assert!(cv_core::catalog::AffordanceTable::load().counts(r).is_some());
         }
         assert_eq!(sweep(&dir, refs, false, false).unwrap().changed, 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Every stored document of the index at `dir`, canonically ordered.
+    fn all_docs(dir: &Path) -> Vec<String> {
+        let (index, _) = open_or_create(dir).unwrap();
+        let searcher = index.reader().unwrap().searcher();
+        let found = searcher
+            .search(&tantivy::query::AllQuery, &tantivy::collector::DocSetCollector)
+            .unwrap();
+        let mut docs: Vec<String> = found
+            .into_iter()
+            .map(|at| tantivy::Document::to_json(&searcher.doc::<TantivyDocument>(at).unwrap(), &index.schema()))
+            .collect();
+        docs.sort();
+        docs
+    }
+
+    /// A Codex rollout's lines: its meta at `ts`, then a user and an assistant message.
+    fn rollout(id: &str, ts: &str, words: &str) -> String {
+        [
+            serde_json::json!({"timestamp":ts,"type":"session_meta","payload":{"id":id,"timestamp":ts,"cwd":"/proj"}}),
+            serde_json::json!({"timestamp":ts,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":format!("{words} question")}]}}),
+            serde_json::json!({"timestamp":ts,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":format!("{words} answer, see /proj/{id}.rs")}]}}),
+        ]
+        .map(|line| format!("{line}\n"))
+        .concat()
+    }
+
+    /// `cv index` reads each rollout discovery decoded from those bytes while discovery goes on,
+    /// leaving the rest (and a second copy of an id) to the full plan: the index, events and
+    /// copy choice equal a sweep after discovery, cold and as a rebuild.
+    #[test]
+    fn decoded_rollouts_are_swept_beside_discovery_exactly_as_after_it() {
+        let w = cv_testkit::World::in_process("sweep-decoded", cv_core::env::Env::enter_isolated);
+        let day = w.home.join(".codex/sessions/2026/08/01");
+        let archive = w.home.join(".codex/archived_sessions");
+        std::fs::create_dir_all(&day).unwrap();
+        std::fs::create_dir_all(&archive).unwrap();
+        let zst =
+            |path: &Path, text: String| std::fs::write(path, zstd::encode_all(text.as_bytes(), 1).unwrap()).unwrap();
+        let b = day.join("rollout-2026-08-01T10-00-00-zqb.jsonl.zst");
+        zst(
+            &day.join("rollout-2026-08-01T10-00-00-zqa.jsonl.zst"),
+            rollout("zqa", "2026-08-01T10:00:00Z", "zqorig"),
+        );
+        zst(&b, rollout("zqb", "2026-08-01T10:00:00Z", "zqbee"));
+        // The later, plain copy of zqa is preferred: the compressed one read early loses.
+        let preferred = archive.join("rollout-2026-08-01T10-00-00-zqa.jsonl");
+        std::fs::write(&preferred, rollout("zqa", "2026-08-01T12:00:00Z", "zqcopy")).unwrap();
+        std::fs::write(
+            day.join("rollout-2026-08-01T10-00-00-zqc.jsonl"),
+            rollout("zqc", "2026-08-01T10:00:00Z", "zqsea"),
+        )
+        .unwrap();
+        write_claude(&w.proj, "zqclaude", "zqclaude body");
+
+        let check = |dir: &Path, rebuild: bool, early: usize| {
+            let (swept, refs) = sweep_all(dir, rebuild, false).unwrap();
+            assert_eq!((swept.errors, swept.early, swept.copies), (0, early, 1));
+            let reference = tmpdir();
+            sweep(&reference, refs, false, false).unwrap();
+            assert_eq!(all_docs(dir), all_docs(&reference));
+            std::fs::remove_dir_all(reference).unwrap();
+            assert_eq!(text_search(dir, "zqcopy", 5).unwrap()[0].id, "zqa");
+            assert!(text_search(dir, "zqorig", 5).unwrap().is_empty());
+            let catalog = rusqlite::Connection::open(w.cv_home.join("catalog.db")).unwrap();
+            let source: String = catalog
+                .query_row(
+                    "SELECT source_path FROM event_sessions WHERE session_id='zqa'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(Path::new(&source), preferred);
+            assert_eq!(
+                sweep_all(dir, false, false).unwrap().0.changed,
+                0,
+                "then nothing is stale"
+            );
+        };
+        let dir = tmpdir();
+        check(&dir, false, 2);
+        // A changed rollout is decoded again (a scan-cache miss) and read early after the clear.
+        zst(&b, rollout("zqb", "2026-08-01T10:00:00Z", "zqbuzz"));
+        std::fs::write(&preferred, rollout("zqa", "2026-08-01T12:00:00Z", "zqcopy again")).unwrap();
+        check(&dir, true, 1);
+        assert!(text_search(&dir, "zqbee", 5).unwrap().is_empty());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
