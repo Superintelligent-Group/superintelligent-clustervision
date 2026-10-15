@@ -138,26 +138,6 @@ pub(crate) fn for_each_json_line_at_with<R: BufRead>(
     scan_json_lines(reader, offset, parse, f).0
 }
 
-/// Fallible record transport for production readers: malformed JSON/UTF-8 remains a per-record
-/// skip, while terminal input failures cannot masquerade as EOF and certify partial output.
-pub(crate) fn try_for_each_json_line_at<R: BufRead>(
-    reader: R,
-    offset: u64,
-    f: impl FnMut(Value, u64, bool, u64) -> Flow,
-) -> std::io::Result<u64> {
-    try_for_each_json_line_at_with(reader, offset, |line| serde_json::from_str(line).ok(), f)
-}
-
-pub(crate) fn try_for_each_json_line_at_with<R: BufRead>(
-    reader: R,
-    offset: u64,
-    parse: impl FnMut(&str) -> Option<Value>,
-    f: impl FnMut(Value, u64, bool, u64) -> Flow,
-) -> std::io::Result<u64> {
-    let (skipped, result) = scan_json_lines(reader, offset, parse, f);
-    result.map(|()| skipped)
-}
-
 fn scan_json_lines<R: BufRead>(
     mut reader: R,
     mut offset: u64,
@@ -549,17 +529,16 @@ mod tests {
     }
 
     #[test]
-    fn fallible_json_lines_retry_interrupted_and_preserve_corrupt_record_offsets() {
+    fn json_lines_retry_interrupted_and_preserve_corrupt_record_offsets() {
         let input = InterruptedOnce {
             input: std::io::Cursor::new(b"\xff\n{\"n\":1}\n{\"n\":2}".to_vec()),
             interrupted: false,
         };
         let mut seen = Vec::new();
-        let skipped = try_for_each_json_line_at(input, 5, |value, offset, complete, skipped| {
+        let skipped = for_each_json_line_at(input, 5, |value, offset, complete, skipped| {
             seen.push((value["n"].as_u64().unwrap(), offset, complete, skipped));
             Flow::Continue
-        })
-        .unwrap();
+        });
         assert_eq!(skipped, 1);
         assert_eq!(seen, vec![(1, 15, true, 1), (2, 22, false, 1)]);
     }
@@ -578,9 +557,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_json_line_io_returns_error_and_legacy_helpers_stop_with_one_skip() {
-        let error = try_for_each_json_line_at(TerminalIo, 0, |_, _, _, _| unreachable!()).unwrap_err();
-        assert_eq!(error.to_string(), "terminal source failure");
+    fn terminal_json_line_io_stops_legacy_helpers_with_one_skip() {
         assert_eq!(for_each_json_line(TerminalIo, |_| unreachable!()), 1);
         assert_eq!(for_each_json_line_at(TerminalIo, 0, |_, _, _, _| unreachable!()), 1);
         let error = crate::stream::with_read_check(TerminalIo, &mut || Ok(()), |reader| {
