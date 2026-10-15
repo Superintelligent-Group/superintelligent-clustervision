@@ -3,6 +3,7 @@
 ## Unreleased
 
 - OpenCode skips message and part cells that are not TEXT, UTF-8 JSON (2.x counts them as skipped lines) instead of failing the session.
+- OpenClaw: lazy reads skip an empty `event_json` row instead of failing; store discovery no longer holds whole transcripts in memory.
 - Native builds decode zstd (Codex rollouts, Zed and OpenClaw blobs) with libzstd: a cold index of compressed rollouts takes 39% fewer instructions.
 - A copied or moved `CLUSTERVISION_HOME` keeps its full-text index: baselines follow an identity stored in the index, not its path.
 - Devin, OpenCode, Hermes, Zed and Goose discovery reuse cached results while their database, WAL and journal are unchanged.
