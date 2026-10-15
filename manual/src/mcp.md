@@ -7,7 +7,7 @@ other direction: it hands the same powers to a **running coding agent** so it ca
 
 It's a [Model Context Protocol](https://modelcontextprotocol.io) server speaking
 line-delimited JSON-RPC 2.0 over stdio. Point Claude Code (or Codex, Gemini, …) at it and
-the agent gets the whole `cv` command surface as tools, plus a handful of MCP-only tools
+the agent gets the Read, Reshape, Export, System and task commands as tools, plus two MCP-only tools
 for live coordination. [Hooks](#hooks-cv-inside-a-running-session), further down, are the other
 direction again: cv acting inside a running Claude Code session with no tool call at all.
 
@@ -73,9 +73,10 @@ A call runs the same `cv` executable as `cv <command> <args…> --json`, and its
 back as the tool result. The `--json` is appended only for commands that have the flag (so `cat`,
 `export`, `blame`, `resume`, … return text), and `json` is therefore *not* a
 property you set. A **non-zero exit is an MCP tool error** (`isError: true`) carrying the
-child's stderr, so `cv`'s exit-2 "no session matching …" reaches the agent verbatim. A
-malformed or unknown argument never reaches `cv` at all: it comes back as JSON-RPC
-`-32602 Invalid params`.
+child's stderr, so `cv`'s exit-2 "no session matching …" reaches the agent verbatim. An
+unknown argument, missing required value or malformed boolean flag comes back as JSON-RPC
+`-32602 Invalid params`. Other CLI validation, including conflicting options and invalid
+numeric strings, runs in the child and returns a tool error.
 
 Because the schema is the running binary's own, **tool names, flags, harness lists and
 output shapes cannot drift from the CLI** — there is no second binary to find, and so none to
@@ -101,7 +102,8 @@ Over MCP — and **only** over MCP — `show` gets a default window: when the ca
 would otherwise land in the agent's context in one shot, which is exactly the problem
 `doctor` exists to diagnose. Naming any selector (including `max_bytes` alone, or
 `pre_compaction`, which sets its own window) suppresses the defaults entirely — asking for
-the whole thing is allowed, it just has to be asked for. The `ls` / `search` `limit`
+the whole thing is allowed, it just has to be asked for. A `kind` row view also suppresses
+the defaults: it covers the whole session unless given a supported window. The `ls` / `search` `limit`
 defaults are the CLI's, unchanged.
 
 ## The roster
@@ -134,8 +136,9 @@ same `id` and returns the same report plus everything the CLI has grown since.
 
 ## The MCP-only tools
 
-These two have **no CLI equivalent** and stay hand-written, because one blocks and the other
-holds a cursor across calls — things a one-shot command cannot do.
+These two are hand-written tools over the shared watcher: one waits for a regex match;
+the other returns immediately with a cursor for the next poll. The CLI's `scry` and `watch`
+commands expose continuous feeds instead of this request/response interface.
 
 ### `await_omen`
 

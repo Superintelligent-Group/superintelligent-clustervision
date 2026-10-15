@@ -351,8 +351,9 @@ shapes cannot drift. Mechanism (the server is `cv mcp`, so the clap tree is in-p
   argument; repeatable arguments accept a scalar or an array. `long` carries the actual CLI flag
   spelling, which can differ from the argument's property name. A call runs the same executable as `cv <cmd> <args> --json` (or without `--json` for commands that have no
   JSON form, returning text) and returns stdout; a non-zero exit returns stderr as the error.
-- Over MCP, `show` defaults to `last: 50` and `max_bytes: 200000` (a full transcript is never the
-  default there); `ls`/`search` default `limit` stays the CLI default.
+- Over MCP, transcript `show` defaults to `last: 50` and `max_bytes: 200000` when no window,
+  byte cap or `pre_compaction` is supplied. A `kind` row view suppresses these defaults;
+  `ls`/`search` default `limit` stays the CLI default.
 - MCP-only tools keep their names and hand-written schemas: `observe_stream`, `await_omen` (one
   blocks, one holds a cursor). `read_session`, `search_sessions`,
   `list_sessions`, `project_sessions`, `recall`, `prune_session`, `prune_retrieve` are removed
