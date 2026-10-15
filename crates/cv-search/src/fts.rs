@@ -2914,10 +2914,7 @@ mod tests {
         let hits = text_search(&dir, "Inspect", copies + 10).unwrap();
         assert_eq!(hits.len(), copies);
         for (n, r) in refs.iter().enumerate() {
-            assert!(!cv_core::events::needs_ingest(
-                r,
-                cv_core::events::file_mtime_ns(&r.path)
-            ));
+            assert!(!cv_core::events::needs_ingest(r));
             assert!(cv_core::catalog::AffordanceTable::load().counts(r).is_some());
             if n < copies {
                 let events = cv_core::events::events_for("claude", &r.id, None);
@@ -3022,10 +3019,7 @@ mod tests {
             let hits = text_search(&dir, &format!("zqmixed{n}"), 30).unwrap();
             assert_eq!(hits.len(), 1);
             assert_eq!(hits[0].id, r.id);
-            assert!(!cv_core::events::needs_ingest(
-                r,
-                cv_core::events::file_mtime_ns(&r.path)
-            ));
+            assert!(!cv_core::events::needs_ingest(r));
             assert!(cv_core::catalog::AffordanceTable::load().counts(r).is_some());
         }
         assert_eq!(sweep(&dir, refs, false, false).unwrap().changed, 0);
@@ -4248,10 +4242,7 @@ mod tests {
         let appended = refresh(false);
         assert_eq!((appended.changed, appended.resumed), (1, 1));
         let source = cv_core::source::Probe::default().snapshot(&r);
-        assert!(!cv_core::events::needs_ingest(
-            &r,
-            cv_core::events::file_mtime_ns(&r.path)
-        ));
+        assert!(!cv_core::events::needs_ingest(&r));
         let counts = cv_core::catalog::AffordanceTable::load()
             .counts_with_source(&r, &source)
             .unwrap();
@@ -4769,12 +4760,12 @@ mod tests {
             primary,
             "child append leaves directory signature unchanged"
         );
-        assert!(cv_core::events::needs_ingest(&r, primary.0));
+        assert!(cv_core::events::needs_ingest(&r));
         assert!(cv_core::catalog::AffordanceTable::load().stale(&r));
         assert_eq!(sweep(&dir, vec![r.clone()], false, false).unwrap().changed, 1);
         assert_eq!(text_search(&dir, "zqafterchild", 10).unwrap().len(), 1);
         assert_eq!(cv_core::events::events_for("grok", &r.id, Some("file_read")).len(), 1);
-        assert!(!cv_core::events::needs_ingest(&r, primary.0));
+        assert!(!cv_core::events::needs_ingest(&r));
         assert!(!cv_core::catalog::AffordanceTable::load().stale(&r));
         for d in [dir, sdir] {
             std::fs::remove_dir_all(d).ok();
@@ -4797,10 +4788,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cv_core::offsets::file_sig(&agent), primary);
-        assert!(cv_core::events::needs_ingest(&r, primary.0));
+        assert!(cv_core::events::needs_ingest(&r));
         assert!(cv_core::catalog::AffordanceTable::load().stale(&r));
         cv_core::events::ingest_ref(&r).unwrap();
-        assert!(!cv_core::events::needs_ingest(&r, primary.0));
+        assert!(!cv_core::events::needs_ingest(&r));
         assert!(
             cv_core::catalog::AffordanceTable::load().stale(&r),
             "events refresh cannot refresh counts"
@@ -4839,12 +4830,12 @@ mod tests {
         writer.execute_batch("INSERT INTO messages(session_id,role,content,timestamp) VALUES('wal-session','user','zqafterwal',1002);
             INSERT INTO messages(session_id,role,tool_calls,timestamp) VALUES('wal-session','assistant','[{\"id\":\"c\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"/repo/new.rs\\\"}\"}}]',1003);").unwrap();
         assert_eq!(cv_core::offsets::file_sig(&db), primary, "write stayed in WAL");
-        assert!(cv_core::events::needs_ingest(&r, primary.0));
+        assert!(cv_core::events::needs_ingest(&r));
         assert!(cv_core::catalog::AffordanceTable::load().stale(&r));
         assert_eq!(sweep(&dir, vec![r.clone()], false, false).unwrap().changed, 1);
         assert_eq!(text_search(&dir, "zqafterwal", 10).unwrap().len(), 1);
         assert_eq!(cv_core::events::events_for("hermes", &r.id, Some("file_read")).len(), 1);
-        assert!(!cv_core::events::needs_ingest(&r, primary.0));
+        assert!(!cv_core::events::needs_ingest(&r));
         assert!(!cv_core::catalog::AffordanceTable::load().stale(&r));
         for d in [dir, sdir] {
             std::fs::remove_dir_all(d).ok();
@@ -5329,10 +5320,7 @@ mod tests {
             assert!(!read_indexed_sigs(&index, &f).unwrap().0.contains_key(&r.id));
             assert!(cv_core::catalog::AffordanceTable::load().counts(&r).is_none());
             assert!(cv_core::events::events_for(r.harness.as_str(), &r.id, None).is_empty());
-            assert!(cv_core::events::needs_ingest(
-                &r,
-                cv_core::events::file_mtime_ns(&r.path)
-            ));
+            assert!(cv_core::events::needs_ingest(&r));
             assert!(cv_core::resume::MarkTable::load().get(&r).is_none());
             std::fs::remove_dir_all(dir).unwrap();
         }
@@ -5436,10 +5424,7 @@ mod tests {
         assert!(!read_indexed_sigs(&index, &f).unwrap().0.contains_key(&r.id));
         assert!(cv_core::catalog::AffordanceTable::load().counts(&r).is_none());
         assert!(cv_core::events::events_for(r.harness.as_str(), &r.id, None).is_empty());
-        assert!(cv_core::events::needs_ingest(
-            &r,
-            cv_core::events::file_mtime_ns(&r.path)
-        ));
+        assert!(cv_core::events::needs_ingest(&r));
         assert!(cv_core::resume::MarkTable::load().get(&r).is_none());
         std::fs::remove_dir_all(dir).ok();
     }
@@ -5604,15 +5589,9 @@ mod tests {
             DELETE FROM source_dependencies WHERE consumer='events';",
         )
         .unwrap();
-        assert!(cv_core::events::needs_ingest(
-            &parent,
-            cv_core::offsets::file_sig(&parent.path).0
-        ));
+        assert!(cv_core::events::needs_ingest(&parent));
         let child = cv_core::subagent_tree_of(&parent).remove(0).session;
-        assert!(cv_core::events::needs_ingest(
-            &child,
-            cv_core::offsets::file_sig(&child.path).0
-        ));
+        assert!(cv_core::events::needs_ingest(&child));
 
         // The production `--subagents` sweep: parent and agent are both FTS-fresh, events-stale.
         assert_eq!(
@@ -5622,10 +5601,7 @@ mod tests {
         );
         let changed = sweep(&dir, vec![parent.clone()], false, true).unwrap().changed;
         assert_eq!(changed, 0, "catalog-only pass must not rewrite tantivy docs");
-        assert!(!cv_core::events::needs_ingest(
-            &parent,
-            cv_core::offsets::file_sig(&parent.path).0
-        ));
+        assert!(!cv_core::events::needs_ingest(&parent));
         let child_source = cv_core::source::Probe::default().snapshot(&child);
         let child_provenance = cv_core::events::Provenance {
             parent_id: Some(parent.id.clone()),
@@ -6338,10 +6314,7 @@ mod tests {
         )
         .unwrap();
         for r in &refs {
-            assert!(!cv_core::events::needs_ingest(
-                r,
-                cv_core::events::file_mtime_ns(&r.path)
-            ));
+            assert!(!cv_core::events::needs_ingest(r));
         }
         let reread = sweep(&dir, refs.clone(), false, false).unwrap();
         assert_eq!((reread.changed, reread.resumed), (refs.len(), 0));
@@ -6397,10 +6370,7 @@ mod tests {
                 format!("{:?}", cv_core::events::events_for(r.harness.as_str(), &r.id, None)),
                 *expected
             );
-            assert!(cv_core::events::needs_ingest(
-                r,
-                cv_core::events::file_mtime_ns(&r.path)
-            ));
+            assert!(cv_core::events::needs_ingest(r));
             assert!(cv_core::resume::MarkTable::load().get(r).is_none());
             let source = cv_core::source::Probe::default().snapshot(r);
             assert!(
@@ -6414,10 +6384,7 @@ mod tests {
         let retry = sweep(&dir, refs.clone(), false, false).unwrap();
         assert_eq!((retry.resumed, retry.errors), (0, 0));
         for r in &refs {
-            assert!(!cv_core::events::needs_ingest(
-                r,
-                cv_core::events::file_mtime_ns(&r.path)
-            ));
+            assert!(!cv_core::events::needs_ingest(r));
         }
         let words = some_words(&refs);
         assert_eq!(observe(&dir, &refs, &words), whole_sweep(&refs, &words));

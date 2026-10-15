@@ -521,7 +521,7 @@ fn session_events(harness: &str, id: &str, query: &str) -> (u16, Value) {
         Ok(x) => x,
         Err(e) => return e,
     };
-    if events::needs_ingest(&r, events::file_mtime_ns(&r.path)) {
+    if events::needs_ingest(&r) {
         if let Err(e) = events::ingest_ref(&r) {
             return err(500, &format!("event ingest failed: {e:#}"));
         }
