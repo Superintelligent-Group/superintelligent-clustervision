@@ -128,13 +128,11 @@ fn block_from_fields(item: &Value, q: &Quirks, text: &mut dyn FnMut(&'static str
             redacted: true,
         });
     }
-    if ty == q.tool_use.0 {
-        return Some(Block::ToolUse {
-            id: str_field(item, "id"),
-            name: str_field(item, "name"),
-            input: item.get(q.tool_use.1).cloned().unwrap_or(Value::Null).into(),
-            namespace: None,
-        });
+    if ty == q.tool_use.0 || matches!(ty, "image" | "document") {
+        // These shapes do not use the caller's text callback. Owned entry points use the
+        // same field selection and conversion as the source-backed codec.
+        return block_from_view_with(item.into(), q, false, &mut |v| v.text(false), u64::MAX)
+            .expect("an owned JSON value has no source reads");
     }
     match ty {
         "tool_result" => {
@@ -149,9 +147,6 @@ fn block_from_fields(item: &Value, q: &Quirks, text: &mut dyn FnMut(&'static str
                 details: None,
             })
         }
-        "image" => Some(image_from(item, q)),
-        // A `document` block (PDF/text attachments on user turns) is a File.
-        "document" => Some(document_from(item, q)),
         _ => None,
     }
 }
@@ -364,64 +359,6 @@ pub fn blocks_from(content: Option<&Value>, q: &Quirks) -> Vec<Block> {
         Some(Value::String(s)) => vec![Block::Text { text: s.clone().into() }],
         Some(Value::Array(items)) => items.iter().filter_map(|i| block_from(i, q)).collect(),
         _ => Vec::new(),
-    }
-}
-
-/// `source {type, media_type, …}` → (media type, reference). The IR never inlines image bytes: a
-/// `base64` source is recorded only as the marker `base64:inline`, a Files-API id as `file:<id>`,
-/// a URL as itself.
-fn source_ref(source: Option<&Value>, base64_marker: bool) -> (Option<String>, Option<String>) {
-    let media_type = source
-        .and_then(|s| s.get("media_type"))
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let data_ref = source.and_then(|s| match s.get("type").and_then(Value::as_str) {
-        Some("url") => s.get("url").and_then(Value::as_str).map(str::to_string),
-        Some("file") => s.get("file_id").and_then(Value::as_str).map(|id| format!("file:{id}")),
-        Some("base64") | None if base64_marker => s
-            .get("data")
-            .and_then(Value::as_str)
-            .map(|_| "base64:inline".to_string()),
-        Some(other) if base64_marker => Some(other.to_string()),
-        _ => None,
-    });
-    (media_type, data_ref)
-}
-
-fn image_from(item: &Value, q: &Quirks) -> Block {
-    match q.flat_media {
-        Some(n) => Block::Image {
-            media_type: item.get("mimeType").and_then(Value::as_str).map(str::to_string),
-            data_ref: item
-                .get("data")
-                .and_then(Value::as_str)
-                .map(|d| crate::ir::truncate(d, n)),
-        },
-        None => {
-            let (media_type, data_ref) = source_ref(item.get("source"), true);
-            Block::Image { media_type, data_ref }
-        }
-    }
-}
-
-fn document_from(item: &Value, q: &Quirks) -> Block {
-    match q.flat_media {
-        Some(_) => Block::File {
-            mime: item.get("mimeType").and_then(Value::as_str).map(str::to_string),
-            path: item.get("name").and_then(Value::as_str).map(str::to_string),
-            source: item
-                .get("data")
-                .and_then(Value::as_str)
-                .map(|_| "base64:inline".to_string()),
-        },
-        None => {
-            let (mime, source) = source_ref(item.get("source"), false);
-            Block::File {
-                mime,
-                path: item.get("title").and_then(Value::as_str).map(str::to_string),
-                source,
-            }
-        }
     }
 }
 

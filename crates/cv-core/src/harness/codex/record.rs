@@ -42,47 +42,10 @@ impl Demand {
     /// newlines) by the demand's text rule. Several parts under spans are joined into the
     /// source's private decoded backing, never owned.
     fn joined(self, v: Option<JsonView<'_>>, source: Option<&crate::json::JsonSource>) -> Result<Text> {
-        let Some(v) = v else { return Ok(Text::default()) };
         if self.heads {
-            return Ok(Text::Inline(count_head(Some(v))?));
+            return Ok(Text::Inline(count_head(v)?));
         }
-        if let Some(text) = self.text(v)? {
-            return Ok(text);
-        }
-        let Some(parts) = v.array()? else {
-            return Ok(Text::default());
-        };
-        let mut strings = Vec::new();
-        for part in parts {
-            if let Some(text) = part?.get("text")?.filter(|t| t.is_string().unwrap_or(false)) {
-                strings.push(text);
-            }
-        }
-        match (strings.as_slice(), source) {
-            ([], _) => Ok(Text::default()),
-            ([one], _) => Ok(self.text(*one)?.unwrap_or_default()),
-            (_, Some(source)) if self.spans => {
-                crate::harness::store::text::append(source, &source.decoded_backing()?, |out| {
-                    for (i, view) in strings.into_iter().enumerate() {
-                        if i > 0 {
-                            out.push("\n")?;
-                        }
-                        out.push_string(view)?;
-                    }
-                    Ok(())
-                })
-            }
-            _ => {
-                let mut joined = String::new();
-                for (i, view) in strings.into_iter().enumerate() {
-                    if i > 0 {
-                        joined.push('\n');
-                    }
-                    joined.push_str(view.resolve()?.as_str().unwrap_or_default());
-                }
-                Ok(Text::Inline(joined))
-            }
-        }
+        super::super::wire::joined_text(v, source.filter(|_| self.spans), &mut |v| self.text(v))
     }
 }
 

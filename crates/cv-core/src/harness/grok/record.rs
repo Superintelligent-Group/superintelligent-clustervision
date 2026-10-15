@@ -179,46 +179,10 @@ pub(super) fn message(
 /// `text` of each part joined by newlines. Under spans, one large string stays in the source and
 /// several parts are joined into the source's private decoded backing, never owned.
 fn join(view: Option<JsonView<'_>>, spans: Option<&JsonSource>) -> Result<Text> {
-    let Some(view) = view else { return Ok(Text::default()) };
-    if view.is_string()? {
-        return Ok(match spans {
-            Some(_) => view.source_text()?,
-            None => view.text(false)?,
-        }
-        .unwrap_or_default());
-    }
-    let Some(array) = view.array()? else {
-        return Ok(Text::default());
-    };
-    let mut parts = Vec::new();
-    for part in array {
-        if let Some(text) = part?.get("text")?.filter(|v| v.is_string().unwrap_or(false)) {
-            parts.push(text);
-        }
-    }
-    let Some(source) = spans else {
-        let mut joined = String::new();
-        for (i, part) in parts.into_iter().enumerate() {
-            if i != 0 {
-                joined.push('\n');
-            }
-            joined.push_str(part.resolve()?.as_str().unwrap_or_default());
-        }
-        return Ok(Text::Inline(joined));
-    };
-    match parts.len() {
-        0 => Ok(Text::default()),
-        1 => Ok(parts[0].source_text()?.unwrap_or_default()),
-        _ => crate::harness::store::text::append(source, &source.decoded_backing()?, |out| {
-            for (i, part) in parts.into_iter().enumerate() {
-                if i != 0 {
-                    out.push("\n")?;
-                }
-                out.push_string(part)?;
-            }
-            Ok(())
-        }),
-    }
+    super::super::wire::joined_text(view, spans, &mut |view| match spans {
+        Some(_) => view.source_text(),
+        None => view.text(false),
+    })
 }
 
 /// kind/origin for a Grok `user` record from its own semantics. A real typed prompt is
