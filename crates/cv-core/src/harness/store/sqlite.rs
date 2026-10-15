@@ -370,6 +370,192 @@ pub(crate) fn append_cell(
     )?
 }
 
+/// A store's JSON cells as views: rows already are the byte source. Each cell a read selects is
+/// copied once into the source's operation-owned arena (an incremental read by rowid where the
+/// table allows one, else the row's own bytes), validated once, and handed to the format's one
+/// decoder as a [`JsonView`](crate::json::JsonView). The demand decides what the decoder
+/// resolves, never which code runs.
+pub(crate) struct Cells {
+    source: crate::json::JsonSource,
+    arena: std::sync::Arc<super::bytes::ByteSource>,
+    incremental: bool,
+}
+
+/// One cell's bytes in a [`Cells`] arena.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Cell(u64, u64);
+
+impl Cells {
+    /// Cells of `table` in the database at `path`, guarded by the reader's dependencies.
+    pub(crate) fn new(conn: &Connection, path: &Path, reads: &crate::source::ReadSet, table: &str) -> Result<Self> {
+        let source = crate::json::JsonSource::capture_with_reads(path, reads)?;
+        Ok(Self {
+            arena: source.decoded_backing()?,
+            source,
+            incremental: incremental_utf8_table(conn, table),
+        })
+    }
+
+    /// What a query selects for `column` so [`Cells::cell`] can read it from columns `i` and
+    /// `i + 1`: the rowid and the cell's type when reads are incremental, else the cell itself.
+    pub(crate) fn select(&self, column: &str) -> String {
+        if self.incremental {
+            format!("rowid, typeof({column})")
+        } else {
+            format!("{column}, NULL")
+        }
+    }
+
+    /// The cell `select(column)` put at column `i` of `row`. None for a cell that is not TEXT,
+    /// is empty or is not UTF-8 (UTF-8 is checked when it is read).
+    pub(crate) fn cell(
+        &self,
+        conn: &Connection,
+        table: &str,
+        column: &str,
+        row: &rusqlite::Row<'_>,
+        i: usize,
+    ) -> Result<Option<Cell>> {
+        use rusqlite::types::ValueRef;
+        let (offset, len) = if self.incremental {
+            if row.get_ref(i + 1)?.as_str_or_null()? != Some("text") {
+                return Ok(None);
+            }
+            append_cell(conn, table, column, row.get(i)?, &self.arena)?
+        } else {
+            let ValueRef::Text(bytes) = row.get_ref(i)? else {
+                return Ok(None);
+            };
+            self.arena.append(|writer| Ok(writer.write_all(bytes)?))?
+        };
+        Ok((len != 0).then_some(Cell(offset, len)))
+    }
+
+    /// The BLOB `select(column)` put at column `i` of `row`, passed through `decode` (a
+    /// decompressor, say) into the arena: the decoded bytes are the cell. None for a cell that is
+    /// not a BLOB or is empty; a `decode` failure is an error.
+    pub(crate) fn blob(
+        &self,
+        conn: &Connection,
+        table: &str,
+        column: &str,
+        row: &rusqlite::Row<'_>,
+        i: usize,
+        decode: impl FnOnce(&mut dyn std::io::BufRead, &mut dyn std::io::Write) -> Result<()>,
+    ) -> Result<Option<Cell>> {
+        use rusqlite::types::ValueRef;
+        let (offset, len) = if self.incremental {
+            if row.get_ref(i + 1)?.as_str_or_null()? != Some("blob") {
+                return Ok(None);
+            }
+            let blob = conn.blob_open(rusqlite::DatabaseName::Main, table, column, row.get(i)?, true)?;
+            if blob.is_empty() {
+                return Ok(None);
+            }
+            let mut blob = std::io::BufReader::with_capacity(64 * 1024, blob);
+            self.arena.append(|writer| decode(&mut blob, writer))?
+        } else {
+            let ValueRef::Blob(mut bytes) = row.get_ref(i)? else {
+                return Ok(None);
+            };
+            if bytes.is_empty() {
+                return Ok(None);
+            }
+            self.arena.append(|writer| decode(&mut bytes, writer))?
+        };
+        Ok((len != 0).then_some(Cell(offset, len)))
+    }
+
+    /// A TEXT cell holding a plain string (not JSON), copied into the arena as one JSON string so
+    /// the decoder views it like any other string. None for a cell that is not TEXT, is empty or
+    /// is not UTF-8.
+    pub(crate) fn text(
+        &self,
+        conn: &Connection,
+        table: &str,
+        column: &str,
+        row: &rusqlite::Row<'_>,
+        i: usize,
+    ) -> Result<Option<Cell>> {
+        let mut valid = false;
+        let (offset, len) = self.arena.append(|writer| {
+            super::text::generate_string(writer, |builder| {
+                valid = self.chunks(conn, table, column, row, i, |chunk| builder.push(chunk))?;
+                Ok(())
+            })
+        })?;
+        Ok((valid && len > 2).then_some(Cell(offset, len)))
+    }
+
+    /// Visit the UTF-8 chunks of the TEXT cell `select(column)` put at column `i` of `row`
+    /// without copying it anywhere. False for a cell that is not TEXT or is not UTF-8.
+    pub(crate) fn chunks(
+        &self,
+        conn: &Connection,
+        table: &str,
+        column: &str,
+        row: &rusqlite::Row<'_>,
+        i: usize,
+        mut visit: impl FnMut(&str) -> Result<()>,
+    ) -> Result<bool> {
+        use rusqlite::types::ValueRef;
+        if self.incremental {
+            if row.get_ref(i + 1)?.as_str_or_null()? != Some("text") {
+                return Ok(false);
+            }
+            return with_cell_reader(conn, table, column, row.get(i)?, |reader, _| {
+                for_each_utf8(reader, &mut visit)
+            });
+        }
+        let ValueRef::Text(bytes) = row.get_ref(i)? else {
+            return Ok(false);
+        };
+        let Ok(text) = std::str::from_utf8(bytes) else {
+            return Ok(false);
+        };
+        visit(text)?;
+        Ok(true)
+    }
+
+    /// The captured store and the arena its cells are copied into, where a decoder composes text
+    /// that is checked against the store like the cells themselves.
+    pub(crate) fn out(&self) -> (&crate::json::JsonSource, &std::sync::Arc<super::bytes::ByteSource>) {
+        (&self.source, &self.arena)
+    }
+
+    /// The cell at `rowid` of `table.column`, TEXT or BLOB bytes as stored, for a store that
+    /// locates its rows itself (by key). None when empty.
+    pub(crate) fn row(&self, conn: &Connection, table: &str, column: &str, rowid: i64) -> Result<Option<Cell>> {
+        let (offset, len) = append_cell(conn, table, column, rowid, &self.arena)?;
+        Ok((len != 0).then_some(Cell(offset, len)))
+    }
+
+    /// Bytes a format derives as a cell of their own: a BLOB in the store's own encoding rule, or
+    /// a JSON string holding a JSON document. None when empty.
+    pub(crate) fn append(&self, write: impl FnOnce(&mut dyn std::io::Write) -> Result<()>) -> Result<Option<Cell>> {
+        let (offset, len) = self.arena.append(write)?;
+        Ok((len != 0).then_some(Cell(offset, len)))
+    }
+
+    /// Recheck the store and the reader's dependencies (once, when a read ends).
+    pub(crate) fn check(&self) -> Result<()> {
+        self.source.check()
+    }
+
+    /// Decode `cell` with `f`. None when the cell is not exactly one JSON value; every other
+    /// error is a source failure.
+    pub(crate) fn read<T>(
+        &self,
+        cell: Cell,
+        f: impl for<'a> FnOnce(crate::json::JsonView<'a>) -> Result<T>,
+    ) -> Result<Option<T>> {
+        match self.source.read_backing_value(self.arena.clone(), cell.0, cell.1, f) {
+            Err(error) if error.downcast_ref::<crate::json::InvalidJson>().is_some() => Ok(None),
+            result => result.map(Some),
+        }
+    }
+}
+
 /// Incremental TEXT bytes use the database's encoding. Ordinary UTF-8 rowid tables support
 /// bounded reads; views, virtual/WITHOUT ROWID tables and UTF-16 stores retain their typed reader.
 pub(crate) fn incremental_utf8_table(conn: &Connection, table: &str) -> bool {

@@ -242,7 +242,7 @@ fn compare(frozen: &mut Frozen, session: &Session, target: Harness, mode: Thinki
 /// Output goldens per test under `tests/fixtures/emit-frozen/`, frozen from retired oracles
 /// (the pre-streaming emitters, distill's pre-sharing products). `CV_REGEN_CORPUS=1` rewrites
 /// them; explain every diff in the commit.
-pub(crate) struct Frozen(std::collections::BTreeMap<String, Value>, &'static str);
+pub(crate) struct Frozen(pub(crate) std::collections::BTreeMap<String, Value>, &'static str);
 
 impl Frozen {
     pub(crate) fn new(name: &'static str) -> Self {
