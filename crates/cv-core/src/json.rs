@@ -1012,29 +1012,45 @@ impl<'a> JsonView<'a> {
         if !self.is_string()? {
             return Ok(None);
         }
-        if spans
-            && self
-                .source_range()?
-                .is_some_and(|(_, len)| len - 2 > crate::lazy::INLINE_MAX as u64)
-        {
-            // A JSON escape is at most six bytes per decoded byte: only near-threshold escaped
-            // strings need their decoded length, and those are at most 24 KiB of input.
-            let (_, len) = self.source_range()?.context("JSON text source")?;
-            let mut decoded = 0;
-            if len - 2 <= 6 * crate::lazy::INLINE_MAX as u64 {
-                self.for_each_char(|c| {
-                    decoded += c.len_utf8();
-                    decoded <= crate::lazy::INLINE_MAX
-                })?;
-            }
-            if len - 2 > 6 * crate::lazy::INLINE_MAX as u64 || decoded > crate::lazy::INLINE_MAX {
-                #[cfg(feature = "mmap")]
-                return self.text(true);
-                #[cfg(not(feature = "mmap"))]
-                return self.source_text();
-            }
+        if spans && self.exceeds_inline()? {
+            #[cfg(feature = "mmap")]
+            return self.text(true);
+            #[cfg(not(feature = "mmap"))]
+            return self.source_text();
         }
         self.text(false)
+    }
+    /// [`lazy_text`](Self::lazy_text) for a store whose strings live in many files or cells:
+    /// text that stays in the source is a checked source text naming its own bytes, never a span
+    /// of the session's primary file.
+    pub(crate) fn lazy_source_text(self, spans: bool) -> Result<Option<crate::lazy::Text>> {
+        if !self.is_string()? {
+            return Ok(None);
+        }
+        if spans && self.exceeds_inline()? {
+            return self.source_text();
+        }
+        self.text(false)
+    }
+    /// The span rule: a string whose decoded length exceeds INLINE_MAX.
+    fn exceeds_inline(self) -> Result<bool> {
+        let Some((_, len)) = self.source_range()? else {
+            return Ok(false);
+        };
+        if len - 2 <= crate::lazy::INLINE_MAX as u64 {
+            return Ok(false);
+        }
+        // A JSON escape is at most six bytes per decoded byte: only near-threshold escaped
+        // strings need their decoded length, and those are at most 24 KiB of input.
+        if len - 2 > 6 * crate::lazy::INLINE_MAX as u64 {
+            return Ok(true);
+        }
+        let mut decoded = 0;
+        self.for_each_char(|c| {
+            decoded += c.len_utf8();
+            decoded <= crate::lazy::INLINE_MAX
+        })?;
+        Ok(decoded > crate::lazy::INLINE_MAX)
     }
     /// Visit a string's decoded characters until `visit` returns false. A borrowed string is
     /// decoded in place, without a decode window; false for a nonstring.
