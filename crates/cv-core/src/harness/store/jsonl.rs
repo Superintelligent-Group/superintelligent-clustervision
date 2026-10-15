@@ -2,75 +2,9 @@
 
 pub(crate) mod ranges;
 
-use super::document::{self, accepts_value, Index, Raw};
-use crate::lazy::RawValue;
+use super::document;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
 use std::path::Path;
-
-/// Visit Value-compatible records with their absolute byte offsets. Malformed JSON lines are
-/// skipped; UTF-8/read failure anywhere returns None, matching read_to_string's all-or-none
-/// contract. Callbacks may already have run: callers must discard accumulated state on None.
-/// Mapped source bytes/index are dropped before this returns the original read-only descriptor;
-/// the portable or mapping-failure path retains only a single line's scratch buffer.
-pub(crate) fn scan(path: &Path, visit: impl FnMut(Raw<'_>, u64)) -> Option<File> {
-    scan_selected(path, |_| true, visit)
-}
-
-/// Apply an existing lexical selection before JSON validation, preserving whole-file UTF-8
-/// validation. Useful for event readers whose original contract selects a literal marker.
-pub(crate) fn scan_selected(
-    path: &Path,
-    select: impl Fn(&str) -> bool,
-    mut visit: impl FnMut(Raw<'_>, u64),
-) -> Option<File> {
-    let file = File::open(path).ok()?;
-    #[cfg(feature = "mmap")]
-    if let Ok(source) = super::document::Source::map_file(&file) {
-        let text = std::str::from_utf8(source.bytes()).ok()?;
-        for line in text.lines() {
-            let line = line.trim();
-            if !select(line) {
-                continue;
-            }
-            let Ok(validated) = serde_json::from_str::<&RawValue>(line) else {
-                continue;
-            };
-            let offset = (validated.get().as_ptr() as usize - text.as_ptr() as usize) as u64;
-            let raw = source.slice(offset, validated.get().len() as u64)?;
-            if accepts_value(raw) {
-                visit(raw, offset);
-            }
-        }
-        return Some(file);
-    }
-    let mut reader = BufReader::new(file.try_clone().ok()?);
-    let mut line = Vec::new();
-    let mut offset = 0;
-    loop {
-        line.clear();
-        let n = reader.read_until(b'\n', &mut line).ok()?;
-        if n == 0 {
-            break;
-        }
-        let text = std::str::from_utf8(&line).ok()?;
-        let trimmed = text.trim();
-        if select(trimmed) {
-            if let Ok(validated) = serde_json::from_str::<&RawValue>(trimmed) {
-                let index = Index::default();
-                let raw = Raw::new(validated.get(), &index);
-                if accepts_value(raw) {
-                    visit(
-                        raw,
-                        offset + (trimmed.as_ptr() as usize - text.as_ptr() as usize) as u64,
-                    );
-                }
-            }
-        }
-        offset += n as u64;
-    }
-    Some(file)
-}
 
 /// One physical JSONL line, as the record reader hands it to a codec.
 pub(crate) struct Line<'v> {
@@ -82,6 +16,28 @@ pub(crate) struct Line<'v> {
     pub complete: bool,
     /// The Value-compatible record, or None for a blank, non-UTF-8 or rejected line.
     pub view: Option<crate::json::JsonView<'v>>,
+    /// Nothing but ASCII whitespace: a `None` view on any other line is a rejected record.
+    pub blank: bool,
+}
+
+/// Every record of a whole JSONL file through [`for_each_line`], for sidecar and discovery
+/// reducers that keep no offsets: the file is captured, opened against the capture, and its
+/// identity rechecked at the end. Blank and rejected lines are skipped.
+pub(crate) fn for_each_record(
+    path: &Path,
+    mut visit: impl FnMut(crate::json::JsonView<'_>) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let source = crate::json::JsonSource::capture(path)?;
+    let file = File::open(path)?;
+    source.check_metadata(file.metadata()?)?;
+    for_each_line(&source, &file, 0, source.len(), |line| {
+        if let Some(view) = line.view {
+            visit(view)?;
+        }
+        Ok(crate::stream::Flow::Continue)
+    })?;
+    source.check_metadata(file.metadata()?)?;
+    source.check()
 }
 
 /// Records of `from..to` in a captured JSONL source, each physical line once. This is the byte
@@ -95,6 +51,31 @@ pub(crate) struct Line<'v> {
 pub(crate) fn for_each_line(
     source: &crate::json::JsonSource,
     file: &File,
+    from: u64,
+    to: u64,
+    visit: impl FnMut(Line<'_>) -> anyhow::Result<crate::stream::Flow>,
+) -> anyhow::Result<()> {
+    lines(source, file, None, from, to, visit)
+}
+
+/// [`for_each_line`] over the source's private decoded bytes (a decompressed copy, `len` bytes
+/// long, at the start of `backing`): views keep the original's provenance, offsets are decoded.
+pub(crate) fn for_each_decoded_line(
+    source: &crate::json::JsonSource,
+    backing: &std::sync::Arc<super::bytes::ByteSource>,
+    len: u64,
+    from: u64,
+    visit: impl FnMut(Line<'_>) -> anyhow::Result<crate::stream::Flow>,
+) -> anyhow::Result<()> {
+    lines(source, &backing.file()?, Some((backing, len)), from, len, visit)
+}
+
+type Decoded<'b> = Option<(&'b std::sync::Arc<super::bytes::ByteSource>, u64)>;
+
+fn lines(
+    source: &crate::json::JsonSource,
+    file: &File,
+    decoded: Decoded<'_>,
     from: u64,
     to: u64,
     mut visit: impl FnMut(Line<'_>) -> anyhow::Result<crate::stream::Flow>,
@@ -112,13 +93,22 @@ pub(crate) fn for_each_line(
         let mut start = 0;
         for end in memchr::memchr_iter(b'\n', bytes).map(|i| i + 1) {
             let line = &bytes[start..end - 1];
-            if in_memory(source, from + start as u64, from + end as u64, true, line, &mut visit)? == Flow::Stop {
+            let (at, end) = (from + start as u64, from + end as u64);
+            if in_memory(source, decoded, at, end, true, line, &mut visit)? == Flow::Stop {
                 return Ok(());
             }
-            start = end;
+            start = end as usize - from as usize;
         }
         if start < bytes.len() {
-            in_memory(source, from + start as u64, to, false, &bytes[start..], &mut visit)?;
+            in_memory(
+                source,
+                decoded,
+                from + start as u64,
+                to,
+                false,
+                &bytes[start..],
+                &mut visit,
+            )?;
         }
         return Ok(());
     }
@@ -130,26 +120,35 @@ pub(crate) fn for_each_line(
         },
     )?;
     frames.keep_small_records(64 * 1024);
-    let context = document::range::RangeSource::from_captured(source.clone())?;
+    let context = match decoded {
+        Some((backing, _)) => document::range::RangeSource::decoded(source.clone(), backing)?,
+        None => document::range::RangeSource::from_captured(source.clone())?,
+    };
     while let Some(frame) = frames.next() {
         let (raw, complete) = frame?;
         let end = frames.offset();
         let flow = if let Some(bytes) = frames.small_record() {
-            in_memory(source, raw.offset, end, complete, bytes, &mut visit)?
+            in_memory(source, decoded, raw.offset, end, complete, bytes, &mut visit)?
         } else {
             let range = trim_ascii(file, raw)?;
             let at = range.offset;
             let mut visited = false;
-            let read = (range.len != 0).then(|| {
-                source.read_positioned_range_value(&context, at, range.len, |view| {
-                    visited = true;
-                    visit(Line {
-                        at,
-                        end,
-                        complete,
-                        view: Some(view),
-                    })
+            let blank = range.len == 0;
+            let mut view = |view: crate::json::JsonView<'_>| {
+                visited = true;
+                visit(Line {
+                    at,
+                    end,
+                    complete,
+                    view: Some(view),
+                    blank,
                 })
+            };
+            let read = (!blank).then(|| match decoded {
+                Some((backing, len)) => {
+                    source.read_positioned_decoded_value(&context, backing, len, at, range.len, &mut view)
+                }
+                None => source.read_positioned_range_value(&context, at, range.len, &mut view),
             });
             match read {
                 Some(Err(error)) if !visited && error.downcast_ref::<crate::json::InvalidJson>().is_some() => None,
@@ -163,6 +162,7 @@ pub(crate) fn for_each_line(
                         end,
                         complete,
                         view: None,
+                        blank,
                     })
                 },
                 Ok,
@@ -232,6 +232,7 @@ impl<'s> Records<'s> {
 /// One line whose bytes are in memory (mapped, or read as a small positioned record).
 fn in_memory(
     source: &crate::json::JsonSource,
+    decoded: Decoded<'_>,
     start: u64,
     end: u64,
     complete: bool,
@@ -246,20 +247,24 @@ fn in_memory(
         .count();
     let trimmed = &bytes[lead..bytes.len() - tail];
     let at = start + lead as u64;
-    if let Some(text) = (!trimmed.is_empty())
-        .then(|| std::str::from_utf8(trimmed).ok())
-        .flatten()
-    {
+    let blank = trimmed.is_empty();
+    if let Some(text) = (!blank).then(|| std::str::from_utf8(trimmed).ok()).flatten() {
         let mut visited = false;
-        match source.read_record(at, text, |view| {
+        let view = |view: crate::json::JsonView<'_>| {
             visited = true;
             visit(Line {
                 at,
                 end,
                 complete,
                 view: Some(view),
+                blank,
             })
-        }) {
+        };
+        let read = match decoded {
+            Some((backing, len)) => source.read_decoded_record(backing, len, at, text, view),
+            None => source.read_record(at, text, view),
+        };
+        match read {
             Err(error) if !visited && error.downcast_ref::<crate::json::InvalidJson>().is_some() => {}
             flow => return flow,
         }
@@ -269,6 +274,7 @@ fn in_memory(
         end,
         complete,
         view: None,
+        blank,
     })
 }
 
@@ -295,37 +301,4 @@ fn trim_ascii(file: &File, mut range: ranges::Range) -> anyhow::Result<ranges::R
         }
     }
     Ok(range)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::harness::store::document::Record;
-
-    #[test]
-    fn projected_records_keep_absolute_offsets_and_value_acceptance() {
-        let world = cv_testkit::World::new("raw-jsonl");
-        let path = world.base.join("wire.jsonl");
-        let text = format!(
-            "\u{2003}{{\"n\":1,\"body\":\"{}\"}} \r\n\ninvalid\n{{\"n\":2,\"ignored\":1e400}}\n{{\"n\":3}}",
-            "雪".repeat(3000)
-        );
-        std::fs::write(&path, &text).unwrap();
-        let mut seen = Vec::new();
-        let file = scan(&path, |raw, offset| {
-            assert_eq!(&text[offset as usize..offset as usize + raw.get().len()], raw.get());
-            seen.push(Record::parse(raw).unwrap().value("n").unwrap());
-        })
-        .unwrap();
-        assert_eq!(seen, [serde_json::json!(1), serde_json::json!(3)]);
-        assert_eq!(file.metadata().unwrap().len(), text.len() as u64);
-        let mut selected = 0;
-        assert!(scan_selected(&path, |line| line.contains("\"n\":3"), |_, _| selected += 1).is_some());
-        assert_eq!(selected, 1);
-        // Selection does not hide a non-UTF8 suffix: callers must retract a partial result.
-        let mut bad = text.into_bytes();
-        bad.extend_from_slice(b"\n\xff");
-        std::fs::write(&path, bad).unwrap();
-        assert!(scan_selected(&path, |_| false, |_, _| panic!("selected nothing")).is_none());
-    }
 }

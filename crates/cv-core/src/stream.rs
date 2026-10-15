@@ -273,83 +273,6 @@ pub trait MessageSink {
     fn checkpoint(&mut self, _cp: &mut Checkpoint) {}
 }
 
-/// Check cancellation at buffered input boundaries, including rows which emit no message.
-/// Legacy tolerant readers may swallow I/O errors, so preserve the original control failure
-/// independently and return it after the reader operation instead of accepting a partial count.
-pub(crate) fn with_read_check<R: std::io::BufRead, T>(
-    reader: R,
-    check: &mut dyn FnMut() -> Result<()>,
-    read: impl FnOnce(CheckedReader<'_, R>) -> T,
-) -> Result<T> {
-    let mut error = None;
-    let result = read(CheckedReader {
-        reader,
-        check,
-        error: &mut error,
-    });
-    if let Some(error) = error {
-        return Err(error);
-    }
-    Ok(result)
-}
-
-pub(crate) struct CheckedReader<'a, R> {
-    reader: R,
-    check: &'a mut dyn FnMut() -> Result<()>,
-    error: &'a mut Option<anyhow::Error>,
-}
-impl<R> CheckedReader<'_, R> {
-    fn check(&mut self) -> std::io::Result<bool> {
-        // Some tolerant line readers continue after errors. Once interruption is latched,
-        // terminate their input rather than providing an infinite sequence of errors.
-        if self.error.is_some() {
-            return Ok(false);
-        }
-        if let Err(error) = (self.check)() {
-            *self.error = Some(error);
-            return Err(std::io::Error::other("input read interrupted"));
-        }
-        Ok(true)
-    }
-    fn latch_io<T>(&mut self, result: std::io::Result<T>) -> std::io::Result<T> {
-        match result {
-            Err(error) if error.kind() != std::io::ErrorKind::Interrupted => {
-                let forwarded = std::io::Error::new(error.kind(), error.to_string());
-                self.error.get_or_insert(error.into());
-                Err(forwarded)
-            }
-            other => other,
-        }
-    }
-}
-impl<R: std::io::Read> std::io::Read for CheckedReader<'_, R> {
-    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
-        if !self.check()? {
-            return Ok(0);
-        }
-        let result = self.reader.read(bytes);
-        self.latch_io(result)
-    }
-}
-impl<R: std::io::BufRead> std::io::BufRead for CheckedReader<'_, R> {
-    fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
-        if !self.check()? {
-            return Ok(&[]);
-        }
-        match self.reader.fill_buf() {
-            Err(error) if error.kind() != std::io::ErrorKind::Interrupted => {
-                let forwarded = std::io::Error::new(error.kind(), error.to_string());
-                self.error.get_or_insert(error.into());
-                Err(forwarded)
-            }
-            other => other,
-        }
-    }
-    fn consume(&mut self, bytes: usize) {
-        self.reader.consume(bytes);
-    }
-}
-
 /// Run an adapter boundary with a consumer error guard. Legacy adapter loops can keep using
 /// `message() -> Flow`; failures stop delivery immediately and surface after the adapter returns,
 /// including errors raised by metadata, dependencies, checkpoints or an EOF-only sink check.
@@ -1177,38 +1100,6 @@ fn note_turns(r: &SessionRef, turns: usize) {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn checked_reader_latches_underlying_read_errors_even_when_consumer_ignores_them() {
-        struct Failing;
-        impl std::io::Read for Failing {
-            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "source read failed",
-                ))
-            }
-        }
-        impl std::io::BufRead for Failing {
-            fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "source read failed",
-                ))
-            }
-            fn consume(&mut self, _: usize) {}
-        }
-        let error = with_read_check(Failing, &mut || Ok(()), |mut reader| {
-            let _ = std::io::Read::read(&mut reader, &mut [0; 1]);
-            assert_eq!(std::io::Read::read(&mut reader, &mut [0; 1]).unwrap(), 0);
-        })
-        .unwrap_err();
-        assert_eq!(
-            error.downcast_ref::<std::io::Error>().unwrap().kind(),
-            std::io::ErrorKind::BrokenPipe
-        );
-        assert_eq!(error.to_string(), "source read failed");
-    }
-
     #[test]
     fn metadata_projection_preserves_existing_modes_and_complete_precedence() {
         for opts in [

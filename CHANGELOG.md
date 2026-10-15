@@ -24,6 +24,7 @@
 - A transcript replaced or rewritten after parsing fails its first lazy content read instead of silently returning the replacement's bytes.
 - Cline, Roo, LM Studio, OpenSession and account exports read through one codec each; lazy text follows Claude's span rule (decoded length over 4 KiB).
 - Claude transcripts parse through one record codec in every mode and build, using about 20% fewer instructions; malformed records get one acceptance rule everywhere.
+- Codex, Grok, Qwen, Kimi, Kimi Code and Continue read through one record codec per format: a cold Codex index takes 13% fewer instructions; bad lines skip individually.
 - OpenSession preserves optional opaque principals through reads and transformations; mixed-source compositions retain attribution only when every source agrees.
 - The first fleet read after an upgrade that invalidates the catalog prints one stderr note that it is re-discovering, suggesting `cv index`.
 - `ls --json --enrich` `display_title` uses the row's `title` when present and never picks harness-injected turns such as Codex AGENTS.md instructions.

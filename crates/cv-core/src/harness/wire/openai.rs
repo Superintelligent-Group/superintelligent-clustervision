@@ -67,11 +67,6 @@ pub const KIMI_CODE: Quirks = Quirks {
     ..OPENAI
 };
 
-/// [`blocks_from_view`] over an owned value, every string inline.
-pub fn blocks_from(content: Option<&Value>, q: &Quirks) -> Vec<Block> {
-    blocks_from_view(content.map(Into::into), q, &mut |v| v.text(false)).unwrap_or_default()
-}
-
 /// The caller's rule for turning a content string into a [`Text`] (inline, a span, or checked
 /// source text); `None` for a nonstring. [`JsonView::lazy_text`](crate::json::JsonView) is the
 /// shared one.
@@ -306,21 +301,27 @@ pub fn structured_arguments(s: &str) -> Value {
     }
 }
 
-/// [`tool_call_from_view`] over an owned value, arguments inline.
-pub fn tool_call(c: &Value) -> Block {
-    tool_call_from_view(c.into(), false).unwrap_or_else(|_| unreachable!("owned views do not fail"))
-}
-
 /// Every entry of a `tool_calls` array (a JSON array value, or `None`).
 pub fn tool_calls(v: Option<&Value>) -> Vec<Block> {
     v.and_then(Value::as_array)
-        .map(|a| a.iter().map(tool_call).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|c| tool_call_from_view(c.into(), false).ok())
+                .collect()
+        })
         .unwrap_or_default()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn blocks_from(content: Option<&Value>, q: &Quirks) -> Vec<Block> {
+        blocks_from_view(content.map(Into::into), q, &mut |v| v.text(false)).unwrap()
+    }
+    fn tool_call(c: &Value) -> Block {
+        tool_call_from_view(c.into(), false).unwrap()
+    }
     use serde_json::json;
 
     #[test]
