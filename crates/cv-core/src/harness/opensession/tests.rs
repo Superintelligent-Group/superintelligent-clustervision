@@ -320,7 +320,7 @@ fn every_field_session() -> Session {
 }
 
 /// The gate for this reader: a 0.3 document is `document()` → `from_str` → `document()` with not
-/// one byte changed. There is no canonicalizer to drift; the reader IS the IR's `Deserialize`.
+/// one byte changed. There is no canonicalizer to drift; every field reads through the IR's `Deserialize`.
 #[test]
 fn a_0_3_document_round_trips_byte_identical() {
     let original = every_field_session();
@@ -409,7 +409,7 @@ fn discovers_documents_in_registered_sources() {
 }
 
 #[test]
-fn native_messages_match_document_codec_and_reject_late_invalid_turns() {
+fn native_messages_read_back_what_was_written_and_reject_late_invalid_turns() {
     use crate::stream::{CollectSink, ParseOptions};
     let dir = tmpdir("native");
     let path = dir.join("native.opensession.json");
@@ -435,7 +435,8 @@ fn native_messages_match_document_codec_and_reject_late_invalid_turns() {
     written["messages"][1]["usage"]["unknown"] = json!(ignored);
     let bytes = serde_json::to_vec(&written).unwrap();
     std::fs::write(&path, &bytes).unwrap();
-    let mut expected = from_str(std::str::from_utf8(&bytes).unwrap()).unwrap();
+    // The writer is the oracle: unknown fields are skipped, everything written reads back.
+    let mut expected = original.clone();
     expected.source_path = Some(path.clone());
     for opts in [ParseOptions::full(), ParseOptions::lazy(), ParseOptions::complete()] {
         let mut sink = CollectSink::default();
