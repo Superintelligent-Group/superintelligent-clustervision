@@ -235,7 +235,7 @@ fn compare(frozen: &mut Frozen, session: &Session, target: Harness, mode: Thinki
     let report = crate::digest::sha256_hex(&serde_json::to_vec(&report)?);
     assert_eq!(actual["fidelity"], report, "exact fidelity classification");
     let label = base.file_name().unwrap().to_string_lossy().into_owned();
-    assert!(frozen.0.insert(label, actual).is_none(), "unique label");
+    frozen.insert(label, actual);
     Ok(())
 }
 
@@ -246,6 +246,10 @@ pub(crate) struct Frozen(pub(crate) std::collections::BTreeMap<String, Value>, &
 impl Frozen {
     pub(crate) fn new(name: &'static str) -> Self {
         Self(Default::default(), name)
+    }
+
+    pub(crate) fn insert(&mut self, label: String, entry: Value) {
+        assert!(self.0.insert(label, entry).is_none(), "unique label");
     }
 
     pub(crate) fn check(self) -> Result<()> {
