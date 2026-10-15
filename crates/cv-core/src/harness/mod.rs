@@ -164,7 +164,7 @@ fn scan_json_lines<R: BufRead>(
             skipped += 1;
             continue;
         };
-        let text = text.trim();
+        let text = store::json::trim_str(text);
         if text.is_empty() {
             continue;
         }
@@ -197,7 +197,7 @@ fn each_json_line_inner(
     parse: &mut impl FnMut(&str) -> Option<Value>,
     f: &mut impl FnMut(Value) -> Flow,
 ) -> Flow {
-    let line = line.trim();
+    let line = store::json::trim_str(line);
     if line.is_empty() {
         return Flow::Continue;
     }

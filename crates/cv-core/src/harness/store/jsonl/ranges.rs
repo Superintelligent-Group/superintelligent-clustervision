@@ -1,5 +1,5 @@
 //! Bounded positioned JSONL framing. Producers retain/check source identity and choose their own
-//! JSON/UTF-8 acceptance policy; these helpers preserve raw ranges, Unicode trim and partial EOF.
+//! JSON/UTF-8 acceptance policy; these helpers preserve raw ranges, JSON whitespace trim and partial EOF.
 use anyhow::{Context, Result};
 use std::{
     fs,
@@ -18,7 +18,7 @@ pub(crate) fn reader<S: At + ?Sized>(file: &S, range: Range) -> Result<BufReader
         },
     ))
 }
-/// Each completed range excludes LF; CR and Unicode whitespace remain until trim. A partial final
+/// Each completed range excludes LF; CR and other whitespace remain until trim. A partial final
 /// row is emitted with complete=false. On read error the consumer may stop or retry from offset().
 pub(crate) fn records<S: At + ?Sized>(file: &S, range: Range) -> Result<Records<'_, S>> {
     Ok(Records {
@@ -30,39 +30,28 @@ pub(crate) fn records<S: At + ?Sized>(file: &S, range: Range) -> Result<Records<
     })
 }
 
-/// Match the buffered driver's Unicode trim. Only boundary windows are decoded, even when
-/// a record is a giant string or consists entirely of whitespace.
+/// Trim JSON whitespace ([`super::super::json::is_whitespace`]) from a record of any size,
+/// reading only its boundary windows.
 pub(crate) fn trim<S: At + ?Sized>(file: &S, mut range: Range) -> Result<Range> {
+    use crate::harness::store::json::is_whitespace;
     range.offset.checked_add(range.len).context("JSONL range overflow")?;
     let mut window = [0; 64 * 1024];
     while range.len > 0 {
         let n = range.len.min(window.len() as u64) as usize;
         read_exact_at(file, &mut window[..n], range.offset)?;
-        let end = match std::str::from_utf8(&window[..n]) {
-            Ok(_) => n,
-            Err(error) if error.error_len().is_none() => error.valid_up_to(),
-            // Invalid UTF-8 cannot be trimmed into an accepted record.
-            Err(_) => return Ok(range),
-        };
-        let text = std::str::from_utf8(&window[..end]).unwrap();
-        let leading = text.len() - text.trim_start().len();
-        range.offset += leading as u64;
-        range.len -= leading as u64;
-        if leading != end || end == 0 {
+        let lead = window[..n].iter().take_while(|b| is_whitespace(b)).count();
+        range.offset += lead as u64;
+        range.len -= lead as u64;
+        if lead != n {
             break;
         }
     }
     while range.len > 0 {
         let n = range.len.min(window.len() as u64) as usize;
         read_exact_at(file, &mut window[..n], range.offset + range.len - n as u64)?;
-        // The tail window can start inside a UTF-8 scalar; its trailing end cannot.
-        let start = window[..n].iter().take_while(|byte| **byte & 0xc0 == 0x80).count();
-        let Ok(text) = std::str::from_utf8(&window[start..n]) else {
-            return Ok(range);
-        };
-        let trailing = text.len() - text.trim_end().len();
-        range.len -= trailing as u64;
-        if trailing != text.len() || text.is_empty() {
+        let tail = window[..n].iter().rev().take_while(|b| is_whitespace(b)).count();
+        range.len -= tail as u64;
+        if tail != n {
             break;
         }
     }
@@ -77,11 +66,12 @@ mod tests {
     fn positioned_frames_match_buffered_lines_and_trim_boundary_windows() {
         let world = cv_testkit::World::new("positioned-jsonl-frames");
         let text = format!(
-            "{{\"n\":1}}\r\n\n{}{{\"body\":\"{}\"}}{}\n{}\n final 🌙 ",
-            "\u{2003}".repeat(30000),
+            "{{\"n\":1}}\r\n\n{}{{\"body\":\"{}\"}}{}\n{}\n{}\n final 🌙 ",
+            " \t".repeat(40000),
             "x\\n".repeat(30000),
-            "\u{2002}".repeat(30000),
+            "\r ".repeat(40000),
             "\u{2003}".repeat(30000),
+            " ".repeat(140000),
         );
         let path = world.base.join("rows.jsonl");
         std::fs::write(&path, &text).unwrap();
@@ -108,7 +98,7 @@ mod tests {
             let trimmed = trim(&file, raw).unwrap();
             let mut actual = String::new();
             reader(&file, trimmed).unwrap().read_to_string(&mut actual).unwrap();
-            assert_eq!(actual, row.trim());
+            assert_eq!(actual, crate::harness::store::json::trim_str(row));
         }
         assert!(framed.next().is_none());
         assert!(reader(

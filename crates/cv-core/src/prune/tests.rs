@@ -2267,10 +2267,11 @@ fn malformed_large_rows_preserve_owned_passthrough_and_fatal_utf8() -> Result<()
     let valid = r#" {"sessionId":"old","type":"user","uuid":"u","message":{"content":"kept"}} "#;
     let text = format!("{malformed}\n{valid}\r\n\u{2003} \r\n");
     std::fs::write(&source, &text)?;
-    // Frozen legacy acceptance/framing: global trim_end, per-line serde Value acceptance,
-    // invalid JSON passthrough, id surgery only on valid rows, one LF per retained record.
+    // Frozen legacy acceptance/framing: global trim_end of JSON whitespace (the U+2003 row is a
+    // record), per-line serde Value acceptance, invalid JSON passthrough, id surgery only on
+    // valid rows, one LF per retained record.
     let expected: String = text
-        .trim_end()
+        .trim_end_matches([' ', '\t', '\r', '\n'])
         .split('\n')
         .map(|line| {
             let line = if serde_json::from_str::<Value>(line).is_ok() {

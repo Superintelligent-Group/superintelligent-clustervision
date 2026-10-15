@@ -2373,7 +2373,7 @@ fn revive_staged(
             let newline = memchr::memchr(b'\n', bytes);
             let n = newline.map_or(bytes.len(), |i| i + 1);
             if rewrite {
-                let non_whitespace = |byte: &u8| !matches!(byte, b' ' | b'\t' | b'\r' | b'\n');
+                let non_whitespace = |byte: &u8| !crate::harness::store::json::is_whitespace(byte);
                 if start.is_none() {
                     start = bytes[..n]
                         .iter()
@@ -3075,7 +3075,10 @@ fn retrieve_captured(source: &crate::json::JsonSource, file: &std::fs::File, pat
         let mut found = None;
         let mut duplicates = 0usize;
         #[cfg(feature = "mmap")]
-        for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        for line in text
+            .lines()
+            .filter(|line| !crate::harness::store::json::trim_str(line).is_empty())
+        {
             let offset = (line.as_ptr() as usize - text.as_ptr() as usize) as u64;
             let projected = source.read_borrowed_range_syntax(offset, line, |view| {
                 project_sidecar_entry(view, id, available.len() < 20)

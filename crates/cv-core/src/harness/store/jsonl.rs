@@ -8,7 +8,7 @@ use std::path::Path;
 
 /// One physical JSONL line, as the record reader hands it to a codec.
 pub(crate) struct Line<'v> {
-    /// Absolute offset of the record after ASCII whitespace trimming.
+    /// Absolute offset of the record after JSON whitespace trimming.
     pub at: u64,
     /// Absolute offset just past the line: after its LF, or the end of the read.
     pub end: u64,
@@ -16,7 +16,7 @@ pub(crate) struct Line<'v> {
     pub complete: bool,
     /// The Value-compatible record, or None for a blank, non-UTF-8 or rejected line.
     pub view: Option<crate::json::JsonView<'v>>,
-    /// Nothing but ASCII whitespace: a `None` view on any other line is a rejected record.
+    /// Nothing but JSON whitespace: a `None` view on any other line is a rejected record.
     pub blank: bool,
 }
 
@@ -46,7 +46,7 @@ pub(crate) fn for_each_record(
 /// line into one reused buffer and leave a giant line in place as a positioned view, so no
 /// private copy of it is ever made. Either way the codec sees the same [`JsonView`] API.
 ///
-/// Records are trimmed of ASCII whitespace only, as JSON itself allows. Read errors end the
+/// Records are trimmed of JSON whitespace only (space, tab, LF, CR). Read errors end the
 /// visit with an error. `file` must be the descriptor the caller checked against `source`.
 pub(crate) fn for_each_line(
     source: &crate::json::JsonSource,
@@ -130,7 +130,7 @@ fn lines(
         let flow = if let Some(bytes) = frames.small_record() {
             in_memory(source, decoded, raw.offset, end, complete, bytes, &mut visit)?
         } else {
-            let range = trim_ascii(file, raw)?;
+            let range = ranges::trim(file, raw)?;
             let at = range.offset;
             let mut visited = false;
             let blank = range.len == 0;
@@ -239,13 +239,8 @@ fn in_memory(
     bytes: &[u8],
     visit: &mut impl FnMut(Line<'_>) -> anyhow::Result<crate::stream::Flow>,
 ) -> anyhow::Result<crate::stream::Flow> {
-    let lead = bytes.iter().take_while(|b| b.is_ascii_whitespace()).count();
-    let tail = bytes[lead..]
-        .iter()
-        .rev()
-        .take_while(|b| b.is_ascii_whitespace())
-        .count();
-    let trimmed = &bytes[lead..bytes.len() - tail];
+    let lead = bytes.iter().take_while(|b| super::json::is_whitespace(b)).count();
+    let trimmed = super::json::trim(&bytes[lead..]);
     let at = start + lead as u64;
     let blank = trimmed.is_empty();
     if let Some(text) = (!blank).then(|| std::str::from_utf8(trimmed).ok()).flatten() {
@@ -278,27 +273,59 @@ fn in_memory(
     })
 }
 
-/// ASCII-trim a giant positioned record by reading only its boundary windows.
-fn trim_ascii(file: &File, mut range: ranges::Range) -> anyhow::Result<ranges::Range> {
-    let mut bytes = [0; 64 * 1024];
-    while range.len > 0 {
-        let n = range.len.min(bytes.len() as u64) as usize;
-        ranges::read_exact_at(file, &mut bytes[..n], range.offset)?;
-        let lead = bytes[..n].iter().take_while(|b| b.is_ascii_whitespace()).count();
-        range.offset += lead as u64;
-        range.len -= lead as u64;
-        if lead != n {
-            break;
+#[cfg(test)]
+mod tests {
+    use crate::stream::Flow;
+
+    /// JSON whitespace is space, tab, LF and CR. A line holding only U+2003 (EM SPACE), short or
+    /// past the in-memory limit, is a rejected record to every reader of a transcript, and a line
+    /// of JSON whitespace is blank to all of them.
+    #[test]
+    fn every_path_trims_json_whitespace_only() {
+        let world = cv_testkit::World::new("jsonl-json-whitespace");
+        let record =
+            r#"{"type":"user","uuid":"a","parentUuid":null,"sessionId":"s","message":{"role":"user","content":"hi"}}"#;
+        for (name, filler, blank) in [
+            ("em", "\u{2003}".to_owned(), false),
+            ("em-large", "\u{2003}".repeat(40_000), false),
+            ("ascii", " \t\r".to_owned(), true),
+            ("ascii-large", " \t".repeat(70_000), true),
+        ] {
+            let path = world.base.join(format!("{name}.jsonl"));
+            let text = format!("{record}\n{filler}\n");
+            std::fs::write(&path, &text).unwrap();
+            let source = crate::json::JsonSource::capture(&path).unwrap();
+            let file = std::fs::File::open(&path).unwrap();
+
+            let mut codec = Vec::new();
+            super::for_each_line(&source, &file, 0, source.len(), |line| {
+                codec.push((line.blank, line.view.is_some()));
+                Ok(Flow::Continue)
+            })
+            .unwrap();
+            assert_eq!(codec, [(false, true), (blank, false)], "codec, {name}");
+
+            let lines = 1 + usize::from(!blank);
+            let counts = crate::restamp::write_restamped_transcript(&source, &file, "n", &mut std::io::sink()).unwrap();
+            assert_eq!(counts.lines, lines, "restamp, {name}");
+            assert_eq!(crate::restamp::restamp(&text, "n").lines, lines, "restamp text, {name}");
+            assert_eq!(
+                crate::harness::for_each_json_line_str(&text, |_| Flow::Continue),
+                u64::from(!blank),
+                "line reader, {name}"
+            );
+
+            let verified = crate::harness::claude::emit::verify_claude_resumable(&path, None);
+            assert_eq!(verified.is_ok(), blank, "verify, {name}: {verified:?}");
+
+            let opts = crate::prune::PruneOptions {
+                new_id: Some(format!("{name}-pruned")),
+                ..Default::default()
+            };
+            let pruned = crate::prune::prune_session(&path, &opts).unwrap();
+            let output = std::fs::read_to_string(&pruned.new_path).unwrap();
+            assert_eq!(output.contains('\u{2003}'), !blank, "prune, {name}");
+            assert_eq!(output.lines().count(), lines, "prune, {name}");
         }
     }
-    while range.len > 0 {
-        let n = range.len.min(bytes.len() as u64) as usize;
-        ranges::read_exact_at(file, &mut bytes[..n], range.offset + range.len - n as u64)?;
-        let tail = bytes[..n].iter().rev().take_while(|b| b.is_ascii_whitespace()).count();
-        range.len -= tail as u64;
-        if tail != n {
-            break;
-        }
-    }
-    Ok(range)
 }

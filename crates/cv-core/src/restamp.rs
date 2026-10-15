@@ -214,7 +214,7 @@ pub(crate) fn write_restamped_transcript(
             let line = std::str::from_utf8(bytes).map_err(|_| {
                 std::io::Error::new(std::io::ErrorKind::InvalidData, "stream did not contain valid UTF-8")
             })?;
-            counts.lines += usize::from(!line.trim().is_empty());
+            counts.lines += usize::from(!crate::harness::store::json::trim_str(line).is_empty());
             if let Some(restamped) = restamp_line(line, new_id) {
                 counts.stamped += 1;
                 output.write_all(restamped.as_bytes())?;
@@ -276,7 +276,7 @@ pub fn restamp(text: &str, new_id: &str) -> Restamped {
             Some(l) => (l, "\n"),
             None => (piece, ""),
         };
-        lines += usize::from(!line.trim().is_empty());
+        lines += usize::from(!crate::harness::store::json::trim_str(line).is_empty());
         match restamp_line(line, new_id) {
             Some(new) => {
                 stamped += 1;

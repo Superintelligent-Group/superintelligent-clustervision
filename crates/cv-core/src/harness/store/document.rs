@@ -455,7 +455,7 @@ impl<'a> Iterator for ArrayIter<'a> {
 }
 
 fn whitespace(b: &[u8], i: &mut usize) {
-    while b.get(*i).is_some_and(u8::is_ascii_whitespace) {
+    while b.get(*i).is_some_and(super::json::is_whitespace) {
         *i += 1;
     }
 }
@@ -497,7 +497,7 @@ fn value_end(b: &[u8], mut i: usize, index: &Index) -> Option<usize> {
             let start = i;
             while b
                 .get(i)
-                .is_some_and(|c| !c.is_ascii_whitespace() && !b",]}".contains(c))
+                .is_some_and(|c| !super::json::is_whitespace(c) && !b",]}".contains(c))
             {
                 i += 1;
             }

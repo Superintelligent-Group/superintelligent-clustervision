@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Prune, restamp and resume verification treat a line of Unicode spaces as a malformed record, as the reader does; only JSON whitespace makes a line blank.
+
 - SQLite readers cannot create harness WAL sidecars when a rollback-mode database switches to WAL during a read.
 
 - New-name publication fails safely when neither hard links nor exclusive rename are supported, instead of risking overwriting a concurrent writer.

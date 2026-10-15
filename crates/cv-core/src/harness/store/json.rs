@@ -1,6 +1,24 @@
 //! Allocation-free checks that serde's ignored/raw values omit. Call only after JSON syntax
 //! validation; these checks preserve Value's finite numbers, UTF-8/UTF-16 and depth acceptance.
 
+/// JSON's insignificant whitespace (RFC 8259): space, tab, LF and CR, never form feed or a Unicode
+/// space. Every reader of a JSONL line trims by exactly this, so a line is blank to all or to none.
+pub(crate) fn is_whitespace(byte: &u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\n' | b'\r')
+}
+
+/// `bytes` without the JSON whitespace around it.
+pub(crate) fn trim(bytes: &[u8]) -> &[u8] {
+    let lead = bytes.iter().take_while(|b| is_whitespace(b)).count();
+    let tail = bytes[lead..].iter().rev().take_while(|b| is_whitespace(b)).count();
+    &bytes[lead..bytes.len() - tail]
+}
+
+/// [`trim`] over text.
+pub(crate) fn trim_str(text: &str) -> &str {
+    text.trim_matches(|c: char| c.is_ascii() && is_whitespace(&(c as u8)))
+}
+
 /// RawValue validates JSON syntax but deliberately skips finite-number and surrogate checks,
 /// and its ignored containers do not consume Value's recursion budget. Match Value acceptance
 /// before applying replay controls, without decoding or allocating the potentially giant strings.
@@ -64,10 +82,7 @@ pub(crate) fn value_compatible_str_at_depth_with(
             }
             b'-' | b'0'..=b'9' => {
                 let start = i;
-                while b
-                    .get(i)
-                    .is_some_and(|c| !c.is_ascii_whitespace() && !b",]}".contains(c))
-                {
+                while b.get(i).is_some_and(|c| !is_whitespace(c) && !b",]}".contains(c)) {
                     i += 1;
                 }
                 if serde_json::from_slice::<serde_json::Number>(&b[start..i]).is_err() {
@@ -131,10 +146,7 @@ pub(crate) fn validate_value(text: &str, mut span: impl FnMut(usize, usize)) -> 
             Some(b'n') if b[i..].starts_with(b"null") => i += 4,
             Some(b'-' | b'0'..=b'9') => {
                 let start = i;
-                while b
-                    .get(i)
-                    .is_some_and(|c| !c.is_ascii_whitespace() && !b",]}".contains(c))
-                {
+                while b.get(i).is_some_and(|c| !is_whitespace(c) && !b",]}".contains(c)) {
                     i += 1;
                 }
                 if serde_json::from_slice::<serde_json::Number>(&b[start..i]).is_err() {
@@ -173,7 +185,7 @@ pub(crate) fn validate_value(text: &str, mut span: impl FnMut(usize, usize)) -> 
 }
 
 fn skip_ws(b: &[u8], mut i: usize) -> usize {
-    while matches!(b.get(i), Some(b' ' | b'\n' | b'\t' | b'\r')) {
+    while b.get(i).is_some_and(is_whitespace) {
         i += 1;
     }
     i

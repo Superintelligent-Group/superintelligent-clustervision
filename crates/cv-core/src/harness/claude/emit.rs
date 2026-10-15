@@ -443,7 +443,7 @@ fn verify_legacy(path: &Path, agent: Option<&str>) -> Result<()> {
     let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let lines: Vec<Value> = text
         .lines()
-        .filter(|l| !l.trim().is_empty())
+        .filter(|l| !crate::harness::store::json::trim_str(l).is_empty())
         .map(|l| serde_json::from_str(l).with_context(|| format!("{}: not a JSON record: {l}", path.display())))
         .collect::<Result<_>>()?;
     let uuids: std::collections::HashSet<&str> = lines

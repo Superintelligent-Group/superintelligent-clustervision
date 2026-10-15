@@ -170,7 +170,10 @@ impl<'a> Cursor<'a> {
     pub fn whitespace(&mut self) -> io::Result<()> {
         loop {
             let bytes = self.fill_buf()?;
-            let n = bytes.iter().take_while(|b| b.is_ascii_whitespace()).count();
+            let n = bytes
+                .iter()
+                .take_while(|b| crate::harness::store::json::is_whitespace(b))
+                .count();
             if n == 0 {
                 return Ok(());
             }
@@ -279,7 +282,7 @@ impl<'a> Cursor<'a> {
                 let bytes = self.fill_buf()?;
                 let n = bytes
                     .iter()
-                    .take_while(|b| !b.is_ascii_whitespace() && !b",]}".contains(b))
+                    .take_while(|b| !crate::harness::store::json::is_whitespace(b) && !b",]}".contains(b))
                     .count();
                 if n == 0 {
                     break;

@@ -13,7 +13,7 @@ place as a positioned view. That `cfg` is the only one a reader needs; `JsonView
 API over borrowed, positioned and owned (`(&Value).into()`, for strings with no file) values.
 Each line is validated once by `store::json::validate_value` (exactly serde `Value` acceptance,
 property-tested against serde), which also indexes long strings and containers so every later
-field selection skips them in O(1). Lines are ASCII-trimmed, as JSON allows.
+field selection skips them in O(1). Lines are trimmed of JSON whitespace (space, tab, LF, CR) only.
 
 **Decoder.** One function per format, `record(view, demand) -> session facts + Option<Message>`
 (Claude: `harness/claude/record.rs`). It selects the fields any record kind reads in one pass
