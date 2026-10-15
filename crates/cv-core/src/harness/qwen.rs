@@ -500,7 +500,7 @@ struct ReplayState {
     /// `functionCall` ids of `agent` calls: their `tool_result` is a sub-agent's return.
     spawn_calls: BTreeSet<String>,
     /// `functionCall` id → the tool's name (unwrapped from `tool_call`), for the results.
-    call_names: std::collections::HashMap<String, String>,
+    call_names: std::collections::BTreeMap<String, String>,
     skipped: u64,
 }
 

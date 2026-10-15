@@ -100,7 +100,7 @@ use crate::stream::{Checkpoint, Flow, MessageSink, ParseOptions};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -365,7 +365,7 @@ struct ResumeState {
 #[derive(serde::Deserialize)]
 struct SavedCtx {
     model_bindings: ModelBindings,
-    call_names: HashMap<String, String>,
+    call_names: BTreeMap<String, String>,
     seen_prompts: std::collections::BTreeSet<u64>,
     protocol_version: Option<String>,
     facts: Map<String, Value>,
@@ -803,7 +803,7 @@ struct Ctx<'a> {
     step: Option<StepBuf>,
     model_bindings: ModelBindings,
     /// `toolCallId` → tool name, so a result can name its tool (`Block::ToolResult::tool_name`).
-    call_names: HashMap<String, String>,
+    call_names: BTreeMap<String, String>,
     /// Hashes of system prompts already surfaced (a re-bind with the same prompt is bookkeeping).
     /// Ordered so later checkpoints remain identical after restoring this state.
     seen_prompts: std::collections::BTreeSet<u64>,
@@ -821,7 +821,7 @@ impl<'a> Ctx<'a> {
             opts,
             step: None,
             model_bindings: ModelBindings::default(),
-            call_names: HashMap::new(),
+            call_names: BTreeMap::new(),
             seen_prompts: std::collections::BTreeSet::new(),
             protocol_version: None,
             facts: Map::new(),

@@ -373,6 +373,45 @@ fn every_corpus_version_reads_as_its_golden_summary() {
     );
 }
 
+/// What cv persists or prints is byte-deterministic: two reads of one session take byte-identical
+/// checkpoints at every offset an adapter allows. Each read's hash maps get their own random seed,
+/// so a map serialized in iteration order differs between them.
+#[test]
+fn every_corpus_checkpoint_serializes_deterministically() {
+    struct Checkpoints(Vec<Vec<u8>>);
+    impl cv_core::MessageSink for Checkpoints {
+        fn message(&mut self, _: cv_core::Message) -> cv_core::Flow {
+            cv_core::Flow::Continue
+        }
+        fn wants_checkpoint(&mut self, _: u64) -> bool {
+            true
+        }
+        fn checkpoint(&mut self, cp: &mut cv_core::stream::Checkpoint) {
+            self.0.push(serde_json::to_vec(cp).unwrap());
+        }
+    }
+    let _w = World::in_process("corpus-checkpoints", cv_core::env::Env::enter_isolated);
+    let mut taken = 0;
+    for h in HARNESSES {
+        for v in subdirs(&corpus_root().join(h.name)) {
+            let adapter = (h.adapter)(&v);
+            for r in adapter.discover().expect("discover") {
+                let read = || {
+                    let mut sink = Checkpoints(Vec::new());
+                    let session = adapter
+                        .try_stream(&r, &cv_core::ParseOptions::full(), &mut sink)
+                        .unwrap();
+                    (sink.0, serde_json::to_vec(&session).unwrap())
+                };
+                let first = read();
+                taken += first.0.len();
+                assert!(first == read(), "{}/{}: {}", h.name, v.display(), r.id);
+            }
+        }
+    }
+    assert!(taken > 0, "no adapter took a checkpoint");
+}
+
 /// Doctor needs rich metadata but only decoded byte counts from text. Check every actual
 /// adapter's lazy-extra interpretation against its full reader, including child sessions.
 #[test]

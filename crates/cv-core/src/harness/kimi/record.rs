@@ -22,7 +22,7 @@ pub(super) fn message(
     spans: Option<&JsonSource>,
     enrich: &WireEnrich,
     complete: bool,
-    names: &HashMap<String, String>,
+    names: &BTreeMap<String, String>,
 ) -> Result<Option<Message>> {
     let Some(fields) = Fields::parse(view, &["role", "content", "tool_calls", "tool_call_id"])? else {
         return Ok(None);

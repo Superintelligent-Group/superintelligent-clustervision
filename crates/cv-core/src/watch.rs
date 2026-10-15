@@ -8,7 +8,7 @@
 use crate::harness;
 use crate::ir::{Harness, Message, SessionRef};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 mod read;
@@ -237,7 +237,7 @@ impl From<Pos> for State {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Cursor {
     v: u32,
-    o: HashMap<String, Pos>,
+    o: BTreeMap<String, Pos>,
 }
 
 const CURSOR_VERSION: u32 = 1;
@@ -270,7 +270,7 @@ impl Cursor {
 /// tail — so every one of them compares against a parsed count, never a row count.
 pub struct Watcher {
     filter: Filter,
-    seen: HashMap<String, State>,
+    seen: BTreeMap<String, State>,
     /// Where sessions come from: [`crate::discover_all`] (stat the fleet, the default) or
     /// [`crate::sessions`] (the catalog fast path, for a poller that runs every few seconds).
     discover: fn() -> Vec<SessionRef>,
@@ -287,7 +287,7 @@ impl Watcher {
     pub fn with_discovery(filter: Filter, emit_existing: bool, discover: fn() -> Vec<SessionRef>) -> Self {
         let mut w = Watcher {
             filter,
-            seen: HashMap::new(),
+            seen: BTreeMap::new(),
             discover,
         };
         if !emit_existing {
@@ -1198,7 +1198,7 @@ mod tests {
         // Prior wire selection: size eligibility first, then the first eight eligible
         // reader states in the map's iteration order. Positions always survive both limits.
         let mut readers = 0;
-        let expected: HashMap<_, _> = watcher
+        let expected: BTreeMap<_, _> = watcher
             .seen
             .iter()
             .map(|(key, state)| {
