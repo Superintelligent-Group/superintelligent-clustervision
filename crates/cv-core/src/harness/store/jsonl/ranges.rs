@@ -312,8 +312,8 @@ pub(crate) struct Records<'a, S: ?Sized = fs::File> {
 impl<S: ?Sized> Records<'_, S> {
     /// Optionally retain small physical records during framing, avoiding a second positioned
     /// read. Above this fixed cap the scratch is cleared; giant records remain only ranges.
+    /// The scratch grows with the records it holds, never past the cap.
     pub(crate) fn keep_small_records(&mut self, limit: usize) {
-        self.small = Vec::with_capacity(limit);
         self.small_limit = limit;
     }
     pub(crate) fn small_record(&self) -> Option<&[u8]> {
@@ -348,6 +348,11 @@ impl<S: At + ?Sized> Iterator for Records<'_, S> {
             if self.small_complete {
                 let payload = n - usize::from(newline.is_some());
                 if payload <= self.small_limit - self.small.len() {
+                    let needed = self.small.len() + payload;
+                    if needed > self.small.capacity() {
+                        let grown = needed.max(2 * self.small.capacity()).min(self.small_limit);
+                        self.small.reserve_exact(grown - self.small.len());
+                    }
                     self.small.extend_from_slice(&bytes[..payload]);
                 } else {
                     self.small.clear();
