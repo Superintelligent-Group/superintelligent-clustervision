@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Reading a live session no longer fails with "JSON source changed" when its writer appends: `.jsonl` sources may grow; truncation and rewrites still fail.
+
 - A failed prune, rewind or adopt retracts its companion file only if it is still cv's own, on every platform, and reports a failed retract.
 
 - Replacing a directory without atomic swap no longer deletes the new tree when restoring the old one fails; both are kept and named.
