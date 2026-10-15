@@ -24,6 +24,9 @@ Datapath design and open gaps: `docs/design/DATAPATHS.md`; goal, budgets and mea
   PIDs you started.
 - Never run an unfiltered `cargo test -p <crate>` for exploration; filter to what you changed. The
   one full `cargo test --workspace` before pushing is the gate.
+- Product lines per crate are budgeted in `tools/size-budget.txt` (`tools/check-size.py`, a CI
+  gate). Growth means raising a number in the same commit, justified against "The shape"; it
+  ratchets down as code shrinks. No committed evidence files; design docs stay under 250 lines.
 - A file embedded with `include_str!` must live inside its crate, or `cargo publish` fails.
 - `crates/cv-core/tests/corpus/<harness>/<version>/` is real harness-written data, scrubbed. Never
   regenerate a committed version in place; add a new version. Summaries regenerate with
