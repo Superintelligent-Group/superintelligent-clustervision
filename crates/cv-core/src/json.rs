@@ -1515,8 +1515,7 @@ impl<'a> JsonView<'a> {
     pub fn write_canonical(self, writer: &mut impl Write) -> Result<()> {
         match self.0 {
             View::Owned(value) => serde_json::to_writer(writer, value).map_err(Into::into),
-            View::Source(source) => write_raw(source.raw, writer),
-            View::Portable(_) => write_portable(self, writer),
+            View::Source(_) | View::Portable(_) => write_source(self, writer),
         }
     }
 }
@@ -1618,69 +1617,14 @@ fn decode_string(quoted: &str, f: &mut impl FnMut(&str) -> Result<()>) -> Result
     anyhow::ensure!(decoded.is_ok(), "validated JSON string failed decoding");
     Ok(())
 }
-fn write_raw(raw: Raw<'_>, writer: &mut impl Write) -> Result<()> {
-    match raw.get().as_bytes().first() {
-        Some(b'{') => {
-            let entries = document::object_entries(raw).context("invalid validated JSON object")?;
-            writer.write_all(b"{")?;
-            for (i, (key, value)) in entries.into_iter().enumerate() {
-                if i != 0 {
-                    writer.write_all(b",")?;
-                }
-                serde_json::to_writer(&mut *writer, &key)?;
-                writer.write_all(b":")?;
-                write_raw(value, writer)?;
-            }
-            writer.write_all(b"}")?;
-        }
-        Some(b'[') => {
-            writer.write_all(b"[")?;
-            for (i, value) in document::array_iter(raw)
-                .context("invalid validated JSON array")?
-                .enumerate()
-            {
-                if i != 0 {
-                    writer.write_all(b",")?;
-                }
-                write_raw(value, writer)?;
-            }
-            writer.write_all(b"]")?;
-        }
-        Some(b'"') => {
-            // Strict validation already established UTF-8 and string acceptance. Serde
-            // preserves every short escape except optional slash escaping; Unicode escapes
-            // need decoding to normalize code points and canonical control characters.
-            let bytes = raw.get().as_bytes();
-            if !bytes.contains(&b'\\')
-                || (memchr::memmem::find(bytes, b"\\u").is_none() && memchr::memmem::find(bytes, b"\\/").is_none())
-            {
-                writer.write_all(bytes)?;
-            } else {
-                writer.write_all(b"\"")?;
-                let mut scratch = Vec::new();
-                decode_string(raw.get(), &mut |text| {
-                    scratch.clear();
-                    serde_json::to_writer(&mut scratch, text)?;
-                    writer.write_all(&scratch[1..scratch.len() - 1])?;
-                    Ok(())
-                })?;
-                writer.write_all(b"\"")?;
-            }
-        }
-        Some(b'-' | b'0'..=b'9') => {
-            let number: Number = serde_json::from_str(raw.get())?;
-            serde_json::to_writer(writer, &number)?;
-        }
-        _ => writer.write_all(raw.get().as_bytes())?, // Validated null/bool.
-    }
-    Ok(())
-}
-
-fn write_portable(value: JsonView<'_>, writer: &mut impl Write) -> Result<()> {
-    let View::Portable(source) = value.0 else {
-        unreachable!()
+/// One container walk for both byte sources; only scalar access depends on the backing.
+fn write_source(value: JsonView<'_>, writer: &mut impl Write) -> Result<()> {
+    let kind = match value.0 {
+        View::Source(source) => source.raw.get().as_bytes().first().copied(),
+        View::Portable(source) => source.source.kind(source.value)?,
+        View::Owned(_) => unreachable!(),
     };
-    match source.source.kind(source.value)? {
+    match kind {
         Some(b'{') => {
             writer.write_all(b"{")?;
             let mut first = true;
@@ -1706,18 +1650,38 @@ fn write_portable(value: JsonView<'_>, writer: &mut impl Write) -> Result<()> {
             writer.write_all(b"]")?;
         }
         Some(b'"') => {
+            if let View::Source(source) = value.0 {
+                // Preserve the mapped fast path: only Unicode and optional slash escapes need
+                // decoding to match serde's canonical spelling. Accepted bytes can pass through.
+                let bytes = source.raw.get().as_bytes();
+                if !bytes.contains(&b'\\')
+                    || (memchr::memmem::find(bytes, b"\\u").is_none() && memchr::memmem::find(bytes, b"\\/").is_none())
+                {
+                    writer.write_all(bytes)?;
+                    return Ok(());
+                }
+            }
             writer.write_all(b"\"")?;
             let mut scratch = Vec::new();
-            source.source.for_each_string_chunk_until(source.value, &mut |text| {
+            let mut encode = |text: &str| {
                 scratch.clear();
                 serde_json::to_writer(&mut scratch, text)?;
                 writer.write_all(&scratch[1..scratch.len() - 1])?;
                 Ok(())
-            })?;
+            };
+            match value.0 {
+                View::Source(source) => decode_string(source.raw.get(), &mut encode)?,
+                View::Portable(source) => source.source.for_each_string_chunk_until(source.value, &mut encode)?,
+                View::Owned(_) => unreachable!(),
+            }
             writer.write_all(b"\"")?;
         }
         Some(b'-' | b'0'..=b'9') => {
-            let number: Number = source.source.materialize(source.value)?;
+            let number: Number = match value.0 {
+                View::Source(source) => serde_json::from_str(source.raw.get())?,
+                View::Portable(source) => source.source.materialize(source.value)?,
+                View::Owned(_) => unreachable!(),
+            };
             serde_json::to_writer(writer, &number)?;
         }
         Some(b't') => writer.write_all(b"true")?,
