@@ -802,33 +802,9 @@ mod db {
             }
         }
 
-        /// Same answer [`needs_ingest`] would give for `r`, from the preloaded table. Takes the
-        /// file `size` the caller already stat'ed (bulk sweeps have it from `file_sig`) instead of
-        /// re-stat'ing per row.
-        pub fn needs_ingest(&self, r: &SessionRef, mtime_ns: i64, size: i64) -> bool {
-            let source = crate::source::Snapshot {
-                primary: (mtime_ns, size),
-                dependencies: crate::source::Probe::default().dependencies(r),
-            };
-            self.needs_ingest_with_source(r, &source)
-        }
-
-        /// The same decision with dependencies already gathered by the operation's shared probe.
-        pub fn needs_ingest_with_source(&self, r: &SessionRef, source: &crate::source::Snapshot) -> bool {
-            self.needs_ingest_with_probe(r, source, &mut crate::source::Probe::default())
-        }
-
-        pub fn needs_ingest_with_probe(
-            &self,
-            r: &SessionRef,
-            source: &crate::source::Snapshot,
-            probe: &mut crate::source::Probe,
-        ) -> bool {
-            self.needs_ingest_with_provenance(r, source, &Provenance::default(), probe)
-        }
-
-        /// Freshness of the one published output: source copy, provenance, tuple and dependencies.
-        pub fn needs_ingest_with_provenance(
+        /// Whether `r`'s one published event output is stale: source copy, provenance, tuple and
+        /// dependencies, checked against the preloaded table with the operation's shared probe.
+        pub fn needs_ingest(
             &self,
             r: &SessionRef,
             source: &crate::source::Snapshot,
@@ -1156,7 +1132,7 @@ mod db {
         let mut n = 0;
         for (r, provenance) in sources {
             let source = probe.snapshot(&r);
-            if !force && !sync.needs_ingest_with_provenance(&r, &source, &provenance, &mut probe) {
+            if !force && !sync.needs_ingest(&r, &source, &provenance, &mut probe) {
                 continue;
             }
             match ingest_subagent(&r, &provenance) {
@@ -1533,21 +1509,7 @@ mod db_stub {
         pub fn load() -> SyncTable {
             SyncTable
         }
-        pub fn needs_ingest(&self, _r: &SessionRef, _mtime_ns: i64, _size: i64) -> bool {
-            false
-        }
-        pub fn needs_ingest_with_source(&self, _r: &SessionRef, _source: &crate::source::Snapshot) -> bool {
-            false
-        }
-        pub fn needs_ingest_with_probe(
-            &self,
-            _r: &SessionRef,
-            _source: &crate::source::Snapshot,
-            _probe: &mut crate::source::Probe,
-        ) -> bool {
-            false
-        }
-        pub fn needs_ingest_with_provenance(
+        pub fn needs_ingest(
             &self,
             _r: &SessionRef,
             _source: &crate::source::Snapshot,
@@ -1971,7 +1933,7 @@ mod tests {
         let stale = |r: &SessionRef, prov: &Provenance| {
             let mut probe = crate::source::Probe::default();
             let source = probe.snapshot(r);
-            SyncTable::load().needs_ingest_with_provenance(r, &source, prov, &mut probe)
+            SyncTable::load().needs_ingest(r, &source, prov, &mut probe)
         };
         let rows = || format!("{:?}", events_for("claude", "shared", None));
         ingest_ref(&a).unwrap();
@@ -2171,7 +2133,9 @@ mod tests {
         let r = SessionRef::new("empty", crate::Harness::Claude, &path);
         assert_eq!(ingest_ref(&r).unwrap(), 0);
         assert!(!needs_ingest(&r, file_mtime_ns(&path)));
-        assert!(!SyncTable::load().needs_ingest(&r, file_mtime_ns(&path), 0));
+        let source = crate::source::Probe::default().snapshot(&r);
+        let mut probe = crate::source::Probe::default();
+        assert!(!SyncTable::load().needs_ingest(&r, &source, &Provenance::default(), &mut probe));
         let conn = crate::catalog::open_db().unwrap();
         conn.execute("UPDATE event_sync SET size=NULL WHERE id='empty'", [])
             .unwrap();

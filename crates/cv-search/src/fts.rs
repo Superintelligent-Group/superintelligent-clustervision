@@ -801,7 +801,7 @@ impl SweepPlanner<'_> {
                 dependencies_fresh && dependencies.primary_fresh(r, &source.dependencies)
             }) && metadata.get(&r.id) == Some(&DiscoveryMetadata::new(r, prov));
             unchanged += usize::from(fts_fresh);
-            let events = event_sync.needs_ingest_with_provenance(r, &source, prov, &mut probe);
+            let events = event_sync.needs_ingest(r, &source, prov, &mut probe);
             // Unchanged on every axis → skip entirely (no re-parse beyond the metadata scan).
             if fts_fresh
                 && !events
@@ -3068,8 +3068,9 @@ mod tests {
         assert_eq!(index.reader().unwrap().searcher().num_docs(), 0);
         assert!(cv_core::events::SyncTable::load().needs_ingest(
             &r,
-            cv_core::events::file_mtime_ns(&r.path),
-            std::fs::metadata(&r.path).unwrap().len() as i64
+            &cv_core::source::Probe::default().snapshot(&r),
+            &Default::default(),
+            &mut cv_core::source::Probe::default()
         ));
         assert!(cv_core::resume::MarkTable::load().get(&r).is_none());
         assert!(cv_core::catalog::AffordanceTable::load().counts(&r).is_none());
@@ -4193,7 +4194,12 @@ mod tests {
         assert!(cv_core::catalog::AffordanceTable::load()
             .counts_with_source(&r, &base)
             .is_some());
-        assert!(!cv_core::events::SyncTable::load().needs_ingest_with_source(&r, &base));
+        assert!(!cv_core::events::SyncTable::load().needs_ingest(
+            &r,
+            &base,
+            &Default::default(),
+            &mut cv_core::source::Probe::default()
+        ));
         let changed = refresh();
         assert_eq!((changed.changed, changed.resumed), (1, 0));
         assert!(text_search(&dir, "zanzibar", 10).unwrap().is_empty());
@@ -5626,7 +5632,7 @@ mod tests {
             agent_id: Some("kid2".into()),
             workflow: None,
         };
-        assert!(!cv_core::events::SyncTable::load().needs_ingest_with_provenance(
+        assert!(!cv_core::events::SyncTable::load().needs_ingest(
             &child,
             &child_source,
             &child_provenance,
