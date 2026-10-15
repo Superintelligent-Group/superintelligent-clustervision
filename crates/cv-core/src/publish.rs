@@ -298,9 +298,26 @@ impl StagedDir {
 
     /// [`Claim::New`] refuses an existing name. [`Claim::Replace`] swaps the directories in one
     /// step where the platform can (`RENAME_SWAP`, `RENAME_EXCHANGE`); elsewhere it moves the old
-    /// one aside first, so the name is briefly absent but never half merged. The replaced tree is
-    /// then deleted.
-    pub fn publish(mut self, destination: &Path, claim: Claim) -> Result<()> {
+    /// one aside first, so the name is briefly absent but never half merged, and a failed claim
+    /// puts the old tree back. If even that fails, both trees are kept and the error names them.
+    /// The replaced tree is then deleted.
+    pub fn publish(self, destination: &Path, claim: Claim) -> Result<()> {
+        #[cfg(target_vendor = "apple")]
+        let swap = |from: &Path, to: &Path| rename_with(from, to, libc::RENAME_SWAP);
+        #[cfg(target_os = "linux")]
+        let swap = |from: &Path, to: &Path| rename_with(from, to, libc::RENAME_EXCHANGE);
+        #[cfg(not(any(target_vendor = "apple", target_os = "linux")))]
+        let swap = |_: &Path, _: &Path| None;
+        self.publish_using(destination, claim, swap, |from, to| std::fs::rename(from, to))
+    }
+
+    fn publish_using(
+        mut self,
+        destination: &Path,
+        claim: Claim,
+        swap: impl FnOnce(&Path, &Path) -> Option<io::Result<()>>,
+        mut rename: impl FnMut(&Path, &Path) -> io::Result<()>,
+    ) -> Result<()> {
         let context = || format!("publishing {}", destination.display());
         let exists = std::fs::symlink_metadata(destination).is_ok();
         let staged = std::mem::take(&mut self.path);
@@ -320,13 +337,7 @@ impl StagedDir {
             sync_parent(destination);
             return Ok(());
         }
-        #[cfg(target_vendor = "apple")]
-        let swapped = rename_with(&staged, destination, libc::RENAME_SWAP);
-        #[cfg(target_os = "linux")]
-        let swapped = rename_with(&staged, destination, libc::RENAME_EXCHANGE);
-        #[cfg(not(any(target_vendor = "apple", target_os = "linux")))]
-        let swapped: Option<io::Result<()>> = None;
-        let old = match swapped {
+        let old = match swap(&staged, destination) {
             // The staged name now holds the replaced tree.
             Some(Ok(())) => staged,
             Some(Err(e)) => {
@@ -335,12 +346,23 @@ impl StagedDir {
             }
             None => {
                 let aside = staged.with_extension("replaced");
-                if let Err(e) = std::fs::rename(destination, &aside) {
+                if let Err(e) = rename(destination, &aside) {
                     self.path = staged;
                     return Err(e).with_context(context);
                 }
-                if let Err(e) = std::fs::rename(&staged, destination) {
-                    let _ = std::fs::rename(&aside, destination);
+                if let Err(e) = rename(&staged, destination) {
+                    if let Err(restore) = rename(&aside, destination) {
+                        // Neither tree holds the name now. Delete nothing; say where both are.
+                        return Err(e).with_context(|| {
+                            format!(
+                                "publishing {}; putting the replaced tree back also failed ({restore}), \
+                                 so it is kept at {} and the new one at {}",
+                                destination.display(),
+                                aside.display(),
+                                staged.display()
+                            )
+                        });
+                    }
                     self.path = staged;
                     return Err(e).with_context(context);
                 }
@@ -510,6 +532,63 @@ mod tests {
         assert!(!std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
         assert_eq!(std::fs::read(&target).unwrap(), b"after!");
         assert_eq!(temporaries(dir), 0);
+    }
+
+    /// Without an atomic swap the old tree is moved aside before the new one takes the name. When
+    /// that second rename fails the old tree goes back; when putting it back fails too, nothing is
+    /// deleted and the error says where both trees are.
+    #[test]
+    fn a_failed_move_aside_replacement_keeps_a_tree_and_reports_the_error() {
+        let world = cv_testkit::World::new("publish-move-aside");
+        let tree = |path: &Path| std::fs::read_to_string(path.join("which")).ok();
+        // Each case fails the renames whose (1-based) numbers it lists: 1 moves the old tree
+        // aside, 2 claims the name, 3 puts the old tree back.
+        for (case, failing, published) in [
+            ("ok", &[][..], Some("new")),
+            ("aside", &[1][..], Some("old")),
+            ("claim", &[2][..], Some("old")),
+            ("restore", &[2, 3][..], None),
+        ] {
+            let dir = world.base.join(case);
+            std::fs::create_dir(&dir).unwrap();
+            let destination = dir.join("tree");
+            std::fs::create_dir(&destination).unwrap();
+            std::fs::write(destination.join("which"), "old").unwrap();
+            let staged = StagedDir::beside(&destination, "test").unwrap();
+            std::fs::write(staged.path().join("which"), "new").unwrap();
+            let mut calls = 0;
+            let rename = |from: &Path, to: &Path| {
+                calls += 1;
+                match failing.contains(&calls) {
+                    true => Err(io::Error::other(format!("injected failure {calls}"))),
+                    false => std::fs::rename(from, to),
+                }
+            };
+            let result = staged.publish_using(&destination, Claim::Replace, |_, _| None, rename);
+            assert_eq!(result.is_ok(), failing.is_empty(), "{case}: {result:?}");
+            assert_eq!(tree(&destination).as_deref(), published, "{case}");
+            let left: Vec<_> = std::fs::read_dir(&dir)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .filter(|p| p != &destination)
+                .collect();
+            if published.is_some() {
+                assert!(left.is_empty(), "{case}: {left:?}");
+                continue;
+            }
+            // Neither tree holds the name: both are kept, and the error names where.
+            let error = format!("{:#}", result.unwrap_err());
+            let mut kept: Vec<_> = left.iter().filter_map(|p| tree(p)).collect();
+            kept.sort();
+            assert_eq!(kept, ["new", "old"], "{case}: {left:?}");
+            for path in &left {
+                assert!(error.contains(&path.display().to_string()), "{case}: {error}");
+            }
+            assert!(
+                error.contains("injected failure 2") && error.contains("injected failure 3"),
+                "{error}"
+            );
+        }
     }
 
     #[cfg(unix)]

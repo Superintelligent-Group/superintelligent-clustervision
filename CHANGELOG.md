@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Replacing a directory without atomic swap no longer deletes the new tree when restoring the old one fails; both are kept and named.
+
 - Prune, restamp and resume verification treat a line of Unicode spaces as a malformed record, as the reader does; only JSON whitespace makes a line blank.
 
 - SQLite readers cannot create harness WAL sidecars when a rollback-mode database switches to WAL during a read.
