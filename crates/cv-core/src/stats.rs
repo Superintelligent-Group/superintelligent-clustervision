@@ -614,6 +614,7 @@ impl TokenFold {
 }
 
 /// The keys `cv stats --json` / `GET /api/stats` carry, in order.
+#[cfg(test)]
 pub const STATS_KEYS: [&str; 6] = [
     "sessions",
     "messages",

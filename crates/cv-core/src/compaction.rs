@@ -18,7 +18,7 @@
 //! [`CompactionSink`]; it keeps only small per-boundary rows + (optionally) the summary text, never
 //! the transcript. Requested full summaries are retained as output and may be arbitrarily large.
 
-use crate::ir::{Block, Message, MessageKind, Session, SessionRef};
+use crate::ir::{Block, Message, MessageKind, SessionRef};
 use crate::stream::{Flow, MessageSink};
 use serde_json::Value;
 
@@ -285,7 +285,8 @@ pub fn row(boundaries: &[Compaction], n: usize) -> Value {
 /// from an already-parsed session's messages, without re-streaming. Mirrors [`CompactionSink`]'s
 /// logic on `session.messages`, resolving retained lazy text against `session.source_path` and
 /// returning demanded summary read errors.
-pub fn detect_in_session(session: &Session, keep_summaries: bool) -> anyhow::Result<Vec<Compaction>> {
+#[cfg(test)]
+pub fn detect_in_session(session: &crate::ir::Session, keep_summaries: bool) -> anyhow::Result<Vec<Compaction>> {
     let mut sink = CompactionSink::new(keep_summaries);
     sink.resolver = Some(crate::lazy::Resolver::new(session.source_path.clone()));
     for m in &session.messages {
@@ -297,6 +298,7 @@ pub fn detect_in_session(session: &Session, keep_summaries: bool) -> anyhow::Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Session;
 
     #[test]
     fn bounded_summary_preview_matches_full_text_for_blank_and_multiblock_bodies() {
