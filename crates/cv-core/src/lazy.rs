@@ -340,9 +340,9 @@ impl SourceStamp {
     }
 }
 
-/// Resolves [`Span`]s against their source file(s). Memory-maps each source on first use (with the
-/// `mmap` feature) so resolving slices pages on demand rather than reading the whole file; without
-/// `mmap` (e.g. wasm32) it falls back to a positioned ranged read.
+/// Resolves [`Span`]s against their source file(s). With the `mmap` feature each demand maps only
+/// its span's bytes and drops them when it returns, so resolving every span of a multi-GB
+/// transcript never holds the file mapped; without `mmap` (e.g. wasm32) it reads positioned.
 ///
 /// The primary source is held to its [`SourceStamp`]: a demand fails (checked) or resolves empty
 /// (unchecked) unless the file is the stamped one, unchanged or only appended to. That catches a
@@ -353,7 +353,7 @@ pub struct Resolver {
     primary: Option<PathBuf>,
     stamp: Option<SourceStamp>,
     #[cfg(feature = "mmap")]
-    checked_maps: std::cell::RefCell<std::collections::HashMap<PathBuf, CheckedMap>>,
+    checked_files: std::cell::RefCell<std::collections::HashMap<PathBuf, FirstDemand>>,
 }
 
 /// A capture at demand time; [`Resolver::admit`] holds it to the parse-time stamp.
@@ -407,11 +407,27 @@ impl CheckedSource {
     }
 }
 
+/// The file a resolver's first checked demand on a path saw; later demands must see it too.
 #[cfg(feature = "mmap")]
-struct CheckedMap {
+struct FirstDemand {
     captured: crate::json::JsonSource,
     file: std::fs::File,
-    map: memmap2::Mmap,
+}
+
+/// One demand's span bytes, mapped for that demand only.
+#[cfg(feature = "mmap")]
+enum SpanBytes {
+    Empty,
+    Mapped(memmap2::Mmap),
+}
+#[cfg(feature = "mmap")]
+impl AsRef<[u8]> for SpanBytes {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            Self::Empty => &[],
+            Self::Mapped(map) => map,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -516,7 +532,7 @@ impl Resolver {
             primary,
             stamp,
             #[cfg(feature = "mmap")]
-            checked_maps: std::cell::RefCell::new(std::collections::HashMap::new()),
+            checked_files: std::cell::RefCell::new(std::collections::HashMap::new()),
         }
     }
 
@@ -539,38 +555,38 @@ impl Resolver {
     }
 
     #[cfg(feature = "mmap")]
-    fn checked_bytes<'a>(&'a self, sp: &Span, source: &CheckedSource) -> anyhow::Result<&'a [u8]> {
+    fn checked_bytes(&self, sp: &Span, source: &CheckedSource) -> anyhow::Result<SpanBytes> {
         if sp.len == 0 {
-            return Ok(&[]);
+            return Ok(SpanBytes::Empty);
         }
-        let mut maps = self.checked_maps.borrow_mut();
-        if !maps.contains_key(&source.path) {
-            let file = source.file.try_clone()?;
-            let map = unsafe { memmap2::Mmap::map(&file)? };
-            maps.insert(
+        let mut first = self.checked_files.borrow_mut();
+        if !first.contains_key(&source.path) {
+            first.insert(
                 source.path.clone(),
-                CheckedMap {
+                FirstDemand {
                     captured: source.captured.clone(),
-                    file,
-                    map,
+                    file: source.file.try_clone()?,
                 },
             );
         }
-        let cached = maps.get(&source.path).unwrap();
+        let first = &first[&source.path];
         // The first checked demand is remembered; later demands must see that same file.
-        cached.captured.check_metadata(source.file.metadata()?)?;
-        source.captured.check_metadata(cached.file.metadata()?)?;
+        first.captured.check_metadata(source.file.metadata()?)?;
+        source.captured.check_metadata(first.file.metadata()?)?;
         source.check()?;
-        let start = usize::try_from(sp.offset)?;
         let len = usize::try_from(sp.len)?;
-        let end = start
-            .checked_add(len)
-            .ok_or_else(|| anyhow::anyhow!("Text span overflows address space"))?;
-        anyhow::ensure!(end <= cached.map.len(), "Text span is outside mapped source");
-        let slice = &cached.map[start..end];
-        // SAFETY: checked mappings are never replaced/removed while this Resolver lives.
+        // `checked_source` bounded the span by the captured length.
+        // SAFETY: a read-only mapping of the demand's own descriptor, dropped with the demand.
         // File identity guards detect ordinary changes around each demand, not atomic snapshots.
-        Ok(unsafe { std::mem::transmute::<&[u8], &'a [u8]>(slice) })
+        let map = unsafe {
+            memmap2::MmapOptions::new()
+                .offset(sp.offset)
+                .len(len)
+                .map(&source.file)?
+        };
+        #[cfg(test)]
+        crate::harness::store::jsonl::note_mapped(len);
+        Ok(SpanBytes::Mapped(map))
     }
 
     /// Checked text materialization. Inline/native unescaped text can borrow; escaped output
@@ -580,9 +596,10 @@ impl Resolver {
         let state = DemandState::default();
         #[cfg(feature = "mmap")]
         let output = {
-            let bytes = self.checked_bytes(sp, &source)?;
+            let held = self.checked_bytes(sp, &source)?;
+            let bytes = held.as_ref();
             if !sp.escaped {
-                String::from_utf8_lossy(bytes)
+                Cow::Owned(String::from_utf8_lossy(bytes).into_owned())
             } else if sp.len <= 64 * 1024 {
                 Cow::Owned(unescape_body(bytes))
             } else {
@@ -634,9 +651,9 @@ impl Resolver {
         #[cfg(feature = "mmap")]
         let (reader, offset) = {
             let bytes = self.checked_bytes(sp, &source)?;
-            if !sp.escaped && std::str::from_utf8(bytes).is_ok() {
+            if !sp.escaped && std::str::from_utf8(bytes.as_ref()).is_ok() {
                 state.finish(&source)?;
-                return Ok(bytes.len());
+                return Ok(bytes.as_ref().len());
             }
             (std::io::Cursor::new(bytes), 0)
         };
@@ -670,25 +687,23 @@ impl Resolver {
         let source = self.checked_source(sp)?;
         let len = max_raw.saturating_add(3).min(sp.len);
         #[cfg(feature = "mmap")]
-        let bytes = Cow::Borrowed(self.checked_bytes(&Span { len, ..sp.clone() }, &source)?);
+        let held = self.checked_bytes(&Span { len, ..sp.clone() }, &source)?;
         #[cfg(not(feature = "mmap"))]
-        let bytes = {
+        let held = {
             use std::io::Read;
             let mut bytes = vec![0; usize::try_from(len)?];
             let result = source.reader(sp.offset)?.read_exact(&mut bytes);
             source.check()?;
             result?;
-            Cow::Owned(bytes)
+            bytes
         };
-        let end = complete_utf8_prefix(&bytes, usize::try_from(max_raw)?);
-        let output = if sp.escaped {
-            Cow::Owned(unescape_body(&bytes[..complete_escape_prefix(&bytes[..end])]))
+        let bytes: &[u8] = held.as_ref();
+        let end = complete_utf8_prefix(bytes, usize::try_from(max_raw)?);
+        let output = Cow::Owned(if sp.escaped {
+            unescape_body(&bytes[..complete_escape_prefix(&bytes[..end])])
         } else {
-            match bytes {
-                Cow::Borrowed(bytes) => String::from_utf8_lossy(&bytes[..end]),
-                Cow::Owned(bytes) => Cow::Owned(String::from_utf8_lossy(&bytes[..end]).into_owned()),
-            }
-        };
+            String::from_utf8_lossy(&bytes[..end]).into_owned()
+        });
         source.check()?;
         Ok(output)
     }
@@ -1292,12 +1307,53 @@ mod tests {
         let prefix = resolver.try_resolve_prefix(&span, 1024).unwrap();
         assert_eq!(prefix.len(), 1023);
         assert!(prefix.chars().all(char::is_whitespace));
-        #[cfg(feature = "mmap")]
-        assert!(matches!(resolver.try_resolve(&span).unwrap(), Cow::Borrowed(_)));
     }
 
     /// A transcript renamed over after the parse, before any demand, must not resolve: the
     /// session's spans point into the file that was parsed, not into its replacement.
+    /// A whole read of a transcript many windows long, every span resolved, never maps more than
+    /// a window (grown to hold its longest line) or a span at a time: mapped bytes are bounded by
+    /// the read's shape, not the file's size.
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn reading_a_large_transcript_maps_a_bounded_window_never_the_file() {
+        use crate::harness::store::jsonl::{MAPPED_PEAK, MAP_WINDOW};
+        use crate::ir::{Harness, SessionRef};
+        let world = cv_testkit::World::new("lazy-bounded-mapping");
+        let path = world.proj.join("windowed.jsonl");
+        let line = |i: usize, len: usize| {
+            serde_json::json!({"type": "user", "uuid": format!("u{i}"), "sessionId": "windowed",
+                "message": {"role": "user", "content": format!("{i} {}", "x".repeat(len))}})
+            .to_string()
+                + "\n"
+        };
+        let longest = 3 * MAP_WINDOW as usize;
+        let body: String = (0..400)
+            .map(|i| line(i, if i == 200 { longest } else { 9_000 }))
+            .collect();
+        std::fs::write(&path, &body).unwrap();
+        MAPPED_PEAK.with(|peak| peak.set(0));
+        let adapter = crate::harness::claude::Claude::with_config_dir(&world.proj);
+        let reference = SessionRef::new("windowed", Harness::Claude, path.clone());
+        let mut session =
+            crate::stream::collect_with(&adapter, &reference, &crate::stream::ParseOptions::lazy()).unwrap();
+        assert!(session.messages.iter().any(|m| m.content.iter().any(|b| matches!(b,
+            crate::ir::Block::Text { text } if text.is_span()))));
+        session.materialize().unwrap();
+        assert_eq!(session.messages.len(), 400);
+        let peak = MAPPED_PEAK.with(|peak| peak.get());
+        assert!(peak > 0, "the read was mapped");
+        assert!(
+            peak <= 2 * (longest + 1024),
+            "peak mapping {peak} for a {longest}-byte line"
+        );
+        assert!(
+            peak * 4 < body.len(),
+            "peak mapping {peak} of a {}-byte file",
+            body.len()
+        );
+    }
+
     #[test]
     fn a_file_replaced_after_the_parse_fails_the_first_demand_and_growth_does_not() {
         use crate::ir::{Block, Harness, SessionRef};
@@ -1694,8 +1750,6 @@ mod tests {
         };
         assert_eq!(resolver.try_resolve(&ordinary).unwrap(), "ordinary é text");
         assert_eq!(resolver.try_resolved_len(&ordinary).unwrap(), 16);
-        #[cfg(feature = "mmap")]
-        assert!(matches!(resolver.try_resolve(&ordinary).unwrap(), Cow::Borrowed(_)));
         drop(resolver);
         std::fs::remove_dir_all(dir).unwrap();
     }

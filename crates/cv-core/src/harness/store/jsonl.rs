@@ -82,35 +82,8 @@ fn lines(
 ) -> anyhow::Result<()> {
     use crate::stream::Flow;
     #[cfg(feature = "mmap")]
-    if let Ok(map) = unsafe { memmap2::Mmap::map(file) } {
-        #[cfg(unix)]
-        let _ = map.advise(memmap2::Advice::Sequential);
-        let bytes = usize::try_from(from)
-            .ok()
-            .zip(usize::try_from(to).ok())
-            .and_then(|(from, to)| map.get(from..to))
-            .unwrap_or(&[]);
-        let mut start = 0;
-        for end in memchr::memchr_iter(b'\n', bytes).map(|i| i + 1) {
-            let line = &bytes[start..end - 1];
-            let (at, end) = (from + start as u64, from + end as u64);
-            if in_memory(source, decoded, at, end, true, line, &mut visit)? == Flow::Stop {
-                return Ok(());
-            }
-            start = end as usize - from as usize;
-        }
-        if start < bytes.len() {
-            in_memory(
-                source,
-                decoded,
-                from + start as u64,
-                to,
-                false,
-                &bytes[start..],
-                &mut visit,
-            )?;
-        }
-        return Ok(());
+    if let Some(mapped) = mapped_lines(source, file, decoded, from, to, &mut visit) {
+        return mapped;
     }
     let mut frames = ranges::records(
         file,
@@ -175,16 +148,86 @@ fn lines(
     Ok(())
 }
 
+/// The most a line pass keeps mapped at once: one window, grown only to hold a line longer than
+/// it. A pass over a multi-GB transcript never holds the whole file mapped, so its resident (and,
+/// on Linux, cgroup-charged) mapped bytes stay bounded by the passes running, not by file size.
+/// 8 MiB in production (64 KiB in tests).
+#[cfg(feature = "mmap")]
+pub(crate) const MAP_WINDOW: u64 = if cfg!(test) { 64 << 10 } else { 8 << 20 };
+
+// Tests: the largest mapping each thread has made, the bound the mapped-bytes test asserts.
+#[cfg(all(test, feature = "mmap"))]
+thread_local! { pub(crate) static MAPPED_PEAK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+#[cfg(all(test, feature = "mmap"))]
+pub(crate) fn note_mapped(len: usize) {
+    MAPPED_PEAK.with(|peak| peak.set(peak.get().max(len)));
+}
+
+/// [`lines`] over windows of a mapping, each dropped before the next is mapped. `None` when the
+/// first window cannot be mapped: the caller reads positioned instead.
+#[cfg(feature = "mmap")]
+fn mapped_lines(
+    source: &crate::json::JsonSource,
+    file: &File,
+    decoded: Decoded<'_>,
+    from: u64,
+    to: u64,
+    visit: &mut impl FnMut(Line<'_>) -> anyhow::Result<crate::stream::Flow>,
+) -> Option<anyhow::Result<()>> {
+    use crate::stream::Flow;
+    let mut at = from;
+    while at < to {
+        // A window's complete lines end at its last LF; one holding none grows until it does.
+        let mut end = to.min(at.saturating_add(MAP_WINDOW));
+        let map = loop {
+            let len = usize::try_from(end - at).ok()?;
+            let map = match unsafe { memmap2::MmapOptions::new().offset(at).len(len).map(file) } {
+                Ok(map) => map,
+                Err(_) if at == from => return None,
+                Err(error) => return Some(Err(error.into())),
+            };
+            if end == to || memchr::memrchr(b'\n', &map).is_some() {
+                break map;
+            }
+            end = to.min(at.saturating_add(2 * (end - at)));
+        };
+        #[cfg(test)]
+        note_mapped(map.len());
+        #[cfg(unix)]
+        let _ = map.advise(memmap2::Advice::Sequential);
+        let last = match end == to {
+            true => map.len(),
+            false => memchr::memrchr(b'\n', &map).map_or(map.len(), |i| i + 1),
+        };
+        let bytes = &map[..last];
+        let mut start = 0;
+        for stop in memchr::memchr_iter(b'\n', bytes).map(|i| i + 1) {
+            let line = &bytes[start..stop - 1];
+            let flow = in_memory(source, decoded, at + start as u64, at + stop as u64, true, line, visit);
+            match flow {
+                Ok(Flow::Stop) => return Some(Ok(())),
+                Err(error) => return Some(Err(error)),
+                Ok(Flow::Continue) => {}
+            }
+            start = stop;
+        }
+        if start < bytes.len() {
+            // Only the read's last window can end without an LF: a partial last line.
+            return Some(in_memory(source, decoded, at + start as u64, to, false, &bytes[start..], visit).map(|_| ()));
+        }
+        at += last as u64;
+    }
+    Some(Ok(()))
+}
+
 /// Records a first [`for_each_line`] pass kept by range (a line's, or a value inside one, from
 /// `JsonView::source_range`), read again from the same descriptor in any order: for formats
 /// whose later records replace earlier ones, so selection must reach EOF before decoding.
-/// Mapped builds borrow every range from one mapping; positioned builds read a small range into
-/// one buffer and leave a giant one in place, exactly as [`for_each_line`] does.
+/// A small range is read into one buffer. A giant one is mapped for its read alone in mapped
+/// builds and left in place as a positioned view otherwise, so the file is never held mapped.
 pub(crate) struct Records<'s> {
     source: &'s crate::json::JsonSource,
     file: &'s File,
-    #[cfg(feature = "mmap")]
-    map: Option<memmap2::Mmap>,
     context: Option<document::range::RangeSource>,
     buffer: Vec<u8>,
 }
@@ -194,8 +237,6 @@ impl<'s> Records<'s> {
         Self {
             source,
             file,
-            #[cfg(feature = "mmap")]
-            map: unsafe { memmap2::Mmap::map(file) }.ok(),
             context: None,
             buffer: Vec::new(),
         }
@@ -207,14 +248,22 @@ impl<'s> Records<'s> {
         len: u64,
         f: impl FnOnce(crate::json::JsonView<'_>) -> anyhow::Result<T>,
     ) -> anyhow::Result<T> {
+        anyhow::ensure!(
+            at.checked_add(len).is_some_and(|end| end <= self.source.len()),
+            "record range outside its source"
+        );
         #[cfg(feature = "mmap")]
-        if let Some(map) = &self.map {
-            let bytes = usize::try_from(at)
-                .ok()
-                .zip(usize::try_from(at + len).ok())
-                .and_then(|(from, to)| map.get(from..to))
-                .ok_or_else(|| anyhow::anyhow!("record range outside its source"))?;
-            return self.source.read_record(at, std::str::from_utf8(bytes)?, f);
+        if len > 64 * 1024 {
+            // SAFETY: a read-only mapping of the checked descriptor, dropped with this read.
+            let map = unsafe {
+                memmap2::MmapOptions::new()
+                    .offset(at)
+                    .len(usize::try_from(len)?)
+                    .map(self.file)?
+            };
+            #[cfg(test)]
+            note_mapped(map.len());
+            return self.source.read_record(at, std::str::from_utf8(&map)?, f);
         }
         if len <= 64 * 1024 {
             self.buffer.resize(len as usize, 0);

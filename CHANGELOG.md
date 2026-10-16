@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Reading a large transcript maps 8 MiB windows and each span alone, never the whole file: `cv doctor` on 1.3 GB peaks at 22 MB RSS, not 2.6 GB.
+
 - `cv index` exits 0 when only some sessions are unreadable: it retries a changed source once, warns with the count; `--json` lists them, `--strict` fails.
 
 - A persisted tool output cv cannot open (another user's file) no longer fails its session's indexing: the session is indexed with a note.
