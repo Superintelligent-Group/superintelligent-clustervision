@@ -11,7 +11,7 @@
 //! session is O(cap), never O(session) — an unbounded haystack here once meant multi-GB RSS on a
 //! real corpus.
 
-use crate::ir::{truncate, Block, Harness, Message, Role, SessionRef};
+use crate::ir::{truncate, Block, Harness, Message, SessionRef};
 use crate::lazy::{Resolver, Text};
 use crate::projection::Head;
 use crate::stream::{Flow, MessageSink, ParseOptions};
@@ -22,15 +22,15 @@ use std::path::Path;
 pub const LIVE_HAY_BYTES: usize = 256 * 1024;
 
 /// Builds a capped searchable head (`hay`, at most [`LIVE_HAY_BYTES`]) as messages stream past
-/// (each dropped immediately), grabbing the first user text for the label fallback; stops the
-/// parse once the cap is hit and a first-user label candidate exists. Stream it under
+/// (each dropped immediately), keeping the first [`Message::prompt_title`] for the label; stops the
+/// parse once the cap is hit and the label is known. Stream it under
 /// [`ParseOptions::lazy`] so large content arrives as spans resolved only up to the remaining
 /// budget — peak per session is O(cap), never O(session).
 ///
 /// The no-index live path for `cv pack`, `cv search` and `cv serve`'s `/api/search` alike.
 pub struct CapSink {
     pub hay: Head,
-    pub first_user: Option<String>,
+    pub first_prompt: Option<String>,
     resolver: Resolver,
     error: Option<anyhow::Error>,
     failed: bool,
@@ -41,7 +41,7 @@ impl CapSink {
     pub fn new(path: &Path) -> Self {
         CapSink {
             hay: Head::new(LIVE_HAY_BYTES),
-            first_user: None,
+            first_prompt: None,
             resolver: Resolver::new(Some(path.to_path_buf())),
             error: None,
             failed: false,
@@ -65,24 +65,13 @@ impl MessageSink for CapSink {
         if self.failed {
             return Flow::Stop;
         }
-        if self.first_user.is_none() && m.role == Role::User {
-            for b in &m.content {
-                if let Block::Text { text } = b {
-                    // Inline text keeps its full non-whitespace test. Lazy labels use the same
-                    // checked 512-byte head as indexed/semantic search: raw bytes for spans,
-                    // decoded UTF8 bytes for retained source strings.
-                    let t = match text.try_resolve_prefix(&self.resolver, 512) {
-                        Ok(text) => text,
-                        Err(error) => {
-                            self.error = Some(error);
-                            self.failed = true;
-                            return Flow::Stop;
-                        }
-                    };
-                    if !t.trim().is_empty() {
-                        self.first_user = Some(t.chars().take(73).collect());
-                        break;
-                    }
+        if self.first_prompt.is_none() {
+            match m.prompt_title(&self.resolver) {
+                Ok(title) => self.first_prompt = title,
+                Err(error) => {
+                    self.error = Some(error);
+                    self.failed = true;
+                    return Flow::Stop;
                 }
             }
         }
@@ -115,7 +104,7 @@ impl MessageSink for CapSink {
                 return Flow::Stop;
             }
         }
-        if self.hay.full() && self.first_user.is_some() {
+        if self.hay.full() && self.first_prompt.is_some() {
             Flow::Stop
         } else {
             Flow::Continue
@@ -179,7 +168,7 @@ pub fn live_search_filtered(
             let low = sink.hay.as_str().to_lowercase();
             let Some(pos) = low.find(&needle) else { continue };
             out.hits.push(LiveHit {
-                title: crate::label_from(meta.title.as_deref(), sink.first_user.as_deref()),
+                title: crate::label_from(meta.title.as_deref(), sink.first_prompt.as_deref()),
                 snippet: {
                     let range = lowercase_source_range(sink.hay.as_str(), pos..pos + needle.len());
                     snippet(sink.hay.as_str(), range.start, range.len())
@@ -256,6 +245,7 @@ pub fn ceil_char(s: &str, mut i: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::Role;
 
     #[test]
     fn empty_live_window_skips_sources_and_snippets_saturate_extreme_positions() {
@@ -327,7 +317,7 @@ mod tests {
         assert_eq!(sink.message(message), Flow::Stop);
         let complete = format!("prompt\nEdit {input}\nlater");
         assert_eq!(sink.hay.as_str(), &complete[..floor_char(&complete, LIVE_HAY_BYTES)]);
-        assert_eq!(sink.first_user.as_deref(), Some("prompt"));
+        assert_eq!(sink.first_prompt.as_deref(), Some("prompt"));
         assert!(sink.hay.capacity() <= LIVE_HAY_BYTES);
     }
 
@@ -340,7 +330,7 @@ mod tests {
             let decoded = format!(
                 "{}{}",
                 if late_whitespace {
-                    " ".repeat(1024)
+                    " ".repeat(crate::ir::TITLE_HEAD as usize)
                 } else {
                     "source label\n".into()
                 },
@@ -364,7 +354,7 @@ mod tests {
             assert_eq!(sink.hay.as_str().len(), floor_char(&decoded, LIVE_HAY_BYTES));
             assert!(sink.hay.as_str() == &decoded[..floor_char(&decoded, LIVE_HAY_BYTES)]);
             assert!(sink.hay.capacity() <= LIVE_HAY_BYTES);
-            assert_eq!(sink.first_user.is_none(), late_whitespace);
+            assert_eq!(sink.first_prompt.is_none(), late_whitespace);
             std::fs::write(&conditional, format!("dependency {late_whitespace}")).unwrap();
             let mut stale = CapSink::new(&path);
             stale.hay = Head::new(3);
@@ -396,33 +386,6 @@ mod tests {
             assert!(sink.take_error().is_some());
             assert!(sink.hay.is_empty());
         }
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn lazy_label_uses_prefix_policy_and_inline_checks_full_whitespace() {
-        let dir = cv_testkit::temp_dir("live-head-lazy-label");
-        let path = dir.join("text");
-        let content = format!("{}late meaningful text", " ".repeat(1024));
-        std::fs::write(&path, &content).unwrap();
-        let mut lazy = CapSink::new(&path);
-        let mut message = Message::new(Role::User);
-        message.content.push(Block::Text {
-            text: Text::Span(crate::Span {
-                source: Some(path.clone()),
-                offset: 0,
-                len: content.len() as u64,
-                escaped: false,
-            }),
-        });
-        assert_eq!(lazy.message(message), Flow::Continue);
-        assert!(lazy.first_user.is_none());
-        assert!(lazy.hay.as_str().contains("late meaningful text"));
-        let mut inline = CapSink::new(&path);
-        let mut message = Message::new(Role::User);
-        message.content.push(Block::Text { text: content.into() });
-        inline.message(message);
-        assert_eq!(inline.first_user.as_deref(), Some(" ".repeat(73).as_str()));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

@@ -4,40 +4,12 @@ use cv_core::Text;
 use cv_core::{Block, Flow, Message, MessageSink, Resolver, Role};
 
 const EMBED_HEAD_BYTES: usize = 64 * 1024;
-const FIRST_USER_RAW_HEAD: u64 = 512;
-const LABEL_CHARS: usize = 73; // label_from reads 72 characters plus one for its ellipsis.
 
 use cv_core::projection::Head;
 
-/// Message::text's joining and non-whitespace test, retaining only the label's required chars.
-/// Inline whitespace beyond the head still counts when deciding which user message is first.
-#[derive(Default)]
-struct UserLabel {
-    head: String,
-    chars: usize,
-    joined_nonempty: bool,
-    meaningful: bool,
-}
-impl UserLabel {
-    fn push(&mut self, text: &str) {
-        if self.joined_nonempty {
-            self.keep("\n");
-        }
-        self.keep(text);
-        self.joined_nonempty |= !text.is_empty();
-        self.meaningful |= !text.trim().is_empty();
-    }
-    fn keep(&mut self, text: &str) {
-        for ch in text.chars().take(LABEL_CHARS - self.chars) {
-            self.head.push(ch);
-            self.chars += 1;
-        }
-    }
-}
-
 pub(super) struct DocSink {
     pub(super) body: Head,
-    pub(super) first_user_text: Option<String>,
+    pub(super) first_prompt: Option<String>,
     pub(super) reads: cv_core::source::ReadSet,
     resolver: Resolver,
     error: Option<anyhow::Error>,
@@ -47,7 +19,7 @@ impl DocSink {
     pub(super) fn new(resolver: Resolver) -> Self {
         Self {
             body: Head::new(EMBED_HEAD_BYTES),
-            first_user_text: None,
+            first_prompt: None,
             reads: Default::default(),
             resolver,
             error: None,
@@ -153,26 +125,22 @@ impl MessageSink for DocSink {
         if self.failed || self.error.is_some() {
             return Flow::Stop;
         }
-        if self.first_user_text.is_none() && message.role == Role::User {
-            let mut label = UserLabel::default();
+        if self.first_prompt.is_none() && message.role == Role::User {
             for block in &message.content {
                 if let Block::Text { text } = block {
                     self.read_text(text);
-                    match text.try_resolve_prefix(&self.resolver, FIRST_USER_RAW_HEAD) {
-                        Ok(text) => label.push(&text),
-                        Err(error) => {
-                            self.error = Some(error);
-                            return Flow::Stop;
-                        }
-                    }
                 }
             }
-            if label.meaningful {
-                self.first_user_text = Some(label.head);
+            match message.prompt_title(&self.resolver) {
+                Ok(title) => self.first_prompt = title,
+                Err(error) => {
+                    self.error = Some(error);
+                    return Flow::Stop;
+                }
             }
         }
         self.append_searchable(&message);
-        if self.error.is_some() || (self.body.full() && self.first_user_text.is_some()) {
+        if self.error.is_some() || (self.body.full() && self.first_prompt.is_some()) {
             Flow::Stop
         } else {
             Flow::Continue
@@ -243,10 +211,7 @@ mod tests {
             assert!(projected.take_error().is_none());
             assert_eq!(projected.body.as_str(), prefix(&decoded, EMBED_HEAD_BYTES));
             assert!(projected.body.capacity() <= EMBED_HEAD_BYTES);
-            assert_eq!(
-                projected.first_user_text.as_deref(),
-                Some(decoded.chars().take(LABEL_CHARS).collect::<String>().as_str())
-            );
+            assert_eq!(projected.first_prompt, Some(cv_core::ir::truncate(&decoded, 80)));
             assert!(projected.reads.fresh(&mut cv_core::source::Probe::default()));
             std::fs::write(dependency, "dependency changed or appeared").unwrap();
             assert!(!projected.reads.fresh(&mut cv_core::source::Probe::default()));
@@ -434,8 +399,8 @@ mod tests {
         }
         assert_eq!(actual.body.as_str(), expected);
         assert_eq!(
-            cv_core::label_from(None, actual.first_user_text.as_deref()),
-            cv_core::label_from(None, messages[1].text().as_deref())
+            actual.first_prompt,
+            messages[1].prompt_title(&Resolver::new(None)).unwrap()
         );
         let fake_embed = |body: &str| {
             body.bytes()
@@ -501,10 +466,7 @@ mod tests {
                 actual.message(message(Role::User, vec![content]));
                 assert!(actual.body.len() <= EMBED_HEAD_BYTES);
                 assert_eq!(actual.body.capacity(), EMBED_HEAD_BYTES);
-                assert!(actual
-                    .first_user_text
-                    .as_ref()
-                    .is_none_or(|text| text.len() <= LABEL_CHARS * 4));
+                assert!(actual.first_prompt.is_none_or(|text| text.chars().count() <= 80));
             }
         }
     }
@@ -530,25 +492,15 @@ mod tests {
     }
 
     #[test]
-    fn semantic_head_first_user_is_bounded_across_blocks_and_late_whitespace() {
-        for blocks in [
-            vec![text(" ".repeat(10000)), text("late")],
-            vec![text("α".repeat(10000)), text("tail")],
-            (0..1000).map(|_| text("a")).collect(),
-            vec![text(""), text(""), text("hello")],
-        ] {
-            let m = message(Role::User, blocks);
-            let expected = cv_core::label_from(None, m.text().as_deref());
-            let mut actual = sink();
-            actual.message(m);
-            assert_eq!(cv_core::label_from(None, actual.first_user_text.as_deref()), expected);
-            assert!(actual.first_user_text.unwrap().len() <= LABEL_CHARS * 4);
-        }
+    fn semantic_head_titles_the_first_prompt() {
+        let mut instructions = message(Role::User, vec![text("# AGENTS.md instructions for /work")]);
+        instructions.kind = cv_core::MessageKind::InjectedContext;
         let mut actual = sink();
+        actual.message(instructions);
         actual.message(message(Role::User, vec![text(" ".repeat(10000))]));
-        assert!(actual.first_user_text.is_none());
+        assert!(actual.first_prompt.is_none());
         actual.message(message(Role::User, vec![text("chosen")]));
-        assert_eq!(actual.first_user_text.as_deref(), Some("chosen"));
+        assert_eq!(actual.first_prompt.as_deref(), Some("chosen"));
     }
 
     #[test]
@@ -580,7 +532,7 @@ mod tests {
             Flow::Stop
         ));
         assert_eq!(actual.body.as_str(), saved);
-        assert_eq!(actual.first_user_text.as_deref(), Some("label"));
+        assert_eq!(actual.first_prompt.as_deref(), Some("label"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -600,21 +552,16 @@ mod tests {
             };
             let expected = resolver.try_resolve_prefix(&span, EMBED_HEAD_BYTES as u64).unwrap();
             let mut actual = DocSink::new(Resolver::new(Some(dir.join("source"))));
-            let expected_label = cv_core::label_from(
-                None,
-                Some(&resolver.try_resolve_prefix(&span, FIRST_USER_RAW_HEAD).unwrap()),
-            );
-            actual.message(message(Role::User, vec![Block::Text { text: Text::Span(span) }]));
+            let prompt = message(Role::User, vec![Block::Text { text: Text::Span(span) }]);
+            let expected_label = prompt.prompt_title(&resolver).unwrap();
+            actual.message(prompt);
             let mut projected = prefix(&expected, EMBED_HEAD_BYTES).to_owned();
             if projected.len() < EMBED_HEAD_BYTES && expected.len() <= EMBED_HEAD_BYTES {
                 projected.push('\n');
             }
             assert_eq!(actual.body.as_str(), projected);
             assert!(actual.body.len() <= EMBED_HEAD_BYTES);
-            assert_eq!(
-                cv_core::label_from(None, actual.first_user_text.as_deref()),
-                expected_label
-            );
+            assert_eq!(actual.first_prompt, expected_label);
         }
         std::fs::remove_dir_all(dir).unwrap();
     }

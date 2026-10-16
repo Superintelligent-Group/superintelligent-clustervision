@@ -671,15 +671,7 @@ fn analysis_label(session: &Session, resolver: &crate::Resolver) -> anyhow::Resu
     {
         return Ok(description.to_owned());
     }
-    let first_user = session
-        .messages
-        .iter()
-        .find(|message| message.role == Role::User)
-        .map(|message| MessageText::new(message, resolver).text())
-        .transpose()?
-        .flatten()
-        .filter(|text| !text.trim().is_empty());
-    Ok(crate::ir::label_from(session.title.as_deref(), first_user.as_deref()))
+    Ok(crate::ir::label_from(session.title_with(resolver)?.as_deref(), None))
 }
 
 fn analyze(session: &Session, opts: &DistillOptions, demand: Demand) -> anyhow::Result<PreparedDistillation> {

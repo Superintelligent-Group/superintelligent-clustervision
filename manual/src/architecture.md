@@ -116,7 +116,7 @@ A few supporting types complete the picture:
 - **`GitInfo`** — the `branch` / `commit` / `remote` a session ran against, when the harness records it.
 - **`SessionRef`** — a *lightweight handle* to a session discovered on disk (`id`, `harness`, `path`, `cwd`, `title`, timestamps, `message_count`). It's cheap to produce for listings and search **without parsing the whole transcript**. Discovery yields `SessionRef`s; a full `Session` is parsed only when you actually open one.
 
-`Session` also carries a little behavior for free: `label()` (a short title for listings, falling back to the first user message), `first_user_text()`, `searchable_text()` (every text/thinking/tool block concatenated — what feeds the search index), and `harness_extra(h)` / `harness_extra_mut(h)` for the per-harness bags.
+`Session` also carries a little behavior for free: `label()` (a short title for listings, falling back to the first prompt by the one title rule, `Message::prompt_title`), `first_user_text()`, `searchable_text()` (every text/thinking/tool block concatenated — what feeds the search index), and `harness_extra(h)` / `harness_extra_mut(h)` for the per-harness bags.
 
 ## The `Adapter` trait
 

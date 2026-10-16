@@ -303,7 +303,8 @@ impl Session {
         self.extra.get(h.as_str()).and_then(serde_json::Value::as_object)
     }
 
-    /// First non-empty user text, used as a fallback title / preview.
+    /// First non-empty user text, injected or not: what a native store's own fallback title
+    /// copies. cv's titles come from [`Message::prompt_title`].
     pub fn first_user_text(&self) -> Option<String> {
         self.messages
             .iter()
@@ -311,51 +312,35 @@ impl Session {
             .find_map(|m| m.text().filter(|t| !t.trim().is_empty()))
     }
 
-    /// A short human label for listings.
+    /// A short human label for listings: [`Session::synth_title`] at most 72 characters long.
     pub fn label(&self) -> String {
-        match self.title.as_deref() {
-            Some(title) => label_from(Some(title), None),
-            None => label_from(None, self.first_user_text().as_deref()),
-        }
+        label_from(self.synth_title().as_deref(), None)
     }
 
-    /// The best title for a machine listing: the explicit [`title`](Session::title) when present,
-    /// otherwise one synthesized from the first user message that reads as a real prompt — skipping
-    /// harness-injected turns ([`MessageKind::InjectedContext`]: AGENTS.md instructions, environment
-    /// context), the `Caveat:` command preamble, bare `<system-reminder>`/command-wrapper turns, and peeling a
-    /// leading `<system-reminder>` block off an otherwise-real turn (tool results are [`Role::Tool`],
-    /// already excluded). `None` only when a session carries no explicit title and no user prose.
-    ///
-    /// Resolver-aware: [`Text::resolve_prefix`](crate::lazy::Text::resolve_prefix) reads at most
-    /// 8 KiB per Span/Source Text block; Inline blocks contribute their complete existing text.
-    /// A candidate joins all its Text blocks, so its allocation is not capped at 8 KiB. Safe to
-    /// call on a [`ParseOptions::lazy`](crate::ParseOptions::lazy) parse without dereferencing a
-    /// lazy [`Span`](crate::lazy::Span) as inline text. The result is transcript-derived text
+    /// The session's title: the explicit [`title`](Session::title) when present, otherwise its
+    /// first [`Message::prompt_title`], passing over a prompt whose lazy text cannot be read
+    /// ([`Session::title_with`] makes that an error). The result is transcript-derived text
     /// (untrusted): JSON consumers get it raw; a terminal seam must sanitize it.
     pub fn synth_title(&self) -> Option<String> {
-        if let Some(t) = &self.title {
-            return Some(t.clone());
-        }
-        // Read prefixes of Span/Source blocks; Inline text is already owned and contributes in
-        // full. Multiple Text blocks retain their existing joined-candidate semantics.
-        const HEAD: u64 = 8 * 1024;
         let resolver = self.resolver();
-        self.messages
-            .iter()
-            .filter(|m| m.role == Role::User && m.kind != MessageKind::InjectedContext)
-            .find_map(|m| {
-                let mut s = String::new();
-                for b in &m.content {
-                    if let Block::Text { text } = b {
-                        if !s.is_empty() {
-                            s.push('\n');
-                        }
-                        s.push_str(&text.try_resolve_prefix(&resolver, HEAD).unwrap_or_default());
-                    }
-                }
-                meaningful_prompt(&s)
-            })
-            .map(|t| truncate(&t, 80))
+        self.title.clone().or_else(|| {
+            self.messages
+                .iter()
+                .find_map(|m| m.prompt_title(&resolver).ok().flatten())
+        })
+    }
+
+    /// [`Session::synth_title`] reading lazy blocks through `resolver`, an unreadable one the error.
+    pub fn title_with(&self, resolver: &crate::lazy::Resolver) -> anyhow::Result<Option<String>> {
+        if let Some(t) = &self.title {
+            return Ok(Some(t.clone()));
+        }
+        for m in &self.messages {
+            if let Some(t) = m.prompt_title(resolver)? {
+                return Ok(Some(t));
+            }
+        }
+        Ok(None)
     }
 
     /// All textual content concatenated — used to build a search index.
@@ -979,6 +964,31 @@ pub struct SessionRef {
 }
 
 impl Message {
+    /// The title rule: what every listing, index, hit and label calls a session that carries no
+    /// explicit title is its first turn that titles one. That is the exchange's prompt (what the
+    /// person typed, or the task another agent handed this thread: `Role::User`,
+    /// [`MessageKind::Prompt`]) once leading `<system-reminder>` blocks are peeled, unless what
+    /// remains is empty, the `Caveat:` local-command preamble or a bare command wrapper. Injected
+    /// context (instruction files, environment blocks) never titles a session.
+    ///
+    /// The title is the message's Text blocks joined by newlines, at most 80 characters. Reads at
+    /// most [`TITLE_HEAD`] raw bytes of each lazy block; an unreadable one is the error.
+    pub fn prompt_title(&self, resolver: &crate::lazy::Resolver) -> anyhow::Result<Option<String>> {
+        if self.role != Role::User || self.kind != MessageKind::Prompt {
+            return Ok(None);
+        }
+        let mut s = String::new();
+        for b in &self.content {
+            if let Block::Text { text } = b {
+                if !s.is_empty() {
+                    s.push('\n');
+                }
+                s.push_str(&text.try_resolve_prefix(resolver, TITLE_HEAD)?);
+            }
+        }
+        Ok(meaningful_prompt(&s).map(|t| truncate(&t, 80)))
+    }
+
     /// Whether this message is a conversational turn in [`SessionRef::message_count`]'s sense: a
     /// typed prompt or a model reply. Tool results, injected context, notices, errors and carriers
     /// are not. The count a full parse writes back to the catalog ([`crate::catalog::fill_count`]).
@@ -1045,19 +1055,23 @@ impl SessionRef {
     }
 }
 
-/// A short human label from a title and/or first-user-text fallback — the projection
+/// A short human label from a title and/or the first [`Message::prompt_title`] — the projection
 /// [`Session::label`] makes, exposed so streaming consumers can build it without a whole `Session`.
-pub fn label_from(title: Option<&str>, first_user_text: Option<&str>) -> String {
+pub fn label_from(title: Option<&str>, prompt: Option<&str>) -> String {
     title
-        .or(first_user_text)
+        .or(prompt)
         .map(|s| truncate(s, 72))
         .unwrap_or_else(|| "(untitled)".into())
 }
 
+/// How many raw bytes of each lazy text block [`Message::prompt_title`] reads: enough to peel the
+/// reminders a harness prepends to a prompt.
+pub const TITLE_HEAD: u64 = 8 * 1024;
+
 /// A user turn's text as a real prompt, or `None` when it's only harness noise. Peels any leading
 /// `<system-reminder>…</system-reminder>` blocks and surrounding whitespace, then rejects the
 /// residual if it's empty, the `Caveat:` local-command preamble, or a bare command wrapper
-/// (`<command-name>`/`<command-message>`/`<local-command-stdout>`). Used by [`Session::synth_title`].
+/// (`<command-name>`/`<command-message>`/`<local-command-stdout>`). Used by [`Message::prompt_title`].
 fn meaningful_prompt(text: &str) -> Option<String> {
     let mut s = text.trim_start();
     loop {
@@ -1761,7 +1775,12 @@ mod tests {
         let mut injected = user("# AGENTS.md instructions for /work");
         injected.kind = MessageKind::InjectedContext;
         s.messages.insert(0, injected);
+        // Nor is any other user-role turn around the exchange: only a prompt titles a session.
+        let mut summary = user("Summary of the conversation so far");
+        summary.kind = MessageKind::CompactionSummary;
+        s.messages.insert(0, summary);
         assert_eq!(s.synth_title().as_deref(), Some("ask about otters"));
+        assert_eq!(s.label(), "ask about otters");
         // A session with no user prose stays None.
         s.messages = vec![user("<system-reminder>only noise</system-reminder>")];
         assert_eq!(s.synth_title(), None);

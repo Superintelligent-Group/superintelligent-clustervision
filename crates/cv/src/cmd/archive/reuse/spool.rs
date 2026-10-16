@@ -59,8 +59,8 @@ impl cv_core::MessageSink for Spool {
             return cv_core::Flow::Stop;
         }
         let result = (|| -> Result<()> {
-            if self.first_user.is_none() && message.role == cv_core::Role::User {
-                if let Some(head) = cv_core::render::message_label(&message, &self.resolver)? {
+            if self.first_user.is_none() {
+                if let Some(head) = message.prompt_title(&self.resolver)? {
                     self.first_user = Some(FirstUser {
                         ordinal: self.messages + 1,
                         head: Some(head),
@@ -157,10 +157,6 @@ mod tests {
             let first = first.unwrap();
             assert_eq!(first.ordinal, 2, "empty first user must not lock the label source");
             assert_eq!(
-                cv_core::label_from(None, first.head.as_deref()),
-                cv_core::label_from(None, session.first_user_text().as_deref())
-            );
-            assert_eq!(
                 cv_core::label_from(session.title.as_deref(), first.head.as_deref()),
                 session.label(),
                 "the explicit title must outrank the captured prompt fallback"
@@ -220,7 +216,7 @@ mod tests {
     }
 
     #[test]
-    fn bounded_label_matches_first_user_text_and_unicode_truncation() {
+    fn bounded_label_matches_the_session_label_and_unicode_truncation() {
         for text in [
             "".into(),
             " \n\t".into(),
@@ -232,7 +228,7 @@ mod tests {
             session.messages[0].content.push(Block::Text { text: "".into() });
             let (_, first) = stage(&session);
             let first = first.unwrap();
-            assert!(first.head.as_ref().unwrap().chars().count() <= 72);
+            assert!(first.head.as_ref().unwrap().chars().count() <= 80);
             assert_eq!(cv_core::label_from(None, first.head.as_deref()), session.label());
         }
     }

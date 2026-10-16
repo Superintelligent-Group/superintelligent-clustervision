@@ -266,7 +266,7 @@ pub(crate) fn read_corpus_doc(r: &cv_core::SessionRef) -> Result<(Doc, cv_core::
     )
     .with_context(|| format!("reading semantic corpus session {} ({})", r.id, r.harness))?
     .session;
-    let title = cv_core::label_from(meta.title.as_deref(), sink.first_user_text.as_deref());
+    let title = cv_core::label_from(meta.title.as_deref(), sink.first_prompt.as_deref());
     Ok((
         Doc {
             id: r.id.clone(),

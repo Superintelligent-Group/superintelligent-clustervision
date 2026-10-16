@@ -1234,7 +1234,7 @@ mod tests {
                     }
                     let (mut doc, _) = fake_doc(r, None)?;
                     doc.body = sink.body.into_string();
-                    doc.title = sink.first_user_text;
+                    doc.title = sink.first_prompt;
                     Ok((doc, sink.reads))
                 },
                 |bodies| {

@@ -9,19 +9,7 @@ use std::path::Path;
 /// discard staged output on error: a source or writer failure may follow an emitted prefix.
 pub fn write_markdown(s: &Session, out: &mut impl Write, resolver: &crate::Resolver) -> anyhow::Result<()> {
     let reads = crate::source::session_reads(s);
-    let label = match &s.title {
-        Some(title) => truncate(title, 72),
-        None => {
-            let mut label = None;
-            for message in s.messages.iter().filter(|m| m.role == Role::User) {
-                if let Some(candidate) = message_label(message, resolver)? {
-                    label = Some(candidate);
-                    break;
-                }
-            }
-            label.unwrap_or_else(|| "(untitled)".into())
-        }
-    };
+    let label = label_from(s.title_with(resolver)?.as_deref(), None);
     out.write_all(
         md_header(
             &label,
@@ -43,32 +31,13 @@ pub fn write_markdown(s: &Session, out: &mut impl Write, resolver: &crate::Resol
     Ok(())
 }
 
-/// The exact label projection of a message's concatenated plain text, retaining at most 73
-/// scalars. Complete checked demands preserve whitespace-only rejection and late source errors.
-pub fn message_label(m: &Message, resolver: &crate::Resolver) -> anyhow::Result<Option<String>> {
-    plain_text_preview(m, resolver, 72, true)
-}
-
 /// Exact character-bounded preview of concatenated plain-text blocks, including whitespace-only
 /// text. Checked demands scan discarded tails without retaining them.
 pub fn message_text_preview(m: &Message, resolver: &crate::Resolver, chars: usize) -> anyhow::Result<Option<String>> {
-    plain_text_preview(m, resolver, chars, false)
-}
-
-fn plain_text_preview(
-    m: &Message,
-    resolver: &crate::Resolver,
-    chars: usize,
-    require_meaningful: bool,
-) -> anyhow::Result<Option<String>> {
     let mut head = String::new();
     let mut remaining = chars.saturating_add(1);
     let mut nonempty = false;
-    let mut meaningful = false;
     let mut append = |part: &str| {
-        if !meaningful {
-            meaningful = part.chars().any(|c| !c.is_whitespace());
-        }
         for c in part.chars().take(remaining) {
             head.push(c);
             remaining -= 1;
@@ -86,7 +55,7 @@ fn plain_text_preview(
             })?;
         }
     }
-    Ok((if require_meaningful { meaningful } else { nonempty }).then(|| truncate(&head, chars)))
+    Ok(nonempty.then(|| truncate(&head, chars)))
 }
 
 /// Write one Markdown section, preserving the owned renderer's exact formatting.
@@ -478,7 +447,7 @@ mod tests {
     }
 
     #[test]
-    fn checked_message_labels_match_join_trim_and_truncate_oracle() {
+    fn checked_message_previews_match_join_and_truncate_oracle() {
         for pieces in [
             vec!["", ""],
             vec!["\u{2003}\n", "\t"],
@@ -490,24 +459,10 @@ mod tests {
                 m.content.push(Block::Text { text: text.into() });
             }
             assert_eq!(
-                message_label(&m, &crate::Resolver::new(None)).unwrap(),
-                m.text().filter(|t| !t.trim().is_empty()).map(|t| truncate(&t, 72))
-            );
-            assert_eq!(
                 message_text_preview(&m, &crate::Resolver::new(None), 80).unwrap(),
                 m.text().map(|t| truncate(&t, 80))
             );
         }
-        let text = format!("{}🌙", " ".repeat(100000));
-        let source = Source::new(&serde_json::to_vec(&serde_json::json!({"text":text})).unwrap());
-        let mut m = Message::new(Role::User);
-        m.content.push(Block::Text {
-            text: source_text(&source.json(), "text"),
-        });
-        assert_eq!(
-            message_label(&m, &crate::Resolver::new(None)).unwrap(),
-            Some(truncate(&text, 72))
-        );
     }
 
     #[test]

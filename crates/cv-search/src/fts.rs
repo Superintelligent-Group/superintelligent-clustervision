@@ -1561,7 +1561,7 @@ const CHECKPOINT_AT_MOST: u64 = 8 * CHUNK_BYTES as u64;
 
 /// The version of what a mark's `fts` layer and the docs behind it mean, part of every mark's
 /// version: bump it when [`FtsState`], the doc layout or [`CHECKPOINT_EVERY`] changes.
-const RESUME_TAG: &str = "fts3";
+const RESUME_TAG: &str = "fts4";
 
 /// The checkpoint `job` can resume from: the source grew, its sampled mark still matches, and
 /// its state covers every consumer this pass feeds. Growth is interpreted under the adapter's
@@ -1881,8 +1881,8 @@ struct ChunkSink<'w> {
     disc_title: Option<String>,
     meta_title: Option<String>,
     meta_received: bool,
-    /// The head of the first user text (the title fallback), at most [`FIRST_USER_CHARS`].
-    first_user: Option<String>,
+    /// The first [`cv_core::Message::prompt_title`]: the title when the session has none of its own.
+    first_prompt: Option<String>,
     /// Sub-agent attribution stamped on every doc of a folded-in forest transcript; empty
     /// (all-`None`) for a top-level session, leaving its docs unchanged.
     prov: cv_core::events::Provenance,
@@ -1927,16 +1927,13 @@ struct FtsState {
     cwd: Option<String>,
     meta_title: Option<String>,
     meta_received: bool,
-    first_user: Option<String>,
+    first_prompt: Option<String>,
     preview: String,
 }
 
 /// Length cap (chars) of the stored head-of-body preview — the snippet fallback when a hit's
 /// source file is gone at query time. ~240 bytes/session keeps the index lean.
 const PREVIEW_CHARS: usize = 240;
-
-/// How much of the first user text the sink keeps: [`cv_core::label_from`] reads 72 chars of it.
-const FIRST_USER_CHARS: usize = 512;
 
 impl<'w> ChunkSink<'w> {
     fn new(
@@ -1963,7 +1960,7 @@ impl<'w> ChunkSink<'w> {
             disc_title: r.title.clone(),
             meta_title: None,
             meta_received: false,
-            first_user: None,
+            first_prompt: None,
             prov,
             resolver: cv_core::Resolver::new(Some(r.path.clone())),
             dependencies: Default::default(),
@@ -2005,21 +2002,21 @@ impl<'w> ChunkSink<'w> {
         sink.cwd = st.cwd;
         sink.meta_title = st.meta_title;
         sink.meta_received = st.meta_received;
-        sink.first_user = st.first_user;
+        sink.first_prompt = st.first_prompt;
         sink.preview = st.preview;
         sink.last_checkpoint = cp.offset;
         Some(sink)
     }
 
     /// Session label for display: the parsed title when the adapter delivered metadata (authoritative,
-    /// e.g. codex's None → first-user fallback), else the discovery-time title (claude's ai-title).
+    /// e.g. codex's None → first-prompt fallback), else the discovery-time title (claude's ai-title).
     fn title(&self) -> String {
         let primary = if self.meta_received {
             self.meta_title.as_deref()
         } else {
             self.disc_title.as_deref()
         };
-        cv_core::label_from(primary, self.first_user.as_deref())
+        cv_core::label_from(primary, self.first_prompt.as_deref())
     }
 
     /// The fields every doc of the session carries.
@@ -2395,7 +2392,7 @@ impl cv_core::MessageSink for ChunkSink<'_> {
                 cwd: self.cwd.clone(),
                 meta_title: self.meta_title.clone(),
                 meta_received: self.meta_received,
-                first_user: self.first_user.clone(),
+                first_prompt: self.first_prompt.clone(),
                 preview: self.preview.clone(),
             },
         );
@@ -2407,25 +2404,16 @@ impl cv_core::MessageSink for ChunkSink<'_> {
         }
         // Move the resolver out so the chunk callbacks (which mutate `self`) don't conflict with it.
         let r = std::mem::replace(&mut self.resolver, cv_core::Resolver::new(None));
-        // First user text → the title fallback. Only its first 72 chars are ever read
-        // (`label_from` truncates), so a span resolves just a 512-byte head, never the whole field.
-        if self.first_user.is_none() && m.role == cv_core::Role::User {
+        // The first prompt → the title fallback (the core title rule reads a bounded head).
+        if self.first_prompt.is_none() && m.role == cv_core::Role::User {
             for b in &m.content {
                 if let Block::Text { text } = b {
                     self.record_text(text);
-                    let s = match text.try_resolve_prefix(&r, 512) {
-                        Ok(text) => text,
-                        Err(error) => {
-                            self.err = Some(error.context("reading search label"));
-                            break;
-                        }
-                    };
-                    let t = s.trim();
-                    if !t.is_empty() {
-                        self.first_user = Some(t.chars().take(FIRST_USER_CHARS).collect());
-                        break;
-                    }
                 }
+            }
+            match m.prompt_title(&r) {
+                Ok(title) => self.first_prompt = title,
+                Err(error) => self.err = Some(error.context("reading search label")),
             }
         }
         // A turn copied from another session is that session's hit, not this one's.

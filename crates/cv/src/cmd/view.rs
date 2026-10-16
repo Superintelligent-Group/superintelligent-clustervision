@@ -6,7 +6,7 @@ use crate::util::{
     Window, WindowArgs,
 };
 use anyhow::{bail, Context, Result};
-use cv_core::ir::{truncate, Block, Harness, Message, MessageKind, Role, Session, SessionRef};
+use cv_core::ir::{truncate, Block, Harness, Message, MessageKind, Session, SessionRef};
 use cv_core::render::turn_label;
 use cv_core::Adapter;
 use std::io::{IsTerminal, Write};
@@ -1006,7 +1006,7 @@ fn read_tree(r: &SessionRef, adapter: &dyn Adapter) -> Result<(Session, Vec<Tree
     struct TreeSink {
         rows: Vec<TreeRow>,
         resolver: cv_core::Resolver,
-        first_user: Option<String>,
+        first_prompt: Option<String>,
         error: Option<anyhow::Error>,
     }
     impl cv_core::MessageSink for TreeSink {
@@ -1018,8 +1018,8 @@ fn read_tree(r: &SessionRef, adapter: &dyn Adapter) -> Result<(Session, Vec<Tree
         }
         fn message(&mut self, m: Message) -> cv_core::Flow {
             let result = (|| -> Result<()> {
-                if self.first_user.is_none() && m.role == Role::User {
-                    self.first_user = cv_core::render::message_label(&m, &self.resolver)?;
+                if self.first_prompt.is_none() {
+                    self.first_prompt = m.prompt_title(&self.resolver)?;
                 }
                 let preview = cv_core::render::message_text_preview(&m, &self.resolver, 80)?;
                 let line = tree_line_with_preview(&m, preview);
@@ -1040,7 +1040,7 @@ fn read_tree(r: &SessionRef, adapter: &dyn Adapter) -> Result<(Session, Vec<Tree
     let mut sink = TreeSink {
         rows: Vec::new(),
         resolver: cv_core::Resolver::new(Some(r.path.clone())),
-        first_user: None,
+        first_prompt: None,
         error: None,
     };
     let pass = cv_core::stream::Pass {
@@ -1053,14 +1053,14 @@ fn read_tree(r: &SessionRef, adapter: &dyn Adapter) -> Result<(Session, Vec<Tree
         return Err(error);
     }
     read.guard.expect("guarded pass").verify(r)?;
-    Ok((session, sink.rows, sink.first_user))
+    Ok((session, sink.rows, sink.first_prompt))
 }
 
 fn print_tree(r: &SessionRef, adapter: &dyn Adapter) -> Result<()> {
-    let (session, rows, first_user) = read_tree(r, adapter)?;
+    let (session, rows, first_prompt) = read_tree(r, adapter)?;
     println!(
         "# {}",
-        cv_core::label_from(session.title.as_deref(), first_user.as_deref())
+        cv_core::label_from(session.title.as_deref(), first_prompt.as_deref())
     );
     println!("{} · {} · {} msg", session.harness, session.id, rows.len());
     println!();
@@ -1317,7 +1317,7 @@ fn stream_session_render_inner<W: std::io::Write>(
         title: Option<String>,
         model: Option<String>,
         created_at: Option<chrono::DateTime<chrono::Utc>>,
-        first_user: Option<String>,
+        first_prompt: Option<String>,
         header: H,
         render_msg: R,
         buf: Vec<String>,
@@ -1396,7 +1396,7 @@ fn stream_session_render_inner<W: std::io::Write>(
                 harness: self.harness,
                 id: self.id.clone(),
                 cwd: self.cwd.clone(),
-                label: cv_core::label_from(self.title.as_deref(), self.first_user.as_deref()),
+                label: cv_core::label_from(self.title.as_deref(), self.first_prompt.as_deref()),
                 model: self.model.clone(),
                 created_at: self.created_at,
             };
@@ -1499,8 +1499,8 @@ fn stream_session_render_inner<W: std::io::Write>(
 
             if self.checked_markdown {
                 let result = (|| -> Result<()> {
-                    if self.first_user.is_none() && m.role == Role::User {
-                        self.first_user = cv_core::render::message_label(&m, &self.resolver)?;
+                    if self.first_prompt.is_none() {
+                        self.first_prompt = m.prompt_title(&self.resolver)?;
                     }
                     if self.printed {
                         cv_core::render::write_md_message(&m, self.out, &self.resolver)?;
@@ -1518,7 +1518,7 @@ fn stream_session_render_inner<W: std::io::Write>(
                     return Flow::Stop;
                 }
                 self.rendered += 1;
-                let title_known = self.title.is_some() || self.first_user.is_some();
+                let title_known = self.title.is_some() || self.first_prompt.is_some();
                 if !self.printed && ((self.model.is_some() && title_known) || self.rendered >= HOLDBACK) {
                     self.flush_header();
                 }
@@ -1535,10 +1535,12 @@ fn stream_session_render_inner<W: std::io::Write>(
                 self.result = Err(std::io::Error::other(error));
                 return Flow::Stop;
             }
-            if self.first_user.is_none() && m.role == Role::User {
-                if let Some(t) = m.text() {
-                    if !t.trim().is_empty() {
-                        self.first_user = Some(t);
+            if self.first_prompt.is_none() {
+                match m.prompt_title(&self.resolver) {
+                    Ok(title) => self.first_prompt = title,
+                    Err(error) => {
+                        self.result = Err(std::io::Error::other(error));
+                        return Flow::Stop;
                     }
                 }
             }
@@ -1564,7 +1566,7 @@ fn stream_session_render_inner<W: std::io::Write>(
                 self.write(&rendered);
             } else {
                 self.buf.push(rendered);
-                let title_known = self.title.is_some() || self.first_user.is_some();
+                let title_known = self.title.is_some() || self.first_prompt.is_some();
                 if (self.model.is_some() && title_known) || self.buf.len() >= HOLDBACK {
                     self.flush_header();
                 }
@@ -1593,7 +1595,7 @@ fn stream_session_render_inner<W: std::io::Write>(
         title: r.title.clone(),
         model: None,
         created_at: r.created_at,
-        first_user: None,
+        first_prompt: None,
         header,
         render_msg,
         buf: Vec::new(),
@@ -1725,6 +1727,7 @@ fn md_message(m: &Message) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cv_core::ir::Role;
 
     #[test]
     fn fleetwide_agent_selection_honors_harness_and_zero_compaction_is_usage_error() {
@@ -1741,7 +1744,7 @@ mod tests {
     }
 
     #[test]
-    fn lazy_tree_rows_preserve_owned_previews_and_first_user_label() -> Result<()> {
+    fn lazy_tree_rows_preserve_owned_previews_and_first_prompt_label() -> Result<()> {
         let world = crate::test_world("tree-row-projection");
         let text = "🌙\\\"\n".repeat(30000);
         let path = world.write_session("tree-preview", &[
@@ -1754,10 +1757,10 @@ mod tests {
         let r = SessionRef::new("tree-preview", Harness::Claude, path);
         let adapter = cv_core::harness::for_harness(Harness::Claude).unwrap();
         let owned = adapter.parse(&r)?;
-        let (session, rows, first_user) = read_tree(&r, adapter.as_ref())?;
+        let (session, rows, first_prompt) = read_tree(&r, adapter.as_ref())?;
         assert_eq!(rows.len(), owned.messages.len());
         assert_eq!(
-            cv_core::label_from(session.title.as_deref(), first_user.as_deref()),
+            cv_core::label_from(session.title.as_deref(), first_prompt.as_deref()),
             owned.label()
         );
         for (row, message) in rows.iter().zip(&owned.messages) {

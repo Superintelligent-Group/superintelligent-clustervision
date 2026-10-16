@@ -92,7 +92,7 @@ fn ranked_json_rows<'a>(
     }
 }
 
-/// Reduce the stable inline prefix with the existing title policy. Once lazy text appears,
+/// Reduce the stable inline prefix with the title rule (`Message::prompt_title`). Once lazy text appears,
 /// preserve deferred user collection: resolution needs EOF source metadata and may fail after
 /// a source mutation, allowing a later user turn to become the title.
 struct TitleUsers {
@@ -121,7 +121,8 @@ impl TitleUsers {
 }
 impl cv_core::MessageSink for TitleUsers {
     fn message(&mut self, m: cv_core::Message) -> cv_core::Flow {
-        if m.role != cv_core::Role::User || m.kind == cv_core::MessageKind::InjectedContext || self.fallback.is_some() {
+        // Only a prompt can title a session (`Message::prompt_title`).
+        if m.role != cv_core::Role::User || m.kind != cv_core::MessageKind::Prompt || self.fallback.is_some() {
             return cv_core::Flow::Continue;
         }
         self.deferred |= m.content.iter().any(|block| {

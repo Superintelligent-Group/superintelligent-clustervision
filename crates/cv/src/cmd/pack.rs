@@ -310,7 +310,7 @@ fn live_scan_adapters<'a>(
             let lo = floor_char(sink.hay.as_str(), pos.saturating_sub(40));
             let hi = ceil_char(sink.hay.as_str(), (pos + 120).min(sink.hay.len()));
             let snippet = sink.hay.as_str()[lo..hi].replace('\n', " ").trim().to_string();
-            let title = cv_core::label_from(meta.title.as_deref(), sink.first_user.as_deref());
+            let title = cv_core::label_from(meta.title.as_deref(), sink.first_prompt.as_deref());
             scored.insert(
                 rank,
                 cv_search::Hit {

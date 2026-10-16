@@ -209,10 +209,11 @@ fn ls_json_zero_limit_validates_inputs_without_creating_a_catalog() {
     assert!(!err.is_empty());
 }
 
-/// Codex rows on the committed corpus: `display_title` is the row's `title`, never the injected
-/// AGENTS.md or environment-context turn that opens every rollout.
+/// Codex sessions on the committed corpus are titled by their first prompt, never the injected
+/// AGENTS.md or environment-context turn that opens every rollout: the row's `title` and
+/// `display_title`, and the title of every index and live-scan hit.
 #[test]
-fn ls_json_enrich_codex_display_title_is_the_listed_title() {
+fn codex_titles_are_the_first_prompt_in_listings_and_hits() {
     fn copy(from: &std::path::Path, to: &std::path::Path) {
         fs::create_dir_all(to).unwrap();
         for entry in fs::read_dir(from).unwrap() {
@@ -236,6 +237,22 @@ fn ls_json_enrich_codex_display_title_is_the_listed_title() {
         for row in &rows {
             assert!(row["title"].is_string(), "{row}");
             assert_eq!(row["display_title"], row["title"], "{}: {row}", version.display());
+        }
+        w.cv_ok(&["index"]);
+        for scan in [false, true] {
+            let mut args = vec!["search", "--json", "--limit", "100"];
+            if scan {
+                args.push("--scan");
+            }
+            let (out, _) = w.cv_ok(&[args.as_slice(), &["prime"]].concat());
+            let hits: Vec<serde_json::Value> = serde_json::from_str(out.trim()).expect("pure JSON");
+            let titles: Vec<_> = hits.iter().map(|h| h["title"].as_str().unwrap()).collect();
+            assert_eq!(
+                titles,
+                ["List three prime numbers."],
+                "{} scan={scan}",
+                version.display()
+            );
         }
     }
 }

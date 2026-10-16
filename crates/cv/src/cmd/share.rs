@@ -12,7 +12,7 @@
 use crate::util::{home_rel, parse_harness, resolve};
 use anyhow::{Context, Result};
 use cv_core::html::{self, ShareMeta};
-use cv_core::ir::{human_bytes, label_from, Harness, Message, Role, Session};
+use cv_core::ir::{human_bytes, label_from, Harness, Message, Session};
 use cv_core::redact::{redact_message, redact_text, RedactOptions, RedactStats};
 use cv_core::{Flow, MessageSink, ParseOptions};
 use std::io::Write;
@@ -72,7 +72,7 @@ fn share_session(
         created_at: r.created_at,
         title: r.title.clone(),
         model: None,
-        first_user: None,
+        first_prompt: None,
         buf: Vec::new(),
         printed: false,
         meta_for_end: None,
@@ -119,7 +119,7 @@ struct ShareSink<'w, W: Write> {
     created_at: Option<chrono::DateTime<chrono::Utc>>,
     title: Option<String>,
     model: Option<String>,
-    first_user: Option<String>,
+    first_prompt: Option<String>,
     /// Rendered messages held back until the header is written.
     buf: Vec<String>,
     printed: bool,
@@ -152,7 +152,7 @@ impl<W: Write> ShareSink<'_, W> {
             (None, _) => None,
         };
         let meta = ShareMeta {
-            label: label_from(title.as_deref(), self.first_user.as_deref()),
+            label: label_from(title.as_deref(), self.first_prompt.as_deref()),
             harness: self.harness,
             id: self.id.clone(),
             model: self.model.clone(),
@@ -223,11 +223,13 @@ impl<W: Write> MessageSink for ShareSink<'_, W> {
                 self.model = Some(md.clone());
             }
         }
-        // First user text (post-redaction) backs the header label when there's no title.
-        if self.first_user.is_none() && m.role == Role::User {
-            if let Some(t) = m.text() {
-                if !t.trim().is_empty() {
-                    self.first_user = Some(t);
+        // The first prompt (post-redaction) backs the header label when there's no title.
+        if self.first_prompt.is_none() {
+            match m.prompt_title(&self.resolver) {
+                Ok(title) => self.first_prompt = title,
+                Err(error) => {
+                    self.result = Err(std::io::Error::other(error));
+                    return Flow::Stop;
                 }
             }
         }
@@ -243,7 +245,7 @@ impl<W: Write> MessageSink for ShareSink<'_, W> {
             self.write(&rendered);
         } else {
             self.buf.push(rendered);
-            let title_known = self.title.is_some() || self.first_user.is_some();
+            let title_known = self.title.is_some() || self.first_prompt.is_some();
             if (self.model.is_some() && title_known) || self.buf.len() >= HOLDBACK {
                 self.flush_header();
             }
@@ -272,6 +274,7 @@ fn safe_stem(id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cv_core::ir::Role;
     use cv_core::{Block, Json};
 
     #[test]
@@ -333,7 +336,7 @@ mod tests {
             created_at: None,
             title: Some("source parity".into()),
             model: None,
-            first_user: None,
+            first_prompt: None,
             buf: Vec::new(),
             printed: false,
             meta_for_end: None,
