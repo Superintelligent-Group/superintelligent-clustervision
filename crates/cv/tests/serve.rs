@@ -1260,6 +1260,12 @@ fn serve_search() {
         assert!(v["error"].as_str().unwrap().contains("q parameter"), "{v}");
     }
 
+    // Semantic vectors embed the exchange alone: asking them for the context is a 400, as the
+    // CLI's --semantic conflicts with --kind.
+    let (status, v) = get_json(port, "/api/search?semantic=1&kind=context&q=zebrafish");
+    assert_eq!(status, 400, "{v}");
+    assert!(v["error"].as_str().unwrap().contains("embeds the exchange only"), "{v}");
+
     // harness: a filter, and a typo is a clear 400 (same as /api/sessions).
     let (status, v) = get_json(port, "/api/search?scan=1&q=zebrafish&harness=claude");
     assert_eq!(status, 200);

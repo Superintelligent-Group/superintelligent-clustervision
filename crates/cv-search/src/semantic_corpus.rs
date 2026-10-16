@@ -7,9 +7,14 @@ const EMBED_HEAD_BYTES: usize = 64 * 1024;
 
 use cv_core::projection::Head;
 
+/// What a session's vector is made of: the head of its own exchange
+/// ([`cv_core::MessageKind::is_exchange`], minus turns a fork copied from its source), as the
+/// full-text `body` field holds it, and its first [`cv_core::Message::prompt_title`].
 pub(super) struct DocSink {
     pub(super) body: Head,
     pub(super) first_prompt: Option<String>,
+    /// Turns stamped before this were copied from another session ([`cv_core::Adapter::copied_before`]).
+    pub(super) copied_before: Option<chrono::DateTime<chrono::Utc>>,
     pub(super) reads: cv_core::source::ReadSet,
     resolver: Resolver,
     error: Option<anyhow::Error>,
@@ -20,6 +25,7 @@ impl DocSink {
         Self {
             body: Head::new(EMBED_HEAD_BYTES),
             first_prompt: None,
+            copied_before: None,
             reads: Default::default(),
             resolver,
             error: None,
@@ -139,7 +145,10 @@ impl MessageSink for DocSink {
                 }
             }
         }
-        self.append_searchable(&message);
+        let copied = matches!((message.timestamp, self.copied_before), (Some(at), Some(before)) if at < before);
+        if message.kind.is_exchange() && !copied {
+            self.append_searchable(&message);
+        }
         if self.error.is_some() || (self.body.full() && self.first_prompt.is_some()) {
             Flow::Stop
         } else {
@@ -492,7 +501,7 @@ mod tests {
     }
 
     #[test]
-    fn semantic_head_titles_the_first_prompt() {
+    fn semantic_head_embeds_the_exchange_and_titles_the_first_prompt() {
         let mut instructions = message(Role::User, vec![text("# AGENTS.md instructions for /work")]);
         instructions.kind = cv_core::MessageKind::InjectedContext;
         let mut actual = sink();
@@ -501,6 +510,38 @@ mod tests {
         assert!(actual.first_prompt.is_none());
         actual.message(message(Role::User, vec![text("chosen")]));
         assert_eq!(actual.first_prompt.as_deref(), Some("chosen"));
+        assert!(!actual.body.as_str().contains("AGENTS.md"));
+        assert!(actual.body.as_str().contains("chosen"));
+    }
+
+    /// The committed Claude corpus copies one CLAUDE.md into 18 transcripts; a vector embeds it
+    /// only where the exchange says it (`dfa91e7c`'s reply quotes it), and the fork's copied
+    /// turns (`b3a058ca`) are its source's alone, as the full-text `body` field holds them.
+    #[test]
+    fn corpus_semantic_bodies_embed_the_exchange_not_copied_instructions() {
+        let home = cv_testkit::temp_dir("semantic-corpus-home");
+        let scope = (*cv_core::env::Env::current()).clone().enter();
+        scope.set("CLUSTERVISION_HOME", &home);
+        let project = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../cv-core/tests/corpus/claude/2.1.296/.claude/projects/-home-corpus-project");
+        let mut quoted = Vec::new();
+        for path in std::fs::read_dir(&project).unwrap().map(|e| e.unwrap().path()) {
+            if path.extension().is_none_or(|x| x != "jsonl") {
+                continue;
+            }
+            let id = path.file_stem().unwrap().to_str().unwrap().to_owned();
+            let r = cv_core::SessionRef::new(&id, cv_core::Harness::Claude, &path);
+            let (doc, _) = crate::read_corpus_doc(&r).unwrap();
+            if doc.body.contains("corpus test repository") {
+                quoted.push(id[..8].to_owned());
+            }
+            if id.starts_with("b3a058ca") {
+                assert!(!doc.body.contains("Which language did you use first"), "a copied turn");
+            }
+        }
+        assert_eq!(quoted, ["dfa91e7c"]);
+        drop(scope);
+        std::fs::remove_dir_all(home).unwrap();
     }
 
     #[test]

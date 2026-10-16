@@ -164,6 +164,11 @@ CPU-fast, so clustervision just embeds every session up front and does a
 brute-force in-memory cosine scan at query time — no approximate-nearest-neighbor
 index needed at the ~1k-session scale.
 
+A session's vector embeds the head of its own exchange, as the full-text index
+matches it: never the injected instructions, system prompts or hook output around
+it, and never turns a fork copied from its source. `--kind context` and
+`--kind all` are full-text only.
+
 The model is fetched from the HuggingFace Hub on first use and cached under
 `~/.cache/huggingface`. To pin a local copy and run fully offline, point
 `CV_SEARCH_MODEL` at a model directory:

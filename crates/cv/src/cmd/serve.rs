@@ -563,6 +563,10 @@ fn search(query: &str, semantic_search: &cv_search::SemanticSearch) -> Reply {
         },
     };
 
+    if semantic && scope != cv_search::Scope::Exchange {
+        let (status, body) = err(400, "semantic=1 embeds the exchange only: kind= is full-text");
+        return (status, body, Vec::new());
+    }
     let (mut hits, source, mut note) = if semantic {
         match semantic_search.search(
             &q,

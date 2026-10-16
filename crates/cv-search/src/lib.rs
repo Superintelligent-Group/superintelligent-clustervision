@@ -160,7 +160,7 @@ pub fn text_search_indexed(dir: impl Into<Option<PathBuf>>, query: &str, limit: 
 pub struct SearchFilter<'a> {
     pub harness: Option<&'a str>,
     pub cwd: Option<&'a str>,
-    /// Which text a full-text query matches; semantic search ignores it.
+    /// Which text a full-text query matches; semantic vectors embed the exchange alone.
     pub scope: Scope,
 }
 
@@ -257,6 +257,7 @@ pub fn semantic_search_filtered(
 pub(crate) fn read_corpus_doc(r: &cv_core::SessionRef) -> Result<(Doc, cv_core::source::ReadSet)> {
     let adapter = cv_core::harness::for_harness(r.harness).with_context(|| format!("no adapter for {}", r.harness))?;
     let mut sink = semantic_corpus::DocSink::new(cv_core::Resolver::new(Some(r.path.clone())));
+    sink.copied_before = adapter.copied_before(r, &mut sink);
     let meta = cv_core::stream::stream_counted(
         &*adapter,
         r,

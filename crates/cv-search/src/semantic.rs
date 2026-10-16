@@ -36,7 +36,9 @@ use model2vec_rs::model::StaticModel;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-const PROJECTION_VERSION: u32 = 1;
+/// What a stored vector embeds ([`crate::semantic_corpus::DocSink`]); a store of another
+/// projection re-embeds whole. 2: the exchange only, not the context around it.
+const PROJECTION_VERSION: u32 = 2;
 
 /// A small, strong static-embedding model (~30MB, 256-dim). Distilled from a sentence encoder.
 const MODEL_REPO: &str = "minishlab/potion-base-8M";
