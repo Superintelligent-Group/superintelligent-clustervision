@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Parsimony gate: product code per crate stays within a checked-in budget, and the tree holds no
+"""Parsimony gate: product code per crate and per module, and test code per crate, stay within a
+checked-in budget, and the tree holds no
 committed evidence. Growth is allowed only by editing tools/size-budget.txt in the same change, so
 it is a decision a reviewer sees, not drift. The budget also ratchets down: one more than
 SLACK above the measured size fails, so freed room is not silently refilled.
@@ -119,12 +120,43 @@ def product_lines(crate: pathlib.Path) -> int:
     return total
 
 
-def measure() -> dict[str, int]:
-    return {
-        crate.name: product_lines(crate)
-        for crate in sorted(pathlib.Path("crates").iterdir())
-        if (crate / "src").is_dir()
-    }
+def module_key(crate: pathlib.Path, path: pathlib.Path) -> str:
+    """`crate:module` where a module is a top-level file or directory under src, and `harness/*`
+    and `cmd/*` split one level deeper (an adapter or a command is the unit a lane owns)."""
+    parts = list(path.relative_to(crate / "src").parts)
+    key = "/".join(parts[:2]) if parts[0] in ("harness", "cmd") and len(parts) > 1 else parts[0]
+    return f"{crate.name}:{key.removesuffix('.rs')}"
+
+
+def measure() -> tuple[dict[str, int], dict[str, int], dict[str, int]]:
+    """(product lines per crate, product lines per module, test lines per crate)."""
+    crates: dict[str, int] = {}
+    modules: dict[str, int] = {}
+    tests: dict[str, int] = {}
+    for crate in sorted(pathlib.Path("crates").iterdir()):
+        if not (crate / "src").is_dir():
+            continue
+        files = sorted((crate / "src").rglob("*.rs"))
+        excluded: set[pathlib.Path] = set()
+        stripped = {path: strip_test_items(path, excluded) for path in files}
+        total = 0
+        for path in files:
+            if path.name == "tests.rs" or "tests" in path.relative_to(crate / "src").parts[:-1]:
+                continue
+            if path.resolve() in excluded:
+                continue
+            n = sum(1 for line in stripped[path].splitlines() if line.strip())
+            total += n
+            modules[module_key(crate, path)] = modules.get(module_key(crate, path), 0) + n
+        crates[crate.name] = total
+        every = sum(
+            sum(1 for line in path.read_text(encoding="utf-8", errors="replace").splitlines() if line.strip())
+            for sub in ("src", "tests")
+            if (crate / sub).is_dir()
+            for path in (crate / sub).rglob("*.rs")
+        )
+        tests[crate.name] = every - total
+    return crates, modules, tests
 
 
 def tracked(*patterns: str) -> list[str]:
@@ -132,33 +164,47 @@ def tracked(*patterns: str) -> list[str]:
     return [line for line in out.stdout.splitlines() if line]
 
 
+TEST_SLACK = 0.10
+
+
+def check(kind: str, name: str, lines: int, limit: int | None, slack: float, failures: list[str]) -> None:
+    if limit is None:
+        failures.append(f"{name}: {lines} {kind} lines and no budget (add it to {BUDGET})")
+    elif lines > limit:
+        failures.append(f"{name}: {lines} {kind} lines exceed the budget of {limit} by {lines - limit}")
+    elif lines < limit / (1 + slack):
+        failures.append(f"{name}: budget {limit} is more than {slack:.0%} above the {lines} measured; lower it")
+
+
 def main() -> int:
-    sizes = measure()
+    crates, modules, tests = measure()
     if "--write" in sys.argv:
         BUDGET.write_text(
-            "# Product lines per crate (tools/check-size.py). Raise a number only as a reviewed decision.\n"
-            + "".join(f"{name} {lines}\n" for name, lines in sizes.items())
+            "# Product lines per crate and per module, and test lines per crate (tools/check-size.py).\n"
+            "# Raise a number only as a reviewed decision; the gate ratchets each one down as code shrinks.\n"
+            + "".join(f"{name} {lines}\n" for name, lines in crates.items())
+            + "".join(f"{name}:tests {lines}\n" for name, lines in tests.items())
+            + "".join(f"{name} {lines}\n" for name, lines in sorted(modules.items()))
         )
         print(f"wrote {BUDGET}")
         return 0
 
-    failures = []
-    budget = {}
+    failures: list[str] = []
+    budget: dict[str, int] = {}
     for line in BUDGET.read_text().splitlines():
         if line.strip() and not line.startswith("#"):
             name, lines = line.split()
             budget[name] = int(lines)
-    for name, lines in sizes.items():
-        limit = budget.get(name)
-        if limit is None:
-            failures.append(f"{name}: {lines} product lines and no budget (add it to {BUDGET})")
-        elif lines > limit:
-            failures.append(f"{name}: {lines} product lines exceed the budget of {limit} by {lines - limit}")
-        elif lines < limit / (1 + SLACK):
-            failures.append(f"{name}: budget {limit} is more than {SLACK:.0%} above the {lines} measured; lower it")
-        print(f"{name:12} {lines:7} / {limit if limit is not None else '-'}")
-    for name in budget.keys() - sizes.keys():
-        failures.append(f"{name}: budgeted but no such crate; remove it from {BUDGET}")
+    for name, lines in crates.items():
+        check("product", name, lines, budget.get(name), SLACK, failures)
+        print(f"{name:12} {lines:7} / {budget.get(name, '-')}")
+    for name, lines in tests.items():
+        check("test", f"{name}:tests", lines, budget.get(f"{name}:tests"), TEST_SLACK, failures)
+    for name, lines in modules.items():
+        check("product", name, lines, budget.get(name), SLACK, failures)
+    known = set(crates) | {f"{c}:tests" for c in crates} | set(modules)
+    for name in budget.keys() - known:
+        failures.append(f"{name}: budgeted but no such crate or module; remove it from {BUDGET}")
 
     for path in tracked("docs/*.json", "docs/**/*.json", "tools/profiling/results/*"):
         failures.append(f"{path}: measurements belong in commit messages, not committed files")
