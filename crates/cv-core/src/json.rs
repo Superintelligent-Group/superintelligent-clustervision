@@ -119,12 +119,13 @@ pub(crate) fn same_or_grown(
 }
 /// A write updates a file's timestamps before its length (Linux's write path does), so for an
 /// instant an append in flight looks like a same-length rewrite. Before calling an observation of
-/// `path` at its captured `extent` with other timestamps a rewrite, look again: an append's
-/// length grows within milliseconds, a rewrite's does not.
+/// `path` at its captured `extent` with other timestamps a rewrite, look again, backing off from
+/// 1 ms to 256 ms (about half a second in all, for a writer descheduled mid-`write` on a loaded
+/// machine): an append's length grows, a rewrite's does not.
 pub(crate) fn append_in_flight(path: &Path, extent: (u64, Option<(u64, u64)>)) -> bool {
     #[cfg(unix)]
-    for _ in 0..20 {
-        std::thread::sleep(std::time::Duration::from_millis(1));
+    for step in 0..9 {
+        std::thread::sleep(std::time::Duration::from_millis(1 << step));
         if Identity::read(path).is_ok_and(|now| same_or_grown(false, extent, (now.len, now.file()))) {
             return true;
         }
