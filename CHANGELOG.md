@@ -3,6 +3,7 @@
 ## Unreleased
 
 - A live `.jsonl` beside its writer is admitted by content (same file, sampled prefix intact), never by waiting; index, events, counts, vectors reread once.
+- Pre-binary `embeddings.json` semantic stores are no longer read or migrated (querying them already failed); `cv index --semantic` rebuilds.
 
 - Reading a large transcript maps 8 MiB windows and each span alone, never the whole file: `cv doctor` on 1.3 GB peaks at 22 MB RSS, not 2.6 GB.
 

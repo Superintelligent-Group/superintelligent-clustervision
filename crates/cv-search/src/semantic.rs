@@ -25,9 +25,8 @@
 //! ```
 //!
 //! The metadata stays JSON (it's small, schema-evolvable via serde defaults); only the bulk —
-//! the vectors — is fixed-width. A store written by an older build (pure JSON, starts with `{`)
-//! still loads, and [`semantic_search`] migrates the legacy default `embeddings.json` to the
-//! binary default path on first use.
+//! the vectors — is fixed-width. A pre-binary all-JSON store is rejected like any bad magic:
+//! `cv index --semantic` rebuilds it.
 
 use crate::Hit;
 use anyhow::{bail, Context, Result};
@@ -120,64 +119,6 @@ impl Store {
     }
 }
 
-// ---- legacy (pre-binary) store --------------------------------------------------------------
-
-/// The old all-JSON store layout, kept so existing `embeddings.json` files load + migrate.
-#[derive(serde::Deserialize)]
-struct LegacyStore {
-    model: String,
-    records: Vec<LegacyRecord>,
-}
-
-#[derive(serde::Deserialize)]
-struct LegacyRecord {
-    id: String,
-    harness: String,
-    cwd: Option<String>,
-    title: Option<String>,
-    preview: String,
-    #[serde(default)]
-    created_at: Option<i64>,
-    #[serde(default)]
-    updated_at: Option<i64>,
-    vector: Vec<f32>,
-}
-
-impl From<LegacyStore> for Store {
-    fn from(old: LegacyStore) -> Store {
-        let dim = old.records.first().map(|r| r.vector.len()).unwrap_or(0);
-        let mut meta = Vec::with_capacity(old.records.len());
-        let mut vectors = Vec::with_capacity(old.records.len() * dim);
-        for r in old.records {
-            // A malformed row (wrong dim) would shear the flat block; skip it instead.
-            if r.vector.len() != dim {
-                continue;
-            }
-            vectors.extend_from_slice(&r.vector);
-            meta.push(RecordMeta {
-                id: r.id,
-                harness: r.harness,
-                cwd: r.cwd,
-                title: r.title,
-                preview: r.preview,
-                created_at: r.created_at,
-                updated_at: r.updated_at,
-                source_path: None,
-                source: None,
-                hints: None,
-            });
-        }
-        Store {
-            model: old.model,
-            projection: 0,
-            model_reads: None,
-            dim,
-            meta,
-            vectors,
-        }
-    }
-}
-
 // ---- store I/O -------------------------------------------------------------------------------
 
 /// Serialize + write the store atomically (temp + rename).
@@ -221,7 +162,6 @@ fn save_store(path: &Path, store: &Store) -> Result<()> {
     Ok(())
 }
 
-/// Load a store: the binary format, or (transparently) a legacy all-JSON store.
 // Parsing the metadata validates the complete declared binary extent. Vector contents are
 // arbitrary f32 bits; defer their ownership until a consumer actually needs retained vectors.
 struct VectorBacking {
@@ -280,24 +220,11 @@ fn load_store_metadata(path: &Path) -> Result<(Store, Option<VectorBacking>)> {
         .with_context(|| format!("reading embedding store {} — run `embed_all` first", path.display()))?;
     let file_len = file.metadata()?.len();
     let mut input = std::io::BufReader::new(file);
-    let mut first = [0u8; 1];
-    let n = input.read(&mut first)?;
-    if n == 1 && first[0] == b'{' {
-        // Legacy JSON keeps its existing owned decoder, but does not need another full wire copy.
-        let prefixed = std::io::Cursor::new(first).chain(input);
-        let legacy: LegacyStore = serde_json::from_reader(prefixed).context("parsing legacy JSON embedding store")?;
-        return Ok((legacy.into(), None));
-    }
     let mut header = [0u8; 24];
-    header[0] = first[0];
-    let complete_header = if n == 0 {
-        false
-    } else {
-        match input.read_exact(&mut header[1..]) {
-            Ok(()) => true,
-            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => false,
-            Err(error) => return Err(error).context("reading embedding store header"),
-        }
+    let complete_header = match input.read_exact(&mut header) {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => false,
+        Err(error) => return Err(error).context("reading embedding store header"),
     };
     if !complete_header || &header[..8] != MAGIC {
         bail!(
@@ -714,8 +641,8 @@ fn encode_batch(
 
 /// Embed `query` and return the top-`k` sessions by cosine similarity.
 ///
-/// Legacy stores still load and migrate to the binary format. Stores without recorded model
-/// artifact identities must refresh once through `cv index --semantic` before querying.
+/// Stores without recorded model artifact identities must refresh once through
+/// `cv index --semantic` before querying.
 ///
 /// The store's recorded model must match the model the query would embed under (including a
 /// `CV_SEARCH_MODEL` override), and the query vector's dimensionality must match the store's —
@@ -732,7 +659,6 @@ pub fn semantic_search_filtered(
     k: usize,
     filter: crate::SearchFilter<'_>,
 ) -> Result<Vec<Hit>> {
-    migrate_legacy_sibling(path);
     let store = load_store(path)?;
     if store.meta.is_empty() {
         return Ok(Vec::new());
@@ -830,7 +756,6 @@ impl<M> ResidentState<M> {
             // Release the old generation before loading another; a failed replacement never
             // leaves an old answer available as fallback.
             self.store = None;
-            migrate_legacy_sibling(path);
             let mut reads = ReadSet::default();
             reads.record(path);
             let mut store = load_store(path)?;
@@ -962,28 +887,6 @@ fn validate_store_model(store: &Store, spec: &ModelSpec, path: &Path) -> Result<
         );
     }
     Ok(())
-}
-
-/// One-time upgrade: when `path` is absent but the old default `embeddings.json` exists alongside
-/// it, convert that JSON store into the binary format at `path`. Best-effort (a failure just means
-/// `load_store` reports the missing file); the legacy file is left untouched.
-fn migrate_legacy_sibling(path: &Path) {
-    if path.exists() || path.file_name().is_none() {
-        return;
-    }
-    let legacy = path.with_file_name("embeddings.json");
-    if legacy == path || !legacy.exists() {
-        return;
-    }
-    if let Ok(store) = load_store(&legacy) {
-        if save_store(path, &store).is_ok() {
-            eprintln!(
-                "(migrated legacy embedding store {} → {})",
-                legacy.display(),
-                path.display()
-            );
-        }
-    }
 }
 
 /// Brute-force cosine ranking of the store against an already-embedded query, mapping the top-`k`
@@ -2755,43 +2658,6 @@ mod tests {
         assert_eq!(back.vectors, s.vectors); // bit-exact through to_le_bytes/from_le_bytes
                                              // And the loaded store ranks like the in-memory one.
         assert_eq!(rank(&back, &[0.25, -1.5, 3.0], 1)[0].id, "a");
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// An embedding store written by an older build (pure JSON, with or without the date fields)
-    /// must still load — and `migrate_legacy_sibling` upgrades it to the binary default path.
-    #[test]
-    fn legacy_json_store_loads_and_migrates() {
-        let json = r#"{
-            "model": "minishlab/potion-base-8M",
-            "records": [{
-                "id": "old", "harness": "claude", "cwd": null, "title": "t",
-                "preview": "p", "vector": [0.5, 0.5]
-            }]
-        }"#;
-        let dir = std::env::temp_dir().join(format!("cv-emb-legacy-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let legacy_path = dir.join("embeddings.json");
-        std::fs::write(&legacy_path, json).unwrap();
-
-        // Loads directly (dateless fields default to None), ranks, and maps to a hit.
-        let store = load_store(&legacy_path).unwrap();
-        assert_eq!(store.dim, 2);
-        assert_eq!(store.meta.len(), 1);
-        assert_eq!(store.meta[0].created_at, None);
-        let hits = rank(&store, &[0.5, 0.5], 1);
-        assert_eq!(hits[0].id, "old");
-        assert_eq!(hits[0].created_at, None);
-
-        // Sibling migration: a missing binary store next to the legacy JSON gets created.
-        let bin_path = dir.join("embeddings.bin");
-        migrate_legacy_sibling(&bin_path);
-        assert!(bin_path.exists(), "legacy store should migrate to the binary path");
-        let migrated = load_store(&bin_path).unwrap();
-        assert_eq!(migrated.meta.len(), 1);
-        assert_eq!(migrated.vectors, vec![0.5, 0.5]);
-        assert!(legacy_path.exists(), "legacy file is left in place");
 
         std::fs::remove_dir_all(&dir).ok();
     }

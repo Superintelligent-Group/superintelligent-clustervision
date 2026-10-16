@@ -2,12 +2,12 @@
 # Raise a number only as a reviewed decision; the gate ratchets each one down as code shrinks.
 cv 19221
 cv-core 79151
-cv-search 4830
+cv-search 4737
 cv-testkit 450
 cv-web 15
 cv:tests 15358
 cv-core:tests 64390
-cv-search:tests 7373
+cv-search:tests 7340
 cv-testkit:tests 39
 cv-web:tests 0
 cv-core:affordance 1822
@@ -83,8 +83,8 @@ cv-core:tools 472
 cv-core:watch 1318
 cv-search:fts 2858
 cv-search:ingest 146
-cv-search:lib 278
-cv-search:semantic 1074
+cv-search:lib 277
+cv-search:semantic 982
 cv-search:semantic_corpus 153
 cv-search:session_collector 321
 cv-testkit:heap 73

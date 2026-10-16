@@ -89,7 +89,6 @@ pub fn default_tantivy_dir() -> PathBuf {
 }
 
 /// Default location of the semantic embedding store (binary; see `semantic` module docs).
-/// A legacy `embeddings.json` next to it is migrated on first query.
 pub fn default_embeddings_path() -> PathBuf {
     home_dir().join("embeddings.bin")
 }
