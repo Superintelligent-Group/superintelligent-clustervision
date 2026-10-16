@@ -804,40 +804,6 @@ mod imp {
     /// `(harness, id, path)` → the captured primary source tuple and counts a full read recorded.
     type AffordanceRows = std::collections::HashMap<(String, String, String), (i64, i64, String)>;
 
-    /// Legacy aggregate signature retained for API compatibility. Fresh affordance counts use
-    /// the captured primary tuple plus exact auxiliary dependencies instead: directory totals
-    /// and a shared database session's catalog timestamp cannot establish those dependencies.
-    pub fn affordance_sig(r: &SessionRef) -> (i64, i64) {
-        let Ok(md) = std::fs::metadata(&r.path) else {
-            return (0, 0);
-        };
-        let shared_db = r
-            .path
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| matches!(e, "db" | "sqlite" | "sqlite3" | "vscdb"));
-        if shared_db {
-            return (r.updated_at.and_then(|t| t.timestamp_nanos_opt()).unwrap_or(0), -1);
-        }
-        if md.is_dir() {
-            let (mut newest, mut total) = (0i64, 0i64);
-            for e in std::fs::read_dir(&r.path).into_iter().flatten().flatten() {
-                let Ok(m) = e.metadata() else { continue };
-                if m.is_file() {
-                    let t = m
-                        .modified()
-                        .ok()
-                        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                        .map_or(0, |d| d.as_nanos() as i64);
-                    newest = newest.max(t);
-                    total += m.len() as i64;
-                }
-            }
-            return (newest, total);
-        }
-        crate::offsets::file_sig(&r.path)
-    }
-
     /// The key under which a counts row records the [`crate::affordance::VIEW_VERSION`] that
     /// counted it.
     const VERSION_KEY: &str = "_v";
@@ -871,12 +837,6 @@ mod imp {
         }
         Some(counts)
     }
-
-    /// Compatibility entry point without a before-read source snapshot. It cannot publish fresh
-    /// counts safely: the closure may contain counts from an earlier read. Use
-    /// [`note_affordances_with_source`] with a snapshot captured before counting instead.
-    #[deprecated(note = "no-op without a before-read source snapshot; use note_affordances_with_source")]
-    pub fn note_affordances(_r: &SessionRef, _counts: impl FnOnce() -> crate::affordance::Counts) {}
 
     /// Record counts against the dependencies captured before their complete source pass.
     pub fn note_affordances_with_source(
@@ -1764,12 +1724,9 @@ mod imp {
 }
 
 #[cfg(feature = "sqlite")]
-#[allow(deprecated)]
-pub use imp::{
-    affordance_sig, fill_count, lookup, note_affordances, note_affordances_with_source, sync, AffordanceTable,
-};
-#[cfg(feature = "sqlite")]
 pub(crate) use imp::{all_sessions, db_path, open_at, open_db, watches_for};
+#[cfg(feature = "sqlite")]
+pub use imp::{fill_count, lookup, note_affordances_with_source, sync, AffordanceTable};
 
 #[cfg(all(feature = "sqlite", test))]
 pub(crate) use imp::replace_harness;
@@ -1784,9 +1741,6 @@ pub(crate) fn last_full_sync() -> Option<i64> {
 pub fn sync(_refs: &[SessionRef]) {}
 #[cfg(not(feature = "sqlite"))]
 pub fn fill_count(_r: &SessionRef, _n: usize) {}
-#[cfg(not(feature = "sqlite"))]
-#[deprecated(note = "no-op without a before-read source snapshot; use note_affordances_with_source")]
-pub fn note_affordances(_r: &SessionRef, _counts: impl FnOnce() -> crate::affordance::Counts) {}
 #[cfg(not(feature = "sqlite"))]
 pub fn note_affordances_with_source(
     _r: &SessionRef,
