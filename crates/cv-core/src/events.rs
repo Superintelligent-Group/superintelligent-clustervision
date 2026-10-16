@@ -83,8 +83,7 @@ pub struct EventSink {
     events: Vec<Event>,
     dependencies: crate::source::ReadSet,
     capture_events: bool,
-    error: Option<anyhow::Error>,
-    failed: bool,
+    latch: crate::stream::Latch,
 }
 
 impl EventSink {
@@ -97,20 +96,18 @@ impl EventSink {
             events: Vec::new(),
             dependencies: Default::default(),
             capture_events: true,
-            error: None,
-            failed: false,
+            latch: Default::default(),
         }
     }
 
     /// Observe a borrowed message when another consumer owns its delivery.
     pub fn observe_message(&mut self, m: &Message) -> Flow {
-        if self.failed {
+        if self.latch.failed() {
             return Flow::Stop;
         }
         if self.capture_events {
             if let Err(error) = extract_into(m, self.msg_idx, self.cwd.as_deref(), &mut self.events) {
-                self.error = Some(error);
-                self.failed = true;
+                self.latch.fail(error);
                 return Flow::Stop;
             }
         }
@@ -152,8 +149,7 @@ impl EventSink {
             events: Vec::new(),
             dependencies: st.dependencies,
             capture_events: true,
-            error: None,
-            failed: false,
+            latch: Default::default(),
         })
     }
 }
@@ -172,12 +168,12 @@ struct EventState {
 
 impl MessageSink for EventSink {
     fn dependency(&mut self, path: &std::path::Path) {
-        if !self.failed {
+        if !self.latch.failed() {
             self.dependencies.record(path);
         }
     }
     fn meta(&mut self, s: &Session) {
-        if !self.failed && self.cwd.is_none() {
+        if !self.latch.failed() && self.cwd.is_none() {
             self.cwd = s.cwd.clone();
         }
     }
@@ -187,18 +183,15 @@ impl MessageSink for EventSink {
     }
 
     fn take_error(&mut self) -> Option<anyhow::Error> {
-        self.error.take().or_else(|| {
-            self.failed
-                .then(|| anyhow::anyhow!("event consumer has already failed"))
-        })
+        self.latch.take("event consumer")
     }
 
     fn wants_checkpoint(&mut self, _offset: u64) -> bool {
-        !self.failed
+        !self.latch.failed()
     }
 
     fn checkpoint(&mut self, cp: &mut Checkpoint) {
-        if self.failed {
+        if self.latch.failed() {
             return;
         }
         cp.put(
