@@ -2813,7 +2813,7 @@ pub(crate) fn index_refs(dir: &Path, refs: &[cv_core::SessionRef], catalog: bool
         };
         let source = probe.snapshot(r);
         let (mtime, size) = source.primary;
-        let mut es = catalog.then(|| cv_core::events::EventSink::new(r.cwd.clone()));
+        let mut es = catalog.then(|| cv_core::events::SpoolingSink::new(r.cwd.clone()));
         let (_, reads) = index_session_clean(
             &mut writer,
             &f,
@@ -2826,13 +2826,8 @@ pub(crate) fn index_refs(dir: &Path, refs: &[cv_core::SessionRef], catalog: bool
         )
         .with_context(|| format!("indexing {}", r.id))?;
         if let Some(es) = es {
-            cv_core::events::record_from_with_source(
-                r,
-                0,
-                es.events(),
-                &source.with_reads(es.dependencies()),
-                &Default::default(),
-            );
+            let source = source.with_reads(es.inner().dependencies());
+            cv_core::events::record_spooled_with_source(r, 0, es.into_spool()?, &source, &Default::default())?;
         }
         dependencies.push((r.clone(), source.with_reads(&reads)));
     }

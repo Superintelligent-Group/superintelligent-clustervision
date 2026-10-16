@@ -77,7 +77,7 @@ impl EventSpool {
     pub fn temporary_bytes(&self) -> Result<u64> {
         self.ordered.temporary_bytes()
     }
-    fn push(&mut self, event: Event) -> Result<()> {
+    pub fn push(&mut self, event: Event) -> Result<()> {
         self.ordered.push(event)
     }
     #[cfg(any(test, feature = "sqlite"))]
@@ -359,9 +359,7 @@ mod tests {
     #[cfg(feature = "sqlite")]
     #[test]
     fn ordered_publication_preserves_suffix_dedup_and_rolls_back_failures() {
-        use crate::events::{
-            events_for, needs_ingest, record_from_with_source, record_spooled_with_source, Provenance,
-        };
+        use crate::events::{events_for, needs_ingest, record_spooled_with_source, Provenance};
         use crate::{Harness, SessionRef};
         let world = crate::test_world("event-spool-transaction");
         let path = world.proj.join("events.jsonl");
@@ -370,14 +368,15 @@ mod tests {
         let source = crate::source::Probe::default()
             .snapshot(&r)
             .with_reads(&Default::default());
-        // The public slice API accepts arbitrary order and dedups across nonadjacent rows.
-        let prefix = event(0, None);
-        let original = vec![
+        let mut original = EventSpool::default();
+        for row in [
+            event(0, None),
             event(2, Some("old".into())),
-            prefix.clone(),
             event(2, Some("old".into())),
-        ];
-        record_from_with_source(&r, 0, &original, &source, &Provenance::default());
+        ] {
+            original.push(row).unwrap();
+        }
+        record_spooled_with_source(&r, 0, original, &source, &Provenance::default()).unwrap();
         assert_eq!(events_for("claude", "events", None).len(), 2);
         let mut spool = EventSpool::default();
         spool.push(event(2, None)).unwrap();

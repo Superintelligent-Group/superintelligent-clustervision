@@ -803,33 +803,15 @@ mod db {
         }
     }
 
-    /// Persist `events` as the complete event set for session `r` (one transaction: delete prior
-    /// rows, insert, stamp `event_sync` and the source baseline from `source`, captured by the
-    /// caller **before** streaming, so content appended mid-parse reads as stale next time).
-    /// Idempotent — a re-ingest of an unchanged session rewrites identical rows. Best-effort: any
-    /// sqlite error leaves the previous state and returns quietly.
+    /// Publish a completed ordered batch with bounded row/target retention in one transaction:
+    /// delete the prior rows of messages `from` and later, insert, and stamp `event_sync` and the
+    /// source baseline from `source`, captured by the caller **before** streaming, so content
+    /// appended mid-parse reads as stale next time. Any spill read, ordering or SQL failure rolls
+    /// back rows and freshness together.
     ///
-    /// Dedup invariant (what replaced v1's unique expression index): the DELETE-by-session +
-    /// batch-INSERT shape makes cross-session duplicates impossible by construction, and
-    /// duplicates *within* this batch — same `(msg_idx, kind, target)`, matching the old index's
-    /// `COALESCE(target,'')` semantics — are dropped by the in-memory set below.
-    ///
-    /// From `from`, only the rows of messages `from` and later are replaced; the earlier ones
-    /// stay as the pass that read them stored them.
-    pub fn record_from_with_source(
-        r: &SessionRef,
-        from: usize,
-        events: &[Event],
-        source: &crate::source::Snapshot,
-        prov: &Provenance,
-    ) {
-        if let Some(mut conn) = open() {
-            let _ = record_from_in(&mut conn, r, from, events.iter().map(Ok), false, prov, source);
-        }
-    }
-
-    /// Publish a completed ordered batch with bounded row/target retention in one transaction.
-    /// Any spill read, ordering or SQL failure rolls back rows and freshness together.
+    /// Dedup invariant: the DELETE-by-session + batch-INSERT shape makes cross-session duplicates
+    /// impossible by construction, and duplicates within one message — same `(msg_idx, kind,
+    /// target)`, `COALESCE(target,'')` semantics — are dropped as they arrive.
     pub fn record_spooled_with_source(
         r: &SessionRef,
         from: usize,
@@ -850,7 +832,7 @@ mod db {
         prov: &Provenance,
     ) -> Result<()> {
         let rows = events.rows()?;
-        record_from_in(conn, r, from, rows, true, prov, source)
+        record_from_in(conn, r, from, rows, prov, source)
     }
 
     // Acquire write ownership before reading authority. A deferred WAL transaction can read
@@ -868,12 +850,11 @@ mod db {
         Ok(tx)
     }
 
-    fn record_from_in<E: std::borrow::Borrow<Event>>(
+    fn record_from_in(
         conn: &mut Connection,
         r: &SessionRef,
         from: usize,
-        events: impl IntoIterator<Item = Result<E>>,
-        ordered: bool,
+        events: impl IntoIterator<Item = Result<Event>>,
         prov: &Provenance,
         source: &crate::source::Snapshot,
     ) -> Result<()> {
@@ -919,19 +900,16 @@ mod db {
             let mut targets: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
             let mut previous = None;
             for e in events {
-                let item = e?;
-                let e = item.borrow();
-                if ordered {
-                    if e.msg_idx < from || previous.is_some_and(|idx| e.msg_idx < idx) {
-                        anyhow::bail!("event batch is not ordered from the resume index");
-                    }
-                    if previous != Some(e.msg_idx) {
-                        // Stream extraction emits consecutive rows for each message. Dedup keys
-                        // cannot recur in later messages, so retain only this message's keys.
-                        seen.clear();
-                    }
-                    previous = Some(e.msg_idx);
+                let e = e?;
+                if e.msg_idx < from || previous.is_some_and(|idx| e.msg_idx < idx) {
+                    anyhow::bail!("event batch is not ordered from the resume index");
                 }
+                if previous != Some(e.msg_idx) {
+                    // Stream extraction emits consecutive rows for each message. Dedup keys
+                    // cannot recur in later messages, so retain only this message's keys.
+                    seen.clear();
+                }
+                previous = Some(e.msg_idx);
                 if !seen.insert((e.msg_idx, e.kind, e.target.clone().unwrap_or_default())) {
                     continue;
                 }
@@ -1289,7 +1267,7 @@ mod db {
             let source = crate::source::Probe::default()
                 .snapshot(&r)
                 .with_reads(&Default::default());
-            record_from_with_source(&r, 0, &[], &source, &Provenance::default());
+            record_spooled_with_source(&r, 0, Default::default(), &source, &Provenance::default()).unwrap();
             let mut first = open().unwrap();
             let second = open().unwrap();
             assert_eq!(
@@ -1380,7 +1358,7 @@ mod db {
 #[cfg(feature = "sqlite")]
 pub use db::{
     catalog_has_events, edits_touching_file, events_for, ingest_all, ingest_ref, ingest_subagent, needs_ingest,
-    record_from_with_source, record_spooled_with_source, sessions_editing, sessions_touching, SyncTable,
+    record_spooled_with_source, sessions_editing, sessions_touching, SyncTable,
 };
 
 /// No-op fallbacks without sqlite: extraction still works (the sink is pure), persistence and
@@ -1414,14 +1392,6 @@ mod db_stub {
         pub fn can_resume(&self, _r: &SessionRef, _provenance: &Provenance) -> bool {
             false
         }
-    }
-    pub fn record_from_with_source(
-        _r: &SessionRef,
-        _from: usize,
-        _events: &[Event],
-        _source: &crate::source::Snapshot,
-        _prov: &Provenance,
-    ) {
     }
     pub fn record_spooled_with_source(
         _r: &SessionRef,
@@ -1460,7 +1430,7 @@ mod db_stub {
 #[cfg(not(feature = "sqlite"))]
 pub use db_stub::{
     catalog_has_events, edits_touching_file, events_for, ingest_all, ingest_ref, ingest_subagent, needs_ingest,
-    record_from_with_source, record_spooled_with_source, sessions_editing, sessions_touching, SyncTable,
+    record_spooled_with_source, sessions_editing, sessions_touching, SyncTable,
 };
 
 #[cfg(test)]
