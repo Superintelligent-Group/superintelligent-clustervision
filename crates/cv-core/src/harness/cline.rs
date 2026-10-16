@@ -1290,7 +1290,7 @@ mod tests {
             created_at: DateTime::<Utc>::from_timestamp_millis(1717000000000),
             updated_at: DateTime::<Utc>::from_timestamp_millis(1717000005000),
             model: Some("claude-x".to_string()),
-            ..Session::new("src".to_string(), Harness::Cline)
+            ..Session::new("src", Harness::Cline)
         };
 
         let mut user = Message::new(Role::User);

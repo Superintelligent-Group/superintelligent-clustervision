@@ -270,20 +270,11 @@ impl Adapter for OpenCode {
             let meta: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
 
             let mut s = Session {
-                source_stamp: None,
-                id: r.id.clone(),
-                harness: Harness::OpenCode,
                 cwd: meta.get("directory").and_then(Value::as_str).map(PathBuf::from),
                 title: meta.get("title").and_then(Value::as_str).map(str::to_string),
                 created_at: meta.pointer("/time/created").and_then(super::ts_from_value),
                 updated_at: meta.pointer("/time/updated").and_then(super::ts_from_value),
-                model: None,
-                git: None,
-                messages: Vec::new(),
                 source_path: Some(r.path.clone()),
-                extra: serde_json::Map::new(),
-                principal: None,
-                system_prompt: None,
                 lineage: Lineage {
                     parent: meta
                         .get("parentID")
@@ -292,6 +283,7 @@ impl Adapter for OpenCode {
                         .map(str::to_string),
                     ..Lineage::default()
                 },
+                ..Session::new(r.id.clone(), Harness::OpenCode)
             };
 
             // Order message files by `time/created` (same ordering as before) while holding only the
@@ -687,11 +679,6 @@ mod db {
             bag.insert(k.clone(), v.clone());
         }
         let mut s = Session {
-            source_stamp: None,
-            id: r.id.clone(),
-            harness: Harness::OpenCode,
-            principal: None,
-            system_prompt: None,
             // A sub-agent session (`@agent` mention, `subtask`) points at the session that spawned it.
             lineage: Lineage {
                 parent: row
@@ -726,10 +713,8 @@ mod db {
                 .and_then(|m| m.get("id"))
                 .and_then(Value::as_str)
                 .map(str::to_string),
-            git: None,
-            messages: Vec::new(),
             source_path: Some(r.path.clone()),
-            extra: Map::new(),
+            ..Session::new(r.id.clone(), Harness::OpenCode)
         };
         if !bag.is_empty() {
             s.harness_extra_mut(Harness::OpenCode).extend(bag);

@@ -488,17 +488,6 @@ mod tests {
     #[test]
     fn detects_boundaries_and_pairs_summaries_by_parent_uuid() {
         let session = Session {
-            source_stamp: None,
-            id: "s".into(),
-            harness: Harness::Claude,
-            cwd: None,
-            title: None,
-            created_at: None,
-            updated_at: None,
-            model: None,
-            git: None,
-            source_path: None,
-            extra: Default::default(),
             messages: vec![
                 plain_user("hello"),                           // 0
                 boundary("b1", "manual", 989063),              // 1
@@ -508,9 +497,7 @@ mod tests {
                 summary("b2", "SUMMARY TWO"),                  // 5
                 plain_user("after"),                           // 6
             ],
-            principal: None,
-            system_prompt: None,
-            lineage: crate::ir::Lineage::default(),
+            ..Session::new("s", Harness::Claude)
         };
         let comps = detect_in_session(&session, true).unwrap();
         assert_eq!(comps.len(), 2, "two boundaries");
@@ -540,21 +527,8 @@ mod tests {
         let mut sum = summary("ignored", "ADJACENT SUMMARY");
         sum.parent_id = None;
         let session = Session {
-            source_stamp: None,
-            id: "s".into(),
-            harness: Harness::Claude,
-            cwd: None,
-            title: None,
-            created_at: None,
-            updated_at: None,
-            model: None,
-            git: None,
-            source_path: None,
-            extra: Default::default(),
             messages: vec![boundary("bx", "manual", 100), sum],
-            principal: None,
-            system_prompt: None,
-            lineage: crate::ir::Lineage::default(),
+            ..Session::new("s", Harness::Claude)
         };
         let comps = detect_in_session(&session, true).unwrap();
         assert_eq!(comps.len(), 1);
@@ -565,21 +539,8 @@ mod tests {
     #[test]
     fn keep_summaries_false_detects_but_drops_text() {
         let session = Session {
-            source_stamp: None,
-            id: "s".into(),
-            harness: Harness::Claude,
-            cwd: None,
-            title: None,
-            created_at: None,
-            updated_at: None,
-            model: None,
-            git: None,
-            source_path: None,
-            extra: Default::default(),
             messages: vec![boundary("b", "manual", 100), summary("b", "text")],
-            principal: None,
-            system_prompt: None,
-            lineage: crate::ir::Lineage::default(),
+            ..Session::new("s", Harness::Claude)
         };
         let comps = detect_in_session(&session, false).unwrap();
         assert_eq!(comps.len(), 1);

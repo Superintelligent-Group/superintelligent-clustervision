@@ -251,12 +251,7 @@ fn session_header(r: &SessionRef) -> (Session, PathBuf) {
     let header = peek_header(&wire);
 
     let mut s = Session {
-        source_stamp: None,
-        id: r.id.clone(),
-        harness: Harness::KimiCode,
-        principal: None,
         system_prompt: header.system_prompt,
-        lineage: crate::ir::Lineage::default(),
         cwd: r
             .cwd
             .clone()
@@ -267,10 +262,8 @@ fn session_header(r: &SessionRef) -> (Session, PathBuf) {
         // The model is bound by the 2nd record (`profile.bind`); peek at the head so the sink's
         // header knows it before the body streams.
         model: header.model,
-        git: None,
-        messages: Vec::new(),
         source_path: Some(r.path.clone()),
-        extra: Map::new(),
+        ..Session::new(r.id.clone(), Harness::KimiCode)
     };
     if agent_id == "main" {
         // Session facts live in the harness bag, `extra["kimi-code"]`, never at the top level.

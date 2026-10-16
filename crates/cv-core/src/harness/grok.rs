@@ -291,9 +291,6 @@ fn session_header(r: &SessionRef) -> (Session, HashMap<String, ToolEnrich>) {
         .unwrap_or(Value::Null);
 
     let mut s = Session {
-        source_stamp: None,
-        id: r.id.clone(),
-        harness: Harness::Grok,
         cwd: summary
             .pointer("/info/cwd")
             .and_then(Value::as_str)
@@ -311,12 +308,8 @@ fn session_header(r: &SessionRef) -> (Session, HashMap<String, ToolEnrich>) {
             .and_then(Value::as_str)
             .map(str::to_string),
         git: grok_git(&summary),
-        messages: Vec::new(),
         source_path: Some(dir.clone()),
-        extra: serde_json::Map::new(),
-        principal: None,
-        system_prompt: None,
-        lineage: crate::ir::Lineage::default(),
+        ..Session::new(r.id.clone(), Harness::Grok)
     };
 
     // Sidecar enrichment: tool_call / tool_call_update entries from the ACP update stream.
