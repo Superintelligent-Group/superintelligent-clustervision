@@ -3088,6 +3088,7 @@ fn ranked_search(
             parent_id: get_str(f.parent_id),
             agent_id: get_str(f.agent_id),
             workflow: get_str(f.workflow),
+            session: None,
         });
     }
     Ok(hits)
@@ -4330,6 +4331,7 @@ mod tests {
                 parent_id: get_str(f.parent_id),
                 agent_id: get_str(f.agent_id),
                 workflow: get_str(f.workflow),
+                session: None,
             });
         }
         Ok(hits)

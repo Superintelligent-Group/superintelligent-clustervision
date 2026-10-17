@@ -325,6 +325,7 @@ fn live_scan_adapters<'a>(
                     parent_id: None,
                     agent_id: None,
                     workflow: None,
+                    session: None,
                 },
             );
             if scored.len() > fetch {
@@ -1360,6 +1361,7 @@ mod tests {
             parent_id: None,
             agent_id: None,
             workflow: None,
+            session: None,
         }
     }
 

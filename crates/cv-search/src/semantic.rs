@@ -984,6 +984,7 @@ fn rank_filtered(store: &Store, q: &[f32], k: usize, filter: crate::SearchFilter
                 parent_id: None,
                 agent_id: None,
                 workflow: None,
+                session: None,
             }
         })
         .collect()
