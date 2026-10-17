@@ -338,8 +338,10 @@ records the same event the CLI would, stamped `web:<who>` (`who` from the body, 
   `cv task events`.
 - **`GET /api/lanes?session=<id>`** — a session's sub-agent forest joined to the tasks each lane
   holds (`cv lanes --tasks`).
-- **`GET /api/backlog?repo=&state=&tag=&all=1`** — every open task, newest activity first.
-- **`POST /api/task/{id}/{resolve,done,note,discuss,claim,release,reopen}`** — `{choice}` |
+- **`GET /api/tasks?detail=1&repo=&state=&tag=&all=1`** — every task with the backlog columns
+  (owner, blockers, age), newest activity first; the inbox page's Backlog pane reads it.
+  `GET /api/backlog` is gone (410 with this pointer).
+- **`POST /api/task/{id}/{resolve,done,note,discuss,claim,release}`** — `{choice}` |
   `{accept_default: true}` | `{confirm: true}` for `resolve` (with an optional `note`),
   `{observed}` for `done`, `{text}` for `note`/`discuss`.
 

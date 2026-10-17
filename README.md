@@ -179,7 +179,7 @@ cv task sweep --repo ~/proj                            # what git says is probab
 
 Same substrate over MCP (`task_open` … `task_inbox`, generated from `cv task`) and `cv serve`
 (`/api/tasks`, `/api/tasks/inbox/{who}`, and the inbox page's `/api/inbox`, `/api/task/<id>/{resolve,
-done,note,discuss,claim,release,reopen}`, `/api/events` — the same query as `cv task events`). State lives in
+done,note,discuss,claim,release}`, `/api/events` — the same query as `cv task events`). State lives in
 a replayed event log (`~/.clustervision/tasks/events.jsonl`) that refuses events its own reducer
 would reject; every append is one event, never an edit.
 
