@@ -194,12 +194,12 @@ stays a catalog-only read.
 
 #### Freshness — what `ls` guarantees
 
-`cv ls` reads the **probed catalog**, not a full fleet scan. On a 7,000-session, 95 GB fleet a warm
-`cv ls` takes 0.12–0.16 s (it checks every primary source, below; measured 2026-10-16 on a host at
-load 150+). The first read on a new home, or after an upgrade that changes how sessions are read,
-re-discovers the whole fleet: 82 s wall and 4.5 CPU-minutes on that fleet, under that load. cv
-says so on stderr when an upgrade causes it; run `cv index` right after upgrading to pay it up
-front. The catalog's freshness rests on a staleness probe plus a time backstop (`CLUSTERVISION_MAX_STALE_SECS`, default **900s**):
+`cv ls` reads the **probed catalog**, not a full fleet scan. Measured 2026-10-14 on a frozen copy
+of a 5,421-session, 78 GB fleet (host load 25–200, so the ranges are wide; `docs/design/PERF.md`
+has the conditions), a warm `cv ls` took 0.06–0.09 s (it checks every primary source, below). The
+first read on a new home, or after an upgrade that changes how sessions are read, re-discovers the
+whole fleet: 158–186 s on that fleet. cv says so on stderr when an upgrade causes it; run
+`cv index` right after upgrading to pay it up front. The catalog's freshness rests on a staleness probe plus a time backstop (`CLUSTERVISION_MAX_STALE_SECS`, default **900s**):
 
 - **A new session in a watched directory is seen on the next read.** Creating a session bumps its directory's mtime; the probe re-stats watched directories and re-discovers the affected harness before reading. A first session in a previously empty deeper directory can escape those watches and remain unseen until the time backstop forces full discovery — at most `CLUSTERVISION_MAX_STALE_SECS` after the last full sync, on the next read.
 - **A new storage root is seen too.** When a root appears that the catalog does not watch yet (a new agent under a `*` entry in `claude-roots`, or a line added to that file — see [Harnesses](harnesses.md#claude-code-sessions-outside-claude)), the probe re-discovers that harness.

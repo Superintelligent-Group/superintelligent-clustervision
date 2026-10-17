@@ -15,8 +15,8 @@ data was found under `$HOME`.
 ### First `cv ls` is slow, then fast
 
 Discovery parallelizes across harnesses and caches metadata by file identity (length, mtime,
-device, inode, ctime), so the first run does the real work (82 s wall for 7,000 sessions and 95 GB
-on a busy host, 2026-10-16) and later runs take 0.1–0.2 s. A huge Codex rollout (hundreds of MB) is
+device, inode, ctime), so the first run does the real work (158–186 s for 5,421 sessions and 78 GB,
+measured 2026-10-14) and later runs take under 0.1 s. A huge Codex rollout (hundreds of MB) is
 sampled head+tail during discovery, never fully read. See [Architecture](architecture.md).
 
 ### `cv port` warns about lost content
