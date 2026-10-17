@@ -778,6 +778,11 @@ fn call_tool(name: &str, args: &Value, cancelled: Cancellation<'_>) -> anyhow::R
                  and labeled: `task_done` with `observed`, `task_note` for evidence"
             )
         }
+        // Removed in 0.17: it reads Claude Code's hook JSON on stdin, which no MCP call supplies.
+        "hook" => anyhow::bail!(
+            "hook was removed from the MCP roster in 0.17 — it is Claude Code's hook body (stdin JSON), \
+             which a tool call cannot supply; `hooks_install` wires it into Claude Code"
+        ),
         // Everything else is a CLI-generated command tool: shell out to `cv`.
         other => match cli() {
             Some(c) if c.find(other).is_some() => c.call_cancelled(other, args, cancelled).map(ToolOutput::Command),

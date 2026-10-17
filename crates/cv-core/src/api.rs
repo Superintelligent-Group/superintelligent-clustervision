@@ -62,7 +62,13 @@ pub fn route_json(parts: &[&str], query: &str) -> (u16, Value) {
              read /api/tasks and /api/task/{id}",
         ),
 
-        ["api", "tasks", "inbox", who] => tasks_inbox(who),
+        ["api", "tasks", "inbox", who] => tasks_inbox(who, query),
+
+        // Removed in 0.17: the inbox page reads the task rows with their backlog columns.
+        ["api", "backlog"] => err(
+            410,
+            "removed in 0.17 — read /api/tasks?detail=1 (every open task, oldest first; all=1 adds closed ones)",
+        ),
 
         ["api", "task", id] => task_one(id, Query::parse(query).flag("events")),
 
@@ -132,9 +138,11 @@ fn with_tasks(f: impl FnOnce(&crate::task::ReplayOutcome) -> (u16, Value)) -> (u
     }
 }
 
-/// `GET /api/tasks?state=&assignee=&repo=&tag=&all=` — task projections, oldest first.
+/// `GET /api/tasks?state=&assignee=&repo=&tag=&all=&detail=` — task projections, oldest first;
+/// `detail=1` adds the backlog columns (`opened_by`, `issue`, `body`, `notes`, `decision`, `blocked`).
 fn tasks(query: &str) -> (u16, Value) {
     let params = Query::parse(query);
+    let detail = params.flag("detail");
     with_tasks(|outcome| {
         let filter = crate::task::TaskFilter {
             state: params.get("state"),
@@ -147,7 +155,16 @@ fn tasks(query: &str) -> (u16, Value) {
         };
         // An unknown state string is a clear 400 (naming the vocabulary), not a silent [].
         let tasks: Vec<crate::task::TaskRow> = match crate::task::list(&outcome.model, &filter) {
-            Ok(tasks) => tasks.into_iter().map(crate::task::TaskRow::full).collect(),
+            Ok(tasks) => tasks
+                .into_iter()
+                .map(|t| {
+                    if detail {
+                        crate::task::TaskRow::detailed(t, &outcome.model)
+                    } else {
+                        crate::task::TaskRow::full(t)
+                    }
+                })
+                .collect(),
             Err(e) => return err(400, &e),
         };
         ok(json!({ "tasks": tasks, "warnings": outcome.warnings }))
@@ -187,12 +204,34 @@ fn task_events(id: &str) -> (u16, Value) {
     })
 }
 
-/// `GET /api/tasks/inbox/{who}` — what needs this endpoint.
-fn tasks_inbox(who: &str) -> (u16, Value) {
+/// `GET /api/tasks/inbox/{who}?since=&all=` — what needs this endpoint; the whole store unless
+/// `since` windows it.
+fn tasks_inbox(who: &str, query: &str) -> (u16, Value) {
+    let now = chrono::Utc::now();
+    let window = match inbox_window(&Query::parse(query), None, now) {
+        Ok(window) => window,
+        Err(e) => return err(400, &e),
+    };
     with_tasks(|outcome| {
-        let entries = crate::task::inbox_page(outcome, who, None, None, false, chrono::Utc::now()).items;
+        let entries = crate::task::inbox_page(outcome, who, None, window, false, now).items;
         ok(json!({ "inbox": entries, "warnings": outcome.warnings }))
     })
+}
+
+/// The inbox window a query asks for: `all` lifts it, `since` (`2h`, `3d`, an instant) sets it,
+/// else `default` back from `now`. Every inbox route windows through this one reading.
+pub fn inbox_window(
+    params: &Query,
+    default: Option<chrono::Duration>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<chrono::DateTime<chrono::Utc>>, String> {
+    if params.flag("all") {
+        return Ok(None);
+    }
+    match params.get("since") {
+        Some(since) => crate::task::parse_since(&since, now).map(Some),
+        None => Ok(default.map(|back| now - back)),
+    }
 }
 
 // --- sessions -----------------------------------------------------------------------------------
@@ -814,6 +853,9 @@ mod tests {
             assert_eq!(status, 410, "{parts:?}");
             assert!(v["error"].as_str().unwrap().contains("removed in 0.15.0"), "{v}");
         }
+        let (status, v) = route_json(&["api", "backlog"], "");
+        assert_eq!(status, 410);
+        assert!(v["error"].as_str().unwrap().contains("/api/tasks?detail=1"), "{v}");
         assert_eq!(route_json(&["api", "nope"], "").0, 404);
         assert_eq!(route_json(&["api", "sessions"], "harness=warpdrive").0, 400);
     }

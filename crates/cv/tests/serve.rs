@@ -1057,6 +1057,27 @@ fn serve_tasks_routes() {
         "HTTP rows carry timestamps: {v}"
     );
     assert!(v["warnings"].as_array().is_some_and(|w| w.is_empty()), "{v}");
+    // `detail=1` adds the inbox page's backlog columns; the plain row keeps its shape.
+    assert!(row.get("notes").is_none() && row.get("body").is_none(), "{v}");
+    let (status, v) = get_json(port, "/api/tasks?detail=1");
+    assert_eq!(status, 200, "{v}");
+    let row = v["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == json!(id))
+        .unwrap();
+    assert_eq!(row["opened_by"], "human", "{v}");
+    assert_eq!(
+        (
+            row["notes"].as_u64(),
+            row["decision"].as_bool(),
+            row["blocked"].as_bool()
+        ),
+        (Some(0), Some(false), Some(false)),
+        "{v}"
+    );
+    assert_eq!(row["body"], "", "{v}");
 
     // State filter hits and misses.
     let (_, v) = get_json(port, "/api/tasks?state=claimed");
@@ -1714,8 +1735,18 @@ fn serve_carries_the_inbox_and_guards_its_writes() {
     assert_eq!(status, 200, "{v}");
     assert_eq!(v["who"], "ember", "the server's --who is the default inbox: {v}");
     let (status, v) = get_json(port, "/api/backlog");
-    assert_eq!(status, 200, "{v}");
-    assert_eq!(v["count"], 1, "{v}");
+    assert_eq!(status, 410, "{v}");
+    assert!(
+        v["error"].as_str().unwrap_or_default().contains("/api/tasks?detail=1"),
+        "{v}"
+    );
+    let raw = raw_post(
+        port,
+        &format!("/api/task/{id}/reopen"),
+        "{}",
+        &[("Content-Type", "application/json")],
+    );
+    assert_eq!(raw_status(&raw), 410, "{raw}");
 
     let path = format!("/api/task/{id}/note");
     let body = r#"{"who":"ember","text":"a little flat"}"#;

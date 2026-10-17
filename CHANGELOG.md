@@ -3,6 +3,12 @@
 ## Unreleased
 
 - One freshness record per consumer and session, verified on load (counts, events, search, usage); watches record file identities. Each rereads once after upgrading.
+- **Breaking:** `GET /api/backlog` is removed (410 pointer); the inbox page reads `/api/tasks?detail=1`, which adds the backlog columns.
+- **Breaking:** `POST /api/task/{id}/reopen` is removed (410): a closed task stays closed; open a new task and note the old id.
+- **Breaking:** MCP no longer offers `hook` (it reads Claude Code's hook JSON on stdin; a call did nothing); calling it points at `hooks_install`.
+- `cv search`: when live snippets cannot be generated the indexed previews stand in, with a note, as `/api/search` already did.
+- `/api/tasks/inbox/{who}` takes `since=` and `all=` like `/api/inbox`.
+- `cv archive sync` takes its inventory from the index sweep (one corpus walk, the index refreshed on the way); a home whose index cannot be written falls back to discovery.
 - A live `.jsonl` beside its writer is admitted by content (same file, sampled prefix intact), never by waiting; index, events, counts, vectors reread once.
 - Pre-binary `embeddings.json` semantic stores are no longer read or migrated (querying them already failed); `cv index --semantic` rebuilds.
 
