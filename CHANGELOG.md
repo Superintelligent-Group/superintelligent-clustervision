@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Inbox table headers no longer cover the first task row, restoring clicks to expand Backlog task details.
+
 - HTTP rejects duplicate Host headers before routing requests.
 
 - HTTP search rejects conflicting kind, scan and semantic parameters consistently with the CLI.
