@@ -822,7 +822,7 @@ fn preferred_index_copies(refs: Vec<cv_core::SessionRef>) -> Vec<cv_core::Sessio
 /// **Resumption:** a claude or plain-`.jsonl` codex transcript that has grown since the last pass
 /// is read only from that pass's last [`cv_core::stream::Checkpoint`] (its mark, one per file in
 /// the catalog, taken every [`CHECKPOINT_EVERY`] bytes) when the mark's sampled guards match
-/// ([`cv_core::resume::MarkHead::holds`]) and covers everything this pass feeds: the docs from the
+/// ([`cv_core::resume::MarkHead::admit`]) and covers everything this pass feeds: the docs from the
 /// mark's message on are replaced, the events from there on, and the counts continue from the
 /// mark's. This relies on the adapter's immutable-prefix append contract, not a proof of the
 /// whole prefix's contents. Otherwise the session is read whole. New marks are stored only after the commit that
@@ -1622,10 +1622,8 @@ fn resumable_from(job: &Job, version: &str) -> Option<cv_core::stream::Checkpoin
         return None;
     }
     let head = job.mark.as_ref()?;
-    if !head.holds(&cv_core::source::primary_path(&job.r), job.size.max(0) as u64, version) {
-        return None;
-    }
     let cp = cv_core::resume::state(&job.r, head)?;
+    head.admit(&cv_core::source::primary_path(&job.r), version, &cp)?;
     cp.messages()?;
     if job.fts {
         let state: FtsState = cp.get(FTS_LAYER)?;
@@ -5111,9 +5109,7 @@ mod tests {
         .unwrap();
         let marks = cv_core::resume::MarkTable::load();
         let head = marks.get(&r).unwrap();
-        let adapter = cv_core::harness::for_harness(r.harness).unwrap();
-        let version = cv_core::resume::version(adapter.as_ref(), RESUME_TAG).unwrap();
-        assert!(head.holds(&r.path, std::fs::metadata(&r.path).unwrap().len(), &version));
+        assert!(head.prefix.holds(&r.path));
         assert!(cv_core::resume::state(&r, head)
             .unwrap()
             .get::<FtsState>(FTS_LAYER)
@@ -5202,9 +5198,7 @@ mod tests {
         .unwrap();
         let marks = cv_core::resume::MarkTable::load();
         let head = marks.get(&r).unwrap();
-        let adapter = cv_core::harness::for_harness(r.harness).unwrap();
-        let version = cv_core::resume::version(adapter.as_ref(), RESUME_TAG).unwrap();
-        assert!(head.holds(&r.path, std::fs::metadata(&r.path).unwrap().len(), &version));
+        assert!(head.prefix.holds(&r.path));
         let replay = sweep(&dir, vec![r.clone()], false, false).unwrap();
         assert_eq!((replay.changed, replay.resumed, replay.errors), (1, 0, 0));
         let events = || {
@@ -7131,7 +7125,7 @@ mod tests {
             .unwrap()
             .set_times(std::fs::FileTimes::new().set_modified(modified))
             .unwrap();
-        assert!(head.holds(&path, body.len() as u64, &head.version));
+        assert!(head.prefix.holds(&path));
         let swept = sweep(&dir, vec![r.clone()], false, false).unwrap();
         assert_eq!((swept.changed, swept.resumed, swept.errors), (1, 0, 0));
         assert!(text_search(&dir, "oldneedle", 10).unwrap().is_empty());
@@ -7343,7 +7337,10 @@ mod tests {
         assert!(!replacement.exists(), "the hook replaced the transcript");
         let head = cv_core::resume::MarkTable::load().get(&r).unwrap().clone();
         let at = body("zqoldword").find("zqoldword").unwrap() as u64;
-        assert!(at > 4096 && at + 4096 < head.offset, "the edit is outside both samples");
+        assert!(
+            at > 4096 && at + 4096 < head.offset(),
+            "the edit is outside both samples"
+        );
         std::fs::OpenOptions::new()
             .append(true)
             .open(&path)
@@ -7383,17 +7380,14 @@ mod tests {
         let head = cv_core::resume::MarkTable::load().get(&r).unwrap().clone();
         let at = body.find("zqoldone").unwrap() as u64;
         assert!(
-            at > 4096 && at + 4096 < head.offset,
+            at > 4096 && at + 4096 < head.offset(),
             "edit is outside both sampled ranges"
         );
         let edited = body.replace("zqoldone", "zqnewone");
         assert_eq!(body.len(), edited.len());
         std::fs::write(&path, edited).unwrap();
         bump_mtime(path.to_str().unwrap());
-        assert!(
-            head.holds(&path, body.len() as u64, &head.version),
-            "sampled mark cannot detect this edit"
-        );
+        assert!(head.prefix.holds(&path), "sampled mark cannot detect this edit");
 
         let swept = sweep(&dir, vec![r], false, false).unwrap();
         assert_eq!((swept.changed, swept.resumed), (1, 0));
@@ -7421,7 +7415,7 @@ mod tests {
         // 0: a byte before its mark changes (a letter inside the line before it), then it grows.
         let (r0, b0) = &fleet[0];
         let mut bytes = b0.clone();
-        let at = (0..head(0).offset as usize - 1)
+        let at = (0..head(0).offset() as usize - 1)
             .rev()
             .find(|&i| bytes[i].is_ascii_lowercase())
             .unwrap();
@@ -7429,7 +7423,7 @@ mod tests {
         std::fs::write(&r0.path, &bytes).unwrap();
         // 1: cut short of its mark.
         let (r1, b1) = &fleet[1];
-        std::fs::write(&r1.path, &b1[..head(1).offset as usize - 1]).unwrap();
+        std::fs::write(&r1.path, &b1[..head(1).offset() as usize - 1]).unwrap();
         // 2: grown, but its mark was written by another version.
         let (r2, b2) = &fleet[2];
         std::fs::write(&r2.path, b2).unwrap();

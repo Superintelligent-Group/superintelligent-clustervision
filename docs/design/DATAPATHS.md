@@ -130,11 +130,13 @@ Key sources: `cv/src/cmd/view.rs`, `cv-core/src/{api,affordance,watch,lazy,strea
    Known adapter-local sidecars, directory members and WAL files are covered. Consumers capture
    conditional Claude fork siblings and resolved external output paths before reading them, including
    absent files. Complete read sets survive prefix checkpoints and are revalidated at publication.
-   Source records older than version 3 reread once through normal refresh to capture primary identity; that source migration needs no additional index rebuild.
+   Source records older than version 4 reread once through normal refresh to capture primary identity; that source migration needs no additional index rebuild.
 3. Current resume marks sample the first 4 KiB and the 4 KiB preceding the mark. This is not a
    proof that the entire prefix is unchanged. FTS now requires growth before using a mark, so
    same-size rewrites take a whole pass; inode replacement also rejects reuse. A rewrite followed by
-   growth can still escape the samples. Unix unchanged reuse now additionally checks inode/ctime,
+   growth can still escape the samples, and so can a same-length edit outside them: a captured
+   `.jsonl` admits a changed stat (a writer mid-`write`) by the same samples, never by waiting.
+   Unix unchanged reuse now additionally checks inode/ctime,
    rejecting same-size restored-mtime rewrites; platforms without that identity retain length/mtime guards.
    Unconditional detection of arbitrary prefix edits requires reading that prefix or a trusted
    writer/filesystem change signal; do not promise both zero prefix reads and such detection.
@@ -193,7 +195,7 @@ identifies application state, not a claim that the OS page cache was evicted.
   cell's native SQLite allocation. Zed discovery still grows Serde string scratch; Hermes raw
   reasoning/provider extras and native row/FTS allocation remain owned.
 - **Resume-mark sampling** (correctness boundary 3) cannot detect an arbitrary prefix rewrite
-  followed by growth without reading the prefix or a writer/filesystem change signal.
+  followed by growth, or at the same length, without reading the prefix or a change signal.
 - **First-run listing and full live recount** budgets in `PERF.md` are not re-established.
 - **Zed authored-thread capture.** The isolated GUI attempt could not drive the GPUI agent editor
   and produced no threads; see `tools/harness-corpus/zed/README.md`.

@@ -377,4 +377,60 @@ mod tests {
             assert_eq!(output.lines().count(), lines, "prune, {name}");
         }
     }
+
+    /// A writer appending half records at a time while passes read: every pass reads to its
+    /// captured length without error, each record it yields is whole, a trailing partial line is
+    /// held back (no view, not complete), and the source still checks at the end. No sleeps.
+    #[test]
+    fn a_pass_beside_a_writer_of_half_records_never_errors_or_yields_a_partial() {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let world = cv_testkit::World::new("jsonl-live-writer");
+        let path = world.base.join("live.jsonl");
+        let record = |i: usize| format!("{{\"n\":{i},\"pad\":\"{}\"}}\n", "p".repeat(i % 300));
+        std::fs::write(&path, (0..200).map(record).collect::<String>()).unwrap();
+        let stop = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let writer = scope.spawn(|| {
+                let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+                for i in 200..20_000 {
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let line = record(i);
+                    let (head, tail) = line.split_at(line.len() / 2);
+                    file.write_all(head.as_bytes()).unwrap();
+                    file.write_all(tail.as_bytes()).unwrap();
+                }
+            });
+            for _ in 0..20 {
+                let source = crate::json::JsonSource::capture(&path).unwrap();
+                let file = std::fs::File::open(&path).unwrap();
+                source.check_metadata(file.metadata().unwrap()).unwrap();
+                let mut records = Vec::new();
+                super::for_each_line(&source, &file, 0, source.len(), |line| {
+                    match line.view {
+                        Some(view) => {
+                            assert!(line.complete, "a record is whole");
+                            records.push(view.source_range()?.unwrap());
+                        }
+                        None => assert!(!line.complete && line.end == source.len(), "only a held-back tail"),
+                    }
+                    Ok(Flow::Continue)
+                })
+                .unwrap();
+                let bytes = std::fs::read(&path).unwrap();
+                for (n, (at, len)) in records.into_iter().enumerate() {
+                    assert_eq!(
+                        &bytes[at as usize..(at + len) as usize],
+                        record(n).trim_end().as_bytes()
+                    );
+                }
+                source.check_metadata(file.metadata().unwrap()).unwrap();
+                source.check().unwrap();
+            }
+            stop.store(true, Ordering::Relaxed);
+            writer.join().unwrap();
+        });
+    }
 }

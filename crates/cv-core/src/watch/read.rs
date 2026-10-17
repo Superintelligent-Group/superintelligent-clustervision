@@ -131,31 +131,27 @@ impl ReadState {
             || self.path != r.path
             || self.primary.as_ref() != Some(&adapter.resume_source(r))
             || current.primary.1 < self.source.primary.1
+            || !self.source.dependencies_fresh(current, &mut source::Probe::default())
         {
             return None;
         }
-        let same = current.primary == self.source.primary;
-        if same
-            && !self
-                .identity
-                .as_ref()
-                .is_some_and(|guard| guard.fresh(&mut source::Probe::default()))
+        // A source that did not grow is held to its whole identity, not only the anchor's sample.
+        if current.primary.1 == self.source.primary.1
+            && (current.primary != self.source.primary
+                || !self
+                    .identity
+                    .as_ref()
+                    .is_some_and(|guard| guard.fresh(&mut source::Probe::default())))
         {
-            return None;
-        }
-        if !same && current.primary.1 <= self.source.primary.1 {
-            return None;
-        }
-        if !self.source.dependencies_fresh(current, &mut source::Probe::default()) {
             return None;
         }
         let anchor = self.anchor.as_ref()?;
-        let version = crate::resume::version(adapter, CONSUMER)?;
-        (anchor.checkpoint.messages()? <= skip
-            && anchor
-                .head
-                .holds(&adapter.resume_source(r), current.primary.1 as u64, &version))
-        .then_some(&anchor.checkpoint)
+        (anchor.checkpoint.messages()? <= skip).then_some(())?;
+        anchor.head.admit(
+            &adapter.resume_source(r),
+            &crate::resume::version(adapter, CONSUMER)?,
+            &anchor.checkpoint,
+        )
     }
 }
 
@@ -1041,7 +1037,8 @@ mod tests {
         let anchor = complete.anchor.as_ref().unwrap();
         assert!(anchor
             .head
-            .holds(&adapter.resume_source(&r), body.len() as u64, &anchor.head.version));
+            .admit(&adapter.resume_source(&r), &anchor.head.version, &anchor.checkpoint)
+            .is_some());
         assert!(!complete.fresh_with(adapter.as_ref(), &r));
         let mut rewritten = read_session(adapter.as_ref(), &r, Some(&complete), next.total).unwrap();
         assert!(!rewritten.resumed);

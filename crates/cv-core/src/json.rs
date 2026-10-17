@@ -18,6 +18,7 @@ use crate::harness::store::document::range::{Range, RangeSource};
 use crate::harness::store::document::Raw;
 #[cfg(feature = "mmap")]
 use crate::harness::store::document::Source;
+use crate::source::{FileId, Prefix};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Number, Value};
@@ -26,7 +27,6 @@ use std::fs::Metadata;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::SystemTime;
 
 /// A complete JSON value. Source descriptors clone cheaply; owned values retain Value semantics.
 /// Deserialization always produces `Owned`, including objects that resemble source descriptors.
@@ -66,11 +66,14 @@ pub(crate) struct JsonSource(Arc<CapturedSource>);
 #[derive(Debug)]
 struct CapturedSource {
     path: PathBuf,
-    identity: Identity,
+    identity: FileId,
     /// Line-delimited logs are append-only by contract: a writer may still be adding records
-    /// after capture. Growth of the same file leaves the captured prefix intact, so it is not a
-    /// change; truncation, replacement and same-length rewrites still are.
-    appendable: bool,
+    /// after capture. For them the captured prefix's sample is kept, so growth of the same file
+    /// with that prefix intact is not a change ([`FileId::admits`]); truncation, replacement and
+    /// rewrites of the sampled bytes still are. Readers stop at the captured length.
+    prefix: Option<Prefix>,
+    /// The last observation admitted against `prefix`: the same one again needs no read.
+    admitted: std::sync::Mutex<Option<FileId>>,
     reads: Option<Arc<crate::source::ReadSet>>,
     decoded: std::sync::Mutex<Option<Arc<crate::harness::store::bytes::ByteSource>>>,
 }
@@ -94,74 +97,9 @@ fn is_append_only_log(path: &Path) -> bool {
         .and_then(|e| e.to_str())
         .is_some_and(|e| APPEND_ONLY_EXTENSIONS.iter().any(|x| e.eq_ignore_ascii_case(x)))
 }
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct Identity {
-    len: u64,
-    modified: SystemTime,
-    #[cfg(unix)]
-    device: u64,
-    #[cfg(unix)]
-    inode: u64,
-    #[cfg(unix)]
-    changed: (i64, i64),
-}
-/// The one growth rule for an append-only source, in every consumer: `later` is the captured
-/// file unchanged, or the same file (device and inode on unix) only longer. Truncation, a
-/// replacement and a same-length rewrite are changes. Readers stay inside the captured length,
-/// so bytes appended after a capture are never read under it. An in-place rewrite that also grows
-/// the file keeps its inode and is not detected here.
-pub(crate) fn same_or_grown(
-    unchanged: bool,
-    (len, file): (u64, Option<(u64, u64)>),
-    (later_len, later_file): (u64, Option<(u64, u64)>),
-) -> bool {
-    unchanged || (later_len > len && later_file == file)
-}
-/// A write updates a file's timestamps before its length (Linux's write path does), so for an
-/// instant an append in flight looks like a same-length rewrite. Before calling an observation of
-/// `path` at its captured `extent` with other timestamps a rewrite, look again, backing off from
-/// 1 ms to 256 ms (about half a second in all, for a writer descheduled mid-`write` on a loaded
-/// machine): an append's length grows, a rewrite's does not.
-pub(crate) fn append_in_flight(path: &Path, extent: (u64, Option<(u64, u64)>)) -> bool {
-    #[cfg(unix)]
-    for step in 0..9 {
-        std::thread::sleep(std::time::Duration::from_millis(1 << step));
-        if Identity::read(path).is_ok_and(|now| same_or_grown(false, extent, (now.len, now.file()))) {
-            return true;
-        }
-    }
-    let _ = (path, extent);
-    false
-}
-impl Identity {
-    fn file(&self) -> Option<(u64, u64)> {
-        #[cfg(unix)]
-        return Some((self.device, self.inode));
-        #[cfg(not(unix))]
-        return None;
-    }
-    fn admits(&self, later: &Identity) -> bool {
-        same_or_grown(later == self, (self.len, self.file()), (later.len, later.file()))
-    }
-    fn read(path: &Path) -> Result<Self> {
-        let metadata = std::fs::metadata(path).with_context(|| format!("reading JSON source {}", path.display()))?;
-        Self::from_metadata(metadata)
-    }
-    fn from_metadata(metadata: Metadata) -> Result<Self> {
-        #[cfg(unix)]
-        use std::os::unix::fs::MetadataExt;
-        anyhow::ensure!(metadata.is_file(), "JSON source is not a regular file");
-        Ok(Self {
-            len: metadata.len(),
-            modified: metadata.modified()?,
-            #[cfg(unix)]
-            device: metadata.dev(),
-            #[cfg(unix)]
-            inode: metadata.ino(),
-            #[cfg(unix)]
-            changed: (metadata.ctime(), metadata.ctime_nsec()),
-        })
-    }
+fn file_id(metadata: &Metadata) -> Result<FileId> {
+    anyhow::ensure!(metadata.is_file(), "JSON source is not a regular file");
+    FileId::of(metadata).context("JSON source has no modification time")
 }
 impl JsonSource {
     pub(crate) fn decoded_backing(&self) -> Result<Arc<crate::harness::store::bytes::ByteSource>> {
@@ -189,32 +127,48 @@ impl JsonSource {
     fn capture_guarded(path: &Path, reads: Option<Arc<crate::source::ReadSet>>) -> Result<Self> {
         // Preserve symlink spelling so later retargeting changes the observed identity.
         let path = std::path::absolute(path).context("locating JSON source")?;
-        let identity = Identity::read(&path)?;
+        let (identity, prefix) = if is_append_only_log(&path) {
+            let file = std::fs::File::open(&path).with_context(|| format!("reading JSON source {}", path.display()))?;
+            let identity = file_id(&file.metadata()?)?;
+            (
+                identity,
+                Some(Prefix::of(&file, identity.len).context("sampling JSON source")?),
+            )
+        } else {
+            let metadata =
+                std::fs::metadata(&path).with_context(|| format!("reading JSON source {}", path.display()))?;
+            (file_id(&metadata)?, None)
+        };
         Ok(Self(Arc::new(CapturedSource {
-            appendable: is_append_only_log(&path),
             path,
             identity,
+            prefix,
+            admitted: std::sync::Mutex::new(None),
             reads,
             decoded: std::sync::Mutex::new(None),
         })))
     }
     pub(crate) fn check(&self) -> Result<()> {
-        anyhow::ensure!(
-            self.holds(&Identity::read(&self.0.path)?),
-            "JSON source changed: {}",
-            self.0.path.display()
-        );
-        self.check_reads()
+        let metadata = std::fs::metadata(&self.0.path)
+            .with_context(|| format!("reading JSON source {}", self.0.path.display()))?;
+        self.check_metadata(metadata)
     }
     /// Whether the file as observed now still carries every byte captured: identical, or for an
-    /// append-only log the same file grown ([`same_or_grown`]).
-    fn holds(&self, now: &Identity) -> bool {
-        if self.0.appendable {
-            let then = (self.0.identity.len, self.0.identity.file());
-            self.0.identity.admits(now) || ((now.len, now.file()) == then && append_in_flight(&self.0.path, then))
-        } else {
-            *now == self.0.identity
+    /// append-only log admitted as growth ([`FileId::admits`]).
+    fn holds(&self, now: &FileId) -> bool {
+        if *now == self.0.identity {
+            return true;
         }
+        let Some(prefix) = &self.0.prefix else { return false };
+        let mut admitted = self.0.admitted.lock().unwrap_or_else(|poison| poison.into_inner());
+        if *admitted == Some(*now) {
+            return true;
+        }
+        let holds = self.0.identity.admits(prefix, now, &self.0.path);
+        if holds {
+            *admitted = Some(*now);
+        }
+        holds
     }
     fn check_reads(&self) -> Result<()> {
         if let Some(reads) = &self.0.reads {
@@ -231,7 +185,7 @@ impl JsonSource {
         Self::capture_guarded(path, None)
     }
     /// `later` is a capture of the same path that still carries every byte of this one: identical,
-    /// or for an append-only log the same file grown ([`same_or_grown`]).
+    /// or for an append-only log admitted as growth ([`FileId::admits`]).
     pub(crate) fn admits(&self, later: &JsonSource) -> bool {
         self.0.path == later.0.path && self.holds(&later.0.identity)
     }
@@ -243,7 +197,7 @@ impl JsonSource {
     }
     pub(crate) fn check_metadata(&self, metadata: Metadata) -> Result<()> {
         anyhow::ensure!(
-            self.holds(&Identity::from_metadata(metadata)?),
+            self.holds(&file_id(&metadata)?),
             "JSON source changed: {}",
             self.0.path.display()
         );
@@ -1891,7 +1845,7 @@ mod tests {
                 std::fs::write(p, b"{\"z\":9}\n{\"b\":2}\n").unwrap();
                 std::fs::File::open(p)
                     .unwrap()
-                    .set_modified(SystemTime::UNIX_EPOCH)
+                    .set_modified(std::time::SystemTime::UNIX_EPOCH)
                     .unwrap();
             }),
             ("replace with a larger file", |p| {
@@ -1908,22 +1862,39 @@ mod tests {
         }
     }
 
-    /// Linux stamps a write's mtime before it extends the file: an observer can see new timestamps
-    /// at the captured length while an append is in flight. That is growth, not a rewrite.
+    /// Append admission is decided by content, never by waiting: a log seen mid-write (new
+    /// timestamps at its captured length, as Linux's write path shows) and one grown by half a
+    /// record are admitted; a same-length rewrite of a sampled byte is not. An edit outside the
+    /// samples is the documented limit (`crate::resume`), not detected.
     #[cfg(unix)]
     #[test]
-    fn append_only_log_seen_mid_write_at_its_captured_length_is_growth() {
-        let (_fixture, path) = log_fixture("live.jsonl", b"{\"a\":1}\n");
+    fn append_only_log_admission_is_decided_by_content() {
+        use std::io::Write;
+        let body: String = (0..400)
+            .map(|i| format!("{{\"n\":{i},\"pad\":\"{}\"}}\n", "x".repeat(40)))
+            .collect();
+        let (_fixture, path) = log_fixture("live.jsonl", body.as_bytes());
         let source = JsonSource::capture(&path).unwrap();
         let file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
-        file.set_modified(SystemTime::UNIX_EPOCH).unwrap();
-        std::thread::scope(|scope| {
-            scope.spawn(|| {
-                std::thread::sleep(std::time::Duration::from_millis(3));
-                std::io::Write::write_all(&mut &file, b"{\"b\":2}\n").unwrap();
-            });
-            source.check().unwrap();
-        });
+        file.set_modified(std::time::SystemTime::UNIX_EPOCH).unwrap();
+        source.check().unwrap();
+        (&file).write_all(b"{\"half\":").unwrap();
+        source.check().unwrap();
+        let grown = std::fs::read(&path).unwrap();
+        let rewrite = |at: usize| {
+            let mut bytes = grown.clone();
+            bytes[at] = b'y';
+            std::fs::write(&path, &bytes).unwrap();
+        };
+        for at in [body.len() - 3, 3] {
+            rewrite(at);
+            assert!(
+                source.check().unwrap_err().to_string().contains("JSON source changed"),
+                "byte {at}"
+            );
+        }
+        rewrite(body.len() / 2);
+        source.check().unwrap();
     }
 
     #[test]
@@ -2301,7 +2272,7 @@ mod tests {
                 // Preserve length so mapped bytes remain valid; a deliberate mtime makes the check
                 // deterministic on filesystems with coarse timestamp granularity.
                 std::fs::write(&fixture.path, br#"{"a":2} "#)?;
-                std::fs::File::open(&fixture.path)?.set_modified(SystemTime::UNIX_EPOCH)?;
+                std::fs::File::open(&fixture.path)?.set_modified(std::time::SystemTime::UNIX_EPOCH)?;
                 Ok(())
             })
             .expect_err("post-operation source change must reject its output");
@@ -2310,7 +2281,7 @@ mod tests {
         std::fs::write(&replacement, br#"{"a":3} "#).unwrap();
         std::fs::File::open(&replacement)
             .unwrap()
-            .set_modified(SystemTime::UNIX_EPOCH)
+            .set_modified(std::time::SystemTime::UNIX_EPOCH)
             .unwrap();
         std::fs::rename(replacement, &fixture.path).unwrap();
         #[cfg(unix)]
@@ -2360,7 +2331,7 @@ mod tests {
         );
         std::fs::File::open(&fixture.path)
             .unwrap()
-            .set_modified(SystemTime::UNIX_EPOCH)
+            .set_modified(std::time::SystemTime::UNIX_EPOCH)
             .unwrap();
         assert!(child.resolve().is_err());
         assert!(snapshot.validated_range(1, input.len() as u64 - 2).is_err());
@@ -2474,7 +2445,7 @@ mod tests {
         let error = value
             .with_view(|view| {
                 let result = view.canonical_prefix(0)?;
-                std::fs::File::open(&fixture.path)?.set_modified(SystemTime::UNIX_EPOCH)?;
+                std::fs::File::open(&fixture.path)?.set_modified(std::time::SystemTime::UNIX_EPOCH)?;
                 Ok(result)
             })
             .unwrap_err();
@@ -2483,7 +2454,7 @@ mod tests {
         let error = value
             .with_view::<()>(|_| {
                 std::fs::File::open(&fixture.path)?
-                    .set_modified(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1))?;
+                    .set_modified(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1))?;
                 anyhow::bail!("intentional callback stop")
             })
             .unwrap_err();
@@ -2507,7 +2478,7 @@ mod tests {
         assert_eq!(canonical(&child), br#""last""#);
         let error = restored
             .with_view::<()>(|_| {
-                std::fs::File::open(&fixture.path)?.set_modified(SystemTime::UNIX_EPOCH)?;
+                std::fs::File::open(&fixture.path)?.set_modified(std::time::SystemTime::UNIX_EPOCH)?;
                 anyhow::bail!("intentional callback stop")
             })
             .unwrap_err();

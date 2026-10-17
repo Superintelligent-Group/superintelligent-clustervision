@@ -67,23 +67,118 @@ fn absolute(path: &Path) -> Option<PathBuf> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// One file as `stat` saw it, the one identity every guard compares. It has exactly two
+/// comparisons: `==` (strict: the file is unchanged) and [`FileId::admits`] (append: the same
+/// file, grown or not, with its captured prefix intact). Device, inode and ctime are 0 off Unix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct FileId {
+    pub len: u64,
+    pub mtime_ns: u64,
+    pub dev: u64,
+    pub ino: u64,
+    pub ctime_ns: i64,
+}
+
+impl FileId {
+    pub fn of(metadata: &std::fs::Metadata) -> Option<Self> {
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        let modified = metadata.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
+        #[cfg(unix)]
+        let (dev, ino, ctime_ns) = (
+            metadata.dev(),
+            metadata.ino(),
+            metadata.ctime() * 1_000_000_000 + metadata.ctime_nsec(),
+        );
+        #[cfg(not(unix))]
+        let (dev, ino, ctime_ns) = (0, 0, 0);
+        Some(Self {
+            len: metadata.len(),
+            mtime_ns: modified.as_nanos() as u64,
+            dev,
+            ino,
+            ctime_ns,
+        })
+    }
+
+    /// Append admission for an append-only source captured as `self` with sample `prefix`:
+    /// `later` is this file unchanged, or the same file (device and inode) at least as long whose
+    /// bytes under the captured length still sample as they did ([`Prefix::holds`]). No timing:
+    /// a writer mid-`write` (new timestamps, old length) is admitted by content, and a same-length
+    /// rewrite of the sampled bytes is rejected. An edit outside the samples is not detected
+    /// (the limit [`crate::resume`] documents).
+    pub fn admits(&self, prefix: &Prefix, later: &FileId, path: &Path) -> bool {
+        self == later || (later.dev, later.ino) == (self.dev, self.ino) && later.len >= self.len && prefix.holds(path)
+    }
+}
+
+/// How many bytes a [`Prefix`] samples at the head of the file and again just before its end.
+pub(crate) const SAMPLE_SPAN: u64 = 4096;
+
+/// The bytes `0..len` of one file (device, inode), sampled: FNV-1a over the first
+/// [`SAMPLE_SPAN`] bytes, the [`SAMPLE_SPAN`] bytes before `len` (overlapping on a short file)
+/// and `len` itself. A sample, not a digest of the whole prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Prefix {
+    pub len: u64,
+    pub hash: u64,
+    pub dev: u64,
+    pub ino: u64,
+}
+
+impl Prefix {
+    /// The sample of `file`'s first `len` bytes; `None` when it is shorter or unreadable. Reads
+    /// positioned, so the handle's own position never moves.
+    pub fn of(file: &std::fs::File, len: u64) -> Option<Self> {
+        use crate::harness::store::jsonl::ranges::read_exact_at;
+        let id = FileId::of(&file.metadata().ok()?)?;
+        if id.len < len {
+            return None;
+        }
+        let mut head = vec![0u8; len.min(SAMPLE_SPAN) as usize];
+        read_exact_at(file, &mut head, 0).ok()?;
+        let from = len.saturating_sub(SAMPLE_SPAN);
+        let mut tail = vec![0u8; (len - from) as usize];
+        read_exact_at(file, &mut tail, from).ok()?;
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for b in head.iter().chain(&tail).chain(&len.to_le_bytes()) {
+            hash = (hash ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3);
+        }
+        Some(Self {
+            len,
+            hash,
+            dev: id.dev,
+            ino: id.ino,
+        })
+    }
+
+    /// The file `path` names now is this one, at least `len` long, sampling as it did.
+    pub fn holds(&self, path: &Path) -> bool {
+        std::fs::File::open(path).is_ok_and(|file| Self::of(&file, self.len) == Some(*self))
+    }
+}
+
+/// One recorded path: its identity, or `None` when absent. A pass's append-only primary also
+/// keeps its [`Prefix`] in memory, which only that pass's growth admission reads; equality,
+/// hashing and the serialized record are path and identity.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Entry {
     path: PathBuf,
-    state: Option<FileState>,
+    state: Option<FileId>,
+    #[serde(skip)]
+    prefix: Option<Prefix>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-struct FileState {
-    len: u64,
-    modified_ns: u64,
-    identity: Option<(u64, u64, i64, i64)>,
+impl PartialEq for Entry {
+    fn eq(&self, other: &Self) -> bool {
+        self.path == other.path && self.state == other.state
+    }
 }
-
-impl FileState {
-    /// Length and file (device, inode), the terms of [`crate::json::same_or_grown`].
-    fn extent(&self) -> (u64, Option<(u64, u64)>) {
-        (self.len, self.identity.map(|(device, inode, ..)| (device, inode)))
+impl Eq for Entry {}
+impl std::hash::Hash for Entry {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.path.hash(state);
+        self.state.hash(state);
     }
 }
 
@@ -114,14 +209,14 @@ impl Stamp {
 
     fn records(&self) -> Option<Records> {
         let records: Records = serde_json::from_str(&self.0).ok()?;
-        (records.version == 3).then_some(records)
+        (records.version == 4).then_some(records)
     }
 
     /// Canonical serialization puts the small primary record before the potentially large
     /// inventory. The delimiter cannot occur inside an encoded path: its quotes would be escaped.
     /// Compare it without decoding every auxiliary path. Older/noncanonical records miss.
     fn canonical_parts(&self) -> Option<(&str, &str)> {
-        self.0.strip_prefix("{\"version\":3,\"primary\":{")?;
+        self.0.strip_prefix("{\"version\":4,\"primary\":{")?;
         self.0.split_once(",\"entries\":")
     }
 
@@ -142,7 +237,7 @@ impl Stamp {
                 // A differing prefix must still be a well-formed typed record before resume.
                 return old_primary == now_primary
                     || old_primary
-                        .strip_prefix("{\"version\":3,\"primary\":")
+                        .strip_prefix("{\"version\":4,\"primary\":")
                         .is_some_and(|entry| serde_json::from_str::<Entry>(entry).is_ok());
             }
         }
@@ -220,13 +315,28 @@ impl ReadSet {
     }
 
     pub fn record(&mut self, path: &Path) {
+        self.record_as(path, false);
+    }
+
+    /// [`Self::record`] for an append-only primary: its first record also keeps its [`Prefix`],
+    /// so [`Self::fresh_or_grown`] can admit its growth by content.
+    pub(crate) fn record_appendable(&mut self, path: &Path) {
+        self.record_as(path, true);
+    }
+
+    fn record_as(&mut self, path: &Path, appendable: bool) {
         let Some(path) = absolute(path) else {
             self.known = false;
             return;
         };
         if let std::collections::btree_map::Entry::Vacant(slot) = self.entries.entry(path) {
             match Probe::default().entry(slot.key()) {
-                Some(entry) => {
+                Some(mut entry) => {
+                    if let Some(state) = entry.state.filter(|_| appendable) {
+                        entry.prefix = std::fs::File::open(&entry.path)
+                            .ok()
+                            .and_then(|file| Prefix::of(&file, state.len));
+                    }
                     slot.insert(entry);
                 }
                 None => self.known = false,
@@ -237,7 +347,7 @@ impl ReadSet {
     /// The `(mtime_ns, len)` recorded for an existing `path`, the key persisted caches index by.
     pub(crate) fn signature(&self, path: &Path) -> Option<(u64, u64)> {
         let state = self.entries.get(&absolute(path)?)?.state.as_ref()?;
-        Some((state.modified_ns, state.len))
+        Some((state.mtime_ns, state.len))
     }
 
     /// Paths whose original stamps this read set retains. Dependency notifications can replay
@@ -266,28 +376,26 @@ impl ReadSet {
 
     /// Revalidate exactly the paths captured by this consumer, including absence and identity.
     pub fn fresh(&self, probe: &mut Probe) -> bool {
-        self.fresh_or_grown(None, probe)
+        self.known
+            && self
+                .entries
+                .values()
+                .all(|entry| probe.entry(&entry.path).as_ref() == Some(entry))
     }
 
-    /// [`Self::fresh`], except that `primary`, an append-only transcript, may also have grown
-    /// under [`crate::json::same_or_grown`]: a pass that read inside its captured length still
+    /// [`Self::fresh`], except that a primary recorded by [`Self::record_appendable`] may also
+    /// have grown ([`FileId::admits`]): a pass that read inside its captured length still
     /// describes that prefix.
-    pub(crate) fn fresh_or_grown(&self, primary: Option<&Path>, probe: &mut Probe) -> bool {
-        let primary = primary.and_then(absolute);
+    pub(crate) fn fresh_or_grown(&self, probe: &mut Probe) -> bool {
         self.known
             && self.entries.values().all(|entry| {
                 let now = probe.entry(&entry.path);
                 now.as_ref() == Some(entry)
-                    || primary.as_ref() == Some(&entry.path)
-                        && entry
-                            .state
-                            .as_ref()
-                            .zip(now.and_then(|now| now.state))
-                            .is_some_and(|(then, now)| {
-                                crate::json::same_or_grown(false, then.extent(), now.extent())
-                                    || then.extent() == now.extent()
-                                        && crate::json::append_in_flight(&entry.path, then.extent())
-                            })
+                    || entry
+                        .state
+                        .zip(entry.prefix)
+                        .zip(now.and_then(|now| now.state))
+                        .is_some_and(|((then, prefix), now)| then.admits(&prefix, &now, &entry.path))
             })
     }
 }
@@ -421,7 +529,7 @@ impl Snapshot {
 #[derive(Default)]
 pub struct Probe {
     // The map key owns the path once; outer None is unavailable, inner None is absent.
-    entries: HashMap<PathBuf, Option<Option<FileState>>>,
+    entries: HashMap<PathBuf, Option<Option<FileId>>>,
     directories: HashMap<PathBuf, Option<std::sync::Arc<Vec<PathBuf>>>>,
     // Adapters resolved once per operation: detection stats roots, so not once per session.
     adapters: HashMap<Harness, Option<Box<dyn crate::harness::Adapter>>>,
@@ -430,30 +538,11 @@ pub struct Probe {
 impl Probe {
     fn entry(&mut self, path: &Path) -> Option<Entry> {
         let path = absolute(path)?;
-        let state = self
+        let state = (*self
             .entries
             .entry(path.clone())
             .or_insert_with(|| match std::fs::metadata(&path) {
-                Ok(md) => {
-                    let modified = md
-                        .modified()
-                        .ok()?
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .ok()?
-                        .as_nanos() as u64;
-                    #[cfg(unix)]
-                    let identity = {
-                        use std::os::unix::fs::MetadataExt;
-                        Some((md.dev(), md.ino(), md.ctime(), md.ctime_nsec()))
-                    };
-                    #[cfg(not(unix))]
-                    let identity = None;
-                    Some(Some(FileState {
-                        len: md.len(),
-                        modified_ns: modified,
-                        identity,
-                    }))
-                }
+                Ok(md) => Some(Some(FileId::of(&md)?)),
                 Err(e)
                     if matches!(
                         e.kind(),
@@ -463,9 +552,12 @@ impl Probe {
                     Some(None)
                 }
                 Err(_) => None,
-            })
-            .clone()?;
-        Some(Entry { path, state })
+            }))?;
+        Some(Entry {
+            path,
+            state,
+            prefix: None,
+        })
     }
 
     fn directory(&mut self, path: &Path) -> Option<std::sync::Arc<Vec<PathBuf>>> {
@@ -501,7 +593,7 @@ impl Probe {
 
     fn dependencies_from(&mut self, r: &SessionRef, primary: &Path) -> Option<Stamp> {
         Stamp::serialize(&Records {
-            version: 3,
+            version: 4,
             primary: self.entry(primary)?,
             entries: self.dependency_entries(r, primary)?,
             reads: None,
@@ -733,7 +825,11 @@ impl Probe {
             .into_iter()
             .map(|(path, state)| {
                 let path = if path.is_absolute() { path } else { absolute(&path)? };
-                Some(Entry { path, state })
+                Some(Entry {
+                    path,
+                    state,
+                    prefix: None,
+                })
             })
             .collect()
     }
@@ -750,7 +846,7 @@ impl Probe {
             primary: self
                 .entry(primary)
                 .and_then(|entry| entry.state)
-                .map_or((0, 0), |state| (state.modified_ns as i64, state.len as i64)),
+                .map_or((0, 0), |state| (state.mtime_ns as i64, state.len as i64)),
             dependencies: self.dependencies_from(r, primary),
         }
     }
@@ -773,7 +869,7 @@ pub fn unchanged_from(r: &SessionRef, primary: &Path, snapshot: &Snapshot) -> bo
     let current_primary = current_entry
         .as_ref()
         .and_then(|entry| entry.state.as_ref())
-        .map_or((0, 0), |state| (state.modified_ns as i64, state.len as i64));
+        .map_or((0, 0), |state| (state.mtime_ns as i64, state.len as i64));
     if current_primary != snapshot.primary {
         return false;
     }
@@ -1509,7 +1605,7 @@ mod tests {
         assert!(Table::load("upgrade").fresh(&r, base.primary, &base.dependencies));
         let mut table = Table::load("upgrade");
         for (_, stamp) in table.rows.values_mut() {
-            stamp.0 = stamp.0.replacen("\"version\":3", "\"version\":1", 1);
+            stamp.0 = stamp.0.replacen("\"version\":4", "\"version\":1", 1);
         }
         assert!(!table.fresh(&r, base.primary, &base.dependencies));
         assert!(Table::load("upgrade").fresh(&r, base.primary, &base.dependencies));

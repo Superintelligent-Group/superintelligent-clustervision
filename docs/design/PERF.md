@@ -88,7 +88,9 @@ A resume mark (`resume.rs`) is checked by device and inode, length, and a hash o
 and the 4 KiB before the mark. An in-place edit outside those samples that is followed by growth
 is not detected: index and watch resume past it, and the edited bytes keep the docs, events and
 counts they were read with until a whole pass (`cv index --rebuild`, a same-size rewrite, or a new
-inode). Rewind's prefix receipt has the same limit.
+inode). Rewind's prefix receipt has the same limit, and so does the append admission of a captured
+`.jsonl` (`source::FileId::admits`): a stat that changed at the captured length (a writer
+mid-`write`) is admitted when the samples match, so a same-length edit outside them is not caught.
 
 Hashing the whole prefix on each resume would close the gap, and was rejected. On the largest
 local transcript (189,759,498 bytes), the mark's FNV-1a took 1.03 s and 1.22 s (0.16 to 0.19
