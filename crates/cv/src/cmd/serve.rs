@@ -557,8 +557,14 @@ fn search(query: &str, searcher: &cv_search::Searcher) -> Reply {
             None => return bad(400, &format!("unknown kind {kind:?}: exchange, context or all")),
         },
     };
-    if semantic && scope != cv_search::Scope::Exchange {
-        return bad(400, "semantic=1 embeds the exchange only: kind= is full-text");
+    if semantic && scan {
+        return bad(400, "semantic=1 conflicts with scan=1");
+    }
+    if (semantic || scan) && params.get("kind").is_some() {
+        return bad(
+            400,
+            "kind= requires indexed full-text search; omit semantic=1 and scan=1",
+        );
     }
     let source = if semantic {
         Source::Semantic
@@ -875,6 +881,21 @@ mod staged_tests {
 #[cfg(test)]
 mod semantic_service_tests {
     use super::*;
+
+    #[test]
+    fn search_rejects_cli_conflicts_before_reading_sources() {
+        let _world = crate::test_world("search-conflicts");
+        for flags in [
+            "scan=1&kind=context",
+            "scan=1&kind=all",
+            "scan=1&kind=exchange",
+            "semantic=1&kind=exchange",
+            "scan=1&semantic=1",
+        ] {
+            let (status, body, _) = search(&format!("q=needle&{flags}"), &cv_search::Searcher::default());
+            assert_eq!(status, 400, "{flags}: {body}");
+        }
+    }
 
     #[test]
     fn token_comparison_needs_every_byte() {

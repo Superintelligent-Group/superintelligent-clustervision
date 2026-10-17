@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- HTTP search rejects conflicting kind, scan and semantic parameters consistently with the CLI.
+
 ## 0.17.0 — 2026-10-17 — stream, never materialize
 
 cv's readers now stream: a giant tool output, a 60 MB escaped string or a 64 MiB SQLite cell

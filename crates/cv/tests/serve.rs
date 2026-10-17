@@ -1285,7 +1285,13 @@ fn serve_search() {
     // CLI's --semantic conflicts with --kind.
     let (status, v) = get_json(port, "/api/search?semantic=1&kind=context&q=zebrafish");
     assert_eq!(status, 400, "{v}");
-    assert!(v["error"].as_str().unwrap().contains("embeds the exchange only"), "{v}");
+    assert!(
+        v["error"]
+            .as_str()
+            .unwrap()
+            .contains("kind= requires indexed full-text search"),
+        "{v}"
+    );
 
     // harness: a filter, and a typo is a clear 400 (same as /api/sessions).
     let (status, v) = get_json(port, "/api/search?scan=1&q=zebrafish&harness=claude");
