@@ -1056,9 +1056,10 @@ impl PlanState {
         let indexed = existing.get(&r.id).copied().unwrap_or(source.primary);
         let dependencies_fresh =
             baseline.is_some_and(|old| old.primary == indexed && old.dependencies_fresh(&source, probe));
-        let fts_fresh = fts_is_fresh(r, existing.get(&r.id), mtime, size, || {
-            baseline.is_some_and(|old| old.fresh(&source, probe))
-        }) && metadata.get(&r.id) == Some(&DiscoveryMetadata::new(r, prov));
+        let fts_fresh =
+            cv_core::offsets::sig_is_fresh_with_source(existing.get(&r.id).copied(), source.primary, || {
+                baseline.is_some_and(|old| old.fresh(&source, probe))
+            }) && metadata.get(&r.id) == Some(&DiscoveryMetadata::new(r, prov));
         let events = event_sync.needs_ingest(r, &source, prov, probe);
         // Unchanged on every axis → skip entirely (no re-parse beyond the metadata scan).
         if fts_fresh
@@ -1870,7 +1871,7 @@ fn index_session(
 ///
 /// A large session flushes chunk docs into the writer *while* streaming, so a mid-stream parse
 /// error would otherwise leave a truncated head behind — and since every chunk doc is stamped with
-/// the full current `(mtime, size)`, [`fts_is_fresh`] would then skip the session forever, freezing
+/// the full current `(mtime, size)`, [`cv_core::offsets::sig_is_fresh_with_source`] would then skip the session forever, freezing
 /// the truncation in. Deleting by the shared id term on the error path removes those partial docs
 /// (tantivy applies operations in opstamp order, so this cannot touch docs added by a later pass);
 /// the id drops out of the skip-set entirely and is retried on the next run.
@@ -2502,20 +2503,6 @@ impl cv_core::MessageSink for ChunkSink<'_> {
     }
 }
 
-/// Whether an indexed session is FTS-fresh given its stored `(mtime, size)` and the current file
-/// signature. Both must match, including for append logs: a same-size edit is still a change.
-/// A real empty file requires fresh captured source authority. Unreadable `(0, 0)` tuples
-/// and missing/legacy guards still miss. Pre-`size` indexes rebuild in [`open_or_create`].
-fn fts_is_fresh(
-    _r: &cv_core::SessionRef,
-    stored: Option<&(i64, i64)>,
-    mtime: i64,
-    size: i64,
-    source_fresh: impl FnOnce() -> bool,
-) -> bool {
-    stored.is_some_and(|&stored| cv_core::offsets::sig_is_fresh_with_source(stored, (mtime, size), source_fresh))
-}
-
 /// `id → (mtime, size)` for every live doc (the incremental skip-set), plus the set of ids that
 /// are folded-in sub-agent docs (those tagged with a `parent_id`), which a plain refresh's reap
 /// must leave alone.
@@ -2745,10 +2732,7 @@ fn staleness_over(dir: &Path, refs: &[cv_core::SessionRef]) -> Option<Staleness>
     for r in refs {
         let cur = cv_core::offsets::file_sig(&cv_core::source::primary_path(r));
         newest_on_disk = newest_on_disk.max(cur.0);
-        if !sigs
-            .get(&r.id)
-            .is_some_and(|&stored| cv_core::offsets::sig_is_fresh_with_source(stored, cur, || true))
-        {
+        if !cv_core::offsets::sig_is_fresh_with_source(sigs.get(&r.id).copied(), cur, || true) {
             stale_sessions += 1;
         }
     }
@@ -5237,37 +5221,6 @@ mod tests {
         std::fs::remove_dir_all(oracle).unwrap();
     }
 
-    /// Every source requires both mtime and size to match. Unknown or empty sources are stale.
-    #[test]
-    fn fts_is_fresh_requires_mtime_and_size_for_every_source() {
-        let append_only = sref("append", "append", "/tmp/append.jsonl".into());
-        let non_append = cv_core::SessionRef {
-            id: "cline-task".into(),
-            harness: cv_core::Harness::Cline,
-            path: "/tmp/task/api_conversation_history.json".into(),
-            cwd: Some("/home/u/proj".into()),
-            title: Some("task".into()),
-            created_at: None,
-            updated_at: None,
-            message_count: 1,
-        };
-
-        assert!(fts_is_fresh(&append_only, Some(&(111, 4096)), 111, 4096, || true));
-        assert!(!fts_is_fresh(&append_only, Some(&(111, 4096)), 222, 4096, || true));
-        assert!(!fts_is_fresh(&append_only, Some(&(111, 4096)), 222, 4096, || panic!(
-            "tuple miss must not check primary identity"
-        )));
-        assert!(!fts_is_fresh(&append_only, Some(&(111, 4096)), 111, 8192, || true));
-        assert!(!fts_is_fresh(&append_only, Some(&(111, 0)), 111, 0, || false));
-        assert!(fts_is_fresh(&append_only, Some(&(111, 0)), 111, 0, || true));
-        assert!(!fts_is_fresh(&append_only, Some(&(111, 4096)), 111, 4096, || false));
-        assert!(!fts_is_fresh(&append_only, None, 111, 4096, || true));
-
-        assert!(fts_is_fresh(&non_append, Some(&(111, 4096)), 111, 4096, || true));
-        assert!(!fts_is_fresh(&non_append, Some(&(111, 4096)), 222, 4096, || true));
-        assert!(!fts_is_fresh(&non_append, Some(&(111, 4096)), 111, 8192, || true));
-    }
-
     #[test]
     fn auxiliary_directory_changes_refresh_search_events_and_counts() {
         let _home = IsolatedHome::new();
@@ -5772,7 +5725,7 @@ mod tests {
 
     /// Regression for the truncated-fresh hole (B1): a parse error *after* chunk docs were already
     /// flushed into the writer must not leave those docs behind — they carry the full current
-    /// `(mtime, size)` stamp, so a later `fts_is_fresh` would skip the session forever and freeze
+    /// `(mtime, size)` stamp, so a later `sig_is_fresh_with_source` would skip the session forever and freeze
     /// the truncated head into the index. [`index_session_clean`] (the path both `index_all` and
     /// the sub-agent fold drive) deletes the partial docs on error, dropping the id from the
     /// skip-set so the session is retried next run.

@@ -597,7 +597,7 @@ mod db {
         )
         .ok()?;
         // Lazy migration: a pre-`size` `event_sync` (the CREATE above is a no-op on it) gets the
-        // column added in place. Old rows read back a NULL size, which [`sync_fresh`] treats as
+        // column added in place. Old rows read back a NULL size, which [`sync_sig`] treats as
         // stale — each session re-ingests once and is stamped with its size; no wholesale drop.
         let has_size: bool = conn
             .query_row(
@@ -655,21 +655,9 @@ mod db {
         )
     }
 
-    /// The event-catalog freshness predicate over a stored `(mtime_ns, size)` stamp, shared with
-    /// FTS. Both must match, including for append logs: a same-size edit is still a change.
-    /// A missing stored size (a pre-`size` catalog row) never matches. A real empty file
-    /// requires the captured source guard, just like a nonempty file; missing/old guards miss.
-    fn sync_fresh(
-        stored: Option<(i64, Option<i64>)>,
-        mtime_ns: i64,
-        size: i64,
-        source_fresh: impl FnOnce() -> bool,
-    ) -> bool {
-        stored.is_some_and(|(stored_mtime, stored_size)| {
-            stored_size.is_some_and(|stored_size| {
-                crate::offsets::sig_is_fresh_with_source((stored_mtime, stored_size), (mtime_ns, size), source_fresh)
-            })
-        })
+    /// A stored `event_sync` stamp; a pre-`size` row (NULL size) has none.
+    fn sync_sig((mtime, size): (i64, Option<i64>)) -> Option<(i64, i64)> {
+        Some((mtime, size?))
     }
 
     /// Whether `r` needs an event (re)ingest: its source as captured now is not the one the
@@ -697,7 +685,7 @@ mod db {
             )
             .ok();
         let source = crate::source::Probe::default().snapshot(r);
-        !sync_fresh(stored, source.primary.0, source.primary.1, || {
+        !crate::offsets::sig_is_fresh_with_source(stored.and_then(sync_sig), source.primary, || {
             crate::source::Table::load("events")
                 .get(r)
                 .is_some_and(|old| old.fresh(&source, &mut crate::source::Probe::default()))
@@ -785,15 +773,14 @@ mod db {
                 r.id.clone(),
                 r.path.to_string_lossy().into_owned(),
             );
-            !sync_fresh(
+            !crate::offsets::sig_is_fresh_with_source(
                 rows.get(&key)
                     .filter(|entry| {
                         entry.provenance == *provenance
                             && entry.cwd.as_deref() == r.cwd.as_ref().map(|p| p.to_string_lossy()).as_deref()
                     })
-                    .map(|entry| entry.signature),
-                source.primary.0,
-                source.primary.1,
+                    .and_then(|entry| sync_sig(entry.signature)),
+                source.primary,
                 || self.dependencies.get(r).is_some_and(|old| old.fresh(source, probe)),
             )
         }
