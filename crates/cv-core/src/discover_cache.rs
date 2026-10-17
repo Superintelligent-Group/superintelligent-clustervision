@@ -275,10 +275,7 @@ where
 {
     // One capture decides freshness: the path's full identity, inside the read set (with its
     // prefix sample when it may grow under a continuation). Its `(mtime, size)` only keys rows.
-    match version {
-        Some(_) => reads.record_appendable(path),
-        None => reads.record(path),
-    }
+    reads.record_as(path, version.is_some());
     #[cfg_attr(not(feature = "sqlite"), allow(unused_variables))]
     let Some(key @ (_, size)) = reads.signature(path) else {
         return scan(None).0;

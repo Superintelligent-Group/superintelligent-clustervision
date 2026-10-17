@@ -318,13 +318,9 @@ impl ReadSet {
         self.record_as(path, false);
     }
 
-    /// [`Self::record`] for an append-only primary: its first record also keeps its [`Prefix`],
+    /// [`Self::record`]; for an `appendable` primary its first record also keeps its [`Prefix`],
     /// so [`Self::fresh_or_grown`] can admit its growth by content.
-    pub(crate) fn record_appendable(&mut self, path: &Path) {
-        self.record_as(path, true);
-    }
-
-    fn record_as(&mut self, path: &Path, appendable: bool) {
+    pub(crate) fn record_as(&mut self, path: &Path, appendable: bool) {
         let Some(path) = absolute(path) else {
             self.known = false;
             return;
@@ -383,7 +379,7 @@ impl ReadSet {
                 .all(|entry| probe.entry(&entry.path).as_ref() == Some(entry))
     }
 
-    /// [`Self::fresh`], except that a primary recorded by [`Self::record_appendable`] may also
+    /// [`Self::fresh`], except that a primary recorded as appendable may also
     /// have grown ([`FileId::admits`]): a pass that read inside its captured length still
     /// describes that prefix.
     pub(crate) fn fresh_or_grown(&self, probe: &mut Probe) -> bool {
@@ -992,17 +988,18 @@ fn ensure_table(conn: &rusqlite::Connection) -> Option<()> {
     .ok()
 }
 
-/// One previously published baseline, without loading every session's records during writes.
-/// The consumer row and this baseline must be read from one SQL snapshot by the caller.
+/// One previously published baseline is [`Snapshot::fresh`] against `now`, without loading every
+/// session's records during writes. The consumer row and this baseline must be read from one SQL
+/// snapshot by the caller.
 #[cfg(feature = "sqlite")]
-pub(crate) fn baseline_in(conn: &rusqlite::Connection, consumer: &str, r: &SessionRef) -> Option<Snapshot> {
+pub(crate) fn fresh_in(conn: &rusqlite::Connection, consumer: &str, r: &SessionRef, now: &Snapshot) -> bool {
     let (h, id, path) = key(r);
     conn.query_row(
         "SELECT mtime,size,stamp FROM source_dependencies WHERE consumer=?1 AND harness=?2 AND id=?3 AND path=?4",
         rusqlite::params![consumer, h, id, path],
         |row| Ok(Snapshot::stored((row.get(0)?, row.get(1)?), row.get(2)?)),
     )
-    .ok()
+    .is_ok_and(|old| old.fresh(now, &mut Probe::default()))
 }
 
 /// Publish in the same transaction as SQL consumer output. A failure must roll back both.

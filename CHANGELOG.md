@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- A live `.jsonl` read beside its writer is admitted by content (same file, prefix samples intact), never by waiting; source baselines reread once.
+- A live `.jsonl` beside its writer is admitted by content (same file, sampled prefix intact), never by waiting; index, events, counts, vectors reread once.
 
 - Reading a large transcript maps 8 MiB windows and each span alone, never the whole file: `cv doctor` on 1.3 GB peaks at 22 MB RSS, not 2.6 GB.
 

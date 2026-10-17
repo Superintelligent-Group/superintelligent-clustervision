@@ -915,8 +915,7 @@ mod imp {
             )
             .ok();
         if stored.is_some_and(|(sa, sb, text)| (sa, sb) == (a, b) && counts_of(&text).is_some())
-            && crate::source::baseline_in(conn, "counts", r)
-                .is_some_and(|old| old.fresh(source, &mut crate::source::Probe::default()))
+            && crate::source::fresh_in(conn, "counts", r, source)
         {
             return;
         }

@@ -100,9 +100,7 @@ impl Cache {
         if digest != header_digest(r, &fallback, rows, bytes as u64) {
             return None;
         }
-        if !crate::source::baseline_in(&conn, CONSUMER, r)
-            .is_some_and(|old| old.fresh(current, &mut crate::source::Probe::default()))
-        {
+        if !crate::source::fresh_in(&conn, CONSUMER, r, current) {
             return None;
         }
         let payload_bytes = bytes as u64 - fallback.len() as u64;
@@ -413,9 +411,7 @@ impl Publisher {
             )
             .ok()?;
             crate::source::publish_in(&conn, CONSUMER, &self.r, &self.source)?;
-            if !crate::source::baseline_in(&conn, CONSUMER, &self.r)
-                .is_some_and(|old| old.fresh(&self.source, &mut crate::source::Probe::default()))
-            {
+            if !crate::source::fresh_in(&conn, CONSUMER, &self.r, &self.source) {
                 return None;
             }
             loop {
