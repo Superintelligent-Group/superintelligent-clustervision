@@ -89,8 +89,8 @@ disk). Instructions retired, `/usr/bin/time -l`:
 The index of that home is 2.4 GB of tantivy segments and a 193 MB `catalog.db` (7,374 session
 rows, 6,828 scan-cache rows, 1,513,943 events, 7,374 affordance-count rows, 22,120 source
 dependencies, 389 watched paths). The second index pass is a defect, not a cost: 4,893 is the
-Codex rollout count, so the first pass's Codex baselines did not hold (the freshness lane holds it
-as a release blocker). The one-time 0.17 upgrade costs on a home built by 0.16.1 (catalog reread
+Codex rollout count, so that snapshot's first-pass Codex baselines did not hold. This is historical
+evidence; verify the present tree with repeated unchanged passes, including compressed rollouts. The one-time 0.17 upgrade costs on a home built by 0.16.1 (catalog reread
 for the new identity, the index rebuild for the `context` field and the title rule, the semantic
 re-embed) were **not measured**: the upgrade run was stopped for load. Expect one full reread of
 every session by the catalog and one by the indexer, and one re-embed of every session's exchange.

@@ -139,7 +139,8 @@ row counted by an older view is "not counted", so adding a kind or a reader neve
   roster is the clap tree.
 - **`has:<kind>`** in the query calculus: `cv ls -q has:plan`, `cv ls -q 'has:schedule harness:hermes'`.
   The fleet question ("which sessions left a cron job behind") is a selector, not a `lanes` flag;
-  `ls`, `search`, MCP `ls` and `cv serve` all take `-q`.
+  `ls`, `stats` and `dataset` take `-q`; MCP `ls` exposes it as `query`. Search uses its own
+  full-text query grammar; HTTP session listing exposes harness/cwd filters.
 - **Hook body**: the `compact` hook (Claude `SessionStart` after compaction) adds the one command
   that reads back the plan, schedules and background jobs the compacted context held.
 

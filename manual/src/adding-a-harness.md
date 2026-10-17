@@ -21,7 +21,7 @@ The steps:
    impl Yours {
        /// Resolve the store from `$HOME` / the env (existing paths only).
        pub fn detect() -> Self {
-           Yours { root: dirs::home_dir().map(|h| h.join(".yours/sessions")).filter(|p| p.exists()) }
+           Yours { root: crate::env::home_dir().map(|h| h.join(".yours/sessions")).filter(|p| p.exists()) }
        }
    }
 

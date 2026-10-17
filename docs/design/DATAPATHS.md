@@ -57,7 +57,8 @@ can decode a whole field first. Each bound must hold across the composed path.
 
 This describes implementation, not a blanket performance claim. Required navigation state and
 demanded output are not themselves avoidable bloat. Shared under every row since 0.17: one line
-reader (`store::jsonl::for_each_line`, mapped or positioned, 8 MiB windows), one validator
+reader (`store::jsonl::for_each_line`, mapped or positioned; mapped windows start at 8 MiB and
+grow to hold a longer line), one validator
 (`store::json::validate_value`), one string-body codec, one checked span resolver (`lazy`), one
 JSON-whitespace trim rule, and one SQLite cell reader (`store::sqlite::Cells`).
 
@@ -193,10 +194,9 @@ identifies application state, not a claim that the OS page cache was evicted.
   ([`CODEC.md`](CODEC.md)), but Codex, Claude, Grok, Kimi and Kimi Code still discover through a
   second grammar, and the OpenClaw window-group, Goose fork, Qwen `TaskInventory`, Hermes dedup
   and export-cache paths are bespoke walks built for one measured lookup each.
-- **Three message windowings, two search entry points.** `api::WindowSink`, the text renderer's
-  own window pass in `cv/src/cmd/view.rs` and `cv/src/cmd/pack.rs`'s sink select windows three
-  ways; `cmd/search.rs` and `cmd/serve.rs` each assemble a search. One `WindowSink` and one
-  `cv_search::search()` were planned for 0.17 and did not land.
+- **Three message windowings.** `api::WindowSink`, the text renderer's own window pass in
+  `cv/src/cmd/view.rs` and `cv/src/cmd/pack.rs`'s relevance sink still select windows separately.
+  CLI and HTTP search now share `cv_search::Searcher::search`, including notes and snippets.
 - **Removed in 0.17**, so they need no gap: `loom::splice`, `spill::Temporary`, the catalog's
   `affordance_sig` and no-op `note_affordances`, the unordered events publication path, the
   pre-binary semantic store migration, and the four sink latches (one `stream::Latch`).

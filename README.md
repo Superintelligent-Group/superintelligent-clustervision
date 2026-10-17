@@ -38,6 +38,7 @@ Restarting from scratch is the most expensive thing you do all day. **clustervis
 
 ```sh
 # 🔎 find that session from last week by what it was ABOUT, not where it lived
+cv index                                     # build/refresh the search index first
 cv search "the flux inference refactor"        # full-text, instant
 cv search --semantic "formalizing proofs"      # by meaning — no keyword overlap needed
 

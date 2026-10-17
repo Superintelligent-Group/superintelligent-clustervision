@@ -176,19 +176,23 @@ curl 'http://127.0.0.1:7777/api/sessions?harness=claude&limit=2'
   {
     "id": "a1b2c3d4-5e6f-7890-abcd-ef0123456789",
     "harness": "claude",
+    "path": "/Users/you/.claude/projects/-Users-you-code-clustervision/a1b2c3d4-5e6f-7890-abcd-ef0123456789.jsonl",
+    "size_bytes": 412998,
     "cwd": "/Users/you/code/clustervision",
     "title": "wire up the fleet dashboard",
-    "updated_at": "2026-05-30T18:42:10Z",
-    "created_at": "2026-05-30T17:05:01Z",
+    "updated_at": "2026-05-30T18:42:10+00:00",
+    "created_at": "2026-05-30T17:05:01+00:00",
     "message_count": 87
   },
   {
     "id": "9f8e7d6c-1234-5678-9abc-def012345678",
     "harness": "claude",
+    "path": "/Users/you/.claude/projects/-Users-you-code-other-project/9f8e7d6c-1234-5678-9abc-def0123456789.jsonl",
+    "size_bytes": 15342,
     "cwd": "/Users/you/code/other-project",
     "title": "debug the retry backoff",
-    "updated_at": "2026-05-30T16:20:44Z",
-    "created_at": "2026-05-30T15:58:12Z",
+    "updated_at": "2026-05-30T16:20:44+00:00",
+    "created_at": "2026-05-30T15:58:12+00:00",
     "message_count": 31
   }
 ]
@@ -200,7 +204,8 @@ Full-text (or `semantic=1`) search over the whole corpus, as the array of rows `
 emits: the session row plus `score`, `snippet` and the sub-agent provenance trio. Params: `q`
 (required, non-empty), `limit`, `harness`, `cwd`, `kind` (`exchange`, `context` or `all`, as `cv search --kind`), `semantic=1`, `scan=1`. With no usable index it is
 a `503` naming the cause and the fix, as `cv search` errors; `scan=1` asks for the same head-capped
-live scan `cv search --scan` runs. The response header `X-Cv-Search-Source` is `index` | `semantic`
+live scan `cv search --scan` runs. Both semantic and live searches cover only the exchange;
+`kind=context` or `kind=all` with either mode returns 400. The response header `X-Cv-Search-Source` is `index` | `semantic`
 | `live`, with a human sentence in `X-Cv-Search-Note` whenever the answer may be partial (a stale
 index, a live scan, a truncation).
 

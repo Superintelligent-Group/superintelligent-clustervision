@@ -464,7 +464,6 @@ version = "0.16.1"
 dependencies = [
  "clustervision-core",
  "serde_json",
- "uuid",
  "wasm-bindgen",
 ]
 

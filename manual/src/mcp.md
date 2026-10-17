@@ -37,7 +37,9 @@ claude mcp add clustervision -- /absolute/path/to/cv mcp
 Any MCP host works — give it the absolute path to `cv` as the command and `mcp` as its one
 argument. **stdout is the protocol channel**, so all diagnostics go to stderr. It implements
 `initialize`, `ping`, `tools/list` and `tools/call` against protocol version `2025-06-18`, and
-every tool returns its result as a single text content block. (Until 0.15.0 this was a separate
+generated tools return stdout as the first text content block and, on success, nonempty stderr
+as a second block. Parse `content[0].text` for JSON; keep diagnostics separate.
+(Until 0.15.0 this was a separate
 `cv-mcp` binary; the 0.15 shim was removed in 0.16.0.)
 
 ## The tools are generated from the CLI
@@ -53,7 +55,8 @@ prints: clap's own introspection of the command tree — every visible command a
 subcommand with its group, `about`, and each argument's kind (`flag` / `option` /
 `positional`), actual long flag, repeatability, value type, possible values, default, help text and required-ness. Each
 command in the **Read**, **Reshape**, **Export** and **System** groups, and every `cv task`
-subcommand, becomes one MCP tool:
+subcommand becomes one MCP tool, except bare parent commands and `hook` (its stdin is supplied
+by Claude Code, not by an MCP call):
 
 - the **tool name is the command name** (`ls`, `show`, `cat`, …; a subcommand joins with
   an underscore, `task_open`);
@@ -102,7 +105,9 @@ Over MCP — and **only** over MCP — `show` gets a default window: when the ca
 would otherwise land in the agent's context in one shot, which is exactly the problem
 `doctor` exists to diagnose. Naming any selector (including `max_bytes` alone, or
 `pre_compaction`, which sets its own window) suppresses the defaults entirely — asking for
-the whole thing is allowed, it just has to be asked for. A `kind` row view also suppresses
+the whole thing is allowed, it just has to be asked for. The byte budget cuts at message
+boundaries and always admits the first selected message, so it is not a hard response-size cap.
+A `kind` row view also suppresses
 the defaults: it covers the whole session unless given a supported window. The `ls` / `search` `limit`
 defaults are the CLI's, unchanged.
 
@@ -111,8 +116,9 @@ defaults are the CLI's, unchanged.
 Generated when this manual is built, from a live `tools/list` of the `cv mcp` beside it, so it
 is the server's own answer. "Required" is the schema's `required` list (the full argument list is
 in [the command reference](reference.md)); "Runs" is the command line a call becomes, with
-`--json` where the command has it. Each Reshape tool produces a **new** session id; the source
-is never touched.
+`--json` where the command has it. Reshape tools preserve their sources; most produce a **new**
+session id. `adopt` copies an
+agent under its existing id into another parent; `resume` prints or runs a launch command.
 
 {{#cv-mcp-tools}}
 

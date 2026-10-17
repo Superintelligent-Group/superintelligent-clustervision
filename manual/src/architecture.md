@@ -65,7 +65,7 @@ pub struct Message {
 | `branch` | a rewind, reset or fork marker: what follows does not continue what precedes |
 | `carrier` | a verbatim non-conversational record, carried only under `ParseOptions::complete` |
 
-`MessageKind::is_model_visible()` says whether a turn was part of what the model saw or said — prompts, replies, tool results, injected context and the system prompt are; the rest is bookkeeping around the conversation. `cv doctor`, the dataset exporter and the emitters all use it instead of reading harness keys.
+`Message::is_model_visible()` includes prompts, replies, tool results, injected context, system prompts and compaction summaries, plus sub-agent spawns and returns carried by a non-System role. Harness System markers stay outside the model-visible exchange. `cv doctor`, the dataset exporter and the emitters all use it instead of reading harness keys.
 
 `Origin` is the orthogonal question — not *what* the turn is but **where it came from**, which `role` alone can't tell you (a `user`-role turn might be a person typing, a hook's stdout, or a cron wakeup):
 
@@ -84,11 +84,11 @@ Both are **mandatory on every message and never guessed by a consumer.** `Messag
 
 ### `extra` is nested by harness, always
 
-Everything genuinely specific to one harness lives in `extra[<harness name>]` — `extra["claude"]["attachment_type"]`, `extra["codex"]["history_mode"]` — reached through `harness_extra(h)` / `harness_extra_mut(h)`, never written flat at the top level. The keys inside keep the harness's own spelling; where cv invents a name it is snake_case. Exactly one other top-level key is allowed on a message: `_record`, the verbatim source record carried under `ParseOptions::complete`.
+Everything genuinely specific to one harness lives in `extra[<harness name>]` — `extra["claude"]["attachment_type"]`, `extra["codex"]["history_mode"]` — reached through `harness_extra(h)` / `harness_extra_mut(h)`, never written flat at the top level. The keys inside keep the harness's own spelling; where cv invents a name it is snake_case. Two message-level bookkeeping keys are allowed: `_record`, the verbatim source record under `ParseOptions::complete`, and `cv_byte_offset`, the source position under offset-enabled reads.
 
 The rule that makes this work is that **shared concepts leave `extra`**. Compaction is a `kind`, not a Claude field. The system prompt is `Session::system_prompt`. Parent/fork/continuation pointers are `Session::lineage`. Structured tool-result state is `Block::ToolResult::details`. An error is `kind: error`. So `compaction.rs`, `doctor.rs`, `render.rs`, the dataset exporter and every emitter key off the IR, and an emitter consults `extra[…]` only for its *own* harness, when replaying a session back into the format it came from.
 
-Every `--json` output cv produces speaks exactly this vocabulary, in snake_case, and [`cv schema --json`](cli.md#cv-schema) publishes it machine-readably.
+cv-defined JSON fields use snake_case; opaque principals, harness extras and native payloads keep their keys. [`cv schema --json`](cli.md#cv-schema) publishes the cv vocabulary machine-readably.
 
 A `Message`'s content is a list of `Block`s — the atoms of a conversation. The enum is tagged `#[serde(tag = "type")]` (a block has a `type`; a message has a `kind`) so it round-trips to clean JSON:
 
@@ -117,7 +117,7 @@ A few supporting types complete the picture:
 - **`GitInfo`** — the `branch` / `commit` / `remote` a session ran against, when the harness records it.
 - **`SessionRef`** — a *lightweight handle* to a session discovered on disk (`id`, `harness`, `path`, `cwd`, `title`, timestamps, `message_count`). It's cheap to produce for listings and search **without parsing the whole transcript**. Discovery yields `SessionRef`s; a full `Session` is parsed only when you actually open one.
 
-`Session` also carries a little behavior for free: `label()` (a short title for listings, falling back to the first prompt by the one title rule, `Message::prompt_title`), `first_user_text()`, `searchable_text()` (every text/thinking/tool block concatenated — what feeds the search index), and `harness_extra(h)` / `harness_extra_mut(h)` for the per-harness bags.
+`Session` also carries a little behavior for free: `label()` (a short title for listings, falling back to the first prompt by the one title rule, `Message::prompt_title`), `first_user_text()`, `searchable_text()` (every text/thinking/tool block concatenated; search indexing separately projects exchange and context), and `harness_extra(h)` / `harness_extra_mut(h)` for the per-harness bags.
 
 ## The `Adapter` trait
 
@@ -180,7 +180,7 @@ A failing adapter logs and contributes an empty list rather than sinking the who
 
 Cold discovery of a large corpus means reading and JSON-parsing every transcript just to pull a handful of metadata fields. That's slow. But a transcript that has not changed has unchanged metadata, and an append-only log that only grew still has the metadata its old prefix produced.
 
-That's the trick behind [`discover_cache.rs`](https://github.com/emberian/cv/blob/main/crates/cv-core/src/discover_cache.rs): the `scan_cache` table in the catalog database (`$CLUSTERVISION_HOME/catalog.db`), keyed by path, `(mtime_ns, size)`, the adapter's interpretation version and the captured file identity (`source::FileId`: length, mtime, device, inode, ctime), storing the `SessionRef`s each file produced. A hit returns the stored refs **without touching the file** — steady-state discovery costs one `stat` per file instead of a full read+parse — and a `.jsonl` that only grew continues from its stored position, so a listing beside a live writer costs the appended bytes. Measured 2026-10-14 on a frozen copy of the maintainer's fleet (5,421 sessions, 78 GB): the first `cv ls` on an empty home took 158–186 s; a warm `cv ls` 0.06–0.09 s. The 0.17 binary lists the live fleet of 7,374 sessions in 2.36 trillion instructions on the first run and 0.6 billion warm (`docs/design/PERF.md`).
+That's the trick behind [`discover_cache.rs`](https://github.com/emberian/cv/blob/main/crates/cv-core/src/discover_cache.rs): the `scan_cache` table in the catalog database (`$CLUSTERVISION_HOME/catalog.db`), keyed by path, `(mtime_ns, size)`, the adapter's interpretation version and the captured file identity (`source::FileId`: length, mtime, device, inode, ctime), storing the `SessionRef`s each file produced. A hit returns the stored refs after checking captured identities and dependencies, without a full read+parse — and a `.jsonl` that only grew continues from its stored position, so a listing beside a live writer costs the appended bytes. Measured 2026-10-14 on a frozen copy of the maintainer's fleet (5,421 sessions, 78 GB): the first `cv ls` on an empty home took 158–186 s; a warm `cv ls` 0.06–0.09 s. The 0.17 binary lists the live fleet of 7,374 sessions in 2.36 trillion instructions on the first run and 0.6 billion warm (`docs/design/PERF.md`).
 
 Adapters opt in by wrapping their per-file scan in `cached_scan_with_reads` (one session per
 file, with the side files the scan consults captured first) or `cached_scan_many` (a file that
@@ -193,14 +193,14 @@ crate::discover_cache::cached_scan_with_reads(&transcript, reads, || scan(&trans
 Some careful properties make it safe to lean on:
 
 - **Correctness never depends on it.** An entry is reused only when the tuple, the interpretation version and the captured identity all match, so a rewrite with a restored timestamp misses and re-scans. A missing or corrupt cache just means everything is re-scanned (and the cache rebuilt).
-- **It's process-global and shared** by `cv` and the desktop app through the one catalog database; the same rows feed the freshness probe's append detection.
+- **It's scoped to the resolved environment** in process and persisted for `cv` and the desktop app through the catalog database; the same rows feed the freshness probe's append detection.
 - **Empty results aren't cached** — a non-transcript path is cheap to re-reject.
 
 ### The head/tail cap
 
 One more guard keeps discovery fast on pathological inputs. Some transcripts are *enormous* — Codex rollout logs can run to hundreds of megabytes. Fully parsing those during a *listing* would defeat the point of the cheap-`SessionRef` design.
 
-So the file-based adapters cap how much they read during discovery. The Codex adapter is the clearest example: files up to a `FULL_SCAN_CAP` (8 MiB) are parsed in full; anything larger is **sampled head + tail** (1 MiB each). The head carries `id` / `cwd` / `title` / `created_at`; the tail's last record carries the real `updated_at`. The middle is never read — `message_count` becomes a head-density estimate that stays roughly monotonic with file growth, and the *exact* contents are parsed lazily only when you actually open the session. Discovery never reads, or JSON-parses, gigabytes just to list.
+So the file-based adapters cap how much they read during discovery. The Codex adapter is the clearest example: plain files up to a `FULL_SCAN_CAP` (8 MiB) are parsed in full; larger plain files are **sampled head + tail** (1 MiB each). The head carries `id` / `cwd` / `title` / `created_at`; the tail's last record carries the real `updated_at`. The middle of a sampled plain rollout is never read, so `message_count` is 0 (not counted), not an extrapolation. Compressed `.jsonl.zst` rollouts are decoded and counted in full, regardless of size. A subsequent index pass can populate exact catalog counts.
 
 ### Sub-agents
 
