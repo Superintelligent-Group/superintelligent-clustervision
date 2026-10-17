@@ -11,7 +11,7 @@ use crate::json::JsonView;
 
 /// Strict borrowed shape inspection: ignored uploaded bodies never become a second Value tree.
 fn inspect<T>(text: &str, f: impl FnOnce(JsonView<'_>) -> T) -> Option<T> {
-    let source = RangeSource::borrowed(None, text.as_bytes(), 0, false);
+    let source = RangeSource::text(None, text, 0, false);
     let value = source.accept(source.range(), Validation::Value).ok()??;
     Some(f(JsonView::of(&source, value)))
 }

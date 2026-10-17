@@ -72,8 +72,9 @@ impl Index {
 }
 
 enum Backing<'a> {
-    /// Bytes in memory whose first byte sits at this absolute offset.
-    Bytes(&'a [u8], u64),
+    /// Bytes in memory whose first byte sits at this absolute offset; `true` when they are known
+    /// to be UTF-8 (a `str`), so borrowed strings and keys need no second check.
+    Bytes(&'a [u8], u64, bool),
     File(File),
 }
 
@@ -97,7 +98,7 @@ impl<'a> RangeSource<'a> {
         original: bool,
     ) -> Self {
         Self {
-            backing: Backing::Bytes(bytes, base),
+            backing: Backing::Bytes(bytes, base, false),
             captured,
             original,
             extent: Range {
@@ -107,10 +108,25 @@ impl<'a> RangeSource<'a> {
             index: Index::default(),
         }
     }
+    /// [`Self::borrowed`] over text, whose strings need no UTF-8 check when borrowed.
+    pub(crate) fn text(captured: Option<crate::json::JsonSource>, text: &'a str, base: u64, original: bool) -> Self {
+        let mut source = Self::borrowed(captured, text.as_bytes(), base, original);
+        source.backing = Backing::Bytes(text.as_bytes(), base, true);
+        source
+    }
+    /// A borrowed string body as text: unchecked when the backing is known UTF-8.
+    fn text_of(&self, body: &'a [u8]) -> Result<&'a str> {
+        if let Backing::Bytes(_, _, true) = &self.backing {
+            // SAFETY: the backing was built from a `str`, and `body` is a slice of it between
+            // a string's quotes (ASCII boundaries), so it is UTF-8.
+            return Ok(unsafe { std::str::from_utf8_unchecked(body) });
+        }
+        std::str::from_utf8(body).map_err(|_| crate::json::InvalidJson.into())
+    }
     fn of_bytes(captured: Option<crate::json::JsonSource>, bytes: &'a ByteSource, original: bool) -> Result<Self> {
         let len = bytes.len()?;
         let backing = match bytes.memory_bytes() {
-            Some(memory) => Backing::Bytes(memory, 0),
+            Some(memory) => Backing::Bytes(memory, 0, false),
             None => Backing::File(bytes.file()?),
         };
         Ok(Self {
@@ -172,7 +188,7 @@ impl<'a> RangeSource<'a> {
     }
     /// The range's bytes when they are in memory.
     pub(crate) fn borrow(&self, range: Range) -> Option<&'a [u8]> {
-        let Backing::Bytes(bytes, base) = &self.backing else {
+        let Backing::Bytes(bytes, base, _) = &self.backing else {
             return None;
         };
         let start = usize::try_from(range.offset.checked_sub(*base)?).ok()?;
@@ -188,11 +204,11 @@ impl<'a> RangeSource<'a> {
         }
         Ok(Cursor {
             backing: match &self.backing {
-                Backing::Bytes(bytes, base) => CursorBacking::Bytes(bytes, *base),
+                Backing::Bytes(bytes, base, _) => CursorBacking::Bytes(bytes, *base),
                 Backing::File(file) => CursorBacking::File(file),
             },
             index: Some(&self.index),
-            range,
+            end: range.end()?,
             position: range.offset,
             window: Vec::new(),
             window_start: range.offset,
@@ -325,7 +341,7 @@ enum CursorBacking<'a> {
 pub(crate) struct Cursor<'a> {
     backing: CursorBacking<'a>,
     index: Option<&'a Index>,
-    range: Range,
+    end: u64,
     position: u64,
     window: Vec<u8>,
     window_start: u64,
@@ -338,11 +354,10 @@ impl<'a> Cursor<'a> {
             offset: base,
             len: bytes.len() as u64,
         };
-        range.end()?;
         Ok(Self {
             backing: CursorBacking::Bytes(bytes, base),
             index: None,
-            range,
+            end: range.end()?,
             position: base,
             window: Vec::new(),
             window_start: base,
@@ -383,7 +398,7 @@ impl<'a> Cursor<'a> {
         Ok(self
             .index
             .and_then(|index| index.get(start))
-            .filter(|&end| end > start && end <= self.range.end().unwrap_or(0)))
+            .filter(|&end| end > start && end <= self.end))
     }
     fn remember(&self, start: u64, min: u64) {
         if let Some(index) = self.index {
@@ -511,21 +526,20 @@ impl<'a> Cursor<'a> {
     }
 }
 impl BufRead for Cursor<'_> {
+    #[inline]
     fn fill_buf(&mut self) -> io::Result<&[u8]> {
-        if self.position == self.range.end()? {
-            return Ok(&[]);
-        }
         match self.backing {
             CursorBacking::Bytes(bytes, base) => {
-                Ok(&bytes[(self.position - base) as usize..(self.range.end()? - base) as usize])
+                Ok(&bytes[(self.position - base) as usize..(self.end - base) as usize])
             }
+            CursorBacking::File(_) if self.position == self.end => Ok(&[]),
             CursorBacking::File(file) => {
                 let consumed = usize::try_from(self.position - self.window_start).unwrap_or(usize::MAX);
                 if consumed < self.window.len() {
                     return Ok(&self.window[consumed..]);
                 }
                 self.window_start = self.position;
-                let n = (self.range.end()? - self.position).min(WINDOW as u64) as usize;
+                let n = (self.end - self.position).min(WINDOW as u64) as usize;
                 self.window.resize(n, 0);
                 let n = loop {
                     match read_at(file, &mut self.window, self.position) {
@@ -546,11 +560,9 @@ impl BufRead for Cursor<'_> {
             }
         }
     }
+    #[inline]
     fn consume(&mut self, n: usize) {
-        assert!(
-            n as u64 <= self.range.end().unwrap() - self.position,
-            "cursor consumed beyond range"
-        );
+        debug_assert!(n as u64 <= self.end - self.position, "cursor consumed beyond range");
         self.position += n as u64;
     }
 }
@@ -700,14 +712,10 @@ impl<'a> RangeSource<'a> {
             }
         };
         if let Some(bytes) = self.borrow(range) {
-            return Ok(match std::str::from_utf8(bytes) {
-                Ok(text) => super::super::json::validate_value(
-                    &mut super::super::json::Text(text.as_bytes()),
-                    strict,
-                    depth,
-                    span,
-                ),
-                Err(_) => super::super::json::validate_value(&mut &bytes[..], strict, depth, span),
+            return Ok(if let Backing::Bytes(_, _, true) = &self.backing {
+                super::super::json::validate_value(&mut super::super::json::Text(bytes), strict, depth, span)
+            } else {
+                super::super::json::validate_value(&mut &bytes[..], strict, depth, span)
             });
         }
         let mut windowed = Windowed::new(self, range);
@@ -738,7 +746,7 @@ impl<'a> RangeSource<'a> {
         if let Some(bytes) = self.borrow(string) {
             let body = &bytes[1..bytes.len() - 1];
             if !body.contains(&b'\\') {
-                return visit(std::str::from_utf8(body).map_err(|_| crate::json::InvalidJson)?);
+                return visit(self.text_of(body)?);
             }
         } else if string.len <= INLINE_MAX as u64 + 2 {
             let decoded: String = self.materialize(string)?;
@@ -765,9 +773,7 @@ impl<'a> RangeSource<'a> {
         if let Some(bytes) = self.borrow(string) {
             let body = &bytes[1..bytes.len() - 1];
             if !body.contains(&b'\\') {
-                return Ok(Cow::Borrowed(
-                    std::str::from_utf8(body).map_err(|_| crate::json::InvalidJson)?,
-                ));
+                return Ok(Cow::Borrowed(self.text_of(body)?));
             }
         }
         Ok(Cow::Owned(self.materialize(string)?))

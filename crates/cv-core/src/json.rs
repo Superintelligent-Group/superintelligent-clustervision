@@ -233,7 +233,7 @@ impl JsonSource {
         f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>,
     ) -> Result<T> {
         let range = self.range(offset, text.len() as u64)?;
-        let context = RangeSource::borrowed(Some(self.clone()), text.as_bytes(), offset, true);
+        let context = RangeSource::text(Some(self.clone()), text, offset, true);
         range.view_unchecked(&context, validation, f)
     }
     /// [`Self::read_record`] over this source's private decoded bytes (`decoded_len` of them), an
@@ -248,7 +248,7 @@ impl JsonSource {
         f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>,
     ) -> Result<T> {
         let range = self.decoded_range(backing.clone(), decoded_len, offset, text.len() as u64)?;
-        let context = RangeSource::borrowed(Some(self.clone()), text.as_bytes(), offset, false);
+        let context = RangeSource::text(Some(self.clone()), text, offset, false);
         range.view_unchecked(&context, Validation::Value, f)
     }
     /// [`Self::read_positioned_range_value`] over this source's private decoded bytes, with a
