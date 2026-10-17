@@ -281,7 +281,6 @@ impl ByteSource {
         }
     }
     /// Publish only after the owning operation has validated its successful completion.
-    #[allow(dead_code)] // Publication consumers land separately from SQLite byte-source extraction.
     pub fn copy_to(&self, out: &mut (impl std::io::Write + ?Sized)) -> std::io::Result<u64> {
         match &self.bytes {
             Bytes::Memory(bytes) => {
