@@ -62,10 +62,6 @@ pub struct ReadState {
     anchor: Option<Anchor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     completed: Option<Completed>,
-    // Primary inode/ctime is separate from append dependencies: growth invalidates EOF metadata,
-    // while the immutable-prefix checkpoint may remain useful.
-    #[serde(default)]
-    identity: Option<source::ReadSet>,
 }
 
 impl ReadState {
@@ -78,7 +74,6 @@ impl ReadState {
             source: source::Probe::default().snapshot(r),
             anchor: None,
             completed: None,
-            identity: None,
         }
     }
 
@@ -94,7 +89,6 @@ impl ReadState {
         self.version == state_version(adapter)
             && self.path == r.path
             && self.primary.as_ref() == Some(&adapter.resume_source(r))
-            && self.identity.as_ref().is_some_and(|guard| guard.fresh(&mut probe))
             && self.source.fresh(&now, &mut probe)
     }
 
@@ -103,10 +97,6 @@ impl ReadState {
             && self.path == r.path
             && self.primary.as_ref() == Some(&source::primary_path(r))
             && source::unchanged(r, &self.source)
-            && self
-                .identity
-                .as_ref()
-                .is_none_or(|guard| guard.fresh(&mut source::Probe::default()))
     }
 
     /// Number of old messages covered by the accepted stable checkpoint, when available.
@@ -136,13 +126,7 @@ impl ReadState {
             return None;
         }
         // A source that did not grow is held to its whole identity, not only the anchor's sample.
-        if current.primary.1 == self.source.primary.1
-            && (current.primary != self.source.primary
-                || !self
-                    .identity
-                    .as_ref()
-                    .is_some_and(|guard| guard.fresh(&mut source::Probe::default())))
-        {
+        if current.primary.1 == self.source.primary.1 && !self.source.fresh(current, &mut source::Probe::default()) {
             return None;
         }
         let anchor = self.anchor.as_ref()?;
@@ -178,7 +162,6 @@ pub struct ReadPass {
     before: Option<Anchor>,
     last: Option<Anchor>,
     completed: Option<Completed>,
-    identity: source::ReadSet,
 }
 
 impl ReadPass {
@@ -200,7 +183,6 @@ impl ReadPass {
             source: self.source.clone(),
             anchor,
             completed: self.completed.clone(),
-            identity: Some(self.identity.clone()),
         }
     }
 }
@@ -485,9 +467,9 @@ fn read_inner<'a>(
         .filter(|state| !session_output && state.fresh_with(adapter, r))
         .and_then(|state| state.completed.as_ref());
     let stop_after_selection = cached.is_some_and(|complete| skip.saturating_add(keep) < complete.total);
-    let mut primary_reads = source::ReadSet::default();
-    primary_reads.record(&primary);
-    let metadata_guard = primary_reads;
+    // The primary's whole identity, for a pass whose dependency inventory was unavailable.
+    let mut metadata_guard = source::ReadSet::default();
+    metadata_guard.record(&primary);
     let from = previous.and_then(|state| state.from(adapter, r, &captured, skip));
     if session_output {
         skip = from.and_then(stream::Checkpoint::messages).unwrap_or(0);
@@ -648,7 +630,6 @@ fn read_inner<'a>(
         before,
         last,
         completed,
-        identity: metadata_guard,
     })
 }
 
