@@ -86,7 +86,7 @@ pub(crate) fn validate_value(
     b: &mut impl Bytes,
     strict: bool,
     depth: usize,
-    mut span: impl FnMut(usize, usize),
+    mut span: impl FnMut(u8, usize, usize),
 ) -> Option<(usize, usize)> {
     // Open containers: (start, is_object). Value rejects the 128th level; grammar alone has no
     // limit, so deeper levels spill to the heap only when a document actually nests that far.
@@ -117,7 +117,7 @@ pub(crate) fn validate_value(
                         Some(open) => open.0,
                         None => deep.pop()?.0,
                     };
-                    span(start, i + 1);
+                    span(if object { b'{' } else { b'[' }, start, i + 1);
                     i += 1;
                 } else {
                     if object {
@@ -128,7 +128,7 @@ pub(crate) fn validate_value(
             }
             Some(b'"') => {
                 let end = string(b, i, strict)?;
-                span(i, end);
+                span(b'"', i, end);
                 i = end;
             }
             Some(b't') if b.slice(i, 4) == Some(b"true") => i += 4,
@@ -165,7 +165,7 @@ pub(crate) fn validate_value(
             }
             depth -= 1;
             deep.truncate(depth.saturating_sub(open.len()));
-            span(start, i + 1);
+            span(if object { b'{' } else { b'[' }, start, i + 1);
             i += 1;
         }
     }
@@ -177,7 +177,7 @@ fn key_or_value(
     i: usize,
     object: bool,
     strict: bool,
-    span: &mut impl FnMut(usize, usize),
+    span: &mut impl FnMut(u8, usize, usize),
 ) -> Option<usize> {
     if object {
         key(b, i, strict, span)
@@ -194,12 +194,12 @@ fn skip_ws(b: &mut impl Bytes, mut i: usize) -> usize {
 }
 
 /// An object key and its colon; the offset after the colon.
-fn key(b: &mut impl Bytes, i: usize, strict: bool, span: &mut impl FnMut(usize, usize)) -> Option<usize> {
+fn key(b: &mut impl Bytes, i: usize, strict: bool, span: &mut impl FnMut(u8, usize, usize)) -> Option<usize> {
     if b.get(i) != Some(b'"') {
         return None;
     }
     let end = string(b, i, strict)?;
-    span(i, end);
+    span(b'"', i, end);
     let i = skip_ws(b, end);
     (b.get(i) == Some(b':')).then_some(i + 1)
 }
@@ -593,18 +593,18 @@ mod tests {
         for input in cases {
             let expected = serde_json::from_str::<serde_json::Value>(&input).is_ok();
             assert_eq!(
-                validate_value(&mut input.as_bytes(), true, 0, |_, _| {}).is_some(),
+                validate_value(&mut input.as_bytes(), true, 0, |_, _, _| {}).is_some(),
                 expected,
                 "bytes: {input}"
             );
             assert_eq!(
-                validate_value(&mut Text(input.as_bytes()), true, 0, |_, _| {}).is_some(),
+                validate_value(&mut Text(input.as_bytes()), true, 0, |_, _, _| {}).is_some(),
                 expected,
                 "text: {input}"
             );
             // Grammar alone accepts what RawValue accepts.
             assert_eq!(
-                validate_value(&mut Text(input.as_bytes()), false, 0, |_, _| {}).is_some(),
+                validate_value(&mut Text(input.as_bytes()), false, 0, |_, _, _| {}).is_some(),
                 serde_json::from_str::<&crate::lazy::RawValue>(&input).is_ok(),
                 "syntax: {input}"
             );
@@ -706,7 +706,7 @@ mod tests {
         }
         for input in cases {
             let oracle = serde_json::from_str::<serde_json::Value>(&input).is_ok();
-            let bounds = validate_value(&mut Text(input.as_bytes()), true, 0, |_, _| {});
+            let bounds = validate_value(&mut Text(input.as_bytes()), true, 0, |_, _, _| {});
             assert_eq!(bounds.is_some(), oracle, "{input:?}");
             if let Some((start, end)) = bounds {
                 assert_eq!(&input[start..end], trim_str(&input), "{input:?}");
@@ -714,7 +714,7 @@ mod tests {
             // A child value validated with its parents' levels open sees the same limit.
             let nested = format!("[{input}]");
             assert_eq!(
-                validate_value(&mut Text(input.as_bytes()), true, 1, |_, _| {}).is_some(),
+                validate_value(&mut Text(input.as_bytes()), true, 1, |_, _, _| {}).is_some(),
                 serde_json::from_str::<serde_json::Value>(&nested).is_ok() && oracle,
                 "nested {input:?}"
             );
@@ -723,7 +723,7 @@ mod tests {
 
     #[test]
     fn rejects_non_utf8_ignored_text() {
-        assert!(validate_value(&mut &b"{\"ignored\":\"\xff\"}"[..], true, 0, |_, _| {}).is_none());
-        assert!(validate_value(&mut &b"{\"ignored\":\"\xff\"}"[..], false, 0, |_, _| {}).is_none());
+        assert!(validate_value(&mut &b"{\"ignored\":\"\xff\"}"[..], true, 0, |_, _, _| {}).is_none());
+        assert!(validate_value(&mut &b"{\"ignored\":\"\xff\"}"[..], false, 0, |_, _, _| {}).is_none());
     }
 }

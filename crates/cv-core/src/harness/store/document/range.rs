@@ -628,11 +628,6 @@ impl<'s> Windowed<'s> {
         }
     }
 }
-impl Windowed<'_> {
-    fn get(&mut self, i: usize) -> Option<u8> {
-        self.load(i, 1).then(|| self.buf[i - self.start])
-    }
-}
 impl super::super::json::Bytes for Windowed<'_> {
     fn get(&mut self, i: usize) -> Option<u8> {
         self.load(i, 1).then(|| self.buf[i - self.start])
@@ -695,17 +690,16 @@ impl<'a> RangeSource<'a> {
         }))
     }
     /// [`validate_value`](super::super::json::validate_value) over the range's bytes, remembering
-    /// every long string and container for later selection.
+    /// every long string and container as it closes (the index is bounded; nothing is collected).
     fn validated(&self, range: Range, strict: bool, depth: usize) -> Result<Option<(usize, usize)>> {
         anyhow::ensure!(self.contains(range)?, "JSON range outside source");
-        let index = |kind: u8, start: usize, end: usize| {
+        let span = |kind: u8, start: usize, end: usize| {
             let (start, end) = (start as u64, end as u64);
             if end - start > if kind == b'"' { INLINE_MAX as u64 } else { SKIP_MIN } {
                 self.index.remember(range.offset + start, range.offset + end);
             }
         };
         if let Some(bytes) = self.borrow(range) {
-            let span = |start, end| index(bytes[start], start, end);
             return Ok(match std::str::from_utf8(bytes) {
                 Ok(text) => super::super::json::validate_value(
                     &mut super::super::json::Text(text.as_bytes()),
@@ -717,21 +711,9 @@ impl<'a> RangeSource<'a> {
             });
         }
         let mut windowed = Windowed::new(self, range);
-        let mut kinds = Vec::new();
-        let accepted = super::super::json::validate_value(&mut windowed, strict, depth, |start, end| {
-            // The first byte of a span is in the window that found its end only for strings;
-            // containers are remembered after their close, so note their kind by position.
-            kinds.push((start, end));
-        });
+        let accepted = super::super::json::validate_value(&mut windowed, strict, depth, span);
         if let Some(error) = windowed.error {
             return Err(error.into());
-        }
-        if accepted.is_some() {
-            for (start, end) in kinds {
-                if let Some(kind) = windowed.get(start) {
-                    index(kind, start, end);
-                }
-            }
         }
         Ok(accepted)
     }
@@ -1323,7 +1305,7 @@ mod syntax_tests {
             .unwrap()
             .set_len(1)
             .unwrap();
-        assert!(super::super::super::json::validate_value(&mut windowed, true, 0, |_, _| {}).is_none());
+        assert!(super::super::super::json::validate_value(&mut windowed, true, 0, |_, _, _| {}).is_none());
         assert!(windowed.error.is_some());
         assert!(source.accept(source.range(), Validation::Value).is_err());
         std::fs::remove_file(path).unwrap();
