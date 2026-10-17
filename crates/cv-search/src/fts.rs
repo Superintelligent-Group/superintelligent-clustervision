@@ -3534,10 +3534,11 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(Path::new(&source), preferred);
+            let again = sweep_all(dir, false, false).unwrap().0;
             assert_eq!(
-                sweep_all(dir, false, false).unwrap().0.changed,
-                0,
-                "then nothing is stale"
+                (again.changed, again.work.callbacks),
+                (0, 0),
+                "then nothing is stale and nothing is read"
             );
         };
         let dir = tmpdir();
