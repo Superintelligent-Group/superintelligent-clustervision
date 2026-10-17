@@ -1050,14 +1050,14 @@ impl PlanState {
         } = self;
         let source = probe.snapshot(r);
         let (mtime, size) = source.primary;
-        let dependencies_fresh = dependencies.auxiliary_fresh_with_probe(
-            r,
-            existing.get(&r.id).copied().unwrap_or(source.primary),
-            &source.dependencies,
-            probe,
-        );
+        // Auxiliary inputs are judged across primary growth, against the tuple the docs were
+        // indexed at; the adapter's checkpoint then decides whether the growth resumes.
+        let baseline = dependencies.get(r);
+        let indexed = existing.get(&r.id).copied().unwrap_or(source.primary);
+        let dependencies_fresh =
+            baseline.is_some_and(|old| old.primary == indexed && old.dependencies_fresh(&source, probe));
         let fts_fresh = fts_is_fresh(r, existing.get(&r.id), mtime, size, || {
-            dependencies_fresh && dependencies.primary_fresh(r, &source.dependencies)
+            baseline.is_some_and(|old| old.fresh(&source, probe))
         }) && metadata.get(&r.id) == Some(&DiscoveryMetadata::new(r, prov));
         let events = event_sync.needs_ingest(r, &source, prov, probe);
         // Unchanged on every axis → skip entirely (no re-parse beyond the metadata scan).

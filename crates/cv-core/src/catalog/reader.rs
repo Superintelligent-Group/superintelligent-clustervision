@@ -86,7 +86,7 @@ impl Reader {
             }; // Reset the SQL statement before filesystem provenance checks or body reads.
             if (a, b) != source.primary
                 || a == 0
-                || !crate::source::fresh_record((mtime, size), stamp, source.primary, &source.dependencies, probe)
+                || !crate::source::Snapshot::stored((mtime, size), stamp).fresh(source, probe)
             {
                 return None;
             }

@@ -470,6 +470,14 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    #[cfg_attr(not(feature = "sqlite"), allow(dead_code))]
+    pub(crate) fn stored(primary: (i64, i64), stamp: String) -> Self {
+        Self {
+            primary,
+            dependencies: Some(Stamp(stamp)),
+        }
+    }
+
     /// Retain both declared inventory and conditional reads with their original identities.
     pub(crate) fn all_reads(&self) -> Option<ReadSet> {
         let records = self.dependencies.as_ref()?.records()?;
@@ -919,51 +927,14 @@ fn key(r: &SessionRef) -> Key {
 /// complete read sets have a row, so an old consumer cannot silently certify unresolved paths.
 #[derive(Default)]
 pub struct Table {
-    rows: HashMap<Key, ((i64, i64), Stamp)>,
+    rows: HashMap<Key, Snapshot>,
 }
 
 impl Table {
-    pub fn fresh(&self, r: &SessionRef, primary: (i64, i64), dependencies: &Option<Stamp>) -> bool {
-        self.fresh_with_probe(r, primary, dependencies, &mut Probe::default())
-    }
-
-    /// Shared operation probes memoize dynamic files consulted by multiple consumers/sessions.
-    pub fn fresh_with_probe(
-        &self,
-        r: &SessionRef,
-        primary: (i64, i64),
-        dependencies: &Option<Stamp>,
-        probe: &mut Probe,
-    ) -> bool {
-        dependencies.as_ref().is_some_and(|current| {
-            self.rows.get(&key(r)).is_some_and(|(old_primary, old)| {
-                *old_primary == primary && old.same_primary(current) && old.matches(current, probe)
-            })
-        })
-    }
-
-    /// Only the primary identity, without rewalking auxiliary records. Combine this with
-    /// an already checked auxiliary baseline when deciding whether to skip a complete read.
-    pub fn primary_fresh(&self, r: &SessionRef, dependencies: &Option<Stamp>) -> bool {
-        dependencies
-            .as_ref()
-            .is_some_and(|current| self.rows.get(&key(r)).is_some_and(|(_, old)| old.same_primary(current)))
-    }
-
-    /// Append-safe auxiliary authority, bound to the primary tuple of this consumer's old
-    /// output. Primary growth is intentionally excluded; the adapter/checkpoint verifies reuse.
-    pub fn auxiliary_fresh_with_probe(
-        &self,
-        r: &SessionRef,
-        baseline_primary: (i64, i64),
-        dependencies: &Option<Stamp>,
-        probe: &mut Probe,
-    ) -> bool {
-        dependencies.as_ref().is_some_and(|current| {
-            self.rows
-                .get(&key(r))
-                .is_some_and(|(old_primary, old)| *old_primary == baseline_primary && old.matches(current, probe))
-        })
+    /// This consumer's published baseline for `r`, compared with [`Snapshot::fresh`] (strict)
+    /// or [`Snapshot::dependencies_fresh`] (its auxiliary inputs, across primary growth).
+    pub fn get(&self, r: &SessionRef) -> Option<&Snapshot> {
+        self.rows.get(&key(r))
     }
 
     #[cfg(feature = "sqlite")]
@@ -988,7 +959,7 @@ impl Table {
                 .ok()?;
             Some(
                 rows.flatten()
-                    .map(|(key, (primary, text))| (key, (primary, Stamp(text))))
+                    .map(|(key, (primary, text))| (key, Snapshot::stored(primary, text)))
                     .collect(),
             )
         };
@@ -1021,45 +992,17 @@ fn ensure_table(conn: &rusqlite::Connection) -> Option<()> {
     .ok()
 }
 
-/// Validate one SQL baseline with the same stamp rules and shared probe used by batch tables.
+/// One previously published baseline, without loading every session's records during writes.
 /// The consumer row and this baseline must be read from one SQL snapshot by the caller.
 #[cfg(feature = "sqlite")]
-pub(crate) fn fresh_record(
-    old_primary: (i64, i64),
-    old_stamp: String,
-    primary: (i64, i64),
-    dependencies: &Option<Stamp>,
-    probe: &mut Probe,
-) -> bool {
-    old_primary == primary
-        && dependencies.as_ref().is_some_and(|stamp| {
-            let old = Stamp(old_stamp);
-            old.same_primary(stamp) && old.matches(stamp, probe)
-        })
-}
-
-/// Check one previously recorded baseline without loading every session's records during writes.
-#[cfg(feature = "sqlite")]
-pub(crate) fn fresh_in(
-    conn: &rusqlite::Connection,
-    consumer: &str,
-    r: &SessionRef,
-    primary: (i64, i64),
-    dependencies: &Option<Stamp>,
-) -> bool {
-    dependencies.as_ref().is_some_and(|stamp| {
-        let (h, id, path) = key(r);
-        conn.query_row(
-            "SELECT mtime,size,stamp FROM source_dependencies WHERE consumer=?1 AND harness=?2 AND id=?3 AND path=?4",
-            rusqlite::params![consumer, h, id, path],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?)),
-        )
-        .ok()
-        .is_some_and(|(mtime, size, old)| {
-            let old = Stamp(old);
-            (mtime, size) == primary && old.same_primary(stamp) && old.matches(stamp, &mut Probe::default())
-        })
-    })
+pub(crate) fn baseline_in(conn: &rusqlite::Connection, consumer: &str, r: &SessionRef) -> Option<Snapshot> {
+    let (h, id, path) = key(r);
+    conn.query_row(
+        "SELECT mtime,size,stamp FROM source_dependencies WHERE consumer=?1 AND harness=?2 AND id=?3 AND path=?4",
+        rusqlite::params![consumer, h, id, path],
+        |row| Ok(Snapshot::stored((row.get(0)?, row.get(1)?), row.get(2)?)),
+    )
+    .ok()
 }
 
 /// Publish in the same transaction as SQL consumer output. A failure must roll back both.
@@ -1250,7 +1193,9 @@ mod tests {
         let before = Probe::default().snapshot(&r).with_reads(&ReadSet::default());
         for consumer in ["counts", "events", "fts", "semantic"] {
             update(consumer, &[(r.clone(), before.clone())]);
-            assert!(Table::load(consumer).fresh(&r, before.primary, &before.dependencies));
+            assert!(Table::load(consumer)
+                .get(&r)
+                .is_some_and(|old| old.fresh(&before, &mut Probe::default())));
         }
         let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
         std::fs::write(&path, "new body").unwrap();
@@ -1270,17 +1215,24 @@ mod tests {
         );
         for consumer in ["counts", "events", "fts", "semantic"] {
             let table = Table::load(consumer);
-            assert!(!table.fresh(&r, now.primary, &now.dependencies));
-            assert!(table.auxiliary_fresh_with_probe(&r, before.primary, &now.dependencies, &mut Probe::default()));
-            assert!(!table.primary_fresh(&r, &now.dependencies));
+            assert!(!table.get(&r).is_some_and(|old| old.fresh(&now, &mut Probe::default())));
+            assert!(table.get(&r).is_some_and(
+                |old| old.primary == before.primary && old.dependencies_fresh(&now, &mut Probe::default())
+            ));
         }
         // A publication racing the restored-tuple write cannot establish freshness.
         update("counts", &[(r.clone(), before.clone())]);
-        assert!(!Table::load("counts").fresh(&r, now.primary, &now.dependencies));
+        assert!(!Table::load("counts")
+            .get(&r)
+            .is_some_and(|old| old.fresh(&now, &mut Probe::default())));
         let now = now.with_reads(&ReadSet::default());
         update("counts", &[(r.clone(), now.clone())]);
-        assert!(Table::load("counts").fresh(&r, now.primary, &now.dependencies));
-        assert!(!Table::load("events").fresh(&r, now.primary, &now.dependencies));
+        assert!(Table::load("counts")
+            .get(&r)
+            .is_some_and(|old| old.fresh(&now, &mut Probe::default())));
+        assert!(!Table::load("events")
+            .get(&r)
+            .is_some_and(|old| old.fresh(&now, &mut Probe::default())));
         // Replacement with equal bytes and restored timestamps is a different primary too.
         let replacement = w.base.join("replacement");
         std::fs::write(&replacement, "new body").unwrap();
@@ -1295,7 +1247,9 @@ mod tests {
         assert_eq!(now.primary, replaced.primary);
         assert!(!now.fresh(&replaced, &mut Probe::default()));
         assert!(!unchanged(&r, &now));
-        assert!(!Table::load("counts").fresh(&r, replaced.primary, &replaced.dependencies));
+        assert!(!Table::load("counts")
+            .get(&r)
+            .is_some_and(|old| old.fresh(&replaced, &mut Probe::default())));
     }
 
     #[test]
@@ -1518,13 +1472,19 @@ mod tests {
             update("relative", &[(r.clone(), captured.clone())]);
             std::env::set_current_dir(root.join("other")).unwrap();
             assert!(unchanged(&r, &captured));
-            assert!(Table::load("relative").fresh(&r, base.primary, &base.dependencies));
+            assert!(Table::load("relative")
+                .get(&r)
+                .is_some_and(|old| old.fresh(&base, &mut Probe::default())));
             // A different same-named file in the new cwd is irrelevant to the original read.
             std::fs::write("external.txt", "unrelated").unwrap();
-            assert!(Table::load("relative").fresh(&r, base.primary, &base.dependencies));
+            assert!(Table::load("relative")
+                .get(&r)
+                .is_some_and(|old| old.fresh(&base, &mut Probe::default())));
             std::fs::write(root.join("external.txt"), "after!").unwrap();
             assert!(!unchanged(&r, &captured));
-            assert!(!Table::load("relative").fresh(&r, base.primary, &base.dependencies));
+            assert!(!Table::load("relative")
+                .get(&r)
+                .is_some_and(|old| old.fresh(&base, &mut Probe::default())));
             return;
         }
         let w = crate::test_world("relative-source-reads");
@@ -1565,21 +1525,33 @@ mod tests {
         reads.record(&extra);
         let before = base.with_reads(&reads);
         update("dynamic", &[(r.clone(), before.clone())]);
-        assert!(Table::load("dynamic").fresh(&r, base.primary, &base.dependencies));
+        assert!(Table::load("dynamic")
+            .get(&r)
+            .is_some_and(|old| old.fresh(&base, &mut Probe::default())));
         std::fs::write(&extra, "before").unwrap();
         reads.record(&extra); // Keep the first capture, even after the dependent read changed.
         assert!(!unchanged(&r, &base.with_reads(&reads)));
-        assert!(!Table::load("dynamic").fresh(&r, base.primary, &base.dependencies));
+        assert!(!Table::load("dynamic")
+            .get(&r)
+            .is_some_and(|old| old.fresh(&base, &mut Probe::default())));
         update("dynamic", &[(r.clone(), before)]);
-        assert!(!Table::load("dynamic").fresh(&r, base.primary, &base.dependencies));
+        assert!(!Table::load("dynamic")
+            .get(&r)
+            .is_some_and(|old| old.fresh(&base, &mut Probe::default())));
         let mut reads = ReadSet::default();
         reads.record(&extra);
         update("dynamic", &[(r.clone(), base.with_reads(&reads))]);
-        assert!(Table::load("dynamic").fresh(&r, base.primary, &base.dependencies));
+        assert!(Table::load("dynamic")
+            .get(&r)
+            .is_some_and(|old| old.fresh(&base, &mut Probe::default())));
         std::fs::write(&extra, "after!").unwrap();
-        assert!(!Table::load("dynamic").fresh(&r, base.primary, &base.dependencies));
+        assert!(!Table::load("dynamic")
+            .get(&r)
+            .is_some_and(|old| old.fresh(&base, &mut Probe::default())));
         assert_eq!(Probe::default().snapshot(&r).primary, base.primary);
-        assert!(!Table::load("other").fresh(&r, base.primary, &base.dependencies));
+        assert!(!Table::load("other")
+            .get(&r)
+            .is_some_and(|old| old.fresh(&base, &mut Probe::default())));
     }
 
     #[test]
@@ -1599,16 +1571,23 @@ mod tests {
         };
         let base = Probe::default().snapshot(&r);
         update("upgrade", &[(r.clone(), base.clone())]);
-        assert!(!Table::load("upgrade").fresh(&r, base.primary, &base.dependencies));
+        assert!(!Table::load("upgrade")
+            .get(&r)
+            .is_some_and(|old| old.fresh(&base, &mut Probe::default())));
         let complete = base.with_reads(&ReadSet::default());
         update("upgrade", &[(r.clone(), complete.clone())]);
-        assert!(Table::load("upgrade").fresh(&r, base.primary, &base.dependencies));
+        assert!(Table::load("upgrade")
+            .get(&r)
+            .is_some_and(|old| old.fresh(&base, &mut Probe::default())));
         let mut table = Table::load("upgrade");
-        for (_, stamp) in table.rows.values_mut() {
+        for old in table.rows.values_mut() {
+            let stamp = old.dependencies.as_mut().unwrap();
             stamp.0 = stamp.0.replacen("\"version\":4", "\"version\":1", 1);
         }
-        assert!(!table.fresh(&r, base.primary, &base.dependencies));
-        assert!(Table::load("upgrade").fresh(&r, base.primary, &base.dependencies));
+        assert!(!table.get(&r).is_some_and(|old| old.fresh(&base, &mut Probe::default())));
+        assert!(Table::load("upgrade")
+            .get(&r)
+            .is_some_and(|old| old.fresh(&base, &mut Probe::default())));
     }
 
     #[test]
@@ -1641,10 +1620,16 @@ mod tests {
             3,
             "one main DB and absent WAL/journal probes shared by both sessions"
         );
-        assert!(!Table::load("counts").fresh(&r, before.primary, &before.dependencies));
+        assert!(!Table::load("counts")
+            .get(&r)
+            .is_some_and(|old| old.fresh(&before, &mut Probe::default())));
         update("counts", &[(r.clone(), before.clone())]);
-        assert!(Table::load("counts").fresh(&r, before.primary, &before.dependencies));
-        assert!(!Table::load("events").fresh(&r, before.primary, &before.dependencies));
+        assert!(Table::load("counts")
+            .get(&r)
+            .is_some_and(|old| old.fresh(&before, &mut Probe::default())));
+        assert!(!Table::load("events")
+            .get(&r)
+            .is_some_and(|old| old.fresh(&before, &mut Probe::default())));
 
         std::fs::write(w.base.join("sessions.db-wal"), "new WAL").unwrap();
         let after = Probe::default().snapshot(&r).with_reads(&ReadSet::default());
@@ -1653,12 +1638,18 @@ mod tests {
         assert!(!unchanged(&r, &before));
         update("counts", &[(r.clone(), before)]);
         assert!(
-            !Table::load("counts").fresh(&r, after.primary, &after.dependencies),
+            !Table::load("counts")
+                .get(&r)
+                .is_some_and(|old| old.fresh(&after, &mut Probe::default())),
             "a racing change cannot publish freshness"
         );
         update("counts", &[(r.clone(), after.clone())]);
-        assert!(Table::load("counts").fresh(&r, after.primary, &after.dependencies));
-        assert!(!Table::load("events").fresh(&r, after.primary, &after.dependencies));
+        assert!(Table::load("counts")
+            .get(&r)
+            .is_some_and(|old| old.fresh(&after, &mut Probe::default())));
+        assert!(!Table::load("events")
+            .get(&r)
+            .is_some_and(|old| old.fresh(&after, &mut Probe::default())));
     }
     #[test]
     fn scoped_children_track_wire_state_and_opencode_parts() {

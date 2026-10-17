@@ -698,7 +698,9 @@ mod db {
             .ok();
         let source = crate::source::Probe::default().snapshot(r);
         !sync_fresh(stored, source.primary.0, source.primary.1, || {
-            crate::source::Table::load("events").fresh(r, source.primary, &source.dependencies)
+            crate::source::Table::load("events")
+                .get(r)
+                .is_some_and(|old| old.fresh(&source, &mut crate::source::Probe::default()))
         })
     }
 
@@ -792,10 +794,7 @@ mod db {
                     .map(|entry| entry.signature),
                 source.primary.0,
                 source.primary.1,
-                || {
-                    self.dependencies
-                        .fresh_with_probe(r, source.primary, &source.dependencies, probe)
-                },
+                || self.dependencies.get(r).is_some_and(|old| old.fresh(source, probe)),
             )
         }
         /// Whether retained prefix events belong to this source copy and expected provenance.
