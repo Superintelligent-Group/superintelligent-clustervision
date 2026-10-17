@@ -31,6 +31,8 @@ table lists the flags, defaults, routes and MCP tool that changed.
 `cv tree`, `cv prompts`, `cv compaction`, `cv timeline`, `cv board` and the other 0.15 names still
 exit 2 with their pointers; the `cvd` and `cv-mcp` shims went in 0.16.0.
 
+- Reject premature EOF in positioned JSONL reads instead of treating missing captured bytes as a partial final record.
+
 **What reads differently** (`--json` consumers):
 - **Codex `message_count` counts prompt and reply turns**, as the parser does: no duplicated event
   echoes, injected instructions or inherited history. OpenCode, Goose, Hermes, Devin and Qwen
