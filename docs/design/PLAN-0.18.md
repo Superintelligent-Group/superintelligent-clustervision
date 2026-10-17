@@ -46,6 +46,7 @@ here, not the goal.
 | X1 | ExactStrings (Q10): a bounded set over the trailing user run, labeled | 840 raw lines used once (hermes ReplayDedup) | spill/exact.rs | −400 if d5 shows runs small | low | d5 |
 | L1 | leftovers: emitter `fallback_title` → `Message::prompt_title`; Cursor `<timestamp>` title wrapper; Qwen per-project schedule staleness; AFFORDANCES.md leaves | correctness of titles and `has:` rows | CHANGELOG 0.17 / AFFORDANCES.md | ±150 | low | — |
 | K1 | HARNESS-ASKS: re-read Claude Code docs; if PreCompact `compactSummary` landed, `cv hook pre-compact` emits the distill span | the compaction summary an agent wakes to | docs/design/HARNESS-ASKS.md | +150 only if landed | low | 10-minute check |
+| G1 | no command blocks an agent silently: non-TTY stdout gets the one-shot state + a stderr line naming `--follow`/`--for`; following is opt-in and announces itself within 1 s; daemons print a ready line; `cv hook` on a TTY exits 2; a CI contract runs every subcommand piped under a 5 s budget | an agent ran `cv scry` and it hung forever printing nothing (ember, 2026-10-18) | cmd/live.rs, watch, serve, hooks.rs | +150..250 | low | — |
 
 ## (c) Lanes, order, integration points
 
@@ -91,6 +92,20 @@ continuation file at 200K; delete-first inside a lane.
 8. **Prune twins:** count the owned halves of the five LARGE_RECORD pairs → R1's estimate from the
    actual twin size.
 
+## (d′) Lane M results (2026-10-18, persvati, release build, load 4-10 on 24 cores)
+
+| # | number | mark |
+|---|---|---|
+| d1 | stubbing Resolver leaves 230 dead lines in lazy.rs (393 gross incl. the Resolver family) | **Z1 NO-GO** (< 400): waits for the Goose-era rewrite |
+| d2 | per prompt: `hook decisions` 12.6 M insn, `hook edit` 13.9 M, `hook start` 16.7 M, `hook compact` 50 M on a 96 MB transcript; `has:plan` warm 35 M, `search` warm 59 M, `ls` warm 20 M; **first `ls` 9.9 G / 1.35 s, first `has:plan` 40 G / 6.2 s, first `index` 64 G** (qual-home, 419 sessions) | per-prompt work < 40 ms: hooks are free; **the felt budget is the first-run path → C1 is the lane** |
+| d4 | `index` unchanged = 86 M cv instructions (57 ms): alloc 19 %, dependency/path hashing 17 %, tantivy open 15 %, sqlite 13 %, FileId decode 13 % | **C3 not a lane**; PERF's live 1.0-1.6 s is fleet scale. C2's 2.8 G is the Claude tool-results stat inventory |
+| d5 | max trailing user single-text run: corpus 8,204 B, real Hermes 758 B | **X1 GO** (≪ 1 MiB); note a second user: `stats.rs` TokenFold |
+| d6 | Codex: 12 events, `~/.codex/hooks.json` (+ repo-local), Claude-shaped snake_case stdin with `transcript_path`, exit 2 = block, `async` handlers; Gemini: 11 events, `~/.gemini/settings.json`, any exit ∉ {0,1} = deny, sync only, **HTML-escapes `additionalContext`**; Qwen: no checkout | Codex hosts 5/5 hooks, Gemini 3/5 (start, decisions, edit) and needs its own context encoding; **H1 +250..400 holds** |
+| d7 | `block_to` vs `anthropic/write::block`: 29 LCS-equal lines (14 non-trivial); qwen vs gemini parts: 25 / 14 | **E1 not a lane; J2 ≈ −200** |
+| d8 | prune owned halves 603 raw, 474-561 cleanly deletable; view halves (918) stay; `retrieve` 163 is a move | **R1 ≈ −500..−900**, not −1,500..−2,000 |
+
+0.18's parsimony is therefore ≈ −1.5..−2K (C1/J1, X1, R1); its value is power and trust.
+
 ## (e) Decisions only ember can make (recommendation in bold)
 
 1. Theme order. **Maturity + power first half (Lanes 0, H, A), parsimony second half (R, then the
@@ -109,8 +124,7 @@ continuation file at 200K; delete-first inside a lane.
 8. Q1 emitters-as-codec. **No lane; fold the two literal twins into J2.**
 9. Q10 ExactStrings. **Replace after d5 unless real runs exceed 1 MiB.**
 10. Q8 snapshots reaper. **Keep; the immutable-copy prototype was never measured.**
-11. Q4 Span: approve "`SourceText` serializes as the span object" so byte identity holds.
-    **Approve; go only with d1.**
+11. Q4 Span. **Answered by d1: no-go for 0.18.**
 12. Lane discipline: 0.17 lanes ran past 500K tokens and died before deleting. **Cap 250K,
     continuation at 200K, ≤ 3 overlapping lanes at once, delete-first ordering.**
 
