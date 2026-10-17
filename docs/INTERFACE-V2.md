@@ -152,8 +152,8 @@ candidates as `harness:full-id` lines and exits 2.
 
 ## 4. The IR (cv-core `ir.rs`)
 
-`Session { id, harness, cwd, title, created_at, updated_at, model, git, system_prompt, lineage,
-messages, source_path, extra }` → `Message { id, parent_id, role, kind, origin, timestamp, model,
+`Session { principal, id, harness, cwd, title, created_at, updated_at, model, git, system_prompt,
+lineage, messages, source_path, extra }` → `Message { id, parent_id, role, kind, origin, timestamp, model,
 content, usage, extra }` → `Block` (`text | thinking | tool_use | tool_result | image | file`,
 serde tag `type`). `Role` says who speaks, `MessageKind` what the message is (`prompt`, `reply`,
 `tool_result`, `injected_context`, `system_prompt`, `notice`, `compaction_boundary`,

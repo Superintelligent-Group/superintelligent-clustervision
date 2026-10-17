@@ -14,10 +14,10 @@ data was found under `$HOME`.
 
 ### First `cv ls` is slow, then fast
 
-Discovery parallelizes across harnesses and caches metadata keyed by `(mtime, size)`, so the first
-run does the real work (a few seconds across thousands of sessions) and later runs are ~instant. A
-huge transcript (hundreds of MB) is sampled head+tail during discovery, never fully read. See
-[Architecture](architecture.md).
+Discovery parallelizes across harnesses and caches metadata by file identity (length, mtime,
+device, inode, ctime), so the first run does the real work (82 s wall for 7,000 sessions and 95 GB
+on a busy host, 2026-10-16) and later runs take 0.1–0.2 s. A huge Codex rollout (hundreds of MB) is
+sampled head+tail during discovery, never fully read. See [Architecture](architecture.md).
 
 ### `cv port` warns about lost content
 

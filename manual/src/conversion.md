@@ -195,7 +195,7 @@ a parsed session, see [the OpenSession standard](#the-opensession-standard) belo
 
 ## The OpenSession standard
 
-After reverse-engineering seventeen different transcript formats, one thing was obvious: they're all
+After reverse-engineering twenty-one different transcript formats, one thing was obvious: they're all
 *almost the same thing* underneath. **OpenSession** is the format they should have agreed on — a
 small, honest, harness-neutral interchange format, written down as a proposal for harness authors.
 clustervision's internal [IR](architecture.md#the-unified-ir) is its reference implementation: the

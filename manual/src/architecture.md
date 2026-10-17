@@ -2,7 +2,7 @@
 
 This chapter is for contributors and the curious: how clustervision is built, and why it's shaped the way it is. 🔮
 
-The whole project rests on one idea. Every harness — Claude Code, Codex, Gemini, Cursor, seventeen of them and counting — stores its sessions in a different on-disk dialect. clustervision parses every one of those dialects **into a single unified representation** (the IR), and then *everything else* — search, porting, packing, the board, the app — is just a function over that IR. The data-flow one-liner is:
+The whole project rests on one idea. Every harness — Claude Code, Codex, Gemini, Cursor, twenty-one of them — stores its sessions in a different on-disk dialect. clustervision parses every one of those dialects **into a single unified representation** (the IR), and then *everything else* — search, porting, packing, tasks, the app — is just a function over that IR. The data-flow one-liner is:
 
 ```text
 parse(any harness) → IR → search · port · prune · loom · pack · archive · coordinate · view
@@ -18,13 +18,14 @@ The spine is `Session → Message → Block`:
 
 ```rust
 pub struct Session {
+    pub principal: Option<Principal>,           // the opaque identity the session acts as, when a store records one; never inferred
     pub id: String,
     pub harness: Harness,
     pub cwd: Option<PathBuf>,
     pub title: Option<String>,
     pub created_at: Option<DateTime<Utc>>,
     pub updated_at: Option<DateTime<Utc>>,
-    pub model: Option<String>,                  // the session default; messages carry a model only when it differs
+    pub model: Option<String>,                  // the session default; each message carries the model it ran under
     pub git: Option<GitInfo>,
     pub system_prompt: Option<String>,          // the prompt the harness sent, when the store keeps it
     pub lineage: Lineage,                       // forked_from · parent · spawned_by_tool_use · continued_in · continues · agent_path
@@ -138,41 +139,36 @@ pub trait Adapter: Send + Sync {
 }
 ```
 
-`discover` + `stream` are the read path. A whole-session parse is not a fourth method:
+`discover` + `stream` are the read path. A whole-session parse is not a fifth method:
 `adapter.parse(&r)` is `stream::collect` over `stream`, so the streaming and the materializing
-readers cannot diverge. The shared pieces an adapter imports instead of retyping live beside the
-trait: `harness/wire/{anthropic,openai}` (the two content shapes most stores persist, read into
-blocks and written back) and `harness/store` (`write_jsonl`, `xdg_data_dir`, and
-`store::sqlite::open_ro`, which opens every database read-only).
+readers cannot diverge. The trait's other methods all have defaults: `try_stream`/`try_resume`
+(a read that may continue from a verified checkpoint), `dependencies` (the side files a read of
+one session consults, so freshness can watch them), `store_affordances` (plans, goals and
+schedules that live only in a side store) and `copied_before` (the turns a fork copied from its
+source). The shared pieces an adapter imports instead of retyping live beside the trait:
+`harness/wire/{anthropic,openai}` (the two content shapes most stores persist, read into blocks
+and written back) and `harness/store` (`jsonl::for_each_line`, the one line reader in both
+builds; `json::validate_value`; `sqlite::Cells` and `open_ro`, which opens every database
+read-only; `write_jsonl`, `xdg_data_dir`). Every family reads through one record codec over one
+byte source; `docs/design/CODEC.md` is the rule.
 
 Being a **conversion target** is not part of the trait either. An emitter is a free function,
-`harness/<h>/emit.rs`'s `emit(&Session, &Path, &EmitOptions) -> Result<EmitResult>` — the codec
-run backwards plus a store writer — registered in the one table `emit::emitter_for`, from which
-the CLI's `--to` list and the round-trip test are derived. `EmitResult { path, new_id,
-resume_hint }` carries a human nudge like `claude --resume <id>`.
+`harness/<h>/emit.rs`'s `emit(&Session, &Path, &EmitOptions) -> Result<EmitResult>` — the
+format's fields written by the shared encoder plus a store writer — registered in the one table
+`emit::emitter_for`, from which `supported_targets()`, the `--harness` target list and the
+round-trip test are derived. `EmitResult { path, new_id, resume_hint }` carries a human nudge
+like `claude --resume <id>`.
 
 The `Send + Sync` bound is load-bearing: it's what lets discovery fan out across adapters in parallel. Every adapter holds only path data (connections are opened per call), so the bound is always satisfied.
 
-Adapters are registered in one place — `harness::all()`:
-
-```rust
-pub fn all() -> Vec<Box<dyn Adapter>> {
-    let mut adapters: Vec<Box<dyn Adapter>> = vec![
-        Box::new(claude::Claude::detect()),
-        Box::new(codex::Codex::detect()),
-        Box::new(grok::Grok::detect()),
-        // … opencode, gemini, openclaw, kimi, qwen,
-        //   lmstudio, cline, roo, continuedev, the exports …
-    ];
-    #[cfg(feature = "sqlite")]
-    { adapters.push(Box::new(hermes::Hermes::detect()));   // SQLite-backed harnesses
-      adapters.push(Box::new(cursor::Cursor::detect()));   // are gated behind a feature
-      /* goose, zed, devin */ }
-    adapters
-}
-```
-
-`detect()` resolves each store from `$HOME` and the environment. The SQLite-backed adapters (Cursor, Hermes, Goose, Zed, Devin) are behind the `sqlite` feature so the WASM build can drop them. `for_harness(h)` returns just the one adapter you asked for. Adding a harness is "write one `Adapter`, add a line to `all()` and to the `harnesses!` list" — the [adding a harness](adding-a-harness.md) chapter walks the whole thing.
+Adapters are registered in one place — `harness::for_harness(h)`, a match from each `Harness`
+to its `detect()`ed adapter; `harness::all()` is that match applied to `ORDER`, the array of
+every harness in listing order. `detect()` resolves each store from `$HOME` and the environment,
+and a per-session lookup detects only the one harness it needs (detection stats roots and reads
+config). The adapters whose primary store is SQLite (Cursor, Hermes, Goose, Zed, Devin) are behind
+the `sqlite` feature so the WASM build can drop them. Adding a harness is "write one `Adapter`, add
+an arm to `for_harness` and a line to the `harnesses!` list" — the
+[adding a harness](adding-a-harness.md) chapter walks the whole thing.
 
 ## Discovery & the incremental cache
 
@@ -188,13 +184,13 @@ let out: Vec<SessionRef> = adapters
 
 (Turn the `parallel` feature off — e.g. on `wasm32` — and you get an identical sequential pass. The file-heavy adapters use the same trick *internally* via `par_filter_map` / `par_flat_map` to scan many transcripts at once.)
 
-A failing adapter logs and contributes an empty list rather than sinking the whole scan — one harness's corrupt file never breaks discovery of the other sixteen.
+A failing adapter logs and contributes an empty list rather than sinking the whole scan — one harness's corrupt file never breaks discovery of the other twenty.
 
 ### The cache
 
-Cold discovery of a large corpus means reading and JSON-parsing every transcript just to pull a handful of metadata fields. That's slow. But transcripts only change by being **appended to**, so a file whose `(mtime, size)` is unchanged since last time has unchanged metadata.
+Cold discovery of a large corpus means reading and JSON-parsing every transcript just to pull a handful of metadata fields. That's slow. But a transcript that has not changed has unchanged metadata, and an append-only log that only grew still has the metadata its old prefix produced.
 
-That's the whole trick behind [`discover_cache.rs`](https://github.com/emberian/cv/blob/main/crates/cv-core/src/discover_cache.rs): a persistent JSON cache under the user's cache dir, keyed on `(mtime_ns, size)`, storing the `SessionRef`s each file produced. A hit returns the stored refs **without touching the file** — steady-state discovery costs one `stat` per file instead of a full read+parse. In practice that's the difference between **~37s cold and ~0.25s warm**.
+That's the trick behind [`discover_cache.rs`](https://github.com/emberian/cv/blob/main/crates/cv-core/src/discover_cache.rs): the `scan_cache` table in the catalog database (`$CLUSTERVISION_HOME/catalog.db`), keyed by path, `(mtime_ns, size)`, the adapter's interpretation version and the captured file identity (`source::FileId`: length, mtime, device, inode, ctime), storing the `SessionRef`s each file produced. A hit returns the stored refs **without touching the file** — steady-state discovery costs one `stat` per file instead of a full read+parse — and a `.jsonl` that only grew continues from its stored position, so a listing beside a live writer costs the appended bytes. Measured 2026-10-16 on the maintainer's fleet (about 7,000 sessions, 95 GB, host load 150+): the first `cv ls` on an empty home took 82 s wall and 4.5 CPU-minutes; a warm `cv ls` 0.12–0.16 s.
 
 Adapters opt in by wrapping their per-file scan in `cached_scan` / `cached_scan_many`:
 
@@ -207,10 +203,9 @@ crate::discover_cache::cached_scan(&path, || match scan(&path) {
 
 Some careful properties make it safe to lean on:
 
-- **Correctness never depends on it.** An entry is reused *only* when `(mtime, size)` match exactly, so any real change misses and re-scans. A missing or corrupt cache just means everything is re-scanned (and the cache rebuilt).
-- **It's process-global and shared** by `cv` and the desktop app via one JSON file.
-- **Writes are atomic** (temp file + rename). `persist()` runs after a full `discover_all()`, flushes only if something changed, and drops entries whose files no longer exist so the cache can't grow without bound.
-- **Empty results aren't cached** — a non-transcript path is cheap to re-reject, and caching it would bloat the file.
+- **Correctness never depends on it.** An entry is reused only when the tuple, the interpretation version and the captured identity all match, so a rewrite with a restored timestamp misses and re-scans. A missing or corrupt cache just means everything is re-scanned (and the cache rebuilt).
+- **It's process-global and shared** by `cv` and the desktop app through the one catalog database; the same rows feed the freshness probe's append detection.
+- **Empty results aren't cached** — a non-transcript path is cheap to re-reject.
 
 ### The head/tail cap
 

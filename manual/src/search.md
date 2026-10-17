@@ -169,7 +169,7 @@ transformer forward pass and no ONNX runtime: text is tokenized, per-token
 vectors are looked up in a distilled table and mean-pooled. It's tiny and
 CPU-fast, so clustervision just embeds every session up front and does a
 brute-force in-memory cosine scan at query time — no approximate-nearest-neighbor
-index needed at the ~1k-session scale.
+index needed at a few thousand sessions (one 256-float vector per session).
 
 A session's vector embeds the head of its own exchange, as the full-text index
 matches it: never the injected instructions, system prompts or hook output around

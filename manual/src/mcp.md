@@ -283,8 +283,8 @@ Details that matter:
   falls within the last 30 minutes. The hook skips the calling session and, inside a sub-agent,
   its own agent id.
 
-Measured on the maintainer's store (6,704 sessions, 2.7M events, 37 GB of Claude transcripts),
-release build, five runs each: `start` 20–30 ms, `decisions` 10 ms, `edit` 10–30 ms, `lane`
+Measured at the 0.16.1 release on the maintainer's store (6,704 sessions, 2.7M events, 37 GB of
+Claude transcripts), release build, five runs each: `start` 20–30 ms, `decisions` 10 ms, `edit` 10–30 ms, `lane`
 under 10 ms, `compact` 10 ms on a 1 MB transcript, 70–90 ms at 16.5 MB (why the full scan stops
 at 8 MiB), and 10 ms on the tail path at 190 MB.
 
