@@ -104,23 +104,9 @@ The two tables below are generated from the clap tree, and a unit test
 | `hooks` | `install` `remove` `show` |
 <!-- end: cv schema --commands -->
 
-Renames and removals (old → new; the old name is GONE, it errors with a pointer and exit 2):
-
-| old | new | why |
-|---|---|---|
-| `convert <id> --to <h>` | `port <id> --harness <h>` | convert and port were the same act (produce a copy that runs elsewhere); one verb |
-| `port --to <h>` / `--to-dir <d>` | `port --harness <h>` / `--cwd <d>` | say what the value is, not where it goes |
-| `query` | `schema` | `query` prints the field/operator reference; it does not run a query |
-| `recall` | removed | superseded by `pack`, the one "build context from the corpus" verb. `distill` was removed with it in 0.11 and returned in 0.14 as a deterministic lane reshaping |
-| `prune --retrieve <id>` | `cat <session> <tool_use_id>` | fetching a tool's output is a Read, not a prune option |
-| `prune --range` | `prune --keep A..B` | it selects what to KEEP; `--range` is the read-window flag elsewhere |
-| `show --range -N` | `show --first N` | `-N` looked like "last N" to everyone who used it |
-| `cv help` footer | `recipes` | the agent quickstart is a real command |
-
-`cat <session-id> <tool_use_id>` prints one tool call's full output wherever it lives (inline, in a
-`prune` sidecar, or in a persisted-output file); `--input` prints the arguments; exit 2 if the id
-is unknown. `formats` is the format census (§7). `recipes` is the agent quickstart, also named by
-`cv --help`'s last line.
+A removed or renamed name (`convert`, `query`, `recall`, `board`, `prune --retrieve`, `--to`, …) is
+GONE: it errors with a pointer at its replacement and exits 2. The old → new table is the manual's
+"Renamed in 0.11.0" (`manual/src/cli.md`); `cv help`'s agent footer became the `recipes` command.
 
 ## 2. Flags — the same word means the same thing everywhere
 
@@ -245,16 +231,11 @@ manifest to the source; `tools/harness-drift.sh` greps the `~/pug` checkouts aga
 
 *Named 2026-09-20 in a parsimony pass. Not a plan; a direction.* cv keeps discovering one idea and
 naming it anew: **two representations of the same thing disagree, and something must judge whether
-that is expected.** It is implemented six times: manifest ↔ adapter source (`formats_manifest`,
-`formats::Finding`), manifest ↔ on-disk data (`cv formats`, `RecordStat`), source IR ↔ emitted
-output (`emit_verified`, `emit::Delta`), render ↔ IR (`web/selftest.html`), `extra` ↔ the
-namespacing rule (`assert_no_flat_keys`, a panic), manifest ↔ upstream checkout
-(`harness-drift.sh`, printed lines). Each checks a different pair, so none is redundant; the cost
-is that adding a surface means a seventh bespoke checker. The end-state is one
-`Divergence { what, a, b, expected, where }` and one renderer; `Finding` and `Delta` are already
-that type with two spellings. This document had no mechanical check and was wrong twice on the day
-it was written; §1 and §6 are generated now, §3 is asserted by `cv schema --json`'s `session_row`,
-and §4 shrank to what `ir.rs` cannot say for itself.
+that is expected.** Six checkers do it today (`formats_manifest`, `cv formats`, `emit_verified`,
+`web/selftest.html`, `assert_no_flat_keys`, `harness-drift.sh`), each over a different pair, each
+reporting in its own shape. The end-state is one `Divergence { what, a, b, expected, where }` and
+one renderer, so adding a surface means declaring a pair; `formats::Finding` and `emit::Delta` are
+already that type with two spellings.
 
 ## 9. Design history
 
