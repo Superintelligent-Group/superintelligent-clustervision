@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- HTTP rejects duplicate Host headers before routing requests.
+
 - HTTP search rejects conflicting kind, scan and semantic parameters consistently with the CLI.
 
 ## 0.17.0 — 2026-10-17 — stream, never materialize

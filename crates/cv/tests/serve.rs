@@ -1925,6 +1925,19 @@ fn malformed_header_fields_fail_before_routing() {
 }
 
 #[test]
+fn duplicate_host_fields_are_rejected_before_routing() {
+    let w = world("duplicate-host");
+    let (port, _server) = spawn_serve(&w);
+    for hosts in [
+        [("Host", "localhost"), ("host", "evil.example")],
+        [("Host", "localhost"), ("Host", "localhost")],
+    ] {
+        let response = raw_request(port, "GET", "/api/health", &hosts);
+        assert_eq!(raw_status(&response), 400, "{response}");
+    }
+}
+
+#[test]
 fn malformed_local_host_authorities_are_rejected() {
     let w = world("host-authority");
     let (port, _server) = spawn_serve(&w);
