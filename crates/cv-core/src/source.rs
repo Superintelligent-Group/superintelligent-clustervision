@@ -651,13 +651,6 @@ impl Probe {
             .clone()
     }
 
-    /// Collect the currently declared session-local dependencies. Plain file transcripts have
-    /// an empty set; shared databases depend on WAL and rollback journals even when absent.
-    pub fn dependencies(&mut self, r: &SessionRef) -> Option<Stamp> {
-        let primary = self.primary_path(r);
-        self.dependencies_from(r, &primary)
-    }
-
     /// [`primary_path`] with this operation's adapter registry.
     pub fn primary_path(&mut self, r: &SessionRef) -> PathBuf {
         self.adapters
@@ -1071,7 +1064,7 @@ mod tests {
         for text in cases {
             std::fs::write(session.join("summary.json"), &text).unwrap();
             let old = serde_json::from_str::<serde_json::Value>(&text).ok();
-            let stamp = super::Probe::default().dependencies(&reference);
+            let stamp = super::Probe::default().snapshot(&reference).stamp;
             assert_eq!(stamp.is_some(), old.is_some());
             if let Some(stamp) = stamp {
                 let expected = old.unwrap().get("session_kind").and_then(serde_json::Value::as_str) == Some("subagent");
