@@ -1285,7 +1285,13 @@ fn serve_search() {
     // CLI's --semantic conflicts with --kind.
     let (status, v) = get_json(port, "/api/search?semantic=1&kind=context&q=zebrafish");
     assert_eq!(status, 400, "{v}");
-    assert!(v["error"].as_str().unwrap().contains("embeds the exchange only"), "{v}");
+    assert!(
+        v["error"]
+            .as_str()
+            .unwrap()
+            .contains("kind= requires indexed full-text search"),
+        "{v}"
+    );
 
     // harness: a filter, and a typo is a clear 400 (same as /api/sessions).
     let (status, v) = get_json(port, "/api/search?scan=1&q=zebrafish&harness=claude");
@@ -1916,6 +1922,19 @@ fn malformed_header_fields_fail_before_routing() {
     }
     let response = raw_request(port, "GET", "/api/health", &[("X-Valid_Token", "\tvalid\tvalue\t")]);
     assert_eq!(raw_status(&response), 200, "{response}");
+}
+
+#[test]
+fn duplicate_host_fields_are_rejected_before_routing() {
+    let w = world("duplicate-host");
+    let (port, _server) = spawn_serve(&w);
+    for hosts in [
+        [("Host", "localhost"), ("host", "evil.example")],
+        [("Host", "localhost"), ("Host", "localhost")],
+    ] {
+        let response = raw_request(port, "GET", "/api/health", &hosts);
+        assert_eq!(raw_status(&response), 400, "{response}");
+    }
 }
 
 #[test]
