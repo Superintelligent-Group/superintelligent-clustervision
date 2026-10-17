@@ -1,18 +1,18 @@
 # Product lines per crate and per module, and test lines per crate (tools/check-size.py).
 # Raise a number only as a reviewed decision; the gate ratchets each one down as code shrinks.
 cv 19200
-cv-core 78889
+cv-core 78914
 cv-search 4747
 cv-testkit 450
 cv-web 15
 cv:tests 15345
-cv-core:tests 64321
+cv-core:tests 64325
 cv-search:tests 7337
 cv-testkit:tests 39
 cv-web:tests 0
 cv-core:affordance 1809
 cv-core:api 977
-cv-core:catalog 1245
+cv-core:catalog 1264
 cv-core:compaction 268
 cv-core:config 81
 cv-core:dataset 866
@@ -74,7 +74,7 @@ cv-core:rewind 1001
 cv-core:rows 182
 cv-core:sanitize 77
 cv-core:scan 229
-cv-core:source 1057
+cv-core:source 1063
 cv-core:spill 708
 cv-core:stats 1050
 cv-core:stream 943

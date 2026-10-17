@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- One freshness record per consumer and session, verified on load (counts, events, search, usage); each rereads once after upgrading.
+- One freshness record per consumer and session, verified on load (counts, events, search, usage); watches record file identities. Each rereads once after upgrading.
 - A live `.jsonl` beside its writer is admitted by content (same file, sampled prefix intact), never by waiting; index, events, counts, vectors reread once.
 - Pre-binary `embeddings.json` semantic stores are no longer read or migrated (querying them already failed); `cv index --semantic` rebuilds.
 

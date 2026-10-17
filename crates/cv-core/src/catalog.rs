@@ -37,7 +37,7 @@ pub(crate) type PrimaryReads = std::collections::HashMap<std::path::PathBuf, cra
 pub(crate) type Publication<'a> = (
     Harness,
     &'a [SessionRef],
-    Vec<(std::path::PathBuf, i64)>,
+    Vec<(std::path::PathBuf, Watched)>,
     &'a PrimaryReads,
 );
 
@@ -58,20 +58,36 @@ pub(crate) fn capture_primary_reads_from(a: &dyn crate::Adapter, refs: &[Session
 #[cfg(feature = "sqlite")]
 mod imp {
     use super::*;
+    use crate::source::FileId;
     use rusqlite::{params, Connection, Row};
     use std::collections::{BTreeSet, HashSet};
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime};
 
-    /// A directory (or db file) whose recorded mtime is younger than this at record time is stamped
-    /// `mtime_ns = 0` ("always stale"): a session file may have landed *between* discovery
-    /// enumerating the directory and us stat'ing it, so the next probe re-discovers that harness
-    /// once and re-records a trustworthy mtime. Self-quiescing: an actively-written harness pays
-    /// one cheap re-discovery per probe until it goes idle for this long.
+    /// A directory (or db file) modified within this of being recorded is [`Watched::Unknown`]
+    /// ("always stale"): a session file may have landed *between* discovery enumerating the
+    /// directory and us stat'ing it, so the next probe re-discovers that harness once and
+    /// re-records a trustworthy identity. Self-quiescing: an actively-written harness pays one
+    /// cheap re-discovery per probe until it goes idle for this long.
     const WATCH_FUDGE: Duration = Duration::from_secs(2);
 
-    /// An optional WAL was absent at discovery. Unlike `0`, stable absence is fresh; its
-    /// appearance must invalidate discovery even if the database itself has not changed.
-    const WATCH_ABSENT: i64 = -1;
+    impl Watched {
+        fn value(self) -> rusqlite::types::Value {
+            use rusqlite::types::Value;
+            match self {
+                Watched::Unknown => Value::Null,
+                Watched::Absent => Value::Blob(Vec::new()),
+                Watched::Is(id) => Value::Blob(id.to_bytes().into()),
+            }
+        }
+
+        fn stored(bytes: Option<Vec<u8>>) -> Self {
+            match bytes {
+                None => Watched::Unknown,
+                Some(bytes) if bytes.is_empty() => Watched::Absent,
+                Some(bytes) => FileId::from_bytes(&bytes).map_or(Watched::Unknown, Watched::Is),
+            }
+        }
+    }
 
     pub(crate) fn db_path() -> Option<PathBuf> {
         // Back-compat: also honor the legacy `$CLAURDVOYANT_HOME` / `claurdvoyant` cache dir so a
@@ -145,17 +161,20 @@ mod imp {
         let mut conn = Connection::open(path).ok()?;
         // WAL + a busy timeout so concurrent cv processes don't error each other out.
         conn.busy_timeout(Duration::from_secs(5)).ok()?;
-        // A counts table carrying its own copy of the source signature (0.16) is dropped: counts
-        // reread once and publish with the one baseline record.
+        // Tables of 0.16's shape are dropped: a counts table carrying its own copy of the source
+        // signature (counts reread once, published with the one baseline record) and watches
+        // recorded as an mtime (one full discovery records identities).
         let legacy: bool = conn
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('affordance_counts') WHERE name='sig_a')",
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('affordance_counts') WHERE name='sig_a')
+                 OR EXISTS(SELECT 1 FROM pragma_table_info('watched') WHERE name='mtime_ns')",
                 [],
                 |row| row.get(0),
             )
             .ok()?;
         if legacy {
-            conn.execute_batch("DROP TABLE affordance_counts;").ok()?;
+            conn.execute_batch("DROP TABLE IF EXISTS affordance_counts; DROP TABLE IF EXISTS watched;")
+                .ok()?;
         }
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
@@ -175,7 +194,7 @@ mod imp {
              CREATE TABLE IF NOT EXISTS watched(
                  harness  TEXT NOT NULL,
                  path     TEXT NOT NULL,
-                 mtime_ns INTEGER NOT NULL,
+                 id       BLOB,
                  PRIMARY KEY(harness, path)
              );
              CREATE TABLE IF NOT EXISTS primary_sources(
@@ -279,18 +298,10 @@ mod imp {
         Some(conn)
     }
 
-    fn watch_is_fresh(path: &Path, recorded: i64) -> bool {
+    fn watch_is_fresh(path: &Path, recorded: Watched) -> bool {
         match std::fs::metadata(path) {
-            Ok(md) => {
-                recorded != 0
-                    && recorded != WATCH_ABSENT
-                    && md.modified().ok().is_some_and(|t| {
-                        t.duration_since(UNIX_EPOCH)
-                            .ok()
-                            .is_some_and(|d| d.as_nanos() as i64 == recorded)
-                    })
-            }
-            Err(e) => recorded == WATCH_ABSENT && e.kind() == std::io::ErrorKind::NotFound,
+            Ok(md) => matches!(recorded, Watched::Is(id) if FileId::of(&md) == Some(id)),
+            Err(e) => recorded == Watched::Absent && e.kind() == std::io::ErrorKind::NotFound,
         }
     }
 
@@ -420,7 +431,12 @@ mod imp {
     /// post-discovery sync. Deleting first is what makes vanished sessions vanish from
     /// [`all_sessions`]; the transaction keeps concurrent readers from seeing the gap.
     #[cfg(test)]
-    pub(crate) fn replace_harness(h: Harness, refs: &[SessionRef], watches: &[(PathBuf, i64)], before: &PrimaryReads) {
+    pub(crate) fn replace_harness(
+        h: Harness,
+        refs: &[SessionRef],
+        watches: &[(PathBuf, Watched)],
+        before: &PrimaryReads,
+    ) {
         if let Some(mut conn) = open() {
             replace_harness_in(&mut conn, h, refs, watches, before);
         }
@@ -431,7 +447,7 @@ mod imp {
         conn: &mut Connection,
         h: Harness,
         refs: &[SessionRef],
-        watches: &[(PathBuf, i64)],
+        watches: &[(PathBuf, Watched)],
         before: &PrimaryReads,
     ) {
         let sources = prepare_sources(h, refs, before);
@@ -442,7 +458,7 @@ mod imp {
         conn: &mut Connection,
         h: Harness,
         refs: &[SessionRef],
-        watches: &[(PathBuf, i64)],
+        watches: &[(PathBuf, Watched)],
         sources: &SourceRows,
     ) {
         let Ok(tx) = conn.transaction() else { return };
@@ -567,7 +583,7 @@ mod imp {
         tx: &rusqlite::Transaction,
         h: Harness,
         refs: &[SessionRef],
-        watches: &[(PathBuf, i64)],
+        watches: &[(PathBuf, Watched)],
         source_rows: &SourceRows,
         rewrite_sessions: bool,
     ) -> rusqlite::Result<()> {
@@ -577,24 +593,20 @@ mod imp {
         }
         let watch_rows = watches
             .iter()
-            .map(|(path, mtime)| {
-                (
-                    path.to_string_lossy().into_owned(),
-                    rusqlite::types::Value::Integer(*mtime),
-                )
-            })
+            .map(|(path, watched)| (path.to_string_lossy().into_owned(), watched.value()))
             .collect();
         reconcile_rows(tx, h, "primary_sources", "reads", source_rows)?;
-        reconcile_rows(tx, h, "watched", "mtime_ns", &watch_rows)
+        reconcile_rows(tx, h, "watched", "id", &watch_rows)
     }
 
     /// Compute the watch set for one harness from a finished discovery: the harness roots, every
     /// ancestor directory between each session file and its root (so a new project/day directory
-    /// anywhere in the tree bumps a watched mtime), and — for the SQLite-backed harnesses — each
-    /// session's backing file and its WAL (in-place writes change neither directory mtimes nor
-    /// necessarily the main database). Optional CLI metadata and absent WALs remain watched. Other paths that can't be
-    /// stat'd record `0`, as do recently-modified paths (see [`WATCH_FUDGE`]).
-    pub(crate) fn watches_for(h: Harness, roots: &[PathBuf], refs: &[SessionRef]) -> Vec<(PathBuf, i64)> {
+    /// anywhere in the tree changes a watched identity), and — for the SQLite-backed harnesses —
+    /// each session's backing file and its WAL (in-place writes change neither directory mtimes
+    /// nor necessarily the main database). Optional CLI metadata and absent WALs remain watched.
+    /// Other paths that can't be stat'd are unknown, as are recently-modified paths
+    /// (see [`WATCH_FUDGE`]).
+    pub(crate) fn watches_for(h: Harness, roots: &[PathBuf], refs: &[SessionRef]) -> Vec<(PathBuf, Watched)> {
         let mut paths: BTreeSet<PathBuf> = roots.iter().cloned().collect();
         let mut optional_files = BTreeSet::new();
         let file_watch = matches!(
@@ -633,21 +645,22 @@ mod imp {
         let now = SystemTime::now();
         paths
             .into_iter()
-            .filter_map(|p| {
+            .map(|p| {
                 let md = match std::fs::metadata(&p) {
                     Ok(md) => md,
                     Err(e) if optional_files.contains(&p) && e.kind() == std::io::ErrorKind::NotFound => {
-                        return Some((p, WATCH_ABSENT));
+                        return (p, Watched::Absent);
                     }
-                    Err(_) => return Some((p, 0)), // unknown: never record as fresh
+                    Err(_) => return (p, Watched::Unknown),
                 };
-                let Ok(mtime) = md.modified() else { return Some((p, 0)) };
-                let ns = mtime.duration_since(UNIX_EPOCH).ok()?.as_nanos() as i64;
-                let ns = match now.duration_since(mtime) {
-                    Ok(age) if age >= WATCH_FUDGE => ns,
-                    _ => 0, // too fresh (or clock skew): force one re-discovery next probe
-                };
-                Some((p, ns))
+                // Too fresh (or clock skew): force one re-discovery next probe.
+                let settled = md
+                    .modified()
+                    .ok()
+                    .and_then(|mtime| now.duration_since(mtime).ok())
+                    .is_some_and(|age| age >= WATCH_FUDGE);
+                let watched = FileId::of(&md).filter(|_| settled);
+                (p, watched.map_or(Watched::Unknown, Watched::Is))
             })
             .collect()
     }
@@ -672,10 +685,14 @@ mod imp {
         let mut watched_harnesses: HashSet<Harness> = HashSet::new();
         let mut watched_paths: HashSet<(Harness, String)> = HashSet::new();
         {
-            let mut stmt = conn.prepare("SELECT harness, path, mtime_ns FROM watched").ok()?;
+            let mut stmt = conn.prepare("SELECT harness, path, id FROM watched").ok()?;
             let rows = stmt
                 .query_map([], |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?))
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        Watched::stored(r.get(2)?),
+                    ))
                 })
                 .ok()?;
             for row in rows {
@@ -1028,6 +1045,7 @@ mod imp {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use std::time::UNIX_EPOCH;
 
         fn db_ref(harness: Harness, path: PathBuf) -> SessionRef {
             SessionRef {
@@ -1504,7 +1522,7 @@ mod imp {
             publish_all(&[(
                 Harness::Claude,
                 std::slice::from_ref(&a),
-                vec![(path.clone(), 1)],
+                vec![(path.clone(), Watched::Absent)],
                 &before,
             )]);
             let conn = open().unwrap();
@@ -1527,7 +1545,7 @@ mod imp {
             publish_all(&[(
                 Harness::Claude,
                 std::slice::from_ref(&changed),
-                vec![(path.clone(), 2)],
+                vec![(path.clone(), Watched::Unknown)],
                 &before,
             )]);
             assert!(matches_sessions(std::iter::once(&a)));
@@ -1541,13 +1559,11 @@ mod imp {
                 .unwrap();
             assert_eq!(unchanged, guard);
             assert_eq!(
-                conn.query_row(
-                    "SELECT mtime_ns FROM watched WHERE path=?1",
-                    [path.to_string_lossy()],
-                    |r| r.get::<_, i64>(0)
-                )
+                conn.query_row("SELECT id FROM watched WHERE path=?1", [path.to_string_lossy()], |r| {
+                    r.get::<_, Option<Vec<u8>>>(0)
+                })
                 .unwrap(),
-                1
+                Some(Vec::new())
             );
             conn.execute_batch("DROP TRIGGER reject_publication;").unwrap();
             // Restoring original captured proof must not bless the intervening file rewrite.
@@ -1555,7 +1571,7 @@ mod imp {
             publish_all(&[(
                 Harness::Claude,
                 std::slice::from_ref(&changed),
-                vec![(path.clone(), 2)],
+                vec![(path.clone(), Watched::Unknown)],
                 &before,
             )]);
             let published: String = conn
@@ -1598,11 +1614,11 @@ mod imp {
             let metadata = world.base.join("meta.json");
             let watches = watches_for(Harness::Cursor, std::slice::from_ref(&world.base), &[r]);
             let absent = watches.iter().find(|(path, _)| path == &metadata).unwrap().1;
-            assert_eq!(absent, WATCH_ABSENT);
+            assert_eq!(absent, Watched::Absent);
             assert!(watch_is_fresh(&metadata, absent));
             std::fs::write(&metadata, r#"{"cwd":"/scratch/project"}"#).unwrap();
             assert!(!watch_is_fresh(&metadata, absent));
-            let present = crate::source::FileId::at(&metadata).unwrap().mtime_ns as i64;
+            let present = Watched::Is(FileId::at(&metadata).unwrap());
             assert!(watch_is_fresh(&metadata, present));
             std::fs::File::open(&metadata)
                 .unwrap()
@@ -1626,7 +1642,7 @@ mod imp {
                 "OpenClaw SQLite is file-watched"
             );
             let absent = watches.iter().find(|(p, _)| *p == wal).unwrap().1;
-            assert_eq!(absent, WATCH_ABSENT);
+            assert_eq!(absent, Watched::Absent);
             assert!(watch_is_fresh(&wal, absent));
 
             std::fs::write(&wal, "wal").unwrap();
@@ -1634,14 +1650,14 @@ mod imp {
                 !watch_is_fresh(&wal, absent),
                 "WAL appearance invalidates its absent watch"
             );
-            let present = crate::source::FileId::at(&wal).unwrap().mtime_ns as i64;
+            let present = Watched::Is(FileId::at(&wal).unwrap());
             assert!(watch_is_fresh(&wal, present));
             std::fs::remove_file(&wal).unwrap();
             assert!(
                 !watch_is_fresh(&wal, present),
                 "WAL removal invalidates its present watch"
             );
-            assert!(!watch_is_fresh(&wal, 0), "unknown is not stable absence");
+            assert!(!watch_is_fresh(&wal, Watched::Unknown), "unknown is not stable absence");
 
             let jsonl = db_ref(Harness::OpenClaw, w.base.join("legacy.jsonl"));
             let watches = watches_for(Harness::OpenClaw, &[], std::slice::from_ref(&jsonl));
@@ -1722,6 +1738,15 @@ mod imp {
 
 #[cfg(feature = "sqlite")]
 pub(crate) use imp::{all_sessions, db_path, open_at, open_db, watches_for};
+/// One watched path as discovery recorded it: its identity, an optional file's stable absence
+/// (fresh until it appears), or unknown (unreadable, or modified too recently: never fresh).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Watched {
+    Unknown,
+    Absent,
+    Is(crate::source::FileId),
+}
+
 #[cfg(feature = "sqlite")]
 pub use imp::{fill_count, lookup, note_affordances_with_source, sync, AffordanceTable};
 
@@ -1784,7 +1809,7 @@ pub(crate) fn watches_for(
     _h: Harness,
     _roots: &[std::path::PathBuf],
     _refs: &[SessionRef],
-) -> Vec<(std::path::PathBuf, i64)> {
+) -> Vec<(std::path::PathBuf, Watched)> {
     Vec::new()
 }
 #[cfg(not(feature = "sqlite"))]

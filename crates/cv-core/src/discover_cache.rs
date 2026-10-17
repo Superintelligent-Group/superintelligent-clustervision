@@ -853,7 +853,7 @@ mod tests {
         .unwrap();
         conn.execute_batch(
             "INSERT OR REPLACE INTO catalog_meta(key,value) VALUES('last_full_sync','1');
-            INSERT OR REPLACE INTO watched(harness,path,mtime_ns) VALUES('gemini','old-watch',1);",
+            INSERT OR REPLACE INTO watched(harness,path,id) VALUES('gemini','old-watch',X'');",
         )
         .unwrap();
         let conn = crate::catalog::open_db().unwrap();

@@ -183,7 +183,7 @@ impl Reader {
         &mut self,
         h: Harness,
         refs: &[SessionRef],
-        watches: &[(std::path::PathBuf, i64)],
+        watches: &[(std::path::PathBuf, super::Watched)],
         before: &super::PrimaryReads,
     ) {
         #[cfg(feature = "sqlite")]

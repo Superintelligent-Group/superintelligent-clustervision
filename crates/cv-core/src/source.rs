@@ -70,7 +70,7 @@ fn absolute(path: &Path) -> Option<PathBuf> {
 /// One file as `stat` saw it, the one identity every guard compares. It has exactly two
 /// comparisons: `==` (strict: the file is unchanged) and [`FileId::admits`] (append: the same
 /// file, grown or not, with its captured prefix intact). Device, inode and ctime are 0 off Unix.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FileId {
     pub len: u64,
     pub mtime_ns: u64,
@@ -103,6 +103,31 @@ impl FileId {
             dev,
             ino,
             ctime_ns,
+        })
+    }
+
+    /// The five words, little-endian: the bytes a stored identity is.
+    pub fn to_bytes(self) -> [u8; 40] {
+        let mut out = [0; 40];
+        for (i, word) in [self.len, self.mtime_ns, self.dev, self.ino, self.ctime_ns as u64]
+            .into_iter()
+            .enumerate()
+        {
+            out[i * 8..i * 8 + 8].copy_from_slice(&word.to_le_bytes());
+        }
+        out
+    }
+
+    /// [`Self::to_bytes`] reversed; `None` for any other length.
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let bytes: &[u8; 40] = bytes.try_into().ok()?;
+        let word = |i: usize| u64::from_le_bytes(bytes[i * 8..i * 8 + 8].try_into().unwrap());
+        Some(Self {
+            len: word(0),
+            mtime_ns: word(1),
+            dev: word(2),
+            ino: word(3),
+            ctime_ns: word(4) as i64,
         })
     }
 
@@ -537,38 +562,21 @@ impl Published {
         bytes.extend(VERSION.to_le_bytes());
         bytes.extend(output_digest(output).to_le_bytes());
         bytes.push(u8::from(baseline.primary.is_some()));
-        let id = baseline.primary.unwrap_or(FileId {
-            len: 0,
-            mtime_ns: 0,
-            dev: 0,
-            ino: 0,
-            ctime_ns: 0,
-        });
-        for word in [id.len, id.mtime_ns, id.dev, id.ino, id.ctime_ns as u64] {
-            bytes.extend(word.to_le_bytes());
-        }
+        bytes.extend(baseline.primary.unwrap_or_default().to_bytes());
         bytes.extend(stamp.0.as_bytes());
         Some(bytes)
     }
 
     pub fn decode(bytes: &[u8]) -> Option<Self> {
-        let word = |at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
         if bytes.len() < HEAD || bytes[..4] != VERSION.to_le_bytes() || bytes[12] > 1 {
             return None;
         }
-        let primary = (bytes[12] == 1).then(|| FileId {
-            len: word(13),
-            mtime_ns: word(21),
-            dev: word(29),
-            ino: word(37),
-            ctime_ns: word(45) as i64,
-        });
         Some(Self {
             baseline: Baseline {
-                primary,
+                primary: (bytes[12] == 1).then(|| FileId::from_bytes(&bytes[13..HEAD])).flatten(),
                 stamp: Some(Stamp(String::from_utf8(bytes[HEAD..].to_vec()).ok()?)),
             },
-            output: word(4),
+            output: u64::from_le_bytes(bytes[4..12].try_into().unwrap()),
         })
     }
 
