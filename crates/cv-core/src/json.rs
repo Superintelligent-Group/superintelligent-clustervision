@@ -213,41 +213,6 @@ impl JsonSource {
             decoded: None,
         })
     }
-    /// Project an original-source range already in memory (`text`, at `offset`) without reading
-    /// it again, checking identity around the projection. The producer checks its opened
-    /// descriptor against this capture before supplying bytes.
-    #[cfg(feature = "mmap")]
-    pub(crate) fn read_borrowed_range_value<T>(
-        &self,
-        offset: u64,
-        text: &str,
-        f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>,
-    ) -> Result<T> {
-        self.read_borrowed_range(offset, text, Validation::Value, f)
-    }
-    /// Syntax-only counterpart for typed projections whose ignored fields use IgnoredAny.
-    #[cfg(feature = "mmap")]
-    pub(crate) fn read_borrowed_range_syntax<T>(
-        &self,
-        offset: u64,
-        text: &str,
-        f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>,
-    ) -> Result<T> {
-        self.read_borrowed_range(offset, text, Validation::Syntax, f)
-    }
-    #[cfg(feature = "mmap")]
-    fn read_borrowed_range<T>(
-        &self,
-        offset: u64,
-        text: &str,
-        validation: Validation,
-        f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>,
-    ) -> Result<T> {
-        let range = self.range(offset, text.len() as u64)?;
-        self.check()?;
-        let context = RangeSource::borrowed(Some(self.clone()), text.as_bytes(), offset, true);
-        range.with_source(&context, validation, f)
-    }
     /// One Value-compatible record of an in-memory copy (mapped or read) of this capture. No
     /// stat: the record reader checks identity once per operation and after each record that
     /// published a source descriptor, rather than twice per record.
@@ -257,9 +222,19 @@ impl JsonSource {
         text: &str,
         f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>,
     ) -> Result<T> {
+        self.read_record_with(offset, text, Validation::Value, f)
+    }
+    /// [`Self::read_record`] under a chosen acceptance (grammar only for typed sidecars).
+    pub(crate) fn read_record_with<T>(
+        &self,
+        offset: u64,
+        text: &str,
+        validation: Validation,
+        f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>,
+    ) -> Result<T> {
         let range = self.range(offset, text.len() as u64)?;
         let context = RangeSource::borrowed(Some(self.clone()), text.as_bytes(), offset, true);
-        range.view_unchecked(&context, Validation::Value, f)
+        range.view_unchecked(&context, validation, f)
     }
     /// [`Self::read_record`] over this source's private decoded bytes (`decoded_len` of them), an
     /// in-memory copy of one record at `offset`. Decoded bytes are immutable: the reader checks
@@ -290,34 +265,20 @@ impl JsonSource {
         self.decoded_range(backing.clone(), decoded_len, offset, len)?
             .with_source(context, Validation::Value, f)
     }
-    /// Reuse one checked original-source positioned context for many typed records.
-    #[cfg(not(feature = "mmap"))]
-    pub(crate) fn read_positioned_range_syntax<T>(
+    /// One record through an original-source positioned context shared across records.
+    pub(crate) fn read_positioned_range<T>(
         &self,
         context: &RangeSource<'_>,
         offset: u64,
         len: u64,
+        validation: Validation,
         f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>,
     ) -> Result<T> {
         anyhow::ensure!(
             context.matches_original(self),
             "JSON positioned context has different provenance"
         );
-        self.range(offset, len)?.with_source(context, Validation::Syntax, f)
-    }
-    /// Strict Value counterpart sharing an original-source positioned context across records.
-    pub(crate) fn read_positioned_range_value<T>(
-        &self,
-        context: &RangeSource<'_>,
-        offset: u64,
-        len: u64,
-        f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>,
-    ) -> Result<T> {
-        anyhow::ensure!(
-            context.matches_original(self),
-            "JSON positioned context has different provenance"
-        );
-        self.range(offset, len)?.with_source(context, Validation::Value, f)
+        self.range(offset, len)?.with_source(context, validation, f)
     }
     pub(crate) fn read_range_value<T>(
         &self,
@@ -1350,25 +1311,25 @@ mod tests {
 
     #[cfg(not(feature = "mmap"))]
     #[test]
-    fn positioned_syntax_context_preserves_capture_and_failure_precedence() {
-        let first = Fixture::new(br#"{"known":1,"ignored":"\ud800"}"#);
-        let second = Fixture::new(br#"{"known":1,"ignored":"\ud800"}"#);
+    fn positioned_context_preserves_capture_and_failure_precedence() {
+        let first = Fixture::new(br#"{"known":1,"ignored":"x"}"#);
+        let second = Fixture::new(br#"{"known":1,"ignored":"x"}"#);
         let source = JsonSource::capture(&first.path).unwrap();
         let other = JsonSource::capture(&second.path).unwrap();
         let context = RangeSource::from_captured(source.clone()).unwrap();
         assert_eq!(
             source
-                .read_positioned_range_syntax(&context, 0, source.len(), |view| {
+                .read_positioned_range(&context, 0, source.len(), Validation::Value, |view| {
                     Ok(view.get("known")?.unwrap().resolve()?.as_u64())
                 })
                 .unwrap(),
             Some(1)
         );
         assert!(other
-            .read_positioned_range_syntax(&context, 0, other.len(), |_| Ok(()))
+            .read_positioned_range(&context, 0, other.len(), Validation::Value, |_| Ok(()))
             .is_err());
         let error = source
-            .read_positioned_range_syntax(&context, 0, source.len(), |_| -> Result<()> {
+            .read_positioned_range(&context, 0, source.len(), Validation::Value, |_| -> Result<()> {
                 std::fs::OpenOptions::new()
                     .append(true)
                     .open(&first.path)?
@@ -1791,13 +1752,12 @@ mod tests {
         for input in cases {
             let expected = serde_json::from_slice::<Value>(&input).is_ok();
             let fixture = Fixture::new(&input);
-            #[cfg(feature = "mmap")]
             if let Ok(text) = std::str::from_utf8(&input) {
                 let source = JsonSource::capture(&fixture.path).unwrap();
                 assert_eq!(
-                    source.read_borrowed_range_value(0, text, |_| Ok(())).is_ok(),
+                    source.read_record(0, text, |_| Ok(())).is_ok(),
                     expected,
-                    "borrowed {input:?}"
+                    "in memory {input:?}"
                 );
             }
             assert_eq!(
@@ -1806,21 +1766,6 @@ mod tests {
                 "{input:?}"
             );
         }
-    }
-
-    #[cfg(feature = "mmap")]
-    #[test]
-    fn borrowed_source_guard_checks_after_callback_failure() {
-        let input = "{\"s\":\"body\"}";
-        let fixture = Fixture::new(input.as_bytes());
-        let source = JsonSource::capture(&fixture.path).unwrap();
-        let error = source
-            .read_borrowed_range_value(0, input, |_| -> Result<()> {
-                std::fs::write(&fixture.path, b"null").unwrap();
-                anyhow::bail!("callback failure")
-            })
-            .unwrap_err();
-        assert!(error.to_string().contains("source changed"), "{error}");
     }
 
     #[test]

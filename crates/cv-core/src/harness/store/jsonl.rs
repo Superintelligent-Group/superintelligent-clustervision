@@ -121,7 +121,9 @@ fn lines(
                 Some((backing, len)) => {
                     source.read_positioned_decoded_value(&context, backing, len, at, range.len, &mut view)
                 }
-                None => source.read_positioned_range_value(&context, at, range.len, &mut view),
+                None => {
+                    source.read_positioned_range(&context, at, range.len, crate::json::Validation::Value, &mut view)
+                }
             });
             match read {
                 Some(Err(error)) if !visited && error.downcast_ref::<crate::json::InvalidJson>().is_some() => None,
@@ -225,6 +227,8 @@ fn mapped_lines(
 /// whose later records replace earlier ones, so selection must reach EOF before decoding.
 /// A small range is read into one buffer. A giant one is mapped for its read alone in mapped
 /// builds and left in place as a positioned view otherwise, so the file is never held mapped.
+/// A record that is not UTF-8 is rejected ([`InvalidJson`](crate::json::InvalidJson)), as
+/// [`for_each_line`] rejects such a line.
 pub(crate) struct Records<'s> {
     source: &'s crate::json::JsonSource,
     file: &'s File,
@@ -248,6 +252,16 @@ impl<'s> Records<'s> {
         len: u64,
         f: impl FnOnce(crate::json::JsonView<'_>) -> anyhow::Result<T>,
     ) -> anyhow::Result<T> {
+        self.read_with(at, len, crate::json::Validation::Value, f)
+    }
+    /// [`Self::read`] under a chosen acceptance.
+    pub(crate) fn read_with<T>(
+        &mut self,
+        at: u64,
+        len: u64,
+        validation: crate::json::Validation,
+        f: impl FnOnce(crate::json::JsonView<'_>) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
         anyhow::ensure!(
             at.checked_add(len).is_some_and(|end| end <= self.source.len()),
             "record range outside its source"
@@ -263,18 +277,20 @@ impl<'s> Records<'s> {
             };
             #[cfg(test)]
             note_mapped(map.len());
-            return self.source.read_record(at, std::str::from_utf8(&map)?, f);
+            let text = std::str::from_utf8(&map).map_err(|_| crate::json::InvalidJson)?;
+            return self.source.read_record_with(at, text, validation, f);
         }
         if len <= 64 * 1024 {
             self.buffer.resize(len as usize, 0);
             ranges::read_exact_at(self.file, &mut self.buffer, at)?;
-            return self.source.read_record(at, std::str::from_utf8(&self.buffer)?, f);
+            let text = std::str::from_utf8(&self.buffer).map_err(|_| crate::json::InvalidJson)?;
+            return self.source.read_record_with(at, text, validation, f);
         }
         if self.context.is_none() {
             self.context = Some(document::range::RangeSource::from_captured(self.source.clone())?);
         }
         let context = self.context.as_ref().expect("context was just made");
-        self.source.read_positioned_range_value(context, at, len, f)
+        self.source.read_positioned_range(context, at, len, validation, f)
     }
 }
 

@@ -3,47 +3,8 @@
 
 pub(crate) mod range;
 
-#[cfg(feature = "mmap")]
-use anyhow::Context;
 use anyhow::Result;
 use serde_json::Value;
-
-/// A whole file mapped read-only, for the two readers not yet on `jsonl::for_each_line`.
-#[cfg(feature = "mmap")]
-pub(crate) struct Source {
-    bytes: Bytes,
-}
-#[cfg(feature = "mmap")]
-enum Bytes {
-    Mapped(memmap2::Mmap),
-    Owned(Vec<u8>),
-}
-#[cfg(feature = "mmap")]
-impl std::ops::Deref for Bytes {
-    type Target = [u8];
-    fn deref(&self) -> &[u8] {
-        match self {
-            Self::Mapped(m) => m,
-            Self::Owned(v) => v,
-        }
-    }
-}
-#[cfg(feature = "mmap")]
-impl Source {
-    /// Map an existing read-only descriptor. JSONL readers retain it for selected-field replay.
-    pub fn map_file(file: &std::fs::File) -> Result<Self> {
-        // External truncation has the same documented caveat as the other mapped adapters.
-        let bytes = if file.metadata()?.len() == 0 {
-            Bytes::Owned(Vec::new())
-        } else {
-            Bytes::Mapped(unsafe { memmap2::Mmap::map(file) }.context("mapping source")?)
-        };
-        Ok(Self { bytes })
-    }
-    pub fn bytes(&self) -> &[u8] {
-        &self.bytes
-    }
-}
 
 /// A derived-envelope shape rejection, distinct from a backing read or source-change error.
 #[derive(Debug, thiserror::Error)]

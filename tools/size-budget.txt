@@ -1,12 +1,12 @@
 # Product lines per crate and per module, and test lines per crate (tools/check-size.py).
 # Raise a number only as a reviewed decision; the gate ratchets each one down as code shrinks.
 cv 18475
-cv-core 78670
+cv-core 78558
 cv-search 4889
 cv-testkit 450
 cv-web 15
 cv:tests 15162
-cv-core:tests 64427
+cv-core:tests 64412
 cv-search:tests 7338
 cv-testkit:tests 39
 cv-web:tests 0
@@ -35,7 +35,7 @@ cv-core:harness/cursor 1761
 cv-core:harness/devin 1395
 cv-core:harness/export 895
 cv-core:harness/gemini 2291
-cv-core:harness/goose 1607
+cv-core:harness/goose 1592
 cv-core:harness/grok 1068
 cv-core:harness/harmony 253
 cv-core:harness/hermes 2386
@@ -48,14 +48,14 @@ cv-core:harness/opencode 3014
 cv-core:harness/opensession 439
 cv-core:harness/qwen 1755
 cv-core:harness/roo 132
-cv-core:harness/store 3795
+cv-core:harness/store 3755
 cv-core:harness/wire 1313
 cv-core:harness/zed 867
 cv-core:html 669
 cv-core:ingest 280
 cv-core:ir 1609
 cv-core:ir_json 495
-cv-core:json 1388
+cv-core:json 1349
 cv-core:lanes 711
 cv-core:lazy 1079
 cv-core:lib 703
@@ -63,7 +63,7 @@ cv-core:lockfile 32
 cv-core:loom 74
 cv-core:offsets 20
 cv-core:projection 676
-cv-core:prune 3469
+cv-core:prune 3451
 cv-core:publish 416
 cv-core:query 1998
 cv-core:redact 701
