@@ -557,8 +557,8 @@ fn search(query: &str, searcher: &cv_search::Searcher) -> Reply {
             None => return bad(400, &format!("unknown kind {kind:?}: exchange, context or all")),
         },
     };
-    if semantic && scope != cv_search::Scope::Exchange {
-        return bad(400, "semantic=1 embeds the exchange only: kind= is full-text");
+    if (semantic || scan) && scope != cv_search::Scope::Exchange {
+        return bad(400, "this mode searches the exchange only; kind= needs the index");
     }
     let source = if semantic {
         Source::Semantic

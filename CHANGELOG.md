@@ -117,6 +117,7 @@ APFS clone of 5,421 sessions, Claude 38 GB, Codex 40 GB compressed; live: ~7,000
 - Resume hints quote shell arguments safely, including unusual paths and session identifiers.
 
 **Search**
+- HTTP live search rejects context/all scopes with 400 instead of silently searching the exchange; use indexed search for those scopes.
 - Search matches the exchange; injected instructions, system prompts and hooks are `--kind context`; fork copies hit their source once. The index rebuilds once.
 - Semantic vectors embed the exchange only, not injected context or fork copies; `cv index --semantic` re-embeds once. `/api/search?semantic=1&kind=context` is a 400.
 - `cv search` with no usable index errors at once naming the cause and fix, never scanning unasked; `--scan` (`/api/search?scan=1`) asks for the live scan.
