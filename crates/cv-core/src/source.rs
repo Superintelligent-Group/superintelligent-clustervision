@@ -1435,14 +1435,14 @@ mod tests {
         std::fs::write(w.base.join("primary.jsonl"), "primary").unwrap();
         std::fs::write(w.base.join("external.txt"), "before").unwrap();
         std::fs::create_dir(w.base.join("other")).unwrap();
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
+        let status = w
+            .command(std::env::current_exe().unwrap())
             .args([
                 "--exact",
                 "source::tests::relative_reads_remain_bound_to_the_capture_directory",
                 "--nocapture",
             ])
             .env(CHILD_ROOT, &w.base)
-            .current_dir(&w.base)
             .status()
             .unwrap();
         assert!(status.success());
