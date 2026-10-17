@@ -32,6 +32,7 @@ table lists the flags, defaults, routes and MCP tool that changed.
 exit 2 with their pointers; the `cvd` and `cv-mcp` shims went in 0.16.0.
 
 - Reject premature EOF in positioned JSONL reads instead of treating missing captured bytes as a partial final record.
+- Preserve concurrent directory claims during fallback publication and restoration; retain both trees when restoration is blocked.
 
 **What reads differently** (`--json` consumers):
 - **Codex `message_count` counts prompt and reply turns**, as the parser does: no duplicated event
