@@ -368,6 +368,7 @@ impl<'a> Cursor<'a> {
             self.consume(n);
         }
     }
+    #[cfg(test)]
     pub fn borrow_range(&self, range: Range) -> Option<&[u8]> {
         let (bytes, base) = match &self.backing {
             CursorBacking::Bytes(b, base) => (*b, *base),
@@ -568,80 +569,103 @@ impl Read for Cursor<'_> {
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
-/// A grammar-only view: quoted tokens are independently validated in bounded windows, then
-/// represented by an empty string. The original source and all consumer values remain intact.
-/// Keeping punctuation, numbers and literals lets serde retain authority over JSON grammar.
-struct SyntaxReader<'a> {
-    source: &'a RangeSource<'a>,
-    cursor: Cursor<'a>,
-    plain_left: usize,
-    quotes_left: usize,
-    invalid_string: bool,
-    strict_strings: bool,
+/// A positioned range read in windows for one validation pass: the byte source behind
+/// [`validate_value`](super::super::json::validate_value) when the bytes are not in memory.
+/// Indexes are relative to the range; a read failure is remembered and ends the pass.
+struct Windowed<'s> {
+    source: &'s RangeSource<'s>,
+    range: Range,
+    buf: Vec<u8>,
+    /// Relative index of `buf[0]`.
+    start: usize,
+    error: Option<io::Error>,
 }
-impl<'a> SyntaxReader<'a> {
-    fn new(source: &'a RangeSource<'a>, range: Range) -> io::Result<Self> {
-        Ok(Self {
+impl<'s> Windowed<'s> {
+    fn new(source: &'s RangeSource<'s>, range: Range) -> Self {
+        Self {
             source,
-            cursor: source.cursor(range)?,
-            plain_left: 0,
-            quotes_left: 0,
-            invalid_string: false,
-            strict_strings: false,
-        })
+            range,
+            buf: Vec::new(),
+            start: 0,
+            error: None,
+        }
+    }
+    /// Make `i..i+len` resident when it exists; the window slides to start at `i`.
+    fn load(&mut self, i: usize, len: usize) -> bool {
+        if self.error.is_some() {
+            return false;
+        }
+        let end = match i.checked_add(len) {
+            Some(end) if end as u64 <= self.range.len => end,
+            _ => return false,
+        };
+        if i >= self.start && end <= self.start + self.buf.len() {
+            return true;
+        }
+        let want = (self.range.len - i as u64).min(WINDOW.max(len) as u64) as usize;
+        let window = Range {
+            offset: self.range.offset + i as u64,
+            len: want as u64,
+        };
+        self.buf.clear();
+        let read = self
+            .source
+            .cursor(window)
+            .and_then(|mut cursor| cursor.read_to_end(&mut self.buf));
+        match read {
+            Ok(n) if n == want => {
+                self.start = i;
+                true
+            }
+            Ok(_) => {
+                self.error = Some(io::Error::new(io::ErrorKind::UnexpectedEof, "source was truncated"));
+                false
+            }
+            Err(error) => {
+                self.error = Some(error);
+                false
+            }
+        }
     }
 }
-impl Read for SyntaxReader<'_> {
-    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
-        if output.is_empty() {
-            return Ok(0);
+impl Windowed<'_> {
+    fn get(&mut self, i: usize) -> Option<u8> {
+        self.load(i, 1).then(|| self.buf[i - self.start])
+    }
+}
+impl super::super::json::Bytes for Windowed<'_> {
+    fn get(&mut self, i: usize) -> Option<u8> {
+        self.load(i, 1).then(|| self.buf[i - self.start])
+    }
+    fn slice(&mut self, i: usize, len: usize) -> Option<&[u8]> {
+        self.load(i, len)
+            .then(|| &self.buf[i - self.start..i - self.start + len])
+    }
+    fn utf8(&mut self, i: usize, end: usize) -> bool {
+        if i >= self.start && end <= self.start + self.buf.len() {
+            return std::str::from_utf8(&self.buf[i - self.start..end - self.start]).is_ok();
         }
-        if self.quotes_left > 0 {
-            let n = self.quotes_left.min(output.len());
-            output[..n].fill(b'"');
-            self.quotes_left -= n;
-            return Ok(n);
-        }
-        if self.plain_left == 0 {
-            let bytes = self.cursor.fill_buf()?;
-            if bytes.is_empty() {
-                return Ok(0);
-            }
-            self.plain_left = memchr::memchr(b'"', bytes).unwrap_or(bytes.len());
-            if self.plain_left == 0 {
-                let string = match self.cursor.string() {
-                    Ok(string) => string,
-                    Err(error) if error.kind() == io::ErrorKind::InvalidData => {
-                        self.invalid_string = true;
-                        return Err(error);
-                    }
-                    Err(error) => return Err(error),
-                };
-                let valid = if let Some(bytes) = self.cursor.borrow_range(string) {
-                    serde_json::from_slice::<&serde_json::value::RawValue>(bytes).is_ok()
-                        && (!self.strict_strings || super::super::json::value_compatible(bytes))
-                } else {
-                    let mut body = self.source.cursor(string.body())?;
-                    let valid = super::super::json::validate_body(&mut body, self.strict_strings).is_ok();
-                    if let Some(kind) = body.read_error {
-                        return Err(io::Error::new(kind, "reading JSON string syntax"));
-                    }
-                    valid
-                };
-                if !valid {
-                    self.invalid_string = true;
-                    return Err(invalid("invalid JSON string syntax"));
-                }
-                self.quotes_left = 2;
-                return self.read(output);
+        let body = Range {
+            offset: self.range.offset + i as u64,
+            len: (end - i) as u64,
+        };
+        match self
+            .source
+            .cursor(body)
+            .and_then(|mut cursor| super::super::jsonl::ranges::valid_utf8(&mut cursor))
+        {
+            Ok(valid) => valid,
+            Err(error) => {
+                self.error = Some(error);
+                false
             }
         }
-        let bytes = self.cursor.fill_buf()?;
-        let n = output.len().min(self.plain_left).min(bytes.len());
-        output[..n].copy_from_slice(&bytes[..n]);
-        self.cursor.consume(n);
-        self.plain_left -= n;
-        Ok(n)
+    }
+    fn number(&mut self, i: usize, end: usize, strict: bool) -> bool {
+        if let Some(token) = self.slice(i, end - i) {
+            return super::super::json::number_accepted(token, strict);
+        }
+        false
     }
 }
 
@@ -657,171 +681,65 @@ pub(crate) enum Validation {
 
 impl<'a> RangeSource<'a> {
     /// Accept `range` under `validation`, returning the value's range without its surrounding
-    /// JSON whitespace, or None when it is not accepted. Bytes in memory are checked in one pass
-    /// that also indexes long fields; positioned bytes are checked in bounded windows.
+    /// JSON whitespace, or None when it is not accepted. The one validator runs over the bytes in
+    /// memory, or over the positioned range in windows; it indexes long fields as it goes.
     pub(crate) fn accept(&self, range: Range, validation: Validation) -> Result<Option<Range>> {
-        if let Validation::Cached = validation {
-            return Ok(Some(range));
-        }
+        let strict = match validation {
+            Validation::Cached => return Ok(Some(range)),
+            Validation::Value => true,
+            Validation::Syntax => false,
+        };
+        Ok(self.validated(range, strict, 0)?.map(|(start, end)| Range {
+            offset: range.offset + start as u64,
+            len: (end - start) as u64,
+        }))
+    }
+    /// [`validate_value`](super::super::json::validate_value) over the range's bytes, remembering
+    /// every long string and container for later selection.
+    fn validated(&self, range: Range, strict: bool, depth: usize) -> Result<Option<(usize, usize)>> {
+        anyhow::ensure!(self.contains(range)?, "JSON range outside source");
+        let index = |kind: u8, start: usize, end: usize| {
+            let (start, end) = (start as u64, end as u64);
+            if end - start > if kind == b'"' { INLINE_MAX as u64 } else { SKIP_MIN } {
+                self.index.remember(range.offset + start, range.offset + end);
+            }
+        };
         if let Some(bytes) = self.borrow(range) {
-            let lead = bytes
-                .iter()
-                .take_while(|b| super::super::json::is_whitespace(b))
-                .count();
-            let trimmed = super::super::json::trim(&bytes[lead..]);
-            let value = Range {
-                offset: range.offset + lead as u64,
-                len: trimmed.len() as u64,
-            };
-            let Ok(text) = std::str::from_utf8(trimmed) else {
-                return Ok(None);
-            };
-            let valid = match validation {
-                Validation::Cached => unreachable!(),
-                Validation::Value => super::super::json::validate_value(text, |start, end| {
-                    let (start, end) = (start as u64, end as u64);
-                    if end - start
-                        > if trimmed[start as usize] == b'"' {
-                            INLINE_MAX as u64
-                        } else {
-                            SKIP_MIN
-                        }
-                    {
-                        self.index.remember(value.offset + start, value.offset + end);
-                    }
-                }),
-                Validation::Syntax => serde_json::from_str::<&serde_json::value::RawValue>(text).is_ok(),
-            };
-            return Ok(valid.then_some(value));
+            let span = |start, end| index(bytes[start], start, end);
+            return Ok(match std::str::from_utf8(bytes) {
+                Ok(text) => super::super::json::validate_value(
+                    &mut super::super::json::Text(text.as_bytes()),
+                    strict,
+                    depth,
+                    span,
+                ),
+                Err(_) => super::super::json::validate_value(&mut &bytes[..], strict, depth, span),
+            });
         }
-        let valid = match validation {
-            Validation::Cached => unreachable!(),
-            Validation::Value => self.validate(range)?,
-            Validation::Syntax => self.syntax(range)?,
-        };
-        if !valid {
-            return Ok(None);
+        let mut windowed = Windowed::new(self, range);
+        let mut kinds = Vec::new();
+        let accepted = super::super::json::validate_value(&mut windowed, strict, depth, |start, end| {
+            // The first byte of a span is in the window that found its end only for strings;
+            // containers are remembered after their close, so note their kind by position.
+            kinds.push((start, end));
+        });
+        if let Some(error) = windowed.error {
+            return Err(error.into());
         }
-        Ok(Some(self.cursor(range)?.value()?))
-    }
-    /// Validate grammar and whole-range UTF-8 once. Export archives use this boundary before
-    /// validating individual conversations with Value's independently reset recursion budget.
-    fn syntax(&self, range: Range) -> Result<bool> {
-        self.syntax_with_strings(range, false)
-    }
-    fn syntax_with_strings(&self, range: Range, strict_strings: bool) -> Result<bool> {
-        use serde::Deserialize;
-        self.check_identity()?;
-        let mut reader = SyntaxReader::new(self, range)?;
-        reader.strict_strings = strict_strings;
-        let result = {
-            let mut decoder = serde_json::Deserializer::from_reader(&mut reader);
-            serde::de::IgnoredAny::deserialize(&mut decoder).and_then(|_| decoder.end())
-        };
-        if let Err(error) = result {
-            self.check_identity()?;
-            if reader.invalid_string {
-                return Ok(false);
+        if accepted.is_some() {
+            for (start, end) in kinds {
+                if let Some(kind) = windowed.get(start) {
+                    index(kind, start, end);
+                }
             }
-            if error.is_io() {
-                return Err(error.into());
-            }
-            return Ok(false);
         }
-        let valid = super::super::jsonl::ranges::valid_utf8(&mut self.cursor(range)?)?;
-        self.check_identity()?;
-        Ok(valid)
+        Ok(accepted)
     }
 
-    /// Scalar/depth validation after the syntax boundary: Value's finite numbers, paired
-    /// surrogates and nesting limit, from `depth` levels already open.
+    /// Scalar/depth validation of a value already accepted by grammar: Value's finite numbers,
+    /// paired surrogates and nesting limit, from `depth` levels already open.
     pub fn accepts_value_at_depth(&self, range: Range, depth: usize) -> Result<bool> {
-        if let Some(bytes) = self.borrow(range) {
-            return Ok(super::super::json::value_compatible_at_depth_with(
-                bytes,
-                depth,
-                |start, end| {
-                    let (start, end) = (start as u64, end as u64);
-                    if end - start
-                        > if bytes[start as usize] == b'"' {
-                            INLINE_MAX as u64
-                        } else {
-                            SKIP_MIN
-                        }
-                    {
-                        self.index.remember(range.offset + start, range.offset + end);
-                    }
-                },
-            ));
-        }
-        self.accepts_value_parts(range, depth, false)
-    }
-    fn accepts_value_parts(&self, range: Range, mut depth: usize, strings_accepted: bool) -> Result<bool> {
-        let mut cursor = self.cursor(range)?;
-        loop {
-            cursor.whitespace()?;
-            match cursor.peek()? {
-                None => break,
-                Some(b'"') => {
-                    let string = cursor.string()?;
-                    if strings_accepted {
-                        continue;
-                    }
-                    let valid = if let Some(bytes) = cursor.borrow_range(string) {
-                        super::super::json::value_compatible(bytes)
-                    } else {
-                        let mut body = self.cursor(string.body())?;
-                        let valid = super::super::json::validate_body(&mut body, true).is_ok();
-                        if let Some(kind) = body.read_error {
-                            return Err(io::Error::new(kind, "reading JSON string").into());
-                        }
-                        valid
-                    };
-                    if !valid {
-                        return Ok(false);
-                    }
-                }
-                Some(b'{' | b'[') => {
-                    depth += 1;
-                    if depth >= 128 {
-                        return Ok(false);
-                    }
-                    cursor.consume(1);
-                }
-                Some(b'}' | b']') => {
-                    depth = depth.checked_sub(1).context("unvalidated JSON nesting")?;
-                    cursor.consume(1);
-                }
-                Some(b'-' | b'0'..=b'9') => {
-                    let number = cursor.value()?;
-                    let valid = if let Some(bytes) = cursor.borrow_range(number) {
-                        super::super::json::value_compatible(bytes)
-                    } else {
-                        match serde_json::from_reader::<_, serde_json::Number>(self.cursor(number)?) {
-                            Ok(_) => true,
-                            Err(e) if e.is_io() => return Err(e.into()),
-                            Err(_) => false,
-                        }
-                    };
-                    if !valid {
-                        return Ok(false);
-                    }
-                }
-                Some(_) => cursor.consume(1),
-            }
-        }
-        Ok(true)
-    }
-    pub fn validate(&self, range: Range) -> Result<bool> {
-        let result = self.syntax_with_strings(range, true).and_then(|syntax| {
-            if syntax {
-                self.accepts_value_parts(range, 0, true)
-            } else {
-                Ok(false)
-            }
-        });
-        self.check_identity()?;
-        result
+        Ok(self.validated(range, true, depth)?.is_some())
     }
     /// Explicit materialization is for demanded typed metadata/output, not structural traversal.
     pub fn materialize<T: serde::de::DeserializeOwned>(&self, range: Range) -> Result<T> {
@@ -1117,12 +1035,6 @@ mod acceptance_tests {
             let source = RangeSource::open(&path).unwrap();
             let expected = serde_json::from_str::<serde_json::Value>(&case).is_ok();
             assert_eq!(
-                source.syntax(source.range()).unwrap() && source.accepts_value_at_depth(source.range(), 0).unwrap(),
-                expected,
-                "separate acceptance: {} bytes",
-                case.len()
-            );
-            assert_eq!(
                 source.accept(source.range(), Validation::Value).unwrap().is_some(),
                 expected,
                 "{} bytes",
@@ -1177,7 +1089,7 @@ mod acceptance_tests {
         }
         std::fs::write(&path, b"{\"ignored\":\"\xff\"}").unwrap();
         let invalid = RangeSource::open(&path).unwrap();
-        assert!(!invalid.syntax(invalid.range()).unwrap());
+        assert!(invalid.accept(invalid.range(), Validation::Syntax).unwrap().is_none());
         std::fs::remove_file(path).unwrap();
     }
 }
@@ -1191,9 +1103,9 @@ mod io_tests {
         let text = format!("  \"{}\"  ", "\\n\\\"".repeat(WINDOW));
         std::fs::write(&path, &text).unwrap();
         let source = RangeSource::open(&path).unwrap();
-        assert!(source.validate(source.range()).unwrap());
-        let expected = source.cursor(source.range()).unwrap().value().unwrap();
+        let expected = source.accept(source.range(), Validation::Value).unwrap().unwrap();
         assert!(source.index.get(expected.offset).is_some());
+        assert_eq!(source.cursor(source.range()).unwrap().value().unwrap(), expected);
         assert_eq!(source.cursor(source.range()).unwrap().value().unwrap(), expected);
         let bounded = Range {
             offset: expected.offset,
@@ -1209,7 +1121,7 @@ mod io_tests {
         let encoded = serde_json::to_string(&"x".repeat(WINDOW * 3)).unwrap();
         std::fs::write(&path, &encoded).unwrap();
         let source = RangeSource::open(&path).unwrap();
-        assert!(source.validate(source.range()).unwrap());
+        assert!(source.accept(source.range(), Validation::Value).unwrap().is_some());
         let mut callbacks = 0;
         let result = source.string_chunks(source.range(), &mut |_| {
             callbacks += 1;
@@ -1399,22 +1311,21 @@ mod syntax_tests {
     }
 
     #[test]
-    fn grammar_reader_preserves_a_late_io_failure() {
+    fn a_source_truncated_during_validation_is_a_read_error_not_a_rejection() {
         let path = std::env::temp_dir().join(format!("cv-syntax-io-{}", uuid::Uuid::new_v4()));
         std::fs::write(&path, format!("[null,\"{}\"]", "a".repeat(WINDOW * 3))).unwrap();
         let source = RangeSource::open(&path).unwrap();
-        let mut reader = SyntaxReader::new(&source, source.range()).unwrap();
-        assert_eq!(reader.read(&mut [0; 6]).unwrap(), 6);
+        let mut windowed = Windowed::new(&source, source.range());
+        assert_eq!(super::super::super::json::Bytes::get(&mut windowed, 0), Some(b'['));
         std::fs::OpenOptions::new()
             .write(true)
             .open(&path)
             .unwrap()
             .set_len(1)
             .unwrap();
-        let mut parser = serde_json::Deserializer::from_reader(&mut reader);
-        let error = serde::de::IgnoredAny::deserialize(&mut parser).unwrap_err();
-        assert!(error.is_io());
-        assert!(!reader.invalid_string);
+        assert!(super::super::super::json::validate_value(&mut windowed, true, 0, |_, _| {}).is_none());
+        assert!(windowed.error.is_some());
+        assert!(source.accept(source.range(), Validation::Value).is_err());
         std::fs::remove_file(path).unwrap();
     }
 
@@ -1459,7 +1370,7 @@ mod syntax_tests {
             std::fs::write(&path, &bytes).unwrap();
             let source = RangeSource::open(&path).unwrap();
             assert_eq!(
-                source.syntax(source.range()).unwrap(),
+                source.accept(source.range(), Validation::Syntax).unwrap().is_some(),
                 oracle(&bytes),
                 "{} bytes: {:?}",
                 bytes.len(),
