@@ -93,6 +93,7 @@ APFS clone of 5,421 sessions, Claude 38 GB, Codex 40 GB compressed; live: ~7,000
 ### All changes
 
 **Reading**
+- Schema includes `hook_ledger` among lane status sources and documents returned lanes; runtime lane JSON is unchanged.
 - Cursor Agent CLI chat and ACP blob stores are read: prompts, replies, tool calls, summaries, modes and lineage; numeric modes read as names.
 - Untitled sessions are titled by their first prompt everywhere (index and scan hits, labels, Markdown, share, archive), never injected AGENTS.md or environment context.
 - `ls --json --enrich` `display_title` uses the row's `title` when present and never picks harness-injected turns such as Codex AGENTS.md instructions.
