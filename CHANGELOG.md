@@ -19,12 +19,14 @@ table lists the flags, defaults, routes and MCP tool that changed.
 | `POST /api/task/{id}/reopen` | gone (410): a closed task stays closed; open a new task and note the old id |
 | MCP `hook` | gone; a call points at `hooks_install` (it read Claude Code's hook JSON on stdin, so a call did nothing) |
 | `cv search` with no usable index scanned transcripts live | an error naming the cause and the fix; `cv search --scan` (`/api/search?scan=1`) asks for the live scan |
+| Codex plain rollouts over 8 MiB had extrapolated discovery counts | `message_count: 0` means not counted; compressed rollouts are counted in full; indexing supplies exact catalog counts |
 | `cv search` matched injected files, system prompts and hooks | matches the exchange; `--kind context` (`/api/search?kind=context`) for those, `--kind all` for both |
 | `/api/search?semantic=1&kind=context` | 400: vectors embed the exchange only |
 | `cv port --thinking native\|text\|drop`, default `native`; `cv rewind` copied reasoning byte for byte | `--thinking portable` on `port`, `rewind`, `splice`, `pack`; `port` and `rewind` default `native` when every recorded model is `claude-*`, else `portable` |
 | `prune --drop-thinking` left an inline marker per flattened block | omits the block; `cv cat <new-id> <record-uuid>#think<i>` returns it from the sidecar |
-| `prune --to <taken id>`; `dataset`, `pack`, `share`, `distill --pack`, `rewind`, `adopt` onto an existing name wrote into it | exit 2, nothing written; `--force` (`prune`, `dataset`, `pack`, `share`, `distill`) replaces by atomic rename |
-| `cv index` exit 1 when any session was unreadable | exit 0 with a warning count; `--strict` keeps the failure, `--json` lists `unreadable` |
+| `prune --to <taken id>`; `dataset`, `pack`, `share`, `distill --pack` onto an existing name wrote into it | exit 2, nothing written; `--force` (`prune`, `dataset`, `pack`, `share`, `distill`) replaces by atomic rename |
+| `rewind --to` and `adopt` refused a taken target with exit 1 | exit 2; `adopt --force` still replaces; rewind requires another id |
+| `cv index` exit 1 when any session was unreadable | exit 0 with warnings when some sessions succeed; all unreadable still fails; `--strict` fails on any; `--json` lists `unreadable` |
 | `cv index --semantic --subagents` | a usage error before anything is written: run the two separately |
 | a pre-binary `embeddings.json` semantic store | not read or migrated; `cv index --semantic` rebuilds |
 
@@ -32,9 +34,10 @@ table lists the flags, defaults, routes and MCP tool that changed.
 exit 2 with their pointers; the `cvd` and `cv-mcp` shims went in 0.16.0.
 
 **What reads differently** (`--json` consumers):
-- **Codex `message_count` counts prompt and reply turns**, as the parser does: no duplicated event
+- **Codex `message_count` counts logical turns**, as the parser does: no duplicated event
   echoes, injected instructions or inherited history. OpenCode, Goose, Hermes, Devin and Qwen
-  discovery counts match their parsers too; cached counts refresh once.
+  discovery counts match their parsers too; cached counts refresh once. Plain Codex rollouts over
+  8 MiB report 0 until counted, replacing the old extrapolation.
 - **An untitled session's `title` is its first exchange prompt**, in index and scan hits, labels,
   Markdown, share and archive, never an injected AGENTS.md or environment turn; `ls --json --enrich`
   `display_title` prefers the row's `title`.
@@ -63,7 +66,8 @@ exit 2 with their pointers; the `cvd` and `cv-mcp` shims went in 0.16.0.
   to use. A harness-qualified id (`claude:abc`) discovers only that harness on a catalog miss; id
   prefixes stay case-sensitive.
 - `cv serve` answers 400 to malformed numeric parameters (`/api/sessions?limit=abc` was ignored),
-  framing, headers and authorities, and to task POSTs that are not JSON within the body limit.
+  framing, headers and authorities. Task POSTs reject invalid JSON (400), oversized bodies (413),
+  and a non-JSON media type or forbidden origin (403).
   `GET /api/session/{harness}/{id}/export` downloads the complete session as Markdown or OpenSession.
 - `ls --json --limit 0` prints `[]` after argument validation without touching the inventory;
   `cv index --json` prints `{indexed, path, unreadable: [{id, harness, reason}]}`.
@@ -80,15 +84,16 @@ APFS clone of 5,421 sessions, Claude 38 GB, Codex 40 GB compressed; live: ~7,000
   last pass stopped. A full build from an empty home: 866 s at a 715 MB footprint frozen; 966 s,
   RSS 3.4 GB live. Unchanged afterwards: 0.4-0.8 s frozen, 1.0-1.6 s live.
 - The first fleet read rediscovers every harness (the catalog's interpretation version changed) and
-  prints one stderr note suggesting `cv index`: `cv ls`, first run, frozen, 158-186 s. Do not pay it
-  inside an agent's MCP call.
-- Counts, events, search and usage each reread once to write their freshness record; affordance
-  counts (`has:`) are recounted (Claude checkpoints, OpenCode turns); watch cursors record file
-  identities on their next pass.
+  may print a stderr note suggesting `cv index` when the old catalog records its interpretation
+  version: `cv ls`, first run, frozen, 158-186 s. Do not pay it inside an agent's MCP call.
+- Indexing refreshes counts, events and search baselines together; usage refreshes on its first
+  token-statistics read. Affordance counts (`has:`) are recounted (Claude checkpoints, OpenCode
+  turns); watch cursors record file identities on their next pass.
 - `cv search --semantic` needs `cv index --semantic` once more: vectors embed the exchange only and
   a pre-binary `embeddings.json` store is no longer read (not measured).
-- The task log and catalog open with no migration step; a copied or moved `CLUSTERVISION_HOME`
-  keeps its full-text index.
+- The task log needs no migration. The catalog upgrades automatically: legacy counts and watch
+  tables are recreated, cache columns added and discovery invalidated. No manual migration command
+  is needed. Moving a home preserves its index when transcript paths and identities stay valid.
 
 ### All changes
 

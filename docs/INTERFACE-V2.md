@@ -16,11 +16,12 @@ the same thing on every command that has it; a JSON key is spelled one way; a me
 
 *From the 2026-10 parsimony review, which measured cv at 110K product lines growing 20K a month.
 It is the direction every change steers by: a change that moves away from it needs a reason
-written next to it. The 0.17 tree is 103.3K product lines (`python3 -I tools/check-size.py`),
+written next to it. The reviewed 0.17 tree is 102.4K product lines (`python3 -I tools/check-size.py`),
 pinned per crate and per module in `tools/size-budget.txt`; a budget only rises as a reviewed
 decision and ratchets down as code shrinks.*
 
-**Three crates, one binary, one API, one UI, 37 commands, two reshape primitives.**
+**Three product libraries, one binary, one API, one UI, 37 commands, two reshape primitives.**
+The workspace also contains the CLI crate and `cv-testkit`.
 
 - `cv-core`: IR, adapters, emit, the read API that every door maps onto, tasks, lanes, watch.
   `cv-search` stays the one satellite only because tantivy does not belong inside the dependency
@@ -69,8 +70,9 @@ written beside the codec, not derived from it (deferred to 0.18). `derive` does 
 1 MiB), `rewind.rs` 1,001 with its own owned copier, `adopt` 248 in `cv`. `loom::Composition`
 (74 lines) still composes splice outside the emitter. Message windowing is written in
 `api::WindowSink`, `cv/src/cmd/view.rs` (the text renderer resolves `--first/--last/--range` in
-its own pass) and `cv/src/cmd/pack.rs`; the search entry point is spelled twice (`cmd/search.rs`,
-`cmd/serve.rs`). The clap tree in `cv/src/main.rs` is 1,605 lines. The task reducer is 664 lines
+its own pass) and `cv/src/cmd/pack.rs`. CLI and HTTP search now share
+`cv_search::Searcher::search`; each door renders its own response. The clap tree in
+`cv/src/main.rs` is 1,605 lines. The task reducer is 664 lines
 plus 224 of model inside a 2,182-line `task` module; `lanes.jsonl` is stored state (hook stops
 arrive before transcripts). The manual is sixteen pages; the CLI smoke file is 3,847 lines.
 
@@ -78,9 +80,10 @@ arrive before transcripts). The manual is sixteen pages; the CLI smoke file is 3
 
 ## 1. Commands
 
-Grouped help (`cv --help` shows every command under these headings; nothing is hidden).
+Grouped help (`cv --help` shows every current command; removed names are hidden error stubs).
 **Read** commands are read-only over existing sessions; **Reshape** commands produce a NEW
-session id from existing ones and never touch the source (`resume` launches one); **Export**
+session from existing ones and never touch the source (`adopt` copies an agent under its existing
+id into another parent; `resume` prints a launch hint or launches an existing session); **Export**
 commands produce something that is not a session; **Fleet & live** is multi-agent coordination,
 live views and the servers; **System** is cv's own state and reference.
 
@@ -112,22 +115,22 @@ GONE: it errors with a pointer at its replacement and exits 2. The old → new t
 
 **Windows** (on `show`, `export` and MCP `show`; all 0-based, end-exclusive): `--first N`,
 `--last N`, `--range A..B` (`A..` to the end, `..B` from the start), `--around N [--context K]`
-(default 5), `--max-bytes N` (stop after N bytes of rendered output and print `… continue with
---range <next>..`). Only one of `--first/--last/--range/--around` may be given. `prune --keep A..B`
+(default 5), `--max-bytes N` (a message-boundary budget, with the first selected message always admitted; print
+`… continue with --range <next>..` when more remain). Only one of `--first/--last/--range/--around` may be given. `prune --keep A..B`
 and `splice <id>:A..B` use the same `A..B` grammar.
 
 **Everywhere else:** `--harness <h>` (filter or target, never "--to"), `--cwd <dir>`, `--out <dir>`
-(write somewhere other than the real store), `--json` (machine output; every command that prints a
-list or a session has it), `--limit N`, `--fresh` (bypass the catalog), `--all` (include what is
+(write somewhere other than the real store), `--json` (machine output where supported), `--limit N`, `--fresh` (bypass the catalog), `--all` (include what is
 hidden by default: finished lanes, archived sessions, terminal tasks).
 
-**Ids:** every command accepts a unique id prefix or `harness:id`. An ambiguous prefix lists the
+**Session selectors:** accept a unique id prefix or `harness:id`. An ambiguous prefix lists the
 candidates as `harness:full-id` lines and exits 2.
 
 ## 3. JSON — snake_case, one shape per noun
 
-- Every `--json` output and every MCP payload uses **snake_case** keys. Timestamps are
-  `DateTime::to_rfc3339()` — UTC spelled `+00:00`, never `Z` — on every door.
+- cv-defined JSON fields use **snake_case**. Opaque `principal`, harness extras, tool arguments
+  and native carriers preserve their own keys. Timestamps are RFC 3339: session rows use
+  `DateTime::to_rfc3339()` (`+00:00`); serialized IR sessions/messages use chrono serde (`Z`).
 - A **session row** (from `ls`, `search`, `/api/sessions`, …) always has the same keys:
   `id, harness, path, cwd, title, created_at, updated_at, message_count, size_bytes`
   (+ `display_title`, `git` under `--enrich`; + `score`, `snippet`, `agent_id`, `parent_id`,
@@ -191,12 +194,13 @@ under `⚠ lost`.
 
 Tools are **generated from the CLI**: `cv mcp` reads its own clap `Command` at startup and
 registers one tool per Read/Reshape/Export/System command and subcommand and per `cv task`
-subcommand (a parent with no arguments of its own is not a tool), named after the command with a
+subcommand (bare parents and the stdin-only `hook` are excluded), named after the command with a
 subcommand joined by `_`. Each argument is a JSON-schema property with the clap help as its
 description; positionals map to properties named after the argument; repeatable arguments accept a
 scalar or an array; `long` carries the actual flag spelling. A call runs the same executable as
 `cv <cmd> <args> --json` (or without `--json` for commands that have no JSON form) and returns
-stdout; a non-zero exit returns stderr as the error. Over MCP, transcript `show` defaults to
+stdout as the first text block and nonempty successful stderr as a second block; a non-zero exit
+returns stderr as the error (or stdout when stderr is empty). Over MCP, transcript `show` defaults to
 `last: 50` and `max_bytes: 200000` when no window, byte cap or `pre_compaction` is supplied; a
 `kind` row view suppresses these defaults. `await_omen` and `observe_stream` keep hand-written
 schemas. The 0.11 hand-written session tools are gone (`read_session` → `show`, `search_sessions`

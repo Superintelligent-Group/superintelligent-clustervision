@@ -7,13 +7,14 @@ build differs only in its byte source.** Every family is on it as of 0.17.
 
 **Byte source.** `store::jsonl::for_each_line(source, file, from, to, visit)` yields each
 physical line once as a `Line { at, end, complete, view }`, with `view: Option<JsonView>` (None
-for blank, non-UTF-8 or rejected lines). Mapped builds borrow lines from one mapping; positioned
+for blank, non-UTF-8 or rejected lines). Mapped builds borrow lines from successive 8 MiB windows (grown for a longer line); positioned
 builds (and a failed mapping) read lines up to 64 KiB into one buffer and leave a giant line in
 place as a positioned view. That `cfg` is the only one a reader needs; `JsonView` has the same
-API over borrowed, positioned and owned (`(&Value).into()`, for strings with no file) values.
+API with two arms: a source view over `RangeSource` (mapped/borrowed bytes or positioned reads),
+and an owned `Value` view (`(&Value).into()`, for strings with no file).
 Each line is validated once by `store::json::validate_value` (exactly serde `Value` acceptance,
-property-tested against serde), which also indexes long strings and containers so every later
-field selection skips them in O(1). Lines are trimmed of JSON whitespace (space, tab, LF, CR) only.
+property-tested against serde). A bounded endpoint index lets cached long strings and containers
+be skipped in O(1); an evicted endpoint can require rescanning. Lines are trimmed of JSON whitespace (space, tab, LF, CR) only.
 
 **Decoder.** One function per format, `record(view, demand) -> session facts + Option<Message>`
 (Claude: `harness/claude/record.rs`). It selects the fields any record kind reads in one pass

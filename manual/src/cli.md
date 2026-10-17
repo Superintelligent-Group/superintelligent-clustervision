@@ -66,7 +66,7 @@ commands have it is in the [reference](reference.md)):
 | `--limit <n>` | how many rows/records |
 | `--all` | include what is hidden by default |
 | `--thinking <mode>` | reasoning policy: `native`, `portable`, `text`, `drop`; rewind accepts native/portable |
-| `--strict` | fail if a loss the target format *could* have carried happens |
+| `--strict` | `port`: fail on unexpected fidelity loss; `index`: fail on any unreadable session |
 
 **`--thinking` and replay.** Thinking blocks come in two shapes. A few carry plaintext. Most carry
 only a provider **signature** — an opaque, vendor-bound blob with no text at all (on one real
@@ -139,7 +139,10 @@ Only **one** of `--first`/`--last`/`--range`/`--around` may be given; clap refus
 … continue with --range 4..
 ```
 
-so paging a huge session is a loop of copy-paste with no arithmetic. Messages outside the window are never resolved, so a windowed view of a multi-gigabyte transcript reads only the bytes it shows.
+The byte budget cuts at message boundaries and always admits the first selected message; headers,
+JSON envelopes and continuation hints can add bytes. It is not a hard response-size limit.
+Messages outside the window keep lazy payloads, but validation, metadata and `--last` selection
+can still traverse the source beyond the displayed window.
 
 Two relatives use the same `A..B` grammar without being read-windows: [`cv prune --keep A..B`](#cv-prune) selects the turns to *keep* in a new session, and [`cv splice`](#cv-splice)'s specs are `<id>:A..B`.
 
@@ -987,7 +990,7 @@ cv schema --commands         # every command, grouped, with its one-line about
 cv schema --commands --json  # the whole tree with every argument — what generates the MCP tools
 ```
 
-`cv schema --json` publishes five shapes: `session_row` (keys, `enrich_keys`, `search_extra_keys`, timestamps), `session` (fields, `lineage`, `extra`), `message` (fields, and the `role`/`kind`/`origin`/`usage` vocabularies), `block` (its `type` tag and every type), and `query`. `cv schema --commands --json` emits, for every visible command and subcommand, `{ name, group, about, args: [{ name, kind, value_type, possible_values?, default?, help, required }] }` — produced from clap itself, which is why [the MCP tools](mcp.md) can be generated rather than hand-maintained and so cannot drift from the CLI.
+`cv schema --json` publishes eight shapes: `session_row` (keys, `enrich_keys`, `search_extra_keys`, timestamps), `session` (fields, `lineage`, `extra`), `message` (fields, and the `role`/`kind`/`origin`/`usage` vocabularies), `block` (its `type` tag and every type), `prompt_row`, `lane`, `deferral`, and `query`. `cv schema --commands --json` emits, for every visible command and subcommand, `{ name, group, about, args: [{ name, kind, value_type, possible_values?, default?, help, required }] }` — produced from clap itself, which is why [the MCP tools](mcp.md) can be generated rather than hand-maintained and so cannot drift from the CLI.
 
 This command used to be called `cv query`, which read like it ran one. It doesn't; it describes the language.
 

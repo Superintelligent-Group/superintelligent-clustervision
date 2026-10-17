@@ -111,9 +111,9 @@ home the process may not write (a sandbox's deny-write rule, a read-only copy) i
 listed and shown from the index and catalog already there.
 
 `--scan` asks for the live scan instead, and says so on stderr: case-insensitive substring
-matching over only the first 256 KiB of searchable content per session, in discovery order,
+matching over only the first 256 KiB of exchange content per session, in discovery order,
 with no Tantivy operators and no BM25 ranking. Invalid query syntax is an error, never a
-reason to scan.
+reason to scan. `--kind` requires indexed full-text search; it cannot be combined with `--scan`.
 
 > Older releases also kept a SQLite full-text index as a middle tier; it's
 > retired (tantivy is canonical). If a stale `index.sqlite` lingers in your
