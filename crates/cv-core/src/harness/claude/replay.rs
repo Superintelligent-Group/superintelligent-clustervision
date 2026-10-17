@@ -151,7 +151,7 @@ fn empty_content(source: &RangeSource, row: Range) -> Result<bool> {
 
 fn rewrite(bytes: ByteSource, mode: crate::emit::ThinkingMode, empties: bool) -> Result<(ByteStage, Changes)> {
     let bytes = Arc::new(bytes);
-    let source = RangeSource::private(bytes.clone())?;
+    let source = RangeSource::private(&bytes)?;
     let mut reserved = HashSet::new();
     let mut invalid = Vec::new();
     let mut seen = HashSet::new();

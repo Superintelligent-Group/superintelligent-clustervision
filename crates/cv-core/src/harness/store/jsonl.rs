@@ -228,7 +228,7 @@ fn mapped_lines(
 pub(crate) struct Records<'s> {
     source: &'s crate::json::JsonSource,
     file: &'s File,
-    context: Option<document::range::RangeSource>,
+    context: Option<document::range::RangeSource<'static>>,
     buffer: Vec<u8>,
 }
 
