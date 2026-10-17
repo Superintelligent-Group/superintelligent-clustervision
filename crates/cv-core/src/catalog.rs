@@ -1741,6 +1741,7 @@ pub(crate) use imp::{all_sessions, db_path, open_at, open_db, watches_for};
 /// One watched path as discovery recorded it: its identity, an optional file's stable absence
 /// (fresh until it appears), or unknown (unreadable, or modified too recently: never fresh).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(feature = "sqlite"), allow(dead_code))]
 pub(crate) enum Watched {
     Unknown,
     Absent,

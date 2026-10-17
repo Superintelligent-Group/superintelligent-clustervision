@@ -556,6 +556,7 @@ pub struct Published {
 const HEAD: usize = 4 + 8 + 1 + 5 * 8;
 
 impl Published {
+    #[cfg(feature = "sqlite")]
     fn encode(baseline: &Baseline, output: &[u8]) -> Option<Vec<u8>> {
         let stamp = baseline.stamp.as_ref()?;
         let mut bytes = Vec::with_capacity(HEAD + stamp.0.len());

@@ -3527,7 +3527,7 @@ mod tests {
             let catalog = rusqlite::Connection::open(w.cv_home.join("catalog.db")).unwrap();
             let source: String = catalog
                 .query_row(
-                    "SELECT source_path FROM event_sessions WHERE session_id='zqa'",
+                    "SELECT path FROM source_dependencies WHERE consumer='events' AND id='zqa'",
                     [],
                     |row| row.get(0),
                 )
