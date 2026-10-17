@@ -476,7 +476,7 @@ pub struct EditEvent {
 #[cfg(feature = "sqlite")]
 mod db {
     use super::*;
-    use anyhow::Result;
+    use anyhow::{Context as _, Result};
     use rusqlite::{params, Connection};
 
     /// Event-tables schema generation, stamped into the catalog's `PRAGMA user_version`.
@@ -792,7 +792,7 @@ mod db {
             params![harness, r.id],
         )?;
         crate::source::publish_in(&tx, "events", r, source, &authority(r, prov))
-            .ok_or_else(|| anyhow::anyhow!("event source baseline publication failed"))?;
+            .context("event source baseline publication failed")?;
         tx.commit()?;
         Ok(())
     }

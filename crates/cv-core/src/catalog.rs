@@ -908,7 +908,7 @@ mod imp {
             "INSERT OR REPLACE INTO affordance_counts(harness,id,path,counts) VALUES(?1,?2,?3,?4)",
             params![r.harness.as_str(), r.id, path, text],
         );
-        if written.is_ok() && crate::source::publish_in(&tx, "counts", r, source, text.as_bytes()).is_some() {
+        if written.is_ok() && crate::source::publish_in(&tx, "counts", r, source, text.as_bytes()).is_ok() {
             let _ = tx.commit();
         }
     }

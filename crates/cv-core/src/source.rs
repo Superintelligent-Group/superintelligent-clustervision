@@ -847,30 +847,27 @@ impl Table {
 #[cfg(feature = "sqlite")]
 fn open() -> Option<rusqlite::Connection> {
     let conn = crate::catalog::open_db()?;
-    ensure_table(&conn)?;
+    ensure_table(&conn).ok()?;
     Some(conn)
 }
 
 /// The table, in the one-record shape. A table of the older columns is dropped: every consumer
 /// rereads once.
 #[cfg(feature = "sqlite")]
-fn ensure_table(conn: &rusqlite::Connection) -> Option<()> {
-    let legacy: bool = conn
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('source_dependencies') WHERE name='stamp')",
-            [],
-            |row| row.get(0),
-        )
-        .ok()?;
+fn ensure_table(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    let legacy: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('source_dependencies') WHERE name='stamp')",
+        [],
+        |row| row.get(0),
+    )?;
     if legacy {
-        conn.execute_batch("DROP TABLE source_dependencies;").ok()?;
+        conn.execute_batch("DROP TABLE source_dependencies;")?;
     }
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS source_dependencies(
         consumer TEXT NOT NULL,harness TEXT NOT NULL,id TEXT NOT NULL,path TEXT NOT NULL,
         record BLOB NOT NULL,PRIMARY KEY(consumer,harness,id,path));",
     )
-    .ok()
 }
 
 /// One stored baseline, when it was published with `output`. The consumer row and this record
@@ -905,8 +902,9 @@ pub(crate) fn fresh_in(
     published_in(conn, consumer, r, output).is_some_and(|old| old.fresh(now, &mut Probe::default()))
 }
 
-/// Publish in the same transaction as SQL consumer output `output`. A failure must roll back
-/// both. Only a complete pass (its read set recorded) over a source still unchanged publishes.
+/// Publish in the same transaction as SQL consumer output `output`. A failure, returned with
+/// its reason, must roll back both. Only a complete pass (its read set recorded) over a source
+/// still unchanged publishes.
 #[cfg(feature = "sqlite")]
 pub(crate) fn publish_in(
     conn: &rusqlite::Connection,
@@ -914,32 +912,31 @@ pub(crate) fn publish_in(
     r: &SessionRef,
     baseline: &Baseline,
     output: &[u8],
-) -> Option<()> {
+) -> anyhow::Result<()> {
     ensure_table(conn)?;
     let (h, id, path) = key(r);
     conn.execute(
         "DELETE FROM source_dependencies WHERE consumer=?1 AND harness=?2 AND id=?3 AND path=?4",
         rusqlite::params![consumer, h, id, path],
-    )
-    .ok()?;
+    )?;
     let complete = baseline
         .stamp
         .as_ref()
         .is_some_and(|stamp| stamp.records().is_some_and(|records| records.reads.is_some()));
     if complete && unchanged(r, baseline) {
+        let record = Published::encode(baseline, output).ok_or_else(|| anyhow::anyhow!("baseline without a stamp"))?;
         conn.execute(
             "INSERT INTO source_dependencies(consumer,harness,id,path,record) VALUES(?1,?2,?3,?4,?5)",
-            rusqlite::params![consumer, h, id, path, Published::encode(baseline, output)?],
-        )
-        .ok()?;
+            rusqlite::params![consumer, h, id, path, record],
+        )?;
     }
-    Some(())
+    Ok(())
 }
 
 /// Forget every baseline of `consumer` on the caller's connection: its output is gone.
 #[cfg(feature = "sqlite")]
 pub(crate) fn forget_in(conn: &rusqlite::Connection, consumer: &str) -> Option<()> {
-    ensure_table(conn)?;
+    ensure_table(conn).ok()?;
     conn.execute("DELETE FROM source_dependencies WHERE consumer=?1", [consumer])
         .ok()?;
     Some(())
@@ -1000,23 +997,38 @@ pub fn invalidate(_consumer: &str, _refs: &[SessionRef]) -> bool {
 /// Publish after a consumer whose output lives outside the catalog commits it (its output is
 /// the empty row). Revalidation makes concurrent edits stale; old baselines must already have
 /// been invalidated with [`invalidate`]. SQL consumers publish atomically through `publish_in`.
+/// Each row publishes on its own: the rows returned failed, with the reason, and only their
+/// sessions are read again next pass; the rest commit together.
 #[cfg(feature = "sqlite")]
-pub fn update(consumer: &str, updates: &[Update]) {
+pub fn update(consumer: &str, updates: &[Update]) -> Vec<(SessionRef, String)> {
     if updates.is_empty() {
-        return;
+        return Vec::new();
     }
-    let Some(mut conn) = open() else { return };
-    let Ok(tx) = conn.transaction() else { return };
-    for (r, baseline) in updates {
-        if publish_in(&tx, consumer, r, baseline, b"").is_none() {
-            return;
+    let mut failed = Vec::new();
+    let mut publish = || -> anyhow::Result<()> {
+        let mut conn = open().ok_or_else(|| anyhow::anyhow!("the catalog cannot be opened"))?;
+        let mut tx = conn.transaction()?;
+        for (r, baseline) in updates {
+            let row = tx.savepoint().map_err(anyhow::Error::from).and_then(|row| {
+                publish_in(&row, consumer, r, baseline, b"")?;
+                Ok(row.commit()?)
+            });
+            if let Err(e) = row {
+                failed.push((r.clone(), format!("{e:#}")));
+            }
         }
+        Ok(tx.commit()?)
+    };
+    match publish() {
+        Ok(()) => failed,
+        Err(e) => updates.iter().map(|(r, _)| (r.clone(), format!("{e:#}"))).collect(),
     }
-    let _ = tx.commit();
 }
 
 #[cfg(not(feature = "sqlite"))]
-pub fn update(_consumer: &str, _updates: &[Update]) {}
+pub fn update(_consumer: &str, _updates: &[Update]) -> Vec<(SessionRef, String)> {
+    Vec::new()
+}
 
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {

@@ -461,7 +461,7 @@ fn sweep_decoded(dir: &Path, rebuild: bool, decoded: cv_core::handoff::Receiver)
     }
     let mut state = PlanState::load(&index, &f, dir, rebuild)?;
     let consumer = state.consumer.clone();
-    let ran = run_fed(&mut writer, &f, &consumer, available_workers(), move |feed| {
+    let mut ran = run_fed(&mut writer, &f, &consumer, available_workers(), move |feed| {
         let top = cv_core::events::Provenance::default();
         let mut ids = HashSet::new();
         let mut next = Some(first);
@@ -487,7 +487,7 @@ fn sweep_decoded(dir: &Path, rebuild: bool, decoded: cv_core::handoff::Receiver)
     })?;
     writer.commit().context("committing index")?;
     cv_core::resume::update(&ran.marks);
-    cv_core::source::update(&consumer, &ran.dependencies);
+    publish_dependencies(&mut ran, &consumer);
     Ok(Some(ran))
 }
 
@@ -536,7 +536,7 @@ fn report(swept: Swept, rebuild: bool, strict: bool) -> Result<Indexed> {
     let unread = swept.unreadable.len();
     anyhow::ensure!(
         swept.errors == unread,
-        "index incomplete: {} session(s) failed: {}; retry cv index",
+        "index incomplete: {} publication(s) failed: {}; retry cv index",
         swept.errors - unread,
         swept.first_error.as_deref().unwrap_or("unknown error")
     );
@@ -578,9 +578,10 @@ pub(crate) struct Swept {
     pub changed: usize,
     /// Requested logical sessions whose FTS documents were already fresh.
     pub unchanged: usize,
-    /// Sessions whose parse or event publication failed (successful independent work is kept).
+    /// Parses and event or search baseline publications that failed (successful independent
+    /// work is kept).
     pub errors: usize,
-    /// The first event publication failure.
+    /// The first publication failure.
     first_error: Option<String>,
     /// Sessions that could not be read, of [`Self::errors`].
     pub unreadable: Vec<Unreadable>,
@@ -877,7 +878,7 @@ fn sweep_refs(dir: &Path, refs: &[cv_core::SessionRef], rebuild: bool, subagents
         missing,
         consumer,
     } = plan;
-    let ran = run_jobs(&mut writer, &f, jobs, &consumer)?;
+    let mut ran = run_jobs(&mut writer, &f, jobs, &consumer)?;
 
     // Reap sessions that disappeared from disk since the last index (incremental only). A plain
     // refresh never reaps the folded sub-agent forest — see [`missing_ids`].
@@ -891,7 +892,7 @@ fn sweep_refs(dir: &Path, refs: &[cv_core::SessionRef], rebuild: bool, subagents
     };
     writer.commit().context("committing index")?;
     cv_core::resume::update(&ran.marks);
-    cv_core::source::update(&consumer, &ran.dependencies);
+    publish_dependencies(&mut ran, &consumer);
     compact(dir, &index, &mut writer)?;
     Ok(Swept {
         total,
@@ -1213,7 +1214,7 @@ fn body_hash(mut hash: u64, bytes: &[u8]) -> u64 {
 struct Ran {
     #[cfg(test)]
     work: SweepWork,
-    /// Event publications that failed: the catalog could not be written.
+    /// Event and search baseline publications that failed: the catalog could not be written.
     errors: usize,
     first_error: Option<String>,
     /// Sessions whose read failed: each stays out of the index until a later pass reads it.
@@ -1227,6 +1228,18 @@ struct Ran {
     dependencies: Vec<cv_core::source::Update>,
     #[cfg(all(test, feature = "probe-heap"))]
     bodies: HashMap<String, BodySummary>,
+}
+
+/// Publish the committed docs' baselines; a row that fails is an error of the pass (its session
+/// is read again next pass) and the rest stick.
+fn publish_dependencies(ran: &mut Ran, consumer: &str) {
+    for (r, why) in cv_core::source::update(consumer, &std::mem::take(&mut ran.dependencies)) {
+        let message = format!("search baseline publication failed for {} ({}): {why}", r.id, r.harness);
+        eprintln!("cv-search: {message}");
+        ran.errors += 1;
+        ran.first_error
+            .get_or_insert_with(|| cv_core::ir::truncate(&message, 512));
+    }
 }
 
 fn available_workers() -> usize {
@@ -1493,7 +1506,7 @@ fn run_fed(
                 if open.is_empty() {
                     writer.commit().context("interim commit")?;
                     cv_core::resume::update(&std::mem::take(&mut ran.marks));
-                    cv_core::source::update(consumer, &std::mem::take(&mut ran.dependencies));
+                    publish_dependencies(&mut ran, consumer);
                     since_commit = 0;
                     let mut q = queue.lock().unwrap();
                     q.draining = false;
@@ -2838,7 +2851,9 @@ pub(crate) fn index_refs(dir: &Path, refs: &[cv_core::SessionRef], catalog: bool
         dependencies.push((r.clone(), source.with_reads(&reads)));
     }
     writer.commit().context("committing index")?;
-    cv_core::source::update(&consumer, &dependencies);
+    if let Some((r, why)) = cv_core::source::update(&consumer, &dependencies).first() {
+        anyhow::bail!("publishing the search baseline of {}: {why}", r.id);
+    }
     Ok(refs.len())
 }
 
@@ -6880,6 +6895,60 @@ mod tests {
         for r in &refs {
             assert!(!cv_core::events::needs_ingest(r));
         }
+        let words = some_words(&refs);
+        assert_eq!(observe(&dir, &refs, &words), whole_sweep(&refs, &words));
+        for d in [dir, sdir] {
+            std::fs::remove_dir_all(d).ok();
+        }
+    }
+
+    /// One row's baseline publication failing loses that row only: the other sessions' baselines
+    /// commit, and the next pass reads the one session whose baseline is missing.
+    #[test]
+    fn one_failed_baseline_publication_rereads_only_its_session() {
+        let home = IsolatedHome::new();
+        let (dir, sdir) = (tmpdir(), tmpdir());
+        let fleet = resumable_fleet(&sdir, 3);
+        let refs: Vec<_> = fleet.iter().map(|(r, _)| r.clone()).collect();
+        write_heads(&fleet, 1, 1);
+        let cold = sweep(&dir, refs.clone(), false, false).unwrap();
+        assert_eq!((cold.changed, cold.errors), (refs.len(), 0));
+        let consumer = source_consumer(&dir).unwrap();
+        let conn = rusqlite::Connection::open(home.home.join("catalog.db")).unwrap();
+        conn.execute("DELETE FROM source_dependencies WHERE consumer=?1", [&consumer])
+            .unwrap();
+        conn.execute_batch(&format!(
+            "CREATE TRIGGER reject_baseline BEFORE INSERT ON source_dependencies
+             WHEN NEW.consumer='{consumer}' AND NEW.id='{}' BEGIN SELECT RAISE(ABORT, 'test'); END;",
+            refs[1].id
+        ))
+        .unwrap();
+        let reread = sweep(&dir, refs.clone(), false, false).unwrap();
+        assert_eq!(
+            (reread.changed, reread.errors),
+            (refs.len(), 1),
+            "the docs committed; one row's baseline did not"
+        );
+        let first = reread.first_error.as_deref().unwrap();
+        assert!(
+            first.contains("search baseline publication failed")
+                && first.contains(&refs[1].id)
+                && first.contains("test"),
+            "{first}"
+        );
+        assert!(
+            report(reread, false, false).is_err(),
+            "a lost publication is the pass's failure"
+        );
+        conn.execute_batch("DROP TRIGGER reject_baseline;").unwrap();
+        let retry = sweep(&dir, refs.clone(), false, false).unwrap();
+        assert_eq!(
+            (retry.changed, retry.errors),
+            (1, 0),
+            "only the unpublished session is read again"
+        );
+        let again = sweep(&dir, refs.clone(), false, false).unwrap();
+        assert_eq!((again.changed, again.work.callbacks), (0, 0));
         let words = some_words(&refs);
         assert_eq!(observe(&dir, &refs, &words), whole_sweep(&refs, &words));
         for d in [dir, sdir] {
