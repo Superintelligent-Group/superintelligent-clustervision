@@ -51,6 +51,7 @@ use super::wire::anthropic;
 use super::Adapter;
 use crate::ir::*;
 use crate::json::{InvalidJson, JsonSource, JsonView};
+use crate::source::{sqlite_sidecars, Dependencies, Probe};
 use crate::stream::{Flow, MessageSink, ParseOptions};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -90,9 +91,46 @@ impl Cline {
     }
 }
 
+/// The side files of a Cline-family task directory, every one a freshness dependency.
+pub(super) fn task_dir_dependencies(r: &SessionRef, deps: &mut Dependencies) {
+    deps.files.extend(
+        [
+            "api_conversation_history.json",
+            "ui_messages.json",
+            "task_metadata.json",
+            "history_item.json",
+        ]
+        .map(|name| r.path.join(name)),
+    );
+}
+
 impl Adapter for Cline {
     fn harness(&self) -> Harness {
         Harness::Cline
+    }
+
+    fn dependencies(&self, r: &SessionRef, _probe: &mut Probe, deps: &mut Dependencies) -> Option<()> {
+        if r.path
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().ends_with(".messages.json"))
+        {
+            let sid = r.id.split('/').next().unwrap_or(&r.id);
+            if let Some(dir) = r.path.parent() {
+                deps.files.push(dir.join(format!("{sid}.json")));
+                if !r.id.contains('/') {
+                    if let Some(data) = dir.parent().and_then(Path::parent) {
+                        for name in ["sessions.db", "cron.db", "teams.db"] {
+                            let db = data.join("db").join(name);
+                            deps.files.extend(sqlite_sidecars(&db));
+                            deps.files.push(db);
+                        }
+                    }
+                }
+            }
+            return Some(());
+        }
+        task_dir_dependencies(r, deps);
+        Some(())
     }
 
     fn roots(&self) -> Vec<PathBuf> {

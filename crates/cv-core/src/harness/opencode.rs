@@ -63,6 +63,7 @@ pub use emit::emit;
 
 use super::Adapter;
 use crate::ir::*;
+use crate::source::{is_sqlite_source, Dependencies, Probe};
 use crate::stream::{Flow, MessageSink, ParseOptions};
 use anyhow::{Context, Result};
 use serde_json::{json, Map, Value};
@@ -194,6 +195,32 @@ fn resolve_db(_data: &Path) -> Option<PathBuf> {
 impl Adapter for OpenCode {
     fn harness(&self) -> Harness {
         Harness::OpenCode
+    }
+
+    fn dependencies(&self, r: &SessionRef, probe: &mut Probe, deps: &mut Dependencies) -> Option<()> {
+        if is_sqlite_source(r)? {
+            return Some(());
+        }
+        let storage = r
+            .path
+            .ancestors()
+            .find(|p| p.file_name().is_some_and(|n| n == "session"))
+            .and_then(Path::parent)?;
+        let messages = storage.join("message").join(&r.id);
+        // Parts are keyed by the parsed message ID. Read only the ID (other fields are ignored),
+        // and enumerate only this session's own message/part directories.
+        for message in probe.list(&messages)?.iter() {
+            #[derive(serde::Deserialize)]
+            struct MessageId {
+                #[serde(default)]
+                id: String,
+            }
+            let file = fs::File::open(message).ok()?;
+            let id: MessageId = serde_json::from_reader(std::io::BufReader::new(file)).ok()?;
+            deps.directories.push(storage.join("part").join(id.id));
+        }
+        deps.directories.push(messages);
+        Some(())
     }
 
     fn roots(&self) -> Vec<PathBuf> {

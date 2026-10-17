@@ -80,6 +80,7 @@ use super::Adapter;
 use crate::ir::*;
 use crate::json::{JsonSource, JsonView};
 use crate::lazy::{Text, INLINE_MAX};
+use crate::source::{Dependencies, Probe};
 use crate::stream::{Checkpoint, Flow, MessageSink, ParseOptions};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -126,6 +127,25 @@ impl Kimi {
 impl Adapter for Kimi {
     fn harness(&self) -> Harness {
         Harness::Kimi
+    }
+
+    fn dependencies(&self, r: &SessionRef, probe: &mut Probe, deps: &mut Dependencies) -> Option<()> {
+        if let Some(root) = r
+            .path
+            .ancestors()
+            .find(|p| p.file_name().is_some_and(|n| n == "sessions"))
+            .and_then(Path::parent)
+        {
+            deps.files.push(root.join("config.toml"));
+        }
+        deps.files.push(r.path.join("meta.json"));
+        if probe.exists(&r.path.join("context.jsonl"))? {
+            // Includes rotated segments and their membership; no subagent/background recursion.
+            deps.directories.push(r.path.clone());
+        } else {
+            deps.files.push(r.path.join(format!("{}.jsonl", r.id)));
+        }
+        Some(())
     }
 
     fn roots(&self) -> Vec<PathBuf> {

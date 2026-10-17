@@ -41,6 +41,7 @@ use super::{parse_ts, Adapter};
 use crate::ir::*;
 use crate::json::{JsonSource, JsonView};
 use crate::lazy::Text;
+use crate::source::{Dependencies, Probe};
 use crate::stream::{Checkpoint, Flow, MessageSink, ParseOptions};
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -74,6 +75,44 @@ impl Grok {
 impl Adapter for Grok {
     fn harness(&self) -> Harness {
         Harness::Grok
+    }
+
+    fn dependencies(&self, r: &SessionRef, probe: &mut Probe, deps: &mut Dependencies) -> Option<()> {
+        deps.files.extend(
+            [
+                "summary.json",
+                "chat_history.jsonl",
+                "updates.jsonl",
+                "system_prompt.txt",
+                "plan.json",
+                "rewind_points.jsonl",
+            ]
+            .map(|name| r.path.join(name)),
+        );
+        // Only subagents consult sibling parent metadata. Ordinary sessions never scan a cwd
+        // group's siblings merely to establish freshness. Retain the before-read metadata:
+        // interpreting kind must not bless a later version of the summary.
+        let summary_path = r.path.join("summary.json");
+        probe.exists(&summary_path)?;
+        let subagent = JsonSource::capture(&summary_path)
+            .ok()?
+            .read_document(|view| {
+                let kind = view
+                    .get("session_kind")?
+                    .map(|kind| crate::projection::string_prefix(kind, 9))
+                    .transpose()?
+                    .flatten();
+                Ok(kind.as_deref() == Some("subagent"))
+            })
+            .ok()?;
+        if subagent {
+            let group = r.path.parent()?;
+            deps.files.push(group.to_path_buf());
+            for sibling in probe.list(group)?.iter() {
+                deps.files.push(sibling.join("subagents").join(&r.id).join("meta.json"));
+            }
+        }
+        Some(())
     }
 
     fn roots(&self) -> Vec<PathBuf> {

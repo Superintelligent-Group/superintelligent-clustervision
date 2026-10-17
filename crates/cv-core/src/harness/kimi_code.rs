@@ -96,6 +96,7 @@ use crate::harness::claude::CARRIER_KEY;
 use crate::ir::*;
 use crate::json::{JsonSource, JsonView};
 use crate::lazy::Text;
+use crate::source::{Dependencies, Probe};
 use crate::stream::{Checkpoint, Flow, MessageSink, ParseOptions};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -131,6 +132,20 @@ impl KimiCode {
 impl Adapter for KimiCode {
     fn harness(&self) -> Harness {
         Harness::KimiCode
+    }
+
+    fn dependencies(&self, r: &SessionRef, _probe: &mut Probe, deps: &mut Dependencies) -> Option<()> {
+        let (session, agent) = match (r.path.parent(), r.path.file_name().and_then(|n| n.to_str())) {
+            (Some(agents), Some(agent))
+                if agents.file_name().is_some_and(|n| n == "agents") && agent.starts_with("agent-") =>
+            {
+                (agents.parent().unwrap_or(&r.path), agent)
+            }
+            _ => (r.path.as_path(), "main"),
+        };
+        deps.files.push(session.join("state.json"));
+        deps.files.push(session.join("agents").join(agent).join("wire.jsonl"));
+        Some(())
     }
 
     fn roots(&self) -> Vec<PathBuf> {

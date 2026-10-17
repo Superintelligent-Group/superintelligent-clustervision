@@ -49,7 +49,7 @@ pub(crate) fn is_sqlite_source(r: &SessionRef) -> Option<bool> {
     }
 }
 
-fn sqlite_sidecars(path: &Path) -> [PathBuf; 2] {
+pub(crate) fn sqlite_sidecars(path: &Path) -> [PathBuf; 2] {
     ["-wal", "-journal"].map(|suffix| {
         let mut sidecar = path.as_os_str().to_os_string();
         sidecar.push(suffix);
@@ -529,6 +529,15 @@ impl Snapshot {
     }
 }
 
+/// What an adapter declares a session reads besides its primary
+/// ([`crate::harness::Adapter::dependencies`]): `files` are recorded present or absent;
+/// `directories` are enumerated one level and every entry recorded.
+#[derive(Default)]
+pub struct Dependencies {
+    pub files: Vec<PathBuf>,
+    pub directories: Vec<PathBuf>,
+}
+
 /// File and immediate-directory probes shared within one operation. It never descends recursively.
 #[derive(Default)]
 pub struct Probe {
@@ -564,7 +573,13 @@ impl Probe {
         })
     }
 
-    fn directory(&mut self, path: &Path) -> Option<std::sync::Arc<Vec<PathBuf>>> {
+    /// Whether `path` exists, recording its identity for this operation; `None` when unreadable.
+    pub fn exists(&mut self, path: &Path) -> Option<bool> {
+        Some(self.entry(path)?.state.is_some())
+    }
+
+    /// The entries of directory `path`, read once per operation; an absent directory is empty.
+    pub fn list(&mut self, path: &Path) -> Option<std::sync::Arc<Vec<PathBuf>>> {
         let path = absolute(path)?;
         self.directories
             .entry(path.clone())
@@ -607,207 +622,26 @@ impl Probe {
     // Publication already has typed captured records; collect fresh entries without a second
     // serialized stamp and parser allocation. The same inventory serves serialized checkpoints.
     fn dependency_entries(&mut self, r: &SessionRef, primary: &Path) -> Option<Vec<Entry>> {
-        let mut files = Vec::new();
-        let mut directories = Vec::new();
-        let ext = r.path.extension().and_then(|e| e.to_str());
-        let sqlite = is_sqlite_source(r)?;
-        if sqlite {
-            files.extend(sqlite_sidecars(&r.path));
+        let mut deps = Dependencies::default();
+        if is_sqlite_source(r)? {
+            deps.files.extend(sqlite_sidecars(&r.path));
         }
-        if let Some(metadata) = cursor_cli_metadata(r) {
-            files.push(metadata);
-        }
-        match r.harness {
-            Harness::Claude => {
-                if r.path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with("agent-"))
-                {
-                    files.push(r.path.with_extension("meta.json"));
-                }
-                directories.push(r.path.with_extension("").join("tool-results"));
-                if let Some(session) = r
-                    .path
-                    .ancestors()
-                    .find(|p| p.file_name().is_some_and(|n| n == "subagents" || n == "workflows"))
-                    .and_then(Path::parent)
-                {
-                    directories.push(session.join("tool-results"));
-                }
-                if let Some(config) = r
-                    .path
-                    .ancestors()
-                    .find(|p| p.file_name().is_some_and(|n| n == "projects"))
-                    .and_then(Path::parent)
-                {
-                    directories.push(config.join("tasks").join(&r.id));
-                }
-            }
-            Harness::Grok => {
-                files.extend(
-                    [
-                        "summary.json",
-                        "chat_history.jsonl",
-                        "updates.jsonl",
-                        "system_prompt.txt",
-                        "plan.json",
-                        "rewind_points.jsonl",
-                    ]
-                    .map(|name| r.path.join(name)),
-                );
-                // Only subagents consult sibling parent metadata. Ordinary sessions never scan
-                // a cwd group's siblings merely to establish freshness.
-                let summary_path = r.path.join("summary.json");
-                // Retain the before-read metadata: interpreting kind must not bless a later
-                // version of the summary when the inventory is assembled below.
-                self.entry(&summary_path)?;
-                let subagent = crate::json::JsonSource::capture(&summary_path)
-                    .ok()?
-                    .read_document(|view| {
-                        let kind = view
-                            .get("session_kind")?
-                            .map(|kind| crate::projection::string_prefix(kind, 9))
-                            .transpose()?
-                            .flatten();
-                        Ok(kind.as_deref() == Some("subagent"))
-                    })
-                    .ok()?;
-                if subagent {
-                    let group = r.path.parent()?;
-                    files.push(group.to_path_buf());
-                    for sibling in self.directory(group)?.iter() {
-                        files.push(sibling.join("subagents").join(&r.id).join("meta.json"));
-                    }
-                }
-            }
-            Harness::Cline
-                if r.path
-                    .file_name()
-                    .is_some_and(|n| n.to_string_lossy().ends_with(".messages.json")) =>
-            {
-                let sid = r.id.split('/').next().unwrap_or(&r.id);
-                if let Some(dir) = r.path.parent() {
-                    files.push(dir.join(format!("{sid}.json")));
-                    if !r.id.contains('/') {
-                        if let Some(data) = dir.parent().and_then(Path::parent) {
-                            for name in ["sessions.db", "cron.db", "teams.db"] {
-                                let db = data.join("db").join(name);
-                                files.extend(sqlite_sidecars(&db));
-                                files.push(db);
-                            }
-                        }
-                    }
-                }
-            }
-            Harness::Gemini => {
-                if let Some(project) = r
-                    .path
-                    .ancestors()
-                    .find(|p| p.file_name().is_some_and(|n| n == "chats"))
-                    .and_then(Path::parent)
-                {
-                    directories.push(project.join(&r.id).join("tracker"));
-                    directories.push(project.join(&r.id).join("plans"));
-                }
-            }
-            Harness::Qwen => {
-                files.push(r.path.with_extension("meta.json"));
-                if let Some(chats) = r.path.parent().filter(|p| p.file_name().is_some_and(|n| n == "chats")) {
-                    if let (Some(root), Some(cwd)) = (
-                        chats.parent().and_then(Path::parent).and_then(Path::parent),
-                        r.cwd.as_ref().and_then(|p| p.to_str()),
-                    ) {
-                        files.push(
-                            root.join("tmp")
-                                .join(crate::digest::sha256_hex(cwd.as_bytes()))
-                                .join("scheduled_tasks.json"),
-                        );
-                    }
-                }
-            }
-            Harness::Cline | Harness::Roo => files.extend(
-                [
-                    "api_conversation_history.json",
-                    "ui_messages.json",
-                    "task_metadata.json",
-                    "history_item.json",
-                ]
-                .map(|name| r.path.join(name)),
-            ),
-            Harness::Kimi => {
-                if let Some(root) = r
-                    .path
-                    .ancestors()
-                    .find(|p| p.file_name().is_some_and(|n| n == "sessions"))
-                    .and_then(Path::parent)
-                {
-                    files.push(root.join("config.toml"));
-                }
-                files.push(r.path.join("meta.json"));
-                if self.entry(&r.path.join("context.jsonl"))?.state.is_some() {
-                    // Includes rotated segments and their membership; no subagent/background recursion.
-                    directories.push(r.path.clone());
-                } else {
-                    files.push(r.path.join(format!("{}.jsonl", r.id)));
-                }
-            }
-            Harness::KimiCode => {
-                let (session, agent) = match (r.path.parent(), r.path.file_name().and_then(|n| n.to_str())) {
-                    (Some(agents), Some(agent))
-                        if agents.file_name().is_some_and(|n| n == "agents") && agent.starts_with("agent-") =>
-                    {
-                        (agents.parent().unwrap_or(&r.path), agent)
-                    }
-                    _ => (r.path.as_path(), "main"),
-                };
-                files.push(session.join("state.json"));
-                files.push(session.join("agents").join(agent).join("wire.jsonl"));
-            }
-            Harness::OpenClaw => {
-                if let Some(state) = r.path.ancestors().nth(4) {
-                    if ext.is_some_and(|e| matches!(e, "db" | "sqlite" | "sqlite3")) {
-                        let db = state.join("state/openclaw.sqlite");
-                        files.extend(sqlite_sidecars(&db));
-                        files.push(db);
-                    } else {
-                        if let Some(dir) = r.path.parent() {
-                            files.push(dir.join("sessions.json"));
-                        }
-                        files.push(state.join("cron/jobs.json"));
-                        files.push(state.join("subagents/runs.json"));
-                    }
-                }
-            }
-            Harness::OpenCode if !sqlite => {
-                let storage = r
-                    .path
-                    .ancestors()
-                    .find(|p| p.file_name().is_some_and(|n| n == "session"))
-                    .and_then(Path::parent)?;
-                {
-                    let messages = storage.join("message").join(&r.id);
-                    // Parts are keyed by the parsed message ID. Read only the ID (other fields are
-                    // ignored), and enumerate only this session's own message/part directories.
-                    for message in self.directory(&messages)?.iter() {
-                        #[derive(Deserialize)]
-                        struct MessageId {
-                            #[serde(default)]
-                            id: String,
-                        }
-                        let file = std::fs::File::open(message).ok()?;
-                        let id: MessageId = serde_json::from_reader(std::io::BufReader::new(file)).ok()?;
-                        directories.push(storage.join("part").join(id.id));
-                    }
-                    directories.push(messages);
-                }
-            }
-            _ => {}
-        }
+        deps.files.extend(cursor_cli_metadata(r));
+        // The adapter is taken out of the registry while it probes through `self`.
+        let adapter = self
+            .adapters
+            .remove(&r.harness)
+            .unwrap_or_else(|| crate::harness::for_harness(r.harness));
+        let declared = adapter
+            .as_ref()
+            .map_or(Some(()), |adapter| adapter.dependencies(r, self, &mut deps));
+        self.adapters.insert(r.harness, adapter);
+        declared?;
+        let Dependencies { files, directories } = deps;
         let mut entries = BTreeMap::new();
         for dir in directories {
             entries.insert(dir.clone(), self.entry(&dir)?.state);
-            for file in self.directory(&dir)?.iter() {
+            for file in self.list(&dir)?.iter() {
                 if primary != r.path && absolute(file)? == absolute(primary)? {
                     continue;
                 }
