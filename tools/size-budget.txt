@@ -1,17 +1,17 @@
 # Product lines per crate and per module, and test lines per crate (tools/check-size.py).
 # Raise a number only as a reviewed decision; the gate ratchets each one down as code shrinks.
-cv 19200
-cv-core 78910
+cv 18753
+cv-core 79207
 cv-search 4747
 cv-testkit 450
 cv-web 15
-cv:tests 15345
-cv-core:tests 64325
+cv:tests 15189
+cv-core:tests 64391
 cv-search:tests 7337
 cv-testkit:tests 39
 cv-web:tests 0
 cv-core:affordance 1809
-cv-core:api 977
+cv-core:api 1061
 cv-core:catalog 1265
 cv-core:compaction 268
 cv-core:config 81
@@ -62,7 +62,7 @@ cv-core:lib 703
 cv-core:lockfile 32
 cv-core:loom 74
 cv-core:offsets 20
-cv-core:projection 463
+cv-core:projection 676
 cv-core:prune 3469
 cv-core:publish 416
 cv-core:query 1998
@@ -92,7 +92,7 @@ cv-testkit:lib 377
 cv-web:lib 15
 cv:blame 708
 cv:cmd/adopt 248
-cv:cmd/archive 696
+cv:cmd/archive 697
 cv:cmd/browse 422
 cv:cmd/cat 175
 cv:cmd/compaction 62
@@ -116,12 +116,12 @@ cv:cmd/schema 266
 cv:cmd/search 303
 cv:cmd/serve 882
 cv:cmd/serve_tasks 431
-cv:cmd/session_json 316
+cv:cmd/session_json 57
 cv:cmd/share 254
 cv:cmd/task 1596
 cv:cmd/task_ops 624
 cv:cmd/tools 239
-cv:cmd/view 1660
+cv:cmd/view 1471
 cv:cmd/workflow 727
 cv:http 572
 cv:llm 528

@@ -9,11 +9,12 @@
 //! pointer, 500 broke).
 
 use crate::ir::{Harness, SessionRef};
-use crate::stream::{Flow, MessageSink};
-use crate::{Message, Session};
+use crate::Session;
 use serde_json::{json, Value};
 
 mod read;
+mod window;
+pub use window::WindowSink;
 
 /// Route a decoded path (`["api", "session", "claude", "abc"]`) plus a raw query string.
 /// Never panics; an unknown path is a 404.
@@ -85,23 +86,22 @@ pub fn route_staged(parts: &[&str], query: &str) -> anyhow::Result<Option<Staged
     let ["api", "session", harness, id, "messages"] = parts else {
         return Ok(None);
     };
-    let result = message_window(harness, id, query, true);
+    let result = message_window(harness, id, query);
     let mut output = crate::bytes::ByteStage::default();
-    let mut counted = Counted {
-        writer: &mut output,
-        bytes: 0,
+    let position = std::rc::Rc::new(std::cell::Cell::new(0));
+    let mut counted = crate::projection::Counted {
+        inner: &mut output,
+        position: position.clone(),
     };
     let status = match result {
         Ok((r, mut sink)) => {
-            let frames = sink
-                .staged
-                .take()
-                .expect("staged window destination")
-                .into_inner()
-                .map_err(|error| error.into_error())?
-                .finish()?;
+            let frames = sink.finish()?;
             let envelope = window_envelope(&r, &sink, Value::Array(Vec::new()));
-            crate::projection::write_json_array(&mut counted, &envelope, "messages", &frames)?;
+            let framing = crate::projection::Framing {
+                total: Some(sink.selected),
+                ..Default::default()
+            };
+            crate::projection::write_frames(&mut counted, &envelope, "messages", &frames, framing)?;
             anyhow::ensure!(
                 sink.reads.fresh(&mut crate::source::Probe::default()),
                 "API window source changed while staging response"
@@ -113,29 +113,12 @@ pub fn route_staged(parts: &[&str], query: &str) -> anyhow::Result<Option<Staged
             status
         }
     };
-    let bytes = counted.bytes;
+    let bytes = position.get();
     Ok(Some(StagedJson {
         status,
         body: output.finish()?,
         bytes,
     }))
-}
-struct Counted<W> {
-    writer: W,
-    bytes: u64,
-}
-impl<W: std::io::Write> std::io::Write for Counted<W> {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        let n = self.writer.write(bytes)?;
-        self.bytes = self
-            .bytes
-            .checked_add(n as u64)
-            .ok_or_else(|| std::io::Error::other("JSON response length overflow"))?;
-        Ok(n)
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.writer.flush()
-    }
 }
 
 // --- the task log -------------------------------------------------------------------------------
@@ -333,31 +316,6 @@ fn session_head(harness: &str, id: &str) -> (u16, Value) {
     ok(row)
 }
 
-/// Collects the message window `[start, end)` as serialized IR, never holding more than the
-/// window: out-of-window messages pass by as unmaterialized lazy handles, and the stream stops
-/// at `end` (after noting whether a message exists there — the `has_more` probe).
-struct WindowSink {
-    resolver: crate::Resolver,
-    primary: std::path::PathBuf,
-    /// Index of the next message to arrive.
-    idx: usize,
-    start: usize,
-    /// Exclusive window end; `None` streams to EOF.
-    end: Option<usize>,
-    msgs: Vec<Value>,
-    staged: Option<std::io::BufWriter<crate::bytes::ByteStage>>,
-    selected: usize,
-    /// A message at `end` exists (so the window isn't the tail of the session).
-    more: bool,
-    /// Session metadata the stream delivered (codex meta / the parse-bridge), when any did —
-    /// claude's native stream emits none.
-    meta: Option<Value>,
-    fail: Option<anyhow::Error>,
-    capture: bool,
-    checkpoint: Option<(usize, crate::stream::Checkpoint, Option<Value>)>,
-    reads: crate::source::ReadSet,
-}
-
 /// The `session` object a windowed read returns. Whatever a session knows about itself has to
 /// arrive here or it never reaches a reader: the windowed path is the one every transcript open
 /// uses.
@@ -376,80 +334,6 @@ fn session_meta_json(s: &Session) -> Value {
     meta
 }
 
-impl MessageSink for WindowSink {
-    fn dependency(&mut self, path: &std::path::Path) {
-        self.reads.record(path);
-    }
-    fn wants_checkpoint(&mut self, _: u64) -> bool {
-        self.capture && self.end.is_some_and(|end| end > self.start && self.idx == end)
-    }
-    fn checkpoint(&mut self, checkpoint: &mut crate::stream::Checkpoint) {
-        self.capture = false;
-        if read::bounded_size(&(&*checkpoint, &self.meta)).is_some() {
-            self.checkpoint = Some((self.idx, checkpoint.clone(), self.meta.clone()));
-        }
-    }
-
-    fn take_error(&mut self) -> Option<anyhow::Error> {
-        self.fail.take()
-    }
-
-    fn meta(&mut self, s: &Session) {
-        if self.meta.is_none() {
-            self.meta = Some(session_meta_json(s));
-        }
-    }
-
-    fn message(&mut self, m: Message) -> Flow {
-        read::note_message_sources(&m, &self.primary, &mut self.reads);
-        let idx = self.idx;
-        self.idx += 1;
-        if idx < self.start {
-            return Flow::Continue; // before the window: skip without touching content bytes
-        }
-        if self.end.is_some_and(|e| idx >= e) {
-            self.more = true;
-            return Flow::Stop; // at the window's end: note the existence, read no further
-        }
-        if let Some(stage) = self.staged.as_mut() {
-            use std::io::Write;
-            let result = (|| -> anyhow::Result<()> {
-                if self.selected > 0 {
-                    stage.write_all(b",")?;
-                }
-                m.write_json(stage, &self.resolver)?;
-                Ok(())
-            })();
-            return match result {
-                Ok(()) => {
-                    self.selected += 1;
-                    Flow::Continue
-                }
-                Err(error) => {
-                    self.fail = Some(error);
-                    Flow::Stop
-                }
-            };
-        }
-        let mut m = m;
-        if let Err(error) = m.materialize(&self.resolver) {
-            self.fail = Some(error);
-            return Flow::Stop;
-        }
-        match serde_json::to_value(&m) {
-            Ok(v) => {
-                self.msgs.push(v);
-                self.selected += 1;
-                Flow::Continue
-            }
-            Err(e) => {
-                self.fail = Some(e.into());
-                Flow::Stop
-            }
-        }
-    }
-}
-
 /// `GET /api/session/{harness}/{id}/messages?start=&end=&extra=` — the window `[start, end)` of the
 /// session's messages as IR JSON, without parsing the rest of a huge transcript.
 ///
@@ -461,12 +345,7 @@ impl MessageSink for WindowSink {
 /// `extra=1` additionally keeps each message's harness `extra` map (e.g. `compactMetadata` on a
 /// compaction boundary) and the structured tool-result `details` sidecar — the structure view
 /// pages through with this on to find the seams.
-fn message_window(
-    harness: &str,
-    id: &str,
-    query: &str,
-    staged: bool,
-) -> Result<(SessionRef, WindowSink), (u16, Value)> {
+fn message_window(harness: &str, id: &str, query: &str) -> Result<(SessionRef, WindowSink), (u16, Value)> {
     let params = Query::parse(query);
     // Window bounds must parse cleanly — a typo'd index is a clear 400, not a silent full read.
     let idx_param = |key: &str| params.unsigned(key).map_err(|error| err(400, &error));
@@ -479,11 +358,10 @@ fn message_window(
 
     let (r, adapter) = lookup(harness, id)?;
 
-    let (shell, mut sink) =
-        match read::window_output(read::shared(), adapter.as_ref(), &r, start, end, want_extra, staged) {
-            Ok(value) => value,
-            Err(e) => return Err(err(500, &format!("stream failed: {e:#}"))),
-        };
+    let (shell, mut sink) = match read::window(read::shared(), adapter.as_ref(), &r, start, end, want_extra) {
+        Ok(value) => value,
+        Err(e) => return Err(err(500, &format!("stream failed: {e:#}"))),
+    };
     // Preserve first pushed metadata; readers which never push it use the returned shell.
     if sink.meta.is_none() {
         sink.meta = Some(session_meta_json(&shell));
@@ -503,11 +381,14 @@ fn window_envelope(r: &SessionRef, sink: &WindowSink, messages: Value) -> Value 
 }
 
 fn messages(harness: &str, id: &str, query: &str) -> (u16, Value) {
-    let (r, mut sink) = match message_window(harness, id, query, false) {
+    let (r, mut sink) = match message_window(harness, id, query) {
         Ok(value) => value,
         Err(error) => return error,
     };
-    let messages = Value::Array(std::mem::take(&mut sink.msgs));
+    let messages = match sink.values() {
+        Ok(values) => Value::Array(values),
+        Err(e) => return err(500, &format!("stream failed: {e:#}")),
+    };
     ok(window_envelope(&r, &sink, messages))
 }
 
@@ -731,25 +612,17 @@ fn err(status: u16, msg: &str) -> (u16, Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ParseOptions;
+    use crate::stream::{Flow, MessageSink};
+    use crate::{Message, ParseOptions};
 
     fn window(start: usize, end: Option<usize>) -> WindowSink {
-        WindowSink {
-            resolver: crate::Resolver::new(None),
-            primary: std::path::PathBuf::new(),
-            staged: None,
-            selected: 0,
-            idx: 0,
+        WindowSink::page(
+            std::path::Path::new(""),
             start,
             end,
-            msgs: Vec::new(),
-            more: false,
-            meta: None,
-            fail: None,
-            capture: false,
-            checkpoint: None,
-            reads: crate::source::ReadSet::default(),
-        }
+            false,
+            crate::source::ReadSet::default(),
+        )
     }
 
     #[test]
@@ -852,7 +725,7 @@ mod tests {
             Ok(())
         })
         .is_err());
-        assert!(selected.msgs.is_empty());
+        assert_eq!(selected.selected, 0);
         let mut before = window(1, Some(2));
         assert_eq!(before.message(message.clone()), Flow::Continue);
         assert!(before.take_error().is_none());
@@ -887,7 +760,7 @@ mod tests {
         for start in (0..records).step_by(page) {
             let mut sink = window(start, Some(start + page));
             adapter.try_stream(&r, &ParseOptions::lazy(), &mut sink).unwrap();
-            assert_eq!(sink.msgs.len(), page);
+            assert_eq!(sink.selected, page);
             assert_eq!(sink.more, start + page < records);
             callbacks += sink.idx;
         }
