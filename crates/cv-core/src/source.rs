@@ -1,17 +1,17 @@
 //! Primary identity and auxiliary source dependencies, with append-safe comparisons.
 //!
-//! Stamps retain canonical individual path records, including absence, rather than a lossy
-//! max-mtime/total-size aggregate. Each consumer owns its baseline: refreshing counts cannot
-//! make an older search index fresh. Missing baselines cause an incremental reread once.
+//! A consumer captures a [`Baseline`] before it reads: the primary file's [`FileId`] and a
+//! [`Stamp`] of every auxiliary path, present or absent, never a lossy aggregate. It publishes
+//! the baseline with its output in one transaction, as one flat record whose bytes carry the
+//! digest of that output; loading verifies the record, and the consumer verifies the digest
+//! against its row. Each consumer owns its baseline: refreshing counts cannot make an older
+//! search index fresh, and a missing or legacy record rereads once.
 //!
-//! These are metadata freshness guards, not content verification. Version 3 captures primary
-//! identity before reads. On Unix, inode/ctime reject timestamp-restored rewrites/replacements;
-//! other platforms currently retain the length/mtime metadata guarantee.
-//! Append-safe dependency comparisons deliberately exclude that primary identity: immutable-prefix
-//! contracts and sampled resume marks still govern reuse during growth. The before-pass inventory
-//! covers adapter-local files; consumers additionally capture paths before dynamic reads. Complete
-//! read sets (even empty) remain distinct from unrecorded ones. Older baselines reread once through
-//! ordinary incremental refresh; no index rebuild.
+//! These are metadata guards, not content verification. Append-safe comparisons deliberately
+//! exclude the primary identity: immutable-prefix contracts and sampled resume marks govern reuse
+//! during growth. The before-pass inventory covers adapter-declared paths; consumers additionally
+//! capture paths before dynamic reads. Complete read sets (even empty) stay distinct from
+//! unrecorded ones.
 
 use crate::ir::{Harness, SessionRef};
 use serde::{Deserialize, Serialize};
@@ -80,6 +80,11 @@ pub struct FileId {
 }
 
 impl FileId {
+    /// The file at `path` now; `None` when it is absent or unreadable.
+    pub fn at(path: &Path) -> Option<Self> {
+        Self::of(&std::fs::metadata(path).ok()?)
+    }
+
     pub fn of(metadata: &std::fs::Metadata) -> Option<Self> {
         #[cfg(unix)]
         use std::os::unix::fs::MetadataExt;
@@ -140,10 +145,7 @@ impl Prefix {
         let from = len.saturating_sub(SAMPLE_SPAN);
         let mut tail = vec![0u8; (len - from) as usize];
         read_exact_at(file, &mut tail, from).ok()?;
-        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-        for b in head.iter().chain(&tail).chain(&len.to_le_bytes()) {
-            hash = (hash ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3);
-        }
+        let hash = fnv1a(fnv1a(fnv1a(0xcbf2_9ce4_8422_2325, &head), &tail), &len.to_le_bytes());
         Some(Self {
             len,
             hash,
@@ -182,16 +184,18 @@ impl std::hash::Hash for Entry {
     }
 }
 
-/// Exact serialized primary and auxiliary metadata records, not a content digest.
+/// Exact serialized auxiliary records, not a content digest.
 #[derive(Serialize, Deserialize)]
 struct Records {
     version: u32,
-    primary: Entry,
     entries: Vec<Entry>,
     /// None is a before-pass inventory, not a complete consumer read set.
     #[serde(default)]
     reads: Option<Vec<Entry>>,
 }
+
+/// The one format version of stamps and stored records; older ones reread once.
+const VERSION: u32 = 4;
 
 /// A canonical record string. Loaded baselines remain strings instead of allocating each path
 /// three times for counts, events and search; equality compares the actual records.
@@ -209,36 +213,18 @@ impl Stamp {
 
     fn records(&self) -> Option<Records> {
         let records: Records = serde_json::from_str(&self.0).ok()?;
-        (records.version == 4).then_some(records)
+        (records.version == VERSION).then_some(records)
     }
 
-    /// Canonical serialization puts the small primary record before the potentially large
-    /// inventory. The delimiter cannot occur inside an encoded path: its quotes would be escaped.
-    /// Compare it without decoding every auxiliary path. Older/noncanonical records miss.
-    fn canonical_parts(&self) -> Option<(&str, &str)> {
-        self.0.strip_prefix("{\"version\":4,\"primary\":{")?;
-        self.0.split_once(",\"entries\":")
-    }
-
-    fn same_primary(&self, current: &Stamp) -> bool {
-        self.canonical_parts()
-            .zip(current.canonical_parts())
-            .is_some_and(|((old, _), (now, _))| old == now)
-    }
-
+    /// The same inventory, and every recorded read still as recorded. A complete empty read set
+    /// against a freshly generated stamp compares as text, without decoding its owned paths.
     fn matches(&self, current: &Stamp, probe: &mut Probe) -> bool {
-        // Auxiliary comparison is independent of primary growth. Canonical complete empty
-        // read sets compare the remaining inventory without decoding its owned paths.
-        if let Some(((old_primary, old), (now_primary, now))) = self.canonical_parts().zip(current.canonical_parts()) {
-            if old.strip_suffix("\"reads\":[]}").is_some_and(|base| {
-                now.strip_suffix("\"reads\":null}") == Some(base) || now.strip_suffix("\"reads\":[]}") == Some(base)
-            }) {
-                // Equal primary prefixes are already validated by the freshly generated stamp.
-                // A differing prefix must still be a well-formed typed record before resume.
-                return old_primary == now_primary
-                    || old_primary
-                        .strip_prefix("{\"version\":4,\"primary\":")
-                        .is_some_and(|entry| serde_json::from_str::<Entry>(entry).is_ok());
+        if let Some(base) = self.0.strip_suffix(",\"reads\":[]}") {
+            if [",\"reads\":null}", ",\"reads\":[]}"]
+                .iter()
+                .any(|suffix| current.0.strip_suffix(suffix) == Some(base))
+            {
+                return true;
             }
         }
         let Some(old) = self.records() else { return false };
@@ -458,25 +444,24 @@ pub(crate) fn record_message_reads(message: &crate::Message, primary: &std::path
     }
 }
 
-/// A source pass's captured primary signature and auxiliary dependencies.
+/// What a consumer captured before reading one session: the primary's identity and the stamp of
+/// its auxiliary paths. Compared one way: [`Baseline::fresh`] (strict) or
+/// [`Baseline::dependencies_fresh`] (auxiliary only, across primary growth).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Snapshot {
-    pub primary: (i64, i64),
-    pub dependencies: Option<Stamp>,
+pub struct Baseline {
+    pub primary: Option<FileId>,
+    pub stamp: Option<Stamp>,
 }
 
-impl Snapshot {
-    #[cfg_attr(not(feature = "sqlite"), allow(dead_code))]
-    pub(crate) fn stored(primary: (i64, i64), stamp: String) -> Self {
-        Self {
-            primary,
-            dependencies: Some(Stamp(stamp)),
-        }
+impl Baseline {
+    /// The captured primary's length; 0 when it was absent.
+    pub fn primary_len(&self) -> u64 {
+        self.primary.map_or(0, |id| id.len)
     }
 
     /// Retain both declared inventory and conditional reads with their original identities.
     pub(crate) fn all_reads(&self) -> Option<ReadSet> {
-        let records = self.dependencies.as_ref()?.records()?;
+        let records = self.stamp.as_ref()?.records()?;
         let mut reads = ReadSet::default();
         for entry in records.entries.into_iter().chain(records.reads.into_iter().flatten()) {
             reads.entries.entry(entry.path.clone()).or_insert(entry);
@@ -486,7 +471,7 @@ impl Snapshot {
 
     /// Recorded consumer reads, for a resumed consumer to retain reads made by its old prefix.
     pub fn reads(&self) -> Option<ReadSet> {
-        let entries = self.dependencies.as_ref()?.records()?.reads?;
+        let entries = self.stamp.as_ref()?.records()?.reads?;
         Some(ReadSet {
             entries: entries.into_iter().map(|entry| (entry.path.clone(), entry)).collect(),
             known: true,
@@ -495,37 +480,101 @@ impl Snapshot {
 
     /// Auxiliary inventories and all recorded reads still match, independently of primary growth.
     pub fn dependencies_fresh(&self, current: &Self, probe: &mut Probe) -> bool {
-        self.dependencies
+        self.stamp
             .as_ref()
-            .zip(current.dependencies.as_ref())
+            .zip(current.stamp.as_ref())
             .is_some_and(|(old, now)| old.matches(now, probe))
     }
 
-    /// Strict consumer freshness using operation-local metadata probes.
+    /// Strict: the primary was captured and is unchanged, and the dependencies are fresh.
     pub fn fresh(&self, current: &Self, probe: &mut Probe) -> bool {
-        self.primary == current.primary
-            && self
-                .dependencies
-                .as_ref()
-                .zip(current.dependencies.as_ref())
-                .is_some_and(|(old, now)| old.same_primary(now))
-            && self.dependencies_fresh(current, probe)
+        self.primary.is_some() && self.primary == current.primary && self.dependencies_fresh(current, probe)
     }
 
     /// Attach the read set captured by this consumer's complete pass, never another consumer's.
     pub fn with_reads(&self, reads: &ReadSet) -> Self {
-        let dependencies = (|| {
+        let stamp = (|| {
             if !reads.known {
                 return None;
             }
-            let mut records = self.dependencies.as_ref()?.records()?;
+            let mut records = self.stamp.as_ref()?.records()?;
             records.reads = Some(reads.entries.values().cloned().collect());
             Stamp::serialize(&records)
         })();
         Self {
             primary: self.primary,
-            dependencies,
+            stamp,
         }
+    }
+}
+
+fn fnv1a(mut hash: u64, bytes: &[u8]) -> u64 {
+    for b in bytes {
+        hash = (hash ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3);
+    }
+    hash
+}
+
+/// The digest a record carries of the output row it was published with.
+fn output_digest(output: &[u8]) -> u64 {
+    fnv1a(0xcbf2_9ce4_8422_2325, output)
+}
+
+/// A stored baseline, the bytes `source_dependencies` holds: `VERSION u32 | output digest u64 |
+/// primary present u8 | len, mtime_ns, dev, ino u64, ctime_ns i64 | stamp`, little-endian.
+/// Decoding verifies the version and the length; [`Published::of`] verifies the output.
+pub struct Published {
+    baseline: Baseline,
+    output: u64,
+}
+
+const HEAD: usize = 4 + 8 + 1 + 5 * 8;
+
+impl Published {
+    fn encode(baseline: &Baseline, output: &[u8]) -> Option<Vec<u8>> {
+        let stamp = baseline.stamp.as_ref()?;
+        let mut bytes = Vec::with_capacity(HEAD + stamp.0.len());
+        bytes.extend(VERSION.to_le_bytes());
+        bytes.extend(output_digest(output).to_le_bytes());
+        bytes.push(u8::from(baseline.primary.is_some()));
+        let id = baseline.primary.unwrap_or(FileId {
+            len: 0,
+            mtime_ns: 0,
+            dev: 0,
+            ino: 0,
+            ctime_ns: 0,
+        });
+        for word in [id.len, id.mtime_ns, id.dev, id.ino, id.ctime_ns as u64] {
+            bytes.extend(word.to_le_bytes());
+        }
+        bytes.extend(stamp.0.as_bytes());
+        Some(bytes)
+    }
+
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        let word = |at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
+        if bytes.len() < HEAD || bytes[..4] != VERSION.to_le_bytes() || bytes[12] > 1 {
+            return None;
+        }
+        let primary = (bytes[12] == 1).then(|| FileId {
+            len: word(13),
+            mtime_ns: word(21),
+            dev: word(29),
+            ino: word(37),
+            ctime_ns: word(45) as i64,
+        });
+        Some(Self {
+            baseline: Baseline {
+                primary,
+                stamp: Some(Stamp(String::from_utf8(bytes[HEAD..].to_vec()).ok()?)),
+            },
+            output: word(4),
+        })
+    }
+
+    /// The stored baseline, when `output` is the output it was published with.
+    pub fn of(&self, output: &[u8]) -> Option<&Baseline> {
+        (self.output == output_digest(output)).then_some(&self.baseline)
     }
 }
 
@@ -612,8 +661,7 @@ impl Probe {
 
     fn dependencies_from(&mut self, r: &SessionRef, primary: &Path) -> Option<Stamp> {
         Stamp::serialize(&Records {
-            version: 4,
-            primary: self.entry(primary)?,
+            version: VERSION,
             entries: self.dependency_entries(r, primary)?,
             reads: None,
         })
@@ -672,20 +720,17 @@ impl Probe {
             .collect()
     }
 
-    pub fn snapshot(&mut self, r: &SessionRef) -> Snapshot {
+    pub fn snapshot(&mut self, r: &SessionRef) -> Baseline {
         let primary = self.primary_path(r);
         self.snapshot_from(r, &primary)
     }
 
     /// Capture the concrete adapter's append source while retaining its logical session key
     /// and all other auxiliary inputs. Path selection must not perform unrecorded source reads.
-    pub fn snapshot_from(&mut self, r: &SessionRef, primary: &Path) -> Snapshot {
-        Snapshot {
-            primary: self
-                .entry(primary)
-                .and_then(|entry| entry.state)
-                .map_or((0, 0), |state| (state.mtime_ns as i64, state.len as i64)),
-            dependencies: self.dependencies_from(r, primary),
+    pub fn snapshot_from(&mut self, r: &SessionRef, primary: &Path) -> Baseline {
+        Baseline {
+            primary: self.entry(primary).and_then(|entry| entry.state),
+            stamp: self.dependencies_from(r, primary),
         }
     }
 }
@@ -696,22 +741,17 @@ pub fn primary_path(r: &SessionRef) -> PathBuf {
 }
 
 /// A captured source still matches at publication time. Errors never establish freshness.
-pub fn unchanged(r: &SessionRef, snapshot: &Snapshot) -> bool {
-    unchanged_from(r, &primary_path(r), snapshot)
+pub fn unchanged(r: &SessionRef, baseline: &Baseline) -> bool {
+    unchanged_from(r, &primary_path(r), baseline)
 }
 
 /// Publication guard against the concrete adapter's source path.
-pub fn unchanged_from(r: &SessionRef, primary: &Path, snapshot: &Snapshot) -> bool {
+pub fn unchanged_from(r: &SessionRef, primary: &Path, baseline: &Baseline) -> bool {
     let mut probe = Probe::default();
-    let current_entry = probe.entry(primary);
-    let current_primary = current_entry
-        .as_ref()
-        .and_then(|entry| entry.state.as_ref())
-        .map_or((0, 0), |state| (state.mtime_ns as i64, state.len as i64));
-    if current_primary != snapshot.primary {
+    if baseline.primary.is_none() || probe.entry(primary).and_then(|entry| entry.state) != baseline.primary {
         return false;
     }
-    let Some(stamp) = snapshot.dependencies.as_ref() else {
+    let Some(stamp) = baseline.stamp.as_ref() else {
         return false;
     };
     let Some(now) = probe.dependency_entries(r, primary) else {
@@ -720,18 +760,9 @@ pub fn unchanged_from(r: &SessionRef, primary: &Path, snapshot: &Snapshot) -> bo
     // Directory enumeration is complete. Only metadata probes are needed for dynamic reads;
     // release path lists before parsing the captured inventory's owned paths.
     probe.directories.clear();
-    let Some(Records {
-        primary: captured_primary,
-        entries,
-        reads,
-        ..
-    }) = stamp.records()
-    else {
+    let Some(Records { entries, reads, .. }) = stamp.records() else {
         return false;
     };
-    if current_entry.as_ref() != Some(&captured_primary) {
-        return false;
-    }
     let same = entries == now;
     drop(entries);
     drop(now);
@@ -742,7 +773,7 @@ pub fn unchanged_from(r: &SessionRef, primary: &Path, snapshot: &Snapshot) -> bo
     })
 }
 
-pub type Update = (SessionRef, Snapshot);
+pub type Update = (SessionRef, Baseline);
 
 type Key = (String, String, String);
 fn key(r: &SessionRef) -> Key {
@@ -753,18 +784,28 @@ fn key(r: &SessionRef) -> Key {
     )
 }
 
-/// A consumer's baselines, loaded once. Older records/missing read sets reread once; even empty
-/// complete read sets have a row, so an old consumer cannot silently certify unresolved paths.
+/// A consumer's published baselines, loaded once. Older records and missing read sets reread
+/// once; even empty complete read sets have a row, so an old consumer cannot silently certify
+/// unresolved paths.
 #[derive(Default)]
 pub struct Table {
-    rows: HashMap<Key, Snapshot>,
+    rows: HashMap<Key, Published>,
 }
 
 impl Table {
-    /// This consumer's published baseline for `r`, compared with [`Snapshot::fresh`] (strict)
-    /// or [`Snapshot::dependencies_fresh`] (its auxiliary inputs, across primary growth).
-    pub fn get(&self, r: &SessionRef) -> Option<&Snapshot> {
-        self.rows.get(&key(r))
+    /// This consumer's baseline for `r`, for [`Baseline::dependencies_fresh`] across growth.
+    pub fn get(&self, r: &SessionRef) -> Option<&Baseline> {
+        Some(&self.rows.get(&key(r))?.baseline)
+    }
+
+    /// The baseline published with exactly `output`, the consumer's current output row.
+    pub fn published(&self, r: &SessionRef, output: &[u8]) -> Option<&Baseline> {
+        self.rows.get(&key(r))?.of(output)
+    }
+
+    /// The consumer's output `output` for `r` is [`Baseline::fresh`] against `now`.
+    pub fn fresh(&self, r: &SessionRef, now: &Baseline, output: &[u8], probe: &mut Probe) -> bool {
+        self.published(r, output).is_some_and(|old| old.fresh(now, probe))
     }
 
     #[cfg(feature = "sqlite")]
@@ -777,19 +818,16 @@ impl Table {
     pub(crate) fn load_in(conn: &rusqlite::Connection, consumer: &str) -> Self {
         let load = || -> Option<_> {
             let mut stmt = conn
-                .prepare("SELECT harness,id,path,mtime,size,stamp FROM source_dependencies WHERE consumer=?1")
+                .prepare("SELECT harness,id,path,record FROM source_dependencies WHERE consumer=?1")
                 .ok()?;
             let rows = stmt
                 .query_map([consumer], |row| {
-                    Ok((
-                        (row.get(0)?, row.get(1)?, row.get(2)?),
-                        ((row.get(3)?, row.get(4)?), row.get::<_, String>(5)?),
-                    ))
+                    Ok(((row.get(0)?, row.get(1)?, row.get(2)?), row.get::<_, Vec<u8>>(3)?))
                 })
                 .ok()?;
             Some(
                 rows.flatten()
-                    .map(|(key, (primary, text))| (key, Snapshot::stored(primary, text)))
+                    .filter_map(|(key, record)| Some((key, Published::decode(&record)?)))
                     .collect(),
             )
         };
@@ -811,38 +849,69 @@ fn open() -> Option<rusqlite::Connection> {
     Some(conn)
 }
 
+/// The table, in the one-record shape. A table of the older columns is dropped: every consumer
+/// rereads once.
 #[cfg(feature = "sqlite")]
 fn ensure_table(conn: &rusqlite::Connection) -> Option<()> {
+    let legacy: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('source_dependencies') WHERE name='stamp')",
+            [],
+            |row| row.get(0),
+        )
+        .ok()?;
+    if legacy {
+        conn.execute_batch("DROP TABLE source_dependencies;").ok()?;
+    }
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS source_dependencies(
         consumer TEXT NOT NULL,harness TEXT NOT NULL,id TEXT NOT NULL,path TEXT NOT NULL,
-        mtime INTEGER NOT NULL,size INTEGER NOT NULL,stamp TEXT NOT NULL,
-        PRIMARY KEY(consumer,harness,id,path));",
+        record BLOB NOT NULL,PRIMARY KEY(consumer,harness,id,path));",
     )
     .ok()
 }
 
-/// One previously published baseline is [`Snapshot::fresh`] against `now`, without loading every
-/// session's records during writes. The consumer row and this baseline must be read from one SQL
-/// snapshot by the caller.
+/// One stored baseline, when it was published with `output`. The consumer row and this record
+/// must be read from one SQL snapshot by the caller.
 #[cfg(feature = "sqlite")]
-pub(crate) fn fresh_in(conn: &rusqlite::Connection, consumer: &str, r: &SessionRef, now: &Snapshot) -> bool {
+pub(crate) fn published_in(
+    conn: &rusqlite::Connection,
+    consumer: &str,
+    r: &SessionRef,
+    output: &[u8],
+) -> Option<Baseline> {
     let (h, id, path) = key(r);
-    conn.query_row(
-        "SELECT mtime,size,stamp FROM source_dependencies WHERE consumer=?1 AND harness=?2 AND id=?3 AND path=?4",
-        rusqlite::params![consumer, h, id, path],
-        |row| Ok(Snapshot::stored((row.get(0)?, row.get(1)?), row.get(2)?)),
-    )
-    .is_ok_and(|old| old.fresh(now, &mut Probe::default()))
+    let record: Vec<u8> = conn
+        .query_row(
+            "SELECT record FROM source_dependencies WHERE consumer=?1 AND harness=?2 AND id=?3 AND path=?4",
+            rusqlite::params![consumer, h, id, path],
+            |row| row.get(0),
+        )
+        .ok()?;
+    Published::decode(&record)?.of(output).cloned()
 }
 
-/// Publish in the same transaction as SQL consumer output. A failure must roll back both.
+/// [`Table::fresh`] for one row, without loading every session's records during writes.
+#[cfg(feature = "sqlite")]
+pub(crate) fn fresh_in(
+    conn: &rusqlite::Connection,
+    consumer: &str,
+    r: &SessionRef,
+    now: &Baseline,
+    output: &[u8],
+) -> bool {
+    published_in(conn, consumer, r, output).is_some_and(|old| old.fresh(now, &mut Probe::default()))
+}
+
+/// Publish in the same transaction as SQL consumer output `output`. A failure must roll back
+/// both. Only a complete pass (its read set recorded) over a source still unchanged publishes.
 #[cfg(feature = "sqlite")]
 pub(crate) fn publish_in(
     conn: &rusqlite::Connection,
     consumer: &str,
     r: &SessionRef,
-    snapshot: &Snapshot,
+    baseline: &Baseline,
+    output: &[u8],
 ) -> Option<()> {
     ensure_table(conn)?;
     let (h, id, path) = key(r);
@@ -851,18 +920,26 @@ pub(crate) fn publish_in(
         rusqlite::params![consumer, h, id, path],
     )
     .ok()?;
-    if let Some(stamp) = snapshot
-        .dependencies
+    let complete = baseline
+        .stamp
         .as_ref()
-        .filter(|stamp| stamp.records().is_some_and(|records| records.reads.is_some()) && unchanged(r, snapshot))
-    {
+        .is_some_and(|stamp| stamp.records().is_some_and(|records| records.reads.is_some()));
+    if complete && unchanged(r, baseline) {
         conn.execute(
-            "INSERT INTO source_dependencies(consumer,harness,id,path,mtime,size,stamp)
-            VALUES(?1,?2,?3,?4,?5,?6,?7)",
-            rusqlite::params![consumer, h, id, path, snapshot.primary.0, snapshot.primary.1, stamp.0],
+            "INSERT INTO source_dependencies(consumer,harness,id,path,record) VALUES(?1,?2,?3,?4,?5)",
+            rusqlite::params![consumer, h, id, path, Published::encode(baseline, output)?],
         )
         .ok()?;
     }
+    Some(())
+}
+
+/// Forget every baseline of `consumer` on the caller's connection: its output is gone.
+#[cfg(feature = "sqlite")]
+pub(crate) fn forget_in(conn: &rusqlite::Connection, consumer: &str) -> Option<()> {
+    ensure_table(conn)?;
+    conn.execute("DELETE FROM source_dependencies WHERE consumer=?1", [consumer])
+        .ok()?;
     Some(())
 }
 
@@ -873,8 +950,8 @@ pub fn rename_consumer(from: &str, to: &str) -> bool {
         let mut conn = open()?;
         let tx = conn.transaction().ok()?;
         tx.execute(
-            "INSERT OR IGNORE INTO source_dependencies(consumer,harness,id,path,mtime,size,stamp)
-             SELECT ?2,harness,id,path,mtime,size,stamp FROM source_dependencies WHERE consumer=?1",
+            "INSERT OR IGNORE INTO source_dependencies(consumer,harness,id,path,record)
+             SELECT ?2,harness,id,path,record FROM source_dependencies WHERE consumer=?1",
             rusqlite::params![from, to],
         )
         .ok()?;
@@ -918,9 +995,9 @@ pub fn invalidate(_consumer: &str, _refs: &[SessionRef]) -> bool {
     true
 }
 
-/// Publish after the consumer commits its output. Revalidation makes concurrent edits stale;
-/// old baselines must already have been invalidated with [`invalidate`]. SQL consumers instead
-/// publish atomically with their output through `publish_in`.
+/// Publish after a consumer whose output lives outside the catalog commits it (its output is
+/// the empty row). Revalidation makes concurrent edits stale; old baselines must already have
+/// been invalidated with [`invalidate`]. SQL consumers publish atomically through `publish_in`.
 #[cfg(feature = "sqlite")]
 pub fn update(consumer: &str, updates: &[Update]) {
     if updates.is_empty() {
@@ -928,8 +1005,8 @@ pub fn update(consumer: &str, updates: &[Update]) {
     }
     let Some(mut conn) = open() else { return };
     let Ok(tx) = conn.transaction() else { return };
-    for (r, snapshot) in updates {
-        if publish_in(&tx, consumer, r, snapshot).is_none() {
+    for (r, baseline) in updates {
+        if publish_in(&tx, consumer, r, baseline, b"").is_none() {
             return;
         }
     }
@@ -958,7 +1035,7 @@ mod tests {
         }
         let missing = SessionRef::new("missing", Harness::OpenCode, w.base.join("missing"));
         assert_eq!(is_sqlite_source(&missing), None);
-        assert!(Probe::default().snapshot(&missing).dependencies.is_none());
+        assert!(Probe::default().snapshot(&missing).stamp.is_none());
         let legacy = w.base.join("ses_old.json");
         std::fs::write(&legacy, "{}").unwrap();
         assert_eq!(
@@ -1013,6 +1090,10 @@ mod tests {
         assert!(!reads.fresh(&mut Probe::default()));
     }
 
+    fn tuple(baseline: &Baseline) -> Option<(u64, u64)> {
+        baseline.primary.map(|id| (id.len, id.mtime_ns))
+    }
+
     #[cfg(unix)]
     #[test]
     fn primary_identity_rejects_restored_tuple_rewrites_and_replacements() {
@@ -1037,7 +1118,7 @@ mod tests {
             .set_times(std::fs::FileTimes::new().set_modified(modified))
             .unwrap();
         let now = Probe::default().snapshot(&r);
-        assert_eq!(before.primary, now.primary);
+        assert_eq!(tuple(&before), tuple(&now), "length and mtime restored");
         assert!(!before.fresh(&now, &mut Probe::default()));
         assert!(!unchanged(&r, &before));
         assert!(
@@ -1075,7 +1156,7 @@ mod tests {
             .unwrap();
         std::fs::rename(&replacement, &path).unwrap();
         let replaced = Probe::default().snapshot(&r);
-        assert_eq!(now.primary, replaced.primary);
+        assert_eq!(tuple(&now), tuple(&replaced));
         assert!(!now.fresh(&replaced, &mut Probe::default()));
         assert!(!unchanged(&r, &now));
         assert!(!Table::load("counts")
@@ -1084,24 +1165,54 @@ mod tests {
     }
 
     #[test]
-    fn primary_identity_legacy_and_malformed_records_miss_without_decoding_inventory() {
-        let w = crate::test_world("primary-legacy");
+    fn stored_records_verify_version_shape_and_output_before_any_inventory_decodes() {
+        let w = crate::test_world("record-verify");
         let path = w.base.join("primary.jsonl");
         std::fs::write(&path, "body").unwrap();
         let r = SessionRef::new("s", Harness::Claude, &path);
         let now = Probe::default().snapshot(&r).with_reads(&ReadSet::default());
-        let stamp = now.dependencies.as_ref().unwrap();
-        assert!(stamp.same_primary(stamp));
+        let stamp = now.stamp.as_ref().unwrap();
         assert!(stamp.matches(stamp, &mut Probe::default()));
         let mut legacy = serde_json::to_value(stamp.records().unwrap()).unwrap();
         legacy["version"] = 2.into();
-        legacy.as_object_mut().unwrap().remove("primary");
         let legacy = Stamp(serde_json::to_string(&legacy).unwrap());
-        assert!(!legacy.same_primary(stamp));
         assert!(!legacy.matches(stamp, &mut Probe::default()));
-        let malformed = Stamp(stamp.0.replace("\"primary\":{", "\"primary\":null,\"ignored\":{"));
-        assert!(!malformed.same_primary(stamp));
-        assert!(!malformed.matches(stamp, &mut Probe::default()));
+        assert!(!Stamp("{}".into()).matches(stamp, &mut Probe::default()));
+        let bytes = Published::encode(&now, b"row").unwrap();
+        let stored = Published::decode(&bytes).unwrap();
+        assert!(stored.of(b"other").is_none());
+        assert!(stored.of(b"row").unwrap().fresh(&now, &mut Probe::default()));
+        assert_eq!(stored.of(b"row").unwrap().primary, now.primary);
+        assert!(Published::decode(&bytes[..HEAD - 1]).is_none());
+        let mut other_version = bytes.clone();
+        other_version[0] ^= 1;
+        assert!(Published::decode(&other_version).is_none());
+        let mut absent = bytes.clone();
+        absent[12] = 0;
+        assert!(!Published::decode(&absent)
+            .unwrap()
+            .of(b"row")
+            .unwrap()
+            .fresh(&now, &mut Probe::default()));
+        absent[12] = 2;
+        assert!(Published::decode(&absent).is_none());
+        let mut text = bytes.clone();
+        text.truncate(HEAD);
+        text.extend(b"{\"version\":1}");
+        assert!(!Published::decode(&text)
+            .unwrap()
+            .of(b"row")
+            .unwrap()
+            .fresh(&now, &mut Probe::default()));
+        assert!(Published::encode(&Probe::default().snapshot(&r), b"").is_some());
+        assert!(Published::encode(
+            &Baseline {
+                primary: now.primary,
+                stamp: None
+            },
+            b""
+        )
+        .is_none());
     }
 
     #[test]
@@ -1112,15 +1223,15 @@ mod tests {
         let journal = world.base.join("sessions.db-journal");
         let r = SessionRef::new("s", Harness::Hermes, &db);
         let absent = Probe::default().snapshot(&r).with_reads(&ReadSet::default());
-        let records = absent.dependencies.as_ref().unwrap().records().unwrap();
+        let records = absent.stamp.as_ref().unwrap().records().unwrap();
         assert!(records
             .entries
             .iter()
             .any(|entry| entry.path == journal && entry.state.is_none()));
         let mut legacy_records = records;
         legacy_records.entries.retain(|entry| entry.path != journal);
-        let legacy = Snapshot {
-            dependencies: Stamp::serialize(&legacy_records),
+        let legacy = Baseline {
+            stamp: Stamp::serialize(&legacy_records),
             ..absent.clone()
         };
         assert!(
@@ -1157,14 +1268,14 @@ mod tests {
         let mut reads = ReadSet::default();
         reads.record(&absent);
         let before = Probe::default().snapshot(&r).with_reads(&reads);
-        let stamp = before.dependencies.as_ref().unwrap();
+        let stamp = before.stamp.as_ref().unwrap();
         assert_eq!(stamp.0, serde_json::to_string(&stamp.records().unwrap()).unwrap());
         assert_eq!(stamp.0.capacity(), stamp.0.len());
-        let reference = |captured: &Snapshot| {
+        let reference = |captured: &Baseline| {
             let mut probe = Probe::default();
             let now = probe.snapshot(&r);
-            let old = captured.dependencies.as_ref().unwrap().records().unwrap();
-            let fresh = now.dependencies.as_ref().unwrap().records().unwrap();
+            let old = captured.stamp.as_ref().unwrap().records().unwrap();
+            let fresh = now.stamp.as_ref().unwrap().records().unwrap();
             now.primary == captured.primary
                 && old.entries == fresh.entries
                 && old.reads.as_ref().is_none_or(|reads| {
@@ -1233,7 +1344,7 @@ mod tests {
         let before = super::Probe::default()
             .snapshot_from(&r, &wire)
             .with_reads(&super::ReadSet::default());
-        assert_eq!(before.primary, crate::offsets::file_sig(&wire));
+        assert_eq!(before.primary, super::FileId::at(&wire));
         std::fs::write(&wire, "prefix\nappend\n").unwrap();
         let grown = super::Probe::default().snapshot_from(&r, &wire);
         assert_ne!(before.primary, grown.primary);
@@ -1262,7 +1373,7 @@ mod tests {
         let mut reads = super::ReadSet::default();
         reads.record(&extra);
         let captured = super::Probe::default().snapshot(&r).with_reads(&reads);
-        let restored: super::Snapshot = serde_json::from_slice(&serde_json::to_vec(&captured).unwrap()).unwrap();
+        let restored: super::Baseline = serde_json::from_slice(&serde_json::to_vec(&captured).unwrap()).unwrap();
         assert!(restored.fresh(&super::Probe::default().snapshot(&r), &mut super::Probe::default()));
         std::fs::write(&path, "primary grows").unwrap();
         let now = super::Probe::default().snapshot(&r);
@@ -1274,7 +1385,7 @@ mod tests {
         std::fs::write(&extra, "created").unwrap();
         assert!(!restored.dependencies_fresh(&super::Probe::default().snapshot(&r), &mut super::Probe::default()));
         suffix.merge(&super::ReadSet::unrecorded());
-        assert!(now.with_reads(&suffix).dependencies.is_none());
+        assert!(now.with_reads(&suffix).stamp.is_none());
     }
     use super::*;
 
@@ -1412,7 +1523,7 @@ mod tests {
             .is_some_and(|old| old.fresh(&base, &mut Probe::default())));
         let mut table = Table::load("upgrade");
         for old in table.rows.values_mut() {
-            let stamp = old.dependencies.as_mut().unwrap();
+            let stamp = old.baseline.stamp.as_mut().unwrap();
             stamp.0 = stamp.0.replacen("\"version\":4", "\"version\":1", 1);
         }
         assert!(!table.get(&r).is_some_and(|old| old.fresh(&base, &mut Probe::default())));
@@ -1443,8 +1554,8 @@ mod tests {
             ..r.clone()
         };
         assert_eq!(
-            probe.snapshot(&other).with_reads(&ReadSet::default()).dependencies,
-            before.dependencies
+            probe.snapshot(&other).with_reads(&ReadSet::default()).stamp,
+            before.stamp
         );
         assert_eq!(
             probe.entries.len(),
@@ -1465,7 +1576,7 @@ mod tests {
         std::fs::write(w.base.join("sessions.db-wal"), "new WAL").unwrap();
         let after = Probe::default().snapshot(&r).with_reads(&ReadSet::default());
         assert_eq!(after.primary, before.primary);
-        assert_ne!(after.dependencies, before.dependencies);
+        assert_ne!(after.stamp, before.stamp);
         assert!(!unchanged(&r, &before));
         update("counts", &[(r.clone(), before)]);
         assert!(
@@ -1508,11 +1619,8 @@ mod tests {
         assert!(before.dependencies_fresh(&after, &mut Probe::default()));
         std::fs::write(session.join("state.json"), "after!").unwrap();
         assert_ne!(
-            after.dependencies,
-            Probe::default()
-                .snapshot(&r)
-                .with_reads(&ReadSet::default())
-                .dependencies
+            after.stamp,
+            Probe::default().snapshot(&r).with_reads(&ReadSet::default()).stamp
         );
 
         let storage = w.base.join("storage");
@@ -1534,14 +1642,11 @@ mod tests {
         std::fs::write(&part, "after!").unwrap();
         let after = Probe::default().snapshot(&r).with_reads(&ReadSet::default());
         assert_eq!(before.primary, after.primary);
-        assert_ne!(before.dependencies, after.dependencies, "part-only same-size edit");
+        assert_ne!(before.stamp, after.stamp, "part-only same-size edit");
         std::fs::write(storage.join("part/mid/new.json"), "new").unwrap();
         assert_ne!(
-            after.dependencies,
-            Probe::default()
-                .snapshot(&r)
-                .with_reads(&ReadSet::default())
-                .dependencies,
+            after.stamp,
+            Probe::default().snapshot(&r).with_reads(&ReadSet::default()).stamp,
             "part membership"
         );
     }
@@ -1613,11 +1718,8 @@ mod tests {
         });
         std::fs::remove_file(&wal).unwrap();
         assert_eq!(
-            before.dependencies,
-            Probe::default()
-                .snapshot(&r)
-                .with_reads(&ReadSet::default())
-                .dependencies
+            before.stamp,
+            Probe::default().snapshot(&r).with_reads(&ReadSet::default()).stamp
         );
         assert!(
             crate::catalog::AffordanceTable::load().counts(&r).unwrap().is_empty(),

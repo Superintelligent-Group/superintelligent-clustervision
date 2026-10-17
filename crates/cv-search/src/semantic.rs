@@ -30,7 +30,7 @@
 
 use crate::Hit;
 use anyhow::{bail, Context, Result};
-use cv_core::source::{Probe, ReadSet, Snapshot};
+use cv_core::source::{Baseline, Probe, ReadSet};
 use model2vec_rs::model::StaticModel;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -84,10 +84,16 @@ struct RecordMeta {
     updated_at: Option<i64>,
     #[serde(default)]
     source_path: Option<PathBuf>,
-    #[serde(default)]
-    source: Option<Snapshot>,
+    /// A row stored by an older baseline shape is dateless provenance: it re-embeds once.
+    #[serde(default, deserialize_with = "lenient")]
+    source: Option<Baseline>,
     #[serde(default)]
     hints: Option<ReferenceHints>,
+}
+
+/// `None` for a value of another shape, instead of failing the whole store.
+fn lenient<'de, D: serde::Deserializer<'de>, T: serde::Deserialize<'de>>(d: D) -> Result<Option<T>, D::Error> {
+    Ok(T::deserialize(<serde_json::Value as serde::Deserialize>::deserialize(d)?).ok())
 }
 
 /// The JSON block inside the binary store (deserialize side; serialization uses a borrowed twin
@@ -2060,9 +2066,9 @@ mod tests {
             (second, if flipped { vec![1.0, 0.0] } else { vec![0.0, 1.0] }),
         ]);
         store.meta[0].source_path = Some(path.with_extension("source"));
-        store.meta[0].source = Some(Snapshot {
-            primary: (7, 9),
-            dependencies: None,
+        store.meta[0].source = Some(Baseline {
+            primary: None,
+            stamp: None,
         });
         store.meta[0].hints = Some(ReferenceHints {
             cwd: None,

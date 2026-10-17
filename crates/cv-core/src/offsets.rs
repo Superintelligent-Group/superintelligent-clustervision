@@ -15,53 +15,7 @@
 //! changes, and on the largest codex session by messages (70,071 recorded, 92,062 parsed today)
 //! `--last 20` printed an empty window. The table is dropped on catalog open.
 
-use std::path::Path;
-
 /// `Message.extra` key the claude/codex adapters stamp with the message's source byte offset
 /// (the start of the JSON record line that produced it) under
 /// [`ParseOptions::lazy_offsets`](crate::ParseOptions::lazy_offsets).
 pub const OFFSET_KEY: &str = "cv_byte_offset";
-
-/// File `(mtime_ns, size)`: the staleness signature catalog rows are keyed by.
-/// `(0, 0)` when unreadable, which is never treated as fresh.
-pub fn file_sig(path: &Path) -> (i64, i64) {
-    let Ok(md) = std::fs::metadata(path) else { return (0, 0) };
-    let mtime = md
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_nanos() as i64)
-        .unwrap_or(0);
-    (mtime, md.len() as i64)
-}
-
-/// The one output-row freshness predicate (counts, events, FTS): the stored `(mtime_ns, size)` is
-/// the current one, then the captured source authority holds. A missing row, an unreadable `(0, 0)`
-/// tuple or a missing stamp never matches; a real empty file needs that authority too.
-pub fn sig_is_fresh_with_source(stored: Option<(i64, i64)>, now: (i64, i64), fresh: impl FnOnce() -> bool) -> bool {
-    now.0 != 0 && now.1 >= 0 && stored == Some(now) && fresh()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn guarded_empty_requires_known_tuple_and_source_authority() {
-        assert!(sig_is_fresh_with_source(Some((111, 0)), (111, 0), || true));
-        assert!(!sig_is_fresh_with_source(None, (111, 0), || true));
-        for (stored, current) in [
-            ((111, 0), (111, 0)),
-            ((0, 0), (0, 0)),
-            ((111, 0), (222, 0)),
-            ((111, 0), (111, 1)),
-        ] {
-            assert!(!sig_is_fresh_with_source(Some(stored), current, || false));
-        }
-        assert!(!sig_is_fresh_with_source(Some((0, 0)), (0, 0), || true));
-        assert!(!sig_is_fresh_with_source(Some((111, -1)), (111, -1), || true));
-        assert!(!sig_is_fresh_with_source(Some((111, 0)), (222, 0), || panic!(
-            "mismatching tuple must not probe source"
-        )));
-    }
-}

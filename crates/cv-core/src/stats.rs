@@ -207,7 +207,7 @@ struct UsageBatch {
     hits: UsageRecords,
     fallback_model: String,
     #[cfg(feature = "sqlite")]
-    publication: Option<(SessionRef, crate::source::Snapshot)>,
+    publication: Option<(SessionRef, crate::source::Baseline)>,
 }
 enum UsageRecords {
     Staged(Ordered<UsageHit>),

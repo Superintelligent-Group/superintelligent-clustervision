@@ -157,7 +157,7 @@ Then closed (lane `aff-sidefiles`): Qwen `scheduled_tasks.json`; Cline schedule 
 `teams.db` runs; OpenClaw's cron and sub-agent registries; Kimi `state.json` todos; Grok
 `hook_execution`; Claude `--fork-session` and Goose fork lineage, which no store records but the
 copied records imply. A side store is read only when a full read rewrites the session's
-`affordance_counts` row (its signature moved), or for the view itself.
+`affordance_counts` row (its source baseline changed), or for the view itself.
 
 Leaves (named, not done here): Kimi Code `tools.update_store` (carried records); a Cline
 schedule's maker (no session is recorded); OpenClaw 1.29 completions that are plain user text; Roo's

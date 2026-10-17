@@ -145,6 +145,18 @@ mod imp {
         let mut conn = Connection::open(path).ok()?;
         // WAL + a busy timeout so concurrent cv processes don't error each other out.
         conn.busy_timeout(Duration::from_secs(5)).ok()?;
+        // A counts table carrying its own copy of the source signature (0.16) is dropped: counts
+        // reread once and publish with the one baseline record.
+        let legacy: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('affordance_counts') WHERE name='sig_a')",
+                [],
+                |row| row.get(0),
+            )
+            .ok()?;
+        if legacy {
+            conn.execute_batch("DROP TABLE affordance_counts;").ok()?;
+        }
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
              CREATE TABLE IF NOT EXISTS sessions(
@@ -180,8 +192,6 @@ mod imp {
                  harness TEXT NOT NULL,
                  id      TEXT NOT NULL,
                  path    TEXT NOT NULL,
-                 sig_a   INTEGER NOT NULL,
-                 sig_b   INTEGER NOT NULL,
                  counts  TEXT NOT NULL,
                  PRIMARY KEY(harness, id, path)
              );
@@ -801,8 +811,8 @@ mod imp {
         crate::discover_cache::fill_count(conn, &r.path, r.harness, &r.id, n);
     }
 
-    /// `(harness, id, path)` → the captured primary source tuple and counts a full read recorded.
-    type AffordanceRows = std::collections::HashMap<(String, String, String), (i64, i64, String)>;
+    /// `(harness, id, path)` → the counts text a full read recorded.
+    type AffordanceRows = std::collections::HashMap<(String, String, String), String>;
 
     /// The key under which a counts row records the [`crate::affordance::VIEW_VERSION`] that
     /// counted it.
@@ -841,16 +851,13 @@ mod imp {
     /// Record counts against the dependencies captured before their complete source pass.
     pub fn note_affordances_with_source(
         r: &SessionRef,
-        source: &crate::source::Snapshot,
+        source: &crate::source::Baseline,
         counts: impl FnOnce() -> crate::affordance::Counts,
     ) {
         if !db_path().is_some_and(|p| p.exists()) {
             return;
         }
         if !crate::source::unchanged(r, source) {
-            return;
-        }
-        if source.primary.0 == 0 {
             return;
         }
         let Some(mut conn) = open() else { return };
@@ -862,29 +869,29 @@ mod imp {
     pub(crate) fn note_affordances_in(
         conn: &mut Connection,
         r: &SessionRef,
-        source: &crate::source::Snapshot,
+        source: &crate::source::Baseline,
         counts: impl FnOnce() -> crate::affordance::Counts,
     ) {
-        let (a, b) = source.primary;
         let path = r.path.to_string_lossy();
-        let stored: Option<(i64, i64, String)> = conn
+        let stored: Option<String> = conn
             .query_row(
-                "SELECT sig_a, sig_b, counts FROM affordance_counts WHERE harness=?1 AND id=?2 AND path=?3",
+                "SELECT counts FROM affordance_counts WHERE harness=?1 AND id=?2 AND path=?3",
                 params![r.harness.as_str(), r.id, path],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| row.get(0),
             )
             .ok();
-        if stored.is_some_and(|(sa, sb, text)| (sa, sb) == (a, b) && counts_of(&text).is_some())
-            && crate::source::fresh_in(conn, "counts", r, source)
-        {
+        if stored.is_some_and(|text| {
+            counts_of(&text).is_some() && crate::source::fresh_in(conn, "counts", r, source, text.as_bytes())
+        }) {
             return;
         }
         let Ok(tx) = conn.transaction() else { return };
+        let text = counts_text(&counts());
         let written = tx.execute(
-            "INSERT OR REPLACE INTO affordance_counts(harness,id,path,sig_a,sig_b,counts) VALUES(?1,?2,?3,?4,?5,?6)",
-            params![r.harness.as_str(), r.id, path, a, b, counts_text(&counts())],
+            "INSERT OR REPLACE INTO affordance_counts(harness,id,path,counts) VALUES(?1,?2,?3,?4)",
+            params![r.harness.as_str(), r.id, path, text],
         );
-        if written.is_ok() && crate::source::publish_in(&tx, "counts", r, source).is_some() {
+        if written.is_ok() && crate::source::publish_in(&tx, "counts", r, source, text.as_bytes()).is_some() {
             let _ = tx.commit();
         }
     }
@@ -901,15 +908,10 @@ mod imp {
                 let mut conn = open()?;
                 let tx = conn.transaction().ok()?;
                 let mut stmt = tx
-                    .prepare("SELECT harness, id, path, sig_a, sig_b, counts FROM affordance_counts")
+                    .prepare("SELECT harness, id, path, counts FROM affordance_counts")
                     .ok()?;
                 let rows = stmt
-                    .query_map([], |row| {
-                        Ok((
-                            (row.get(0)?, row.get(1)?, row.get(2)?),
-                            (row.get(3)?, row.get(4)?, row.get(5)?),
-                        ))
-                    })
+                    .query_map([], |row| Ok(((row.get(0)?, row.get(1)?, row.get(2)?), row.get(3)?)))
                     .ok()?;
                 Some(AffordanceTable {
                     rows: rows.flatten().collect(),
@@ -932,7 +934,7 @@ mod imp {
         pub fn counts_with_source(
             &self,
             r: &SessionRef,
-            source: &crate::source::Snapshot,
+            source: &crate::source::Baseline,
         ) -> Option<crate::affordance::Counts> {
             self.counts_with_probe(r, source, &mut crate::source::Probe::default())
         }
@@ -940,7 +942,7 @@ mod imp {
         pub fn counts_with_probe(
             &self,
             r: &SessionRef,
-            source: &crate::source::Snapshot,
+            source: &crate::source::Baseline,
             probe: &mut crate::source::Probe,
         ) -> Option<crate::affordance::Counts> {
             let key = (
@@ -948,15 +950,10 @@ mod imp {
                 r.id.clone(),
                 r.path.to_string_lossy().into_owned(),
             );
-            let (a, b, text) = self.rows.get(&key)?;
-            if (*a, *b) == source.primary
-                && *a != 0
-                && self.dependencies.get(r).is_some_and(|old| old.fresh(source, probe))
-            {
-                counts_of(text)
-            } else {
-                None
-            }
+            let text = self.rows.get(&key)?;
+            self.dependencies
+                .fresh(r, source, text.as_bytes(), probe)
+                .then(|| counts_of(text))?
         }
 
         /// Whether `r` has no fresh counts (a sweep re-reads it to fill them).
@@ -1605,7 +1602,7 @@ mod imp {
             assert!(watch_is_fresh(&metadata, absent));
             std::fs::write(&metadata, r#"{"cwd":"/scratch/project"}"#).unwrap();
             assert!(!watch_is_fresh(&metadata, absent));
-            let present = crate::offsets::file_sig(&metadata).0;
+            let present = crate::source::FileId::at(&metadata).unwrap().mtime_ns as i64;
             assert!(watch_is_fresh(&metadata, present));
             std::fs::File::open(&metadata)
                 .unwrap()
@@ -1637,7 +1634,7 @@ mod imp {
                 !watch_is_fresh(&wal, absent),
                 "WAL appearance invalidates its absent watch"
             );
-            let present = crate::offsets::file_sig(&wal).0;
+            let present = crate::source::FileId::at(&wal).unwrap().mtime_ns as i64;
             assert!(watch_is_fresh(&wal, present));
             std::fs::remove_file(&wal).unwrap();
             assert!(
@@ -1672,12 +1669,12 @@ mod imp {
                     .set_times(std::fs::FileTimes::new().set_modified(old))
                     .unwrap();
             }
-            let db_sig = crate::offsets::file_sig(&path);
+            let db_sig = crate::source::FileId::at(&path);
             let r = db_ref(Harness::OpenCode, path.clone());
             let watches = watches_for(Harness::OpenCode, std::slice::from_ref(&w.base), &[r]);
             assert!(watches.iter().all(|(p, stamp)| watch_is_fresh(p, *stamp)));
             conn.execute("INSERT INTO messages VALUES ('new message')", []).unwrap();
-            assert_eq!(crate::offsets::file_sig(&path), db_sig, "write stayed in WAL");
+            assert_eq!(crate::source::FileId::at(&path), db_sig, "write stayed in WAL");
             let changed: Vec<_> = watches.iter().filter(|(p, stamp)| !watch_is_fresh(p, *stamp)).collect();
             assert_eq!(changed.len(), 1);
             assert_eq!(
@@ -1744,7 +1741,7 @@ pub fn fill_count(_r: &SessionRef, _n: usize) {}
 #[cfg(not(feature = "sqlite"))]
 pub fn note_affordances_with_source(
     _r: &SessionRef,
-    _source: &crate::source::Snapshot,
+    _source: &crate::source::Baseline,
     _counts: impl FnOnce() -> crate::affordance::Counts,
 ) {
 }
@@ -1762,14 +1759,14 @@ impl AffordanceTable {
     pub fn counts_with_source(
         &self,
         _r: &SessionRef,
-        _source: &crate::source::Snapshot,
+        _source: &crate::source::Baseline,
     ) -> Option<crate::affordance::Counts> {
         None
     }
     pub fn counts_with_probe(
         &self,
         _r: &SessionRef,
-        _source: &crate::source::Snapshot,
+        _source: &crate::source::Baseline,
         _probe: &mut crate::source::Probe,
     ) -> Option<crate::affordance::Counts> {
         None

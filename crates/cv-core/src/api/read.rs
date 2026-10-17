@@ -1,6 +1,6 @@
 //! Small verified continuations for repeated API reads. No messages are cached.
 use super::{session_meta_json, WindowSink};
-use crate::source::{Probe, ReadSet, Snapshot};
+use crate::source::{Baseline, Probe, ReadSet};
 use crate::stream::{Checkpoint, Flow, ParseOptions};
 use crate::{Adapter, Session, SessionRef};
 use anyhow::Result;
@@ -65,7 +65,7 @@ enum Payload {
 #[derive(Clone, Serialize)]
 struct Entry {
     key: Key,
-    source: Snapshot,
+    source: Baseline,
     payload: Payload,
     #[serde(skip)]
     bytes: usize,
@@ -134,7 +134,7 @@ pub(super) fn note_message_sources(message: &crate::Message, primary: &std::path
     crate::source::record_message_reads(message, primary, reads);
 }
 
-fn captured(r: &SessionRef, primary: &std::path::Path) -> (Snapshot, ReadSet) {
+fn captured(r: &SessionRef, primary: &std::path::Path) -> (Baseline, ReadSet) {
     let before = Probe::default().snapshot_from(r, primary);
     let mut reads = ReadSet::default();
     // Include replacement identity and ctime, even when size and mtime were restored.
@@ -142,7 +142,7 @@ fn captured(r: &SessionRef, primary: &std::path::Path) -> (Snapshot, ReadSet) {
     (before, reads)
 }
 
-fn fresh(r: &SessionRef, before: &Snapshot, primary: &std::path::Path) -> bool {
+fn fresh(r: &SessionRef, before: &Baseline, primary: &std::path::Path) -> bool {
     let mut probe = Probe::default();
     let current = probe.snapshot_from(r, primary);
     before.fresh(&current, &mut probe)
@@ -277,7 +277,7 @@ pub(super) fn window_output(
     Ok((shell.expect("a stream or accepted resume returned metadata"), sink))
 }
 
-fn verify(r: &SessionRef, primary: &std::path::Path, before: &Snapshot, sink: &WindowSink) -> Result<()> {
+fn verify(r: &SessionRef, primary: &std::path::Path, before: &Baseline, sink: &WindowSink) -> Result<()> {
     anyhow::ensure!(
         fresh(r, &before.with_reads(&sink.reads), primary) && sink.reads.fresh(&mut Probe::default()),
         "API window source changed before publication"

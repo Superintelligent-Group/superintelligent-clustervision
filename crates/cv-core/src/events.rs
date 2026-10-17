@@ -484,14 +484,13 @@ mod db {
     /// v1 (0.9.10) stored `(harness TEXT, session_id TEXT, …, target TEXT)` per event row plus a
     /// dedup expression index — measured at ~3× the data size in indexes alone. v2 interns session
     /// identity and targets into side tables and carries integers per row. The catalog is a pure
-    /// cache, so "migration" is version-stamp + drop + lazy reingest (dropping `event_sync` makes
+    /// cache, so "migration" is version-stamp + drop + lazy reingest (dropping the baselines makes
     /// every session look stale; the next `cv index` — or any on-the-spot `cv events <id>` —
     /// rebuilds), exactly like the tantivy schema self-heal.
     /// v3 (0.9.13) adds sub-agent provenance columns (`parent_id`, `agent_id`, `workflow`) to
     /// `event_sessions`, so a folded-in sub-agent transcript's events can be attributed to the
     /// orchestrator that spawned it. Same self-heal as before: bumping the version drops the event
-    /// tables + `event_sync`, so everything reads stale and the next `cv index` reingests on the
-    /// new schema.
+    /// tables, so everything reads stale and the next `cv index` reingests on the new schema.
     const EVENTS_SCHEMA_VERSION: i64 = 3;
 
     /// Drop pre-v2 event tables (their indexes go with them) and stamp the version.
@@ -525,6 +524,7 @@ mod db {
              PRAGMA user_version = {EVENTS_SCHEMA_VERSION};"
         ))
         .ok()?;
+        crate::source::forget_in(conn, "events")?;
         // The drop frees most of the file's pages but SQLite never returns them to the OS on its
         // own — reclaim once, opportunistically (a busy db just keeps its free pages for reuse).
         let _ = conn.execute_batch("VACUUM;");
@@ -560,8 +560,6 @@ mod db {
                  parent_id  TEXT,
                  agent_id   TEXT,
                  workflow   TEXT,
-                 source_path TEXT,
-                 source_cwd TEXT,
                  UNIQUE(harness, session_id)
              );
              CREATE TABLE IF NOT EXISTS event_targets(
@@ -579,228 +577,92 @@ mod db {
              );
              CREATE INDEX IF NOT EXISTS idx_events_session ON events(session);
              CREATE INDEX IF NOT EXISTS idx_events_target ON events(target_id);
-             CREATE TABLE IF NOT EXISTS event_sync(
-                 harness  TEXT NOT NULL,
-                 id       TEXT NOT NULL,
-                 path     TEXT NOT NULL,
-                 mtime_ns INTEGER NOT NULL,
-                 size     INTEGER,
-                 PRIMARY KEY(harness, id, path)
-             );",
+             -- The per-session skip-table (0.16 and earlier): the baseline record is the stamp.
+             DROP TABLE IF EXISTS event_sync;",
         )
         .ok()?;
-        // Lazy migration: a pre-`size` `event_sync` (the CREATE above is a no-op on it) gets the
-        // column added in place. Old rows read back a NULL size, which [`sync_sig`] treats as
-        // stale — each session re-ingests once and is stamped with its size; no wholesale drop.
-        let has_size: bool = conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('event_sync') WHERE name='size')",
-                [],
-                |r| r.get(0),
-            )
-            .ok()?;
-        if !has_size {
-            conn.execute_batch("ALTER TABLE event_sync ADD COLUMN size INTEGER;")
-                .ok()?;
-        }
-        let has_source_path: bool = conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('event_sessions') WHERE name='source_path')",
-                [],
-                |row| row.get(0),
-            )
-            .ok()?;
-        if !has_source_path {
-            conn.execute_batch("ALTER TABLE event_sessions ADD COLUMN source_path TEXT;")
-                .ok()?;
-        }
-        let has_source_cwd: bool = conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('event_sessions') WHERE name='source_cwd')",
-                [],
-                |row| row.get(0),
-            )
-            .ok()?;
-        if !has_source_cwd {
-            conn.execute_batch("ALTER TABLE event_sessions ADD COLUMN source_cwd TEXT;")
-                .ok()?;
-        }
         Some(conn)
     }
 
-    fn authority_matches(conn: &Connection, r: &SessionRef, prov: &Provenance) -> rusqlite::Result<bool> {
-        conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM event_sessions es JOIN event_sync s
-               ON s.harness=es.harness AND s.id=es.session_id AND s.path=es.source_path
-             WHERE es.harness=?1 AND es.session_id=?2 AND es.source_path=?3
-               AND es.parent_id IS ?4 AND es.agent_id IS ?5 AND es.workflow IS ?6
-               AND es.source_cwd IS ?7 AND s.mtime_ns != 0 AND s.size >= 0)",
-            params![
-                r.harness.as_str(),
-                r.id,
-                r.path.to_string_lossy(),
-                prov.parent_id,
-                prov.agent_id,
-                prov.workflow,
-                r.cwd.as_ref().map(|p| p.to_string_lossy())
-            ],
-            |row| row.get(0),
-        )
+    /// What an event publication's baseline record is published with: the provenance and cwd
+    /// its rows were attributed under. Another provenance's rows are another output.
+    fn authority(r: &SessionRef, prov: &Provenance) -> Vec<u8> {
+        let cwd = r.cwd.as_ref().map(|p| p.to_string_lossy());
+        let mut bytes = Vec::new();
+        for field in [
+            prov.parent_id.as_deref(),
+            prov.agent_id.as_deref(),
+            prov.workflow.as_deref(),
+            cwd.as_deref(),
+        ] {
+            bytes.push(u8::from(field.is_some()));
+            let field = field.unwrap_or_default();
+            bytes.extend((field.len() as u64).to_le_bytes());
+            bytes.extend(field.as_bytes());
+        }
+        bytes
     }
 
-    /// A stored `event_sync` stamp; a pre-`size` row (NULL size) has none.
-    fn sync_sig((mtime, size): (i64, Option<i64>)) -> Option<(i64, i64)> {
-        Some((mtime, size?))
-    }
-
-    /// Whether `r` needs an event (re)ingest: its source as captured now is not the one the
-    /// `event_sync` row's baseline recorded (or there is none). `false` when the catalog can't be opened — events
-    /// degrade silently rather than re-streaming the corpus into a broken db forever.
+    /// Whether `r` needs an event (re)ingest: its source as captured now is not the one its
+    /// published baseline recorded, or that baseline belongs to another provenance, or there is
+    /// none. `false` when the catalog can't be opened — events degrade silently rather than
+    /// re-streaming the corpus into a broken db forever.
     ///
     /// Opens a fresh connection per call — fine for a one-off check (`cv events <id>`), wrong for
-    /// a corpus sweep: bulk callers use [`SyncTable`] (one query for the whole skip-table).
+    /// a corpus sweep: bulk callers use [`SyncTable`] (one query for the whole table).
     pub fn needs_ingest(r: &SessionRef) -> bool {
         let Some(conn) = open() else { return false };
-        let stored: Option<(i64, Option<i64>)> = conn
-            .query_row(
-                "SELECT s.mtime_ns, s.size FROM event_sync s JOIN event_sessions es
-                   ON es.harness=s.harness AND es.session_id=s.id AND es.source_path=s.path
-                 WHERE s.harness=?1 AND s.id=?2 AND s.path=?3
-                   AND es.parent_id IS NULL AND es.agent_id IS NULL AND es.workflow IS NULL
-                   AND es.source_cwd IS ?4",
-                params![
-                    r.harness.as_str(),
-                    r.id,
-                    r.path.to_string_lossy(),
-                    r.cwd.as_ref().map(|p| p.to_string_lossy())
-                ],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .ok();
         let source = crate::source::Probe::default().snapshot(r);
-        !crate::offsets::sig_is_fresh_with_source(stored.and_then(sync_sig), source.primary, || {
-            crate::source::Table::load("events")
-                .get(r)
-                .is_some_and(|old| old.fresh(&source, &mut crate::source::Probe::default()))
-        })
+        !crate::source::fresh_in(&conn, "events", r, &source, &authority(r, &Provenance::default()))
     }
 
-    /// The whole `event_sync` skip-table, loaded with **one** connection + query, for bulk passes
+    /// Every published event baseline, loaded with **one** connection + query, for bulk passes
     /// that check every discovered session ([`ingest_all`], the FTS indexer's event ride-along).
     /// The per-session [`needs_ingest`] opens a connection — and re-runs the catalog DDL — per
     /// call, which a ~2,400-session sweep pays ~2,400 times.
     ///
     /// Answers exactly like [`needs_ingest`], including the degrade: when the catalog can't be
     /// opened, every check returns `false` (don't re-stream the corpus into a broken db).
-    /// `(harness, id, path) → (mtime_ns, size)` — one loaded `event_sync` stamp per session
-    /// (size is `None` on rows written before the size column existed).
-    struct SyncEntry {
-        signature: (i64, Option<i64>),
-        cwd: Option<String>,
-        provenance: Provenance,
-    }
-    type SyncRows = std::collections::HashMap<(String, String, String), SyncEntry>;
-
     pub struct SyncTable {
-        /// The loaded skip-table; `None` when the catalog is unavailable.
-        rows: Option<SyncRows>,
-        dependencies: crate::source::Table,
+        /// `None` when the catalog is unavailable.
+        baselines: Option<crate::source::Table>,
     }
 
     impl SyncTable {
         pub fn load() -> SyncTable {
-            let load = || -> Option<(SyncRows, crate::source::Table)> {
-                let mut conn = open()?;
-                let tx = conn.transaction().ok()?;
-                let mut stmt = tx
-                    .prepare("SELECT s.harness, s.id, s.path, s.mtime_ns, s.size, es.parent_id, es.agent_id, es.workflow, es.source_cwd
-                              FROM event_sync s JOIN event_sessions es
-                                ON es.harness=s.harness AND es.session_id=s.id AND es.source_path=s.path")
-                    .ok()?;
-                let rows = stmt
-                    .query_map([], |row| {
-                        Ok((
-                            (
-                                row.get::<_, String>(0)?,
-                                row.get::<_, String>(1)?,
-                                row.get::<_, String>(2)?,
-                            ),
-                            SyncEntry {
-                                signature: (row.get(3)?, row.get(4)?),
-                                cwd: row.get(8)?,
-                                provenance: Provenance {
-                                    parent_id: row.get(5)?,
-                                    agent_id: row.get(6)?,
-                                    workflow: row.get(7)?,
-                                },
-                            },
-                        ))
-                    })
-                    .ok()?;
-                Some((rows.flatten().collect(), crate::source::Table::load_in(&tx, "events")))
-            };
-            match load() {
-                Some((rows, dependencies)) => SyncTable {
-                    rows: Some(rows),
-                    dependencies,
-                },
-                None => SyncTable {
-                    rows: None,
-                    dependencies: Default::default(),
-                },
+            SyncTable {
+                baselines: open().map(|conn| crate::source::Table::load_in(&conn, "events")),
             }
         }
 
-        /// Whether `r`'s one published event output is stale: source copy, provenance, tuple and
-        /// dependencies, checked against the preloaded table with the operation's shared probe.
+        /// Whether `r`'s one published event output is stale: provenance, source identity and
+        /// dependencies, checked against the loaded table with the operation's shared probe.
         pub fn needs_ingest(
             &self,
             r: &SessionRef,
-            source: &crate::source::Snapshot,
+            source: &crate::source::Baseline,
             provenance: &Provenance,
             probe: &mut crate::source::Probe,
         ) -> bool {
-            let Some(rows) = &self.rows else { return false };
-            let key = (
-                r.harness.as_str().to_string(),
-                r.id.clone(),
-                r.path.to_string_lossy().into_owned(),
-            );
-            !crate::offsets::sig_is_fresh_with_source(
-                rows.get(&key)
-                    .filter(|entry| {
-                        entry.provenance == *provenance
-                            && entry.cwd.as_deref() == r.cwd.as_ref().map(|p| p.to_string_lossy()).as_deref()
-                    })
-                    .and_then(|entry| sync_sig(entry.signature)),
-                source.primary,
-                || self.dependencies.get(r).is_some_and(|old| old.fresh(source, probe)),
-            )
+            self.baselines
+                .as_ref()
+                .is_some_and(|table| !table.fresh(r, source, &authority(r, provenance), probe))
         }
+
         /// Whether retained prefix events belong to this source copy and expected provenance.
-        /// This is separate from unchanged freshness: an ordinary append changes the tuple.
+        /// This is separate from unchanged freshness: an ordinary append changes the identity.
         pub fn can_resume(&self, r: &SessionRef, provenance: &Provenance) -> bool {
-            self.rows.as_ref().is_some_and(|rows| {
-                rows.get(&(
-                    r.harness.as_str().to_owned(),
-                    r.id.clone(),
-                    r.path.to_string_lossy().into_owned(),
-                ))
-                .is_some_and(|entry| {
-                    entry.signature.0 != 0
-                        && entry.signature.1.is_some_and(|size| size >= 0)
-                        && entry.provenance == *provenance
-                        && entry.cwd.as_deref() == r.cwd.as_ref().map(|p| p.to_string_lossy()).as_deref()
-                })
-            })
+            self.baselines
+                .as_ref()
+                .is_some_and(|table| table.published(r, &authority(r, provenance)).is_some())
         }
     }
 
     /// Publish a completed ordered batch with bounded row/target retention in one transaction:
-    /// delete the prior rows of messages `from` and later, insert, and stamp `event_sync` and the
-    /// source baseline from `source`, captured by the caller **before** streaming, so content
-    /// appended mid-parse reads as stale next time. Any spill read, ordering or SQL failure rolls
-    /// back rows and freshness together.
+    /// delete the prior rows of messages `from` and later, insert, and publish the source
+    /// baseline from `source`, captured by the caller **before** streaming, so content appended
+    /// mid-parse reads as stale next time. Any spill read, ordering or SQL failure rolls back rows
+    /// and freshness together.
     ///
     /// Dedup invariant: the DELETE-by-session + batch-INSERT shape makes cross-session duplicates
     /// impossible by construction, and duplicates within one message — same `(msg_idx, kind,
@@ -809,7 +671,7 @@ mod db {
         r: &SessionRef,
         from: usize,
         events: EventSpool,
-        source: &crate::source::Snapshot,
+        source: &crate::source::Baseline,
         prov: &Provenance,
     ) -> Result<()> {
         let mut conn = open().ok_or_else(|| anyhow::anyhow!("event catalog unavailable"))?;
@@ -821,7 +683,7 @@ mod db {
         r: &SessionRef,
         from: usize,
         events: EventSpool,
-        source: &crate::source::Snapshot,
+        source: &crate::source::Baseline,
         prov: &Provenance,
     ) -> Result<()> {
         let rows = events.rows()?;
@@ -837,7 +699,7 @@ mod db {
         prov: &Provenance,
     ) -> Result<rusqlite::Transaction<'a>> {
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        if from > 0 && !authority_matches(&tx, r, prov)? {
+        if from > 0 && crate::source::published_in(&tx, "events", r, &authority(r, prov)).is_none() {
             anyhow::bail!("event prefix belongs to another or unknown output authority");
         }
         Ok(tx)
@@ -849,9 +711,8 @@ mod db {
         from: usize,
         events: impl IntoIterator<Item = Result<Event>>,
         prov: &Provenance,
-        source: &crate::source::Snapshot,
+        source: &crate::source::Baseline,
     ) -> Result<()> {
-        let (mtime_ns, size) = source.primary;
         let tx = publication_transaction(conn, r, from, prov)?;
         let harness = r.harness.as_str();
         tx.execute(
@@ -861,17 +722,8 @@ mod db {
         // Stamp provenance on every record (idempotent re-ingest keeps it current); top-level
         // sessions write NULLs, which leaves the existing top-level rows exactly as before.
         tx.execute(
-            "UPDATE event_sessions SET parent_id=?3, agent_id=?4, workflow=?5, source_path=?6, source_cwd=?7
-             WHERE harness=?1 AND session_id=?2",
-            params![
-                harness,
-                r.id,
-                prov.parent_id,
-                prov.agent_id,
-                prov.workflow,
-                r.path.to_string_lossy(),
-                r.cwd.as_ref().map(|p| p.to_string_lossy())
-            ],
+            "UPDATE event_sessions SET parent_id=?3, agent_id=?4, workflow=?5 WHERE harness=?1 AND session_id=?2",
+            params![harness, r.id, prov.parent_id, prov.agent_id, prov.workflow],
         )?;
         let session = tx.query_row(
             "SELECT id FROM event_sessions WHERE harness=?1 AND session_id=?2",
@@ -934,15 +786,12 @@ mod db {
                 ])?;
             }
         }
+        // One session's rows have one source copy: another path's baseline no longer describes them.
         tx.execute(
-            "DELETE FROM event_sync WHERE harness=?1 AND id=?2",
+            "DELETE FROM source_dependencies WHERE consumer='events' AND harness=?1 AND id=?2",
             params![harness, r.id],
         )?;
-        tx.execute(
-            "INSERT OR REPLACE INTO event_sync(harness,id,path,mtime_ns,size) VALUES(?1,?2,?3,?4,?5)",
-            params![harness, r.id, r.path.to_string_lossy(), mtime_ns, size],
-        )?;
-        crate::source::publish_in(&tx, "events", r, source)
+        crate::source::publish_in(&tx, "events", r, source, &authority(r, prov))
             .ok_or_else(|| anyhow::anyhow!("event source baseline publication failed"))?;
         tx.commit()?;
         Ok(())
@@ -950,8 +799,8 @@ mod db {
 
     /// (Re)ingest events for one session: stream it (lazily — large content stays on disk) through
     /// a [`SpoolingSink`] and persist the rows. Returns the number of events extracted. The
-    /// `(mtime, size)` stamp is captured **before** the streamed pass, so anything appended while
-    /// we were reading still shows as stale next time.
+    /// baseline is captured **before** the streamed pass, so anything appended while we were
+    /// reading still shows as stale next time.
     pub fn ingest_ref(r: &SessionRef) -> Result<usize> {
         let adapter =
             crate::harness::for_harness(r.harness).ok_or_else(|| anyhow::anyhow!("no adapter for {}", r.harness))?;
@@ -981,8 +830,8 @@ mod db {
         Ok(len)
     }
 
-    /// (Re)ingest events for every discovered session, skipping unchanged ones (by the
-    /// `event_sync` `(mtime, size)` signature) unless `force`. The standalone entry point for users who don't run the tantivy
+    /// (Re)ingest events for every discovered session, skipping unchanged ones (by their
+    /// published baseline) unless `force`. The standalone entry point for users who don't run the tantivy
     /// indexer (which otherwise ingests events as a ride-along). Returns sessions (re)ingested.
     ///
     /// With `subagents`, also fold each top-level Claude session's whole sub-agent **forest**
@@ -1273,13 +1122,15 @@ mod db {
             // This is the former production sequence: the read admits a WAL snapshot, then
             // another connection commits before the initial INSERT. Waiting cannot fix it.
             let deferred = first.transaction().unwrap();
-            assert!(authority_matches(&deferred, &r, &Provenance::default()).unwrap());
-            second
-                .execute(
-                    "UPDATE event_sessions SET workflow='intervening' WHERE session_id='lock'",
-                    [],
-                )
-                .unwrap();
+            assert!(
+                crate::source::published_in(&deferred, "events", &r, &authority(&r, &Provenance::default())).is_some()
+            );
+            // Another publication re-attributes the output: its baseline now names that workflow.
+            let provenance = Provenance {
+                workflow: Some("intervening".into()),
+                ..Default::default()
+            };
+            crate::source::publish_in(&second, "events", &r, &source, &authority(&r, &provenance)).unwrap();
             let error = deferred
                 .execute(
                     "INSERT OR IGNORE INTO event_sessions(harness,session_id) VALUES('claude','lock')",
@@ -1308,10 +1159,6 @@ mod db {
                     .unwrap(),
                 before
             );
-            let provenance = Provenance {
-                workflow: Some("intervening".into()),
-                ..Default::default()
-            };
             // Exercise the production transaction owner before its first output mutation.
             let immediate = publication_transaction(&mut first, &r, 1, &provenance).unwrap();
             let error = second
@@ -1341,9 +1188,13 @@ mod db {
                 before
             );
             let count: i64 = second
-                .query_row("SELECT COUNT(*) FROM event_sync WHERE id='lock'", [], |row| row.get(0))
+                .query_row(
+                    "SELECT COUNT(*) FROM source_dependencies WHERE consumer='events' AND id='lock'",
+                    [],
+                    |row| row.get(0),
+                )
                 .unwrap();
-            assert_eq!(count, 1, "authority rejection preserves the published stamp");
+            assert_eq!(count, 1, "authority rejection preserves the published baseline");
         }
     }
 }
@@ -1376,7 +1227,7 @@ mod db_stub {
         pub fn needs_ingest(
             &self,
             _r: &SessionRef,
-            _source: &crate::source::Snapshot,
+            _source: &crate::source::Baseline,
             _provenance: &Provenance,
             _probe: &mut crate::source::Probe,
         ) -> bool {
@@ -1390,7 +1241,7 @@ mod db_stub {
         _r: &SessionRef,
         _from: usize,
         _events: EventSpool,
-        _source: &crate::source::Snapshot,
+        _source: &crate::source::Baseline,
         _prov: &Provenance,
     ) -> Result<()> {
         Ok(())
@@ -1793,18 +1644,6 @@ mod tests {
             events_for("claude", "shared", None)[0].target.as_deref(),
             Some("/first/b.rs")
         );
-        let conn = crate::catalog::open_db().unwrap();
-        let a_sig = crate::offsets::file_sig(&a.path);
-        conn.execute(
-            "INSERT INTO event_sync(harness,id,path,mtime_ns,size) VALUES('claude','shared',?1,?2,?3)",
-            rusqlite::params![a.path.to_string_lossy(), a_sig.0, a_sig.1],
-        )
-        .unwrap();
-        assert!(
-            stale(&a, &direct),
-            "a competing historical path stamp cannot claim published output"
-        );
-        assert!(!stale(&b, &direct));
         let before = rows();
         let source = crate::source::Probe::default().snapshot(&a);
         let empty = || SpoolingSink::new(None).into_spool().unwrap();
@@ -1843,32 +1682,19 @@ mod tests {
         assert!(!stale(&changed, &direct));
         let conn = crate::catalog::open_db().unwrap();
         assert_eq!(
-            conn.query_row("SELECT COUNT(*) FROM event_sync WHERE id='shared'", [], |row| row
-                .get::<_, i64>(0))
-                .unwrap(),
-            1
+            conn.query_row(
+                "SELECT COUNT(*) FROM source_dependencies WHERE consumer='events' AND id='shared'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1,
+            "one session has one published source copy"
         );
-        conn.execute("UPDATE event_sessions SET source_path=NULL", []).unwrap();
-        assert!(stale(&changed, &direct), "legacy output has no authoritative path");
-        assert!(!SyncTable::load().can_resume(&changed, &direct));
-        assert!(record_spooled_with_source(&changed, 1, empty(), &source, &direct).is_err());
-        ingest_ref(&changed).unwrap();
-        assert!(!stale(&changed, &direct));
         let before = rows();
         let source = crate::source::Probe::default().snapshot(&changed);
         record_spooled_with_source(&changed, 1, empty(), &source, &direct).unwrap();
         assert_eq!(rows(), before, "same-authority prefix retention remains supported");
-        conn.execute_batch(
-            "ALTER TABLE event_sessions DROP COLUMN source_path; ALTER TABLE event_sessions DROP COLUMN source_cwd;",
-        )
-        .unwrap();
-        assert!(
-            stale(&changed, &direct),
-            "existing catalog gains nullable authority and misses lazily"
-        );
-        assert_eq!(rows(), before, "authority migration keeps old event output available");
-        ingest_ref(&changed).unwrap();
-        assert!(!stale(&changed, &direct));
     }
 
     #[cfg(feature = "sqlite")]
@@ -1981,27 +1807,13 @@ mod tests {
         let mut probe = crate::source::Probe::default();
         assert!(!SyncTable::load().needs_ingest(&r, &source, &Provenance::default(), &mut probe));
         let conn = crate::catalog::open_db().unwrap();
-        conn.execute("UPDATE event_sync SET size=NULL WHERE id='empty'", [])
-            .unwrap();
-        assert!(needs_ingest(&r), "historical unknown size still misses");
-        ingest_ref(&r).unwrap();
         conn.execute("DELETE FROM source_dependencies WHERE consumer='events'", [])
             .unwrap();
         assert!(needs_ingest(&r), "missing captured authority still misses");
         ingest_ref(&r).unwrap();
-        let text: String = conn
-            .query_row(
-                "SELECT stamp FROM source_dependencies WHERE consumer='events'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let mut legacy: serde_json::Value = serde_json::from_str(&text).unwrap();
-        legacy["version"] = 2.into();
-        legacy.as_object_mut().unwrap().remove("primary");
         conn.execute(
-            "UPDATE source_dependencies SET stamp=?1 WHERE consumer='events'",
-            [legacy.to_string()],
+            "UPDATE source_dependencies SET record=substr(record,1,53)||'{\"version\":2}' WHERE consumer='events'",
+            [],
         )
         .unwrap();
         assert!(needs_ingest(&r), "old source stamps cannot authorize empty reuse");
@@ -2151,7 +1963,7 @@ mod tests {
     }
 
     /// Migration e2e: a v1-shaped (0.9.10) catalog opened by v2 code is dropped wholesale —
-    /// old rows AND `event_sync` (so everything reads as stale) — then lazily reingested; the
+    /// old rows AND its stamps (so everything reads as stale) — then lazily reingested; the
     /// version stamp prevents re-drops; and a v1 table snuck back in by an old binary under a
     /// v2 stamp self-heals on the next open.
     #[cfg(feature = "sqlite")]
@@ -2192,7 +2004,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let mtime = crate::offsets::file_sig(&path).0;
+        let mtime = crate::source::FileId::at(&path).unwrap().mtime_ns;
         {
             let conn = rusqlite::Connection::open(home.join("catalog.db")).unwrap();
             conn.execute_batch(&format!(

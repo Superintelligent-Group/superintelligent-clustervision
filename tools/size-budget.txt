@@ -1,18 +1,18 @@
 # Product lines per crate and per module, and test lines per crate (tools/check-size.py).
 # Raise a number only as a reviewed decision; the gate ratchets each one down as code shrinks.
 cv 19200
-cv-core 79015
-cv-search 4737
+cv-core 78889
+cv-search 4747
 cv-testkit 450
 cv-web 15
 cv:tests 15345
-cv-core:tests 64351
-cv-search:tests 7340
+cv-core:tests 64321
+cv-search:tests 7337
 cv-testkit:tests 39
 cv-web:tests 0
 cv-core:affordance 1809
 cv-core:api 977
-cv-core:catalog 1257
+cv-core:catalog 1245
 cv-core:compaction 268
 cv-core:config 81
 cv-core:dataset 866
@@ -22,7 +22,7 @@ cv-core:distill 1520
 cv-core:doctor 265
 cv-core:emit 1805
 cv-core:env 235
-cv-core:events 1650
+cv-core:events 1500
 cv-core:formats 617
 cv-core:handoff 132
 cv-core:harness/claude 4095
@@ -61,7 +61,7 @@ cv-core:lazy 1086
 cv-core:lib 703
 cv-core:lockfile 32
 cv-core:loom 74
-cv-core:offsets 39
+cv-core:offsets 20
 cv-core:projection 463
 cv-core:prune 3469
 cv-core:publish 416
@@ -74,17 +74,17 @@ cv-core:rewind 1001
 cv-core:rows 182
 cv-core:sanitize 77
 cv-core:scan 229
-cv-core:source 991
+cv-core:source 1057
 cv-core:spill 708
-cv-core:stats 1061
+cv-core:stats 1050
 cv-core:stream 943
 cv-core:task 2182
 cv-core:tools 459
 cv-core:watch 1318
-cv-search:fts 2858
+cv-search:fts 2863
 cv-search:ingest 146
 cv-search:lib 277
-cv-search:semantic 982
+cv-search:semantic 987
 cv-search:semantic_corpus 153
 cv-search:session_collector 321
 cv-testkit:heap 73

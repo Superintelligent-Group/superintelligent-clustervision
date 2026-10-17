@@ -58,7 +58,7 @@ pub struct ReadState {
     path: PathBuf,
     #[serde(default)]
     primary: Option<PathBuf>,
-    pub source: source::Snapshot,
+    pub source: source::Baseline,
     anchor: Option<Anchor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     completed: Option<Completed>,
@@ -114,19 +114,21 @@ impl ReadState {
         &'a self,
         adapter: &dyn Adapter,
         r: &SessionRef,
-        current: &source::Snapshot,
+        current: &source::Baseline,
         skip: usize,
     ) -> Option<&'a stream::Checkpoint> {
         if self.version != state_version(adapter)
             || self.path != r.path
             || self.primary.as_ref() != Some(&adapter.resume_source(r))
-            || current.primary.1 < self.source.primary.1
+            || current.primary_len() < self.source.primary_len()
             || !self.source.dependencies_fresh(current, &mut source::Probe::default())
         {
             return None;
         }
         // A source that did not grow is held to its whole identity, not only the anchor's sample.
-        if current.primary.1 == self.source.primary.1 && !self.source.fresh(current, &mut source::Probe::default()) {
+        if current.primary_len() == self.source.primary_len()
+            && !self.source.fresh(current, &mut source::Probe::default())
+        {
             return None;
         }
         let anchor = self.anchor.as_ref()?;
@@ -156,7 +158,7 @@ pub struct ReadPass {
     /// Primary bytes from the admitted checkpoint to captured EOF, excluding auxiliary reads
     /// and guard samples. A bounded unchanged read may stop before traversing this whole suffix.
     pub suffix_bytes: u64,
-    source: source::Snapshot,
+    source: source::Baseline,
     path: PathBuf,
     primary: PathBuf,
     before: Option<Anchor>,
@@ -574,7 +576,7 @@ fn read_inner<'a>(
     let before = sink.before.as_ref().and_then(anchor);
     let last = done.last.as_ref().or(sink.last.as_ref()).and_then(anchor);
     anyhow::ensure!(
-        if source.dependencies.is_some() {
+        if source.stamp.is_some() {
             source::unchanged_from(r, &primary, &source)
         } else {
             source::Probe::default().snapshot_from(r, &primary).primary == source.primary
@@ -616,11 +618,9 @@ fn read_inner<'a>(
         total,
         reached_eof: complete,
         parsed_messages: sink.total - first,
-        suffix_bytes: (captured.primary.1.max(0) as u64).saturating_sub(if resumed {
-            from.map_or(0, |cp| cp.offset)
-        } else {
-            0
-        }),
+        suffix_bytes: captured
+            .primary_len()
+            .saturating_sub(if resumed { from.map_or(0, |cp| cp.offset) } else { 0 }),
         messages: sink.messages,
         resumed,
         prefix: first,
@@ -712,7 +712,10 @@ mod tests {
             .unwrap()
             .set_times(std::fs::FileTimes::new().set_modified(modified))
             .unwrap();
-        assert_eq!(crate::offsets::file_sig(&a), crate::offsets::file_sig(&b));
+        assert_eq!(
+            source::FileId::at(&a).map(|id| (id.len, id.mtime_ns)),
+            source::FileId::at(&b).map(|id| (id.len, id.mtime_ns))
+        );
         let r = SessionRef::new("foreign", Harness::Codex, dir.join("logical"));
         let first = read(&Foreign(a), &r, None, 0, 0).unwrap();
         let state = first.accepted(first.total);
@@ -1014,7 +1017,8 @@ mod tests {
             .unwrap()
             .set_times(std::fs::FileTimes::new().set_modified(modified))
             .unwrap();
-        assert_eq!(source::Probe::default().snapshot(&r).primary, complete.source.primary);
+        let tuple = |source: &source::Baseline| source.primary.map(|id| (id.len, id.mtime_ns));
+        assert_eq!(tuple(&source::Probe::default().snapshot(&r)), tuple(&complete.source));
         let anchor = complete.anchor.as_ref().unwrap();
         assert!(anchor
             .head

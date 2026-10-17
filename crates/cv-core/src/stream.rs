@@ -708,7 +708,7 @@ pub struct Streamed {
 /// Source receipt for an operation that stages output before publication.
 /// Validate after resolving all demanded payloads, before exposing the completed stage.
 pub struct StagedReadGuard {
-    source: crate::source::Snapshot,
+    source: crate::source::Baseline,
     reads: crate::source::ReadSet,
     primary: std::path::PathBuf,
 }
@@ -793,7 +793,7 @@ pub struct Counted {
 
 impl Counted {
     /// Publish against the dependencies captured before this pass, including any side-store rows.
-    pub fn record_with_source(&self, r: &SessionRef, source: &crate::source::Snapshot) {
+    pub fn record_with_source(&self, r: &SessionRef, source: &crate::source::Baseline) {
         let source = source.with_reads(&self.dependencies);
         if crate::source::unchanged(r, &source) {
             note_turns(r, self.turns);
