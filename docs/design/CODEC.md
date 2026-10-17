@@ -24,7 +24,12 @@ over `INLINE_MAX` stays in the source (a `Span` when mapped, a checked `Text::So
 positioned), tool arguments over `INLINE_MAX` become `Json::Source`. Lean, facts, usage, rich and
 complete are which fields get resolved, never which code runs. Discovery, fork heads and
 prefix counts are demands on the same reader. The driver rechecks source identity after a
-record that published a source descriptor and once at the end, never per record.
+record that published a source descriptor and once at the end, never per record; the identity is
+`source::FileId`, and a `.jsonl` that grew under the read is admitted by content
+(`FileId::admits`: same inode, at least as long, sampled prefix unchanged), with the trailing
+partial line held back. Every span a reader hands out resolves through one checked resolver in
+`lazy`, so a replaced or shrunk file fails the first content read instead of returning the
+replacement's bytes.
 
 **Heap budgets by construction.** Nothing unselected is decoded, so a reducer's heap is the
 fields it reads; a giant line is never copied on positioned builds; spans and source arguments
