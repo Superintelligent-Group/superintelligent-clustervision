@@ -560,7 +560,9 @@ fn search(query: &str, searcher: &cv_search::Searcher) -> Reply {
     if semantic && scan {
         return bad(400, "semantic=1 conflicts with scan=1");
     }
-    if (semantic || scan) && scope != cv_search::Scope::Exchange {
+    // The CLI declares --kind as conflicting with --scan and --semantic; the HTTP door keeps the
+    // same rule, so one request shape means one thing on both.
+    if (semantic || scan) && params.get("kind").is_some() {
         return bad(400, "this mode searches the exchange only; kind= needs the index");
     }
     let source = if semantic {
