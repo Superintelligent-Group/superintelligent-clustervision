@@ -172,17 +172,7 @@ an arm to `for_harness` and a line to the `harnesses!` list" — the
 
 ## Discovery & the incremental cache
 
-`discover_all()` is the front door. It collects every registered adapter with a root on this machine, then runs their `discover()` methods **in parallel via rayon**, so the cost is the slowest single adapter rather than the sum:
-
-```rust
-#[cfg(feature = "parallel")]
-let out: Vec<SessionRef> = adapters
-    .par_iter()
-    .flat_map_iter(|a| run(a.as_ref()))
-    .collect();
-```
-
-(Turn the `parallel` feature off — e.g. on `wasm32` — and you get an identical sequential pass. The file-heavy adapters use the same trick *internally* via `par_filter_map` / `par_flat_map` to scan many transcripts at once.)
+`discover_all()` is the front door. It collects every registered adapter with a root on this machine, then runs their `discover()` jobs **in parallel via rayon** (`jobs.into_par_iter().map(run_job)`), so the cost is the slowest single adapter rather than the sum. (Turn the `parallel` feature off — e.g. on `wasm32` — and you get an identical sequential pass. The file-heavy adapters use the same trick *internally* via `par_filter_map` / `par_flat_map` to scan many transcripts at once, and `cv index` runs discovery with a hand-off so a compressed Codex rollout decoded for discovery is read by the indexer beside it, never decoded twice.)
 
 A failing adapter logs and contributes an empty list rather than sinking the whole scan — one harness's corrupt file never breaks discovery of the other twenty.
 
@@ -192,13 +182,12 @@ Cold discovery of a large corpus means reading and JSON-parsing every transcript
 
 That's the trick behind [`discover_cache.rs`](https://github.com/emberian/cv/blob/main/crates/cv-core/src/discover_cache.rs): the `scan_cache` table in the catalog database (`$CLUSTERVISION_HOME/catalog.db`), keyed by path, `(mtime_ns, size)`, the adapter's interpretation version and the captured file identity (`source::FileId`: length, mtime, device, inode, ctime), storing the `SessionRef`s each file produced. A hit returns the stored refs **without touching the file** — steady-state discovery costs one `stat` per file instead of a full read+parse — and a `.jsonl` that only grew continues from its stored position, so a listing beside a live writer costs the appended bytes. Measured 2026-10-16 on the maintainer's fleet (about 7,000 sessions, 95 GB, host load 150+): the first `cv ls` on an empty home took 82 s wall and 4.5 CPU-minutes; a warm `cv ls` 0.12–0.16 s.
 
-Adapters opt in by wrapping their per-file scan in `cached_scan` / `cached_scan_many`:
+Adapters opt in by wrapping their per-file scan in `cached_scan_with_reads` (one session per
+file, with the side files the scan consults captured first) or `cached_scan_many` (a file that
+holds several sessions, as Gemini's logs do):
 
 ```rust
-crate::discover_cache::cached_scan(&path, || match scan(&path) {
-    Ok(r) => Some(r),
-    Err(e) => { eprintln!("cv: skipping {}: {e:#}", path.display()); None }
-})
+crate::discover_cache::cached_scan_with_reads(&transcript, reads, || scan(&transcript))
 ```
 
 Some careful properties make it safe to lean on:
@@ -252,4 +241,4 @@ The shape to take away: **`cv-core` owns the IR, the adapters, and discovery; ev
 ## Where to go next
 
 - [Cross-harness conversion](conversion.md) — the `emit` side of the trait, and what survives a round-trip.
-- [Adding a harness](adding-a-harness.md) — write one `Adapter`, add one line to `all()`, done.
+- [Adding a harness](adding-a-harness.md) — write one `Adapter`, add one arm to `for_harness`, done.
