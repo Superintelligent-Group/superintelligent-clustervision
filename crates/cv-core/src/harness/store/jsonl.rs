@@ -20,24 +20,84 @@ pub(crate) struct Line<'v> {
     pub blank: bool,
 }
 
-/// Every record of a whole JSONL file through [`for_each_line`], for sidecar and discovery
-/// reducers that keep no offsets: the file is captured, opened against the capture, and its
-/// identity rechecked at the end. Blank and rejected lines are skipped.
+/// One captured source, shared by whole, resumed and bounded discovery reads. Adapters own
+/// their codec state and checkpoint policy; this boundary owns opening and identity rechecks.
+pub(crate) struct Read {
+    source: crate::json::JsonSource,
+    file: File,
+}
+
+#[cfg(test)]
+thread_local! { pub(crate) static OPENED: std::cell::RefCell<Vec<std::path::PathBuf>> = const { std::cell::RefCell::new(Vec::new()) }; }
+
+impl Read {
+    pub(crate) fn open(path: &Path) -> anyhow::Result<Self> {
+        #[cfg(test)]
+        OPENED.with(|paths| paths.borrow_mut().push(path.to_path_buf()));
+        let source = crate::json::JsonSource::capture(path)?;
+        let file = File::open(path)?;
+        source.check_metadata(file.metadata()?)?;
+        Ok(Self { source, file })
+    }
+
+    pub(crate) fn source(&self) -> &crate::json::JsonSource {
+        &self.source
+    }
+
+    /// Whole or resumed read through the captured EOF. An unterminated record at actual EOF
+    /// may be valid, but never offers a complete checkpoint boundary.
+    pub(crate) fn lines(
+        &self,
+        from: u64,
+        visit: impl FnMut(Line<'_>) -> anyhow::Result<crate::stream::Flow>,
+    ) -> anyhow::Result<()> {
+        if from == 0 {
+            self.prefix(self.source.len(), visit)
+        } else {
+            self.visit(from, self.source.len(), visit)
+        }
+    }
+
+    /// At most `limit` source bytes. A cut inside a record is not EOF: that record is withheld,
+    /// even if its prefix happens to be valid JSON. Stopping the visitor does not claim EOF.
+    pub(crate) fn prefix(
+        &self,
+        limit: u64,
+        visit: impl FnMut(Line<'_>) -> anyhow::Result<crate::stream::Flow>,
+    ) -> anyhow::Result<()> {
+        self.visit(0, self.source.len().min(limit), visit)
+    }
+
+    fn visit(
+        &self,
+        from: u64,
+        to: u64,
+        mut visit: impl FnMut(Line<'_>) -> anyhow::Result<crate::stream::Flow>,
+    ) -> anyhow::Result<()> {
+        let read = for_each_line(&self.source, &self.file, from, to, |line| {
+            if !line.complete && to < self.source.len() {
+                return Ok(crate::stream::Flow::Continue);
+            }
+            visit(line)
+        });
+        self.source.check_metadata(self.file.metadata()?)?;
+        self.source.check()?;
+        read
+    }
+}
+
+/// Whole-file projection for sidecar reducers that keep no offsets. Blank and rejected lines
+/// are skipped; the same lifecycle guards used by streaming and discovery bracket the read.
 pub(crate) fn for_each_record(
     path: &Path,
     mut visit: impl FnMut(crate::json::JsonView<'_>) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
-    let source = crate::json::JsonSource::capture(path)?;
-    let file = File::open(path)?;
-    source.check_metadata(file.metadata()?)?;
-    for_each_line(&source, &file, 0, source.len(), |line| {
+    Read::open(path)?.lines(0, |line| {
         if let Some(view) = line.view {
             visit(view)?;
         }
         Ok(crate::stream::Flow::Continue)
-    })?;
-    source.check_metadata(file.metadata()?)?;
-    source.check()
+    })
 }
 
 /// Records of `from..to` in a captured JSONL source, each physical line once. This is the byte
@@ -341,6 +401,51 @@ fn in_memory(
 #[cfg(test)]
 mod tests {
     use crate::stream::Flow;
+
+    #[test]
+    fn bounded_prefix_is_not_a_valid_unterminated_eof_record() -> anyhow::Result<()> {
+        let world = cv_testkit::World::new("jsonl-bounded-eof");
+        let path = world.base.join("wire.jsonl");
+        let valid = r#"{"type":"user"}"#;
+        std::fs::write(&path, format!("{valid} trailing\n"))?;
+        let mut calls = 0;
+        super::Read::open(&path)?.prefix(valid.len() as u64, |_| {
+            calls += 1;
+            Ok(Flow::Continue)
+        })?;
+        assert_eq!(
+            calls, 0,
+            "a budget boundary cannot validate a prefix of a rejected record"
+        );
+        std::fs::write(&path, valid)?;
+        super::Read::open(&path)?.prefix(valid.len() as u64, |line| {
+            assert!(line.view.is_some());
+            assert!(!line.complete);
+            calls += 1;
+            Ok(Flow::Continue)
+        })?;
+        assert_eq!(calls, 1, "actual unterminated EOF keeps the shared acceptance rule");
+        Ok(())
+    }
+
+    #[test]
+    fn lifecycle_rechecks_a_source_even_after_visitor_stop() -> anyhow::Result<()> {
+        let world = cv_testkit::World::new("jsonl-stop-recheck");
+        let path = world.base.join("wire.jsonl");
+        std::fs::write(&path, "{}\n{}\n")?;
+        let read = super::Read::open(&path)?;
+        let result = read.lines(0, |_| {
+            let replacement = path.with_extension("replacement");
+            std::fs::write(&replacement, "{}\n")?;
+            std::fs::rename(&replacement, &path)?;
+            Ok(Flow::Stop)
+        });
+        assert!(
+            result.is_err(),
+            "early discovery stop must reject replacement (immutable-prefix appends remain admissible)"
+        );
+        Ok(())
+    }
 
     /// JSON whitespace is space, tab, LF and CR. A line holding only U+2003 (EM SPACE), short or
     /// past the in-memory limit, is a rejected record to every reader of a transcript, and a line
