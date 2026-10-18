@@ -361,6 +361,20 @@ impl CodexCtx {
     }
 }
 
+/// Canonical header for a live hook's rollout, through the same codec as every other read.
+/// Hooks never scan history; an oversized or incomplete first record has no usable identity.
+pub fn hook_header(path: &Path) -> Option<Session> {
+    use std::io::{BufRead, Read};
+    let file = std::fs::File::open(path).ok()?;
+    let mut head = String::new();
+    std::io::BufReader::new(file)
+        .take(1024 * 1024)
+        .read_line(&mut head)
+        .ok()?;
+    let session = parse_str("", &head, true, Some(path.to_path_buf()));
+    (!session.id.is_empty()).then_some(session)
+}
+
 /// Parse a Codex transcript from its text contents into a [`Session`].
 ///
 /// Pure (no filesystem); handles both the modern `.jsonl` rollout (`is_jsonl = true`) and the 2025

@@ -89,8 +89,9 @@ impl ToolHistogram {
         cwd: Option<&std::path::Path>,
         scratch: &mut Vec<Event>,
         tool: Option<&str>,
+        extractor: &mut events::EventExtractor,
     ) -> anyhow::Result<()> {
-        events::extract_into_for_tool(m, idx, cwd, tool, scratch)?;
+        extractor.extract(m, idx, cwd, tool, scratch)?;
         for event in scratch.iter() {
             self.note(event);
         }
@@ -106,8 +107,9 @@ impl ToolHistogram {
     ) -> anyhow::Result<Self> {
         let mut h = Self::default();
         let mut scratch = Vec::new();
+        let mut extractor = events::EventExtractor::default();
         for (i, m) in msgs.into_iter().enumerate() {
-            h.note_message(m, i, cwd, &mut scratch, None)?;
+            h.note_message(m, i, cwd, &mut scratch, None, &mut extractor)?;
         }
         Ok(h)
     }
@@ -122,6 +124,7 @@ impl ToolHistogram {
             cwd: r.cwd.clone(),
             msg_idx: 0,
             histogram: Self::default(),
+            extractor: events::EventExtractor::default(),
             tool: tool.map(str::to_owned),
             scratch: Vec::new(),
             fail: None,
@@ -164,6 +167,7 @@ impl ToolHistogram {
 }
 
 struct HistogramSink {
+    extractor: events::EventExtractor,
     cwd: Option<std::path::PathBuf>,
     msg_idx: usize,
     histogram: ToolHistogram,
@@ -191,6 +195,7 @@ impl MessageSink for HistogramSink {
             self.cwd.as_deref(),
             &mut self.scratch,
             self.tool.as_deref(),
+            &mut self.extractor,
         ) {
             self.fail = Some(error);
             return Flow::Stop;
@@ -540,6 +545,7 @@ mod tests {
     #[test]
     fn histogram_stream_retains_only_distinct_tools_and_keeps_meta_cwd_rules() {
         let mut sink = HistogramSink {
+            extractor: events::EventExtractor::default(),
             cwd: None,
             msg_idx: 0,
             histogram: ToolHistogram::default(),
@@ -571,6 +577,7 @@ mod tests {
         assert_eq!(sink.histogram.total_calls, 2200);
         assert_eq!(sink.scratch.capacity(), 0);
         let mut discovered = HistogramSink {
+            extractor: events::EventExtractor::default(),
             cwd: Some("/discovery".into()),
             msg_idx: 0,
             histogram: ToolHistogram::default(),
@@ -725,6 +732,7 @@ mod tests {
         assert_eq!(all.message(m.clone()), Flow::Stop);
         assert!(all.take_error().is_some());
         let mut histogram = HistogramSink {
+            extractor: events::EventExtractor::default(),
             cwd: None,
             msg_idx: 0,
             histogram: ToolHistogram::default(),
@@ -844,6 +852,7 @@ mod tests {
         std::fs::remove_file(path).unwrap();
         assert!(ToolHistogram::from_messages([&message], None).is_err());
         let mut histogram = HistogramSink {
+            extractor: events::EventExtractor::default(),
             cwd: None,
             msg_idx: 0,
             histogram: ToolHistogram::default(),

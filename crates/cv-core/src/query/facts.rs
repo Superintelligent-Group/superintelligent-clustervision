@@ -82,8 +82,9 @@ impl<'a> SessionFacts<'a> {
     fn events(&self) -> anyhow::Result<&[Event]> {
         if self.events.get().is_none() {
             let mut rows = Vec::new();
+            let mut extractor = events::EventExtractor::default();
             for (i, message) in self.session.messages.iter().enumerate() {
-                events::extract_into(message, i, self.session.cwd.as_deref(), &mut rows)?;
+                extractor.extract(message, i, self.session.cwd.as_deref(), None, &mut rows)?;
             }
             let _ = self.events.set(rows);
         }

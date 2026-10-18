@@ -149,14 +149,14 @@ fn install_is_idempotent_show_reports_and_remove_restores_the_file() {
     let out = cv_ok(&w, &["hooks", "remove", "claude"]);
     assert!(out.contains("nothing written"), "{out}");
 
-    // Project scope writes under the cwd, and only Claude is a known harness.
+    // Project scope writes under the cwd, and unsupported harnesses error.
     let out = cv_ok(&w, &["hooks", "install", "claude", "--scope", "project"]);
     assert!(out.contains("installed"), "{out}");
     assert!(w.base.join(".claude/settings.json").exists());
     assert!(w.base.join(".claude/skills/cv/SKILL.md").exists());
-    let (ok, code, _, err) = w.cv(&["hooks", "install", "codex"]);
+    let (ok, code, _, err) = w.cv(&["hooks", "install", "gemini"]);
     assert!(!ok && code == 1, "unknown harness errors");
-    assert!(err.contains("Claude Code only"), "{err}");
+    assert!(err.contains("no verified hook contract"), "{err}");
 
     // doctor says whether the hooks are installed (project scope here) and the policy in force.
     w.write_session(
@@ -419,8 +419,149 @@ fn each_hook_answers_the_docs_payload_for_its_event() {
         ""
     );
 
+    // Codex rejects `ask`; a real conflict must use its supported blocking decision.
+    let codex_patch = with(
+        common(&w, "codex-current", "PreToolUse"),
+        json!({
+            "tool_name": "apply_patch", "tool_input": {"command": "*** Begin Patch\n*** Add File: src/untracked.rs\n+new\n*** Update File: src/widget.rs\n@@\n-a\n+b\n*** End Patch"}
+        }),
+    );
+    let out = hook(&w, "edit", &codex_patch, &[("CV_HOOK_HARNESS", "codex")]);
+    let output: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(output["hookSpecificOutput"]["permissionDecision"], "deny");
+    assert!(output["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .unwrap()
+        .contains("widget.rs"));
+
     // Garbage on stdin never fails the harness.
     let (ok, _, out, err) = w.cv_stdin(&["hook", "edit"], "not json");
     assert!(ok && out.is_empty(), "{out}");
     assert!(err.contains("not the hook JSON"), "{err}");
+}
+
+#[test]
+fn codex_install_scopes_preserve_unrelated_hooks_and_are_reversible() {
+    let w = World::new("codex-hooks-install");
+    for (scope, root) in [("user", w.home.clone()), ("project", w.base.clone())] {
+        let path = root.join(".codex/hooks.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let theirs = json!({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "notify.sh"}]}]}});
+        fs::write(&path, theirs.to_string()).unwrap();
+        cv_ok(&w, &["hooks", "install", "codex", "--scope", scope]);
+        let once = fs::read(&path).unwrap();
+        let out = cv_ok(&w, &["hooks", "install", "codex", "--scope", scope]);
+        assert!(out.contains("nothing written"), "{out}");
+        assert_eq!(fs::read(&path).unwrap(), once);
+        let shown: serde_json::Value =
+            serde_json::from_str(&cv_ok(&w, &["hooks", "show", "codex", "--scope", scope, "--json"])).unwrap();
+        assert_eq!(shown["installed"].as_array().unwrap().len(), 6);
+        assert_eq!(shown["would_change"], false);
+        assert!(shown["installed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["event"] == "PreToolUse" && row["matcher"] == "apply_patch"));
+        assert!(shown["installed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["command"].as_str().unwrap().starts_with("CV_HOOK_HARNESS=codex ")));
+        cv_ok(&w, &["hooks", "remove", "codex", "--scope", scope]);
+        let back: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert_eq!(back, theirs);
+        assert!(!root.join(".codex/skills/cv/SKILL.md").exists());
+    }
+}
+
+#[test]
+fn codex_real_hook_payloads_compose_with_the_recorded_rollouts() {
+    fn copy(from: &std::path::Path, to: &std::path::Path) {
+        fs::create_dir_all(to).unwrap();
+        for entry in fs::read_dir(from).unwrap() {
+            let path = entry.unwrap().path();
+            let target = to.join(path.file_name().unwrap());
+            if path.is_dir() {
+                copy(&path, &target);
+            } else {
+                fs::copy(path, target).unwrap();
+            }
+        }
+    }
+    let corpus = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../cv-core/tests/corpus/codex/0.163.0");
+    let w = World::new("codex-real-hooks");
+    copy(&corpus.join(".codex"), &w.home.join(".codex"));
+    cv_ok(&w, &["index"]);
+    cv_ok(
+        &w,
+        &[
+            "task",
+            "decide",
+            "fixture choice",
+            "--for",
+            "corpus:hooks",
+            "--default",
+            "left",
+            "--option",
+            "right",
+        ],
+    );
+    let mut observed = [false; 5];
+    let mut parent = None;
+    for line in fs::read_to_string(corpus.join("hooks.jsonl")).unwrap().lines() {
+        let capture: serde_json::Value = serde_json::from_str(line).unwrap();
+        let mut input = capture["input"].clone();
+        for field in ["transcript_path", "agent_transcript_path"] {
+            if let Some(path) = input[field]
+                .as_str()
+                .and_then(|p| p.strip_prefix("/home/corpus/.codex/"))
+            {
+                input[field] = json!(w.home.join(".codex").join(path));
+            }
+        }
+        let (name, index) = match input["hook_event_name"].as_str().unwrap() {
+            "SessionStart" if input["source"] == "compact" => ("compact", 0),
+            "SessionStart" => ("start", 1),
+            "SubagentStart" | "SubagentStop" => ("lane", 2),
+            "UserPromptSubmit" => ("decisions", 3),
+            "PreToolUse" => ("edit", 4),
+            other => panic!("unexpected recorded hook {other}"),
+        };
+        let output = hook(
+            &w,
+            name,
+            &input,
+            &[("CV_HOOK_HARNESS", "codex"), ("CV_ENDPOINT", "corpus:hooks")],
+        );
+        match name {
+            "compact" => assert!(context_of(&output).contains("compaction #1")),
+            "start" => assert!(context_of(&output).contains("earlier session(s)")),
+            "decisions" => assert!(context_of(&output).contains("1 decision(s) owed")),
+            "edit" => assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&output).unwrap()["hookSpecificOutput"]["permissionDecision"],
+                "deny"
+            ),
+            "lane" => {
+                assert!(output.is_empty());
+                if input["hook_event_name"] == "SubagentStop" {
+                    parent = Some(input["transcript_path"].as_str().unwrap().to_string());
+                }
+            }
+            _ => unreachable!(),
+        }
+        observed[index] = true;
+    }
+    assert!(observed.into_iter().all(|seen| seen));
+    let ledger: Vec<serde_json::Value> = fs::read_to_string(w.cv_home.join("lanes.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let stop = ledger.iter().find(|row| row["event"] == "stop").unwrap();
+    assert_eq!(stop["transcript_path"].as_str(), parent.as_deref());
+    let selector = format!("codex:{}", stop["session_id"].as_str().unwrap());
+    let lanes: Vec<serde_json::Value> = serde_json::from_str(&cv_ok(&w, &["lanes", &selector, "--json"])).unwrap();
+    assert!(lanes.iter().any(|lane| lane["agent_id"] == stop["agent_id"]
+        && lane["status"] == "stopped"
+        && lane["status_source"] == "hook_ledger"));
 }

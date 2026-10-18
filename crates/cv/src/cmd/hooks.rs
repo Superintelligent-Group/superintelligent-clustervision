@@ -1,4 +1,4 @@
-//! The cybernetic layer: `cv hooks` installs five Claude Code hooks (idempotent, reversible) and
+//! The cybernetic layer: `cv hooks` installs five Claude Code or Codex hooks (idempotent, reversible) and
 //! `cv hook <name>` is each hook's body — it reads the hook JSON on stdin and prints a line or two.
 //!
 //! Verified against the Claude Code 2.1.296 hooks docs: a `SessionStart` hook's
@@ -54,10 +54,10 @@ pub(crate) enum HooksCmd {
     /// Merge cv's five hooks into the harness's settings file and copy the `cv` skill beside them.
     /// Idempotent: a second run writes nothing.
     Install {
-        /// The harness (`claude` is the one verified today).
+        /// The harness (`claude` or `codex`).
         #[arg(default_value = "claude")]
         harness: String,
-        /// `user` = `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR`); `project` = `./.claude/settings.json`.
+        /// `user` writes the harness home; `project` writes `.claude/settings.json` or `.codex/hooks.json`.
         #[arg(long, value_enum, default_value_t = Scope::User)]
         scope: Scope,
     },
@@ -172,6 +172,23 @@ const SPECS: &[Spec] = &[
     },
 ];
 
+// Older released Codex builds do not expose the newer Claude-compatible matcher aliases.
+const CODEX_EDIT: Spec = Spec {
+    event: "PreToolUse",
+    matcher: Some("apply_patch"),
+    name: HookName::Edit,
+    asynchronous: false,
+};
+fn specs(harness: Harness) -> impl Iterator<Item = &'static Spec> {
+    SPECS.iter().map(move |spec| {
+        if harness == Harness::Codex && spec.name == HookName::Edit {
+            &CODEX_EDIT
+        } else {
+            spec
+        }
+    })
+}
+
 // ───────────────────────────── settings file ─────────────────────────────
 
 /// Claude Code's config dir: `$CLAUDE_CONFIG_DIR`, else `~/.claude`.
@@ -182,16 +199,33 @@ fn claude_config_dir() -> Option<PathBuf> {
         .or_else(|| crate::util::dirs_home().map(|h| h.join(".claude")))
 }
 
-/// `(settings.json, skills/cv/SKILL.md)` for a scope.
-fn paths(scope: Scope) -> Result<(PathBuf, PathBuf)> {
+/// `(settings.json or hooks.json, skills/cv/SKILL.md)` for a harness and scope.
+fn paths(harness: Harness, scope: Scope) -> Result<(PathBuf, PathBuf)> {
     let dir = match scope {
-        Scope::User => claude_config_dir().context("no home directory: cannot locate ~/.claude")?,
-        Scope::Project => std::env::current_dir()
-            .context("reading the current directory")?
-            .join(".claude"),
+        Scope::User if harness == Harness::Claude => {
+            claude_config_dir().context("no home directory: cannot locate ~/.claude")?
+        }
+        Scope::User => cv_core::env::var_os("CODEX_HOME")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| crate::util::dirs_home().map(|h| h.join(".codex")))
+            .context("no home directory: cannot locate ~/.codex")?,
+        Scope::Project => {
+            std::env::current_dir()
+                .context("reading the current directory")?
+                .join(if harness == Harness::Claude {
+                    ".claude"
+                } else {
+                    ".codex"
+                })
+        }
     };
     Ok((
-        dir.join("settings.json"),
+        dir.join(if harness == Harness::Claude {
+            "settings.json"
+        } else {
+            "hooks.json"
+        }),
         dir.join("skills").join("cv").join("SKILL.md"),
     ))
 }
@@ -234,8 +268,17 @@ fn shell_quote(p: &str) -> String {
 }
 
 /// The `command` string for one hook: this binary, absolute, then `hook <name>`.
-fn command_for(exe: &str, name: HookName) -> String {
-    format!("{} hook {}", shell_quote(exe), name.as_str())
+fn command_for(harness: Harness, exe: &str, name: HookName) -> String {
+    format!(
+        "{}{} hook {}",
+        if harness == Harness::Codex {
+            "CV_HOOK_HARNESS=codex "
+        } else {
+            ""
+        },
+        shell_quote(exe),
+        name.as_str()
+    )
 }
 
 /// Is this handler one of ours? Recognized by shape: `<something>/cv hook <name>` (quotes allowed
@@ -249,10 +292,10 @@ fn ours(handler: &Value) -> Option<HookName> {
     (base == "cv" || base == "cv.exe").then_some(name)
 }
 
-fn handler_for(exe: &str, spec: &Spec) -> Value {
+fn handler_for(harness: Harness, exe: &str, spec: &Spec) -> Value {
     let mut h = Map::new();
     h.insert("type".into(), json!("command"));
-    h.insert("command".into(), json!(command_for(exe, spec.name)));
+    h.insert("command".into(), json!(command_for(harness, exe, spec.name)));
     if spec.asynchronous {
         h.insert("async".into(), json!(true));
     } else {
@@ -289,7 +332,7 @@ fn strip_ours(settings: &mut Value) {
 }
 
 /// `settings` with our six entries present (one group per spec, appended under its event).
-fn with_ours(mut settings: Value, exe: &str) -> Value {
+fn with_ours(harness: Harness, mut settings: Value, exe: &str) -> Value {
     strip_ours(&mut settings);
     let obj = settings.as_object_mut().expect("settings is an object");
     let hooks = obj.entry("hooks").or_insert_with(|| json!({}));
@@ -297,12 +340,12 @@ fn with_ours(mut settings: Value, exe: &str) -> Value {
         *hooks = json!({});
     }
     let hooks = hooks.as_object_mut().expect("object");
-    for spec in SPECS {
+    for spec in specs(harness) {
         let mut group = Map::new();
         if let Some(m) = spec.matcher {
             group.insert("matcher".into(), json!(m));
         }
-        group.insert("hooks".into(), json!([handler_for(exe, spec)]));
+        group.insert("hooks".into(), json!([handler_for(harness, exe, spec)]));
         let groups = hooks.entry(spec.event).or_insert_with(|| json!([]));
         if !groups.is_array() {
             *groups = json!([]);
@@ -313,12 +356,12 @@ fn with_ours(mut settings: Value, exe: &str) -> Value {
 }
 
 /// Which of our entries are present in `settings`, by `(event, matcher, name)`, with the command found.
-fn present(settings: &Value) -> HashMap<(&'static str, Option<&'static str>, HookName), String> {
+fn present(harness: Harness, settings: &Value) -> HashMap<(&'static str, Option<&'static str>, HookName), String> {
     let mut found = HashMap::new();
     let Some(hooks) = settings.get("hooks").and_then(Value::as_object) else {
         return found;
     };
-    for spec in SPECS {
+    for spec in specs(harness) {
         let Some(groups) = hooks.get(spec.event).and_then(Value::as_array) else {
             continue;
         };
@@ -338,14 +381,12 @@ fn present(settings: &Value) -> HashMap<(&'static str, Option<&'static str>, Hoo
     found
 }
 
-fn require_claude(harness: &str) -> Result<()> {
-    if harness != "claude" {
-        bail!(
-            "`cv hooks` knows Claude Code only (`claude`); {harness:?} has no verified hook contract yet — \
-             the manual's Hooking a harness in page says what each harness offers"
-        );
+fn hook_harness(harness: &str) -> Result<Harness> {
+    match harness {
+        "claude" => Ok(Harness::Claude),
+        "codex" => Ok(Harness::Codex),
+        _ => bail!("`cv hooks` supports verified Claude Code (`claude`) and Codex (`codex`) hooks; {harness:?} has no verified hook contract"),
     }
-    Ok(())
 }
 
 fn this_exe() -> Result<String> {
@@ -356,11 +397,11 @@ fn this_exe() -> Result<String> {
 pub(crate) fn cmd_hooks(cmd: HooksCmd) -> Result<()> {
     match cmd {
         HooksCmd::Install { harness, scope } => {
-            require_claude(&harness)?;
-            let (settings_path, skill_path) = paths(scope)?;
+            let harness = hook_harness(&harness)?;
+            let (settings_path, skill_path) = paths(harness, scope)?;
             let exe = this_exe()?;
             let before = read_settings(&settings_path)?;
-            let after = with_ours(before.clone(), &exe);
+            let after = with_ours(harness, before.clone(), &exe);
             let mut changed = Vec::new();
             if after != before {
                 write_settings(&settings_path, &after)?;
@@ -381,15 +422,15 @@ pub(crate) fn cmd_hooks(cmd: HooksCmd) -> Result<()> {
                 );
             } else {
                 println!("cv hooks: installed {}", changed.join(" · "));
-                println!("  (takes effect in new Claude Code sessions; `cv hooks show` lists the entries, `cv hooks remove` deletes them)");
+                println!("  (takes effect in new harness sessions; `cv hooks show` lists the entries, `cv hooks remove` deletes them)");
             }
             Ok(())
         }
         HooksCmd::Remove { harness, scope } => {
-            require_claude(&harness)?;
-            let (settings_path, skill_path) = paths(scope)?;
+            let harness = hook_harness(&harness)?;
+            let (settings_path, skill_path) = paths(harness, scope)?;
             let before = read_settings(&settings_path)?;
-            let n = present(&before).len();
+            let n = present(harness, &before).len();
             let mut after = before.clone();
             strip_ours(&mut after);
             let mut removed = Vec::new();
@@ -415,20 +456,20 @@ pub(crate) fn cmd_hooks(cmd: HooksCmd) -> Result<()> {
             Ok(())
         }
         HooksCmd::Show { harness, scope, json } => {
-            require_claude(&harness)?;
-            let (settings_path, skill_path) = paths(scope)?;
+            let harness = hook_harness(&harness)?;
+            let (settings_path, skill_path) = paths(harness, scope)?;
             let exe = this_exe()?;
             let before = read_settings(&settings_path)?;
-            let after = with_ours(before.clone(), &exe);
-            let have = present(&before);
+            let after = with_ours(harness, before.clone(), &exe);
+            let have = present(harness, &before);
             let skill_present = std::fs::read_to_string(&skill_path).ok().as_deref() == Some(SKILL);
             if json {
                 let (mut installed, mut missing) = (Vec::new(), Vec::new());
-                for s in SPECS {
+                for s in specs(harness) {
                     let row = json!({"event": s.event, "matcher": s.matcher, "hook": s.name.as_str(),
-                        "command": command_for(&exe, s.name)});
+                        "command": command_for(harness, &exe, s.name)});
                     match have.get(&(s.event, s.matcher, s.name)) {
-                        Some(cmd) if *cmd == command_for(&exe, s.name) => installed.push(row),
+                        Some(cmd) if *cmd == command_for(harness, &exe, s.name) => installed.push(row),
                         _ => missing.push(row),
                     }
                 }
@@ -443,8 +484,8 @@ pub(crate) fn cmd_hooks(cmd: HooksCmd) -> Result<()> {
                 return Ok(());
             }
             println!("# cv hooks — {} ({:?} scope)\n", home_rel(&settings_path), scope);
-            for s in SPECS {
-                let want = command_for(&exe, s.name);
+            for s in specs(harness) {
+                let want = command_for(harness, &exe, s.name);
                 let mark = match have.get(&(s.event, s.matcher, s.name)) {
                     Some(cmd) if *cmd == want => "✓",
                     Some(_) => "~", // ours, another binary path: install replaces it
@@ -461,9 +502,9 @@ pub(crate) fn cmd_hooks(cmd: HooksCmd) -> Result<()> {
             println!(
                 "\n{}",
                 if after == before && skill_present {
-                    "installed; `cv hooks install claude` would write nothing".to_string()
+                    format!("installed; `cv hooks install {harness}` would write nothing")
                 } else {
-                    "✓ present · + `cv hooks install claude` adds · ~ replaces (another cv binary's path)".to_string()
+                    format!("✓ present · + `cv hooks install {harness}` adds · ~ replaces (another cv binary's path)")
                 }
             );
             Ok(())
@@ -494,9 +535,11 @@ pub(crate) fn status() -> (Vec<(Scope, usize, PathBuf)>, Policy) {
     let mut idle = None;
     let mut env_block: HashMap<String, String> = HashMap::new();
     for scope in [Scope::User, Scope::Project] {
-        let Ok((path, _)) = paths(scope) else { continue };
+        let Ok((path, _)) = paths(Harness::Claude, scope) else {
+            continue;
+        };
         let settings = read_settings(&path).unwrap_or(json!({}));
-        scopes.push((scope, present(&settings).len(), path));
+        scopes.push((scope, present(Harness::Claude, &settings).len(), path));
         if let Some(b) = settings.get("autoCompactEnabled").and_then(Value::as_bool) {
             auto = Some(b);
         }
@@ -578,6 +621,8 @@ pub(crate) fn doctor_json() -> Value {
 /// The fields the five bodies read from the hook JSON (every other field is ignored).
 #[derive(Deserialize, Default)]
 struct Input {
+    #[serde(skip)]
+    codex: bool,
     #[serde(default)]
     session_id: String,
     transcript_path: Option<PathBuf>,
@@ -603,7 +648,7 @@ pub(crate) fn cmd_hook(name: HookName) -> Result<()> {
     }
     let mut raw = String::new();
     let _ = std::io::stdin().read_to_string(&mut raw);
-    let input: Input = match serde_json::from_str(&raw) {
+    let mut input: Input = match serde_json::from_str(&raw) {
         Ok(i) => i,
         Err(e) => {
             eprintln!(
@@ -613,6 +658,7 @@ pub(crate) fn cmd_hook(name: HookName) -> Result<()> {
             return Ok(());
         }
     };
+    input.codex = cv_core::env::var_os("CV_HOOK_HARNESS").as_deref() == Some(std::ffi::OsStr::new("codex"));
     let out = match name {
         HookName::Compact => hook_compact(&input),
         HookName::Start => hook_start(&input),
@@ -695,11 +741,15 @@ fn hook_compact(input: &Input) -> Result<Option<Value>> {
     let Some(path) = input.transcript_path.as_deref() else {
         return Ok(None);
     };
-    let id = short_id(&input.session_id);
+    let id = if input.codex {
+        format!("codex:{}", input.session_id)
+    } else {
+        short_id(&input.session_id)
+    };
     let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     if size > COMPACT_FULL_SCAN_MAX {
         // A tail without a boundary (one far back in a long transcript) still gets the pointers.
-        let what = match last_boundary_in_tail(path) {
+        let what = match if input.codex { None } else { last_boundary_in_tail(path) } {
             Some((trigger, pre_tokens)) => format!(
                 " ({}, {})",
                 trigger.as_deref().unwrap_or("compaction"),
@@ -714,13 +764,18 @@ fn hook_compact(input: &Input) -> Result<Option<Value>> {
             format!(
                 "context compacted{what}. `cv show {id} --kind compaction_boundary,compaction_summary` lists this session's \
                  boundaries with their message indexes; `cv show {id} --pre-compaction N` reads what the Nth discarded (`cv show \
-                 {id} --kind prompt,answer --pre-compaction N` just its prompts); `cv rewind {id} --at <msg>` resumes the agent as of a message. \
+                 {id} --kind prompt,answer --pre-compaction N` just its prompts); {rewind} \
                  {AFFORDANCE_POINTER}",
+                rewind = if input.codex { String::new() } else { format!("`cv rewind {id} --at <msg>` resumes the agent as of a message.") },
                 AFFORDANCE_POINTER = affordance_pointer(&id)
             ),
         )));
     }
-    let comps = cv_core::compaction::detect(&claude_ref(&input.session_id, path), false)?;
+    let mut reference = claude_ref(&input.session_id, path);
+    if input.codex {
+        reference.harness = Harness::Codex;
+    }
+    let comps = cv_core::compaction::detect(&reference, false)?;
     let Some(last) = comps.last() else {
         return Ok(Some(not_recorded_yet(&id)));
     };
@@ -735,7 +790,7 @@ fn hook_compact(input: &Input) -> Result<Option<Value>> {
         "context compacted ({trigger}, {pre}) at message {idx} — compaction #{k} of this session. \
          `cv show {id} --pre-compaction {k}` reads what was lost (`cv show {id} --kind prompt,answer --pre-compaction {k}` just its prompts)"
     );
-    if idx > 0 {
+    if idx > 0 && !input.codex {
         text.push_str(&format!(
             "; `cv rewind {id} --at {}` resumes the agent as of before it.",
             idx - 1
@@ -824,6 +879,7 @@ fn hook_start(input: &Input) -> Result<Option<Value>> {
                 .unwrap_or_default();
             let id = match r.harness {
                 Harness::Claude => short_id(&r.id),
+                Harness::Codex => format!("codex:{}", r.id),
                 h => format!("{h}:{}", short_id(&r.id)),
             };
             lines.push(format!(
@@ -846,6 +902,45 @@ fn hook_start(input: &Input) -> Result<Option<Value>> {
     Ok(Some(context("SessionStart", text)))
 }
 
+fn edit_paths(input: &Input) -> Vec<String> {
+    let Some(tool) = input.tool_input.as_ref() else {
+        return Vec::new();
+    };
+    if !input.codex {
+        return tool
+            .get("file_path")
+            .or_else(|| tool.get("notebook_path"))
+            .and_then(Value::as_str)
+            .map(|s| vec![s.to_string()])
+            .unwrap_or_default();
+    }
+    // Codex apply_patch's hook input is command-shaped even for freeform calls.
+    let Some(patch) = tool.get("command").and_then(Value::as_str) else {
+        return Vec::new();
+    };
+    if patch.trim().lines().next() != Some("*** Begin Patch") {
+        return Vec::new();
+    }
+    let mut paths: Vec<String> = patch
+        .trim()
+        .lines()
+        .filter_map(|line| {
+            [
+                "*** Add File: ",
+                "*** Update File: ",
+                "*** Delete File: ",
+                "*** Move to: ",
+            ]
+            .into_iter()
+            .find_map(|prefix| line.strip_prefix(prefix))
+            .map(str::to_string)
+        })
+        .collect();
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
 /// `SubagentStart` / `SubagentStop`: one row in the lane ledger; no output, no model action.
 fn hook_lane(input: &Input) -> Result<Option<Value>> {
     let event = match input.hook_event_name.as_deref() {
@@ -856,20 +951,45 @@ fn hook_lane(input: &Input) -> Result<Option<Value>> {
     let Some(agent_id) = input.agent_id.as_deref() else {
         return Ok(None);
     };
-    let agent_id = agent_id.strip_prefix("agent-").unwrap_or(agent_id).to_string();
+    let agent_id = if input.codex {
+        agent_id
+    } else {
+        agent_id.strip_prefix("agent-").unwrap_or(agent_id)
+    }
+    .to_string();
     let expand = |p: &Path| -> PathBuf {
         match (p.strip_prefix("~"), crate::util::dirs_home()) {
             (Ok(rest), Some(h)) => h.join(rest),
             _ => p.to_path_buf(),
         }
     };
-    let transcript_path = input.transcript_path.as_deref().map(expand);
+    let mut transcript_path = input.transcript_path.as_deref().map(expand);
     let agent_transcript_path = input.agent_transcript_path.as_deref().map(expand).or_else(|| {
+        if input.codex {
+            return (event == "start").then(|| transcript_path.clone()).flatten();
+        }
         transcript_path
             .as_deref()
             .and_then(cv_core::harness::claude::sidecar::subagents_dir)
             .map(|d| d.join(format!("agent-{agent_id}.jsonl")))
     });
+    let session_id = if input.codex {
+        let path = agent_transcript_path
+            .as_deref()
+            .context("Codex lane hook has no child transcript")?;
+        let parent = cv_core::harness::codex::hook_header(path)
+            .and_then(|s| s.lineage.parent)
+            .context("Codex child transcript has no parent identity")?;
+        if event == "start" {
+            transcript_path = cv_core::catalog::lookup(&parent, Some(Harness::Codex))
+                .into_iter()
+                .next()
+                .map(|r| r.path);
+        }
+        parent
+    } else {
+        input.session_id.clone()
+    };
     let last_text = input
         .last_assistant_message
         .as_deref()
@@ -878,7 +998,7 @@ fn hook_lane(input: &Input) -> Result<Option<Value>> {
     cv_core::lanes::append_lane_event(&LaneEvent {
         ts: chrono::Utc::now(),
         event: event.into(),
-        session_id: input.session_id.clone(),
+        session_id,
         agent_id,
         agent_type: input.agent_type.clone(),
         transcript_path,
@@ -938,56 +1058,66 @@ fn is_current_editor(t: &cv_core::events::TouchedSession, session_id: &str, agen
 /// index (`cv touched`) names the sessions, the catalog names their transcripts, one `stat` each
 /// says which are live. Nothing printed = allow.
 fn hook_edit(input: &Input) -> Result<Option<Value>> {
-    let Some(file) = input
-        .tool_input
-        .as_ref()
-        .and_then(|t| t.get("file_path").or_else(|| t.get("notebook_path")))
-        .and_then(Value::as_str)
-    else {
-        return Ok(None);
-    };
-    let abs = if Path::new(file).is_absolute() {
-        PathBuf::from(file)
-    } else {
-        input
-            .cwd
-            .clone()
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_default()
-            .join(file.trim_start_matches("./"))
-    };
-    let my_agent = input
-        .agent_id
-        .as_deref()
-        .map(|a| a.strip_prefix("agent-").unwrap_or(a).to_string());
-    let mut live: Vec<(String, i64)> = Vec::new();
-    for t in cv_core::events::sessions_editing(&abs.to_string_lossy()) {
-        if is_current_editor(&t, &input.session_id, my_agent.as_deref()) {
+    let files = edit_paths(input);
+    let mut conflicts = Vec::new();
+    for file in files {
+        let abs = if Path::new(&file).is_absolute() {
+            PathBuf::from(&file)
+        } else {
+            input
+                .cwd
+                .clone()
+                .or_else(|| std::env::current_dir().ok())
+                .unwrap_or_default()
+                .join(file.trim_start_matches("./"))
+        };
+        let my_agent = input
+            .agent_id
+            .as_deref()
+            .map(|a| a.strip_prefix("agent-").unwrap_or(a).to_string());
+        let mut live: Vec<(String, i64)> = Vec::new();
+        for t in cv_core::events::sessions_editing(&abs.to_string_lossy()) {
+            if (input.codex && t.harness == "codex" && t.session_id == input.session_id)
+                || (!input.codex && is_current_editor(&t, &input.session_id, my_agent.as_deref()))
+            {
+                continue;
+            }
+            let Some(path) = transcript_of(&t) else { continue };
+            if let Some(m) = minutes_since_modified(&path).filter(|m| *m <= LIVE_MINUTES) {
+                live.push((
+                    if t.harness == "codex" {
+                        format!("codex:{}", t.session_id)
+                    } else {
+                        short_id(&t.session_id)
+                    },
+                    m,
+                ));
+            }
+        }
+        if live.is_empty() {
             continue;
         }
-        let Some(path) = transcript_of(&t) else { continue };
-        if let Some(m) = minutes_since_modified(&path).filter(|m| *m <= LIVE_MINUTES) {
-            live.push((t.session_id.clone(), m));
-        }
+        live.sort_by_key(|(_, m)| *m);
+        let (first, mins) = &live[0];
+        let more = match live.len() {
+            1 => String::new(),
+            n => format!(" (and {} more live session{})", n - 1, if n == 2 { "" } else { "s" }),
+        };
+        let shown = home_rel(&abs);
+        let reason = format!(
+        "cv: {shown} was edited by live session {} ({mins} min ago){more}. `cv show {} --last 10` shows its hand; proceed only if the edits do not collide.",
+        first,
+        first
+    );
+        conflicts.push(reason);
     }
-    if live.is_empty() {
+    if conflicts.is_empty() {
         return Ok(None);
     }
-    live.sort_by_key(|(_, m)| *m);
-    let (first, mins) = &live[0];
-    let more = match live.len() {
-        1 => String::new(),
-        n => format!(" (and {} more live session{})", n - 1, if n == 2 { "" } else { "s" }),
-    };
-    let shown = home_rel(&abs);
-    let reason = format!(
-        "cv: {shown} was edited by live session {} ({mins} min ago){more}. `cv show {} --last 10` shows its hand; proceed only if the edits do not collide.",
-        short_id(first),
-        short_id(first)
-    );
+    let reason = conflicts.join("\n");
     Ok(Some(json!({"hookSpecificOutput": {
         "hookEventName": "PreToolUse",
-        "permissionDecision": "ask",
+        "permissionDecision": if input.codex { "deny" } else { "ask" },
         "permissionDecisionReason": reason,
     }})))
 }
@@ -997,10 +1127,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn codex_patch_guards_all_destinations_without_treating_shell_as_a_patch() {
+        let input = Input {
+            codex: true,
+            tool_input: Some(
+                json!({"command": "*** Begin Patch\n*** Update File: from name.rs\n*** Move to: to name.rs\n@@\n-old\n+new\n*** Add File: added.rs\n+hello\n*** Delete File: deleted.rs\n*** End Patch"}),
+            ),
+            ..Input::default()
+        };
+        assert_eq!(
+            edit_paths(&input),
+            ["added.rs", "deleted.rs", "from name.rs", "to name.rs"]
+        );
+        let shell = Input {
+            tool_input: Some(json!({"command": "echo '*** Update File: pretend.rs'"})),
+            ..input
+        };
+        assert!(edit_paths(&shell).is_empty());
+    }
+
+    #[test]
     fn hook_install_keeps_existing_readers_on_the_previous_files() {
         use std::io::Read;
         let _world = crate::test_world("hooks-atomic");
-        let (settings, skill) = paths(Scope::User).unwrap();
+        let (settings, skill) = paths(Harness::Claude, Scope::User).unwrap();
         std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
         std::fs::write(&settings, "{}").unwrap();
         std::fs::write(&skill, "previous skill").unwrap();
@@ -1019,7 +1169,7 @@ mod tests {
         assert_eq!(held, "previous skill");
         assert_eq!(
             read_settings(&settings).unwrap(),
-            with_ours(json!({}), &this_exe().unwrap())
+            with_ours(Harness::Claude, json!({}), &this_exe().unwrap())
         );
         assert_eq!(std::fs::read_to_string(skill).unwrap(), SKILL);
     }
@@ -1062,24 +1212,24 @@ mod tests {
                 "Stop": [{"hooks": [{"type": "command", "command": "/usr/bin/notify"}]}]
             }
         });
-        let once = with_ours(theirs.clone(), "/opt/cv");
-        let twice = with_ours(once.clone(), "/opt/cv");
+        let once = with_ours(Harness::Claude, theirs.clone(), "/opt/cv");
+        let twice = with_ours(Harness::Claude, once.clone(), "/opt/cv");
         assert_eq!(once, twice, "a second install changes nothing");
-        assert_eq!(present(&once).len(), SPECS.len());
+        assert_eq!(present(Harness::Claude, &once).len(), SPECS.len());
         // Theirs survived, in place.
         assert_eq!(once["hooks"]["PreToolUse"][0]["matcher"], "Bash");
         assert_eq!(once["hooks"]["PreToolUse"][1]["matcher"], "Edit|Write");
         assert_eq!(once["hooks"]["SubagentStop"][0]["hooks"][0]["async"], true);
         assert!(once["hooks"]["SessionStart"][0]["hooks"][0]["async"].is_null());
         // A reinstall from another binary path replaces ours rather than adding a seventh.
-        let moved = with_ours(once.clone(), "/usr/local/bin/cv");
-        assert_eq!(present(&moved).len(), SPECS.len());
+        let moved = with_ours(Harness::Claude, once.clone(), "/usr/local/bin/cv");
+        assert_eq!(present(Harness::Claude, &moved).len(), SPECS.len());
         assert_eq!(moved["hooks"]["SessionStart"].as_array().unwrap().len(), 2);
         let mut back = moved;
         strip_ours(&mut back);
         assert_eq!(back, theirs, "remove restores the original exactly");
         // Nothing of ours in an empty file leaves no `hooks` key behind.
-        let mut empty = with_ours(json!({}), "/opt/cv");
+        let mut empty = with_ours(Harness::Claude, json!({}), "/opt/cv");
         strip_ours(&mut empty);
         assert_eq!(empty, json!({}));
     }

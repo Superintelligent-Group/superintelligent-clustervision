@@ -420,10 +420,11 @@ pub fn subagent_tree_filtered_of(
 /// *and* `Workflow` sub-agents (which live a tier deeper), each enriched with its `*.meta.json`
 /// sidecar (agent type / task description / spawning tool_use) and, for workflow agents, the
 /// orchestrator's journaled result (`status` + `summary`). Newest first. Non-Claude harnesses
-/// return empty for now.
+/// return empty unless supported; Codex membership comes from installed hooks and verified headers.
 pub fn subagent_tree_of(r: &SessionRef) -> Vec<SubagentInfo> {
     match r.harness {
         Harness::Claude => harness::claude::subagent_tree(&r.path),
+        Harness::Codex => lanes::codex_hook_forest(r),
         Harness::Devin => {
             #[cfg(feature = "sqlite")]
             {

@@ -587,10 +587,11 @@ const PERSISTED: &[(&str, &[&str])] = &[
         "cline/",
         &["subagent_spawn", "subagent_spawn/state", "subagent_return", "question"],
     ),
-    (
-        "codex/",
-        &["subagent_spawn", "subagent_return", "approval/state", "approval/deny"],
-    ),
+    ("codex/", &["subagent_spawn", "subagent_return", "approval/state"]),
+    // These versions exercised an MCP call refused by approval policy. The hooks-only writer
+    // fixture has no MCP request; a PreToolUse hook block is not an approval request record.
+    ("codex/0.161.0$", &["approval/deny"]),
+    ("codex/0.162.1$", &["approval/deny"]),
     ("continue/", &["plan", "subagent_spawn"]),
     (
         "devin/",
