@@ -3,19 +3,24 @@ use cv_core::{Message, MessageKind, Origin, Role};
 use serde_json::{json, Value};
 use std::io::Read;
 
+fn vocabulary<T: serde::de::DeserializeOwned + serde::Serialize>(values: &Value) {
+    for value in values.as_array().expect("schema vocabulary") {
+        let parsed: T = serde_json::from_value(value.clone()).expect("schema value must be real serde");
+        assert_eq!(
+            serde_json::to_value(parsed).expect("serialize vocabulary"),
+            *value,
+            "schema vocabulary must name emitted values, not only accepted aliases"
+        );
+    }
+}
+
 fn main() {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input).unwrap();
     let schema: Value = serde_json::from_str(&input).expect("message schema on stdin");
-    for value in schema["role"].as_array().unwrap() {
-        serde_json::from_value::<Role>(value.clone()).expect("schema role must be real serde");
-    }
-    for value in schema["kind"].as_array().unwrap() {
-        serde_json::from_value::<MessageKind>(value.clone()).expect("schema kind must be real serde");
-    }
-    for value in schema["origin"].as_array().unwrap() {
-        serde_json::from_value::<Origin>(value.clone()).expect("schema origin must be real serde");
-    }
+    vocabulary::<Role>(&schema["role"]);
+    vocabulary::<MessageKind>(&schema["kind"]);
+    vocabulary::<Origin>(&schema["origin"]);
 
     let rich = json!({
         "id":"m", "parent_id":"p", "role":"assistant", "kind":"reply", "origin":"model",
