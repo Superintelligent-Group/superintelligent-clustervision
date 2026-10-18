@@ -27,6 +27,12 @@ pub(crate) struct Read {
     file: File,
 }
 
+impl ranges::At for Read {
+    fn read_at(&self, bytes: &mut [u8], at: u64) -> std::io::Result<usize> {
+        ranges::At::read_at(&self.file, bytes, at)
+    }
+}
+
 #[cfg(test)]
 thread_local! { pub(crate) static OPENED: std::cell::RefCell<Vec<std::path::PathBuf>> = const { std::cell::RefCell::new(Vec::new()) }; }
 

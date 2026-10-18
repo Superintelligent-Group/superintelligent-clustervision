@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Kimi listings use native titles or stop at the first fallback prompt; exact counts come from complete reads or indexing.
+- Kimi reads reject callback changes to captured transcripts and wire enrichment, including final messages from older rotated segments.
+
 - JSON listings and filtered windows reuse filesystem metadata for shared stores while rechecking presence at rendering.
 - Hermes keeps generation membership in private indexed storage while preserving exact duplicate detection and lazy message bodies.
 

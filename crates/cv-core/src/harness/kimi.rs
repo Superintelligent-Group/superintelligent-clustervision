@@ -87,7 +87,7 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
-use std::io::{Read, Seek, SeekFrom};
+
 use std::path::{Path, PathBuf};
 
 mod record;
@@ -431,11 +431,11 @@ fn stream_context(
     start: ContextStart,
     sink: &mut dyn MessageSink,
 ) -> Result<Session> {
-    let mut pending: Option<Message> = None;
+    let mut pending: Option<(Message, JsonSource)> = None;
     let mut stopped = false;
     let prior_skipped = ctx.skipped;
     let mut accept = |view: JsonView<'_>,
-                      source: &JsonSource,
+                      input: &jsonl::Read,
                       starts: Option<&str>,
                       position: Option<u64>,
                       skipped: u64|
@@ -443,15 +443,14 @@ fn stream_context(
         if let Some(name) = starts {
             ctx.rotated = Some(name.into());
         }
-        let role = view
-            .get("role")?
-            .map(|v| v.resolve().map(|v| v.as_str().unwrap_or("").to_owned()))
-            .transpose()?
-            .unwrap_or_default();
+        let Some(record) = record::Record::of(view)? else {
+            return Ok(Flow::Continue);
+        };
+        let role = record.role.as_deref().unwrap_or_default();
         let checkpoint_record = u64::from(role == "_checkpoint");
         ctx.checkpoints += checkpoint_record;
         if role == "_usage" {
-            if let Some(p) = pending.as_mut() {
+            if let Some((p, _)) = pending.as_mut() {
                 record::fold_usage(p, view)?;
             }
             return Ok(Flow::Continue);
@@ -459,8 +458,8 @@ fn stream_context(
         // Interpret without applying the current record's call-name/positional state. The anchor
         // below replays this record and must retain only the immutable prefix's state.
         let message = record::message(
-            view,
-            opts.spans.then_some(source),
+            &record,
+            opts.spans.then_some(input.source()),
             enrich,
             opts.complete,
             &ctx.call_names,
@@ -468,13 +467,18 @@ fn stream_context(
         let Some(mut m) = message else {
             return Ok(Flow::Continue);
         };
-        if let Some(prev) = pending.take() {
-            if sink.message(prev) == Flow::Stop {
+        if let Some((prev, source)) = pending.take() {
+            let flow = sink.message(prev);
+            input.check_backing()?;
+            source.check()?;
+            if flow == Flow::Stop {
                 stopped = true;
                 return Ok(Flow::Stop);
             }
             if let Some(offset) = position.filter(|_| start.capture) {
-                if sink.wants_checkpoint(offset) {
+                let wanted = sink.wants_checkpoint(offset);
+                input.check_backing()?;
+                if wanted {
                     #[derive(serde::Serialize)]
                     struct State<'a> {
                         primary: &'a Path,
@@ -496,6 +500,7 @@ fn stream_context(
                         },
                     );
                     sink.checkpoint(&mut cp);
+                    input.check_backing()?;
                     ctx.checkpoints += checkpoint_record;
                 }
             }
@@ -521,26 +526,36 @@ fn stream_context(
             }
             _ => {}
         }
-        if m.kind == MessageKind::CompactionSummary && sink.message(compaction_boundary(m.timestamp)) == Flow::Stop {
-            stopped = true;
-            return Ok(Flow::Stop);
-        }
-        if let Some(segment) = ctx.rotated.take() {
-            if m.kind != MessageKind::CompactionSummary
-                && sink.message(rotation_branch(m.timestamp, segment)) == Flow::Stop
-            {
+        if m.kind == MessageKind::CompactionSummary {
+            let flow = sink.message(compaction_boundary(m.timestamp));
+            input.check_backing()?;
+            if flow == Flow::Stop {
                 stopped = true;
-                return Ok(Flow::Stop);
+                return Ok(flow);
             }
         }
-        pending = Some(m);
+        if let Some(segment) = ctx.rotated.take() {
+            if m.kind != MessageKind::CompactionSummary {
+                let flow = sink.message(rotation_branch(m.timestamp, segment));
+                input.check_backing()?;
+                if flow == Flow::Stop {
+                    stopped = true;
+                    return Ok(flow);
+                }
+            }
+        }
+        pending = Some((m, input.source().clone()));
         Ok(Flow::Continue)
     };
     let skipped = visit_segments(segments, start.at, &mut accept)?;
     if !stopped {
-        if let Some(last) = pending {
+        if let Some((last, source)) = pending {
             sink.message(last);
+            source.check()?;
         }
+    }
+    if let Some(input) = &enrich.file {
+        input.check()?;
     }
     if ctx.checkpoints > 0 {
         crate::affordance::note_checkpoints(s.harness_extra_mut(Harness::Kimi), ctx.checkpoints, []);
@@ -620,6 +635,10 @@ fn default_model_from_config(config_toml: &Path) -> Option<String> {
 /// transcript path that doesn't exist.
 fn scan(id: &str, transcript: &Path, dir: &Path, cwd: Option<PathBuf>) -> Option<SessionRef> {
     let meta = fs::metadata(transcript).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    let primary = crate::source::FileId::of(&meta)?;
     let mtime: Option<DateTime<Utc>> = meta
         .modified()
         .ok()
@@ -628,21 +647,20 @@ fn scan(id: &str, transcript: &Path, dir: &Path, cwd: Option<PathBuf>) -> Option
 
     // title: state.json.custom_title (modern only) else first user text from the transcript.
     let mut title = read_custom_title(dir);
-    let mut message_count = 0usize;
-    visit_segments(&transcript_segments(dir, transcript), None, &mut |view, _, _, _, _| {
-        let Some(fields) = Fields::parse(view, &["role", "content"])? else {
-            return Ok(Flow::Continue);
-        };
-        let role = fields.string("role")?;
-        if matches!(role.as_deref(), Some("user" | "assistant")) {
-            message_count += 1;
+    if title.is_none() {
+        visit_segments(&transcript_segments(dir, transcript), None, &mut |view, _, _, _, _| {
+            if let Some(record) = record::Record::of(view)? {
+                title = record.title()?;
+            }
+            Ok(if title.is_some() { Flow::Stop } else { Flow::Continue })
+        })
+        .ok()?;
+    } else {
+        // A summary title avoids body reads, while the primary path must remain present.
+        if crate::source::FileId::of(&fs::metadata(transcript).ok()?) != Some(primary) {
+            return None;
         }
-        if title.is_none() && role.as_deref() == Some("user") {
-            title = super::wire::text_title(fields.get("content"))?;
-        }
-        Ok(Flow::Continue)
-    })
-    .ok()?;
+    }
 
     // wire gives nicer first/last timestamps when present.
     let wire = wire_path_for(dir, transcript);
@@ -660,7 +678,7 @@ fn scan(id: &str, transcript: &Path, dir: &Path, cwd: Option<PathBuf>) -> Option
         title,
         created_at: created,
         updated_at: updated,
-        message_count,
+        message_count: 0,
     })
 }
 
@@ -729,7 +747,7 @@ fn transcript_segments(dir: &Path, transcript: &Path) -> Vec<PathBuf> {
 
 /// A record visitor of [`visit_segments`]: the record, its segment's source, the rotated-in
 /// segment's name, a checkpoint anchor, and the rejected lines before it.
-type SegmentRecord<'a> = dyn FnMut(JsonView<'_>, &JsonSource, Option<&str>, Option<u64>, u64) -> Result<Flow> + 'a;
+type SegmentRecord<'a> = dyn FnMut(JsonView<'_>, &jsonl::Read, Option<&str>, Option<u64>, u64) -> Result<Flow> + 'a;
 
 /// Every record of every segment, in order: the live one from `at` alone when resuming. kimi-cli
 /// rotates the live file on `/clear`, on a compaction (`Context.clear`) and on a rewind
@@ -747,13 +765,18 @@ fn visit_segments(segments: &[PathBuf], at: Option<u64>, accept: &mut SegmentRec
         if at.is_some() && !live {
             continue;
         }
-        let file = match fs::File::open(path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error.into()),
+        let input = match jsonl::Read::open(path) {
+            Ok(input) => input,
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                continue
+            }
+            Err(error) => return Err(error),
         };
-        let source = JsonSource::capture(path)?;
-        source.check_metadata(file.metadata()?)?;
+        let source = input.source();
         let from = if live { at.unwrap_or(0) } else { 0 };
         anyhow::ensure!(from <= source.len(), "context offset beyond source");
         let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
@@ -763,12 +786,12 @@ fn visit_segments(segments: &[PathBuf], at: Option<u64>, accept: &mut SegmentRec
         let mut announce = shared;
         let mut start = from;
         let mut stopped = false;
-        jsonl::for_each_line(&source, &file, from, source.len(), |line| {
+        input.lines(from, |line| {
             let line_start = std::mem::replace(&mut start, line.end);
             // Older segments need fingerprints for their successor; the live one only until its
             // copied prefix diverges.
             if !live || shared {
-                let Some(hash) = fingerprint(&file, &line)? else {
+                let Some(hash) = fingerprint(&input, &line)? else {
                     skipped += 1;
                     return Ok(Flow::Continue);
                 };
@@ -789,11 +812,11 @@ fn visit_segments(segments: &[PathBuf], at: Option<u64>, accept: &mut SegmentRec
             let starts = announce.then_some(name);
             announce = false;
             let position = (live && line.complete).then_some(line_start);
-            let flow = accept(view, &source, starts, position, skipped)?;
+            let flow = accept(view, &input, starts, position, skipped)?;
+            input.check_backing()?;
             stopped = flow == Flow::Stop;
             Ok(flow)
         })?;
-        source.check()?;
         if stopped {
             break;
         }
@@ -805,7 +828,7 @@ fn visit_segments(segments: &[PathBuf], at: Option<u64>, accept: &mut SegmentRec
 /// What a segment's line is matched against its predecessor's by: a hash of its ASCII-trimmed
 /// bytes, as `str::hash` writes them. `None` for a non-UTF-8 line, which takes no place in the
 /// shared prefix. Only rotated segments and a live file's copied prefix are fingerprinted.
-fn fingerprint(file: &fs::File, line: &jsonl::Line<'_>) -> Result<Option<u64>> {
+fn fingerprint(file: &impl jsonl::ranges::At, line: &jsonl::Line<'_>) -> Result<Option<u64>> {
     use std::hash::Hasher;
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     match line.view {
@@ -822,13 +845,32 @@ fn fingerprint(file: &fs::File, line: &jsonl::Line<'_>) -> Result<Option<u64>> {
         }
         None if line.blank => {}
         None => {
-            let mut bytes = vec![0; (line.end - line.at) as usize];
-            jsonl::ranges::read_exact_at(file, &mut bytes, line.at)?;
-            let text = bytes.trim_ascii_end();
-            if std::str::from_utf8(text).is_err() {
+            let range = jsonl::ranges::Range {
+                offset: line.at,
+                len: line.end - line.at,
+            };
+            if !jsonl::ranges::valid_utf8(&mut jsonl::ranges::reader(file, range)?)? {
                 return Ok(None);
             }
-            hash.write(text);
+            // Match trim_ascii_end without copying a giant rejected record.
+            let mut end = line.end;
+            let mut bytes = vec![0; range.len.min(64 * 1024) as usize];
+            while end > line.at {
+                let n = (end - line.at).min(bytes.len() as u64) as usize;
+                jsonl::ranges::read_exact_at(file, &mut bytes[..n], end - n as u64)?;
+                let trimmed = bytes[..n].trim_ascii_end().len();
+                end -= (n - trimmed) as u64;
+                if trimmed != 0 {
+                    break;
+                }
+            }
+            let mut at = line.at;
+            while at < end {
+                let n = (end - at).min(bytes.len() as u64) as usize;
+                jsonl::ranges::read_exact_at(file, &mut bytes[..n], at)?;
+                hash.write(&bytes[..n]);
+                at += n as u64;
+            }
         }
     }
     hash.write_u8(0xff);
@@ -920,29 +962,28 @@ fn rotation_branch(ts: Option<DateTime<Utc>>, segment: String) -> Message {
 /// The system prompt from the head of `context.jsonl` (kimi-cli writes it as the first record,
 /// `{"role":"_system_prompt", …}`; `soul/context.py:99`). Bounded to the first few lines.
 fn peek_system_prompt(transcript: &Path) -> Option<String> {
-    let source = JsonSource::capture(transcript).ok()?;
-    let file = fs::File::open(transcript).ok()?;
-    source.check_metadata(file.metadata().ok()?).ok()?;
+    let input = jsonl::Read::open(transcript).ok()?;
     let mut prompt = None;
     let mut seen = 0usize;
-    jsonl::for_each_line(&source, &file, 0, source.len(), |line| {
-        let Some(view) = line.view else {
-            return Ok(Flow::Continue);
-        };
-        seen += 1;
-        let Some(fields) = Fields::parse(view, &["role", "content"])? else {
-            return Ok(if seen >= 4 { Flow::Stop } else { Flow::Continue });
-        };
-        if fields.string("role")?.as_deref() == Some("_system_prompt") {
-            let text = record::join(fields.get("content"), None)?;
-            if !text.is_empty() {
-                prompt = text.inline_str().map(str::to_owned);
+    input
+        .lines(0, |line| {
+            let Some(view) = line.view else {
+                return Ok(Flow::Continue);
+            };
+            seen += 1;
+            let Some(record) = record::Record::of(view)? else {
+                return Ok(if seen >= 4 { Flow::Stop } else { Flow::Continue });
+            };
+            if record.role.as_deref() == Some("_system_prompt") {
+                let text = record::join(record.fields.get("content"), None)?;
+                if !text.is_empty() {
+                    prompt = text.inline_str().map(str::to_owned);
+                }
+                return Ok(Flow::Stop);
             }
-            return Ok(Flow::Stop);
-        }
-        Ok(if seen >= 4 { Flow::Stop } else { Flow::Continue })
-    })
-    .ok()?;
+            Ok(if seen >= 4 { Flow::Stop } else { Flow::Continue })
+        })
+        .ok()?;
     prompt
 }
 
@@ -981,7 +1022,7 @@ struct WireEnrich {
     tool_results: HashMap<String, WireToolResult>,
     statuses: Vec<WireStatus>,
     first_timestamp: Option<DateTime<Utc>>,
-    file: Option<fs::File>,
+    file: Option<jsonl::Read>,
     spans: bool,
 }
 
@@ -1002,10 +1043,9 @@ impl WireEnrich {
     fn read(&self, range: WireRange) -> Option<Vec<u8>> {
         // Keep the original descriptor open: replacing the path during a pass cannot redirect
         // full-mode enrichment to an unrelated file. This reader is used sequentially.
-        let mut file = self.file.as_ref()?;
-        file.seek(SeekFrom::Start(range.offset)).ok()?;
+        let file = self.file.as_ref()?;
         let mut bytes = vec![0; range.len];
-        file.read_exact(&mut bytes).ok()?;
+        jsonl::ranges::read_exact_at(file, &mut bytes, range.offset).ok()?;
         Some(bytes)
     }
 
@@ -1051,18 +1091,15 @@ fn read_wire_enrichment(wire: &Path, spans: bool) -> WireEnrich {
     }
 }
 
-fn read_wire(wire: &Path, e: &mut WireEnrich) -> Result<fs::File> {
-    let source = JsonSource::capture(wire)?;
-    let file = fs::File::open(wire)?;
-    source.check_metadata(file.metadata()?)?;
-    jsonl::for_each_line(&source, &file, 0, source.len(), |line| {
+fn read_wire(wire: &Path, e: &mut WireEnrich) -> Result<jsonl::Read> {
+    let input = jsonl::Read::open(wire)?;
+    input.lines(0, |line| {
         if let Some(view) = line.view {
             wire_record(e, view)?;
         }
         Ok(Flow::Continue)
     })?;
-    source.check()?;
-    Ok(file)
+    Ok(input)
 }
 
 fn wire_record(e: &mut WireEnrich, view: JsonView<'_>) -> Result<()> {
@@ -1326,6 +1363,182 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn custom_title_skips_context_reads_and_fallback_stops_at_first_title() -> Result<()> {
+        let world = crate::test_world("kimi-title-demand");
+        let dir = world.base.join("session");
+        fs::create_dir_all(&dir)?;
+        let live = dir.join("context.jsonl");
+        fs::write(
+            &live,
+            format!(
+                "{{\"role\":\"assistant\",\"content\":\"{}\"}}\n{{\"role\":\"user\",\"content\":\"late prompt\"}}\n",
+                "x".repeat(1 << 20)
+            ),
+        )?;
+        fs::write(dir.join("state.json"), r#"{"custom_title":"native title"}"#)?;
+        fs::write(dir.join("wire.jsonl"), "{\"timestamp\":9}\n{\"timestamp\":2}\n")?;
+        jsonl::OPENED.with(|paths| paths.borrow_mut().clear());
+        let native = scan("session", &live, &dir, None).unwrap();
+        assert_eq!(native.title.as_deref(), Some("native title"));
+        assert_eq!(
+            (native.created_at, native.updated_at),
+            (epoch_to_dt(9.0), epoch_to_dt(2.0))
+        );
+        assert!(!jsonl::OPENED.with(|paths| paths.borrow().contains(&live)));
+        assert_eq!(native.message_count, 0);
+        fs::write(dir.join("state.json"), "{}")?;
+        assert_eq!(
+            scan("session", &live, &dir, None).unwrap().title.as_deref(),
+            Some("late prompt")
+        );
+        fs::write(dir.join("state.json"), r#"{"custom_title":"native title"}"#)?;
+        fs::remove_file(&live)?;
+        assert!(
+            scan("session", &live, &dir, None).is_none(),
+            "a summary cannot resurrect an absent primary"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fingerprints_keep_rejected_utf8_and_ascii_trimming_semantics() -> Result<()> {
+        use std::hash::Hasher;
+        let world = crate::test_world("kimi-prefix-fingerprint");
+        let path = world.base.join("context.jsonl");
+        let mut raw = format!("  {{bad:{}\t\r\n", "λ".repeat(100_000)).into_bytes();
+        raw.extend_from_slice(b"\xff\n   {\"role\":\"user\",\"content\":\"valid\"}\r\n");
+        fs::write(&path, &raw)?;
+        let input = jsonl::Read::open(&path)?;
+        input.lines(0, |line| {
+            let bytes = raw[line.at as usize..line.end as usize].trim_ascii_end();
+            let expected = std::str::from_utf8(bytes).ok().map(|_| {
+                let mut hash = std::collections::hash_map::DefaultHasher::new();
+                hash.write(bytes);
+                hash.write_u8(0xff);
+                hash.finish()
+            });
+            assert_eq!(fingerprint(&input, &line)?, expected);
+            Ok(Flow::Continue)
+        })?;
+        Ok(())
+    }
+
+    #[test]
+    fn callbacks_cannot_resume_mapped_context_after_truncation() -> Result<()> {
+        struct Shrink {
+            path: PathBuf,
+            stage: u8,
+            hit: bool,
+        }
+        impl Shrink {
+            fn at(&mut self, stage: u8) {
+                if self.stage == stage && !self.hit {
+                    fs::OpenOptions::new()
+                        .write(true)
+                        .open(&self.path)
+                        .unwrap()
+                        .set_len(0)
+                        .unwrap();
+                    self.hit = true;
+                }
+            }
+        }
+        impl MessageSink for Shrink {
+            fn message(&mut self, _: Message) -> Flow {
+                self.at(0);
+                Flow::Continue
+            }
+            fn wants_checkpoint(&mut self, _: u64) -> bool {
+                self.at(1);
+                self.stage != 1
+            }
+            fn checkpoint(&mut self, _: &mut Checkpoint) {
+                self.at(2);
+            }
+        }
+        let world = crate::test_world("kimi-callback-source");
+        let dir = world.base.join("session");
+        fs::create_dir_all(&dir)?;
+        let path = dir.join("context.jsonl");
+        let reference = SessionRef::new("session", Harness::Kimi, &dir);
+        let adapter = Kimi::with_home(&world.base);
+        for stage in 0..3 {
+            fs::write(&path, "{\"role\":\"user\",\"content\":\"owned prompt\"}\n".repeat(1024))?;
+            let mut sink = Shrink {
+                path: path.clone(),
+                stage,
+                hit: false,
+            };
+            assert!(adapter.stream(&reference, &ParseOptions::full(), &mut sink).is_err());
+            assert!(sink.hit, "callback stage {stage}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn final_pending_message_checks_its_older_segment_and_captured_wire() -> Result<()> {
+        let world = crate::test_world("kimi-final-source");
+        let dir = world.base.join("session");
+        fs::create_dir_all(&dir)?;
+        let old = dir.join("context_1.jsonl");
+        let live = dir.join("context.jsonl");
+        let wire = dir.join("wire.jsonl");
+        let reference = SessionRef::new("session", Harness::Kimi, &dir);
+        let adapter = Kimi::with_home(&world.base);
+        for target in [&old, &wire] {
+            fs::write(&old, "{\"role\":\"user\",\"content\":\"older pending prompt\"}\n")?;
+            fs::write(&live, "")?;
+            fs::write(
+                &wire,
+                "{\"timestamp\":9,\"message\":{\"type\":\"TurnBegin\",\"payload\":{}}}\n",
+            )?;
+            let mut kept = None;
+            let result = adapter.stream(&reference, &ParseOptions::full(), &mut |m: Message| {
+                kept = Some(m);
+                fs::remove_file(target).unwrap();
+                Flow::Continue
+            });
+            assert!(result.is_err(), "final callback invalidates {}", target.display());
+            assert_eq!(kept.unwrap().text().as_deref(), Some("older pending prompt"));
+        }
+        // Optional malformed/absent wire remains tolerated before any enrichment is admitted.
+        fs::write(&wire, "invalid-json\n")?;
+        adapter.stream(&reference, &ParseOptions::full(), &mut |_: Message| Flow::Continue)?;
+        fs::remove_file(&wire)?;
+        adapter.stream(&reference, &ParseOptions::full(), &mut |_: Message| Flow::Continue)?;
+        Ok(())
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn deferred_counts_publish_for_directory_refs_and_invalidate_on_growth() -> Result<()> {
+        let world = crate::test_world("kimi-count-publication");
+        let home = world.home.join(".kimi");
+        let dir = home.join("sessions/hash/session");
+        fs::create_dir_all(&dir)?;
+        let path = dir.join("context.jsonl");
+        let first = "{\"role\":\"user\",\"content\":\"question\"}\n";
+        fs::write(&path, first)?;
+        let adapter = Kimi::with_home(&home);
+        let context = crate::discover_cache::read::Context::current();
+        let _scope = context.enter();
+        let r = crate::sessions_for(Some(Harness::Kimi)).remove(0);
+        assert_eq!(r.message_count, 0);
+        let mut sink = crate::stream::CollectSink::default();
+        crate::stream::stream_counted(
+            &adapter,
+            &r,
+            &ParseOptions::facts(),
+            &mut sink,
+            crate::stream::Pass::RECORD,
+        )?;
+        assert_eq!(crate::sessions_for(Some(Harness::Kimi))[0].message_count, 1);
+        fs::write(&path, format!("{first}{{\"role\":\"user\",\"content\":\"next\"}}\n"))?;
+        assert_eq!(crate::sessions_for(Some(Harness::Kimi))[0].message_count, 0);
+        Ok(())
+    }
+
+    #[test]
     fn discovery_refreshes_titles_registry_rotations_and_wire_without_live_append() -> Result<()> {
         let world = crate::test_world("kimi_aux_discovery");
         let context = crate::discover_cache::read::Context::current();
@@ -1343,7 +1556,7 @@ mod tests {
         let adapter = Kimi::with_home(&home);
         let first = adapter.discover()?.remove(0);
         assert_eq!(first.title.as_deref(), Some("prompt fallback"));
-        assert_eq!(first.message_count, 2);
+        assert_eq!(first.message_count, 0);
         assert_eq!(first.cwd.as_deref(), Some(Path::new(cwd)));
         fs::write(
             dir.join("state.json"),
@@ -1362,12 +1575,12 @@ mod tests {
         assert_eq!(adapter.discover()?[0].cwd, None);
         let rotated = dir.join("context_1.jsonl");
         fs::write(&rotated, "{\"role\":\"user\",\"content\":\"earlier\"}\n")?;
-        assert_eq!(adapter.discover()?[0].message_count, 3);
+        assert_eq!(adapter.discover()?[0].message_count, 0);
         fs::write(
             &rotated,
             "{\"role\":\"user\",\"content\":\"earlier\"}\n{\"role\":\"assistant\",\"content\":\"prior reply\"}\n",
         )?;
-        assert_eq!(adapter.discover()?[0].message_count, 4);
+        assert_eq!(adapter.discover()?[0].message_count, 0);
         fs::write(
             dir.join("wire.jsonl"),
             "{\"timestamp\":1700000000}\n{\"timestamp\":1700000001}\n",
@@ -1419,7 +1632,7 @@ mod tests {
             let actual = scan("session", &live, &dir, Some("/p".into())).unwrap();
             // The shared prefix (prompt, blank, invalid) is read once; the rejected lines of the
             // live file count, the rotated `\xff` too.
-            assert_eq!(actual.message_count, 4, "{title}");
+            assert_eq!(actual.message_count, 0, "{title}");
             let expected = read_custom_title(&dir).or(crate::harness::wire::text_title(Some(
                 (&serde_json::json!([{"text":""},{"text":body}])).into(),
             ))?);
@@ -1471,7 +1684,8 @@ mod tests {
         complete: bool,
         names: &mut BTreeMap<String, String>,
     ) -> Option<Message> {
-        let m = record::message(v.into(), None, enrich, complete, names).unwrap()?;
+        let record = record::Record::of(v.into()).unwrap()?;
+        let m = record::message(&record, None, enrich, complete, names).unwrap()?;
         note_call_names(&m, names);
         Some(m)
     }
@@ -2497,7 +2711,7 @@ mod tests {
         let first = subagent_refs(&main);
         assert_eq!(first.len(), 12);
         for reference in &first {
-            assert_eq!(reference.message_count, 128);
+            assert_eq!(reference.message_count, 0);
             assert_eq!(reference.cwd, main.cwd);
             let hit = crate::discover_cache::cached_scan(&reference.path.join("context.jsonl"), || {
                 panic!("unchanged child context must be cached")
@@ -2518,7 +2732,7 @@ mod tests {
             child.join("context_1.jsonl"),
             "{\"role\":\"assistant\",\"content\":\"older\"}\n",
         )?;
-        assert_eq!(subagent_refs(&main)[0].message_count, 129);
+        assert_eq!(subagent_refs(&main)[0].message_count, 0);
         fs::write(
             child.join("wire.jsonl"),
             "{\"timestamp\":1700000000}\n{\"timestamp\":1700000001}\n",
