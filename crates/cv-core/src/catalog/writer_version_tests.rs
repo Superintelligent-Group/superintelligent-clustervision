@@ -134,7 +134,9 @@ fn cached_null_observation_refills_on_discovery_without_another_bump() {
     std::fs::write(&path, "{\"type\":\"user\",\"version\":\"2.1.296\"}\n").unwrap();
     let discover = || {
         use crate::harness::Adapter;
-        crate::harness::claude::Claude::with_config_dir(&projects).discover().unwrap()
+        crate::harness::claude::Claude::with_config_dir(&projects)
+            .discover()
+            .unwrap()
     };
     let refs = Context::current().run(|| {
         let refs = discover();
@@ -142,23 +144,39 @@ fn cached_null_observation_refills_on_discovery_without_another_bump() {
         crate::discover_cache::persist(false);
         refs
     });
-    open_db().unwrap().execute("UPDATE sessions SET writer_version=NULL", []).unwrap();
+    open_db()
+        .unwrap()
+        .execute("UPDATE sessions SET writer_version=NULL", [])
+        .unwrap();
     let refill = Context::current();
     refill.run(|| {
         sync(&discover());
-        assert_eq!(refill.writer_versions(Harness::Claude).len(), 1, "cached NULL must demand the reducer");
+        assert_eq!(
+            refill.writer_versions(Harness::Claude).len(),
+            1,
+            "cached NULL must demand the reducer"
+        );
         crate::discover_cache::persist(false);
     });
     assert_eq!(column(&refs[0]).as_deref(), Some("2.1.296"));
     let settled = Context::current();
     settled.run(|| {
         sync(&discover());
-        assert!(settled.writer_versions(Harness::Claude).is_empty(), "settled cache hit makes no observation");
+        assert!(
+            settled.writer_versions(Harness::Claude).is_empty(),
+            "settled cache hit makes no observation"
+        );
     });
     // The metadata continuation retains its previous maximum and folds a newer appended writer.
     use std::io::Write;
-    writeln!(std::fs::OpenOptions::new().append(true).open(path).unwrap(), "{{\"type\":\"user\",\"version\":\"2.2.0\"}}").unwrap();
-    Context::current().run(|| { sync(&discover()); });
+    writeln!(
+        std::fs::OpenOptions::new().append(true).open(path).unwrap(),
+        "{{\"type\":\"user\",\"version\":\"2.2.0\"}}"
+    )
+    .unwrap();
+    Context::current().run(|| {
+        sync(&discover());
+    });
     assert_eq!(column(&refs[0]).as_deref(), Some("2.2.0"));
 }
 
@@ -169,12 +187,15 @@ fn read_only_catalog_serves_observations_and_drops_publication() {
     let w = crate::test_world("writer-read-only");
     let r = session(&w.base, "recorded");
     observe(&Context::current(), &r, Some("2.1.296"));
-    let modes: Vec<_> = std::fs::read_dir(&w.cv_home).unwrap().map(|e| {
-        let path = e.unwrap().path();
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
-        (path, mode)
-    }).collect();
+    let modes: Vec<_> = std::fs::read_dir(&w.cv_home)
+        .unwrap()
+        .map(|e| {
+            let path = e.unwrap().path();
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+            (path, mode)
+        })
+        .collect();
     std::fs::set_permissions(&w.cv_home, std::fs::Permissions::from_mode(0o555)).unwrap();
     let result = std::panic::catch_unwind(|| {
         assert_eq!(writer_versions()[0].newest.as_deref(), Some("2.1.296"));
@@ -182,6 +203,8 @@ fn read_only_catalog_serves_observations_and_drops_publication() {
         assert_eq!(writer_versions()[0].newest.as_deref(), Some("2.1.296"));
     });
     std::fs::set_permissions(&w.cv_home, std::fs::Permissions::from_mode(0o755)).unwrap();
-    for (path, mode) in modes { std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap(); }
+    for (path, mode) in modes {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
     result.unwrap();
 }

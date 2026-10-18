@@ -6,7 +6,7 @@ cv-search 4901
 cv-testkit 450
 cv-web 15
 cv:tests 15539
-cv-core:tests 64682
+cv-core:tests 64705
 cv-search:tests 7394
 cv-testkit:tests 39
 cv-web:tests 0
