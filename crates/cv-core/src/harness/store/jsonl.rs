@@ -54,7 +54,7 @@ impl Read {
         if from == 0 {
             self.prefix(self.source.len(), visit)
         } else {
-            self.visit(from, self.source.len(), visit)
+            self.snapshot(from, self.source.len(), visit)
         }
     }
 
@@ -65,17 +65,29 @@ impl Read {
         limit: u64,
         visit: impl FnMut(Line<'_>) -> anyhow::Result<crate::stream::Flow>,
     ) -> anyhow::Result<()> {
-        self.visit(0, self.source.len().min(limit), visit)
+        self.visit_with_end(0, self.source.len().min(limit), false, visit)
     }
 
-    fn visit(
+    /// A historical byte length intentionally acts as that snapshot's EOF, rather than a
+    /// discovery budget. A valid unterminated final record remains visible, never checkpointable.
+    pub(crate) fn snapshot(
         &self,
         from: u64,
         to: u64,
+        visit: impl FnMut(Line<'_>) -> anyhow::Result<crate::stream::Flow>,
+    ) -> anyhow::Result<()> {
+        self.visit_with_end(from, to.min(self.source.len()), true, visit)
+    }
+
+    fn visit_with_end(
+        &self,
+        from: u64,
+        to: u64,
+        snapshot: bool,
         mut visit: impl FnMut(Line<'_>) -> anyhow::Result<crate::stream::Flow>,
     ) -> anyhow::Result<()> {
         let read = for_each_line(&self.source, &self.file, from, to, |line| {
-            if !line.complete && to < self.source.len() {
+            if !snapshot && !line.complete && to < self.source.len() {
                 return Ok(crate::stream::Flow::Continue);
             }
             visit(line)
@@ -84,6 +96,39 @@ impl Read {
         self.source.check()?;
         read
     }
+}
+
+/// Pure in-memory JSONL, through the same positioned framer and Value-compatible line
+/// acceptance as file reads. Views have no file provenance; demanded content stays owned.
+pub(crate) fn slice(
+    bytes: &[u8],
+    mut visit: impl FnMut(Line<'_>) -> anyhow::Result<crate::stream::Flow>,
+) -> anyhow::Result<()> {
+    let mut frames = ranges::records(
+        bytes,
+        ranges::Range {
+            offset: 0,
+            len: bytes.len() as u64,
+        },
+    )?;
+    while let Some(frame) = frames.next() {
+        let (raw, complete) = frame?;
+        let start = raw.offset as usize;
+        let end = (raw.offset + raw.len) as usize;
+        if in_memory(
+            None,
+            None,
+            raw.offset,
+            frames.offset(),
+            complete,
+            &bytes[start..end],
+            &mut visit,
+        )? == crate::stream::Flow::Stop
+        {
+            break;
+        }
+    }
+    Ok(())
 }
 
 /// Whole-file projection for sidecar reducers that keep no offsets. Blank and rejected lines
@@ -161,7 +206,7 @@ fn lines(
         let (raw, complete) = frame?;
         let end = frames.offset();
         let flow = if let Some(bytes) = frames.small_record() {
-            in_memory(source, decoded, raw.offset, end, complete, bytes, &mut visit)?
+            in_memory(Some(source), decoded, raw.offset, end, complete, bytes, &mut visit)?
         } else {
             let range = ranges::trim(file, raw)?;
             let at = range.offset;
@@ -265,7 +310,15 @@ fn mapped_lines(
         let mut start = 0;
         for stop in memchr::memchr_iter(b'\n', bytes).map(|i| i + 1) {
             let line = &bytes[start..stop - 1];
-            let flow = in_memory(source, decoded, at + start as u64, at + stop as u64, true, line, visit);
+            let flow = in_memory(
+                Some(source),
+                decoded,
+                at + start as u64,
+                at + stop as u64,
+                true,
+                line,
+                visit,
+            );
             match flow {
                 Ok(Flow::Stop) => return Some(Ok(())),
                 Err(error) => return Some(Err(error)),
@@ -275,7 +328,18 @@ fn mapped_lines(
         }
         if start < bytes.len() {
             // Only the read's last window can end without an LF: a partial last line.
-            return Some(in_memory(source, decoded, at + start as u64, to, false, &bytes[start..], visit).map(|_| ()));
+            return Some(
+                in_memory(
+                    Some(source),
+                    decoded,
+                    at + start as u64,
+                    to,
+                    false,
+                    &bytes[start..],
+                    visit,
+                )
+                .map(|_| ()),
+            );
         }
         at += last as u64;
     }
@@ -356,7 +420,7 @@ impl<'s> Records<'s> {
 
 /// One line whose bytes are in memory (mapped, or read as a small positioned record).
 fn in_memory(
-    source: &crate::json::JsonSource,
+    source: Option<&crate::json::JsonSource>,
     decoded: Decoded<'_>,
     start: u64,
     end: u64,
@@ -370,7 +434,7 @@ fn in_memory(
     let blank = trimmed.is_empty();
     if let Some(text) = (!blank).then(|| std::str::from_utf8(trimmed).ok()).flatten() {
         let mut visited = false;
-        let view = |view: crate::json::JsonView<'_>| {
+        let mut view = |view: crate::json::JsonView<'_>| {
             visited = true;
             visit(Line {
                 at,
@@ -380,9 +444,20 @@ fn in_memory(
                 blank,
             })
         };
-        let read = match decoded {
-            Some((backing, len)) => source.read_decoded_record(backing, len, at, text, view),
-            None => source.read_record(at, text, view),
+        let read = match (source, decoded) {
+            (Some(source), Some((backing, len))) => source.read_decoded_record(backing, len, at, text, view),
+            (Some(source), None) => source.read_record(at, text, view),
+            (None, _) => (|| {
+                let context = document::range::RangeSource::text(None, text, at, false);
+                let range = document::range::Range {
+                    offset: at,
+                    len: text.len() as u64,
+                };
+                match context.accept(range, crate::json::Validation::Value)? {
+                    Some(value) => view(crate::json::JsonView::of(&context, value)),
+                    None => Err(crate::json::InvalidJson.into()),
+                }
+            })(),
         };
         match read {
             Err(error) if !visited && error.downcast_ref::<crate::json::InvalidJson>().is_some() => {}
@@ -417,6 +492,17 @@ mod tests {
             calls, 0,
             "a budget boundary cannot validate a prefix of a rejected record"
         );
+        super::Read::open(&path)?.snapshot(0, valid.len() as u64, |line| {
+            assert!(line.view.is_some());
+            assert!(!line.complete, "historical EOF is not a checkpoint boundary");
+            calls += 1;
+            Ok(Flow::Continue)
+        })?;
+        assert_eq!(
+            calls, 1,
+            "the same cut explicitly requested as a historical snapshot is EOF"
+        );
+        calls = 0;
         std::fs::write(&path, valid)?;
         super::Read::open(&path)?.prefix(valid.len() as u64, |line| {
             assert!(line.view.is_some());
@@ -425,6 +511,41 @@ mod tests {
             Ok(Flow::Continue)
         })?;
         assert_eq!(calls, 1, "actual unterminated EOF keeps the shared acceptance rule");
+        Ok(())
+    }
+
+    #[test]
+    fn pure_slice_and_captured_file_share_framing_and_rejected_record_positions() -> anyhow::Result<()> {
+        let world = cv_testkit::World::new("jsonl-memory-file");
+        let path = world.base.join("wire.jsonl");
+        let mut bytes = format!(" \r\n{{\"x\":\"{}\"}}\n{{\"x\":1e400,\"x\":0}}\n", "雪".repeat(40000)).into_bytes();
+        bytes.extend_from_slice(b"\xff\n{\"partial\":true}");
+        std::fs::write(&path, &bytes)?;
+        let mut memory = Vec::new();
+        super::slice(&bytes, |line| {
+            memory.push((
+                line.at,
+                line.end,
+                line.complete,
+                line.blank,
+                line.view.map(|v| v.resolve().map(|v| v.into_owned())).transpose()?,
+            ));
+            Ok(Flow::Continue)
+        })?;
+        let mut file = Vec::new();
+        super::Read::open(&path)?.lines(0, |line| {
+            file.push((
+                line.at,
+                line.end,
+                line.complete,
+                line.blank,
+                line.view.map(|v| v.resolve().map(|v| v.into_owned())).transpose()?,
+            ));
+            Ok(Flow::Continue)
+        })?;
+        assert_eq!(memory, file);
+        assert_eq!(memory.iter().filter(|row| row.4.is_none() && !row.3).count(), 2);
+        assert!(!memory.last().unwrap().2);
         Ok(())
     }
 

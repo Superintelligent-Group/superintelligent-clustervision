@@ -276,7 +276,8 @@ pub trait MessageSink {
 /// Run an adapter boundary with a consumer error guard. Legacy adapter loops can keep using
 /// `message() -> Flow`; failures stop delivery immediately and surface after the adapter returns,
 /// including errors raised by metadata, dependencies, checkpoints or an EOF-only sink check.
-/// An intentional stop remains successful. Any staged output from a failed pass must be discarded.
+/// An intentional stop succeeds only without source or consumer errors; it never suppresses
+/// invalidation detected during completion. Discard staged output from every failed pass.
 pub fn checked<T>(sink: &mut dyn MessageSink, read: impl FnOnce(&mut dyn MessageSink) -> Result<T>) -> Result<T> {
     let mut guard = ErrorGuard {
         inner: sink,

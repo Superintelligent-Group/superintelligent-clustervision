@@ -393,9 +393,11 @@ pub fn parse_str(id: &str, text: &str, is_jsonl: bool, source_path: Option<PathB
     let demand = Demand::of(&ParseOptions::full());
     if is_jsonl {
         let mut det = EventDetector::default();
-        super::for_each_json_line_str(text, |v| match nl_flags((&v).into()) {
-            Ok(flags) => det.feed(flags),
-            Err(_) => Flow::Continue,
+        let _ = super::store::jsonl::slice(text.as_bytes(), |line| {
+            Ok(match line.view.map(nl_flags).transpose() {
+                Ok(Some(flags)) => det.feed(flags),
+                _ => Flow::Continue,
+            })
         });
         let mut reader = Reader {
             session: &mut s,
@@ -405,9 +407,14 @@ pub fn parse_str(id: &str, text: &str, is_jsonl: bool, source_path: Option<PathB
             demand,
             source: None,
         };
-        let skipped = super::for_each_json_line_str(text, |v| {
-            let _ = reader.record((&v).into());
-            Flow::Continue
+        let mut skipped = 0;
+        let _ = super::store::jsonl::slice(text.as_bytes(), |line| {
+            if let Some(view) = line.view {
+                let _ = reader.record(view);
+            } else {
+                skipped += u64::from(!line.blank);
+            }
+            Ok(Flow::Continue)
         });
         super::note_skipped_lines(&mut s, skipped);
     } else if let Ok(root) = serde_json::from_str::<Value>(text) {

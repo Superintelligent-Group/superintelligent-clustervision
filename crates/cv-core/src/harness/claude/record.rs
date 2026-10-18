@@ -109,6 +109,32 @@ const SYSTEM_EXTRA: &[&str] = &[
     "direction",
 ];
 
+pub(super) enum Demand {
+    Message,
+    Metadata,
+}
+
+/// One shared selection/type parse for metadata and message demands. Fields are lazy views;
+/// discovery never constructs a message or resolves bodies, rich extras or tool arguments.
+pub(super) struct Head<'a> {
+    pub(super) top: Fields<'a>,
+    pub(super) ty: String,
+}
+
+impl<'a> Head<'a> {
+    pub(super) fn parse(view: JsonView<'a>, demand: Demand) -> Result<Option<Self>> {
+        let keys = match demand {
+            Demand::Message => TOP,
+            Demand::Metadata => &["type", "version", "cwd", "timestamp", "customTitle", "aiTitle"],
+        };
+        let Some(top) = Fields::parse(view, keys)? else {
+            return Ok(None);
+        };
+        let ty = top.string("type")?.unwrap_or_default();
+        Ok(Some(Self { top, ty }))
+    }
+}
+
 /// One record: update `session` and hand its message (if any) to `sink`. `at` is the record's
 /// byte offset when the source has one. `sourced` is set when the delivered message holds a
 /// source descriptor, which obliges the reader to recheck the source before going on. Errors
@@ -122,10 +148,9 @@ pub(super) fn ingest(
     sourced: &mut bool,
 ) -> Result<Flow> {
     // A record that is not an object carries nothing (Value's lookups all miss).
-    let Some(top) = Fields::parse(view, TOP)? else {
+    let Some(Head { top, ty }) = Head::parse(view, Demand::Message)? else {
         return Ok(Flow::Continue);
     };
-    let ty = top.string("type")?.unwrap_or_default();
     let ty = ty.as_str();
     let r = Record { view, top, at, opts };
 
