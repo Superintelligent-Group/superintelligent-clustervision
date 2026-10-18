@@ -403,6 +403,57 @@ impl SavedCtx {
     }
 }
 
+/// The wire head shared by metadata, header peeking and message projection.
+struct WireRecord<'v> {
+    fields: Fields<'v>,
+    ty: String,
+}
+impl<'v> WireRecord<'v> {
+    fn of(view: JsonView<'v>) -> Result<Option<Self>> {
+        let Some(fields) = Fields::parse(
+            view,
+            &["type", "time", "event", "message", "modelAlias", "kind", "systemPrompt"],
+        )?
+        else {
+            return Ok(None);
+        };
+        let ty = fields.string("type")?.unwrap_or_default();
+        Ok(Some(Self { fields, ty }))
+    }
+    fn timestamp(&self) -> Result<Option<DateTime<Utc>>> {
+        Ok(self.fields.value("time")?.as_ref().and_then(super::ts_from_value))
+    }
+    fn message(&self) -> Result<Option<MessageHead<'v>>> {
+        self.fields
+            .get("message")
+            .map(MessageHead::of)
+            .transpose()
+            .map(Option::flatten)
+    }
+}
+struct MessageHead<'v> {
+    fields: Fields<'v>,
+    role: Option<String>,
+    origin: Option<String>,
+}
+impl<'v> MessageHead<'v> {
+    fn of(view: JsonView<'v>) -> Result<Option<Self>> {
+        let Some(fields) = Fields::parse(view, &["role", "origin", "content"])? else {
+            return Ok(None);
+        };
+        let role = fields.string("role")?;
+        let origin = fields
+            .get("origin")
+            .map(|v| v.get("kind"))
+            .transpose()?
+            .flatten()
+            .filter(|v| v.is_string().unwrap_or(false))
+            .map(|v| -> Result<String> { Ok(v.resolve()?.as_str().unwrap_or_default().to_owned()) })
+            .transpose()?;
+        Ok(Some(Self { fields, role, origin }))
+    }
+}
+
 /// The one Kimi Code read: records `at..` of an agent's wire log, each through the record
 /// codec. After a finished record with no step held (a pending step is amended by later parts,
 /// results and usage; its EOF flush is provisional) the sink may take a checkpoint with the
@@ -416,30 +467,32 @@ fn stream_wire(
     sink: &mut dyn MessageSink,
 ) -> Result<Option<Session>> {
     ctx.init_model(s.model.as_deref());
-    let source = JsonSource::capture(wire)?;
-    let file = fs::File::open(wire)?;
-    source.check_metadata(file.metadata()?)?;
-    if at > source.len() {
+    let input = jsonl::Read::open(wire)?;
+    if at > input.source().len() {
         return Ok(None);
     }
-    let spans = ctx.opts.spans.then_some(&source);
     let mut skipped = prior_skipped;
-    jsonl::for_each_line(&source, &file, at, source.len(), |line| {
+    input.lines(at, |line| {
         let Some(view) = line.view else {
             skipped += u64::from(!line.blank);
             return Ok(Flow::Continue);
         };
-        let flow = ctx.record(view, spans, sink)?;
-        if flow != Flow::Stop && line.complete && ctx.step.is_none() && sink.wants_checkpoint(line.end) {
-            checkpoint_wire(&ctx, wire, line.end, skipped, sink);
+        let flow = ctx.record(view, Some(&input), sink)?;
+        input.check_backing()?;
+        if flow != Flow::Stop && line.complete && ctx.step.is_none() {
+            let wanted = sink.wants_checkpoint(line.end);
+            input.check_backing()?;
+            if wanted {
+                checkpoint_wire(&ctx, wire, line.end, skipped, sink);
+                input.check_backing()?;
+            }
         }
         Ok(flow)
     })?;
-    source.check_metadata(file.metadata()?)?;
-    source.check()?;
     if !ctx.stopped {
         ctx.flush_step(sink);
     }
+    input.check()?;
     s.model = ctx.model_bindings.first.take().or(s.model);
     s.harness_extra_mut(Harness::KimiCode).append(&mut ctx.facts);
     if let Some(pv) = ctx.protocol_version.take() {
@@ -618,8 +671,8 @@ fn read_workspaces(path: &Path) -> HashMap<String, PathBuf> {
         .unwrap_or_default()
 }
 
-/// Cheap metadata-only scan for `discover`: state.json for identity/title/times, one pass over the
-/// transcript for the turn count (and the title when state.json has none).
+/// Native state metadata wins; read wire only for missing titles/timestamps. Exact turn counts
+/// are deferred to complete reads or indexing.
 fn scan(session_dir: &Path, id: &str, fallback_cwd: Option<PathBuf>) -> Option<SessionRef> {
     let state = read_discovery_state(session_dir);
     let wire = main_wire(session_dir);
@@ -635,7 +688,9 @@ fn scan(session_dir: &Path, id: &str, fallback_cwd: Option<PathBuf>) -> Option<S
         .get("title")
         .and_then(Value::as_str)
         .is_none_or(|t| t.trim().is_empty());
-    let w = scan_wire_with_title(&wire, title_needed).ok()?;
+    let state_created = state.get("createdAt").and_then(super::ts_from_value);
+    let state_updated = state.get("updatedAt").and_then(super::ts_from_value);
+    let w = scan_wire_with_title(&wire, title_needed, state_created.is_none() || state_updated.is_none()).ok()?;
     let title = state
         .get("title")
         .and_then(Value::as_str)
@@ -643,16 +698,8 @@ fn scan(session_dir: &Path, id: &str, fallback_cwd: Option<PathBuf>) -> Option<S
         .map(str::to_string)
         .or(w.title);
 
-    let created = state
-        .get("createdAt")
-        .and_then(super::ts_from_value)
-        .or(w.first_ts)
-        .or_else(|| file_mtime(&wire));
-    let updated = state
-        .get("updatedAt")
-        .and_then(super::ts_from_value)
-        .or(w.last_ts)
-        .or_else(|| file_mtime(&wire));
+    let created = state_created.or(w.first_ts).or_else(|| file_mtime(&wire));
+    let updated = state_updated.or(w.last_ts).or_else(|| file_mtime(&wire));
 
     Some(SessionRef {
         id: id.to_string(),
@@ -669,7 +716,7 @@ fn scan(session_dir: &Path, id: &str, fallback_cwd: Option<PathBuf>) -> Option<S
 /// What one pass over a wire log yields for a listing.
 #[derive(Default)]
 struct WireScan {
-    /// user + assistant turns (the [`SessionRef::message_count`] contract).
+    /// Not counted until a complete read or indexing pass certifies exact turns.
     message_count: usize,
     /// The first prompt the USER typed (not an injected notice), truncated.
     title: Option<String>,
@@ -677,69 +724,41 @@ struct WireScan {
     last_ts: Option<DateTime<Utc>>,
 }
 
-/// One pass over a wire log: turn count, title fallback and time bounds. A user record is one turn;
-/// an assistant turn is one LLM step (`step.end`).
+/// Listing metadata only; timestamps retain their exact extrema when the native state lacks them.
 fn scan_wire(wire: &Path) -> Result<WireScan> {
-    scan_wire_with_title(wire, true)
+    scan_wire_with_title(wire, true, true)
 }
-fn scan_wire_with_title(wire: &Path, title_needed: bool) -> Result<WireScan> {
+fn scan_wire_with_title(wire: &Path, title_needed: bool, times_needed: bool) -> Result<WireScan> {
     let mut w = WireScan::default();
-    if !wire.exists() {
+    if (!title_needed && !times_needed) || !wire.exists() {
         return Ok(w);
     }
-    jsonl::for_each_record(wire, |view| {
-        if let Some(ts) = view
-            .get("time")?
-            .map(|v| v.resolve())
-            .transpose()?
-            .as_deref()
-            .and_then(super::ts_from_value)
-        {
-            w.first_ts = Some(w.first_ts.map_or(ts, |f| f.min(ts)));
-            w.last_ts = Some(w.last_ts.map_or(ts, |l| l.max(ts)));
-        }
-        let fields = super::store::document::Fields::parse(view, &["type", "message", "event"])?;
-        let Some(fields) = fields else {
-            return Ok(());
+    let input = jsonl::Read::open(wire)?;
+    input.lines(0, |line| {
+        let Some(view) = line.view else {
+            return Ok(Flow::Continue);
         };
-        match fields.string("type")?.as_deref() {
-            Some("context.append_message") => {
-                if let Some(message) = fields.get("message") {
-                    let message = super::store::document::Fields::parse(message, &["role", "origin", "content"])?;
-                    if let Some(message) = message {
-                        if message.string("role")?.as_deref() == Some("user") {
-                            w.message_count += 1;
-                            if title_needed && w.title.is_none() {
-                                let origin = message
-                                    .get("origin")
-                                    .map(|v| v.get("kind"))
-                                    .transpose()?
-                                    .flatten()
-                                    .map(|v| v.resolve())
-                                    .transpose()?;
-                                if origin.as_deref().and_then(Value::as_str).unwrap_or("user") == "user" {
-                                    w.title = super::wire::text_title(message.get("content"))?;
-                                }
-                            }
-                        }
-                    }
-                }
+        let Some(record) = WireRecord::of(view)? else {
+            return Ok(Flow::Continue);
+        };
+        if times_needed {
+            if let Some(ts) = record.timestamp()? {
+                w.first_ts = Some(w.first_ts.map_or(ts, |f| f.min(ts)));
+                w.last_ts = Some(w.last_ts.map_or(ts, |l| l.max(ts)));
             }
-            Some("context.append_loop_event") => {
-                let event = fields
-                    .get("event")
-                    .map(|v| v.get("type"))
-                    .transpose()?
-                    .flatten()
-                    .map(|v| v.resolve())
-                    .transpose()?;
-                if event.as_deref().and_then(Value::as_str) == Some("step.end") {
-                    w.message_count += 1;
-                }
-            }
-            _ => {}
         }
-        Ok(())
+        if title_needed && w.title.is_none() && record.ty == "context.append_message" {
+            if let Some(message) = record.message()? {
+                if message.role.as_deref() == Some("user") && message.origin.as_deref().unwrap_or("user") == "user" {
+                    w.title = super::wire::text_title(message.fields.get("content"))?;
+                }
+            }
+        }
+        Ok(if !times_needed && w.title.is_some() {
+            Flow::Stop
+        } else {
+            Flow::Continue
+        })
     })?;
     Ok(w)
 }
@@ -764,21 +783,20 @@ struct HeaderFields {
 /// requested field only on relevant record kinds; unrelated body/telemetry fields remain views.
 fn peek_header(wire: &Path) -> HeaderFields {
     let read = || -> Result<HeaderFields> {
-        let source = JsonSource::capture(wire)?;
-        let file = fs::File::open(wire)?;
-        source.check_metadata(file.metadata()?)?;
+        let input = jsonl::Read::open(wire)?;
         let mut header = HeaderFields::default();
         let mut seen = 0;
-        jsonl::for_each_line(&source, &file, 0, source.len(), |line| {
+        input.lines(0, |line| {
             let Some(view) = line.view else {
                 return Ok(Flow::Continue);
             };
             seen += 1;
-            if let Some(record) = Fields::parse(view, &["type", "modelAlias", "systemPrompt", "kind"])? {
-                let ty = record.string("type")?.unwrap_or_default();
+            if let Some(head) = WireRecord::of(view)? {
+                let record = &head.fields;
+                let ty = &head.ty;
                 if header.model.is_none()
                     && (matches!(ty.as_str(), "profile.bind" | "config.update" | "usage.record")
-                        || loop_request(&ty, record.string("kind")?.as_deref()))
+                        || loop_request(ty, record.string("kind")?.as_deref()))
                 {
                     header.model = record.string("modelAlias")?;
                 }
@@ -885,15 +903,17 @@ impl<'a> Ctx<'a> {
     /// strings in it) chooses only where text, arguments and complete envelopes live. The step
     /// under construction keeps its payloads' source lifetime while it waits for usage/end. Small
     /// bookkeeping records are resolved and handled whole by [`Self::bookkeeping`].
-    fn record(&mut self, view: JsonView<'_>, spans: Option<&JsonSource>, sink: &mut dyn MessageSink) -> Result<Flow> {
-        let Some(record) = Fields::parse(view, &["type", "time", "event", "message", "modelAlias", "kind"])? else {
+    fn record(&mut self, view: JsonView<'_>, input: Option<&jsonl::Read>, sink: &mut dyn MessageSink) -> Result<Flow> {
+        let spans = input.filter(|_| self.opts.spans).map(jsonl::Read::source);
+        let Some(head) = WireRecord::of(view)? else {
             return Ok(if self.opts.complete {
                 self.bookkeeping(view.resolve()?.as_ref(), sink)
             } else {
                 Flow::Continue
             });
         };
-        let ty = record.string("type")?.unwrap_or_default();
+        let record = &head.fields;
+        let ty = &head.ty;
         if ty == "tools.update_store" {
             if let Some(fields) = Fields::parse(view, &["key", "value"])? {
                 if fields.string("key")?.as_deref() == Some("todo") {
@@ -924,7 +944,7 @@ impl<'a> Ctx<'a> {
             }
         }
         if !self.opts.complete && matches!(ty.as_str(), "llm.request" | "usage.record") {
-            let loop_request = loop_request(&ty, record.string("kind")?.as_deref());
+            let loop_request = loop_request(ty, record.string("kind")?.as_deref());
             if ty == "usage.record" || loop_request {
                 self.bind_model(record.string("modelAlias")?, loop_request);
             }
@@ -937,40 +957,22 @@ impl<'a> Ctx<'a> {
                 v.text(false)
             }
         };
-        let ts = record.value("time")?.as_ref().and_then(super::ts_from_value);
+        let ts = head.timestamp()?;
         if ty == "context.append_message" {
-            let message = record
-                .get("message")
-                .map(|view| Fields::parse(view, &["role", "origin", "content"]))
-                .transpose()?
-                .flatten();
+            let message = head.message()?;
             let blocks = openai::blocks_from_view(
-                message.as_ref().and_then(|m| m.get("content")),
+                message.as_ref().and_then(|m| m.fields.get("content")),
                 &openai::KIMI_CODE,
                 &mut text,
             )?;
-            let role = message.as_ref().map(|m| m.string("role")).transpose()?.flatten();
-            let origin = match message.as_ref().and_then(|m| m.get("origin")) {
-                Some(origin) => origin
-                    .get("kind")?
-                    .filter(|v| v.is_string().unwrap_or(false))
-                    .map(|v| v.resolve().map(|v| v.as_str().unwrap_or_default().to_owned()))
-                    .transpose()?,
-                None => None,
-            };
+            let role = message.as_ref().and_then(|m| m.role.as_deref());
+            let origin = message.as_ref().and_then(|m| m.origin.as_deref());
             let raw = match (self.opts.complete, spans) {
                 (false, _) => None,
                 (true, Some(_)) => Some(view.to_json()?),
                 (true, None) => Some(crate::Json::Owned(view.resolve()?.into_owned())),
             };
-            let flow = self.append_message(
-                role.as_deref(),
-                origin.as_deref().unwrap_or("user"),
-                ts,
-                sink,
-                blocks,
-                raw,
-            );
+            let flow = self.append_message(role, origin.unwrap_or("user"), ts, sink, blocks, raw);
             return Ok(if flow == Flow::Stop { self.stop() } else { flow });
         }
         if ty != "context.append_loop_event" {
@@ -1027,7 +1029,14 @@ impl<'a> Ctx<'a> {
             "content.part" | "tool.call" => {
                 let uuid = fields.string("stepUuid")?.unwrap_or_default();
                 let metadata = Value::Object(fields.project(&["stepUuid", "turnId", "step"])?);
-                if self.ensure_step(&uuid, &metadata, ts, sink) == Flow::Stop {
+                let may_flush = self.step.as_ref().is_some_and(|step| step.uuid != uuid);
+                let flow = self.ensure_step(&uuid, &metadata, ts, sink);
+                if may_flush {
+                    if let Some(input) = input {
+                        input.check_backing()?;
+                    }
+                }
+                if flow == Flow::Stop {
                     return Ok(self.stop());
                 }
                 if event_type == "content.part" {
@@ -2026,6 +2035,71 @@ mod tests {
     }
 
     #[test]
+    fn native_state_avoids_wire_scan_but_missing_times_keep_exact_extrema() -> Result<()> {
+        let world = crate::test_world("kimi-code-native-metadata");
+        let dir = world.base.join("session-summary");
+        let wire = main_wire(&dir);
+        fs::create_dir_all(wire.parent().unwrap())?;
+        fs::write(&wire, "{\"type\":\"context.append_message\",\"time\":9,\"message\":{\"role\":\"user\",\"content\":\"wire prompt\"}}\n{\"time\":2}\n{\"time\":15}\n")?;
+        fs::write(
+            dir.join("state.json"),
+            r#"{"title":" native raw title ","createdAt":100,"updatedAt":101}"#,
+        )?;
+        jsonl::OPENED.with(|paths| paths.borrow_mut().clear());
+        let summary = scan(&dir, "summary", None).unwrap();
+        assert_eq!(summary.title.as_deref(), Some(" native raw title "));
+        assert_eq!(summary.created_at, super::super::ts_from_value(&serde_json::json!(100)));
+        assert_eq!(summary.updated_at, super::super::ts_from_value(&serde_json::json!(101)));
+        assert!(!jsonl::OPENED.with(|paths| paths.borrow().contains(&wire)));
+        fs::write(dir.join("state.json"), r#"{"title":"native title","createdAt":100}"#)?;
+        let partial = scan(&dir, "summary", None).unwrap();
+        assert_eq!(partial.created_at, summary.created_at);
+        assert_eq!(partial.updated_at, super::super::ts_from_value(&serde_json::json!(15)));
+        fs::write(dir.join("state.json"), r#"{"createdAt":100,"updatedAt":101}"#)?;
+        assert_eq!(
+            scan(&dir, "summary", None).unwrap().title.as_deref(),
+            Some("wire prompt")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn swapped_step_and_eof_callbacks_recheck_source_before_reuse() -> Result<()> {
+        let world = crate::test_world("kimi-code-step-callback");
+        let dir = world.base.join("session-step");
+        let wire = main_wire(&dir);
+        fs::create_dir_all(wire.parent().unwrap())?;
+        let begin = "{\"type\":\"context.append_loop_event\",\"event\":{\"type\":\"step.begin\",\"uuid\":\"one\"}}\n";
+        let part = "{\"type\":\"context.append_loop_event\",\"event\":{\"type\":\"content.part\",\"stepUuid\":\"one\",\"part\":{\"type\":\"text\",\"text\":\"first reply\"}}}\n";
+        let swap = "{\"type\":\"context.append_loop_event\",\"event\":{\"type\":\"content.part\",\"stepUuid\":\"two\",\"part\":{\"type\":\"text\",\"text\":\"next reply\"}}}\n";
+        let reference = SessionRef::new("step", Harness::KimiCode, &dir);
+        let adapter = KimiCode::with_home(&world.base);
+        for tail in [String::new(), format!("{swap}{}", "{}\n".repeat(2000))] {
+            let raw = format!("{begin}{part}{tail}");
+            fs::write(&wire, &raw)?;
+            adapter.stream(&reference, &ParseOptions::full(), &mut |_: Message| Flow::Continue)?;
+            let mut calls = 0;
+            let result = adapter.stream(&reference, &ParseOptions::full(), &mut |_: Message| {
+                calls += 1;
+                fs::OpenOptions::new()
+                    .write(true)
+                    .open(&wire)
+                    .unwrap()
+                    .set_len(0)
+                    .unwrap();
+                Flow::Continue
+            });
+            assert!(
+                result.is_err(),
+                "{} callback",
+                if tail.is_empty() { "EOF" } else { "swapped step" }
+            );
+            assert_eq!(calls, 1);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn checked_discovery_kimi_code_matches_owned_steps_titles_and_state() -> Result<()> {
         let world = crate::test_world("kimi-code-discovery-selected");
         let dir = world.base.join("session-id");
@@ -2049,7 +2123,7 @@ mod tests {
         bytes.extend_from_slice(" {\"type\":\"context.append_message\",\"message\":{\"role\":\"user\",\"origin\":{\"kind\":null},\"content\":\"partial\"}} ".as_bytes());
         bytes.extend_from_slice(b"\n{\"type\":\"ignored\",\"type\":\"context.append_loop_event\",\"event\":{\"type\":\"step.begin\",\"type\":\"step.end\"}}\n");
         fs::write(&wire, bytes)?;
-        let facts = |w: WireScan| (w.message_count, w.title, w.first_ts, w.last_ts);
+        let facts = |w: WireScan| (w.title, w.first_ts, w.last_ts);
         assert_eq!(facts(scan_wire(&wire)?), facts(reducer(&wire)));
         for title in [
             Value::Null,
@@ -2061,7 +2135,7 @@ mod tests {
             fs::write(dir.join("state.json"), serde_json::to_vec(&state)?)?;
             let actual = scan(&dir, "id", None).unwrap();
             let old = reducer(&wire);
-            assert_eq!(actual.message_count, old.message_count);
+            assert_eq!(actual.message_count, 0);
             assert_eq!(
                 actual.title,
                 state
@@ -2119,33 +2193,37 @@ mod tests {
     /// The simple discovery reducer over owned values: turn count, title fallback, time bounds.
     fn reducer(wire: &Path) -> WireScan {
         let mut w = WireScan::default();
-        super::super::for_each_json_line_str(&fs::read_to_string(wire).unwrap(), |v| {
-            if let Some(ts) = v.get("time").and_then(super::super::ts_from_value) {
-                w.first_ts = Some(w.first_ts.map_or(ts, |f| f.min(ts)));
-                w.last_ts = Some(w.last_ts.map_or(ts, |l| l.max(ts)));
-            }
-            match v.get("type").and_then(Value::as_str) {
-                Some("context.append_message") => {
-                    if v.pointer("/message/role").and_then(Value::as_str) == Some("user") {
-                        w.message_count += 1;
-                        let kind = v.pointer("/message/origin/kind").and_then(Value::as_str);
-                        if w.title.is_none() && kind.unwrap_or("user") == "user" {
-                            let t = super::super::wire::text_parts(v.pointer("/message/content"));
-                            if !t.trim().is_empty() {
-                                w.title = Some(crate::ir::truncate(&t, 80));
+        let bytes = fs::read(wire).unwrap();
+        for line in bytes.split(|byte| *byte == b'\n') {
+            let Ok(line) = std::str::from_utf8(line) else { continue };
+            super::super::for_each_json_line_str(line, |v| {
+                if let Some(ts) = v.get("time").and_then(super::super::ts_from_value) {
+                    w.first_ts = Some(w.first_ts.map_or(ts, |f| f.min(ts)));
+                    w.last_ts = Some(w.last_ts.map_or(ts, |l| l.max(ts)));
+                }
+                match v.get("type").and_then(Value::as_str) {
+                    Some("context.append_message") => {
+                        if v.pointer("/message/role").and_then(Value::as_str) == Some("user") {
+                            w.message_count += 1;
+                            let kind = v.pointer("/message/origin/kind").and_then(Value::as_str);
+                            if w.title.is_none() && kind.unwrap_or("user") == "user" {
+                                let t = super::super::wire::text_parts(v.pointer("/message/content"));
+                                if !t.trim().is_empty() {
+                                    w.title = Some(crate::ir::truncate(&t, 80));
+                                }
                             }
                         }
                     }
+                    Some("context.append_loop_event")
+                        if v.pointer("/event/type").and_then(Value::as_str) == Some("step.end") =>
+                    {
+                        w.message_count += 1;
+                    }
+                    _ => {}
                 }
-                Some("context.append_loop_event")
-                    if v.pointer("/event/type").and_then(Value::as_str) == Some("step.end") =>
-                {
-                    w.message_count += 1;
-                }
-                _ => {}
-            }
-            Flow::Continue
-        });
+                Flow::Continue
+            });
+        }
         w
     }
 
@@ -2754,7 +2832,7 @@ mod tests {
         assert_eq!(first.len(), 12);
         for (index, reference) in first.iter().enumerate() {
             assert_eq!(reference.id, format!("parent/agent-{index}"));
-            assert_eq!(reference.message_count, 128);
+            assert_eq!(reference.message_count, 0);
             assert_eq!(reference.cwd, main.cwd);
             let wire = reference.path.join("wire.jsonl");
             let hit =
@@ -2771,7 +2849,7 @@ mod tests {
         let wire = unchanged[2].path.join("wire.jsonl");
         fs::write(&wire, "{\"type\":\"context.append_message\",\"time\":1800000000000,\"message\":{\"role\":\"user\",\"content\":\"new prompt\"}}\n")?;
         let refreshed = subagent_refs(&main);
-        assert_eq!(refreshed[2].message_count, 1);
+        assert_eq!(refreshed[2].message_count, 0);
         assert_eq!(refreshed[2].title.as_deref(), Some("new prompt"));
         assert_eq!(refreshed[2].created_at.unwrap().timestamp_millis(), 1800000000000);
         fs::remove_file(wire)?;
@@ -2790,7 +2868,7 @@ mod tests {
         assert_eq!(sub.id, format!("{SID}/agent-0"));
         assert_eq!(sub.path, main.path.join("agents").join("agent-0"));
         assert_eq!(sub.title.as_deref(), Some("Extract IPA verifier math"));
-        assert_eq!(sub.message_count, 2, "the prompt + one step");
+        assert_eq!(sub.message_count, 0, "discovery defers the exact prompt + step count");
         assert_eq!(sub.created_at.map(|t| t.timestamp_millis()), Some(1787509646010));
 
         let s = a.parse(sub).unwrap();
@@ -2832,7 +2910,7 @@ mod tests {
         assert_eq!(r.harness, Harness::KimiCode);
         assert_eq!(r.cwd.as_deref(), Some(Path::new("/Users/u/proj")));
         assert_eq!(r.title.as_deref(), Some("fix the flaky test"));
-        assert_eq!(r.message_count, 4, "2 user records + 2 LLM steps");
+        assert_eq!(r.message_count, 0, "discovery defers the exact user + step count");
         assert_eq!(r.created_at.map(|t| t.timestamp_millis()), Some(1787509645914));
         assert_eq!(r.updated_at.map(|t| t.timestamp_millis()), Some(1787509891612));
         fs::remove_dir_all(&root).ok();
