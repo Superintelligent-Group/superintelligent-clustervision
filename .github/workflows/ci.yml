@@ -25,6 +25,8 @@ jobs:
       - name: Isolate cv state
         run: echo "CLUSTERVISION_HOME=$RUNNER_TEMP/cv-ci-home" >> "$GITHUB_ENV"
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
         with:
           toolchain: 1.99.0
@@ -59,6 +61,12 @@ jobs:
 
       - name: Build (default features)
         run: cargo build --workspace --all-targets
+
+      - name: Compatibility comparator controls
+        run: python3 -I tools/test-compatibility.py
+
+      - name: Compatibility against last stable release
+        run: tools/compatibility-gate.sh
 
       # One process per test (a test that hangs or aborts takes only itself down). nextest does
       # not run doctests; the second line keeps them.

@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 # Root-operated landing: dispatch exact candidate CI, poll every 60s, then CAS main.
-# Usage: tools/land-ci.sh <origin-branch> [workflow-file (default ci.yml)]
+# Usage: tools/land-ci.sh <origin-branch>
 # Requires gh authentication, Python 3, and a clean candidate already on origin.
 set -euo pipefail
 fail() { echo "land-ci: $*" >&2; exit 1; }
-[[ $# -ge 1 && $# -le 2 ]] || fail 'usage: land-ci.sh <origin-branch> [workflow-file]'
-branch=$1 workflow=${2:-ci.yml}
+[[ $# == 1 ]] || fail 'usage: land-ci.sh <origin-branch> '
+branch=$1 workflow=ci.yml
 git check-ref-format "refs/heads/$branch" >/dev/null || fail 'invalid branch'
 [[ $branch != main ]] || fail 'candidate must be a separate branch'
-[[ $workflow =~ ^[a-zA-Z0-9_-]+\.yml$ ]] || fail 'invalid workflow filename'
 remote_sha() {
     local result
     result=$(git ls-remote --exit-code origin "refs/heads/$1")

@@ -29,6 +29,8 @@ if a[:1]==['ls-remote']:
  branch=a[-1]; sha=os.environ['BASE'] if branch.endswith('/main') else os.environ['SHA']
  if (p/'dispatched').exists() and os.environ.get('RACE') == branch: sha='c'*40
  print(sha+'\\t'+branch)
+elif a[:1]==['merge-base']: sys.exit(1 if os.environ.get('NON_ANCESTOR') else 0)
+elif a[:1]==['push']: sys.exit(1 if os.environ.get('LEASE_RACE') else 0)
 elif 'rev-parse' in a:
  print(str(p/'cv-remote/wt-test') if '--show-toplevel' in a else os.environ['SHA'])
 elif 'status' in a: print(' M preserved' if os.environ.get('DIRTY') else '',end='')
@@ -39,7 +41,7 @@ elif a[:2]==['worktree','add']: pathlib.Path(a[-2]).mkdir(parents=True)
 import json, os, pathlib, sys
 p=pathlib.Path(os.environ['MOCK_ROOT']); a=sys.argv[1:]
 if a[:2]==['workflow','run']: (p/'dispatched').touch()
-elif a[:2]==['run','view']: print(os.environ['SHA']+' completed success workflow_dispatch')
+elif a[:2]==['run','view']: print(os.environ['SHA']+' completed '+os.environ.get('FINAL_STATUS','success')+' workflow_dispatch')
 else:
  rows=[dict(databaseId=1,headSha=os.environ['SHA'],status='completed',conclusion='success',url='mock')]
  if (p/'dispatched').exists() and not os.environ.get('STALE'):
@@ -92,6 +94,26 @@ os.execv('/bin/bash',['/bin/bash']+sys.argv[1:])
                 self.assertNotEqual(result.returncode, 0, result.stdout)
                 self.assert_no_push()
 
+    def test_non_ancestor_and_direct_status_mismatch_never_push(self):
+        for env in ({'NON_ANCESTOR': '1'}, {'FINAL_STATUS': 'failure'}):
+            with self.subTest(env=env):
+                (self.root/'dispatched').unlink(missing_ok=True)
+                result = self.run_script('land-ci.sh', 'candidate', **env)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assert_no_push()
+
+    def test_lease_race_propagates_push_rejection(self):
+        result = self.run_script('land-ci.sh', 'candidate', LEASE_RACE='1')
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertNotIn('Landed', result.stdout)
+        self.assertIn('--force-with-lease=refs/heads/main:' + BASE,
+                      (self.root/'git-calls').read_text())
+
+    def test_supplemental_workflow_cannot_authorize_landing(self):
+        result = self.run_script('land-ci.sh', 'candidate', 'macos.yml')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.root/'dispatched').exists())
+
     def test_worker_propagates_failures_and_keeps_warm_target(self):
         target = self.root/'cv-remote/target-test'
         target.mkdir(parents=True)
@@ -124,6 +146,59 @@ os.execv('/bin/bash',['/bin/bash']+sys.argv[1:])
         result = self.run_script('remote-gate.sh', 'main', 'bad;touch-no')
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.root/'git-calls').exists())
+
+
+class CompatibilityCache(unittest.TestCase):
+    def test_reuse_is_owned_and_changed_probe_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / 'candidate'
+            repo.mkdir()
+            def git(*args):
+                return subprocess.check_output(['git', '-C', str(repo), *args], text=True).strip()
+            git('init', '-q')
+            git('config', 'user.name', 'Fixture')
+            git('config', 'user.email', 'fixture@example.invalid')
+            git('config', 'commit.gpgsign', 'false')
+            (repo/'Cargo.toml').write_text('version = "0.18.0"\n')
+            examples = repo/'crates/cv-core/examples'
+            examples.mkdir(parents=True)
+            (examples/'existing.rs').write_text('release example')
+            git('add', 'crates')
+            git('add', 'Cargo.toml')
+            git('commit', '-qm', 'release')
+            git('tag', 'v0.17.0')
+            probe = repo/'crates/cv-core/examples/compatibility_probe.rs'
+            probe.parent.mkdir(parents=True, exist_ok=True)
+            probe.write_text('fixture probe')
+            git('add', str(probe))
+            git('commit', '-qm', 'candidate probe')
+            commands = root/'bin'
+            commands.mkdir()
+            for name, body in {
+                'cargo': 'import os; assert os.environ.get("RUSTC_WRAPPER", "") == ""',
+                'python3': 'import os,sys\nif sys.argv[1:2] != ["-I"]: os.execv(sys.executable,[sys.executable]+sys.argv[1:])',
+            }.items():
+                path = commands/name
+                path.write_text('#!' + os.sys.executable + '\n' + body)
+                path.chmod(0o755)
+            env = dict(os.environ, PATH=str(commands)+':'+os.environ['PATH'], RUSTC_WRAPPER='',
+                       CV_COMPAT_CACHE_ROOT=str(root/'cache'), CARGO_TARGET_DIR=str(root/'target'))
+            def run():
+                return subprocess.run(['/bin/bash', str(TOOLS/'compatibility-gate.sh')], cwd=repo,
+                                      env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            for _ in range(2):
+                result = run()
+                self.assertEqual(result.returncode, 0, result.stdout)
+            caches = list((root/'cache').iterdir())
+            self.assertEqual(len(caches), 1)
+            baseline = caches[0]/'baseline'
+            self.assertTrue((caches[0]/'owner').is_file())
+            (baseline/'crates/cv-core/examples/compatibility_probe.rs').write_text('other session changed this')
+            result = run()
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn('baseline probe changed', result.stdout)
+            self.assertFalse((caches[0]/'lock').exists())
 
 
 if __name__ == '__main__':

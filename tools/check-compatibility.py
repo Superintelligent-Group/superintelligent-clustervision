@@ -46,6 +46,17 @@ def subset(old, new, path="contract"):
         require(old == new, f"{path}: {old!r} -> {new!r}")
 
 
+def default_values(old, new, path="message_defaults"):
+    """Allow new fields, but preserve actual values (including empty arrays and nulls)."""
+    if isinstance(old, dict):
+        require(isinstance(new, dict), f"{path}: object changed")
+        for key, value in old.items():
+            require(key in new, f"{path}.{key}: removed")
+            default_values(value, new[key], f"{path}.{key}")
+    else:
+        require(type(old) is type(new) and old == new, f"{path}: {old!r} -> {new!r}")
+
+
 def named(rows):
     require(len({r["name"] for r in rows}) == len(rows), "duplicate contract name")
     return {r["name"]: r for r in rows}
@@ -205,7 +216,7 @@ def collect(binary, probe, source, root, baseline=False):
     failure_env = dict(env, CLUSTERVISION_HOME=str(denied / "catalog"))
     invoke(binary, failure_env, ["task", "open", "compat operational failure"], code=1)
     return {"commands": commands, "schema": data_contract(schema), "rows": shape(rows), "session": shape(session),
-            "messages": shape(messages), "tools": tools, "routes": http_routes(binary, env, routes(source)),
+            "messages": shape(messages), "message_defaults": messages[1], "tools": tools, "routes": http_routes(binary, env, routes(source)),
             "exits": [0, 1, 2]}
 
 
@@ -234,6 +245,7 @@ def compare(old, new, baseline_tag, candidate_version):
             subset(value, after[name], f"{key}.{name}")
     for key in ("schema", "rows", "session", "messages", "exits"):
         subset(old[key], new[key], key)
+    default_values(old["message_defaults"], new["message_defaults"])
     for route, response in old["routes"].items():
         require(route in new["routes"], f"HTTP route removed: {route}")
         require(response["status"] == new["routes"][route]["status"], f"HTTP status changed: {route}")

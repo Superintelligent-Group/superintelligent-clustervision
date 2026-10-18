@@ -17,7 +17,7 @@ class Compatibility(unittest.TestCase):
             "tools": [{"name": "show", "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}}],
             "schema": {"message": {"fields": ["role", "content"]}}, "rows": [{"id": "str"}],
             "session": {"messages": [{"role": "=user", "content": []}]},
-            "messages": [{"role": "=user", "content": []}], "exits": [0, 1, 2],
+            "messages": [{"role": "=user", "content": []}], "message_defaults": {"role": "user", "content": [], "usage": None}, "exits": [0, 1, 2],
             "routes": {"GET /api/sessions": {"status": 200, "pointer": ""}}}
 
     def check(self, new, old=None, tag="v0.17.0", version="0.18.0"):
@@ -29,6 +29,7 @@ class Compatibility(unittest.TestCase):
         new["commands"][0]["args"].append({"name": "optional", "required": False})
         new["tools"][0]["inputSchema"]["properties"]["optional"] = {"type": "string"}
         new["messages"][0]["new_field"] = "str"
+        new["message_defaults"]["new_field"] = False
         new["schema"]["message"]["fields"].append("new_field")
         self.check(new)
 
@@ -43,6 +44,9 @@ class Compatibility(unittest.TestCase):
             lambda n: n["tools"][0]["inputSchema"].update(required=["id", "new"]),
             lambda n: n["tools"].clear(), lambda n: n["messages"][0].pop("role"),
             lambda n: n["messages"][0].update(role="=assistant"),
+            lambda n: n["message_defaults"].update(usage={}),
+            lambda n: n["message_defaults"].update(content=[{"type": "text", "text": "new default"}]),
+            lambda n: n["message_defaults"].update(role="assistant"),
             lambda n: n["rows"][0].pop("id"), lambda n: n["routes"].clear(),
             lambda n: n["routes"]["GET /api/sessions"].update(status=404),
             lambda n: n["exits"].remove(2)]
