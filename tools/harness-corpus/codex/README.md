@@ -41,6 +41,7 @@ The record shapes, the persistence policy, the file layout, and the item orderin
 | image input | `codex exec --image dot.png` (persisted as `input_image`; the text model sees a placeholder) |
 | compaction | resume with `-c model_auto_compact_token_limit=200`, which forces a local compaction |
 | MCP | `mcp_server.py`, a stdio server with one `add` tool, in `config.toml` |
+| hooks | `--only hooks` with `CV_HOOK_BINARY=/absolute/path/cv`: live start/compact/decision/edit/child lifecycle payloads and cv responses in `hooks.jsonl` |
 | sub-agents | `--enable multi_agent`, which spawns one child thread (its own rollout) |
 
 `codex exec` has no `/compact`, so compaction is forced through the token limit instead.
@@ -57,3 +58,9 @@ after VACUUM. Config, `installation_id`, shell snapshots and locks are not copie
 The proxy refuses calls past `MAX_CALLS` (default 40) and logs every one to `$WORK/calls.jsonl`.
 That log holds only item and tool types, never content or headers. A full run takes 20 to 30
 calls, and the count goes into `MANIFEST.toml`.
+
+The hooks scenario grants hook trust only in the isolated fixture home. It first records a real
+editor, indexes that store, and poses a decision to the fixture identity. The guarded edit then
+blocks with `permissionDecision: "deny"`: Codex rejects `ask` hook output and otherwise
+continues with the edit. The scenario fails unless all
+five hook effects occurred and the guarded file stayed unchanged. No real harness home is used.

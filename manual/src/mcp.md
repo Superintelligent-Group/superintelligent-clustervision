@@ -238,22 +238,23 @@ One command sets it up, and an agent can run it for itself:
 ```sh
 cv hooks install claude                 # ~/.claude/settings.json (or $CLAUDE_CONFIG_DIR)
 cv hooks install claude --scope project # ./.claude/settings.json
+cv hooks install codex                  # ~/.codex/hooks.json (or $CODEX_HOME)
+cv hooks install codex --scope project  # ./.codex/hooks.json
 cv hooks show claude                    # what install would change; --json for the before/after
 cv hooks remove claude                  # exactly cv's entries and the skill, nothing else
 ```
 
 `install` is idempotent: a second run writes nothing. It merges six entries (five hooks; `lane`
 serves both sub-agent events) into the settings file's `hooks` key, beside whatever is already
-there, and copies the [`cv` skill](#the-skill) to `skills/cv/SKILL.md` under the same `.claude`
-dir. Each entry's command is this `cv` binary's absolute path plus `hook <name>`. That shape is how
+there, and copies the [`cv` skill](#the-skill) to `skills/cv/SKILL.md` under the same harness directory. Each entry's command is this `cv` binary's absolute path plus `hook <name>`. That shape is how
 `remove` and a reinstall recognize cv's entries, so a reinstall from a moved binary replaces
 them instead of adding more. A settings file that is not valid JSON is left untouched and the
 command errors. The hooks take effect in new sessions. `cv doctor` prints whether they are
 installed and which compaction policy is in force.
 
 Claude Code (checked against 2.1.296 and its [hooks reference](https://code.claude.com/docs/en/hooks))
-is the one harness with a verified contract. `cv hooks install codex` (or any other name) errors
-rather than writing a guess.
+and Codex 0.163.0 have verified contracts. Other harness names error. Codex commands carry
+`CV_HOOK_HARNESS=codex` so the shared bodies read Codex transcripts and native thread identities.
 
 ### The five hooks
 
@@ -282,6 +283,14 @@ Details that matter:
 - **start** reads the catalog as it stands, without a freshness probe. A session newer than the
   last `cv ls` / `cv archive sync` is missing until one runs. The commit sha comes from the last
   `[branch sha]` line in each transcript's final 512 KiB.
+- **Codex** uses the same events; its edit matcher is the canonical `apply_patch` tool name. The edit guard
+  checks every added, updated, removed or moved path in its patch. Codex rejects `ask`, so a
+  live conflict returns `deny` and blocks that patch. Coordinate with the other session; to
+  override the guard, remove its edit handler from `hooks.json` (`cv hooks remove codex`
+  removes all five hooks). Compaction recovery points at
+  `cv show --pre-compaction`; `cv rewind` currently supports Claude sessions. Codex lane UUIDs
+  and parent identities come from its own rollout metadata. Its forest includes children
+  registered by installed hooks; older, unregistered child sessions are absent.
 - **lane** writes the ledger [`cv lanes`](swarm.md) reads. A `stop` row at or after a lane's last
   turn makes it read `stopped` with `status_source: hook_ledger`, even before the transcript
   records the `SubagentStop` attachment.

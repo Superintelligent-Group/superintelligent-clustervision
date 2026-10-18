@@ -238,21 +238,38 @@ fn codex_titles_are_the_first_prompt_in_listings_and_hits() {
             assert!(row["title"].is_string(), "{row}");
             assert_eq!(row["display_title"], row["title"], "{}: {row}", version.display());
         }
+        let titles: std::collections::HashMap<_, _> = rows
+            .iter()
+            .map(|row| {
+                (
+                    row["id"].as_str().unwrap().to_string(),
+                    cv_core::label_from(row["title"].as_str(), None),
+                )
+            })
+            .collect();
+        let needle = rows
+            .iter()
+            .filter_map(|row| row["title"].as_str())
+            .flat_map(str::split_whitespace)
+            .find(|word| word.len() >= 5 && word.chars().all(char::is_alphanumeric))
+            .expect("fixture prompt term");
         w.cv_ok(&["index"]);
         for scan in [false, true] {
             let mut args = vec!["search", "--json", "--limit", "100"];
             if scan {
                 args.push("--scan");
             }
-            let (out, _) = w.cv_ok(&[args.as_slice(), &["prime"]].concat());
+            let (out, _) = w.cv_ok(&[args.as_slice(), &[needle]].concat());
             let hits: Vec<serde_json::Value> = serde_json::from_str(out.trim()).expect("pure JSON");
-            let titles: Vec<_> = hits.iter().map(|h| h["title"].as_str().unwrap()).collect();
-            assert_eq!(
-                titles,
-                ["List three prime numbers."],
-                "{} scan={scan}",
-                version.display()
-            );
+            assert!(!hits.is_empty(), "{} scan={scan} term={needle}", version.display());
+            for hit in hits {
+                assert_eq!(
+                    hit["title"].as_str(),
+                    titles.get(hit["id"].as_str().unwrap()).map(String::as_str),
+                    "{} scan={scan}",
+                    version.display()
+                );
+            }
         }
     }
 }

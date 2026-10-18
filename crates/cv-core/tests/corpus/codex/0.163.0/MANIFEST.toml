@@ -1,0 +1,11 @@
+# Written by tools/harness-corpus. Never regenerate a committed version in place.
+harness = "codex"
+version = "0.163.0"
+generated = "2026-10-18"
+model = "glm-5.3-flash via Z.ai coding endpoint, through key_proxy.py --translate responses"
+codex_model_profile = "gpt-6-luna (the slug Codex recorded; it picks Codex's tool set, not the model)"
+model_calls = 16
+scenarios = ["hooks"]
+skipped = []
+generator_commit = "61d5a477"
+generator_dirty = true
