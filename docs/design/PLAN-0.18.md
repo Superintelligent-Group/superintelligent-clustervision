@@ -25,13 +25,13 @@ here, not the goal.
 
 ## (b) Candidate items
 
-| # | item | why a user/agent cares | evidence | size (rule §f) | risk | depends on |
+| # | item | why a user/agent cares | evidence | size | risk | depends on |
 |---|---|---|---|---|---|---|
 | C1 | first-run `ls` lists without parsing; `message_count: 0` = not counted; exact counts from `cv index`/first full read | minutes → seconds in every fresh home, sandbox, MCP call | PERF.md 0.17 facts (2.36 T); catalog.rs defines "not counted"; DATAPATHS.md: exact first-run counts cannot be cheap | discovery demand per adapter ~+200/−400; shares step 5 | product change (E2) | J |
 | C2 | `has:` 0.24-0.3 s: a stat per session + tool-results dirs ≈ 2.8 G insn | felt on every `ls -q has:` in MCP | PERF.md has:plan rows | ~100 (trust `watched` identities refreshed by the sweep) | low | measure d4 |
 | C3 | `cv index` unchanged live 1.0-1.6 s (≤1 s), append 0.70 s (≤0.53 s): fixed cost | hook-driven indexing on every stop | PERF.md table | unknown until d4 | medium | measure d4 |
 | C4 | fleet-scale check that pass 2 after `cv index` reads nothing (the 4,893 reread) | the 0.17 fix (164d3b95) was proven at 76 rollouts only | PERF.md; codex-baseline notes | measurement, 0 lines | — | ember runs `cv index` once |
-| H1 | `cv hooks install codex\|gemini\|qwen`: event-name table + settings path + payload mapping; the five hooks ported | the five loops exist only for Claude Code (hooks.rs `require_claude`) | `~/.codex/hooks.json`; Codex events PreToolUse/Stop/SessionStart/UserPromptSubmit/PostToolUse/SubagentStop/PreCompact/SessionEnd; Gemini BeforeTool/AfterTool/SessionStart/SessionEnd/BeforeAgent/AfterAgent/BeforeModel/AfterModel/PreCompress/Notification | +250..400 in cmd/hooks.rs + corpus `hooks` scenarios | medium: each contract verified live on persvati through the corpus key proxy | d6 |
+| H1 | `cv hooks install codex`: event-name table + settings path + payload mapping; the five hooks ported; Gemini/Qwen out (untestable here) | the five loops exist only for Claude Code (hooks.rs `require_claude`) | `~/.codex/hooks.json`; Codex events PreToolUse/Stop/SessionStart/UserPromptSubmit/PostToolUse/SubagentStop/PreCompact/SessionEnd; Gemini BeforeTool/AfterTool/SessionStart/SessionEnd/BeforeAgent/AfterAgent/BeforeModel/AfterModel/PreCompress/Notification | +250..400 in cmd/hooks.rs + corpus `hooks` scenarios | medium: each contract verified live on persvati through the corpus key proxy | d6 |
 | H2 | drift sensor: `cv doctor` row per harness "newest writer version in your fleet vs newest corpus version cv is verified against"; weekly persvati cron running tools/harness-drift.sh --pull | silent format drift (three harnesses moved stores without error, 2026-09-19) | claude record `version`; codex `cli_version`; tests/corpus/*/MANIFEST.toml | +100..150 (catalog column `writer_version`, one bump) | low | I1 |
 | A1 | stability promise: session row keys, message JSON, exit codes 0/1/2, routes, MCP names; deprecation = one minor of 410/exit-2 pointers; CI gate = schema diff vs the last tag | agents script against `--json`; no promise exists today | INTERFACE-V2 §3-4; `cv schema --commands --json` | +1 doc page, +60 tool | low | — |
 | A2 | macOS CI job (macos-14): default-features nextest subset + mmap heap gates + sqlite lifecycle check; nightly and on `v*-rc*` tags | macOS code (APFS, ctime in FileId, F_FULLFSYNC publish, mmap windows) runs only at release; nothing compiles on the laptop | ci.yml all ubuntu | +60 yml | cost: macOS minutes 10× | — |
@@ -104,41 +104,27 @@ continuation file at 200K; delete-first inside a lane.
 | d7 | `block_to` vs `anthropic/write::block`: 29 LCS-equal lines (14 non-trivial); qwen vs gemini parts: 25 / 14 | **E1 not a lane; J2 ≈ −200** |
 | d8 | prune owned halves 603 raw, 474-561 cleanly deletable; view halves (918) stay; `retrieve` 163 is a move | **R1 ≈ −500..−900**, not −1,500..−2,000 |
 
-0.18's parsimony is therefore ≈ −1.5..−2K (C1/J1, X1, R1); its value is power and trust.
+The felt cost is the first-run path; the rest is already fast. 0.18's value is power and trust.
 
-## (e) Decisions only ember can make (recommendation in bold)
+## (e) ember's decisions (2026-10-18)
 
-1. Theme order. **Maturity + power first half (Lanes 0, H, A), parsimony second half (R, then the
-   integration branch); Z1 only if d1 ≥ 400.**
-2. First `ls` shows uncounted rows and leaves exact counts to `cv index`. **Yes; restate the 300 ms
-   budget as "first `ls` ≤ 2 s per 10K sessions without counts".**
-3. Restate the known-false budgets (full recount from bytes/(cores × 400 MB/s); the counting pass
-   at the measured ~700 MB/s floor, labeled). **Yes: a budget nobody can meet is not an instrument.**
-4. Hooks for Codex, Gemini, Qwen in 0.18; OpenClaw/Hermes in-process plugin hooks deferred.
-   **Yes; each verified live on persvati via the corpus key proxy.**
-5. Drift sensor as a `cv doctor` row plus a weekly persvati cron. **Yes; one catalog column, riding
-   the single 0.18 bump (I1).**
-6. macOS CI nightly + on `-rc` tags vs per push. **Nightly + rc tags (cost).**
-7. Stability promise scope. **Promise only what a test checks: session row keys, message JSON, exit
-   codes, routes, MCP names; one minor of pointers before removal; schema-diff gate.**
-8. Q1 emitters-as-codec. **No lane; fold the two literal twins into J2.**
-9. Q10 ExactStrings. **Replace after d5 unless real runs exceed 1 MiB.**
-10. Q8 snapshots reaper. **Keep; the immutable-copy prototype was never measured.**
-11. Q4 Span. **Answered by d1: no-go for 0.18.**
-12. Lane discipline: 0.17 lanes ran past 500K tokens and died before deleting. **Cap 250K,
-    continuation at 200K, ≤ 3 overlapping lanes at once, delete-first ordering.**
+1. Theme order as in §a: maturity and power first, parsimony where deletion is literal.
+2. No numerological targets. The §f weights, the per-10K-session budgets and the ratchet
+   percentages are gone: we pursue excellence and speed, measure what we ship, and say what we
+   measured. The size gate stays only as a drift alarm (a module growing is a question, not a
+   failure); the heap gates stay because they catch regressions.
+3. PERF.md states no targets. It keeps measured facts with their dates and conditions.
+4. Hooks only where they can be tested for real: Codex (ember uses it; the corpus key proxy runs it
+   on persvati). Gemini and Qwen hooks are out of 0.18.
+5. The "drift sensor" is one `cv doctor` row: newest writer version seen in the stores vs the
+   newest version the corpus has verified, so a harness changing its format is noticed on ember's
+   machine instead of silently misread. No cron, no network.
+6. Everything else: do our best. Span (Q4) stays a no-go on d1's count; emitters-as-codec is not
+   a lane; ExactStrings goes if the replacement is simpler; the snapshot reaper stays.
 
-## (f) What 0.17's estimates got wrong, and the 0.18 estimation rule
+## (f) Estimating
 
-- Moves were counted as savings (`Probe::dependency_entries` → `Adapter::dependencies`: −190
-  estimated, ≈ 0 real).
-- "Unify N shapes into one" was costed as (N−1)×size, but the survivor absorbs every variant's
-  cfg, `Result` plumbing and quirk (identity: 10 shapes → `FileId`, −204 of 2.5K).
-- Deletions that need an output change (char-budgeted heads, Span serialization) were counted as
-  byte-identical; they are product decisions first.
-- Lanes hit context ceilings mid-port: new code landed, old paths stayed (Resolver untouched).
-- Bug fixes and hardening rode each step (+0.1K each) and were not netted.
-
-**Rule for 0.18:** estimate = lines that will be deleted whose replacement already exists or is a
-literal twin ×1.0; "unify N" ×0.3; "move" ×0; every commit message states estimate vs actual, so
-the ratio is visible by the second week and lanes can be stopped on evidence, not hope.
+0.17 estimated savings it could not get: moves counted as deletions, "unify N" counted as
+(N−1)×size, output-changing deletions treated as byte-identical, lanes dying at their context
+ceiling before deleting. 0.18 does not estimate lines. A lane says what it deleted and what it
+added after the fact, and a reader judges the change on its shape.
