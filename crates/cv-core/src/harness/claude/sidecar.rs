@@ -12,11 +12,8 @@
 //! parser lives here: [`super`] (the sub-agent forest) and [`super::super::claude_workflow`]
 //! (the Workflow objects) used to each carry their own copy of both.
 
-use crate::stream::Flow;
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::fs;
-use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
 /// The journal a `Workflow` run writes into its run dir.
@@ -51,20 +48,23 @@ pub fn workflows_dir(transcript: &Path) -> Option<PathBuf> {
 /// A run dir's `journal.jsonl` reduced to `agentId → full result Value`. The LAST `result` record
 /// per agent wins: a `result` supersedes the earlier `started`, and a re-issued agent journals more
 /// than once. Empty when the journal is absent or unreadable; a corrupt line is skipped the way
-/// every adapter skips one (`for_each_json_line`).
+/// every adapter skips one (the shared JSONL lifecycle).
 pub fn journal_results(run_dir: &Path) -> BTreeMap<String, Value> {
     let mut map = BTreeMap::new();
-    let Ok(file) = fs::File::open(run_dir.join(JOURNAL)) else {
-        return map;
-    };
-    super::super::for_each_json_line(BufReader::new(file), |v| {
-        if v.get("type").and_then(Value::as_str) == Some("result") {
-            if let (Some(id), Some(r)) = (v.get("agentId").and_then(Value::as_str), v.get("result")) {
-                map.insert(id.to_string(), r.clone());
+    let read = crate::harness::store::jsonl::for_each_record(&run_dir.join(JOURNAL), |view| {
+        let Some(fields) = crate::harness::store::document::Fields::parse(view, &["type", "agentId", "result"])? else {
+            return Ok(());
+        };
+        if fields.string("type")?.as_deref() == Some("result") {
+            if let (Some(id), Some(result)) = (fields.string("agentId")?, fields.get("result")) {
+                map.insert(id, result.resolve()?.into_owned());
             }
         }
-        Flow::Continue
+        Ok(())
     });
+    if read.is_err() {
+        map.clear();
+    }
     map
 }
 
@@ -91,6 +91,7 @@ pub fn result_summary(result: &Value) -> (Option<String>, Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::io::Write;
 
     #[test]

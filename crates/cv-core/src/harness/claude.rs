@@ -20,19 +20,19 @@ pub(crate) mod replay;
 /// The sidecar tree beside a transcript (`subagents/`, `workflows/`, `journal.jsonl`): every path
 /// spelled once, and the one journal parser.
 pub mod sidecar;
+use super::store::jsonl;
 use super::wire::anthropic;
 use crate::ir::*;
 use crate::ir::{MessageKind, Origin};
 use crate::json::{Json, JsonSource};
 use crate::lazy::Text;
 use crate::stream::{Checkpoint, CollectSink, Flow, MessageSink, ParseOptions, ADAPTER_LAYER};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use chrono::{DateTime, Utc};
 pub use emit::{emit, verify_claude_resumable};
 use serde_json::{Map, Value};
 use std::collections::HashSet;
 use std::fs;
-use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -311,8 +311,9 @@ pub fn stream_str(
     let mut session = new_session_for(id, source_path, opts);
     let mut spawns = crate::affordance::AffordanceSink::new(Harness::Claude, sink);
     // Pure-string path (parse_str, tests): no file offsets, so all content stays inline.
-    super::for_each_json_line_str(text, |v| {
-        record::ingest(&mut session, (&v).into(), None, opts, &mut spawns, &mut false).unwrap_or(Flow::Stop)
+    let _ = jsonl::slice(text.as_bytes(), |line| match line.view {
+        Some(view) => record::ingest(&mut session, view, None, opts, &mut spawns, &mut false),
+        None => Ok(Flow::Continue),
     });
     session
 }
@@ -377,20 +378,17 @@ fn read(
     sink: &mut dyn MessageSink,
     check: &mut dyn FnMut() -> Result<()>,
 ) -> Result<Session> {
-    let source = JsonSource::capture(path)?;
-    let file = fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    source.check_metadata(file.metadata()?)?;
+    let read = jsonl::Read::open(path)?;
+    let source = read.source();
     let to = to.map_or(source.len(), |to| to.min(source.len()));
     let mut spawns = crate::affordance::AffordanceSink::new(Harness::Claude, sink);
-    let mut published = false;
     crate::stream::checked(&mut spawns, |sink| {
-        crate::harness::store::jsonl::for_each_line(&source, &file, from, to, |line| {
+        read.snapshot(from, to, |line| {
             check()?;
             if let Some(view) = line.view {
                 let mut sourced = false;
                 let flow = record::ingest(&mut session, view, Some(line.at), opts, sink, &mut sourced)?;
                 if sourced {
-                    published = true;
                     source.check()?;
                 }
                 if flow == Flow::Stop {
@@ -406,10 +404,6 @@ fn read(
             Ok(Flow::Continue)
         })
     })?;
-    if published {
-        source.check_metadata(file.metadata()?)?;
-        source.check()?;
-    }
     Ok(session)
 }
 
@@ -820,19 +814,31 @@ fn read_meta(path: &std::path::Path) -> (Option<String>, Option<String>, Option<
 /// `Agent` tool_result). Reads one record at a time and retains the last substantive assistant text.
 /// `None` for an empty/unreadable transcript or one with no substantive assistant text.
 pub fn subagent_return(path: &std::path::Path) -> Option<String> {
-    let file = fs::File::open(path).ok()?;
-    let mut last: Option<String> = None;
-    super::for_each_json_line(BufReader::new(file), |v| {
-        if v.get("type").and_then(Value::as_str) == Some("assistant") {
-            if let Some(Value::Array(items)) = v.get("message").and_then(|m| m.get("content")) {
+    let read = jsonl::Read::open(path).ok()?;
+    let mut last = None;
+    read.lines(0, |line| {
+        let Some(head) = line
+            .view
+            .map(|view| record::Head::parse(view, record::Demand::Message))
+            .transpose()?
+            .flatten()
+        else {
+            return Ok(Flow::Continue);
+        };
+        if head.ty == "assistant" {
+            let items = head.top.get("message").map(|m| m.get("content")).transpose()?.flatten();
+            if let Some(items) = items.map(|v| v.array()).transpose()?.flatten() {
                 let mut buf = String::new();
-                for it in items {
-                    if it.get("type").and_then(Value::as_str) == Some("text") {
-                        if let Some(t) = it.get("text").and_then(Value::as_str) {
+                for item in items {
+                    let Some(fields) = super::store::document::Fields::parse(item?, &["type", "text"])? else {
+                        continue;
+                    };
+                    if fields.string("type")?.as_deref() == Some("text") {
+                        if let Some(text) = fields.string("text")? {
                             if !buf.is_empty() {
                                 buf.push('\n');
                             }
-                            buf.push_str(t);
+                            buf.push_str(&text);
                         }
                     }
                 }
@@ -841,8 +847,9 @@ pub fn subagent_return(path: &std::path::Path) -> Option<String> {
                 }
             }
         }
-        Flow::Continue
-    });
+        Ok(Flow::Continue)
+    })
+    .ok()?;
     last
 }
 
@@ -893,56 +900,120 @@ impl SubagentEnd {
 
 pub fn subagent_end(path: &std::path::Path) -> SubagentEnd {
     let mut end = SubagentEnd::default();
-    let Ok(file) = fs::File::open(path) else {
-        return end;
-    };
-    super::for_each_json_line(BufReader::new(file), |v| {
-        let ts = v.get("timestamp").and_then(Value::as_str).and_then(parse_ts);
-        match v.get("type").and_then(Value::as_str) {
-            Some(kind @ ("user" | "assistant")) => {
+    let Ok(read) = jsonl::Read::open(path) else { return end };
+    let result = read.lines(0, |line| {
+        let Some(head) = line
+            .view
+            .map(|view| record::Head::parse(view, record::Demand::Message))
+            .transpose()?
+            .flatten()
+        else {
+            return Ok(Flow::Continue);
+        };
+        let ts = head.top.string("timestamp")?.as_deref().and_then(parse_ts);
+        match head.ty.as_str() {
+            kind @ ("user" | "assistant") => {
                 if let Some(ts) = ts {
                     end.last_turn_at = Some(end.last_turn_at.map_or(ts, |t: DateTime<Utc>| t.max(ts)));
                 }
-                let msg = v.get("message").unwrap_or(&Value::Null);
-                if v.get("isApiErrorMessage").and_then(Value::as_bool).unwrap_or(false) {
-                    let text = msg
-                        .get("content")
-                        .and_then(Value::as_array)
-                        .map(|blocks| {
-                            blocks
-                                .iter()
-                                .filter_map(|b| b.get("text").and_then(Value::as_str))
-                                .collect::<Vec<_>>()
-                                .join(" ")
-                        })
-                        .or_else(|| msg.get("content").and_then(Value::as_str).map(str::to_string))
-                        .unwrap_or_default();
+                let message = head
+                    .top
+                    .get("message")
+                    .map(|m| super::store::document::Fields::parse(m, &["content", "model"]))
+                    .transpose()?
+                    .flatten();
+                if head
+                    .top
+                    .get("isApiErrorMessage")
+                    .map(|v| v.as_bool())
+                    .transpose()?
+                    .flatten()
+                    == Some(true)
+                {
+                    let mut text = String::new();
+                    if let Some(content) = message.as_ref().and_then(|m| m.get("content")) {
+                        if let Some(blocks) = content.array()? {
+                            let mut first = true;
+                            for block in blocks {
+                                let Some(fields) = super::store::document::Fields::parse(block?, &["text"])? else {
+                                    continue;
+                                };
+                                if let Some(part) = fields.string("text")? {
+                                    if !first {
+                                        text.push(' ');
+                                    }
+                                    first = false;
+                                    text.push_str(&part);
+                                }
+                            }
+                        } else if content.is_string()? {
+                            text = content.resolve()?.as_str().unwrap_or_default().to_string();
+                        }
+                    }
+                    let status = head
+                        .top
+                        .get("apiErrorStatus")
+                        .map(|v| v.as_number())
+                        .transpose()?
+                        .flatten()
+                        .and_then(|n| n.as_u64());
+                    let resets_at = line
+                        .view
+                        .unwrap()
+                        .get("quotaLimits")?
+                        .map(|v| v.get("resetsAt"))
+                        .transpose()?
+                        .flatten()
+                        .map(|v| v.as_number())
+                        .transpose()?
+                        .flatten()
+                        .and_then(|n| n.as_i64())
+                        .and_then(|s| DateTime::from_timestamp(s, 0));
                     end.api_error = Some(ApiErrorNotice {
                         ts,
                         text,
-                        error: v.get("error").and_then(Value::as_str).map(str::to_string),
-                        status: v.get("apiErrorStatus").and_then(Value::as_u64),
-                        resets_at: v
-                            .pointer("/quotaLimits/resetsAt")
-                            .and_then(Value::as_i64)
-                            .and_then(|s| DateTime::from_timestamp(s, 0)),
+                        error: head.top.string("error")?,
+                        status,
+                        resets_at,
                     });
-                } else if kind == "user" || msg.get("model").and_then(Value::as_str) != Some(SYNTHETIC_MODEL) {
-                    // A real turn after the notice: the agent was resumed; the error is history.
+                } else if kind == "user"
+                    || message
+                        .as_ref()
+                        .map(|m| m.string("model"))
+                        .transpose()?
+                        .flatten()
+                        .as_deref()
+                        != Some(SYNTHETIC_MODEL)
+                {
                     end.api_error = None;
                 }
             }
-            Some("attachment")
-                if v.pointer("/attachment/hookEvent").and_then(Value::as_str) == Some("SubagentStop") =>
-            {
-                if let Some(ts) = ts {
-                    end.stopped_at = Some(end.stopped_at.map_or(ts, |t: DateTime<Utc>| t.max(ts)));
+            "attachment" => {
+                let hook = head
+                    .top
+                    .get("attachment")
+                    .map(|v| v.get("hookEvent"))
+                    .transpose()?
+                    .flatten();
+                if hook
+                    .map(|v| crate::projection::string_prefix(v, 13))
+                    .transpose()?
+                    .flatten()
+                    .as_deref()
+                    == Some("SubagentStop")
+                {
+                    if let Some(ts) = ts {
+                        end.stopped_at = Some(end.stopped_at.map_or(ts, |t: DateTime<Utc>| t.max(ts)));
+                    }
                 }
             }
             _ => {}
         }
-        Flow::Continue
+        Ok(Flow::Continue)
     });
+    if result.is_err() {
+        return SubagentEnd::default();
+    }
     end
 }
 
@@ -966,32 +1037,47 @@ pub struct TaskNotice {
 /// for records that start with the tag.
 pub fn task_notices(parent_path: &std::path::Path) -> std::collections::HashMap<String, TaskNotice> {
     let mut map = std::collections::HashMap::new();
-    let Ok(file) = fs::File::open(parent_path) else {
+    let Ok(read) = jsonl::Read::open(parent_path) else {
         return map;
     };
-    super::for_each_json_line(BufReader::new(file), |v| {
-        let content = match v.get("type").and_then(Value::as_str) {
-            Some("user") => v.pointer("/message/content"),
-            Some("queue-operation") => v.get("content"),
+    let result = read.lines(0, |line| {
+        let Some(head) = line
+            .view
+            .map(|view| record::Head::parse(view, record::Demand::Message))
+            .transpose()?
+            .flatten()
+        else {
+            return Ok(Flow::Continue);
+        };
+        let content = match head.ty.as_str() {
+            "user" => head.top.get("message").map(|m| m.get("content")).transpose()?.flatten(),
+            "queue-operation" => head.top.get("content"),
             _ => None,
         };
-        let Some(Value::String(content)) = content else {
-            return Flow::Continue;
+        let Some(content) = content.filter(|v| v.is_string().unwrap_or(false)) else {
+            return Ok(Flow::Continue);
         };
-        if !content.trim_start().starts_with("<task-notification>") {
-            return Flow::Continue;
+        let body = content.source_text()?.unwrap_or_default();
+        let (prefix, _) = super::store::document::text_head(&body, &crate::lazy::Resolver::new(None), 32, true)?;
+        if !prefix.starts_with("<task-notification>") {
+            return Ok(Flow::Continue);
         }
+        let content = content.resolve()?;
+        let content = content.as_str().unwrap_or_default();
         if let (Some(id), Some(status)) = (tag_inner(content, "task-id"), tag_inner(content, "status")) {
             map.insert(
                 id.trim().to_string(),
                 TaskNotice {
                     status: status.trim().to_string(),
-                    ts: v.get("timestamp").and_then(Value::as_str).and_then(parse_ts),
+                    ts: head.top.string("timestamp")?.as_deref().and_then(parse_ts),
                 },
             );
         }
-        Flow::Continue
+        Ok(Flow::Continue)
     });
+    if result.is_err() {
+        map.clear();
+    }
     map
 }
 
@@ -1025,15 +1111,13 @@ fn scan(path: &Path) -> Result<SessionRef> {
 }
 
 fn scan_at(path: &Path, from: Option<&Checkpoint>) -> Result<(SessionRef, Option<Checkpoint>)> {
-    let source = JsonSource::capture(path)?;
-    let file = fs::File::open(path)?;
-    source.check_metadata(file.metadata()?)?;
+    let read = jsonl::Read::open(path)?;
+    let source = read.source();
     let (mut scan, offset) = metadata::Scan::restore(path, from);
     anyhow::ensure!(offset <= source.len(), "discovery checkpoint outside source");
     #[cfg(test)]
     metadata::FRAMED.with(|frames| frames.borrow_mut().push((offset, source.len() - offset)));
-    scan.read(&source, &file, offset)?;
-    source.check_metadata(file.metadata()?)?;
+    scan.read(&read, offset)?;
     let checkpoint = scan.checkpoint();
     Ok((scan.finish(), checkpoint))
 }
@@ -1440,12 +1524,12 @@ mod tests {
         );
         assert_eq!(sink.messages[1].model.as_deref(), Some("<synthetic>"));
 
-        // scan(): message_count skips both notices
+        // Discovery defers counting; full reads above retain the synthetic-turn classification.
         let dir = std::env::temp_dir().join(format!("cv-claude-scan-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("s1.jsonl");
         std::fs::write(&p, format!("{text}\n")).unwrap();
-        assert_eq!(scan(&p).unwrap().message_count, 2);
+        assert_eq!(scan(&p).unwrap().message_count, 0);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2386,7 +2470,7 @@ mod tests {
     }
 
     #[test]
-    fn native_json_inputs_check_completion_only_after_source_publication() {
+    fn native_json_inputs_verify_completion_even_after_owned_early_stop() {
         let world = crate::test_world("claude-json-input-completion");
         let path = world.proj.join("source.jsonl");
         let record = |input: Value| {
@@ -2400,23 +2484,56 @@ mod tests {
         let tiny = record(serde_json::json!({"path": "x"}));
         let reference = SessionRef::new("source", Harness::Claude, path.clone());
         let adapter = Claude::with_config_dir(&world.proj);
-        fs::write(&path, &tiny).unwrap();
-        let mut owned = None;
-        let mut remove_tiny = |message: Message| {
-            owned = Some(message);
-            fs::remove_file(&path).unwrap();
-            Flow::Stop
-        };
+        fs::write(&path, tiny.clone() + &tiny).unwrap();
+        let mut stable_calls = 0;
         adapter
-            .stream(&reference, &ParseOptions::lazy(), &mut remove_tiny)
+            .stream(&reference, &ParseOptions::lazy(), &mut |_: Message| {
+                stable_calls += 1;
+                Flow::Stop
+            })
             .unwrap();
-        assert!(matches!(
-            &owned.unwrap().content[0],
-            Block::ToolUse {
-                input: Json::Owned(_),
-                ..
+        assert_eq!(
+            stable_calls, 1,
+            "intentional stop succeeds while the captured source is unchanged"
+        );
+        struct RemoveOwned {
+            path: PathBuf,
+            owned: Option<Message>,
+            calls: usize,
+            checkpoints: usize,
+        }
+        impl MessageSink for RemoveOwned {
+            fn message(&mut self, message: Message) -> Flow {
+                self.calls += 1;
+                self.owned = Some(message);
+                fs::remove_file(&self.path).unwrap();
+                Flow::Stop
             }
-        ));
+            fn wants_checkpoint(&mut self, _: u64) -> bool {
+                true
+            }
+            fn checkpoint(&mut self, _: &mut Checkpoint) {
+                self.checkpoints += 1;
+            }
+        }
+        let mut deleting = RemoveOwned {
+            path: path.clone(),
+            owned: None,
+            calls: 0,
+            checkpoints: 0,
+        };
+        assert!(adapter
+            .stream(&reference, &ParseOptions::lazy(), &mut deleting)
+            .is_err());
+        assert_eq!((deleting.calls, deleting.checkpoints), (1, 0));
+        let Block::ToolUse {
+            input: Json::Owned(input),
+            ..
+        } = &deleting.owned.as_ref().unwrap().content[0]
+        else {
+            panic!("tiny tool input should remain owned and usable");
+        };
+        assert_eq!(input["path"], "x");
         // A later callback that emits only owned inputs need not stat the source on that record,
         // but completion must reject invalidation of an earlier published Source descriptor.
         let large = record(serde_json::json!({"body": "x".repeat(INLINE_MAX)}));

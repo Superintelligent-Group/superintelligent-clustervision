@@ -2,11 +2,12 @@
 //! emit the IR back into a harness's native format for cross-harness porting.
 
 use crate::ir::{Harness, Session, SessionRef};
-use crate::stream::{Flow, MessageSink, ParseOptions};
+#[cfg(test)]
+use crate::stream::Flow;
+use crate::stream::{MessageSink, ParseOptions};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use std::io::BufRead;
 use std::path::PathBuf;
 
 pub mod claude;
@@ -94,92 +95,8 @@ impl EpochNumber for u64 {
     }
 }
 
-/// Drive a tolerant JSONL pass over `reader`: blank and malformed lines are skipped (never fail a
-/// session over one bad record), every parsed record goes to `f`, and `Flow::Stop` ends the pass
-/// early. **Not** for offset-tracking paths (the claude/codex lazy-span readers need each line's
-/// byte offset and keep their own `read_until`/mmap loops).
-///
-/// Returns how many non-blank lines were skipped as unreadable (corrupt JSON or an undecodable
-/// read) before the pass ended — adapters surface a non-zero count via
-/// [`note_skipped_lines`] so silent corruption is at least visible in the session metadata.
-pub(crate) fn for_each_json_line<R: BufRead>(reader: R, f: impl FnMut(Value) -> Flow) -> u64 {
-    for_each_json_line_with(reader, |line| serde_json::from_str(line).ok(), f)
-}
-
-/// [`for_each_json_line`] with the line parser given: `parse` returns `None` for a line it cannot
-/// read (counted as skipped).
-pub(crate) fn for_each_json_line_with<R: BufRead>(
-    reader: R,
-    mut parse: impl FnMut(&str) -> Option<Value>,
-    mut f: impl FnMut(Value) -> Flow,
-) -> u64 {
-    for_each_json_line_at_with(reader, 0, &mut parse, |value, _, _, _| f(value))
-}
-
-/// The same tolerant record contract with absolute consumed positions for append checkpoints.
-/// `complete` is true only after a newline and known byte accounting; a partial EOF record is
-/// emitted but must be replayed on growth. JSON/UTF-8 failures remain per-line skips.
+/// Independent owned-value oracle for codec tests; production reads use `store::jsonl`.
 #[cfg(test)]
-pub(crate) fn for_each_json_line_at<R: BufRead>(
-    reader: R,
-    offset: u64,
-    f: impl FnMut(Value, u64, bool, u64) -> Flow,
-) -> u64 {
-    for_each_json_line_at_with(reader, offset, |line| serde_json::from_str(line).ok(), f)
-}
-
-/// Offset-tracked records with the same caller-supplied parser as [`for_each_json_line_with`].
-pub(crate) fn for_each_json_line_at_with<R: BufRead>(
-    reader: R,
-    offset: u64,
-    parse: impl FnMut(&str) -> Option<Value>,
-    f: impl FnMut(Value, u64, bool, u64) -> Flow,
-) -> u64 {
-    scan_json_lines(reader, offset, parse, f).0
-}
-
-fn scan_json_lines<R: BufRead>(
-    mut reader: R,
-    mut offset: u64,
-    mut parse: impl FnMut(&str) -> Option<Value>,
-    mut f: impl FnMut(Value, u64, bool, u64) -> Flow,
-) -> (u64, std::io::Result<()>) {
-    let mut skipped = 0;
-    let mut line = Vec::new();
-    loop {
-        line.clear();
-        loop {
-            match reader.read_until(b'\n', &mut line) {
-                Ok(0) if line.is_empty() => return (skipped, Ok(())),
-                Ok(_) => {
-                    offset += line.len() as u64;
-                    break;
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(error) => return (skipped + 1, Err(error)),
-            }
-        }
-        let complete = line.last() == Some(&b'\n');
-        let Ok(text) = std::str::from_utf8(&line) else {
-            skipped += 1;
-            continue;
-        };
-        let text = store::json::trim_str(text);
-        if text.is_empty() {
-            continue;
-        }
-        let Some(value) = parse(text) else {
-            skipped += 1;
-            continue;
-        };
-        if f(value, offset, complete, skipped) == Flow::Stop {
-            break;
-        }
-    }
-    (skipped, Ok(()))
-}
-
-/// [`for_each_json_line`] over already-read text (no per-line allocation). Returns the skip count.
 pub(crate) fn for_each_json_line_str(text: &str, mut f: impl FnMut(Value) -> Flow) -> u64 {
     let mut skipped = 0u64;
     let mut parse = |line: &str| serde_json::from_str(line).ok();
@@ -191,6 +108,7 @@ pub(crate) fn for_each_json_line_str(text: &str, mut f: impl FnMut(Value) -> Flo
     skipped
 }
 
+#[cfg(test)]
 fn each_json_line_inner(
     line: &str,
     skipped: &mut u64,
@@ -528,62 +446,6 @@ mod tests {
         assert_eq!(ts_from_epoch(1_767_323_045_000u64).unwrap(), s);
     }
 
-    struct InterruptedOnce {
-        input: std::io::Cursor<Vec<u8>>,
-        interrupted: bool,
-    }
-    impl std::io::Read for InterruptedOnce {
-        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
-            std::io::Read::read(&mut self.input, bytes)
-        }
-    }
-    impl BufRead for InterruptedOnce {
-        fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
-            if !self.interrupted {
-                self.interrupted = true;
-                return Err(std::io::ErrorKind::Interrupted.into());
-            }
-            self.input.fill_buf()
-        }
-        fn consume(&mut self, bytes: usize) {
-            self.input.consume(bytes);
-        }
-    }
-
-    #[test]
-    fn json_lines_retry_interrupted_and_preserve_corrupt_record_offsets() {
-        let input = InterruptedOnce {
-            input: std::io::Cursor::new(b"\xff\n{\"n\":1}\n{\"n\":2}".to_vec()),
-            interrupted: false,
-        };
-        let mut seen = Vec::new();
-        let skipped = for_each_json_line_at(input, 5, |value, offset, complete, skipped| {
-            seen.push((value["n"].as_u64().unwrap(), offset, complete, skipped));
-            Flow::Continue
-        });
-        assert_eq!(skipped, 1);
-        assert_eq!(seen, vec![(1, 15, true, 1), (2, 22, false, 1)]);
-    }
-
-    struct TerminalIo;
-    impl std::io::Read for TerminalIo {
-        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
-            Err(std::io::Error::other("terminal source failure"))
-        }
-    }
-    impl BufRead for TerminalIo {
-        fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
-            Err(std::io::Error::other("terminal source failure"))
-        }
-        fn consume(&mut self, _: usize) {}
-    }
-
-    #[test]
-    fn terminal_json_line_io_stops_legacy_helpers_with_one_skip() {
-        assert_eq!(for_each_json_line(TerminalIo, |_| unreachable!()), 1);
-        assert_eq!(for_each_json_line_at(TerminalIo, 0, |_, _, _, _| unreachable!()), 1);
-    }
-
     #[test]
     fn for_each_json_line_skips_junk_and_stops() {
         let text = "{\"n\":1}\n\n   \nnot json\n{\"n\":2}\n{\"n\":3}";
@@ -598,15 +460,6 @@ mod tests {
         });
         assert_eq!(seen, vec![1, 2], "blank/junk skipped, Stop honored");
         assert_eq!(skipped, 1, "the `not json` line counts; blank lines don't");
-
-        // The reader-driven variant sees the same records and the same skip count.
-        let mut seen2 = Vec::new();
-        let skipped2 = for_each_json_line(std::io::Cursor::new(text.as_bytes()), |v| {
-            seen2.push(v.get("n").and_then(Value::as_i64).unwrap_or(0));
-            Flow::Continue
-        });
-        assert_eq!(seen2, vec![1, 2, 3]);
-        assert_eq!(skipped2, 1);
 
         // note_skipped_lines: zero leaves `extra` untouched (clean sessions stay byte-identical).
         let mut s = Session::new("x", Harness::Codex);

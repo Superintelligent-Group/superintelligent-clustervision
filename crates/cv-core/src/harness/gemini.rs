@@ -603,9 +603,9 @@ enum Body {
 
 impl Body {
     fn of(view: crate::json::JsonView<'_>) -> Result<Self> {
-        Ok(match view.source_range()? {
-            Some((at, len)) => Body::Range(at, len),
-            None => Body::Owned(view.resolve()?.into_owned()),
+        Ok(match view.to_json()? {
+            crate::json::Json::Source(range) => Body::Range(range.offset(), range.len()),
+            crate::json::Json::Owned(value) => Body::Owned(value),
         })
     }
 }
@@ -955,9 +955,11 @@ fn parse_chat_recording(text: &str, harness: Harness, source_path: Option<PathBu
         Some(session) => session,
         None => {
             let mut replay = RecordingReplay::default();
-            super::for_each_json_line_str(text, |rec| {
-                let _ = replay.ingest((&rec).into());
-                Flow::Continue
+            let _ = super::store::jsonl::slice(text.as_bytes(), |line| {
+                if let Some(view) = line.view {
+                    let _ = replay.ingest(view);
+                }
+                Ok(Flow::Continue)
             });
             replay
                 .emit(d, source_path.as_deref(), None, &mut sink, &mut false)

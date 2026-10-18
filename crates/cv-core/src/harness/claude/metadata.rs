@@ -2,7 +2,6 @@
 //! record codec's metadata demand, over the same byte source as every other Claude read.
 
 use super::*;
-use crate::harness::store::document::Fields;
 use serde::{Deserialize, Serialize};
 
 #[cfg(test)]
@@ -50,6 +49,7 @@ impl Scan {
                 {
                     scan.writer_version = state.writer_version;
                     scan.session = state.session;
+                    scan.session.message_count = 0;
                     scan.custom_title = state.custom_title;
                     return (scan, cp.offset);
                 }
@@ -78,10 +78,10 @@ impl Scan {
 
     /// Fold lines `offset..` of the captured transcript. The continuation is the state after the
     /// last finished line; a partial last line is folded but re-read next time.
-    pub(super) fn read(&mut self, source: &JsonSource, file: &fs::File, offset: u64) -> Result<()> {
+    pub(super) fn read(&mut self, read: &crate::harness::store::jsonl::Read, offset: u64) -> Result<()> {
         let mut finished = offset;
         let mut partial = false;
-        crate::harness::store::jsonl::for_each_line(source, file, offset, source.len(), |line| {
+        read.lines(offset, |line| {
             if !line.complete {
                 self.save_prefix(finished);
                 partial = true;
@@ -101,24 +101,10 @@ impl Scan {
     }
 
     fn record(&mut self, view: crate::json::JsonView<'_>) -> Result<()> {
-        let Some(fields) = Fields::parse(
-            view,
-            &[
-                "version",
-                "type",
-                "cwd",
-                "timestamp",
-                "customTitle",
-                "aiTitle",
-                "isApiErrorMessage",
-                "message",
-            ],
-        )?
-        else {
+        let Some(record::Head { top: fields, ty }) = record::Head::parse(view, record::Demand::Metadata)? else {
             return Ok(());
         };
         crate::writer_version::observe(&mut self.writer_version, fields.string("version")?.as_deref());
-        let ty = fields.string("type")?.unwrap_or_default();
         if ty == "custom-title" {
             if let Some(title) = fields.string("customTitle")? {
                 self.session.title = Some(title);
@@ -137,27 +123,6 @@ impl Scan {
             self.session.created_at = Some(self.session.created_at.map_or(ts, |old| old.min(ts)));
             self.session.updated_at = Some(self.session.updated_at.map_or(ts, |old| old.max(ts)));
         }
-        if matches!(ty.as_str(), "user" | "assistant") {
-            let synthetic = ty == "assistant"
-                && (fields
-                    .get("isApiErrorMessage")
-                    .map(|v| v.as_bool())
-                    .transpose()?
-                    .flatten()
-                    == Some(true)
-                    || match fields
-                        .get("message")
-                        .map(|m| Fields::parse(m, &["model"]))
-                        .transpose()?
-                        .flatten()
-                    {
-                        Some(message) => message.string("model")?.as_deref() == Some(SYNTHETIC_MODEL),
-                        None => false,
-                    });
-            if !synthetic {
-                self.session.message_count += 1;
-            }
-        }
         Ok(())
     }
 
@@ -171,11 +136,14 @@ impl Scan {
 mod tests {
     use super::*;
 
-    // The former discovery reducer is the oracle: its count deliberately does not parse content,
-    // and its cwd/timestamps include metadata-only records unlike the conversational parser.
+    // The former discovery reducer remains the metadata oracle. Counts are now deliberately0;
+    // cwd/timestamps still include metadata-only records unlike the conversational parser.
     fn owned(path: &Path, bytes: &[u8]) -> SessionRef {
         let mut out = Scan::new(path);
-        super::super::super::for_each_json_line(std::io::Cursor::new(bytes), |v| {
+        for v in bytes
+            .split(|byte| *byte == b'\n')
+            .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+        {
             let ty = v.get("type").and_then(Value::as_str).unwrap_or("");
             if ty == "custom-title" {
                 if let Some(t) = v.get("customTitle").and_then(Value::as_str) {
@@ -195,14 +163,7 @@ mod tests {
                 out.session.created_at = Some(out.session.created_at.map_or(ts, |c| c.min(ts)));
                 out.session.updated_at = Some(out.session.updated_at.map_or(ts, |u| u.max(ts)));
             }
-            let synthetic = ty == "assistant"
-                && (v.get("isApiErrorMessage").and_then(Value::as_bool) == Some(true)
-                    || v.pointer("/message/model").and_then(Value::as_str) == Some(SYNTHETIC_MODEL));
-            if matches!(ty, "user" | "assistant") && !synthetic {
-                out.session.message_count += 1;
-            }
-            Flow::Continue
-        });
+        }
         out.finish()
     }
 
@@ -216,6 +177,38 @@ mod tests {
             "{}",
             path.display()
         );
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn discovery_defers_counts_until_a_complete_read_and_growth_invalidates_them() -> Result<()> {
+        let world = crate::test_world("claude-discovery-counts");
+        let path = world.proj.join("counts.jsonl");
+        let text = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"question\"}}\n{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":\"answer\"}}\n";
+        fs::write(&path, text)?;
+        let context = crate::discover_cache::read::Context::current();
+        let _scope = context.enter();
+        let reference = cached_metadata(&path, false).unwrap();
+        assert_eq!(reference.message_count, 0);
+        crate::catalog::sync(std::slice::from_ref(&reference));
+        crate::discover_cache::persist(false);
+        let adapter = Claude::with_config_dir(&world.proj);
+        crate::stream::stream_counted(
+            &adapter,
+            &reference,
+            &ParseOptions::facts(),
+            &mut crate::stream::CollectSink::default(),
+            crate::stream::Pass::RECORD,
+        )?;
+        assert_eq!(cached_metadata(&path, false).unwrap().message_count, 2);
+        fs::write(
+            &path,
+            format!("{text}{{\"type\":\"custom-title\",\"customTitle\":\"late rename\"}}\n"),
+        )?;
+        let grown = cached_metadata(&path, false).unwrap();
+        assert_eq!(grown.message_count, 0);
+        assert_eq!(grown.title.as_deref(), Some("late rename"));
+        Ok(())
     }
 
     #[test]
@@ -379,8 +372,8 @@ mod tests {
         text.push_str(append);
         assert_eq!(
             cached_metadata(&path, false).unwrap().message_count,
-            1,
-            "published fallback counts do not alter reducer state"
+            0,
+            "growth invalidates published counts without changing metadata continuation state"
         );
         for mutation in 0..8 {
             crate::discover_cache::persist(false);
@@ -458,7 +451,7 @@ mod tests {
         );
         fs::write(&path, "{\"type\":\"user\"}\n").unwrap();
         FRAMED.with(|frames| frames.borrow_mut().clear());
-        assert_eq!(cached_metadata(&path, false).unwrap().message_count, 1);
+        assert_eq!(cached_metadata(&path, false).unwrap().message_count, 0);
         assert_eq!(
             FRAMED.with(|frames| frames.borrow().clone()),
             vec![(0, append.len() as u64)]

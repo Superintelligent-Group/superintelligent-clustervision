@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Claude listings defer exact message counts to indexing or complete reads while preserving transcript-derived titles, timestamps, and writer observations.
+- Claude reads report source deletion or replacement during callbacks even after an intentional stop with owned content.
 - Preserve untouched native records while sharing Claude prune, rewind, and adoption derivation.
 
 - Grok listings use native summaries and stop after finding fallback titles; exact message counts appear after indexing or a complete read.

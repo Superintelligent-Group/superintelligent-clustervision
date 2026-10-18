@@ -2119,7 +2119,7 @@ mod tests {
     /// The simple discovery reducer over owned values: turn count, title fallback, time bounds.
     fn reducer(wire: &Path) -> WireScan {
         let mut w = WireScan::default();
-        super::super::for_each_json_line(std::io::BufReader::new(fs::File::open(wire).unwrap()), |v| {
+        super::super::for_each_json_line_str(&fs::read_to_string(wire).unwrap(), |v| {
             if let Some(ts) = v.get("time").and_then(super::super::ts_from_value) {
                 w.first_ts = Some(w.first_ts.map_or(ts, |f| f.min(ts)));
                 w.last_ts = Some(w.last_ts.map_or(ts, |l| l.max(ts)));
