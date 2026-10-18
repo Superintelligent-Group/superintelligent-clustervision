@@ -7,7 +7,9 @@ use super::{coerce_text, str_field};
 pub(crate) mod write;
 use crate::ir::Block;
 use crate::lazy::Text;
-use serde_json::{json, Map, Value};
+#[cfg(test)]
+use serde_json::json;
+use serde_json::Value;
 
 /// How a store spells the shape. Every field is the Anthropic spelling in [`ANTHROPIC`].
 #[derive(Debug, Clone, Copy)]
@@ -405,138 +407,22 @@ fn blocks_to(content: &[Block], q: &Quirks, user: bool) -> anyhow::Result<Vec<Va
     Ok(out)
 }
 
-/// Owned-codec output keeps its historical Span schema, but Source text errors are fallible
-/// and its already-owned decoded string can move directly into the output Value.
-fn text_value(text: &Text) -> anyhow::Result<Value> {
-    match text {
-        Text::Inline(value) => Ok(Value::String(value.clone())),
-        Text::Span(span) => serde_json::to_value(span).map_err(Into::into),
-        Text::Source(source) => Ok(Value::String(source.try_resolve()?)),
-    }
-}
-
 fn block_to(b: &Block, q: &Quirks, user: bool) -> anyhow::Result<Option<Value>> {
-    Ok(Some(match b {
-        Block::Text { text } => {
-            let mut fields = Map::new();
-            fields.insert("type".into(), json!("text"));
-            fields.insert("text".into(), text_value(text)?);
-            Value::Object(fields)
-        }
-        Block::Thinking {
-            text,
-            signature,
-            encrypted,
-            redacted,
-        } => {
-            let mut m = Map::new();
-            match q.redacted_thinking {
-                Some(rt) if *redacted => {
-                    m.insert("type".into(), json!(rt));
-                    if let Some(enc) = encrypted {
-                        m.insert("data".into(), json!(enc));
-                    }
-                }
-                _ => {
-                    m.insert("type".into(), json!("thinking"));
-                    m.insert(q.thinking.0.into(), text_value(text)?);
-                    if let Some(sig) = signature {
-                        m.insert(q.thinking.1.into(), json!(sig));
-                    }
-                }
-            }
-            Value::Object(m)
-        }
-        Block::ToolUse { id, name, input, .. } => {
-            let mut fields = Map::new();
-            fields.insert("type".into(), json!(q.tool_use.0));
-            fields.insert("id".into(), json!(id));
-            fields.insert("name".into(), json!(name));
-            fields.insert(q.tool_use.1.into(), input.resolve()?.into_owned());
-            Value::Object(fields)
-        }
-        Block::ToolResult {
-            tool_use_id,
-            content,
-            is_error,
-            ..
-        } if user => {
-            let mut fields = Map::new();
-            fields.insert("type".into(), json!("tool_result"));
-            fields.insert("tool_use_id".into(), json!(tool_use_id));
-            fields.insert("content".into(), text_value(content)?);
-            fields.insert("is_error".into(), json!(is_error));
-            Value::Object(fields)
-        }
-        Block::ToolResult { .. } => return Ok(None),
-        Block::Image { media_type, data_ref } => image_block(media_type, data_ref, q),
-        Block::File { mime, path, source } if user && q.flat_media.is_none() => {
-            // Inverse of `document_from`: title ← path, source ← url/file_id.
-            let mut src = Map::new();
-            if let Some(mt) = mime {
-                src.insert("media_type".into(), json!(mt));
-            }
-            match source.as_deref() {
-                Some(r) if r.starts_with("file:") => {
-                    src.insert("type".into(), json!("file"));
-                    src.insert("file_id".into(), json!(&r["file:".len()..]));
-                }
-                Some(r) => {
-                    src.insert("type".into(), json!("url"));
-                    src.insert("url".into(), json!(r));
-                }
-                None => {}
-            }
-            let mut doc = Map::new();
-            doc.insert("type".into(), json!("document"));
-            if let Some(p) = path {
-                doc.insert("title".into(), json!(p));
-            }
-            doc.insert("source".into(), Value::Object(src));
-            Value::Object(doc)
-        }
-        Block::File { path, source, .. } => {
-            let label = path.as_deref().or(source.as_deref()).unwrap_or("?");
-            json!({ "type": "text", "text": format!("[file: {label}]") })
-        }
-    }))
+    write::owned(b, q, user)
 }
 
-/// An `image` block rebuilt from the IR's reference so the pointer survives a round trip (the
-/// reader keeps a ref, not the bytes): the three `source` shapes [`image_from`] reads, or the
-/// flat `mimeType`/`data` pair.
+/// An image rebuilt from its retained reference, using the same grammar as streamed output.
 pub fn image_block(media_type: &Option<String>, data_ref: &Option<String>, q: &Quirks) -> Value {
-    if q.flat_media.is_some() {
-        let mut m = Map::new();
-        m.insert("type".into(), json!("image"));
-        if let Some(mt) = media_type {
-            m.insert("mimeType".into(), json!(mt));
-        }
-        if let Some(d) = data_ref {
-            m.insert("data".into(), json!(d));
-        }
-        return Value::Object(m);
-    }
-    let mut source = Map::new();
-    if let Some(mt) = media_type {
-        source.insert("media_type".into(), json!(mt));
-    }
-    match data_ref.as_deref() {
-        Some(r) if r.starts_with("file:") => {
-            source.insert("type".into(), json!("file"));
-            source.insert("file_id".into(), json!(&r["file:".len()..]));
-        }
-        Some("base64:inline") => {
-            // Bytes were intentionally not retained in the IR; mark the kind.
-            source.insert("type".into(), json!("base64"));
-        }
-        Some(r) => {
-            source.insert("type".into(), json!("url"));
-            source.insert("url".into(), json!(r));
-        }
-        None => {}
-    }
-    json!({ "type": "image", "source": Value::Object(source) })
+    write::owned(
+        &Block::Image {
+            media_type: media_type.clone(),
+            data_ref: data_ref.clone(),
+        },
+        q,
+        false,
+    )
+    .expect("image fields serialize infallibly")
+    .expect("image is an assistant block")
 }
 
 #[cfg(test)]
