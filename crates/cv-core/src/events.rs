@@ -83,6 +83,7 @@ pub struct EventSink {
     events: Vec<Event>,
     dependencies: crate::source::ReadSet,
     capture_events: bool,
+    extractor: EventExtractor,
     latch: crate::stream::Latch,
 }
 
@@ -96,6 +97,7 @@ impl EventSink {
             events: Vec::new(),
             dependencies: Default::default(),
             capture_events: true,
+            extractor: EventExtractor::default(),
             latch: Default::default(),
         }
     }
@@ -105,17 +107,21 @@ impl EventSink {
         if self.latch.failed() {
             return Flow::Stop;
         }
-        if self.capture_events {
-            if let Err(error) = extract_into(m, self.msg_idx, self.cwd.as_deref(), &mut self.events) {
-                self.latch.fail(error);
-                return Flow::Stop;
-            }
+        if let Err(error) = self
+            .extractor
+            .extract(m, self.msg_idx, self.cwd.as_deref(), None, &mut self.events)
+        {
+            self.latch.fail(error);
+            return Flow::Stop;
+        }
+        if !self.capture_events {
+            release_scratch(&mut self.events);
         }
         self.msg_idx += 1;
         Flow::Continue
     }
 
-    /// Keep checkpoint state and dependencies without extracting or retaining event rows.
+    /// Keep checkpoint/call identity state and dependencies without retaining event rows.
     /// Useful when events are fresh but another consumer needs a new shared resume mark.
     pub fn without_events(mut self) -> Self {
         self.capture_events = false;
@@ -149,6 +155,7 @@ impl EventSink {
             events: Vec::new(),
             dependencies: st.dependencies,
             capture_events: true,
+            extractor: st.extractor,
             latch: Default::default(),
         })
     }
@@ -160,6 +167,8 @@ const EVENTS_LAYER: &str = "events";
 /// What an [`EventSink`] holds at a checkpoint: the rows so far are in the catalog already.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct EventState {
+    #[serde(default)]
+    extractor: EventExtractor,
     msg_idx: usize,
     cwd: Option<PathBuf>,
     #[serde(default = "crate::source::ReadSet::unrecorded")]
@@ -197,6 +206,7 @@ impl MessageSink for EventSink {
         cp.put(
             EVENTS_LAYER,
             &EventState {
+                extractor: self.extractor.clone(),
                 msg_idx: self.msg_idx,
                 cwd: self.cwd.clone(),
                 dependencies: self.dependencies.clone(),
@@ -222,26 +232,80 @@ pub(crate) fn release_scratch(events: &mut Vec<Event>) {
     }
 }
 
-pub(crate) fn extract_into(m: &Message, msg_idx: usize, cwd: Option<&Path>, out: &mut Vec<Event>) -> Result<()> {
-    extract_into_for_tool(m, msg_idx, cwd, None, out)
+/// Correlate native completed file changes with already-classified visible calls by exact ID.
+/// Code-mode nested calls have their own native IDs and no visible ToolUse counterpart.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct EventExtractor {
+    inferred_edits: std::collections::BTreeSet<String>,
 }
 
-pub(crate) fn extract_into_for_tool(
+impl EventExtractor {
+    pub(crate) fn extract(
+        &mut self,
+        m: &Message,
+        msg_idx: usize,
+        cwd: Option<&Path>,
+        tool: Option<&str>,
+        out: &mut Vec<Event>,
+    ) -> Result<()> {
+        extract_message(m, msg_idx, cwd, tool, out, &mut self.inferred_edits)
+    }
+}
+
+pub(crate) fn extract_into(m: &Message, msg_idx: usize, cwd: Option<&Path>, out: &mut Vec<Event>) -> Result<()> {
+    EventExtractor::default().extract(m, msg_idx, cwd, None, out)
+}
+
+fn extract_message(
     m: &Message,
     msg_idx: usize,
     cwd: Option<&Path>,
     tool: Option<&str>,
     out: &mut Vec<Event>,
+    inferred_edits: &mut std::collections::BTreeSet<String>,
 ) -> Result<()> {
     let mut staged = Vec::new();
     let ts = m.timestamp.map(|t| t.timestamp());
+    if tool.is_none_or(|name| name == "apply_patch") {
+        let item = m.extra.get("codex").and_then(|bag| bag.get("item"));
+        if let Some(item) = item.filter(|item| item["type"] == "FileChange" && item["status"] == "completed") {
+            let id = item.get("id").and_then(serde_json::Value::as_str);
+            if id.is_some_and(|id| !inferred_edits.contains(id)) {
+                let mut paths = std::collections::BTreeSet::new();
+                for (path, change) in item
+                    .get("changes")
+                    .and_then(serde_json::Value::as_object)
+                    .into_iter()
+                    .flatten()
+                {
+                    paths.insert(absolutize(path, cwd));
+                    if let Some(dest) = change.get("move_path").and_then(serde_json::Value::as_str) {
+                        paths.insert(absolutize(dest, cwd));
+                    }
+                }
+                staged.extend(paths.into_iter().map(|path| Event {
+                    msg_idx,
+                    ts,
+                    kind: "file_edit",
+                    tool: Some("apply_patch".into()),
+                    target: Some(path),
+                    detail: None,
+                    call: false,
+                }));
+            }
+        }
+    }
     for b in &m.content {
         match b {
-            Block::ToolUse { name, input, .. } => {
+            Block::ToolUse { id, name, input, .. } => {
                 if tool.is_some_and(|selected| selected != name) {
                     continue;
                 }
+                let before = staged.len();
                 extract_call_into(name, input, msg_idx, ts, cwd, &mut staged)?;
+                if staged[before..].iter().any(|event| event.kind == "file_edit") {
+                    inferred_edits.insert(id.clone());
+                }
             }
             Block::ToolResult {
                 content,
@@ -270,6 +334,11 @@ pub(crate) fn extract_into_for_tool(
                 });
             }
             _ => {}
+        }
+    }
+    for block in &m.content {
+        if let Block::ToolResult { tool_use_id, .. } = block {
+            inferred_edits.remove(tool_use_id);
         }
     }
     out.extend(staged);
@@ -1282,6 +1351,50 @@ mod tests {
     use super::*;
     use crate::ir::{Message, Role};
     use serde_json::json;
+
+    #[test]
+    fn native_codex_patch_facts_deduplicate_by_exact_call_identity_across_checkpoints() {
+        // Real Codex 0.163.0 records from the isolated hooks scenario; scrubbed, not authored.
+        let nested = crate::harness::codex::parse_str(
+            "nested",
+            include_str!("../tests/fixtures/codex/code_mode_patch.jsonl"),
+            true,
+            None,
+        );
+        let direct = crate::harness::codex::parse_str(
+            "direct",
+            include_str!("../tests/fixtures/codex/direct_patch.jsonl"),
+            true,
+            None,
+        );
+        for session in [&nested, &direct] {
+            assert_eq!(session.messages.len(), 3);
+            let mut before = EventSink::new(None);
+            before.observe_message(&session.messages[0]);
+            let initial = before.events().iter().filter(|e| e.kind == "file_edit").count();
+            let mut checkpoint = Checkpoint::new(42);
+            before.checkpoint(&mut checkpoint);
+            // Cross the actual serialized checkpoint boundary, not a clone of the extractor.
+            let bytes = serde_json::to_vec(&checkpoint).unwrap();
+            let checkpoint = serde_json::from_slice(&bytes).unwrap();
+            let mut after = EventSink::resume(&checkpoint).unwrap();
+            for message in &session.messages[1..] {
+                after.observe_message(message);
+            }
+            let edits: Vec<_> = after.events().iter().filter(|e| e.kind == "file_edit").collect();
+            assert_eq!(initial + edits.len(), 1);
+            let histogram = crate::tools::ToolHistogram::from_messages(&session.messages, None).unwrap();
+            assert_eq!(histogram.tools.values().map(|t| t.edits).sum::<usize>(), 1);
+        }
+        // Parallel completions must not mistake an unrelated outer call for the native child.
+        let mut sink = EventSink::new(None);
+        sink.observe_message(&direct.messages[0]);
+        sink.observe_message(&nested.messages[0]);
+        sink.observe_message(&nested.messages[1]);
+        sink.observe_message(&direct.messages[1]);
+        assert_eq!(sink.events().iter().filter(|e| e.kind == "file_edit").count(), 2);
+        assert_eq!(sink.events().iter().filter(|e| e.call).count(), 2);
+    }
 
     #[test]
     fn checkpoint_only_sink_tracks_positions_without_extracting_rows() {
