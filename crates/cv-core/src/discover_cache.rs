@@ -293,7 +293,7 @@ where
             .and_then(|(refs, captured)| captured.includes(&reads).then(|| (refs.clone(), captured.clone())))
     };
     if let Some((refs, captured)) = candidate {
-        if captured.fresh(&mut crate::source::Probe::default()) && !context.needs_writer_observation(&refs) {
+        if captured.fresh(&mut crate::source::Probe::default()) {
             return refs;
         }
     }
@@ -313,7 +313,7 @@ where
             entry.payload.parsed();
             let candidate = admit_loaded(&cache, path, entry, &reads);
             if let Some((refs, captured)) = candidate {
-                if captured.fresh(&mut crate::source::Probe::default()) && !context.needs_writer_observation(&refs) {
+                if captured.fresh(&mut crate::source::Probe::default()) {
                     return refs;
                 }
             }

@@ -49,16 +49,18 @@ fn observations_are_monotonic_retained_and_do_not_read_sources() {
 }
 
 #[test]
-fn null_rows_demand_discovery_once_but_absence_is_settled() {
+fn null_rows_remain_unknown_until_normal_observation() {
     let w = crate::test_world("writer-null");
     let r = session(&w.base, "bare");
     sync(std::slice::from_ref(&r));
-    let context = Context::current();
-    assert!(context.needs_writer_observation(std::slice::from_ref(&r)));
-    observe(&context, &r, None);
-    assert!(!context.needs_writer_observation(std::slice::from_ref(&r)));
+    assert_eq!(column(&r), None);
+    assert_eq!(writer_versions()[0].unknown, 1);
+    observe(&Context::current(), &r, None);
     assert_eq!(column(&r).as_deref(), Some(""));
-    assert!(!Context::current().needs_writer_observation(std::slice::from_ref(&r)));
+    assert_eq!(writer_versions()[0].unknown, 1);
+    sync(std::slice::from_ref(&r));
+    assert_eq!(column(&r).as_deref(), Some(""));
+    assert!(!r.path.exists(), "catalog publication does not read sources");
 }
 
 #[test]
@@ -126,7 +128,7 @@ fn discovery_observes_newest_claude_tail_and_canonical_codex_meta() {
 }
 
 #[test]
-fn cached_null_observation_refills_on_discovery_without_another_bump() {
+fn cached_unknown_stays_unknown_until_normal_source_change() {
     let w = crate::test_world("writer-cached-null");
     let projects = w.base.join("projects");
     std::fs::create_dir_all(projects.join("p")).unwrap();
@@ -148,25 +150,18 @@ fn cached_null_observation_refills_on_discovery_without_another_bump() {
         .unwrap()
         .execute("UPDATE sessions SET writer_version=NULL", [])
         .unwrap();
-    let refill = Context::current();
-    refill.run(|| {
-        sync(&discover());
-        assert_eq!(
-            refill.writer_versions(Harness::Claude).len(),
-            1,
-            "cached NULL must demand the reducer"
-        );
-        crate::discover_cache::persist(false);
-    });
-    assert_eq!(column(&refs[0]).as_deref(), Some("2.1.296"));
     let settled = Context::current();
     settled.run(|| {
         sync(&discover());
         assert!(
             settled.writer_versions(Harness::Claude).is_empty(),
-            "settled cache hit makes no observation"
+            "writer coverage must not force a cached source read"
         );
     });
+    assert_eq!(column(&refs[0]), None);
+    let observed = writer_versions();
+    let claude = observed.iter().find(|row| row.harness == "claude").unwrap();
+    assert_eq!((claude.sessions, claude.unknown), (1, 1));
     // The metadata continuation retains its previous maximum and folds a newer appended writer.
     use std::io::Write;
     writeln!(
