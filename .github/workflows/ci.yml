@@ -45,6 +45,9 @@ jobs:
       - name: Parsimony budget
         run: python3 -I tools/check-size.py
 
+      - name: Operating script controls
+        run: python3 -I tools/test-operating-scripts.py
+
       - name: Corpus tools
         run: python3 -I tools/harness-corpus/test_tools.py
 
