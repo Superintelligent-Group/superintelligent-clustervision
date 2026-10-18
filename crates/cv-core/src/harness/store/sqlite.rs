@@ -22,7 +22,9 @@ use std::path::Path;
 
 #[cfg(test)]
 pub(crate) mod export_tests;
+mod selection;
 mod snapshots;
+pub(crate) use selection::Selection;
 
 /// A reader retains both its private backing (when needed) and the original provenance.
 /// Use `read` around an adapter operation, and carry `reads()` into lazy source captures.
@@ -197,6 +199,37 @@ fn sidecar(path: &Path, suffix: &str) -> std::path::PathBuf {
     let mut name = path.as_os_str().to_os_string();
     name.push(suffix);
     name.into()
+}
+
+/// Complete one adapter operation under the reader's existing before/after provenance checks.
+pub(crate) fn read<T>(path: &Path, operation: impl FnOnce(&ReadConnection) -> Result<T>) -> Result<T> {
+    open_ro(path)?.read(operation)
+}
+
+/// Whether byte-exact indexed facts may replace native ID equality. Any explicit collation
+/// or non-TEXT affinity conservatively retains the adapter's original native query.
+pub(crate) fn binary_text_columns(conn: &Connection, table: &str, names: &[&str]) -> Result<bool> {
+    use rusqlite::OptionalExtension as _;
+    let ddl = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?1",
+            [table],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    if !ddl.is_some_and(|ddl| !ddl.to_ascii_uppercase().contains("COLLATE")) {
+        return Ok(false);
+    }
+    let mut stmt = conn.prepare("SELECT name,type FROM pragma_table_info(?1)")?;
+    let columns = stmt
+        .query_map([table], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(names.iter().all(|name| {
+        columns
+            .iter()
+            .any(|(column, kind)| column == name && kind.eq_ignore_ascii_case("TEXT"))
+    }))
 }
 
 /// Open a harness database without writing anything in its directory (see the module docs).

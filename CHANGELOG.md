@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- OpenClaw parent lookups retain indexed window facts for large native stores, preserving query order, malformed values, and source guards.
+
 - Catalog publication waits for concurrent writers before comparing rows, preventing avoidable lost discovery updates during indexing.
 
 - Preserve untouched native records while sharing Claude prune, rewind, and adoption derivation.

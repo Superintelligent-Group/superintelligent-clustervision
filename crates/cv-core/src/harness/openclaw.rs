@@ -747,123 +747,54 @@ thread_local! {
 }
 
 #[cfg(feature = "sqlite")]
-enum WindowId {
-    Text(String),
-    Invalid(rusqlite::types::Type),
-    Utf8(std::str::Utf8Error),
-}
-#[cfg(feature = "sqlite")]
-#[derive(Default)]
-struct WindowGroups(HashMap<String, Vec<WindowId>>);
+struct WindowGroups(super::store::sqlite::Selection);
 #[cfg(feature = "sqlite")]
 impl WindowGroups {
-    fn load(conn: &rusqlite::Connection) -> Result<(Option<Self>, usize)> {
+    fn load(conn: &rusqlite::Connection) -> Result<(Self, usize)> {
         use rusqlite::types::ValueRef;
-        let mut groups = Self::default();
-        // Leave half the shared 16MiB operation budget for other inventories and guards.
-        // An oversized membership table keeps a tiny unavailable sentinel, then uses SQL.
-        const BUILD_BUDGET: usize = 8 * 1024 * 1024;
-        let mut strings = 0usize;
-        let mut vector_capacity = 0usize;
-        // This path is selected only for the original plain table scan and BINARY TEXT ID
-        // contract. Keep that same traversal order, not an invented chronological/id sort.
-        let mut stmt = conn.prepare("SELECT session_key,session_id FROM session_windows NOT INDEXED")?;
-        let mut rows = stmt.query([])?;
-        while let Some(row) = rows.next()? {
-            let Ok(key) = row.get_ref(0)?.as_str() else {
-                continue;
-            };
-            let value = row.get_ref(1)?;
-            if matches!(value, ValueRef::Null) {
-                continue;
-            }
-            let existing = groups.0.get(key);
-            let fresh = existing.is_none();
-            let old_capacity = existing.map_or(0, Vec::capacity);
-            let next_capacity = if existing.is_none_or(|ids| ids.len() == ids.capacity()) {
-                (old_capacity * 2).max(4)
-            } else {
-                old_capacity
-            };
-            let map_capacity = if fresh && groups.0.len() == groups.0.capacity() {
-                (groups.0.capacity() * 2).max(3)
-            } else {
-                groups.0.capacity()
-            };
-            let new_strings = key.len() * usize::from(fresh)
-                + match value {
-                    ValueRef::Text(bytes) => bytes.len(),
-                    _ => 0,
-                };
-            // Twofold table/vector storage allowance covers their next growth before allocating.
-            let estimate = strings
-                .saturating_add(new_strings)
-                .saturating_add(map_capacity * std::mem::size_of::<(String, Vec<WindowId>)>() * 2)
-                .saturating_add((vector_capacity - old_capacity + next_capacity) * std::mem::size_of::<WindowId>() * 2)
-                .saturating_add(std::mem::size_of::<WindowId>() * 8);
-            if estimate > BUILD_BUDGET {
-                return Ok((None, std::mem::size_of::<Option<Self>>()));
-            }
-            strings += new_strings;
-            let id = match value {
-                ValueRef::Text(bytes) => match std::str::from_utf8(bytes) {
-                    Ok(id) => WindowId::Text(id.to_owned()),
-                    Err(error) => WindowId::Utf8(error),
-                },
-                value => WindowId::Invalid(value.data_type()),
-            };
-            #[cfg(test)]
-            SQL_PARENT_ROWS.with(|count| count.set(count.get() + 1));
-            let ids = if fresh {
-                groups.0.entry(key.to_owned()).or_default()
-            } else {
-                groups.0.get_mut(key).expect("existing window group")
-            };
-            ids.push(id);
-            vector_capacity = vector_capacity - old_capacity + ids.capacity();
-        }
-        drop(rows);
-        #[cfg(test)]
-        SQL_PARENT_FULLSCANS
-            .with(|count| count.set(count.get() + stmt.get_status(rusqlite::StatementStatus::FullscanStep) as usize));
-        let bytes = groups.0.capacity() * std::mem::size_of::<(String, Vec<WindowId>)>()
-            + groups
-                .0
-                .iter()
-                .map(|(key, ids)| {
-                    key.capacity()
-                        + ids.capacity() * std::mem::size_of::<WindowId>()
-                        + ids
-                            .iter()
-                            .map(|id| match id {
-                                WindowId::Text(id) => id.capacity(),
-                                _ => 0,
-                            })
-                            .sum::<usize>()
-                })
-                .sum::<usize>();
-        Ok((Some(groups), bytes))
+        let selection = super::store::sqlite::Selection::build(
+            "CREATE TABLE windows(ordinal INTEGER PRIMARY KEY,key BLOB,session_id);
+             CREATE INDEX windows_by_key ON windows(key,ordinal);",
+            |index| {
+                let mut insert = index.prepare("INSERT INTO windows(key,session_id) VALUES (?1,?2)")?;
+                // Only the original plain BINARY/TEXT scan uses this index. Preserve its
+                // physical order and native ID types, including malformed UTF-8 text.
+                let mut stmt = conn.prepare("SELECT session_key,session_id FROM session_windows NOT INDEXED")?;
+                let mut rows = stmt.query([])?;
+                while let Some(row) = rows.next()? {
+                    let Ok(key) = row.get_ref(0)?.as_str() else { continue };
+                    let value = row.get_ref(1)?;
+                    if matches!(value, ValueRef::Null) {
+                        continue;
+                    }
+                    insert.execute(rusqlite::params![
+                        key.as_bytes(),
+                        rusqlite::types::ToSqlOutput::Borrowed(value)
+                    ])?;
+                    #[cfg(test)]
+                    SQL_PARENT_ROWS.with(|count| count.set(count.get() + 1));
+                }
+                drop(rows);
+                #[cfg(test)]
+                SQL_PARENT_FULLSCANS.with(|count| {
+                    count.set(count.get() + stmt.get_status(rusqlite::StatementStatus::FullscanStep) as usize)
+                });
+                Ok(())
+            },
+        )?;
+        Ok((Self(selection), super::store::sqlite::Selection::RETAINED_BYTES))
     }
     fn candidates(&self, key: &str, current: &str) -> Result<Vec<String>> {
-        let mut out = Vec::new();
-        for id in self.0.get(key).into_iter().flatten() {
-            match id {
-                WindowId::Text(id) if id != current => out.push(id.clone()),
-                WindowId::Text(_) => {}
-                WindowId::Invalid(kind) => {
-                    return Err(rusqlite::Error::InvalidColumnType(0, "session_id".into(), *kind).into())
-                }
-                WindowId::Utf8(error) => {
-                    return Err(rusqlite::Error::FromSqlConversionFailure(
-                        0,
-                        rusqlite::types::Type::Text,
-                        Box::new(*error),
-                    )
-                    .into())
-                }
-            }
-        }
-        Ok(out)
+        self.0.with(|index| {
+            // No affinity on the copied value: comparing TEXT current preserves the original
+            // TEXT-affinity table's stored values, and get(String) preserves selected errors.
+            let mut stmt =
+                index.prepare("SELECT session_id FROM windows WHERE key=?1 AND session_id!=?2 ORDER BY ordinal")?;
+            let candidates = stmt
+                .query_map(rusqlite::params![key.as_bytes(), current], |row| row.get(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(candidates)
+        })
     }
 }
 #[cfg(feature = "sqlite")]
@@ -877,32 +808,7 @@ fn plain_parent_scan(conn: &rusqlite::Connection, key: &str, current: &str) -> R
     if !plain {
         return Ok(false);
     }
-    use rusqlite::OptionalExtension as _;
-    let ddl = conn
-        .query_row(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='session_windows'",
-            [],
-            |row| row.get::<_, Option<String>>(0),
-        )
-        .optional()?
-        .flatten();
-    let Some(ddl) = ddl else {
-        return Ok(false);
-    };
-    if ddl.to_ascii_uppercase().contains("COLLATE") {
-        return Ok(false);
-    }
-    let columns = conn
-        .prepare("PRAGMA table_info(session_windows)")?
-        .query_map([], |row| Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?)))?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    // Native default TEXT/BINARY comparison matches String equality. Custom affinity or any
-    // explicit collation keeps the original SQL, including its coercion/exclusion behavior.
-    Ok(["session_key", "session_id"].iter().all(|name| {
-        columns
-            .iter()
-            .any(|(column, kind)| column == name && kind.eq_ignore_ascii_case("TEXT"))
-    }))
+    super::store::sqlite::binary_text_columns(conn, "session_windows", &["session_key", "session_id"])
 }
 
 /// [`KeyFacts`] from `session_windows`. The spawner is the window under `spawned_by` — when that key
@@ -977,11 +883,7 @@ fn sqlite_key_facts(
                     let (groups, bytes) = WindowGroups::load(conn)?;
                     Ok((groups, reads.clone(), bytes))
                 })?;
-                if let Some(groups) = groups.as_ref() {
-                    std::sync::Arc::new(groups.candidates(by, session_id)?)
-                } else {
-                    std::sync::Arc::new(load()?)
-                }
+                std::sync::Arc::new(groups.candidates(by, session_id)?)
             } else {
                 // Both SQL parameters determine membership. Rust string equality cannot
                 // decide whether this key includes the current child under custom collations.
@@ -1315,8 +1217,7 @@ fn discover_sqlite(_db: &Path) -> Result<Vec<SessionRef>> {
 /// of every cell, then decodes only the selected ones.
 #[cfg(feature = "sqlite")]
 fn stream_sqlite(r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
-    let conn = open_ro(&r.path)?;
-    conn.read(|conn| {
+    super::store::sqlite::read(&r.path, |conn| {
         // Navigation and payload reads must see the same history: a concurrent leaf update cannot
         // change which rows the second pass emits. A deferred read transaction writes no store data.
         let snapshot = conn.unchecked_transaction()?;
@@ -3187,11 +3088,10 @@ mod tests {
         conn.execute_batch(
             "CREATE TABLE session_windows(session_key TEXT,session_id TEXT);
             INSERT INTO session_windows VALUES ('parent','z'),('parent',NULL),('parent','self'),
-                ('parent','a'),('other',x'01'),('utf8',CAST(x'ff' AS TEXT));",
+                ('parent','a'),('parent','z'),('other',x'01'),('utf8',CAST(x'ff' AS TEXT));",
         )?;
         assert!(plain_parent_scan(&conn, "parent", "self")?);
         let (groups, _) = WindowGroups::load(&conn)?;
-        let groups = groups.expect("small native membership table");
         let oracle = conn
             .prepare("SELECT session_id FROM session_windows WHERE session_key=?1 AND session_id!=?2")?
             .query_map(["parent", "self"], |row| row.get::<_, String>(0))?
@@ -3200,6 +3100,20 @@ mod tests {
         assert!(groups.candidates("missing", "self")?.is_empty());
         assert!(groups.candidates("other", "self").is_err());
         assert!(groups.candidates("utf8", "self").is_err());
+        for key in ["other", "utf8"] {
+            let native = conn
+                .query_row(
+                    "SELECT session_id FROM session_windows WHERE session_key=?1 AND session_id!=?2",
+                    [key, "self"],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap_err();
+            let indexed = groups.candidates(key, "self").unwrap_err();
+            assert_eq!(
+                indexed.downcast_ref::<rusqlite::Error>().unwrap().to_string(),
+                native.to_string()
+            );
+        }
         conn.execute("CREATE INDEX windows_by_key ON session_windows(session_key)", [])?;
         assert!(!plain_parent_scan(&conn, "parent", "self")?);
         for ddl in [
@@ -3212,13 +3126,95 @@ mod tests {
             custom.execute_batch(ddl)?;
             assert!(!plain_parent_scan(&custom, "parent", "self")?, "{ddl}");
         }
-        // Construction stops before copying metadata larger than the operation allowance.
+        // Oversized inventories remain indexed instead of falling back to a scan per key.
         let large = rusqlite::Connection::open_in_memory()?;
         large.execute_batch(
             "CREATE TABLE session_windows(session_key TEXT,session_id TEXT);
             INSERT INTO session_windows VALUES ('parent',printf('%.*c',9*1024*1024,'x'));",
         )?;
-        assert!(WindowGroups::load(&large)?.0.is_none());
+        let (groups, _) = WindowGroups::load(&large)?;
+        assert_eq!(groups.candidates("parent", "self")?[0].len(), 9 * 1024 * 1024);
+        assert!(groups.candidates("missing", "self")?.is_empty());
+        Ok(())
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_large_window_selection_uses_index_and_matches_native_scan() -> Result<()> {
+        use std::time::Instant;
+        let conn = rusqlite::Connection::open_in_memory()?;
+        conn.execute_batch("CREATE TABLE session_windows(session_key TEXT,session_id TEXT)")?;
+        {
+            let mut insert = conn.prepare("INSERT INTO session_windows VALUES (?1,?2)")?;
+            for ordinal in 0..25000 {
+                insert.execute(rusqlite::params![
+                    format!("key-{}", ordinal % 500),
+                    format!("{ordinal}:{}", "x".repeat(512))
+                ])?;
+            }
+        }
+        let start = Instant::now();
+        let (groups, _) = WindowGroups::load(&conn)?;
+        let build = start.elapsed();
+        let mut native_steps = 0;
+        let start = Instant::now();
+        let mut expected = Vec::new();
+        for i in 0..100 {
+            let mut stmt =
+                conn.prepare("SELECT session_id FROM session_windows WHERE session_key=?1 AND session_id!=?2")?;
+            expected.push(
+                stmt.query_map([format!("key-{i}"), "self".into()], |row| row.get::<_, String>(0))?
+                    .collect::<std::result::Result<Vec<_>, _>>()?,
+            );
+            native_steps += stmt.get_status(rusqlite::StatementStatus::FullscanStep);
+        }
+        let native = start.elapsed();
+        let start = Instant::now();
+        for (i, oracle) in expected.iter().enumerate() {
+            assert_eq!(&groups.candidates(&format!("key-{i}"), "self")?, oracle);
+        }
+        let indexed = start.elapsed();
+        let disk_bytes = groups.0.with(|index| {
+            let mut stmt =
+                index.prepare("SELECT session_id FROM windows WHERE key=?1 AND session_id!=?2 ORDER BY ordinal")?;
+            assert_eq!(
+                stmt.query_map(rusqlite::params![b"key-0".as_slice(), "self"], |row| row
+                    .get::<_, String>(0))?
+                    .count(),
+                50
+            );
+            assert_eq!(stmt.get_status(rusqlite::StatementStatus::FullscanStep), 0);
+            Ok(index.query_row(
+                "SELECT page_count*page_size FROM pragma_page_count(),pragma_page_size()",
+                [],
+                |row| row.get::<_, u64>(0),
+            )?)
+        })?;
+        assert!(disk_bytes > 8 * 1024 * 1024);
+        assert_eq!(native_steps, 100 * 24999);
+        let tiny = rusqlite::Connection::open_in_memory()?;
+        tiny.execute_batch("CREATE TABLE session_windows(session_key TEXT,session_id TEXT); INSERT INTO session_windows VALUES ('key','a'),('key','b')")?;
+        let start = Instant::now();
+        let (small, _) = WindowGroups::load(&tiny)?;
+        let tiny_build = start.elapsed();
+        let start = Instant::now();
+        for _ in 0..1000 {
+            assert_eq!(small.candidates("key", "self")?, ["a", "b"]);
+        }
+        let tiny_indexed = start.elapsed();
+        let start = Instant::now();
+        for _ in 0..1000 {
+            let mut stmt =
+                tiny.prepare("SELECT session_id FROM session_windows WHERE session_key=?1 AND session_id!=?2")?;
+            assert_eq!(
+                stmt.query_map(["key", "self"], |row| row.get::<_, String>(0))?
+                    .collect::<std::result::Result<Vec<_>, _>>()?,
+                ["a", "b"]
+            );
+        }
+        let tiny_native = start.elapsed();
+        eprintln!("tiny window selection: rows=2 queries=1000 build={tiny_build:?} native={tiny_native:?} indexed={tiny_indexed:?}");
+        eprintln!("window selection: rows=25000 queries=100 build={build:?} native={native:?} indexed={indexed:?} native_fullscan_steps={native_steps} private_bytes={disk_bytes}");
         Ok(())
     }
 
