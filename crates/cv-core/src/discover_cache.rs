@@ -95,8 +95,7 @@ struct Cache {
 
 /// Bump when discovery changes the interpretation of unchanged source bytes.
 /// 5: 0.18's one bump, covering the `sessions.writer_version` column and the discovery change
-/// that shares it. Version-5 catalogs are never bumped again within 0.18: writer versions of
-/// existing rows are backfilled through [`crate::catalog::WriterVersions`], not by a rescan.
+/// that shares it. Existing NULL observations are filled by normal discovery cache demand.
 #[cfg(feature = "sqlite")]
 pub(crate) const INTERPRETATION_VERSION: u32 = 5;
 /// Every live cache by catalog. Each environment ([`crate::env`]) retains its current catalog's;
@@ -294,7 +293,7 @@ where
             .and_then(|(refs, captured)| captured.includes(&reads).then(|| (refs.clone(), captured.clone())))
     };
     if let Some((refs, captured)) = candidate {
-        if captured.fresh(&mut crate::source::Probe::default()) {
+        if captured.fresh(&mut crate::source::Probe::default()) && !context.needs_writer_observation(&refs) {
             return refs;
         }
     }
@@ -314,7 +313,7 @@ where
             entry.payload.parsed();
             let candidate = admit_loaded(&cache, path, entry, &reads);
             if let Some((refs, captured)) = candidate {
-                if captured.fresh(&mut crate::source::Probe::default()) {
+                if captured.fresh(&mut crate::source::Probe::default()) && !context.needs_writer_observation(&refs) {
                     return refs;
                 }
             }

@@ -827,6 +827,7 @@ const ERROR_PREFIX: &str = "[error] ";
 #[derive(Default)]
 #[cfg_attr(test, derive(Debug, PartialEq))]
 struct CodexScan {
+    writer_version: Option<String>,
     id: String,
     cwd: Option<PathBuf>,
     title: Option<String>,
@@ -894,6 +895,7 @@ impl CodexScan {
                     self.cwd = string(field("cwd")?)?.map(PathBuf::from);
                 }
                 if !self.meta_seen {
+                    self.writer_version = string(field("cli_version")?)?;
                     self.meta_seen = true;
                     self.inherit_before = field("subagent_history_start_ordinal")?
                         .map(JsonView::as_number)
@@ -1125,6 +1127,7 @@ fn scan_rollout(path: &Path, full_scan_cap: u64) -> Result<(SessionRef, Option<R
         updated_at: s.updated_at,
         message_count: s.message_count,
     };
+    crate::discover_cache::read::Context::current().observe_writer(&r, s.writer_version.as_deref());
     Ok((r, decoded))
 }
 

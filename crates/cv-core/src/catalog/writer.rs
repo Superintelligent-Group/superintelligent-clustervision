@@ -62,15 +62,4 @@ impl Writer {
         }
     }
 
-    /// [`super::note_writer_version`] on this owned connection, for a sweep's backfill.
-    pub fn record_writer_version(&mut self, r: &SessionRef, source: &Baseline, version: Option<&str>) {
-        #[cfg(feature = "sqlite")]
-        {
-            super::imp::note_writer_version_in(&mut self.conn, r, source, version);
-        }
-        #[cfg(not(feature = "sqlite"))]
-        {
-            super::note_writer_version(r, source, version);
-        }
-    }
 }
