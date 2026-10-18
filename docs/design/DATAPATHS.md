@@ -97,7 +97,7 @@ Compressed, encoded, scanned, decoded and emitted bytes must be labeled separate
 | Operation | Actual work | Optimization boundary |
 |---|---|---|
 | Warm ls/stats | Catalog probe, metadata rows, sort/filter; query presence shares its source Probe, JSON rendering rechecks metadata in bounded batches | Preserve freshness between phases; measure discovery separately |
-| Full discovery | Metadata projection, validated count reuse and cache/catalog publication; Claude and Grok defer cold counts | Remaining count-only adapter scans must go; exact fallback metadata and validation may still require EOF |
+| Full discovery | Metadata projection, validated count reuse and cache/catalog publication; Claude, Codex and Grok defer cold counts | Remaining count-only adapter scans must go; exact fallback metadata and validation may still require EOF |
 | Text windows / last N | Lazy range or deque, selected messages materialized | Already useful bounds; giant selected output is still output-sized |
 | JSON show / MCP show | CLI show/export stages resolved frames and envelopes in bounded spill storage; EOF metadata retained. MCP stages selected windows | CLI Last retains lazy tail descriptors; owned adapter extras and redaction trees remain; MCP client payload size and subprocess startup |
 | Affordance view | Facts projection into classified rows; checked bounded text summaries | Unprojected adapters retain rich extras; side stores and result rows; escaped validation still traverses the whole field |
@@ -190,8 +190,8 @@ identifies application state, not a claim that the OS page cache was evicted.
 
 ## Open gaps
 
-- **Discovery demands.** Claude and Grok now share classification/lifecycle and defer counts;
-  Codex, Kimi, Kimi Code and Qwen ports remain. Other adapters still count during discovery:
+- **Discovery demands.** Claude, Codex and Grok share classification/lifecycle and defer counts;
+  Kimi, Kimi Code and Qwen ports remain. Other adapters still count during discovery:
   Hermes replays conversations solely for totals; Cursor CLI also uses counted turns to exclude
   empty stores. Preserve inclusion and exact metadata while removing count-only construction.
   Shared SQLite/portable selections now serve OpenClaw, Hermes, Qwen tasks, Goose and exports;
