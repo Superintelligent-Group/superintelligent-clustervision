@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """No builds/network: exercise operating scripts against disposable command mocks."""
 import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -9,6 +10,31 @@ import unittest
 TOOLS = Path(__file__).resolve().parent
 SHA = 'a' * 40
 BASE = 'b' * 40
+
+
+class MacOSCoverage(unittest.TestCase):
+    def test_lifecycle_filters_cover_shared_framing_and_callback_regressions(self):
+        workflow = (TOOLS.parent/'.github/workflows/macos.yml').read_text()
+        commands = [line.strip()[5:] for line in workflow.splitlines()
+                    if line.strip().startswith('run: cargo nextest run')]
+        self.assertEqual(len(commands), 2)
+        callbacks = [
+            'harness::claude::tests::callback_truncation_is_rejected_before_resuming_mapped_records',
+            'harness::codex::tests::callback_truncation_stops_before_resuming_mapped_records',
+            'harness::grok::tests::callback_boundaries_and_held_eof_verify_the_backing',
+        ]
+        # These regex-only nextest expressions use the same regex grammar subset as re.
+        for command in commands:
+            patterns = re.findall(r'test\(/(.+?)/\)', command)
+            self.assertEqual(len(patterns), 2)
+            for name in callbacks + ['source::tests::identity', 'harness::store::jsonl::tests::lifecycle']:
+                self.assertTrue(any(re.search(pattern, name) for pattern in patterns), (command, name))
+            self.assertFalse(any(re.search(pattern, 'harness::gemini::tests::unrelated') for pattern in patterns))
+        self.assertNotIn('--no-default-features', commands[0])
+        self.assertIn('--no-default-features --features sqlite', commands[1])
+        self.assertIn("tags: ['v*-rc*']", workflow)
+        self.assertIn('workflow_dispatch:', workflow)
+        self.assertIn('CLUSTERVISION_HOME=$RUNNER_TEMP/', workflow)
 
 
 class Scripts(unittest.TestCase):
