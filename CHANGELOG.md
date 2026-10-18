@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Grok reads reject source changes during message/checkpoint callbacks, including held reasoning at EOF.
+
 - JSON listings and filtered windows reuse filesystem metadata for shared stores while rechecking presence at rendering.
 - Hermes keeps generation membership in private indexed storage while preserving exact duplicate detection and lazy message bodies.
 

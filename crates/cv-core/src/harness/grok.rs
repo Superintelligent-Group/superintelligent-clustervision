@@ -431,9 +431,12 @@ fn stream_history_at(
             if m.role == Role::Assistant {
                 p.content.append(&mut m.content);
                 m.content = p.content;
-            } else if sink.message(p) == Flow::Stop {
-                stopped = true;
-                return Ok(Flow::Stop);
+            } else {
+                if sink.message(p) == Flow::Stop {
+                    stopped = true;
+                    return Ok(Flow::Stop);
+                }
+                read.check_backing()?;
             }
         }
         if m.model.is_some() && m.model == session_model {
@@ -453,10 +456,16 @@ fn stream_history_at(
             checkpoint.put(crate::stream::ADAPTER_LAYER, &State { wire, skipped });
             sink.checkpoint(&mut checkpoint);
         }
+        if !stopped {
+            // Record decoding is finished; guard the callback group before mapped iteration.
+            read.check_backing()?;
+        }
         Ok(flow)
     })?;
     if let (Some(p), false) = (pending, stopped) {
         sink.message(p);
+        // Held reasoning is delivered after lines() already performed its completion check.
+        read.check()?;
     }
     super::note_skipped_lines(&mut s, skipped);
     Ok(Some(s))
@@ -909,6 +918,189 @@ mod tests {
 
     use super::*;
     use crate::harness::Parse;
+
+    #[cfg(unix)]
+    #[test]
+    fn callback_boundaries_and_held_eof_verify_the_backing() {
+        const CHILD: &str = "CV_TEST_GROK_CALLBACK_BACKING";
+        if std::env::var_os(CHILD).is_none() {
+            use std::os::unix::process::CommandExt;
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "harness::grok::tests::callback_boundaries_and_held_eof_verify_the_backing",
+                ])
+                .env(CHILD, "1");
+            // A regressed mapped read may fail in the child, never in the shared runner.
+            unsafe {
+                command.pre_exec(|| {
+                    let limit = libc::rlimit {
+                        rlim_cur: 0,
+                        rlim_max: 0,
+                    };
+                    if libc::setrlimit(libc::RLIMIT_CORE, &limit) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+            let mut child = command.spawn().unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    assert!(status.success(), "Grok callback child {} failed: {status}", child.id());
+                    return;
+                }
+                if std::time::Instant::now() >= deadline {
+                    child.kill().unwrap();
+                    let _ = child.wait();
+                    panic!("Grok callback child {} timed out", child.id());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+        eprintln!("GROK_CALLBACK_CHILD pid={}", std::process::id());
+        struct Callback {
+            wire: PathBuf,
+            stage: &'static str,
+            action: &'static str,
+            stop: bool,
+            calls: usize,
+            checkpoints: usize,
+            changed: bool,
+            first: Option<Message>,
+        }
+        impl Callback {
+            fn change(&mut self, stage: &str) {
+                if self.stage == stage && !self.changed {
+                    match self.action {
+                        "truncate" => fs::OpenOptions::new()
+                            .write(true)
+                            .open(&self.wire)
+                            .unwrap()
+                            .set_len(0)
+                            .unwrap(),
+                        "delete" => fs::remove_file(&self.wire).unwrap(),
+                        _ => return,
+                    }
+                    self.changed = true;
+                }
+            }
+        }
+        impl MessageSink for Callback {
+            fn message(&mut self, message: Message) -> Flow {
+                self.calls += 1;
+                if self.first.is_none() {
+                    self.first = Some(message);
+                }
+                self.change("message");
+                if self.stop {
+                    Flow::Stop
+                } else {
+                    Flow::Continue
+                }
+            }
+            fn wants_checkpoint(&mut self, _: u64) -> bool {
+                self.change("wants");
+                self.stage == "checkpoint"
+            }
+            fn checkpoint(&mut self, _: &mut Checkpoint) {
+                self.checkpoints += 1;
+                self.change("checkpoint");
+            }
+        }
+        let world = crate::test_world("grok-callback-boundaries");
+        let home = world.home.join(".grok");
+        let dir = home.join("sessions/group/scratch");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("summary.json"),
+            r#"{"info":{"id":"scratch","cwd":"/synthetic"}}"#,
+        )
+        .unwrap();
+        let wire = dir.join("chat_history.jsonl");
+        let reference = SessionRef::new("scratch", Harness::Grok, &dir);
+        let adapter = Grok::with_home(&home);
+        let reasoning =
+            "{\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"held reasoning\"}]}\n";
+        let user = serde_json::json!({"type":"user","content":"owned ".repeat(1000)});
+        let turns = format!("{user}\n{}", "{\"type\":\"user\",\"content\":\"tail\"}\n".repeat(999));
+        // EOF first gives a non-crashing independent refutation on an unguarded baseline.
+        for stage in ["eof", "pending", "message", "wants", "checkpoint"] {
+            let bytes = match stage {
+                "eof" => reasoning.to_owned(),
+                "pending" => format!("{reasoning}{turns}"),
+                _ => turns.clone(),
+            };
+            for lazy in [false, true] {
+                for action in ["unchanged", "truncate", "delete"] {
+                    if action == "delete" && stage != "eof" {
+                        continue;
+                    }
+                    for stop in [false, true] {
+                        if stop && matches!(stage, "wants" | "checkpoint") {
+                            continue;
+                        }
+                        fs::write(&wire, &bytes).unwrap();
+                        let mut sink = Callback {
+                            wire: wire.clone(),
+                            stage: if matches!(stage, "eof" | "pending") {
+                                "message"
+                            } else {
+                                stage
+                            },
+                            action,
+                            stop,
+                            calls: 0,
+                            checkpoints: 0,
+                            changed: false,
+                            first: None,
+                        };
+                        let opts = if lazy {
+                            ParseOptions::lazy()
+                        } else {
+                            ParseOptions::full()
+                        };
+                        let result = adapter.try_stream(&reference, &opts, &mut sink);
+                        assert_eq!(
+                            result.is_err(),
+                            sink.changed,
+                            "stage={stage},lazy={lazy},action={action},stop={stop}"
+                        );
+                        if sink.changed || stop {
+                            assert_eq!(
+                                sink.calls, 1,
+                                "do not deliver another record after invalidation or Stop"
+                            );
+                        } else {
+                            assert_eq!(
+                                sink.calls,
+                                match stage {
+                                    "eof" => 1,
+                                    "pending" => 1001,
+                                    _ => 1000,
+                                }
+                            );
+                        }
+                        assert_eq!(sink.checkpoints > 0, stage == "checkpoint");
+                        if action == "unchanged" {
+                            assert_eq!(fs::read(&wire).unwrap(), bytes.as_bytes());
+                        }
+                        if !lazy && stage == "message" {
+                            let Block::Text {
+                                text: Text::Inline(text),
+                            } = &sink.first.as_ref().unwrap().content[0]
+                            else {
+                                panic!("owned text")
+                            };
+                            assert_eq!(text, &"owned ".repeat(1000));
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn cheap_discovery_summary_title_never_opens_the_transcript() -> Result<()> {
