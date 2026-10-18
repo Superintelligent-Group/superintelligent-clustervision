@@ -61,5 +61,4 @@ impl Writer {
             counted.record_with_source(r, source);
         }
     }
-
 }

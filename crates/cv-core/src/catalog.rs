@@ -392,8 +392,13 @@ mod imp {
         let Some(mut conn) = open() else { return };
         let Ok(tx) = conn.transaction() else { return };
         if insert_refs(&tx, refs).is_ok()
-            && refs.iter().map(|r| r.harness).collect::<HashSet<_>>().into_iter()
-                .all(|h| publish_writer_versions(&tx, h).is_ok()) {
+            && refs
+                .iter()
+                .map(|r| r.harness)
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .all(|h| publish_writer_versions(&tx, h).is_ok())
+        {
             let _ = tx.commit();
         }
     }
@@ -942,14 +947,20 @@ mod imp {
     /// Apply observations collected by existing discovery reads, under the publication's writer lock.
     fn publish_writer_versions(tx: &rusqlite::Transaction, h: Harness) -> rusqlite::Result<()> {
         for (id, path, version) in crate::discover_cache::read::Context::current().writer_versions(h) {
-            let old: Option<String> = tx.query_row(
-                "SELECT writer_version FROM sessions WHERE harness=?1 AND id=?2 AND path=?3",
-                params![h.as_str(), id, path], |row| row.get(0),
-            ).optional()?.flatten();
+            let old: Option<String> = tx
+                .query_row(
+                    "SELECT writer_version FROM sessions WHERE harness=?1 AND id=?2 AND path=?3",
+                    params![h.as_str(), id, path],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .flatten();
             let mut newest = old;
             crate::writer_version::observe(&mut newest, version.as_deref());
-            tx.execute("UPDATE sessions SET writer_version=?4 WHERE harness=?1 AND id=?2 AND path=?3",
-                params![h.as_str(), id, path, newest.as_deref().unwrap_or("")])?;
+            tx.execute(
+                "UPDATE sessions SET writer_version=?4 WHERE harness=?1 AND id=?2 AND path=?3",
+                params![h.as_str(), id, path, newest.as_deref().unwrap_or("")],
+            )?;
         }
         Ok(())
     }
@@ -959,8 +970,16 @@ mod imp {
     pub fn writer_versions() -> Vec<crate::writer_version::Observed> {
         let mut result = crate::writer_version::empty_observations();
         let Some(conn) = open() else { return result };
-        let Ok(mut stmt) = conn.prepare("SELECT harness,writer_version FROM sessions WHERE harness IN ('claude','codex')") else { return result };
-        let Ok(rows) = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))) else { return result };
+        let Ok(mut stmt) =
+            conn.prepare("SELECT harness,writer_version FROM sessions WHERE harness IN ('claude','codex')")
+        else {
+            return result;
+        };
+        let Ok(rows) = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        }) else {
+            return result;
+        };
         for (h, version) in rows.flatten() {
             if let Some(observed) = result.iter_mut().find(|o| o.harness == h) {
                 observed.sessions += 1;
@@ -1808,9 +1827,7 @@ pub(crate) enum Watched {
 }
 
 #[cfg(feature = "sqlite")]
-pub use imp::{
-    fill_count, lookup, note_affordances_with_source, sync, writer_versions, AffordanceTable,
-};
+pub use imp::{fill_count, lookup, note_affordances_with_source, sync, writer_versions, AffordanceTable};
 
 #[cfg(all(feature = "sqlite", test))]
 pub(crate) use imp::replace_harness;

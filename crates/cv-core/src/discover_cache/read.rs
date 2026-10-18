@@ -73,9 +73,9 @@ impl Context {
         let cell = OnceLock::new();
         let _ = cell.set(Some(connection));
         Self(Arc::new(Owner {
-                writer_versions: Default::default(),
-                #[cfg(feature = "sqlite")]
-                unobserved: OnceLock::new(),
+            writer_versions: Default::default(),
+            #[cfg(feature = "sqlite")]
+            unobserved: OnceLock::new(),
             path,
             connection: cell,
             cache: std::sync::OnceLock::new(),
@@ -95,7 +95,11 @@ impl Context {
     }
     #[cfg(feature = "sqlite")]
     pub(crate) fn writer_versions(&self, harness: crate::Harness) -> Vec<(String, String, Option<String>)> {
-        self.0.writer_versions.lock().unwrap().iter()
+        self.0
+            .writer_versions
+            .lock()
+            .unwrap()
+            .iter()
             .filter(|((h, _, _), _)| *h == harness)
             .map(|((_, id, path), version)| (id.clone(), path.to_string_lossy().into_owned(), version.clone()))
             .collect()
@@ -117,7 +121,10 @@ impl Context {
             })
         }
         #[cfg(not(feature = "sqlite"))]
-        { let _ = refs; false }
+        {
+            let _ = refs;
+            false
+        }
     }
     pub(crate) fn path(&self) -> PathBuf {
         self.0.path.clone()

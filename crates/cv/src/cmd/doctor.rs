@@ -207,15 +207,33 @@ fn print_report(rep: &Report, label: &str, n_targets: usize) {
 
 /// Render only catalog knowledge. This helper never resolves or probes source paths.
 fn writer_versions_line(observations: Vec<cv_core::writer_version::Observed>) -> String {
-    let rows: Vec<_> = observations.into_iter().map(|o| {
-        let verified = cv_core::writer_version::VERIFIED.iter().find(|(h, _)| *h == o.harness).unwrap().1;
-        let status = match o.newest.as_deref().and_then(|v| cv_core::writer_version::compare(v, verified)) {
-            Some(std::cmp::Ordering::Greater) => " · newer than verified",
-            _ => "",
-        };
-        format!("{} observed {} / verified {}{} ({} unknown of {})", o.harness,
-            o.newest.as_deref().unwrap_or("unknown"), verified, status, o.unknown, o.sessions)
-    }).collect();
+    let rows: Vec<_> = observations
+        .into_iter()
+        .map(|o| {
+            let verified = cv_core::writer_version::VERIFIED
+                .iter()
+                .find(|(h, _)| *h == o.harness)
+                .unwrap()
+                .1;
+            let status = match o
+                .newest
+                .as_deref()
+                .and_then(|v| cv_core::writer_version::compare(v, verified))
+            {
+                Some(std::cmp::Ordering::Greater) => " · newer than verified",
+                _ => "",
+            };
+            format!(
+                "{} observed {} / verified {}{} ({} unknown of {})",
+                o.harness,
+                o.newest.as_deref().unwrap_or("unknown"),
+                verified,
+                status,
+                o.unknown,
+                o.sessions
+            )
+        })
+        .collect();
     format!("Writer versions: {}", rows.join("; "))
 }
 
@@ -224,11 +242,20 @@ mod writer_version_tests {
     use super::*;
     #[test]
     fn catalog_knowledge_and_unknown_coverage() {
-        let line = writer_versions_line(vec![cv_core::writer_version::Observed {
-            harness: "claude", newest: Some("2.10.0".into()), sessions: 5, unknown: 2,
-        }, cv_core::writer_version::Observed {
-            harness: "codex", newest: None, sessions: 0, unknown: 0,
-        }]);
+        let line = writer_versions_line(vec![
+            cv_core::writer_version::Observed {
+                harness: "claude",
+                newest: Some("2.10.0".into()),
+                sessions: 5,
+                unknown: 2,
+            },
+            cv_core::writer_version::Observed {
+                harness: "codex",
+                newest: None,
+                sessions: 0,
+                unknown: 0,
+            },
+        ]);
         assert!(line.contains("newer than verified"));
         assert!(line.contains("2 unknown of 5"));
         assert!(line.contains("codex observed unknown"));

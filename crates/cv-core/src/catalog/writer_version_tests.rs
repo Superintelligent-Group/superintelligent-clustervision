@@ -6,13 +6,20 @@ fn session(w: &std::path::Path, id: &str) -> SessionRef {
     SessionRef::new(id, Harness::Claude, w.join(format!("{id}.jsonl")))
 }
 fn column(r: &SessionRef) -> Option<String> {
-    open_db().unwrap().query_row(
-        "SELECT writer_version FROM sessions WHERE harness=?1 AND id=?2 AND path=?3",
-        params![r.harness.as_str(), r.id, r.path.to_string_lossy()], |row| row.get(0),
-    ).unwrap()
+    open_db()
+        .unwrap()
+        .query_row(
+            "SELECT writer_version FROM sessions WHERE harness=?1 AND id=?2 AND path=?3",
+            params![r.harness.as_str(), r.id, r.path.to_string_lossy()],
+            |row| row.get(0),
+        )
+        .unwrap()
 }
 fn observe(context: &Context, r: &SessionRef, version: Option<&str>) {
-    context.run(|| { context.observe_writer(r, version); sync(std::slice::from_ref(r)); });
+    context.run(|| {
+        context.observe_writer(r, version);
+        sync(std::slice::from_ref(r));
+    });
 }
 
 #[test]
@@ -28,7 +35,8 @@ fn observations_are_monotonic_retained_and_do_not_read_sources() {
     // Independent operation, as with concurrent/older discovery publishing after a newer one.
     observe(&Context::current(), &r, Some("2.9.0"));
     observe(&Context::current(), &r, None);
-    let mut retitled = r.clone(); retitled.title = Some("changed".into());
+    let mut retitled = r.clone();
+    retitled.title = Some("changed".into());
     replace_harness(Harness::Claude, &[retitled, other.clone()], &[], &Default::default());
     assert_eq!(column(&r).as_deref(), Some("2.10.0"));
     let summary = writer_versions();
@@ -58,15 +66,29 @@ fn old_catalog_migrates_once_and_normal_publication_observes() {
     let w = crate::test_world("writer-migration");
     let r = session(&w.base, "old");
     let conn = Connection::open(db_path().unwrap()).unwrap();
-    conn.execute_batch("CREATE TABLE sessions(harness TEXT NOT NULL,id TEXT NOT NULL,path TEXT NOT NULL,cwd TEXT,
+    conn.execute_batch(
+        "CREATE TABLE sessions(harness TEXT NOT NULL,id TEXT NOT NULL,path TEXT NOT NULL,cwd TEXT,
         title TEXT,created_at INTEGER,updated_at INTEGER,message_count INTEGER,PRIMARY KEY(harness,id,path));
         CREATE TABLE catalog_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
-        INSERT INTO catalog_meta VALUES('discovery_version','4');").unwrap();
-    conn.execute("INSERT INTO sessions(harness,id,path) VALUES('claude','old',?1)", [r.path.to_string_lossy()]).unwrap();
+        INSERT INTO catalog_meta VALUES('discovery_version','4');",
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO sessions(harness,id,path) VALUES('claude','old',?1)",
+        [r.path.to_string_lossy()],
+    )
+    .unwrap();
     drop(conn);
     observe(&Context::current(), &r, Some("2.1.296"));
     assert_eq!(column(&r).as_deref(), Some("2.1.296"));
-    let stored: String = open_db().unwrap().query_row("SELECT value FROM catalog_meta WHERE key='discovery_version'", [], |r| r.get(0)).unwrap();
+    let stored: String = open_db()
+        .unwrap()
+        .query_row(
+            "SELECT value FROM catalog_meta WHERE key='discovery_version'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(stored, "5");
 }
 
@@ -76,7 +98,11 @@ fn discovery_observes_newest_claude_tail_and_canonical_codex_meta() {
     let claude = w.base.join("claude/projects/project");
     std::fs::create_dir_all(&claude).unwrap();
     let path = claude.join("c.jsonl");
-    std::fs::write(&path, "{\"type\":\"user\",\"version\":\"2.9.0\"}\n{\"type\":\"user\",\"version\":\"2.10.0\"}\n").unwrap();
+    std::fs::write(
+        &path,
+        "{\"type\":\"user\",\"version\":\"2.9.0\"}\n{\"type\":\"user\",\"version\":\"2.10.0\"}\n",
+    )
+    .unwrap();
     let context = Context::current();
     context.run(|| {
         use crate::harness::Adapter;
@@ -86,7 +112,8 @@ fn discovery_observes_newest_claude_tail_and_canonical_codex_meta() {
         sync(&refs);
         assert_eq!(column(&refs[0]).as_deref(), Some("2.10.0"));
     });
-    let codex = w.base.join("codex/sessions"); std::fs::create_dir_all(&codex).unwrap();
+    let codex = w.base.join("codex/sessions");
+    std::fs::create_dir_all(&codex).unwrap();
     let path = codex.join("rollout-x.jsonl");
     std::fs::write(&path, "{\"type\":\"session_meta\",\"payload\":{\"id\":\"child\",\"cli_version\":\"0.162.1\"}}\n{\"type\":\"session_meta\",\"payload\":{\"id\":\"parent\",\"cli_version\":\"9.0.0\"}}\n").unwrap();
     Context::current().run(|| {
@@ -96,4 +123,65 @@ fn discovery_observes_newest_claude_tail_and_canonical_codex_meta() {
         sync(&refs);
         assert_eq!(column(&refs[0]).as_deref(), Some("0.162.1"));
     });
+}
+
+#[test]
+fn cached_null_observation_refills_on_discovery_without_another_bump() {
+    let w = crate::test_world("writer-cached-null");
+    let projects = w.base.join("projects");
+    std::fs::create_dir_all(projects.join("p")).unwrap();
+    let path = projects.join("p/c.jsonl");
+    std::fs::write(&path, "{\"type\":\"user\",\"version\":\"2.1.296\"}\n").unwrap();
+    let discover = || {
+        use crate::harness::Adapter;
+        crate::harness::claude::Claude::with_config_dir(&projects).discover().unwrap()
+    };
+    let refs = Context::current().run(|| {
+        let refs = discover();
+        sync(&refs);
+        crate::discover_cache::persist(false);
+        refs
+    });
+    open_db().unwrap().execute("UPDATE sessions SET writer_version=NULL", []).unwrap();
+    let refill = Context::current();
+    refill.run(|| {
+        sync(&discover());
+        assert_eq!(refill.writer_versions(Harness::Claude).len(), 1, "cached NULL must demand the reducer");
+        crate::discover_cache::persist(false);
+    });
+    assert_eq!(column(&refs[0]).as_deref(), Some("2.1.296"));
+    let settled = Context::current();
+    settled.run(|| {
+        sync(&discover());
+        assert!(settled.writer_versions(Harness::Claude).is_empty(), "settled cache hit makes no observation");
+    });
+    // The metadata continuation retains its previous maximum and folds a newer appended writer.
+    use std::io::Write;
+    writeln!(std::fs::OpenOptions::new().append(true).open(path).unwrap(), "{{\"type\":\"user\",\"version\":\"2.2.0\"}}").unwrap();
+    Context::current().run(|| { sync(&discover()); });
+    assert_eq!(column(&refs[0]).as_deref(), Some("2.2.0"));
+}
+
+#[cfg(unix)]
+#[test]
+fn read_only_catalog_serves_observations_and_drops_publication() {
+    use std::os::unix::fs::PermissionsExt;
+    let w = crate::test_world("writer-read-only");
+    let r = session(&w.base, "recorded");
+    observe(&Context::current(), &r, Some("2.1.296"));
+    let modes: Vec<_> = std::fs::read_dir(&w.cv_home).unwrap().map(|e| {
+        let path = e.unwrap().path();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+        (path, mode)
+    }).collect();
+    std::fs::set_permissions(&w.cv_home, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let result = std::panic::catch_unwind(|| {
+        assert_eq!(writer_versions()[0].newest.as_deref(), Some("2.1.296"));
+        observe(&Context::current(), &r, Some("9.0.0"));
+        assert_eq!(writer_versions()[0].newest.as_deref(), Some("2.1.296"));
+    });
+    std::fs::set_permissions(&w.cv_home, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for (path, mode) in modes { std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap(); }
+    result.unwrap();
 }
