@@ -3,7 +3,8 @@
 "Never materialize" was built as extra decoders beside each adapter's owned one (Claude had
 five: owned Value, typed borrowed, positioned "portable", lean, facts), plus parity tests that
 those paths agree. The rule now: **a wire format has one decoder, parameterized by demand; a
-build differs only in its byte source.** Every family is on it as of 0.17.
+build differs only in its byte source.** Discovery must share that classification too; remaining
+count-only scans are tracked in [`DATAPATHS.md`](DATAPATHS.md).
 
 **Byte source.** `store::jsonl::for_each_line(source, file, from, to, visit)` yields each
 physical line once as a `Line { at, end, complete, view }`, with `view: Option<JsonView>` (None
@@ -21,19 +22,20 @@ be skipped in O(1); an evicted endpoint can require rescanning. Lines are trimme
 (`Fields::parse`), then resolves only what the demand asks for: `ParseOptions` plus the sink's
 `extra_projection`. Content goes through the family's block codec (`wire::anthropic::
 block_from_view_with`) with the shared text rule `JsonView::lazy_text(spans)`: decoded length
-over `INLINE_MAX` stays in the source (a `Span` when mapped, a checked `Text::Source` when
-positioned), tool arguments over `INLINE_MAX` become `Json::Source`. Lean, facts, usage, rich and
+over `INLINE_MAX` stays in the source: primary transcript text uses `Span` in both builds;
+independent files, cells and decoded backing use checked `Text::Source`. Large tool arguments
+become `Json::Source`. Lean, facts, usage, rich and
 complete are which fields get resolved, never which code runs. Discovery, fork heads and
 prefix counts are demands on the same reader. The driver rechecks source identity after a
-record that published a source descriptor and once at the end, never per record; the identity is
+record that published a source descriptor and at completion; the identity is
 `source::FileId`, and a `.jsonl` that grew under the read is admitted by content
 (`FileId::admits`: same inode, at least as long, sampled prefix unchanged), with the trailing
 partial line held back. Every span a reader hands out resolves through one checked resolver in
 `lazy`, so a replaced or shrunk file fails the first content read instead of returning the
 replacement's bytes.
 
-**Heap budgets by construction.** Nothing unselected is decoded, so a reducer's heap is the
-fields it reads; a giant line is never copied on positioned builds; spans and source arguments
+**Heap budgets by construction.** Materialization follows demand, while validation can still
+traverse unselected bytes. A reducer retains the fields it reads; a giant line is never copied on positioned builds; spans and source arguments
 defer payloads to the consumer. The CI heap gate (`check-heap-budget.py`, both builds) and the
 operation gates stay the proof. Still owned, and so still output-sized: complete-mode carriers
 and metadata, rich `toolUseResult` sidecars, array tool results under 64 KiB (coerced inline).
@@ -42,9 +44,9 @@ and metadata, rich `toolUseResult` sidecars, array tool results under 64 KiB (co
 gate, plus behavior tests where the rule lives (classification, checkpoints and resume,
 source-change rejection, offset stamps). Shared primitives (`validate_value`, the streaming
 classifiers) are tested against simple oracles. No test compares two decoders: there are none.
-A port is checked once, before deleting the old paths, with a scratch dump of every message
-(span descriptors included), checkpoint and session over real sessions in every demand,
-byte-identical before and after; that tool is not committed.
+Before deleting an old path, compare hashes of canonical outputs, resolved payloads, checkpoints
+and session metadata against an independent baseline over recorded sessions in each affected
+demand. Stream hashes rather than retaining transcript dumps; diagnostic tools stay uncommitted.
 
 **Byte sources by family.** JSONL (Claude, the OpenAI family, Gemini's jsonl era): `for_each_line`.
 JSON documents (Gemini's document era, cline, roo, cline_sdk, lmstudio, opensession, the exports):
@@ -53,7 +55,7 @@ points. SQLite stores (opencode, cursor, devin, goose, zed, openclaw, hermes): `
 each cell copied once into the source's arena, validated once, then viewed. `codex`, `cursor` and
 `goose` `legacy` modules are readers of older formats, not oracles. Test-only legacy emitters are
 retired to frozen goldens (`tests/fixtures/emit-frozen/`, `Frozen` in `emit/grok_qwen_tests.rs`).
-A change whose dump differs must explain each difference in its commit; the ports' are in git.
+A change whose output differs must explain each difference in its commit.
 
 **Writing shared wire formats.** Anthropic blocks use one grammar with explicit leaf publication:
 checked streams resolve source text; the public owned API preserves Span descriptors and resolves
@@ -61,3 +63,12 @@ Source text. Only callers requesting an owned Value buffer that value. Qwen and 
 GenAI part selection and text/media fields, preserving their native malformed-field qualification;
 consumer-specific tool IDs, wrappers, signatures and demand remain in the adapters. Independent
 frozen outputs check both contracts without retaining a second production codec.
+
+**Store selections.** `store::sqlite::read` brackets an operation with the existing descriptor
+and native read-set checks. Private `Selection` databases hold derived membership, never write
+the native store, and belong to its operation inventory. OpenClaw promotes from native SQL
+after another query cache miss; Hermes indexes normalized digests and confirms collisions by
+exact source comparison. Native ordering, affinities and collations remain authoritative.
+Portable `selection::Positions` indexes Qwen task times and export IDs without copying payloads.
+Goose retains its already indexed scalar family selection. Page-cache settings and inventory
+admission charges do not bound individual SQLite cells or demanded candidate vectors.
