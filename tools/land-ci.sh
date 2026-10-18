@@ -4,7 +4,7 @@
 # Requires gh authentication, Python 3, and a clean candidate already on origin.
 set -euo pipefail
 fail() { echo "land-ci: $*" >&2; exit 1; }
-[[ $# == 1 ]] || fail 'usage: land-ci.sh <origin-branch> '
+[[ $# == 1 ]] || fail 'usage: land-ci.sh <origin-branch>'
 branch=$1 workflow=ci.yml
 git check-ref-format "refs/heads/$branch" >/dev/null || fail 'invalid branch'
 [[ $branch != main ]] || fail 'candidate must be a separate branch'

@@ -195,6 +195,20 @@ class CompatibilityCache(unittest.TestCase):
             self.assertEqual(len(caches), 1)
             baseline = caches[0]/'baseline'
             self.assertTrue((caches[0]/'owner').is_file())
+            receipt = caches[0]/'owner'
+            identity = receipt.read_text()
+            receipt.write_text('another owner')
+            result = run()
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn('unowned or mismatched', result.stdout)
+            receipt.write_text(identity)
+            lock = caches[0]/'lock'
+            lock.mkdir()
+            result = run()
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn('cache busy', result.stdout)
+            self.assertTrue(lock.exists())
+            lock.rmdir()
             (baseline/'crates/cv-core/examples/compatibility_probe.rs').write_text('other session changed this')
             result = run()
             self.assertNotEqual(result.returncode, 0, result.stdout)

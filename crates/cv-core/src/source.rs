@@ -219,8 +219,7 @@ struct Records {
     reads: Option<Vec<Entry>>,
 }
 
-/// The one format version of stamps and stored records; older ones reread once.
-// 0.18 interpretation migration: native hook events and corrected affordance counts.
+/// Shared 0.18 interpretation version (native events/counts); older stamps reread once.
 const VERSION: u32 = 5;
 
 /// A canonical record string. Loaded baselines remain strings instead of allocating each path
