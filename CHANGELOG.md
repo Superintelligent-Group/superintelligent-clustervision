@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Kimi Code listings use complete native state metadata directly and defer exact counts; incomplete metadata retains transcript-derived titles and timestamps.
+- Kimi Code reads detect callback source changes before continuing a new step or completing an unfinished one.
+
 - Kimi listings use native titles or stop at the first fallback prompt; exact counts come from complete reads or indexing.
 - Kimi reads reject callback changes to captured transcripts and wire enrichment, including final messages from older rotated segments.
 
