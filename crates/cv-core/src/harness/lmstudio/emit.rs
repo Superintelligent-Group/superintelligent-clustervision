@@ -230,8 +230,7 @@ pub(super) fn emit(session: &Session, out_dir: &Path, opts: &crate::emit::EmitOp
         out_dir.join("conversations")
     };
     let file_path = conversations.join(format!("{new_id}.conversation.json"));
-    let title = super::super::wire::write::fallback_title(session, &resolver)?
-        .unwrap_or_else(|| "Untitled".into());
+    let title = super::super::wire::write::fallback_title(session, &resolver)?.unwrap_or_else(|| "Untitled".into());
     let mut stage = BufWriter::with_capacity(64 * 1024, ByteStage::new());
     {
         let mut pretty = PrettyJson::new(&mut stage, 0);

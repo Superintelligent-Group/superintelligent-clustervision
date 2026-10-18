@@ -1182,7 +1182,8 @@ impl<'a> Ctx<'a> {
         }
         let mut message = Message::of_kind(Role::Tool, MessageKind::ToolResult, Origin::Harness);
         if !self.native_subagents && matches!(self.call_names.get(&id).map(String::as_str), Some("Agent" | "AgentSwarm")) {
-            let head = content.try_resolve_prefix(&crate::lazy::Resolver::new(None), crate::ir::TITLE_HEAD)?;
+            let resolver = crate::lazy::Resolver::new(None);
+            let head = content.try_resolve_prefix(&resolver, crate::ir::TITLE_HEAD)?;
             let header = head.split("\n\n").next().unwrap_or("");
             if header.starts_with("agent_id:") && header.lines().any(|line| matches!(line, "status: completed" | "status: failed")) {
                 message.kind = MessageKind::SubagentReturn;
