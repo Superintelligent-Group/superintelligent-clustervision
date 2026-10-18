@@ -811,6 +811,82 @@ fn plain_parent_scan(conn: &rusqlite::Connection, key: &str, current: &str) -> R
     super::store::sqlite::binary_text_columns(conn, "session_windows", &["session_key", "session_id"])
 }
 
+#[cfg(feature = "sqlite")]
+fn sqlite_parent_candidates(
+    conn: &rusqlite::Connection,
+    by: &str,
+    session_id: &str,
+    path: &Path,
+    reads: &crate::source::ReadSet,
+) -> Result<std::sync::Arc<Vec<String>>> {
+    let load = || -> Result<Vec<String>> {
+        let mut stmt =
+            conn.prepare("SELECT session_id FROM session_windows WHERE session_key=?1 AND session_id!=?2")?;
+        let candidates = stmt
+            .query_map([by, session_id], |row| {
+                #[cfg(test)]
+                SQL_PARENT_ROWS.with(|count| count.set(count.get() + 1));
+                row.get(0)
+            })?
+            .collect::<std::result::Result<Vec<String>, _>>()?;
+        #[cfg(test)]
+        SQL_PARENT_FULLSCANS
+            .with(|count| count.set(count.get() + stmt.get_status(rusqlite::StatementStatus::FullscanStep) as usize));
+        Ok(candidates)
+    };
+    // Query plans can vary by parameter with SQLite statistics. Check the actual key's
+    // plan rather than applying one plain scan's traversal order to an indexed key.
+    let candidates = {
+        let mut encoded_plan_key = String::with_capacity(by.len() * 2);
+        use std::fmt::Write as _;
+        for byte in by.as_bytes() {
+            write!(&mut encoded_plan_key, "{byte:02x}")?;
+        }
+        encoded_plan_key.push(':');
+        for byte in session_id.as_bytes() {
+            write!(&mut encoded_plan_key, "{byte:02x}")?;
+        }
+        let (plain, _) =
+            crate::source::inventory("openclaw-parent-plan", &path.join(&encoded_plan_key), reads, || {
+                Ok((
+                    plain_parent_scan(conn, by, session_id)?,
+                    reads.clone(),
+                    std::mem::size_of::<bool>(),
+                ))
+            })?;
+        // The operation already memoizes complete query results. Only a second cache
+        // miss needs a whole-store index; a single-window scope keeps native startup cost.
+        crate::source::inventory("openclaw-parent-windows", &path.join(&encoded_plan_key), reads, || {
+            let candidates = if *plain && crate::source::inventory_scoped() {
+                let (queried, _) = crate::source::inventory("openclaw-window-queried", path, reads, || {
+                    Ok((
+                        std::sync::atomic::AtomicBool::new(false),
+                        reads.clone(),
+                        std::mem::size_of::<std::sync::atomic::AtomicBool>(),
+                    ))
+                })?;
+                if queried.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    let (groups, _) = crate::source::inventory("openclaw-window-groups", path, reads, || {
+                        let (groups, bytes) = WindowGroups::load(conn)?;
+                        Ok((groups, reads.clone(), bytes))
+                    })?;
+                    groups.candidates(by, session_id)?
+                } else {
+                    load()?
+                }
+            } else {
+                // Both SQL parameters determine membership under custom collations.
+                load()?
+            };
+            let bytes = candidates.capacity() * std::mem::size_of::<String>()
+                + candidates.iter().map(String::capacity).sum::<usize>();
+            Ok((candidates, reads.clone(), bytes))
+        })?
+        .0
+    };
+    Ok(candidates)
+}
+
 /// [`KeyFacts`] from `session_windows`. The spawner is the window under `spawned_by` — when that key
 /// has several windows (resets, rollovers), the one whose transcript records this session's key as `childSessionKey`.
 #[cfg(feature = "sqlite")]
@@ -842,60 +918,7 @@ fn sqlite_key_facts(
     };
     let mut parent = None;
     if let Some(by) = &spawned_by {
-        let load = || -> Result<Vec<String>> {
-            let mut stmt =
-                conn.prepare("SELECT session_id FROM session_windows WHERE session_key=?1 AND session_id!=?2")?;
-            let candidates = stmt
-                .query_map([by.as_str(), session_id], |row| {
-                    #[cfg(test)]
-                    SQL_PARENT_ROWS.with(|count| count.set(count.get() + 1));
-                    row.get(0)
-                })?
-                .collect::<std::result::Result<Vec<String>, _>>()?;
-            #[cfg(test)]
-            SQL_PARENT_FULLSCANS.with(|count| {
-                count.set(count.get() + stmt.get_status(rusqlite::StatementStatus::FullscanStep) as usize)
-            });
-            Ok(candidates)
-        };
-        // Query plans can vary by parameter with SQLite statistics. Check the actual key's
-        // plan rather than applying one plain scan's traversal order to an indexed key.
-        let candidates = {
-            let mut encoded_plan_key = String::with_capacity(by.len() * 2);
-            use std::fmt::Write as _;
-            for byte in by.as_bytes() {
-                write!(&mut encoded_plan_key, "{byte:02x}")?;
-            }
-            encoded_plan_key.push(':');
-            for byte in session_id.as_bytes() {
-                write!(&mut encoded_plan_key, "{byte:02x}")?;
-            }
-            let (plain, _) =
-                crate::source::inventory("openclaw-parent-plan", &path.join(&encoded_plan_key), reads, || {
-                    Ok((
-                        plain_parent_scan(conn, by, session_id)?,
-                        reads.clone(),
-                        std::mem::size_of::<bool>(),
-                    ))
-                })?;
-            if *plain && crate::source::inventory_scoped() {
-                let (groups, _) = crate::source::inventory("openclaw-window-groups", path, reads, || {
-                    let (groups, bytes) = WindowGroups::load(conn)?;
-                    Ok((groups, reads.clone(), bytes))
-                })?;
-                std::sync::Arc::new(groups.candidates(by, session_id)?)
-            } else {
-                // Both SQL parameters determine membership. Rust string equality cannot
-                // decide whether this key includes the current child under custom collations.
-                crate::source::inventory("openclaw-parent-windows", &path.join(&encoded_plan_key), reads, || {
-                    let candidates = load()?;
-                    let bytes = candidates.capacity() * std::mem::size_of::<String>()
-                        + candidates.iter().map(String::capacity).sum::<usize>();
-                    Ok((candidates, reads.clone(), bytes))
-                })?
-                .0
-            }
-        };
+        let candidates = sqlite_parent_candidates(conn, by, session_id, path, reads)?;
         parent = if candidates.len() == 1 {
             candidates.first().cloned()
         } else {
@@ -3192,6 +3215,29 @@ mod tests {
         })?;
         assert!(disk_bytes > 8 * 1024 * 1024);
         assert_eq!(native_steps, 100 * 24999);
+        let reads = crate::source::ReadSet::default();
+        let selector = Path::new("/synthetic/openclaw-query-promotion");
+        let _scope = crate::source::read_scope();
+        let start = Instant::now();
+        assert_eq!(
+            &*sqlite_parent_candidates(&conn, "key-0", "self", selector, &reads)?,
+            &expected[0]
+        );
+        let first_query = start.elapsed();
+        // A repeated identical query is memoized and must not construct a private index.
+        assert_eq!(
+            &*sqlite_parent_candidates(&conn, "key-0", "self", selector, &reads)?,
+            &expected[0]
+        );
+        let start = Instant::now();
+        for (i, oracle) in expected.iter().enumerate().skip(1) {
+            assert_eq!(
+                &*sqlite_parent_candidates(&conn, &format!("key-{i}"), "self", selector, &reads)?,
+                oracle
+            );
+        }
+        let remaining_queries = start.elapsed();
+        eprintln!("adaptive selection: first={first_query:?} remaining99_including_build={remaining_queries:?}");
         let tiny = rusqlite::Connection::open_in_memory()?;
         tiny.execute_batch("CREATE TABLE session_windows(session_key TEXT,session_id TEXT); INSERT INTO session_windows VALUES ('key','a'),('key','b')")?;
         let start = Instant::now();
@@ -3220,7 +3266,7 @@ mod tests {
 
     #[cfg(feature = "sqlite")]
     #[test]
-    fn sqlite_parent_window_scan_runs_once_per_scope_and_preserves_negative_groups() -> Result<()> {
+    fn sqlite_parent_window_scan_promotes_after_a_distinct_query_and_preserves_guards() -> Result<()> {
         let world = crate::test_world("openclaw-sql-parent-scope");
         let dir = world.base.join("agents/main/agent");
         fs::create_dir_all(&dir)?;
@@ -3279,6 +3325,21 @@ mod tests {
             let _scope = crate::source::read_scope();
             for i in 0..40 {
                 assert_eq!(read(&format!("child-{i}"))?.lineage.parent.as_deref(), Some("parent"));
+                if i == 0 {
+                    assert_eq!(
+                        SQL_PARENT_ROWS.with(|count| count.get()),
+                        1,
+                        "one query keeps native startup"
+                    );
+                    let steps = SQL_PARENT_FULLSCANS.with(|count| count.get());
+                    assert_eq!(read("child-0")?.lineage.parent.as_deref(), Some("parent"));
+                    assert_eq!(
+                        SQL_PARENT_ROWS.with(|count| count.get()),
+                        1,
+                        "same memoized query does not promote"
+                    );
+                    assert_eq!(SQL_PARENT_FULLSCANS.with(|count| count.get()), steps);
+                }
             }
             for i in 0..40 {
                 assert_eq!(
@@ -3286,12 +3347,9 @@ mod tests {
                     Some(format!("distinct-parent-{i}").as_str())
                 );
             }
-            assert_eq!(SQL_PARENT_ROWS.with(|count| count.get()), 122);
+            assert_eq!(SQL_PARENT_ROWS.with(|count| count.get()), 123);
             one_scan = SQL_PARENT_FULLSCANS.with(|count| count.get());
-            assert!(
-                one_scan > 0 && one_scan <= 122,
-                "one actual global scan, not one perchild"
-            );
+            assert_eq!(one_scan, 2 * 121, "first query plus one whole-store inventory scan");
             assert!(read("negative")?.lineage.parent.is_none());
             let conn = rusqlite::Connection::open(&path)?;
             conn.execute("INSERT INTO session_nodes(session_key,current_session_id,entry_json,updated_at) VALUES ('not-yet','new-parent','{}',1)",[])?;
@@ -3305,7 +3363,7 @@ mod tests {
             assert_eq!(read(&format!("child-{i}"))?.lineage.parent.as_deref(), Some("parent"));
         }
         assert_eq!(SQL_PARENT_ROWS.with(|count| count.get()), 3);
-        assert!(SQL_PARENT_FULLSCANS.with(|count| count.get()) > one_scan * 2);
+        assert!(SQL_PARENT_FULLSCANS.with(|count| count.get()) > one_scan);
         Ok(())
     }
 

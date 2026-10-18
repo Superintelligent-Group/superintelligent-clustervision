@@ -4,7 +4,7 @@
 
 - Hermes keeps generation membership in private indexed storage while preserving exact duplicate detection and lazy message bodies.
 
-- OpenClaw parent lookups retain indexed window facts for large native stores, preserving query order, malformed values, and source guards.
+- Repeated OpenClaw parent lookups share private indexed facts; one-query operations keep native startup cost, query order, malformed values, and source guards.
 
 - Catalog publication waits for concurrent writers before comparing rows, preventing avoidable lost discovery updates during indexing.
 
