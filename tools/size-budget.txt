@@ -7,7 +7,7 @@ cv-testkit 450
 cv-web 15
 cv:tests 15713
 cv-core:tests 65016
-cv-search:tests 7394
+cv-search:tests 7405
 cv-testkit:tests 39
 cv-web:tests 0
 cv-core:affordance 1873

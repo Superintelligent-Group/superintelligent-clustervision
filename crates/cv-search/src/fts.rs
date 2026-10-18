@@ -3516,10 +3516,8 @@ mod tests {
         let zst =
             |path: &Path, text: String| std::fs::write(path, zstd::encode_all(text.as_bytes(), 1).unwrap()).unwrap();
         let b = day.join("rollout-2026-08-01T10-00-00-zqb.jsonl.zst");
-        zst(
-            &day.join("rollout-2026-08-01T10-00-00-zqa.jsonl.zst"),
-            rollout("zqa", "2026-08-01T10:00:00Z", "zqorig"),
-        );
+        let a = day.join("rollout-2026-08-01T10-00-00-zqa.jsonl.zst");
+        zst(&a, rollout("zqa", "2026-08-01T10:00:00Z", "zqorig"));
         zst(&b, rollout("zqb", "2026-08-01T10:00:00Z", "zqbee"));
         // The later, plain copy of zqa is preferred: the compressed one read early loses.
         let preferred = archive.join("rollout-2026-08-01T10-00-00-zqa.jsonl");
@@ -3558,6 +3556,19 @@ mod tests {
         };
         let dir = tmpdir();
         check(&dir, false, 2);
+        // A cached discovery can publish without a writer observation after an earlier failed
+        // publication. Unknown coverage must not force decoding this unchanged losing copy.
+        let catalog = rusqlite::Connection::open(w.cv_home.join("catalog.db")).unwrap();
+        assert_eq!(
+            catalog
+                .execute(
+                    "UPDATE sessions SET writer_version=NULL WHERE harness='codex' AND id='zqa' AND path=?1",
+                    [a.to_string_lossy()],
+                )
+                .unwrap(),
+            1
+        );
+        drop(catalog);
         // A changed rollout is decoded again (a scan-cache miss) and read early after the clear.
         zst(&b, rollout("zqb", "2026-08-01T10:00:00Z", "zqbuzz"));
         std::fs::write(&preferred, rollout("zqa", "2026-08-01T12:00:00Z", "zqcopy again")).unwrap();
