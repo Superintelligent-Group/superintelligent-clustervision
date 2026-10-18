@@ -265,18 +265,19 @@ def main():
             additive = json.loads(json.dumps(after))
             additive["rows"][0]["compat_optional"] = "str"
             compare(before, additive, args.baseline_tag, args.candidate_version)
-            for mutation in ("row removal", "row type", "route removal", "MCP removal"):
+            for mutation in ("row removal", "row type", "route removal", "MCP removal", "message default"):
                 broken = json.loads(json.dumps(after))
                 if mutation == "row removal": broken["rows"][0].pop("id")
                 if mutation == "row type": broken["rows"][0]["id"] = "int"
                 if mutation == "route removal": broken["routes"].pop(next(iter(before["routes"])))
+                if mutation == "message default": broken["message_defaults"]["content"] = [{"type": "text", "text": "changed default"}]
                 if mutation == "MCP removal": broken["tools"] = [t for t in broken["tools"] if t["name"] != "show"]
                 try:
                     compare(before, broken, args.baseline_tag, args.candidate_version)
                 except Incompatible:
                     continue
                 raise Incompatible(f"comparator accepted intentional {mutation}")
-            print("real-contract mutations: additive field passes; row removal/type, route removal and MCP removal fail")
+            print("real-contract mutations: additive field passes; row removal/type, route/MCP removal and message default change fail")
     print(f"compatible with {args.baseline_tag}: {len(before['commands'])} CLI commands, {len(before['tools'])} MCP tools, {len(before['routes'])} HTTP patterns; schema, real JSON/serde and exits")
 
 

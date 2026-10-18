@@ -160,6 +160,7 @@ class CompatibilityCache(unittest.TestCase):
             git('config', 'user.name', 'Fixture')
             git('config', 'user.email', 'fixture@example.invalid')
             git('config', 'commit.gpgsign', 'false')
+            git('config', 'tag.gpgsign', 'false')
             (repo/'Cargo.toml').write_text('version = "0.18.0"\n')
             examples = repo/'crates/cv-core/examples'
             examples.mkdir(parents=True)
