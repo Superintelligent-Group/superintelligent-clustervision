@@ -55,3 +55,10 @@ full gate on a build host, with release tags available and an owned candidate ta
 The build wrapper retains its own temporary checkout/target for inspection. Before
 accepting a contract change, inspect the actual failure and update only its narrow
 exception and pointer test when a deprecation was intended.
+
+CI also exercises upgrade from the checksum-pinned, released 0.16.1 Linux binary over every
+session-bearing corpus version. `tools/check-upgrade.py --baseline <old-cv> --candidate <new-cv>`
+copies stores into an isolated home, compares upgraded and clean candidate rows/events and
+streamed `show` hashes, and requires two unchanged index passes to report no changed sessions.
+Stores that 0.16.1 did not support are reported as new discovery coverage. Scratch catalogs
+remain available for diagnosis; transcript output is never dumped. Run this on the build host.

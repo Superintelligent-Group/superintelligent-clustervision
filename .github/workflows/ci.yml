@@ -68,6 +68,18 @@ jobs:
       - name: Compatibility against last stable release
         run: tools/compatibility-gate.sh
 
+      - name: Upgrade gate controls
+        run: python3 -I tools/test-upgrade.py
+
+      - name: Upgrade from the released 0.16.1 binary
+        shell: bash
+        run: |
+          baseline=$(mktemp -d "$RUNNER_TEMP/cv-upgrade-baseline-XXXXXX")
+          curl -fsSL --retry 3 https://github.com/emberian/cv/releases/download/v0.16.1/clustervision-x86_64-unknown-linux-gnu.tar.xz -o "$baseline/release.tar.xz"
+          echo "5dd429825e0c0dbb56c7ebf09fcb2339ff9d43916593dd769d3da89ce95b9540  $baseline/release.tar.xz" | sha256sum -c -
+          tar -xJf "$baseline/release.tar.xz" -C "$baseline" --strip-components=1
+          python3 -I tools/check-upgrade.py --baseline "$baseline/cv" --candidate target/debug/cv --scratch-parent "$RUNNER_TEMP"
+
       # One process per test (a test that hangs or aborts takes only itself down). nextest does
       # not run doctests; the second line keeps them.
 
