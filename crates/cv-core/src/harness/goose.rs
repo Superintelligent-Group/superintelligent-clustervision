@@ -323,51 +323,9 @@ fn discover_db(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
         let updated: Option<String> = row.get(4).ok().flatten();
         Ok((id, title, wd, created, updated))
     })?;
-    let mut counts = HashMap::<String, usize>::new();
-    let message_columns = columns(conn, "messages");
-    // Older partial stores still list known sessions when message counts are unavailable.
-    if ["session_id", "role", "content_json"]
-        .iter()
-        .all(|column| message_columns.contains(*column))
-    {
-        // One cursor pass over every row: the stream's own decoder classifies each, building no
-        // text (no `Out`), so a count is the number of turns a read of the session yields.
-        let metadata = if message_columns.contains("metadata_json") {
-            "metadata_json"
-        } else {
-            "NULL"
-        };
-        let cells = Cells::new(conn, db, &crate::source::ReadSet::default(), "messages")?;
-        let mut count_stmt = conn.prepare(&format!(
-            "SELECT session_id, role, {}, {} FROM messages",
-            cells.select("content_json"),
-            cells.select(metadata)
-        ))?;
-        let mut messages = count_stmt.query([])?;
-        let opts = ParseOptions::lazy();
-        while let Some(row) = messages.next()? {
-            let role: String = row.get(1).unwrap_or_default();
-            let metadata = match cells.cell(conn, "messages", metadata, row, 4)? {
-                Some(cell) => cells.read(cell, |v| record::metadata(v, false))?,
-                None => None,
-            };
-            let decoded = match cells.cell(conn, "messages", "content_json", row, 2)? {
-                Some(cell) => cells
-                    .read(cell, |v| record::content(v, &mut HashMap::new(), &opts, None))?
-                    .unwrap_or_default(),
-                None => Decoded::default(),
-            };
-            if is_turn(role, metadata, decoded) {
-                let id: String = row.get(0)?;
-                *counts.entry(id).or_default() += 1;
-            }
-        }
-        cells.out().0.check()?;
-    }
     let mut out = Vec::new();
     for row in rows.flatten() {
         let (id, title, wd, created, updated) = row;
-        let count = counts.remove(&id).unwrap_or(0);
         out.push(SessionRef {
             id,
             harness: Harness::Goose,
@@ -378,7 +336,7 @@ fn discover_db(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
                 .map(|t| crate::ir::truncate(&t, 80)),
             created_at: created.as_deref().and_then(parse_ts_text),
             updated_at: updated.as_deref().and_then(parse_ts_text),
-            message_count: count,
+            message_count: 0,
         });
     }
     Ok(out)
@@ -710,20 +668,6 @@ struct DbMsg {
     metadata: Option<Value>,
 }
 
-/// Whether a row is a conversational turn, by the same assembly the stream uses. Compaction
-/// history only refines rows that are never turns, so discovery needs none.
-fn is_turn(role: String, metadata: Option<Value>, decoded: Decoded) -> bool {
-    let row = DbMsg {
-        role,
-        created: None,
-        id: None,
-        tokens: None,
-        metadata,
-    };
-    row.into_message_decoded(decoded, None, &mut AgentHistory::default(), false)
-        .is_some_and(|m| m.is_turn())
-}
-
 /// What the rows before this one left in the model's context, in store order: how many there were
 /// and whether any is still `agentVisible`. Goose's compaction (`context_mgmt::compact_messages`)
 /// flips EVERY earlier row to `agentVisible: false` and appends an agent-only summary, so a summary
@@ -880,7 +824,7 @@ fn list_legacy(dir: &Path) -> Vec<(String, PathBuf)> {
     out
 }
 
-/// Project the metadata header and conversational count without retaining raw message lines.
+/// Project the native metadata header while retaining legacy whole-file UTF-8 acceptance.
 fn discover_legacy(name: &str, path: &Path) -> Option<SessionRef> {
     legacy::discover(name, path)
 }
@@ -1771,7 +1715,65 @@ mod tests {
     }
 
     #[test]
-    fn discovery_count_matches_full_codec_turns_for_shapes_visibility_and_corruption() {
+    fn metadata_listing_refills_complete_counts_for_sqlite_and_legacy_sources() -> Result<()> {
+        let w = crate::test_world("goose-deferred-counts");
+        let dir = w.home.join(".local/share/goose/sessions");
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("sessions.db");
+        let writer = Connection::open(&path)?;
+        writer.execute_batch(SCHEMA)?;
+        writer.execute(
+            "INSERT INTO sessions(id,description,working_dir) VALUES ('native','Native','/native')",
+            [],
+        )?;
+        writer.execute_batch("INSERT INTO messages(session_id,role,content_json,created_timestamp) VALUES ('native','user','[{\"type\":\"text\",\"text\":\"question\"}]',1),('native','assistant','[{\"type\":\"text\",\"text\":\"answer\"}]',2)")?;
+        let legacy = dir.join("legacy.jsonl");
+        let first = "{\"description\":\"Legacy\",\"working_dir\":\"/legacy\"}\n{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"question\"}]}\n";
+        std::fs::write(&legacy, first)?;
+        let refs = crate::sessions_for(Some(Harness::Goose));
+        assert_eq!(refs.len(), 2);
+        assert!(refs.iter().all(|r| r.message_count == 0));
+        let adapter = Goose::with_sessions_dir(&dir);
+        for reference in &refs {
+            crate::stream::stream_counted(
+                &adapter,
+                reference,
+                &ParseOptions::facts(),
+                &mut crate::stream::Discard,
+                crate::stream::Pass::RECORD,
+            )?;
+        }
+        let check = |refs: &[SessionRef], native, legacy| {
+            assert_eq!(refs.iter().find(|r| r.id == "native").unwrap().message_count, native);
+            assert_eq!(refs.iter().find(|r| r.id == "legacy").unwrap().message_count, legacy);
+        };
+        check(&crate::sessions_for(Some(Harness::Goose)), 2, 1);
+        let refreshed = crate::discover_all();
+        check(&refreshed, 2, 1);
+        for mut reference in refreshed {
+            reference.message_count = 0;
+            assert_eq!(
+                serde_json::to_value(&reference)?,
+                serde_json::to_value(refs.iter().find(|old| old.id == reference.id).unwrap())?
+            );
+        }
+        writer.execute("UPDATE sessions SET description='Renamed' WHERE id='native'", [])?;
+        let changed = crate::sessions_for(Some(Harness::Goose));
+        check(&changed, 0, 1);
+        assert_eq!(
+            changed.iter().find(|r| r.id == "native").unwrap().title.as_deref(),
+            Some("Renamed")
+        );
+        std::fs::write(
+            &legacy,
+            format!("{first}{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"next\"}}]}}\n"),
+        )?;
+        check(&crate::sessions_for(Some(Harness::Goose)), 0, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn discovery_defers_counts_and_streams_preserve_shapes_visibility_and_corruption() {
         let conn = mk(SCHEMA);
         let giant = "雪λ\n".repeat(20000);
         let mut cases = vec![
@@ -1880,8 +1882,11 @@ mod tests {
         }
         for reference in discover_db(&conn, &at(&conn)).unwrap() {
             let parsed = parse_db(&conn, &sref(&conn, &reference.id)).unwrap();
+            assert_eq!(reference.message_count, 0);
+            let mut sink = crate::stream::CollectSink::default();
+            stream_db_opts(&conn, &reference, &ParseOptions::lazy(), &mut sink).unwrap();
             assert_eq!(
-                reference.message_count,
+                sink.messages.iter().filter(|m| m.is_turn()).count(),
                 parsed.messages.iter().filter(|m| m.is_turn()).count(),
                 "{}",
                 reference.id
@@ -1907,7 +1912,7 @@ mod tests {
     }
 
     #[test]
-    fn discover_db_orders_and_counts() {
+    fn discover_db_orders_without_reading_message_counts() {
         let c = mk(SCHEMA);
         c.execute("INSERT INTO sessions (id, description, working_dir, updated_at) VALUES ('a','A','/x','2024-01-01 00:00:00')", []).unwrap();
         c.execute("INSERT INTO sessions (id, description, working_dir, updated_at) VALUES ('b','B','/y','2024-02-01 00:00:00')", []).unwrap();
@@ -1925,11 +1930,17 @@ mod tests {
         assert_eq!(refs.len(), 2);
         assert_eq!(refs[0].id, "b"); // updated_at DESC
         assert_eq!(refs[1].id, "a");
-        assert_eq!(
-            refs[1].message_count, 2,
-            "user + assistant; the tool-result row and the corrupt row are not turns"
-        );
+        assert_eq!(refs[1].message_count, 0, "discovery does not reduce the messages table");
         assert_eq!(refs[0].title.as_deref(), Some("B"));
+        assert_eq!(
+            parse_db(&c, &refs[1])
+                .unwrap()
+                .messages
+                .iter()
+                .filter(|m| m.is_turn())
+                .count(),
+            2
+        );
     }
 
     #[test]
@@ -1967,7 +1978,7 @@ mod tests {
         let r = discover_legacy("20240101_120000", &path).unwrap();
         assert_eq!(r.title.as_deref(), Some("legacy chat"));
         assert_eq!(r.cwd.as_deref().map(|p| p.to_str().unwrap()), Some("/home/u/old"));
-        assert_eq!(r.message_count, 2, "m3 is only a tool result: a Tool turn, not counted");
+        assert_eq!(r.message_count, 0, "discovery reads metadata without reducing messages");
         assert!(r.created_at.is_some());
 
         // full parse
@@ -1975,6 +1986,7 @@ mod tests {
         assert_eq!(s.title.as_deref(), Some("legacy chat"));
         assert_eq!(s.cwd.as_deref().map(|p| p.to_str().unwrap()), Some("/home/u/old"));
         assert_eq!(s.messages.len(), 3);
+        assert_eq!(s.messages.iter().filter(|m| m.is_turn()).count(), 2);
         assert_eq!(
             kinds(&s),
             vec![

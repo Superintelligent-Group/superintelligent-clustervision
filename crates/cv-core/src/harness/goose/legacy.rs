@@ -138,12 +138,24 @@ fn discover_checked(name: &str, path: &Path) -> Result<SessionRef> {
         let result = if let Some(bytes) = records.small_record() {
             // read_to_string rejected invalid UTF-8 in malformed and ignored records too.
             let text = std::str::from_utf8(bytes)?;
-            match serde_json::from_str::<Value>(text) {
-                Ok(value) => note((&value).into(), header, &mut session),
-                Err(_) => Ok(()),
+            if header {
+                match serde_json::from_str::<Value>(text) {
+                    Ok(value) => note_header((&value).into(), &mut session),
+                    Err(_) => Ok(()),
+                }
+            } else {
+                Ok(())
             }
+        } else if header {
+            source.read_range_value(range.offset, range.len, |view| note_header(view, &mut session))
         } else {
-            source.read_range_value(range.offset, range.len, |view| note(view, header, &mut session))
+            // Legacy discovery has always rejected invalid UTF-8 anywhere in the file. Keep
+            // that inclusion contract without decoding undemanded message JSON or bodies.
+            anyhow::ensure!(
+                ranges::valid_utf8(&mut ranges::reader(&file, range)?)?,
+                "invalid Goose legacy UTF-8"
+            );
+            Ok(())
         };
         match result {
             Ok(()) => {}
@@ -162,52 +174,40 @@ fn discover_checked(name: &str, path: &Path) -> Result<SessionRef> {
     source.check()?;
     Ok(session)
 }
-fn note(view: JsonView<'_>, header: bool, session: &mut SessionRef) -> Result<()> {
-    if header {
-        let Some(fields) = Fields::parse(view, &["description", "working_dir", "created_at", "updated_at"])? else {
-            return Ok(());
-        };
-        if let Some(description) = fields.get("description") {
-            if description.is_string()? {
-                let mut prefix = String::new();
-                let mut chars = 0;
-                let mut nonwhite = false;
-                description.for_each_str_chunk(|part| {
-                    nonwhite |= part.chars().any(|c| !c.is_whitespace());
-                    for c in part.chars().take(81 - chars) {
-                        prefix.push(c);
-                        chars += 1;
-                    }
-                    Ok(())
-                })?;
-                session.title = nonwhite.then(|| crate::ir::truncate(&prefix, 80));
-            }
-        }
-        session.cwd = fields
-            .string("working_dir")?
-            .filter(|s| !s.is_empty())
-            .map(PathBuf::from);
-        for (key, output) in [
-            ("created_at", &mut session.created_at),
-            ("updated_at", &mut session.updated_at),
-        ] {
-            if let Some(value) = fields.get(key) {
-                if value.is_string()? || value.as_number()?.is_some() {
-                    *output = parse_ts_value(value.resolve()?.as_ref());
+fn note_header(view: JsonView<'_>, session: &mut SessionRef) -> Result<()> {
+    let Some(fields) = Fields::parse(view, &["description", "working_dir", "created_at", "updated_at"])? else {
+        return Ok(());
+    };
+    if let Some(description) = fields.get("description") {
+        if description.is_string()? {
+            let mut prefix = String::new();
+            let mut chars = 0;
+            let mut nonwhite = false;
+            description.for_each_str_chunk(|part| {
+                nonwhite |= part.chars().any(|c| !c.is_whitespace());
+                for c in part.chars().take(81 - chars) {
+                    prefix.push(c);
+                    chars += 1;
                 }
+                Ok(())
+            })?;
+            session.title = nonwhite.then(|| crate::ir::truncate(&prefix, 80));
+        }
+    }
+    session.cwd = fields
+        .string("working_dir")?
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from);
+    for (key, output) in [
+        ("created_at", &mut session.created_at),
+        ("updated_at", &mut session.updated_at),
+    ] {
+        if let Some(value) = fields.get(key) {
+            if value.is_string()? || value.as_number()?.is_some() {
+                *output = parse_ts_value(value.resolve()?.as_ref());
             }
         }
-        return Ok(());
     }
-    let Some(fields) = Fields::parse(view, &["role", "content"])? else {
-        return Ok(());
-    };
-    let role = fields.string("role")?.unwrap_or_else(|| "user".into());
-    let decoded = match fields.get("content") {
-        Some(content) => record::content(content, &mut HashMap::new(), &ParseOptions::lazy(), None)?,
-        None => Decoded::default(),
-    };
-    session.message_count += usize::from(is_turn(role, None, decoded));
     Ok(())
 }
 
@@ -215,7 +215,7 @@ fn note(view: JsonView<'_>, header: bool, session: &mut SessionRef) -> Result<()
 mod tests {
     use super::*;
     #[test]
-    fn projected_discovery_preserves_header_count_and_whole_utf8_policy() {
+    fn metadata_discovery_preserves_header_and_whole_utf8_policy() {
         let world = crate::test_world("goose-legacy-discovery");
         let path = world.base.join("legacy.jsonl");
         let observe = |r: Option<SessionRef>| serde_json::to_value(r).unwrap();
@@ -449,7 +449,6 @@ mod tests {
             .next()
             .and_then(|l| serde_json::from_str(l).ok())
             .unwrap_or(Value::Null);
-        let count = owned_messages(path).iter().filter(|m| m.is_turn()).count();
         let title = header
             .get("description")
             .and_then(Value::as_str)
@@ -468,7 +467,7 @@ mod tests {
             title,
             created_at: header.get("created_at").and_then(parse_ts_value),
             updated_at: header.get("updated_at").and_then(parse_ts_value),
-            message_count: count,
+            message_count: 0,
         })
     }
 }

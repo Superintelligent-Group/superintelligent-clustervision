@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Goose listings defer exact counts to complete reads while preserving native headers, session inclusion, and legacy whole-file UTF-8 validation.
+
 - Hermes listings read native session metadata without scanning message bodies; indexing or complete reads supply source-certified canonical turn counts.
 
 - Listings reuse source-certified exact turn counts after complete reads, preserving them across harmless metadata refreshes and invalidating changed sources.
