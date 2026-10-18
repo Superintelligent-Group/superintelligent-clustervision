@@ -421,36 +421,9 @@ fn refs_conn(conn: &Connection, path: &Path, delegates_of: Option<&HashSet<Strin
             message_count: 0,
         });
     }
-    // Native message_count counts active rows (including tools/notices, omitting compacted
-    // history). SessionRef counts canonical prompts/replies, including rotation ancestors.
-    // Reuse the display parser so generation/replay dedup and type classification cannot drift.
-    let options = if path.is_file() {
-        ParseOptions::lazy()
-    } else {
-        ParseOptions::bulk()
-    };
-    for reference in &mut out {
-        let mut count = TurnCount::default();
-        stream_conn_with_demand(
-            conn,
-            reference,
-            &options,
-            &mut count,
-            &crate::source::ReadSet::default(),
-            true,
-        )?;
-        reference.message_count = count.0;
-    }
+    // Discovery owns native session metadata and inclusion, not a transcript reduction.
+    // Complete reads/indexing publish canonical turns through the shared source certificate.
     Ok(out)
-}
-
-#[derive(Default)]
-struct TurnCount(usize);
-impl MessageSink for TurnCount {
-    fn message(&mut self, message: Message) -> Flow {
-        self.0 += usize::from(message.is_turn());
-        Flow::Continue
-    }
 }
 
 /// Hermes titles a compression chain `COALESCE(tip.title, root.title)` (`hermes_state_sessions.py:1137`):
@@ -674,21 +647,10 @@ fn stream_conn_with_reads(
     sink: &mut dyn MessageSink,
     reads: &crate::source::ReadSet,
 ) -> Result<Session> {
-    stream_conn_with_demand(conn, r, opts, sink, reads, false)
-}
-
-fn stream_conn_with_demand(
-    conn: &Connection,
-    r: &SessionRef,
-    opts: &ParseOptions,
-    sink: &mut dyn MessageSink,
-    reads: &crate::source::ReadSet,
-    count_only: bool,
-) -> Result<Session> {
     // session-level metadata (guard optional columns for historical schemas).
     let scols = columns(conn, "sessions");
     let expr = |col: &str| {
-        if scols.contains(col) && (!count_only || matches!(col, "parent_session_id" | "end_reason" | "model_config")) {
+        if scols.contains(col) {
             col.to_string()
         } else {
             "NULL".to_string()
@@ -733,24 +695,14 @@ fn stream_conn_with_demand(
         bag: mut hermes_bag,
         system_prompt,
         imported,
-    } = if count_only {
-        // Turn classification/replay do not inspect imported origin or system-prompt/header
-        // payloads. Listing already owns its title/cwd; avoid reading these fields again here.
-        SessionFacts {
-            bag: Default::default(),
-            system_prompt: None,
-            imported: false,
-        }
-    } else {
-        read_session_facts(
-            conn,
-            (&r.path, reads),
-            &r.id,
-            source.as_deref(),
-            end_reason.as_deref(),
-            opts,
-        )?
-    };
+    } = read_session_facts(
+        conn,
+        (&r.path, reads),
+        &r.id,
+        source.as_deref(),
+        end_reason.as_deref(),
+        opts,
+    )?;
     // A foreign import: every message of the session came through the importer.
     let session_origin = imported.then_some(Origin::Import);
 
@@ -873,11 +825,7 @@ fn stream_conn_with_demand(
     // look-back (the trailing run of user single-texts since the last substantive assistant turn),
     // not the whole transcript, so peak stays O(one message).
     let mut dedup = ReplayDedup::default();
-    let demand = Demand {
-        opts,
-        count_only,
-        incremental,
-    };
+    let demand = Demand { opts, incremental };
     'lineage: for sid in &chain {
         // `ORDER BY id`, as Hermes itself reads (`_ACTIVE_IDS_SQL`, `_fetch_conversation_rows`):
         // timestamps are not monotonic and would split a tool call from its result.
@@ -1355,11 +1303,9 @@ const CELL_COLS: &[&str] = &[
     "codex_message_items",
 ];
 
-/// What a read of the rows resolves: the parse demand, plus `count_only` (discovery's turn
-/// count: only whether a non-turn or an assistant reply has a body, never the body itself).
+/// Row materialization follows the shared parse demand and SQLite cell access mode.
 struct Demand<'a> {
     opts: &'a ParseOptions,
-    count_only: bool,
     incremental: bool,
 }
 
@@ -1388,11 +1334,6 @@ fn read_row(
     let role = borrowed_text(row, idx("role"));
     let display_kind = get_str("display_kind");
     let compressed_summary = get_i64("_compressed_summary").is_some_and(|n| n != 0);
-    // Non-turn rows cannot affect a turn count or replay suppression.
-    let nonturn = matches!(role, Some("tool" | "system"))
-        || compressed_summary
-        || display_kind.as_deref().and_then(harness_display_kind).is_some();
-    let skip = demand.count_only && nonturn;
     let check_failed = role == Some("assistant") && display_kind.is_none();
 
     let content_at = idx(if demand.incremental {
@@ -1403,36 +1344,7 @@ fn read_row(
     .unwrap();
     let mut body = None;
     let mut untyped_failed_turn = false;
-    let mut projected = false;
-    if !skip && demand.count_only && role == Some("assistant") {
-        // A reply counts by presence and the failed-turn notice; its body is not copied.
-        let mut prefix = [0; MULTIMODAL_SENTINEL.len()];
-        let mut prefix_len = 0;
-        let mut present = false;
-        let mut notice = FailedNotice::new();
-        match cells.chunks(conn, "messages", "content", row, content_at, |chunk| {
-            present |= !chunk.is_empty();
-            let take = chunk.len().min(prefix.len() - prefix_len);
-            prefix[prefix_len..prefix_len + take].copy_from_slice(&chunk.as_bytes()[..take]);
-            prefix_len += take;
-            if prefix_len == prefix.len() && prefix.as_slice() == MULTIMODAL_SENTINEL.as_bytes() {
-                return Err(CountNeedsBody.into());
-            }
-            notice.push(chunk);
-            Ok(())
-        }) {
-            Ok(valid) => {
-                projected = true;
-                untyped_failed_turn = check_failed && valid && notice.finished();
-                if valid && present {
-                    body = Some(Body::Text("[content present]".into()));
-                }
-            }
-            Err(error) if error.is::<CountNeedsBody>() => {}
-            Err(error) => return Err(error),
-        }
-    }
-    if !skip && !projected {
+    {
         if let Some(text) = cells.text(conn, "messages", "content", row, content_at)? {
             let multimodal = role != Some("tool");
             (body, untyped_failed_turn) = cells
@@ -1441,7 +1353,7 @@ fn read_row(
         }
     }
 
-    let calls = match cell("tool_calls")?.filter(|_| !skip) {
+    let calls = match cell("tool_calls")? {
         Some(calls) => cells
             .read(calls, |view| {
                 let mut calls = Vec::new();
@@ -1460,7 +1372,7 @@ fn read_row(
     // dedup) and the text entries of `reasoning_details`; the first encrypted handle of
     // `reasoning_details` or else `codex_reasoning_items`. Full demand keeps the JSON sidecars.
     let mut reasoning = Reasoning::default();
-    if !(demand.count_only && (nonturn || role == Some("assistant"))) {
+    {
         let summary = borrowed_text(row, idx("reasoning"));
         if let Some(summary) = summary {
             reasoning.push(summary);
@@ -1940,10 +1852,6 @@ impl FailedNotice {
             .any(|(p, notice)| *p == Some(notice.len()))
     }
 }
-
-#[derive(Debug, thiserror::Error)]
-#[error("count needs multimodal body projection")]
-struct CountNeedsBody;
 
 /// Whole-`Session` convenience over [`stream_conn`] for tests: stream into a [`CollectSink`] and
 /// reattach the messages. The production path goes through `Adapter::parse` → `stream::collect`.
@@ -3292,7 +3200,7 @@ mod tests {
     }
 
     #[test]
-    fn discover_orders_and_counts() {
+    fn discover_orders_without_reducing_messages() {
         let conn = mk_conn("schema-v14.sql");
         conn.execute_batch(&fixture("discover_orders_and_counts.sql")).unwrap();
         conn.execute_batch(
@@ -3306,9 +3214,27 @@ mod tests {
         assert_eq!(refs.len(), 2);
         // ordered by started_at DESC
         assert_eq!(refs[0].id, "b");
-        assert_eq!(refs[0].message_count, 3);
+        assert_eq!(refs[0].message_count, 0);
+        assert_eq!(
+            parse_conn(&conn, &refs[0])
+                .unwrap()
+                .messages
+                .iter()
+                .filter(|m| m.is_turn())
+                .count(),
+            3
+        );
         assert_eq!(refs[1].id, "a");
-        assert_eq!(refs[1].message_count, 1);
+        assert_eq!(refs[1].message_count, 0);
+        assert_eq!(
+            parse_conn(&conn, &refs[1])
+                .unwrap()
+                .messages
+                .iter()
+                .filter(|m| m.is_turn())
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -3442,10 +3368,10 @@ mod tests {
         )?;
         let adapter = Hermes::with_db(path);
         let (references, discovery_bytes) = observe(|| adapter.discover())?;
-        assert_eq!(references[0].message_count, 1);
+        assert_eq!(references[0].message_count, 0);
         assert_eq!(
-            discovery_bytes,
-            [0],
+            discovery_bytes.iter().sum::<u64>(),
+            0,
             "actual listing must not stage the undemanded reply body"
         );
         let (session, collection_bytes) =
@@ -3459,7 +3385,7 @@ mod tests {
     }
 
     #[test]
-    fn count_demand_preserves_parser_acceptance_without_copying_plain_assistant_bodies() -> Result<()> {
+    fn streamed_turn_classification_preserves_owned_parser_acceptance() -> Result<()> {
         let world = crate::test_world("hermes-count-demand");
         let path = world.base.join("state.db");
         let writer = Connection::open(&path)?;
@@ -3493,42 +3419,16 @@ mod tests {
         )?;
         let reference = SessionRef::new("s", Harness::Hermes, &path);
         let parsed = parse_conn(&writer, &reference)?;
-        struct CountSink {
-            turns: usize,
-            placeholders: usize,
-        }
+        struct CountSink(usize);
         impl MessageSink for CountSink {
             fn message(&mut self, message: Message) -> Flow {
-                self.turns += usize::from(message.is_turn());
-                for block in &message.content {
-                    if let Block::Text { text } = block {
-                        assert!(
-                            !matches!(text, crate::Text::Source(_)),
-                            "ordinary count body must not own arena bytes"
-                        );
-                        self.placeholders += usize::from(text == "[content present]");
-                    }
-                }
+                self.0 += usize::from(message.is_turn());
                 Flow::Continue
             }
         }
-        let mut count = CountSink {
-            turns: 0,
-            placeholders: 0,
-        };
-        stream_conn_with_demand(
-            &writer,
-            &reference,
-            &ParseOptions::lazy(),
-            &mut count,
-            &crate::source::ReadSet::default(),
-            true,
-        )?;
-        assert_eq!(count.turns, parsed.messages.iter().filter(|m| m.is_turn()).count());
-        assert_eq!(
-            count.placeholders, 2,
-            "ordinary reply and failed-turn body are represented without copies"
-        );
+        let mut count = CountSink(0);
+        stream_conn(&writer, &reference, &ParseOptions::lazy(), &mut count)?;
+        assert_eq!(count.0, parsed.messages.iter().filter(|m| m.is_turn()).count());
         Ok(())
     }
 
@@ -3553,7 +3453,7 @@ mod tests {
         }
         let adapter = Hermes::with_db(path);
         let reference = adapter.discover()?.remove(0);
-        assert_eq!(reference.message_count, 3);
+        assert_eq!(reference.message_count, 0);
         let owned = parse_conn(&writer, &reference)?;
         let mut checked = crate::stream::collect_with(&adapter, &reference, &ParseOptions::lazy_extra())?;
         assert_eq!(checked.messages.len(), 3);
@@ -3590,7 +3490,7 @@ mod tests {
     }
 
     #[test]
-    fn discovery_turn_counts_match_native_display_and_compression_replay() -> Result<()> {
+    fn discovery_defers_turns_and_complete_reads_publish_native_display_counts() -> Result<()> {
         let world = crate::test_world("hermes-discovery-turn-counts");
         let path = world.base.join("state.db");
         std::fs::copy(
@@ -3601,22 +3501,38 @@ mod tests {
         writer.execute("UPDATE sessions SET message_count=999", [])?;
         let adapter = Hermes::with_db(path.clone());
         let mut imported = false;
-        for reference in adapter.discover()? {
+        let references = adapter.discover()?;
+        assert!(references.iter().all(|r| r.message_count == 0));
+        crate::catalog::sync(&references);
+        for reference in references {
             let parsed = crate::stream::collect_with(&adapter, &reference, &ParseOptions::full())?;
             imported |= parsed.messages.iter().any(|message| message.origin == Origin::Import);
-            assert_eq!(
-                reference.message_count,
-                parsed.messages.iter().filter(|m| m.is_turn()).count(),
-                "{}",
-                reference.id
-            );
+            let done = crate::stream::stream_counted(
+                &adapter,
+                &reference,
+                &ParseOptions::facts(),
+                &mut crate::stream::Discard,
+                crate::stream::Pass::RECORD,
+            )?;
+            let turns = parsed.messages.iter().filter(|m| m.is_turn()).count();
+            assert_eq!(done.counted.unwrap().turns, turns, "{}", reference.id);
+            let reader = crate::catalog::Reader::open().unwrap();
+            let mut refreshed = reference.clone();
+            reader.refill_turns(std::iter::once(&mut refreshed));
+            assert_eq!(refreshed.message_count, turns, "{}", reference.id);
             for child in subagent_refs(&reference) {
+                assert_eq!(child.message_count, 0);
                 let parsed = crate::stream::collect_with(&adapter, &child, &ParseOptions::full())?;
+                let done = crate::stream::stream_counted(
+                    &adapter,
+                    &child,
+                    &ParseOptions::facts(),
+                    &mut crate::stream::Discard,
+                    crate::stream::Pass::RECORD,
+                )?;
                 assert_eq!(
-                    child.message_count,
-                    parsed.messages.iter().filter(|m| m.is_turn()).count(),
-                    "{}",
-                    child.id
+                    done.counted.unwrap().turns,
+                    parsed.messages.iter().filter(|m| m.is_turn()).count()
                 );
             }
         }
@@ -3689,14 +3605,15 @@ mod tests {
         assert_eq!(by_id(A).cwd, Some(PathBuf::from("/tmp/proj")));
         assert_eq!(
             by_id(A).message_count,
-            8,
-            "SessionRef counts canonical conversational turns"
+            0,
+            "cold discovery defers canonical turn counting"
         );
 
         // A: the display view — each carried message once, in id order, the summary as a system turn.
         let a = parse_conn(&conn, &sref(&conn, A)).unwrap();
         let t = texts(&a);
         assert_eq!(a.messages.len(), 13, "{t:?}");
+        assert_eq!(a.messages.iter().filter(|m| m.is_turn()).count(), 8);
         // Index by message (the tool-result turn has no text, so `t` is one shorter).
         let txt = |i: usize| a.messages[i].text().unwrap_or_default();
         assert_eq!(txt(0), "fix the flaky test in tests/sched.py");
