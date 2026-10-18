@@ -6,7 +6,11 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 #[cfg(feature = "sqlite")]
 type Connection = Arc<std::sync::Mutex<rusqlite::Connection>>;
+type WriterKey = (crate::Harness, String, PathBuf);
 struct Owner {
+    writer_versions: std::sync::Mutex<std::collections::HashMap<WriterKey, Option<String>>>,
+    #[cfg(feature = "sqlite")]
+    unobserved: OnceLock<std::collections::HashSet<WriterKey>>,
     path: PathBuf,
     #[cfg(feature = "sqlite")]
     connection: OnceLock<Option<Connection>>,
@@ -42,6 +46,9 @@ impl Context {
     pub(crate) fn current() -> Self {
         Self::inherited().unwrap_or_else(|| {
             Self(Arc::new(Owner {
+                writer_versions: Default::default(),
+                #[cfg(feature = "sqlite")]
+                unobserved: OnceLock::new(),
                 #[cfg(feature = "sqlite")]
                 path: crate::catalog::db_path()
                     .map(|path| catalog_key(&path))
@@ -66,6 +73,9 @@ impl Context {
         let cell = OnceLock::new();
         let _ = cell.set(Some(connection));
         Self(Arc::new(Owner {
+            writer_versions: Default::default(),
+            #[cfg(feature = "sqlite")]
+            unobserved: OnceLock::new(),
             path,
             connection: cell,
             cache: std::sync::OnceLock::new(),
@@ -76,6 +86,45 @@ impl Context {
             #[cfg(test)]
             rows: Default::default(),
         }))
+    }
+    /// Observation lifetime is this discovery operation, shared with its parallel workers.
+    pub(crate) fn observe_writer(&self, r: &crate::SessionRef, version: Option<&str>) {
+        let mut rows = self.0.writer_versions.lock().unwrap();
+        let newest = rows.entry((r.harness, r.id.clone(), r.path.clone())).or_default();
+        crate::writer_version::observe(newest, version);
+    }
+    #[cfg(feature = "sqlite")]
+    pub(crate) fn writer_versions(&self, harness: crate::Harness) -> Vec<(String, String, Option<String>)> {
+        self.0
+            .writer_versions
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|((h, _, _), _)| *h == harness)
+            .map(|((_, id, path), version)| (id.clone(), path.to_string_lossy().into_owned(), version.clone()))
+            .collect()
+    }
+    /// A version-5 cache created before writer extraction was connected may still have NULLs.
+    /// Fill those through normal discovery demand, once; examined absence is stored as empty.
+    pub(crate) fn needs_writer_observation(&self, refs: &[crate::SessionRef]) -> bool {
+        #[cfg(feature = "sqlite")]
+        {
+            let unknown = self.0.unobserved.get_or_init(|| self.with_connection(|conn| {
+                let Ok(mut stmt) = conn.prepare("SELECT harness,id,path FROM sessions WHERE writer_version IS NULL AND harness IN ('claude','codex')") else { return Default::default() };
+                let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))) else { return Default::default() };
+                rows.flatten().filter_map(|(h,id,path)| Some((crate::Harness::parse(&h)?, id, PathBuf::from(path)))).collect()
+            }).unwrap_or_default());
+            let observed = self.0.writer_versions.lock().unwrap();
+            refs.iter().any(|r| {
+                let key = (r.harness, r.id.clone(), r.path.clone());
+                unknown.contains(&key) && !observed.contains_key(&key)
+            })
+        }
+        #[cfg(not(feature = "sqlite"))]
+        {
+            let _ = refs;
+            false
+        }
     }
     pub(crate) fn path(&self) -> PathBuf {
         self.0.path.clone()

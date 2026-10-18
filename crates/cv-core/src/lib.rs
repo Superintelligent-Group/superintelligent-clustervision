@@ -881,3 +881,6 @@ mod copy_authority_tests {
         assert_eq!(pick(vec![prefix, old.clone()], "same").unwrap().unwrap().path, old.path);
     }
 }
+
+/// Harness writer observations and corpus verification versions.
+pub mod writer_version;

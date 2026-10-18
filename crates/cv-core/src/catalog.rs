@@ -59,7 +59,7 @@ pub(crate) fn capture_primary_reads_from(a: &dyn crate::Adapter, refs: &[Session
 mod imp {
     use super::*;
     use crate::source::FileId;
-    use rusqlite::{params, Connection, Row};
+    use rusqlite::{params, Connection, OptionalExtension, Row};
     use std::collections::{BTreeSet, HashSet};
     use std::time::{Duration, SystemTime};
 
@@ -240,6 +240,8 @@ mod imp {
                  ALTER TABLE sessions ADD COLUMN updated_ns INTEGER;",
             );
         }
+        // NULL means not observed; recorded versions are historical evidence from discovery.
+        let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN writer_version TEXT;");
         let has_version: bool = conn
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM pragma_table_info('scan_cache') WHERE name='interpretation_version')",
@@ -357,11 +359,14 @@ mod imp {
     }
 
     /// Insert (or replace) every ref through `stmt` — shared by [`sync`] and [`Reader::replace_harness`].
+    /// A replaced row keeps its `writer_version`: discovery does not know it, and omitting the
+    /// column would erase it.
     fn insert_refs(tx: &rusqlite::Transaction, refs: &[SessionRef]) -> rusqlite::Result<()> {
         let mut stmt = tx.prepare(
             "INSERT OR REPLACE INTO sessions
-             (harness,id,path,cwd,title,created_at,updated_at,message_count,created_ns,updated_ns)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+             (harness,id,path,cwd,title,created_at,updated_at,message_count,created_ns,updated_ns,writer_version)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,
+                 (SELECT writer_version FROM sessions WHERE harness=?1 AND id=?2 AND path=?3))",
         )?;
         for r in refs {
             stmt.execute(params![
@@ -386,7 +391,14 @@ mod imp {
     pub fn sync(refs: &[SessionRef]) {
         let Some(mut conn) = open() else { return };
         let Ok(tx) = conn.transaction() else { return };
-        if insert_refs(&tx, refs).is_ok() {
+        if insert_refs(&tx, refs).is_ok()
+            && refs
+                .iter()
+                .map(|r| r.harness)
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .all(|h| publish_writer_versions(&tx, h).is_ok())
+        {
             let _ = tx.commit();
         }
     }
@@ -588,9 +600,16 @@ mod imp {
         rewrite_sessions: bool,
     ) -> rusqlite::Result<()> {
         if rewrite_sessions {
+            let versions = recorded_writer_versions(tx, h)?;
             tx.execute("DELETE FROM sessions WHERE harness=?1", params![h.as_str()])?;
             insert_refs(tx, refs)?;
+            let mut restore =
+                tx.prepare("UPDATE sessions SET writer_version=?4 WHERE harness=?1 AND id=?2 AND path=?3")?;
+            for (id, path, version) in &versions {
+                restore.execute(params![h.as_str(), id, path, version])?;
+            }
         }
+        publish_writer_versions(tx, h)?;
         let watch_rows = watches
             .iter()
             .map(|(path, watched)| (path.to_string_lossy().into_owned(), watched.value()))
@@ -911,6 +930,65 @@ mod imp {
         if written.is_ok() && crate::source::publish_in(&tx, "counts", r, source, text.as_bytes()).is_ok() {
             let _ = tx.commit();
         }
+    }
+
+    /// `(id, path, writer_version)` for every row of `h` that has one, for rows a rewrite
+    /// deletes and reinserts.
+    fn recorded_writer_versions(
+        tx: &rusqlite::Transaction,
+        h: Harness,
+    ) -> rusqlite::Result<Vec<(String, String, String)>> {
+        let mut stmt =
+            tx.prepare("SELECT id,path,writer_version FROM sessions WHERE harness=?1 AND writer_version IS NOT NULL")?;
+        let rows = stmt.query_map([h.as_str()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        rows.collect()
+    }
+
+    /// Apply observations collected by existing discovery reads, under the publication's writer lock.
+    fn publish_writer_versions(tx: &rusqlite::Transaction, h: Harness) -> rusqlite::Result<()> {
+        for (id, path, version) in crate::discover_cache::read::Context::current().writer_versions(h) {
+            let old: Option<String> = tx
+                .query_row(
+                    "SELECT writer_version FROM sessions WHERE harness=?1 AND id=?2 AND path=?3",
+                    params![h.as_str(), id, path],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .flatten();
+            let mut newest = old;
+            crate::writer_version::observe(&mut newest, version.as_deref());
+            tx.execute(
+                "UPDATE sessions SET writer_version=?4 WHERE harness=?1 AND id=?2 AND path=?3",
+                params![h.as_str(), id, path, newest.as_deref().unwrap_or("")],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Catalog knowledge only: no transcript probes or backfill. NULL/empty/unsupported versions
+    /// count as unknown; the maximum is historical evidence, not a claim of current source validity.
+    pub fn writer_versions() -> Vec<crate::writer_version::Observed> {
+        let mut result = crate::writer_version::empty_observations();
+        let Some(conn) = open() else { return result };
+        let Ok(mut stmt) =
+            conn.prepare("SELECT harness,writer_version FROM sessions WHERE harness IN ('claude','codex')")
+        else {
+            return result;
+        };
+        let Ok(rows) = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        }) else {
+            return result;
+        };
+        for (h, version) in rows.flatten() {
+            if let Some(observed) = result.iter_mut().find(|o| o.harness == h) {
+                observed.sessions += 1;
+                if !crate::writer_version::observe(&mut observed.newest, version.as_deref()) {
+                    observed.unknown += 1;
+                }
+            }
+        }
+        result
     }
 
     /// Every recorded affordance count, loaded once for a sweep (`cv ls -q has:plan`, `cv index`).
@@ -1749,7 +1827,7 @@ pub(crate) enum Watched {
 }
 
 #[cfg(feature = "sqlite")]
-pub use imp::{fill_count, lookup, note_affordances_with_source, sync, AffordanceTable};
+pub use imp::{fill_count, lookup, note_affordances_with_source, sync, writer_versions, AffordanceTable};
 
 #[cfg(all(feature = "sqlite", test))]
 pub(crate) use imp::replace_harness;
@@ -1802,6 +1880,10 @@ impl AffordanceTable {
     }
 }
 #[cfg(not(feature = "sqlite"))]
+pub fn writer_versions() -> Vec<crate::writer_version::Observed> {
+    crate::writer_version::empty_observations()
+}
+#[cfg(not(feature = "sqlite"))]
 pub fn lookup(_id: &str, _harness: Option<Harness>) -> Vec<SessionRef> {
     Vec::new()
 }
@@ -1820,3 +1902,5 @@ pub(crate) fn all_sessions() -> Option<Vec<SessionRef>> {
 
 #[cfg(all(test, feature = "sqlite"))]
 mod counts_tests;
+#[cfg(all(test, feature = "sqlite"))]
+mod writer_version_tests;

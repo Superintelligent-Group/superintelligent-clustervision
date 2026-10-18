@@ -8,16 +8,18 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 thread_local! { pub(super) static FRAMED: std::cell::RefCell<Vec<(u64,u64)>> = const { std::cell::RefCell::new(Vec::new()) }; }
 
-pub(super) const CONTINUATION_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "/claude.discovery/1");
-const LAYER: &str = "claude.discovery";
+pub(super) const CONTINUATION_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "/claude.discovery/2");
+const LAYER: &str = "claude.discovery.v2";
 
 #[derive(Clone, Serialize, Deserialize)]
 struct State {
+    writer_version: Option<String>,
     session: SessionRef,
     custom_title: bool,
 }
 
 pub(super) struct Scan {
+    writer_version: Option<String>,
     session: SessionRef,
     custom_title: bool,
     prefix: Option<(u64, State)>,
@@ -32,6 +34,7 @@ impl Scan {
                 path,
             ),
             custom_title: false,
+            writer_version: None,
             prefix: None,
         }
     }
@@ -45,6 +48,7 @@ impl Scan {
                     && state.session.harness == Harness::Claude
                     && state.session.message_count as u64 <= cp.offset
                 {
+                    scan.writer_version = state.writer_version;
                     scan.session = state.session;
                     scan.custom_title = state.custom_title;
                     return (scan, cp.offset);
@@ -58,6 +62,7 @@ impl Scan {
         self.prefix = Some((
             offset,
             State {
+                writer_version: self.writer_version.clone(),
                 session: self.session.clone(),
                 custom_title: self.custom_title,
             },
@@ -99,6 +104,7 @@ impl Scan {
         let Some(fields) = Fields::parse(
             view,
             &[
+                "version",
                 "type",
                 "cwd",
                 "timestamp",
@@ -111,6 +117,7 @@ impl Scan {
         else {
             return Ok(());
         };
+        crate::writer_version::observe(&mut self.writer_version, fields.string("version")?.as_deref());
         let ty = fields.string("type")?.unwrap_or_default();
         if ty == "custom-title" {
             if let Some(title) = fields.string("customTitle")? {
@@ -155,6 +162,7 @@ impl Scan {
     }
 
     pub(super) fn finish(self) -> SessionRef {
+        crate::discover_cache::read::Context::current().observe_writer(&self.session, self.writer_version.as_deref());
         self.session
     }
 }
