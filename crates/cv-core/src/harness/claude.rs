@@ -401,6 +401,9 @@ fn read(
                 cp.put(ADAPTER_LAYER, &session);
                 sink.checkpoint(&mut cp);
             }
+            // The codec returns immediately after message delivery. Check after that callback
+            // and the wants/optional-checkpoint group before the framer touches its mapping again.
+            read.check_backing()?;
             Ok(Flow::Continue)
         })
     })?;
@@ -2467,6 +2470,157 @@ mod tests {
         assert_eq!(deleting.calls, 1);
         assert_eq!(deleting.checkpoints, 0);
         assert!(deleting.captured.unwrap().resolve().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn callback_truncation_is_rejected_before_resuming_mapped_records() {
+        const CHILD: &str = "CV_TEST_CLAUDE_CALLBACK_TRUNCATION";
+        if std::env::var_os(CHILD).is_none() {
+            use std::os::unix::process::CommandExt;
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "harness::claude::tests::callback_truncation_is_rejected_before_resuming_mapped_records",
+                ])
+                .env(CHILD, "1");
+            // A regression may SIGBUS the child; never the shared runner or a core dump.
+            unsafe {
+                command.pre_exec(|| {
+                    let limit = libc::rlimit {
+                        rlim_cur: 0,
+                        rlim_max: 0,
+                    };
+                    if libc::setrlimit(libc::RLIMIT_CORE, &limit) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+            let mut child = command.spawn().unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    assert!(
+                        status.success(),
+                        "callback truncation child {} failed: {status}",
+                        child.id()
+                    );
+                    return;
+                }
+                if std::time::Instant::now() >= deadline {
+                    child.kill().unwrap();
+                    let _ = child.wait();
+                    panic!("callback truncation child {} timed out", child.id());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+        struct Mutate {
+            path: PathBuf,
+            original: Vec<u8>,
+            file: fs::File,
+            at: &'static str,
+            replace: bool,
+            mutate: bool,
+            calls: usize,
+            checkpoints: usize,
+            held: Option<Message>,
+        }
+        impl Mutate {
+            fn change(&mut self, at: &str) {
+                if self.mutate && (self.at == at || (self.at == "ignored-wants" && at == "wants")) {
+                    if self.replace {
+                        fs::rename(&self.path, self.path.with_extension("moved")).unwrap();
+                        fs::write(&self.path, &self.original).unwrap();
+                    }
+                    self.file.set_len(0).unwrap();
+                    self.mutate = false;
+                }
+            }
+        }
+        impl MessageSink for Mutate {
+            fn message(&mut self, message: Message) -> Flow {
+                self.calls += 1;
+                self.held = Some(message);
+                self.change("message");
+                Flow::Continue
+            }
+            fn wants_checkpoint(&mut self, _: u64) -> bool {
+                self.change("wants");
+                self.at == "checkpoint"
+            }
+            fn checkpoint(&mut self, _: &mut Checkpoint) {
+                self.checkpoints += 1;
+                self.change("checkpoint");
+            }
+        }
+        let world = crate::test_world("claude-callback-truncation");
+        let path = world.proj.join("source.jsonl");
+        for spans in [false, true] {
+            let first = serde_json::json!({"type":"user","uuid":"first","message":{"role":"user","content":"owned ".repeat(1000)}});
+            let tail = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"tail\"}}\n".repeat(1000);
+            let original = format!("{first}\n{tail}").into_bytes();
+            for at in ["message", "wants", "checkpoint", "ignored-wants"] {
+                let original = if at == "ignored-wants" {
+                    [
+                        b"{\"type\":\"custom-title\",\"customTitle\":\"metadata first\"}\n".as_slice(),
+                        &original,
+                    ]
+                    .concat()
+                } else {
+                    original.clone()
+                };
+                for (mutate, replace) in [(false, false), (true, false), (true, true)] {
+                    fs::write(&path, &original).unwrap();
+                    let mut sink = Mutate {
+                        path: path.clone(),
+                        original: original.clone(),
+                        file: fs::OpenOptions::new().write(true).open(&path).unwrap(),
+                        at,
+                        replace,
+                        mutate,
+                        calls: 0,
+                        checkpoints: 0,
+                        held: None,
+                    };
+                    let reference = SessionRef::new("source", Harness::Claude, path.clone());
+                    let opts = if spans {
+                        ParseOptions::lazy()
+                    } else {
+                        ParseOptions::full()
+                    };
+                    let result = Claude::with_config_dir(&world.proj).stream(&reference, &opts, &mut sink);
+                    assert_eq!(result.is_err(), mutate, "spans={spans},at={at},replace={replace}");
+                    if mutate {
+                        assert_eq!(
+                            sink.calls,
+                            usize::from(at != "ignored-wants"),
+                            "do not resume the mapped framer after a callback shrinks it"
+                        );
+                        assert_eq!(sink.checkpoints, usize::from(at == "checkpoint"));
+                        if at == "ignored-wants" {
+                            assert!(
+                                sink.held.is_none(),
+                                "metadata checkpoint polling precedes every delivered message"
+                            );
+                            continue;
+                        }
+                        let Block::Text { text } = &sink.held.as_ref().unwrap().content[0] else {
+                            panic!("first text")
+                        };
+                        assert_eq!(matches!(text, Text::Span(_)), spans);
+                        if let Text::Inline(text) = text {
+                            assert_eq!(text, &"owned ".repeat(1000));
+                        }
+                    } else {
+                        assert_eq!(sink.calls, 1001);
+                        assert_eq!(fs::read(&path).unwrap(), original);
+                    }
+                }
+            }
+        }
     }
 
     #[test]
