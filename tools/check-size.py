@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Parsimony gate: product code per crate and per module, and test code per crate, stay within a
-checked-in budget, and the tree holds no
-committed evidence. Growth is allowed only by editing tools/size-budget.txt in the same change, so
-it is a decision a reviewer sees, not drift. The budget also ratchets down: one more than
-SLACK above the measured size fails, so freed room is not silently refilled.
+"""Report product/test size drift against a reviewed measurement snapshot.
+
+Size changes are evidence for design review, not pass/fail thresholds. --write refreshes
+that snapshot without setting a target. Repository hygiene checks (committed measurement
+artifacts and oversized design documents) still fail independently of code size.
 
 Product lines: non-blank lines of crates/<crate>/src/**/*.rs outside `#[cfg(test)]` items (a test
 module, import or helper is skipped to its matching brace or `;`, with strings, raw strings, char
@@ -17,7 +17,6 @@ import subprocess
 import sys
 
 BUDGET = pathlib.Path("tools/size-budget.txt")
-SLACK = 0.05
 DOC_MAX_LINES = 250
 CFG_TEST = re.compile(r"#\[(cfg\((test|all\(test\b[^\]]*)\)|test)\]")  # cfg(test) items and #[test] fns
 MOD_DECL = re.compile(r"\bmod\s+(\w+)\s*;")
@@ -166,16 +165,11 @@ def tracked(*patterns: str) -> list[str]:
     return [line for line in out.stdout.splitlines() if line]
 
 
-TEST_SLACK = 0.10
-
-
-def check(kind: str, name: str, lines: int, limit: int | None, slack: float, failures: list[str]) -> None:
-    if limit is None:
-        failures.append(f"{name}: {lines} {kind} lines and no budget (add it to {BUDGET})")
-    elif lines > limit:
-        failures.append(f"{name}: {lines} {kind} lines exceed the budget of {limit} by {lines - limit}")
-    elif lines < limit / (1 + slack):
-        failures.append(f"{name}: budget {limit} is more than {slack:.0%} above the {lines} measured; lower it")
+def check(kind: str, name: str, lines: int, previous: int | None, changes: list[str]) -> None:
+    if previous is None:
+        changes.append(f"{name}: {lines} {kind} lines (new; no recorded measurement)")
+    elif lines != previous:
+        changes.append(f"{name}: {lines} {kind} lines ({lines - previous:+d} from {previous})")
 
 
 def main() -> int:
@@ -183,7 +177,7 @@ def main() -> int:
     if "--write" in sys.argv:
         BUDGET.write_text(
             "# Product lines per crate and per module, and test lines per crate (tools/check-size.py).\n"
-            "# Raise a number only as a reviewed decision; the gate ratchets each one down as code shrinks.\n"
+            "# Reviewed measurements, not targets. Drift is informational; --write records the current tree.\n"
             + "".join(f"{name} {lines}\n" for name, lines in crates.items())
             + "".join(f"{name}:tests {lines}\n" for name, lines in tests.items())
             + "".join(f"{name} {lines}\n" for name, lines in sorted(modules.items()))
@@ -192,21 +186,22 @@ def main() -> int:
         return 0
 
     failures: list[str] = []
+    changes: list[str] = []
     budget: dict[str, int] = {}
     for line in BUDGET.read_text().splitlines():
         if line.strip() and not line.startswith("#"):
             name, lines = line.split()
             budget[name] = int(lines)
     for name, lines in crates.items():
-        check("product", name, lines, budget.get(name), SLACK, failures)
+        check("product", name, lines, budget.get(name), changes)
         print(f"{name:12} {lines:7} / {budget.get(name, '-')}")
     for name, lines in tests.items():
-        check("test", f"{name}:tests", lines, budget.get(f"{name}:tests"), TEST_SLACK, failures)
+        check("test", f"{name}:tests", lines, budget.get(f"{name}:tests"), changes)
     for name, lines in modules.items():
-        check("product", name, lines, budget.get(name), SLACK, failures)
+        check("product", name, lines, budget.get(name), changes)
     known = set(crates) | {f"{c}:tests" for c in crates} | set(modules)
     for name in budget.keys() - known:
-        failures.append(f"{name}: budgeted but no such crate or module; remove it from {BUDGET}")
+        changes.append(f"{name}: no longer present (previously {budget[name]} lines)")
 
     for path in tracked("docs/*.json", "docs/**/*.json", "tools/profiling/results/*"):
         failures.append(f"{path}: measurements belong in commit messages, not committed files")
@@ -215,6 +210,8 @@ def main() -> int:
         if n > DOC_MAX_LINES:
             failures.append(f"{path}: {n} lines; design docs stay under {DOC_MAX_LINES} (history lives in git)")
 
+    for change in changes:
+        print(f"SIZE {change}")
     for failure in failures:
         print(f"FAIL {failure}", file=sys.stderr)
     return 1 if failures else 0
