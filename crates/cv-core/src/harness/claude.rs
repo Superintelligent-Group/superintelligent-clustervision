@@ -1176,6 +1176,7 @@ const CLAUDE_EXTRA_TOP: &[&str] = &[
     "parentToolUseID",
     "toolUseID",
     "sourceToolAssistantUUID",
+    "sourceToolUseID",
     "attributionAgent",
     "attributionMcpServer",
     "attributionMcpTool",
@@ -1262,6 +1263,39 @@ mod tests {
                 _ => None,
             })
             .expect("tool result details")
+    }
+
+    #[test]
+    fn leftovers_slash_skill_projection_keeps_tool_correlation() -> Result<()> {
+        let body = "Base directory for this skill: /skills/test\n\nDo the task";
+        let records = [
+            serde_json::json!({"type":"user","uuid":"slash","isMeta":true,"message":{"role":"user","content":body}}),
+            serde_json::json!({"type":"assistant","uuid":"call","message":{"role":"assistant","content":[{"type":"tool_use","id":"skill-call","name":"Skill","input":{"skill":"test"}}]}}),
+            serde_json::json!({"type":"user","uuid":"tool-body","isMeta":true,"sourceToolUseID":"skill-call","message":{"role":"user","content":body}}),
+        ];
+        let wire = records.iter().map(|r| format!("{r}\n")).collect::<String>();
+        for opts in [ParseOptions::full(), ParseOptions::facts(), ParseOptions::complete()] {
+            let mut sink = CollectSink::default();
+            let mut session = stream_str("skills", &wire, None, &opts, &mut sink);
+            session.messages = sink.messages;
+            assert_eq!(
+                session
+                    .messages
+                    .iter()
+                    .filter(|m| m
+                        .harness_extra(Harness::Claude)
+                        .is_some_and(|bag| bag.get("sourceToolUseID") == Some(&serde_json::json!("skill-call"))))
+                    .count(),
+                1
+            );
+            let rows = crate::affordance::of_session(&session)?;
+            assert_eq!(
+                rows.iter().filter(|r| r.kind == crate::affordance::Kind::Skill).count(),
+                2,
+                "slash activation plus the Skill call, without counting its body twice"
+            );
+        }
+        Ok(())
     }
 
     #[test]

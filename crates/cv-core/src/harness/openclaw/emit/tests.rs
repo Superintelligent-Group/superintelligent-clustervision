@@ -259,7 +259,7 @@ fn checked_openclaw_borrowed_wrapper_matches_replay_definition_and_none() -> Res
 }
 
 #[test]
-fn checked_openclaw_title_policy_matches_frozen_explicit_and_first_user() -> Result<()> {
+fn checked_openclaw_title_policy_matches_frozen_explicit_and_meaningful_prompt() -> Result<()> {
     let world = crate::test_world("openclaw-title-policy");
     let mut frozen = crate::emit::grok_qwen_tests::Frozen::new("openclaw-title-policy");
     for title in [None, Some(""), Some("   "), Some("explicit λ")] {

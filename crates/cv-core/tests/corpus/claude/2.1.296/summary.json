@@ -1068,7 +1068,7 @@
       "affordances": {
         "approval/state": 1,
         "hook/output": 3,
-        "skill/load": 1
+        "skill/load": 2
       },
       "lineage": {},
       "model": "glm-5.3-flash",

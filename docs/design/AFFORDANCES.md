@@ -88,7 +88,9 @@ only) is an `approval/deny` at that message; OpenCode's `patch` parts (1.x) and 
 
 **The catalog's counts carry the view's version** (`affordance::VIEW_VERSION`, stored as `_v`): a
 row counted by an older view is "not counted", so adding a kind or a reader never makes
-`has:<kind>` answer a stale no. Bump it with any change to what `Counter` counts.
+`has:<kind>` answer a stale no. Normally bump it with a change to what `Counter` counts.
+0.18 shares the coordinated source-stamp epoch upgrade instead: old counts/events/search
+receipts all become stale together, while the counts payload stays at view version 5.
 
 **IR corrections** (existing kinds, assigned where adapters left them out; CHANGELOG'd):
 
@@ -163,11 +165,18 @@ baseline is the one `source::Baseline` record every consumer publishes (the cata
 `affordance_sig` and the no-op `note_affordances` are gone), and `AffordanceSink` latches errors
 through the one `stream::Latch` the event and spool sinks use.
 
-Leaves (named, not done here): Kimi Code `tools.update_store` (carried records); a Cline
-schedule's maker (no session is recorded); OpenClaw 1.29 completions that are plain user text; Roo's
-`new_task` result, which rides a mixed user turn the adapter types `Prompt` (so no
-`subagent_return`); Kimi Code 0.39.1 spawns, which have no record of their own; Claude skills run
-by slash command, whose only trace is the command notice and an `isMeta` body.
+Then closed in 0.18: Kimi Code `tools.update_store{key:todo,value}` supplies the latest
+`plan/state` (rich items, presence only for Facts reducers). Legacy Kimi Code Agent/AgentSwarm
+steps infer spawns and completed/failed result headers infer returns; native 2.x markers remain
+authoritative and suppress duplicate inference. Roo's mixed user turn stays a `Prompt`: its
+matched `new_task` result supplies a `subagent_return` detail. Claude's injected "Base directory
+for this skill:" body identifies a slash-loaded skill; `sourceToolUseID` prevents counting a
+Skill tool call's body a second time. Qwen's per-project schedule-file identity is already in
+its source baseline, including edits, deletion and recreation.
+
+Leaves: a Cline schedule's maker (no owning session is recorded), and OpenClaw 1.29
+completions that carry only ordinary user text without a structured completion marker.
+Do not infer either from timing or ambiguous prose alone.
 
 For `approval` and `checkpoint`, left: a per-call *allow* (no corpus store records one: Kimi Code
 `permission.record_approval_result` is unwritten in auto mode, Devin `tool_call_state` holds only a

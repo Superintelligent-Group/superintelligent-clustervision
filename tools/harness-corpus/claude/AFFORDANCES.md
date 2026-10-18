@@ -43,7 +43,7 @@ The IR column is how cv reads it today (`MessageKind`/`Block`/`extra["claude"]`/
 | cron | `CronCreate`/`CronList`/`CronDelete` | tool calls (session-only jobs) | yes | `ToolUse` |
 | wakeup | `ScheduleWakeup` | tool call, then (process waits) a `user` turn `isMeta`, `turnOrigin: scheduled` | yes (fired) | `Prompt` with `origin: scheduler` |
 | /loop | bundled skill over cron | — | no (cron covered) | — |
-| skills | `/corpus-greet` and the `Skill` tool | command rows + skill body as a user text block; `attachment.skill_listing`, `command_permissions` | yes | `Notice` + `Prompt`; listing `InjectedContext` |
+| skills | `/corpus-greet` and the `Skill` tool | command rows + skill body as a user text block; `attachment.skill_listing`, `command_permissions` | yes | invocation `Notice`, body `InjectedContext`; slash body `skill/load` (tool-linked bodies deduplicated), listing `InjectedContext` |
 | MCP | `--mcp-config` stdio server | `mcp__corpus__add` tool_use | yes | `ToolUse` named `mcp__corpus__add` |
 | ToolSearch (deferred tools) | `ToolSearch` | `tool_reference` result blocks, `attachment.deferred_tools_delta`/`deferred_tools_record` | yes (MCP tool loaded through it) | `ToolResult`; deltas `InjectedContext` |
 | worktree | `EnterWorktree`/`ExitWorktree` | `worktree-state`, `relocated` | yes | carried; `relocated_cwd` in bag |

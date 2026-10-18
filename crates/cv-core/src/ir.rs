@@ -1069,20 +1069,25 @@ pub fn label_from(title: Option<&str>, prompt: Option<&str>) -> String {
 pub const TITLE_HEAD: u64 = 8 * 1024;
 
 /// A user turn's text as a real prompt, or `None` when it's only harness noise. Peels any leading
-/// `<system-reminder>…</system-reminder>` blocks and surrounding whitespace, then rejects the
+/// `<system-reminder>…</system-reminder>` and Cursor `<timestamp>…</timestamp>` blocks
+/// and surrounding whitespace, then rejects the
 /// residual if it's empty, the `Caveat:` local-command preamble, or a bare command wrapper
 /// (`<command-name>`/`<command-message>`/`<local-command-stdout>`). Used by [`Message::prompt_title`].
 fn meaningful_prompt(text: &str) -> Option<String> {
     let mut s = text.trim_start();
     loop {
         s = s.trim_start();
-        let Some(rest) = s.strip_prefix("<system-reminder>") else {
-            break;
-        };
-        let Some(end) = rest.find("</system-reminder>") else {
-            break;
-        };
-        s = &rest[end + "</system-reminder>".len()..];
+        let peeled = [
+            ("<system-reminder>", "</system-reminder>"),
+            ("<timestamp>", "</timestamp>"),
+        ]
+        .into_iter()
+        .find_map(|(open, close)| {
+            let rest = s.strip_prefix(open)?;
+            Some(&rest[rest.find(close)? + close.len()..])
+        });
+        let Some(rest) = peeled else { break };
+        s = rest;
     }
     let s = s.trim();
     if s.is_empty()
@@ -1739,6 +1744,18 @@ mod tests {
         assert_eq!(
             meaningful_prompt("<system-reminder>a</system-reminder><system-reminder>b</system-reminder> hi").as_deref(),
             Some("hi")
+        );
+        assert_eq!(
+            meaningful_prompt("<timestamp>Monday, Oct 12, 2026, 7:50 PM (UTC-4)</timestamp>\nreal question").as_deref(),
+            Some("real question")
+        );
+        assert_eq!(
+            meaningful_prompt("<timestamp>metadata</timestamp><system-reminder>noise</system-reminder>"),
+            None
+        );
+        assert_eq!(
+            meaningful_prompt("<timestamp>unfinished").as_deref(),
+            Some("<timestamp>unfinished")
         );
         // Pure noise (no residual prose) yields None.
         assert_eq!(

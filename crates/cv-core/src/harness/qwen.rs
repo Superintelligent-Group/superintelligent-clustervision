@@ -968,12 +968,29 @@ mod tests {
         let before = crate::source::Probe::default().snapshot(&reference);
         assert_eq!(scheduled_tasks(&reference)[0].summary, "first");
         assert_eq!(scheduled_tasks(&reference)[0].summary, "first");
+        #[cfg(feature = "sqlite")]
+        {
+            crate::catalog::sync(std::slice::from_ref(&reference));
+            let source = before.with_reads(&crate::source::ReadSet::default());
+            crate::catalog::note_affordances_with_source(&reference, &source, || {
+                [(crate::affordance::Kind::Schedule, 1)].into_iter().collect()
+            });
+            assert_eq!(
+                crate::catalog::AffordanceTable::load().counts(&reference).unwrap()[&crate::affordance::Kind::Schedule],
+                1
+            );
+        }
         fs::write(
             &file,
             serde_json::to_vec(&serde_json::json!([{"id":"changed schedule","sessionId":"session"}]))?,
         )?;
         assert!(!crate::source::unchanged(&reference, &before));
         assert_eq!(scheduled_tasks(&reference)[0].summary, "changed schedule");
+        #[cfg(feature = "sqlite")]
+        assert!(
+            crate::catalog::AffordanceTable::load().counts(&reference).is_none(),
+            "has:schedule must not reuse counts after a per-project edit"
+        );
         fs::remove_file(&file)?;
         assert!(scheduled_tasks(&reference).is_empty());
         fs::write(

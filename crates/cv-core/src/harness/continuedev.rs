@@ -289,7 +289,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &crate::emit::EmitOptions) 
 
     // ── transcript: <sessionId>.json ──
     let resolver = crate::lazy::Resolver::new(session.source_path.clone());
-    let title = super::wire::write::fallback_title(session, Harness::Continue, opts.thinking, &resolver)?;
+    let title = super::wire::write::fallback_title(session, &resolver)?;
     let file_path = out_dir.join(format!("{new_id}.json"));
     emit::transcript(
         session,
