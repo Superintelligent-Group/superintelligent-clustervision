@@ -442,3 +442,39 @@ fn complete_count_publication_waits_for_writer_and_commits_one_pair() {
     assert_eq!(r.message_count, 9);
     assert_eq!(refilled(&reader, &r), 9);
 }
+
+#[test]
+fn partial_publication_preserves_a_concurrent_certified_complete_pass() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let w = crate::test_world("partial-count-race");
+    let path = w.base.join("session.jsonl");
+    std::fs::write(&path, "source").unwrap();
+    let r = SessionRef::new("s", crate::Harness::Codex, path);
+    sync(std::slice::from_ref(&r));
+    let source = Probe::default().snapshot(&r).with_reads(&ReadSet::default());
+    let mut publishing = open_db().unwrap();
+    let partial_ref = r.clone();
+    let (ready, started) = mpsc::channel();
+    let (resume, released) = mpsc::channel();
+    let worker = std::thread::spawn(crate::env::carry(move || {
+        super::imp::note_counts_in(&mut publishing, &partial_ref, &source, None, || {
+            // The old pair has been read, but there is no writer transaction yet.
+            ready.send(()).unwrap();
+            released.recv_timeout(Duration::from_secs(10)).unwrap();
+            [(crate::affordance::Kind::Plan, 99)].into_iter().collect()
+        });
+    }));
+    started.recv_timeout(Duration::from_secs(10)).unwrap();
+    counted(&r, 9);
+    resume.send(()).unwrap();
+    worker.join().unwrap();
+    let reader = Reader::open().unwrap();
+    assert_eq!(refilled(&reader, &r), 9);
+    assert_eq!(
+        reader
+            .counts_with_probe(&r, &Probe::default().snapshot(&r), &mut Probe::default())
+            .unwrap()[&crate::affordance::Kind::Plan],
+        1
+    );
+}
