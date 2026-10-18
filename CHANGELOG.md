@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Hermes listings read native session metadata without scanning message bodies; indexing or complete reads supply source-certified canonical turn counts.
+
 - Listings reuse source-certified exact turn counts after complete reads, preserving them across harmless metadata refreshes and invalidating changed sources.
 - Kimi Code listings use complete native state metadata directly and defer exact counts; incomplete metadata retains transcript-derived titles and timestamps.
 - Kimi Code reads detect callback source changes before continuing a new step or completing an unfinished one.
