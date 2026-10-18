@@ -17,9 +17,8 @@ fn apply_query(refs: &mut Vec<SessionRef>, query: &Option<cv_core::SessionQuery>
     crate::cmd::query::filter_refs(refs, q, &crate::cmd::query::text_sets(q)?)
 }
 
-/// Session rows for `--json` listings: the SAME refs the table would print (the `exists()` guard —
-/// a row whose file vanished since the probe is dropped — comes free from the `stat` that yields
-/// `size_bytes`), capped at `limit`.
+/// Session rows for `--json` listings, capped at `limit`. Fresh render-phase metadata supplies
+/// both presence and `size_bytes`; rows sharing a path reuse that observation within each batch.
 fn json_rows<'a>(refs: impl Iterator<Item = &'a SessionRef>, limit: usize) -> Vec<(&'a SessionRef, serde_json::Value)> {
     // Several logical sessions can share one database. Recheck at this rendering boundary,
     // then reuse metadata in small batches: a missing tail must not grow another fleet-sized map.
