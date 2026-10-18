@@ -162,13 +162,13 @@
         "user/injected_context",
         "user/prompt",
         "user/injected_context",
-        "assistant/reply",
-        "tool/tool_result",
+        "assistant/subagent_spawn",
+        "tool/subagent_return",
         "assistant/reply",
         "user/injected_context",
         "user/prompt",
         "user/injected_context",
-        "assistant/reply",
+        "assistant/subagent_spawn",
         "tool/tool_result",
         "assistant/reply",
         "user/injected_context",
@@ -225,8 +225,8 @@
       "compaction_boundaries": [
         127
       ],
-      "subagent_spawns": 0,
-      "subagent_returns": 0,
+      "subagent_spawns": 2,
+      "subagent_returns": 1,
       "affordances": {
         "approval/state": 1,
         "background_job/complete": 1,
@@ -237,11 +237,14 @@
         "hook/output": 20,
         "plan/enter": 1,
         "plan/exit": 1,
+        "plan/state": 1,
         "plan/write": 2,
         "schedule/create": 1,
         "schedule/delete": 1,
         "schedule/list": 1,
-        "skill/load": 2
+        "skill/load": 2,
+        "subagent_return/return": 1,
+        "subagent_spawn/spawn": 2
       },
       "lineage": {},
       "model": "__kimi_env_model__",

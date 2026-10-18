@@ -301,6 +301,7 @@
         "hook/output": 19,
         "plan/enter": 1,
         "plan/exit": 1,
+        "plan/state": 1,
         "plan/write": 2,
         "schedule/create": 1,
         "schedule/delete": 1,

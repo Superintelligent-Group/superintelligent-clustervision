@@ -1278,9 +1278,22 @@ mod tests {
             let mut sink = CollectSink::default();
             let mut session = stream_str("skills", &wire, None, &opts, &mut sink);
             session.messages = sink.messages;
-            assert_eq!(session.messages.iter().filter(|m| m.harness_extra(Harness::Claude).is_some_and(|bag| bag.get("sourceToolUseID") == Some(&serde_json::json!("skill-call")))).count(), 1);
+            assert_eq!(
+                session
+                    .messages
+                    .iter()
+                    .filter(|m| m
+                        .harness_extra(Harness::Claude)
+                        .is_some_and(|bag| bag.get("sourceToolUseID") == Some(&serde_json::json!("skill-call"))))
+                    .count(),
+                1
+            );
             let rows = crate::affordance::of_session(&session)?;
-            assert_eq!(rows.iter().filter(|r| r.kind == crate::affordance::Kind::Skill).count(), 2, "slash activation plus the Skill call, without counting its body twice");
+            assert_eq!(
+                rows.iter().filter(|r| r.kind == crate::affordance::Kind::Skill).count(),
+                2,
+                "slash activation plus the Skill call, without counting its body twice"
+            );
         }
         Ok(())
     }

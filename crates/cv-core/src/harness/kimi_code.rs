@@ -386,7 +386,9 @@ struct SavedCtx {
 impl SavedCtx {
     fn restore(self, opts: &ParseOptions) -> Ctx<'_> {
         let mut facts = self.facts;
-        if opts.facts_only() { facts.remove("todo"); }
+        if opts.facts_only() {
+            facts.remove("todo");
+        }
         Ctx {
             opts,
             step: None,
@@ -898,19 +900,28 @@ impl<'a> Ctx<'a> {
                     if let Some(values) = fields.get("value").map(JsonView::array).transpose()?.flatten() {
                         if self.opts.facts_only() {
                             let mut present = false;
-                            for value in values { if crate::affordance::item_present(value?)? { present = true; break; } }
+                            for value in values {
+                                if crate::affordance::item_present(value?)? {
+                                    present = true;
+                                    break;
+                                }
+                            }
                             self.facts.remove("todo");
                             self.facts.insert("todo_present".into(), Value::Bool(present));
                         } else {
-                            let items: Vec<crate::affordance::Item> = values.map(|value| crate::affordance::item_of_view(value?))
-                                .filter_map(|item| item.transpose()).collect::<Result<_>>()?;
+                            let items: Vec<crate::affordance::Item> = values
+                                .map(|value| crate::affordance::item_of_view(value?))
+                                .filter_map(|item| item.transpose())
+                                .collect::<Result<_>>()?;
                             self.facts.insert("todo_present".into(), Value::Bool(!items.is_empty()));
                             self.facts.insert("todo".into(), serde_json::to_value(items)?);
                         }
                     }
                 }
             }
-            if !self.opts.complete { return Ok(Flow::Continue); }
+            if !self.opts.complete {
+                return Ok(Flow::Continue);
+            }
         }
         if !self.opts.complete && matches!(ty.as_str(), "llm.request" | "usage.record") {
             let loop_request = loop_request(&ty, record.string("kind")?.as_deref());
@@ -1181,11 +1192,20 @@ impl<'a> Ctx<'a> {
             details.insert("persistedOutput".into(), serde_json::json!({"path":path}));
         }
         let mut message = Message::of_kind(Role::Tool, MessageKind::ToolResult, Origin::Harness);
-        if !self.native_subagents && matches!(self.call_names.get(&id).map(String::as_str), Some("Agent" | "AgentSwarm")) {
+        if !self.native_subagents
+            && matches!(
+                self.call_names.get(&id).map(String::as_str),
+                Some("Agent" | "AgentSwarm")
+            )
+        {
             let resolver = crate::lazy::Resolver::new(None);
             let head = content.try_resolve_prefix(&resolver, crate::ir::TITLE_HEAD)?;
             let header = head.split("\n\n").next().unwrap_or("");
-            if header.starts_with("agent_id:") && header.lines().any(|line| matches!(line, "status: completed" | "status: failed")) {
+            if header.starts_with("agent_id:")
+                && header
+                    .lines()
+                    .any(|line| matches!(line, "status: completed" | "status: failed"))
+            {
                 message.kind = MessageKind::SubagentReturn;
                 message.origin = Origin::Subagent;
             }
@@ -1632,7 +1652,9 @@ impl<'a> Ctx<'a> {
                     result.origin = Origin::Harness;
                 }
             }
-        } else if step.msg.content.iter().any(|block| matches!(block, Block::ToolUse { name, .. } if matches!(name.as_str(), "Agent" | "AgentSwarm"))) {
+        } else if step.msg.content.iter().any(
+            |block| matches!(block, Block::ToolUse { name, .. } if matches!(name.as_str(), "Agent" | "AgentSwarm")),
+        ) {
             step.msg.kind = MessageKind::SubagentSpawn;
         }
         if (!step.msg.content.is_empty() || step.msg.usage.is_some()) && sink.message(step.msg) == Flow::Stop {
@@ -1734,22 +1756,34 @@ mod tests {
     #[test]
     fn leftovers_todo_updates_keep_latest_state_and_facts_presence() -> Result<()> {
         use crate::affordance::{self, Kind};
-        for opts in [ParseOptions::full(), ParseOptions::lazy(), ParseOptions::facts(), ParseOptions::complete()] {
+        for opts in [
+            ParseOptions::full(),
+            ParseOptions::lazy(),
+            ParseOptions::facts(),
+            ParseOptions::complete(),
+        ] {
             let mut ctx = Ctx::new(&opts);
             let mut sink = crate::stream::CollectSink::default();
             for status in ["pending", "done"] {
                 let value = serde_json::json!({"type":"tools.update_store","key":"todo","value":[{"title":"read a.txt","status":status}]});
                 ctx.record(JsonView::from(&value), None, &mut sink)?;
             }
-            let irrelevant = serde_json::json!({"type":"tools.update_store","key":"unrelated","value":"x".repeat(128*1024)});
+            let irrelevant =
+                serde_json::json!({"type":"tools.update_store","key":"unrelated","value":"x".repeat(128*1024)});
             ctx.record(JsonView::from(&irrelevant), None, &mut sink)?;
             let mut session = Session::new("todo", Harness::KimiCode);
             session.harness_extra_mut(Harness::KimiCode).extend(ctx.facts.clone());
             let rows = affordance::session_rows(&session);
-            assert_eq!(rows.len(), 1); assert_eq!((rows[0].kind, rows[0].action), (Kind::Plan, "state"));
+            assert_eq!(rows.len(), 1);
+            assert_eq!((rows[0].kind, rows[0].action), (Kind::Plan, "state"));
             if opts.facts_only() {
-                assert!(!ctx.facts.contains_key("todo"), "reducers retain presence, not arbitrary-size plan text");
-            } else { assert_eq!(rows[0].items[0].status.as_deref(), Some("done")); }
+                assert!(
+                    !ctx.facts.contains_key("todo"),
+                    "reducers retain presence, not arbitrary-size plan text"
+                );
+            } else {
+                assert_eq!(rows[0].items[0].status.as_deref(), Some("done"));
+            }
             let counter = affordance::Counter::new(&SessionRef::new("todo", Harness::KimiCode, "unused"));
             assert_eq!(counter.finish(&session, &[])[&Kind::Plan], 1);
             let clear = serde_json::json!({"type":"tools.update_store","key":"todo","value":[]});
@@ -1757,7 +1791,10 @@ mod tests {
             session.harness_extra_mut(Harness::KimiCode).extend(ctx.facts);
             assert!(affordance::session_rows(&session).is_empty());
         }
-        assert!(Flavor::of(&ParseOptions::facts()) != Flavor::of(&ParseOptions::lazy()), "rich and presence-only checkpoints cannot substitute for one another");
+        assert!(
+            Flavor::of(&ParseOptions::facts()) != Flavor::of(&ParseOptions::lazy()),
+            "rich and presence-only checkpoints cannot substitute for one another"
+        );
         Ok(())
     }
 
@@ -1773,13 +1810,33 @@ mod tests {
                 serde_json::json!({"type":"context.append_loop_event","event":{"type":"tool.result","toolCallId":"agent-call","result":{"output":format!("agent_id: agent-0\nactual_subagent_type: coder\nstatus: {status}\n\nanswer")}}}),
                 serde_json::json!({"type":"context.append_loop_event","event":{"type":"step.end","uuid":"step","turnId":"0","step":1}}),
             ];
-            for record in records { ctx.record(JsonView::from(&record), None, &mut sink)?; }
+            for record in records {
+                ctx.record(JsonView::from(&record), None, &mut sink)?;
+            }
             assert_eq!(sink.messages[0].kind, MessageKind::SubagentSpawn);
-            assert_eq!(sink.messages[1].kind, if status == "running" { MessageKind::ToolResult } else { MessageKind::SubagentReturn });
-            let mut session = Session::new("agents", Harness::KimiCode); session.messages = sink.messages;
+            assert_eq!(
+                sink.messages[1].kind,
+                if status == "running" {
+                    MessageKind::ToolResult
+                } else {
+                    MessageKind::SubagentReturn
+                }
+            );
+            let mut session = Session::new("agents", Harness::KimiCode);
+            session.messages = sink.messages;
             let rows = crate::affordance::of_session(&session)?;
-            assert_eq!(rows.iter().filter(|r| r.kind == crate::affordance::Kind::SubagentSpawn).count(), 1);
-            assert_eq!(rows.iter().filter(|r| r.kind == crate::affordance::Kind::SubagentReturn).count(), usize::from(status != "running"));
+            assert_eq!(
+                rows.iter()
+                    .filter(|r| r.kind == crate::affordance::Kind::SubagentSpawn)
+                    .count(),
+                1
+            );
+            assert_eq!(
+                rows.iter()
+                    .filter(|r| r.kind == crate::affordance::Kind::SubagentReturn)
+                    .count(),
+                usize::from(status != "running")
+            );
         }
         Ok(())
     }

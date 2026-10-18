@@ -623,7 +623,10 @@ fn refine_spawn(h: Harness, m: &mut Message, open: &mut std::collections::HashMa
             let mut returned = false;
             for b in &mut m.content {
                 if let Block::ToolResult {
-                    tool_use_id, content, tool_name, ..
+                    tool_use_id,
+                    content,
+                    tool_name,
+                    ..
                 } = b
                 {
                     match open.remove(tool_use_id.as_str()) {
@@ -632,7 +635,7 @@ fn refine_spawn(h: Harness, m: &mut Message, open: &mut std::collections::HashMa
                             if !all_results && h == Harness::Roo {
                                 *tool_name = Some("new_task".into());
                             }
-                        },
+                        }
                         // A lazy span is a large result: an answer, not a launch receipt.
                         Some(Returns::ResultUnless(marker)) => {
                             returned |= match content {
@@ -710,10 +713,24 @@ pub fn item_of(v: &Value) -> Option<Item> {
 }
 
 fn item_text(view: JsonView<'_>) -> Result<Option<JsonView<'_>>> {
-    if view.is_string()? { return Ok(Some(view)); }
-    for key in ["content", "subject", "title", "step", "description", "text", "task", "name", "goal"] {
+    if view.is_string()? {
+        return Ok(Some(view));
+    }
+    for key in [
+        "content",
+        "subject",
+        "title",
+        "step",
+        "description",
+        "text",
+        "task",
+        "name",
+        "goal",
+    ] {
         if let Some(text) = view.get(key)? {
-            if text.is_string()? { return Ok(Some(text)); }
+            if text.is_string()? {
+                return Ok(Some(text));
+            }
         }
     }
     Ok(None)
@@ -723,16 +740,28 @@ fn item_text(view: JsonView<'_>) -> Result<Option<JsonView<'_>>> {
 pub(crate) fn item_present(view: JsonView<'_>) -> Result<bool> {
     let Some(text) = item_text(view)? else { return Ok(false) };
     let mut present = false;
-    text.for_each_str_chunk(|chunk| { present |= !chunk.trim().is_empty(); Ok(()) })?;
+    text.for_each_str_chunk(|chunk| {
+        present |= !chunk.trim().is_empty();
+        Ok(())
+    })?;
     Ok(present)
 }
 
 pub fn item_of_view(view: JsonView<'_>) -> Result<Option<Item>> {
     let Some(text) = item_text(view)? else { return Ok(None) };
-    let Some(content) = input::item_string(text, view.is_string()?)? else { return Ok(None) };
-    let status = if view.is_string()? { None } else {
-        match view.get("status")? { Some(value) => Some(value), None => view.get("state")? }
-            .map(input::string).transpose()?.flatten()
+    let Some(content) = input::item_string(text, view.is_string()?)? else {
+        return Ok(None);
+    };
+    let status = if view.is_string()? {
+        None
+    } else {
+        match view.get("status")? {
+            Some(value) => Some(value),
+            None => view.get("state")?,
+        }
+        .map(input::string)
+        .transpose()?
+        .flatten()
     };
     Ok(Some(Item { content, status }))
 }
@@ -924,11 +953,15 @@ fn record(
             .unwrap_or(false))
     };
     Ok(match h {
-        H::Claude if m.kind == MessageKind::InjectedContext && m.origin == Origin::Harness
-            && m.harness_extra(h).is_none_or(|bag| !bag.contains_key("sourceToolUseID"))
-            && starts_with("Base directory for this skill:")? => {
-                Some((Kind::Skill, "load", "slash command"))
-            }
+        H::Claude
+            if m.kind == MessageKind::InjectedContext
+                && m.origin == Origin::Harness
+                && m.harness_extra(h)
+                    .is_none_or(|bag| !bag.contains_key("sourceToolUseID"))
+                && starts_with("Base directory for this skill:")? =>
+        {
+            Some((Kind::Skill, "load", "slash command"))
+        }
         H::Claude if m.kind == MessageKind::InjectedContext && starts_with("<task-notification>")? => {
             Some((Kind::BackgroundJob, "complete", "task-notification"))
         }
@@ -1045,8 +1078,15 @@ fn detail_hits<'a>(
         };
         if h == Harness::Roo && m.kind != MessageKind::SubagentReturn && tool_name.as_deref() == Some("new_task") {
             out.push(Hit::Detail {
-                kind: Kind::SubagentReturn, action: "return", tool: Some("new_task"), tool_use_id: Some(tool_use_id),
-                summary: if summaries { text::plain_summary(content, resolver)? } else { String::new() },
+                kind: Kind::SubagentReturn,
+                action: "return",
+                tool: Some("new_task"),
+                tool_use_id: Some(tool_use_id),
+                summary: if summaries {
+                    text::plain_summary(content, resolver)?
+                } else {
+                    String::new()
+                },
             });
         }
         if *is_error && text::denied(content, resolver, h)? {
@@ -1205,9 +1245,19 @@ pub fn session_rows(s: &Session) -> Vec<Affordance> {
         out.push(session_row(Kind::Approval, "state", tool, summary, Vec::new()));
     }
     if s.harness == Harness::KimiCode {
-        let items: Vec<Item> = bag.get("todo").and_then(Value::as_array).into_iter().flatten().filter_map(item_of).collect();
+        let items: Vec<Item> = bag
+            .get("todo")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(item_of)
+            .collect();
         if !items.is_empty() || bag.get("todo_present").and_then(Value::as_bool) == Some(true) {
-            let summary = if items.is_empty() { "todo state".into() } else { items_summary(&items) };
+            let summary = if items.is_empty() {
+                "todo state".into()
+            } else {
+                items_summary(&items)
+            };
             out.push(session_row(Kind::Plan, "state", "tools.update_store", summary, items));
         }
     }
@@ -1458,9 +1508,26 @@ mod tests {
     #[test]
     fn leftovers_roo_mixed_return_keeps_prompt_and_counts_once() -> Result<()> {
         let mut call = Message::new(Role::Assistant);
-        call.content.push(Block::ToolUse { id: "child".into(), name: "new_task".into(), input: json!({}).into(), namespace: None });
+        call.content.push(Block::ToolUse {
+            id: "child".into(),
+            name: "new_task".into(),
+            input: json!({}).into(),
+            namespace: None,
+        });
         let mut mixed = Message::new(Role::User);
-        mixed.content = vec![Block::ToolResult { tool_use_id: "child".into(), content: "child answer".into(), is_error: false, tool_name: None, status: None, details: None }, Block::Text { text: "environment metadata".into() }];
+        mixed.content = vec![
+            Block::ToolResult {
+                tool_use_id: "child".into(),
+                content: "child answer".into(),
+                is_error: false,
+                tool_name: None,
+                status: None,
+                details: None,
+            },
+            Block::Text {
+                text: "environment metadata".into(),
+            },
+        ];
         let mut open = std::collections::HashMap::new();
         refine_spawn(Harness::Roo, &mut call, &mut open)?;
         refine_spawn(Harness::Roo, &mut mixed, &mut open)?;
@@ -1471,22 +1538,34 @@ mod tests {
         assert_eq!(rows.iter().filter(|r| r.kind == Kind::SubagentReturn).count(), 1);
         assert_eq!(rows[0].tool_use_id.as_deref(), Some("child"));
         let r = crate::SessionRef::new("roo", Harness::Roo, "unused");
-        let mut counter = Counter::new(&r); counter.note(&call)?; counter.note(&mixed)?;
-        assert_eq!(counter.finish(&Session::new("roo", Harness::Roo), &[])[&Kind::SubagentReturn], 1);
+        let mut counter = Counter::new(&r);
+        counter.note(&call)?;
+        counter.note(&mixed)?;
+        assert_eq!(
+            counter.finish(&Session::new("roo", Harness::Roo), &[])[&Kind::SubagentReturn],
+            1
+        );
         Ok(())
     }
 
     #[test]
     fn leftovers_claude_slash_skill_body_is_not_a_second_tool_activation() -> Result<()> {
         let mut body = Message::of_kind(Role::User, MessageKind::InjectedContext, Origin::Harness);
-        body.content.push(Block::Text { text: "Base directory for this skill: /skills/test\n\nDo the task".into() });
+        body.content.push(Block::Text {
+            text: "Base directory for this skill: /skills/test\n\nDo the task".into(),
+        });
         let resolver = crate::lazy::Resolver::new(None);
         assert_eq!(message_rows(Harness::Claude, &body, 0, &resolver)?[0].kind, Kind::Skill);
-        body.harness_extra_mut(Harness::Claude).insert("sourceToolUseID".into(), json!("tool-call"));
+        body.harness_extra_mut(Harness::Claude)
+            .insert("sourceToolUseID".into(), json!("tool-call"));
         assert!(message_rows(Harness::Claude, &body, 0, &resolver)?.is_empty());
-        body.kind = MessageKind::Prompt; body.origin = Origin::Human;
+        body.kind = MessageKind::Prompt;
+        body.origin = Origin::Human;
         body.extra.clear();
-        assert!(message_rows(Harness::Claude, &body, 0, &resolver)?.is_empty(), "literal human prose is not a skill activation");
+        assert!(
+            message_rows(Harness::Claude, &body, 0, &resolver)?.is_empty(),
+            "literal human prose is not a skill activation"
+        );
         Ok(())
     }
 
