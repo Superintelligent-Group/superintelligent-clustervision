@@ -148,8 +148,13 @@ impl Context {
     }
     #[cfg(feature = "sqlite")]
     pub(crate) fn with_connection_mut<T>(&self, f: impl FnOnce(&mut rusqlite::Connection) -> T) -> Option<T> {
-        let connection = self
-            .0
+        let connection = self.connection()?;
+        let mut connection = connection.lock().ok()?;
+        Some(f(&mut connection))
+    }
+    #[cfg(feature = "sqlite")]
+    fn connection(&self) -> Option<Connection> {
+        self.0
             .connection
             .get_or_init(|| {
                 if self.0.path.as_os_str().is_empty() {
@@ -159,9 +164,20 @@ impl Context {
                 self.0.opens.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 crate::catalog::open_at(&self.0.path).map(|connection| Arc::new(std::sync::Mutex::new(connection)))
             })
-            .as_ref()?;
-        let mut connection = connection.lock().ok()?;
-        Some(f(&mut connection))
+            .clone()
+    }
+    /// Reuse the operation's existing catalog connection after scan-cache locks have dropped.
+    /// Refilling by logical session key also covers directory refs cached under a child file.
+    pub(crate) fn refill_turns(&self, refs: &mut [crate::SessionRef]) {
+        if refs.iter().all(|r| r.message_count != 0) {
+            return;
+        }
+        #[cfg(feature = "sqlite")]
+        if let Some(connection) = self.connection() {
+            crate::catalog::Reader::from_connection(connection).refill_turns(refs.iter_mut());
+        }
+        #[cfg(not(feature = "sqlite"))]
+        let _ = refs;
     }
 }
 

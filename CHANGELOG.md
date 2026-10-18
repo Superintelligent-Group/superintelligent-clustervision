@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Listings reuse source-certified exact turn counts after complete reads, preserving them across harmless metadata refreshes and invalidating changed sources.
+
 - JSON listings and filtered windows reuse filesystem metadata for shared stores while rechecking presence at rendering.
 - Hermes keeps generation membership in private indexed storage while preserving exact duplicate detection and lazy message bodies.
 

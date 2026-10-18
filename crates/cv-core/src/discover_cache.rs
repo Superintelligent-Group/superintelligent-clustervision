@@ -266,11 +266,22 @@ where
     .next()
 }
 
-fn cached_scan_inner<F>(
+fn cached_scan_inner<F>(path: &Path, version: Option<&str>, reads: crate::source::ReadSet, scan: F) -> Vec<SessionRef>
+where
+    F: FnOnce(Option<&crate::stream::Checkpoint>) -> (Vec<SessionRef>, Option<ScanContinuation>),
+{
+    let context = read::Context::current();
+    let mut refs = cached_scan_captured(path, version, reads, scan, &context);
+    context.refill_turns(&mut refs);
+    refs
+}
+
+fn cached_scan_captured<F>(
     path: &Path,
     version: Option<&str>,
     mut reads: crate::source::ReadSet,
     scan: F,
+    context: &read::Context,
 ) -> Vec<SessionRef>
 where
     F: FnOnce(Option<&crate::stream::Checkpoint>) -> (Vec<SessionRef>, Option<ScanContinuation>),
@@ -282,7 +293,6 @@ where
     let Some(key @ (_, size)) = reads.signature(path) else {
         return scan(None).0;
     };
-    let context = read::Context::current();
     let cache = context.cache();
     clear_invalidated(&cache);
     let candidate = {

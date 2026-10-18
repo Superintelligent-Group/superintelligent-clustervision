@@ -155,18 +155,24 @@ fn discover_all_with_catalog(mut catalog: Option<catalog::Reader>) -> Vec<Sessio
     };
 
     #[cfg(feature = "parallel")]
-    let results: Vec<_> = {
+    let mut results: Vec<_> = {
         use rayon::prelude::*;
         jobs.into_par_iter().map(run_job).collect()
     };
     #[cfg(not(feature = "parallel"))]
-    let results: Vec<_> = jobs.into_iter().map(run_job).collect();
+    let mut results: Vec<_> = jobs.into_iter().map(run_job).collect();
 
     // Persist freshly-scanned metadata (pruning vanished files) so the next discovery reuses it.
     if catalog.is_none() {
         catalog = catalog::Reader::open();
     }
     if let Some(catalog) = &mut catalog {
+        catalog.refill_turns(
+            results
+                .iter_mut()
+                .filter_map(|(_, _, refs, _)| refs.as_mut())
+                .flat_map(|refs| refs.iter_mut()),
+        );
         catalog.persist_discovery(true);
     } else {
         discover_cache::persist(true);
@@ -288,7 +294,7 @@ fn discover_harness(h: Harness, mut catalog: Option<&mut catalog::Reader>) -> Op
         .map(|reader| reader.capture_primary_reads(a.as_ref()))
         .unwrap_or_default();
     let roots = a.roots();
-    let refs = if roots.is_empty() {
+    let mut refs = if roots.is_empty() {
         Vec::new()
     } else {
         match a.discover() {
@@ -300,6 +306,7 @@ fn discover_harness(h: Harness, mut catalog: Option<&mut catalog::Reader>) -> Op
         }
     };
     if let Some(reader) = catalog.as_mut() {
+        reader.refill_turns(refs.iter_mut());
         reader.replace_harness(h, &refs, &catalog::watches_for(h, &roots, &refs), &before);
     }
     Some(refs)

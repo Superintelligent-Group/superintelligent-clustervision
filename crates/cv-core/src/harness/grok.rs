@@ -986,8 +986,14 @@ mod tests {
             [dir.to_string_lossy().as_ref()],
             |row| row.get(0),
         )?;
-        assert_eq!(serde_json::from_str::<Vec<SessionRef>>(&persisted)?[0].message_count, 2);
-        // A new operation also retains the exact count.
+        // Raw discovery metadata stays unknown: authenticated counts are refilled by logical
+        // session identity, rather than rewriting a cache entry whose key may be a directory.
+        assert_eq!(serde_json::from_str::<Vec<SessionRef>>(&persisted)?[0].message_count, 0);
+        assert_eq!(
+            crate::catalog::Reader::open().unwrap().all_sessions().unwrap()[0].message_count,
+            2
+        );
+        // A new operation also retains the exact count without an in-memory cache mutation.
         drop(_scope);
         let next = crate::discover_cache::read::Context::current();
         let _next_scope = next.enter();

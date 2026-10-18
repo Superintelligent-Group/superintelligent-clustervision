@@ -797,8 +797,7 @@ impl Counted {
     pub fn record_with_source(&self, r: &SessionRef, source: &crate::source::Baseline) {
         let source = source.with_reads(&self.dependencies);
         if crate::source::unchanged(r, &source) {
-            note_turns(r, self.turns);
-            crate::catalog::note_affordances_with_source(r, &source, || self.counts.clone());
+            crate::catalog::note_counted_with_source(r, &source, self.turns, || self.counts.clone());
         }
     }
 }
@@ -994,14 +993,6 @@ impl MessageSink for Counting<'_> {
         self.space_after(cp);
         self.last_offset = cp.offset;
         self.last = Some(cp.clone());
-    }
-}
-
-/// A whole-session read of `r` counted `turns`: fill a "not counted" catalog row (see
-/// [`stream_counted`]).
-fn note_turns(r: &SessionRef, turns: usize) {
-    if r.message_count == 0 && turns > 0 {
-        crate::catalog::fill_count(r, turns);
     }
 }
 

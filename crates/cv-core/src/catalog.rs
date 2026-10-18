@@ -860,12 +860,15 @@ mod imp {
     /// counted it.
     const VERSION_KEY: &str = "_v";
 
-    fn counts_text(c: &crate::affordance::Counts) -> String {
+    fn counts_text(c: &crate::affordance::Counts, turns: Option<usize>) -> String {
         let mut obj: serde_json::Map<String, serde_json::Value> = c
             .iter()
             .map(|(k, n)| (k.as_str().to_string(), serde_json::json!(n)))
             .collect();
         obj.insert(VERSION_KEY.into(), crate::affordance::VIEW_VERSION.into());
+        if let Some(turns) = turns {
+            obj.insert("_turns".into(), turns.into());
+        }
         serde_json::Value::Object(obj).to_string()
     }
 
@@ -890,10 +893,38 @@ mod imp {
         Some(counts)
     }
 
+    /// Exact turns are an optional part of the same source-certified count payload. Old or
+    /// malformed extensions are unknown; never infer a certified value from the sessions row.
+    pub(super) fn turns_of(text: &str) -> Option<usize> {
+        counts_of(text)?;
+        let value: serde_json::Value = serde_json::from_str(text).ok()?;
+        let turns = value.get("_turns")?.as_u64()?;
+        i64::try_from(turns).ok()?;
+        usize::try_from(turns).ok()
+    }
+
+    pub(crate) fn note_counted_with_source(
+        r: &SessionRef,
+        source: &crate::source::Baseline,
+        turns: usize,
+        counts: impl FnOnce() -> crate::affordance::Counts,
+    ) {
+        note_counts_with_source(r, source, Some(turns), counts);
+    }
+
     /// Record counts against the dependencies captured before their complete source pass.
     pub fn note_affordances_with_source(
         r: &SessionRef,
         source: &crate::source::Baseline,
+        counts: impl FnOnce() -> crate::affordance::Counts,
+    ) {
+        note_counts_with_source(r, source, None, counts);
+    }
+
+    fn note_counts_with_source(
+        r: &SessionRef,
+        source: &crate::source::Baseline,
+        turns: Option<usize>,
         counts: impl FnOnce() -> crate::affordance::Counts,
     ) {
         if !db_path().is_some_and(|p| p.exists()) {
@@ -903,39 +934,80 @@ mod imp {
             return;
         }
         let Some(mut conn) = open() else { return };
-        note_affordances_in(&mut conn, r, source, counts);
+        note_counts_in(&mut conn, r, source, turns, counts);
     }
 
     /// The caller verified the captured source before publishing on this existing connection.
     /// The output and its independent freshness baseline still commit in one transaction.
-    pub(crate) fn note_affordances_in(
+    pub(crate) fn note_counts_in(
         conn: &mut Connection,
         r: &SessionRef,
         source: &crate::source::Baseline,
+        turns: Option<usize>,
         counts: impl FnOnce() -> crate::affordance::Counts,
     ) {
-        let path = r.path.to_string_lossy();
-        let stored: Option<String> = conn
-            .query_row(
-                "SELECT counts FROM affordance_counts WHERE harness=?1 AND id=?2 AND path=?3",
-                params![r.harness.as_str(), r.id, path],
-                |row| row.get(0),
-            )
-            .ok();
-        if stored.is_some_and(|text| {
-            counts_of(&text).is_some() && crate::source::fresh_in(conn, "counts", r, source, text.as_bytes())
-        }) {
+        if turns.is_some_and(|n| i64::try_from(n).is_err()) {
             return;
         }
-        let Ok(tx) = conn.transaction() else { return };
-        let text = counts_text(&counts());
-        let written = tx.execute(
-            "INSERT OR REPLACE INTO affordance_counts(harness,id,path,counts) VALUES(?1,?2,?3,?4)",
-            params![r.harness.as_str(), r.id, path, text],
-        );
-        if written.is_ok() && crate::source::publish_in(&tx, "counts", r, source, text.as_bytes()).is_ok() {
+        let path = r.path.to_string_lossy();
+        // Validate the old receipt before taking a writer lock. Recheck both SQL values after
+        // BEGIN IMMEDIATE: a racing publication cannot lend its provenance to our skip decision.
+        let stored = count_record_in(conn, r);
+        let keep = stored.as_ref().is_some_and(|(text, record)| {
+            counts_of(text).is_some()
+                && turns.is_none_or(|turns| turns_of(text) == Some(turns))
+                && crate::source::Published::decode(record)
+                    .and_then(|p| p.of(text.as_bytes()).cloned())
+                    .is_some_and(|old| old.fresh(source, &mut crate::source::Probe::default()))
+        });
+        if keep && turns.is_none() {
+            return;
+        }
+        let text = counts_text(&counts(), turns);
+        let Ok(tx) = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate) else {
+            return;
+        };
+        let current = count_record_in(&tx, r);
+        // Partial affordance publication must not replace a concurrent enriched complete pass.
+        if turns.is_none() && current != stored {
+            return;
+        }
+        let write = || -> anyhow::Result<()> {
+            if !(keep && current == stored) {
+                tx.execute(
+                    "INSERT OR REPLACE INTO affordance_counts(harness,id,path,counts) VALUES(?1,?2,?3,?4)",
+                    params![r.harness.as_str(), r.id, path, text],
+                )?;
+                crate::source::publish_in(&tx, "counts", r, source, text.as_bytes())?;
+                anyhow::ensure!(
+                    crate::source::published_in(&tx, "counts", r, text.as_bytes()).is_some(),
+                    "source changed before count publication"
+                );
+            } else {
+                anyhow::ensure!(
+                    crate::source::unchanged(r, source),
+                    "source changed before count refill"
+                );
+            }
+            if let Some(turns) = turns {
+                tx.execute(
+                    "UPDATE sessions SET message_count=?1 WHERE harness=?2 AND id=?3 AND path=?4 AND message_count=0",
+                    params![turns as i64, r.harness.as_str(), r.id, path],
+                )?;
+            }
+            Ok(())
+        };
+        if write().is_ok() {
             let _ = tx.commit();
         }
+    }
+
+    /// Output and its source receipt from one statement snapshot. Callers reset this statement
+    /// before filesystem validation; no catalog transaction spans a source read.
+    pub(super) fn count_record_in(conn: &Connection, r: &SessionRef) -> Option<(String, Vec<u8>)> {
+        conn.prepare_cached("SELECT a.counts,d.record FROM affordance_counts AS a JOIN source_dependencies AS d ON d.consumer='counts' AND d.harness=a.harness AND d.id=a.id AND d.path=a.path WHERE a.harness=?1 AND a.id=?2 AND a.path=?3").ok()?.query_row(
+            params![r.harness.as_str(),r.id,r.path.to_string_lossy()], |row| Ok((row.get(0)?,row.get(1)?))
+        ).ok()
     }
 
     /// `(id, path, writer_version)` for every row of `h` that has one, for rows a rewrite
@@ -1443,9 +1515,19 @@ mod imp {
                 1,
                 "capture, publication and cache persist reuse the operation connection"
             );
-            assert_eq!(refreshed[0].message_count, 2);
+            assert_eq!(refreshed[0].message_count, 0, "growth invalidates the certified count");
+            crate::stream::stream_counted(
+                &crate::harness::claude::Claude::detect(),
+                &refreshed[0],
+                &crate::stream::ParseOptions::facts(),
+                &mut crate::stream::Discard,
+                crate::stream::Pass::RECORD,
+            )
+            .unwrap();
+            let exact = crate::sessions_impl().0;
+            assert_eq!(exact[0].message_count, 2);
             assert_eq!(
-                serde_json::to_value(&refreshed).unwrap(),
+                serde_json::to_value(&exact).unwrap(),
                 serde_json::to_value(crate::discover_all()).unwrap()
             );
         }
@@ -1849,7 +1931,7 @@ mod imp {
         fn counts_an_older_view_wrote_are_not_counted() {
             let mut c = crate::affordance::Counts::new();
             c.insert(crate::affordance::Kind::Approval, 2);
-            assert_eq!(counts_of(&counts_text(&c)), Some(c));
+            assert_eq!(counts_of(&counts_text(&c, None)), Some(c));
             assert_eq!(counts_of(r#"{"plan": 1}"#), None);
             assert_eq!(counts_of(r#"{"plan": 1, "_v": 1}"#), None);
             // Classifier changes can turn a previous view's zero into a positive count.
@@ -1880,6 +1962,9 @@ pub(crate) enum Watched {
 #[cfg(feature = "sqlite")]
 pub use imp::{fill_count, lookup, note_affordances_with_source, sync, writer_versions, AffordanceTable};
 
+#[cfg(feature = "sqlite")]
+pub(crate) use imp::note_counted_with_source;
+
 #[cfg(all(feature = "sqlite", test))]
 pub(crate) use imp::replace_harness;
 
@@ -1897,6 +1982,14 @@ pub fn fill_count(_r: &SessionRef, _n: usize) {}
 pub fn note_affordances_with_source(
     _r: &SessionRef,
     _source: &crate::source::Baseline,
+    _counts: impl FnOnce() -> crate::affordance::Counts,
+) {
+}
+#[cfg(not(feature = "sqlite"))]
+pub(crate) fn note_counted_with_source(
+    _r: &SessionRef,
+    _source: &crate::source::Baseline,
+    _turns: usize,
     _counts: impl FnOnce() -> crate::affordance::Counts,
 ) {
 }
