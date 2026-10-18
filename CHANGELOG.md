@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Claude reads reject callback-triggered truncation before resuming mapped records, including checkpoint callbacks.
+
 - Catalog publication waits for concurrent writers before comparing rows, preventing avoidable lost discovery updates during indexing.
 
 - Claude listings defer exact message counts to indexing or complete reads while preserving transcript-derived titles, timestamps, and writer observations.
