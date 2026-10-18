@@ -20,23 +20,21 @@ struct Archive {
     source: JsonSource,
     entries: Vec<Entry>,
     // Positions sorted by id then original position; discovery keeps archive order.
-    by_id: Vec<usize>,
+    by_id: crate::harness::store::selection::Positions,
     charge: usize,
 }
 impl Archive {
     fn entry(&self, id: &str) -> Option<&Entry> {
-        let position = self.by_id.partition_point(|&i| self.entries[i].id.as_str() < id);
         self.by_id
-            .get(position)
+            .equal(|i| self.entries[i].id.as_str().cmp(id))
+            .first()
             .map(|&i| &self.entries[i])
-            .filter(|entry| entry.id == id)
     }
 }
-fn entry_index(entries: &[Entry]) -> Vec<usize> {
-    let mut index: Vec<_> = (0..entries.len()).collect();
-    index.sort_unstable_by(|&a, &b| entries[a].id.cmp(&entries[b].id).then(a.cmp(&b)));
-    index
+fn entry_index(entries: &[Entry]) -> crate::harness::store::selection::Positions {
+    crate::harness::store::selection::Positions::new(entries.len(), |a, b| entries[a].id.cmp(&entries[b].id))
 }
+
 struct Cached {
     path: PathBuf,
     archive: Arc<Archive>,

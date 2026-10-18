@@ -6,7 +6,7 @@ cv-search 4901
 cv-testkit 450
 cv-web 15
 cv:tests 15713
-cv-core:tests 65204
+cv-core:tests 65208
 cv-search:tests 7405
 cv-testkit:tests 39
 cv-web:tests 0
@@ -34,7 +34,7 @@ cv-core:harness/codex 3048
 cv-core:harness/continuedev 1013
 cv-core:harness/cursor 1711
 cv-core:harness/devin 1395
-cv-core:harness/export 895
+cv-core:harness/export 892
 cv-core:harness/gemini 2291
 cv-core:harness/goose 1592
 cv-core:harness/grok 1113
@@ -49,7 +49,7 @@ cv-core:harness/opencode 3014
 cv-core:harness/opensession 439
 cv-core:harness/qwen 1754
 cv-core:harness/roo 132
-cv-core:harness/store 3897
+cv-core:harness/store 3900
 cv-core:harness/wire 1256
 cv-core:harness/zed 867
 cv-core:html 669

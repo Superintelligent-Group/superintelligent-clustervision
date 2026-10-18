@@ -14,4 +14,11 @@ impl Positions {
         let end = self.0.partition_point(|&i| through(i));
         &self.0[start..end]
     }
+    pub(crate) fn equal(&self, compare: impl Fn(usize) -> Ordering) -> &[usize] {
+        self.range(|i| compare(i).is_lt(), |i| !compare(i).is_gt())
+    }
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.0.len()
+    }
 }
