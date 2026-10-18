@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- JSON listings and filtered windows reuse filesystem metadata for shared stores while rechecking presence at rendering.
+
 - Catalog publication waits for concurrent writers before comparing rows, preventing avoidable lost discovery updates during indexing.
 
 - Claude listings defer exact message counts to indexing or complete reads while preserving transcript-derived titles, timestamps, and writer observations.

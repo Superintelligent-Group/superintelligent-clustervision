@@ -21,7 +21,16 @@ fn apply_query(refs: &mut Vec<SessionRef>, query: &Option<cv_core::SessionQuery>
 /// a row whose file vanished since the probe is dropped — comes free from the `stat` that yields
 /// `size_bytes`), capped at `limit`.
 fn json_rows<'a>(refs: impl Iterator<Item = &'a SessionRef>, limit: usize) -> Vec<(&'a SessionRef, serde_json::Value)> {
-    refs.filter_map(|r| std::fs::metadata(&r.path).ok().map(|m| (r, m.len())))
+    // Several logical sessions can share one database. Recheck at this rendering boundary,
+    // then reuse metadata in small batches: a missing tail must not grow another fleet-sized map.
+    let mut probe = cv_core::source::Probe::default();
+    refs.enumerate()
+        .filter_map(|(index, r)| {
+            if index % 256 == 0 {
+                probe = cv_core::source::Probe::default();
+            }
+            probe.size(&r.path).map(|size| (r, size))
+        })
         .take(limit)
         .map(|(r, size)| (r, session_row(r, Some(size))))
         .collect()
@@ -449,6 +458,53 @@ tokens ({} session(s) + {} sub-agent transcript(s){}{}):",
 mod window_tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn machine_windows_recheck_shared_paths_and_keep_readable_old_timestamps() {
+        let world = crate::test_world("shared_window_metadata");
+        let path = world.base.join("shared.db");
+        let refs: Vec<_> = ["first", "second"]
+            .into_iter()
+            .map(|id| SessionRef::new(id, cv_core::Harness::OpenCode, path.clone()))
+            .collect();
+        let query = cv_core::SessionQuery::parse("text:hit").unwrap();
+        let texts = cv_core::query::TextSets::resolve(&query, |_| refs.iter().map(|r| r.id.clone()).collect());
+        for content in ["one", "longer"] {
+            std::fs::write(&path, content).unwrap();
+            std::fs::File::open(&path)
+                .unwrap()
+                .set_times(
+                    std::fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH - std::time::Duration::from_secs(1)),
+                )
+                .unwrap();
+            assert!(cv_core::source::FileId::at(&path).is_none());
+            let mut selected = refs.clone();
+            cv_core::query::filter_refs_limited(
+                &mut selected,
+                &query,
+                &texts,
+                2,
+                cv_core::query::WindowPresence::Existing,
+            )
+            .unwrap();
+            let rows = json_rows(selected.iter(), 2);
+            assert_eq!(rows.len(), 2);
+            assert!(rows.iter().all(|(_, row)| row["size_bytes"] == content.len()));
+        }
+        // The rendering phase must not retain the query's earlier presence observation.
+        let mut selected = refs;
+        cv_core::query::filter_refs_limited(
+            &mut selected,
+            &query,
+            &texts,
+            2,
+            cv_core::query::WindowPresence::Existing,
+        )
+        .unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert!(json_rows(selected.iter(), 2).is_empty());
+    }
+
     #[test]
     fn heap_machine_windows_match_stable_rank_presence_and_ties() {
         let world = crate::test_world("heap_json_windows");
@@ -504,6 +560,49 @@ mod window_tests {
                 reference
             })
             .collect()
+    }
+
+    #[cfg(feature = "probe-heap")]
+    #[test]
+    #[ignore = "isolated diagnostic; run with --test-threads=1 and --nocapture"]
+    fn listing_metadata_heap_control() {
+        let world = crate::test_world("listing_metadata_heap");
+        let mut first_peak = None;
+        for count in [20_000, 100_000] {
+            let refs: Vec<_> = (0..count)
+                .map(|i| {
+                    SessionRef::new(
+                        i.to_string(),
+                        cv_core::Harness::Claude,
+                        world.base.join(format!("missing-{i}")),
+                    )
+                })
+                .collect();
+            let start = cv_testkit::heap::begin();
+            let old: Vec<_> = refs
+                .iter()
+                .filter_map(|r| std::fs::metadata(&r.path).ok().map(|m| (r, m.len())))
+                .take(20)
+                .map(|(r, size)| session_row(r, Some(size)))
+                .collect();
+            let previous = cv_testkit::heap::end(start);
+            let start = cv_testkit::heap::begin();
+            let selected = json_rows(refs.iter(), 20);
+            let current = cv_testkit::heap::end(start);
+            assert!(old.is_empty() && selected.is_empty());
+            if let Some(first_peak) = first_peak {
+                assert!(
+                    current.peak_above_baseline_bytes <= first_peak * 2,
+                    "metadata cache grew with missing inventory"
+                );
+            } else {
+                first_peak = Some(current.peak_above_baseline_bytes);
+            }
+            eprintln!(
+                "listing metadata heap {}",
+                serde_json::json!({"refs":count,"previous":previous,"current":current})
+            );
+        }
     }
 
     #[cfg(feature = "probe-heap")]

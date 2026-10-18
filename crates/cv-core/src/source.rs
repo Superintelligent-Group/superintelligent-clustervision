@@ -599,31 +599,45 @@ pub struct Dependencies {
 /// File and immediate-directory probes shared within one operation. It never descends recursively.
 #[derive(Default)]
 pub struct Probe {
-    // The map key owns the path once; outer None is unavailable, inner None is absent.
-    entries: HashMap<PathBuf, Option<Option<FileId>>>,
+    entries: HashMap<PathBuf, Observation>,
     directories: HashMap<PathBuf, Option<std::sync::Arc<Vec<PathBuf>>>>,
     // Adapters resolved once per operation: detection stats roots, so not once per session.
     adapters: HashMap<Harness, Option<Box<dyn crate::harness::Adapter>>>,
 }
 
+enum Observation {
+    File(FileId),
+    // Metadata exists, but its timestamp cannot form a freshness identity.
+    Unidentified(u64),
+    Absent,
+    Unavailable,
+}
+
 impl Probe {
-    fn entry(&mut self, path: &Path) -> Option<Entry> {
-        let path = absolute(path)?;
-        let state = (*self
-            .entries
-            .entry(path.clone())
-            .or_insert_with(|| match std::fs::metadata(&path) {
-                Ok(md) => Some(Some(FileId::of(&md)?)),
+    fn observation(&mut self, path: &Path) -> &Observation {
+        self.entries
+            .entry(path.to_path_buf())
+            .or_insert_with(|| match std::fs::metadata(path) {
+                Ok(md) => FileId::of(&md).map_or(Observation::Unidentified(md.len()), Observation::File),
                 Err(e)
                     if matches!(
                         e.kind(),
                         std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
                     ) =>
                 {
-                    Some(None)
+                    Observation::Absent
                 }
-                Err(_) => None,
-            }))?;
+                Err(_) => Observation::Unavailable,
+            })
+    }
+
+    fn entry(&mut self, path: &Path) -> Option<Entry> {
+        let path = absolute(path)?;
+        let state = match self.observation(&path) {
+            Observation::File(id) => Some(*id),
+            Observation::Absent => None,
+            Observation::Unidentified(_) | Observation::Unavailable => return None,
+        };
         Some(Entry {
             path,
             state,
@@ -634,6 +648,16 @@ impl Probe {
     /// Whether `path` exists, recording its identity for this operation; `None` when unreadable.
     pub fn exists(&mut self, path: &Path) -> Option<bool> {
         Some(self.entry(path)?.state.is_some())
+    }
+
+    /// Metadata size captured once per path in this probe. Missing/unreadable paths return None;
+    /// a readable path without a usable freshness timestamp still has a size.
+    pub fn size(&mut self, path: &Path) -> Option<u64> {
+        match self.observation(&absolute(path)?) {
+            Observation::File(id) => Some(id.len),
+            Observation::Unidentified(len) => Some(*len),
+            Observation::Absent | Observation::Unavailable => None,
+        }
     }
 
     /// The entries of directory `path`, read once per operation; an absent directory is empty.
@@ -1032,6 +1056,31 @@ pub fn update(_consumer: &str, _updates: &[Update]) -> Vec<(SessionRef, String)>
 
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn metadata_size_reuse_does_not_certify_unidentified_sources() {
+        let world = crate::test_world("probe-size-identity");
+        let path = world.base.join("source");
+        std::fs::write(&path, "one").unwrap();
+        std::fs::File::open(&path)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH - std::time::Duration::from_secs(1)),
+            )
+            .unwrap();
+        let mut probe = Probe::default();
+        assert_eq!(probe.size(&path), Some(3));
+        assert_eq!(probe.exists(&path), None);
+        assert!(probe.entry(&path).is_none());
+        std::fs::write(&path, "longer").unwrap();
+        assert_eq!(probe.size(&path), Some(3));
+        assert_eq!(Probe::default().size(&path), Some(6));
+        std::fs::remove_file(&path).unwrap();
+        let mut absent = Probe::default();
+        assert_eq!(absent.size(&path), None);
+        assert_eq!(absent.exists(&path), Some(false));
+    }
+
     #[test]
     fn arbitrary_opencode_database_names_retain_wal_and_journal_guards() {
         let w = crate::test_world("source-opencode-arbitrary-db");

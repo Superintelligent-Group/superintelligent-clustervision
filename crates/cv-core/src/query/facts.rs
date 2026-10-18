@@ -738,7 +738,7 @@ pub fn filter_refs_limited(
     let mut selected = 0;
     for (index, r) in refs.iter().enumerate() {
         // An absent ref cannot appear in an Existing window, so its body is not needed.
-        if matches!(presence, WindowPresence::Existing) && r.path.metadata().is_err() {
+        if matches!(presence, WindowPresence::Existing) && plan.probe.size(&r.path).is_none() {
             continue;
         }
         let matches = match plan.cheap(r)? {
