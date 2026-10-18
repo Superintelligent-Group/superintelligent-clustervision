@@ -128,10 +128,22 @@ impl Adapter for Grok {
             if entry.file_name() != "summary.json" {
                 continue;
             }
-            match scan(entry.path()) {
-                Ok(Some(r)) => out.push(r),
-                Ok(None) => {}
-                Err(e) => eprintln!("cv: skipping {}: {e:#}", entry.path().display()),
+            let dir = entry.path().parent().unwrap();
+            let mut reads = crate::source::ReadSet::default();
+            reads.record(entry.path());
+            let reference = SessionRef::new("", Harness::Grok, dir);
+            reads.record(&self.resume_source(&reference));
+            // Key by the public ref path, so the existing full-read count publication updates
+            // this same cache entry. Summary and transcript identities guard its contents.
+            let scanned = crate::discover_cache::cached_scan_with_reads(dir, reads, || match scan(entry.path()) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("cv: skipping {}: {e:#}", entry.path().display());
+                    None
+                }
+            });
+            if let Some(r) = scanned {
+                out.push(r);
             }
         }
         Ok(out)
@@ -389,18 +401,17 @@ fn stream_history_at(
     opts: &ParseOptions,
     sink: &mut dyn MessageSink,
 ) -> Result<Option<Session>> {
-    let source = JsonSource::capture(wire).with_context(|| format!("reading {}", wire.display()))?;
-    let file = fs::File::open(wire).with_context(|| format!("reading {}", wire.display()))?;
-    source.check_metadata(file.metadata()?)?;
+    let read = jsonl::Read::open(wire).with_context(|| format!("reading {}", wire.display()))?;
+    let source = read.source();
     if at > source.len() {
         return Ok(None);
     }
-    let spans = opts.spans.then_some(&source);
+    let spans = opts.spans.then_some(source);
     let session_model = s.model.clone();
     let mut pending: Option<Message> = None;
     let mut stopped = false;
     let mut skipped = prior_skipped;
-    jsonl::for_each_line(&source, &file, at, source.len(), |line| {
+    read.lines(at, |line| {
         let Some(view) = line.view else {
             skipped += u64::from(!line.blank);
             return Ok(Flow::Continue);
@@ -444,8 +455,6 @@ fn stream_history_at(
         }
         Ok(flow)
     })?;
-    source.check_metadata(file.metadata()?)?;
-    source.check()?;
     if let (Some(p), false) = (pending, stopped) {
         sink.message(p);
     }
@@ -632,26 +641,29 @@ fn scan(summary_path: &Path) -> Result<Option<SessionRef>> {
                 .filter(|s| !s.trim().is_empty())
         })
         .map(|s| crate::ir::truncate(s, 80));
-    // `message_count` is the contract's user + assistant turns (`SessionRef::message_count`), so it
-    // is counted from the transcript: summary.json's `num_chat_messages` counts every line —
-    // `system` and `tool_result` included — and `num_messages` is the user-turn count. The same
-    // pass supplies the title fallback (first non-empty user text).
-    let mut message_count = 0usize;
-    let initial_title = title.clone();
-    if jsonl::for_each_record(&dir.join("chat_history.jsonl"), |v| {
-        let ty = string(Some(v), "type")?;
-        if matches!(ty.as_deref(), Some("user") | Some("assistant")) {
-            message_count += 1;
+    // Exact turn counts belong to index/full reads. Summary-titled sessions do not open the
+    // transcript. Otherwise stream the codec's title demand until the first title or EOF;
+    // absence beyond a fixed byte budget is not yet an authorized metadata tradeoff.
+    if title.is_none() {
+        let read = jsonl::Read::open(&dir.join("chat_history.jsonl"));
+        if let Ok(read) = read {
+            let mut candidate = None;
+            if read
+                .lines(0, |line| {
+                    if let Some(view) = line.view {
+                        candidate = record::discovery_title(view)?;
+                    }
+                    Ok(if candidate.is_some() {
+                        Flow::Stop
+                    } else {
+                        Flow::Continue
+                    })
+                })
+                .is_ok()
+            {
+                title = candidate;
+            }
         }
-        if title.is_none() && ty.as_deref() == Some("user") {
-            title = super::wire::text_title(v.get("content")?)?;
-        }
-        Ok(())
-    })
-    .is_err()
-    {
-        message_count = 0;
-        title = initial_title;
     }
 
     Ok(Some(SessionRef {
@@ -666,7 +678,7 @@ fn scan(summary_path: &Path) -> Result<Option<SessionRef>> {
             .and_then(Value::as_str)
             .and_then(parse_ts)
             .or_else(|| summary.get("last_active_at").and_then(Value::as_str).and_then(parse_ts)),
-        message_count,
+        message_count: 0,
     }))
 }
 
@@ -899,7 +911,112 @@ mod tests {
     use crate::harness::Parse;
 
     #[test]
-    fn discovery_title_and_count_match_value_oracle() {
+    fn cheap_discovery_summary_title_never_opens_the_transcript() -> Result<()> {
+        let world = crate::test_world("grok-summary-only");
+        let dir = world.base.join("session");
+        fs::create_dir_all(&dir)?;
+        fs::write(
+            dir.join("summary.json"),
+            r#"{"info":{"id":"s","cwd":"/project"},"session_summary":"native title","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z"}"#,
+        )?;
+        // A titled session is identifiable even while its transcript is absent/unreadable.
+        jsonl::OPENED.with(|paths| paths.borrow_mut().clear());
+        let r = scan(&dir.join("summary.json"))?.unwrap();
+        assert_eq!(r.title.as_deref(), Some("native title"));
+        assert_eq!(r.cwd.as_deref(), Some(Path::new("/project")));
+        assert_eq!(r.updated_at.unwrap().to_rfc3339(), "2026-01-02T00:00:00+00:00");
+        assert_eq!(r.message_count, 0);
+        assert!(jsonl::OPENED.with(|paths| paths.borrow().is_empty()));
+        Ok(())
+    }
+
+    #[test]
+    fn cheap_discovery_keeps_a_title_after_a_giant_preamble() -> Result<()> {
+        let world = crate::test_world("grok-bounded-title");
+        let dir = world.base.join("session");
+        fs::create_dir_all(&dir)?;
+        fs::write(dir.join("summary.json"), r#"{"info":{"id":"s"}}"#)?;
+        let history = format!(
+            "{{\"type\":\"system\",\"content\":\"{}\"}}\n{{\"type\":\"user\",\"content\":\"late title\"}}\n",
+            "x".repeat(1 << 20)
+        );
+        fs::write(dir.join("chat_history.jsonl"), history)?;
+        let r = scan(&dir.join("summary.json"))?.unwrap();
+        assert_eq!(
+            r.title.as_deref(),
+            Some("late title"),
+            "missing-summary fallback is unchanged"
+        );
+        assert_eq!(r.message_count, 0);
+        Ok(())
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn cheap_discovery_keeps_exact_full_read_counts_only_while_sources_are_unchanged() -> Result<()> {
+        let world = crate::test_world("grok-count-publication");
+        let home = world.base.join("grok");
+        let dir = home.join("sessions/s");
+        fs::create_dir_all(&dir)?;
+        let summary = dir.join("summary.json");
+        fs::write(&summary, r#"{"info":{"id":"s"},"session_summary":"native title"}"#)?;
+        let history = dir.join("chat_history.jsonl");
+        let first = "{\"type\":\"user\",\"content\":\"question\"}\n{\"type\":\"assistant\",\"content\":\"answer\"}\n";
+        fs::write(&history, first)?;
+        let grok = Grok::with_home(&home);
+        let context = crate::discover_cache::read::Context::current();
+        let _scope = context.enter();
+        let r = grok.discover()?.remove(0);
+        assert_eq!(r.message_count, 0);
+        crate::catalog::sync(std::slice::from_ref(&r));
+        crate::discover_cache::persist(false);
+        let mut sink = crate::stream::CollectSink::default();
+        let done = crate::stream::stream_counted(
+            &grok,
+            &r,
+            &ParseOptions::facts(),
+            &mut sink,
+            crate::stream::Pass::RECORD,
+        )?;
+        assert_eq!(done.counted.unwrap().turns, 2);
+        assert_eq!(grok.discover()?[0].message_count, 2);
+        let conn = crate::catalog::open_db().unwrap();
+        let persisted: String = conn.query_row(
+            "SELECT refs FROM scan_cache WHERE path=?1",
+            [dir.to_string_lossy().as_ref()],
+            |row| row.get(0),
+        )?;
+        assert_eq!(serde_json::from_str::<Vec<SessionRef>>(&persisted)?[0].message_count, 2);
+        // A new operation also retains the exact count.
+        drop(_scope);
+        let next = crate::discover_cache::read::Context::current();
+        let _next_scope = next.enter();
+        assert_eq!(grok.discover()?[0].message_count, 2);
+        fs::write(&history, format!("{first}{{\"type\":\"user\",\"content\":\"next\"}}\n"))?;
+        assert_eq!(
+            grok.discover()?[0].message_count,
+            0,
+            "growth invalidates the exact count"
+        );
+        let grown = grok.discover()?.remove(0);
+        crate::catalog::sync(std::slice::from_ref(&grown));
+        crate::stream::stream_counted(
+            &grok,
+            &grown,
+            &ParseOptions::facts(),
+            &mut sink,
+            crate::stream::Pass::RECORD,
+        )?;
+        assert_eq!(grok.discover()?[0].message_count, 3);
+        fs::write(&summary, r#"{"info":{"id":"s"},"session_summary":"renamed"}"#)?;
+        let renamed = grok.discover()?.remove(0);
+        assert_eq!(renamed.title.as_deref(), Some("renamed"));
+        assert_eq!(renamed.message_count, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn discovery_title_matches_value_oracle_without_counting() {
         let world = cv_testkit::World::new("grok-raw-title");
         let dir = world.base.join("session");
         fs::create_dir_all(&dir).unwrap();
@@ -944,7 +1061,8 @@ mod tests {
                 Flow::Continue
             });
             let actual = scan(&summary).unwrap().unwrap();
-            assert_eq!(actual.message_count, expected_count);
+            assert_eq!(actual.message_count, 0);
+            assert!(expected_count > 0);
             assert_eq!(
                 actual.title,
                 expected_title,
@@ -959,7 +1077,7 @@ mod tests {
         )
         .unwrap();
         let actual = scan(&summary).unwrap().unwrap();
-        assert_eq!(actual.message_count, 1);
+        assert_eq!(actual.message_count, 0);
         assert_eq!(actual.title.as_deref(), Some("prefix"));
     }
 
@@ -1296,14 +1414,14 @@ mod tests {
         let s = grok.parse(&r).unwrap();
         // The contract count: user + assistant turns (the fixture's `system` line and two
         // `tool_result` lines are not turns; summary.json's `num_chat_messages` says 5).
-        assert_eq!(r.message_count, 4);
+        assert_eq!(r.message_count, 0, "discovery does not count transcript turns");
         assert_eq!(
-            r.message_count,
+            4,
             s.messages
                 .iter()
                 .filter(|m| matches!(m.role, Role::User | Role::Assistant))
                 .count(),
-            "discover's count is the parse's user+assistant count"
+            "a full read still yields the exact user+assistant count"
         );
         // Every Grok fact is nested under `extra["grok"]` (`docs/INTERFACE-V2.md` §4).
         crate::harness::assert_no_flat_keys(&s);
