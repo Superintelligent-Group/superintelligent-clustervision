@@ -246,8 +246,9 @@ impl Adapter for Goose {
             if r.path.extension().is_some_and(|e| e == "jsonl") {
                 return legacy::stream(&r.id, &r.path, opts, sink);
             }
-            let conn = open_ro(&r.path)?;
-            conn.read(|conn| stream_db_opts_with_reads(conn, r, opts, sink, conn.reads()))
+            super::store::sqlite::read(&r.path, |conn| {
+                stream_db_opts_with_reads(conn, r, opts, sink, conn.reads())
+            })
         })
     }
 
@@ -437,26 +438,7 @@ fn earliest_holder(conn: &Connection, first: &str, excluding: Option<&str>) -> O
 fn binary_holder_ids(conn: &Connection) -> bool {
     [("sessions", "id"), ("messages", "session_id")]
         .into_iter()
-        .all(|(table, id)| {
-            let ddl = conn
-                .query_row(
-                    "SELECT sql FROM sqlite_master WHERE type='table' AND name=?1",
-                    [table],
-                    |row| row.get::<_, String>(0),
-                )
-                .ok();
-            if !ddl.is_some_and(|ddl| !ddl.to_ascii_uppercase().contains("COLLATE")) {
-                return false;
-            }
-            let Ok(mut stmt) = conn.prepare(&format!("PRAGMA table_info({table})")) else {
-                return false;
-            };
-            let Ok(columns) = stmt.query_map([], |row| Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?))) else {
-                return false;
-            };
-            let mut columns = columns.flatten();
-            columns.any(|(name, kind)| name == id && kind.eq_ignore_ascii_case("TEXT"))
-        })
+        .all(|(table, id)| super::store::sqlite::binary_text_columns(conn, table, &[id]).unwrap_or(false))
 }
 
 #[cfg(test)]
