@@ -170,8 +170,8 @@ fn discover_db(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
         let thread = thread_cell(conn, &cells, &id, data_type.as_deref())
             .ok()
             .flatten()
-            .and_then(|cell| cells.read(cell, |view| listing(view, cells.out().0)).ok().flatten());
-        let (cwd, count) = thread.unwrap_or_default();
+            .and_then(|cell| cells.read(cell, listing).ok().flatten());
+        let cwd = thread.flatten();
         out.push(SessionRef {
             id,
             harness: Harness::Zed,
@@ -182,28 +182,17 @@ fn discover_db(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
                 .map(|t| crate::ir::truncate(&t, 80)),
             created_at: created.as_deref().and_then(super::parse_ts),
             updated_at: updated.as_deref().and_then(super::parse_ts),
-            message_count: count,
+            message_count: 0,
         });
     }
     Ok(out)
 }
 
-/// What a listing reads from a thread: its cwd and `message_count`, counted by the one decoder
-/// under the counting demand (user and assistant turns it emits).
-fn listing(view: crate::json::JsonView<'_>, source: &crate::json::JsonSource) -> Result<(Option<PathBuf>, usize)> {
-    let (metadata, messages) = record::header(view)?;
-    let mut count = 0;
-    if let Some(messages) = messages {
-        let demand = record::Demand {
-            spans: true,
-            count: true,
-        };
-        record::messages(messages, source, demand, &mut |m| {
-            count += usize::from(matches!(m.role, Role::User | Role::Assistant));
-            Flow::Continue
-        })?;
-    }
-    Ok((snapshot_cwd(&metadata), count))
+/// Listing needs the snapshot cwd, not a replay of the thread's message bodies.
+/// The complete cell is still decoded and validated before this metadata projection.
+fn listing(view: crate::json::JsonView<'_>) -> Result<Option<PathBuf>> {
+    let (metadata, _) = record::header(view)?;
+    Ok(snapshot_cwd(&metadata))
 }
 
 /// The thread's `data` cell, decompressed into the cells' arena: `data_type` `"zstd"` is one
@@ -331,8 +320,7 @@ fn stream_thread(
     // All session metadata is known up front; hand it to the sink before the body.
     sink.meta(&s);
     if let Some((_, Some(messages))) = &thread {
-        let demand = record::Demand { spans, count: false };
-        messages.with_view(|view| record::messages(view, cells.out().0, demand, &mut |m| sink.message(m)))?;
+        messages.with_view(|view| record::messages(view, cells.out().0, spans, &mut |m| sink.message(m)))?;
     }
     Ok(s)
 }
@@ -631,7 +619,7 @@ mod tests {
     }
 
     #[test]
-    fn discover_reads_metadata_and_counts() {
+    fn discover_reads_metadata_without_decoding_messages() {
         let c = mk(SCHEMA);
         insert(&c, "t1", "Fix the flaky test", "zstd", &zstd_blob(&legacy_thread()));
         // A second, newer thread with workspace folders but an empty summary.
@@ -643,7 +631,9 @@ mod tests {
         )
         .unwrap();
 
+        record::DECODED_MESSAGES.with(|n| n.set(0));
         let refs = discover(&c);
+        assert_eq!(record::DECODED_MESSAGES.with(|n| n.get()), 0);
         assert_eq!(refs.len(), 2);
         // Ordered by updated_at DESC.
         assert_eq!(refs[0].id, "t2");
@@ -653,15 +643,77 @@ mod tests {
         assert_eq!(t1.title.as_deref(), Some("Fix the flaky test"));
         assert_eq!(t1.cwd.as_deref(), Some(Path::new("/Users/u/proj")));
         assert!(t1.created_at.unwrap() < t1.updated_at.unwrap());
-        // user + assistant turns only: 1 user + 2 assistant (the Tool turn doesn't count).
-        assert_eq!(t1.message_count, 3);
+        assert_eq!(t1.message_count, 0, "exact counts come from complete reads");
 
         let t2 = &refs[0];
         assert_eq!(t2.title, None, "empty summary must not become a title");
         // Snapshot cwd wins over folder_paths.
         assert_eq!(t2.cwd.as_deref(), Some(Path::new("/Users/u/proj")));
-        // 1 user + 1 assistant ("Resume" and the Tool turn don't count).
-        assert_eq!(t2.message_count, 2);
+        assert_eq!(t2.message_count, 0);
+        for reference in &refs {
+            parse_thread(&c, reference).unwrap();
+        }
+        assert!(
+            record::DECODED_MESSAGES.with(|n| n.get()) > 0,
+            "full reads still decode messages"
+        );
+    }
+
+    #[test]
+    fn complete_reads_refill_counts_and_database_changes_invalidate_them() -> Result<()> {
+        let world = crate::test_world("zed-count-refill");
+        let db = world.base.join("threads.db");
+        {
+            let writer = Connection::open(&db)?;
+            writer.execute_batch(SCHEMA)?;
+            insert(&writer, "thread", "Native title", "zstd", &zstd_blob(&legacy_thread()));
+        }
+        let adapter = Zed::with_root(&world.base);
+        let reference = adapter.discover()?.remove(0);
+        assert_eq!(reference.message_count, 0);
+        crate::catalog::sync(std::slice::from_ref(&reference));
+        let complete = crate::stream::stream_counted(
+            &adapter,
+            &reference,
+            &ParseOptions::facts(),
+            &mut crate::stream::Discard,
+            crate::stream::Pass::RECORD,
+        )?;
+        let turns = complete.counted.unwrap().turns;
+        assert_eq!(turns, 3);
+        record::DECODED_MESSAGES.with(|n| n.set(0));
+        assert_eq!(adapter.discover()?[0].message_count, turns);
+        assert_eq!(
+            record::DECODED_MESSAGES.with(|n| n.get()),
+            0,
+            "count reuse cannot replay bodies"
+        );
+        let stored = crate::catalog::Reader::open().unwrap().all_sessions().unwrap();
+        assert_eq!(stored[0].message_count, turns);
+        // A live WAL changes the source even before the database file is checkpointed.
+        let writer = Connection::open(&db)?;
+        writer.execute_batch("PRAGMA journal_mode=WAL;")?;
+        let mut changed = legacy_thread();
+        changed["messages"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"role":"user","text":"next turn"}));
+        writer.execute("UPDATE threads SET data=?1 WHERE id='thread'", [zstd_blob(&changed)])?;
+        let unknown = adapter.discover()?.remove(0);
+        assert_eq!(unknown.message_count, 0);
+        assert_eq!(unknown.cwd, reference.cwd);
+        assert_eq!(unknown.title, reference.title);
+        assert_eq!(record::DECODED_MESSAGES.with(|n| n.get()), 0);
+        let complete = crate::stream::stream_counted(
+            &adapter,
+            &unknown,
+            &ParseOptions::facts(),
+            &mut crate::stream::Discard,
+            crate::stream::Pass::RECORD,
+        )?;
+        assert_eq!(complete.counted.unwrap().turns, 4);
+        assert_eq!(adapter.discover()?[0].message_count, 4);
+        Ok(())
     }
 
     #[test]
@@ -865,7 +917,7 @@ mod tests {
                 expected.iter().collect::<Vec<_>>()
             );
             for r in actual {
-                assert_eq!(r.message_count, 3);
+                assert_eq!(r.message_count, 0);
                 assert_eq!(parse_thread(&c, &r).unwrap().messages.len(), 4);
             }
             for text in [
@@ -1100,7 +1152,7 @@ mod tests {
         .unwrap();
         let refs = discover(&c);
         assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0].message_count, 3);
+        assert_eq!(refs[0].message_count, 0);
         assert!(refs[0].created_at.is_none(), "no created_at column in old schema");
         let s = parse_thread(&c, &sref("t")).unwrap();
         assert_eq!(s.messages.len(), 4);
@@ -1241,13 +1293,11 @@ mod tests {
                 "parse != collect(stream) for {}",
                 r.id
             );
-            // And the discover contract: message_count == parsed user+assistant turns.
-            let ua = parsed
+            assert_eq!(r.message_count, 0, "discovery leaves turns uncounted for {}", r.id);
+            assert!(parsed
                 .messages
                 .iter()
-                .filter(|m| matches!(m.role, Role::User | Role::Assistant))
-                .count();
-            assert_eq!(r.message_count, ua, "message_count contract for {}", r.id);
+                .any(|m| matches!(m.role, Role::User | Role::Assistant)));
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

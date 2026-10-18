@@ -83,7 +83,7 @@ JSON-whitespace trim rule, and one SQLite cell reader (`store::sqlite::Cells`).
 | Hermes SQLite | Indexed rows and private generation membership with exact collision checks; bounded replay suppression, transactional exports and checked complete bodies | Ordinary lean reads still own bodies/extras. Giant output rows/FTS allocate natively; prompt-only CPU tradeoff remains documented |
 | Goose SQLite / legacy | Native indexed scalar family selection, shared checked SQLite lifecycle and framed legacy views; lean demand avoids unrelated sidecars | Full demanded metadata and explicit owned output remain; decoding/staging costs differ by shape |
 | OpenClaw JSONL / SQLite | Checked branch replay; repeated parent queries promote to private ordered membership, first query stays native; incremental cells and compressed staging | O(events) navigation/backing; codec workspace; demanded complete/control/system metadata; native-cell and non-rowid fallbacks |
-| Zed SQLite | Incremental blobs decoded once; lazy messages use checked selected text/arguments and skip discarded attachment bodies | Typed discovery counts avoid message trees; largest decoded string still grows Serde scratch; decoded spill, requested metadata and WITHOUT ROWID native-cell fallback |
+| Zed SQLite | Incremental blobs decoded once; lazy messages use checked selected text/arguments and skip discarded attachment bodies | Discovery defers counts but validates the whole decoded cell for snapshot cwd; Serde string scratch, decoded spill, requested metadata and WITHOUT ROWID native-cell fallback remain |
 | LM Studio | Schema-selected document/turn views, selected lazy text spans and incremental variants; mapped or positioned sources | Bounded discovery title prefixes; Harmony decoding and arbitrary demanded output/metadata remain owned |
 | ChatGPT / Claude account exports | Bounded metadata cache, shared ordered ID positions and positioned source views; selected-conversation replay | Branch descriptors, joined text and selected owned output; sender/empty-archive corrections have focused source oracles |
 | OpenSession | Shared source validation/views and per-message IR projection | Selected authoritative rich fields remain owned; giant serialization proof separate from count/discovery |
@@ -97,7 +97,7 @@ Compressed, encoded, scanned, decoded and emitted bytes must be labeled separate
 | Operation | Actual work | Optimization boundary |
 |---|---|---|
 | Warm ls/stats | Catalog probe, metadata rows, sort/filter; query presence shares its source Probe, JSON rendering rechecks metadata in bounded batches | Preserve freshness between phases; measure discovery separately |
-| Full discovery | Metadata projection, certified count reuse and cache/catalog publication; Claude, Codex, Grok, Kimi, Kimi Code and Hermes defer cold counts | Remaining count-only adapter scans must go; exact fallback metadata and validation may still require EOF |
+| Full discovery | Metadata projection, certified count reuse and cache/catalog publication; Claude, Codex, Grok, Kimi, Kimi Code, Hermes, Goose and Zed defer cold counts | Remaining count-only adapter scans must go; exact fallback metadata and validation may still require EOF |
 | Text windows / last N | Lazy range or deque, selected messages materialized | Already useful bounds; giant selected output is still output-sized |
 | JSON show / MCP show | CLI show/export stages resolved frames and envelopes in bounded spill storage; EOF metadata retained. MCP stages selected windows | CLI Last retains lazy tail descriptors; owned adapter extras and redaction trees remain; MCP client payload size and subprocess startup |
 | Affordance view | Facts projection into classified rows; checked bounded text summaries | Unprojected adapters retain rich extras; side stores and result rows; escaped validation still traverses the whole field |
@@ -191,7 +191,8 @@ identifies application state, not a claim that the OS page cache was evicted.
 ## Open gaps
 
 - **Discovery demands.** Claude, Codex, Grok, Kimi and Kimi Code share record projections and
-  defer counts; Hermes reads native session metadata without replaying conversations. Complete
+  defer counts; Hermes and Goose read native session metadata without replaying conversations. Zed
+  projects snapshot metadata without decoding message bodies, retaining whole-cell validation. Complete
   reads publish certified counts; direct discovery, including directory refs, reuses them through
   the shared cache connection after cache locks drop. Validation uses a fresh bounded Probe batch,
   never observations retained across calls. Qwen and other adapter ports remain; Cursor CLI uses
