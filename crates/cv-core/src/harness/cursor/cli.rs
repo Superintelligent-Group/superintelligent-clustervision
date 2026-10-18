@@ -63,9 +63,7 @@ impl MessageSink for Count {
         self.count += usize::from(message.is_turn());
         if self.title.is_none() && message.kind == MessageKind::Prompt && message.origin == Origin::Human {
             match message.prompt_title(&crate::lazy::Resolver::new(None)) {
-                Ok(title) => {
-                    self.title = title
-                }
+                Ok(title) => self.title = title,
                 Err(error) => {
                     self.error.get_or_insert(error);
                     return Flow::Stop;
@@ -720,7 +718,7 @@ mod tests {
         let world = crate::test_world("cursor-timestamp-title");
         let body = "<timestamp>Monday, Oct 12, 2026, 7:50 PM (UTC-4)</timestamp>\nask about otters";
         let record = json!({"role":"user","content":body}).to_string().into_bytes();
-        let (conn, r) = fixture(field(1, &[1;32]), &[(1, record)], &world.base);
+        let (conn, r) = fixture(field(1, &[1; 32]), &[(1, record)], &world.base);
         let mut count = Count::default();
         let session = read(&conn, &r, &ParseOptions::full(), true, &mut count).unwrap();
         assert_eq!(count.title.as_deref(), Some("ask about otters"));
@@ -856,7 +854,10 @@ mod tests {
             ],
             ..Message::new(Role::User)
         };
-        assert_eq!(only.prompt_title(&crate::lazy::Resolver::new(None)).unwrap().as_deref(), Some(expected.as_str()));
+        assert_eq!(
+            only.prompt_title(&crate::lazy::Resolver::new(None)).unwrap().as_deref(),
+            Some(expected.as_str())
+        );
         let empty = json!({"role":"assistant","content":[],"providerOptions":{"cursor":{"opaque":1}}});
         assert!(decode(&empty, true, false).is_none());
         assert!(!decode(&empty, true, true).unwrap().is_turn());

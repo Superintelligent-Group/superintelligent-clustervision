@@ -122,9 +122,22 @@ fn previous_source_epoch_cannot_certify_current_counts() {
     publish(&r, 1, &ReadSet::default());
     assert!(AffordanceTable::load().counts(&r).is_some());
     let conn = open_db().unwrap();
-    let mut record: Vec<u8> = conn.query_row("SELECT record FROM source_dependencies WHERE consumer='counts' AND id='epoch'", [], |row| row.get(0)).unwrap();
+    let mut record: Vec<u8> = conn
+        .query_row(
+            "SELECT record FROM source_dependencies WHERE consumer='counts' AND id='epoch'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     let current = u32::from_le_bytes(record[..4].try_into().unwrap());
     record[..4].copy_from_slice(&(current - 1).to_le_bytes());
-    conn.execute("UPDATE source_dependencies SET record=?1 WHERE consumer='counts' AND id='epoch'", [&record]).unwrap();
-    assert!(AffordanceTable::load().counts(&r).is_none(), "unchanged payload and source cannot revive a previous-epoch receipt");
+    conn.execute(
+        "UPDATE source_dependencies SET record=?1 WHERE consumer='counts' AND id='epoch'",
+        [&record],
+    )
+    .unwrap();
+    assert!(
+        AffordanceTable::load().counts(&r).is_none(),
+        "unchanged payload and source cannot revive a previous-epoch receipt"
+    );
 }

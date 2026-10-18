@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Affordances include Claude slash-loaded skills, Kimi Code todo state and legacy agents, and Roo returns carried alongside user text.
 - Emitted fallback titles use meaningful prompts; Cursor CLI titles omit leading timestamp metadata while transcript text stays intact.
 
 - **Breaking:** `cv scry` with stdout piped prints the sessions it would follow once and exits 0; `--follow` keeps following, `--for 30s|5m|2h` bounds it.

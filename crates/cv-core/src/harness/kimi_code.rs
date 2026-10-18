@@ -350,6 +350,8 @@ struct Flavor {
     spans: bool,
     offsets: bool,
     complete: bool,
+    #[serde(default)]
+    facts: bool,
 }
 impl Flavor {
     fn of(opts: &ParseOptions) -> Self {
@@ -358,6 +360,7 @@ impl Flavor {
             spans: opts.spans,
             offsets: opts.offsets,
             complete: opts.complete,
+            facts: opts.facts_only(),
         }
     }
 }
@@ -376,10 +379,14 @@ struct SavedCtx {
     call_names: BTreeMap<String, String>,
     seen_prompts: std::collections::BTreeSet<u64>,
     protocol_version: Option<String>,
+    #[serde(default)]
+    native_subagents: bool,
     facts: Map<String, Value>,
 }
 impl SavedCtx {
     fn restore(self, opts: &ParseOptions) -> Ctx<'_> {
+        let mut facts = self.facts;
+        if opts.facts_only() { facts.remove("todo"); }
         Ctx {
             opts,
             step: None,
@@ -387,7 +394,8 @@ impl SavedCtx {
             call_names: self.call_names,
             seen_prompts: self.seen_prompts,
             protocol_version: self.protocol_version,
-            facts: self.facts,
+            native_subagents: self.native_subagents,
+            facts,
             stopped: false,
         }
     }
@@ -816,6 +824,7 @@ struct Ctx<'a> {
     /// Ordered so later checkpoints remain identical after restoring this state.
     seen_prompts: std::collections::BTreeSet<u64>,
     protocol_version: Option<String>,
+    native_subagents: bool,
     /// Session-level affordance facts read off bookkeeping records: the approval modes
     /// (`permission.set_mode`) and the file-history checkpoints (`file_history.checkpoint`).
     facts: Map<String, Value>,
@@ -832,6 +841,7 @@ impl<'a> Ctx<'a> {
             call_names: BTreeMap::new(),
             seen_prompts: std::collections::BTreeSet::new(),
             protocol_version: None,
+            native_subagents: false,
             facts: Map::new(),
             stopped: false,
         }
@@ -882,6 +892,26 @@ impl<'a> Ctx<'a> {
             });
         };
         let ty = record.string("type")?.unwrap_or_default();
+        if ty == "tools.update_store" {
+            if let Some(fields) = Fields::parse(view, &["key", "value"])? {
+                if fields.string("key")?.as_deref() == Some("todo") {
+                    if let Some(values) = fields.get("value").map(JsonView::array).transpose()?.flatten() {
+                        if self.opts.facts_only() {
+                            let mut present = false;
+                            for value in values { if crate::affordance::item_present(value?)? { present = true; break; } }
+                            self.facts.remove("todo");
+                            self.facts.insert("todo_present".into(), Value::Bool(present));
+                        } else {
+                            let items: Vec<crate::affordance::Item> = values.map(|value| crate::affordance::item_of_view(value?))
+                                .filter_map(|item| item.transpose()).collect::<Result<_>>()?;
+                            self.facts.insert("todo_present".into(), Value::Bool(!items.is_empty()));
+                            self.facts.insert("todo".into(), serde_json::to_value(items)?);
+                        }
+                    }
+                }
+            }
+            if !self.opts.complete { return Ok(Flow::Continue); }
+        }
         if !self.opts.complete && matches!(ty.as_str(), "llm.request" | "usage.record") {
             let loop_request = loop_request(&ty, record.string("kind")?.as_deref());
             if ty == "usage.record" || loop_request {
@@ -1151,6 +1181,14 @@ impl<'a> Ctx<'a> {
             details.insert("persistedOutput".into(), serde_json::json!({"path":path}));
         }
         let mut message = Message::of_kind(Role::Tool, MessageKind::ToolResult, Origin::Harness);
+        if !self.native_subagents && matches!(self.call_names.get(&id).map(String::as_str), Some("Agent" | "AgentSwarm")) {
+            let head = content.try_resolve_prefix(&crate::lazy::Resolver::new(None), crate::ir::TITLE_HEAD)?;
+            let header = head.split("\n\n").next().unwrap_or("");
+            if header.starts_with("agent_id:") && header.lines().any(|line| matches!(line, "status: completed" | "status: failed")) {
+                message.kind = MessageKind::SubagentReturn;
+                message.origin = Origin::Subagent;
+            }
+        }
         message.timestamp = ts;
         message.content.push(Block::ToolResult {
             tool_use_id: id.clone(),
@@ -1298,6 +1336,7 @@ impl<'a> Ctx<'a> {
                 sink.message(m)
             }
             "subagent.spawned" | "subagent.completed" | "subagent.failed" => {
+                self.native_subagents = true;
                 // Kimi Code 2.x records a sub-agent's life on the parent's wire (0.x left only the
                 // `Agent` call and its result). The records land inside the spawning step, so they
                 // queue behind its tool results; the child's own transcript is `agents/<id>/`.
@@ -1580,9 +1619,21 @@ impl<'a> Ctx<'a> {
 
     /// Emit the buffered step: the Assistant turn, then its Tool turns (in wire order).
     fn flush_step(&mut self, sink: &mut dyn MessageSink) -> Flow {
-        let Some(step) = self.step.take() else {
+        let Some(mut step) = self.step.take() else {
             return Flow::Continue;
         };
+        if self.native_subagents {
+            // Native markers queued in this step are authoritative, including when a tool result
+            // arrived before its marker. Do not emit a second inferred return for the same run.
+            for result in &mut step.results {
+                if result.role == Role::Tool && result.kind == MessageKind::SubagentReturn {
+                    result.kind = MessageKind::ToolResult;
+                    result.origin = Origin::Harness;
+                }
+            }
+        } else if step.msg.content.iter().any(|block| matches!(block, Block::ToolUse { name, .. } if matches!(name.as_str(), "Agent" | "AgentSwarm"))) {
+            step.msg.kind = MessageKind::SubagentSpawn;
+        }
         if (!step.msg.content.is_empty() || step.msg.usage.is_some()) && sink.message(step.msg) == Flow::Stop {
             return Flow::Stop;
         }
@@ -1678,6 +1729,59 @@ mod tests {
     use super::*;
     use crate::harness::Parse;
     use serde_json::json;
+
+    #[test]
+    fn leftovers_todo_updates_keep_latest_state_and_facts_presence() -> Result<()> {
+        use crate::affordance::{self, Kind};
+        for opts in [ParseOptions::full(), ParseOptions::lazy(), ParseOptions::facts(), ParseOptions::complete()] {
+            let mut ctx = Ctx::new(&opts);
+            let mut sink = crate::stream::CollectSink::default();
+            for status in ["pending", "done"] {
+                let value = serde_json::json!({"type":"tools.update_store","key":"todo","value":[{"title":"read a.txt","status":status}]});
+                ctx.record(JsonView::from(&value), None, &mut sink)?;
+            }
+            let irrelevant = serde_json::json!({"type":"tools.update_store","key":"unrelated","value":"x".repeat(128*1024)});
+            ctx.record(JsonView::from(&irrelevant), None, &mut sink)?;
+            let mut session = Session::new("todo", Harness::KimiCode);
+            session.harness_extra_mut(Harness::KimiCode).extend(ctx.facts.clone());
+            let rows = affordance::session_rows(&session);
+            assert_eq!(rows.len(), 1); assert_eq!((rows[0].kind, rows[0].action), (Kind::Plan, "state"));
+            if opts.facts_only() {
+                assert!(!ctx.facts.contains_key("todo"), "reducers retain presence, not arbitrary-size plan text");
+            } else { assert_eq!(rows[0].items[0].status.as_deref(), Some("done")); }
+            let counter = affordance::Counter::new(&SessionRef::new("todo", Harness::KimiCode, "unused"));
+            assert_eq!(counter.finish(&session, &[])[&Kind::Plan], 1);
+            let clear = serde_json::json!({"type":"tools.update_store","key":"todo","value":[]});
+            ctx.record(JsonView::from(&clear), None, &mut sink)?;
+            session.harness_extra_mut(Harness::KimiCode).extend(ctx.facts);
+            assert!(affordance::session_rows(&session).is_empty());
+        }
+        assert!(Flavor::of(&ParseOptions::facts()) != Flavor::of(&ParseOptions::lazy()), "rich and presence-only checkpoints cannot substitute for one another");
+        Ok(())
+    }
+
+    #[test]
+    fn leftovers_legacy_agent_calls_infer_spawn_and_completed_returns() -> Result<()> {
+        for status in ["completed", "failed", "running"] {
+            let opts = ParseOptions::full();
+            let mut ctx = Ctx::new(&opts);
+            let mut sink = crate::stream::CollectSink::default();
+            let records = [
+                serde_json::json!({"type":"context.append_loop_event","event":{"type":"step.begin","uuid":"step","turnId":"0","step":1}}),
+                serde_json::json!({"type":"context.append_loop_event","event":{"type":"tool.call","uuid":"call","stepUuid":"step","toolCallId":"agent-call","name":"Agent","args":{}}}),
+                serde_json::json!({"type":"context.append_loop_event","event":{"type":"tool.result","toolCallId":"agent-call","result":{"output":format!("agent_id: agent-0\nactual_subagent_type: coder\nstatus: {status}\n\nanswer")}}}),
+                serde_json::json!({"type":"context.append_loop_event","event":{"type":"step.end","uuid":"step","turnId":"0","step":1}}),
+            ];
+            for record in records { ctx.record(JsonView::from(&record), None, &mut sink)?; }
+            assert_eq!(sink.messages[0].kind, MessageKind::SubagentSpawn);
+            assert_eq!(sink.messages[1].kind, if status == "running" { MessageKind::ToolResult } else { MessageKind::SubagentReturn });
+            let mut session = Session::new("agents", Harness::KimiCode); session.messages = sink.messages;
+            let rows = crate::affordance::of_session(&session)?;
+            assert_eq!(rows.iter().filter(|r| r.kind == crate::affordance::Kind::SubagentSpawn).count(), 1);
+            assert_eq!(rows.iter().filter(|r| r.kind == crate::affordance::Kind::SubagentReturn).count(), usize::from(status != "running"));
+        }
+        Ok(())
+    }
 
     #[test]
     fn model_bindings_follow_native_request_order_and_survive_every_suffix() -> Result<()> {

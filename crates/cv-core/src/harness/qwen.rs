@@ -975,7 +975,10 @@ mod tests {
             crate::catalog::note_affordances_with_source(&reference, &source, || {
                 [(crate::affordance::Kind::Schedule, 1)].into_iter().collect()
             });
-            assert_eq!(crate::catalog::AffordanceTable::load().counts(&reference).unwrap()[&crate::affordance::Kind::Schedule], 1);
+            assert_eq!(
+                crate::catalog::AffordanceTable::load().counts(&reference).unwrap()[&crate::affordance::Kind::Schedule],
+                1
+            );
         }
         fs::write(
             &file,
@@ -984,7 +987,10 @@ mod tests {
         assert!(!crate::source::unchanged(&reference, &before));
         assert_eq!(scheduled_tasks(&reference)[0].summary, "changed schedule");
         #[cfg(feature = "sqlite")]
-        assert!(crate::catalog::AffordanceTable::load().counts(&reference).is_none(), "has:schedule must not reuse counts after a per-project edit");
+        assert!(
+            crate::catalog::AffordanceTable::load().counts(&reference).is_none(),
+            "has:schedule must not reuse counts after a per-project edit"
+        );
         fs::remove_file(&file)?;
         assert!(scheduled_tasks(&reference).is_empty());
         fs::write(

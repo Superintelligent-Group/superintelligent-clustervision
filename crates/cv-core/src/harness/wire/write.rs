@@ -194,7 +194,9 @@ pub(crate) fn check_source_fields(session: &crate::ir::Session) -> Result<()> {
 
 /// Native fallback labels use the same meaningful-prompt policy as cv's listings.
 pub(crate) fn fallback_title(session: &crate::ir::Session, resolver: &Resolver) -> Result<Option<String>> {
-    Ok(session.title_with(resolver)?.map(|title| crate::ir::truncate(&title, 80)))
+    Ok(session
+        .title_with(resolver)?
+        .map(|title| crate::ir::truncate(&title, 80)))
 }
 
 #[cfg(test)]
@@ -205,16 +207,28 @@ mod title_tests {
         use crate::ir::{Block, Message, MessageKind, Origin, Role, Session};
         let mut session = Session::new("synthetic", crate::Harness::Continue);
         let mut injected = Message::of_kind(Role::User, MessageKind::InjectedContext, Origin::Harness);
-        injected.content.push(Block::Text { text: "harness bookkeeping".into() });
+        injected.content.push(Block::Text {
+            text: "harness bookkeeping".into(),
+        });
         let mut noise = Message::new(Role::User);
-        noise.content.push(Block::Text { text: "<command-name>/usage</command-name>".into() });
+        noise.content.push(Block::Text {
+            text: "<command-name>/usage</command-name>".into(),
+        });
         let mut prompt = Message::new(Role::User);
-        prompt.content.push(Block::Text { text: "<system-reminder>metadata</system-reminder> please fix the parser".into() });
+        prompt.content.push(Block::Text {
+            text: "<system-reminder>metadata</system-reminder> please fix the parser".into(),
+        });
         session.messages = vec![injected, noise, prompt];
         let resolver = Resolver::new(None);
-        assert_eq!(fallback_title(&session, &resolver)?.as_deref(), Some("please fix the parser"));
+        assert_eq!(
+            fallback_title(&session, &resolver)?.as_deref(),
+            Some("please fix the parser")
+        );
         session.title = Some("λ".repeat(100));
-        assert_eq!(fallback_title(&session, &resolver)?, Some(crate::ir::truncate(&"λ".repeat(100), 80)));
+        assert_eq!(
+            fallback_title(&session, &resolver)?,
+            Some(crate::ir::truncate(&"λ".repeat(100), 80))
+        );
         Ok(())
     }
 }

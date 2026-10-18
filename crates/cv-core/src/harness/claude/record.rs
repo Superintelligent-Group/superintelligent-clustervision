@@ -72,6 +72,7 @@ const TOP: &[&str] = &[
     "version",
     "parentToolUseID",
     "sourceToolAssistantUUID",
+    "sourceToolUseID",
     "attributionAgent",
     "attributionMcpServer",
     "attributionMcpTool",
@@ -695,6 +696,11 @@ impl<'a> Record<'a, '_> {
                     bag.insert(key.to_string(), val);
                 }
             }
+        }
+        // Skill bodies loaded by a tool have an ID; slash-loaded bodies do not. This small
+        // correlation fact prevents counting the tool invocation and its injected body twice.
+        if let Some(id) = self.top.string("sourceToolUseID")? {
+            bag.insert("sourceToolUseID".into(), Value::String(id));
         }
         if facts || (!opts.extra && opts.usage_identity) {
             if let Some(id) = body_string("id")? {

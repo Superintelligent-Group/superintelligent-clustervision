@@ -367,6 +367,7 @@ pub fn classify_tool_view(h: Harness, name: &str, input: JsonView<'_>) -> Result
         },
         // sub-agents
         (_, n) if spawn_returns(h, n).is_some() => (SubagentSpawn, "spawn"),
+        (H::KimiCode, "Agent" | "AgentSwarm") => (SubagentSpawn, "spawn"),
         // skills
         (_, "Skill" | "activate_skill" | "load_skill" | "Skills") | (H::OpenCode | H::Qwen | H::Roo, "skill") => {
             (Skill, "load")
@@ -616,17 +617,22 @@ fn refine_spawn(h: Harness, m: &mut Message, open: &mut std::collections::HashMa
         }
         _ if !open.is_empty() && !m.content.is_empty() => {
             let all_results = m.content.iter().all(|b| matches!(b, Block::ToolResult { .. }));
-            if !all_results {
+            if !all_results && h != Harness::Roo {
                 return Ok(());
             }
             let mut returned = false;
-            for b in &m.content {
+            for b in &mut m.content {
                 if let Block::ToolResult {
-                    tool_use_id, content, ..
+                    tool_use_id, content, tool_name, ..
                 } = b
                 {
                     match open.remove(tool_use_id.as_str()) {
-                        Some(Returns::Result) => returned = true,
+                        Some(Returns::Result) => {
+                            returned = true;
+                            if !all_results && h == Harness::Roo {
+                                *tool_name = Some("new_task".into());
+                            }
+                        },
                         // A lazy span is a large result: an answer, not a launch receipt.
                         Some(Returns::ResultUnless(marker)) => {
                             returned |= match content {
@@ -639,7 +645,7 @@ fn refine_spawn(h: Harness, m: &mut Message, open: &mut std::collections::HashMa
                     }
                 }
             }
-            if returned {
+            if returned && all_results {
                 m.kind = MessageKind::SubagentReturn;
                 m.origin = Origin::Subagent;
             }
@@ -703,42 +709,32 @@ pub fn item_of(v: &Value) -> Option<Item> {
     item_of_view(JsonView::from(v)).expect("owned JSON item")
 }
 
-pub fn item_of_view(view: JsonView<'_>) -> Result<Option<Item>> {
-    const TEXT: &[&str] = &[
-        "content",
-        "subject",
-        "title",
-        "step",
-        "description",
-        "text",
-        "task",
-        "name",
-        "goal",
-    ];
-    // A plain-string item is trimmed; object content retains its original whitespace.
-    if view.is_string()? {
-        return Ok(input::item_string(view, true)?.map(|content| Item { content, status: None }));
-    }
-    for &key in TEXT {
-        let Some(value) = view.get(key)? else {
-            continue;
-        };
-        if !value.is_string()? {
-            continue;
+fn item_text(view: JsonView<'_>) -> Result<Option<JsonView<'_>>> {
+    if view.is_string()? { return Ok(Some(view)); }
+    for key in ["content", "subject", "title", "step", "description", "text", "task", "name", "goal"] {
+        if let Some(text) = view.get(key)? {
+            if text.is_string()? { return Ok(Some(text)); }
         }
-        let Some(content) = input::item_string(value, false)? else {
-            return Ok(None);
-        };
-        let status = match view.get("status")? {
-            Some(value) => Some(value),
-            None => view.get("state")?,
-        }
-        .map(input::string)
-        .transpose()?
-        .flatten();
-        return Ok(Some(Item { content, status }));
     }
     Ok(None)
+}
+
+/// Reducer presence check without allocating a potentially large plan item's text.
+pub(crate) fn item_present(view: JsonView<'_>) -> Result<bool> {
+    let Some(text) = item_text(view)? else { return Ok(false) };
+    let mut present = false;
+    text.for_each_str_chunk(|chunk| { present |= !chunk.trim().is_empty(); Ok(()) })?;
+    Ok(present)
+}
+
+pub fn item_of_view(view: JsonView<'_>) -> Result<Option<Item>> {
+    let Some(text) = item_text(view)? else { return Ok(None) };
+    let Some(content) = input::item_string(text, view.is_string()?)? else { return Ok(None) };
+    let status = if view.is_string()? { None } else {
+        match view.get("status")? { Some(value) => Some(value), None => view.get("state")? }
+            .map(input::string).transpose()?.flatten()
+    };
+    Ok(Some(Item { content, status }))
 }
 
 /// `- [x] done`, `[ ] todo`, `[-] doing`, `1. step`, `* step` lines.
@@ -928,6 +924,11 @@ fn record(
             .unwrap_or(false))
     };
     Ok(match h {
+        H::Claude if m.kind == MessageKind::InjectedContext && m.origin == Origin::Harness
+            && m.harness_extra(h).is_none_or(|bag| !bag.contains_key("sourceToolUseID"))
+            && starts_with("Base directory for this skill:")? => {
+                Some((Kind::Skill, "load", "slash command"))
+            }
         H::Claude if m.kind == MessageKind::InjectedContext && starts_with("<task-notification>")? => {
             Some((Kind::BackgroundJob, "complete", "task-notification"))
         }
@@ -1042,6 +1043,12 @@ fn detail_hits<'a>(
         else {
             continue;
         };
+        if h == Harness::Roo && m.kind != MessageKind::SubagentReturn && tool_name.as_deref() == Some("new_task") {
+            out.push(Hit::Detail {
+                kind: Kind::SubagentReturn, action: "return", tool: Some("new_task"), tool_use_id: Some(tool_use_id),
+                summary: if summaries { text::plain_summary(content, resolver)? } else { String::new() },
+            });
+        }
         if *is_error && text::denied(content, resolver, h)? {
             out.push(Hit::Detail {
                 kind: Kind::Approval,
@@ -1197,6 +1204,13 @@ pub fn session_rows(s: &Session) -> Vec<Affordance> {
         let summary = format!("mode: {}", modes.join(" → "));
         out.push(session_row(Kind::Approval, "state", tool, summary, Vec::new()));
     }
+    if s.harness == Harness::KimiCode {
+        let items: Vec<Item> = bag.get("todo").and_then(Value::as_array).into_iter().flatten().filter_map(item_of).collect();
+        if !items.is_empty() || bag.get("todo_present").and_then(Value::as_bool) == Some(true) {
+            let summary = if items.is_empty() { "todo state".into() } else { items_summary(&items) };
+            out.push(session_row(Kind::Plan, "state", "tools.update_store", summary, items));
+        }
+    }
     if s.harness == Harness::OpenCode {
         // The session's permission ruleset: `[{permission, pattern, action}]`.
         let rules: Vec<Item> = bag
@@ -1332,6 +1346,8 @@ fn message_rows(harness: Harness, m: &Message, i: usize, resolver: &crate::lazy:
 /// The view's version, stored beside the catalog's counts: bump it whenever a kind, a table row or
 /// a reader changes what [`Counter`] would count, so rows an older view counted read as "not
 /// counted" and are recounted, instead of answering `has:<new kind>` with a stale no.
+/// 0.18's coordinated source-stamp epoch invalidates every consumer receipt together; its
+/// interpretation fixes share that one release reread while this payload version stays 5.
 pub const VIEW_VERSION: u32 = 5;
 
 /// Affordance counts by kind: what the catalog stores per session so `has:<kind>` never parses.
@@ -1439,6 +1455,41 @@ mod tests {
 
     /// The old whole-session oracle includes EOF session facts, inline summaries beyond the lazy
     /// prefix, result details and side-store rows. Streaming must preserve all of those in order.
+    #[test]
+    fn leftovers_roo_mixed_return_keeps_prompt_and_counts_once() -> Result<()> {
+        let mut call = Message::new(Role::Assistant);
+        call.content.push(Block::ToolUse { id: "child".into(), name: "new_task".into(), input: json!({}).into(), namespace: None });
+        let mut mixed = Message::new(Role::User);
+        mixed.content = vec![Block::ToolResult { tool_use_id: "child".into(), content: "child answer".into(), is_error: false, tool_name: None, status: None, details: None }, Block::Text { text: "environment metadata".into() }];
+        let mut open = std::collections::HashMap::new();
+        refine_spawn(Harness::Roo, &mut call, &mut open)?;
+        refine_spawn(Harness::Roo, &mut mixed, &mut open)?;
+        assert!(open.is_empty(), "mixed returns consume their matching pending ID");
+        assert_eq!((mixed.kind, mixed.origin), (MessageKind::Prompt, Origin::Human));
+        let resolver = crate::lazy::Resolver::new(None);
+        let rows = message_rows(Harness::Roo, &mixed, 1, &resolver)?;
+        assert_eq!(rows.iter().filter(|r| r.kind == Kind::SubagentReturn).count(), 1);
+        assert_eq!(rows[0].tool_use_id.as_deref(), Some("child"));
+        let r = crate::SessionRef::new("roo", Harness::Roo, "unused");
+        let mut counter = Counter::new(&r); counter.note(&call)?; counter.note(&mixed)?;
+        assert_eq!(counter.finish(&Session::new("roo", Harness::Roo), &[])[&Kind::SubagentReturn], 1);
+        Ok(())
+    }
+
+    #[test]
+    fn leftovers_claude_slash_skill_body_is_not_a_second_tool_activation() -> Result<()> {
+        let mut body = Message::of_kind(Role::User, MessageKind::InjectedContext, Origin::Harness);
+        body.content.push(Block::Text { text: "Base directory for this skill: /skills/test\n\nDo the task".into() });
+        let resolver = crate::lazy::Resolver::new(None);
+        assert_eq!(message_rows(Harness::Claude, &body, 0, &resolver)?[0].kind, Kind::Skill);
+        body.harness_extra_mut(Harness::Claude).insert("sourceToolUseID".into(), json!("tool-call"));
+        assert!(message_rows(Harness::Claude, &body, 0, &resolver)?.is_empty());
+        body.kind = MessageKind::Prompt; body.origin = Origin::Human;
+        body.extra.clear();
+        assert!(message_rows(Harness::Claude, &body, 0, &resolver)?.is_empty(), "literal human prose is not a skill activation");
+        Ok(())
+    }
+
     #[test]
     fn streamed_read_matches_full_session_and_side_store() {
         let _world = crate::test_world("affordance-stream");
