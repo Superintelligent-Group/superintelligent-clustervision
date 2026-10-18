@@ -1,12 +1,12 @@
 # Product lines per crate and per module, and test lines per crate (tools/check-size.py).
 # Reviewed measurements, not targets. Drift is informational; --write records the current tree.
-cv 18791
-cv-core 78674
+cv 18800
+cv-core 78695
 cv-search 4901
 cv-testkit 450
 cv-web 15
-cv:tests 15713
-cv-core:tests 65060
+cv:tests 15801
+cv-core:tests 65084
 cv-search:tests 7405
 cv-testkit:tests 39
 cv-web:tests 0
@@ -75,7 +75,7 @@ cv-core:rewind 1072
 cv-core:rows 182
 cv-core:sanitize 77
 cv-core:scan 229
-cv-core:source 1070
+cv-core:source 1091
 cv-core:spill 723
 cv-core:stats 1050
 cv-core:stream 943
@@ -95,7 +95,7 @@ cv-web:lib 15
 cv:blame 708
 cv:cmd/adopt 248
 cv:cmd/archive 705
-cv:cmd/browse 422
+cv:cmd/browse 431
 cv:cmd/cat 175
 cv:cmd/compaction 62
 cv:cmd/compose 728

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- JSON listings and filtered windows reuse filesystem metadata for shared stores while rechecking presence at rendering.
+
 - Catalog publication waits for concurrent writers before comparing rows, preventing avoidable lost discovery updates during indexing.
 
 - Preserve untouched native records while sharing Claude prune, rewind, and adoption derivation.
