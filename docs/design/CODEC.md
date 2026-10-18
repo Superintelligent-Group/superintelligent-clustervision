@@ -54,3 +54,10 @@ each cell copied once into the source's arena, validated once, then viewed. `cod
 `goose` `legacy` modules are readers of older formats, not oracles. Test-only legacy emitters are
 retired to frozen goldens (`tests/fixtures/emit-frozen/`, `Frozen` in `emit/grok_qwen_tests.rs`).
 A change whose dump differs must explain each difference in its commit; the ports' are in git.
+
+**Writing shared wire formats.** Anthropic blocks use one grammar with explicit leaf publication:
+checked streams resolve source text; the public owned API preserves Span descriptors and resolves
+Source text. Only callers requesting an owned Value buffer that value. Qwen and Gemini share
+GenAI part selection and text/media fields, preserving their native malformed-field qualification;
+consumer-specific tool IDs, wrappers, signatures and demand remain in the adapters. Independent
+frozen outputs check both contracts without retaining a second production codec.

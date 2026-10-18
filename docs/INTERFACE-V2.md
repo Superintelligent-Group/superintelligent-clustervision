@@ -33,7 +33,7 @@ The workspace also contains the CLI crate and `cv-testkit`.
   `S + Q + C + G + E`: the store description **S** (60-150 lines, plus about 25 per SQL table
   queried); genuine format quirks **Q** (0-400: Gemini's `$set`/`$rewindTo` replay, Kimi's
   rotation fingerprints, Codex's held `token_count`, OpenClaw's tree selection, Devin's forest);
-  the codec **C**, 0 when the adapter rides a shared wire codec (`harness/wire/{anthropic,openai}`)
+  the codec **C**, 0 when the adapter rides a shared wire codec (`harness/wire/{anthropic,openai,genai}`)
   and 480-1,000 for a format with its own record grammar (Codex, Claude, Kimi Code, OpenClaw,
   Hermes, OpenCode 1.x + 2.x); glue to the shared drivers **G** (at most 40); and the emitter **E**
   (150-450: the shared encoder, the format's fields, a `JsonlStage` or SQLite writer). Roo (132
@@ -64,8 +64,8 @@ codex 3,032, opencode 3,014, hermes 2,386, gemini 2,291, cursor 1,761, qwen 1,75
 and the wire codecs 1,313. Every family reads through one record codec over one byte source
 (`docs/design/CODEC.md`), but discovery still has its own grammar in Codex, Claude, Grok, Kimi and
 Kimi Code, and six heap-gate scenario paths (OpenClaw window groups, Goose fork inventory, Qwen
-`TaskInventory`, Hermes dedup, the export cache) are bespoke SQL or file walks. Emitters are
-written beside the codec, not derived from it (deferred to 0.18). `derive` now owns native record
+`TaskInventory`, Hermes dedup, the export cache) are bespoke SQL or file walks. Anthropic block publication and Qwen/Gemini part fields now share their wire grammar;
+store wrappers and output selection remain beside each adapter. `derive` now owns native record
 selection/writing for prune, rewind and adoption. Prune uses
 checked views at every size; untouched records keep their bytes except for selected identity
 changes. Rewind retains evidence/window selection and adoption retains destination/meta policy.
