@@ -87,6 +87,26 @@ def write_rows(path, rows, payload_prefix="", row_prefix=b"", row_suffix=b"\n", 
             output.write(row_suffix)
 
 
+def rewind_gate(binary, root, env):
+    case = root / "rewind"
+    case.mkdir()
+    source = case / "source.jsonl"
+    prune_fixture(source, "thinking")
+    original = file_digest(source)
+    child = subprocess.run([str(binary), str(source), "rewind"], env=env, capture_output=True, text=True)
+    assert child.returncode == 0, f"rewind probe failed: {child.stderr[-2000:]}"
+    report = json.loads(child.stdout)
+    peak = checked_peak(report["heap"])
+    output = Path(report["result"]["new_path"])
+    # Frozen native output from67ad8bf9; includes the giant reasoning and linked tool result.
+    assert output.stat().st_size == 67117243
+    assert file_digest(output) == "4553371cfa62e4eabe181e4f4438c5b2443ac62487ec97524e8b193c0c412654"
+    assert file_digest(source) == original, "rewind modified source"
+    assert report["result"]["open_tool_calls"] == 0
+    print(json.dumps({"case":"rewind-native", "peak_live_rust_bytes":peak,
+                      "source_bytes":source.stat().st_size, "output_bytes":output.stat().st_size}))
+
+
 def prune_gate(binary, root, env, cases=("thinking", "ascii-declass", "unicode-declass")):
     # Frozen native sidecars (measured when the prune turn/linked-input paths landed). Hashes cover the
     # full decoded payload and metadata, without building a second giant owned Value tree.
@@ -611,6 +631,7 @@ def main():
                    CLUSTERVISION_HOME=str(root / "catalog"), RAYON_NUM_THREADS="1")
         binary = args.prune_probe.resolve(strict=True)
         prune_gate(binary, root, env)
+        rewind_gate(binary, root, env)
         usage_gate(binary, root, env)
         window_gate(window_binary(args.window_build_report), root, env)
         claude_port_gate(args.claude_port_probe.resolve(strict=True), root, env)

@@ -1188,7 +1188,7 @@ fn giant_ignored_row_preserves_raw_bytes_and_recorded_usage() {
     let dir = tmpdir();
     let sid = "11111111-1111-4111-8111-111111111111";
     let new_id = "22222222-2222-4222-8222-222222222222";
-    let line = format!(" {{ \"sessionId\":\"{sid}\", \"type\":\"user\", \"message\":{{\"content\":\"prompt\"}}, \"unrelated\":\"{}[PRUNED id=fake]{}\" }}", "x".repeat(LARGE_RECORD as usize), "x".repeat(LARGE_RECORD as usize));
+    let line = format!(" {{ \"sessionId\":\"{sid}\", \"type\":\"user\", \"message\":{{\"content\":\"prompt\"}}, \"unrelated\":\"{}[PRUNED id=fake]{}\" }}", "x".repeat(1024 * 1024), "x".repeat(1024 * 1024));
     let usage = serde_json::json!({"type":"assistant","sessionId":sid,"message":{"content":"answer","usage":{"input_tokens":100000000}}});
     let src = dir.join(format!("{sid}.jsonl"));
     std::fs::write(&src, format!("{line}\n{usage}\n")).unwrap();
@@ -1284,11 +1284,11 @@ fn hardlinked_source_is_rejected_before_truncation() {
 }
 
 #[test]
-fn source_string_mutation_matches_owned_output_sidecars_and_estimate() {
+fn source_string_mutation_matches_frozen_output_sidecars_and_estimate() {
     for drop in [false, true] {
         let world = cv_testkit::World::new("prune-source-string-mutation");
         let text = format!("{}\n{}\r\n🌙\\\"\n", "x".repeat(1024 * 1024), "a".repeat(70000));
-        let mut owned = serde_json::json!({"type":"user","sessionId":"old","session_id":"old2","uuid":"line","message":{"content":[
+        let owned = serde_json::json!({"type":"user","sessionId":"old","session_id":"old2","uuid":"line","message":{"content":[
             {"type":"tool_result","tool_use_id":"t","content":text,"extra":1.50},
             {"type":"text","text":"keep"},
             {"type":"tool_result","content":"small"},
@@ -1297,7 +1297,6 @@ fn source_string_mutation_matches_owned_output_sidecars_and_estimate() {
         ]},"parentUuid":"p"});
         let raw = serde_json::to_string_pretty(&owned).unwrap();
         let raw = format!("{{\"sessionId\":\"shadow\",{}", raw.strip_prefix('{').unwrap());
-        owned = serde_json::from_str(&raw).unwrap();
         let path = world.base.join("input.jsonl");
         std::fs::write(&path, &raw).unwrap();
         let source = crate::json::JsonSource::capture(&path).unwrap();
@@ -1315,49 +1314,12 @@ fn source_string_mutation_matches_owned_output_sidecars_and_estimate() {
         let plan = source_user_prune(&source, range, &opts, "new", 0, &HashMap::new())
             .unwrap()
             .unwrap();
-        let mut sidecar = Vec::new();
-        let mut count = 0;
-        let mut images = 0;
-        let mut saved = 0;
-        let mut modified = false;
-        prune_user_line(
-            &mut owned,
-            &opts,
-            &HashMap::new(),
-            "new",
-            "line",
-            &mut sidecar,
-            &mut count,
-            &mut images,
-            &mut saved,
-            &mut modified,
-        );
-        let expected = crate::restamp_line(&owned.to_string(), "new").unwrap();
-        let mut actual = Vec::new();
-        plan.record
-            .with_view(|v| v.write_canonical_replacing(&plan.replacements, &mut actual))
-            .unwrap();
-        assert_eq!(actual, expected.as_bytes());
-        assert_eq!(plan.saved, saved);
-        assert_eq!(plan.payloads.len(), count);
-        assert_eq!(plan.estimate, line_est(&owned));
-        if !drop {
-            let mut expected = Vec::new();
-            for entry in &sidecar {
-                serde_json::to_writer(&mut expected, entry).unwrap();
-                expected.push(b'\n');
-            }
-            let mut actual = Vec::new();
-            for payload in &plan.payloads {
-                write_source_payload(payload, &mut actual).unwrap();
-            }
-            assert_eq!(actual, expected);
-        }
+        assert_frozen_plan(&format!("string-{drop}"), Some(&plan));
     }
 }
 
 #[test]
-fn source_user_mutation_matches_rich_payload_and_mirror_owned_oracle() {
+fn source_user_mutation_matches_frozen_rich_payload_and_mirror() {
     let cases = [
         serde_json::json!({"message":{"content":[{"type":"tool_result","content":[
             {"type":"text","text":"first\n"},{"type":"text","text":""},
@@ -1372,7 +1334,7 @@ fn source_user_mutation_matches_rich_payload_and_mirror_owned_oracle() {
         serde_json::json!({"message":{"content":[{"type":"tool_result","content":"[PRUNED id=already]"}]},
             "toolUseResult":"[PRUNED id=mirror]"}),
     ];
-    for original in cases {
+    for (case, original) in cases.into_iter().enumerate() {
         for drop in [false, true] {
             let world = cv_testkit::World::new("source-rich-user-prune");
             let mut owned = original.clone();
@@ -1394,52 +1356,7 @@ fn source_user_mutation_matches_rich_payload_and_mirror_owned_oracle() {
                 ..Default::default()
             };
             let plan = source_user_prune(&source, range, &opts, "new", 0, &HashMap::new()).unwrap();
-            let mut entries = Vec::new();
-            let mut count = 0;
-            let mut images = 0;
-            let mut saved = 0;
-            let mut modified = false;
-            prune_user_line(
-                &mut owned,
-                &opts,
-                &HashMap::new(),
-                "new",
-                "L0",
-                &mut entries,
-                &mut count,
-                &mut images,
-                &mut saved,
-                &mut modified,
-            );
-            let Some(plan) = plan else {
-                assert!(!modified);
-                continue;
-            };
-            assert!(modified);
-            assert_eq!(plan.images, images);
-            assert_eq!(plan.payloads.len(), count);
-            assert_eq!(plan.saved, saved);
-            assert_eq!(plan.estimate, line_est(&owned));
-            let mut actual = Vec::new();
-            plan.record
-                .with_view(|v| v.write_canonical_replacing(&plan.replacements, &mut actual))
-                .unwrap();
-            assert_eq!(
-                actual,
-                crate::restamp_line(&owned.to_string(), "new").unwrap().as_bytes()
-            );
-            if !drop {
-                let mut expected = Vec::new();
-                for entry in entries {
-                    serde_json::to_writer(&mut expected, &entry).unwrap();
-                    expected.push(b'\n');
-                }
-                let mut actual = Vec::new();
-                for payload in plan.payloads {
-                    write_source_payload(&payload, &mut actual).unwrap();
-                }
-                assert_eq!(actual, expected);
-            }
+            assert_frozen_plan(&format!("rich-{case}-{drop}"), plan.as_ref());
         }
     }
 }
@@ -1455,15 +1372,33 @@ fn source_reroot_preserves_owned_stamp_order_including_duplicate_ids() {
         let path = world.base.join("input.jsonl");
         std::fs::write(&path, &raw).unwrap();
         let source = crate::json::JsonSource::capture(&path).unwrap();
-        let spans = source
-            .read_range_value(0, raw.len() as u64, crate::restamp::source_id_spans)
-            .unwrap();
-        let record = source.validated_range(0, raw.len() as u64).unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let mut selected = crate::derive::Select::read(
+            &source,
+            Range {
+                offset: 0,
+                len: raw.len() as u64,
+            },
+            true,
+            false,
+        )
+        .unwrap();
+        selected.root = true;
         let expected = crate::restamp_line(&raw, "new").unwrap_or(raw);
         let mut expected: Value = serde_json::from_str(&expected).unwrap();
         expected["parentUuid"] = Value::Null;
         let mut actual = Vec::new();
-        assert!(write_source_reroot(&record, &source, "new", &spans, &mut actual).unwrap());
+        crate::derive::derive(
+            &source,
+            &file,
+            std::iter::once(Ok(selected)),
+            &crate::derive::Rewrite {
+                session_id: "new",
+                standalone: false,
+            },
+            &mut actual,
+        )
+        .unwrap();
         assert_eq!(actual, format!("{expected}\n").as_bytes());
     }
 }
@@ -1654,7 +1589,7 @@ fn retrieve_giant_unselected_fields_return_only_requested_content() {
 }
 
 #[test]
-fn source_turn_projection_matches_owned_pass_composition() -> Result<()> {
+fn source_turn_projection_matches_frozen_composition() -> Result<()> {
     let world = crate::test_world("prune-turn-projection");
     for (case, mut original) in [
         serde_json::json!({"type":"assistant","uuid":"a","sessionId":"old","parentUuid":"p","message":{"content":[
@@ -1694,48 +1629,7 @@ fn source_turn_projection_matches_owned_pass_composition() -> Result<()> {
                         declassify_tokens: vec!["alpha".into(), "beta".into(), "ος".into()],
                         ..Default::default()
                     };
-                    let mut owned = original.clone();
-                    let mut sidecar = Vec::new();
-                    let mut count = 0;
-                    let mut images = 0;
-                    let mut saved = 0;
-                    let mut modified = false;
-                    let user = owned["type"] == "user";
-                    if user {
-                        prune_user_line(
-                            &mut owned,
-                            &opts,
-                            &HashMap::new(),
-                            "new",
-                            "u",
-                            &mut sidecar,
-                            &mut count,
-                            &mut images,
-                            &mut saved,
-                            &mut modified,
-                        );
-                    } else if thinking {
-                        prune_assistant_thinking(
-                            &mut owned,
-                            &opts,
-                            "a",
-                            &mut sidecar,
-                            &mut count,
-                            &mut saved,
-                            &mut modified,
-                        );
-                    }
-                    prune_declassify_text(
-                        &mut owned,
-                        &opts,
-                        "new",
-                        if user { "u" } else { "a" },
-                        &mut sidecar,
-                        &mut count,
-                        &mut saved,
-                        &mut modified,
-                    );
-                    drop_omitted_blocks(&mut owned);
+                    let user = original["type"] == "user";
                     let source = crate::json::JsonSource::capture(&path)?;
                     let plan = source_turn_prune(
                         &source,
@@ -1750,38 +1644,7 @@ fn source_turn_projection_matches_owned_pass_composition() -> Result<()> {
                         user,
                         thinking && !user,
                     )?;
-                    if !modified {
-                        assert!(plan.is_none());
-                        continue;
-                    }
-                    let plan = plan.unwrap();
-                    assert_eq!(
-                        plan.payloads.len(),
-                        count,
-                        "case={case} drop={drop} thinking={thinking} min={min_hits}"
-                    );
-                    assert_eq!(plan.saved, saved);
-                    assert_eq!(plan.images, images);
-                    assert_eq!(plan.estimate, line_est(&owned));
-                    let mut actual = Vec::new();
-                    plan.record
-                        .with_view(|view| view.write_canonical_replacing(&plan.replacements, &mut actual))?;
-                    assert_eq!(
-                        actual,
-                        crate::restamp_line(&owned.to_string(), "new").unwrap().as_bytes()
-                    );
-                    if !drop {
-                        let mut expected = Vec::new();
-                        for entry in &sidecar {
-                            serde_json::to_writer(&mut expected, entry)?;
-                            expected.push(b'\n');
-                        }
-                        let mut actual = Vec::new();
-                        for payload in &plan.payloads {
-                            write_source_payload(payload, &mut actual)?;
-                        }
-                        assert_eq!(actual, expected);
-                    }
+                    assert_frozen_plan(&format!("turn-{case}-{drop}-{thinking}-{min_hits}"), plan.as_ref());
                 }
             }
         }
@@ -1964,35 +1827,6 @@ fn staged_usage_trim_preserves_whitespace_only_buffers_and_eof_failure() -> Resu
 
 #[test]
 fn linked_tool_input_projection_matches_frozen_owned_lookup() -> Result<()> {
-    fn owned_lookup(
-        file: &std::fs::File,
-        v: &Value,
-        tools: &HashMap<String, (String, Range, usize)>,
-    ) -> Result<HashMap<String, (String, Value)>> {
-        let mut result = HashMap::new();
-        if let Some(blocks) = v.pointer("/message/content").and_then(Value::as_array) {
-            for block in blocks {
-                if block.get("type").and_then(Value::as_str) != Some("tool_result") {
-                    continue;
-                }
-                let Some(id) = block.get("tool_use_id").and_then(Value::as_str) else {
-                    continue;
-                };
-                if result.contains_key(id) {
-                    continue;
-                }
-                if let Some((name, range, index)) = tools.get(id) {
-                    let mut original: Value = serde_json::from_str(&read_line(file, *range)?)?;
-                    let input = original
-                        .pointer_mut(&format!("/message/content/{index}/input"))
-                        .map(Value::take)
-                        .unwrap_or(Value::Null);
-                    result.insert(id.to_owned(), (name.clone(), input));
-                }
-            }
-        }
-        Ok(result)
-    }
     let world = crate::test_world("prune-linked-input");
     let path = world.base.join("source.jsonl");
     let raw = format!(
@@ -2004,35 +1838,25 @@ fn linked_tool_input_projection_matches_frozen_owned_lookup() -> Result<()> {
         serde_json::to_string(&"x".repeat(2 * 1024 * 1024))?
     );
     std::fs::write(&path, &raw)?;
-    let file = std::fs::File::open(&path)?;
     let source = crate::json::JsonSource::capture(&path)?;
     let range = Range {
         offset: 0,
         len: raw.len() as u64,
     };
-    let original: Value = serde_json::from_str(&raw)?;
     let mut tools = HashMap::new();
-    collect_tool_names(&original, range, &mut tools);
-    let user = serde_json::json!({"message":{"content":[
-        {"type":"tool_result","tool_use_id":"duplicate"},{"type":"tool_result","tool_use_id":"duplicate"},
-        {"type":"tool_result","tool_use_id":"missing"},{"type":"tool_result","tool_use_id":"unknown"},
-        {"type":"tool_result","tool_use_id":17},{"type":"text","tool_use_id":"duplicate"}]}});
-    let expected = owned_lookup(&file, &user, &tools)?;
-    assert_eq!(materialize_tool_inputs(&source, &user, &tools)?, expected);
+    source.read_range_value(0, range.len, |view| {
+        decision_facts_source(view, range, &PruneOptions::default(), &mut tools).map(|_| ())
+    })?;
     assert_eq!(
-        expected["duplicate"],
+        source_tool_metadata(&source, Some("duplicate"), &tools)?,
         ("last".into(), serde_json::json!([{"keep":"λ"}]))
     );
-    assert_eq!(expected["missing"], ("NoInput".into(), Value::Null));
-    assert!(!expected.contains_key("unknown"));
-    let mut facts_tools = HashMap::new();
-    source.read_range_value(0, range.len, |view| {
-        decision_facts_source(view, range, &PruneOptions::default(), &mut facts_tools).map(|_| ())
-    })?;
-    assert_eq!(materialize_tool_inputs(&source, &user, &facts_tools)?, expected);
+    assert_eq!(
+        source_tool_metadata(&source, Some("missing"), &tools)?,
+        ("NoInput".into(), Value::Null)
+    );
     std::fs::write(&path, b"unavailable original metadata")?;
-    assert!(materialize_tool_inputs(&source, &user, &tools).is_err());
-    assert!(owned_lookup(&file, &user, &tools).is_err());
+    assert!(source_tool_metadata(&source, Some("duplicate"), &tools).is_err());
     Ok(())
 }
 
@@ -2320,7 +2144,7 @@ fn malformed_large_rows_preserve_owned_passthrough_and_fatal_utf8() -> Result<()
 fn rejected_large_json_keeps_strict_owned_value_acceptance() -> Result<()> {
     let dir = tmpdir();
     let path = dir.join("source.jsonl");
-    let padding = " ".repeat(LARGE_RECORD as usize);
+    let padding = " ".repeat(1024 * 1024);
     for raw in [
         "{bad}".to_owned(),
         "1e400".to_owned(),
@@ -2666,4 +2490,61 @@ fn byte_window_accounts_for_trailing_reminders_and_prompt_snap_overshoot() {
         ..options
     };
     assert_eq!(select_kept_turns(&rows, &options, 4), (0, 4, None, false));
+}
+
+// Frozen from67ad8bf9 before deleting the owned transform twins. Keep output/sidecar bytes and
+// estimates covered without maintaining a second implementation of the transform.
+fn assert_frozen_plan(key: &str, plan: Option<&SourcePrune>) {
+    let actual = if let Some(p) = plan {
+        let mut output = Vec::new();
+        p.record
+            .with_view(|v| crate::derive::write_modified(v, &p.replacements, "new", false, &mut output))
+            .unwrap();
+        let mut sidecar = Vec::new();
+        for payload in &p.payloads {
+            write_source_payload(payload, &mut sidecar).unwrap();
+        }
+        let hash = |bytes: &[u8]| {
+            let mut h = crate::digest::Sha256::new();
+            h.update(bytes);
+            h.finish_hex()
+        };
+        serde_json::json!({"key": key, "output": hash(&output), "sidecar": hash(&sidecar), "count":p.payloads.len(), "images":p.images,"saved":p.saved,"estimate":[p.estimate.tokens,p.estimate.signature,p.estimate.images]})
+    } else {
+        serde_json::json!({"key":key,"none":true})
+    };
+    let expected = include_str!("../../tests/fixtures/prune/projections.jsonl")
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|row| row["key"] == key)
+        .unwrap();
+    assert_eq!(actual, expected, "{key}");
+}
+
+#[test]
+fn standalone_prune_preserves_unmodified_metadata_bytes_at_every_size() {
+    for padding in [0, 1024 * 1024] {
+        let world = crate::test_world("prune-standalone-raw-metadata");
+        let path = world.base.join("agent-child.jsonl");
+        let metadata = format!(
+            "{{ \"type\" : \"system\", \"sessionId\" : \"old\", \"value\" : 1.00, \"padding\":\"{}\" }}",
+            "x".repeat(padding)
+        );
+        let user = r#"{"type":"user","sessionId":"old","isSidechain":true,"agentId":"child","uuid":"u","parentUuid":"parent","message":{"content":"prompt"}}"#;
+        std::fs::write(&path, format!("{metadata}\n{user}\n")).unwrap();
+        let result = prune_session(
+            &path,
+            &PruneOptions {
+                new_id: Some("derived".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let output = std::fs::read_to_string(result.new_path).unwrap();
+        assert!(output.starts_with(&format!("{}\n", crate::restamp_line(&metadata, "derived").unwrap())));
+        let second: Value = serde_json::from_str(output.lines().nth(1).unwrap()).unwrap();
+        assert_eq!(second["isSidechain"], false);
+        assert!(second.get("agentId").is_none());
+        assert!(second["parentUuid"].is_null());
+    }
 }

@@ -38,7 +38,7 @@ use crate::harness::store::{
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Marker prefix stamped where a payload used to be; carries enough to retrieve the original. The
@@ -56,7 +56,6 @@ const TUR_SUFFIX: &str = "#tur";
 /// itself, pricing each field with the shared [`crate::ir::TokenKind`] rates, [`IMAGE_TOKENS`] per
 /// image and [`BLOCK_TOKENS`] per block — the numbers the IR-side estimator produces.
 use crate::ir::{TokenKind, BLOCK_TOKENS, IMAGE_TOKENS};
-const LARGE_RECORD: u64 = 1024 * 1024;
 
 /// Knobs for [`prune_session`].
 #[derive(Debug, Clone)]
@@ -458,41 +457,30 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
         },
     )? {
         let (range, _) = record?;
-        let facts = if range.len >= LARGE_RECORD {
-            match source.read_range_value(range.offset, range.len, |view| {
-                let spans = crate::restamp::source_id_spans(view)?;
-                let facts = decision_facts_source(view, range, opts, &mut tool_names)?;
-                id_spans.insert(range.offset, spans);
-                Ok(facts)
-            }) {
-                Ok(facts) => Some(facts),
-                Err(e) if e.is::<crate::json::InvalidJson>() => {
-                    // Value-compatible validation already rejected this row. Malformed JSON
-                    // passes through, but invalid UTF-8 remains fatal even in ignored fields.
-                    if !ranges::valid_utf8(&mut ranges::reader(&file, range)?)? {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            "stream did not contain valid UTF-8",
-                        )
-                        .into());
-                    }
-                    None
+        let facts = match source.read_range_value(range.offset, range.len, |view| {
+            let spans = crate::restamp::source_id_spans(view)?;
+            let facts = decision_facts_source(view, range, opts, &mut tool_names)?;
+            id_spans.insert(range.offset, spans);
+            Ok(facts)
+        }) {
+            Ok(facts) => Some(facts),
+            Err(e) if e.is::<crate::json::InvalidJson>() => {
+                // Value-compatible validation already rejected this row. Malformed JSON
+                // passes through, but invalid UTF-8 remains fatal even in ignored fields.
+                if !ranges::valid_utf8(&mut ranges::reader(&file, range)?)? {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "stream did not contain valid UTF-8",
+                    )
+                    .into());
                 }
-                Err(e) => return Err(e),
+                None
             }
-        } else {
-            let line = read_line(&file, range)?;
-            let value = serde_json::from_str::<Value>(&line).ok();
-            if let Some(v) = &value {
-                collect_tool_names(v, range, &mut tool_names);
-            }
-            value
-                .as_ref()
-                .map(|v| decision_facts(v, opts.window.is_some() || opts.revive))
+            Err(e) => return Err(e),
         };
         let facts = facts.map(|mut facts| {
-            if subagent {
-                crate::rewind::normalize_subagent_record(&mut facts);
+            if subagent && facts.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+                facts["isSidechain"] = Value::Bool(false);
             }
             facts
         });
@@ -603,7 +591,6 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
     let mut sidecar_stage = std::io::BufWriter::with_capacity(64 * 1024, ByteStage::new());
     let mut sidecar_count = 0usize;
     let mut rooted = false;
-    let mut sidecar: Vec<SidecarEntry> = Vec::new();
     let mut pruned_count = 0usize;
     let mut image_blocks = 0usize;
     let mut est_tokens_saved = 0u64;
@@ -611,17 +598,30 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
 
     for (idx, (facts, range)) in parsed.into_iter().zip(lines.iter()).enumerate() {
         let Some(facts) = facts else {
-            // Keep malformed/blank records byte-identical without owning their bodies.
-            // Planning validated UTF-8; captured source guards cover this staged copy too.
+            // Malformed/blank records use the same writer with no accepted rewrite nodes.
+            let mut scan = MarkerWriter::new(&mut output);
+            let selected = crate::derive::Select {
+                range: *range,
+                newline: true,
+                record: None,
+                ids: Vec::new(),
+                replacements: Vec::new(),
+                root: false,
+            };
+            crate::derive::derive(
+                &source,
+                &file,
+                std::iter::once(Ok(selected)),
+                &crate::derive::Rewrite {
+                    session_id: &new_id,
+                    standalone: subagent,
+                },
+                &mut scan,
+            )?;
             if opts.revive {
-                let mut scan = MarkerWriter::new(&mut output);
-                std::io::copy(&mut ranges::reader(&file, *range)?, &mut scan)?;
                 output_facts.push(None);
                 output_pruned.push(scan.found);
-            } else {
-                std::io::copy(&mut ranges::reader(&file, *range)?, &mut output)?;
             }
-            output.write_all(b"\n")?;
             continue;
         };
         let ty = facts.get("type").and_then(Value::as_str).unwrap_or("");
@@ -659,93 +659,16 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
         }
 
         let needs_root = (subagent || (windowing && keep_start > 0)) && !rooted && is_main_turn(&facts);
-        if subagent && range.len >= LARGE_RECORD {
-            let plan = if is_turn_line && (opts.declassify || (is_old && (ty == "user" || opts.thinking))) {
-                source_turn_prune(
-                    &source,
-                    *range,
-                    opts,
-                    &new_id,
-                    idx,
-                    &tool_names,
-                    is_old && ty == "user",
-                    is_old && ty == "assistant" && opts.thinking,
-                )?
-            } else {
-                None
-            };
-            let mut replacements = Vec::new();
-            if needs_root {
-                rooted = true;
-            }
-            let record = source.validated_range(range.offset, range.len)?;
-            if needs_root {
-                if let Some(parent) = source_parent_override(&record)? {
-                    replacements.push(parent);
-                }
-            }
-            let mut facts = facts;
-            if let Some(plan) = plan {
-                replacements.extend(plan.replacements);
-                pruned_count += plan.payloads.len();
-                est_tokens_saved += plan.saved;
-                image_blocks += plan.images;
-                if !opts.drop {
-                    for payload in &plan.payloads {
-                        write_source_payload(payload, &mut sidecar_stage)?;
-                        sidecar_count += 1;
-                    }
-                }
-                if opts.revive {
-                    if let Some(facts) = facts.as_object_mut() {
-                        plan.estimate.store(facts);
-                    }
-                }
-            }
-            let mut scan = MarkerWriter::new(&mut output);
-            record.with_view(|view| write_subagent_source(view, &replacements, &new_id, &mut scan))?;
-            scan.write_all(b"\n")?;
-            if opts.revive {
-                output_facts.push(Some(facts));
-                output_pruned.push(scan.found);
-            }
-            continue;
-        }
-        let may_mutate =
-            (is_old && ty == "user" && facts.get("_prune_payload").and_then(Value::as_bool).unwrap_or(true))
+        rooted |= needs_root;
+        let may_prune = is_turn_line
+            && (opts.declassify
+                || (is_old && ty == "user" && facts["_prune_payload"].as_bool().unwrap_or(true))
                 || (is_old
                     && ty == "assistant"
                     && opts.thinking
-                    && facts.get("_prune_thinking").and_then(Value::as_bool).unwrap_or(true))
-                || (is_turn_line && opts.declassify)
-                || (needs_root && facts.get("_prune_parent").and_then(Value::as_bool).unwrap_or(true));
-        if range.len >= LARGE_RECORD && !may_mutate {
-            let mut scan = MarkerWriter::new(&mut output);
-            crate::restamp::write_restamped_spans(
-                &source,
-                &file,
-                range.offset,
-                range.len,
-                &new_id,
-                &mut id_spans.remove(&range.offset).unwrap_or_default(),
-                &mut scan,
-            )?;
-            scan.write_all(b"\n")?;
-            let pruned = scan.found;
-            if needs_root {
-                rooted = true;
-            }
-            if opts.revive {
-                output_facts.push(Some(facts));
-                output_pruned.push(pruned);
-            }
-            continue;
-        }
-        if range.len >= LARGE_RECORD && is_turn_line {
-            if needs_root {
-                rooted = true;
-            }
-            if let Some(mut plan) = source_turn_prune(
+                    && facts["_prune_thinking"].as_bool().unwrap_or(true)));
+        let plan = if may_prune {
+            source_turn_prune(
                 &source,
                 *range,
                 opts,
@@ -754,173 +677,51 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
                 &tool_names,
                 is_old && ty == "user",
                 is_old && ty == "assistant" && opts.thinking,
-            )? {
-                if needs_root {
-                    if let Some(parent) = source_parent_override(&plan.record)? {
-                        plan.replacements.push(parent);
-                    }
-                }
-                plan.record
-                    .with_view(|view| view.write_canonical_replacing(&plan.replacements, &mut output))?;
-                output.write_all(b"\n")?;
-                pruned_count += plan.payloads.len();
-                est_tokens_saved += plan.saved;
-                image_blocks += plan.images;
-                if !opts.drop {
-                    for payload in &plan.payloads {
-                        write_source_payload(payload, &mut sidecar_stage)?;
-                        sidecar_count += 1;
-                    }
-                }
-                if opts.revive {
-                    let mut facts = facts;
-                    if let Some(facts) = facts.as_object_mut() {
-                        plan.estimate.store(facts);
-                    }
-                    output_facts.push(Some(facts));
-                    output_pruned.push(true);
-                }
-            } else {
-                let record = source.validated_range(range.offset, range.len)?;
-                if needs_root && source_parent_override(&record)?.is_some() {
-                    let pruned = write_source_reroot(
-                        &record,
-                        &source,
-                        &new_id,
-                        &id_spans.remove(&range.offset).unwrap_or_default(),
-                        &mut output,
-                    )?;
-                    if opts.revive {
-                        output_pruned.push(pruned);
-                        output_facts.push(Some(facts));
-                    }
-                } else {
-                    // No mutation was selected; preserve the exact untouched raw record.
-                    let mut scan = MarkerWriter::new(&mut output);
-                    crate::restamp::write_restamped_spans(
-                        &source,
-                        &file,
-                        range.offset,
-                        range.len,
-                        &new_id,
-                        &mut id_spans.remove(&range.offset).unwrap_or_default(),
-                        &mut scan,
-                    )?;
-                    scan.write_all(b"\n")?;
-                    if opts.revive {
-                        output_pruned.push(scan.found);
-                        output_facts.push(Some(facts));
-                    }
+            )?
+        } else {
+            None
+        };
+        let mut facts = facts;
+        let mut selection = crate::derive::Select {
+            range: *range,
+            newline: true,
+            record: Some(source.validated_range(range.offset, range.len)?),
+            ids: id_spans.remove(&range.offset).unwrap_or_default(),
+            replacements: Vec::new(),
+            root: needs_root,
+        };
+        if let Some(plan) = plan {
+            selection.record = Some(plan.record);
+            selection.replacements = plan.replacements;
+            pruned_count += plan.payloads.len();
+            est_tokens_saved += plan.saved;
+            image_blocks += plan.images;
+            if !opts.drop {
+                for payload in &plan.payloads {
+                    write_source_payload(payload, &mut sidecar_stage)?;
+                    sidecar_count += 1;
                 }
             }
-            continue;
-        }
-        if range.len >= LARGE_RECORD
-            && needs_root
-            && !opts.declassify
-            && !(is_old
-                && ty == "assistant"
-                && opts.thinking
-                && facts.get("_prune_thinking").and_then(Value::as_bool).unwrap_or(true))
-        {
-            rooted = true;
-            let record = source.validated_range(range.offset, range.len)?;
-            let pruned = write_source_reroot(
-                &record,
-                &source,
-                &new_id,
-                &id_spans.remove(&range.offset).unwrap_or_default(),
-                &mut output,
-            )?;
             if opts.revive {
-                output_facts.push(Some(facts));
-                output_pruned.push(pruned);
-            }
-            continue;
-        }
-        let line = read_line(&file, *range)?;
-        let mut v: Value = serde_json::from_str(&line)?;
-
-        // Unique per-line key for sidecar ids when a block has no id of its own: the line's uuid,
-        // or its file line index as a last resort — never a shared constant (collisions would make
-        // earlier sidecar payloads unretrievable).
-        let line_key = v
-            .get("uuid")
-            .and_then(Value::as_str)
-            .map(String::from)
-            .unwrap_or_else(|| format!("L{idx}"));
-
-        let mut modified = subagent && crate::rewind::normalize_subagent_record(&mut v);
-        if is_old && ty == "user" {
-            // Only old user messages carry snippable tool results.
-            let current_tools = materialize_tool_inputs(&source, &v, &tool_names)?;
-            prune_user_line(
-                &mut v,
-                opts,
-                &current_tools,
-                &new_id,
-                &line_key,
-                &mut sidecar,
-                &mut pruned_count,
-                &mut image_blocks,
-                &mut est_tokens_saved,
-                &mut modified,
-            );
-        } else if is_old && ty == "assistant" && opts.thinking {
-            // `--thinking`: flatten the OLDEST assistant reasoning (recent thinking, within
-            // keep-last, stays verbatim so the resumed agent keeps its live train of thought).
-            prune_assistant_thinking(
-                &mut v,
-                opts,
-                &line_key,
-                &mut sidecar,
-                &mut pruned_count,
-                &mut est_tokens_saved,
-                &mut modified,
-            );
-        }
-
-        // `--declassify`: snip security-dense message PROSE (user string or assistant text blocks)
-        // wherever it appears — a classifier scores the WHOLE loaded context, so a trigger span
-        // ANYWHERE downgrades a restricted (e.g. Fable) seat; recency does NOT protect it (unlike the
-        // tool/thinking passes above, which keep recent payloads verbatim for continuity). Retrievable.
-        if is_turn_line && opts.declassify {
-            prune_declassify_text(
-                &mut v,
-                opts,
-                &new_id,
-                &line_key,
-                &mut sidecar,
-                &mut pruned_count,
-                &mut est_tokens_saved,
-                &mut modified,
-            );
-        }
-        drop_omitted_blocks(&mut v);
-
-        // An untouched line is the source's bytes with only its session id replaced
-        // ([`crate::restamp_line`]); a snipped line is re-serialized (values preserved; key order
-        // and whitespace may normalize) and then stamped the same way.
-        let out = if modified { v.to_string() } else { line };
-        let mut out = crate::restamp_line(&out, &new_id).unwrap_or(out);
-        if (subagent || (windowing && keep_start > 0)) && !rooted && is_main_turn(&v) {
-            rooted = true;
-            if v.get("parentUuid").is_some_and(|p| !p.is_null()) {
-                // Reparse the stamped line so the new session id survives normalization.
-                let mut stamped: Value = serde_json::from_str(&out)?;
-                stamped["parentUuid"] = Value::Null;
-                out = stamped.to_string();
+                if let Some(facts) = facts.as_object_mut() {
+                    plan.estimate.store(facts);
+                }
             }
         }
+        let mut scan = MarkerWriter::new(&mut output);
+        crate::derive::derive(
+            &source,
+            &file,
+            std::iter::once(Ok(selection)),
+            &crate::derive::Rewrite {
+                session_id: &new_id,
+                standalone: subagent,
+            },
+            &mut scan,
+        )?;
         if opts.revive {
-            output_facts.push(Some(decision_facts(&v, true)));
-            output_pruned.push(out.contains(MARKER_PREFIX));
-        }
-        writeln!(output, "{out}")?;
-        for entry in sidecar.drain(..) {
-            serde_json::to_writer(&mut sidecar_stage, &entry)?;
-            sidecar_stage.write_all(b"\n")?;
-            sidecar_count += 1;
+            output_facts.push(Some(facts));
+            output_pruned.push(scan.found);
         }
     }
 
@@ -1030,12 +831,6 @@ fn stage(destination: &Path, bytes: &ByteSource, mode: u32) -> Result<crate::pub
     )
     .with_context(|| format!("writing {}", destination.display()))?;
     Ok(staged)
-}
-
-fn read_line(file: &std::fs::File, range: Range) -> Result<String> {
-    let mut line = String::with_capacity(usize::try_from(range.len)?);
-    ranges::reader(file, range)?.read_to_string(&mut line)?;
-    Ok(line)
 }
 
 fn decision_facts_source(
@@ -1678,13 +1473,6 @@ fn source_turn_prune(
                 replacements.push((content.to_json()?, Value::Array(array)));
             }
         }
-        for key in ["sessionId", "session_id"] {
-            if let Some(value) = top.get(key) {
-                if value.is_string()? {
-                    replacements.push((value.to_json()?, Value::String(new_id.into())));
-                }
-            }
-        }
         let mut estimate = if opts.revive && !content.map(|value| value.is_array()).transpose()?.unwrap_or(false) {
             match projected_content.as_ref() {
                 Some(value) => est_content(value),
@@ -2130,78 +1918,6 @@ fn tur_is_image_source(value: crate::json::JsonView<'_>) -> Result<bool> {
         return Ok(false);
     };
     Ok(file.get("base64").is_some() || file.string("type")?.is_some_and(|ty| ty.starts_with("image/")))
-}
-
-fn source_parent_override(record: &crate::json::Json) -> Result<Option<(crate::json::Json, Value)>> {
-    record.with_view(|view| {
-        let Some(parent) = view.get("parentUuid")? else {
-            return Ok(None);
-        };
-        if parent.is_null()? {
-            return Ok(None);
-        }
-        Ok(Some((parent.to_json()?, Value::Null)))
-    })
-}
-fn write_source_reroot(
-    record: &crate::json::Json,
-    source: &crate::json::JsonSource,
-    new_id: &str,
-    ids: &[(u64, u64)],
-    output: &mut impl Write,
-) -> Result<bool> {
-    let mut replacements = Vec::new();
-    if let Some(parent) = source_parent_override(record)? {
-        replacements.push(parent);
-    }
-    // Rerooting follows restamp of the untouched row: duplicate id fields reject that stamp.
-    // Preserve the captured accepted id roster rather than stamping the normalized object.
-    for &(start, end) in ids {
-        replacements.push((
-            source.validated_range(start, end - start)?,
-            Value::String(new_id.into()),
-        ));
-    }
-    let mut scan = MarkerWriter::new(output);
-    record.with_view(|view| view.write_canonical_replacing(&replacements, &mut scan))?;
-    scan.write_all(b"\n")?;
-    Ok(scan.found)
-}
-
-/// Stream a selected native child's record as a standalone record, retaining checked large
-/// payloads and applying the same top-level normalization as rewind's owned record path.
-fn write_subagent_source(
-    view: crate::json::JsonView<'_>,
-    replacements: &[(crate::json::Json, Value)],
-    new_id: &str,
-    writer: &mut impl Write,
-) -> Result<()> {
-    if !view.is_object()? {
-        return view.write_canonical_replacing(replacements, writer);
-    }
-    writer.write_all(b"{")?;
-    let mut first = true;
-    view.for_each_entry(|key, child| {
-        if key == "agentId" {
-            return Ok(());
-        }
-        if !first {
-            writer.write_all(b",")?;
-        }
-        first = false;
-        serde_json::to_writer(&mut *writer, key)?;
-        writer.write_all(b":")?;
-        if key == "isSidechain" && child.as_bool()? == Some(true) {
-            writer.write_all(b"false")?;
-        } else if matches!(key, "sessionId" | "session_id") && child.is_string()? {
-            serde_json::to_writer(&mut *writer, new_id)?;
-        } else {
-            child.write_canonical_replacing(replacements, writer)?;
-        }
-        Ok(())
-    })?;
-    writer.write_all(b"}")?;
-    Ok(())
 }
 
 fn write_source_payload(payload: &SourcePayload, writer: &mut impl Write) -> Result<()> {
@@ -2761,565 +2477,15 @@ fn pin_usage(u: &mut serde_json::Map<String, Value>, honest: u64) {
 
 /// Snip the eligible payloads on one (old) user line, in place. `line_key` (the line's uuid or a
 /// file-position fallback) keys sidecar ids for blocks that carry no `tool_use_id` of their own.
-#[allow(clippy::too_many_arguments)]
-fn prune_user_line(
-    v: &mut Value,
-    opts: &PruneOptions,
-    tool_names: &HashMap<String, (String, Value)>,
-    new_id: &str,
-    line_key: &str,
-    sidecar: &mut Vec<SidecarEntry>,
-    count: &mut usize,
-    images: &mut usize,
-    tokens_saved: &mut u64,
-    modified: &mut bool,
-) {
-    // (1) tool_result blocks in message.content (the context-bearing payloads).
-    let mut mirror_base: Option<String> = None; // sidecar-id base for the toolUseResult mirror
-    let mut mirror_tuid: Option<String> = None; // real tool_use_id for the name/input lookup
-    if let Some(blocks) = v.pointer_mut("/message/content").and_then(Value::as_array_mut) {
-        for (bi, block) in blocks.iter_mut().enumerate() {
-            if block.get("type").and_then(Value::as_str) != Some("tool_result") {
-                continue;
-            }
-            let tuid = block.get("tool_use_id").and_then(Value::as_str).map(String::from);
-            // Sidecar id: the tool_use_id when present, else `{line uuid}#tr{block idx}` — unique
-            // per block, never a shared constant (which made colliding entries unretrievable).
-            let entry_id = tuid.clone().unwrap_or_else(|| format!("{line_key}#tr{bi}"));
-            if mirror_base.is_none() {
-                mirror_base = Some(entry_id.clone());
-                mirror_tuid = tuid.clone();
-            }
-            // Decide using a borrow; commit by cloning the payload out (releasing the borrow), then
-            // overwrite the block — so we never hold a read of `block` across the mutation.
-            let committed = match block.get("content") {
-                Some(c) if !c.is_null() && !c.as_str().is_some_and(|s| s.starts_with(MARKER_PREFIX)) => {
-                    let size = value_byte_size(c);
-                    if size <= opts.min_size {
-                        None
-                    } else {
-                        let (kind, text, img) = classify(c);
-                        if kind == "none" {
-                            None
-                        } else {
-                            Some((c.clone(), size, kind, text, img))
-                        }
-                    }
-                }
-                _ => None,
-            };
-            let Some((content, size, kind, text, img)) = committed else {
-                continue;
-            };
-            let line_count = if text.is_empty() { 1 } else { text.lines().count() };
-            let (name, input) = tuid
-                .as_deref()
-                .and_then(|t| tool_names.get(t).cloned())
-                .unwrap_or_else(|| ("unknown".into(), Value::Null));
-            let marker = build_marker(&entry_id, &name, &input, &kind, size, line_count, new_id, opts.drop);
-
-            *tokens_saved += tool_result_tokens(&content).saturating_sub(str_tokens(&marker));
-            *images += img;
-            if !opts.drop {
-                sidecar.push(SidecarEntry {
-                    id: entry_id,
-                    slot: "content".into(),
-                    name,
-                    input,
-                    content,
-                    size,
-                    line_count,
-                    kind,
-                });
-            }
-            block["content"] = Value::String(marker);
-            *modified = true;
-            *count += 1;
-        }
-    }
-
-    // (2) the top-level toolUseResult mirror (disk-only; shrinks the file, not context). Clone it out
-    // first so the borrow is released before we overwrite the field.
-    let tur_committed = match v.get("toolUseResult") {
-        Some(t) if !t.is_null() && !t.as_str().is_some_and(|s| s.starts_with(MARKER_PREFIX)) => {
-            let size = value_byte_size(t);
-            (size > opts.min_size).then(|| (t.clone(), size))
-        }
-        _ => None,
-    };
-    if let Some((tur, size)) = tur_committed {
-        let base = mirror_base.unwrap_or_else(|| line_key.to_string());
-        let id = format!("{base}{TUR_SUFFIX}");
-        let kind = if tur_is_image(&tur) { "image" } else { "text" };
-        let (name, input) = mirror_tuid
-            .as_deref()
-            .and_then(|t| tool_names.get(t).cloned())
-            .unwrap_or_else(|| ("unknown".into(), Value::Null));
-        let line_count = tur.as_str().map(|s| s.lines().count()).unwrap_or(1);
-        let marker = build_marker(&id, &name, &input, kind, size, line_count, new_id, opts.drop);
-        if !opts.drop {
-            sidecar.push(SidecarEntry {
-                id,
-                slot: "toolUseResult".into(),
-                name,
-                input,
-                content: tur,
-                size,
-                line_count,
-                kind: kind.into(),
-            });
-        }
-        v["toolUseResult"] = Value::String(marker);
-        *modified = true;
-        *count += 1;
-    }
-}
-
-/// Omit every `thinking` block on one (old) assistant line: a marker would give the model
-/// nothing. The original block is stashed verbatim in the sidecar under `<line_key>#think<i>`
-/// (`line_key` = the line's uuid, or a file-position fallback), where `cv cat` finds it. A record
-/// left empty is removed after staging and its children relinked
-/// ([`crate::harness::claude::replay::drop_empty_records`]).
-#[allow(clippy::too_many_arguments)]
-fn prune_assistant_thinking(
-    v: &mut Value,
-    opts: &PruneOptions,
-    line_key: &str,
-    sidecar: &mut Vec<SidecarEntry>,
-    count: &mut usize,
-    tokens_saved: &mut u64,
-    modified: &mut bool,
-) {
-    let Some(blocks) = v.pointer_mut("/message/content").and_then(Value::as_array_mut) else {
-        return;
-    };
-    // An omitted block leaves `null` until [`drop_omitted_blocks`], so later passes keep the
-    // source's block indices (their sidecar ids name them).
-    for (i, slot) in blocks.iter_mut().enumerate() {
-        if slot.get("type").and_then(Value::as_str) != Some("thinking") {
-            continue;
-        }
-        let block = slot.take();
-        // Every old thinking block goes, whatever its size — `--min-size` is a payload gate and does
-        // not apply here: a signature-only block still costs hundreds of tokens on the wire.
-        let size = value_byte_size(&block);
-        let line_count = block
-            .get("thinking")
-            .and_then(Value::as_str)
-            .map_or(1, |t| t.lines().count().max(1));
-        *tokens_saved += est_block(&block).total();
-        if !opts.drop {
-            sidecar.push(SidecarEntry {
-                id: format!("{line_key}#think{i}"),
-                slot: "thinking".into(),
-                name: "thinking".into(),
-                input: Value::Null,
-                content: block,
-                size,
-                line_count,
-                kind: "text".into(),
-            });
-        }
-        *modified = true;
-        *count += 1;
-    }
-}
-
-/// Remove the slots [`prune_assistant_thinking`] emptied.
-fn drop_omitted_blocks(v: &mut Value) {
-    if let Some(blocks) = v.pointer_mut("/message/content").and_then(Value::as_array_mut) {
-        blocks.retain(|block| !block.is_null());
-    }
-}
-
-/// `--declassify`: snip a message's TEXT when its security-token density is high, so the resumed
-/// session does not carry classifier-tripping PROSE into a fresh seat's context. Handles both message
-/// shapes: a user turn's bare-string `content`, and an assistant turn's array of `text` blocks. The
-/// original text is stashed in the sidecar verbatim (lossless, readable with `cv cat`, under `<line_key>#declass`)
-/// and replaced with a `[PRUNED …]` marker. A block is snipped iff it contains at least
-/// `declassify_min_hits` DISTINCT `declassify_tokens` (case-insensitive substring match).
-#[allow(clippy::too_many_arguments)]
-fn prune_declassify_text(
-    v: &mut Value,
-    opts: &PruneOptions,
-    new_id: &str,
-    line_key: &str,
-    sidecar: &mut Vec<SidecarEntry>,
-    count: &mut usize,
-    tokens_saved: &mut u64,
-    modified: &mut bool,
-) {
-    // Distinct security terms present (case-insensitive substring). Density, not raw frequency, so a
-    // single benign mention ("the security fix shipped") never trips the snip.
-    let distinct_hits = |s: &str| declassify_hits(s, opts);
-    let Some(content) = v.pointer_mut("/message/content") else {
-        return;
-    };
-    match content {
-        // User turn: `content` is a bare string.
-        Value::String(s) => {
-            if distinct_hits(s) < opts.declassify_min_hits {
-                return;
-            }
-            let size = s.len();
-            let line_count = s.lines().count().max(1);
-            let original = Value::String(std::mem::take(s));
-            let id = format!("{line_key}#declass");
-            let marker = build_marker(
-                &id,
-                "declassified",
-                &Value::Null,
-                "text",
-                size,
-                line_count,
-                new_id,
-                opts.drop,
-            );
-            *tokens_saved += str_tokens(original.as_str().unwrap_or("")).saturating_sub(str_tokens(&marker));
-            if !opts.drop {
-                sidecar.push(SidecarEntry {
-                    id,
-                    slot: "content".into(),
-                    name: "declassified".into(),
-                    input: Value::Null,
-                    content: original,
-                    size,
-                    line_count,
-                    kind: "text".into(),
-                });
-            }
-            *content = Value::String(marker);
-            *modified = true;
-            *count += 1;
-        }
-        // Assistant turn: `content` is an array of blocks; snip dense `text` blocks in place.
-        Value::Array(blocks) => {
-            for (i, block) in blocks.iter_mut().enumerate() {
-                if block.get("type").and_then(Value::as_str) != Some("text") {
-                    continue;
-                }
-                let text = block.get("text").and_then(Value::as_str).unwrap_or("");
-                if distinct_hits(text) < opts.declassify_min_hits {
-                    continue;
-                }
-                let size = text.len();
-                let line_count = text.lines().count().max(1);
-                let original = block.clone();
-                let id = format!("{line_key}#declass{i}");
-                let marker = build_marker(
-                    &id,
-                    "declassified",
-                    &Value::Null,
-                    "text",
-                    size,
-                    line_count,
-                    new_id,
-                    opts.drop,
-                );
-                *tokens_saved += str_tokens(text).saturating_sub(str_tokens(&marker));
-                if !opts.drop {
-                    sidecar.push(SidecarEntry {
-                        id,
-                        slot: "content".into(),
-                        name: "declassified".into(),
-                        input: Value::Null,
-                        content: original,
-                        size,
-                        line_count,
-                        kind: "text".into(),
-                    });
-                }
-                *block = serde_json::json!({ "type": "text", "text": marker });
-                *modified = true;
-                *count += 1;
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Retrieve a stashed original from a prune sidecar by its `tool_use_id` (or `<id>#tur`). Returns the
-/// verbatim value (string, content-block array incl. images, or the raw toolUseResult object). Errors
-/// if the id matches more than one entry — a duplicated id means the sidecar can't say which payload
-/// is which, and silently returning one of them would misattribute data.
-pub fn retrieve(sidecar_path: &Path, id: &str) -> Result<Value> {
-    let source = crate::json::JsonSource::capture(sidecar_path)
-        .with_context(|| format!("reading sidecar {}", sidecar_path.display()))?;
-    let file =
-        std::fs::File::open(sidecar_path).with_context(|| format!("reading sidecar {}", sidecar_path.display()))?;
-    retrieve_captured(&source, &file, sidecar_path, id)
-}
-
-fn retrieve_captured(source: &crate::json::JsonSource, file: &std::fs::File, path: &Path, id: &str) -> Result<Value> {
-    let result = (|| {
-        source.check_metadata(file.metadata()?)?;
-        let extent = Range {
-            offset: 0,
-            len: source.len(),
-        };
-        if !ranges::valid_utf8(&mut ranges::reader(file, extent)?)? {
-            return Err(
-                std::io::Error::new(std::io::ErrorKind::InvalidData, "stream did not contain valid UTF-8").into(),
-            );
-        }
-        let mut available = Vec::new();
-        let mut found = None;
-        let mut duplicates = 0usize;
-        let mut reader = crate::harness::store::jsonl::Records::new(source, file);
-        for row in ranges::records(file, extent)? {
-            let (row, _) = row?;
-            if row.len == 0 {
-                continue;
-            }
-            // Unknown fields keep derived serde's IgnoredAny acceptance; the entry's Value fields
-            // are checked by the projection.
-            let projected = reader.read_with(row.offset, row.len, crate::json::Validation::Syntax, |view| {
-                project_sidecar_entry(view, id, available.len() < 20)
-            });
-            accept_sidecar_entry(projected, &mut available, &mut found, &mut duplicates)?;
-        }
-        if duplicates > 0 {
-            bail!(
-                "id {id:?} appears {} times in sidecar {} — ambiguous, refusing to guess which payload you meant",
-                duplicates + 1,
-                path.display()
-            );
-        }
-        let Some(content) = found else {
-            let mut message = format!("id {id:?} not found in sidecar. available: ");
-            for (i, available) in available.iter().enumerate() {
-                if i != 0 {
-                    message.push_str(", ");
-                }
-                available.with_view(|view| {
-                    view.for_each_str_chunk(|part| {
-                        message.push_str(part);
-                        Ok(())
-                    })?;
-                    Ok(())
-                })?;
-            }
-            bail!(message);
-        };
-        // Only the unambiguous requested output becomes owned, after scanning every row.
-        Ok(content.resolve()?.into_owned())
-    })();
-    let result = result.map_err(|error: anyhow::Error| {
-        if error.downcast_ref::<std::io::Error>().is_some() {
-            error.context(format!("reading sidecar {}", path.display()))
-        } else {
-            error
-        }
-    });
-    // Guard failures take precedence even when a malformed row or callback stopped the scan.
-    source.check_metadata(file.metadata()?)?;
-    source.check()?;
-    result
-}
-
-fn accept_sidecar_entry(
-    projected: Result<(Option<crate::Json>, Option<crate::Json>)>,
-    available: &mut Vec<crate::Json>,
-    found: &mut Option<crate::Json>,
-    duplicates: &mut usize,
-) -> Result<()> {
-    let (shown_id, content) = match projected {
-        Ok(entry) => entry,
-        Err(error)
-            if error.downcast_ref::<crate::json::InvalidJson>().is_some()
-                || error
-                    .downcast_ref::<crate::harness::store::document::InvalidStruct>()
-                    .is_some() =>
-        {
-            return Ok(())
-        }
-        Err(error) => return Err(error),
-    };
-    if let Some(id) = shown_id {
-        available.push(id);
-    }
-    if let Some(content) = content {
-        if found.is_some() {
-            *duplicates += 1;
-        } else {
-            *found = Some(content);
-        }
-    }
-    Ok(())
-}
-
-fn project_sidecar_entry(
-    view: crate::json::JsonView<'_>,
-    id: &str,
-    keep_id: bool,
-) -> Result<(Option<crate::Json>, Option<crate::Json>)> {
-    use crate::harness::store::document::{Fields, InvalidStruct};
-    const KEYS: &[&str] = &["id", "slot", "name", "input", "content", "size", "line_count", "kind"];
-    let fields = Fields::parse_struct(view, KEYS)?.ok_or(InvalidStruct("expected sidecar entry"))?;
-    let field = |key| fields.get(key).ok_or(InvalidStruct("missing sidecar field"));
-    // Unknown fields retain derived serde's IgnoredAny semantics. Only Value fields receive
-    // strict Value acceptance, with the enclosing struct's consumed recursion level.
-    for key in ["input", "content"] {
-        if !field(key)?.accepts_value_at_depth(1)? {
-            return Err(InvalidStruct("invalid sidecar value").into());
-        }
-    }
-    for key in ["slot", "name", "kind", "id"] {
-        let value = field(key)?;
-        if !value.is_string()? || !value.accepts_value_at_depth(1)? {
-            return Err(InvalidStruct("invalid sidecar string").into());
-        }
-    }
-    for key in ["size", "line_count"] {
-        let value = field(key)?;
-        if value.is_string()? || value.is_object()? || value.is_array()? {
-            return Err(InvalidStruct("invalid sidecar integer").into());
-        }
-        if !value.accepts_value_at_depth(1)? {
-            return Err(InvalidStruct("invalid sidecar integer").into());
-        }
-        let number = value.resolve()?;
-        if number.as_u64().and_then(|n| usize::try_from(n).ok()).is_none() {
-            return Err(InvalidStruct("invalid sidecar integer").into());
-        }
-    }
-    let shown = if keep_id { Some(field("id")?.to_json()?) } else { None };
-    let mut at = 0usize;
-    let mut matches = true;
-    field("id")?.for_each_str_chunk(|part| {
-        if matches {
-            matches = at.checked_add(part.len()).and_then(|end| id.as_bytes().get(at..end)) == Some(part.as_bytes());
-            if matches {
-                at += part.len();
-            }
-        }
-        Ok(())
-    })?;
-    let content = if matches && at == id.len() {
-        Some(field("content")?.to_json()?)
-    } else {
-        None
-    };
-    Ok((shown, content))
-}
+mod retrieve;
+pub use retrieve::retrieve;
+#[cfg(test)]
+use retrieve::retrieve_captured;
 
 // ── helpers ───────────────────────────────────────────────────────────────
 
 pub(crate) fn new_uuid() -> String {
     uuid::Uuid::new_v4().to_string()
-}
-
-/// Tool inputs can themselves contain giant file contents. Keep their source record and block
-/// position, then materialize only the inputs needed by the current tool-result record.
-fn collect_tool_names(v: &Value, range: Range, map: &mut HashMap<String, (String, Range, usize)>) {
-    if v.get("type").and_then(Value::as_str) != Some("assistant") {
-        return;
-    }
-    let Some(blocks) = v.pointer("/message/content").and_then(Value::as_array) else {
-        return;
-    };
-    for (index, b) in blocks.iter().enumerate() {
-        if b.get("type").and_then(Value::as_str) == Some("tool_use") {
-            if let Some(id) = b.get("id").and_then(Value::as_str) {
-                map.insert(
-                    id.to_owned(),
-                    (
-                        b.get("name").and_then(Value::as_str).unwrap_or("").to_owned(),
-                        range,
-                        index,
-                    ),
-                );
-            }
-        }
-    }
-}
-
-fn materialize_tool_inputs(
-    source: &crate::json::JsonSource,
-    v: &Value,
-    tools: &HashMap<String, (String, Range, usize)>,
-) -> Result<HashMap<String, (String, Value)>> {
-    let mut result = HashMap::new();
-    if let Some(blocks) = v.pointer("/message/content").and_then(Value::as_array) {
-        for block in blocks {
-            if block.get("type").and_then(Value::as_str) != Some("tool_result") {
-                continue;
-            }
-            let Some(id) = block.get("tool_use_id").and_then(Value::as_str) else {
-                continue;
-            };
-            if result.contains_key(id) {
-                continue;
-            }
-            if tools.contains_key(id) {
-                // Retain only this indexed call's input; unrelated original assistant bodies
-                // may already have been streamed into a sidecar by the preceding turn pass.
-                result.insert(id.to_owned(), source_tool_metadata(source, Some(id), tools)?);
-            }
-        }
-    }
-    Ok(result)
-}
-
-/// Classify a tool_result content value → (kind, projected text, image count).
-fn classify(content: &Value) -> (String, String, usize) {
-    match content {
-        Value::String(s) => ("text".into(), s.clone(), 0),
-        Value::Array(arr) => {
-            let mut text = String::new();
-            let mut images = 0;
-            for b in arr {
-                match b.get("type").and_then(Value::as_str) {
-                    Some("text") => {
-                        if let Some(t) = b.get("text").and_then(Value::as_str) {
-                            if !text.is_empty() {
-                                text.push('\n');
-                            }
-                            text.push_str(t);
-                        }
-                    }
-                    Some("image") => images += 1,
-                    _ => {}
-                }
-            }
-            let kind = match (images > 0, !text.is_empty()) {
-                (true, true) => "mixed",
-                (true, false) => "image",
-                (false, true) => "text",
-                // a non-empty array of other block types is still stored verbatim (lossless)
-                (false, false) if !arr.is_empty() => "text",
-                _ => "none",
-            };
-            (kind.into(), text, images)
-        }
-        _ => ("none".into(), String::new(), 0),
-    }
-}
-
-fn tur_is_image(tur: &Value) -> bool {
-    if tur.get("type").and_then(Value::as_str) == Some("image") {
-        return true;
-    }
-    if let Some(file) = tur.get("file") {
-        if file.get("base64").is_some() {
-            return true;
-        }
-        if file
-            .get("type")
-            .and_then(Value::as_str)
-            .is_some_and(|t| t.starts_with("image/"))
-        {
-            return true;
-        }
-    }
-    false
-}
-
-fn value_byte_size(v: &Value) -> usize {
-    match v {
-        Value::String(s) => s.len(),
-        other => other.to_string().len(),
-    }
 }
 
 fn str_tokens(s: &str) -> u64 {
@@ -3385,76 +2551,12 @@ fn line_est(v: &Value) -> Est {
     }
 }
 
-/// Estimated tokens of a `message.content` value.
+/// The same estimator handles owned replacement nodes through an owned view.
 fn est_content(content: &Value) -> Est {
-    match content {
-        Value::String(s) => Est {
-            tokens: BLOCK_TOKENS + str_tokens(s),
-            ..Est::default()
-        },
-        Value::Array(blocks) => {
-            let mut total = Est::default();
-            for block in blocks {
-                total.add(est_block(block));
-            }
-            total
-        }
-        other => Est {
-            tokens: crate::ir::est_str_tokens(&other.to_string(), TokenKind::ToolResult),
-            ..Est::default()
-        },
-    }
+    est_content_source(content.into(), &[]).expect("owned JSON has no fallible backing")
 }
-
-/// A tool result's `content`, as [`est_block`] prices it inside its block.
-fn tool_result_tokens(content: &Value) -> u64 {
-    est_block(&serde_json::json!({"type": "tool_result", "content": content}))
-        .total()
-        .saturating_sub(BLOCK_TOKENS)
-}
-
-/// One content block: [`BLOCK_TOKENS`] plus each field at its [`TokenKind`] rate.
 fn est_block(block: &Value) -> Est {
-    use crate::ir::{est_str_tokens, est_tokens_bytes};
-    let field = |key: &str| block.get(key).and_then(Value::as_str).unwrap_or("");
-    let mut est = Est {
-        tokens: BLOCK_TOKENS,
-        ..Est::default()
-    };
-    match block.get("type").and_then(Value::as_str) {
-        Some("text") => est.tokens += str_tokens(field("text")),
-        Some("image") => est.images += 1,
-        Some("tool_use") => {
-            est.tokens += est_tokens_bytes(
-                block.get("input").map_or(0, |input| input.to_string().len()),
-                TokenKind::ToolInput,
-            )
-        }
-        Some("tool_result") => match block.get("content") {
-            Some(Value::String(text)) => est.tokens += est_str_tokens(text, TokenKind::ToolResult),
-            Some(Value::Array(items)) => {
-                for item in items {
-                    match item.get("type").and_then(Value::as_str) {
-                        Some("image") => est.images += 1,
-                        Some("text") => {
-                            let text = item.get("text").and_then(Value::as_str).unwrap_or("");
-                            est.tokens += est_str_tokens(text, TokenKind::ToolResult);
-                        }
-                        _ => est.tokens += est_str_tokens(&item.to_string(), TokenKind::ToolResult),
-                    }
-                }
-            }
-            Some(Value::Null) | None => {}
-            Some(other) => est.tokens += est_str_tokens(&other.to_string(), TokenKind::ToolResult),
-        },
-        Some("thinking") => {
-            est.tokens += str_tokens(field("thinking"));
-            est.signature += est_tokens_bytes(field("signature").len(), TokenKind::Signature);
-        }
-        Some("redacted_thinking") => est.signature += est_tokens_bytes(field("data").len(), TokenKind::Signature),
-        _ => est.tokens += est_str_tokens(&block.to_string(), TokenKind::ToolResult),
-    }
-    est
+    est_block_source(block.into(), &[]).expect("owned JSON has no fallible backing")
 }
 
 /// A compact key=value summary of the tool's most telling arguments, for the marker.

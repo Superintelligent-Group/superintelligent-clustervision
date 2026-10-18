@@ -65,10 +65,11 @@ and the wire codecs 1,313. Every family reads through one record codec over one 
 (`docs/design/CODEC.md`), but discovery still has its own grammar in Codex, Claude, Grok, Kimi and
 Kimi Code, and six heap-gate scenario paths (OpenClaw window groups, Goose fork inventory, Qwen
 `TaskInventory`, Hermes dedup, the export cache) are bespoke SQL or file walks. Emitters are
-written beside the codec, not derived from it (deferred to 0.18). `derive` does not exist:
-`prune.rs` is 3,469 lines with every transform twice (owned `Value` and the view for records over
-1 MiB), `rewind.rs` 1,001 with its own owned copier, `adopt` 248 in `cv`. `loom::Composition`
-(74 lines) still composes splice outside the emitter. Message windowing is written in
+written beside the codec, not derived from it (deferred to 0.18). `derive` now owns native record
+selection/writing for prune, rewind and adoption. Prune uses
+checked views at every size; untouched records keep their bytes except for selected identity
+changes. Rewind retains evidence/window selection and adoption retains destination/meta policy.
+`loom::Composition` (74 lines) still composes splice outside the emitter. Message windowing is written in
 `api::WindowSink`, `cv/src/cmd/view.rs` (the text renderer resolves `--first/--last/--range` in
 its own pass) and `cv/src/cmd/pack.rs`. CLI and HTTP search now share
 `cv_search::Searcher::search`; each door renders its own response. The clap tree in

@@ -599,3 +599,49 @@ fn rewind_rejects_output_ids_that_escape_the_output_directory() {
     assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
     cleanup(&dir);
 }
+
+#[test]
+fn checked_derivation_preserves_large_results_and_closes_parallel_calls() {
+    let dir = tmpdir();
+    let path = dir.join(format!("{SID}.jsonl"));
+    let payload = "λ payload\n".repeat(200000);
+    write_jsonl(
+        &path,
+        &[
+            rec("user", "u", None, text("user", "read both")),
+            rec(
+                "assistant",
+                "a",
+                Some("u"),
+                json!({"role":"assistant","content":[
+            {"type":"tool_use","id":"toolu_a","name":"Read","input":{"file_path":"a"}},
+            {"type":"tool_use","id":"toolu_b","name":"Read","input":{"file_path":"b"}}]}),
+            ),
+            rec("user", "r1", Some("a"), result("toolu_a", &payload)),
+            rec("user", "r2", Some("r1"), result("toolu_b", "second")),
+            rec("assistant", "future", Some("r2"), text("assistant", "future")),
+        ],
+    );
+    let original = std::fs::read_to_string(&path).unwrap();
+    let result = rewind_session(
+        &sref(&path, SID),
+        &RewindOptions {
+            full: true,
+            ..opts(CutAt::Message(1), &dir.join("out"))
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        (result.closed_tool_calls, result.open_tool_calls, result.lines_written),
+        (2, 0, 4)
+    );
+    let expected: String = original
+        .lines()
+        .take(4)
+        .map(|line| crate::restamp_line(line, &result.new_id).unwrap() + "\n")
+        .collect();
+    assert_eq!(std::fs::read_to_string(&result.new_path).unwrap(), expected);
+    crate::harness::claude::emit::verify_claude_resumable(&result.new_path, None).unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    cleanup(&dir);
+}
