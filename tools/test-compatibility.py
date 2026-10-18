@@ -29,6 +29,7 @@ class Compatibility(unittest.TestCase):
         new["commands"][0]["args"].append({"name": "optional", "required": False})
         new["tools"][0]["inputSchema"]["properties"]["optional"] = {"type": "string"}
         new["messages"][0]["new_field"] = "str"
+        new["schema"]["message"]["fields"].append("new_field")
         self.check(new)
 
     def test_removal_type_default_requiredness_and_routes_fail(self):

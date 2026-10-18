@@ -168,7 +168,7 @@ def http_routes(binary, env, inventory):
         process.stderr.close()
 
 
-def collect(binary, probe, source, root):
+def collect(binary, probe, source, root, baseline=False):
     env = world(root)
     commands = json.loads(invoke(binary, env, ["schema", "--commands", "--json"]))
     schema = json.loads(invoke(binary, env, ["schema", "--json"]))
@@ -183,10 +183,20 @@ def collect(binary, probe, source, root):
     # The existing schema's field inventories must agree with actual serialized fields.
     require(set(schema["session_row"]["keys"]) <= rows[0].keys(), "session-row schema drifted from ls JSON")
     rich = messages[0]
-    require(set(schema["message"]["fields"]) == rich.keys(), "message schema drifted from real serde")
-    require(set(schema["block"]["types"]) == {b["type"] for b in rich["content"]}, "probe must cover every block tag")
+    require(rich.keys() <= set(schema["message"]["fields"]), "message schema omits real serde fields")
+    tags = {b["type"] for b in rich["content"]}
+    require(tags <= set(schema["block"]["types"]), "schema omits real serde block tags")
+    if baseline:
+        require(set(schema["message"]["fields"]) <= rich.keys(), "extend probe to cover baseline message fields")
+        require(set(schema["block"]["types"]) <= tags, "extend probe to cover baseline block tags")
     for block in rich["content"]:
-        require(set(schema["block"]["types"][block["type"]]) <= block.keys(), f"block field missing: {block['type']}")
+        fields = set(schema["block"]["types"][block["type"]])
+        require(block.keys() - {"type"} <= fields, f"schema omits block field: {block['type']}")
+        if baseline:
+            require(fields <= block.keys(), f"extend probe to cover baseline block fields: {block['type']}")
+    require(rich["usage"].keys() <= set(schema["message"]["usage"]), "schema omits usage fields")
+    if baseline:
+        require(set(schema["message"]["usage"]) <= rich["usage"].keys(), "extend probe to cover baseline usage fields")
     invoke(binary, env, ["show", "absent-session"], code=2)
     invoke(binary, env, ["--not-a-cv-flag"], code=2)
     # Failure to create an archive under an ordinary file is an operational error, not usage.
@@ -236,7 +246,7 @@ def main():
     parser.add_argument("--exercise-mutations", action="store_true", help="prove the comparator rejects mutations of the collected real contracts")
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="cv-compat-") as root:
-        before = collect(Path(args.baseline).resolve(), Path(args.baseline_probe).resolve(), args.baseline_source, Path(root) / "baseline")
+        before = collect(Path(args.baseline).resolve(), Path(args.baseline_probe).resolve(), args.baseline_source, Path(root) / "baseline", baseline=True)
         after = collect(Path(args.candidate).resolve(), Path(args.candidate_probe).resolve(), args.candidate_source, Path(root) / "candidate")
         compare(before, after, args.baseline_tag, args.candidate_version)
         if args.exercise_mutations:

@@ -40,7 +40,8 @@ existing shapes/defaults. It compares the existing command and data schemas, act
 `ls`/`show` JSON, serialized messages containing every existing block type, real MCP
 `tools/list`, HTTP probes derived from the routers' method/path patterns, and success,
 operational-failure and usage-error exits. The schema field lists are also checked
-against the actual row and serializer output. The checks cover these fixtures and
+against the actual row and serializer output. Extend the probe when adding contract
+fields or block variants so the next release baseline has complete fixture coverage. The checks cover these fixtures and
 inventories; they do not prove arbitrary semantic equivalence for every transcript.
 
 The one initial exception is the approved 0.18 waiting-command change: MCP `workflow`
