@@ -261,8 +261,9 @@ impl Adapter for Hermes {
             let sink: &mut dyn MessageSink = &mut spawns;
             // Route by the ref's own DB path (set at discovery time), NOT a single self.db — this is
             // what lets one Hermes adapter span many profile DBs without id collisions.
-            let conn = open_ro(&r.path)?;
-            conn.read(|conn| stream_conn_with_reads(conn, r, opts, sink, conn.reads()))
+            super::store::sqlite::read(&r.path, |conn| {
+                stream_conn_with_reads(conn, r, opts, sink, conn.reads())
+            })
         })
     }
 
@@ -1139,14 +1140,9 @@ fn generation_identity(
 
 #[derive(Default)]
 struct GenerationDedup {
-    headers: std::collections::HashMap<u64, GenerationGroup>,
+    index: Option<super::store::sqlite::Selection>,
     #[cfg(test)]
     forced_hash: Option<u64>,
-}
-#[derive(Default)]
-struct GenerationGroup {
-    pending: Option<i64>,
-    bodies: std::collections::HashMap<u64, Vec<(i64, GenerationIdentity)>>,
 }
 impl GenerationDedup {
     fn fingerprint(&self, hash: u64) -> u64 {
@@ -1175,11 +1171,29 @@ impl GenerationDedup {
             .hash(&mut header);
         let id: i64 = row.get(index(if incremental { "_content_rowid" } else { "id" }).unwrap())?;
         let fingerprint = self.fingerprint(header.finish());
-        if let std::collections::hash_map::Entry::Vacant(entry) = self.headers.entry(fingerprint) {
-            entry.insert(GenerationGroup {
-                pending: Some(id),
-                ..Default::default()
-            });
+        if self.index.is_none() {
+            self.index = Some(super::store::sqlite::Selection::build(
+                "CREATE TABLE generations(ordinal INTEGER PRIMARY KEY,header BLOB,body BLOB,native_id INTEGER,content INTEGER); CREATE INDEX generation_membership ON generations(header,body);",
+                |_| Ok(()),
+            )?);
+        }
+        let selection = self.index.as_ref().unwrap();
+        let header = fingerprint.to_le_bytes();
+        use rusqlite::OptionalExtension as _;
+        let first = selection.with(|private| {
+            let exists: bool = private
+                .prepare_cached("SELECT EXISTS(SELECT 1 FROM generations WHERE header=?1)")?
+                .query_row([&header], |row| row.get(0))?;
+            if !exists {
+                // Unique headers do not demand their bodies. Resolve the pending member only
+                // when another row shares its header, under the same native snapshot.
+                private
+                    .prepare_cached("INSERT INTO generations(header,native_id) VALUES (?1,?2)")?
+                    .execute(rusqlite::params![header, id])?;
+            }
+            Ok(!exists)
+        })?;
+        if first {
             return Ok(true);
         }
         let mut current = generation_identity(row, index, conn, incremental)?;
@@ -1203,43 +1217,63 @@ impl GenerationDedup {
         };
         #[cfg(test)]
         let forced = self.forced_hash;
-        let group = self.headers.get_mut(&fingerprint).unwrap();
         let mut statement = conn.prepare_cached(sql)?;
-        if let Some(prior) = group.pending {
-            let key = statement.query_row([prior], |prior_row| {
-                generation_identity(prior_row, &prior_index, conn, incremental)
-                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))
-            })?;
-            #[cfg(test)]
-            let key = GenerationIdentity {
-                hash: forced.unwrap_or(key.hash),
-                ..key
-            };
-            group.bodies.entry(key.hash).or_default().push((prior, key));
-            group.pending = None;
-        }
-        // Distinct body digests under a repeated header remain an indexed lookup, rather than
-        // scanning every earlier row sharing a timestamp. Only real digest collisions compare.
-        let candidates = group.bodies.entry(current.hash).or_default();
-        for (prior, key) in candidates.iter() {
-            let equal = statement.query_row([*prior], |prior_row| {
-                generation_rows_equal(
-                    row,
-                    index,
-                    prior_row,
-                    &prior_index,
-                    conn,
-                    incremental,
-                    (current.content, key.content),
-                )
-                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))
-            })?;
-            if equal {
-                return Ok(false);
+        selection.with(|private| {
+            let pending: Option<i64> = private
+                .prepare_cached("SELECT native_id FROM generations WHERE header=?1 AND body IS NULL")?
+                .query_row([&header], |row| row.get(0))
+                .optional()?;
+            if let Some(prior) = pending {
+                let key = statement.query_row([prior], |prior_row| {
+                    generation_identity(prior_row, &prior_index, conn, incremental)
+                        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))
+                })?;
+                #[cfg(test)]
+                let key = GenerationIdentity {
+                    hash: forced.unwrap_or(key.hash),
+                    ..key
+                };
+                private
+                    .prepare_cached("UPDATE generations SET body=?1,content=?2 WHERE header=?3 AND body IS NULL")?
+                    .execute(rusqlite::params![key.hash.to_le_bytes(), key.content, header])?;
             }
-        }
-        candidates.push((id, current));
-        Ok(true)
+            // Digests select candidates, never establish equality. Keep all native decoder
+            // normalizations (including f64 bits), then compare demanded bodies exactly.
+            let mut candidates = private.prepare_cached(
+                "SELECT native_id,content FROM generations WHERE header=?1 AND body=?2 ORDER BY ordinal",
+            )?;
+            let mut rows = candidates.query(rusqlite::params![header, current.hash.to_le_bytes()])?;
+            while let Some(candidate) = rows.next()? {
+                let prior: i64 = candidate.get(0)?;
+                let content: bool = candidate.get(1)?;
+                let equal = statement.query_row([prior], |prior_row| {
+                    generation_rows_equal(
+                        row,
+                        index,
+                        prior_row,
+                        &prior_index,
+                        conn,
+                        incremental,
+                        (current.content, content),
+                    )
+                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))
+                })?;
+                if equal {
+                    return Ok(false);
+                }
+            }
+            drop(rows);
+            drop(candidates);
+            private
+                .prepare_cached("INSERT INTO generations(header,body,native_id,content) VALUES (?1,?2,?3,?4)")?
+                .execute(rusqlite::params![
+                    header,
+                    current.hash.to_le_bytes(),
+                    id,
+                    current.content
+                ])?;
+            Ok(true)
+        })
     }
 }
 
@@ -3327,6 +3361,56 @@ mod tests {
                 admission.push(dedup.admit(row, &index, &conn, incremental)?);
             }
             assert_eq!(admission, [true, true, false, true, true, false, true], "{incremental}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn generation_selection_preserves_loose_native_types_and_null_normalization() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(
+            "CREATE TABLE messages(id INTEGER PRIMARY KEY,role,content,timestamp,tool_call_id,tool_calls,tool_name);
+            INSERT INTO messages(role,content,timestamp,tool_name) VALUES
+            (NULL,NULL,NULL,NULL),(x'01',x'02','bad',1),('', '',NULL,NULL),(NULL,'',NULL,NULL),
+            ('assistant','same',1,NULL),('assistant','same',1.0,NULL),('assistant','same','1',NULL),
+            ('assistant','same','1',x'01'),('assistant','same','1','');",
+        )?;
+        let columns = [
+            "role",
+            "content",
+            "_content_rowid",
+            "timestamp",
+            "tool_call_id",
+            "tool_calls",
+            "tool_name",
+        ];
+        let index = |name: &str| {
+            columns
+                .iter()
+                .position(|column| *column == name)
+                .or_else(|| (name == "id").then_some(2))
+        };
+        for incremental in [false, true] {
+            let sql = if incremental {
+                "SELECT role,typeof(content),rowid,timestamp,tool_call_id,tool_calls,tool_name FROM messages ORDER BY id"
+            } else {
+                "SELECT role,content,id,timestamp,tool_call_id,tool_calls,tool_name FROM messages ORDER BY id"
+            };
+            let mut dedup = GenerationDedup {
+                forced_hash: Some(0),
+                ..Default::default()
+            };
+            let mut stmt = conn.prepare(sql)?;
+            let mut rows = stmt.query([])?;
+            let mut admitted = Vec::new();
+            while let Some(row) = rows.next()? {
+                admitted.push(dedup.admit(row, &index, &conn, incremental)?);
+            }
+            assert_eq!(
+                admitted,
+                [true, false, true, false, true, false, true, false, true],
+                "{incremental}"
+            );
         }
         Ok(())
     }

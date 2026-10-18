@@ -325,7 +325,7 @@ struct TaskInventory {
     owners: std::collections::HashMap<String, Vec<usize>>,
     unowned: Vec<TaskTime>,
     time_queried: std::sync::atomic::AtomicBool,
-    time_index: std::sync::OnceLock<Vec<TaskTime>>,
+    time_index: std::sync::OnceLock<super::store::selection::Positions>,
 }
 impl TaskInventory {
     fn from_value(value: Value) -> Self {
@@ -372,12 +372,12 @@ impl TaskInventory {
                     .saturating_add(rows.capacity().saturating_mul(std::mem::size_of::<usize>()))
             },
         );
-        // The second query's sorted copy is charged even while still uninitialized.
+        // The second query's position index is charged even while still uninitialized.
         let times = self
             .unowned
             .capacity()
-            .saturating_add(self.unowned.len())
-            .saturating_mul(std::mem::size_of::<TaskTime>());
+            .saturating_mul(std::mem::size_of::<TaskTime>())
+            .saturating_add(self.unowned.len().saturating_mul(std::mem::size_of::<usize>()));
         rows.saturating_add(owners)
             .saturating_add(times)
             .saturating_add(std::mem::size_of::<Self>())
@@ -412,13 +412,12 @@ impl TaskInventory {
                 selected.extend(right);
             } else {
                 let times = self.time_index.get_or_init(|| {
-                    let mut times = self.unowned.clone();
-                    times.sort_unstable();
-                    times
+                    super::store::selection::Positions::new(self.unowned.len(), |a, b| {
+                        self.unowned[a].cmp(&self.unowned[b])
+                    })
                 });
-                let start = times.partition_point(|(at, _)| *at < from);
-                let end = times.partition_point(|(at, _)| *at <= to);
-                selected.extend(times[start..end].iter().map(|(_, index)| *index));
+                let positions = times.range(|i| self.unowned[i].0 < from, |i| self.unowned[i].0 <= to);
+                selected.extend(positions.iter().map(|&i| self.unowned[i].1));
                 selected.sort_unstable();
             }
         }
