@@ -95,7 +95,7 @@ struct Cache {
 
 /// Bump when discovery changes the interpretation of unchanged source bytes.
 /// 5: 0.18's one bump, covering the `sessions.writer_version` column and the discovery change
-/// that shares it. Existing NULL observations are filled by normal discovery cache demand.
+/// that shares it. Unknown writer versions are filled only by ordinary source reads.
 #[cfg(feature = "sqlite")]
 pub(crate) const INTERPRETATION_VERSION: u32 = 5;
 /// Every live cache by catalog. Each environment ([`crate::env`]) retains its current catalog's;
