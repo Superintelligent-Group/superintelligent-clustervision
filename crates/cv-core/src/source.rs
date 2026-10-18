@@ -220,7 +220,8 @@ struct Records {
 }
 
 /// The one format version of stamps and stored records; older ones reread once.
-const VERSION: u32 = 4;
+// 0.18 interpretation migration: native hook events and corrected affordance counts.
+const VERSION: u32 = 5;
 
 /// A canonical record string. Loaded baselines remain strings instead of allocating each path
 /// three times for counts, events and search; equality compares the actual records.
@@ -1188,9 +1189,11 @@ mod tests {
         let stamp = now.stamp.as_ref().unwrap();
         assert!(stamp.matches(stamp, &mut Probe::default()));
         let mut legacy = serde_json::to_value(stamp.records().unwrap()).unwrap();
-        legacy["version"] = 2.into();
-        let legacy = Stamp(serde_json::to_string(&legacy).unwrap());
-        assert!(!legacy.matches(stamp, &mut Probe::default()));
+        for version in [1, 4] {
+            legacy["version"] = version.into();
+            let legacy = Stamp(serde_json::to_string(&legacy).unwrap());
+            assert!(!legacy.matches(stamp, &mut Probe::default()));
+        }
         assert!(!Stamp("{}".into()).matches(stamp, &mut Probe::default()));
         let bytes = Published::encode(&now, b"row").unwrap();
         let stored = Published::decode(&bytes).unwrap();
@@ -1199,7 +1202,7 @@ mod tests {
         assert_eq!(stored.of(b"row").unwrap().primary, now.primary);
         assert!(Published::decode(&bytes[..HEAD - 1]).is_none());
         let mut other_version = bytes.clone();
-        other_version[0] ^= 1;
+        other_version[..4].copy_from_slice(&4u32.to_le_bytes());
         assert!(Published::decode(&other_version).is_none());
         let mut absent = bytes.clone();
         absent[12] = 0;
@@ -1511,7 +1514,7 @@ mod tests {
     }
 
     #[test]
-    fn unrecorded_and_version_one_baselines_reread_once() {
+    fn unrecorded_and_old_interpretation_baselines_reread_once() {
         let w = crate::test_world("read-set-upgrade");
         let path = w.base.join("plain.jsonl");
         std::fs::write(&path, "primary").unwrap();
@@ -1538,7 +1541,7 @@ mod tests {
         let mut table = Table::load("upgrade");
         for old in table.rows.values_mut() {
             let stamp = old.baseline.stamp.as_mut().unwrap();
-            stamp.0 = stamp.0.replacen("\"version\":4", "\"version\":1", 1);
+            stamp.0 = stamp.0.replacen(&format!("\"version\":{VERSION}"), "\"version\":4", 1);
         }
         assert!(!table.get(&r).is_some_and(|old| old.fresh(&base, &mut Probe::default())));
         assert!(Table::load("upgrade")

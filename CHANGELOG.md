@@ -3,7 +3,7 @@
 ## Unreleased
 
 - `cv doctor` compares observed Claude/Codex writer versions with corpus coverage, including unknown sessions; observations come from normal discovery.
-- The catalog gains a nullable `sessions.writer_version` and discovery interpretation 5: the first listing after upgrading rediscovers once (announced); `--json` is unchanged.
+- The catalog gains nullable `sessions.writer_version`; discovery and source interpretation 5 trigger one rediscovery and consumer reread after upgrading (announced); JSON stays unchanged.
 - A compatibility gate checks the latest release against CLI schemas, serialized messages, session rows, MCP tools, HTTP routes, and exit codes.
 
 - **Breaking:** `cv scry` with stdout piped prints the sessions it would follow once and exits 0; `--follow` keeps following, `--for 30s|5m|2h` bounds it.
