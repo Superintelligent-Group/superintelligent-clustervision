@@ -1,8 +1,22 @@
 //! Private compatibility fixture: use the library's real public serde types, never a copied codec.
-use cv_core::Message;
+use cv_core::{Message, MessageKind, Origin, Role};
+use std::io::Read;
 use serde_json::{json, Value};
 
 fn main() {
+    let mut input = String::new();
+    std::io::stdin().read_to_string(&mut input).unwrap();
+    let schema: Value = serde_json::from_str(&input).expect("message schema on stdin");
+    for value in schema["role"].as_array().unwrap() {
+        serde_json::from_value::<Role>(value.clone()).expect("schema role must be real serde");
+    }
+    for value in schema["kind"].as_array().unwrap() {
+        serde_json::from_value::<MessageKind>(value.clone()).expect("schema kind must be real serde");
+    }
+    for value in schema["origin"].as_array().unwrap() {
+        serde_json::from_value::<Origin>(value.clone()).expect("schema origin must be real serde");
+    }
+
     let rich = json!({
         "id":"m", "parent_id":"p", "role":"assistant", "kind":"reply", "origin":"model",
         "timestamp":"2026-01-01T00:00:00Z", "model":"fixture", "extra":{"claude":{"opaque":true}},
@@ -18,9 +32,12 @@ fn main() {
             {"type":"file","mime":"text/plain","path":"fixture.txt","source":"opaque"}
         ]
     });
-    let messages: Vec<Value> = [rich, json!({"role":"user"})].into_iter().map(|v| {
-        let message: Message = serde_json::from_value(v).expect("released Message input remains readable");
-        serde_json::to_value(message).expect("serialize real Message")
-    }).collect();
+    let messages: Vec<Value> = [rich, json!({"role":"user"})]
+        .into_iter()
+        .map(|v| {
+            let message: Message = serde_json::from_value(v).expect("released Message input remains readable");
+            serde_json::to_value(message).expect("serialize real Message")
+        })
+        .collect();
     println!("{}", json!(messages));
 }

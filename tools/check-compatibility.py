@@ -52,6 +52,8 @@ def named(rows):
 
 
 def shape(value, key=""):
+    if key in {"extra", "input", "details"}:
+        return "opaque JSON"
     if isinstance(value, dict):
         return {k: shape(v, k) for k, v in value.items()}
     if isinstance(value, list):
@@ -79,7 +81,7 @@ def routes(source):
     def normalize(pattern):
         return "/" + "/".join(token.strip()[1:-1] if token.strip().startswith('"') else
                                "*" if token.strip() == ".." else "{}"
-                               for token in pattern[1:-1].split(','))
+                               for token in pattern[1:-1].split(',') if token.strip())
     result = {"GET " + normalize(p) for p in patterns(core + reads + export)}
     for post, pattern in re.findall(r'\((true|false),\s*(\[\s*"api"\s*,[^\]]+\])\)', task_routes):
         route = ("POST " if post == "true" else "GET ") + normalize(pattern)
@@ -91,6 +93,14 @@ def routes(source):
             result.add(route)
     require("GET /api/sessions" in result and "POST /api/task/{}/resolve" in result, "routing inventory incomplete")
     return sorted(result)
+
+
+def data_contract(schema):
+    # Protect machine vocabularies/field inventories, not incidental prose in the reference.
+    keys = {"session_row": ("keys", "enrich_keys", "search_extra_keys"),
+            "session": ("fields", "lineage"), "message": ("fields", "role", "kind", "origin", "usage"),
+            "block": ("tag", "types")}
+    return {section: {key: schema[section][key] for key in fields} for section, fields in keys.items()}
 
 
 def world(root):
@@ -165,7 +175,7 @@ def collect(binary, probe, source, root):
     rows = json.loads(invoke(binary, env, ["ls", "--json"]))
     require(isinstance(rows, list) and len(rows) == 1, "fixture must discover exactly one session")
     session = json.loads(invoke(binary, env, ["show", "compat-session", "--json"]))
-    messages = json.loads(invoke(probe, env, []))
+    messages = json.loads(invoke(probe, env, [], stdin=json.dumps(schema["message"])))
     requests = "\n".join(json.dumps({"jsonrpc": "2.0", "id": i, "method": method, "params": params})
                          for i, method, params in [(1, "initialize", {"protocolVersion": "2025-06-18"}), (2, "tools/list", {})]) + "\n"
     responses = [json.loads(line) for line in invoke(binary, env, ["mcp"], stdin=requests).splitlines()]
@@ -184,7 +194,7 @@ def collect(binary, probe, source, root):
     denied.write_text("fixture")
     failure_env = dict(env, CLUSTERVISION_HOME=str(denied / "catalog"))
     invoke(binary, failure_env, ["task", "open", "compat operational failure"], code=1)
-    return {"commands": commands, "schema": schema, "rows": shape(rows), "session": shape(session),
+    return {"commands": commands, "schema": data_contract(schema), "rows": shape(rows), "session": shape(session),
             "messages": shape(messages), "tools": tools, "routes": http_routes(binary, env, routes(source)),
             "exits": [0, 1, 2]}
 
@@ -198,7 +208,10 @@ def compare(old, new, baseline_tag, candidate_version):
     if baseline_tag == "v0.17.0" and (candidate_version == "0.17.0" or candidate_version.startswith("0.18.")):
         for tool in old["tools"]:
             if tool["name"] == "workflow":
-                tool["inputSchema"].get("properties", {}).pop("follow", None)
+                replacement = named(new["tools"]).get("workflow", {}).get("inputSchema", {}).get("properties", {})
+                if "follow" in tool["inputSchema"].get("properties", {}) and "follow" not in replacement:
+                    require(replacement.get("for", {}).get("type") == "string", "G1 workflow follow removal needs bounded for")
+                    tool["inputSchema"]["properties"].pop("follow")
     for key in ("commands", "tools"):
         before, after = named(old[key]), named(new[key])
         for name, value in before.items():

@@ -71,6 +71,8 @@ class Compatibility(unittest.TestCase):
         tool["inputSchema"]["properties"]["follow"] = {"type": "boolean"}
         new = copy.deepcopy(old)
         new["tools"][0]["inputSchema"]["properties"].pop("follow")
+        with self.assertRaises(compat.Incompatible): self.check(new, old)
+        new["tools"][0]["inputSchema"]["properties"]["for"] = {"type": "string"}
         self.check(new, old)
         for tag, version in [("v0.16.1", "0.18.0"), ("v0.17.0", "0.19.0")]:
             with self.assertRaises(compat.Incompatible): self.check(new, old, tag, version)
