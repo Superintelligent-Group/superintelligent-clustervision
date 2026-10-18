@@ -49,12 +49,12 @@ use crate::ir::*;
 use crate::json::{JsonSource, JsonView};
 use crate::lazy::Text;
 use crate::stream::{Checkpoint, Flow, MessageSink, ParseOptions};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use chrono::{DateTime, Utc};
 use record::{Demand, Reader};
 use serde_json::{Map, Value};
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use walkdir::WalkDir;
@@ -313,18 +313,6 @@ fn is_jsonl_path(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()) == Some("jsonl") || is_zst_path(path)
 }
 
-/// Open a rollout for line-oriented reading, transparently decoding a `.jsonl.zst`.
-fn open_rollout(path: &Path) -> Result<Box<dyn BufRead>> {
-    let f = fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    #[cfg(feature = "sqlite")]
-    if is_zst_path(path) {
-        let dec = super::store::zst::decoder(BufReader::new(f))
-            .map_err(|e| anyhow::anyhow!("zstd header of {}: {e}", path.display()))?;
-        return Ok(Box::new(BufReader::new(dec)));
-    }
-    Ok(Box::new(BufReader::new(f)))
-}
-
 /// Per-parse state every reader carries between records (the record codec reads and updates it).
 /// A checkpoint keeps it whole.
 #[derive(Default, serde::Serialize, serde::Deserialize)]
@@ -439,23 +427,19 @@ pub fn parse_str(id: &str, text: &str, is_jsonl: bool, source_path: Option<PathB
 /// What [`EventDetector`] reads of a record: whether it carries natural-language text as an
 /// `event_msg` (modern) or as a `response_item` message (old format).
 fn nl_flags(v: JsonView<'_>) -> Result<(bool, bool)> {
-    let string = |v: Option<JsonView<'_>>| -> Result<Option<String>> {
-        match v {
-            Some(v) if v.is_string()? => Ok(v.resolve()?.as_str().map(str::to_owned)),
-            _ => Ok(None),
-        }
+    let head = record::Head::of(v)?;
+    let Some(payload) = head.payload else {
+        return Ok((false, false));
     };
-    let payload = v.get("payload")?;
-    let field = |key| -> Result<Option<String>> { string(payload.map(|p| p.get(key)).transpose()?.flatten()) };
-    Ok(match string(v.get("type")?)?.as_deref() {
+    let payload = record::Payload::of(payload)?;
+    Ok(match head.ty.as_deref() {
         Some("event_msg") => (
-            matches!(field("type")?.as_deref(), Some("user_message" | "agent_message")),
+            matches!(payload.ty.as_deref(), Some("user_message" | "agent_message")),
             false,
         ),
         Some("response_item") => (
             false,
-            field("type")?.as_deref() == Some("message")
-                && matches!(field("role")?.as_deref(), Some("user" | "assistant")),
+            payload.ty.as_deref() == Some("message") && matches!(payload.role.as_deref(), Some("user" | "assistant")),
         ),
         _ => (false, false),
     })
@@ -509,7 +493,7 @@ impl EventDetector {
 /// message vec is still reachable when the event arrives: [`apply_token_count`] only ever targets
 /// the last message, and the last message is exactly what's held. The hold is at most one message,
 /// flushed by the next [`flush_all_but_held`] call or by the caller at EOF.
-fn flush_all_but_held(scratch: &mut Vec<Message>, sink: &mut dyn MessageSink) -> Flow {
+fn flush_all_but_held(scratch: &mut Vec<Message>, sink: &mut dyn MessageSink, input: &jsonl::Read) -> Result<Flow> {
     // Also hold an assistant message whose usage came from a `token_usage_record`: its
     // `token_count` twin (rate limits, context window) follows a few records later and merges into
     // it — see [`apply_token_count`].
@@ -519,11 +503,13 @@ fn flush_all_but_held(scratch: &mut Vec<Message>, sink: &mut dyn MessageSink) ->
     });
     let upto = scratch.len() - hold as usize;
     for m in scratch.drain(..upto) {
-        if sink.message(m) == Flow::Stop {
-            return Flow::Stop;
+        let flow = sink.message(m);
+        input.check_backing()?;
+        if flow == Flow::Stop {
+            return Ok(Flow::Stop);
         }
     }
-    Flow::Continue
+    Ok(Flow::Continue)
 }
 
 /// How many messages a parse of a plain `.jsonl` rollout's first `len` bytes yields — the count a
@@ -552,8 +538,7 @@ pub(crate) fn count_prefix_checked(r: &SessionRef, len: u64, check: &mut dyn FnM
 /// private arena whose lazy children keep the compressed original's provenance.
 #[derive(Clone)]
 pub(crate) struct Rollout {
-    source: JsonSource,
-    file: Arc<fs::File>,
+    input: Arc<jsonl::Read>,
     decoded: Option<Arc<ByteSource>>,
     len: u64,
 }
@@ -578,31 +563,40 @@ pub(crate) fn with_decoded<T>(rollout: &Rollout, f: impl FnOnce() -> T) -> T {
 
 impl Rollout {
     fn open(path: &Path) -> Result<Self> {
-        let source = JsonSource::capture(path)?;
-        let decoded = DECODED.with(|decoded| decoded.borrow().as_ref().filter(|r| r.source == source).cloned());
+        let input = Arc::new(jsonl::Read::open(path)?);
+        let source = input.source().clone();
+        let decoded = DECODED.with(|decoded| {
+            decoded
+                .borrow()
+                .as_ref()
+                .filter(|r| r.input.source() == &source)
+                .cloned()
+        });
         if let Some(rollout) = decoded {
             return Ok(rollout);
         }
-        let file = Arc::new(fs::File::open(path).with_context(|| format!("opening {}", path.display()))?);
-        source.check_metadata(file.metadata()?)?;
         if !is_zst_path(path) {
             return Ok(Self {
                 len: source.len(),
-                source,
-                file,
+                input,
                 decoded: None,
             });
         }
         let backing = Arc::new(ByteSource::arena()?);
         let (offset, len) = backing.append(|writer| {
-            std::io::copy(&mut open_rollout(path)?, &mut { writer })?;
+            let bytes = input.reader()?;
+            #[cfg(feature = "sqlite")]
+            let mut bytes = super::store::zst::decoder(bytes)
+                .map_err(|e| anyhow::anyhow!("zstd header of {}: {e}", path.display()))?;
+            #[cfg(not(feature = "sqlite"))]
+            let mut bytes = bytes;
+            std::io::copy(&mut bytes, &mut { writer })?;
             Ok(())
         })?;
         source.check()?;
         debug_assert_eq!(offset, 0);
         Ok(Self {
-            source,
-            file,
+            input,
             decoded: Some(backing),
             len,
         })
@@ -611,8 +605,8 @@ impl Rollout {
     /// Every line `from..to` through the shared JSONL byte source.
     fn lines(&self, from: u64, to: u64, visit: impl FnMut(jsonl::Line<'_>) -> Result<Flow>) -> Result<()> {
         match &self.decoded {
-            Some(backing) => jsonl::for_each_decoded_line(&self.source, backing, self.len, from, visit),
-            None => jsonl::for_each_line(&self.source, &self.file, from, to, visit),
+            Some(backing) => self.input.decoded(backing, self.len, from, visit),
+            None => self.input.snapshot(from, to, visit),
         }
     }
 
@@ -643,7 +637,7 @@ fn sourced(m: &Message) -> bool {
 /// is held until the usage record that may follow it; after every finished line that leaves
 /// nothing held the sink may take a [`Checkpoint`] (plain files only: decoded offsets are not
 /// file positions). A record that published a source descriptor makes the reader recheck the
-/// source's identity before going on, and once more at the end.
+/// source's identity before going on. Completion is verified after the final held callback too.
 #[allow(clippy::too_many_arguments)] // One read: source, resume state, window, demand, sink, check.
 fn read(
     rollout: &Rollout,
@@ -665,7 +659,6 @@ fn read(
     } = state;
     let mut scratch: Vec<Message> = Vec::new();
     let mut stopped = false;
-    let mut published = false;
     let plain = rollout.decoded.is_none();
     rollout.lines(from, to, |line| {
         check()?;
@@ -680,7 +673,7 @@ fn read(
             out: &mut scratch,
             has_events,
             demand: Demand::of(opts),
-            source: Some(&rollout.source),
+            source: Some(rollout.input.source()),
         }
         .record(view)?;
         if opts.offsets && plain {
@@ -692,23 +685,30 @@ fn read(
             }
         }
         if scratch[before..].iter().any(sourced) {
-            published = true;
-            rollout.source.check()?;
+            rollout.input.check()?;
         }
         // Hand the session metadata to the sink as soon as the model is known (session_meta /
         // turn_context land in the first records, before any message), so header-rendering sinks
         // have it ahead of the body.
         if !meta_sent && s.model.is_some() {
             sink.meta(&s);
+            rollout.input.check_backing()?;
             meta_sent = true;
         }
-        if flush_all_but_held(&mut scratch, sink) == Flow::Stop {
+        if flush_all_but_held(&mut scratch, sink, &rollout.input)? == Flow::Stop {
             stopped = true;
             return Ok(Flow::Stop);
         }
         // A trailing assistant is provisional until its usage arrives; a partial EOF record is
         // provisional until a newline arrives. Neither belongs in a reusable immutable prefix.
-        if plain && scratch.is_empty() && line.complete && sink.wants_checkpoint(line.end) {
+        let checkpoint = if plain && scratch.is_empty() && line.complete {
+            let wanted = sink.wants_checkpoint(line.end);
+            rollout.input.check_backing()?;
+            wanted
+        } else {
+            false
+        };
+        if checkpoint {
             let mut cp = Checkpoint::new(line.end);
             cp.put(
                 crate::stream::ADAPTER_LAYER,
@@ -722,18 +722,17 @@ fn read(
                 },
             );
             sink.checkpoint(&mut cp);
+            rollout.input.check_backing()?;
         }
         Ok(Flow::Continue)
     })?;
-    if published {
-        rollout.source.check_metadata(rollout.file.metadata()?)?;
-        rollout.source.check()?;
-    }
     super::note_skipped_lines(&mut s, skipped);
     if !stopped {
         // EOF: emit the held trailing message, if any (no token_count followed it).
         for m in scratch.drain(..) {
-            if sink.message(m) == Flow::Stop {
+            let flow = sink.message(m);
+            rollout.input.check_backing()?;
+            if flow == Flow::Stop {
                 break;
             }
         }
@@ -744,6 +743,7 @@ fn read(
     if !meta_sent {
         sink.meta(&s);
     }
+    rollout.input.check()?;
     Ok(s)
 }
 
@@ -854,7 +854,6 @@ struct CodexScan {
     title: Option<String>,
     created_at: Option<DateTime<Utc>>,
     updated_at: Option<DateTime<Utc>>,
-    message_count: usize,
     /// `subagent_history_start_ordinal` of the first `session_meta`: records below it are the
     /// parent's embedded history, not this thread's (they'd title every subagent with the parent's
     /// first prompt and count its turns).
@@ -882,21 +881,17 @@ impl CodexScan {
                 _ => Ok(None),
             }
         };
-        let ty = string(v.get("type")?)?;
-        if let Some(ts) = string(v.get("timestamp")?)?.as_deref().and_then(parse_ts) {
+        let head = record::Head::of(v)?;
+        let ty = &head.ty;
+        if let Some(ts) = head.timestamp {
             self.created_at.get_or_insert(ts);
             self.updated_at = Some(ts);
         }
-        // Inherited prefix of a fork/subagent rollout: not this thread's turns (see the codec).
-        let ordinal = v.get("ordinal")?.map(JsonView::as_number).transpose()?.flatten();
-        if matches!(
-            (ordinal.and_then(|n| n.as_u64()), self.inherit_before),
-            (Some(o), Some(cut)) if o < cut
-        ) && ty.as_deref() != Some("session_meta")
-        {
+        if head.inherited(self.inherit_before) && ty.as_deref() != Some("session_meta") {
             return Ok(());
         }
-        let p = v.get("payload")?;
+        let p = head.payload;
+        let payload = p.map(record::Payload::of).transpose()?;
         let field = |key| -> Result<Option<JsonView<'_>>> { Ok(p.map(|p| p.get(key)).transpose()?.flatten()) };
         match ty.as_deref() {
             None => {
@@ -928,15 +923,15 @@ impl CodexScan {
             }
             _ if self.title.is_some() => {}
             Some("event_msg") => {
-                if string(field("type")?)?.as_deref() == Some("user_message") {
+                if payload.as_ref().and_then(|p| p.ty.as_deref()) == Some("user_message") {
                     if let Some(message) = field("message")?.filter(|m| m.is_string().unwrap_or(false)) {
                         self.consider_title(title_of(Some(message), None)?);
                     }
                 }
             }
-            Some("response_item") => match string(field("type")?)?.as_deref() {
+            Some("response_item") => match payload.as_ref().and_then(|p| p.ty.as_deref()) {
                 // An absent role is `user`, as in the codec.
-                Some("message") if string(field("role")?)?.as_deref().unwrap_or("user") == "user" => {
+                Some("message") if payload.as_ref().and_then(|p| p.role.as_deref()).unwrap_or("user") == "user" => {
                     self.consider_title(title_of(field("content")?, None)?);
                 }
                 // A task handed to this thread by another agent is its prompt — the only one a
@@ -976,97 +971,11 @@ fn title_of(v: Option<JsonView<'_>>, only: Option<&str>) -> Result<String> {
     Ok(crate::ir::truncate(&trimmed, 80))
 }
 
-/// Discovery's turn count: the record codec's own messages, counted, under its heads demand.
-/// Until the bounded detector decides `has_events`, both grammars run on the same records; once
-/// it is fixed, the other candidate is dropped, including for mixed-era late events. A pass keeps
-/// only the trailing message, the one a later usage record may attach to.
-#[derive(Default)]
-struct Turns {
-    detector: EventDetector,
-    decided: bool,
-    responses: Option<TurnPass>,
-    events: Option<TurnPass>,
-}
-
-struct TurnPass {
-    session: Session,
-    ctx: CodexCtx,
-    trailing: Vec<Message>,
-    count: usize,
-}
-
-impl Default for TurnPass {
-    fn default() -> Self {
-        Self {
-            session: Session::new(String::new(), Harness::Codex),
-            ctx: CodexCtx::default(),
-            trailing: Vec::new(),
-            count: 0,
-        }
-    }
-}
-
-impl TurnPass {
-    fn feed(&mut self, v: JsonView<'_>, has_events: bool) -> Result<()> {
-        let before = self.trailing.len();
-        Reader {
-            session: &mut self.session,
-            ctx: &mut self.ctx,
-            out: &mut self.trailing,
-            has_events,
-            demand: Demand {
-                spans: false,
-                heads: true,
-            },
-            source: None,
-        }
-        .record(v)?;
-        self.count += self.trailing[before..].iter().filter(|m| m.is_turn()).count();
-        if self.trailing.len() > 1 {
-            self.trailing.drain(..self.trailing.len() - 1);
-        }
-        Ok(())
-    }
-}
-
-impl Turns {
-    fn feed(&mut self, v: JsonView<'_>) -> Result<()> {
-        if !self.decided {
-            self.responses.get_or_insert_with(TurnPass::default);
-            self.events.get_or_insert_with(TurnPass::default);
-            if self.detector.feed(nl_flags(v)?) == Flow::Stop {
-                self.decided = true;
-                if self.detector.found {
-                    self.responses = None;
-                } else {
-                    self.events = None;
-                }
-            }
-        }
-        if let Some(pass) = &mut self.responses {
-            pass.feed(v, false)?;
-        }
-        if let Some(pass) = &mut self.events {
-            pass.feed(v, true)?;
-        }
-        Ok(())
-    }
-
-    fn count(&self) -> usize {
-        let pass = if self.detector.found {
-            &self.events
-        } else {
-            &self.responses
-        };
-        pass.as_ref().map_or(0, |pass| pass.count)
-    }
-}
-
 /// Files up to this size are scanned in full by [`scan`]; larger ones are sampled head+tail.
 const FULL_SCAN_CAP: u64 = 8 << 20; // 8 MiB
 
-/// Cheap metadata scan for `discover`: the record codec's heads demand counts turns, bodies are
-/// never resolved past a title. Files up to [`FULL_SCAN_CAP`] (and every `.jsonl.zst`) are scanned
+/// Metadata-only scan for `discover`: bodies are never resolved past a title and counts are
+/// deferred until a full read or index pass. Files up to [`FULL_SCAN_CAP`] (and every `.jsonl.zst`) are scanned
 /// in full; larger plain ones (Codex rollout logs can be hundreds of MB) are sampled head+tail so
 /// discovery never reads gigabytes just to list sessions. Exact content is parsed on actual open.
 fn scan(path: &Path) -> Result<SessionRef> {
@@ -1089,15 +998,12 @@ fn scan_rollout(path: &Path, full_scan_cap: u64) -> Result<(SessionRef, Option<R
     } else {
         let rollout = Rollout::open(path)?;
         if rollout.decoded.is_some() || rollout.len <= full_scan_cap {
-            let mut turns = Turns::default();
             rollout.lines(0, rollout.len, |line| {
                 if let Some(view) = line.view {
                     s.feed(view)?;
-                    turns.feed(view)?;
                 }
                 Ok(Flow::Continue)
             })?;
-            s.message_count = turns.count();
         } else {
             // Head: id / cwd / title / created_at all live near the top; its partial last line is
             // not read.
@@ -1115,16 +1021,9 @@ fn scan_rollout(path: &Path, full_scan_cap: u64) -> Result<(SessionRef, Option<R
                 }
                 Ok(Flow::Continue)
             })?;
-            // The middle was never read, so the turn count is unknown, and `message_count` is a
-            // contract (`SessionRef::message_count`: user + assistant turns, never a proxy). The
-            // head+tail extrapolation that used to stand here was measured 35× low on one real
-            // rollout and 50% high on another. Reading every byte is not the cheap alternative it
-            // looks: one real `~/.codex` holds 1,353 rollouts over this cap (80 GB; 283 over 64 MiB,
-            // the largest 700 MB), and a live one would be re-parsed on every `cv ls`. So a file
-            // over the cap reports 0 — "not counted" — rather than a number that is wrong.
-            s.message_count = 0;
+            // Keep the existing metadata sampling policy; all discovery defers exact counts.
         }
-        rollout.source.check()?;
+        rollout.input.check()?;
         decoded = rollout.decoded.is_some().then_some(rollout);
     }
 
@@ -1146,7 +1045,7 @@ fn scan_rollout(path: &Path, full_scan_cap: u64) -> Result<(SessionRef, Option<R
         title: s.title,
         created_at: s.created_at,
         updated_at: s.updated_at,
-        message_count: s.message_count,
+        message_count: 0,
     };
     crate::discover_cache::read::Context::current().observe_writer(&r, s.writer_version.as_deref());
     Ok((r, decoded))
@@ -1156,6 +1055,221 @@ fn scan_rollout(path: &Path, full_scan_cap: u64) -> Result<(SessionRef, Option<R
 mod tests {
     use super::*;
     use crate::harness::Parse;
+
+    #[test]
+    fn legacy_title_early_stop_still_validates_the_whole_document() -> Result<()> {
+        let world = crate::test_world("codex-legacy-tail");
+        let path = world.proj.join("rollout-legacy.json");
+        let start = r#"{"session":{"id":"legacy","timestamp":"2026-01-01T00:00:00Z"},"items":[{"type":"message","content":"first title"},"#;
+        fs::write(
+            &path,
+            format!("{start}{{\"type\":\"reasoning\",\"ignored\":[true,null]}}]}}"),
+        )?;
+        assert_eq!(scan(&path)?.title.as_deref(), Some("first title"));
+        fs::write(
+            &path,
+            format!("{start}{{\"type\":\"reasoning\",\"ignored\":[true,]}}]}}"),
+        )?;
+        let rejected = legacy::scan(&path)?;
+        assert!(
+            rejected.id.is_empty() && rejected.title.is_none(),
+            "a useful title cannot hide a malformed tail"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn historical_count_prefix_accepts_its_unterminated_snapshot_end() -> Result<()> {
+        let world = crate::test_world("codex-count-snapshot");
+        let path = world.proj.join("rollout-prefix.jsonl");
+        let first =
+            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":"snapshot question"}}"#;
+        fs::write(&path, format!("{first}\n{{\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":\"later question\"}}}}\n"))?;
+        let r = SessionRef::new("prefix", Harness::Codex, &path);
+        assert_eq!(count_prefix(&r, first.len() as u64)?, 1);
+        assert_eq!(adapter().parse(&r)?.messages.iter().filter(|m| m.is_turn()).count(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn callback_truncation_stops_before_resuming_mapped_records() -> Result<()> {
+        struct Truncate {
+            path: PathBuf,
+            stage: u8,
+            mutated: bool,
+        }
+        impl Truncate {
+            fn at(&mut self, stage: u8) {
+                if self.stage == stage && !self.mutated {
+                    fs::OpenOptions::new()
+                        .write(true)
+                        .open(&self.path)
+                        .unwrap()
+                        .set_len(0)
+                        .unwrap();
+                    self.mutated = true;
+                }
+            }
+        }
+        impl MessageSink for Truncate {
+            fn message(&mut self, _: Message) -> Flow {
+                self.at(0);
+                Flow::Continue
+            }
+            fn meta(&mut self, _: &Session) {
+                self.at(1);
+            }
+            fn wants_checkpoint(&mut self, _: u64) -> bool {
+                self.at(2);
+                self.at(3);
+                self.stage != 2
+            }
+            fn checkpoint(&mut self, _: &mut Checkpoint) {
+                self.at(4);
+            }
+        }
+        let world = crate::test_world("codex-callback-shrink");
+        let path = world.proj.join("rollout-shrink.jsonl");
+        let prompt = "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":\"owned prompt\"}}\n";
+        let raw = format!(
+            "{{\"type\":\"turn_context\",\"payload\":{{\"model\":\"test-model\"}}}}\n{}",
+            prompt.repeat(1024)
+        );
+        let reference = SessionRef::new("shrink", Harness::Codex, &path);
+        for stage in 0..5 {
+            fs::write(&path, &raw)?;
+            let mut sink = Truncate {
+                path: path.clone(),
+                stage,
+                mutated: false,
+            };
+            assert!(
+                adapter().stream(&reference, &ParseOptions::full(), &mut sink).is_err(),
+                "callback stage {stage}"
+            );
+            assert!(sink.mutated, "the intended callback must actually run");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn held_final_assistant_verifies_source_after_delivery() -> Result<()> {
+        let world = crate::test_world("codex-held-completion");
+        let path = world.proj.join("rollout-held.jsonl");
+        let raw = r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"held answer"}]}}"#;
+        let reference = SessionRef::new("held", Harness::Codex, &path);
+        for stop in [Flow::Stop, Flow::Continue] {
+            fs::write(&path, raw)?;
+            let mut calls = 0;
+            adapter().stream(&reference, &ParseOptions::full(), &mut |_: Message| {
+                calls += 1;
+                stop
+            })?;
+            assert_eq!(calls, 1, "unchanged source accepts either callback outcome");
+            let mut retained = None;
+            let result = adapter().stream(&reference, &ParseOptions::full(), &mut |m: Message| {
+                retained = Some(m);
+                fs::remove_file(&path).unwrap();
+                stop
+            });
+            assert!(result.is_err(), "held EOF output must not bypass verification");
+            assert_eq!(retained.unwrap().text().as_deref(), Some("held answer"));
+        }
+        struct RemoveAtFinalMeta(PathBuf);
+        impl MessageSink for RemoveAtFinalMeta {
+            fn message(&mut self, _: Message) -> Flow {
+                Flow::Continue
+            }
+            fn meta(&mut self, _: &Session) {
+                fs::remove_file(&self.0).unwrap();
+            }
+        }
+        fs::write(&path, raw)?;
+        assert!(
+            adapter()
+                .stream(&reference, &ParseOptions::full(), &mut RemoveAtFinalMeta(path))
+                .is_err(),
+            "the last metadata callback is inside completion verification too"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn shared_classification_preserves_missing_role_and_canonical_meta() -> Result<()> {
+        let raw = [
+            r#"{"type":"session_meta","payload":{"id":"child","cwd":"/child","cli_version":"0.163","subagent_history_start_ordinal":5,"agent_path":"child"}}"#,
+            r#"{"ordinal":1,"type":"session_meta","payload":{"id":"parent","cwd":"/parent","cli_version":"99","subagent_history_start_ordinal":0}}"#,
+            r#"{"ordinal":2,"type":"response_item","payload":{"type":"message","content":"parent prompt"}}"#,
+            r#"{"ordinal":6,"type":"response_item","payload":{"type":"message","content":"own prompt"}}"#,
+        ].join("\n");
+        let mut scan = CodexScan::default();
+        jsonl::slice(raw.as_bytes(), |line| {
+            if let Some(v) = line.view {
+                scan.feed(v)?;
+            }
+            Ok(Flow::Continue)
+        })?;
+        assert_eq!(scan.id, "child");
+        assert_eq!(scan.cwd.as_deref(), Some(Path::new("/child")));
+        assert_eq!(scan.writer_version.as_deref(), Some("0.163"));
+        assert_eq!(scan.title.as_deref(), Some("own prompt"));
+        let session = parse_str("child", &raw, true, None);
+        assert_eq!(
+            session.messages.iter().filter_map(Message::text).collect::<Vec<_>>(),
+            ["own prompt"]
+        );
+        // An absent role is title/message compatible but does not certify an NL event twin.
+        let v: Value =
+            serde_json::from_str(r#"{"type":"response_item","payload":{"type":"message","content":"own prompt"}}"#)?;
+        assert_eq!(nl_flags(JsonView::from(&v))?, (false, false));
+        Ok(())
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn deferred_discovery_counts_refill_and_invalidate_on_source_change() -> Result<()> {
+        let world = crate::test_world("codex-count-publication");
+        let home = world.base.join("codex");
+        let dir = home.join("sessions");
+        fs::create_dir_all(&dir)?;
+        let path = dir.join("rollout-count.jsonl");
+        let first = "{\"type\":\"session_meta\",\"payload\":{\"id\":\"count\"}}\n{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":\"question\"}}\n";
+        fs::write(&path, first)?;
+        let adapter = Codex::with_home(&home);
+        let context = crate::discover_cache::read::Context::current();
+        let _scope = context.enter();
+        let r = adapter.discover()?.remove(0);
+        assert_eq!(r.message_count, 0);
+        crate::catalog::sync(std::slice::from_ref(&r));
+        crate::discover_cache::persist(false);
+        let mut sink = crate::stream::CollectSink::default();
+        let done = crate::stream::stream_counted(
+            &adapter,
+            &r,
+            &ParseOptions::facts(),
+            &mut sink,
+            crate::stream::Pass::RECORD,
+        )?;
+        assert_eq!(done.counted.unwrap().turns, 1);
+        assert_eq!(adapter.discover()?[0].message_count, 1);
+        drop(_scope);
+        let next = crate::discover_cache::read::Context::current();
+        let _next_scope = next.enter();
+        assert_eq!(adapter.discover()?[0].message_count, 1);
+        fs::write(&path, format!("{first}{{\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":\"next\"}}}}\n"))?;
+        let changed = adapter.discover()?.remove(0);
+        assert_eq!(changed.message_count, 0, "changed sources lose certified counts");
+        crate::catalog::sync(std::slice::from_ref(&changed));
+        crate::stream::stream_counted(
+            &adapter,
+            &changed,
+            &ParseOptions::facts(),
+            &mut sink,
+            crate::stream::Pass::RECORD,
+        )?;
+        assert_eq!(adapter.discover()?[0].message_count, 2);
+        Ok(())
+    }
 
     #[derive(Default)]
     struct BufferedKept {
@@ -2524,7 +2638,7 @@ mod tests {
         let r = &refs[0];
         assert_eq!(r.id, "cold-1");
         assert_eq!(r.title.as_deref(), Some("cold storage question"));
-        assert_eq!(r.message_count, 2);
+        assert_eq!(r.message_count, 0);
 
         let s = cx.parse(r).unwrap();
         assert_eq!(s.model.as_deref(), Some("gpt-6-astra"));
@@ -2565,7 +2679,7 @@ mod tests {
         assert_eq!(refs.len(), 2);
         let (r, bytes) = decoded.recv().expect("the compressed rollout is handed over");
         assert!(decoded.recv().is_none(), "once, and never the plain rollout");
-        assert_eq!((r.path.as_path(), r.message_count), (cold.as_path(), 2));
+        assert_eq!((r.path.as_path(), r.message_count), (cold.as_path(), 0));
 
         let arena = |rollout: Rollout| rollout.decoded.unwrap();
         let handed = bytes.run(|| arena(Rollout::open(&cold).unwrap()));
@@ -2612,10 +2726,7 @@ mod tests {
             r.title.as_deref(),
             Some("Message Type: NEW_TASK Task name: build the client")
         );
-        assert_eq!(
-            r.message_count, 2,
-            "the inherited parent prompt and the injected developer message are not counted"
-        );
+        assert_eq!(r.message_count, 0, "discovery defers exact turn counts");
 
         // Over the full-scan cap the middle is never read: the metadata still comes from the head
         // and tail, and the turn count is 0 ("not counted") rather than an extrapolation
