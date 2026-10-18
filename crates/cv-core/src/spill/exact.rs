@@ -31,7 +31,18 @@ impl Default for ExactStrings {
     }
 }
 impl ExactStrings {
-    #[cfg(test)]
+    pub(crate) fn with_memory_limit(limit: usize) -> Self {
+        Self {
+            limit,
+            ..Self::default()
+        }
+    }
+
+    /// Checkpoints can retain the bounded fast path; spilled keys remain operation-owned.
+    pub(crate) fn memory_values(&self) -> Option<&HashSet<String>> {
+        self.spill.is_none().then_some(&self.memory)
+    }
+
     pub(crate) fn contains(&mut self, text: &str) -> Result<bool> {
         let hash = self.hash(text);
         match &mut self.spill {
@@ -47,7 +58,6 @@ impl ExactStrings {
 
     /// Borrow keys that only need writing/comparison after spill. In-memory retention still owns
     /// its exact bytes, and uses the same payload-plus-slot budget as owned insertion.
-    #[cfg(feature = "sqlite")]
     pub(crate) fn insert_borrowed(&mut self, text: &str) -> Result<bool> {
         self.insert_text(Cow::Borrowed(text))
     }
@@ -143,7 +153,6 @@ impl ExactStrings {
         self.spill.is_some()
     }
 
-    #[cfg(any(feature = "sqlite", test))]
     pub(crate) fn clear(&mut self) {
         self.spill.take();
         self.memory = HashSet::new();

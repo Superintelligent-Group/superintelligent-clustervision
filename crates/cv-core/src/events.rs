@@ -155,7 +155,7 @@ impl EventSink {
             events: Vec::new(),
             dependencies: st.dependencies,
             capture_events: true,
-            extractor: st.extractor,
+            extractor: EventExtractor::resume(st.extractor).ok()?,
             latch: Default::default(),
         })
     }
@@ -168,7 +168,7 @@ const EVENTS_LAYER: &str = "events";
 #[derive(serde::Serialize, serde::Deserialize)]
 struct EventState {
     #[serde(default)]
-    extractor: EventExtractor,
+    extractor: ExtractorState,
     msg_idx: usize,
     cwd: Option<PathBuf>,
     #[serde(default = "crate::source::ReadSet::unrecorded")]
@@ -196,17 +196,20 @@ impl MessageSink for EventSink {
     }
 
     fn wants_checkpoint(&mut self, _offset: u64) -> bool {
-        !self.latch.failed()
+        !self.latch.failed() && self.extractor.can_checkpoint()
     }
 
     fn checkpoint(&mut self, cp: &mut Checkpoint) {
         if self.latch.failed() {
             return;
         }
+        let Some(extractor) = self.extractor.checkpoint() else {
+            return;
+        };
         cp.put(
             EVENTS_LAYER,
             &EventState {
-                extractor: self.extractor.clone(),
+                extractor,
                 msg_idx: self.msg_idx,
                 cwd: self.cwd.clone(),
                 dependencies: self.dependencies.clone(),
@@ -234,12 +237,79 @@ pub(crate) fn release_scratch(events: &mut Vec<Event>) {
 
 /// Correlate native completed file changes with already-classified visible calls by exact ID.
 /// Code-mode nested calls have their own native IDs and no visible ToolUse counterpart.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-pub(crate) struct EventExtractor {
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct ExtractorState {
     inferred_edits: std::collections::BTreeSet<String>,
+    #[serde(default)]
+    completed: std::collections::BTreeSet<String>,
+}
+
+pub(crate) struct EventExtractor {
+    inferred_edits: crate::spill::ExactStrings,
+    completed: crate::spill::ExactStrings,
+    pending: usize,
+}
+
+impl Default for EventExtractor {
+    fn default() -> Self {
+        Self {
+            inferred_edits: crate::spill::ExactStrings::with_memory_limit(64 * 1024),
+            completed: crate::spill::ExactStrings::with_memory_limit(64 * 1024),
+            pending: 0,
+        }
+    }
 }
 
 impl EventExtractor {
+    fn resume(state: ExtractorState) -> Result<Self> {
+        anyhow::ensure!(
+            state.completed.is_subset(&state.inferred_edits),
+            "invalid inferred call checkpoint"
+        );
+        let mut extractor = Self {
+            pending: state.inferred_edits.len() - state.completed.len(),
+            ..Self::default()
+        };
+        for id in state.inferred_edits {
+            extractor.inferred_edits.insert(id)?;
+        }
+        for id in state.completed {
+            extractor.completed.insert(id)?;
+        }
+        Ok(extractor)
+    }
+
+    // Spill files belong to this read operation. Decline the shared checkpoint until
+    // identities fit in its owned state again; append recovery replays the prior prefix.
+    fn can_checkpoint(&self) -> bool {
+        self.inferred_edits.memory_values().is_some() && self.completed.memory_values().is_some()
+    }
+
+    fn checkpoint(&self) -> Option<ExtractorState> {
+        Some(ExtractorState {
+            inferred_edits: self.inferred_edits.memory_values()?.iter().cloned().collect(),
+            completed: self.completed.memory_values()?.iter().cloned().collect(),
+        })
+    }
+
+    fn note_inferred(&mut self, id: &str) -> Result<()> {
+        if self.inferred_edits.insert_borrowed(id)? {
+            self.pending += 1;
+        }
+        Ok(())
+    }
+
+    fn complete(&mut self, id: &str) -> Result<()> {
+        if self.inferred_edits.contains(id)? && self.completed.insert_borrowed(id)? {
+            self.pending = self.pending.saturating_sub(1);
+            if self.pending == 0 {
+                self.inferred_edits.clear();
+                self.completed.clear();
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn extract(
         &mut self,
         m: &Message,
@@ -248,7 +318,7 @@ impl EventExtractor {
         tool: Option<&str>,
         out: &mut Vec<Event>,
     ) -> Result<()> {
-        extract_message(m, msg_idx, cwd, tool, out, &mut self.inferred_edits)
+        extract_message(m, msg_idx, cwd, tool, out, self)
     }
 }
 
@@ -262,7 +332,7 @@ fn extract_message(
     cwd: Option<&Path>,
     tool: Option<&str>,
     out: &mut Vec<Event>,
-    inferred_edits: &mut std::collections::BTreeSet<String>,
+    extractor: &mut EventExtractor,
 ) -> Result<()> {
     let mut staged = Vec::new();
     let ts = m.timestamp.map(|t| t.timestamp());
@@ -270,7 +340,7 @@ fn extract_message(
         let item = m.extra.get("codex").and_then(|bag| bag.get("item"));
         if let Some(item) = item.filter(|item| item["type"] == "FileChange" && item["status"] == "completed") {
             let id = item.get("id").and_then(serde_json::Value::as_str);
-            if id.is_some_and(|id| !inferred_edits.contains(id)) {
+            if id.map(|id| extractor.inferred_edits.contains(id)).transpose()? == Some(false) {
                 let mut paths = std::collections::BTreeSet::new();
                 for (path, change) in item
                     .get("changes")
@@ -304,7 +374,7 @@ fn extract_message(
                 let before = staged.len();
                 extract_call_into(name, input, msg_idx, ts, cwd, &mut staged)?;
                 if staged[before..].iter().any(|event| event.kind == "file_edit") {
-                    inferred_edits.insert(id.clone());
+                    extractor.note_inferred(id)?;
                 }
             }
             Block::ToolResult {
@@ -338,7 +408,7 @@ fn extract_message(
     }
     for block in &m.content {
         if let Block::ToolResult { tool_use_id, .. } = block {
-            inferred_edits.remove(tool_use_id);
+            extractor.complete(tool_use_id)?;
         }
     }
     out.extend(staged);
@@ -1394,6 +1464,31 @@ mod tests {
         sink.observe_message(&direct.messages[1]);
         assert_eq!(sink.events().iter().filter(|e| e.kind == "file_edit").count(), 2);
         assert_eq!(sink.events().iter().filter(|e| e.call).count(), 2);
+    }
+
+    #[test]
+    fn inferred_call_identity_spills_exactly_and_defers_checkpoints_until_closed() {
+        let _world = crate::test_world("events-spilled-calls");
+        let mut sink = EventSink::new(None);
+        for i in 0..3000 {
+            sink.extractor.note_inferred(&format!("pending-{i}")).unwrap();
+        }
+        assert!(!sink.wants_checkpoint(1));
+        let mut checkpoint = Checkpoint::new(1);
+        sink.checkpoint(&mut checkpoint);
+        assert!(EventSink::resume(&checkpoint).is_none());
+        assert!(sink.extractor.inferred_edits.contains("pending-0").unwrap());
+        assert!(sink.extractor.inferred_edits.contains("pending-2999").unwrap());
+        assert!(!sink.extractor.inferred_edits.contains("absent").unwrap());
+        sink.extractor.complete("pending-0").unwrap();
+        sink.extractor.complete("pending-0").unwrap();
+        assert_eq!(sink.extractor.pending, 2999);
+        for i in (1..3000).rev() {
+            sink.extractor.complete(&format!("pending-{i}")).unwrap();
+        }
+        assert!(sink.wants_checkpoint(2));
+        sink.checkpoint(&mut checkpoint);
+        assert_eq!(EventSink::resume(&checkpoint).unwrap().extractor.pending, 0);
     }
 
     #[test]
