@@ -27,6 +27,12 @@ pub(crate) struct Read {
     file: File,
 }
 
+impl ranges::At for Read {
+    fn read_at(&self, bytes: &mut [u8], at: u64) -> std::io::Result<usize> {
+        ranges::At::read_at(&self.file, bytes, at)
+    }
+}
+
 #[cfg(test)]
 thread_local! { pub(crate) static OPENED: std::cell::RefCell<Vec<std::path::PathBuf>> = const { std::cell::RefCell::new(Vec::new()) }; }
 
@@ -42,6 +48,41 @@ impl Read {
 
     pub(crate) fn source(&self) -> &crate::json::JsonSource {
         &self.source
+    }
+
+    /// Positioned bytes from the captured descriptor, for an adapter's compression decoder.
+    pub(crate) fn reader(&self) -> anyhow::Result<impl std::io::BufRead + '_> {
+        ranges::reader(
+            &self.file,
+            ranges::Range {
+                offset: 0,
+                len: self.source.len(),
+            },
+        )
+    }
+
+    /// Recheck the opened inode before resuming mapped bytes after a consumer callback.
+    pub(crate) fn check_backing(&self) -> anyhow::Result<()> {
+        self.source.check_metadata(self.file.metadata()?)
+    }
+
+    /// Verify the captured descriptor and path, including after a codec's held EOF output.
+    pub(crate) fn check(&self) -> anyhow::Result<()> {
+        self.check_backing()?;
+        self.source.check()
+    }
+
+    /// Decoded bytes retain the original source's identity and use its completion guards.
+    pub(crate) fn decoded(
+        &self,
+        backing: &std::sync::Arc<super::bytes::ByteSource>,
+        len: u64,
+        from: u64,
+        visit: impl FnMut(Line<'_>) -> anyhow::Result<crate::stream::Flow>,
+    ) -> anyhow::Result<()> {
+        let read = for_each_decoded_line(&self.source, backing, len, from, visit);
+        self.check()?;
+        read
     }
 
     /// Whole or resumed read through the captured EOF. An unterminated record at actual EOF
@@ -92,8 +133,7 @@ impl Read {
             }
             visit(line)
         });
-        self.source.check_metadata(self.file.metadata()?)?;
-        self.source.check()?;
+        self.check()?;
         read
     }
 }

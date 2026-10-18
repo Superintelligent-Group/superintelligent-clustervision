@@ -3,11 +3,17 @@
 ## Unreleased
 
 - Listings reuse source-certified exact turn counts after complete reads, preserving them across harmless metadata refreshes and invalidating changed sources.
+- Kimi listings use native titles or stop at the first fallback prompt; exact counts come from complete reads or indexing.
+- Kimi reads reject callback changes to captured transcripts and wire enrichment, including final messages from older rotated segments.
+- Grok reads reject source changes during message/checkpoint callbacks, including held reasoning at EOF.
 
 - JSON listings and filtered windows reuse filesystem metadata for shared stores while rechecking presence at rendering.
 - Hermes keeps generation membership in private indexed storage while preserving exact duplicate detection and lazy message bodies.
 
 - Repeated OpenClaw parent lookups share private indexed facts; one-query operations keep native startup cost, query order, malformed values, and source guards.
+- Codex listings defer exact counts to indexing or complete reads; transcript metadata and compressed decode reuse stay unchanged.
+- Codex reads reject callback source truncation and verify identity after final message and metadata delivery.
+- Claude reads reject callback-triggered truncation before resuming mapped records, including checkpoint callbacks.
 
 - Catalog publication waits for concurrent writers before comparing rows, preventing avoidable lost discovery updates during indexing.
 
@@ -31,22 +37,6 @@
 - `cv hook` with a terminal on stdin exits 2 with usage; `cv mcp` and `cv task … -` say what they are reading.
 - MCP tools generated from the CLI omit `--follow` (no Ctrl-C in a tool call); `for` stays.
 - `tests/announce.rs` runs every command on a pipe: exit within 5 s, or be a daemon that announced within 1 s.
-- Inbox table headers no longer cover the first task row, restoring clicks to expand Backlog task details.
-- `cv index` publishes search freshness baselines per session: one row's failure is reported and reread alone, no longer losing the sweep's.
-- One freshness record per consumer and session, verified on load (counts, events, search, usage); watches record file identities. Each rereads once after upgrading.
-- **Breaking:** `GET /api/backlog` is removed (410 pointer); the inbox page reads `/api/tasks?detail=1`, which adds the backlog columns.
-- **Breaking:** `POST /api/task/{id}/reopen` is removed (410): a closed task stays closed; open a new task and note the old id.
-- **Breaking:** MCP no longer offers `hook` (it reads Claude Code's hook JSON on stdin; a call did nothing); calling it points at `hooks_install`.
-- `cv search`: when live snippets cannot be generated the indexed previews stand in, with a note, as `/api/search` already did.
-- `/api/tasks/inbox/{who}` takes `since=` and `all=` like `/api/inbox`.
-- `cv archive sync` takes its inventory from the index sweep (one corpus walk, the index refreshed on the way); a home whose index cannot be written falls back to discovery.
-- A live `.jsonl` beside its writer is admitted by content (same file, sampled prefix intact), never by waiting; index, events, counts, vectors reread once.
-- Pre-binary `embeddings.json` semantic stores are no longer read or migrated (querying them already failed); `cv index --semantic` rebuilds.
-
-- HTTP rejects duplicate Host headers before routing requests.
-
-- HTTP search rejects conflicting kind, scan and semantic parameters consistently with the CLI.
-
 ## 0.17.0 — 2026-10-17 — stream, never materialize
 
 cv's readers now stream: a giant tool output, a 60 MB escaped string or a 64 MiB SQLite cell
@@ -79,6 +69,22 @@ table lists the flags, defaults, routes and MCP tool that changed.
 
 `cv tree`, `cv prompts`, `cv compaction`, `cv timeline`, `cv board` and the other 0.15 names still
 exit 2 with their pointers; the `cvd` and `cv-mcp` shims went in 0.16.0.
+
+- Inbox table headers no longer cover the first task row, restoring clicks to expand Backlog task details.
+- `cv index` publishes search freshness baselines per session: one row's failure is reported and reread alone, no longer losing the sweep's.
+- One freshness record per consumer and session, verified on load (counts, events, search, usage); watches record file identities. Each rereads once after upgrading.
+- **Breaking:** `GET /api/backlog` is removed (410 pointer); the inbox page reads `/api/tasks?detail=1`, which adds the backlog columns.
+- **Breaking:** `POST /api/task/{id}/reopen` is removed (410): a closed task stays closed; open a new task and note the old id.
+- **Breaking:** MCP no longer offers `hook` (it reads Claude Code's hook JSON on stdin; a call did nothing); calling it points at `hooks_install`.
+- `cv search`: when live snippets cannot be generated the indexed previews stand in, with a note, as `/api/search` already did.
+- `/api/tasks/inbox/{who}` takes `since=` and `all=` like `/api/inbox`.
+- `cv archive sync` takes its inventory from the index sweep (one corpus walk, the index refreshed on the way); a home whose index cannot be written falls back to discovery.
+- A live `.jsonl` beside its writer is admitted by content (same file, sampled prefix intact), never by waiting; index, events, counts, vectors reread once.
+- Pre-binary `embeddings.json` semantic stores are no longer read or migrated (querying them already failed); `cv index --semantic` rebuilds.
+
+- HTTP rejects duplicate Host headers before routing requests.
+
+- HTTP search rejects conflicting kind, scan and semantic parameters consistently with the CLI.
 
 - Reject premature EOF in positioned JSONL reads instead of treating missing captured bytes as a partial final record.
 - Preserve concurrent directory claims during fallback publication and restoration; retain both trees when restoration is blocked.

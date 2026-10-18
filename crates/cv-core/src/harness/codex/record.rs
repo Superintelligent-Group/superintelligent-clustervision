@@ -8,32 +8,66 @@
 use super::*;
 use crate::json::{Json, JsonView};
 
+/// Shared wire classification for metadata, grammar detection and message projection.
+pub(super) struct Head<'v> {
+    pub view: JsonView<'v>,
+    pub ty: Option<String>,
+    pub timestamp: Option<DateTime<Utc>>,
+    pub ordinal: Option<u64>,
+    pub payload: Option<JsonView<'v>>,
+}
+
+impl<'v> Head<'v> {
+    pub fn of(view: JsonView<'v>) -> Result<Self> {
+        Ok(Self {
+            view,
+            ty: str_at(Some(view), "type")?,
+            timestamp: str_at(Some(view), "timestamp")?.as_deref().and_then(parse_ts),
+            ordinal: number(view.get("ordinal")?)?.and_then(|n| n.as_u64()),
+            payload: view.get("payload")?,
+        })
+    }
+
+    pub fn inherited(&self, cutoff: Option<u64>) -> bool {
+        matches!((self.ordinal, cutoff), (Some(o), Some(cut)) if o < cut)
+    }
+}
+
+pub(super) struct Payload<'v> {
+    pub view: JsonView<'v>,
+    pub ty: Option<String>,
+    pub role: Option<String>,
+}
+
+impl<'v> Payload<'v> {
+    pub fn of(view: JsonView<'v>) -> Result<Self> {
+        let ty = str_at(Some(view), "type")?;
+        let role = if ty.as_deref() == Some("message") {
+            str_at(Some(view), "role")?
+        } else {
+            None
+        };
+        Ok(Self { view, ty, role })
+    }
+}
+
 /// What the reader wants from each record.
 #[derive(Clone, Copy)]
 pub(super) struct Demand {
     /// Large bodies stay in the source ([`JsonView::lazy_text`]) and large tool arguments become
     /// checked source JSON.
     pub spans: bool,
-    /// Discovery's turn count: a body is only its classification head (see [`count_head`]); tool
-    /// arguments, outputs and rich extras are not resolved.
-    pub heads: bool,
 }
 
 impl Demand {
     pub(super) fn of(opts: &ParseOptions) -> Self {
-        Demand {
-            spans: opts.spans,
-            heads: false,
-        }
+        Demand { spans: opts.spans }
     }
 
     /// A body string by the demand's text rule; None for a nonstring.
     fn text(self, v: JsonView<'_>) -> Result<Option<Text>> {
         if !v.is_string()? {
             return Ok(None);
-        }
-        if self.heads {
-            return Ok(Some(Text::Inline(count_head(Some(v))?)));
         }
         v.lazy_text(self.spans)
     }
@@ -42,27 +76,8 @@ impl Demand {
     /// newlines) by the demand's text rule. Several parts under spans are joined into the
     /// source's private decoded backing, never owned.
     fn joined(self, v: Option<JsonView<'_>>, source: Option<&crate::json::JsonSource>) -> Result<Text> {
-        if self.heads {
-            return Ok(Text::Inline(count_head(v)?));
-        }
         super::super::wire::joined_text(v, source.filter(|_| self.spans), &mut |v| self.text(v))
     }
-}
-
-/// A body reduced to what classification and counting read: its first 96 characters after
-/// leading whitespace, or one space for a nonempty all-whitespace body.
-pub(super) fn count_head(v: Option<JsonView<'_>>) -> Result<String> {
-    let mut head = String::new();
-    let mut any = false;
-    for_each_joined_char(v, |c| {
-        any = true;
-        if head.is_empty() && c.is_whitespace() {
-            return true;
-        }
-        head.push(c);
-        head.chars().count() < 96
-    })?;
-    Ok(if head.is_empty() && any { " ".into() } else { head })
 }
 
 /// Visit the characters of `text_parts(v)` (a string, or the string `text` of each part joined by
@@ -198,9 +213,9 @@ pub(super) struct Reader<'s> {
 impl Reader<'_> {
     /// One rollout record: fold its facts into the session and push its messages.
     pub(super) fn record(&mut self, v: JsonView<'_>) -> Result<()> {
-        let top = |key| v.get(key);
-        let ty = string(top("type")?)?;
-        let ts = string(top("timestamp")?)?.as_deref().and_then(parse_ts);
+        let head = Head::of(v)?;
+        let ty = &head.ty;
+        let ts = head.timestamp;
         if let Some(ts) = ts {
             self.session.created_at.get_or_insert(ts);
             self.session.updated_at = Some(ts);
@@ -209,17 +224,14 @@ impl Reader<'_> {
         // `subagent_history_start_ordinal`): those records still shape the thread's metadata — the
         // child inherits the parent's model/cwd — but they are the parent's turns, not this
         // thread's, so the lean passes emit no messages for them; `complete` keeps them, tagged.
-        let inherited = matches!(
-            (number(top("ordinal")?)?.and_then(|n| n.as_u64()), self.ctx.inherit_before),
-            (Some(o), Some(cut)) if o < cut
-        );
+        let inherited = head.inherited(self.ctx.inherit_before);
         let before = self.out.len();
-        let payload = top("payload")?;
+        let payload = head.payload;
         match ty.as_deref() {
             None => {
                 // bare {id,timestamp} header
                 if self.session.id.is_empty() {
-                    if let Some(id) = string(top("id")?)? {
+                    if let Some(id) = str_at(Some(head.view), "id")? {
                         self.session.id = id;
                     }
                 }
@@ -387,7 +399,9 @@ impl Reader<'_> {
     fn event(&mut self, payload: Option<JsonView<'_>>, ts: Option<DateTime<Utc>>) -> Result<bool> {
         let Some(p) = payload else { return Ok(false) };
         let has_events = self.has_events;
-        match str_at(Some(p), "type")?.as_deref() {
+        let head = Payload::of(p)?;
+        let p = head.view;
+        match head.ty.as_deref() {
             Some("user_message") if has_events => {
                 let body = p.get("message")?;
                 if let Some(text) = body.map(|b| self.demand.text(b)).transpose()?.flatten() {
@@ -698,8 +712,7 @@ impl Reader<'_> {
                 }
             }
         }
-        // Discovery only counts: the structured item (a command's whole output) is not resolved.
-        let item = match item.filter(|_| !self.demand.heads) {
+        let item = match item {
             Some(item) => item.resolve()?.into_owned(),
             None => Value::Null,
         };
@@ -871,7 +884,8 @@ impl Reader<'_> {
     pub(super) fn item(&mut self, payload: Option<JsonView<'_>>, ts: Option<DateTime<Utc>>) -> Result<bool> {
         let Some(p) = payload else { return Ok(false) };
         let d = self.demand;
-        let ty = str_at(Some(p), "type")?.unwrap_or_default();
+        let head = Payload::of(p)?;
+        let ty = head.ty.as_deref().unwrap_or_default();
         let field = |k: &str| -> Result<String> { Ok(str_at(Some(p), k)?.unwrap_or_default()) };
         let passthrough = p.get("internal_chat_message_metadata_passthrough")?;
         let ts = passthrough_ts(passthrough)?.or(ts);
@@ -879,9 +893,9 @@ impl Reader<'_> {
         let before = self.out.len();
         let out = &mut *self.out;
 
-        match ty.as_str() {
+        match ty {
             "message" => {
-                let role = str_at(Some(p), "role")?.unwrap_or_else(|| "user".into());
+                let role = head.role.as_deref().unwrap_or("user");
                 // Natural-language user/assistant text is taken from event_msg when present.
                 if self.has_events && (role == "user" || role == "assistant") {
                     return Ok(true);
@@ -890,7 +904,7 @@ impl Reader<'_> {
                 let content = p.get("content")?;
                 let blocks = openai::blocks_from_view(content, &openai::CODEX, &mut |v| d.text(v))?;
                 if !blocks.is_empty() {
-                    let mut m = match role.as_str() {
+                    let mut m = match role {
                         "assistant" => Message::new(Role::Assistant),
                         // `developer`/`system` messages are instructions the harness injected
                         // (`<user_instructions>`, AGENTS.md); never the user's own words.
@@ -916,21 +930,12 @@ impl Reader<'_> {
                 // `encrypted_content` carries the opaque replay blob.
                 let summary_view = p.get("summary")?;
                 let raw = d.joined(p.get("content")?, self.source)?;
-                let encrypted = match p.get("encrypted_content")? {
-                    // Discovery reads only that a replay blob is there.
-                    Some(blob) if d.heads => blob.is_string()?.then(String::new),
-                    blob => string(blob)?,
-                };
+                let encrypted = string(p.get("encrypted_content")?)?;
                 // When we surfaced raw content but a distinct summary also exists, keep the summary.
                 let (text, summary) = if raw.is_empty() {
                     (d.joined(summary_view, self.source)?, None)
-                } else if d.heads {
-                    (raw, None)
                 } else {
-                    let inline = Demand {
-                        spans: false,
-                        heads: false,
-                    };
+                    let inline = Demand { spans: false };
                     let summary = match inline.joined(summary_view, None)? {
                         Text::Inline(summary) => summary,
                         _ => unreachable!("inline demand"),
@@ -1011,7 +1016,7 @@ impl Reader<'_> {
                     // {status, action:{type:"exec", command:[...], ...}}
                     let mut obj = Map::new();
                     for key in ["action", "status"] {
-                        if let Some(v) = p.get(key)?.filter(|_| !d.heads) {
+                        if let Some(v) = p.get(key)? {
                             obj.insert(key.into(), v.resolve()?.into_owned());
                         }
                     }
@@ -1024,7 +1029,6 @@ impl Reader<'_> {
                         _ => p.get("input")?,
                     };
                     let input = match args {
-                        _ if d.heads => Json::Owned(Value::Null),
                         None => Json::Owned(Value::Null),
                         Some(args) if args.is_string()? && d.spans => args.encoded_argument()?,
                         Some(args) if args.is_string()? => Json::Owned(openai::structured_arguments(
@@ -1058,7 +1062,7 @@ impl Reader<'_> {
                 // code lives only in the `item_completed CommandExecution` note.
                 let output = p.get("output")?;
                 let (content, images, is_error) = match output {
-                    Some(o) if o.is_string()? && !d.heads => {
+                    Some(o) if o.is_string()? => {
                         let mut prefix = String::new();
                         o.for_each_char(|c| {
                             prefix.push(c);
@@ -1075,7 +1079,6 @@ impl Reader<'_> {
                         }
                         (text, Vec::new(), is_error)
                     }
-                    _ if d.heads => (Text::default(), Vec::new(), false),
                     _ => {
                         let (content, images) = coerce_output(output)?;
                         (Text::Inline(content), images, output_is_error(output)?)
@@ -1119,7 +1122,6 @@ impl Reader<'_> {
             }
             "tool_search_output" => {
                 let content = match p.get("tools")? {
-                    _ if d.heads => String::new(),
                     Some(tools) => tools.resolve()?.to_string(),
                     None => "[]".into(),
                 };
@@ -1182,7 +1184,7 @@ impl Reader<'_> {
                     .unwrap_or(false);
                 let mut m = note(MessageKind::CompactionBoundary, ts, "[history compacted]".into());
                 let b = bag(&mut m);
-                b.insert("codex_event".into(), Value::String(ty.clone()));
+                b.insert("codex_event".into(), Value::String(ty.to_owned()));
                 if encrypted {
                     b.insert("encrypted".into(), Value::Bool(true));
                 }
