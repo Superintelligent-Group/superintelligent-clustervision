@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Zed listings preserve native metadata without decoding messages for counts; complete reads supply source-certified counts.
+
 - Listings reuse source-certified exact turn counts after complete reads, preserving them across harmless metadata refreshes and invalidating changed sources.
 - Kimi listings use native titles or stop at the first fallback prompt; exact counts come from complete reads or indexing.
 - Kimi reads reject callback changes to captured transcripts and wire enrichment, including final messages from older rotated segments.
