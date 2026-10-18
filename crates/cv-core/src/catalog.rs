@@ -478,7 +478,10 @@ mod imp {
         watches: &[(PathBuf, Watched)],
         sources: &SourceRows,
     ) {
-        let Ok(tx) = conn.transaction() else { return };
+        // Reserve the writer before reading old rows; deferred upgrades cannot wait safely.
+        let Ok(tx) = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate) else {
+            return;
+        };
         if publish_harness_in(&tx, h, refs, watches, sources, true).is_ok() {
             let _ = tx.commit();
         }
@@ -526,7 +529,10 @@ mod imp {
     }
 
     pub(super) fn publish_all_in(conn: &mut Connection, rows: &[Publication<'_>], sources: &[SourceRows]) {
-        let Ok(tx) = conn.transaction() else { return };
+        // Reserve the writer before reading old rows; deferred upgrades cannot wait safely.
+        let Ok(tx) = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate) else {
+            return;
+        };
         let Ok(equal) = matches_sessions_in(&tx, rows.iter().flat_map(|(_, refs, _, _)| refs.iter())) else {
             return;
         };
@@ -1531,6 +1537,51 @@ mod imp {
             assert!(captured[&path].fresh(&mut crate::source::Probe::default()));
             std::fs::write(&path, "racing").unwrap();
             assert!(!captured[&path].fresh(&mut crate::source::Probe::default()));
+        }
+
+        #[test]
+        fn publication_waits_for_existing_writer_before_comparing_and_replacing() {
+            use std::sync::mpsc;
+            use std::time::Duration;
+            let mut failures = Vec::new();
+            for full in [false, true] {
+                let w = crate::test_world("publication-held-writer");
+                let r = db_ref(Harness::Claude, w.base.join("source"));
+                let mut publishing = open().unwrap();
+                let mut blocking = open().unwrap();
+                let lock = blocking
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .unwrap();
+                lock.execute("INSERT INTO catalog_meta(key,value) VALUES('held-writer','1')", [])
+                    .unwrap();
+                let (started, entered) = mpsc::channel();
+                let (finished, result) = mpsc::channel();
+                let worker = std::thread::spawn(crate::env::carry(move || {
+                    let refs = [r];
+                    started.send(()).unwrap();
+                    if full {
+                        let before = PrimaryReads::default();
+                        let rows = [(Harness::Claude, refs.as_slice(), Vec::new(), &before)];
+                        publish_all_in(&mut publishing, &rows, &[SourceRows::default()]);
+                    } else {
+                        replace_prepared_in(&mut publishing, Harness::Claude, &refs, &[], &SourceRows::default());
+                    }
+                    finished
+                        .send(matches_sessions_in(&publishing, refs.iter()).unwrap())
+                        .unwrap();
+                }));
+                entered.recv_timeout(Duration::from_secs(10)).unwrap();
+                // A publication must wait for the held writer rather than abandon its rows
+                // when upgrading a deferred read snapshot. Release even on negative controls.
+                let early = result.recv_timeout(Duration::from_millis(100)).ok();
+                lock.commit().unwrap();
+                let stored = early.unwrap_or_else(|| result.recv_timeout(Duration::from_secs(10)).unwrap());
+                worker.join().unwrap();
+                if early.is_some() || !stored {
+                    failures.push((full, early, stored));
+                }
+            }
+            assert!(failures.is_empty(), "publication did not wait and commit: {failures:?}");
         }
 
         #[test]

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Catalog publication waits for concurrent writers before comparing rows, preventing avoidable lost discovery updates during indexing.
+
 - Preserve untouched native records while sharing Claude prune, rewind, and adoption derivation.
 
 - Grok listings use native summaries and stop after finding fallback titles; exact message counts appear after indexing or a complete read.
