@@ -65,12 +65,12 @@
 use crate::ir::{Block, Harness, Message, MessageKind, SessionRef};
 use crate::lazy::Resolver;
 use crate::offsets::OFFSET_KEY;
-use crate::prune::{is_sidechain, new_uuid, turn_kind};
+use crate::prune::{new_uuid, turn_kind};
 use crate::stream::{Flow, MessageSink, ParseOptions};
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader, Read, Seek, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 /// Shortest sha prefix accepted (git's own default abbreviation).
@@ -536,20 +536,6 @@ pub fn is_subagent(r: &SessionRef) -> bool {
             .is_some_and(|n| n.starts_with("agent-"))
 }
 
-/// A directly selected child's records become its own standalone conversation. Embedded
-/// sidechains in a selected parent must retain their original meaning.
-pub(crate) fn normalize_subagent_record(v: &mut Value) -> bool {
-    let mut modified = false;
-    if is_sidechain(v) {
-        v["isSidechain"] = Value::Bool(false);
-        modified = true;
-    }
-    if let Some(object) = v.as_object_mut() {
-        modified |= object.shift_remove("agentId").is_some();
-    }
-    modified
-}
-
 /// The source rewind copies a prefix of, captured before the copy and checked after it: the
 /// same file, unchanged or (an append-only transcript) grown with its sampled prefix intact
 /// ([`crate::source::FileId::admits`], whose sampling limit applies). The provenance's sha256 is
@@ -597,7 +583,7 @@ fn rewind_session_after_scan(
             r.harness
         );
     }
-    let (source_guard, mut file) =
+    let (source_guard, file) =
         PrefixReadGuard::capture(&r.path).with_context(|| format!("reading {}", r.path.display()))?;
     let size = source_guard.source.len();
     let subagent = is_subagent(r);
@@ -678,7 +664,7 @@ fn rewind_session_after_scan(
         None => (0, false),
         Some(b) => {
             let b_off = scan.offsets[b];
-            let head = read_line_at(&file, b_off)?
+            let head = read_line_at(&source_guard.source, &file, b_off)?
                 .and_then(|v| {
                     v.pointer("/compactMetadata/preservedSegment/headUuid")
                         .and_then(Value::as_str)
@@ -724,11 +710,20 @@ fn rewind_session_after_scan(
         )?))
     };
 
-    file.seek(std::io::SeekFrom::Start(0))?;
-    let mut reader = BufReader::with_capacity(1 << 20, file.try_clone()?.take(size));
     let mut hasher = crate::digest::Sha256::new();
-    let mut buf: Vec<u8> = Vec::new();
-    let (mut off, mut line_no) = (0u64, 0usize);
+    let mut prefix = crate::harness::store::jsonl::ranges::reader(
+        &file,
+        crate::harness::store::jsonl::ranges::Range { offset: 0, len: size },
+    )?;
+    let mut scratch = [0u8; 64 * 1024];
+    loop {
+        let n = prefix.read(&mut scratch)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&scratch[..n]);
+    }
+    let mut line_no = 0usize;
     let (mut start_line, mut cut_line, mut end_line) = (0usize, 0usize, 0usize);
     let (mut lines_written, mut bytes_written) = (0usize, 0u64);
     let (mut omitted_lines, mut omitted_bytes) = (0usize, 0u64);
@@ -745,16 +740,12 @@ fn rewind_session_after_scan(
         Done,
     }
     let mut phase = Phase::Before;
-    loop {
-        buf.clear();
-        let n = reader.read_until(b'\n', &mut buf)?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
+    use crate::harness::store::jsonl::ranges::{self, Range};
+    for row in ranges::records(&file, Range { offset: 0, len: size })? {
+        let (range, newline) = row?;
+        let at = range.offset;
+        let n = range.len + u64::from(newline);
         line_no += 1;
-        let at = off;
-        off += n as u64;
         if phase == Phase::Before && at >= start_off {
             phase = Phase::Copy;
             start_line = line_no;
@@ -764,57 +755,53 @@ fn rewind_session_after_scan(
         }
         if phase == Phase::Done {
             omitted_lines += 1;
-            omitted_bytes += n as u64;
+            omitted_bytes += n;
             continue;
         }
-        let parsed: Option<Value> = serde_json::from_slice(&buf[..n]).ok();
-        let out_line: Vec<u8> = match parsed {
-            None => buf[..n].to_vec(), // non-JSON line: verbatim
-            Some(mut v) => {
-                if source_session_id.is_none() {
-                    source_session_id = v.get("sessionId").and_then(Value::as_str).map(String::from);
-                }
-                let modified = subagent && normalize_subagent_record(&mut v);
-                if phase == Phase::Closing && !closes_open_call(&v) {
-                    phase = Phase::Done;
-                    omitted_lines += 1;
-                    omitted_bytes += n as u64;
-                    continue;
-                }
-                track_tool_calls(
-                    &v,
-                    &mut open,
-                    if phase == Phase::Closing {
-                        Some(&mut closed)
-                    } else {
-                        None
-                    },
-                );
-                if let Some(c) = v.get("cwd").and_then(Value::as_str) {
-                    if cwds.last().map(String::as_str) != Some(c) {
-                        cwds.retain(|x| x != c);
-                        cwds.push(c.to_string());
-                    }
-                }
-                // The source's bytes with the session id replaced ([`crate::restamp_line`]); a
-                // line whose sidechain markers changed is re-serialized first.
-                let text = if modified {
-                    v.to_string()
-                } else {
-                    String::from_utf8_lossy(buf[..n].strip_suffix(b"\n").unwrap_or(&buf[..n])).into_owned()
-                };
-                let mut s = crate::restamp_line(&text, &new_id).unwrap_or(text).into_bytes();
-                s.push(b'\n');
-                s
+        let mut selected = crate::derive::Select::read(&source_guard.source, range, newline, false)?;
+        if let Some(record) = &selected.record {
+            let facts = record.with_view(selection_facts)?;
+            if source_session_id.is_none() {
+                source_session_id = facts.get("sessionId").and_then(Value::as_str).map(String::from);
             }
-        };
-        if thinking == crate::emit::ThinkingMode::Portable {
-            replay_stage.write_all(&out_line)?;
-        } else if let Some(w) = writer.as_mut() {
-            w.write_all(&out_line)?;
+            if phase == Phase::Closing && !closes_open_call(&facts) {
+                phase = Phase::Done;
+                omitted_lines += 1;
+                omitted_bytes += n;
+                continue;
+            }
+            track_tool_calls(
+                &facts,
+                &mut open,
+                if phase == Phase::Closing {
+                    Some(&mut closed)
+                } else {
+                    None
+                },
+            );
+            if let Some(c) = facts.get("cwd").and_then(Value::as_str) {
+                if cwds.last().map(String::as_str) != Some(c) {
+                    cwds.retain(|x| x != c);
+                    cwds.push(c.to_string());
+                }
+            }
+            // Native valid records have always ended in a newline in rewind output.
+            selected.newline = true;
         }
+        let rewrite = crate::derive::Rewrite {
+            session_id: &new_id,
+            standalone: subagent,
+        };
+        let selected = std::iter::once(Ok(selected));
+        let counts = if thinking == crate::emit::ThinkingMode::Portable {
+            crate::derive::derive(&source_guard.source, &file, selected, &rewrite, &mut replay_stage)?
+        } else if let Some(w) = writer.as_mut() {
+            crate::derive::derive(&source_guard.source, &file, selected, &rewrite, w)?
+        } else {
+            crate::derive::derive(&source_guard.source, &file, selected, &rewrite, &mut std::io::sink())?
+        };
         lines_written += 1;
-        bytes_written += out_line.len() as u64;
+        bytes_written += counts.bytes as u64;
         end_line = line_no;
         if at == cut_off {
             cut_line = line_no;
@@ -987,20 +974,104 @@ fn provenance(res: &RewindResult, opts: &RewindOptions) -> Value {
 
 /// The first `cwd` a transcript records (within its first few hundred lines), if any.
 fn first_cwd(path: &Path) -> Option<String> {
-    let f = std::fs::File::open(path).ok()?;
-    BufReader::new(f).lines().take(500).map_while(Result::ok).find_map(|l| {
-        let v: Value = serde_json::from_str(&l).ok()?;
-        v.get("cwd").and_then(Value::as_str).map(String::from)
-    })
+    let source = crate::json::JsonSource::capture(path).ok()?;
+    let file = std::fs::File::open(path).ok()?;
+    let rows = crate::harness::store::jsonl::ranges::records(
+        &file,
+        crate::harness::store::jsonl::ranges::Range {
+            offset: 0,
+            len: source.len(),
+        },
+    )
+    .ok()?;
+    for row in rows.take(500) {
+        let (range, _) = row.ok()?;
+        let value = source.read_range_value(range.offset, range.len, |view| {
+            view.get("cwd")?
+                .map(|v| Ok(v.resolve()?.as_str().map(str::to_owned)))
+                .transpose()
+                .map(Option::flatten)
+        });
+        if let Ok(Some(cwd)) = value {
+            source.check().ok()?;
+            return Some(cwd);
+        }
+    }
+    None
 }
 
-/// Read and parse the single record starting at byte `off`.
-fn read_line_at(file: &std::fs::File, off: u64) -> Result<Option<Value>> {
-    let mut f = file.try_clone()?;
-    f.seek(std::io::SeekFrom::Start(off))?;
-    let mut line = Vec::new();
-    BufReader::new(f).read_until(b'\n', &mut line)?;
-    Ok(serde_json::from_slice(&line).ok())
+/// Project only selection facts, leaving every native payload in the checked source.
+fn selection_facts(view: crate::json::JsonView<'_>) -> Result<Value> {
+    use crate::harness::store::document::Fields;
+    let keys = [
+        "sessionId",
+        "cwd",
+        "type",
+        "subtype",
+        "isSidechain",
+        "isApiErrorMessage",
+        "message",
+        "compactMetadata",
+    ];
+    let Some(fields) = Fields::parse(view, &keys)? else {
+        return Ok(Value::Null);
+    };
+    let mut facts = fields.project(&keys[..6])?;
+    if let Some(message) = fields
+        .get("message")
+        .map(|v| Fields::parse(v, &["model", "content"]))
+        .transpose()?
+        .flatten()
+    {
+        let mut projected = message.project(&["model"])?;
+        if let Some(blocks) = message.get("content").map(|v| v.array()).transpose()?.flatten() {
+            let mut content = Vec::new();
+            for block in blocks {
+                content.push(match Fields::parse(block?, &["type", "id", "tool_use_id"])? {
+                    Some(block) => Value::Object(block.project(&["type", "id", "tool_use_id"])?),
+                    None => Value::Null,
+                });
+            }
+            projected.insert("content".into(), Value::Array(content));
+        }
+        facts.insert("message".into(), Value::Object(projected));
+    }
+    if let Some(head) = fields
+        .get("compactMetadata")
+        .map(|v| v.get("preservedSegment"))
+        .transpose()?
+        .flatten()
+        .map(|v| v.get("headUuid"))
+        .transpose()?
+        .flatten()
+    {
+        facts.insert(
+            "compactMetadata".into(),
+            serde_json::json!({"preservedSegment":{"headUuid":head.resolve()?.into_owned()}}),
+        );
+    }
+    Ok(Value::Object(facts))
+}
+
+/// Read only the decision fields of the record starting at `off`.
+fn read_line_at(source: &crate::json::JsonSource, file: &std::fs::File, off: u64) -> Result<Option<Value>> {
+    use crate::harness::store::jsonl::ranges::{self, Range};
+    let Some(row) = ranges::records(
+        file,
+        Range {
+            offset: off,
+            len: source.len() - off,
+        },
+    )?
+    .next() else {
+        return Ok(None);
+    };
+    let (range, _) = row?;
+    match source.read_range_value(range.offset, range.len, selection_facts) {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if error.is::<crate::json::InvalidJson>() => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 /// Update the open tool-call set from one record: an assistant's `tool_use` blocks open calls, a

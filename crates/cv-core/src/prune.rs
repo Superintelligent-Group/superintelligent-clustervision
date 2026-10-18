@@ -479,8 +479,8 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
             Err(e) => return Err(e),
         };
         let facts = facts.map(|mut facts| {
-            if subagent {
-                crate::rewind::normalize_subagent_record(&mut facts);
+            if subagent && facts.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+                facts["isSidechain"] = Value::Bool(false);
             }
             facts
         });
@@ -598,17 +598,30 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
 
     for (idx, (facts, range)) in parsed.into_iter().zip(lines.iter()).enumerate() {
         let Some(facts) = facts else {
-            // Keep malformed/blank records byte-identical without owning their bodies.
-            // Planning validated UTF-8; captured source guards cover this staged copy too.
+            // Malformed/blank records use the same writer with no accepted rewrite nodes.
+            let mut scan = MarkerWriter::new(&mut output);
+            let selected = crate::derive::Select {
+                range: *range,
+                newline: true,
+                record: None,
+                ids: Vec::new(),
+                replacements: Vec::new(),
+                root: false,
+            };
+            crate::derive::derive(
+                &source,
+                &file,
+                std::iter::once(Ok(selected)),
+                &crate::derive::Rewrite {
+                    session_id: &new_id,
+                    standalone: subagent,
+                },
+                &mut scan,
+            )?;
             if opts.revive {
-                let mut scan = MarkerWriter::new(&mut output);
-                std::io::copy(&mut ranges::reader(&file, *range)?, &mut scan)?;
                 output_facts.push(None);
                 output_pruned.push(scan.found);
-            } else {
-                std::io::copy(&mut ranges::reader(&file, *range)?, &mut output)?;
             }
-            output.write_all(b"\n")?;
             continue;
         };
         let ty = facts.get("type").and_then(Value::as_str).unwrap_or("");
@@ -646,93 +659,16 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
         }
 
         let needs_root = (subagent || (windowing && keep_start > 0)) && !rooted && is_main_turn(&facts);
-        if subagent {
-            let plan = if is_turn_line && (opts.declassify || (is_old && (ty == "user" || opts.thinking))) {
-                source_turn_prune(
-                    &source,
-                    *range,
-                    opts,
-                    &new_id,
-                    idx,
-                    &tool_names,
-                    is_old && ty == "user",
-                    is_old && ty == "assistant" && opts.thinking,
-                )?
-            } else {
-                None
-            };
-            let mut replacements = Vec::new();
-            if needs_root {
-                rooted = true;
-            }
-            let record = source.validated_range(range.offset, range.len)?;
-            if needs_root {
-                if let Some(parent) = source_parent_override(&record)? {
-                    replacements.push(parent);
-                }
-            }
-            let mut facts = facts;
-            if let Some(plan) = plan {
-                replacements.extend(plan.replacements);
-                pruned_count += plan.payloads.len();
-                est_tokens_saved += plan.saved;
-                image_blocks += plan.images;
-                if !opts.drop {
-                    for payload in &plan.payloads {
-                        write_source_payload(payload, &mut sidecar_stage)?;
-                        sidecar_count += 1;
-                    }
-                }
-                if opts.revive {
-                    if let Some(facts) = facts.as_object_mut() {
-                        plan.estimate.store(facts);
-                    }
-                }
-            }
-            let mut scan = MarkerWriter::new(&mut output);
-            record.with_view(|view| write_subagent_source(view, &replacements, &new_id, &mut scan))?;
-            scan.write_all(b"\n")?;
-            if opts.revive {
-                output_facts.push(Some(facts));
-                output_pruned.push(scan.found);
-            }
-            continue;
-        }
-        let may_mutate =
-            (is_old && ty == "user" && facts.get("_prune_payload").and_then(Value::as_bool).unwrap_or(true))
+        rooted |= needs_root;
+        let may_prune = is_turn_line
+            && (opts.declassify
+                || (is_old && ty == "user" && facts["_prune_payload"].as_bool().unwrap_or(true))
                 || (is_old
                     && ty == "assistant"
                     && opts.thinking
-                    && facts.get("_prune_thinking").and_then(Value::as_bool).unwrap_or(true))
-                || (is_turn_line && opts.declassify)
-                || (needs_root && facts.get("_prune_parent").and_then(Value::as_bool).unwrap_or(true));
-        if !may_mutate {
-            let mut scan = MarkerWriter::new(&mut output);
-            crate::restamp::write_restamped_spans(
-                &source,
-                &file,
-                range.offset,
-                range.len,
-                &new_id,
-                &mut id_spans.remove(&range.offset).unwrap_or_default(),
-                &mut scan,
-            )?;
-            scan.write_all(b"\n")?;
-            let pruned = scan.found;
-            if needs_root {
-                rooted = true;
-            }
-            if opts.revive {
-                output_facts.push(Some(facts));
-                output_pruned.push(pruned);
-            }
-            continue;
-        }
-        if is_turn_line {
-            if needs_root {
-                rooted = true;
-            }
-            if let Some(mut plan) = source_turn_prune(
+                    && facts["_prune_thinking"].as_bool().unwrap_or(true)));
+        let plan = if may_prune {
+            source_turn_prune(
                 &source,
                 *range,
                 opts,
@@ -741,100 +677,48 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
                 &tool_names,
                 is_old && ty == "user",
                 is_old && ty == "assistant" && opts.thinking,
-            )? {
-                if needs_root {
-                    if let Some(parent) = source_parent_override(&plan.record)? {
-                        plan.replacements.push(parent);
-                    }
-                }
-                plan.record
-                    .with_view(|view| view.write_canonical_replacing(&plan.replacements, &mut output))?;
-                output.write_all(b"\n")?;
-                pruned_count += plan.payloads.len();
-                est_tokens_saved += plan.saved;
-                image_blocks += plan.images;
-                if !opts.drop {
-                    for payload in &plan.payloads {
-                        write_source_payload(payload, &mut sidecar_stage)?;
-                        sidecar_count += 1;
-                    }
-                }
-                if opts.revive {
-                    let mut facts = facts;
-                    if let Some(facts) = facts.as_object_mut() {
-                        plan.estimate.store(facts);
-                    }
-                    output_facts.push(Some(facts));
-                    output_pruned.push(true);
-                }
-            } else {
-                let record = source.validated_range(range.offset, range.len)?;
-                if needs_root && source_parent_override(&record)?.is_some() {
-                    let pruned = write_source_reroot(
-                        &record,
-                        &source,
-                        &new_id,
-                        &id_spans.remove(&range.offset).unwrap_or_default(),
-                        &mut output,
-                    )?;
-                    if opts.revive {
-                        output_pruned.push(pruned);
-                        output_facts.push(Some(facts));
-                    }
-                } else {
-                    // No mutation was selected; preserve the exact untouched raw record.
-                    let mut scan = MarkerWriter::new(&mut output);
-                    crate::restamp::write_restamped_spans(
-                        &source,
-                        &file,
-                        range.offset,
-                        range.len,
-                        &new_id,
-                        &mut id_spans.remove(&range.offset).unwrap_or_default(),
-                        &mut scan,
-                    )?;
-                    scan.write_all(b"\n")?;
-                    if opts.revive {
-                        output_pruned.push(scan.found);
-                        output_facts.push(Some(facts));
-                    }
+            )?
+        } else {
+            None
+        };
+        let mut facts = facts;
+        let mut selection = crate::derive::Select {
+            range: *range,
+            newline: true,
+            record: Some(source.validated_range(range.offset, range.len)?),
+            ids: id_spans.remove(&range.offset).unwrap_or_default(),
+            replacements: Vec::new(),
+            root: needs_root,
+        };
+        if let Some(plan) = plan {
+            selection.record = Some(plan.record);
+            selection.replacements = plan.replacements;
+            pruned_count += plan.payloads.len();
+            est_tokens_saved += plan.saved;
+            image_blocks += plan.images;
+            if !opts.drop {
+                for payload in &plan.payloads {
+                    write_source_payload(payload, &mut sidecar_stage)?;
+                    sidecar_count += 1;
                 }
             }
-            continue;
-        }
-        if needs_root
-            && !opts.declassify
-            && !(is_old
-                && ty == "assistant"
-                && opts.thinking
-                && facts.get("_prune_thinking").and_then(Value::as_bool).unwrap_or(true))
-        {
-            rooted = true;
-            let record = source.validated_range(range.offset, range.len)?;
-            let pruned = write_source_reroot(
-                &record,
-                &source,
-                &new_id,
-                &id_spans.remove(&range.offset).unwrap_or_default(),
-                &mut output,
-            )?;
             if opts.revive {
-                output_facts.push(Some(facts));
-                output_pruned.push(pruned);
+                if let Some(facts) = facts.as_object_mut() {
+                    plan.estimate.store(facts);
+                }
             }
-            continue;
         }
         let mut scan = MarkerWriter::new(&mut output);
-        crate::restamp::write_restamped_spans(
+        crate::derive::derive(
             &source,
             &file,
-            range.offset,
-            range.len,
-            &new_id,
-            &mut id_spans.remove(&range.offset).unwrap_or_default(),
+            std::iter::once(Ok(selection)),
+            &crate::derive::Rewrite {
+                session_id: &new_id,
+                standalone: subagent,
+            },
             &mut scan,
         )?;
-        scan.write_all(b"\n")?;
         if opts.revive {
             output_facts.push(Some(facts));
             output_pruned.push(scan.found);
@@ -1589,13 +1473,6 @@ fn source_turn_prune(
                 replacements.push((content.to_json()?, Value::Array(array)));
             }
         }
-        for key in ["sessionId", "session_id"] {
-            if let Some(value) = top.get(key) {
-                if value.is_string()? {
-                    replacements.push((value.to_json()?, Value::String(new_id.into())));
-                }
-            }
-        }
         let mut estimate = if opts.revive && !content.map(|value| value.is_array()).transpose()?.unwrap_or(false) {
             match projected_content.as_ref() {
                 Some(value) => est_content(value),
@@ -2041,78 +1918,6 @@ fn tur_is_image_source(value: crate::json::JsonView<'_>) -> Result<bool> {
         return Ok(false);
     };
     Ok(file.get("base64").is_some() || file.string("type")?.is_some_and(|ty| ty.starts_with("image/")))
-}
-
-fn source_parent_override(record: &crate::json::Json) -> Result<Option<(crate::json::Json, Value)>> {
-    record.with_view(|view| {
-        let Some(parent) = view.get("parentUuid")? else {
-            return Ok(None);
-        };
-        if parent.is_null()? {
-            return Ok(None);
-        }
-        Ok(Some((parent.to_json()?, Value::Null)))
-    })
-}
-fn write_source_reroot(
-    record: &crate::json::Json,
-    source: &crate::json::JsonSource,
-    new_id: &str,
-    ids: &[(u64, u64)],
-    output: &mut impl Write,
-) -> Result<bool> {
-    let mut replacements = Vec::new();
-    if let Some(parent) = source_parent_override(record)? {
-        replacements.push(parent);
-    }
-    // Rerooting follows restamp of the untouched row: duplicate id fields reject that stamp.
-    // Preserve the captured accepted id roster rather than stamping the normalized object.
-    for &(start, end) in ids {
-        replacements.push((
-            source.validated_range(start, end - start)?,
-            Value::String(new_id.into()),
-        ));
-    }
-    let mut scan = MarkerWriter::new(output);
-    record.with_view(|view| view.write_canonical_replacing(&replacements, &mut scan))?;
-    scan.write_all(b"\n")?;
-    Ok(scan.found)
-}
-
-/// Stream a selected native child's record as a standalone record, retaining checked large
-/// payloads and applying the same top-level normalization as rewind's owned record path.
-fn write_subagent_source(
-    view: crate::json::JsonView<'_>,
-    replacements: &[(crate::json::Json, Value)],
-    new_id: &str,
-    writer: &mut impl Write,
-) -> Result<()> {
-    if !view.is_object()? {
-        return view.write_canonical_replacing(replacements, writer);
-    }
-    writer.write_all(b"{")?;
-    let mut first = true;
-    view.for_each_entry(|key, child| {
-        if key == "agentId" {
-            return Ok(());
-        }
-        if !first {
-            writer.write_all(b",")?;
-        }
-        first = false;
-        serde_json::to_writer(&mut *writer, key)?;
-        writer.write_all(b":")?;
-        if key == "isSidechain" && child.as_bool()? == Some(true) {
-            writer.write_all(b"false")?;
-        } else if matches!(key, "sessionId" | "session_id") && child.is_string()? {
-            serde_json::to_writer(&mut *writer, new_id)?;
-        } else {
-            child.write_canonical_replacing(replacements, writer)?;
-        }
-        Ok(())
-    })?;
-    writer.write_all(b"}")?;
-    Ok(())
 }
 
 fn write_source_payload(payload: &SourcePayload, writer: &mut impl Write) -> Result<()> {

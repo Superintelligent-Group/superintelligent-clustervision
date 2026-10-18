@@ -371,7 +371,7 @@ mod tests {
             assert_eq!(codec, [(false, true), (blank, false)], "codec, {name}");
 
             let lines = 1 + usize::from(!blank);
-            let counts = crate::restamp::write_restamped_transcript(&source, &file, "n", &mut std::io::sink()).unwrap();
+            let counts = crate::derive::transcript(&source, &file, "n", &mut std::io::sink()).unwrap();
             assert_eq!(counts.lines, lines, "restamp, {name}");
             assert_eq!(crate::restamp::restamp(&text, "n").lines, lines, "restamp text, {name}");
             assert_eq!(

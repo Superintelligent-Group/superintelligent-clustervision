@@ -1372,15 +1372,33 @@ fn source_reroot_preserves_owned_stamp_order_including_duplicate_ids() {
         let path = world.base.join("input.jsonl");
         std::fs::write(&path, &raw).unwrap();
         let source = crate::json::JsonSource::capture(&path).unwrap();
-        let spans = source
-            .read_range_value(0, raw.len() as u64, crate::restamp::source_id_spans)
-            .unwrap();
-        let record = source.validated_range(0, raw.len() as u64).unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let mut selected = crate::derive::Select::read(
+            &source,
+            Range {
+                offset: 0,
+                len: raw.len() as u64,
+            },
+            true,
+            false,
+        )
+        .unwrap();
+        selected.root = true;
         let expected = crate::restamp_line(&raw, "new").unwrap_or(raw);
         let mut expected: Value = serde_json::from_str(&expected).unwrap();
         expected["parentUuid"] = Value::Null;
         let mut actual = Vec::new();
-        assert!(write_source_reroot(&record, &source, "new", &spans, &mut actual).unwrap());
+        crate::derive::derive(
+            &source,
+            &file,
+            std::iter::once(Ok(selected)),
+            &crate::derive::Rewrite {
+                session_id: "new",
+                standalone: false,
+            },
+            &mut actual,
+        )
+        .unwrap();
         assert_eq!(actual, format!("{expected}\n").as_bytes());
     }
 }
@@ -2480,7 +2498,7 @@ fn assert_frozen_plan(key: &str, plan: Option<&SourcePrune>) {
     let actual = if let Some(p) = plan {
         let mut output = Vec::new();
         p.record
-            .with_view(|v| v.write_canonical_replacing(&p.replacements, &mut output))
+            .with_view(|v| crate::derive::write_modified(v, &p.replacements, "new", false, &mut output))
             .unwrap();
         let mut sidecar = Vec::new();
         for payload in &p.payloads {
@@ -2501,4 +2519,32 @@ fn assert_frozen_plan(key: &str, plan: Option<&SourcePrune>) {
         .find(|row| row["key"] == key)
         .unwrap();
     assert_eq!(actual, expected, "{key}");
+}
+
+#[test]
+fn standalone_prune_preserves_unmodified_metadata_bytes_at_every_size() {
+    for padding in [0, 1024 * 1024] {
+        let world = crate::test_world("prune-standalone-raw-metadata");
+        let path = world.base.join("agent-child.jsonl");
+        let metadata = format!(
+            "{{ \"type\" : \"system\", \"sessionId\" : \"old\", \"value\" : 1.00, \"padding\":\"{}\" }}",
+            "x".repeat(padding)
+        );
+        let user = r#"{"type":"user","sessionId":"old","isSidechain":true,"agentId":"child","uuid":"u","parentUuid":"parent","message":{"content":"prompt"}}"#;
+        std::fs::write(&path, format!("{metadata}\n{user}\n")).unwrap();
+        let result = prune_session(
+            &path,
+            &PruneOptions {
+                new_id: Some("derived".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let output = std::fs::read_to_string(result.new_path).unwrap();
+        assert!(output.starts_with(&format!("{}\n", crate::restamp_line(&metadata, "derived").unwrap())));
+        let second: Value = serde_json::from_str(output.lines().nth(1).unwrap()).unwrap();
+        assert_eq!(second["isSidechain"], false);
+        assert!(second.get("agentId").is_none());
+        assert!(second["parentUuid"].is_null());
+    }
 }

@@ -36,6 +36,7 @@ pub mod ingest;
 pub mod ir;
 mod ir_json;
 pub use ir_json::PrettyJson;
+mod derive;
 pub mod json;
 pub mod lanes;
 pub mod lazy;
