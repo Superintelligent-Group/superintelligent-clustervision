@@ -3,7 +3,7 @@ use std::cmp::Ordering;
 
 /// Only harnesses whose discovery reads observe a writer declaration are listed here.
 /// The roster lives inside the published crate; its test checks the corpus manifests.
-pub const VERIFIED: &[(&str, &str)] = &[("claude", "2.1.296"), ("codex", "0.162.1")];
+pub const VERIFIED: &[(&str, &str)] = &[("claude", "2.1.296"), ("codex", "0.163.0")];
 
 pub struct Observed {
     pub harness: &'static str,
