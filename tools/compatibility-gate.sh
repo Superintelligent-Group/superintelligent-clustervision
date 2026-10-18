@@ -14,7 +14,7 @@ git worktree add --detach "$baseline" "$sha"
 cp crates/cv-core/examples/compatibility_probe.rs "$baseline/crates/cv-core/examples/compatibility_probe.rs"
 export RUSTC_WRAPPER=${RUSTC_WRAPPER:-sccache}
 export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-8}
-(( CARGO_BUILD_JOBS <= 8 )) || { echo 'CARGO_BUILD_JOBS must be <=8' >&2; exit 1; }
+[[ "$CARGO_BUILD_JOBS" =~ ^[1-8]$ ]] || { echo 'CARGO_BUILD_JOBS must be an integer from 1 to 8' >&2; exit 1; }
 export CLUSTERVISION_HOME="$scratch/build-home"
 candidate_target=${CARGO_TARGET_DIR:-"$root/target"}
 # Absolute target paths survive the baseline's different working directory.

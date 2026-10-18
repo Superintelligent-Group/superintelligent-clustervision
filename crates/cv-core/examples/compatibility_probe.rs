@@ -1,7 +1,7 @@
 //! Private compatibility fixture: use the library's real public serde types, never a copied codec.
 use cv_core::{Message, MessageKind, Origin, Role};
-use std::io::Read;
 use serde_json::{json, Value};
+use std::io::Read;
 
 fn main() {
     let mut input = String::new();

@@ -233,12 +233,29 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("baseline", "candidate", "baseline-probe", "candidate-probe", "baseline-source", "candidate-source", "baseline-tag", "candidate-version"):
         parser.add_argument("--" + name, required=True)
+    parser.add_argument("--exercise-mutations", action="store_true", help="prove the comparator rejects mutations of the collected real contracts")
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="cv-compat-") as root:
         before = collect(Path(args.baseline).resolve(), Path(args.baseline_probe).resolve(), args.baseline_source, Path(root) / "baseline")
         after = collect(Path(args.candidate).resolve(), Path(args.candidate_probe).resolve(), args.candidate_source, Path(root) / "candidate")
         compare(before, after, args.baseline_tag, args.candidate_version)
-    print(f"compatible with {args.baseline_tag}: CLI/schema, real JSON/serde, MCP, HTTP routes, exits")
+        if args.exercise_mutations:
+            additive = json.loads(json.dumps(after))
+            additive["rows"][0]["compat_optional"] = "str"
+            compare(before, additive, args.baseline_tag, args.candidate_version)
+            for mutation in ("row removal", "row type", "route removal", "MCP removal"):
+                broken = json.loads(json.dumps(after))
+                if mutation == "row removal": broken["rows"][0].pop("id")
+                if mutation == "row type": broken["rows"][0]["id"] = "int"
+                if mutation == "route removal": broken["routes"].pop(next(iter(before["routes"])))
+                if mutation == "MCP removal": broken["tools"] = [t for t in broken["tools"] if t["name"] != "show"]
+                try:
+                    compare(before, broken, args.baseline_tag, args.candidate_version)
+                except Incompatible:
+                    continue
+                raise Incompatible(f"comparator accepted intentional {mutation}")
+            print("real-contract mutations: additive field passes; row removal/type, route removal and MCP removal fail")
+    print(f"compatible with {args.baseline_tag}: {len(before['commands'])} CLI commands, {len(before['tools'])} MCP tools, {len(before['routes'])} HTTP patterns; schema, real JSON/serde and exits")
 
 
 if __name__ == "__main__":
