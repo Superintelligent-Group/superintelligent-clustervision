@@ -240,6 +240,10 @@ mod imp {
                  ALTER TABLE sessions ADD COLUMN updated_ns INTEGER;",
             );
         }
+        // Nullable: NULL is "no writer version examined", which an older binary's INSERT OR
+        // REPLACE also produces. Whether a recorded one still describes its source is
+        // `source_dependencies`' business (consumer [`WRITER_VERSION`]), not this column's.
+        let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN writer_version TEXT;");
         let has_version: bool = conn
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM pragma_table_info('scan_cache') WHERE name='interpretation_version')",
@@ -357,11 +361,14 @@ mod imp {
     }
 
     /// Insert (or replace) every ref through `stmt` — shared by [`sync`] and [`Reader::replace_harness`].
+    /// A replaced row keeps its `writer_version`: discovery does not know it, and omitting the
+    /// column would erase it.
     fn insert_refs(tx: &rusqlite::Transaction, refs: &[SessionRef]) -> rusqlite::Result<()> {
         let mut stmt = tx.prepare(
             "INSERT OR REPLACE INTO sessions
-             (harness,id,path,cwd,title,created_at,updated_at,message_count,created_ns,updated_ns)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+             (harness,id,path,cwd,title,created_at,updated_at,message_count,created_ns,updated_ns,writer_version)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,
+                 (SELECT writer_version FROM sessions WHERE harness=?1 AND id=?2 AND path=?3))",
         )?;
         for r in refs {
             stmt.execute(params![
@@ -588,8 +595,14 @@ mod imp {
         rewrite_sessions: bool,
     ) -> rusqlite::Result<()> {
         if rewrite_sessions {
+            let versions = recorded_writer_versions(tx, h)?;
             tx.execute("DELETE FROM sessions WHERE harness=?1", params![h.as_str()])?;
             insert_refs(tx, refs)?;
+            let mut restore =
+                tx.prepare("UPDATE sessions SET writer_version=?4 WHERE harness=?1 AND id=?2 AND path=?3")?;
+            for (id, path, version) in &versions {
+                restore.execute(params![h.as_str(), id, path, version])?;
+            }
         }
         let watch_rows = watches
             .iter()
@@ -910,6 +923,121 @@ mod imp {
         );
         if written.is_ok() && crate::source::publish_in(&tx, "counts", r, source, text.as_bytes()).is_ok() {
             let _ = tx.commit();
+        }
+    }
+
+    /// The `source_dependencies` consumer under which a recorded writer version is published:
+    /// the version is current only while the source it was read from is unchanged.
+    const WRITER_VERSION: &str = "writer_version";
+
+    /// `(id, path, writer_version)` for every row of `h` that has one, for rows a rewrite
+    /// deletes and reinserts.
+    fn recorded_writer_versions(
+        tx: &rusqlite::Transaction,
+        h: Harness,
+    ) -> rusqlite::Result<Vec<(String, String, String)>> {
+        let mut stmt =
+            tx.prepare("SELECT id,path,writer_version FROM sessions WHERE harness=?1 AND writer_version IS NOT NULL")?;
+        let rows = stmt.query_map([h.as_str()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        rows.collect()
+    }
+
+    /// Record the writer version `r`'s source declares (`None`: the examined source declares
+    /// none, which settles the row as surely as a version does) against `source`, the baseline
+    /// captured before the examining read. Only a complete read (`Baseline::with_reads`) of a
+    /// still-unchanged source, for a session the catalog already lists, publishes; anything else
+    /// leaves the row unexamined. Never creates the catalog.
+    pub fn note_writer_version(r: &SessionRef, source: &crate::source::Baseline, version: Option<&str>) {
+        if !db_path().is_some_and(|p| p.exists()) {
+            return;
+        }
+        let Some(mut conn) = open() else { return };
+        note_writer_version_in(&mut conn, r, source, version);
+    }
+
+    pub(crate) fn note_writer_version_in(
+        conn: &mut Connection,
+        r: &SessionRef,
+        source: &crate::source::Baseline,
+        version: Option<&str>,
+    ) {
+        if !crate::source::unchanged(r, source) {
+            return;
+        }
+        // "" is the stored form of "examined, declares none"; NULL stays "never examined".
+        let text = version.unwrap_or("");
+        let Ok(tx) = conn.transaction() else { return };
+        let written = tx.execute(
+            "UPDATE sessions SET writer_version=?4 WHERE harness=?1 AND id=?2 AND path=?3",
+            params![r.harness.as_str(), r.id, r.path.to_string_lossy(), text],
+        );
+        if written == Ok(1) && crate::source::publish_in(&tx, WRITER_VERSION, r, source, text.as_bytes()).is_ok() {
+            let _ = tx.commit();
+        }
+    }
+
+    /// Every recorded writer version, loaded once for a sweep. A row is **settled** while its
+    /// version was published against a source that is still the same file; everything else
+    /// (never examined, source changed, record missing or foreign) is stale and is the
+    /// backfill worklist.
+    pub struct WriterVersions {
+        rows: std::collections::HashMap<(String, String, String), String>,
+        dependencies: crate::source::Table,
+    }
+
+    impl WriterVersions {
+        pub fn load() -> WriterVersions {
+            let load = || -> Option<WriterVersions> {
+                let mut conn = open()?;
+                let tx = conn.transaction().ok()?;
+                let mut stmt = tx
+                    .prepare("SELECT harness,id,path,writer_version FROM sessions WHERE writer_version IS NOT NULL")
+                    .ok()?;
+                let rows = stmt
+                    .query_map([], |row| Ok(((row.get(0)?, row.get(1)?, row.get(2)?), row.get(3)?)))
+                    .ok()?;
+                Some(WriterVersions {
+                    rows: rows.flatten().collect(),
+                    dependencies: crate::source::Table::load_in(&tx, WRITER_VERSION),
+                })
+            };
+            load().unwrap_or_else(|| WriterVersions {
+                rows: Default::default(),
+                dependencies: Default::default(),
+            })
+        }
+
+        /// `Some(Some(v))`: the source declared `v`; `Some(None)`: it was examined and declares
+        /// none; `None`: unexamined or stale. Stats the session once.
+        pub fn version(&self, r: &SessionRef) -> Option<Option<&str>> {
+            self.version_with_probe(
+                r,
+                &crate::source::Probe::default().snapshot(r),
+                &mut crate::source::Probe::default(),
+            )
+        }
+
+        /// [`Self::version`] against a baseline and probe an operation already shares.
+        pub fn version_with_probe(
+            &self,
+            r: &SessionRef,
+            source: &crate::source::Baseline,
+            probe: &mut crate::source::Probe,
+        ) -> Option<Option<&str>> {
+            let key = (
+                r.harness.as_str().to_string(),
+                r.id.clone(),
+                r.path.to_string_lossy().into_owned(),
+            );
+            let text = self.rows.get(&key)?;
+            self.dependencies
+                .fresh(r, source, text.as_bytes(), probe)
+                .then_some((!text.is_empty()).then_some(text.as_str()))
+        }
+
+        /// Whether `r` needs its writer version read (again).
+        pub fn stale(&self, r: &SessionRef) -> bool {
+            self.version(r).is_none()
         }
     }
 
@@ -1749,7 +1877,9 @@ pub(crate) enum Watched {
 }
 
 #[cfg(feature = "sqlite")]
-pub use imp::{fill_count, lookup, note_affordances_with_source, sync, AffordanceTable};
+pub use imp::{
+    fill_count, lookup, note_affordances_with_source, note_writer_version, sync, AffordanceTable, WriterVersions,
+};
 
 #[cfg(all(feature = "sqlite", test))]
 pub(crate) use imp::replace_harness;
@@ -1802,6 +1932,31 @@ impl AffordanceTable {
     }
 }
 #[cfg(not(feature = "sqlite"))]
+pub fn note_writer_version(_r: &SessionRef, _source: &crate::source::Baseline, _version: Option<&str>) {}
+/// Without a catalog no writer version is ever recorded, so none is ever worth reading for.
+#[cfg(not(feature = "sqlite"))]
+pub struct WriterVersions;
+#[cfg(not(feature = "sqlite"))]
+impl WriterVersions {
+    pub fn load() -> WriterVersions {
+        WriterVersions
+    }
+    pub fn version(&self, _r: &SessionRef) -> Option<Option<&str>> {
+        None
+    }
+    pub fn version_with_probe(
+        &self,
+        _r: &SessionRef,
+        _source: &crate::source::Baseline,
+        _probe: &mut crate::source::Probe,
+    ) -> Option<Option<&str>> {
+        None
+    }
+    pub fn stale(&self, _r: &SessionRef) -> bool {
+        false
+    }
+}
+#[cfg(not(feature = "sqlite"))]
 pub fn lookup(_id: &str, _harness: Option<Harness>) -> Vec<SessionRef> {
     Vec::new()
 }
@@ -1820,3 +1975,5 @@ pub(crate) fn all_sessions() -> Option<Vec<SessionRef>> {
 
 #[cfg(all(test, feature = "sqlite"))]
 mod counts_tests;
+#[cfg(all(test, feature = "sqlite"))]
+mod writer_version_tests;

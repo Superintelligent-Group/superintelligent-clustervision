@@ -94,8 +94,11 @@ struct Cache {
 }
 
 /// Bump when discovery changes the interpretation of unchanged source bytes.
+/// 5: 0.18's one bump, covering the `sessions.writer_version` column and the discovery change
+/// that shares it. Version-5 catalogs are never bumped again within 0.18: writer versions of
+/// existing rows are backfilled through [`crate::catalog::WriterVersions`], not by a rescan.
 #[cfg(feature = "sqlite")]
-pub(crate) const INTERPRETATION_VERSION: u32 = 4;
+pub(crate) const INTERPRETATION_VERSION: u32 = 5;
 /// Every live cache by catalog. Each environment ([`crate::env`]) retains its current catalog's;
 /// other homes survive only while operations use them.
 static CACHE: OnceLock<RwLock<HashMap<PathBuf, std::sync::Weak<Cache>>>> = OnceLock::new();
