@@ -44,6 +44,12 @@ impl Read {
         &self.source
     }
 
+    /// Check the opened backing after callbacks, before borrowing its mapping again. This
+    /// observes the original inode even if the pathname was replaced; completion checks the path.
+    pub(crate) fn check_backing(&self) -> anyhow::Result<()> {
+        self.source.check_metadata(self.file.metadata()?)
+    }
+
     /// Whole or resumed read through the captured EOF. An unterminated record at actual EOF
     /// may be valid, but never offers a complete checkpoint boundary.
     pub(crate) fn lines(
@@ -92,7 +98,7 @@ impl Read {
             }
             visit(line)
         });
-        self.source.check_metadata(self.file.metadata()?)?;
+        self.check_backing()?;
         self.source.check()?;
         read
     }
