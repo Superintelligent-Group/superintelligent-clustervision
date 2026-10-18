@@ -53,46 +53,28 @@ pub(super) fn items(reader: &mut Reader<'_>, root: JsonView<'_>) -> Result<()> {
 }
 
 /// Discovery deliberately keeps the legacy policy: only session timestamps, no cwd, no event
-/// authority, and turns counted by the record codec's heads demand, one item at a time.
+/// authority; counts are deferred until full reads.
 pub(super) fn scan(path: &Path) -> Result<CodexScan> {
     Ok(read(path, |_source, root| {
         let mut scan = CodexScan::default();
         let meta = root
             .get("session")?
-            .map(|v| Fields::parse(v, &["id", "timestamp", "agent_path"]))
+            .map(|v| Fields::parse(v, &["id", "timestamp"]))
             .transpose()?
             .flatten();
-        let mut ctx = CodexCtx::default();
         if let Some(meta) = meta {
             scan.id = meta.string("id")?.unwrap_or_default();
             scan.created_at = meta.string("timestamp")?.as_deref().and_then(parse_ts);
             scan.updated_at = scan.created_at;
-            ctx.agent_path = meta.string("agent_path")?;
         }
-        let mut session = Session::new(String::new(), Harness::Codex);
-        let mut out = Vec::new();
         if let Some(items) = items_of(root)? {
             for item in items {
                 let item = item?;
-                Reader {
-                    session: &mut session,
-                    ctx: &mut ctx,
-                    out: &mut out,
-                    has_events: false,
-                    demand: Demand {
-                        spans: false,
-                        heads: true,
-                    },
-                    source: None,
-                }
-                .item(Some(item), None)?;
-                scan.message_count += out.drain(..).filter(|m| m.is_turn()).count();
-                if scan.title.is_none() {
-                    if let Some(fields) = Fields::parse(item, &["type", "role", "content"])? {
-                        let user = fields.string("role")?.as_deref().unwrap_or("user") == "user";
-                        if fields.string("type")?.as_deref() == Some("message") && user {
-                            scan.consider_title(title_of(fields.get("content"), None)?);
-                        }
+                let payload = record::Payload::of(item)?;
+                if payload.ty.as_deref() == Some("message") && payload.role.as_deref().unwrap_or("user") == "user" {
+                    scan.consider_title(title_of(payload.view.get("content")?, None)?);
+                    if scan.title.is_some() {
+                        break;
                     }
                 }
             }
