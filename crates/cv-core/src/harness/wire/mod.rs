@@ -1,4 +1,4 @@
-//! The two wire shapes most harnesses persist, read into [`Block`](crate::ir::Block)s and written
+//! The wire shapes most harnesses persist, read into [`Block`](crate::ir::Block)s and written
 //! back out, each spelled **once**:
 //!
 //! - [`anthropic`]: the Messages-API content array (`text | thinking | redacted_thinking | tool_use
@@ -8,12 +8,15 @@
 //!   plus `tool_calls[].function.arguments` as a JSON **string** — Codex, Kimi, Kimi Code, Hermes,
 //!   Continue, Grok.
 //!
+//! - [`genai`]: GenAI parts shared by Qwen and Gemini, retaining each store's tool wrappers.
+//!
 //! An adapter names its store's spelling with a `Quirks` constant and keeps only what is genuinely
 //! its own: where its files are and which records mean prompt, reply, tool, compaction.
 
 use serde_json::Value;
 
 pub mod anthropic;
+pub(crate) mod genai;
 pub mod openai;
 pub(crate) mod write;
 
@@ -235,3 +238,6 @@ mod tests {
         assert_eq!(coerce_text(Some(&json!({"text": "not an array"}))), "");
     }
 }
+
+#[cfg(test)]
+pub(crate) mod genai_frozen;

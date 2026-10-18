@@ -10,6 +10,7 @@
 //! (`--out ~/.qwen`, or a scratch dir: the file goes to its `projects/`).
 
 use crate::emit::*;
+use crate::harness::wire::genai;
 use crate::harness::{
     store::JsonlStage,
     wire::write::{self as wire, ObjectWriter},
@@ -88,31 +89,11 @@ fn write_parts(writer: &mut dyn Write, parts: &[Part<'_>], resolver: &Resolver) 
         }
         let mut row = ObjectWriter::new(writer)?;
         match part {
-            Part::Text(text) => row.field_with("text", |w| wire::text(w, text, resolver))?,
+            Part::Text(text) => genai::text_fields(&mut row, text, false, None, resolver)?,
             Part::Thinking { text, signature } => {
-                row.field_with("text", |w| wire::text(w, text, resolver))?;
-                row.field("thought", true)?;
-                if let Some(signature) = signature {
-                    row.field("thoughtSignature", signature)?;
-                }
+                genai::text_fields(&mut row, text, true, signature.as_deref(), resolver)?
             }
-            Part::Other(Block::Image { media_type, .. }) => row.field_with("inlineData", |w| {
-                let mut data = ObjectWriter::new(w)?;
-                if let Some(mime) = media_type {
-                    data.field("mimeType", mime)?;
-                }
-                data.finish()
-            })?,
-            Part::Other(Block::File { mime, path, source }) => row.field_with("fileData", |w| {
-                let mut data = ObjectWriter::new(w)?;
-                if let Some(mime) = mime {
-                    data.field("mimeType", mime)?;
-                }
-                if let Some(uri) = source.as_deref().or(path.as_deref()) {
-                    data.field("fileUri", uri)?;
-                }
-                data.finish()
-            })?,
+            Part::Other(block @ (Block::Image { .. } | Block::File { .. })) => genai::media_fields(&mut row, block)?,
             Part::Other(Block::ToolUse {
                 id,
                 name,

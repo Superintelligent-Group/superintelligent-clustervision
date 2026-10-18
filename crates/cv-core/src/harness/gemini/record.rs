@@ -6,6 +6,7 @@
 
 use super::*;
 use crate::harness::store::{document::Fields, text};
+use crate::harness::wire::genai::{self, Dialect, Part};
 use crate::json::{JsonSource, JsonView};
 use crate::lazy::{Resolver, Text};
 
@@ -379,13 +380,6 @@ pub(super) fn content_blocks(view: JsonView<'_>, d: Demand<'_>, out: &mut Vec<Bl
     Ok(false)
 }
 
-fn object_field<'a>(fields: &Fields<'a>, key: &str) -> Result<Option<JsonView<'a>>> {
-    match fields.get(key) {
-        Some(view) if view.is_object()? => Ok(Some(view)),
-        _ => Ok(None),
-    }
-}
-
 /// One Part: text / inlineData / fileData / functionCall / functionResponse. True when it has a
 /// `functionResponse` key, whatever its value or which field won dispatch.
 fn part_block(view: JsonView<'_>, d: Demand<'_>, out: &mut Vec<Block>) -> Result<bool> {
@@ -395,81 +389,51 @@ fn part_block(view: JsonView<'_>, d: Demand<'_>, out: &mut Vec<Block>) -> Result
         }
         return Ok(false);
     }
-    let Some(obj) = Fields::parse(
-        view,
-        &[
-            "functionCall",
-            "functionResponse",
-            "inlineData",
-            "fileData",
-            "text",
-            "thought",
-        ],
-    )?
-    else {
-        return Ok(false);
-    };
-    if let Some(fc) = object_field(&obj, "functionCall")? {
-        if let Some(fc) = Fields::parse(fc, &["name", "id", "args"])? {
-            let name = fc.string("name")?.unwrap_or_else(|| "tool".into());
-            let id = fc.string("id")?.unwrap_or_else(|| format!("{name}-call"));
-            out.push(Block::ToolUse {
-                id,
-                name,
-                input: match fc.get("args") {
-                    Some(args) => args.argument(d.spans())?,
-                    None => Value::Null.into(),
-                },
-                namespace: None,
-            });
+    let selected = genai::select(view, Dialect::Gemini)?;
+    match selected.part {
+        Some(Part::Call(fc)) => {
+            if let Some(fc) = Fields::parse(fc, &["name", "id", "args"])? {
+                let name = fc.string("name")?.unwrap_or_else(|| "tool".into());
+                let id = fc.string("id")?.unwrap_or_else(|| format!("{name}-call"));
+                out.push(Block::ToolUse {
+                    id,
+                    name,
+                    input: match fc.get("args") {
+                        Some(args) => args.argument(d.spans())?,
+                        None => Value::Null.into(),
+                    },
+                    namespace: None,
+                });
+            }
         }
-    } else if let Some(fr) = object_field(&obj, "functionResponse")? {
-        if let Some(fr) = Fields::parse(fr, &["name", "id", "response"])? {
-            let name = fr.string("name")?.unwrap_or_else(|| "tool".into());
-            let id = fr.string("id")?.unwrap_or_else(|| format!("{name}-call"));
-            out.push(Block::ToolResult {
-                tool_use_id: id,
-                content: match fr.get("response") {
-                    Some(response) => d.text(value_chunk(response)?)?,
-                    None => Text::default(),
-                },
-                is_error: false,
-                tool_name: Some(name),
-                status: None,
-                details: None,
-            });
+        Some(Part::Response(fr)) => {
+            if let Some(fr) = Fields::parse(fr, &["name", "id", "response"])? {
+                let name = fr.string("name")?.unwrap_or_else(|| "tool".into());
+                let id = fr.string("id")?.unwrap_or_else(|| format!("{name}-call"));
+                out.push(Block::ToolResult {
+                    tool_use_id: id,
+                    content: match fr.get("response") {
+                        Some(response) => d.text(value_chunk(response)?)?,
+                        None => Text::default(),
+                    },
+                    is_error: false,
+                    tool_name: Some(name),
+                    status: None,
+                    details: None,
+                });
+            }
         }
-    } else if let Some(inline) = object_field(&obj, "inlineData")? {
-        if let Some(inline) = Fields::parse(inline, &["mimeType"])? {
-            out.push(Block::Image {
-                media_type: inline.string("mimeType")?,
-                data_ref: None, // we don't inline base64 bytes into the IR
-            });
-        }
-    } else if let Some(fd) = object_field(&obj, "fileData")? {
-        if let Some(fd) = Fields::parse(fd, &["mimeType", "fileUri"])? {
-            out.push(Block::File {
-                mime: fd.string("mimeType")?,
-                path: None,
-                source: fd.string("fileUri")?,
-            });
-        }
-    } else if let Some(text) = obj.get("text").map(|v| v.lazy_text(d.spans())).transpose()?.flatten() {
-        if !text.is_empty() {
-            let thought = obj.get("thought").map(JsonView::as_bool).transpose()?.flatten() == Some(true);
-            out.push(if thought {
-                Block::Thinking {
-                    text,
-                    signature: None,
-                    encrypted: None,
-                    redacted: false,
+        Some(Part::Media(block)) => out.push(block),
+        Some(Part::Text { value, thought, .. }) => {
+            if let Some(text) = value.lazy_text(d.spans())? {
+                if !text.is_empty() {
+                    out.push(genai::text_block(text, thought, None));
                 }
-            } else {
-                Block::Text { text }
-            });
+            }
         }
+        None => {}
     }
-    Ok(obj.get("functionResponse").is_some())
+    Ok(selected.response_present)
 }
 
 /// One piece of a tool result or thought: nothing, a string, or a value shown as compact JSON.
@@ -814,5 +778,39 @@ mod tests {
             }
         }
         std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod genai_contracts {
+    use super::*;
+    use crate::harness::wire::genai_frozen as frozen;
+    #[test]
+    fn decoder_matches_independent_frozen_parts() -> Result<()> {
+        let world = crate::test_world("gemini-genai-frozen");
+        let path = world.base.join("parts.json");
+        let resolver = Resolver::new(Some(path.clone()));
+        let mut rows = Vec::new();
+        for (case, parts) in frozen::cases().into_iter().enumerate() {
+            let value = parts;
+            let bytes = serde_json::to_vec(&value)?;
+            std::fs::write(&path, &bytes)?;
+            let source = JsonSource::capture(&path)?;
+            for demand in 0..2 {
+                let (blocks, flag) = source.read_range_value(0, source.len(), |view| {
+                    let d = Demand {
+                        harness: Harness::Gemini,
+                        source: if demand == 0 { None } else { Some(&source) },
+                        resolver: &resolver,
+                    };
+                    let mut blocks = Vec::new();
+                    let flag = content_blocks(view, d, &mut blocks)?;
+                    Ok((blocks, flag))
+                })?;
+                rows.push(serde_json::json!({"case":case,"demand":demand,"source_sha256":crate::digest::sha256_hex(&bytes),"result":frozen::row(blocks,flag,&resolver)?}));
+            }
+            assert_eq!(std::fs::read(&path)?, bytes, "decoder changed source");
+        }
+        frozen::assert_frozen(rows, include_str!("../../../tests/fixtures/wire/gemini-parts.jsonl"))
     }
 }

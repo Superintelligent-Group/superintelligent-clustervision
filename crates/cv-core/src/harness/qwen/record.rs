@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::harness::store::document::{text_head, text_summary, Fields};
+use crate::harness::wire::genai::{self, Dialect, Part};
 use crate::json::{JsonSource, JsonView};
 use crate::lazy::{Resolver, Text};
 
@@ -407,90 +408,85 @@ fn content_blocks(message: Option<JsonView<'_>>, demand: Demand<'_>) -> Result<V
     let discovery = matches!(demand, Demand::Discovery);
     for part in parts.into_iter().flatten() {
         let part = part?;
-        if let Some(call) = part.get("functionCall")? {
-            let name = string(Some(call), "name")?.unwrap_or_else(|| "tool".into());
-            let id = string(Some(call), "id")?.unwrap_or_else(|| name.clone());
-            let args = call.get("args")?;
-            // `tool_call` invokes a deferred tool (one `tool_search` loaded) by name:
-            // `{name, arguments}`. The call is that tool's, namespaced `tool_call`.
-            let inner = if name == TOOL_CALL { string(args, "name")? } else { None };
-            let (name, namespace, input) = match inner {
-                Some(inner) => (
-                    inner,
-                    Some(TOOL_CALL.to_string()),
-                    args.map(|v| v.get("arguments")).transpose()?.flatten(),
-                ),
-                None => (name, None, args),
-            };
-            let input = match (input, demand) {
-                (Some(_), Demand::Discovery) | (None, _) => Value::Null.into(),
-                (Some(v), Demand::Spans(_)) => v.to_json()?,
-                (Some(v), Demand::Owned) => v.resolve()?.into_owned().into(),
-            };
-            out.push(Block::ToolUse {
-                id,
-                name,
-                input,
-                namespace,
-            });
-        } else if let Some(result) = part.get("functionResponse")? {
-            let name = string(Some(result), "name")?.unwrap_or_else(|| "tool".into());
-            let resp = result.get("response")?;
-            out.push(Block::ToolResult {
-                tool_use_id: string(Some(result), "id")?.unwrap_or_else(|| name.clone()),
-                content: response(resp, demand)?,
-                is_error: resp.map(|v| v.get("error")).transpose()?.flatten().is_some(),
-                tool_name: Some(name),
-                status: None,
-                details: None,
-            });
-        } else if let Some(inline) = part.get("inlineData")? {
-            out.push(Block::Image {
-                media_type: string(Some(inline), "mimeType")?,
-                data_ref: None,
-            });
-        } else if let Some(file) = part.get("fileData")? {
-            out.push(Block::File {
-                mime: string(Some(file), "mimeType")?,
-                path: None,
-                source: string(Some(file), "fileUri")?,
-            });
-        } else if let Some(mut text) = part.get("text")?.map(|v| text_of(v, demand)).transpose()?.flatten() {
-            if text.is_empty() {
-                continue;
-            }
-            let thought = part.get("thought")?.map(|v| v.as_bool()).transpose()?.flatten() == Some(true);
-            if discovery {
-                // Counting needs block presence, tool identity and the first prompt's title;
-                // it never needs a decoded result body or argument tree. Keep the classifier's
-                // trimmed hook prefix separately from the title's untrimmed 81 characters.
-                let head = if !thought
-                    && text_head(&text, &Resolver::new(None), 80, true)?
-                        .0
-                        .starts_with(HOOK_CONTEXT_TAG)
-                {
-                    HOOK_CONTEXT_TAG.to_string()
-                } else {
-                    text_head(&text, &Resolver::new(None), 81, false)?.0
+        match genai::select(part, Dialect::Qwen)?.part {
+            Some(Part::Call(call)) => {
+                let name = string(Some(call), "name")?.unwrap_or_else(|| "tool".into());
+                let id = string(Some(call), "id")?.unwrap_or_else(|| name.clone());
+                let args = call.get("args")?;
+                // `tool_call` invokes a deferred tool (one `tool_search` loaded) by name:
+                // `{name, arguments}`. The call is that tool's, namespaced `tool_call`.
+                let inner = if name == TOOL_CALL { string(args, "name")? } else { None };
+                let (name, namespace, input) = match inner {
+                    Some(inner) => (
+                        inner,
+                        Some(TOOL_CALL.to_string()),
+                        args.map(|v| v.get("arguments")).transpose()?.flatten(),
+                    ),
+                    None => (name, None, args),
                 };
-                text = head.into();
-            }
-            if thought {
-                out.push(Block::Thinking {
-                    text,
-                    signature: if discovery {
-                        None
-                    } else {
-                        string(Some(part), "thoughtSignature")?
-                    },
-                    encrypted: None,
-                    redacted: false,
+                let input = match (input, demand) {
+                    (Some(_), Demand::Discovery) | (None, _) => Value::Null.into(),
+                    (Some(v), Demand::Spans(_)) => v.to_json()?,
+                    (Some(v), Demand::Owned) => v.resolve()?.into_owned().into(),
+                };
+                out.push(Block::ToolUse {
+                    id,
+                    name,
+                    input,
+                    namespace,
                 });
-            } else {
-                out.push(Block::Text { text });
             }
+            Some(Part::Response(result)) => {
+                let name = string(Some(result), "name")?.unwrap_or_else(|| "tool".into());
+                let resp = result.get("response")?;
+                out.push(Block::ToolResult {
+                    tool_use_id: string(Some(result), "id")?.unwrap_or_else(|| name.clone()),
+                    content: response(resp, demand)?,
+                    is_error: resp.map(|v| v.get("error")).transpose()?.flatten().is_some(),
+                    tool_name: Some(name),
+                    status: None,
+                    details: None,
+                });
+            }
+            Some(Part::Media(block)) => out.push(block),
+            Some(Part::Text {
+                value,
+                thought,
+                signature,
+            }) => {
+                let Some(mut text) = text_of(value, demand)? else {
+                    continue;
+                };
+                if text.is_empty() {
+                    continue;
+                }
+                if discovery {
+                    // Counting needs block presence, tool identity and the first prompt's title;
+                    // it never needs a decoded result body or argument tree. Keep the classifier's
+                    // trimmed hook prefix separately from the title's untrimmed 81 characters.
+                    let head = if !thought
+                        && text_head(&text, &Resolver::new(None), 80, true)?
+                            .0
+                            .starts_with(HOOK_CONTEXT_TAG)
+                    {
+                        HOOK_CONTEXT_TAG.to_string()
+                    } else {
+                        text_head(&text, &Resolver::new(None), 81, false)?.0
+                    };
+                    text = head.into();
+                }
+                let signature = match signature {
+                    Some(value) if thought && !discovery && value.is_string()? => {
+                        value.resolve()?.as_str().map(str::to_owned)
+                    }
+                    _ => None,
+                };
+                out.push(genai::text_block(text, thought, signature));
+            }
+            None => {}
         }
     }
+
     Ok(out)
 }
 
@@ -710,5 +706,37 @@ mod tests {
         };
         assert_eq!(text.try_resolve(&Resolver::new(None))?.as_ref(), HOOK_CONTEXT_TAG);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod genai_contracts {
+    use super::*;
+    use crate::harness::wire::genai_frozen as frozen;
+    #[test]
+    fn decoder_matches_independent_frozen_parts() -> Result<()> {
+        let world = crate::test_world("qwen-genai-frozen");
+        let path = world.base.join("parts.json");
+        let resolver = Resolver::new(Some(path.clone()));
+        let mut rows = Vec::new();
+        for (case, parts) in frozen::cases().into_iter().enumerate() {
+            let value = serde_json::json!({"parts":parts});
+            let bytes = serde_json::to_vec(&value)?;
+            std::fs::write(&path, &bytes)?;
+            let source = JsonSource::capture(&path)?;
+            for demand in 0..3 {
+                let (blocks, flag) = source.read_range_value(0, source.len(), |view| {
+                    let d = match demand {
+                        0 => Demand::Owned,
+                        1 => Demand::Spans(&source),
+                        _ => Demand::Discovery,
+                    };
+                    Ok((content_blocks(Some(view), d)?, false))
+                })?;
+                rows.push(serde_json::json!({"case":case,"demand":demand,"source_sha256":crate::digest::sha256_hex(&bytes),"result":frozen::row(blocks,flag,&resolver)?}));
+            }
+            assert_eq!(std::fs::read(&path)?, bytes, "decoder changed source");
+        }
+        frozen::assert_frozen(rows, include_str!("../../../tests/fixtures/wire/qwen-parts.jsonl"))
     }
 }

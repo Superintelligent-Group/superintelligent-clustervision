@@ -1,5 +1,6 @@
 //! Borrow the existing IR, stream checked leaves, and preserve the legacy ordered pretty wire.
 use super::*;
+use crate::harness::wire::genai;
 use crate::{
     harness::{
         store::{bytes::ByteStage, publish_stage},
@@ -33,7 +34,7 @@ fn parts(writer: &mut dyn Write, message: &Message, fates: &[ThinkingFate], reso
         first = false;
         let mut object = ObjectWriter::new(writer)?;
         match block {
-            Block::Text { text } => object.field_with("text", |w| write::text(w, text, resolver))?,
+            Block::Text { text } => genai::text_fields(&mut object, text, false, None, resolver)?,
             Block::Thinking {
                 text,
                 signature,
@@ -46,29 +47,10 @@ fn parts(writer: &mut dyn Write, message: &Message, fates: &[ThinkingFate], reso
                         thinking_placeholder(signature.as_deref(), encrypted.as_deref(), *redacted),
                     )?;
                 } else {
-                    object.field_with("text", |w| write::text(w, text, resolver))?;
-                    if projection == ThinkingFate::Keep {
-                        object.field("thought", true)?;
-                    }
+                    genai::text_fields(&mut object, text, projection == ThinkingFate::Keep, None, resolver)?;
                 }
             }
-            Block::Image { media_type, .. } => object.field_with("inlineData", |w| {
-                let mut data = ObjectWriter::new(w)?;
-                if let Some(mt) = media_type {
-                    data.field("mimeType", mt)?;
-                }
-                data.finish()
-            })?,
-            Block::File { mime, path, source } => object.field_with("fileData", |w| {
-                let mut data = ObjectWriter::new(w)?;
-                if let Some(mt) = mime {
-                    data.field("mimeType", mt)?;
-                }
-                if let Some(uri) = source.as_deref().or(path.as_deref()) {
-                    data.field("fileUri", uri)?;
-                }
-                data.finish()
-            })?,
+            block @ (Block::Image { .. } | Block::File { .. }) => genai::media_fields(&mut object, block)?,
             Block::ToolUse { .. } | Block::ToolResult { .. } => unreachable!(),
         }
         object.finish()?;
