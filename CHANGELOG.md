@@ -4,6 +4,7 @@
 
 - Preserve untouched native records while sharing Claude prune, rewind, and adoption derivation.
 
+- Grok listings use native summaries and stop after finding fallback titles; exact message counts appear after indexing or a complete read.
 - `cv doctor` compares observed Claude/Codex writer versions with corpus coverage, including unknown sessions; observations come from normal discovery.
 - Cataloged writer versions and interpretation 5 trigger an announced rediscovery and consumer reread after upgrading; JSON stays unchanged.
 - A compatibility gate checks the latest release against CLI schemas, serialized messages, session rows, MCP tools, HTTP routes, and exit codes.
