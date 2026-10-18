@@ -124,7 +124,7 @@ pub(super) fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Res
     wire::check_source_fields(session)?;
     let resolver = session.resolver();
     // Match explicit-title precedence, first-user selection, whitespace filtering and truncation.
-    let label = wire::fallback_title(session, Harness::OpenClaw, opts.thinking, &resolver)?;
+    let label = wire::fallback_title(session, &resolver)?;
     let new_id = opts.new_id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
     let cwd = effective_cwd(session, opts);
     let cwd_str = cwd

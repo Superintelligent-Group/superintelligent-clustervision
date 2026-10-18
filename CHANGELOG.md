@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Emitted fallback titles use meaningful prompts; Cursor CLI titles omit leading timestamp metadata while transcript text stays intact.
+
 - **Breaking:** `cv scry` with stdout piped prints the sessions it would follow once and exits 0; `--follow` keeps following, `--for 30s|5m|2h` bounds it.
 - Every waiting command announces what it waits for on stderr within a second, before its first discovery; daemons print their ready line first.
 - `cv workflow --follow` gains `--for <duration>`: stop after that long and render the run as it stands.

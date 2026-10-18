@@ -51,8 +51,7 @@ pub(super) fn discover(home: &Path, out: &mut Vec<SessionRef>) {
     }
 }
 
-/// Discovery's sink: turns, and the title of the first human prompt (its text blocks, each without
-/// leading whitespace, joined by newlines, the first 96 characters).
+/// Discovery's sink: turns and the canonical title of the first meaningful human prompt.
 #[derive(Default)]
 struct Count {
     count: usize,
@@ -63,11 +62,9 @@ impl MessageSink for Count {
     fn message(&mut self, message: Message) -> Flow {
         self.count += usize::from(message.is_turn());
         if self.title.is_none() && message.kind == MessageKind::Prompt && message.origin == Origin::Human {
-            match title(&message) {
+            match message.prompt_title(&crate::lazy::Resolver::new(None)) {
                 Ok(title) => {
-                    self.title = Some(title)
-                        .filter(|text| !text.trim().is_empty())
-                        .map(|text| crate::ir::truncate(&text, 80))
+                    self.title = title
                 }
                 Err(error) => {
                     self.error.get_or_insert(error);
@@ -78,52 +75,6 @@ impl MessageSink for Count {
         Flow::Continue
     }
 }
-fn title(message: &Message) -> Result<String> {
-    const MAX: usize = 96;
-    #[derive(Debug, thiserror::Error)]
-    #[error("Cursor CLI title prefix complete")]
-    struct Complete;
-    let mut title = String::new();
-    let mut chars = 0;
-    for block in &message.content {
-        let Block::Text { text } = block else { continue };
-        // Each block's prefix without leading whitespace; a blank block counts as one space.
-        let mut part = String::new();
-        let mut taken = 0;
-        let mut trimming = true;
-        let result = text.try_for_each_chunk(&crate::lazy::Resolver::new(None), 4096, |chunk| {
-            for ch in chunk.chars() {
-                if trimming && ch.is_whitespace() {
-                    continue;
-                }
-                trimming = false;
-                if taken == MAX - chars {
-                    return Err(Complete.into());
-                }
-                part.push(ch);
-                taken += 1;
-            }
-            Ok(())
-        });
-        match result {
-            Err(error) if error.downcast_ref::<Complete>().is_some() => {}
-            other => other?,
-        }
-        if part.is_empty() {
-            part.push(' ');
-        }
-        if !title.is_empty() && chars < MAX {
-            title.push('\n');
-            chars += 1;
-        }
-        for ch in part.chars().take(MAX - chars) {
-            title.push(ch);
-            chars += 1;
-        }
-    }
-    Ok(title)
-}
-
 pub(super) fn stream(
     conn: &crate::harness::store::sqlite::ReadConnection,
     r: &SessionRef,
@@ -765,6 +716,21 @@ mod tests {
         (conn, SessionRef::new("cli:fixture", Harness::Cursor, path))
     }
     #[test]
+    fn discovery_title_peels_timestamp_without_changing_prompt_text() {
+        let world = crate::test_world("cursor-timestamp-title");
+        let body = "<timestamp>Monday, Oct 12, 2026, 7:50 PM (UTC-4)</timestamp>\nask about otters";
+        let record = json!({"role":"user","content":body}).to_string().into_bytes();
+        let (conn, r) = fixture(field(1, &[1;32]), &[(1, record)], &world.base);
+        let mut count = Count::default();
+        let session = read(&conn, &r, &ParseOptions::full(), true, &mut count).unwrap();
+        assert_eq!(count.title.as_deref(), Some("ask about otters"));
+        assert_eq!(count.count, 1);
+        let _ = session;
+        let message = decode(&json!({"role":"user","content":body}), false, false).unwrap();
+        assert_eq!(message.text().as_deref(), Some(body));
+    }
+
+    #[test]
     fn native_capture_counts_and_tool_links_match_stream() {
         let home = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/cursor/2026.10.01-e373342/.cursor");
         let adapter = Cursor::with_cli_home(&home);
@@ -877,7 +843,7 @@ mod tests {
         read(&conn, &r, &ParseOptions::lazy(), true, &mut count).unwrap();
         assert_eq!(count.count, 3);
         // A blank first prompt titles nothing, so the next prompt titles the session.
-        let expected = crate::ir::truncate(&format!("first line\n{}", "y".repeat(85)), 80);
+        let expected = crate::ir::truncate(&format!("first line\n\n{}", "y".repeat(200)), 80);
         assert_eq!(count.title.as_deref(), Some(expected.as_str()));
         let only = Message {
             content: vec![
@@ -890,7 +856,7 @@ mod tests {
             ],
             ..Message::new(Role::User)
         };
-        assert_eq!(title(&only).unwrap(), format!("first line\n{}", "y".repeat(85)));
+        assert_eq!(only.prompt_title(&crate::lazy::Resolver::new(None)).unwrap().as_deref(), Some(expected.as_str()));
         let empty = json!({"role":"assistant","content":[],"providerOptions":{"cursor":{"opaque":1}}});
         assert!(decode(&empty, true, false).is_none());
         assert!(!decode(&empty, true, true).unwrap().is_turn());
