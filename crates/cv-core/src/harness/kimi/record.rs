@@ -14,20 +14,44 @@ use super::*;
 use crate::harness::store::document::Fields;
 use crate::json::{JsonSource, JsonView};
 
+/// One selected record head shared by metadata and message demands. Large fields remain views.
+pub(super) struct Record<'v> {
+    pub view: JsonView<'v>,
+    pub fields: Fields<'v>,
+    pub role: Option<String>,
+}
+
+impl<'v> Record<'v> {
+    pub fn of(view: JsonView<'v>) -> Result<Option<Self>> {
+        let Some(fields) = Fields::parse(view, &["role", "content", "tool_calls", "tool_call_id"])? else {
+            return Ok(None);
+        };
+        let role = fields.string("role")?;
+        Ok(Some(Self { view, fields, role }))
+    }
+
+    pub fn title(&self) -> Result<Option<String>> {
+        if self.role.as_deref() == Some("user") {
+            super::super::wire::text_title(self.fields.get("content"))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
 /// One record, or `None` to skip it (`_usage` is always `None` here: the stream folds it onto
 /// the preceding message with [`fold_usage`]). `spans` is the captured source when the demand
 /// keeps large strings in it; `names` maps earlier tool calls to their tool.
 pub(super) fn message(
-    view: JsonView<'_>,
+    record: &Record<'_>,
     spans: Option<&JsonSource>,
     enrich: &WireEnrich,
     complete: bool,
     names: &BTreeMap<String, String>,
 ) -> Result<Option<Message>> {
-    let Some(fields) = Fields::parse(view, &["role", "content", "tool_calls", "tool_call_id"])? else {
-        return Ok(None);
-    };
-    let Some(role) = fields.string("role")? else {
+    let view = record.view;
+    let fields = &record.fields;
+    let Some(role) = record.role.as_deref() else {
         return Ok(None);
     };
     let mut text = |v: JsonView<'_>| {
@@ -37,13 +61,13 @@ pub(super) fn message(
             v.text(false)
         }
     };
-    let m = match role.as_str() {
+    let m = match role {
         "_checkpoint" if complete => {
             let mut m = Message::of_kind(Role::System, MessageKind::Carrier, Origin::Harness);
             m.extra
                 .insert(crate::harness::claude::CARRIER_KEY.into(), view.resolve()?.into_owned());
             m.harness_extra_mut(Harness::Kimi)
-                .insert("record_type".into(), Value::String(role));
+                .insert("record_type".into(), Value::String(role.to_owned()));
             m
         }
         "_system_prompt" => {
