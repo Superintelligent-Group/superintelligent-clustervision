@@ -190,8 +190,9 @@ identifies application state, not a claim that the OS page cache was evicted.
 
 ## Open gaps
 
-- **Discovery demands.** Claude, Codex and Grok share classification/lifecycle and defer counts;
-  Kimi, Kimi Code and Qwen ports remain. Other adapters still count during discovery:
+- **Discovery demands.** Claude, Codex, Grok and Kimi share classification/lifecycle and defer
+  counts; Kimi Code and Qwen ports remain. Kimi directory refs still need shared certified-count
+  refill after a completed read. Other adapters still count during discovery:
   Hermes replays conversations solely for totals; Cursor CLI also uses counted turns to exclude
   empty stores. Preserve inclusion and exact metadata while removing count-only construction.
   Shared SQLite/portable selections now serve OpenClaw, Hermes, Qwen tasks, Goose and exports;
