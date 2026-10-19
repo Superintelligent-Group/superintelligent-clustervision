@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `cv prune` and agent adoption refuse a source line that is not one JSON record, like `cv rewind`, instead of copying it; blank lines still pass.
 - Every JSONL adapter reads its transcript through one captured source (`store::jsonl::Read`); the owned-value line reader is gone. Each adapter still owns its resume protocol.
 
 - `message_count` is `null` (a dash in `cv ls`) until a session is counted; `cv stats` reports the uncounted sessions beside the total.

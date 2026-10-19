@@ -766,18 +766,12 @@ fn rewind_session_after_scan(
             omitted_bytes += n;
             continue;
         }
-        let mut selected = crate::derive::Select::read(&source_guard.source, range, newline, false)?;
-        if selected.record.is_none() {
-            // The range is not one JSON value. Only JSON whitespace is an empty physical record,
-            // copied verbatim; anything else is a line the new session could not read back, so it
-            // is refused before anything is published (akapug, #27).
-            let small = range.len <= 64 * 1024;
-            let mut raw = Vec::new();
-            if small {
-                std::io::Read::read_to_end(&mut ranges::reader(&file, range)?, &mut raw)?;
-            }
-            let blank = small && raw.iter().all(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n'));
-            if !blank {
+        // Only JSON whitespace is an empty physical record, copied verbatim; the selector refuses
+        // any other range that is not one JSON value, a line the new session could not read back,
+        // before anything is published (akapug, #27).
+        let mut selected = match crate::derive::Select::read(&source_guard.source, &file, range, newline, false) {
+            Ok(selected) => selected,
+            Err(error) if error.is::<crate::json::InvalidJson>() => {
                 // Past an explicit cut only a record that closes an open call is copied, and a
                 // line that does not parse closes nothing: it is omitted like any other.
                 if phase == Phase::Closing {
@@ -800,7 +794,8 @@ fn rewind_session_after_scan(
                     r.path.display()
                 );
             }
-        }
+            Err(error) => return Err(error),
+        };
         if let Some(record) = &selected.record {
             let facts = record.with_view(selection_facts)?;
             if source_session_id.is_none() {

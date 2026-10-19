@@ -609,8 +609,8 @@ mod tests {
     }
 
     /// JSON whitespace is space, tab, LF and CR. A line holding only U+2003 (EM SPACE), short or
-    /// past the in-memory limit, is a rejected record to every reader of a transcript, and a line
-    /// of JSON whitespace is blank to all of them.
+    /// past the in-memory limit, is a rejected record to every reader of a transcript (and so
+    /// refused by every writer of a derived one), and a line of JSON whitespace is blank to all.
     #[test]
     fn every_path_trims_json_whitespace_only() {
         let world = cv_testkit::World::new("jsonl-json-whitespace");
@@ -637,8 +637,15 @@ mod tests {
             assert_eq!(codec, [(false, true), (blank, false)], "codec, {name}");
 
             let lines = 1 + usize::from(!blank);
-            let counts = crate::derive::transcript(&source, &file, "n", &mut std::io::sink()).unwrap();
-            assert_eq!(counts.lines, lines, "restamp, {name}");
+            match crate::derive::transcript(&source, &file, "n", &mut std::io::sink()) {
+                Ok(counts) => assert!(blank && counts.lines == 1, "restamp, {name}: {counts:?}"),
+                Err(error) => assert!(
+                    !blank
+                        && error.is::<crate::json::InvalidJson>()
+                        && error.to_string().contains(&format!("byte {}", record.len() + 1)),
+                    "restamp, {name}: {error:#}"
+                ),
+            }
             assert_eq!(crate::restamp::restamp(&text, "n").lines, lines, "restamp text, {name}");
             assert_eq!(
                 crate::harness::for_each_json_line_str(&text, |_| Flow::Continue),
@@ -653,10 +660,26 @@ mod tests {
                 new_id: Some(format!("{name}-pruned")),
                 ..Default::default()
             };
-            let pruned = crate::prune::prune_session(&path, &opts).unwrap();
-            let output = std::fs::read_to_string(&pruned.new_path).unwrap();
-            assert_eq!(output.contains('\u{2003}'), !blank, "prune, {name}");
-            assert_eq!(output.lines().count(), lines, "prune, {name}");
+            match crate::prune::prune_session(&path, &opts) {
+                Ok(pruned) => {
+                    let output = std::fs::read_to_string(&pruned.new_path).unwrap();
+                    assert!(blank && output.lines().count() == 1, "prune, {name}: {output:?}");
+                }
+                Err(error) => {
+                    assert!(
+                        !blank && error.is::<crate::json::InvalidJson>(),
+                        "prune, {name}: {error:#}"
+                    );
+                    assert!(
+                        error.to_string().contains("line 2 is not a complete JSON record"),
+                        "prune, {name}: {error:#}"
+                    );
+                    assert!(
+                        !world.base.join(format!("{name}-pruned.jsonl")).exists(),
+                        "prune, {name}"
+                    );
+                }
+            }
         }
     }
 

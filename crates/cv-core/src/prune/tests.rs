@@ -1375,6 +1375,7 @@ fn source_reroot_preserves_owned_stamp_order_including_duplicate_ids() {
         let file = std::fs::File::open(&path).unwrap();
         let mut selected = crate::derive::Select::read(
             &source,
+            &file,
             Range {
                 offset: 0,
                 len: raw.len() as u64,
@@ -2075,7 +2076,7 @@ fn sigma_context_batches_long_ordinary_runs_without_changing_matches() {
 }
 
 #[test]
-fn malformed_large_rows_preserve_owned_passthrough_and_fatal_utf8() -> Result<()> {
+fn malformed_large_rows_refuse_before_staging_and_invalid_utf8_is_named_first() -> Result<()> {
     let dir = tmpdir();
     let source = dir.join("source.jsonl");
     let prefix = " malformed sessionId=old ";
@@ -2085,41 +2086,52 @@ fn malformed_large_rows_preserve_owned_passthrough_and_fatal_utf8() -> Result<()
         "x".repeat(2 << 20)
     );
     let valid = r#" {"sessionId":"old","type":"user","uuid":"u","message":{"content":"kept"}} "#;
-    let text = format!("{malformed}\n{valid}\r\n\u{2003} \r\n");
-    std::fs::write(&source, &text)?;
-    // Frozen legacy acceptance/framing: global trim_end of JSON whitespace (the U+2003 row is a
-    // record), per-line serde Value acceptance, invalid JSON passthrough, id surgery only on
-    // valid rows, one LF per retained record.
-    let expected: String = text
-        .trim_end_matches([' ', '\t', '\r', '\n'])
-        .split('\n')
-        .map(|line| {
-            let line = if serde_json::from_str::<Value>(line).is_ok() {
-                crate::restamp_line(line, "new").unwrap()
-            } else {
-                line.to_owned()
-            };
-            line + "\n"
-        })
-        .collect();
-    for revive in [false, true] {
-        let result = prune_session(
-            &source,
-            &PruneOptions {
-                new_id: Some("new".into()),
-                revive,
-                force: true,
-                ..Default::default()
-            },
-        )?;
-        assert_eq!(std::fs::read_to_string(&result.new_path)?, expected);
-        assert_eq!(result.source_id, "old");
-        assert_eq!(result.pruned_count, 0);
-        assert!(result.sidecar_path.is_none());
-        assert_eq!(std::fs::read_to_string(&source)?, text);
-    }
+    // Frozen legacy framing for readable input: global trim_end of JSON whitespace, id surgery
+    // on the top-level ids, one LF per retained record.
+    let readable = format!("{valid}\r\n \t \r\n");
+    std::fs::write(&source, &readable)?;
+    let expected = crate::restamp_line(readable.trim_end_matches([' ', '\t', '\r', '\n']), "new").unwrap() + "\n";
+    let result = prune_session(
+        &source,
+        &PruneOptions {
+            new_id: Some("new".into()),
+            ..Default::default()
+        },
+    )?;
+    assert_eq!(std::fs::read_to_string(&result.new_path)?, expected);
+    assert_eq!(result.source_id, "old");
     let previous = std::fs::read(dir.join("new.jsonl"))?;
-    let mut invalid = text.into_bytes();
+    // A row that is not one JSON value, past the in-memory limit or a lone U+2003 (a record, not
+    // JSON whitespace), is refused by line before anything is staged, with or without revive.
+    for (text, line) in [
+        (format!("{malformed}\n{valid}\r\n\u{2003} \r\n"), 1),
+        (format!("{valid}\r\n\u{2003} \r\n"), 2),
+    ] {
+        std::fs::write(&source, &text)?;
+        for revive in [false, true] {
+            let error = prune_session(
+                &source,
+                &PruneOptions {
+                    new_id: Some("new".into()),
+                    revive,
+                    force: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+            assert!(error.is::<crate::json::InvalidJson>(), "{error:#}");
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("line {line} is not a complete JSON record")),
+                "{error:#}"
+            );
+            assert_eq!(std::fs::read(dir.join("new.jsonl"))?, previous, "nothing replaced");
+            assert_eq!(std::fs::read_to_string(&source)?, text);
+        }
+    }
+    // Invalid UTF-8 inside the malformed row is named as such, before the malformed refusal.
+    let mut invalid = format!("{malformed}\n{valid}\r\n").into_bytes();
     invalid[1 << 20] = 0xff;
     std::fs::write(&source, invalid)?;
     let error = prune_session(
@@ -2164,13 +2176,23 @@ fn rejected_large_json_keeps_strict_owned_value_acceptance() -> Result<()> {
                 force: true,
                 ..Default::default()
             },
-        )?;
-        let expected = if accepted {
-            crate::restamp_line(row.trim_end(), "new").unwrap() + "\n"
-        } else {
-            row.clone()
-        };
-        assert_eq!(std::fs::read_to_string(result.new_path)?, expected);
+        );
+        // Exactly the rows serde's Value rejects are refused, by line, instead of copied.
+        match result {
+            Ok(result) => {
+                assert!(accepted, "{raw}");
+                let expected = crate::restamp_line(row.trim_end(), "new").unwrap() + "\n";
+                assert_eq!(std::fs::read_to_string(result.new_path)?, expected);
+            }
+            Err(error) => {
+                assert!(!accepted && error.is::<crate::json::InvalidJson>(), "{raw}: {error:#}");
+                assert!(
+                    error.to_string().contains("line 1 is not a complete JSON record"),
+                    "{error:#}"
+                );
+                assert!(!dir.join("new.jsonl").exists(), "{raw}: nothing published");
+            }
+        }
     }
     std::fs::remove_dir_all(dir)?;
     Ok(())
@@ -2547,4 +2569,51 @@ fn standalone_prune_preserves_unmodified_metadata_bytes_at_every_size() {
         assert!(second.get("agentId").is_none());
         assert!(second["parentUuid"].is_null());
     }
+}
+
+/// A malformed line inside the kept window is a record Claude Code cannot read back; a prune
+/// that copied it verbatim would publish an unresumable session. Refuse before staging.
+#[test]
+fn prune_refuses_a_malformed_line_inside_the_kept_window() {
+    let dir = tmpdir();
+    let sid = "44444444-4444-4444-8444-444444444444";
+    let line = |uuid: &str, parent: Option<&str>, role: &str, content: &str| {
+        serde_json::json!({"type":role,"sessionId":sid,"uuid":uuid,"parentUuid":parent,
+            "timestamp":"2026-06-18T00:00:00Z","message":{"role":role,"content":content}})
+        .to_string()
+    };
+    let input = [
+        line("u0", None, "user", "start"),
+        line("a0", Some("u0"), "assistant", "ok"),
+        "{\"type\":\"user\",\"uuid\":\"u1\",\"parentUuid\":\"a0\",\"message\":{\"role\":\"user\",\"content\":\"cut sho"
+            .to_string(),
+        line("a1", Some("u1"), "assistant", "done"),
+    ]
+    .join("\n")
+        + "\n";
+    let path = dir.join(format!("{sid}.jsonl"));
+    std::fs::write(&path, &input).unwrap();
+    // The window that would drop the line does not excuse it either: the source is unreadable.
+    for keep_range in [None, Some((1, None))] {
+        let opts = PruneOptions {
+            new_id: Some("55555555-5555-4555-8555-555555555555".into()),
+            keep_range,
+            ..Default::default()
+        };
+        let error = prune_session(&path, &opts).unwrap_err();
+        assert!(error.is::<crate::json::InvalidJson>(), "{error:#}");
+        let message = error.to_string();
+        assert!(message.contains("line 3 is not a complete JSON record"), "{message}");
+        assert!(message.contains(&path.display().to_string()), "{message}");
+        assert!(
+            !dir.join("55555555-5555-4555-8555-555555555555.jsonl").exists(),
+            "nothing is published when the source is unreadable"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        input,
+        "the source is untouched"
+    );
+    std::fs::remove_dir_all(&dir).ok();
 }

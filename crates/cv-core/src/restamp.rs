@@ -205,11 +205,11 @@ mod tests {
             "\r\n  \n",
             " { \"sessionId\" : \"dead\", \"n\":1.50, \"nested\":{\"sessionId\":\"keep\"} }\r\n",
             "{\"sessionId\":\"dead\",\"sessionId\":\"duplicate\"}\n",
-            "not json ☃\n[\"dead\",\"snake\"]\n",
+            "[\"dead\",\"snake\"]\n",
             "{\"session_id\":12}\n{\"sessionId\":\"dead\",\"ignored\":1e9999}"
         );
         let large = format!(
-            "{small}\n{{\"sessionId\":\"dead\",\"text\":\"{}\",\"session_id\":\"dead\"}}\r\n{}\n{} trailing malformed ☃\n{{\"sessionId\":\"dead\"}}",
+            "{small}\n{{\"sessionId\":\"dead\",\"text\":\"{}\",\"session_id\":\"dead\"}}\r\n{}\n{{\"text\":\"{}\"}}\n{{\"sessionId\":\"dead\"}}",
             "λ\\n".repeat(30000), " ".repeat(100000), "x".repeat(100000)
         );
         for original in ["", small, large.as_str()] {
@@ -227,6 +227,21 @@ mod tests {
                     stamped: expected.stamped,
                     bytes: expected.body.len()
                 }
+            );
+        }
+        // A row that is not one JSON value, short or past the in-memory limit, is refused by
+        // byte rather than copied; the text restamp still copies it, so the two now differ.
+        for malformed in ["not json ☃", &format!("{} trailing malformed ☃", "x".repeat(100000))] {
+            let original = format!("{small}\n{malformed}\n{{\"sessionId\":\"dead\"}}");
+            std::fs::write(&path, &original).unwrap();
+            let source = crate::json::JsonSource::capture(&path).unwrap();
+            let file = std::fs::File::open(&path).unwrap();
+            let mut actual = Vec::new();
+            let error = write_restamped_transcript(&source, &file, "new", &mut actual).unwrap_err();
+            assert!(error.is::<crate::json::InvalidJson>(), "{error:#}");
+            assert!(
+                error.to_string().contains(&format!("byte {}", small.len() + 1)),
+                "{error:#}"
             );
         }
     }

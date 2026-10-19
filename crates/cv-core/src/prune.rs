@@ -449,6 +449,7 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
     let mut id_spans = HashMap::new();
     // Retain only decision facts; payload trees live for one record. Preserve the old global
     // trim_end contract (including whitespace-only trailing records) without copying the file.
+    let mut line_no = 0usize;
     for record in ranges::records(
         &file,
         Range {
@@ -457,6 +458,7 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
         },
     )? {
         let (range, _) = record?;
+        line_no += 1;
         let facts = match source.read_range_value(range.offset, range.len, |view| {
             let spans = crate::restamp::source_id_spans(view)?;
             let facts = decision_facts_source(view, range, opts, &mut tool_names)?;
@@ -465,14 +467,23 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
         }) {
             Ok(facts) => Some(facts),
             Err(e) if e.is::<crate::json::InvalidJson>() => {
-                // Value-compatible validation already rejected this row. Malformed JSON
-                // passes through, but invalid UTF-8 remains fatal even in ignored fields.
+                // Value-compatible validation rejected this row. Invalid UTF-8 is fatal first,
+                // under its own name; then only a blank row (JSON whitespace) passes, copied
+                // verbatim. Anything else is a line the new session could not read back, so it
+                // is refused before anything is staged, whether or not a window would drop it.
                 if !ranges::valid_utf8(&mut ranges::reader(&file, range)?)? {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         "stream did not contain valid UTF-8",
                     )
                     .into());
+                }
+                if ranges::trim(&file, range)?.len != 0 {
+                    return Err(e.context(format!(
+                        "{}: line {line_no} is not a complete JSON record; repair it, or cut before it \
+                         with `cv rewind --at <MSG_IDX>`",
+                        src_path.display()
+                    )));
                 }
                 None
             }
@@ -598,12 +609,14 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
 
     for (idx, (facts, range)) in parsed.into_iter().zip(lines.iter()).enumerate() {
         let Some(facts) = facts else {
-            // Malformed/blank records use the same writer with no accepted rewrite nodes.
+            // Blank records (the parse loop refused every other unreadable row) use the same
+            // writer with no accepted rewrite nodes.
             let mut scan = MarkerWriter::new(&mut output);
             let selected = crate::derive::Select {
                 range: *range,
                 newline: true,
                 record: None,
+                blank: true,
                 ids: Vec::new(),
                 replacements: Vec::new(),
                 root: false,
@@ -686,6 +699,7 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
             range: *range,
             newline: true,
             record: Some(source.validated_range(range.offset, range.len)?),
+            blank: false,
             ids: id_spans.remove(&range.offset).unwrap_or_default(),
             replacements: Vec::new(),
             root: needs_root,

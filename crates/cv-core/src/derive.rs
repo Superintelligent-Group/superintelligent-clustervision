@@ -9,13 +9,42 @@ use std::io::Write;
 pub(crate) struct Select {
     pub range: Range,
     pub newline: bool,
+    /// `None` only for a blank range: the writer copies it verbatim and refuses anything else.
     pub record: Option<Json>,
+    /// JSON whitespace only (possibly empty), the one range that is no record and still copied.
+    pub blank: bool,
     pub ids: Vec<(u64, u64)>,
     pub replacements: Vec<(Json, Value)>,
     pub root: bool,
 }
+
+/// A selected range that is neither one JSON value nor blank. It wraps [`crate::json::InvalidJson`],
+/// so `error.is::<InvalidJson>()` still recognises it; the range says where.
+#[derive(Debug)]
+pub(crate) struct Malformed {
+    pub offset: u64,
+    pub len: u64,
+}
+impl Malformed {
+    fn at(range: Range) -> Self {
+        Self {
+            offset: range.offset,
+            len: range.len,
+        }
+    }
+}
+impl std::fmt::Display for Malformed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the record at byte {} ({} bytes) is not one JSON value",
+            self.offset, self.len
+        )
+    }
+}
+
 impl Select {
-    pub fn read(source: &JsonSource, range: Range, newline: bool, syntax: bool) -> Result<Self> {
+    pub fn read(source: &JsonSource, file: &std::fs::File, range: Range, newline: bool, syntax: bool) -> Result<Self> {
         let read = |view: crate::json::JsonView<'_>| Ok((view.to_json()?, crate::restamp::source_id_spans(view)?));
         let projected = if syntax {
             source.read_range_syntax(range.offset, range.len, read)
@@ -24,12 +53,18 @@ impl Select {
         };
         let (record, ids) = match projected {
             Ok((record, ids)) => (Some(record), ids),
-            Err(error) if error.is::<crate::json::InvalidJson>() => (None, Vec::new()),
+            Err(error) if error.is::<crate::json::InvalidJson>() => {
+                if ranges::trim(file, range)?.len != 0 {
+                    return Err(error.context(Malformed::at(range)));
+                }
+                (None, Vec::new())
+            }
             Err(error) => return Err(error),
         };
         Ok(Self {
             range,
             newline,
+            blank: record.is_none(),
             record,
             ids,
             replacements: Vec::new(),
@@ -81,7 +116,14 @@ pub(crate) fn derive(
     let mut counts = Counts::default();
     for selection in selected {
         let mut selection = selection?;
-        counts.lines += usize::from(ranges::trim(file, selection.range)?.len != 0);
+        let trimmed = ranges::trim(file, selection.range)?;
+        counts.lines += usize::from(trimmed.len != 0);
+        // Only a blank range may be copied without a checked record; an unparsed line would be
+        // one the new session cannot read back. Selectors refuse first; this is the writer's own
+        // guarantee, read from the bytes rather than the flag.
+        if selection.record.is_none() && (!selection.blank || trimmed.len != 0) {
+            return Err(anyhow::Error::new(crate::json::InvalidJson).context(Malformed::at(selection.range)));
+        }
         let payload_rewrite = !selection.replacements.is_empty();
         let mut normalize = false;
         if let Some(record) = selection
@@ -210,7 +252,7 @@ pub(crate) fn transcript(
                 std::io::Error::new(std::io::ErrorKind::InvalidData, "stream did not contain valid UTF-8").into(),
             );
         }
-        Select::read(source, range, newline, true)
+        Select::read(source, file, range, newline, true)
     });
     derive(
         source,

@@ -277,7 +277,8 @@ fn execute_after_stage(
         let dir = p.dest.parent().context("destination has no parent dir")?;
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         let mut output = std::io::BufWriter::new(Staged::create(dir, "adopt", 0o600)?);
-        let counts = crate::derive::transcript(&source, &file, &p.into_session, &mut output)?;
+        let counts = crate::derive::transcript(&source, &file, &p.into_session, &mut output)
+            .with_context(|| format!("adopting {}", p.agent.path.display()))?;
         transcript = Some(output.into_inner().map_err(|e| e.into_error())?);
         if let (Some(src), Some(dest)) = (&p.agent.meta_path, &p.dest_meta) {
             let meta_source =
@@ -290,7 +291,8 @@ fn execute_after_stage(
         }
         counts
     } else {
-        crate::derive::transcript(&source, &file, &p.into_session, &mut std::io::sink())?
+        crate::derive::transcript(&source, &file, &p.into_session, &mut std::io::sink())
+            .with_context(|| format!("adopting {}", p.agent.path.display()))?
     };
     after_stage()?;
     source.check_metadata(file.metadata()?)?;
@@ -415,14 +417,15 @@ mod tests {
     }
 
     #[test]
-    fn adopt_streams_large_and_malformed_rows_with_exact_old_output_and_dry_counts() {
+    fn adopt_streams_large_and_blank_rows_with_exact_old_output_and_dry_counts() {
         let root = fixture("streamed-output");
         let into = sf(&root, LIVE);
         let dead = sf(&root, DEAD);
         let agent = find_agent(AGENT, Some(&dead)).unwrap().remove(0);
         let original = format!(
-            "\r\n{{ \"sessionId\" : \"{DEAD}\", \"text\":\"{}\", \"n\":1.50 }}\r\nnot json ☃\n{}\n{{\"session_id\":\"{DEAD}\"}}",
-            "λ\\n".repeat(40000), " ".repeat(100000)
+            "\r\n{{ \"sessionId\" : \"{DEAD}\", \"text\":\"{}\", \"n\":1.50 }}\r\n{}\n{{\"session_id\":\"{DEAD}\"}}",
+            "λ\\n".repeat(40000),
+            " ".repeat(100000)
         );
         std::fs::write(&agent.path, &original).unwrap();
         let expected = restamp(&original, LIVE);
@@ -438,6 +441,36 @@ mod tests {
                 (expected.lines, expected.stamped, expected.body.len())
             );
         }
+        cleanup_owned_test_root(&root);
+    }
+
+    /// A malformed line between two readable records is a record to no reader; an adoption that
+    /// copied it verbatim would publish an agent transcript Claude Code cannot load. Refuse first,
+    /// naming the file and the byte, and publish nothing.
+    #[test]
+    fn adopt_refuses_a_malformed_line_inside_the_transcript() {
+        let root = fixture("malformed-inside");
+        let into = sf(&root, LIVE);
+        let dead = sf(&root, DEAD);
+        let agent = find_agent(AGENT, Some(&dead)).unwrap().remove(0);
+        let first = format!(
+            "{{\"parentUuid\":null,\"isSidechain\":true,\"agentId\":\"{AGENT}\",\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"brief\"}},\"uuid\":\"u1\",\"sessionId\":\"{DEAD}\"}}\n"
+        );
+        let original = format!(
+            "{first}{{\"parentUuid\":\"u1\",\"isSidechain\":true,\"agentId\":\"{AGENT}\",\"type\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"content\":\"cut sho\n\
+             {{\"parentUuid\":\"u1\",\"isSidechain\":true,\"agentId\":\"{AGENT}\",\"type\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"content\":\"ok\"}},\"uuid\":\"a1\",\"sessionId\":\"{DEAD}\"}}\n"
+        );
+        std::fs::write(&agent.path, &original).unwrap();
+        let p = plan(agent, vec![], &into);
+        for write in [true, false] {
+            let error = execute(&p, write, false).unwrap_err();
+            assert!(error.is::<crate::json::InvalidJson>(), "{error:#}");
+            let message = format!("{error:#}");
+            assert!(message.contains(&p.agent.path.display().to_string()), "{message}");
+            assert!(message.contains(&format!("byte {}", first.len())), "{message}");
+            assert!(!p.dest.exists(), "nothing is published when the source is unreadable");
+        }
+        assert_eq!(std::fs::read(&p.agent.path).unwrap(), original.as_bytes());
         cleanup_owned_test_root(&root);
     }
 
