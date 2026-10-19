@@ -274,7 +274,13 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
             } else {
                 adapter.discover()?
             };
-            out.detail = json!({ "discovered_sessions": refs.len(), "discovered_turns": refs.iter().filter_map(|r| r.message_count).sum::<usize>() });
+            // A store whose count is free (a row count) reports it; one that would have to decode
+            // every body reports "not counted" (`None`) until a full read or `cv index` certifies it.
+            out.detail = json!({
+                "discovered_sessions": refs.len(),
+                "discovered_turns": refs.iter().filter_map(|r| r.message_count).sum::<usize>(),
+                "uncounted_sessions": refs.iter().filter(|r| r.message_count.is_none()).count(),
+            });
             if a.hash_output {
                 refs.sort_by(|a, b| (&a.id, &a.path).cmp(&(&b.id, &b.path)));
                 let mut digest = DigestWriter::default();
