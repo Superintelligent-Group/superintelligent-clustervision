@@ -97,7 +97,7 @@ Compressed, encoded, scanned, decoded and emitted bytes must be labeled separate
 | Operation | Actual work | Optimization boundary |
 |---|---|---|
 | Warm ls/stats | Catalog probe, metadata rows, sort/filter; query presence shares its source Probe, JSON rendering rechecks metadata in bounded batches | Preserve freshness between phases; measure discovery separately |
-| Full discovery | Metadata projection, certified count reuse and cache/catalog publication; Claude, Codex, Grok, Kimi, Kimi Code, Hermes, Goose and Zed defer cold counts | Remaining count-only adapter scans must go; exact fallback metadata and validation may still require EOF |
+| Full discovery | Metadata projection, certified count reuse and cache/catalog publication; Codex, Grok, Kimi, Kimi Code, Hermes, Goose and Zed defer cold counts, Claude counts from its record heads | Remaining count-only adapter scans must go; exact fallback metadata and validation may still require EOF |
 | Text windows / last N | Lazy range or deque, selected messages materialized | Already useful bounds; giant selected output is still output-sized |
 | JSON show / MCP show | CLI show/export stages resolved frames and envelopes in bounded spill storage; EOF metadata retained. MCP stages selected windows | CLI Last retains lazy tail descriptors; owned adapter extras and redaction trees remain; MCP client payload size and subprocess startup |
 | Affordance view | Facts projection into classified rows; checked bounded text summaries | Unprojected adapters retain rich extras; side stores and result rows; escaped validation still traverses the whole field |
@@ -119,6 +119,20 @@ Compressed, encoded, scanned, decoded and emitted bytes must be labeled separate
 
 Key sources: `cv/src/cmd/view.rs`, `cv-core/src/{api,affordance,watch,lazy,stream}.rs`,
 `cv-search/src/{fts,semantic}.rs`, `cv/src/cmd/{query,archive,pack,compose}.rs`.
+
+## The counting rule
+
+A listing reports what the metadata read already produced and nothing it would have to read more
+for. A JSONL adapter whose discovery walks every record head anyway (Claude, and the adapters that
+read every turn: Cursor, Cline, Continue, Devin, Gemini, Qwen, LM Studio, OpenClaw, OpenCode,
+OpenSession, the exports) counts for free and reports `Some(n)`, so `Some(0)` is a session with no
+turns. An adapter for which counting means decoding message bodies or opening a second store
+(Codex, Grok, Kimi, Kimi Code, Zed, Hermes, Goose) reports `None`, "not counted", until a full
+read or `cv index` certifies the number; the catalog keeps a certified count across metadata
+refreshes that leave the source unchanged and drops it when the source changes. `--json` emits
+`null`, the table a dash, `--sort-by messages` ranks uncounted sessions last, `cv stats` reports
+"N not counted yet". The contract is the doc comment on `SessionRef::message_count`
+(`cv-core/src/ir.rs`); a count is never a proxy such as file count or an extrapolation.
 
 ## Correctness boundaries before reuse
 
@@ -191,7 +205,7 @@ identifies application state, not a claim that the OS page cache was evicted.
 ## Open gaps
 
 - **Discovery demands.** Claude, Codex, Grok, Kimi and Kimi Code share record projections and
-  defer counts; Hermes and Goose read native session metadata without replaying conversations. Zed
+  all but Claude defer counts; Hermes and Goose read native session metadata without replaying conversations. Zed
   projects snapshot metadata without decoding message bodies, retaining whole-cell validation. Complete
   reads publish certified counts; direct discovery, including directory refs, reuses them through
   the shared cache connection after cache locks drop. Validation uses a fresh bounded Probe batch,
