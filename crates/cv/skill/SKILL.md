@@ -58,8 +58,8 @@ For Codex, use the same commands with `codex`: user scope writes `$CODEX_HOME/ho
 you accept them in its startup hooks review (`codex exec --dangerously-bypass-hook-trust` for
 automation); `cv hooks show codex` says whether each is trusted. The edit matcher
 is `apply_patch`; every path in its patch is checked. A live conflict blocks the patch
-with `deny` because Codex does not support `ask`; coordinate with the other session before
-editing. To override after coordinating, remove the edit handler from `hooks.json`. Compaction recovery uses `cv show`;
+with `deny` because Codex does not support `ask`; your own sub-agents and parent are not another
+session. Coordinate with the other session before editing. To override after coordinating, remove the edit handler from `hooks.json`. Compaction recovery uses `cv show`;
 `cv rewind` currently supports Claude sessions.
 
 | event | `cv hook` | what you see |

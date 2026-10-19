@@ -295,7 +295,10 @@ Details that matter:
   `[branch sha]` line in each transcript's final 512 KiB.
 - **Codex** uses the same events; its edit matcher is the canonical `apply_patch` tool name. The edit guard
   checks every added, updated, removed or moved path in its patch. Codex rejects `ask`, so a
-  live conflict returns `deny` and blocks that patch. Coordinate with the other session; to
+  live conflict returns `deny` and blocks that patch. Threads under one root (a session, its
+  sub-agents, their children: `parent_thread_id` headers, or the lane ledger for a child not
+  yet indexed) are one session to the guard, as a Claude session's own lanes are: a swarm
+  editing its own files is never denied. Coordinate with the other session; to
   override the guard, remove its edit handler from `hooks.json` (`cv hooks remove codex`
   removes all five hooks). Compaction recovery points at
   `cv show --pre-compaction`; `cv rewind` currently supports Claude sessions. Codex lane UUIDs

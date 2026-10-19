@@ -788,3 +788,77 @@ fn codex_trust_matches_the_real_binary() {
     }
     assert_eq!(rows.iter().filter(|(_, _, t)| t == "modified").count(), 1);
 }
+
+/// A Codex rollout under the world's `~/.codex/sessions`: a `session_meta` header (with
+/// `parent_thread_id` for a child thread) and one `apply_patch` of `file`, in the record shapes
+/// Codex 0.163.0 writes (`tests/fixtures/codex/direct_patch.jsonl`).
+fn codex_rollout(w: &World, id: &str, parent: Option<&str>, file: &str) -> PathBuf {
+    let dir = w.home.join(".codex/sessions/2026/10/19");
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("rollout-2026-10-19T10-00-00-{id}.jsonl"));
+    let mut meta = json!({"id": id, "session_id": parent.unwrap_or(id), "timestamp": "2026-10-19T10:00:00.000Z",
+        "cwd": "/work/proj", "originator": "codex_exec", "cli_version": "0.163.0", "source": "exec"});
+    if let Some(parent) = parent {
+        meta["parent_thread_id"] = json!(parent);
+    }
+    let call = format!("call_{id}");
+    let patch = format!("*** Begin Patch\n*** Update File: {file}\n@@\n-a\n+b\n*** End Patch");
+    let lines = [
+        json!({"timestamp": "2026-10-19T10:00:00.000Z", "ordinal": 0, "type": "session_meta", "payload": meta}),
+        json!({"timestamp": "2026-10-19T10:00:01.000Z", "ordinal": 1, "type": "response_item", "payload": {
+            "type": "function_call", "id": format!("fc_{id}"), "name": "exec_command", "call_id": call,
+            "arguments": json!({"cmd": format!("apply_patch <<'PATCH'\n{patch}\nPATCH"), "workdir": "/work/proj"}).to_string()}}),
+        json!({"timestamp": "2026-10-19T10:00:02.000Z", "ordinal": 2, "type": "event_msg", "payload": {
+            "type": "item_completed", "thread_id": id, "item": {"type": "FileChange", "id": call, "status": "completed",
+            "changes": {format!("/work/proj/{file}"): {"type": "update", "unified_diff": "@@ -1 +1 @@\n-a\n+b\n", "move_path": null}}}}}),
+        json!({"timestamp": "2026-10-19T10:00:03.000Z", "ordinal": 3, "type": "response_item", "payload": {
+            "type": "function_call_output", "id": format!("fco_{id}"), "call_id": call, "output": "Success. Updated the following files:\nM shared.txt\n"}}),
+    ];
+    let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+    fs::write(&path, text).unwrap();
+    path
+}
+
+#[test]
+fn codex_edit_guard_exempts_the_root_threads_lineage_and_denies_strangers() {
+    let w = World::new("codex-lineage");
+    let parent = "01a14d90-0000-7000-8000-000000000001";
+    let child = "01a14d90-0000-7000-8000-000000000002";
+    let stranger = "01a14d90-0000-7000-8000-000000000003";
+    let parent_path = codex_rollout(&w, parent, None, "shared.txt");
+    let child_path = codex_rollout(&w, child, Some(parent), "shared.txt");
+    let stranger_path = codex_rollout(&w, stranger, None, "other.txt");
+    cv_ok(&w, &["index"]);
+    let patch = |file: &str| format!("*** Begin Patch\n*** Update File: {file}\n@@\n-b\n+c\n*** End Patch");
+    let input = |sid: &str, path: &PathBuf, file: &str| {
+        json!({"session_id": sid, "transcript_path": path, "cwd": "/work/proj", "hook_event_name": "PreToolUse",
+            "permission_mode": "bypassPermissions", "tool_name": "apply_patch", "tool_input": {"command": patch(file)}})
+    };
+    let env = [("CV_HOOK_HARNESS", "codex")];
+    // All three rollouts were just written: every editor is live. The child edited shared.txt
+    // moments ago, yet the parent patching it is not a conflict, and neither is the child patching
+    // what its root edited.
+    assert_eq!(hook(&w, "edit", &input(parent, &parent_path, "shared.txt"), &env), "");
+    assert_eq!(hook(&w, "edit", &input(child, &child_path, "shared.txt"), &env), "");
+    // An unrelated root thread is denied, as before.
+    let out = hook(&w, "edit", &input(parent, &parent_path, "other.txt"), &env);
+    let out: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "deny");
+    assert!(out["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .unwrap()
+        .contains(&format!("codex:{stranger}")));
+    let out = hook(&w, "edit", &input(stranger, &stranger_path, "shared.txt"), &env);
+    assert!(out.contains("\"deny\""), "{out}");
+    // A child the catalog has not indexed yet is still placed by the lane ledger's start row.
+    let late = "01a14d90-0000-7000-8000-000000000004";
+    let late_path = codex_rollout(&w, late, Some(parent), "shared.txt");
+    hook(
+        &w,
+        "lane",
+        &json!({"session_id": parent, "transcript_path": parent_path, "hook_event_name": "SubagentStart",
+            "agent_id": late, "agent_type": "default", "cwd": "/work/proj"}),
+        &env,
+    );
+    assert_eq!(hook(&w, "edit", &input(late, &late_path, "shared.txt"), &env), "");
+}

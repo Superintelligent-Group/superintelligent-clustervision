@@ -1287,12 +1287,53 @@ fn is_current_editor(t: &cv_core::events::TouchedSession, session_id: &str, agen
         && t.agent_id.as_deref() == agent_id
 }
 
+/// The root thread of a Codex session: each rollout's `parent_thread_id` header followed up
+/// through the catalog, the lane ledger's `start` rows standing in for a child the catalog has
+/// not indexed yet. A thread without a parent is its own root. Bounded, so a cyclic ledger ends.
+fn codex_root(id: &str, path: Option<&Path>, ledger: &[LaneEvent]) -> String {
+    let mut id = id.to_string();
+    let mut path = path.map(Path::to_path_buf);
+    for _ in 0..16 {
+        let registered = ledger
+            .iter()
+            .rev()
+            .find(|row| row.event == "start" && row.agent_id == id);
+        let parent = path
+            .as_deref()
+            .and_then(cv_core::harness::codex::hook_header)
+            .and_then(|s| s.lineage.parent)
+            .or_else(|| registered.map(|row| row.session_id.clone()));
+        let Some(parent) = parent else { return id };
+        path = cv_core::catalog::lookup(&parent, Some(Harness::Codex))
+            .into_iter()
+            .find(|r| r.id == parent)
+            .map(|r| r.path)
+            .or_else(|| registered.and_then(|row| row.transcript_path.clone()));
+        id = parent;
+    }
+    id
+}
+
 /// `PreToolUse` (`Edit|Write`): `ask` when another live session edited this path — the edit
 /// index (`cv touched`) names the sessions, the catalog names their transcripts, one `stat` each
-/// says which are live. Nothing printed = allow.
+/// says which are live. Nothing printed = allow. A Claude session's own lane is not another
+/// session; neither is any thread under a Codex session's root (its parent, its children), since
+/// Codex only takes `deny` and a swarm shares its files on purpose.
 fn hook_edit(input: &Input) -> Result<Option<Value>> {
     let files = edit_paths(input);
     let mut conflicts = Vec::new();
+    let my_agent = input
+        .agent_id
+        .as_deref()
+        .map(|a| a.strip_prefix("agent-").unwrap_or(a).to_string());
+    let ledger = if input.codex {
+        cv_core::lanes::read_ledger()
+    } else {
+        Vec::new()
+    };
+    let my_root = input
+        .codex
+        .then(|| codex_root(&input.session_id, input.transcript_path.as_deref(), &ledger));
     for file in files {
         let abs = if Path::new(&file).is_absolute() {
             PathBuf::from(&file)
@@ -1304,18 +1345,17 @@ fn hook_edit(input: &Input) -> Result<Option<Value>> {
                 .unwrap_or_default()
                 .join(file.trim_start_matches("./"))
         };
-        let my_agent = input
-            .agent_id
-            .as_deref()
-            .map(|a| a.strip_prefix("agent-").unwrap_or(a).to_string());
         let mut live: Vec<(String, i64)> = Vec::new();
         for t in cv_core::events::sessions_editing(&abs.to_string_lossy()) {
-            if (input.codex && t.harness == "codex" && t.session_id == input.session_id)
-                || (!input.codex && is_current_editor(&t, &input.session_id, my_agent.as_deref()))
-            {
+            if !input.codex && is_current_editor(&t, &input.session_id, my_agent.as_deref()) {
                 continue;
             }
             let Some(path) = transcript_of(&t) else { continue };
+            if let Some(root) = my_root.as_deref() {
+                if t.harness == "codex" && codex_root(&t.session_id, Some(&path), &ledger) == root {
+                    continue;
+                }
+            }
             if let Some(m) = minutes_since_modified(&path).filter(|m| *m <= LIVE_MINUTES) {
                 live.push((
                     if t.harness == "codex" {
