@@ -16,63 +16,95 @@ mod read;
 mod window;
 pub use window::WindowSink;
 
+/// A router's arms spelled once: the `match` that answers and the method/path patterns
+/// `cv schema --json` lists under `routes`, so the compatibility gate probes the code's own table.
+/// Each arm names its method; a binding or `_` prints as `{}`, a rest pattern as `*`.
+#[macro_export]
+macro_rules! routes {
+    (@seg $l:literal) => { $l };
+    (@seg ..) => { "*" };
+    (@seg $i:tt) => { "{}" };
+    (@post GET) => { false };
+    (@post POST) => { true };
+    ($vis:vis const $inventory:ident;
+     $(#[$meta:meta])* $fvis:vis fn $name:ident($post:ident, $parts:ident $(, $arg:ident: $ty:ty)*) -> $ret:ty {
+        $( $( $method:ident [$($seg:tt),*] )|+ => $body:expr, )*
+        _ => $fallback:expr $(,)?
+    }) => {
+        $vis const $inventory: &[&str] =
+            &[$( $( concat!(stringify!($method), " ", $("/", $crate::routes!(@seg $seg)),*) ),+ ),*];
+        $(#[$meta])*
+        $fvis fn $name($post: bool, $parts: &[&str] $(, $arg: $ty)*) -> $ret {
+            match ($post, $parts) {
+                $( $( ($crate::routes!(@post $method), [$($seg),*]) )|+ => $body, )*
+                _ => $fallback,
+            }
+        }
+    };
+}
+
 /// Route a decoded path (`["api", "session", "claude", "abc"]`) plus a raw query string.
 /// Never panics; an unknown path is a 404.
 pub fn route_json(parts: &[&str], query: &str) -> (u16, Value) {
     let _reads = crate::source::read_scope();
-    match parts {
-        ["api", "health"] => ok(json!({
+    read(false, parts, query)
+}
+
+routes! {
+    pub const ROUTES;
+    fn read(_post, parts, query: &str) -> (u16, Value) {
+        GET ["api", "health"] => ok(json!({
             "ok": true,
             "harnesses": Harness::ALL.iter().map(|h| h.as_str()).collect::<Vec<_>>(),
         })),
 
-        ["api", "sessions"] => sessions(query),
+        GET ["api", "sessions"] => sessions(query),
 
-        ["api", "session", harness, id] => session(harness, id),
+        GET ["api", "session", harness, id] => session(harness, id),
 
-        ["api", "session", harness, id, "head"] => session_head(harness, id),
+        GET ["api", "session", harness, id, "head"] => session_head(harness, id),
 
-        ["api", "session", harness, id, "messages"] => messages(harness, id, query),
+        GET ["api", "session", harness, id, "messages"] => messages(harness, id, query),
 
-        ["api", "session", harness, id, "events"] => session_events(harness, id, query),
+        GET ["api", "session", harness, id, "events"] => session_events(harness, id, query),
 
-        ["api", "session", harness, id, "compactions"] => compactions(harness, id),
+        GET ["api", "session", harness, id, "compactions"] => compactions(harness, id),
 
-        ["api", "touched"] => touched(query),
+        GET ["api", "touched"] => touched(query),
 
-        ["api", "session", harness, id, "subagents"] => subagents(harness, id),
+        GET ["api", "session", harness, id, "subagents"] => subagents(harness, id),
 
-        ["api", "session", harness, parent, "subagent", agent] => subagent(harness, parent, agent),
+        GET ["api", "session", harness, parent, "subagent", agent] => subagent(harness, parent, agent),
 
-        ["api", "session", harness, id, "workflow", wf, "script"] => workflow_script(harness, id, wf),
+        GET ["api", "session", harness, id, "workflow", wf, "script"] => workflow_script(harness, id, wf),
 
         // Removed in 0.15.0 with the coordination board: a pointer, not a silent 404.
-        ["api", "board", ..] | ["api", "claims", _] | ["api", "who", _] | ["api", "channels"] => err(
+        GET ["api", "board", ..] | GET ["api", "claims", _] | GET ["api", "who", _] | GET ["api", "channels"] => err(
             410,
             "removed in 0.15.0 with the coordination board — the task log is the fleet's record: \
              /api/tasks, /api/tasks/inbox/{who}, /api/task/{id}/events",
         ),
 
-        ["api", "tasks"] => tasks(query),
+        GET ["api", "tasks"] => tasks(query),
 
         // Removed in 0.15.0 with the land facet: a pointer, not a silent 404.
-        ["api", "tasks", "debt"] | ["api", "tasks", "stats"] => err(
+        GET ["api", "tasks", "debt"] | GET ["api", "tasks", "stats"] => err(
             410,
             "removed in 0.15.0 with the task land facet — completion is self-reported and labeled; \
              read /api/tasks and /api/task/{id}",
         ),
 
-        ["api", "tasks", "inbox", who] => tasks_inbox(who, query),
+        GET ["api", "tasks", "inbox", who] => tasks_inbox(who, query),
 
         // Removed in 0.17: the inbox page reads the task rows with their backlog columns.
-        ["api", "backlog"] => err(
+        GET ["api", "backlog"] => err(
             410,
             "removed in 0.17 — read /api/tasks?detail=1 (every open task, oldest first; all=1 adds closed ones)",
         ),
 
-        ["api", "task", id] => task_one(id, Query::parse(query).flag("events")),
+        GET ["api", "task", id] => task_one(id, Query::parse(query).flag("events")),
 
-        ["api", "task", id, "events"] => task_events(id),
+        GET ["api", "task", id, "events"] => task_events(id),
 
         _ => err(404, "not found"),
     }

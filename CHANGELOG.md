@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- The size gate reports each crate's and module's drift since the last release tag; there is no committed budget file to refresh per commit.
+- `cv schema --json` lists `routes`: every HTTP method/path pattern `cv serve` answers, from the routers' own tables.
+- `cv index --json` reports `changed`, `removed` and `errors` beside `indexed`, so a script need not parse the stderr summary.
 - `cv prune` and agent adoption refuse a source line that is not one JSON record, like `cv rewind`, instead of copying it; blank lines still pass.
 - Every JSONL adapter reads its transcript through one captured source (`store::jsonl::Read`); the owned-value line reader is gone. Each adapter still owns its resume protocol.
 

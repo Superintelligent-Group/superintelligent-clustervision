@@ -305,7 +305,7 @@ fn handle(request: &mut Request<'_>, ctx: &Ctx) {
             ));
         }
         None => {
-            if let Some(result) = download_export(&parts, query) {
+            if let Some(result) = download_export(false, &parts, query) {
                 match result {
                     Ok(download) => match download.body.reader() {
                         Ok(reader) => {
@@ -363,7 +363,7 @@ fn handle(request: &mut Request<'_>, ctx: &Ctx) {
                 }
                 Ok(None) => {}
             }
-            let (status, body, extra) = route(&parts, query, &ctx.searcher);
+            let (status, body, extra) = route(false, &parts, query, &ctx.searcher);
             request.respond(json_response(status, &body, origin.as_deref(), &extra));
         }
     }
@@ -452,19 +452,22 @@ fn allowed_origin(origin: Option<&str>, bind_host: &str) -> Option<String> {
 /// uses the third element today (to say which door answered — see [`search`]).
 type Reply = (u16, Value, Vec<(&'static str, String)>);
 
-/// Route a decoded read path + raw query string. Never panics.
-fn route(parts: &[&str], query: &str, searcher: &cv_search::Searcher) -> Reply {
-    // Routes that carry extra response headers answer here; everything else is header-free.
-    if let ["api", "search"] = parts {
-        return search(query, searcher);
+cv_core::routes! {
+    pub(crate) const ROUTES;
+    /// Route a decoded read path + raw query string. Never panics.
+    fn route(_post, parts, query: &str, searcher: &cv_search::Searcher) -> Reply {
+        // Routes that carry extra response headers answer here; everything else is header-free.
+        GET ["api", "search"] => search(query, searcher),
+        GET ["api", "stats"] => {
+            let (status, body) = stats(query);
+            (status, body, Vec::new())
+        },
+        // Every other noun is the one read API every door maps onto.
+        _ => {
+            let (status, body) = cv_core::api::route_json(parts, query);
+            (status, body, Vec::new())
+        },
     }
-    if let ["api", "stats"] = parts {
-        let (status, body) = stats(query);
-        return (status, body, Vec::new());
-    }
-    // Every other noun is the one read API every door maps onto.
-    let (status, body) = cv_core::api::route_json(parts, query);
-    (status, body, Vec::new())
 }
 
 // --- search & stats: the two things the CLI could do and the dashboard could not ------------
@@ -761,41 +764,44 @@ struct Download {
     filename: String,
 }
 
-fn download_export(parts: &[&str], query: &str) -> Option<Result<Download, (u16, Value)>> {
-    let ["api", "session", harness, id, "export"] = parts else {
-        return None;
+cv_core::routes! {
+    pub(crate) const EXPORT_ROUTES;
+    fn download_export(_post, parts, query: &str) -> Option<Result<Download, (u16, Value)>> {
+        GET ["api", "session", harness, id, "export"] => Some(export(harness, id, query)),
+        _ => None,
+    }
+}
+
+fn export(harness: &str, id: &str, query: &str) -> Result<Download, (u16, Value)> {
+    let format = Query::parse(query).get("format").unwrap_or_else(|| "markdown".into());
+    let (content_type, extension) = match format.as_str() {
+        "markdown" => ("text/markdown; charset=utf-8", "md"),
+        "opensession" => ("application/json", "opensession.json"),
+        _ => return Err(err(400, "format must be markdown or opensession")),
     };
-    Some((|| {
-        let format = Query::parse(query).get("format").unwrap_or_else(|| "markdown".into());
-        let (content_type, extension) = match format.as_str() {
-            "markdown" => ("text/markdown; charset=utf-8", "md"),
-            "opensession" => ("application/json", "opensession.json"),
-            _ => return Err(err(400, "format must be markdown or opensession")),
-        };
-        let harness = Harness::parse(harness).ok_or_else(|| err(400, "unknown harness"))?;
-        let (r, adapter) = cv_core::find(id, Some(harness))
-            .map_err(|error| err(500, &error.to_string()))?
-            .ok_or_else(|| err(404, "session not found"))?;
-        let (body, bytes) = super::view::stage_export(adapter.as_ref(), &r, &format)
-            .map_err(|error| err(500, &format!("export failed: {error:#}")))?;
-        let safe_id: String =
-            r.id.chars()
-                .map(|c| {
-                    if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
-                        c
-                    } else {
-                        '_'
-                    }
-                })
-                .take(120)
-                .collect();
-        Ok(Download {
-            body,
-            bytes,
-            content_type,
-            filename: format!("cv-{}-{safe_id}.{extension}", harness.as_str()),
-        })
-    })())
+    let harness = Harness::parse(harness).ok_or_else(|| err(400, "unknown harness"))?;
+    let (r, adapter) = cv_core::find(id, Some(harness))
+        .map_err(|error| err(500, &error.to_string()))?
+        .ok_or_else(|| err(404, "session not found"))?;
+    let (body, bytes) = super::view::stage_export(adapter.as_ref(), &r, &format)
+        .map_err(|error| err(500, &format!("export failed: {error:#}")))?;
+    let safe_id: String =
+        r.id.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .take(120)
+            .collect();
+    Ok(Download {
+        body,
+        bytes,
+        content_type,
+        filename: format!("cv-{}-{safe_id}.{extension}", harness.as_str()),
+    })
 }
 
 fn staged_response<'a>(
@@ -921,7 +927,7 @@ mod semantic_service_tests {
             semantic: cv_search::SemanticSearch::new(Some(path.clone())),
         };
         for _ in 0..2 {
-            let (status, body, headers) = route(&["api", "search"], "q=anything&semantic=1", &semantic);
+            let (status, body, headers) = route(false, &["api", "search"], "q=anything&semantic=1", &semantic);
             assert_eq!(status, 200);
             assert_eq!(body, json!([]));
             assert!(headers
@@ -929,10 +935,10 @@ mod semantic_service_tests {
                 .any(|(name, value)| *name == "X-Cv-Search-Source" && value == "semantic"));
         }
         std::fs::write(&path, b"invalid replacement").unwrap();
-        let (status, _, _) = route(&["api", "search"], "q=anything&semantic=1", &semantic);
+        let (status, _, _) = route(false, &["api", "search"], "q=anything&semantic=1", &semantic);
         assert_eq!(status, 500);
         std::fs::write(&path, &empty).unwrap();
-        let (status, body, _) = route(&["api", "search"], "q=anything&semantic=1", &semantic);
+        let (status, body, _) = route(false, &["api", "search"], "q=anything&semantic=1", &semantic);
         assert_eq!(status, 200);
         assert_eq!(body, json!([]));
         std::fs::remove_dir_all(dir).unwrap();

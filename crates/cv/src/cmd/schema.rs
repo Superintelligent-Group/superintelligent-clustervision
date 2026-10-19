@@ -141,7 +141,21 @@ pub(crate) fn data_schema_json() -> Value {
             "matched": "with --open-tasks: {task_id, title, state, shared[]} or absent when no task shares ≥3 significant words",
         },
         "query": query::schema_json(),
+        "routes": routes(),
     })
+}
+
+/// Every method/path pattern `cv serve` answers, from the routers' own tables (`cv_core::routes!`).
+fn routes() -> Vec<&'static str> {
+    let mut all = [
+        cv_core::api::ROUTES,
+        super::serve::ROUTES,
+        super::serve::EXPORT_ROUTES,
+        super::serve_tasks::ROUTES,
+    ]
+    .concat();
+    all.sort_unstable();
+    all
 }
 
 /// The command tree in the §6 shape: one entry per visible command and subcommand
@@ -419,6 +433,23 @@ mod tests {
         assert_eq!(v["block"]["tag"], "type");
         assert_eq!(v["session_row"]["keys"].as_array().unwrap().len(), 9);
         assert!(v["query"].is_object());
+        let routes: Vec<&str> = v["routes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r.as_str().unwrap())
+            .collect();
+        for route in [
+            "GET /api/sessions",
+            "GET /api/session/{}/{}/messages",
+            "GET /api/session/{}/{}/export",
+            "GET /api/board/*",
+            "GET /api/search",
+            "POST /api/task/{}/{}",
+        ] {
+            assert!(routes.contains(&route), "{route} missing from {routes:?}");
+        }
+        assert!(routes.windows(2).all(|w| w[0] < w[1]), "sorted, unique: {routes:?}");
         assert!(v["lane"]["status_source"]
             .as_array()
             .unwrap()

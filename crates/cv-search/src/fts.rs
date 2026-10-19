@@ -514,6 +514,12 @@ pub struct Unreadable {
 pub struct Indexed {
     /// Top-level sessions seen.
     pub total: usize,
+    /// Sessions whose documents this pass (re)wrote.
+    pub changed: usize,
+    /// Sessions reaped because their files are gone.
+    pub removed: usize,
+    /// Parses and publications that failed.
+    pub errors: usize,
     /// Sessions left out of the index this pass (a later pass retries each).
     pub unreadable: Vec<Unreadable>,
 }
@@ -553,6 +559,9 @@ fn report(swept: Swept, rebuild: bool, strict: bool) -> Result<Indexed> {
     }
     Ok(Indexed {
         total: swept.total,
+        changed: swept.changed,
+        removed: swept.removed,
+        errors: swept.errors,
         unreadable: swept.unreadable,
     })
 }

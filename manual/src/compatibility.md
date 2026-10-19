@@ -28,40 +28,30 @@ remain governed by their documented removal versions.
 
 ## What the gate checks
 
-`tools/compatibility-gate.sh` selects the highest reachable stable release tag, records
-its commit, and builds it in a separate checkout and target directory. It adds the
-same small private serde probe to that checkout: this exercises the released public
-`Message`/`Block` implementations with rich and minimal fixtures; it is not a claim
-that the baseline checkout is pristine. No baseline artifact is downloaded at runtime.
-The candidate and baseline use the pinned toolchain and separate synthetic homes.
+CI downloads the last release's Linux binary (sha256-pinned in `ci.yml`) and runs
+`tools/check-compatibility.py --baseline <released cv> --candidate target/debug/cv`.
+Nothing is rebuilt from a tag; each binary reports its own contracts, in separate
+synthetic homes, and the comparator permits additions and prose changes while
+rejecting removals and changed existing shapes or defaults.
 
-The comparison permits additions and prose changes, and rejects removals and changed
-existing shapes/defaults. It compares the existing command and data schemas, actual
-`ls`/`show` JSON, serialized messages containing every existing block type, real MCP
-`tools/list`, HTTP probes derived from the routers' method/path patterns, and success,
-operational-failure and usage-error exits. The schema field lists are also checked
-against the actual row and serializer output. Extend the probe when adding contract
-fields or block variants so the next release baseline has complete fixture coverage.
-Every documented role, message kind and origin must also serialize to its documented
-value: accepting the old name as an input alias does not preserve emitted JSON.
-The checks cover these fixtures and
-inventories; they do not prove arbitrary semantic equivalence for every transcript.
+It compares the command tree (`schema --commands --json`), the data schema's field and
+vocabulary lists (`schema --json`), the actual `ls`/`show` JSON shapes of a fixture
+session, the real MCP `tools/list`, and the HTTP routes. The route inventory is the
+candidate's `schema --json` `routes` list, which the routers' own tables produce (the
+`routes!` macro spells each arm once), so it cannot drift from the code; both servers
+are probed on every pattern and a status the baseline answered must hold. A baseline
+older than 0.18 lists no routes and is probed with the candidate's list, so a removed
+route is first caught once 0.18.0 is the baseline. Exit 2 for a caller mistake and
+exit 1 for an operational failure are exercised on both binaries. The schema's field
+lists are also checked against the serialized output. These are fixtures and
+inventories, not a proof of semantic equivalence for every transcript.
 
-The one initial exception is the approved 0.18 waiting-command change: MCP `workflow`
-removes unbounded `follow`; callers use bounded `for`. It applies only against
-v0.17.0 during 0.18 development/release (including the development tree before its
-Cargo version is bumped). CLI pipe/terminal behavior is covered separately by
-`crates/cv/tests/announce.rs`.
+A reviewed removal is named on the CI step with `--accept <contract path>`, beside the
+pinned baseline that still has it; the exception leaves with that baseline. The one
+0.18 entry is MCP `workflow`'s unbounded `follow`, replaced by bounded `for`
+(`tools.workflow.inputSchema.properties.follow`). CLI pipe/terminal behavior is covered
+separately by `crates/cv/tests/announce.rs`.
 
-Run the Python mutation tests with `python3 -I tools/test-compatibility.py`. Run the
-full gate on a build host, with release tags available and an owned candidate target.
-The build wrapper retains its own temporary checkout/target for inspection. Before
-accepting a contract change, inspect the actual failure and update only its narrow
-exception and pointer test when a deprecation was intended.
-
-CI also exercises upgrade from the checksum-pinned, released 0.16.1 Linux binary over every
-session-bearing corpus version. `tools/check-upgrade.py --baseline <old-cv> --candidate <new-cv>`
-copies stores into an isolated home, compares upgraded and clean candidate rows/events and
-streamed `show` hashes, and requires two unchanged index passes to report no changed sessions.
-Stores that 0.16.1 did not support are reported as new discovery coverage. Scratch catalogs
-remain available for diagnosis; transcript output is never dumped. Run this on the build host.
+Run the comparator's mutation tests with `python3 -I tools/test-compatibility.py`. Before
+accepting a contract change, inspect the actual failure and add only its narrow
+`--accept` and pointer test when a deprecation was intended.
