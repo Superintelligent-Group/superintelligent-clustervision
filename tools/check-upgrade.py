@@ -24,12 +24,12 @@ def require(condition, message):
         raise RuntimeError(message)
 
 
-def run(binary, env, *args, timeout=600, diagnostics=False):
+def run(binary, env, *args, timeout=600):
     result = subprocess.run([str(binary), *args], env=env, capture_output=True,
                             text=True, timeout=timeout)
     require(result.returncode == 0,
             f"{binary.name} {' '.join(args)}: exit {result.returncode}: {result.stderr[-2000:]}")
-    return (result.stdout, result.stderr) if diagnostics else result.stdout
+    return result.stdout
 
 
 def show_hash(binary, env, selector):
@@ -111,18 +111,14 @@ def rows(binary, env, expected, baseline=False):
 
 
 def index(binary, env, unchanged=False):
-    output, diagnostics = run(binary, env, "index", "--strict", "--json", diagnostics=True)
-    result = json.loads(output)
+    result = json.loads(run(binary, env, "index", "--strict", "--json"))
     require(result.get("unreadable") == [], f"unreadable upgrade sources: {result}")
-    require(type(result.get("indexed")) is int, f"missing indexed count: {result}")
-    # JSON indexed is the total inventory, NOT changed work. Read the actual sweep diagnostic.
-    reports = re.findall(r"index: (\d+) changed/new \((\d+) read from where the last pass stopped\), "
-                         r"(\d+) removed, (\d+) unchanged, (\d+) errors", diagnostics)
-    require(len(reports) == 1, f"missing or ambiguous index work report: {diagnostics[-2000:]}")
-    changed, resumed, removed, stable, errors = map(int, reports[0])
-    require(errors == 0, f"index publication errors: {reports[0]}")
+    counts = [result.get(key) for key in ("indexed", "changed", "removed", "errors")]
+    require(all(type(count) is int for count in counts), f"missing index counts: {result}")
+    _, changed, removed, errors = counts
+    require(errors == 0, f"index publication errors: {result}")
     if unchanged:
-        require((changed, resumed, removed) == (0, 0, 0), f"unchanged pass performed work: {reports[0]}")
+        require((changed, removed) == (0, 0), f"unchanged pass performed work: {result}")
     return changed
 
 

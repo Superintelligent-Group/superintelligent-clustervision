@@ -243,6 +243,9 @@ pub(crate) fn cmd_index(semantic: bool, rebuild: bool, subagents: bool, strict: 
     if json {
         let mut out = serde_json::json!({
             "indexed": indexed.total,
+            "changed": indexed.changed,
+            "removed": indexed.removed,
+            "errors": indexed.errors,
             "path": dir,
             "unreadable": indexed.unreadable,
         });

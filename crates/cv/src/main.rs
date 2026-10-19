@@ -1016,7 +1016,8 @@ enum Cmd {
         /// the index commits the rest and a later pass retries them.
         #[arg(long)]
         strict: bool,
-        /// Print the result as JSON: `{indexed, path, unreadable: [{id, harness, reason}]}`.
+        /// Print the result as JSON: `{indexed, changed, removed, errors, path, unreadable:
+        /// [{id, harness, reason}]}`.
         #[arg(long)]
         json: bool,
     },
