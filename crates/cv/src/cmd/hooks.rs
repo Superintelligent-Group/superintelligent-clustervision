@@ -199,17 +199,21 @@ fn claude_config_dir() -> Option<PathBuf> {
         .or_else(|| crate::util::dirs_home().map(|h| h.join(".claude")))
 }
 
+/// Codex's home: `$CODEX_HOME`, else `~/.codex`.
+fn codex_home() -> Option<PathBuf> {
+    cv_core::env::var_os("CODEX_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| crate::util::dirs_home().map(|h| h.join(".codex")))
+}
+
 /// `(settings.json or hooks.json, skills/cv/SKILL.md)` for a harness and scope.
 fn paths(harness: Harness, scope: Scope) -> Result<(PathBuf, PathBuf)> {
     let dir = match scope {
         Scope::User if harness == Harness::Claude => {
             claude_config_dir().context("no home directory: cannot locate ~/.claude")?
         }
-        Scope::User => cv_core::env::var_os("CODEX_HOME")
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| crate::util::dirs_home().map(|h| h.join(".codex")))
-            .context("no home directory: cannot locate ~/.codex")?,
+        Scope::User => codex_home().context("no home directory: cannot locate ~/.codex")?,
         Scope::Project => {
             std::env::current_dir()
                 .context("reading the current directory")?
@@ -228,6 +232,174 @@ fn paths(harness: Harness, scope: Scope) -> Result<(PathBuf, PathBuf)> {
         }),
         dir.join("skills").join("cv").join("SKILL.md"),
     ))
+}
+
+// ───────────────────────────── Codex trust ─────────────────────────────
+//
+// Codex runs a `hooks.json` handler only when its identity hash is recorded under
+// `[hooks.state."<hooks.json>:<event>:<group>:<handler>"] trusted_hash` in `config.toml`
+// (`codex-rs/hooks/src/engine/discovery.rs`: `hook_hash`, `hook_trust_status`). The TUI's startup
+// hooks review writes that entry; `codex exec --dangerously-bypass-hook-trust` skips the check;
+// nothing else runs an untrusted or modified handler, silently. The hash is sha256 over the
+// key-sorted compact JSON of the normalized identity: the event's snake_case label, the group's
+// matcher, and the one handler with Codex's defaults applied (`timeout` 600 when unset, `async`
+// false, `statusMessage`/`additionalContextLimit` only when set and not the default). Checked
+// against Codex 0.162.1's `hooks/list` for cv's six entries in every scope.
+
+/// What Codex will do with one of cv's entries: run it, or skip it until reviewed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Trust {
+    Trusted,
+    Untrusted,
+    /// Trusted once, then the entry changed (a moved binary, an edited matcher): skipped again.
+    Modified,
+}
+
+impl Trust {
+    fn as_str(self) -> &'static str {
+        match self {
+            Trust::Trusted => "trusted",
+            Trust::Untrusted => "untrusted",
+            Trust::Modified => "modified",
+        }
+    }
+}
+
+/// One of cv's entries as Codex identifies it: its state key, its current hash, and its trust.
+struct TrustRow {
+    name: HookName,
+    key: String,
+    hash: String,
+    trust: Trust,
+}
+
+/// Codex's state key label for a hooks.json event (`hook_event_key_label`).
+fn codex_event_label(event: &str) -> &'static str {
+    match event {
+        "PreToolUse" => "pre_tool_use",
+        "SessionStart" => "session_start",
+        "UserPromptSubmit" => "user_prompt_submit",
+        "SubagentStart" => "subagent_start",
+        "SubagentStop" => "subagent_stop",
+        _ => "unknown",
+    }
+}
+
+/// The hash Codex computes for a `type: command` handler under `event` with `matcher`.
+fn codex_hook_hash(event: &str, matcher: Option<&str>, handler: &Value) -> String {
+    use sha2::Digest;
+    let mut hook = Map::new();
+    hook.insert("type".into(), json!("command"));
+    hook.insert("command".into(), handler.get("command").cloned().unwrap_or(Value::Null));
+    hook.insert(
+        "timeout".into(),
+        json!(handler.get("timeout").and_then(Value::as_u64).unwrap_or(600).max(1)),
+    );
+    hook.insert(
+        "async".into(),
+        json!(handler.get("async").and_then(Value::as_bool).unwrap_or(false)),
+    );
+    if let Some(s) = handler.get("statusMessage").filter(|v| v.is_string()) {
+        hook.insert("statusMessage".into(), s.clone());
+    }
+    if let Some(limit) = handler
+        .get("additionalContextLimit")
+        .and_then(Value::as_u64)
+        .filter(|l| *l != 2500)
+    {
+        hook.insert("additionalContextLimit".into(), json!(limit));
+    }
+    let mut identity = Map::new();
+    identity.insert("event_name".into(), json!(codex_event_label(event)));
+    if let Some(m) = matcher {
+        identity.insert("matcher".into(), json!(m));
+    }
+    identity.insert("hooks".into(), json!([Value::Object(hook)]));
+    let mut identity = Value::Object(identity);
+    identity.sort_all_objects();
+    let digest = sha2::Sha256::digest(serde_json::to_vec(&identity).unwrap_or_default());
+    format!("sha256:{digest:x}")
+}
+
+/// `[hooks.state]` of Codex's user `config.toml`: state key → `trusted_hash`. The TUI records
+/// trust there for project hooks too.
+fn codex_trust_store() -> HashMap<String, String> {
+    let Some(text) = codex_home().and_then(|h| std::fs::read_to_string(h.join("config.toml")).ok()) else {
+        return HashMap::new();
+    };
+    let Ok(config) = text.parse::<toml::Table>() else {
+        return HashMap::new();
+    };
+    config
+        .get("hooks")
+        .and_then(|h| h.get("state"))
+        .and_then(toml::Value::as_table)
+        .into_iter()
+        .flatten()
+        .filter_map(|(key, state)| {
+            let hash = state.get("trusted_hash")?.as_str()?;
+            Some((key.clone(), hash.to_string()))
+        })
+        .collect()
+}
+
+/// cv's entries in `settings` (a Codex hooks.json at `path`), each with the trust Codex gives it.
+fn codex_trust(path: &Path, settings: &Value) -> Vec<TrustRow> {
+    let store = codex_trust_store();
+    let Some(hooks) = settings.get("hooks").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    // Codex keys by the config folder's canonical path (`/var/…` is `/private/var/…` on macOS).
+    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut rows = Vec::new();
+    for (event, groups) in hooks {
+        for (gi, group) in groups.as_array().into_iter().flatten().enumerate() {
+            let matcher = group.get("matcher").and_then(Value::as_str);
+            for (hi, handler) in group
+                .get("hooks")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .enumerate()
+            {
+                let Some(name) = ours(handler) else { continue };
+                let key = format!("{}:{}:{gi}:{hi}", path.display(), codex_event_label(event));
+                let hash = codex_hook_hash(event, matcher, handler);
+                let trust = match store.get(&key) {
+                    None => Trust::Untrusted,
+                    Some(h) if *h == hash => Trust::Trusted,
+                    Some(_) => Trust::Modified,
+                };
+                rows.push(TrustRow { name, key, hash, trust });
+            }
+        }
+    }
+    rows
+}
+
+/// One phrase for a scope's trust: `trusted`, or the counts and what to do about them.
+fn trust_summary(rows: &[TrustRow], scope: Scope) -> String {
+    let count = |t: Trust| rows.iter().filter(|r| r.trust == t).count();
+    let (untrusted, modified) = (count(Trust::Untrusted), count(Trust::Modified));
+    if untrusted + modified == 0 {
+        return "trusted".to_string();
+    }
+    let mut parts = Vec::new();
+    if untrusted > 0 {
+        parts.push(format!("{untrusted} untrusted"));
+    }
+    if modified > 0 {
+        parts.push(format!("{modified} modified since trusted"));
+    }
+    let project = match scope {
+        Scope::Project => " and this directory must be a trusted project",
+        Scope::User => "",
+    };
+    format!(
+        "{} — Codex skips them until you start `codex` and accept them in its startup hooks review{project} \
+         (automation: `codex exec --dangerously-bypass-hook-trust`)",
+        parts.join(", ")
+    )
 }
 
 fn read_settings(path: &Path) -> Result<Value> {
@@ -424,6 +596,12 @@ pub(crate) fn cmd_hooks(cmd: HooksCmd) -> Result<()> {
                 println!("cv hooks: installed {}", changed.join(" · "));
                 println!("  (takes effect in new harness sessions; `cv hooks show` lists the entries, `cv hooks remove` deletes them)");
             }
+            if harness == Harness::Codex {
+                println!(
+                    "  Codex trust: {}",
+                    trust_summary(&codex_trust(&settings_path, &after), scope)
+                );
+            }
             Ok(())
         }
         HooksCmd::Remove { harness, scope } => {
@@ -463,24 +641,40 @@ pub(crate) fn cmd_hooks(cmd: HooksCmd) -> Result<()> {
             let after = with_ours(harness, before.clone(), &exe);
             let have = present(harness, &before);
             let skill_present = std::fs::read_to_string(&skill_path).ok().as_deref() == Some(SKILL);
+            // Codex: the trust each present entry has today (the file as it is, not as install would leave it).
+            let trust = match harness {
+                Harness::Codex => codex_trust(&settings_path, &before),
+                _ => Vec::new(),
+            };
+            let trust_of = |s: &Spec| {
+                trust
+                    .iter()
+                    .find(|r| r.name == s.name && r.key.contains(&format!(":{}:", codex_event_label(s.event))))
+            };
             if json {
                 let (mut installed, mut missing) = (Vec::new(), Vec::new());
                 for s in specs(harness) {
-                    let row = json!({"event": s.event, "matcher": s.matcher, "hook": s.name.as_str(),
+                    let mut row = json!({"event": s.event, "matcher": s.matcher, "hook": s.name.as_str(),
                         "command": command_for(harness, &exe, s.name)});
+                    if let Some(t) = trust_of(s) {
+                        row["trust"] = json!(t.trust.as_str());
+                        row["trust_key"] = json!(t.key);
+                        row["current_hash"] = json!(t.hash);
+                    }
                     match have.get(&(s.event, s.matcher, s.name)) {
                         Some(cmd) if *cmd == command_for(harness, &exe, s.name) => installed.push(row),
                         _ => missing.push(row),
                     }
                 }
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&json!({
-                        "settings_path": settings_path, "installed": installed, "missing": missing,
-                        "skill_path": skill_path, "skill_present": skill_present,
-                        "before": before, "after": after, "would_change": after != before || !skill_present,
-                    }))?
-                );
+                let mut out = json!({
+                    "settings_path": settings_path, "installed": installed, "missing": missing,
+                    "skill_path": skill_path, "skill_present": skill_present,
+                    "before": before, "after": after, "would_change": after != before || !skill_present,
+                });
+                if harness == Harness::Codex {
+                    out["trust"] = json!(trust_summary(&trust, scope));
+                }
+                println!("{}", serde_json::to_string_pretty(&out)?);
                 return Ok(());
             }
             println!("# cv hooks — {} ({:?} scope)\n", home_rel(&settings_path), scope);
@@ -492,7 +686,10 @@ pub(crate) fn cmd_hooks(cmd: HooksCmd) -> Result<()> {
                     None => "+",
                 };
                 let matcher = s.matcher.map(|m| format!(" [{m}]")).unwrap_or_default();
-                println!("  {mark} {:<17}{matcher:<18} {want}", s.event);
+                let trust = trust_of(s)
+                    .map(|t| format!(" · {}", t.trust.as_str()))
+                    .unwrap_or_default();
+                println!("  {mark} {:<17}{matcher:<18} {want}{trust}", s.event);
             }
             println!(
                 "  {} skill {}",
@@ -507,6 +704,9 @@ pub(crate) fn cmd_hooks(cmd: HooksCmd) -> Result<()> {
                     format!("✓ present · + `cv hooks install {harness}` adds · ~ replaces (another cv binary's path)")
                 }
             );
+            if harness == Harness::Codex && !trust.is_empty() {
+                println!("Codex trust: {}", trust_summary(&trust, scope));
+            }
             Ok(())
         }
     }
@@ -568,7 +768,20 @@ pub(crate) fn status() -> (Vec<(Scope, usize, PathBuf)>, Policy) {
     )
 }
 
-/// The two lines `cv doctor` prints under its header.
+/// Codex's hooks per scope: `(scope, entries present, hooks.json, their trust)`, scopes with entries only.
+fn codex_status() -> Vec<(Scope, usize, PathBuf, Vec<TrustRow>)> {
+    [Scope::User, Scope::Project]
+        .into_iter()
+        .filter_map(|scope| {
+            let (path, _) = paths(Harness::Codex, scope).ok()?;
+            let settings = read_settings(&path).unwrap_or(json!({}));
+            let n = present(Harness::Codex, &settings).len();
+            (n > 0).then(|| (scope, n, path.clone(), codex_trust(&path, &settings)))
+        })
+        .collect()
+}
+
+/// The three lines `cv doctor` prints under its header.
 pub(crate) fn doctor_lines() -> Vec<String> {
     let (scopes, policy) = status();
     let total = SPECS.len();
@@ -582,6 +795,21 @@ pub(crate) fn doctor_lines() -> Vec<String> {
             .to_string()
     } else {
         installed.join(", ")
+    };
+    let codex: Vec<String> = codex_status()
+        .iter()
+        .map(|(scope, n, path, trust)| {
+            format!(
+                "{n}/{total} in {} ({scope:?}), {}",
+                home_rel(path),
+                trust_summary(trust, *scope)
+            )
+        })
+        .collect();
+    let codex = if codex.is_empty() {
+        "not installed — `cv hooks install codex` wires the same five loops for Codex".to_string()
+    } else {
+        codex.join("; ")
     };
     let onoff = |v: Option<bool>, default_on: bool| match v {
         Some(true) => "true".to_string(),
@@ -598,6 +826,7 @@ pub(crate) fn doctor_lines() -> Vec<String> {
     }));
     vec![
         format!("Hooks:       {hooks}"),
+        format!("Codex hooks: {codex}"),
         format!("Policy:      {}", knobs.join(" · ")),
     ]
 }
@@ -607,6 +836,10 @@ pub(crate) fn doctor_json() -> Value {
     json!({
         "installed": scopes.iter().map(|(scope, n, path)| json!({
             "scope": format!("{scope:?}").to_lowercase(), "entries": n, "of": SPECS.len(), "settings_path": path
+        })).collect::<Vec<_>>(),
+        "codex": codex_status().iter().map(|(scope, n, path, trust)| json!({
+            "scope": format!("{scope:?}").to_lowercase(), "entries": n, "of": SPECS.len(), "settings_path": path,
+            "trust": trust.iter().map(|r| json!({"hook": r.name.as_str(), "key": r.key, "trust": r.trust.as_str()})).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
         "policy": {
             "auto_compact_enabled": policy.auto_compact_enabled,
@@ -1054,12 +1287,53 @@ fn is_current_editor(t: &cv_core::events::TouchedSession, session_id: &str, agen
         && t.agent_id.as_deref() == agent_id
 }
 
+/// The root thread of a Codex session: each rollout's `parent_thread_id` header followed up
+/// through the catalog, the lane ledger's `start` rows standing in for a child the catalog has
+/// not indexed yet. A thread without a parent is its own root. Bounded, so a cyclic ledger ends.
+fn codex_root(id: &str, path: Option<&Path>, ledger: &[LaneEvent]) -> String {
+    let mut id = id.to_string();
+    let mut path = path.map(Path::to_path_buf);
+    for _ in 0..16 {
+        let registered = ledger
+            .iter()
+            .rev()
+            .find(|row| row.event == "start" && row.agent_id == id);
+        let parent = path
+            .as_deref()
+            .and_then(cv_core::harness::codex::hook_header)
+            .and_then(|s| s.lineage.parent)
+            .or_else(|| registered.map(|row| row.session_id.clone()));
+        let Some(parent) = parent else { return id };
+        path = cv_core::catalog::lookup(&parent, Some(Harness::Codex))
+            .into_iter()
+            .find(|r| r.id == parent)
+            .map(|r| r.path)
+            .or_else(|| registered.and_then(|row| row.transcript_path.clone()));
+        id = parent;
+    }
+    id
+}
+
 /// `PreToolUse` (`Edit|Write`): `ask` when another live session edited this path — the edit
 /// index (`cv touched`) names the sessions, the catalog names their transcripts, one `stat` each
-/// says which are live. Nothing printed = allow.
+/// says which are live. Nothing printed = allow. A Claude session's own lane is not another
+/// session; neither is any thread under a Codex session's root (its parent, its children), since
+/// Codex only takes `deny` and a swarm shares its files on purpose.
 fn hook_edit(input: &Input) -> Result<Option<Value>> {
     let files = edit_paths(input);
     let mut conflicts = Vec::new();
+    let my_agent = input
+        .agent_id
+        .as_deref()
+        .map(|a| a.strip_prefix("agent-").unwrap_or(a).to_string());
+    let ledger = if input.codex {
+        cv_core::lanes::read_ledger()
+    } else {
+        Vec::new()
+    };
+    let my_root = input
+        .codex
+        .then(|| codex_root(&input.session_id, input.transcript_path.as_deref(), &ledger));
     for file in files {
         let abs = if Path::new(&file).is_absolute() {
             PathBuf::from(&file)
@@ -1071,18 +1345,17 @@ fn hook_edit(input: &Input) -> Result<Option<Value>> {
                 .unwrap_or_default()
                 .join(file.trim_start_matches("./"))
         };
-        let my_agent = input
-            .agent_id
-            .as_deref()
-            .map(|a| a.strip_prefix("agent-").unwrap_or(a).to_string());
         let mut live: Vec<(String, i64)> = Vec::new();
         for t in cv_core::events::sessions_editing(&abs.to_string_lossy()) {
-            if (input.codex && t.harness == "codex" && t.session_id == input.session_id)
-                || (!input.codex && is_current_editor(&t, &input.session_id, my_agent.as_deref()))
-            {
+            if !input.codex && is_current_editor(&t, &input.session_id, my_agent.as_deref()) {
                 continue;
             }
             let Some(path) = transcript_of(&t) else { continue };
+            if let Some(root) = my_root.as_deref() {
+                if t.harness == "codex" && codex_root(&t.session_id, Some(&path), &ledger) == root {
+                    continue;
+                }
+            }
             if let Some(m) = minutes_since_modified(&path).filter(|m| *m <= LIVE_MINUTES) {
                 live.push((
                     if t.harness == "codex" {
@@ -1125,6 +1398,65 @@ fn hook_edit(input: &Input) -> Result<Option<Value>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The hashes Codex 0.162.1's `hooks/list` reported for cv's six entries as `with_ours` writes
+    /// them (recorded 2026-10-19 in an isolated `CODEX_HOME`; the binary path is part of the hash).
+    #[test]
+    fn codex_hook_hash_matches_codex_0_162_1() {
+        let exe = "/private/tmp/claude-501/-Users-ember-dev-cv/ece21c13-ee7c-4db3-b8a6-e83ade448e6a/scratchpad/target-hooks/debug/cv";
+        let settings = with_ours(Harness::Codex, json!({}), exe);
+        let recorded = [
+            (
+                "SessionStart",
+                0,
+                "sha256:bab06d02d2b21b9460a5e75fe440527fb5133c32ba0bf29307f663ed3e45d1b1",
+            ),
+            (
+                "SessionStart",
+                1,
+                "sha256:0648814e802b9e8ceaa87e88b9890ea7bfae7c35d03fe595bf8f0f3fdbdf956a",
+            ),
+            (
+                "SubagentStart",
+                0,
+                "sha256:a374e342343e7317477ef79e00c96e9d54b586c80958b47a766d2e33a5cb48f2",
+            ),
+            (
+                "SubagentStop",
+                0,
+                "sha256:2213dfa52226988d3a710d6fa6ffa12b83028a189d06968e8386ab9fd397a28a",
+            ),
+            (
+                "UserPromptSubmit",
+                0,
+                "sha256:72e820dad14de1ced01a772173169e39c3e88bb7d9ac3265e8fb8c838fad1bc5",
+            ),
+            (
+                "PreToolUse",
+                0,
+                "sha256:aec1ede91be48eb971d19eacb805a8a9b31038fedfcae6c2e460198c8a77b3e6",
+            ),
+        ];
+        for (event, group, hash) in recorded {
+            let g = &settings["hooks"][event][group];
+            assert_eq!(
+                codex_hook_hash(event, g["matcher"].as_str(), &g["hooks"][0]),
+                hash,
+                "{event}[{group}]"
+            );
+        }
+        // The keys Codex stores trust under, and the three states its `hooks/list` reports.
+        let path = Path::new("/home/u/.codex/hooks.json");
+        let rows = codex_trust(path, &settings);
+        assert_eq!(rows.len(), 6);
+        assert!(rows.iter().all(|r| r.trust == Trust::Untrusted));
+        assert!(rows
+            .iter()
+            .any(|r| r.key == "/home/u/.codex/hooks.json:session_start:1:0" && r.name == HookName::Start));
+        assert!(rows
+            .iter()
+            .any(|r| r.key == "/home/u/.codex/hooks.json:pre_tool_use:0:0" && r.hash == recorded[5].2));
+    }
 
     #[test]
     fn codex_patch_guards_all_destinations_without_treating_shell_as_a_patch() {

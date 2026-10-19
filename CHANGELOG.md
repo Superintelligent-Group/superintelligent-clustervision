@@ -17,6 +17,46 @@
 - A reader checks its source after a slow callback, a checkpoint and at EOF; a replaced or truncated file is an error, never a crash.
 - Native Codex file-change records feed `cv touched`, tool histograms and query facts, including code-mode edits, without duplicating visible patch calls.
 - `cv index --subagents` folds the sub-agent forest from stat-keyed metadata instead of re-parsing every transcript each pass.
+- `message_count` is `null` (a dash in `cv ls`) until a session is counted; `cv stats` reports the uncounted sessions beside the total.
+- Goose listings defer exact counts to complete reads while preserving native headers, session inclusion, and legacy whole-file UTF-8 validation.
+
+- Hermes listings read native session metadata without scanning message bodies; indexing or complete reads supply source-certified canonical turn counts.
+- Zed listings preserve native metadata without decoding messages for counts; complete reads supply source-certified counts.
+
+- Listings reuse source-certified exact turn counts after complete reads, preserving them across harmless metadata refreshes and invalidating changed sources.
+- Kimi Code listings use complete native state metadata directly and defer exact counts; incomplete metadata retains transcript-derived titles and timestamps.
+- Kimi Code reads detect callback source changes before continuing a new step or completing an unfinished one.
+
+- Kimi listings use native titles or stop at the first fallback prompt; exact counts come from complete reads or indexing.
+- Kimi reads reject callback changes to captured transcripts and wire enrichment, including final messages from older rotated segments.
+- Grok reads reject source changes during message/checkpoint callbacks, including held reasoning at EOF.
+
+- JSON listings and filtered windows reuse filesystem metadata for shared stores while rechecking presence at rendering.
+- Hermes keeps generation membership in private indexed storage while preserving exact duplicate detection and lazy message bodies.
+
+- Repeated OpenClaw parent lookups share private indexed facts; one-query operations keep native startup cost, query order, malformed values, and source guards.
+- Codex listings defer exact counts to indexing or complete reads; transcript metadata and compressed decode reuse stay unchanged.
+- Codex reads check the source after a slow callback, a checkpoint, the first metadata and at EOF, and reject a replaced or truncated file.
+- Claude reads check the source after a slow callback, a checkpoint and at EOF, and reject a replaced or truncated file before touching its mapping again.
+
+- Catalog publication waits for concurrent writers before comparing rows, preventing avoidable lost discovery updates during indexing.
+
+- Claude listings count turns during discovery (the record heads are read anyway); the count is never deferred.
+- Claude reads report source deletion or replacement during callbacks even after an intentional stop with owned content.
+- Preserve untouched native records while sharing Claude prune, rewind, and adoption derivation.
+
+- Grok listings use native summaries and stop after finding fallback titles; exact message counts appear after indexing or a complete read.
+- `cv doctor` compares observed Claude/Codex writer versions with corpus coverage, including unknown sessions; observations come from normal discovery.
+- Cataloged writer versions and interpretation 5 trigger an announced rediscovery and consumer reread after upgrading; JSON stays unchanged.
+- A compatibility gate checks the latest release against CLI schemas, serialized messages, session rows, MCP tools, HTTP routes, and exit codes.
+- Native Codex file-change records now feed `cv touched`, tool histograms and query facts, including code-mode edits, without duplicating visible patch calls.
+
+- `cv hooks install codex` adds compaction recovery, session context, lane tracking, decision reminders and live edit guards in user or project scope.
+- `cv hooks install|show codex` and `cv doctor` report each Codex hook as trusted, untrusted or modified, with the review step Codex requires.
+- The Codex edit guard no longer denies a patch over a file edited by the same root thread's parent or sub-agents.
+- Affordances include Claude slash-loaded skills, Kimi Code todo state and legacy agents, and Roo returns carried alongside user text.
+- Emitted fallback titles use meaningful prompts; Cursor CLI titles omit leading timestamp metadata while transcript text stays intact.
+- `cv index --subagents` walks the sub-agent forest by its stat-keyed metadata instead of re-parsing every transcript each pass.
 - A folded sub-agent's freshness stamp declares its parent's `tool-results` directory by identity, not entry by entry.
 
 **Titles and affordances.**

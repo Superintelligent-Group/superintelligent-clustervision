@@ -256,6 +256,16 @@ Claude Code (checked against 2.1.296 and its [hooks reference](https://code.clau
 and Codex 0.163.0 have verified contracts. Other harness names error. Codex commands carry
 `CV_HOOK_HARNESS=codex` so the shared bodies read Codex transcripts and native thread identities.
 
+Codex runs a `hooks.json` handler only after you trust it: start `codex` and accept cv's entries
+in its startup hooks review (automation: `codex exec --dangerously-bypass-hook-trust`); project
+scope also needs the directory trusted as a project. Until then Codex skips them silently, and a
+moved binary or an edited matcher makes a trusted entry *modified*, skipped again. `cv hooks
+install codex` prints the state it left, `cv hooks show codex` reports each entry as trusted,
+untrusted or modified, and `cv doctor` has a `Codex hooks:` row. cv reads the same
+`[hooks.state]` table in `~/.codex/config.toml` Codex reads, under the same key and hash
+(checked against Codex 0.162.1's `hooks/list`; `CV_CODEX_BIN=$(which codex) cargo nextest run
+-p clustervision --test hooks codex_trust_matches_the_real_binary` rechecks it live).
+
 ### The five hooks
 
 Each `cv hook <name>` reads the hook's JSON on stdin and prints one line of hook JSON, or nothing.
@@ -285,7 +295,10 @@ Details that matter:
   `[branch sha]` line in each transcript's final 512 KiB.
 - **Codex** uses the same events; its edit matcher is the canonical `apply_patch` tool name. The edit guard
   checks every added, updated, removed or moved path in its patch. Codex rejects `ask`, so a
-  live conflict returns `deny` and blocks that patch. Coordinate with the other session; to
+  live conflict returns `deny` and blocks that patch. Threads under one root (a session, its
+  sub-agents, their children: `parent_thread_id` headers, or the lane ledger for a child not
+  yet indexed) are one session to the guard, as a Claude session's own lanes are: a swarm
+  editing its own files is never denied. Coordinate with the other session; to
   override the guard, remove its edit handler from `hooks.json` (`cv hooks remove codex`
   removes all five hooks). Compaction recovery points at
   `cv show --pre-compaction`; `cv rewind` currently supports Claude sessions. Codex lane UUIDs
