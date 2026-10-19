@@ -54,6 +54,13 @@ classifiers) are tested against simple oracles. No test compares two decoders: t
 Before deleting an old path, compare hashes of canonical outputs, resolved payloads, checkpoints
 and session metadata against an independent baseline over recorded sessions in each affected
 demand. Stream hashes rather than retaining transcript dumps; diagnostic tools stay uncommitted.
+The byte-identity gate is `tools/dump-hash.sh --cv BIN --probe store_probe [--probe-positioned
+store_probe] --scratch DIR [--home DIR]`: over `tools/dump-hash.manifest` (every corpus version
+staged as a fake HOME, four synthetic Claude edges, any external home of real sessions) it prints
+one sorted `sha256  command  session  demand` line per `ls`/`show`/`export`/`search`/`events`/
+`tools`/`stats`/`doctor`/`pack` form, per reshape output and sidecar, and per `store_probe hash`
+demand in both builds. Two runs of one binary print equal sets; a commit that changes output
+pastes the lines it moved into its message. Results are never committed.
 
 **Byte sources by family.** JSONL (Claude, the OpenAI family, Gemini's jsonl era): `for_each_line`.
 JSON documents (Gemini's document era, cline, roo, cline_sdk, lmstudio, opensession, the exports):
