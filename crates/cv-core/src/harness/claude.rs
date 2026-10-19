@@ -388,6 +388,7 @@ fn read(
     crate::stream::checked(&mut spawns, |sink| {
         read.snapshot(from, to, |line| {
             check()?;
+            let started = std::time::Instant::now();
             if let Some(view) = line.view {
                 let mut sourced = false;
                 let flow = record::ingest(&mut session, view, Some(line.at), opts, sink, &mut sourced)?;
@@ -403,10 +404,13 @@ fn read(
                 let mut cp = Checkpoint::new(line.end);
                 cp.put(ADAPTER_LAYER, &session);
                 sink.checkpoint(&mut cp);
+                // The next resume depends on the file being intact: always check.
+                read.check_backing()?;
             }
-            // The codec returns immediately after message delivery. Check after that callback
-            // and the wants/optional-checkpoint group before the framer touches its mapping again.
-            read.check_backing()?;
+            // After the callbacks, before the framer touches its mapping again: the full check if
+            // a callback was slow enough for the file to have changed under it, else once per
+            // window of input.
+            read.check_backing_after(started, line.end)?;
             Ok(Flow::Continue)
         })
     })?;
@@ -2541,6 +2545,9 @@ mod tests {
                     }
                     self.file.set_len(0).unwrap();
                     self.mutate = false;
+                    // A callback that changed the file is a slow one by construction; the reader
+                    // checks the backing after a slow callback, before touching the mapping again.
+                    std::thread::sleep(jsonl::Read::SLOW_CALLBACK * 10);
                 }
             }
         }

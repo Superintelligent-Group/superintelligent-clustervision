@@ -493,7 +493,12 @@ impl EventDetector {
 /// message vec is still reachable when the event arrives: [`apply_token_count`] only ever targets
 /// the last message, and the last message is exactly what's held. The hold is at most one message,
 /// flushed by the next [`flush_all_but_held`] call or by the caller at EOF.
-fn flush_all_but_held(scratch: &mut Vec<Message>, sink: &mut dyn MessageSink, input: &jsonl::Read) -> Result<Flow> {
+fn flush_all_but_held(
+    scratch: &mut Vec<Message>,
+    sink: &mut dyn MessageSink,
+    input: &jsonl::Read,
+    at: u64,
+) -> Result<Flow> {
     // Also hold an assistant message whose usage came from a `token_usage_record`: its
     // `token_count` twin (rate limits, context window) follows a few records later and merges into
     // it — see [`apply_token_count`].
@@ -504,7 +509,7 @@ fn flush_all_but_held(scratch: &mut Vec<Message>, sink: &mut dyn MessageSink, in
     let upto = scratch.len() - hold as usize;
     for m in scratch.drain(..upto) {
         let flow = sink.message(m);
-        input.check_backing()?;
+        input.check_backing_at(at)?;
         if flow == Flow::Stop {
             return Ok(Flow::Stop);
         }
@@ -695,7 +700,7 @@ fn read(
             rollout.input.check_backing()?;
             meta_sent = true;
         }
-        if flush_all_but_held(&mut scratch, sink, &rollout.input)? == Flow::Stop {
+        if flush_all_but_held(&mut scratch, sink, &rollout.input, line.end)? == Flow::Stop {
             stopped = true;
             return Ok(Flow::Stop);
         }
@@ -703,7 +708,7 @@ fn read(
         // provisional until a newline arrives. Neither belongs in a reusable immutable prefix.
         let checkpoint = if plain && scratch.is_empty() && line.complete {
             let wanted = sink.wants_checkpoint(line.end);
-            rollout.input.check_backing()?;
+            rollout.input.check_backing_at(line.end)?;
             wanted
         } else {
             false

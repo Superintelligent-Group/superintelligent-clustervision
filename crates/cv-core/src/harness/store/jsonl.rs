@@ -25,6 +25,8 @@ pub(crate) struct Line<'v> {
 pub(crate) struct Read {
     source: crate::json::JsonSource,
     file: File,
+    /// Bytes through which [`Self::check_backing_at`] last verified the backing file.
+    checked_through: std::sync::atomic::AtomicU64,
 }
 
 impl ranges::At for Read {
@@ -43,7 +45,11 @@ impl Read {
         let source = crate::json::JsonSource::capture(path)?;
         let file = File::open(path)?;
         source.check_metadata(file.metadata()?)?;
-        Ok(Self { source, file })
+        Ok(Self {
+            source,
+            file,
+            checked_through: std::sync::atomic::AtomicU64::new(0),
+        })
     }
 
     pub(crate) fn source(&self) -> &crate::json::JsonSource {
@@ -64,6 +70,43 @@ impl Read {
     /// Recheck the opened inode before resuming mapped bytes after a consumer callback.
     pub(crate) fn check_backing(&self) -> anyhow::Result<()> {
         self.source.check_metadata(self.file.metadata()?)
+    }
+
+    /// Bytes of input between two backing checks on the hot path. A sink callback returns in
+    /// microseconds on the hot path; checking the file's identity after every one of them cost a
+    /// `fstat` per record (four per Codex record), a tenth of a 64 MB parse. The framer maps its
+    /// input in windows, so a check once per window of consumed bytes catches a replaced or
+    /// truncated file before the next mapping, and a checkpoint always forces one.
+    const CHECK_EVERY: u64 = 8 << 20;
+
+    /// [`Self::check_backing`] once per [`Self::CHECK_EVERY`] bytes of consumed input, keyed by the
+    /// offset the reader has reached. Call it after a sink callback; call `check_backing` itself
+    /// where the next step depends on the file being intact (a checkpoint, EOF).
+    /// A sink callback longer than this is one during which the file could plausibly have been
+    /// replaced or truncated (a consumer that writes, talks to a network, or blocks); the backing
+    /// is checked right after it. A callback that returned at once is covered by the window.
+    pub(crate) const SLOW_CALLBACK: std::time::Duration = std::time::Duration::from_micros(200);
+
+    /// After a sink callback that began at `started`: the full check when the callback was slow
+    /// ([`Self::SLOW_CALLBACK`]), the windowed one otherwise.
+    pub(crate) fn check_backing_after(&self, started: std::time::Instant, offset: u64) -> anyhow::Result<()> {
+        if started.elapsed() < Self::SLOW_CALLBACK {
+            return self.check_backing_at(offset);
+        }
+        self.check_backing()?;
+        self.checked_through.store(offset, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    pub(crate) fn check_backing_at(&self, offset: u64) -> anyhow::Result<()> {
+        use std::sync::atomic::Ordering;
+        let through = self.checked_through.load(Ordering::Relaxed);
+        if offset < through.saturating_add(Self::CHECK_EVERY) {
+            return Ok(());
+        }
+        self.check_backing()?;
+        self.checked_through.store(offset, Ordering::Relaxed);
+        Ok(())
     }
 
     /// Verify the captured descriptor and path, including after a codec's held EOF output.
