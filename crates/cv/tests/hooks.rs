@@ -484,7 +484,15 @@ fn codex_real_hook_payloads_compose_with_the_recorded_rollouts() {
             if path.is_dir() {
                 copy(&path, &target);
             } else {
-                fs::copy(path, target).unwrap();
+                fs::copy(&path, &target).unwrap();
+                // The edit guard counts another session as live only if its transcript changed in
+                // the last 30 minutes. On macOS `fs::copy` clones and keeps the source's mtime,
+                // so the copied rollouts are "live" by the checkout's age unless we say so.
+                fs::File::options()
+                    .write(true)
+                    .open(&target)
+                    .and_then(|f| f.set_modified(std::time::SystemTime::now()))
+                    .unwrap();
             }
         }
     }
