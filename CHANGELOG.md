@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Every JSONL adapter reads its transcript through one captured source (`store::jsonl::Read`); the owned-value line reader is gone. Each adapter still owns its resume protocol.
+
 - `message_count` is `null` (a dash in `cv ls`) until a session is counted; `cv stats` reports the uncounted sessions beside the total.
 - Goose listings defer exact counts to complete reads while preserving native headers, session inclusion, and legacy whole-file UTF-8 validation.
 
@@ -26,7 +28,7 @@
 
 - Catalog publication waits for concurrent writers before comparing rows, preventing avoidable lost discovery updates during indexing.
 
-- Claude listings defer exact message counts to indexing or complete reads while preserving transcript-derived titles, timestamps, and writer observations.
+- Claude listings count turns during discovery (the record heads are read anyway); the count is never deferred.
 - Claude reads report source deletion or replacement during callbacks even after an intentional stop with owned content.
 - Preserve untouched native records while sharing Claude prune, rewind, and adoption derivation.
 
