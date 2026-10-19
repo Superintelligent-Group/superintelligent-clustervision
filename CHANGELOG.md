@@ -2,63 +2,58 @@
 
 ## Unreleased
 
-- The size gate reports each crate's and module's drift since the last release tag; there is no committed budget file to refresh per commit.
-- `cv schema --json` lists `routes`: every HTTP method/path pattern `cv serve` answers, from the routers' own tables.
-- `cv index --json` reports `changed`, `removed` and `errors` beside `indexed`, so a script need not parse the stderr summary.
-- `cv prune` and agent adoption refuse a source line that is not one JSON record, like `cv rewind`, instead of copying it; blank lines still pass.
-- Every JSONL adapter reads its transcript through one captured source (`store::jsonl::Read`); the owned-value line reader is gone. Each adapter still owns its resume protocol.
+**Listing and counts.** A first `cv ls` lists without counting where counting is not free.
+- `message_count` is `null` (a dash in the table) until a full read or `cv index` certifies it; `0` means a session with no turns.
+- Claude counts at discovery (its record heads are read anyway); Codex, Grok, Kimi, Kimi Code, Hermes, Goose and Zed are not counted until then.
+- **Breaking:** an uncounted session's `message_count` was `0`; `ls --json`, `/api/sessions` and search rows now emit `null`.
+- `cv stats` reports "N not counted yet" beside the total (`uncounted` in `--json` and `/api/stats`); `--sort-by messages` ranks uncounted sessions last.
+- A certified count survives metadata refreshes that leave the source unchanged and is dropped when the source changes.
+- Kimi, Kimi Code and Grok listings take the recorded native title and stop reading at the first fallback prompt.
+- Hermes and Goose listings read session metadata only; Zed projects its snapshot metadata without decoding messages.
+- A listing racing `cv index` no longer loses a discovery update: catalog publication waits for the other writer instead of discarding.
 
-- `message_count` is `null` (a dash in `cv ls`) until a session is counted; `cv stats` reports the uncounted sessions beside the total.
-- Goose listings defer exact counts to complete reads while preserving native headers, session inclusion, and legacy whole-file UTF-8 validation.
-
-- Hermes listings read native session metadata without scanning message bodies; indexing or complete reads supply source-certified canonical turn counts.
-- Zed listings preserve native metadata without decoding messages for counts; complete reads supply source-certified counts.
-
-- Listings reuse source-certified exact turn counts after complete reads, preserving them across harmless metadata refreshes and invalidating changed sources.
-- Kimi Code listings use complete native state metadata directly and defer exact counts; incomplete metadata retains transcript-derived titles and timestamps.
-- Kimi Code reads detect callback source changes before continuing a new step or completing an unfinished one.
-
-- Kimi listings use native titles or stop at the first fallback prompt; exact counts come from complete reads or indexing.
-- Kimi reads reject callback changes to captured transcripts and wire enrichment, including final messages from older rotated segments.
-- Grok reads reject source changes during message/checkpoint callbacks, including held reasoning at EOF.
-
-- JSON listings and filtered windows reuse filesystem metadata for shared stores while rechecking presence at rendering.
-- Hermes keeps generation membership in private indexed storage while preserving exact duplicate detection and lazy message bodies.
-
-- Repeated OpenClaw parent lookups share private indexed facts; one-query operations keep native startup cost, query order, malformed values, and source guards.
-- Codex listings defer exact counts to indexing or complete reads; transcript metadata and compressed decode reuse stay unchanged.
-- Codex reads check the source after a slow callback, a checkpoint, the first metadata and at EOF, and reject a replaced or truncated file.
-- Claude reads check the source after a slow callback, a checkpoint and at EOF, and reject a replaced or truncated file before touching its mapping again.
-
-- Catalog publication waits for concurrent writers before comparing rows, preventing avoidable lost discovery updates during indexing.
-
-- Claude listings count turns during discovery (the record heads are read anyway); the count is never deferred.
-- Claude reads report source deletion or replacement during callbacks even after an intentional stop with owned content.
-- Preserve untouched native records while sharing Claude prune, rewind, and adoption derivation.
-
-- Grok listings use native summaries and stop after finding fallback titles; exact message counts appear after indexing or a complete read.
-- `cv doctor` compares observed Claude/Codex writer versions with corpus coverage, including unknown sessions; observations come from normal discovery.
-- Cataloged writer versions and interpretation 5 trigger an announced rediscovery and consumer reread after upgrading; JSON stays unchanged.
-- A compatibility gate checks the latest release against CLI schemas, serialized messages, session rows, MCP tools, HTTP routes, and exit codes.
-- Native Codex file-change records now feed `cv touched`, tool histograms and query facts, including code-mode edits, without duplicating visible patch calls.
-
-- `cv hooks install codex` adds compaction recovery, session context, lane tracking, decision reminders and live edit guards in user or project scope.
-- Affordances include Claude slash-loaded skills, Kimi Code todo state and legacy agents, and Roo returns carried alongside user text.
-- Emitted fallback titles use meaningful prompts; Cursor CLI titles omit leading timestamp metadata while transcript text stays intact.
-- `cv index --subagents` walks the sub-agent forest by its stat-keyed metadata instead of re-parsing every transcript each pass.
+**Reading.**
+- Every JSONL adapter reads its transcript through one captured source (`store::jsonl::Read`); each adapter keeps its own resume protocol.
+- A reader checks its source after a slow callback, a checkpoint and at EOF; a replaced or truncated file is an error, never a crash.
+- Native Codex file-change records feed `cv touched`, tool histograms and query facts, including code-mode edits, without duplicating visible patch calls.
+- `cv index --subagents` folds the sub-agent forest from stat-keyed metadata instead of re-parsing every transcript each pass.
 - A folded sub-agent's freshness stamp declares its parent's `tool-results` directory by identity, not entry by entry.
 
-- `cv rewind` copies to the end of the file (`cost-state` and other tail records were dropped) and refuses invalid JSON before publishing.
+**Titles and affordances.**
+- An emitted session's fallback title is its `cv ls` title (the meaningful prompt); Cursor CLI titles omit the leading `<timestamp>` metadata.
+- Affordances include Claude slash-loaded skills, Kimi Code todo state and legacy agents, and Roo returns carried alongside user text.
 
-- `cv rewind`: an unterminated last line in the captured prefix asks for a rerun; a cut omits malformed records while closing open calls.
+**Reshaping.**
+- `cv prune`, `cv rewind` and agent adoption refuse a source line that is not one JSON record instead of copying it; blank lines pass.
+- `cv rewind` copies to the end of the file (`cost-state` and other tail records were dropped).
+- `cv rewind`: an explicit cut omits a malformed later line while closing open calls; an unterminated last line asks for a rerun.
+- `cv rewind` refuses a bodyless turn record only when re-emitting (`--thinking portable`) would drop it; a native copy keeps it.
 
+**Doctor and hooks.**
+- `cv doctor` adds a Writer versions row: the newest Claude/Codex version seen in the stores versus the newest the corpus verified, plus unknown sessions.
+- `cv hooks install codex` (user scope or `--scope project`, `.codex/hooks.json`) installs Claude's five hooks: compaction recovery, start context, lanes, decisions, edit guard.
+- Codex's edit guard denies a conflicting edit outright (Codex hooks have no `ask`); Claude's still asks.
 
+**Waiting commands.**
 - **Breaking:** `cv scry` with stdout piped prints the sessions it would follow once and exits 0; `--follow` keeps following, `--for 30s|5m|2h` bounds it.
 - Every waiting command announces what it waits for on stderr within a second, before its first discovery; daemons print their ready line first.
 - `cv workflow --follow` gains `--for <duration>`: stop after that long and render the run as it stands.
 - `cv hook` with a terminal on stdin exits 2 with usage; `cv mcp` and `cv task … -` say what they are reading.
 - MCP tools generated from the CLI omit `--follow` (no Ctrl-C in a tool call); `for` stays.
-- `tests/announce.rs` runs every command on a pipe: exit within 5 s, or be a daemon that announced within 1 s.
+- `tests/announce.rs` pins it: every command on a pipe exits within 5 s or is a daemon that announced within 1 s.
+
+**Tooling and CI.**
+- `cv schema --json` lists `routes`: every HTTP method/path pattern `cv serve` answers, from the routers' own tables.
+- `cv index --json` reports `changed`, `removed` and `errors` beside `indexed`, so a script need not parse the stderr summary.
+- The size gate reports each crate's and module's drift since the last release tag; `tools/size-budget.txt` and `check-size.py --write` are gone.
+- A compatibility gate downloads the released 0.17.0 binary (digest-pinned) and compares CLI schemas, session rows, messages, MCP tools, HTTP routes and exit codes.
+- The upgrade gate runs the released 0.16.1 binary over every corpus version, then compares the migrated rows, events and `show` output with a clean index.
+- macOS runs nightly and on rc tags: APFS identity, publish, SQLite and mmap gates; a separate workflow smokes the published Darwin artifact natively.
+
+**After upgrading, once.**
+- The first listing rediscovers the fleet (announced on stderr; `cv index` does it ahead of time): catalog interpretation 5 adds a nullable `writer_version`.
+- Every consumer (counts, events, search, usage) rereads each session once: the freshness record is version 5. An older cv re-migrates the catalog.
+
 ## 0.17.0 — 2026-10-17 — stream, never materialize
 
 cv's readers now stream: a giant tool output, a 60 MB escaped string or a 64 MiB SQLite cell
