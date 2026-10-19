@@ -44,6 +44,8 @@
 - Claude listings count turns during discovery (the record heads are read anyway); the count is never deferred.
 - Claude reads report source deletion or replacement during callbacks even after an intentional stop with owned content.
 - Preserve untouched native records while sharing Claude prune, rewind, and adoption derivation.
+- Claude Code 2.1.304 corpus: the request ledger (`api-request`, `-shape`, `-blob`), `isolation-latch` and unknown record types are carried, never read as turns.
+- A Claude fork sub-agent's `fork-context-ref` sets `lineage.forked_from` and `extra.claude.fork_context`; a retried request's `api_error` renders as an error line.
 
 - Grok listings use native summaries and stop after finding fallback titles; exact message counts appear after indexing or a complete read.
 - `cv doctor` compares observed Claude/Codex writer versions with corpus coverage, including unknown sessions; observations come from normal discovery.

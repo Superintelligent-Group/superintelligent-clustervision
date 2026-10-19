@@ -1441,6 +1441,92 @@ mod tests {
     }
 
     #[test]
+    fn request_ledger_and_unknown_records_are_bookkeeping() {
+        // 2.1.300+: every API call leaves an `api-request` (params, blob hashes), its
+        // `api-request-shape` (system prompt + tools) and `api-request-blob`s (one message each,
+        // content-addressed). A blob has a `message`, but it is a request body, never a turn; the
+        // same goes for a record type cv has never met.
+        let text = [
+            r#"{"type":"user","sessionId":"s1","uuid":"u0","timestamp":"2026-10-19T00:00:00Z","message":{"role":"user","content":"hi"}}"#,
+            r#"{"type":"api-request-shape","sessionId":"s1","shapeHash":"h1","timestamp":"2026-10-19T00:00:00Z","version":"2.1.304","shape":{"system":[{"type":"text","text":"sys"}],"tools":[]}}"#,
+            r#"{"type":"api-request-blob","sessionId":"s1","hash":"b1","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#,
+            r#"{"type":"api-request","sessionId":"s1","id":"r1","timestamp":"2026-10-19T00:00:00Z","version":"2.1.304","querySource":"sdk","shapeHash":"h1","params":{"model":"m","max_tokens":1},"keep":0,"tail":["b1"],"cacheControl":[],"requestDigest":"d"}"#,
+            r#"{"type":"isolation-latch","side":"web","sessionId":"s1"}"#,
+            r#"{"type":"never-seen-before","sessionId":"s1","message":{"role":"user","content":"not a turn"}}"#,
+            r#"{"type":"assistant","sessionId":"s1","uuid":"a1","parentUuid":"u0","timestamp":"2026-10-19T00:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"hello"}]}}"#,
+        ]
+        .join("\n");
+        let mut sink = CollectSink::default();
+        stream_str("s1", &text, None, &ParseOptions::full(), &mut sink);
+        assert_eq!(sink.messages.len(), 2, "full mode: the two turns only");
+        let mut sink = CollectSink::default();
+        stream_str("s1", &text, None, &ParseOptions::complete(), &mut sink);
+        let carried: Vec<&str> = sink
+            .messages
+            .iter()
+            .filter_map(|m| m.extra.get(CARRIER_KEY)?.get("type")?.as_str())
+            .collect();
+        assert_eq!(
+            carried,
+            [
+                "api-request-shape",
+                "api-request-blob",
+                "api-request",
+                "isolation-latch",
+                "never-seen-before"
+            ]
+        );
+    }
+
+    #[test]
+    fn fork_context_ref_is_fork_lineage() {
+        // 2.1.302+: a fork sub-agent's transcript opens with where its context was cut from.
+        let text = [
+            r#"{"type":"fork-context-ref","agentId":"a1","parentSessionId":"parent","parentLastUuid":"u9","contextLength":10}"#,
+            r#"{"type":"assistant","sessionId":"parent","uuid":"a1","parentUuid":null,"isSidechain":true,"agentId":"a1","timestamp":"2026-10-19T00:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"forked"}]}}"#,
+        ]
+        .join("\n");
+        let s = parse_str("a1", &text, None);
+        assert_eq!(s.lineage.forked_from.as_deref(), Some("parent"));
+        assert_eq!(
+            s.extra["claude"]["fork_context"],
+            serde_json::json!({"parent_last_uuid": "u9", "context_length": 10})
+        );
+        assert_eq!(s.messages.len(), 1);
+    }
+
+    #[test]
+    fn retried_request_api_error_is_an_error_notice() {
+        // 2.1.302+: a retry is an `api_error` with no `content`; the error object and the retry
+        // counters say what happened. Older records with `content` still read as before.
+        let text = [
+            r#"{"type":"system","subtype":"api_error","level":"error","error":{"message":"429 {\"type\":\"error\"}","status":429,"requestId":"req","formatted":"429 rate limit reached"},"retryInMs":547,"retryAttempt":1,"maxRetries":10,"source":"request_retry","uuid":"e1","timestamp":"2026-10-19T00:00:00Z","sessionId":"s1","version":"2.1.302"}"#,
+            r#"{"type":"system","subtype":"api_error","level":"error","cause":{"code":"ConnectionRefused"},"retryAttempt":1,"uuid":"e2","timestamp":"2026-10-19T00:00:01Z","content":"Connection refused, retrying"}"#,
+            r#"{"type":"system","subtype":"api_error","level":"error","error":"bare string","uuid":"e3","timestamp":"2026-10-19T00:00:02Z"}"#,
+            r#"{"type":"system","subtype":"api_error","level":"error","uuid":"e4","timestamp":"2026-10-19T00:00:03Z"}"#,
+        ]
+        .join("\n");
+        let s = parse_str("s1", &text, None);
+        let texts: Vec<_> = s
+            .messages
+            .iter()
+            .map(|m| (m.kind, m.text().unwrap_or_default()))
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                (MessageKind::Error, "429 rate limit reached (retry 1 of 10)".to_string()),
+                (MessageKind::Error, "Connection refused, retrying".to_string()),
+                (MessageKind::Error, "bare string".to_string()),
+            ]
+        );
+        let bag = cl(&s.messages[0]);
+        assert_eq!(bag["retryAttempt"], 1);
+        assert_eq!(bag["source"], "request_retry");
+        assert_eq!(bag["error"]["status"], 429);
+    }
+
+    #[test]
     fn rendered_attachments_surface_as_system_reminders() {
         // Since ~2.1.23x the system reminders Claude Code appends to the prompt are `attachment`
         // records; `rendered[].content` is exactly what the model saw. Unrendered ones (a hook that

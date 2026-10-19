@@ -41,6 +41,9 @@ const TOP: &[&str] = &[
     "tag",
     "relocatedCwd",
     "continuedInSessionId",
+    "parentSessionId",
+    "parentLastUuid",
+    "contextLength",
     "prUrl",
     "attachment",
     "rendered",
@@ -57,6 +60,10 @@ const TOP: &[&str] = &[
     "hookAdditionalContext",
     "level",
     "cause",
+    "retryAttempt",
+    "maxRetries",
+    "retryInMs",
+    "source",
     "slug",
     "logicalParentUuid",
     "stopReason",
@@ -86,6 +93,12 @@ const SYSTEM_EXTRA: &[&str] = &[
     "compactMetadata",
     "cause",
     "error",
+    // A retried request (2.1.302+ `api_error` with `source: request_retry`): which attempt, of how
+    // many, and the back-off before it.
+    "retryAttempt",
+    "maxRetries",
+    "retryInMs",
+    "source",
     "isMeta",
     "isSidechain",
     "agentId",
@@ -231,6 +244,27 @@ pub(super) fn ingest(
             }
             return r.carry_or_skip(sink);
         }
+        // A fork sub-agent's first record (2.1.302+, `subagent_type: fork`): the child's context is
+        // the parent transcript up to `parentLastUuid` (`contextLength` records), so the parent is
+        // where it was forked from; the cut point rides in the bag as `fork_context`.
+        "fork-context-ref" => {
+            if let Some(id) = r.top.string("parentSessionId")? {
+                session.lineage.forked_from = Some(id);
+            }
+            let mut cut = Map::new();
+            if let Some(uuid) = r.top.string("parentLastUuid")? {
+                cut.insert("parent_last_uuid".into(), Value::String(uuid));
+            }
+            if let Some(n) = r.value("contextLength")?.filter(Value::is_number) {
+                cut.insert("context_length".into(), n);
+            }
+            if !cut.is_empty() {
+                session
+                    .harness_extra_mut(Harness::Claude)
+                    .insert("fork_context".into(), Value::Object(cut));
+            }
+            return r.carry_or_skip(sink);
+        }
         "agent-name" | "tag" | "relocated" | "pr-link" => {
             let (from, to) = match ty {
                 "agent-name" => ("agentName", "agent_name"),
@@ -290,8 +324,11 @@ pub(super) fn ingest(
         }
         // Pure bookkeeping / live-process records with no conversational payload: the input queue,
         // UI/permission state, the leaf pointer, sub-agent hook/streaming telemetry, running cost,
-        // the ATIS latch, artifact watches, request-side content replacements. The lean passes drop
-        // them; `complete` carries them verbatim as round-trippable carrier messages.
+        // the ATIS and isolation latches, artifact watches, request-side content replacements, and
+        // the request ledger (2.1.300+: `api-request` per API call, with its `api-request-shape`
+        // system prompt + tool schemas and `api-request-blob` messages, content-addressed; a blob's
+        // `message` is a request body, not a turn). The lean passes drop them; `complete` carries
+        // them verbatim as round-trippable carrier messages.
         "mode"
         | "permission-mode"
         | "last-prompt"
@@ -303,16 +340,19 @@ pub(super) fn ingest(
         | "file-history-snapshot"
         | "cost-state"
         | "atis-latch"
+        | "isolation-latch"
         | "frame-link"
         | "content-replacement"
         | "artifact-comment-monitor"
-        | "artifact-autoreact-ledger" => return r.carry_or_skip(sink),
+        | "artifact-autoreact-ledger"
+        | "api-request"
+        | "api-request-shape"
+        | "api-request-blob" => return r.carry_or_skip(sink),
         "user" | "assistant" | "system" | "" => {}
-        // Any other record without a `message` body is a bookkeeping record we haven't met yet
-        // (Claude Code adds a few per release). Never conversational — carry it in `complete` mode
-        // so round-trips stay lossless, skip it otherwise.
-        _ if r.top.get("message").is_none() => return r.carry_or_skip(sink),
-        _ => {}
+        // Any other record is a bookkeeping record we haven't met yet (Claude Code adds a few per
+        // release), whether or not it has a `message` field: only the three types above are turns.
+        // Carry it in `complete` mode so round-trips stay lossless, skip it otherwise.
+        _ => return r.carry_or_skip(sink),
     }
 
     note_conversation_metadata(
@@ -508,10 +548,21 @@ impl<'a> Record<'a, '_> {
                 None => Ok(None),
             };
         }
+        // Since 2.1.302 a retried request is an `api_error` with no `content`: `error` is an object
+        // (`formatted`, `message`, `status`) and `retryAttempt`/`maxRetries` say where the retry
+        // loop stood. That is the record of a provider failure the model never saw; render it.
+        let retry = if content.is_none() && subtype == "api_error" {
+            self.api_error_text()?
+        } else {
+            None
+        };
         // Subtypes with no human-readable body — keep them out of the message stream.
         let bodyless = matches!(subtype.as_str(), "turn_duration" | "agents_killed");
-        if bodyless || (content.is_none() && subtype != "compact_boundary") {
+        if bodyless || (content.is_none() && retry.is_none() && subtype != "compact_boundary") {
             return Ok(None);
+        }
+        if let Some(text) = retry {
+            return self.system_msg(Text::Inline(text), &subtype);
         }
         // Slash-command records wrap their payload in pseudo-XML tags; distill the tag soup to a
         // readable one/two-liner (these are always small, so they stay inline).
@@ -528,6 +579,33 @@ impl<'a> Record<'a, '_> {
             None => Text::Inline("[conversation compacted]".to_string()),
         };
         self.system_msg(text, &subtype)
+    }
+
+    /// The one-line text of a content-less `api_error`: the error's `formatted` line (else its
+    /// `message`, else a bare string `error`), with the retry position when the record has one.
+    fn api_error_text(&self) -> Result<Option<String>> {
+        let error = self.top.get("error");
+        let mut text = match error
+            .as_ref()
+            .map(|e| Fields::parse(*e, &["formatted", "message"]))
+            .transpose()?
+            .flatten()
+        {
+            Some(fields) => fields.string("formatted")?.or(fields.string("message")?),
+            None => error
+                .map(|e| e.resolve())
+                .transpose()?
+                .and_then(|e| e.as_str().map(str::to_owned)),
+        };
+        let number = |key: &str| -> Result<Option<u64>> { Ok(self.value(key)?.and_then(|v| v.as_u64())) };
+        if let (Some(line), Some(attempt)) = (text.as_mut(), number("retryAttempt")?) {
+            line.push_str(&format!(" (retry {attempt}"));
+            if let Some(max) = number("maxRetries")? {
+                line.push_str(&format!(" of {max}"));
+            }
+            line.push(')');
+        }
+        Ok(text.filter(|t| !t.trim().is_empty()))
     }
 
     fn system_msg(&self, text: Text, subtype: &str) -> Result<Option<Message>> {
