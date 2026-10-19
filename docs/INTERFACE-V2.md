@@ -16,9 +16,9 @@ the same thing on every command that has it; a JSON key is spelled one way; a me
 
 *From the 2026-10 parsimony review, which measured cv at 110K product lines growing 20K a month.
 It is the direction every change steers by: a change that moves away from it needs a reason
-written next to it. The reviewed 0.17 tree is 102.4K product lines (`python3 -I tools/check-size.py`),
-recorded per crate and per module in `tools/size-budget.txt`. Since 0.18 this is a measurement
-snapshot: size drift informs design review, with no line targets or percentage ratchets.*
+written next to it. The reviewed 0.17 tree is 102.4K product lines (`python3 -I tools/check-size.py`,
+which reports every crate's and module's drift since the last release tag). Since 0.18 size drift
+informs design review, with no line targets or percentage ratchets.*
 
 **Three product libraries, one binary, one API, one UI, 37 commands, two reshape primitives.**
 The workspace also contains the CLI crate and `cv-testkit`.

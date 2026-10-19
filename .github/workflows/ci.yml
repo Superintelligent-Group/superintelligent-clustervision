@@ -38,10 +38,14 @@ jobs:
       - name: Format check
         run: cargo fmt --all --check
 
-      # Product lines per crate stay within tools/size-budget.txt (raised only as a reviewed
-      # decision, lowered as code shrinks); no committed evidence files; design docs stay short.
-      - name: Parsimony budget
-        run: python3 -I tools/check-size.py
+      # Product lines per crate and module as drift since the last release tag (annotations, never
+      # a failure); no committed evidence files; design docs stay short. The shallow checkout needs
+      # the tag; on the release commit itself the tag does not exist yet and the drift is skipped.
+      - name: Size drift and repository hygiene
+        run: |
+          tag=v$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
+          git fetch --no-tags --depth=1 origin "refs/tags/${tag}:refs/tags/${tag}" || echo "::warning::${tag} is not published yet"
+          python3 -I tools/check-size.py
 
       # The corpus generators' shared key proxy (every translator, every generator's own launch
       # line) against a local mock upstream, and scrub.py over a synthetic store. No network.
