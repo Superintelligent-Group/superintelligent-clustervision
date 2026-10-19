@@ -253,7 +253,9 @@ if want interrupt; then # an interrupted turn: SIGINT while a tool is running
     --tools "Bash" --allowedTools "Bash(sleep *)" "${NOSKILLS[@]}" "Run with Bash: sleep 40   and then say done." \
     </dev/null >>"$WORK/run.log" 2>&1) &
   ipid=$!
-  for _ in $(seq 60); do grep -q '"Bash"' "$CLAUDE_CONFIG_DIR"/projects/*/"$id".jsonl 2>/dev/null && break; sleep 0.5; done
+  # Wait for the model's Bash tool_use (not the tool's schema: since 2.1.300 the request ledger
+  # writes every tool name into the transcript before the model has answered).
+  for _ in $(seq 60); do grep -Eq '"type":"tool_use","id":"[^"]*","name":"Bash"' "$CLAUDE_CONFIG_DIR"/projects/*/"$id".jsonl 2>/dev/null && break; sleep 0.5; done
   sleep 1; kill -INT "$ipid" 2>/dev/null || true; wait "$ipid" 2>/dev/null || true
   SCEN+=("interrupt")
 fi
