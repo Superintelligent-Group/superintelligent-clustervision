@@ -45,6 +45,9 @@
 - `cv hooks install codex` adds compaction recovery, session context, lane tracking, decision reminders and live edit guards in user or project scope.
 - Affordances include Claude slash-loaded skills, Kimi Code todo state and legacy agents, and Roo returns carried alongside user text.
 - Emitted fallback titles use meaningful prompts; Cursor CLI titles omit leading timestamp metadata while transcript text stays intact.
+- `cv index --subagents` walks the sub-agent forest by its stat-keyed metadata instead of re-parsing every transcript each pass.
+- A folded sub-agent's freshness stamp declares its parent's `tool-results` directory by identity, not entry by entry.
+
 - `cv rewind` copies to the end of the file (`cost-state` and other tail records were dropped) and refuses invalid JSON before publishing.
 
 - `cv rewind`: an unterminated last line in the captured prefix asks for a rerun; a cut omits malformed records while closing open calls.

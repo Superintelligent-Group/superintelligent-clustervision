@@ -396,7 +396,8 @@ const CHUNK_BYTES: usize = if cfg!(all(test, not(feature = "probe-heap"))) {
 /// marks, and report an incomplete index after the sweep finishes.
 ///
 /// **Sub-agent forest (`subagents`):** after each top-level claude session, also walk its
-/// `cv_core::subagent_tree_of` forest and index/ingest every Task/Workflow agent transcript, tagged
+/// sub-agent forest (`subagent_tree_filtered_of`, `Sessions` demand: stat-keyed, no re-parse) and
+/// index/ingest every Task/Workflow agent transcript, tagged
 /// with provenance (parent id / agent id / workflow run). Off by default — the forest can be
 /// hundreds of transcripts (~900 MB) — and folded-in sub-agent docs carry the provenance fields so
 /// a hit knows which agent of which workflow of which parent it came from.
@@ -970,7 +971,9 @@ impl SweepPlanner<'_> {
         let mut folded_candidates = Vec::new();
         if subagents {
             for r in refs {
-                for sub in cv_core::subagent_tree_of(r) {
+                // The fold needs each agent's identity and workflow only; the `Sessions` demand
+                // answers from the stat-keyed scan cache instead of re-parsing every transcript.
+                for sub in cv_core::subagent_tree_filtered_of(r, cv_core::SubagentDemand::Sessions, None, |_, _| true) {
                     let prov = cv_core::events::Provenance {
                         parent_id: Some(r.id.clone()),
                         agent_id: Some(sub.agent_id().to_string()),

@@ -588,8 +588,9 @@ impl Published {
 }
 
 /// What an adapter declares a session reads besides its primary
-/// ([`crate::harness::Adapter::dependencies`]): `files` are recorded present or absent;
-/// `directories` are enumerated one level and every entry recorded.
+/// ([`crate::harness::Adapter::dependencies`]): `files` are recorded present or absent by their
+/// own identity (a directory listed here moves when an entry appears or goes, without recording
+/// its entries); `directories` are enumerated one level and every entry recorded.
 #[derive(Default)]
 pub struct Dependencies {
     pub files: Vec<PathBuf>,
@@ -1809,6 +1810,62 @@ mod tests {
         assert!(
             crate::catalog::AffordanceTable::load().counts(&r).unwrap().is_empty(),
             "failed invalidation rolls back consumer output mutation"
+        );
+    }
+
+    #[test]
+    fn a_folded_agents_stamp_declares_the_parents_tool_results_by_identity() {
+        // From akapug's PR #25: one agent row carried 2,198 of its parent's spilled files while its
+        // parse had read 25. The agent declares the directory once; the files it read are in its
+        // read set.
+        let world = crate::test_world("folded-agent-tool-results");
+        let project = world.base.join("claude").join("projects").join("-slug");
+        let session = project.join("sess");
+        let subs = session.join("subagents");
+        let spilled = session.join("tool-results");
+        std::fs::create_dir_all(&subs).unwrap();
+        std::fs::create_dir_all(&spilled).unwrap();
+        std::fs::write(session.with_extension("jsonl"), "{}\n").unwrap();
+        for name in ["x.txt", "y.txt", "z.txt"] {
+            std::fs::write(spilled.join(name), "spilled tool output").unwrap();
+        }
+        let agent_path = subs.join("agent-a1.jsonl");
+        std::fs::write(&agent_path, "{}\n").unwrap();
+
+        let parent = SessionRef::new("sess", Harness::Claude, session.with_extension("jsonl"));
+        let agent = SessionRef::new("agent-a1", Harness::Claude, &agent_path);
+        let parent_entries = Probe::default().dependency_entries(&parent, &parent.path).unwrap();
+        let agent_entries = Probe::default().dependency_entries(&agent, &agent.path).unwrap();
+
+        assert!(
+            parent_entries.iter().any(|e| e.path == spilled.join("x.txt")),
+            "the parent still inventories its own tool-results: {parent_entries:?}"
+        );
+        assert!(
+            agent_entries.iter().any(|e| e.path == spilled),
+            "the agent declares the parent's tool-results directory: {agent_entries:?}"
+        );
+        assert!(
+            !agent_entries
+                .iter()
+                .any(|e| e.path.starts_with(&spilled) && e.path != spilled),
+            "the agent must not copy the parent's file inventory: {agent_entries:?}"
+        );
+
+        // A file appearing there still invalidates the agent: the directory's own identity moves.
+        let before = Probe::default().snapshot(&agent).with_reads(&ReadSet::default());
+        std::fs::write(spilled.join("new.txt"), "later output").unwrap();
+        assert!(!unchanged(&agent, &before), "a new spilled file invalidates the agent");
+        std::fs::remove_file(spilled.join("new.txt")).unwrap();
+
+        // A rewrite of a file the agent read invalidates it too, carried by the read set.
+        let mut reads = ReadSet::default();
+        reads.record(&spilled.join("x.txt"));
+        let read_before = Probe::default().snapshot(&agent).with_reads(&reads);
+        std::fs::write(spilled.join("x.txt"), "rewritten tool output").unwrap();
+        assert!(
+            !unchanged(&agent, &read_before),
+            "a read file's rewrite invalidates the agent"
         );
     }
 }
