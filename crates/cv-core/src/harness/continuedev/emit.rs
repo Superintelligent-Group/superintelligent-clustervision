@@ -255,11 +255,7 @@ fn legacy_emit(
     fs::create_dir_all(out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
 
     // ── transcript: <sessionId>.json ──
-    let title = session
-        .title
-        .clone()
-        .or_else(|| session.first_user_text())
-        .map(|t| crate::ir::truncate(&t, 80));
+    let title = session.synth_title().map(|t| crate::ir::truncate(&t, 80));
 
     let mut history: Vec<Value> = Vec::new();
     for msg in &session.messages {
@@ -501,6 +497,8 @@ mod tests {
                 ..Default::default()
             };
             let mut oracle = owned.clone();
+            // The native title is the prompt (cv's listing policy), independent of how thinking is projected.
+            oracle.title = owned.synth_title();
             crate::emit::project_owned_thinking_for_test(&mut oracle, Harness::Continue, mode);
             let old = legacy_emit(&oracle, &world.base.join(format!("old-{mode:?}")), &opts)?;
             let new = super::super::emit(&lazy, &world.base.join(format!("new-{mode:?}")), &opts)?;
