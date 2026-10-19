@@ -177,12 +177,13 @@ if want agents; then # Agent tool: a foreground sub-agent, a custom agent type, 
     "Use the Agent tool with subagent_type echoer to echo the word ok, then use the Agent tool with subagent_type general-purpose and the prompt 'Read a.txt and reply with its first line' and report both answers."
   cc -- --resume "$id" --tools "Agent,Read,SendMessage" --allowedTools "Agent Read SendMessage" "${NOSKILLS[@]}" \
     "Use SendMessage to the echoer agent you started (by its agent id) asking it to echo the word again, and report its reply."
-  # Asked as a fork (no subagent_type). Since 2.1.302 fork sub-agents are on by default in `-p`: the
+  # Asked as a fork (`subagent_type: fork`, named: a model that omits the type gets a general-purpose
+  # child with `launchedWithDefaults`). Since 2.1.302 fork sub-agents are on by default in `-p`: the
   # child's transcript opens with a `fork-context-ref` (parent session + the uuid its context was cut
   # at) and its meta.json says `agentType: fork, isFork: true`. (2.1.296 spawned a plain general-purpose
   # child even with CLAUDE_CODE_FORK_SUBAGENT=1.)
   cc CLAUDE_CODE_FORK_SUBAGENT=1 -- --tools "Agent" --allowedTools "Agent" "${NOSKILLS[@]}" \
-    "Use the Agent tool without a subagent_type (a fork of yourself) with the prompt 'Reply with the single word forked.' and report its reply."
+    "Use the Agent tool with subagent_type set to exactly fork (a fork of yourself) and the prompt 'Reply with the single word forked.' and report its reply."
   cc -- --tools "Agent,Read" --allowedTools "Agent Read" "${NOSKILLS[@]}" \
     "Use the Agent tool with run_in_background set to true, subagent_type echoer, to echo the word later. Then wait for its completion notification and report the word."
   SCEN+=("subagent" "custom_agent_type" "send_message" "fork_subagent" "background_agent" "agent_notification")
