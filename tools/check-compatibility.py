@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Compare locally built release/candidate contracts. No network or real harness stores."""
+"""Compare a released cv binary's contracts with a candidate's. No network or real harness stores.
+
+Additions are compatible; a removed or changed existing shape, default or route is not. A
+reviewed removal is named with --accept (its contract path, e.g.
+tools.workflow.inputSchema.properties.follow) beside the pinned baseline that still has it.
+"""
 import argparse
 import http.client
 import json
@@ -20,15 +25,17 @@ def require(ok, message):
         raise Incompatible(message)
 
 
-def subset(old, new, path="contract"):
+def subset(old, new, path="contract", accepted=frozenset()):
     """Additions are compatible; changing existing values, defaults or requiredness is not."""
     if isinstance(old, dict):
         require(isinstance(new, dict), f"{path}: object changed")
         for key, value in old.items():
             if key in {"description", "help", "about"} or (key == "required" and "properties" in old):
                 continue
+            if f"{path}.{key}" in accepted and key not in new:
+                continue
             require(key in new, f"{path}.{key}: removed")
-            subset(value, new[key], f"{path}.{key}")
+            subset(value, new[key], f"{path}.{key}", accepted)
         # JSON Schema required lists describe input obligations, not output vocabulary.
         if "properties" in old:
             require(set(new.get("required", [])) <= set(old.get("required", [])), f"{path}: new required input")
@@ -37,24 +44,13 @@ def subset(old, new, path="contract"):
         for value in old:
             def matches(candidate):
                 try:
-                    subset(value, candidate, path)
+                    subset(value, candidate, path, accepted)
                     return True
                 except Incompatible:
                     return False
             require(any(matches(candidate) for candidate in new), f"{path}: removed/changed {value!r}")
     else:
         require(old == new, f"{path}: {old!r} -> {new!r}")
-
-
-def default_values(old, new, path="message_defaults"):
-    """Allow new fields, but preserve actual values (including empty arrays and nulls)."""
-    if isinstance(old, dict):
-        require(isinstance(new, dict), f"{path}: object changed")
-        for key, value in old.items():
-            require(key in new, f"{path}.{key}: removed")
-            default_values(value, new[key], f"{path}.{key}")
-    else:
-        require(type(old) is type(new) and old == new, f"{path}: {old!r} -> {new!r}")
 
 
 def named(rows):
@@ -73,37 +69,6 @@ def shape(value, key=""):
     if key in {"type", "role", "kind", "origin"} and isinstance(value, str):
         return "=" + value
     return "null" if value is None else type(value).__name__
-
-
-def routes(source):
-    """Read actual Rust routing slice patterns, including alternatives and task verb dispatch.
-
-    This deliberately fails closed when a router moves: update this tiny adapter alongside it.
-    It is an inventory check plus live probes, not a Rust parser or response-schema promise.
-    """
-    source = Path(source)
-    core = (source / "crates/cv-core/src/api.rs").read_text().split("pub fn route_json(", 1)[1].split("pub fn route_staged(", 1)[0]
-    serve = (source / "crates/cv/src/cmd/serve.rs").read_text()
-    reads = serve.split("fn route(", 1)[1].split("// ---", 1)[0]
-    export = serve.split("fn download_export(", 1)[1].split("Some((||", 1)[0]
-    tasks = (source / "crates/cv/src/cmd/serve_tasks.rs").read_text()
-    task_routes = tasks.split("pub(crate) fn route(", 1)[1].split("fn api_", 1)[0]
-    patterns = lambda text: re.findall(r'\[\s*"api"\s*,[^\]]+\]', text)
-    def normalize(pattern):
-        return "/" + "/".join(token.strip()[1:-1] if token.strip().startswith('"') else
-                               "*" if token.strip() == ".." else "{}"
-                               for token in pattern[1:-1].split(',') if token.strip())
-    result = {"GET " + normalize(p) for p in patterns(core + reads + export)}
-    for post, pattern in re.findall(r'\((true|false),\s*(\[\s*"api"\s*,[^\]]+\])\)', task_routes):
-        route = ("POST " if post == "true" else "GET ") + normalize(pattern)
-        if route == "POST /api/task/{}/{}":
-            verbs = re.findall(r'^\s*"([a-z_]+)"\s*=>', tasks.split("match verb {", 1)[1], re.M)
-            require(bool(verbs), "task action inventory empty")
-            result.update("POST /api/task/{}/" + verb for verb in verbs)
-        else:
-            result.add(route)
-    require("GET /api/sessions" in result and "POST /api/task/{}/resolve" in result, "routing inventory incomplete")
-    return sorted(result)
 
 
 def data_contract(schema):
@@ -179,60 +144,41 @@ def http_routes(binary, env, inventory):
         process.stderr.close()
 
 
-def collect(binary, probe, source, root, baseline=False):
+def collect(binary, root, routes=None):
+    """The binary's contracts. `routes` probes a baseline that predates `schema --json` routes."""
     env = world(root)
     commands = json.loads(invoke(binary, env, ["schema", "--commands", "--json"]))
     schema = json.loads(invoke(binary, env, ["schema", "--json"]))
     rows = json.loads(invoke(binary, env, ["ls", "--json"]))
     require(isinstance(rows, list) and len(rows) == 1, "fixture must discover exactly one session")
     session = json.loads(invoke(binary, env, ["show", "compat-session", "--json"]))
-    messages = json.loads(invoke(probe, env, [], stdin=json.dumps(schema["message"])))
     requests = "\n".join(json.dumps({"jsonrpc": "2.0", "id": i, "method": method, "params": params})
                          for i, method, params in [(1, "initialize", {"protocolVersion": "2025-06-18"}), (2, "tools/list", {})]) + "\n"
     responses = [json.loads(line) for line in invoke(binary, env, ["mcp"], stdin=requests).splitlines()]
     tools = next(r["result"]["tools"] for r in responses if r.get("id") == 2)
-    # The existing schema's field inventories must agree with actual serialized fields.
+    # The schema's field inventories must agree with what the binary actually serializes.
     require(set(schema["session_row"]["keys"]) <= rows[0].keys(), "session-row schema drifted from ls JSON")
-    rich = messages[0]
-    require(rich.keys() <= set(schema["message"]["fields"]), "message schema omits real serde fields")
-    tags = {b["type"] for b in rich["content"]}
-    require(tags <= set(schema["block"]["types"]), "schema omits real serde block tags")
-    if baseline:
-        require(set(schema["message"]["fields"]) <= rich.keys(), "extend probe to cover baseline message fields")
-        require(set(schema["block"]["types"]) <= tags, "extend probe to cover baseline block tags")
-    for block in rich["content"]:
-        fields = set(schema["block"]["types"][block["type"]])
-        require(block.keys() - {"type"} <= fields, f"schema omits block field: {block['type']}")
-        if baseline:
-            require(fields <= block.keys(), f"extend probe to cover baseline block fields: {block['type']}")
-    require(rich["usage"].keys() <= set(schema["message"]["usage"]), "schema omits usage fields")
-    if baseline:
-        require(set(schema["message"]["usage"]) <= rich["usage"].keys(), "extend probe to cover baseline usage fields")
+    require(session.keys() <= set(schema["session"]["fields"]), "session schema omits real serde fields")
+    for message in session["messages"]:
+        require(message.keys() <= set(schema["message"]["fields"]), "message schema omits real serde fields")
+        for block in message["content"]:
+            require(block["type"] in schema["block"]["types"], f"schema omits block tag {block['type']}")
+            require(block.keys() - {"type"} <= set(schema["block"]["types"][block["type"]]), f"schema omits block field: {block['type']}")
     invoke(binary, env, ["show", "absent-session"], code=2)
     invoke(binary, env, ["--not-a-cv-flag"], code=2)
     # Failure to create an archive under an ordinary file is an operational error, not usage.
     denied = Path(root) / "not-a-directory"
     denied.write_text("fixture")
-    failure_env = dict(env, CLUSTERVISION_HOME=str(denied / "catalog"))
-    invoke(binary, failure_env, ["task", "open", "compat operational failure"], code=1)
+    invoke(binary, dict(env, CLUSTERVISION_HOME=str(denied / "catalog")), ["task", "open", "compat operational failure"], code=1)
+    inventory = schema.get("routes", routes)
+    require(bool(inventory), "no HTTP route inventory: the candidate's `schema --json` must list routes")
     return {"commands": commands, "schema": data_contract(schema), "rows": shape(rows), "session": shape(session),
-            "messages": shape(messages), "message_defaults": messages[1], "tools": tools, "routes": http_routes(binary, env, routes(source)),
-            "exits": [0, 1, 2]}
+            "tools": tools, "routes": http_routes(binary, env, inventory), "inventory": inventory,
+            "version": invoke(binary, env, ["--version"]).strip()}
 
 
-def compare(old, new, baseline_tag, candidate_version):
-    # G1 was explicitly approved for 0.18: bounded MCP workflow calls replace unbounded follow.
-    # Cargo still says 0.17.0 during 0.18 development; that exact version is included.
-    # Exact exceptions are populated from the reviewed v0.17.0 -> 0.18 change, not inferred.
-    old = json.loads(json.dumps(old))
-    new = json.loads(json.dumps(new))
-    if baseline_tag == "v0.17.0" and (candidate_version == "0.17.0" or candidate_version.startswith("0.18.")):
-        for tool in old["tools"]:
-            if tool["name"] == "workflow":
-                replacement = named(new["tools"]).get("workflow", {}).get("inputSchema", {}).get("properties", {})
-                if "follow" in tool["inputSchema"].get("properties", {}) and "follow" not in replacement:
-                    require(replacement.get("for", {}).get("type") == "string", "G1 workflow follow removal needs bounded for")
-                    tool["inputSchema"]["properties"].pop("follow")
+def compare(old, new, accepted=frozenset()):
+    old, new = json.loads(json.dumps(old)), json.loads(json.dumps(new))
     for key in ("commands", "tools"):
         before, after = named(old[key]), named(new[key])
         for name, value in before.items():
@@ -242,43 +188,29 @@ def compare(old, new, baseline_tag, candidate_version):
                 after[name]["args"] = named(after[name]["args"])
                 for arg, spec in after[name]["args"].items():
                     require(arg in value["args"] or not spec["required"], f"{name}.{arg}: new required argument")
-            subset(value, after[name], f"{key}.{name}")
-    for key in ("schema", "rows", "session", "messages", "exits"):
-        subset(old[key], new[key], key)
-    default_values(old["message_defaults"], new["message_defaults"])
+            subset(value, after[name], f"{key}.{name}", accepted)
+    for key in ("schema", "rows", "session"):
+        subset(old[key], new[key], key, accepted)
     for route, response in old["routes"].items():
         require(route in new["routes"], f"HTTP route removed: {route}")
-        require(response["status"] == new["routes"][route]["status"], f"HTTP status changed: {route}")
+        # A baseline 404 is a route it never had or a fixture it lacks; anything else must hold.
+        require(response["status"] == 404 or response["status"] == new["routes"][route]["status"],
+                f"HTTP status changed: {route}: {response['status']} -> {new['routes'][route]['status']}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("baseline", "candidate", "baseline-probe", "candidate-probe", "baseline-source", "candidate-source", "baseline-tag", "candidate-version"):
-        parser.add_argument("--" + name, required=True)
-    parser.add_argument("--exercise-mutations", action="store_true", help="prove the comparator rejects mutations of the collected real contracts")
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--baseline", required=True, type=Path, help="the released cv binary")
+    parser.add_argument("--candidate", required=True, type=Path, help="the cv binary under test")
+    parser.add_argument("--accept", action="append", default=[], metavar="PATH",
+                        help="a reviewed removal's contract path, allowed once against this baseline")
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="cv-compat-") as root:
-        before = collect(Path(args.baseline).resolve(), Path(args.baseline_probe).resolve(), args.baseline_source, Path(root) / "baseline", baseline=True)
-        after = collect(Path(args.candidate).resolve(), Path(args.candidate_probe).resolve(), args.candidate_source, Path(root) / "candidate")
-        compare(before, after, args.baseline_tag, args.candidate_version)
-        if args.exercise_mutations:
-            additive = json.loads(json.dumps(after))
-            additive["rows"][0]["compat_optional"] = "str"
-            compare(before, additive, args.baseline_tag, args.candidate_version)
-            for mutation in ("row removal", "row type", "route removal", "MCP removal", "message default"):
-                broken = json.loads(json.dumps(after))
-                if mutation == "row removal": broken["rows"][0].pop("id")
-                if mutation == "row type": broken["rows"][0]["id"] = "int"
-                if mutation == "route removal": broken["routes"].pop(next(iter(before["routes"])))
-                if mutation == "message default": broken["message_defaults"]["content"] = [{"type": "text", "text": "changed default"}]
-                if mutation == "MCP removal": broken["tools"] = [t for t in broken["tools"] if t["name"] != "show"]
-                try:
-                    compare(before, broken, args.baseline_tag, args.candidate_version)
-                except Incompatible:
-                    continue
-                raise Incompatible(f"comparator accepted intentional {mutation}")
-            print("real-contract mutations: additive field passes; row removal/type, route/MCP removal and message default change fail")
-    print(f"compatible with {args.baseline_tag}: {len(before['commands'])} CLI commands, {len(before['tools'])} MCP tools, {len(before['routes'])} HTTP patterns; schema, real JSON/serde and exits")
+        after = collect(args.candidate.resolve(strict=True), Path(root) / "candidate")
+        before = collect(args.baseline.resolve(strict=True), Path(root) / "baseline", routes=after["inventory"])
+        compare(before, after, frozenset(args.accept))
+    print(f"{after['version']} is compatible with {before['version']}: {len(before['commands'])} CLI commands, "
+          f"{len(before['tools'])} MCP tools, {len(before['routes'])} HTTP patterns; schema, real JSON and exits")
 
 
 if __name__ == "__main__":

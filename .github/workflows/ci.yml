@@ -25,8 +25,6 @@ jobs:
       - name: Isolate cv state
         run: echo "CLUSTERVISION_HOME=$RUNNER_TEMP/cv-ci-home" >> "$GITHUB_ENV"
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-        with:
-          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
         with:
           toolchain: 1.99.0
@@ -62,8 +60,19 @@ jobs:
       - name: Compatibility comparator controls
         run: python3 -I tools/test-compatibility.py
 
-      - name: Compatibility against last stable release
-        run: tools/compatibility-gate.sh
+      # The released binary, not a rebuild of its tag: the comparator reads both binaries' own
+      # contracts (`schema --json` lists the HTTP routes from the routers' tables). `--accept`
+      # names the one reviewed 0.18 removal (MCP `workflow` `follow` -> bounded `for`); it leaves
+      # with this baseline.
+      - name: Compatibility against the released 0.17.0 binary
+        shell: bash
+        run: |
+          baseline=$(mktemp -d "$RUNNER_TEMP/cv-compat-baseline-XXXXXX")
+          curl -fsSL --retry 3 https://github.com/emberian/cv/releases/download/v0.17.0/clustervision-x86_64-unknown-linux-gnu.tar.xz -o "$baseline/release.tar.xz"
+          echo "fb940a1bfa8b22cf637f7188a30d6e46ed24efd15144a41de4d3c8b3abf44e5b  $baseline/release.tar.xz" | sha256sum -c -
+          tar -xJf "$baseline/release.tar.xz" -C "$baseline" --strip-components=1
+          python3 -I tools/check-compatibility.py --baseline "$baseline/cv" --candidate target/debug/cv \
+            --accept tools.workflow.inputSchema.properties.follow
 
       - name: Upgrade from the released 0.16.1 binary
         shell: bash
