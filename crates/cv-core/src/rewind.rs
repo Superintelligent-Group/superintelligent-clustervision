@@ -387,7 +387,9 @@ pub enum CutAt {
     Message(usize),
     /// Through the tool result that shows this commit being made ([`CommitEvidence`]).
     Commit(String),
-    /// Through the last message.
+    /// Through the last message AND the records after it, to the end of the source: the tail
+    /// (`cost-state`, `history-suppression`, `bridge-session`, titles, attachments) is part of the
+    /// session, so nothing after the last message is dropped.
     End,
 }
 
@@ -654,6 +656,10 @@ fn rewind_session_after_scan(
         _ => total - 1,
     };
     let cut_off = scan.offsets[cut_idx];
+    // `End` cuts at the end of the FILE, not at the last message's record: the records after the
+    // last message are part of the session and ride along. An explicit `--at`/`--commit` is a
+    // deliberate truncation and still stops at that message's record.
+    let to_eof = matches!(opts.at, CutAt::End);
 
     // Start: the last compaction boundary at or before the cut, moved back to its preserved
     // segment's head when that sits earlier; `--full` (or no boundary) starts at the top.
@@ -686,6 +692,8 @@ fn rewind_session_after_scan(
         } else {
             crate::emit::ThinkingMode::Native
         });
+    // Only a portable replay walks every record back through the reader; a native copy is bytes.
+    let reemits = thinking == crate::emit::ThinkingMode::Portable;
 
     // Pass 2 — one sequential read of the prefix: hash every byte, count lines, copy the window.
     let new_id = opts.new_id.clone().unwrap_or_else(new_uuid);
@@ -759,10 +767,60 @@ fn rewind_session_after_scan(
             continue;
         }
         let mut selected = crate::derive::Select::read(&source_guard.source, range, newline, false)?;
+        if selected.record.is_none() {
+            // The range is not one JSON value. Only JSON whitespace is an empty physical record,
+            // copied verbatim; anything else is a line the new session could not read back, so it
+            // is refused before anything is published (akapug, #27).
+            let small = range.len <= 64 * 1024;
+            let mut raw = Vec::new();
+            if small {
+                std::io::Read::read_to_end(&mut ranges::reader(&file, range)?, &mut raw)?;
+            }
+            let blank = small && raw.iter().all(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n'));
+            if !blank {
+                // Past an explicit cut only a record that closes an open call is copied, and a
+                // line that does not parse closes nothing: it is omitted like any other.
+                if phase == Phase::Closing {
+                    omitted_lines += 1;
+                    omitted_bytes += n;
+                    continue;
+                }
+                // The captured prefix can end inside a record the session is still appending.
+                let why = if range.offset + range.len == size && !newline {
+                    format!(
+                        "is unterminated at the end of the {size} bytes captured; if the session is still \
+                         being written, rerun the rewind; if it was cut short, repair it"
+                    )
+                } else {
+                    "is not a complete JSON record; repair it".into()
+                };
+                drop(writer.take());
+                bail!(
+                    "{}: line {line_no} {why} or cut before it with `--at <MSG_IDX>`",
+                    r.path.display()
+                );
+            }
+        }
         if let Some(record) = &selected.record {
             let facts = record.with_view(selection_facts)?;
             if source_session_id.is_none() {
                 source_session_id = facts.get("sessionId").and_then(Value::as_str).map(String::from);
+            }
+            // A `user`/`assistant` record with no `message` body: the Claude codec carries it
+            // verbatim on a byte copy, but a re-emitted copy walks it through the reader, which
+            // takes nothing out of it and would drop it silently. Refuse only where the copy
+            // would lose it; nothing is published either way.
+            if reemits {
+                if let Some(ty) = unreadable_record(&facts) {
+                    drop(writer.take());
+                    bail!(
+                        "{}: line {line_no} is a `{ty}` record with no `message` body (uuid {}); a \
+                         re-emitted copy would drop it: repair or remove that record, rewind without \
+                         re-emitting, or cut before it with `--at <MSG_IDX>`",
+                        r.path.display(),
+                        facts.get("uuid").and_then(Value::as_str).unwrap_or("(none)"),
+                    );
+                }
             }
             if phase == Phase::Closing && !closes_open_call(&facts) {
                 phase = Phase::Done;
@@ -805,7 +863,11 @@ fn rewind_session_after_scan(
         end_line = line_no;
         if at == cut_off {
             cut_line = line_no;
-            phase = Phase::Closing;
+            // Past an explicit cut the copy keeps only what closes the cut's open calls; an `End`
+            // rewind copies to EOF, so its cut never closes the phase.
+            if !to_eof {
+                phase = Phase::Closing;
+            }
         }
         if phase == Phase::Closing && open.is_empty() {
             phase = Phase::Done;
@@ -1010,13 +1072,14 @@ fn selection_facts(view: crate::json::JsonView<'_>) -> Result<Value> {
         "subtype",
         "isSidechain",
         "isApiErrorMessage",
+        "uuid",
         "message",
         "compactMetadata",
     ];
     let Some(fields) = Fields::parse(view, &keys)? else {
         return Ok(Value::Null);
     };
-    let mut facts = fields.project(&keys[..6])?;
+    let mut facts = fields.project(&keys[..7])?;
     if let Some(message) = fields
         .get("message")
         .map(|v| Fields::parse(v, &["model", "content"]))
@@ -1115,6 +1178,16 @@ fn closes_open_call(v: &Value) -> bool {
                     .any(|b| b.get("type").and_then(Value::as_str) == Some("tool_result"))
             }),
     }
+}
+
+/// The `type` of a record the Claude codec cannot read: a conversation record (`user`/`assistant`)
+/// with no `message` body, which [`crate::harness::claude::record`] drops without a word. Every
+/// other shape is one cv knows how to place — a known bookkeeping type is carried, an unknown type
+/// without a body is a meta record, and a `system` row without content is a bodyless notice — so
+/// only a record that *claims* to be a turn and has no turn in it is unreadable.
+fn unreadable_record(v: &Value) -> Option<&str> {
+    let ty = v.get("type")?.as_str()?;
+    (matches!(ty, "user" | "assistant") && v.get("message").is_none()).then_some(ty)
 }
 
 #[cfg(test)]

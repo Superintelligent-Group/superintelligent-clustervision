@@ -23,6 +23,15 @@ fn write_jsonl(path: &Path, lines: &[Value]) {
     std::fs::write(path, body).unwrap();
 }
 
+fn append(path: &Path, bytes: &[u8]) {
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(path)
+        .unwrap()
+        .write_all(bytes)
+        .unwrap();
+}
+
 fn rec(ty: &str, uuid: &str, parent: Option<&str>, message: Value) -> Value {
     json!({"type": ty, "sessionId": SID, "uuid": uuid, "parentUuid": parent, "isSidechain": false,
            "cwd": "/work/proj", "timestamp": "2026-06-16T00:00:00Z", "message": message})
@@ -123,6 +132,55 @@ fn sref(path: &Path, id: &str) -> SessionRef {
     let r = SessionRef::from_path(path, Harness::Claude);
     assert_eq!(r.id, id, "a fixture's id is its file stem");
     r
+}
+
+/// The records a real transcript ends with AFTER its last message — none of them a message, and
+/// none carrying a `uuid`. The measured defect: `cv rewind --full` of a 238-record session wrote
+/// 235, dropping exactly these three shapes.
+fn tail_records() -> Vec<Value> {
+    vec![
+        json!({"type": "bridge-session", "sessionId": SID, "bridgeSessionId": "cse_1", "lastSequenceNum": 0}),
+        json!({"type": "history-suppression", "sessionId": SID, "cause": "env_owner_mismatch", "ts": "2026-10-01T22:25:24.554Z"}),
+        json!({"type": "cost-state", "sessionId": SID, "totalCostUSD": 0, "totalLinesAdded": 0}),
+    ]
+}
+
+/// A prompt, its answer, then the tail above: two messages, five records.
+fn session_tailed(dir: &Path) -> PathBuf {
+    let mut lines = vec![
+        rec("user", "u0", None, text("user", "land the gate fix")),
+        rec("assistant", "a0", Some("u0"), text("assistant", "landed")),
+    ];
+    lines.extend(tail_records());
+    let path = dir.join(format!("{SID}.jsonl"));
+    write_jsonl(&path, &lines);
+    path
+}
+
+/// The synthetic case from the measured evidence (task7336 `critical-tail`): two messages, an
+/// `invoked_skills` attachment record whose `rendered` is a string (so the codec surfaces no
+/// message for it), then — with `malformed` — a record with a `type` claiming a turn and no
+/// `message` body. `cv show` counts 2 messages and stops at the prompt.
+fn session_attachment_and_bad_tail(dir: &Path, malformed: bool) -> PathBuf {
+    let mut lines = vec![
+        rec("user", "u0", None, text("user", "go")),
+        rec("assistant", "a0", Some("u0"), text("assistant", "done")),
+        json!({"type": "attachment", "uuid": "at1", "parentUuid": "a0", "sessionId": SID,
+               "cwd": "/work/proj", "isSidechain": false,
+               "attachment": {"type": "invoked_skills", "skills": [
+                   {"name": "fresh", "path": "userSettings:fresh", "content": "the amber key"}]},
+               "rendered": "padding"}),
+    ];
+    if malformed {
+        lines.push(json!({"type": "user", "sessionId": SID, "uuid": "bad1"}));
+    }
+    let path = dir.join(format!("{SID}.jsonl"));
+    write_jsonl(&path, &lines);
+    path
+}
+
+fn ty(v: &Value) -> &str {
+    v["type"].as_str().unwrap()
 }
 
 /// The stream index (the `cv show --range` counting) of the message with this uuid.
@@ -285,6 +343,367 @@ fn from_compaction_takes_the_preserved_segment_and_full_takes_everything() {
     );
     assert_eq!(full.lines_written, 16);
     cleanup(&dir);
+}
+
+/// ARM 1 (real tail) — `CutAt::End` copies through the END OF THE FILE, not through the last
+/// message's record: the records after it ride along, with the same `sessionId` rewrite as the rest
+/// of the copy. If the cure were wrong — still cutting at the last message — the output would end at
+/// the answer and the tail would be gone, which is the measured 238 → 235 exactly.
+#[test]
+fn end_copies_the_records_after_the_last_message() {
+    let dir = tmpdir();
+    let src = session_tailed(&dir);
+    let before = std::fs::read(&src).unwrap();
+    let res = rewind_session(&sref(&src, SID), &opts(CutAt::End, &dir.join("out"))).unwrap();
+
+    let got = read_lines(&res.new_path);
+    assert_eq!(
+        got.iter().map(ty).collect::<Vec<_>>(),
+        [
+            "user",
+            "assistant",
+            "bridge-session",
+            "history-suppression",
+            "cost-state"
+        ]
+    );
+    // The tail is the source's records, restamped and nothing else.
+    assert_eq!(got[2]["bridgeSessionId"], "cse_1");
+    assert_eq!(got[3]["cause"], "env_owner_mismatch");
+    assert_eq!(got[4]["totalCostUSD"], 0);
+    assert!(got
+        .iter()
+        .all(|v| v["sessionId"] == "22222222-2222-4222-8222-222222222222"));
+    // Nothing was left behind: the copy runs to the end of the source as read.
+    assert_eq!((res.cut_line, res.end_line, res.lines_written), (2, 5, 5));
+    assert_eq!((res.omitted_lines, res.omitted_bytes), (0, 0));
+    assert_eq!(std::fs::read(&src).unwrap(), before, "the source must never change");
+    cleanup(&dir);
+}
+
+/// CONTROL for arm 1 — an explicit cut is still a truncation: `--at <last message>` ends at that
+/// message's record and copies none of the tail. If the cure were wrong in the other direction —
+/// `End`'s full copy leaking into every cut — this would carry the tail too, and `omitted_lines`
+/// would be 0 instead of 3.
+#[test]
+fn an_explicit_cut_still_ends_at_its_message_record() {
+    let dir = tmpdir();
+    let src = session_tailed(&dir);
+    let cut = idx_of(&src, "a0"); // the last message
+    let res = rewind_session(&sref(&src, SID), &opts(CutAt::Message(cut), &dir.join("out"))).unwrap();
+
+    let got = read_lines(&res.new_path);
+    assert_eq!(got.iter().map(ty).collect::<Vec<_>>(), ["user", "assistant"]);
+    assert_eq!((res.cut_line, res.end_line), (2, 2));
+    assert_eq!(res.omitted_lines, 3);
+    cleanup(&dir);
+}
+
+/// ARM 2 (attachment + malformed tail) — a record the codec reads nothing out of (a `user` record
+/// with no `message` body, the synthetic `critical-tail` shape) makes the rewind REFUSE, naming the
+/// record, instead of truncating at the last message. If the cure were wrong — walking past it
+/// silently — this would exit 0 having dropped the record and everything after it, which is the
+/// measured 10 records in → 8 out.
+#[test]
+fn a_native_copy_carries_a_bodyless_turn_record_verbatim() {
+    // The Claude codec carries a `user` record with no `message` as bookkeeping, so a byte copy
+    // keeps it and the attachment after it rides along to EOF.
+    let dir = tmpdir();
+    let src = session_attachment_and_bad_tail(&dir, true);
+    let out = dir.join("out");
+    let res = rewind_session(&sref(&src, SID), &opts(CutAt::End, &out)).unwrap();
+    let copied = std::fs::read_to_string(out.join(format!("{}.jsonl", res.new_id))).unwrap();
+    assert!(copied.contains("\"uuid\":\"bad1\""), "{copied}");
+    assert!(copied.contains("invoked_skills"), "{copied}");
+}
+
+#[test]
+fn a_portable_copy_refuses_a_bodyless_turn_record_instead_of_dropping_it() {
+    // Portable replay re-emits every record through the reader, which takes nothing out of a
+    // bodyless turn: refuse before publishing rather than mint a session missing a record.
+    let dir = tmpdir();
+    let src = session_attachment_and_bad_tail(&dir, true);
+    let before = std::fs::read(&src).unwrap();
+    let out = dir.join("out");
+    let mut o = opts(CutAt::End, &out);
+    o.thinking = Some(crate::emit::ThinkingMode::Portable);
+    let err = rewind_session(&sref(&src, SID), &o).unwrap_err();
+
+    let msg = err.to_string();
+    assert!(msg.contains("line 4"), "{msg}");
+    assert!(msg.contains("`user`") && msg.contains("no `message` body"), "{msg}");
+    assert!(msg.contains("bad1"), "the refusal names the record: {msg}");
+    assert!(msg.contains("without re-emitting"), "{msg}");
+    // Nothing was published, and no staged copy was left behind.
+    assert!(!out.join("22222222-2222-4222-8222-222222222222.jsonl").exists());
+    assert!(!out.join("22222222-2222-4222-8222-222222222222.rewind.json").exists());
+    assert!(std::fs::read_dir(&out)
+        .unwrap()
+        .flatten()
+        .all(|e| !e.file_name().to_string_lossy().contains("rewind")));
+    assert_eq!(std::fs::read(&src).unwrap(), before, "the source is untouched");
+}
+
+#[test]
+fn without_the_unreadable_record_the_attachment_rides_along() {
+    let dir = tmpdir();
+    let src = session_attachment_and_bad_tail(&dir, false);
+    let res = rewind_session(&sref(&src, SID), &opts(CutAt::End, &dir.join("out"))).unwrap();
+
+    let got = read_lines(&res.new_path);
+    assert_eq!(
+        got.iter().map(ty).collect::<Vec<_>>(),
+        ["user", "assistant", "attachment"]
+    );
+    assert_eq!(got[2]["attachment"]["skills"][0]["name"], "fresh");
+    assert_eq!(got[2]["rendered"], "padding");
+    assert_eq!(got[2]["sessionId"], "22222222-2222-4222-8222-222222222222");
+    assert_eq!(res.omitted_lines, 0);
+    cleanup(&dir);
+}
+
+#[test]
+fn end_refuses_invalid_json_tail_in_native_and_staged_copies() {
+    for thinking in [crate::emit::ThinkingMode::Native, crate::emit::ThinkingMode::Portable] {
+        for tail in ["{\"type\":\"cost-state\"", "not-json\n", "{\"type\":}\n", "\u{000c}\n"] {
+            let dir = tmpdir();
+            let src = session_tailed(&dir);
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&src)
+                .unwrap()
+                .write_all(tail.as_bytes())
+                .unwrap();
+            let before = std::fs::read(&src).unwrap();
+            let out = dir.join("out");
+            let options = RewindOptions {
+                thinking: Some(thinking),
+                ..opts(CutAt::End, &out)
+            };
+            let result = rewind_session(&sref(&src, SID), &options);
+            assert!(result.is_err(), "invalid tail published under {thinking:?}: {tail:?}");
+            assert!(std::fs::read_dir(&out).unwrap().next().is_none());
+            assert_eq!(std::fs::read(&src).unwrap(), before);
+            // A deliberate cut need not validate the bytes it omits.
+            let cut = rewind_session(
+                &sref(&src, SID),
+                &RewindOptions {
+                    at: CutAt::Message(1),
+                    ..options
+                },
+            )
+            .unwrap();
+            assert_eq!(cut.lines_written, 2);
+            assert_eq!(cut.omitted_lines, 4);
+            cleanup(&dir);
+        }
+    }
+}
+
+/// An explicit cut whose message leaves a call open scans on past the cut (`Closing`) for the
+/// result. A malformed line on the way is a future record the cut never meant to copy: it is
+/// omitted, and the result after it still closes the call. The same bytes under `End` sit inside
+/// the copied window and refuse, so the omission is the cut's, not a relaxed parse.
+#[test]
+fn an_explicit_cut_omits_a_malformed_line_while_it_closes_an_open_call() {
+    let dir = tmpdir();
+    let src = dir.join(format!("{SID}.jsonl"));
+    write_jsonl(
+        &src,
+        &[
+            rec("user", "u0", None, text("user", "read it")),
+            rec("assistant", "a0", Some("u0"), bash("t1", "cat notes")),
+        ],
+    );
+    let mut tail = b"not-json\n".to_vec();
+    for v in [
+        rec("user", "t1r", Some("a0"), result("t1", "notes")),
+        rec("assistant", "a1", Some("t1r"), text("assistant", "read")),
+    ] {
+        tail.extend(v.to_string().into_bytes());
+        tail.push(b'\n');
+    }
+    append(&src, &tail);
+    let cut = idx_of(&src, "a0");
+
+    let res = rewind_session(&sref(&src, SID), &opts(CutAt::Message(cut), &dir.join("out"))).unwrap();
+    assert_eq!(uuids(&read_lines(&res.new_path)), ["u0", "a0", "t1r"]);
+    assert_eq!((res.cut_line, res.end_line), (2, 4));
+    assert_eq!((res.closed_tool_calls, res.open_tool_calls), (1, 0));
+    assert_eq!(res.omitted_lines, 2, "the malformed line and the turn after the close");
+
+    let err = rewind_session(&sref(&src, SID), &opts(CutAt::End, &dir.join("end"))).unwrap_err();
+    assert!(
+        err.to_string().contains("line 3 is not a complete JSON record"),
+        "{err}"
+    );
+    cleanup(&dir);
+}
+
+/// The same, with the call never closed: the scan reaches EOF, the open call is reported, and a
+/// live session's half-written last line (no newline) is omitted rather than refused.
+#[test]
+fn an_explicit_cut_left_open_omits_a_half_written_last_line() {
+    let dir = tmpdir();
+    let src = dir.join(format!("{SID}.jsonl"));
+    write_jsonl(
+        &src,
+        &[
+            rec("user", "u0", None, text("user", "read it")),
+            rec("assistant", "a0", Some("u0"), bash("t1", "cat notes")),
+        ],
+    );
+    let cut = idx_of(&src, "a0");
+    append(&src, b"{\"type\":\"user\"");
+    let before = std::fs::read(&src).unwrap();
+
+    let res = rewind_session(&sref(&src, SID), &opts(CutAt::Message(cut), &dir.join("out"))).unwrap();
+    assert_eq!(uuids(&read_lines(&res.new_path)), ["u0", "a0"]);
+    assert_eq!((res.closed_tool_calls, res.open_tool_calls), (0, 1));
+    assert_eq!(res.omitted_lines, 1);
+    assert_eq!(std::fs::read(&src).unwrap(), before, "the source must never change");
+    cleanup(&dir);
+}
+
+/// Under `End` the last line of the captured prefix is copied, so a half-written one refuses; with
+/// no newline the session may still be appending it, and the refusal says to rerun before it says
+/// to repair. The same bytes WITH a newline are a finished bad record: no rerun is offered.
+#[test]
+fn end_names_a_rerun_for_an_unterminated_last_line_only() {
+    for (tail, rerun) in [
+        ("{\"type\":\"cost-state\"", true),
+        ("{\"type\":\"cost-state\"\n", false),
+    ] {
+        let dir = tmpdir();
+        let src = session_tailed(&dir);
+        append(&src, tail.as_bytes());
+        let out = dir.join("out");
+        let msg = rewind_session(&sref(&src, SID), &opts(CutAt::End, &out))
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("line 6"), "{msg}");
+        assert_eq!(
+            msg.contains("unterminated") && msg.contains("rerun the rewind"),
+            rerun,
+            "{msg}"
+        );
+        assert_eq!(msg.contains("not a complete JSON record"), !rerun, "{msg}");
+        assert!(std::fs::read_dir(&out).unwrap().next().is_none(), "nothing published");
+        cleanup(&dir);
+    }
+}
+
+#[test]
+fn present_message_body_variants_remain_parser_compatible() {
+    for body in [
+        json!(null),
+        json!(false),
+        json!(7),
+        json!("bad"),
+        json!([]),
+        json!({}),
+        json!({"content": null}),
+        json!({"content": 7}),
+        json!({"content": {}}),
+    ] {
+        for ty in ["user", "assistant"] {
+            let dir = tmpdir();
+            let src = session_tailed(&dir);
+            let bad = rec(ty, "invalid-body", Some("a0"), body.clone());
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&src)
+                .unwrap()
+                .write_all((bad.to_string() + "\n").as_bytes())
+                .unwrap();
+            let before = std::fs::read(&src).unwrap();
+            let out = dir.join("out");
+            let parsed = crate::harness::claude::parse_str("synthetic", std::str::from_utf8(&before).unwrap(), None);
+            assert_eq!(parsed.messages.len(), 3, "present body produces a message: {body}");
+            let result = rewind_session(&sref(&src, SID), &opts(CutAt::End, &out)).unwrap();
+            assert_eq!(read_lines(&result.new_path)[5]["message"], body);
+            assert_eq!((result.lines_written, result.omitted_lines), (6, 0));
+            assert_eq!(std::fs::read(&src).unwrap(), before);
+            cleanup(&dir);
+        }
+    }
+}
+
+#[test]
+fn valid_empty_content_and_unknown_tail_survive_all_copy_paths() {
+    for thinking in [crate::emit::ThinkingMode::Native, crate::emit::ThinkingMode::Portable] {
+        let dir = tmpdir();
+        let src = session_attachment_and_bad_tail(&dir, false);
+        let extra = [
+            rec("user", "empty", Some("a0"), json!({"role":"user", "content":[]})),
+            json!({"type":"future-state", "sessionId":SID, "payload":{"untouched":true}}),
+        ];
+        for v in extra {
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&src)
+                .unwrap()
+                .write_all((v.to_string() + "\n").as_bytes())
+                .unwrap();
+        }
+        let options = RewindOptions {
+            thinking: Some(thinking),
+            ..opts(CutAt::End, &dir.join("out"))
+        };
+        let res = rewind_session(&sref(&src, SID), &options).unwrap();
+        let got = read_lines(&res.new_path);
+        assert_eq!(got.len(), 5);
+        assert_eq!(got[4]["payload"]["untouched"], true);
+        assert_eq!(got[4]["sessionId"], res.new_id);
+        assert_eq!((res.end_line, res.omitted_lines), (5, 0));
+        assert_eq!(got[2]["attachment"]["skills"].as_array().unwrap().len(), 1);
+        cleanup(&dir);
+    }
+}
+
+#[test]
+fn full_changes_start_but_end_still_includes_compacted_tail() {
+    for full in [false, true] {
+        let dir = tmpdir();
+        let src = session(&dir);
+        for tail in tail_records() {
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&src)
+                .unwrap()
+                .write_all((tail.to_string() + "\n").as_bytes())
+                .unwrap();
+        }
+        let res = rewind_session(
+            &sref(&src, SID),
+            &RewindOptions {
+                full,
+                ..opts(CutAt::End, &dir.join("out"))
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            (res.start_line, res.end_line, res.omitted_lines),
+            (if full { 1 } else { 8 }, 20, 0)
+        );
+        assert_eq!(read_lines(&res.new_path).last().unwrap()["type"], "cost-state");
+        cleanup(&dir);
+    }
+}
+
+#[test]
+fn empty_and_metadata_only_sources_refuse_without_publication() {
+    for body in ["", "\n", "{\"type\":\"cost-state\",\"sessionId\":\"synthetic\"}\n"] {
+        let dir = tmpdir();
+        let src = dir.join(format!("{SID}.jsonl"));
+        std::fs::write(&src, body).unwrap();
+        let out = dir.join("out");
+        let err = rewind_session(&sref(&src, SID), &opts(CutAt::End, &out)).unwrap_err();
+        assert!(err.to_string().contains("no messages"), "{err}");
+        assert!(!out.exists());
+        assert_eq!(std::fs::read_to_string(src).unwrap(), body);
+        cleanup(&dir);
+    }
 }
 
 #[test]
