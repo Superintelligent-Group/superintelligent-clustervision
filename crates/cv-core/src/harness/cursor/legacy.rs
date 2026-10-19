@@ -50,7 +50,7 @@ pub(super) fn discover(conn: &Connection, db: &Path, cwd: Option<&Path>, out: &m
                 title: title
                     .filter(|s| !s.trim().is_empty())
                     .map(|s| crate::ir::truncate(&s, 80)),
-                message_count: count,
+                message_count: Some(count),
                 ..SessionRef::new(format!("legacy:{tab_id}"), Harness::Cursor, db.to_path_buf())
             });
         }
@@ -133,11 +133,11 @@ mod tests {
         for (index, (text, expected)) in [
             (
                 r#"{"tabs":[{"tabId":"a","chatTitle":"A","bubbles":[{"type":"user","text":"1"},2]},{"tabId":"a","bubbles":[3]}]}"#,
-                Some(vec![("a", Some("A"), 2), ("a", None, 1)]),
+                Some(vec![("a", Some("A"), Some(2)), ("a", None, Some(1))]),
             ),
             (
                 r#"{"tabs":[{"tabId":"obsolete","bubbles":[1]}],"tabs":[{"tabId":"a","bubbles":[2],"bubbles":[3,4]}]}"#,
-                Some(vec![("a", None, 2)]),
+                Some(vec![("a", None, Some(2))]),
             ),
             (r#"{"tabs":[{"tabId":"a","bubbles":[1],"bubbles":false}]}"#, Some(vec![])),
             (r#"{"tabs":[null,1,[],{"tabId":"a","bubbles":[]}]}"#, Some(vec![])),

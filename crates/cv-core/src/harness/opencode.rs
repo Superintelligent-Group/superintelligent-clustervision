@@ -259,7 +259,7 @@ impl Adapter for OpenCode {
             if seen.contains(&id) {
                 continue;
             }
-            let message_count = self.message_dir(&id).map(|d| count_turns(&d)).unwrap_or(0);
+            let message_count = Some(self.message_dir(&id).map_or(0, |d| count_turns(&d)));
             out.push(SessionRef {
                 id,
                 harness: Harness::OpenCode,
@@ -570,7 +570,7 @@ mod db {
             .query_map([], |r| session_ref(db, r))?
             .flatten()
             .map(|mut r| {
-                r.message_count = counts.get(&r.id).copied().unwrap_or(0);
+                r.message_count = Some(counts.get(&r.id).copied().unwrap_or(0));
                 r
             })
             .collect();
@@ -592,7 +592,7 @@ mod db {
                 .map(|t| crate::ir::truncate(&t, 80)),
             created_at: r.get::<_, Option<i64>>(3)?.and_then(ts_from_epoch),
             updated_at: r.get::<_, Option<i64>>(4)?.and_then(ts_from_epoch),
-            message_count: 0,
+            message_count: None,
         })
     }
 
@@ -632,7 +632,7 @@ mod db {
             }
         }
         for reference in &mut refs {
-            reference.message_count = counts.get(&reference.id).copied().unwrap_or(0);
+            reference.message_count = Some(counts.get(&reference.id).copied().unwrap_or(0));
         }
         Ok(refs)
     }
@@ -927,7 +927,11 @@ mod db {
                 let refs = discover_snapshot(&path, &Default::default(), &conn)?;
                 assert_eq!(refs.len(), 1);
                 assert_eq!(refs[0].title.as_deref(), Some("current title"));
-                assert_eq!(refs[0].message_count, 0);
+                assert_eq!(
+                    refs[0].message_count,
+                    Some(0),
+                    "a migrated session with no turns is counted"
+                );
             }
             Ok(())
         }
@@ -944,7 +948,7 @@ mod db {
                 refs.iter()
                     .map(|r| (r.id.as_str(), r.message_count))
                     .collect::<Vec<_>>(),
-                vec![("covered", 0), ("newer", 1), ("older", 1)]
+                vec![("covered", Some(0)), ("newer", Some(1)), ("older", Some(1))]
             );
             Ok(())
         }
@@ -1986,7 +1990,7 @@ mod tests {
                 .into_iter()
                 .find(|reference| reference.id == id)
                 .unwrap();
-            assert_eq!(reference.message_count, *new);
+            assert_eq!(reference.message_count, Some(*new));
             let session = adapter.parse(&reference).unwrap();
             assert_eq!(
                 session
@@ -2023,7 +2027,7 @@ mod tests {
         fs::remove_file(&shm).unwrap();
         let adapter = OpenCode::with_db(db);
         let reference = adapter.discover().unwrap().remove(0);
-        assert_eq!(reference.message_count, 2);
+        assert_eq!(reference.message_count, Some(2));
         let mut messages = Vec::new();
         let mut sink = crate::stream::TryFnSink::new(|message| {
             messages.push(message);
@@ -2097,7 +2101,8 @@ mod tests {
             assert_eq!(r.cwd.as_deref(), Some(std::path::Path::new("/home/dev/proj")));
             assert_eq!(r.title.as_deref(), Some("Removing debug comments"));
             assert_eq!(
-                r.message_count, 2,
+                r.message_count,
+                Some(2),
                 "user + assistant turns, from the role inside `data`"
             );
             assert!(r.created_at.is_some() && r.updated_at >= r.created_at);

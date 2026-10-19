@@ -89,7 +89,7 @@ impl Reader {
         {
             let mut probe = crate::source::Probe::default();
             let mut candidates = 0;
-            for r in refs.filter(|r| r.message_count == 0) {
+            for r in refs.filter(|r| r.message_count.is_none()) {
                 let Some((text, record)) = self
                     .conn
                     .lock()
@@ -111,7 +111,7 @@ impl Reader {
                 self.turn_snapshots.set(self.turn_snapshots.get() + 1);
                 let source = probe.snapshot(r);
                 if old.fresh(&source, &mut probe) {
-                    r.message_count = turns;
+                    r.message_count = Some(turns);
                 }
                 // Bound retained fleet auxiliary metadata while sharing common DB identities
                 // within a batch. One exceptional certificate can still name many dependencies.

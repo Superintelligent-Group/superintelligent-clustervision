@@ -621,7 +621,7 @@ mod tests {
             title: None,
             created_at: None,
             updated_at: None,
-            message_count: 3,
+            message_count: Some(3),
         };
         let v = session_row(&r, Some(10));
         let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(|k| k.as_str()).collect();

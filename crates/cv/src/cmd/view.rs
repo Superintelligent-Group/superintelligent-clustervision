@@ -946,7 +946,10 @@ fn subagent_line(s: &cv_core::SubagentInfo) -> String {
         .or(s.description.as_deref())
         .map(|t| truncate(&cv_core::sanitize::sanitize_line(t), 88))
         .unwrap_or_default();
-    format!("{id}  {kind}{status}  {} msg  {blurb}", s.session.message_count)
+    format!(
+        "{id}  {kind}{status}  {} msg  {blurb}",
+        s.session.message_count.map_or("–".to_string(), |n| n.to_string())
+    )
 }
 
 /// Render messages as an indented DAG by `parent_id`. Roots (no/unknown parent) sit at depth 0.
@@ -2575,7 +2578,7 @@ mod tests {
             title: Some("render window".into()),
             created_at: None,
             updated_at: None,
-            message_count: 11,
+            message_count: Some(11),
         }
     }
 
@@ -2729,7 +2732,7 @@ mod tests {
             title: Some("discovery title".into()),
             created_at: None,
             updated_at: None,
-            message_count: 0,
+            message_count: None,
         };
         let total = 60usize;
         let a = Late(total);
@@ -2850,7 +2853,7 @@ mod tests {
             title: Some("discovery title".into()),
             created_at: None,
             updated_at: None,
-            message_count: 3,
+            message_count: Some(3),
         };
         for range in [(2usize, Some(4usize)), (1, None), (3, Some(5))] {
             let header = assert_window_matches_full_parse(&r, range);

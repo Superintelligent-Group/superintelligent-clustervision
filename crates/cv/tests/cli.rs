@@ -1671,7 +1671,6 @@ fn stats_and_ls_asc() {
     let (out, _) = w.cv_ok(&["stats"]);
     assert!(out.contains("2 session(s) · 7 message(s)"), "{out}");
     assert!(out.contains("claude"), "{out}");
-
     // `ls` is newest first; `--asc` prints the same rows oldest → newest (the old `timeline` feed).
     let (out, _) = w.cv_ok(&["ls"]);
     assert!(pos(&out, "alphases") < pos(&out, "betasess"), "{out}");
@@ -1689,6 +1688,46 @@ fn stats_and_ls_asc() {
     let (ok, code, _, err) = w.cv(&["timeline"]);
     assert!(!ok && code == 2, "{err}");
     assert!(err.contains("cv ls --sort-by updated --asc"), "{err}");
+}
+
+#[test]
+fn stats_reports_uncounted_sessions_beside_the_total() {
+    let w = World::new("stats-uncounted");
+    standard_corpus(&w);
+    let (out, _) = w.cv_ok(&["stats"]);
+    assert!(out.contains("2 session(s) · 7 message(s)\n"), "{out}");
+    // A Codex listing defers its count: the sum stays honest and says what it left out.
+    let dir = w.home.join(".codex/sessions/2026/01/01");
+    std::fs::create_dir_all(&dir).unwrap();
+    let id = "019a0000-0000-7000-8000-0000000000aa";
+    let rollout = [
+        serde_json::json!({"timestamp": "2026-01-01T10:00:00Z", "type": "session_meta",
+            "payload": {"id": id, "cwd": "/work/proj", "timestamp": "2026-01-01T10:00:00Z"}}),
+        serde_json::json!({"timestamp": "2026-01-01T10:00:01Z", "type": "response_item",
+            "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}}),
+    ];
+    std::fs::write(
+        dir.join(format!("rollout-2026-01-01T10-00-00-{id}.jsonl")),
+        cv_testkit::jsonl(&rollout),
+    )
+    .unwrap();
+    let (out, _) = w.cv_ok(&["stats"]);
+    assert!(out.contains("3 session(s) · 7 message(s) · 1 not counted yet"), "{out}");
+    let (out, _) = w.cv_ok(&["stats", "--json"]);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(
+        (v["messages"].as_u64(), v["uncounted"].as_u64()),
+        (Some(7), Some(1)),
+        "{out}"
+    );
+    // The table prints a dash for it, and `--sort-by messages` ranks it after every counted row.
+    let (out, _) = w.cv_ok(&["ls", "--sort-by", "messages"]);
+    assert!(out.contains("– msg"), "{out}");
+    assert!(pos(&out, "betasess") < pos(&out, "alphases"), "{out}");
+    assert!(pos(&out, "alphases") < pos(&out, "019a0000"), "{out}");
+    let (out, _) = w.cv_ok(&["ls", "--json", "--harness", "codex"]);
+    let rows: Vec<serde_json::Value> = serde_json::from_str(out.trim()).unwrap();
+    assert!(rows[0]["message_count"].is_null(), "{out}");
 }
 
 #[test]

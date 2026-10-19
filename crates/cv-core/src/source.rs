@@ -1469,7 +1469,7 @@ mod tests {
                 title: None,
                 created_at: None,
                 updated_at: None,
-                message_count: 0,
+                message_count: None,
             };
             let base = Probe::default().snapshot(&r);
             let mut reads = ReadSet::default();
@@ -1524,7 +1524,7 @@ mod tests {
             title: None,
             created_at: None,
             updated_at: None,
-            message_count: 0,
+            message_count: None,
         };
         let base = Probe::default().snapshot(&r);
         let extra = w.base.join("external.txt");
@@ -1574,7 +1574,7 @@ mod tests {
             title: None,
             created_at: None,
             updated_at: None,
-            message_count: 0,
+            message_count: None,
         };
         let base = Probe::default().snapshot(&r);
         update("upgrade", &[(r.clone(), base.clone())]);
@@ -1610,7 +1610,7 @@ mod tests {
             title: None,
             created_at: None,
             updated_at: None,
-            message_count: 0,
+            message_count: None,
         };
         let mut probe = Probe::default();
         let before = probe.snapshot(&r).with_reads(&ReadSet::default());
@@ -1674,7 +1674,7 @@ mod tests {
             title: None,
             created_at: None,
             updated_at: None,
-            message_count: 0,
+            message_count: None,
         };
         let before = Probe::default().snapshot(&r).with_reads(&ReadSet::default());
         std::fs::write(&wire, "line1\nline2\n").unwrap();
@@ -1730,7 +1730,7 @@ mod tests {
             title: None,
             created_at: None,
             updated_at: None,
-            message_count: 0,
+            message_count: None,
         };
         crate::catalog::open_db().unwrap();
         let source = Probe::default().snapshot(&r).with_reads(&ReadSet::default());
@@ -1764,7 +1764,7 @@ mod tests {
             title: None,
             created_at: None,
             updated_at: None,
-            message_count: 0,
+            message_count: None,
         };
         let conn = crate::catalog::open_db().unwrap();
         let before = Probe::default().snapshot(&r).with_reads(&ReadSet::default());

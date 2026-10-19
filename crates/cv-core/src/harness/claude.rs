@@ -1527,12 +1527,13 @@ mod tests {
         );
         assert_eq!(sink.messages[1].model.as_deref(), Some("<synthetic>"));
 
-        // Discovery defers counting; full reads above retain the synthetic-turn classification.
+        // Discovery counts the user turn and the real reply: the API error and the synthetic
+        // notice are not turns.
         let dir = std::env::temp_dir().join(format!("cv-claude-scan-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("s1.jsonl");
         std::fs::write(&p, format!("{text}\n")).unwrap();
-        assert_eq!(scan(&p).unwrap().message_count, 0);
+        assert_eq!(scan(&p).unwrap().message_count, Some(2));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2726,7 +2727,7 @@ mod tests {
         drop(f);
 
         let r = SessionRef {
-            message_count: 1,
+            message_count: Some(1),
             ..SessionRef::new("s", Harness::Claude, path.clone())
         };
         // Lazy parse → expect a Span; resolving it must equal `big`.

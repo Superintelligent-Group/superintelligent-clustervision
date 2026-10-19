@@ -575,7 +575,11 @@ fn eval_term(t: &Term, f: &Facts) -> anyhow::Result<Tri> {
         ),
         FieldId::Title => str_match(t.op, &t.val, f.r.title.as_deref().map(str::to_lowercase)),
         FieldId::Id => str_match(t.op, &t.val, Some(f.r.id.to_lowercase())),
-        FieldId::Msgs => num_match(t.op, &t.val, f.r.message_count as u64),
+        // An uncounted listing row cannot answer `msgs:`; the parse phase counts and decides.
+        FieldId::Msgs => match f.r.message_count {
+            Some(n) => num_match(t.op, &t.val, n as u64),
+            None => Tri::Unknown,
+        },
         FieldId::Created => date_match(t.op, &t.val, f.r.created_at.or(f.r.updated_at)),
         FieldId::Updated => date_match(t.op, &t.val, f.r.updated_at.or(f.r.created_at)),
         // Parse-required.
@@ -749,11 +753,12 @@ fn session_as_ref(s: &Session) -> SessionRef {
         updated_at: s.updated_at,
         // `SessionRef.message_count` is contractually user+assistant turns only (see ir.rs), so
         // `msgs:` must count the same way here as the catalog prefilter does.
-        message_count: s
-            .messages
-            .iter()
-            .filter(|m| matches!(m.role, crate::ir::Role::User | crate::ir::Role::Assistant))
-            .count(),
+        message_count: Some(
+            s.messages
+                .iter()
+                .filter(|m| matches!(m.role, crate::ir::Role::User | crate::ir::Role::Assistant))
+                .count(),
+        ),
     }
 }
 

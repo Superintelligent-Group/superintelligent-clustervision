@@ -182,7 +182,7 @@ fn discover_db(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
                 .map(|t| crate::ir::truncate(&t, 80)),
             created_at: created.as_deref().and_then(super::parse_ts),
             updated_at: updated.as_deref().and_then(super::parse_ts),
-            message_count: 0,
+            message_count: None,
         });
     }
     Ok(out)
@@ -643,13 +643,13 @@ mod tests {
         assert_eq!(t1.title.as_deref(), Some("Fix the flaky test"));
         assert_eq!(t1.cwd.as_deref(), Some(Path::new("/Users/u/proj")));
         assert!(t1.created_at.unwrap() < t1.updated_at.unwrap());
-        assert_eq!(t1.message_count, 0, "exact counts come from complete reads");
+        assert_eq!(t1.message_count, None, "exact counts come from complete reads");
 
         let t2 = &refs[0];
         assert_eq!(t2.title, None, "empty summary must not become a title");
         // Snapshot cwd wins over folder_paths.
         assert_eq!(t2.cwd.as_deref(), Some(Path::new("/Users/u/proj")));
-        assert_eq!(t2.message_count, 0);
+        assert_eq!(t2.message_count, None);
         for reference in &refs {
             parse_thread(&c, reference).unwrap();
         }
@@ -670,7 +670,7 @@ mod tests {
         }
         let adapter = Zed::with_root(&world.base);
         let reference = adapter.discover()?.remove(0);
-        assert_eq!(reference.message_count, 0);
+        assert_eq!(reference.message_count, None);
         crate::catalog::sync(std::slice::from_ref(&reference));
         let complete = crate::stream::stream_counted(
             &adapter,
@@ -682,14 +682,14 @@ mod tests {
         let turns = complete.counted.unwrap().turns;
         assert_eq!(turns, 3);
         record::DECODED_MESSAGES.with(|n| n.set(0));
-        assert_eq!(adapter.discover()?[0].message_count, turns);
+        assert_eq!(adapter.discover()?[0].message_count, Some(turns));
         assert_eq!(
             record::DECODED_MESSAGES.with(|n| n.get()),
             0,
             "count reuse cannot replay bodies"
         );
         let stored = crate::catalog::Reader::open().unwrap().all_sessions().unwrap();
-        assert_eq!(stored[0].message_count, turns);
+        assert_eq!(stored[0].message_count, Some(turns));
         // A live WAL changes the source even before the database file is checkpointed.
         let writer = Connection::open(&db)?;
         writer.execute_batch("PRAGMA journal_mode=WAL;")?;
@@ -700,7 +700,7 @@ mod tests {
             .push(serde_json::json!({"role":"user","text":"next turn"}));
         writer.execute("UPDATE threads SET data=?1 WHERE id='thread'", [zstd_blob(&changed)])?;
         let unknown = adapter.discover()?.remove(0);
-        assert_eq!(unknown.message_count, 0);
+        assert_eq!(unknown.message_count, None);
         assert_eq!(unknown.cwd, reference.cwd);
         assert_eq!(unknown.title, reference.title);
         assert_eq!(record::DECODED_MESSAGES.with(|n| n.get()), 0);
@@ -712,7 +712,7 @@ mod tests {
             crate::stream::Pass::RECORD,
         )?;
         assert_eq!(complete.counted.unwrap().turns, 4);
-        assert_eq!(adapter.discover()?[0].message_count, 4);
+        assert_eq!(adapter.discover()?[0].message_count, Some(4));
         Ok(())
     }
 
@@ -917,7 +917,7 @@ mod tests {
                 expected.iter().collect::<Vec<_>>()
             );
             for r in actual {
-                assert_eq!(r.message_count, 0);
+                assert_eq!(r.message_count, None);
                 assert_eq!(parse_thread(&c, &r).unwrap().messages.len(), 4);
             }
             for text in [
@@ -939,7 +939,7 @@ mod tests {
                 assert!(unreadable.messages.is_empty());
                 assert!(unreadable.harness_extra(Harness::Zed).is_none());
                 let listed = discover(&c).into_iter().find(|r| r.id == "a").unwrap();
-                assert_eq!(listed.message_count, 0);
+                assert_eq!(listed.message_count, None);
                 assert_eq!(listed.cwd, None);
             }
         }
@@ -1024,7 +1024,7 @@ mod tests {
         let refs = discover(&c);
         assert_eq!(refs.len(), 2);
         let bad = refs.iter().find(|r| r.id == "bad").unwrap();
-        assert_eq!(bad.message_count, 0);
+        assert_eq!(bad.message_count, None);
         assert_eq!(bad.title.as_deref(), Some("corrupt one"));
 
         // parse returns the row's metadata + a flag, never an error.
@@ -1059,7 +1059,7 @@ mod tests {
             insert(&c, id, id, data_type, data);
         }
         for r in discover(&c) {
-            assert_eq!(r.message_count, 0, "{}", r.id);
+            assert_eq!(r.message_count, None, "{}", r.id);
             let s = parse_thread(&c, &sref(&r.id)).unwrap();
             assert!(s.messages.is_empty(), "{}", r.id);
             assert_eq!(
@@ -1135,7 +1135,7 @@ mod tests {
         let c = mk(SCHEMA);
         insert(&c, "t", "New Thread", "zstd", &zstd_blob(&thread));
         let refs = discover(&c);
-        assert_eq!(refs[0].message_count, 0);
+        assert_eq!(refs[0].message_count, None);
         let s = parse_thread(&c, &sref("t")).unwrap();
         assert!(s.messages.is_empty());
         assert_eq!(s.title.as_deref(), Some("New Thread"));
@@ -1152,7 +1152,7 @@ mod tests {
         .unwrap();
         let refs = discover(&c);
         assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0].message_count, 0);
+        assert_eq!(refs[0].message_count, None);
         assert!(refs[0].created_at.is_none(), "no created_at column in old schema");
         let s = parse_thread(&c, &sref("t")).unwrap();
         assert_eq!(s.messages.len(), 4);
@@ -1293,7 +1293,7 @@ mod tests {
                 "parse != collect(stream) for {}",
                 r.id
             );
-            assert_eq!(r.message_count, 0, "discovery leaves turns uncounted for {}", r.id);
+            assert_eq!(r.message_count, None, "discovery leaves turns uncounted for {}", r.id);
             assert!(parsed
                 .messages
                 .iter()
@@ -1409,7 +1409,7 @@ mod tests {
                 s.label(),
                 s.cwd,
                 s.messages.len(),
-                r.message_count
+                r.message_count.map_or("-".to_string(), |n| n.to_string())
             );
         }
     }

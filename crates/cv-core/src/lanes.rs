@@ -917,7 +917,7 @@ mod tests {
             title: None,
             created_at: None,
             updated_at: None,
-            message_count: 0,
+            message_count: None,
         };
         let adapter = crate::harness::for_harness(reference.harness).unwrap();
         let whole = crate::stream::collect(adapter.as_ref(), &reference).unwrap();
@@ -1153,7 +1153,7 @@ mod tests {
                 title: None,
                 created_at: None,
                 updated_at: None,
-                message_count: 0,
+                message_count: None,
             },
             agent_type: None,
             description: None,

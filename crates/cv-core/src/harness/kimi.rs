@@ -678,7 +678,7 @@ fn scan(id: &str, transcript: &Path, dir: &Path, cwd: Option<PathBuf>) -> Option
         title,
         created_at: created,
         updated_at: updated,
-        message_count: 0,
+        message_count: None,
     })
 }
 
@@ -1385,7 +1385,7 @@ mod tests {
             (epoch_to_dt(9.0), epoch_to_dt(2.0))
         );
         assert!(!jsonl::OPENED.with(|paths| paths.borrow().contains(&live)));
-        assert_eq!(native.message_count, 0);
+        assert_eq!(native.message_count, None);
         fs::write(dir.join("state.json"), "{}")?;
         assert_eq!(
             scan("session", &live, &dir, None).unwrap().title.as_deref(),
@@ -1523,7 +1523,7 @@ mod tests {
         let context = crate::discover_cache::read::Context::current();
         let _scope = context.enter();
         let r = crate::sessions_for(Some(Harness::Kimi)).remove(0);
-        assert_eq!(r.message_count, 0);
+        assert_eq!(r.message_count, None);
         let mut sink = crate::stream::CollectSink::default();
         crate::stream::stream_counted(
             &adapter,
@@ -1532,9 +1532,9 @@ mod tests {
             &mut sink,
             crate::stream::Pass::RECORD,
         )?;
-        assert_eq!(crate::sessions_for(Some(Harness::Kimi))[0].message_count, 1);
+        assert_eq!(crate::sessions_for(Some(Harness::Kimi))[0].message_count, Some(1));
         fs::write(&path, format!("{first}{{\"role\":\"user\",\"content\":\"next\"}}\n"))?;
-        assert_eq!(crate::sessions_for(Some(Harness::Kimi))[0].message_count, 0);
+        assert_eq!(crate::sessions_for(Some(Harness::Kimi))[0].message_count, None);
         Ok(())
     }
 
@@ -1556,7 +1556,7 @@ mod tests {
         let adapter = Kimi::with_home(&home);
         let first = adapter.discover()?.remove(0);
         assert_eq!(first.title.as_deref(), Some("prompt fallback"));
-        assert_eq!(first.message_count, 0);
+        assert_eq!(first.message_count, None);
         assert_eq!(first.cwd.as_deref(), Some(Path::new(cwd)));
         fs::write(
             dir.join("state.json"),
@@ -1575,12 +1575,12 @@ mod tests {
         assert_eq!(adapter.discover()?[0].cwd, None);
         let rotated = dir.join("context_1.jsonl");
         fs::write(&rotated, "{\"role\":\"user\",\"content\":\"earlier\"}\n")?;
-        assert_eq!(adapter.discover()?[0].message_count, 0);
+        assert_eq!(adapter.discover()?[0].message_count, None);
         fs::write(
             &rotated,
             "{\"role\":\"user\",\"content\":\"earlier\"}\n{\"role\":\"assistant\",\"content\":\"prior reply\"}\n",
         )?;
-        assert_eq!(adapter.discover()?[0].message_count, 0);
+        assert_eq!(adapter.discover()?[0].message_count, None);
         fs::write(
             dir.join("wire.jsonl"),
             "{\"timestamp\":1700000000}\n{\"timestamp\":1700000001}\n",
@@ -1632,7 +1632,7 @@ mod tests {
             let actual = scan("session", &live, &dir, Some("/p".into())).unwrap();
             // The shared prefix (prompt, blank, invalid) is read once; the rejected lines of the
             // live file count, the rotated `\xff` too.
-            assert_eq!(actual.message_count, 0, "{title}");
+            assert_eq!(actual.message_count, None, "{title}");
             let expected = read_custom_title(&dir).or(crate::harness::wire::text_title(Some(
                 (&serde_json::json!([{"text":""},{"text":body}])).into(),
             ))?);
@@ -2711,7 +2711,7 @@ mod tests {
         let first = subagent_refs(&main);
         assert_eq!(first.len(), 12);
         for reference in &first {
-            assert_eq!(reference.message_count, 0);
+            assert_eq!(reference.message_count, None);
             assert_eq!(reference.cwd, main.cwd);
             let hit = crate::discover_cache::cached_scan(&reference.path.join("context.jsonl"), || {
                 panic!("unchanged child context must be cached")
@@ -2732,7 +2732,7 @@ mod tests {
             child.join("context_1.jsonl"),
             "{\"role\":\"assistant\",\"content\":\"older\"}\n",
         )?;
-        assert_eq!(subagent_refs(&main)[0].message_count, 0);
+        assert_eq!(subagent_refs(&main)[0].message_count, None);
         fs::write(
             child.join("wire.jsonl"),
             "{\"timestamp\":1700000000}\n{\"timestamp\":1700000001}\n",

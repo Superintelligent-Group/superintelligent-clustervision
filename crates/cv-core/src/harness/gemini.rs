@@ -153,7 +153,7 @@ fn dedupe_by_id(refs: Vec<SessionRef>) -> Vec<SessionRef> {
                 // `session-<ts>-<id>.jsonl` for the same id holding only the `<session_context>`
                 // preamble (later gemini-cli deletes it, `deleteCurrentSessionIfNotResumableAsync`),
                 // and it is the NEWER file. Between equals the most recently updated wins.
-                let key = |r: &SessionRef| (r.message_count > 0, r.updated_at);
+                let key = |r: &SessionRef| (r.message_count.is_some_and(|n| n > 0), r.updated_at);
                 if key(&r) > key(&out[i]) {
                     out[i] = r;
                 }
@@ -313,7 +313,7 @@ pub(crate) fn scan_session_file(path: &Path, harness: Harness) -> Vec<SessionRef
         let r = SessionRef::new("", harness, path.to_path_buf());
         if let Ok(s) = stream_for(harness, &r, &ParseOptions::lazy(), &mut sink) {
             let mut r = session_ref(&s, path, harness);
-            r.message_count = turns;
+            r.message_count = Some(turns);
             return vec![r];
         }
     } else if is_checkpoint(&name) {
@@ -1171,11 +1171,12 @@ fn session_ref(s: &Session, path: &Path, harness: Harness) -> SessionRef {
         updated_at: s.updated_at,
         // The contract count (`SessionRef::message_count`): user + assistant turns only — a tool
         // result, an `info`/`error` notice or a `$rewindTo` branch marker is a message, not a turn.
-        message_count: s
-            .messages
-            .iter()
-            .filter(|m| matches!(m.role, Role::User | Role::Assistant))
-            .count(),
+        message_count: Some(
+            s.messages
+                .iter()
+                .filter(|m| matches!(m.role, Role::User | Role::Assistant))
+                .count(),
+        ),
     }
 }
 
@@ -2089,11 +2090,13 @@ mod tests {
             assert_eq!(refs.len(), 1);
             assert_eq!(
                 refs[0].message_count,
-                reference
-                    .messages
-                    .iter()
-                    .filter(|m| matches!(m.role, Role::User | Role::Assistant))
-                    .count()
+                Some(
+                    reference
+                        .messages
+                        .iter()
+                        .filter(|m| matches!(m.role, Role::User | Role::Assistant))
+                        .count()
+                )
             );
         }
         fs::remove_dir_all(dir).unwrap();
@@ -2263,7 +2266,11 @@ mod tests {
         let refs2 = scan_session_file(&file2, Harness::Gemini);
         assert_eq!(refs2[0].cwd.as_deref(), Some(Path::new("/Users/u/cvrt8/gemtest")));
         // session_legacy.json parses to user, assistant, tool, assistant, info-notice: three turns.
-        assert_eq!(refs2[0].message_count, 3, "user + assistant turns, not every message");
+        assert_eq!(
+            refs2[0].message_count,
+            Some(3),
+            "user + assistant turns, not every message"
+        );
         let refs3 = scan_session_file(&file3, Harness::Gemini);
         assert_eq!(refs3[0].cwd, None);
 
@@ -2549,16 +2556,16 @@ mod tests {
     fn a_startup_stub_never_shadows_the_session_it_shares_an_id_with() {
         let mk = |n: usize, mins: i64| {
             let mut r = SessionRef::new("same", Harness::Gemini, format!("/x/{n}.jsonl"));
-            r.message_count = n;
+            r.message_count = Some(n);
             r.updated_at = Some(chrono::DateTime::<Utc>::UNIX_EPOCH + chrono::Duration::minutes(mins));
             r
         };
         let kept = dedupe_by_id(vec![mk(4, 1), mk(0, 2)]);
         assert_eq!(kept.len(), 1);
-        assert_eq!(kept[0].message_count, 4, "the newer stub lost");
+        assert_eq!(kept[0].message_count, Some(4), "the newer stub lost");
         assert_eq!(
             dedupe_by_id(vec![mk(2, 1), mk(3, 2)])[0].message_count,
-            3,
+            Some(3),
             "newer real copy wins"
         );
     }

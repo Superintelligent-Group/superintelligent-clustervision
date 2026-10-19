@@ -148,7 +148,7 @@ pub(super) fn scan(path: &Path, index: &Index) -> Result<SessionRef> {
         cwd: acc.cwd.or_else(|| entry.and_then(|e| e.cwd.clone())),
         created_at: acc.created_at,
         updated_at: entry.and_then(|e| e.updated_at).or(acc.updated_at),
-        message_count: acc.message_count,
+        message_count: Some(acc.message_count),
         id,
     })
 }
@@ -308,7 +308,7 @@ mod tests {
             cwd: acc.cwd.or_else(|| entry.and_then(|e| e.cwd.clone())),
             created_at: acc.created_at,
             updated_at: entry.and_then(|e| e.updated_at).or(acc.updated_at),
-            message_count: acc.message_count,
+            message_count: Some(acc.message_count),
         })
     }
 
@@ -347,7 +347,7 @@ mod tests {
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].title.as_deref(), Some("index title"));
         assert_eq!(refs[0].cwd.as_deref(), Some(Path::new("/transcript")));
-        assert_eq!(refs[0].message_count, 3);
+        assert_eq!(refs[0].message_count, Some(3));
         fs::write(&path, [text.as_bytes(), b"\n{bad}\xff"].concat())?;
         assert!(scan(&path, &index).is_err());
         Ok(())

@@ -687,7 +687,7 @@ fn claude_ref(id: &str, path: &Path) -> SessionRef {
         title: None,
         created_at: None,
         updated_at: None,
-        message_count: 0,
+        message_count: None,
     }
 }
 
@@ -885,7 +885,7 @@ fn hook_start(input: &Input) -> Result<Option<Value>> {
             lines.push(format!(
                 "- {id} · {} · {} msgs · {title}{commit}",
                 ago(r.updated_at.or(r.created_at)),
-                r.message_count
+                r.message_count.map_or("–".to_string(), |n| n.to_string())
             ));
         }
     }

@@ -407,7 +407,7 @@ fn child_ref(
         title: Some(crate::ir::truncate(&title, 80)),
         created_at: parent.created_at,
         updated_at: updated.and_then(ts_from_epoch).or(parent.updated_at),
-        message_count: chain_message_count(forest, Some(head)),
+        message_count: Some(chain_message_count(forest, Some(head))),
     })
 }
 
@@ -448,7 +448,7 @@ fn discover_conn(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
                 .map(|t| crate::ir::truncate(&t, 80)),
             created_at: created.and_then(ts_from_epoch),
             updated_at: last.and_then(ts_from_epoch).or_else(|| created.and_then(ts_from_epoch)),
-            message_count: chain_message_count(&forest, head),
+            message_count: Some(chain_message_count(&forest, head)),
         };
         out.push(parent.clone());
         for (agent, head, updated) in subagent_head_rows(conn, &id, &forest) {
@@ -1127,7 +1127,7 @@ mod tests {
         )?;
         let refs = discover_conn(&conn, &path)?;
         let child = refs.iter().find(|r| r.id == "fixture-alpha/sidekick").unwrap();
-        assert_eq!(child.message_count, 5);
+        assert_eq!(child.message_count, Some(5));
         let tree = subagent_tree(&path, "fixture-alpha");
         assert_eq!(tree.len(), 1);
         assert_eq!(tree[0].tool_use_id.as_deref(), Some("spawn-call"));
@@ -1169,13 +1169,13 @@ mod tests {
             let parsed = crate::stream::collect_with(&adapter, &reference, &ParseOptions::full())?;
             assert_eq!(
                 reference.message_count,
-                parsed.messages.iter().filter(|m| m.is_turn()).count(),
+                Some(parsed.messages.iter().filter(|m| m.is_turn()).count()),
                 "{}",
                 reference.id
             );
         }
         let tree = subagent_tree(&path, "fixture-alpha");
-        assert_eq!(tree[0].session.message_count, 5);
+        assert_eq!(tree[0].session.message_count, Some(5));
         Ok(())
     }
 
@@ -1195,7 +1195,7 @@ mod tests {
         assert!(a.created_at.is_some() && a.updated_at.is_some());
         // user+assistant ON the main chain only: the superseded copies and the two tool
         // results don't count. Chain = user(12) + assistant(13) + assistant(16) = 3.
-        assert_eq!(a.message_count, 3);
+        assert_eq!(a.message_count, Some(3));
 
         let sub = &refs[1];
         assert_eq!(sub.title.as_deref(), Some("[sidekick] Fixture session alpha"));
@@ -1204,10 +1204,10 @@ mod tests {
         assert_eq!(sub.updated_at, ts_from_epoch(1_759_600_000i64 + 200));
         // The child's own chain: handoff user + 5 assistant (incl. the compaction summary)
         // = 5 conversational turns (the assistant summary is not a reply).
-        assert_eq!(sub.message_count, 5);
+        assert_eq!(sub.message_count, Some(5));
 
         // Beta: nodes 0 (system), 1 (user), 2 (corrupt), 3 (assistant) → 2.
-        assert_eq!(refs[2].message_count, 2);
+        assert_eq!(refs[2].message_count, Some(2));
     }
 
     #[test]
@@ -1265,7 +1265,7 @@ mod tests {
         assert_eq!(subs.len(), 1);
         assert_eq!(subs[0].session.id, "fixture-alpha/sidekick");
         assert_eq!(subs[0].agent_type.as_deref(), Some("sidekick"));
-        assert_eq!(subs[0].session.message_count, 5);
+        assert_eq!(subs[0].session.message_count, Some(5));
         // ...and the parent records the ghost head.
         let conn = open_ro(&fixture()).unwrap();
         let s = parse_db(&conn, &sref("fixture-alpha")).unwrap();

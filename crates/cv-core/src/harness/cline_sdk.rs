@@ -187,8 +187,9 @@ fn scan(path: &Path, sid: &str) -> Option<SessionRef> {
                 .and_then(parse_ts);
             let mut first = true;
             let mut first_user = false;
+            let mut count = 0;
             for message in messages.array()?.context("SDK messages array")? {
-                r.message_count += 1;
+                count += 1;
                 let message = message?;
                 if let Some(record) = Fields::parse(message, &["ts", "role", "content"])? {
                     if first && r.created_at.is_none() {
@@ -203,6 +204,7 @@ fn scan(path: &Path, sid: &str) -> Option<SessionRef> {
                 }
                 first = false;
             }
+            r.message_count = Some(count);
             r.title = r.title.map(|t| truncate(&t, 80));
             r.updated_at = record
                 .string("updated_at")?

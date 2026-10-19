@@ -418,7 +418,7 @@ fn refs_conn(conn: &Connection, path: &Path, delegates_of: Option<&HashSet<Strin
             title: title.map(|t| crate::ir::truncate(&t, 80)),
             created_at: started.and_then(ts_from_epoch),
             updated_at: latest_of([ended, last, started]),
-            message_count: 0,
+            message_count: None,
         });
     }
     // Discovery owns native session metadata and inclusion, not a transcript reduction.
@@ -3214,7 +3214,7 @@ mod tests {
         assert_eq!(refs.len(), 2);
         // ordered by started_at DESC
         assert_eq!(refs[0].id, "b");
-        assert_eq!(refs[0].message_count, 0);
+        assert_eq!(refs[0].message_count, None);
         assert_eq!(
             parse_conn(&conn, &refs[0])
                 .unwrap()
@@ -3225,7 +3225,7 @@ mod tests {
             3
         );
         assert_eq!(refs[1].id, "a");
-        assert_eq!(refs[1].message_count, 0);
+        assert_eq!(refs[1].message_count, None);
         assert_eq!(
             parse_conn(&conn, &refs[1])
                 .unwrap()
@@ -3368,7 +3368,7 @@ mod tests {
         )?;
         let adapter = Hermes::with_db(path);
         let (references, discovery_bytes) = observe(|| adapter.discover())?;
-        assert_eq!(references[0].message_count, 0);
+        assert_eq!(references[0].message_count, None);
         assert_eq!(
             discovery_bytes.iter().sum::<u64>(),
             0,
@@ -3453,7 +3453,7 @@ mod tests {
         }
         let adapter = Hermes::with_db(path);
         let reference = adapter.discover()?.remove(0);
-        assert_eq!(reference.message_count, 0);
+        assert_eq!(reference.message_count, None);
         let owned = parse_conn(&writer, &reference)?;
         let mut checked = crate::stream::collect_with(&adapter, &reference, &ParseOptions::lazy_extra())?;
         assert_eq!(checked.messages.len(), 3);
@@ -3502,7 +3502,7 @@ mod tests {
         let adapter = Hermes::with_db(path.clone());
         let mut imported = false;
         let references = adapter.discover()?;
-        assert!(references.iter().all(|r| r.message_count == 0));
+        assert!(references.iter().all(|r| r.message_count.is_none()));
         crate::catalog::sync(&references);
         for reference in references {
             let parsed = crate::stream::collect_with(&adapter, &reference, &ParseOptions::full())?;
@@ -3519,9 +3519,9 @@ mod tests {
             let reader = crate::catalog::Reader::open().unwrap();
             let mut refreshed = reference.clone();
             reader.refill_turns(std::iter::once(&mut refreshed));
-            assert_eq!(refreshed.message_count, turns, "{}", reference.id);
+            assert_eq!(refreshed.message_count, Some(turns), "{}", reference.id);
             for child in subagent_refs(&reference) {
-                assert_eq!(child.message_count, 0);
+                assert_eq!(child.message_count, None);
                 let parsed = crate::stream::collect_with(&adapter, &child, &ParseOptions::full())?;
                 let done = crate::stream::stream_counted(
                     &adapter,
@@ -3605,7 +3605,7 @@ mod tests {
         assert_eq!(by_id(A).cwd, Some(PathBuf::from("/tmp/proj")));
         assert_eq!(
             by_id(A).message_count,
-            0,
+            None,
             "cold discovery defers canonical turn counting"
         );
 

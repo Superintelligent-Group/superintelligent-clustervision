@@ -229,7 +229,7 @@ fn pack_session_emits_resumable_claude_session_that_round_trips() {
         title: None,
         created_at: None,
         updated_at: None,
-        message_count: 0,
+        message_count: None,
     };
     use cv_core::harness::Parse;
     let parsed = cv_core::harness::claude::Claude::detect()

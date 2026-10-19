@@ -22,7 +22,7 @@ authorized frozen sources, never writable real harness homes.
 
 | # | Required result | Evidence / boundary |
 |---|---|---|
-| C1 | First listing discovers without exact counting; `message_count: 0` means uncounted; index/full reads publish exact counts | Common codec demands; source-validated count reuse; measure cold and warm paths separately. Optional metadata fidelity is an explicit design decision, below |
+| C1 | First listing discovers without exact counting; `message_count: null` means uncounted; index/full reads publish exact counts | Common codec demands; source-validated count reuse; measure cold and warm paths separately. Optional metadata fidelity is an explicit design decision, below |
 | C2 | Reduce repeated stat inventory for `has:` where the sweep already captured the same source identity | Preserve dependency invalidation; measure the Claude tool-results inventory after J |
 | C3 | Investigate fixed indexing costs when measurements justify a change | No separate lane from the current small-fleet profile; retain fleet-scale validation |
 | C4 | Two unchanged index passes perform no transcript reread at representative fleet scale, including compressed Codex | The original 4,893-session reread needs broader proof than the 76-rollout regression; no synthetic or small-fleet result stands in for real-fleet coverage |

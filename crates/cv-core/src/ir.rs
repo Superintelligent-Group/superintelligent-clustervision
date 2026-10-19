@@ -960,7 +960,17 @@ pub struct SessionRef {
     /// this conversation", comparable across harnesses. Adapters that can't know it cheaply
     /// should compute it from the same records they'd parse into [`Role::User`]/[`Role::Assistant`]
     /// messages, not from a proxy like file count.
-    pub message_count: usize,
+    ///
+    /// `None` means **not counted yet**: a listing that read only the session's metadata (Zed,
+    /// Hermes, Goose, Kimi, Kimi Code, Codex and Grok defer counting, because for them counting
+    /// means decoding every message) until a full read or `cv index` certifies the number. An
+    /// adapter whose discovery reads every turn record anyway (Claude, Cursor, Cline, Continue,
+    /// Devin, Gemini, Qwen, LM Studio, OpenClaw, OpenCode, OpenSession, the exports) always
+    /// counts, so `Some(0)` is a session with no turns, never a placeholder. Listings print a
+    /// dash and `--json` emits `null` for an uncounted session; sorting by messages puts
+    /// uncounted sessions last.
+    #[serde(default)]
+    pub message_count: Option<usize>,
 }
 
 impl Message {
@@ -1036,7 +1046,7 @@ impl SessionRef {
             title: None,
             created_at: None,
             updated_at: None,
-            message_count: 0,
+            message_count: None,
         }
     }
 

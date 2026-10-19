@@ -577,7 +577,7 @@ pub fn subagent_refs(main: &SessionRef) -> Vec<SessionRef> {
                     title: w.title,
                     created_at: w.first_ts.or_else(|| file_mtime(&wire)),
                     updated_at: w.last_ts.or_else(|| file_mtime(&wire)),
-                    message_count: w.message_count,
+                    message_count: None,
                     ..SessionRef::new(&name, Harness::KimiCode, &dir)
                 })
             })?;
@@ -709,15 +709,13 @@ fn scan(session_dir: &Path, id: &str, fallback_cwd: Option<PathBuf>) -> Option<S
         title,
         created_at: created,
         updated_at: updated,
-        message_count: w.message_count,
+        message_count: None,
     })
 }
 
 /// What one pass over a wire log yields for a listing.
 #[derive(Default)]
 struct WireScan {
-    /// Not counted until a complete read or indexing pass certifies exact turns.
-    message_count: usize,
     /// The first prompt the USER typed (not an injected notice), truncated.
     title: Option<String>,
     first_ts: Option<DateTime<Utc>>,
@@ -2135,7 +2133,7 @@ mod tests {
             fs::write(dir.join("state.json"), serde_json::to_vec(&state)?)?;
             let actual = scan(&dir, "id", None).unwrap();
             let old = reducer(&wire);
-            assert_eq!(actual.message_count, 0);
+            assert_eq!(actual.message_count, None);
             assert_eq!(
                 actual.title,
                 state
@@ -2190,7 +2188,7 @@ mod tests {
         }
     }
 
-    /// The simple discovery reducer over owned values: turn count, title fallback, time bounds.
+    /// The simple discovery reducer over owned values: title fallback and time bounds.
     fn reducer(wire: &Path) -> WireScan {
         let mut w = WireScan::default();
         let bytes = fs::read(wire).unwrap();
@@ -2201,25 +2199,16 @@ mod tests {
                     w.first_ts = Some(w.first_ts.map_or(ts, |f| f.min(ts)));
                     w.last_ts = Some(w.last_ts.map_or(ts, |l| l.max(ts)));
                 }
-                match v.get("type").and_then(Value::as_str) {
-                    Some("context.append_message") => {
-                        if v.pointer("/message/role").and_then(Value::as_str) == Some("user") {
-                            w.message_count += 1;
-                            let kind = v.pointer("/message/origin/kind").and_then(Value::as_str);
-                            if w.title.is_none() && kind.unwrap_or("user") == "user" {
-                                let t = super::super::wire::text_parts(v.pointer("/message/content"));
-                                if !t.trim().is_empty() {
-                                    w.title = Some(crate::ir::truncate(&t, 80));
-                                }
-                            }
+                if v.get("type").and_then(Value::as_str) == Some("context.append_message")
+                    && v.pointer("/message/role").and_then(Value::as_str) == Some("user")
+                {
+                    let kind = v.pointer("/message/origin/kind").and_then(Value::as_str);
+                    if w.title.is_none() && kind.unwrap_or("user") == "user" {
+                        let t = super::super::wire::text_parts(v.pointer("/message/content"));
+                        if !t.trim().is_empty() {
+                            w.title = Some(crate::ir::truncate(&t, 80));
                         }
                     }
-                    Some("context.append_loop_event")
-                        if v.pointer("/event/type").and_then(Value::as_str) == Some("step.end") =>
-                    {
-                        w.message_count += 1;
-                    }
-                    _ => {}
                 }
                 Flow::Continue
             });
@@ -2832,7 +2821,7 @@ mod tests {
         assert_eq!(first.len(), 12);
         for (index, reference) in first.iter().enumerate() {
             assert_eq!(reference.id, format!("parent/agent-{index}"));
-            assert_eq!(reference.message_count, 0);
+            assert_eq!(reference.message_count, None);
             assert_eq!(reference.cwd, main.cwd);
             let wire = reference.path.join("wire.jsonl");
             let hit =
@@ -2849,7 +2838,7 @@ mod tests {
         let wire = unchanged[2].path.join("wire.jsonl");
         fs::write(&wire, "{\"type\":\"context.append_message\",\"time\":1800000000000,\"message\":{\"role\":\"user\",\"content\":\"new prompt\"}}\n")?;
         let refreshed = subagent_refs(&main);
-        assert_eq!(refreshed[2].message_count, 0);
+        assert_eq!(refreshed[2].message_count, None);
         assert_eq!(refreshed[2].title.as_deref(), Some("new prompt"));
         assert_eq!(refreshed[2].created_at.unwrap().timestamp_millis(), 1800000000000);
         fs::remove_file(wire)?;
@@ -2868,7 +2857,10 @@ mod tests {
         assert_eq!(sub.id, format!("{SID}/agent-0"));
         assert_eq!(sub.path, main.path.join("agents").join("agent-0"));
         assert_eq!(sub.title.as_deref(), Some("Extract IPA verifier math"));
-        assert_eq!(sub.message_count, 0, "discovery defers the exact prompt + step count");
+        assert_eq!(
+            sub.message_count, None,
+            "discovery defers the exact prompt + step count"
+        );
         assert_eq!(sub.created_at.map(|t| t.timestamp_millis()), Some(1787509646010));
 
         let s = a.parse(sub).unwrap();
@@ -2910,7 +2902,7 @@ mod tests {
         assert_eq!(r.harness, Harness::KimiCode);
         assert_eq!(r.cwd.as_deref(), Some(Path::new("/Users/u/proj")));
         assert_eq!(r.title.as_deref(), Some("fix the flaky test"));
-        assert_eq!(r.message_count, 0, "discovery defers the exact user + step count");
+        assert_eq!(r.message_count, None, "discovery defers the exact user + step count");
         assert_eq!(r.created_at.map(|t| t.timestamp_millis()), Some(1787509645914));
         assert_eq!(r.updated_at.map(|t| t.timestamp_millis()), Some(1787509891612));
         fs::remove_dir_all(&root).ok();

@@ -125,7 +125,16 @@ impl<'a> Head<'a> {
     pub(super) fn parse(view: JsonView<'a>, demand: Demand) -> Result<Option<Self>> {
         let keys = match demand {
             Demand::Message => TOP,
-            Demand::Metadata => &["type", "version", "cwd", "timestamp", "customTitle", "aiTitle"],
+            Demand::Metadata => &[
+                "type",
+                "version",
+                "cwd",
+                "timestamp",
+                "customTitle",
+                "aiTitle",
+                "isApiErrorMessage",
+                "message",
+            ],
         };
         let Some(top) = Fields::parse(view, keys)? else {
             return Ok(None);

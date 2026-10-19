@@ -26,7 +26,10 @@ pub const TOP_CWDS: usize = 10;
 #[derive(Debug, Clone, Default)]
 pub struct CorpusStats {
     pub sessions: usize,
+    /// Turns over the counted sessions; an uncounted session (`message_count` `None`) adds nothing.
     pub messages: usize,
+    /// Sessions whose turns no listing, full read or index has counted yet.
+    pub uncounted: usize,
     pub by_harness: Vec<(&'static str, usize)>,
     /// Every cwd, home-relative (`~/dev/x`), `(no cwd)` for sessions that record none. The full
     /// list; [`CorpusStats::to_json`] and the table take the first [`TOP_CWDS`].
@@ -45,7 +48,10 @@ impl CorpusStats {
         };
         for r in refs {
             *per_harness.entry(r.harness.as_str()).or_default() += 1;
-            stats.messages += r.message_count;
+            match r.message_count {
+                Some(n) => stats.messages += n,
+                None => stats.uncounted += 1,
+            }
             let cwd = r.cwd.as_deref().map(home_rel).unwrap_or_else(|| "(no cwd)".into());
             *per_cwd.entry(cwd).or_default() += 1;
             if let Some(c) = r.created_at {
@@ -63,7 +69,7 @@ impl CorpusStats {
     }
 
     /// The `cv stats --json` payload, whose top-level keys are exactly `sessions, messages,
-    /// by_harness, top_cwds, earliest_created, latest_updated`. `by_harness` is an object in
+    /// uncounted, by_harness, top_cwds, earliest_created, latest_updated`. `by_harness` is an object in
     /// descending-count order (the workspace's serde_json keeps insertion order).
     pub fn to_json(&self) -> Value {
         let by_harness: serde_json::Map<String, Value> =
@@ -77,6 +83,7 @@ impl CorpusStats {
         json!({
             "sessions": self.sessions,
             "messages": self.messages,
+            "uncounted": self.uncounted,
             "by_harness": by_harness,
             "top_cwds": top_cwds,
             "earliest_created": self.earliest_created.map(|d| d.to_rfc3339()),
@@ -615,9 +622,10 @@ impl TokenFold {
 
 /// The keys `cv stats --json` / `GET /api/stats` carry, in order.
 #[cfg(test)]
-pub const STATS_KEYS: [&str; 6] = [
+pub const STATS_KEYS: [&str; 7] = [
     "sessions",
     "messages",
+    "uncounted",
     "by_harness",
     "top_cwds",
     "earliest_created",
@@ -642,7 +650,7 @@ mod tests {
             updated_at: DateTime::parse_from_rfc3339(updated)
                 .ok()
                 .map(|d| d.with_timezone(&Utc)),
-            message_count: msgs,
+            message_count: Some(msgs),
         }
     }
 
@@ -673,11 +681,23 @@ mod tests {
                 "2026-02-01T00:00:00Z",
                 "2026-02-02T00:00:00Z",
             ),
+            // A listing that read only metadata: not in the sum, reported beside it.
+            SessionRef {
+                message_count: None,
+                ..r(
+                    "d",
+                    Harness::Zed,
+                    0,
+                    Some("/w/two"),
+                    "2026-01-03T00:00:00Z",
+                    "2026-01-04T00:00:00Z",
+                )
+            },
         ];
         let s = CorpusStats::compute(&refs);
-        assert_eq!((s.sessions, s.messages), (3, 15));
+        assert_eq!((s.sessions, s.messages, s.uncounted), (4, 15, 1));
         // Descending count, ties by name.
-        assert_eq!(s.by_harness, vec![("codex", 2), ("claude", 1)]);
+        assert_eq!(s.by_harness, vec![("codex", 2), ("claude", 1), ("zed", 1)]);
         assert_eq!(s.top_cwds[0], ("/w/one".to_string(), 2));
         assert!(s.top_cwds.iter().any(|(c, n)| c == "(no cwd)" && *n == 1));
 
@@ -690,7 +710,8 @@ mod tests {
             .keys()
             .map(String::as_str)
             .collect();
-        assert_eq!(harnesses, ["codex", "claude"], "by_harness stays rank-ordered");
+        assert_eq!(harnesses, ["codex", "claude", "zed"], "by_harness stays rank-ordered");
+        assert_eq!(v["uncounted"], 1);
         assert_eq!(v["earliest_created"], "2025-06-01T00:00:00+00:00");
         assert_eq!(v["latest_updated"], "2026-03-01T00:00:00+00:00");
     }
@@ -1078,7 +1099,7 @@ mod tests {
             title: None,
             created_at: None,
             updated_at: None,
-            message_count: 1,
+            message_count: Some(1),
         };
         let t = TokenStats::compute(&[sref("sess", &parent), sref("resumed", &resumed)]).unwrap();
         let warm = TokenStats::compute(&[sref("sess", &parent), sref("resumed", &resumed)]).unwrap();

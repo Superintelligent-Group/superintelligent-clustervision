@@ -1121,7 +1121,7 @@ fn discover_sqlite(db: &Path) -> Result<Vec<SessionRef>> {
                     .and_then(ts_from_epoch)
                     .or_else(|| updated.and_then(ts_from_epoch))
                     .or(acc.updated_at),
-                message_count: acc.message_count,
+                message_count: Some(acc.message_count),
             });
         }
         Ok(out)
@@ -2179,7 +2179,11 @@ mod tests {
             Some("Named session"),
             "session_info names the session"
         );
-        assert_eq!(r.message_count, 5, "every user/assistant row counts, branch or not");
+        assert_eq!(
+            r.message_count,
+            Some(5),
+            "every user/assistant row counts, branch or not"
+        );
         assert_eq!(r.created_at, parse_ts("2026-09-19T10:00:00.000Z"));
         assert_eq!(
             r.updated_at,
@@ -2333,14 +2337,15 @@ mod tests {
         // user + assistant rows, branches included; each window also holds one `toolResult`
         // row, which is not a turn (`SessionRef::message_count`).
         assert_eq!(
-            main.message_count, 12,
+            main.message_count,
+            Some(12),
             "6 user + 6 assistant; the toolResult row is not a turn"
         );
         let fork = by_id("01a0bb4e-2bea-749a-8ec2-c494636244d1");
-        assert_eq!(fork.message_count, 11, "5 user + 6 assistant");
+        assert_eq!(fork.message_count, Some(11), "5 user + 6 assistant");
         let legacy = by_id("3f28190c-96fa-4d73-b37c-251dcccb3f9b");
         assert_eq!(legacy.cwd, Some(PathBuf::from("/Users/ember/ocfid/proj")));
-        assert_eq!(legacy.message_count, 4, "2 user + 2 assistant");
+        assert_eq!(legacy.message_count, Some(4), "2 user + 2 assistant");
 
         // OpenClaw's visible path for the main window. `session_info` and `label` are session
         // facts (they land in the session bag above, not as turns); `model_change` IS a turn —

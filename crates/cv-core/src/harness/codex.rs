@@ -1045,7 +1045,7 @@ fn scan_rollout(path: &Path, full_scan_cap: u64) -> Result<(SessionRef, Option<R
         title: s.title,
         created_at: s.created_at,
         updated_at: s.updated_at,
-        message_count: 0,
+        message_count: None,
     };
     crate::discover_cache::read::Context::current().observe_writer(&r, s.writer_version.as_deref());
     Ok((r, decoded))
@@ -1239,7 +1239,7 @@ mod tests {
         let context = crate::discover_cache::read::Context::current();
         let _scope = context.enter();
         let r = adapter.discover()?.remove(0);
-        assert_eq!(r.message_count, 0);
+        assert_eq!(r.message_count, None);
         crate::catalog::sync(std::slice::from_ref(&r));
         crate::discover_cache::persist(false);
         let mut sink = crate::stream::CollectSink::default();
@@ -1251,14 +1251,14 @@ mod tests {
             crate::stream::Pass::RECORD,
         )?;
         assert_eq!(done.counted.unwrap().turns, 1);
-        assert_eq!(adapter.discover()?[0].message_count, 1);
+        assert_eq!(adapter.discover()?[0].message_count, Some(1));
         drop(_scope);
         let next = crate::discover_cache::read::Context::current();
         let _next_scope = next.enter();
-        assert_eq!(adapter.discover()?[0].message_count, 1);
+        assert_eq!(adapter.discover()?[0].message_count, Some(1));
         fs::write(&path, format!("{first}{{\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":\"next\"}}}}\n"))?;
         let changed = adapter.discover()?.remove(0);
-        assert_eq!(changed.message_count, 0, "changed sources lose certified counts");
+        assert_eq!(changed.message_count, None, "changed sources lose certified counts");
         crate::catalog::sync(std::slice::from_ref(&changed));
         crate::stream::stream_counted(
             &adapter,
@@ -1267,7 +1267,7 @@ mod tests {
             &mut sink,
             crate::stream::Pass::RECORD,
         )?;
-        assert_eq!(adapter.discover()?[0].message_count, 2);
+        assert_eq!(adapter.discover()?[0].message_count, Some(2));
         Ok(())
     }
 
@@ -2638,7 +2638,7 @@ mod tests {
         let r = &refs[0];
         assert_eq!(r.id, "cold-1");
         assert_eq!(r.title.as_deref(), Some("cold storage question"));
-        assert_eq!(r.message_count, 0);
+        assert_eq!(r.message_count, None);
 
         let s = cx.parse(r).unwrap();
         assert_eq!(s.model.as_deref(), Some("gpt-6-astra"));
@@ -2679,7 +2679,7 @@ mod tests {
         assert_eq!(refs.len(), 2);
         let (r, bytes) = decoded.recv().expect("the compressed rollout is handed over");
         assert!(decoded.recv().is_none(), "once, and never the plain rollout");
-        assert_eq!((r.path.as_path(), r.message_count), (cold.as_path(), 0));
+        assert_eq!((r.path.as_path(), r.message_count), (cold.as_path(), None));
 
         let arena = |rollout: Rollout| rollout.decoded.unwrap();
         let handed = bytes.run(|| arena(Rollout::open(&cold).unwrap()));
@@ -2726,7 +2726,7 @@ mod tests {
             r.title.as_deref(),
             Some("Message Type: NEW_TASK Task name: build the client")
         );
-        assert_eq!(r.message_count, 0, "discovery defers exact turn counts");
+        assert_eq!(r.message_count, None, "discovery defers exact turn counts");
 
         // Over the full-scan cap the middle is never read: the metadata still comes from the head
         // and tail, and the turn count is 0 ("not counted") rather than an extrapolation
@@ -2737,7 +2737,7 @@ mod tests {
         assert_eq!(sampled.title, r.title);
         assert_eq!(sampled.updated_at, r.updated_at);
         assert_eq!(
-            sampled.message_count, 0,
+            sampled.message_count, None,
             "over the cap the count is unknown, not estimated"
         );
         std::fs::remove_dir_all(&dir).ok();
@@ -2824,7 +2824,7 @@ mod tests {
                 parsed.id,
                 r.title,
                 parsed.messages.len(),
-                r.message_count,
+                r.message_count.map_or("-".to_string(), |n| n.to_string()),
                 notes,
                 agent_msgs,
                 with_usage,

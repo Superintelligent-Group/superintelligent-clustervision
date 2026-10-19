@@ -37,13 +37,13 @@ pub(super) fn discover(home: &Path, out: &mut Vec<SessionRef>) {
                     title: session.title.or(collector.title),
                     created_at: session.created_at,
                     updated_at: session.updated_at,
-                    message_count: collector.count,
+                    message_count: Some(collector.count),
                     ..r
                 })
             });
             if let Ok(reference) = result {
                 // An empty or uninitialized native store is not a conversation.
-                if reference.message_count > 0 {
+                if reference.message_count.is_some_and(|n| n > 0) {
                     out.push(reference);
                 }
             }
@@ -734,11 +734,11 @@ mod tests {
         let adapter = Cursor::with_cli_home(&home);
         let refs = adapter.discover().unwrap();
         assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0].message_count, 5);
+        assert_eq!(refs[0].message_count, Some(5));
         let session = adapter.parse(&refs[0]).unwrap();
         assert_eq!(session.messages.len(), 10);
         assert_eq!(
-            session.messages.iter().filter(|m| m.is_turn()).count(),
+            Some(session.messages.iter().filter(|m| m.is_turn()).count()),
             refs[0].message_count
         );
         let uses: Vec<_> = session

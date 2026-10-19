@@ -656,7 +656,7 @@ fn scan(path: &Path) -> Result<Option<SessionRef>> {
         title,
         created_at,
         updated_at,
-        message_count,
+        message_count: Some(message_count),
         ..SessionRef::new(id, Harness::LmStudio, path.to_path_buf())
     }))
 }
@@ -1078,7 +1078,7 @@ mod tests {
         let r = scan(&path).unwrap().unwrap();
         assert_eq!(r.id, "sample");
         assert_eq!(r.title.as_deref(), Some("Hello there"));
-        assert_eq!(r.message_count, 2);
+        assert_eq!(r.message_count, Some(2));
 
         let s = LmStudio { root: None }.parse(&r).unwrap();
 
@@ -1479,7 +1479,7 @@ mod tests {
         for reference in &first {
             let direct = scan(&reference.path)?.unwrap();
             assert_eq!(serde_json::to_value(reference)?, serde_json::to_value(&direct)?);
-            assert_eq!(reference.message_count, 128);
+            assert_eq!(reference.message_count, Some(128));
             let hit = crate::discover_cache::cached_scan(&reference.path, || {
                 panic!("discovery must have cached every unchanged conversation")
             })
@@ -1492,7 +1492,7 @@ mod tests {
         let refreshed = adapter.discover()?;
         let reference = refreshed.iter().find(|reference| reference.id == "0").unwrap();
         assert_eq!(reference.title.as_deref(), Some("changed"));
-        assert_eq!(reference.message_count, 2);
+        assert_eq!(reference.message_count, Some(2));
         fs::write(&changed, "not JSON")?;
         assert_eq!(adapter.discover()?.len(), 7);
         fs::write(&changed, r#"{"name":"repaired","messages":[]}"#)?;

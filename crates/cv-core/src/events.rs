@@ -2078,7 +2078,7 @@ mod tests {
             title: Some("fix the parser".into()),
             created_at: None,
             updated_at: None,
-            message_count: 2,
+            message_count: Some(2),
         };
 
         let n = ingest_ref(&r).unwrap();
@@ -2234,7 +2234,7 @@ mod tests {
             title: None,
             created_at: None,
             updated_at: None,
-            message_count: 1,
+            message_count: Some(1),
         };
 
         // First v2 open (inside needs_ingest) migrates: v1 rows gone, sync stamp gone → stale.

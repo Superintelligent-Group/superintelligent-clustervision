@@ -63,7 +63,7 @@ fn chatgpt_walks_mapping_active_branch() {
     assert_eq!(r.id, "c1");
     assert_eq!(r.harness, Harness::ChatGptExport);
     assert_eq!(r.title.as_deref(), Some("Soy Sauce"));
-    assert_eq!(r.message_count, 2);
+    assert_eq!(r.message_count, Some(2));
     assert!(r.created_at.is_some());
 }
 
@@ -192,7 +192,7 @@ fn claude_export_blocks() {
 
     assert_eq!(r.id, "u1");
     assert_eq!(r.harness, Harness::ClaudeExport);
-    assert_eq!(r.message_count, 2);
+    assert_eq!(r.message_count, Some(2));
 }
 
 #[test]
@@ -212,7 +212,7 @@ fn read_finds_conversation_in_file_and_sniffs_kind() {
 
     let r = SessionRef {
         title: Some("second".into()),
-        message_count: 1,
+        message_count: Some(1),
         ..SessionRef::new("b", Harness::ClaudeExport, path.clone())
     };
     let mut sink = CollectSink::default();
@@ -235,7 +235,7 @@ fn real_downloads_exports_parse() {
     for kind in [Kind::ChatGpt, Kind::Claude] {
         let refs = discover_kind(kind);
         eprintln!("{:?}: {} conversation(s)", kind, refs.len());
-        if let Some(r) = refs.iter().find(|r| r.message_count > 0) {
+        if let Some(r) = refs.iter().find(|r| r.message_count.is_some_and(|n| n > 0)) {
             let mut sink = CollectSink::default();
             let mut s = native::stream(kind, r, &ParseOptions::full(), &mut sink).unwrap();
             s.messages = sink.messages;
@@ -335,7 +335,7 @@ fn account_archive_full_output_oracle(payload_bytes: usize) {
         let refs = discover_kind_in(kind, vec![path.clone()]);
         assert_eq!(refs.len(), 2);
         let expected_ref = refs.into_iter().find(|r| r.id == "selected").unwrap();
-        assert_eq!(expected_ref.message_count, 3);
+        assert_eq!(expected_ref.message_count, Some(3));
         for opts in [
             ParseOptions::lazy(),
             ParseOptions::bulk(),
@@ -532,7 +532,7 @@ fn native_archive_keeps_raw_value_acceptance_and_duplicate_precedence() {
     ]});
     std::fs::write(&path, serde_json::to_vec(&json!([roles])).unwrap()).unwrap();
     let refs = discover_kind_in(Kind::Claude, vec![path.clone()]);
-    assert_eq!(refs[0].message_count, 2);
+    assert_eq!(refs[0].message_count, Some(2));
     std::fs::write(&path, "[]").unwrap();
     assert!(discover_kind_in(Kind::Claude, vec![path.clone()]).is_empty());
     std::fs::write(&path, "").unwrap();
@@ -621,7 +621,7 @@ fn multipart_chatgpt_read_keeps_lazy_payloads_and_breaks_parent_cycles() -> Resu
     }});
     std::fs::write(&path, serde_json::to_vec(&json!([cycle]))?)?;
     let refs = discover_kind_in(Kind::ChatGpt, vec![path.clone()]);
-    assert_eq!(refs[0].message_count, 1);
+    assert_eq!(refs[0].message_count, Some(1));
     let mut sink = crate::stream::CollectSink::default();
     native::stream(Kind::ChatGpt, &refs[0], &ParseOptions::lazy(), &mut sink)?;
     assert_eq!(

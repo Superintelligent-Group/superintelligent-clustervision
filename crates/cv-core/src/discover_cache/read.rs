@@ -169,7 +169,7 @@ impl Context {
     /// Reuse the operation's existing catalog connection after scan-cache locks have dropped.
     /// Refilling by logical session key also covers directory refs cached under a child file.
     pub(crate) fn refill_turns(&self, refs: &mut [crate::SessionRef]) {
-        if refs.iter().all(|r| r.message_count != 0) {
+        if refs.iter().all(|r| r.message_count.is_some()) {
             return;
         }
         #[cfg(feature = "sqlite")]

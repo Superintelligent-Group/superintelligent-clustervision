@@ -687,7 +687,7 @@ fn scan(summary_path: &Path) -> Result<Option<SessionRef>> {
             .and_then(Value::as_str)
             .and_then(parse_ts)
             .or_else(|| summary.get("last_active_at").and_then(Value::as_str).and_then(parse_ts)),
-        message_count: 0,
+        message_count: None,
     }))
 }
 
@@ -1117,7 +1117,7 @@ mod tests {
         assert_eq!(r.title.as_deref(), Some("native title"));
         assert_eq!(r.cwd.as_deref(), Some(Path::new("/project")));
         assert_eq!(r.updated_at.unwrap().to_rfc3339(), "2026-01-02T00:00:00+00:00");
-        assert_eq!(r.message_count, 0);
+        assert_eq!(r.message_count, None);
         assert!(jsonl::OPENED.with(|paths| paths.borrow().is_empty()));
         Ok(())
     }
@@ -1139,7 +1139,7 @@ mod tests {
             Some("late title"),
             "missing-summary fallback is unchanged"
         );
-        assert_eq!(r.message_count, 0);
+        assert_eq!(r.message_count, None);
         Ok(())
     }
 
@@ -1159,7 +1159,7 @@ mod tests {
         let context = crate::discover_cache::read::Context::current();
         let _scope = context.enter();
         let r = grok.discover()?.remove(0);
-        assert_eq!(r.message_count, 0);
+        assert_eq!(r.message_count, None);
         crate::catalog::sync(std::slice::from_ref(&r));
         crate::discover_cache::persist(false);
         let mut sink = crate::stream::CollectSink::default();
@@ -1171,7 +1171,7 @@ mod tests {
             crate::stream::Pass::RECORD,
         )?;
         assert_eq!(done.counted.unwrap().turns, 2);
-        assert_eq!(grok.discover()?[0].message_count, 2);
+        assert_eq!(grok.discover()?[0].message_count, Some(2));
         let conn = crate::catalog::open_db().unwrap();
         let persisted: String = conn.query_row(
             "SELECT refs FROM scan_cache WHERE path=?1",
@@ -1180,20 +1180,23 @@ mod tests {
         )?;
         // Raw discovery metadata stays unknown: authenticated counts are refilled by logical
         // session identity, rather than rewriting a cache entry whose key may be a directory.
-        assert_eq!(serde_json::from_str::<Vec<SessionRef>>(&persisted)?[0].message_count, 0);
+        assert_eq!(
+            serde_json::from_str::<Vec<SessionRef>>(&persisted)?[0].message_count,
+            None
+        );
         assert_eq!(
             crate::catalog::Reader::open().unwrap().all_sessions().unwrap()[0].message_count,
-            2
+            Some(2)
         );
         // A new operation also retains the exact count without an in-memory cache mutation.
         drop(_scope);
         let next = crate::discover_cache::read::Context::current();
         let _next_scope = next.enter();
-        assert_eq!(grok.discover()?[0].message_count, 2);
+        assert_eq!(grok.discover()?[0].message_count, Some(2));
         fs::write(&history, format!("{first}{{\"type\":\"user\",\"content\":\"next\"}}\n"))?;
         assert_eq!(
             grok.discover()?[0].message_count,
-            0,
+            None,
             "growth invalidates the exact count"
         );
         let grown = grok.discover()?.remove(0);
@@ -1205,11 +1208,11 @@ mod tests {
             &mut sink,
             crate::stream::Pass::RECORD,
         )?;
-        assert_eq!(grok.discover()?[0].message_count, 3);
+        assert_eq!(grok.discover()?[0].message_count, Some(3));
         fs::write(&summary, r#"{"info":{"id":"s"},"session_summary":"renamed"}"#)?;
         let renamed = grok.discover()?.remove(0);
         assert_eq!(renamed.title.as_deref(), Some("renamed"));
-        assert_eq!(renamed.message_count, 0);
+        assert_eq!(renamed.message_count, None);
         Ok(())
     }
 
@@ -1259,7 +1262,7 @@ mod tests {
                 Flow::Continue
             });
             let actual = scan(&summary).unwrap().unwrap();
-            assert_eq!(actual.message_count, 0);
+            assert_eq!(actual.message_count, None);
             assert!(expected_count > 0);
             assert_eq!(
                 actual.title,
@@ -1275,7 +1278,7 @@ mod tests {
         )
         .unwrap();
         let actual = scan(&summary).unwrap().unwrap();
-        assert_eq!(actual.message_count, 0);
+        assert_eq!(actual.message_count, None);
         assert_eq!(actual.title.as_deref(), Some("prefix"));
     }
 
@@ -1612,7 +1615,7 @@ mod tests {
         let s = grok.parse(&r).unwrap();
         // The contract count: user + assistant turns (the fixture's `system` line and two
         // `tool_result` lines are not turns; summary.json's `num_chat_messages` says 5).
-        assert_eq!(r.message_count, 0, "discovery does not count transcript turns");
+        assert_eq!(r.message_count, None, "discovery does not count transcript turns");
         assert_eq!(
             4,
             s.messages

@@ -550,7 +550,7 @@ pub(crate) fn persist_in(conn: &mut rusqlite::Connection, prune: bool) {
 }
 
 /// [`crate::catalog::fill_count`]'s scan-cache half: set `message_count = n` on the cached ref for
-/// `(path, harness, id)` where it is `0`, both in the persisted row (left at its recorded
+/// `(path, harness, id)` where it is unset, both in the persisted row (left at its recorded
 /// `(mtime, size)`, so a changed file still misses and re-scans) and in this process's copy.
 #[cfg(feature = "sqlite")]
 pub(crate) fn fill_count(conn: &rusqlite::Connection, path: &Path, harness: crate::ir::Harness, id: &str, n: usize) {
@@ -558,9 +558,9 @@ pub(crate) fn fill_count(conn: &rusqlite::Connection, path: &Path, harness: crat
         let mut hit = false;
         for r in refs
             .iter_mut()
-            .filter(|r| r.harness == harness && r.id == id && r.message_count == 0)
+            .filter(|r| r.harness == harness && r.id == id && r.message_count.is_none())
         {
-            r.message_count = n;
+            r.message_count = Some(n);
             hit = true;
         }
         hit
@@ -713,27 +713,27 @@ mod tests {
             let newer = cached_scan_continued(&path, version, |_| {
                 (
                     Some(SessionRef {
-                        message_count: 9,
+                        message_count: Some(9),
                         ..r.clone()
                     }),
                     Some(state()),
                 )
             })
             .unwrap();
-            assert_eq!(newer.message_count, 9);
+            assert_eq!(newer.message_count, Some(9));
             (
                 Some(SessionRef {
-                    message_count: 1,
+                    message_count: Some(1),
                     ..r.clone()
                 }),
                 Some(state()),
             )
         })
         .unwrap();
-        assert_eq!(result.message_count, 1);
+        assert_eq!(result.message_count, Some(1));
         assert_eq!(
             cache.entries.read().unwrap()[&path].payload.known().unwrap().0[0].message_count,
-            9,
+            Some(9),
             "older raced primary pass cannot replace a newer installed row"
         );
     }
@@ -756,7 +756,7 @@ mod tests {
                 title: Some("metadata".into()),
                 created_at: None,
                 updated_at: None,
-                message_count: 0,
+                message_count: None,
             };
             let mut reads = crate::source::ReadSet::default();
             reads.record(path);
@@ -781,7 +781,7 @@ mod tests {
             cached_scan(&paths[0], || panic!("valid persisted row must hit"))
                 .unwrap()
                 .message_count,
-            2
+            Some(2)
         );
         assert_eq!(captured_reads(&paths[0]).unwrap(), expected[0].1);
         assert!(
@@ -803,12 +803,12 @@ mod tests {
                 "tuple mismatch avoids persisted payload loading"
             );
             Some(SessionRef {
-                message_count: 3,
+                message_count: Some(3),
                 ..expected[2].0.clone()
             })
         })
         .unwrap();
-        assert_eq!(fresh.message_count, 3);
+        assert_eq!(fresh.message_count, Some(3));
         assert!(cached_scan_many(&paths[3], Vec::new).is_empty());
         assert!(captured_reads(&paths[3]).is_none(), "invalid ReadSet must also miss");
         assert_eq!(
@@ -819,7 +819,7 @@ mod tests {
         for (i, path) in paths.iter().enumerate() {
             let mut entry = load_entry(&conn, path, stat_key(path).unwrap()).unwrap();
             let (refs, reads) = entry.payload.parsed().unwrap();
-            assert_eq!(refs[0].message_count, [2, 0, 3, 0][i]);
+            assert_eq!(refs[0].message_count, [Some(2), None, Some(3), None][i]);
             assert!(reads.fresh(&mut crate::source::Probe::default()));
         }
         std::fs::remove_file(&paths[1]).unwrap();
@@ -848,7 +848,7 @@ mod tests {
             title: None,
             created_at: None,
             updated_at: None,
-            message_count: 4,
+            message_count: Some(4),
         };
         assert_eq!(cached_scan(&path, || Some(old.clone())).unwrap().id, "old");
         persist(false);
@@ -885,7 +885,7 @@ mod tests {
         );
         let current = SessionRef {
             id: "current".into(),
-            message_count: 2,
+            message_count: Some(2),
             ..old
         };
         assert_eq!(
@@ -897,7 +897,7 @@ mod tests {
             cached_scan(&path, || panic!("current scan must stay cached"))
                 .unwrap()
                 .message_count,
-            2
+            Some(2)
         );
         persist(false);
         assert_eq!(
@@ -928,14 +928,15 @@ mod tests {
         let conn = crate::catalog::open_db().unwrap();
         let key = stat_key(&path).unwrap();
         let mut old_sql = load_entry(&conn, &path, key).unwrap();
-        assert_eq!(old_sql.payload.parsed().unwrap().0[0].message_count, 0);
+        assert_eq!(old_sql.payload.parsed().unwrap().0[0].message_count, None);
         fill_count(&conn, &path, crate::Harness::Claude, "counted", 7);
         let cache = current_cache();
         let mut reads = crate::source::ReadSet::default();
         reads.record(&path);
         let actual = admit_loaded(&cache, &path, old_sql, &reads).unwrap();
         assert_eq!(
-            actual.0[0].message_count, 7,
+            actual.0[0].message_count,
+            Some(7),
             "newer process count wins on admission AND return"
         );
     }
@@ -953,7 +954,7 @@ mod tests {
             title: None,
             created_at: None,
             updated_at: None,
-            message_count: 1,
+            message_count: Some(1),
         };
         let conn = crate::catalog::open_db().unwrap();
         cached_scan(&path, || Some(r.clone()));
@@ -1012,7 +1013,7 @@ mod tests {
             title: None,
             created_at: None,
             updated_at: None,
-            message_count: 1,
+            message_count: Some(1),
         };
         cached_scan(&path, || {
             std::fs::write(&path, "after!").unwrap();

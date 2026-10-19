@@ -251,7 +251,7 @@ fn doc_ref(path: &Path) -> Option<SessionRef> {
                 title: string("title").map(str::to_owned),
                 created_at: o.get("created_at").and_then(ts_from_value),
                 updated_at: o.get("updated_at").and_then(ts_from_value),
-                message_count,
+                message_count: Some(message_count),
             })
         })
         .ok()

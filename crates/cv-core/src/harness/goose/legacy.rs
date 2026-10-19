@@ -467,7 +467,7 @@ mod tests {
             title,
             created_at: header.get("created_at").and_then(parse_ts_value),
             updated_at: header.get("updated_at").and_then(parse_ts_value),
-            message_count: 0,
+            message_count: None,
         })
     }
 }

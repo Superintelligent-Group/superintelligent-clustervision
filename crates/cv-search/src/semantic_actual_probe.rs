@@ -53,7 +53,7 @@ fn reference(path: PathBuf, id: &str, harness: cv_core::Harness) -> cv_core::Ses
         title: None,
         created_at: None,
         updated_at: None,
-        message_count: 2,
+        message_count: Some(2),
     }
 }
 fn claude(path: &Path, content: &str, note: &str) {

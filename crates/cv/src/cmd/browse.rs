@@ -39,7 +39,8 @@ fn json_rows<'a>(refs: impl Iterator<Item = &'a SessionRef>, limit: usize) -> Ve
 #[derive(Eq, PartialEq, Ord, PartialOrd)]
 enum RankKey {
     Time(Option<chrono::DateTime<chrono::Utc>>),
-    Messages(usize),
+    /// `None` (uncounted) ranks after every counted session, including `Some(0)`.
+    Messages(Option<usize>),
 }
 struct RankedRef<'a> {
     key: RankKey,
@@ -313,7 +314,7 @@ pub(crate) fn cmd_ls(
             r.harness.as_str(),
             short_id(&r.id),
             crate::util::fmt_span(r.created_at, r.updated_at),
-            r.message_count,
+            r.message_count.map_or("–".to_string(), |n| n.to_string()),
             r.title
                 .as_deref()
                 .map(|t| truncate(&sanitize_line(t), 60))
@@ -359,7 +360,11 @@ pub(crate) fn cmd_stats(query: Option<String>, json: bool, tokens: bool) -> Resu
     }
 
     println!("✦ clustervision fleet stats\n");
-    println!("{total} session(s) · {} message(s)\n", s.messages);
+    let uncounted = match s.uncounted {
+        0 => String::new(),
+        n => format!(" · {n} not counted yet"),
+    };
+    println!("{total} session(s) · {} message(s){uncounted}\n", s.messages);
 
     println!("by harness:");
     for (h, n) in &s.by_harness {
@@ -517,7 +522,7 @@ mod window_tests {
                     present.clone()
                 };
                 let mut r = SessionRef::new(format!("row-{i}"), cv_core::Harness::Claude, path);
-                r.message_count = i % 7;
+                r.message_count = (i % 7 != 6).then_some(i % 7); // one in seven is uncounted
                 r.created_at = chrono::DateTime::from_timestamp(100 + (i % 4) as i64, 0);
                 r.updated_at = if i % 3 == 0 {
                     None
@@ -550,12 +555,12 @@ mod window_tests {
         (0..count)
             .map(|i| {
                 let mut reference = SessionRef::new(i.to_string(), cv_core::Harness::Claude, present.to_path_buf());
-                reference.message_count = match shape {
+                reference.message_count = Some(match shape {
                     "sorted" => count - i,
                     "reverse" => i,
                     "tied" => 7,
                     _ => ((i as u64 * 2_654_435_761) % 10_007) as usize,
-                };
+                });
                 reference
             })
             .collect()
@@ -687,7 +692,7 @@ mod window_tests {
                     })],
                 );
                 let mut r = SessionRef::new(format!("row-{i}"), cv_core::Harness::Claude, path);
-                r.message_count = i % 3;
+                r.message_count = Some(i % 3);
                 r.created_at = chrono::DateTime::from_timestamp(100 + (i / 2) as i64, 1);
                 r.updated_at = chrono::DateTime::from_timestamp(200 + (i / 3) as i64, 2);
                 r

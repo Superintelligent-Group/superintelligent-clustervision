@@ -52,7 +52,7 @@ struct ReferenceHints {
     title: Option<String>,
     created_at: Option<chrono::DateTime<chrono::Utc>>,
     updated_at: Option<chrono::DateTime<chrono::Utc>>,
-    message_count: usize,
+    message_count: Option<usize>,
 }
 impl From<&cv_core::SessionRef> for ReferenceHints {
     fn from(r: &cv_core::SessionRef) -> Self {
@@ -1075,7 +1075,7 @@ mod tests {
             title: None,
             created_at: None,
             updated_at: None,
-            message_count: 1,
+            message_count: Some(1),
         }
     }
     fn fake_doc(r: &cv_core::SessionRef, dependency: Option<&Path>) -> Result<(crate::Doc, ReadSet)> {
@@ -1345,7 +1345,7 @@ mod tests {
             }
             let path = dir.join(format!("{kind}.bin"));
             let mut r = fixture_ref(&source, "perf");
-            r.message_count = if kind == "arguments" { 2 } else { 1 };
+            r.message_count = Some(if kind == "arguments" { 2 } else { 1 });
             let refs = [r];
             let mut calls = 0;
             let baseline = cv_testkit::heap::begin();
@@ -1439,7 +1439,7 @@ mod tests {
         r.title = Some("new hint".into());
         run(&r);
         assert_eq!(count.get(), 2);
-        r.message_count += 1;
+        r.message_count = Some(r.message_count.map_or(1, |n| n + 1));
         run(&r);
         assert_eq!(count.get(), 3);
         r.cwd = Some("/other/hint".into());
@@ -2076,7 +2076,7 @@ mod tests {
             title: Some("unused refresh title".repeat(4096)),
             created_at: None,
             updated_at: None,
-            message_count: 17,
+            message_count: Some(17),
         });
         store.model = spec.key.clone();
         store.model_reads = Some(spec.reads.clone());

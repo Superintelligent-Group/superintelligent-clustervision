@@ -336,7 +336,7 @@ fn discover_db(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
                 .map(|t| crate::ir::truncate(&t, 80)),
             created_at: created.as_deref().and_then(parse_ts_text),
             updated_at: updated.as_deref().and_then(parse_ts_text),
-            message_count: 0,
+            message_count: None,
         });
     }
     Ok(out)
@@ -1732,7 +1732,7 @@ mod tests {
         std::fs::write(&legacy, first)?;
         let refs = crate::sessions_for(Some(Harness::Goose));
         assert_eq!(refs.len(), 2);
-        assert!(refs.iter().all(|r| r.message_count == 0));
+        assert!(refs.iter().all(|r| r.message_count.is_none()));
         let adapter = Goose::with_sessions_dir(&dir);
         for reference in &refs {
             crate::stream::stream_counted(
@@ -1747,11 +1747,11 @@ mod tests {
             assert_eq!(refs.iter().find(|r| r.id == "native").unwrap().message_count, native);
             assert_eq!(refs.iter().find(|r| r.id == "legacy").unwrap().message_count, legacy);
         };
-        check(&crate::sessions_for(Some(Harness::Goose)), 2, 1);
+        check(&crate::sessions_for(Some(Harness::Goose)), Some(2), Some(1));
         let refreshed = crate::discover_all();
-        check(&refreshed, 2, 1);
+        check(&refreshed, Some(2), Some(1));
         for mut reference in refreshed {
-            reference.message_count = 0;
+            reference.message_count = None;
             assert_eq!(
                 serde_json::to_value(&reference)?,
                 serde_json::to_value(refs.iter().find(|old| old.id == reference.id).unwrap())?
@@ -1759,7 +1759,7 @@ mod tests {
         }
         writer.execute("UPDATE sessions SET description='Renamed' WHERE id='native'", [])?;
         let changed = crate::sessions_for(Some(Harness::Goose));
-        check(&changed, 0, 1);
+        check(&changed, None, Some(1));
         assert_eq!(
             changed.iter().find(|r| r.id == "native").unwrap().title.as_deref(),
             Some("Renamed")
@@ -1768,7 +1768,7 @@ mod tests {
             &legacy,
             format!("{first}{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"next\"}}]}}\n"),
         )?;
-        check(&crate::sessions_for(Some(Harness::Goose)), 0, 0);
+        check(&crate::sessions_for(Some(Harness::Goose)), None, None);
         Ok(())
     }
 
@@ -1882,7 +1882,7 @@ mod tests {
         }
         for reference in discover_db(&conn, &at(&conn)).unwrap() {
             let parsed = parse_db(&conn, &sref(&conn, &reference.id)).unwrap();
-            assert_eq!(reference.message_count, 0);
+            assert_eq!(reference.message_count, None);
             let mut sink = crate::stream::CollectSink::default();
             stream_db_opts(&conn, &reference, &ParseOptions::lazy(), &mut sink).unwrap();
             assert_eq!(
@@ -1906,7 +1906,7 @@ mod tests {
             let refs = discover_db(&conn, &at(&conn))?;
             assert_eq!(refs.len(), 1);
             assert_eq!(refs[0].id, "known");
-            assert_eq!(refs[0].message_count, 0);
+            assert_eq!(refs[0].message_count, None);
         }
         Ok(())
     }
@@ -1930,7 +1930,10 @@ mod tests {
         assert_eq!(refs.len(), 2);
         assert_eq!(refs[0].id, "b"); // updated_at DESC
         assert_eq!(refs[1].id, "a");
-        assert_eq!(refs[1].message_count, 0, "discovery does not reduce the messages table");
+        assert_eq!(
+            refs[1].message_count, None,
+            "discovery does not reduce the messages table"
+        );
         assert_eq!(refs[0].title.as_deref(), Some("B"));
         assert_eq!(
             parse_db(&c, &refs[1])
@@ -1978,7 +1981,10 @@ mod tests {
         let r = discover_legacy("20240101_120000", &path).unwrap();
         assert_eq!(r.title.as_deref(), Some("legacy chat"));
         assert_eq!(r.cwd.as_deref().map(|p| p.to_str().unwrap()), Some("/home/u/old"));
-        assert_eq!(r.message_count, 0, "discovery reads metadata without reducing messages");
+        assert_eq!(
+            r.message_count, None,
+            "discovery reads metadata without reducing messages"
+        );
         assert!(r.created_at.is_some());
 
         // full parse

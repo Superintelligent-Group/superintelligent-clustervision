@@ -173,7 +173,7 @@ pub fn resolve(r: &SessionRef, mark: Mark) -> Option<usize> {
 #[derive(Debug, Clone)]
 struct State {
     /// Cheap change signal from discovery (no full parse needed to detect change).
-    trigger: (usize, Option<i64>),
+    trigger: (Option<usize>, Option<i64>),
     /// How far we've already reported.
     mark: Mark,
     /// Messages past `mark` were left unread when a bounded poll's budget ran out: the next poll
@@ -188,7 +188,7 @@ struct State {
 /// `more` the pending flag. Optional fields keep a cursor issued before they existed decoding.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Pos {
-    t: (usize, Option<i64>),
+    t: (Option<usize>, Option<i64>),
     n: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     b: Option<u64>,
@@ -397,7 +397,7 @@ impl Watcher {
         self.seen.len()
     }
 
-    fn trigger_of(r: &SessionRef) -> (usize, Option<i64>) {
+    fn trigger_of(r: &SessionRef) -> (Option<usize>, Option<i64>) {
         (r.message_count, r.updated_at.map(|t| t.timestamp_millis()))
     }
 
@@ -411,7 +411,9 @@ impl Watcher {
             // (codex/hermes/claude add reasoning/tool/system turns), so seeding from it makes the
             // first `Updated` poll re-emit messages that predate the watcher. Record the true
             // baseline instead — a byte mark where the transcript is append-only (see [`baseline`]).
-            let (mark, read) = capture_baseline(&r, || baseline(&r).unwrap_or(Mark::Messages(r.message_count)));
+            let (mark, read) = capture_baseline(&r, || {
+                baseline(&r).unwrap_or(Mark::Messages(r.message_count.unwrap_or(0)))
+            });
             self.seen.insert(
                 Self::key(&r),
                 State {
@@ -774,7 +776,7 @@ mod tests {
             title: None,
             created_at: None,
             updated_at: None,
-            message_count: 0,
+            message_count: None,
         }
     }
 
@@ -833,11 +835,11 @@ mod tests {
             let dir = std::path::PathBuf::from(crate::env::var_os("CLUSTERVISION_HOME").unwrap());
             let mut old = sref(Harness::Claude, dir.join("old.jsonl"));
             old.updated_at = chrono::DateTime::from_timestamp(1, 0);
-            old.message_count = 1;
+            old.message_count = Some(1);
             let mut new = old.clone();
             new.path = dir.join("new.jsonl");
             new.updated_at = chrono::DateTime::from_timestamp(2, 0);
-            new.message_count = 3; // Hold the trigger fixed; source freshness must catch append.
+            new.message_count = Some(3); // Hold the trigger fixed; source freshness must catch append.
             vec![old, new]
         }
         let row = |text: &str| {
@@ -1197,7 +1199,7 @@ mod tests {
             watcher.seen.insert(
                 format!("claude:{n}"),
                 State {
-                    trigger: (n, None),
+                    trigger: (Some(n), None),
                     mark: Mark::Messages(n),
                     pending: n % 2 == 0,
                     read: Some(read),
@@ -1259,7 +1261,7 @@ mod tests {
             o: [(
                 "claude:original".into(),
                 Pos {
-                    t: (0, None),
+                    t: (Some(0), None),
                     n: 12,
                     b: None,
                     more: false,
@@ -1490,7 +1492,7 @@ mod tests {
             let len = std::fs::metadata(&path).map(|m| m.len() as usize).unwrap_or(0);
             let mut r = sref(Harness::Claude, path);
             r.id = "cursor-test".into();
-            r.message_count = len; // the cheap trigger: the file grew
+            r.message_count = Some(len); // the cheap trigger: the file grew
             vec![r]
         }
         let full = std::fs::read(concat!(
@@ -1570,7 +1572,7 @@ mod tests {
             watcher.seen.insert(
                 format!("session-{i}"),
                 State {
-                    trigger: (i, None),
+                    trigger: (Some(i), None),
                     mark: Mark::Messages(i),
                     pending: true,
                     read: Some(ReadState::baseline(&r)),

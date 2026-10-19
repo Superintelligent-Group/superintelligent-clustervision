@@ -1360,6 +1360,7 @@ fn serve_stats() {
         [
             "sessions",
             "messages",
+            "uncounted",
             "by_harness",
             "top_cwds",
             "earliest_created",

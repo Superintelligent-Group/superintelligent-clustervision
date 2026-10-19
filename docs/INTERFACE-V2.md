@@ -147,6 +147,8 @@ every command of the clap tree on a pipe under this contract.
   `DateTime::to_rfc3339()` (`+00:00`); serialized IR sessions/messages use chrono serde (`Z`).
 - A **session row** (from `ls`, `search`, `/api/sessions`, …) always has the same keys:
   `id, harness, path, cwd, title, created_at, updated_at, message_count, size_bytes`
+  (`message_count` is `null` for a session no listing, full read or index has counted yet; `0` is a
+  session with no turns)
   (+ `display_title`, `git` under `--enrich`; + `score`, `snippet`, `agent_id`, `parent_id`,
   `workflow` from `search`). `cv schema --json` publishes this list as `session_row`, with
   `session`, `message`, `block`, `prompt_row`, `lane`, `deferral` and `query`; the manual's

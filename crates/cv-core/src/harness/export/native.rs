@@ -261,7 +261,7 @@ fn view_ref(kind: Kind, path: &Path, r: &Fields<'_>, id: &str) -> Result<Session
         title,
         created_at: timestamp("create_time", "created_at")?,
         updated_at: timestamp("update_time", "updated_at")?,
-        message_count,
+        message_count: Some(message_count),
         ..SessionRef::new(id, kind.harness(), path.to_path_buf())
     })
 }

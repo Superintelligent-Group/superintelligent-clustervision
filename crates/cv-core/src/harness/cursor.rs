@@ -358,7 +358,7 @@ fn discover_global(conn: &Connection, db: &Path, cwd_map: &HashMap<String, PathB
             title,
             created_at: created.and_then(ts_from_epoch),
             updated_at: updated.and_then(ts_from_epoch),
-            message_count: count,
+            message_count: Some(count),
         });
     }
 }
@@ -708,7 +708,7 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].id, "comp-1");
         assert_eq!(out[0].title.as_deref(), Some("My Chat"));
-        assert_eq!(out[0].message_count, 2);
+        assert_eq!(out[0].message_count, Some(2));
         assert!(out[0].created_at.is_some());
 
         let s = parse_global(&conn, &conn.sref(cid)).unwrap();
@@ -916,7 +916,7 @@ mod tests {
         let map = HashMap::new();
         discover_global(&conn, &conn.path, &map, &mut out);
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].message_count, 2);
+        assert_eq!(out[0].message_count, Some(2));
         // no name -> title falls back to None at discover; label() uses first user text.
         assert!(out[0].title.is_none());
 
@@ -1013,7 +1013,7 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].id, "legacy:tab-1");
         assert_eq!(out[0].cwd.as_deref(), Some(Path::new("/tmp/proj")));
-        assert_eq!(out[0].message_count, 2);
+        assert_eq!(out[0].message_count, Some(2));
 
         let mut r = conn.sref("legacy:tab-1");
         r.cwd = Some(PathBuf::from("/tmp/proj"));

@@ -354,7 +354,7 @@ mod imp {
             title: optional_hint(row, 4, overrides[1])?,
             created_at: ts_col(row, 8, 5)?,
             updated_at: ts_col(row, 9, 6)?,
-            message_count: row.get::<_, i64>(7)? as usize,
+            message_count: row.get::<_, Option<i64>>(7)?.map(|n| n as usize),
         }))
     }
 
@@ -381,7 +381,7 @@ mod imp {
                 r.title,
                 r.created_at.map(|t| t.timestamp()),
                 r.updated_at.map(|t| t.timestamp()),
-                r.message_count as i64,
+                r.message_count.map(|n| n as i64),
                 r.created_at.and_then(|t| t.timestamp_nanos_opt()),
                 r.updated_at.and_then(|t| t.timestamp_nanos_opt()),
                 retained.get(&(r.id.clone(), r.path.to_string_lossy().into_owned())),
@@ -434,7 +434,7 @@ mod imp {
                 title: None,
                 created_at: None,
                 updated_at: None,
-                message_count: 0,
+                message_count: None,
             }))
         }) else {
             return Default::default();
@@ -832,7 +832,7 @@ mod imp {
     }
 
     /// A full parse counted `n` turns in `r`: write it into `r`'s catalog row and its scan-cache
-    /// entry where they hold `0` ("not counted"), so listings show it and the next discovery (a
+    /// entry where they hold `NULL` ("not counted"), so listings show it and the next discovery (a
     /// scan-cache hit while the file is unchanged) keeps it. A row with a count is never touched:
     /// discovery's number stays the authority wherever it has one. Never creates the catalog.
     pub fn fill_count(r: &SessionRef, n: usize) {
@@ -847,7 +847,7 @@ mod imp {
         let path = r.path.to_string_lossy();
         let _ = conn.execute(
             "UPDATE sessions SET message_count=?1
-             WHERE harness=?2 AND id=?3 AND path=?4 AND message_count=0",
+             WHERE harness=?2 AND id=?3 AND path=?4 AND message_count IS NULL",
             params![n as i64, r.harness.as_str(), r.id, path],
         );
         crate::discover_cache::fill_count(conn, &r.path, r.harness, &r.id, n);
@@ -991,7 +991,7 @@ mod imp {
             }
             if let Some(turns) = turns {
                 tx.execute(
-                    "UPDATE sessions SET message_count=?1 WHERE harness=?2 AND id=?3 AND path=?4 AND message_count=0",
+                    "UPDATE sessions SET message_count=?1 WHERE harness=?2 AND id=?3 AND path=?4 AND message_count IS NULL",
                     params![turns as i64, r.harness.as_str(), r.id, path],
                 )?;
             }
@@ -1212,7 +1212,7 @@ mod imp {
                 title: None,
                 created_at: None,
                 updated_at: None,
-                message_count: 0,
+                message_count: None,
             }
         }
 
@@ -1225,10 +1225,10 @@ mod imp {
             std::fs::write(&newer_path, "newer").unwrap();
             let mut first = db_ref(Harness::Claude, first_path.clone());
             first.id = "hit".into();
-            first.message_count = 7;
+            first.message_count = Some(7);
             let mut newer = first.clone();
             newer.path = newer_path;
-            newer.message_count = 9;
+            newer.message_count = Some(9);
             newer.updated_at = chrono::DateTime::from_timestamp(1_700_000_000, 0);
             let mut prefix = first.clone();
             prefix.id = "hit-longer".into();
@@ -1290,7 +1290,7 @@ mod imp {
             first.created_at = chrono::DateTime::from_timestamp(1_700_000_000, 0);
             let mut second = first.clone();
             second.path = w.base.join("second");
-            second.message_count = 9;
+            second.message_count = Some(9);
             sync(&[first.clone(), second]);
             let conn = open().unwrap();
             let projected = exact_session_in(&conn, "session", Some(Harness::Claude), [true, true]).unwrap();
@@ -1338,7 +1338,7 @@ mod imp {
                     actual.path, expected.path,
                     "overridden invalid hint changed copy acceptance"
                 );
-                assert_eq!(actual.message_count, 9);
+                assert_eq!(actual.message_count, Some(9));
             }
         }
 
@@ -1353,7 +1353,7 @@ mod imp {
                     r.id = "session".into();
                     r.title = Some("unused title".repeat(1024));
                     r.cwd = Some(w.base.join("unused-cwd"));
-                    r.message_count = 123;
+                    r.message_count = Some(123);
                     r
                 })
                 .collect();
@@ -1367,7 +1367,7 @@ mod imp {
                     (&lean.id, lean.harness, &lean.path)
                 );
                 assert!(lean.title.is_none() && lean.cwd.is_none());
-                assert_eq!(lean.message_count, 0);
+                assert_eq!(lean.message_count, None);
                 let a = crate::harness::for_harness(full.harness).unwrap();
                 assert_eq!(a.resume_source(full), a.resume_source(lean));
                 let conn = open().unwrap();
@@ -1515,7 +1515,11 @@ mod imp {
                 1,
                 "capture, publication and cache persist reuse the operation connection"
             );
-            assert_eq!(refreshed[0].message_count, 0, "growth invalidates the certified count");
+            assert_eq!(
+                refreshed[0].message_count,
+                Some(2),
+                "a Claude listing recounts on growth"
+            );
             crate::stream::stream_counted(
                 &crate::harness::claude::Claude::detect(),
                 &refreshed[0],
@@ -1525,7 +1529,7 @@ mod imp {
             )
             .unwrap();
             let exact = crate::sessions_impl().0;
-            assert_eq!(exact[0].message_count, 2);
+            assert_eq!(exact[0].message_count, Some(2));
             assert_eq!(
                 serde_json::to_value(&exact).unwrap(),
                 serde_json::to_value(crate::discover_all()).unwrap()
@@ -1685,12 +1689,12 @@ mod imp {
                     (Harness::Gemini, bs, Vec::new(), &before),
                 ])
             };
-            b.message_count = 1;
+            b.message_count = Some(1);
             publish(std::slice::from_ref(&b));
             assert!(matches_sessions([&a, &b].into_iter()));
             // Intervening additive publication after enumeration must defeat the skip.
             let mut intervening = b.clone();
-            intervening.message_count = 909;
+            intervening.message_count = Some(909);
             sync(&[intervening]);
             publish(std::slice::from_ref(&b));
             assert!(matches_sessions([&a, &b].into_iter()));
@@ -1747,7 +1751,7 @@ mod imp {
                 )
                 .unwrap();
             let mut changed = a.clone();
-            changed.message_count = 2;
+            changed.message_count = Some(2);
             std::fs::write(&path, "after!").unwrap();
             let mut newer = crate::source::ReadSet::default();
             newer.record(&path);

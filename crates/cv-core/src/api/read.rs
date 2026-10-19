@@ -24,7 +24,7 @@ struct Key {
     title: Option<String>,
     created_at: Option<chrono::DateTime<chrono::Utc>>,
     updated_at: Option<chrono::DateTime<chrono::Utc>>,
-    message_count: usize,
+    message_count: Option<usize>,
 }
 
 impl Key {
@@ -631,7 +631,7 @@ mod tests {
                 2 => r.cwd = Some(world.home.join("new-cwd")),
                 3 => r.created_at = Some("2026-01-01T00:00:00Z".parse().unwrap()),
                 4 => r.updated_at = Some("2026-02-01T00:00:00Z".parse().unwrap()),
-                5 => r.message_count = 42,
+                5 => r.message_count = Some(42),
                 _ => {}
             }
             let value = head(&cache, &adapter, &r).unwrap();
@@ -639,7 +639,7 @@ mod tests {
             assert_eq!(value["cwd"], json!(r.cwd));
             assert_eq!(value["extra"]["created_hint"], json!(r.created_at));
             assert_eq!(value["extra"]["updated_hint"], json!(r.updated_at));
-            assert_eq!(value["extra"]["catalog_count"], r.message_count);
+            assert_eq!(value["extra"]["catalog_count"], json!(r.message_count));
             assert_eq!(head(&cache, &adapter, &r).unwrap(), value);
             assert_eq!(adapter.0.load(Ordering::Relaxed), i + 1);
         }

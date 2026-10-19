@@ -25,7 +25,10 @@ pub(crate) fn cmd_scry(
     if matches!(wait, Wait::Once) && !existing {
         // The current state: the sessions a follower would baseline, in the order it polls them.
         for r in Watcher::new(filter, true).discover() {
-            println!("{}", header("   ·", &r, r.message_count));
+            println!(
+                "{}",
+                header("   ·", &r, r.message_count.map_or("–".into(), |n| n.to_string()))
+            );
         }
         return Ok(());
     }
@@ -51,7 +54,7 @@ pub(crate) fn cmd_scry(
     }
 }
 
-fn header(tag: &str, r: &SessionRef, messages: usize) -> String {
+fn header(tag: &str, r: &SessionRef, messages: String) -> String {
     let where_ = r.cwd.as_deref().map(home_rel).unwrap_or_else(|| "?".into());
     format!(
         "{tag}  {:8} {:8}  {}  ({messages} msg)",
@@ -66,7 +69,7 @@ fn print_event(ev: &SessionEvent) {
         EventKind::New => "✷ new",
         EventKind::Updated => "   +",
     };
-    println!("{}", header(tag, &ev.reference, ev.new_messages.len()));
+    println!("{}", header(tag, &ev.reference, ev.new_messages.len().to_string()));
     for m in &ev.new_messages {
         if let Some(t) = m.text() {
             println!("      {} {}", cv_core::render::role_label(m.role), truncate(&t, 100));

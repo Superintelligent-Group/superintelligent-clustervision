@@ -1,7 +1,9 @@
-//! Discovery reads only titles, cwd, timestamps and whether an assistant is synthetic: the
+//! Discovery reads titles, cwd, timestamps and the turn count (user/assistant records, minus
+//! synthetic assistants): the
 //! record codec's metadata demand, over the same byte source as every other Claude read.
 
 use super::*;
+use crate::harness::store::document::Fields;
 use serde::{Deserialize, Serialize};
 
 #[cfg(test)]
@@ -27,11 +29,16 @@ pub(super) struct Scan {
 impl Scan {
     pub(super) fn new(path: &Path) -> Self {
         Self {
-            session: SessionRef::new(
-                path.file_stem().and_then(|s| s.to_str()).unwrap_or(""),
-                Harness::Claude,
-                path,
-            ),
+            // Every record head is read, so the count is always known: a transcript with no turns
+            // is `Some(0)`, never "uncounted".
+            session: SessionRef {
+                message_count: Some(0),
+                ..SessionRef::new(
+                    path.file_stem().and_then(|s| s.to_str()).unwrap_or(""),
+                    Harness::Claude,
+                    path,
+                )
+            },
             custom_title: false,
             writer_version: None,
             prefix: None,
@@ -45,11 +52,10 @@ impl Scan {
                 if state.session.id == scan.session.id
                     && state.session.path == scan.session.path
                     && state.session.harness == Harness::Claude
-                    && state.session.message_count as u64 <= cp.offset
+                    && state.session.message_count.is_some_and(|n| n as u64 <= cp.offset)
                 {
                     scan.writer_version = state.writer_version;
                     scan.session = state.session;
-                    scan.session.message_count = 0;
                     scan.custom_title = state.custom_title;
                     return (scan, cp.offset);
                 }
@@ -123,6 +129,30 @@ impl Scan {
             self.session.created_at = Some(self.session.created_at.map_or(ts, |old| old.min(ts)));
             self.session.updated_at = Some(self.session.updated_at.map_or(ts, |old| old.max(ts)));
         }
+        // Discovery already reads every record's head, so the turn count is free here: user and
+        // assistant records, minus synthetic assistants (API errors and `<synthetic>` replies),
+        // the same rule the conversational parser applies.
+        if matches!(ty.as_str(), "user" | "assistant") {
+            let synthetic = ty == "assistant"
+                && (fields
+                    .get("isApiErrorMessage")
+                    .map(|v| v.as_bool())
+                    .transpose()?
+                    .flatten()
+                    == Some(true)
+                    || match fields
+                        .get("message")
+                        .map(|m| Fields::parse(m, &["model"]))
+                        .transpose()?
+                        .flatten()
+                    {
+                        Some(message) => message.string("model")?.as_deref() == Some(SYNTHETIC_MODEL),
+                        None => false,
+                    });
+            if !synthetic {
+                self.session.message_count = self.session.message_count.map(|n| n + 1);
+            }
+        }
         Ok(())
     }
 
@@ -136,8 +166,8 @@ impl Scan {
 mod tests {
     use super::*;
 
-    // The former discovery reducer remains the metadata oracle. Counts are now deliberately0;
-    // cwd/timestamps still include metadata-only records unlike the conversational parser.
+    // The former discovery reducer is the oracle: its count deliberately does not parse content,
+    // and cwd/timestamps still include metadata-only records unlike the conversational parser.
     fn owned(path: &Path, bytes: &[u8]) -> SessionRef {
         let mut out = Scan::new(path);
         for v in bytes
@@ -163,6 +193,12 @@ mod tests {
                 out.session.created_at = Some(out.session.created_at.map_or(ts, |c| c.min(ts)));
                 out.session.updated_at = Some(out.session.updated_at.map_or(ts, |u| u.max(ts)));
             }
+            let synthetic = ty == "assistant"
+                && (v.get("isApiErrorMessage").and_then(Value::as_bool) == Some(true)
+                    || v.pointer("/message/model").and_then(Value::as_str) == Some(SYNTHETIC_MODEL));
+            if matches!(ty, "user" | "assistant") && !synthetic {
+                out.session.message_count = out.session.message_count.map(|n| n + 1);
+            }
         }
         out.finish()
     }
@@ -181,7 +217,7 @@ mod tests {
 
     #[cfg(feature = "sqlite")]
     #[test]
-    fn discovery_defers_counts_until_a_complete_read_and_growth_invalidates_them() -> Result<()> {
+    fn discovery_counts_turns_and_a_complete_read_or_growth_keeps_the_count_exact() -> Result<()> {
         let world = crate::test_world("claude-discovery-counts");
         let path = world.proj.join("counts.jsonl");
         let text = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"question\"}}\n{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":\"answer\"}}\n";
@@ -189,7 +225,7 @@ mod tests {
         let context = crate::discover_cache::read::Context::current();
         let _scope = context.enter();
         let reference = cached_metadata(&path, false).unwrap();
-        assert_eq!(reference.message_count, 0);
+        assert_eq!(reference.message_count, Some(2), "discovery counts the turns it reads");
         crate::catalog::sync(std::slice::from_ref(&reference));
         crate::discover_cache::persist(false);
         let adapter = Claude::with_config_dir(&world.proj);
@@ -200,13 +236,13 @@ mod tests {
             &mut crate::stream::CollectSink::default(),
             crate::stream::Pass::RECORD,
         )?;
-        assert_eq!(cached_metadata(&path, false).unwrap().message_count, 2);
+        assert_eq!(cached_metadata(&path, false).unwrap().message_count, Some(2));
         fs::write(
             &path,
             format!("{text}{{\"type\":\"custom-title\",\"customTitle\":\"late rename\"}}\n"),
         )?;
         let grown = cached_metadata(&path, false).unwrap();
-        assert_eq!(grown.message_count, 0);
+        assert_eq!(grown.message_count, Some(2), "a title record is not a turn");
         assert_eq!(grown.title.as_deref(), Some("late rename"));
         Ok(())
     }
@@ -352,7 +388,7 @@ mod tests {
 
     #[cfg(all(feature = "sqlite", unix))]
     #[test]
-    fn cached_checkpoint_is_independent_of_counts_and_rejects_invalid_states() {
+    fn cached_checkpoint_recounts_on_growth_and_rejects_invalid_states() {
         use std::io::Write;
         let world = crate::test_world("claude-metadata-state-guards");
         let path = world.base.join("s.jsonl");
@@ -372,8 +408,8 @@ mod tests {
         text.push_str(append);
         assert_eq!(
             cached_metadata(&path, false).unwrap().message_count,
-            0,
-            "growth invalidates published counts without changing metadata continuation state"
+            Some(1),
+            "growth recounts; a certified fill never overrides discovery's own count"
         );
         for mutation in 0..8 {
             crate::discover_cache::persist(false);
@@ -401,7 +437,7 @@ mod tests {
                 6 => state.head.prefix.ino ^= 1,
                 _ => {
                     let mut reducer = state.checkpoint.get::<State>(LAYER).unwrap();
-                    reducer.session.message_count = usize::MAX;
+                    reducer.session.message_count = Some(usize::MAX);
                     state.checkpoint.put(LAYER, &reducer);
                 }
             }
@@ -451,7 +487,7 @@ mod tests {
         );
         fs::write(&path, "{\"type\":\"user\"}\n").unwrap();
         FRAMED.with(|frames| frames.borrow_mut().clear());
-        assert_eq!(cached_metadata(&path, false).unwrap().message_count, 0);
+        assert_eq!(cached_metadata(&path, false).unwrap().message_count, Some(1));
         assert_eq!(
             FRAMED.with(|frames| frames.borrow().clone()),
             vec![(0, append.len() as u64)]
@@ -591,7 +627,11 @@ mod tests {
             serde_json::to_value(owned(&path, bytes)).unwrap()
         );
         fs::write(&path, []).unwrap();
-        assert_eq!(scan(&path).unwrap().message_count, 0);
+        assert_eq!(
+            scan(&path).unwrap().message_count,
+            Some(0),
+            "an empty transcript is counted: no turns"
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 }

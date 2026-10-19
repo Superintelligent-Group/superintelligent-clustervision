@@ -3133,7 +3133,7 @@ fn live_snippet(path: &str, harness: &str, query: &str, scope: crate::Scope) -> 
         title: None,
         created_at: None,
         updated_at: None,
-        message_count: 0,
+        message_count: None,
     };
 
     struct Acc {
@@ -4039,7 +4039,7 @@ mod tests {
             title: Some(title.into()),
             created_at: chrono::DateTime::from_timestamp(1, 0),
             updated_at: chrono::DateTime::from_timestamp(2, 0),
-            message_count: 1,
+            message_count: Some(1),
         }
     }
 
@@ -6501,7 +6501,7 @@ mod tests {
                     title: None,
                     created_at: chrono::DateTime::from_timestamp(1, 0),
                     updated_at: chrono::DateTime::from_timestamp(2, 0),
-                    message_count: 1,
+                    message_count: Some(1),
                 };
                 (r, bytes)
             })

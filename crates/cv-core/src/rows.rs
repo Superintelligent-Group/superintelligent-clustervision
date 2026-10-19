@@ -18,7 +18,8 @@ use serde_json::{json, Value};
 
 /// THE session row (§3): the same nine keys `cv ls --json`, `cv search --json`, `cv serve`'s
 /// `/api/sessions` and the desktop app's `api` command emit. `size_bytes` is passed in because
-/// only the caller knows whether it already has the `stat` in hand.
+/// only the caller knows whether it already has the `stat` in hand. `message_count` is `null`
+/// for a session no full read or index has counted yet; `0` is a session with no turns.
 pub fn session_row(r: &SessionRef, size_bytes: Option<u64>) -> Value {
     json!({
         "id": r.id,
@@ -220,7 +221,7 @@ mod tests {
             title: None,
             created_at: None,
             updated_at: None,
-            message_count: 3,
+            message_count: Some(3),
         }
     }
 
@@ -230,7 +231,16 @@ mod tests {
         let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
         assert_eq!(keys, SESSION_ROW_KEYS, "§3 row keys, in order");
         assert!(v["title"].is_null(), "missing title is an explicit null");
+        assert_eq!(v["message_count"], 3);
         assert_eq!(v["size_bytes"], 10);
+        let uncounted = SessionRef {
+            message_count: None,
+            ..a_ref()
+        };
+        assert!(
+            session_row(&uncounted, None)["message_count"].is_null(),
+            "not counted yet is null, never 0"
+        );
     }
 
     #[test]

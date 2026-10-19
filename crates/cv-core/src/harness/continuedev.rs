@@ -100,11 +100,7 @@ impl Adapter for Continue {
             if !seen.insert(meta.session_id.clone()) {
                 continue;
             }
-            out.push(ref_from(
-                meta,
-                &path,
-                scan_session(&path).map_or(0, |s| s.message_count),
-            ));
+            out.push(ref_from(meta, &path, scan_session(&path).map(|s| s.message_count)));
         }
 
         // Fold in any `<id>.json` on disk that the index didn't mention (tolerant of a missing or
@@ -122,14 +118,15 @@ impl Adapter for Continue {
                 if seen.contains(&id) {
                     continue;
                 }
-                let scan = scan_session(&p).unwrap_or_default();
+                let scan = scan_session(&p);
+                let (title, cwd, count) = scan.map_or((None, None, None), |s| (s.title, s.cwd, Some(s.message_count)));
                 let meta = IndexMeta {
                     session_id: id,
-                    title: scan.title,
-                    cwd: scan.cwd,
+                    title,
+                    cwd,
                     created_at: None,
                 };
-                out.push(ref_from(&meta, &p, scan.message_count));
+                out.push(ref_from(&meta, &p, count));
             }
         }
 
@@ -518,7 +515,7 @@ fn read_index(path: &Path) -> Vec<IndexMeta> {
 }
 
 /// Build a `SessionRef` from index metadata + the on-disk transcript path.
-fn ref_from(meta: &IndexMeta, path: &Path, message_count: usize) -> SessionRef {
+fn ref_from(meta: &IndexMeta, path: &Path, message_count: Option<usize>) -> SessionRef {
     let updated = mtime(path);
     SessionRef {
         id: meta.session_id.clone(),
@@ -1171,7 +1168,7 @@ mod tests {
             .expect("indexed session discovered");
         assert_eq!(r.title.as_deref(), Some("Refactor the parser"));
         assert_eq!(r.cwd.as_deref(), Some(Path::new("/Users/me/proj")));
-        assert!(r.message_count >= 3);
+        assert!(r.message_count.is_some_and(|n| n >= 3));
         assert!(r.created_at.is_some());
     }
 
@@ -1317,15 +1314,15 @@ mod tests {
         assert_eq!(indexed.title.as_deref(), Some("index title"));
         assert_eq!(indexed.cwd.as_deref(), Some(Path::new("/index")));
         assert_eq!(indexed.created_at.unwrap().timestamp_millis(), 1700000000000);
-        assert_eq!(indexed.message_count, 2);
+        assert_eq!(indexed.message_count, Some(2));
         let extra = refs.iter().find(|r| r.id == "extra").unwrap();
         assert_eq!(extra.title.as_deref(), Some("extra title"));
         assert_eq!(extra.cwd.as_deref(), Some(Path::new("/extra")));
         assert_eq!(extra.created_at, extra.updated_at);
-        assert_eq!(extra.message_count, 3);
+        assert_eq!(extra.message_count, Some(3));
         let broken = refs.iter().find(|r| r.id == "broken").unwrap();
         assert!(broken.title.is_none());
-        assert_eq!(broken.message_count, 0);
+        assert_eq!(broken.message_count, None);
         fs::remove_dir_all(dir).unwrap();
     }
 }

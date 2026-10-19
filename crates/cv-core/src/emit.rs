@@ -1080,7 +1080,7 @@ mod tests {
             title: None,
             created_at: None,
             updated_at: None,
-            message_count: 0,
+            message_count: None,
         };
         let parsed = Claude::detect().parse(&r).unwrap();
 
@@ -1175,7 +1175,7 @@ mod tests {
             title: None,
             created_at: None,
             updated_at: None,
-            message_count: 0,
+            message_count: None,
         };
         let parsed = Claude::detect().parse(&r).unwrap();
 
@@ -1493,7 +1493,7 @@ mod tests {
             title: None,
             created_at: None,
             updated_at: None,
-            message_count: 0,
+            message_count: None,
         };
         let parsed = Codex::detect().parse(&r).unwrap();
 
@@ -1612,7 +1612,7 @@ mod tests {
             title: None,
             created_at: None,
             updated_at: None,
-            message_count: 0,
+            message_count: None,
         };
         let parsed = Codex::detect().parse(&r).unwrap();
         let mut results: Vec<(String, String, bool)> = Vec::new();
@@ -1657,7 +1657,7 @@ mod tests {
             title: None,
             created_at: None,
             updated_at: None,
-            message_count: 0,
+            message_count: None,
         };
         let parsed = Grok::detect().parse(&r).unwrap();
 
@@ -1730,7 +1730,7 @@ mod tests {
             title: None,
             created_at: None,
             updated_at: None,
-            message_count: 0,
+            message_count: None,
         };
         let parsed = Grok::detect().parse(&r).unwrap();
         let mut results: Vec<(String, bool, Option<String>)> = Vec::new();
@@ -1829,7 +1829,7 @@ mod tests {
             title: None,
             created_at: None,
             updated_at: None,
-            message_count: 0,
+            message_count: None,
         };
         let parsed = OpenClaw::detect().parse(&r).unwrap();
 
@@ -1866,7 +1866,7 @@ mod tests {
             title: None,
             created_at: None,
             updated_at: None,
-            message_count: 0,
+            message_count: None,
         };
         let parsed = Gemini::detect().parse(&r).unwrap();
 
@@ -2541,7 +2541,7 @@ mod tests {
             title: None,
             created_at: None,
             updated_at: None,
-            message_count: 0,
+            message_count: None,
         };
         let parsed = Codex::detect().parse(&r).unwrap();
         assert_eq!(parsed.system_prompt.as_deref(), Some("You are a careful engineer."));
@@ -2593,7 +2593,7 @@ mod tests {
             title: None,
             created_at: None,
             updated_at: None,
-            message_count: 0,
+            message_count: None,
         };
         let parsed = Claude::detect().parse(&r).unwrap();
         assert_eq!(parsed.system_prompt.as_deref(), Some("Follow the house style."));
@@ -2657,7 +2657,7 @@ mod tests {
             title: None,
             created_at: None,
             updated_at: None,
-            message_count: 0,
+            message_count: None,
         };
         let parsed = OpenClaw::detect().parse(&r).unwrap();
         assert_eq!(
@@ -3049,7 +3049,7 @@ mod tests {
             title: None,
             created_at: None,
             updated_at: None,
-            message_count: 0,
+            message_count: None,
         };
         let parsed = Gemini::detect().parse(&r).unwrap();
 

@@ -152,9 +152,9 @@ fn counted(r: &SessionRef, turns: usize) {
     .record_with_source(r, &Probe::default().snapshot(r));
 }
 
-fn refilled(reader: &Reader, r: &SessionRef) -> usize {
+fn refilled(reader: &Reader, r: &SessionRef) -> Option<usize> {
     let mut fresh = r.clone();
-    fresh.message_count = 0;
+    fresh.message_count = None;
     reader.refill_turns(std::iter::once(&mut fresh));
     fresh.message_count
 }
@@ -167,33 +167,33 @@ fn certified_turns_enrich_old_counts_refill_refresh_and_keep_partial_publication
     let r = SessionRef::new("session", Harness::Hermes, path);
     sync(std::slice::from_ref(&r));
     let reader = Reader::open().unwrap();
-    assert_eq!(refilled(&reader, &r), 0);
+    assert_eq!(refilled(&reader, &r), None);
     assert_eq!(
         reader.turn_snapshots(),
         0,
         "cold unknown count must not inventory dependencies"
     );
     publish(&r, 1, &ReadSet::default());
-    assert_eq!(refilled(&reader, &r), 0);
+    assert_eq!(refilled(&reader, &r), None);
     assert_eq!(
         reader.turn_snapshots(),
         0,
         "old counts without turns need no source probe"
     );
     counted(&r, 7);
-    assert_eq!(refilled(&reader, &r), 7);
+    assert_eq!(refilled(&reader, &r), Some(7));
     // Native discovery can return unknown again without discarding a completed source count.
     let mut refreshed = r.clone();
     refreshed.title = Some("same source metadata".into());
     reader.refill_turns(std::iter::once(&mut refreshed));
     let mut owner = Reader::open().unwrap();
     owner.replace_harness(r.harness, std::slice::from_ref(&refreshed), &[], &Default::default());
-    assert_eq!(owner.all_sessions().unwrap()[0].message_count, 7);
+    assert_eq!(owner.all_sessions().unwrap()[0].message_count, Some(7));
     // Neither a stale scalar nor partial affordance publication can impersonate exact turns.
     let conn = open_db().unwrap();
     conn.execute("UPDATE sessions SET message_count=999", []).unwrap();
     publish(&r, 99, &ReadSet::default());
-    assert_eq!(refilled(&reader, &r), 7);
+    assert_eq!(refilled(&reader, &r), Some(7));
     assert_eq!(
         reader
             .counts_with_probe(&r, &Probe::default().snapshot(&r), &mut Probe::default())
@@ -211,7 +211,7 @@ fn certified_turns_enrich_old_counts_refill_refresh_and_keep_partial_publication
     );
     assert_eq!(
         refilled(&reader, &r),
-        8,
+        Some(8),
         "serial index writer publishes exact turns too"
     );
 }
@@ -233,7 +233,7 @@ fn exact_turn_extensions_require_valid_payload_receipt_version_and_integer() {
         .unwrap();
     assert_eq!(
         refilled(&reader, &r),
-        0,
+        None,
         "payload tamper cannot borrow its former receipt"
     );
     for value in [
@@ -256,7 +256,7 @@ fn exact_turn_extensions_require_valid_payload_receipt_version_and_integer() {
         conn.execute("UPDATE affordance_counts SET counts=?1", [&text]).unwrap();
         crate::source::publish_in(&conn, "counts", &r, &Probe::default().snapshot(&r), text.as_bytes()).unwrap();
         let before = reader.turn_snapshots();
-        assert_eq!(refilled(&reader, &r), 0);
+        assert_eq!(refilled(&reader, &r), None);
         assert_eq!(
             reader.turn_snapshots(),
             before,
@@ -268,7 +268,7 @@ fn exact_turn_extensions_require_valid_payload_receipt_version_and_integer() {
     let text = old.to_string();
     conn.execute("UPDATE affordance_counts SET counts=?1", [&text]).unwrap();
     crate::source::publish_in(&conn, "counts", &r, &Probe::default().snapshot(&r), text.as_bytes()).unwrap();
-    assert_eq!(refilled(&reader, &r), 0);
+    assert_eq!(refilled(&reader, &r), None);
     assert_eq!(
         turns_of(&serde_json::json!({"_v":crate::affordance::VIEW_VERSION,"_turns":0}).to_string()),
         Some(0)
@@ -284,22 +284,22 @@ fn certified_turns_reject_database_wal_and_replaced_source_changes() {
     sync(std::slice::from_ref(&r));
     let reader = Reader::open().unwrap();
     counted(&r, 4);
-    assert_eq!(refilled(&reader, &r), 4);
+    assert_eq!(refilled(&reader, &r), Some(4));
     let wal = world.base.join("state.db-wal");
     std::fs::write(&wal, "new frames").unwrap();
-    assert_eq!(refilled(&reader, &r), 0);
+    assert_eq!(refilled(&reader, &r), None);
     counted(&r, 5);
-    assert_eq!(refilled(&reader, &r), 5);
+    assert_eq!(refilled(&reader, &r), Some(5));
     std::fs::remove_file(&wal).unwrap();
-    assert_eq!(refilled(&reader, &r), 0);
+    assert_eq!(refilled(&reader, &r), None);
     counted(&r, 6);
     std::fs::write(&path, "changed database").unwrap();
-    assert_eq!(refilled(&reader, &r), 0);
+    assert_eq!(refilled(&reader, &r), None);
     counted(&r, 7);
     let replacement = world.base.join("replacement");
     std::fs::write(&replacement, "changed database").unwrap();
     std::fs::rename(replacement, path).unwrap();
-    assert_eq!(refilled(&reader, &r), 0);
+    assert_eq!(refilled(&reader, &r), None);
 }
 
 #[test]
@@ -312,14 +312,17 @@ fn turn_payload_receipt_and_session_refill_commit_or_rollback_together() {
     counted(&r, 7);
     let conn = open_db().unwrap();
     let before = count_record_in(&conn, &r).unwrap();
-    conn.execute_batch("UPDATE sessions SET message_count=0; CREATE TRIGGER reject_turns BEFORE UPDATE OF message_count ON sessions BEGIN SELECT RAISE(ABORT,'counterexample'); END;").unwrap();
+    conn.execute_batch("UPDATE sessions SET message_count=NULL; CREATE TRIGGER reject_turns BEFORE UPDATE OF message_count ON sessions BEGIN SELECT RAISE(ABORT,'counterexample'); END;").unwrap();
     counted(&r, 9);
     assert_eq!(count_record_in(&conn, &r).unwrap(), before);
-    assert_eq!(Reader::open().unwrap().all_sessions().unwrap()[0].message_count, 0);
+    assert_eq!(Reader::open().unwrap().all_sessions().unwrap()[0].message_count, None);
     conn.execute_batch("DROP TRIGGER reject_turns;").unwrap();
     counted(&r, 9);
-    assert_eq!(refilled(&Reader::open().unwrap(), &r), 9);
-    assert_eq!(Reader::open().unwrap().all_sessions().unwrap()[0].message_count, 9);
+    assert_eq!(refilled(&Reader::open().unwrap(), &r), Some(9));
+    assert_eq!(
+        Reader::open().unwrap().all_sessions().unwrap()[0].message_count,
+        Some(9)
+    );
 }
 
 #[test]
@@ -368,7 +371,7 @@ fn stopped_stream_never_certifies_exact_turns() {
     )
     .unwrap();
     assert!(read.counted.is_none());
-    assert_eq!(refilled(&Reader::open().unwrap(), &r), 0);
+    assert_eq!(refilled(&Reader::open().unwrap(), &r), None);
 }
 
 #[test]
@@ -388,12 +391,12 @@ fn open_discovery_context_sees_certified_directory_turns_without_cache_key_mutat
             vec![r.clone()]
         })
     };
-    assert_eq!(discover()[0].message_count, 0);
+    assert_eq!(discover()[0].message_count, None);
     sync(std::slice::from_ref(&r));
     counted(&r, 7);
     assert_eq!(
         discover()[0].message_count,
-        7,
+        Some(7),
         "already-open Context observes publication by logical directory key"
     );
     assert_eq!(
@@ -402,7 +405,7 @@ fn open_discovery_context_sees_certified_directory_turns_without_cache_key_mutat
         "certified refill does not reparse the unchanged primary"
     );
     std::fs::write(&primary, "{}\n{}\n").unwrap();
-    assert_eq!(discover()[0].message_count, 0);
+    assert_eq!(discover()[0].message_count, None);
     assert_eq!(scans.get(), 2);
 }
 
@@ -421,7 +424,7 @@ fn complete_count_publication_waits_for_writer_and_commits_one_pair() {
     let lock = blocking
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .unwrap();
-    lock.execute("UPDATE sessions SET message_count=0", []).unwrap();
+    lock.execute("UPDATE sessions SET message_count=NULL", []).unwrap();
     let (started, entered) = mpsc::channel();
     let (finished, result) = mpsc::channel();
     let worker = std::thread::spawn(crate::env::carry(move || {
@@ -439,8 +442,8 @@ fn complete_count_publication_waits_for_writer_and_commits_one_pair() {
     assert!(!early, "publication must wait for the held writer");
     let reader = Reader::open().unwrap();
     let r = reader.all_sessions().unwrap().remove(0);
-    assert_eq!(r.message_count, 9);
-    assert_eq!(refilled(&reader, &r), 9);
+    assert_eq!(r.message_count, Some(9));
+    assert_eq!(refilled(&reader, &r), Some(9));
 }
 
 #[test]
@@ -470,7 +473,7 @@ fn partial_publication_preserves_a_concurrent_certified_complete_pass() {
     resume.send(()).unwrap();
     worker.join().unwrap();
     let reader = Reader::open().unwrap();
-    assert_eq!(refilled(&reader, &r), 9);
+    assert_eq!(refilled(&reader, &r), Some(9));
     assert_eq!(
         reader
             .counts_with_probe(&r, &Probe::default().snapshot(&r), &mut Probe::default())

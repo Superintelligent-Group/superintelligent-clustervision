@@ -304,7 +304,7 @@ fn scan(dir: &Path, id: &str, harness: Harness) -> Option<SessionRef> {
         title,
         created_at,
         updated_at,
-        message_count,
+        message_count: Some(message_count),
     })
 }
 
@@ -1176,7 +1176,7 @@ mod tests {
         let r = scan(&dir, "1717000000000", Harness::Cline).unwrap();
         assert_eq!(r.title.as_deref(), Some("late selected title"));
         assert_eq!(r.cwd, Some(PathBuf::from("/selected")));
-        assert_eq!(r.message_count, 4);
+        assert_eq!(r.message_count, Some(4));
         fs::write(&history, "[{\"role\":\"user\",\"content\":\"ok\"},]").unwrap();
         assert!(parse_task_dir(&dir, "1717000000000", Harness::Cline)
             .unwrap()

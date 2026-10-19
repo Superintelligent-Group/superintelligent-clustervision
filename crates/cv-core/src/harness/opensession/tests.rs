@@ -395,7 +395,11 @@ fn discovers_documents_in_registered_sources() {
     let one = refs.iter().find(|r| r.id == "disco-1").unwrap();
     assert_eq!(one.harness, Harness::OpenSession);
     assert_eq!(one.title.as_deref(), Some("found me"));
-    assert_eq!(one.message_count, 2, "conversational turns only: user + assistant");
+    assert_eq!(
+        one.message_count,
+        Some(2),
+        "conversational turns only: user + assistant"
+    );
 
     // And the ref parses into the session the document describes, with ITS harness.
     let s = OpenSession.parse(one).unwrap();

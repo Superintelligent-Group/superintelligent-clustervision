@@ -504,7 +504,7 @@ fn scan_session_jsonl(path: &Path) -> Option<SessionRef> {
     r.title = s.title.clone();
     r.created_at = s.created_at;
     r.updated_at = s.updated_at;
-    r.message_count = turns;
+    r.message_count = Some(turns);
     Some(r)
 }
 
@@ -851,7 +851,7 @@ mod tests {
             reference.title = session.title;
             reference.created_at = session.created_at;
             reference.updated_at = session.updated_at;
-            reference.message_count = turns;
+            reference.message_count = Some(turns);
             Ok(Some(reference))
         };
         let rows = [
