@@ -287,7 +287,6 @@ fn codex_event_label(event: &str) -> &'static str {
 
 /// The hash Codex computes for a `type: command` handler under `event` with `matcher`.
 fn codex_hook_hash(event: &str, matcher: Option<&str>, handler: &Value) -> String {
-    use sha2::Digest;
     let mut hook = Map::new();
     hook.insert("type".into(), json!("command"));
     hook.insert("command".into(), handler.get("command").cloned().unwrap_or(Value::Null));
@@ -317,8 +316,9 @@ fn codex_hook_hash(event: &str, matcher: Option<&str>, handler: &Value) -> Strin
     identity.insert("hooks".into(), json!([Value::Object(hook)]));
     let mut identity = Value::Object(identity);
     identity.sort_all_objects();
-    let digest = sha2::Sha256::digest(serde_json::to_vec(&identity).unwrap_or_default());
-    format!("sha256:{digest:x}")
+    let mut digest = cv_core::digest::Sha256::new();
+    digest.update(&serde_json::to_vec(&identity).unwrap_or_default());
+    format!("sha256:{}", digest.finish_hex())
 }
 
 /// `[hooks.state]` of Codex's user `config.toml`: state key → `trusted_hash`. The TUI records
