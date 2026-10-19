@@ -43,6 +43,7 @@
 - Native Codex file-change records now feed `cv touched`, tool histograms and query facts, including code-mode edits, without duplicating visible patch calls.
 
 - `cv hooks install codex` adds compaction recovery, session context, lane tracking, decision reminders and live edit guards in user or project scope.
+- `cv hooks install|show codex` and `cv doctor` report each Codex hook as trusted, untrusted or modified, with the review step Codex requires.
 - Affordances include Claude slash-loaded skills, Kimi Code todo state and legacy agents, and Roo returns carried alongside user text.
 - Emitted fallback titles use meaningful prompts; Cursor CLI titles omit leading timestamp metadata while transcript text stays intact.
 - `cv index --subagents` walks the sub-agent forest by its stat-keyed metadata instead of re-parsing every transcript each pass.

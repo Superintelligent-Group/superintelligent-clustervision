@@ -256,6 +256,16 @@ Claude Code (checked against 2.1.296 and its [hooks reference](https://code.clau
 and Codex 0.163.0 have verified contracts. Other harness names error. Codex commands carry
 `CV_HOOK_HARNESS=codex` so the shared bodies read Codex transcripts and native thread identities.
 
+Codex runs a `hooks.json` handler only after you trust it: start `codex` and accept cv's entries
+in its startup hooks review (automation: `codex exec --dangerously-bypass-hook-trust`); project
+scope also needs the directory trusted as a project. Until then Codex skips them silently, and a
+moved binary or an edited matcher makes a trusted entry *modified*, skipped again. `cv hooks
+install codex` prints the state it left, `cv hooks show codex` reports each entry as trusted,
+untrusted or modified, and `cv doctor` has a `Codex hooks:` row. cv reads the same
+`[hooks.state]` table in `~/.codex/config.toml` Codex reads, under the same key and hash
+(checked against Codex 0.162.1's `hooks/list`; `CV_CODEX_BIN=$(which codex) cargo nextest run
+-p clustervision --test hooks codex_trust_matches_the_real_binary` rechecks it live).
+
 ### The five hooks
 
 Each `cv hook <name>` reads the hook's JSON on stdin and prints one line of hook JSON, or nothing.

@@ -54,7 +54,9 @@ beside them; it is idempotent, `cv hooks show claude` prints what it would chang
 hook JSON on stdin, prints at most a line or two:
 
 For Codex, use the same commands with `codex`: user scope writes `$CODEX_HOME/hooks.json`
-(default `~/.codex/hooks.json`), project scope writes `.codex/hooks.json`. The edit matcher
+(default `~/.codex/hooks.json`), project scope writes `.codex/hooks.json`. Codex skips them until
+you accept them in its startup hooks review (`codex exec --dangerously-bypass-hook-trust` for
+automation); `cv hooks show codex` says whether each is trusted. The edit matcher
 is `apply_patch`; every path in its patch is checked. A live conflict blocks the patch
 with `deny` because Codex does not support `ask`; coordinate with the other session before
 editing. To override after coordinating, remove the edit handler from `hooks.json`. Compaction recovery uses `cv show`;

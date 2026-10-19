@@ -565,3 +565,226 @@ fn codex_real_hook_payloads_compose_with_the_recorded_rollouts() {
         && lane["status"] == "stopped"
         && lane["status_source"] == "hook_ledger"));
 }
+
+/// Codex's `[hooks.state]` in `config.toml`, as its startup hooks review writes it.
+fn write_codex_trust(w: &World, hashes: &[(String, String)]) {
+    let mut text = String::from("[hooks.state]\n");
+    for (key, hash) in hashes {
+        text.push_str(&format!("[hooks.state.\"{key}\"]\ntrusted_hash = \"{hash}\"\n"));
+    }
+    fs::write(w.home.join(".codex/config.toml"), text).unwrap();
+}
+
+fn trust_rows(w: &World, scope: &str) -> Vec<(String, String, String)> {
+    let shown: serde_json::Value =
+        serde_json::from_str(&cv_ok(w, &["hooks", "show", "codex", "--scope", scope, "--json"])).unwrap();
+    shown["installed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            (
+                row["trust_key"].as_str().unwrap().to_string(),
+                row["current_hash"].as_str().unwrap().to_string(),
+                row["trust"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn codex_trust_is_read_from_the_store_codex_writes() {
+    let w = World::new("codex-trust");
+    // doctor wants a session to report on; its hooks lines do not depend on it.
+    w.write_session(
+        "docsess",
+        &[
+            user("u0", "2026-10-01T10:00:00Z", "hi"),
+            assistant("a0", "2026-10-01T10:00:05Z", "hello"),
+        ],
+    );
+    // A fresh install is untrusted, and install says so with the two ways out.
+    let out = cv_ok(&w, &["hooks", "install", "codex"]);
+    assert!(out.contains("Codex trust: 6 untrusted"), "{out}");
+    assert!(out.contains("startup hooks review"), "{out}");
+    assert!(out.contains("--dangerously-bypass-hook-trust"), "{out}");
+    let rows = trust_rows(&w, "user");
+    assert_eq!(rows.len(), 6);
+    // Codex keys by the canonical path (`/var/…` is `/private/var/…` on macOS).
+    let hooks_json = fs::canonicalize(w.home.join(".codex/hooks.json"))
+        .unwrap()
+        .display()
+        .to_string();
+    assert!(rows.iter().all(|(_, _, t)| t == "untrusted"), "{rows:?}");
+    assert!(
+        rows.iter()
+            .any(|(k, _, _)| *k == format!("{hooks_json}:pre_tool_use:0:0")),
+        "{rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .any(|(k, _, _)| *k == format!("{hooks_json}:session_start:1:0")),
+        "{rows:?}"
+    );
+    assert!(
+        rows.iter().all(|(_, h, _)| h.starts_with("sha256:") && h.len() == 71),
+        "{rows:?}"
+    );
+    let (ok, _, out, _) = w.cv(&["doctor", "docsess"]);
+    assert!(ok);
+    assert!(
+        out.contains("Codex hooks: 6/6 in ~/.codex/hooks.json (User), 6 untrusted"),
+        "{out}"
+    );
+    assert!(out.contains("Hooks:       not installed"), "{out}");
+
+    // Trust recorded for every key: trusted; a reinstall writes nothing and says so.
+    write_codex_trust(
+        &w,
+        &rows.iter().map(|(k, h, _)| (k.clone(), h.clone())).collect::<Vec<_>>(),
+    );
+    assert!(trust_rows(&w, "user").iter().all(|(_, _, t)| t == "trusted"));
+    let out = cv_ok(&w, &["hooks", "install", "codex"]);
+    assert!(
+        out.contains("nothing written") && out.contains("Codex trust: trusted"),
+        "{out}"
+    );
+    let (_, _, out, _) = w.cv(&["doctor", "docsess"]);
+    assert!(
+        out.contains("Codex hooks: 6/6 in ~/.codex/hooks.json (User), trusted"),
+        "{out}"
+    );
+    let doc: serde_json::Value = serde_json::from_str(&cv_ok(&w, &["doctor", "docsess", "--json"])).unwrap();
+    assert_eq!(doc["hooks"]["codex"][0]["trust"].as_array().unwrap().len(), 6);
+    assert!(doc["hooks"]["codex"][0]["trust"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|t| t["trust"] == "trusted"));
+
+    // One entry trusted at another hash (a moved binary, an edited matcher): modified, skipped again.
+    write_codex_trust(
+        &w,
+        &rows
+            .iter()
+            .map(|(k, h, _)| {
+                let h = if k.ends_with(":pre_tool_use:0:0") {
+                    "sha256:stale".to_string()
+                } else {
+                    h.clone()
+                };
+                (k.clone(), h)
+            })
+            .collect::<Vec<_>>(),
+    );
+    let rows = trust_rows(&w, "user");
+    assert_eq!(rows.iter().filter(|(_, _, t)| t == "modified").count(), 1, "{rows:?}");
+    assert_eq!(rows.iter().filter(|(_, _, t)| t == "trusted").count(), 5, "{rows:?}");
+    let (_, _, out, _) = w.cv(&["doctor", "docsess"]);
+    assert!(
+        out.contains("(User), 1 modified since trusted — Codex skips them"),
+        "{out}"
+    );
+    let out = cv_ok(&w, &["hooks", "show", "codex"]);
+    assert!(
+        out.contains("hook edit · modified") && out.contains("hook start · trusted"),
+        "{out}"
+    );
+    assert!(out.contains("Codex trust: 1 modified since trusted"), "{out}");
+
+    // Project scope: its own keys under ./.codex/hooks.json, and the extra project-trust step.
+    let out = cv_ok(&w, &["hooks", "install", "codex", "--scope", "project"]);
+    assert!(out.contains("6 untrusted") && out.contains("trusted project"), "{out}");
+    let project = fs::canonicalize(w.base.join(".codex/hooks.json"))
+        .unwrap()
+        .display()
+        .to_string();
+    assert!(trust_rows(&w, "project")
+        .iter()
+        .all(|(k, _, t)| k.starts_with(&project) && t == "untrusted"));
+}
+
+/// The real-binary gate for trust: with `CV_CODEX_BIN=/path/to/codex`, ask that Codex's
+/// `app-server` for `hooks/list` over the file cv wrote and compare keys, hashes and states.
+/// Without the variable the test passes without running (CI has no Codex).
+#[test]
+fn codex_trust_matches_the_real_binary() {
+    let Some(codex) = std::env::var_os("CV_CODEX_BIN") else {
+        eprintln!("CV_CODEX_BIN unset: skipping the real-binary trust check");
+        return;
+    };
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let w = World::new("codex-trust-real");
+    cv_ok(&w, &["hooks", "install", "codex"]);
+    let rows = trust_rows(&w, "user");
+    // Trust five as Codex would, leave one at a stale hash: expect trusted ×5, modified ×1.
+    write_codex_trust(
+        &w,
+        &rows
+            .iter()
+            .map(|(k, h, _)| {
+                let h = if k.ends_with(":user_prompt_submit:0:0") {
+                    "sha256:stale".to_string()
+                } else {
+                    h.clone()
+                };
+                (k.clone(), h)
+            })
+            .collect::<Vec<_>>(),
+    );
+    let mut child = Command::new(&codex)
+        .arg("app-server")
+        .env("CODEX_HOME", w.home.join(".codex"))
+        .env("HOME", &w.home)
+        .current_dir(&w.base)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("codex app-server");
+    let mut stdin = child.stdin.take().unwrap();
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"clientInfo":{{"name":"cv-test","version":"0"}}}}}}"#
+    )
+    .unwrap();
+    writeln!(stdin, r#"{{"jsonrpc":"2.0","method":"initialized"}}"#).unwrap();
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","id":2,"method":"hooks/list","params":{{"cwds":[{}]}}}}"#,
+        serde_json::to_string(&w.base).unwrap()
+    )
+    .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let mut reported = std::collections::HashMap::new();
+    for line in std::io::BufRead::lines(std::io::BufReader::new(stdout)) {
+        let msg: serde_json::Value = serde_json::from_str(&line.unwrap()).unwrap();
+        if msg["id"] != 2 {
+            continue;
+        }
+        for entry in msg["result"]["data"].as_array().expect("hooks/list result") {
+            for hook in entry["hooks"].as_array().unwrap() {
+                reported.insert(
+                    hook["key"].as_str().unwrap().to_string(),
+                    (
+                        hook["currentHash"].as_str().unwrap().to_string(),
+                        hook["trustStatus"].as_str().unwrap().to_string(),
+                    ),
+                );
+            }
+        }
+        break;
+    }
+    drop(stdin);
+    let _ = child.kill();
+    let _ = child.wait();
+    let rows = trust_rows(&w, "user");
+    assert_eq!(rows.len(), 6);
+    for (key, hash, trust) in &rows {
+        let (their_hash, their_trust) = reported.get(key).unwrap_or_else(|| panic!("codex did not list {key}"));
+        assert_eq!(their_hash, hash, "{key}");
+        assert_eq!(their_trust, trust, "{key}");
+    }
+    assert_eq!(rows.iter().filter(|(_, _, t)| t == "modified").count(), 1);
+}
