@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- `cv rewind` refuses incomplete or invalid JSON in its copied window without publishing; explicit cuts still omit malformed future records.
+- `cv rewind` copies to the end of the file (`cost-state` and other tail records were dropped) and refuses invalid JSON before publishing.
 
 - `cv rewind`: an unterminated last line in the captured prefix asks for a rerun; a cut omits malformed records while closing open calls.
 

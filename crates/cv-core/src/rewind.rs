@@ -706,6 +706,8 @@ fn rewind_session_after_scan(
         } else {
             crate::emit::ThinkingMode::Native
         });
+    // Only a portable replay walks every record back through the reader; a native copy is bytes.
+    let reemits = thinking == crate::emit::ThinkingMode::Portable;
 
     // Pass 2 — one sequential read of the prefix: hash every byte, count lines, copy the window.
     let new_id = opts.new_id.clone().unwrap_or_else(new_uuid);
@@ -815,23 +817,21 @@ fn rewind_session_after_scan(
                     omitted_bytes += n as u64;
                     continue;
                 }
-                // A record the codec reads nothing out of — a conversation record with no `message`
-                // body (`cv show` counts it as no message at all). The refusal is deliberate
-                // validation, not a claim that the copy would drop these bytes: on the default
-                // path the record would be written verbatim, and only a re-emitted copy (`staged`)
-                // goes back through a reader that takes nothing out of it. The contract is a
-                // complete captured physical end with a malformed tail refused, so cv never mints
-                // a session it cannot read back. Nothing is published either way — the staged copy
-                // is dropped, so the well-formed records before it are never written.
-                if let Some(ty) = unreadable_record(&v) {
-                    drop(writer.take());
-                    bail!(
-                        "{}: line {line_no} is a `{ty}` record with no `message` body (uuid {}) — cv \
-                         cannot read it, and a copy that walked past it would drop it silently; \
-                         repair or remove that record, or cut before it with `--at <MSG_IDX>`",
-                        r.path.display(),
-                        v.get("uuid").and_then(Value::as_str).unwrap_or("(none)"),
-                    );
+                // A `user`/`assistant` record with no `message` body: the Claude codec carries it
+                // verbatim on a plain copy, but a re-emitted copy walks it through the reader, which
+                // takes nothing out of it and would drop it silently. Refuse only where the copy
+                // would lose it; nothing is published either way.
+                if reemits {
+                    if let Some(ty) = unreadable_record(&v) {
+                        drop(writer.take());
+                        bail!(
+                            "{}: line {line_no} is a `{ty}` record with no `message` body (uuid {}); a \
+                             re-emitted copy would drop it: repair or remove that record, rewind without \
+                             re-emitting, or cut before it with `--at <MSG_IDX>`",
+                            r.path.display(),
+                            v.get("uuid").and_then(Value::as_str).unwrap_or("(none)"),
+                        );
+                    }
                 }
                 track_tool_calls(
                     &v,

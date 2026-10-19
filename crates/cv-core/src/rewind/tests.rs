@@ -405,35 +405,45 @@ fn an_explicit_cut_still_ends_at_its_message_record() {
 /// silently — this would exit 0 having dropped the record and everything after it, which is the
 /// measured 10 records in → 8 out.
 #[test]
-fn a_record_the_codec_cannot_read_refuses_instead_of_truncating() {
+fn a_native_copy_carries_a_bodyless_turn_record_verbatim() {
+    // The Claude codec carries a `user` record with no `message` as bookkeeping, so a byte copy
+    // keeps it and the attachment after it rides along to EOF.
+    let dir = tmpdir();
+    let src = session_attachment_and_bad_tail(&dir, true);
+    let out = dir.join("out");
+    let res = rewind_session(&sref(&src, SID), &opts(CutAt::End, &out)).unwrap();
+    let copied = std::fs::read_to_string(out.join(format!("{}.jsonl", res.new_id))).unwrap();
+    assert!(copied.contains("\"uuid\":\"bad1\""), "{copied}");
+    assert!(copied.contains("invoked_skills"), "{copied}");
+}
+
+#[test]
+fn a_portable_copy_refuses_a_bodyless_turn_record_instead_of_dropping_it() {
+    // Portable replay re-emits every record through the reader, which takes nothing out of a
+    // bodyless turn: refuse before publishing rather than mint a session missing a record.
     let dir = tmpdir();
     let src = session_attachment_and_bad_tail(&dir, true);
     let before = std::fs::read(&src).unwrap();
     let out = dir.join("out");
-    let err = rewind_session(&sref(&src, SID), &opts(CutAt::End, &out)).unwrap_err();
+    let mut o = opts(CutAt::End, &out);
+    o.thinking = Some(crate::emit::ThinkingMode::Portable);
+    let err = rewind_session(&sref(&src, SID), &o).unwrap_err();
 
     let msg = err.to_string();
     assert!(msg.contains("line 4"), "{msg}");
     assert!(msg.contains("`user`") && msg.contains("no `message` body"), "{msg}");
-    assert!(
-        msg.contains("bad1"),
-        "the refusal names the record it could not read: {msg}"
-    );
+    assert!(msg.contains("bad1"), "the refusal names the record: {msg}");
+    assert!(msg.contains("without re-emitting"), "{msg}");
     // Nothing was published, and no staged copy was left behind.
     assert!(!out.join("22222222-2222-4222-8222-222222222222.jsonl").exists());
     assert!(!out.join("22222222-2222-4222-8222-222222222222.rewind.json").exists());
     assert!(std::fs::read_dir(&out)
         .unwrap()
         .flatten()
-        .all(|entry| !entry.file_name().to_string_lossy().starts_with(".cv-rewind-")));
-    assert_eq!(std::fs::read(&src).unwrap(), before, "the source must never change");
-    cleanup(&dir);
+        .all(|e| !e.file_name().to_string_lossy().contains("rewind")));
+    assert_eq!(std::fs::read(&src).unwrap(), before, "the source is untouched");
 }
 
-/// CONTROL for arm 2 — the same source with the unreadable record REMOVED copies the attachment:
-/// the refusal comes from that record and not from the attachment, nor from the tail as such. If
-/// the cure were wrong (refusing on any non-message tail record), this would fail; if it were wrong
-/// the other way (still cutting at the last message), the attachment would be missing here.
 #[test]
 fn without_the_unreadable_record_the_attachment_rides_along() {
     let dir = tmpdir();

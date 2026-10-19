@@ -13,7 +13,10 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 /// A follower or daemon has this long after spawning to say what it is waiting for.
-const ANNOUNCE: Duration = Duration::from_secs(1);
+/// The product promise is "announce within a second of starting"; the test allows a cold exec
+/// on a loaded CI runner before `main` runs (main's run 39099115004 lost a second to that), so it
+/// measures the promise with headroom rather than the runner's exec latency.
+const ANNOUNCE: Duration = Duration::from_secs(3);
 /// Everything else has this long to exit.
 const BUDGET: Duration = Duration::from_secs(5);
 /// The commands that keep running on a pipe by design.
