@@ -189,7 +189,10 @@ impl Adapter for Claude {
             .find(|p| p.file_name().is_some_and(|n| n == "subagents" || n == "workflows"))
             .and_then(Path::parent)
         {
-            deps.directories.push(session.join("tool-results"));
+            // By identity, not entry by entry: an agent reads a few of its parent's spilled outputs
+            // and those are in its read set; declaring the whole directory file by file made one
+            // agent row carry thousands of entries it never read.
+            deps.files.push(session.join("tool-results"));
         }
         if let Some(config) = r
             .path
