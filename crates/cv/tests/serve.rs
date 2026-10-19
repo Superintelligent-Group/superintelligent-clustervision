@@ -2,6 +2,7 @@
 //! `cv serve` HTTP endpoints (status codes, JSON shapes, query parsing) — all hermetic via a
 //! temp `$HOME` + `$CLUSTERVISION_HOME` passed only to child processes.
 
+use cv_core::rows::SEARCH_ROW_KEYS;
 use cv_testkit::World;
 use serde_json::{json, Value};
 use std::fs;
@@ -1211,26 +1212,6 @@ fn raw_json(raw: &str) -> Value {
     let body = raw.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
     serde_json::from_str(body).unwrap_or_else(|e| panic!("non-JSON body {body:?}: {e}"))
 }
-
-/// The §3 search row: a session row plus what the search contributed. `cv search --json` emits
-/// exactly these keys in exactly this order, so `/api/search` must too — a consumer that cannot
-/// tell the CLI's rows from the daemon's is the whole point of the contract.
-const SEARCH_ROW_KEYS: [&str; 14] = [
-    "id",
-    "harness",
-    "path",
-    "cwd",
-    "title",
-    "created_at",
-    "updated_at",
-    "message_count",
-    "size_bytes",
-    "score",
-    "snippet",
-    "agent_id",
-    "parent_id",
-    "workflow",
-];
 
 /// `/api/search` over a world with NO full-text index: a 503 naming the cause and the fix unless
 /// the caller asks for the live scan (`scan=1`), which answers in the same row shape and SAYS it

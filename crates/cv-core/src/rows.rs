@@ -176,37 +176,31 @@ pub fn touched_row(t: &TouchedSession) -> Value {
     })
 }
 
-/// The keys a §3 session row carries, in order — for tests and `cv schema`.
-#[cfg(test)]
-pub const SESSION_ROW_KEYS: [&str; 9] = [
-    "id",
-    "harness",
-    "path",
-    "cwd",
-    "title",
-    "created_at",
-    "updated_at",
-    "message_count",
-    "size_bytes",
-];
+/// `head` then `tail`, as one array: the §3 rows are `SessionRef::FIELDS` plus what each row adds.
+const fn joined<const N: usize>(head: &[&'static str], tail: &[&'static str]) -> [&'static str; N] {
+    let mut out = [""; N];
+    let mut i = 0;
+    while i < head.len() {
+        out[i] = head[i];
+        i += 1;
+    }
+    let mut j = 0;
+    while j < tail.len() {
+        out[i + j] = tail[j];
+        j += 1;
+    }
+    assert!(i + j == N, "the row's key count is its parts' sum");
+    out
+}
+
+/// The keys a §3 session row carries, in order: [`SessionRef::FIELDS`] plus `size_bytes`.
+pub const SESSION_ROW_KEYS: [&str; SessionRef::FIELDS.len() + 1] = joined(SessionRef::FIELDS, &["size_bytes"]);
 
 /// The keys a §3 search row carries, in order: the session row plus what the search contributed.
-pub const SEARCH_ROW_KEYS: [&str; 14] = [
-    "id",
-    "harness",
-    "path",
-    "cwd",
-    "title",
-    "created_at",
-    "updated_at",
-    "message_count",
-    "size_bytes",
-    "score",
-    "snippet",
-    "agent_id",
-    "parent_id",
-    "workflow",
-];
+pub const SEARCH_ROW_KEYS: [&str; SESSION_ROW_KEYS.len() + 5] = joined(
+    &SESSION_ROW_KEYS,
+    &["score", "snippet", "agent_id", "parent_id", "workflow"],
+);
 
 #[cfg(test)]
 mod tests {

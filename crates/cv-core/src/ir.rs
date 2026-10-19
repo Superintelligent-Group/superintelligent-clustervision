@@ -1023,6 +1023,20 @@ impl Message {
 }
 
 impl SessionRef {
+    /// The serialized field names in declaration order: the one spelling every row that re-spells
+    /// a session (`cv ls --json`, the search row, the catalog) derives from. A field added to the
+    /// struct without a name here fails `fields_are_the_serde_key_set`.
+    pub const FIELDS: &'static [&'static str] = &[
+        "id",
+        "harness",
+        "path",
+        "cwd",
+        "title",
+        "created_at",
+        "updated_at",
+        "message_count",
+    ];
+
     /// Compare copies of one logical session, with the preferred copy sorting first.
     /// Newest update (or creation) wins; harness and path break ties deterministically.
     pub fn preferred_copy_cmp(&self, other: &Self) -> std::cmp::Ordering {
@@ -1401,6 +1415,26 @@ pub fn home_rel(p: &std::path::Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every `Option` set, so serde emits every field: the key set is exactly `FIELDS`, in order.
+    #[test]
+    fn fields_are_the_serde_key_set() {
+        let full = SessionRef {
+            cwd: Some("/w".into()),
+            title: Some("t".into()),
+            created_at: Some(chrono::DateTime::from_timestamp(1, 0).unwrap()),
+            updated_at: Some(chrono::DateTime::from_timestamp(2, 0).unwrap()),
+            message_count: Some(3),
+            ..SessionRef::new("id", Harness::Claude, "/x.jsonl")
+        };
+        let value = serde_json::to_value(&full).unwrap();
+        let keys: Vec<&str> = value.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            SessionRef::FIELDS,
+            "SessionRef::FIELDS must name every serialized field, in order"
+        );
+    }
 
     #[test]
     fn labels_skip_unused_bodies_and_empty_user_turns() {
