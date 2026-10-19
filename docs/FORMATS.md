@@ -82,7 +82,10 @@ verbatim carrier record under `ParseOptions::complete`) and `cv_byte_offset`.
   `relocated` (`{relocatedCwd}`, forks), `pr-link`
   (`{prNumber, prUrl, prRepository}`), `frame-link`, `content-replacement` (`{replacements}` applied at
   load — forks/microcompact), `artifact-comment-monitor`, `artifact-autoreact-ledger`,
-  `file-history-snapshot`. **`summary` records are no longer written** (gone since ~2.1.25x; still read).
+  `file-history-snapshot`, `file-history-delta`, `worktree-state`, `isolation-latch`, the request ledger
+  `api-request` / `api-request-shape` / `api-request-blob` and a fork child's `fork-context-ref` (all
+  four 2.1.30x; see the 2.1.304 entry below). **`summary` records are no longer written** (gone since
+  ~2.1.25x; still read).
   Most records since ~2.1.25x carry BOTH `sessionId` and snake-case `session_id`, plus `slug`,
   `entrypoint`, `userType`, `version`, `gitBranch`; user turns add `promptId`, `origin{kind:human|…}`,
   `promptSource`, `turnOrigin`, `permissionMode`; assistant turns add `requestId`, `effort`,
@@ -221,6 +224,37 @@ verbatim carrier record under `ParseOptions::complete`) and `cv_byte_offset`.
   `turnPosition{promptIndex, turnIndex}`. Outside `projects/`: `tasks/<sessionId>/<n>.json`
   (TaskCreate), `file-history/<sessionId>/<hash>@v<n>` (checkpoint backups), and background-task output
   and pasted images under `$CLAUDE_CODE_TMPDIR` (default `/tmp/claude-<uid>/<encoded-cwd>/<sessionId>/`).
+- **2.1.304 (corpus `crates/cv-core/tests/corpus/claude/2.1.304/`, generated headless):** the **request
+  ledger** (since 2.1.300, "transcripts record each API request's system prompt, tools and parameters"):
+  every API call leaves three bookkeeping records — `api-request` `{id, timestamp, version, querySource,
+  shapeHash, params{model, betas, max_tokens, thinking, context_management, output_config}, base?, keep,
+  tail[], cacheControl[{path, value}], requestDigest, agentId?}`, `api-request-shape` `{shapeHash,
+  shape{system[], tools[]}}` (the system prompt and every tool schema, one record per distinct shape) and
+  `api-request-blob` `{hash, message}` (one request message, content-addressed; no `version`). A request's
+  messages are the `base` request's first `keep` messages followed by the `tail` blobs, so a transcript
+  reproduces every request byte-for-byte; `assistant` turns carry `requestRef` = the `api-request.id`.
+  It nearly doubles a transcript and no flag turns it off. cv carries all three under `complete` (a
+  blob's `message` is a request body, never a turn) and drops them otherwise. **Fork sub-agents**
+  (`subagent_type: fork`, on by default in `-p` since 2.1.302): the child transcript opens with
+  `fork-context-ref` `{agentId, parentSessionId, parentLastUuid, contextLength}` — its context is the
+  parent up to that uuid — and its meta.json adds `agentType: "fork", isFork, model, finished`; cv sets
+  `lineage.forked_from` and `extra.claude.fork_context{parent_last_uuid, context_length}`. **Retried
+  requests** (2.1.302+): `system/api_error` with `source: "request_retry"`, no `content`, `error{message,
+  status, requestId, formatted, connection, isNetworkDown, rateLimits, noResponse}`, `retryAttempt`,
+  `maxRetries`, `retryInMs`, one per attempt (a rate-limited session wrote 1,143); the synthetic assistant
+  after the last failure may add `apiErrorIsTransient`. cv renders a retry as `kind: error` from
+  `error.formatted` (else `message`) plus `(retry N of M)`. New bookkeeping: `isolation-latch` `{side}`
+  (no `version`; interactive sessions), attachment `max_turns_reached` `{maxTurns, turnCount,
+  exitCommitted}` (`--max-turns`; never rendered) and `invoked_skills`; new fields:
+  `agent_listing_delta.builtInPluginTypes`, `skill_listing.digests`, `deferred_tools_delta.loadedNames`,
+  `hook_*.agentId`, `structured_output.{agentId, slug}`, user `mcpMeta`, task notifications
+  `joinedNoticeRunIds/joinedNoticeLengths/joinedNoticeOwn`, `turn_duration.pendingWorkflowCount`. A
+  third-party server tool (Z.ai's `webReader` behind `WebSearch`) leaves `server_tool_use` and
+  `tool_result` blocks inside an `assistant` message. The binary's record roster also names
+  `ended-by-model`, `agent-color`, `agent-setting`, `bridge-session`, `history-suppression`,
+  `attribution-snapshot`, `dev-mods`, `memory-mode`, `observer-ref` (none observed): every unknown type,
+  with or without a `message`, is carried under `complete`. A transcript holding only `ai-title` /
+  `agent-name` records has no `version` anywhere; `cv doctor` counts it as an unknown writer version.
 - **cv surfacing:** `cv show <id> --tree` appends the sub-agent forest (direct + per-workflow, with journaled
   outcomes); `cv show <id> --subagents` lists every agent with its return; `cv show <id> --agent <aid>`
   renders one sub-agent transcript; `cv events <id> --subagents` extracts the whole forest's tool activity,
