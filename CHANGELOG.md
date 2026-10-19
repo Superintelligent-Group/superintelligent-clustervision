@@ -27,8 +27,8 @@
 
 - Repeated OpenClaw parent lookups share private indexed facts; one-query operations keep native startup cost, query order, malformed values, and source guards.
 - Codex listings defer exact counts to indexing or complete reads; transcript metadata and compressed decode reuse stay unchanged.
-- Codex reads reject callback source truncation and verify identity after final message and metadata delivery.
-- Claude reads reject callback-triggered truncation before resuming mapped records, including checkpoint callbacks.
+- Codex reads check the source after a slow callback, a checkpoint, the first metadata and at EOF, and reject a replaced or truncated file.
+- Claude reads check the source after a slow callback, a checkpoint and at EOF, and reject a replaced or truncated file before touching its mapping again.
 
 - Catalog publication waits for concurrent writers before comparing rows, preventing avoidable lost discovery updates during indexing.
 

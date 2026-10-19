@@ -508,8 +508,9 @@ fn flush_all_but_held(
     });
     let upto = scratch.len() - hold as usize;
     for m in scratch.drain(..upto) {
+        let started = std::time::Instant::now();
         let flow = sink.message(m);
-        input.check_backing_at(at)?;
+        input.check_backing_after(started, at)?;
         if flow == Flow::Stop {
             return Ok(Flow::Stop);
         }
@@ -707,8 +708,9 @@ fn read(
         // A trailing assistant is provisional until its usage arrives; a partial EOF record is
         // provisional until a newline arrives. Neither belongs in a reusable immutable prefix.
         let checkpoint = if plain && scratch.is_empty() && line.complete {
+            let started = std::time::Instant::now();
             let wanted = sink.wants_checkpoint(line.end);
-            rollout.input.check_backing_at(line.end)?;
+            rollout.input.check_backing_after(started, line.end)?;
             wanted
         } else {
             false
@@ -1113,6 +1115,9 @@ mod tests {
                         .set_len(0)
                         .unwrap();
                     self.mutated = true;
+                    // A callback that changed the file is a slow one by construction; the reader
+                    // checks the backing after a slow callback, before touching the mapping again.
+                    std::thread::sleep(crate::harness::store::jsonl::Read::SLOW_CALLBACK * 10);
                 }
             }
         }
