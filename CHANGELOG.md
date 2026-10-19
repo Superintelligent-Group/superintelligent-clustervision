@@ -21,7 +21,9 @@
 
 **Titles and affordances.**
 - An emitted session's fallback title is its `cv ls` title (the meaningful prompt); Cursor CLI titles omit the leading `<timestamp>` metadata.
-- Affordances include Claude slash-loaded skills, Kimi Code todo state and legacy agents, and Roo returns carried alongside user text.
+- `has:skill` and `--kind affordances` count a Claude skill loaded by slash command (its "Base directory for this skill:" body), once per activation.
+- Kimi Code: the latest `TodoList` state is a `plan/state` row; legacy `Agent`/`AgentSwarm` calls are spawns and their completed or failed results returns.
+- Roo: a `new_task` result carried beside user text is a `subagent_return` detail; the turn stays a prompt.
 
 **Reshaping.**
 - `cv prune`, `cv rewind` and agent adoption refuse a source line that is not one JSON record instead of copying it; blank lines pass.
