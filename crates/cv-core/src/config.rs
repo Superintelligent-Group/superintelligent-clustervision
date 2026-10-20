@@ -29,17 +29,18 @@ pub fn config_path() -> Option<PathBuf> {
     config_dir().map(|d| d.join("config.toml"))
 }
 
-/// Load the config, tolerantly: a missing or malformed file yields [`Config::default`].
+/// Load the config, tolerantly: a missing file yields [`Config::default`]; an unreadable or
+/// malformed one does too, said once per process ([`crate::env::warn_once`]).
 pub fn load() -> Config {
-    let Some(p) = config_path() else {
+    if config_path().is_none() {
         return Config::default();
-    };
-    match std::fs::read_to_string(&p) {
-        Ok(text) => toml::from_str(&text).unwrap_or_else(|e| {
-            eprintln!("cv: ignoring malformed {}: {e}", p.display());
+    }
+    match load_for_update() {
+        Ok(config) => config,
+        Err(error) => {
+            crate::env::warn_once("the config file", format!("{error:#}"));
             Config::default()
-        }),
-        Err(_) => Config::default(),
+        }
     }
 }
 
@@ -103,6 +104,8 @@ mod tests {
         assert!(load_for_update().is_err());
         assert!(save(&cfg).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), malformed);
+        // The tolerant read degrades to the defaults (said once on stderr).
+        assert!(load().exports.is_empty());
     }
 
     /// The config is replaced whole; a symlinked config (dotfiles) is replaced at its target and
