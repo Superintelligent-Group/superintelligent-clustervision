@@ -676,9 +676,6 @@ fn scan(summary_path: &Path) -> Result<Option<SessionRef>> {
     }
 
     Ok(Some(SessionRef {
-        id,
-        harness: Harness::Grok,
-        path: dir,
         cwd,
         title,
         created_at: summary.get("created_at").and_then(Value::as_str).and_then(parse_ts),
@@ -688,6 +685,7 @@ fn scan(summary_path: &Path) -> Result<Option<SessionRef>> {
             .and_then(parse_ts)
             .or_else(|| summary.get("last_active_at").and_then(Value::as_str).and_then(parse_ts)),
         message_count: None,
+        ..SessionRef::new(id, Harness::Grok, dir)
     }))
 }
 

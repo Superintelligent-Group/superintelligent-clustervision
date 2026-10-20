@@ -531,7 +531,7 @@ fn selected_tool_agents(
     agent: Option<&str>,
     workflow: Option<&str>,
     demand: crate::SubagentDemand,
-) -> anyhow::Result<Vec<crate::SubagentInfo>> {
+) -> anyhow::Result<Vec<crate::AgentRef>> {
     if agent == Some(ORCHESTRATOR) && workflow.is_none() {
         return Ok(Vec::new());
     }

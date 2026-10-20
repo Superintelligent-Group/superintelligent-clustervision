@@ -1152,14 +1152,10 @@ fn checkpoint_id(file_name: &str) -> String {
 
 fn session_ref(s: &Session, path: &Path, harness: Harness) -> SessionRef {
     SessionRef {
-        id: s.id.clone(),
-        harness,
-        path: path.to_path_buf(),
         cwd: s.cwd.clone(),
         title: s.title.clone(),
         created_at: s.created_at,
-        updated_at: s.updated_at,
-        // The contract count (`SessionRef::message_count`): user + assistant turns only — a tool
+        updated_at: s.updated_at, // The contract count (`SessionRef::message_count`): user + assistant turns only — a tool
         // result, an `info`/`error` notice or a `$rewindTo` branch marker is a message, not a turn.
         message_count: Some(
             s.messages
@@ -1167,6 +1163,7 @@ fn session_ref(s: &Session, path: &Path, harness: Harness) -> SessionRef {
                 .filter(|m| matches!(m.role, Role::User | Role::Assistant))
                 .count(),
         ),
+        ..SessionRef::new(s.id.clone(), harness, path.to_path_buf())
     }
 }
 

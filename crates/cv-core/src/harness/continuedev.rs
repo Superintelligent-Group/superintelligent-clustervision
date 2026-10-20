@@ -416,14 +416,12 @@ fn read_index(path: &Path) -> Vec<IndexMeta> {
 fn ref_from(meta: &IndexMeta, path: &Path, message_count: Option<usize>) -> SessionRef {
     let updated = mtime(path);
     SessionRef {
-        id: meta.session_id.clone(),
-        harness: Harness::Continue,
-        path: path.to_path_buf(),
         cwd: meta.cwd.clone(),
         title: meta.title.clone(),
         created_at: meta.created_at.or(updated),
         updated_at: updated,
         message_count,
+        ..SessionRef::new(meta.session_id.clone(), Harness::Continue, path.to_path_buf())
     }
 }
 

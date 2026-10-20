@@ -336,9 +336,6 @@ fn discover_db(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
     for row in rows.flatten() {
         let (id, title, wd, created, updated) = row;
         out.push(SessionRef {
-            id,
-            harness: Harness::Goose,
-            path: db.to_path_buf(),
             cwd: wd.filter(|s| !s.is_empty()).map(PathBuf::from),
             title: title
                 .filter(|s| !s.trim().is_empty())
@@ -346,6 +343,7 @@ fn discover_db(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
             created_at: created.as_deref().and_then(parse_ts_text),
             updated_at: updated.as_deref().and_then(parse_ts_text),
             message_count: None,
+            ..SessionRef::new(id, Harness::Goose, db.to_path_buf())
         });
     }
     Ok(out)

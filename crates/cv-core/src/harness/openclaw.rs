@@ -1133,9 +1133,6 @@ fn discover_sqlite(db: &Path) -> Result<Vec<SessionRef>> {
                 .or(acc.first_user);
             let cwd = acc.cwd.or(entry.cwd);
             out.push(SessionRef {
-                id: session_id,
-                harness: Harness::OpenClaw,
-                path: db.to_path_buf(),
                 cwd,
                 title,
                 created_at: acc.created_at.or_else(|| created.and_then(ts_from_epoch)),
@@ -1144,6 +1141,7 @@ fn discover_sqlite(db: &Path) -> Result<Vec<SessionRef>> {
                     .or_else(|| updated.and_then(ts_from_epoch))
                     .or(acc.updated_at),
                 message_count: Some(acc.message_count),
+                ..SessionRef::new(session_id, Harness::OpenClaw, db.to_path_buf())
             });
         }
         Ok(out)

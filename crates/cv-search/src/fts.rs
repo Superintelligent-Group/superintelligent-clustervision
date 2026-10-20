@@ -3116,14 +3116,12 @@ fn live_snippet(path: &str, harness: &str, query: &str, scope: crate::Scope) -> 
     let h = cv_core::Harness::parse(harness)?;
     let adapter = cv_core::harness::for_harness(h)?;
     let sref = SessionRef {
-        id: String::new(),
-        harness: h,
-        path: PathBuf::from(path),
         cwd: None,
         title: None,
         created_at: None,
         updated_at: None,
         message_count: None,
+        ..SessionRef::new(String::new(), h, PathBuf::from(path))
     };
 
     struct Acc {

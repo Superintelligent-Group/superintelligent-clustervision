@@ -208,8 +208,8 @@ pub const SUBAGENT_ROW_KEYS: [&str; SESSION_ROW_KEYS.len() + 7] = joined(
 
 /// One sub-agent of a forest as its row: [`session_row`] of its transcript, then the
 /// [`SUBAGENT_ROW_KEYS`] it adds, each an explicit `null` when the sidecar did not say.
-pub fn subagent_row(s: &crate::SubagentInfo, size_bytes: Option<u64>) -> Value {
-    let crate::SubagentInfo {
+pub fn subagent_row(s: &crate::AgentRef, size_bytes: Option<u64>) -> Value {
+    let crate::AgentRef {
         session,
         agent_type,
         description,
@@ -278,7 +278,7 @@ mod tests {
 
     #[test]
     fn subagent_rows_carry_the_session_row_plus_the_sidecar_fields() {
-        let agent = crate::SubagentInfo {
+        let agent = crate::AgentRef {
             session: SessionRef {
                 id: "agent-a1".into(),
                 ..a_ref()

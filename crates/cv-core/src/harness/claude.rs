@@ -263,7 +263,7 @@ impl Adapter for Claude {
         demand: crate::SubagentDemand,
         workflow: Option<&str>,
         select: &(dyn Fn(&str, Option<&str>) -> bool + Sync),
-    ) -> Vec<crate::SubagentInfo> {
+    ) -> Vec<crate::AgentRef> {
         subagent_tree_filtered(&r.path, demand, workflow, &select)
     }
 
@@ -676,49 +676,6 @@ fn persisted_output(text: &str) -> Option<(String, Option<String>)> {
     Some((path.to_string(), size))
 }
 
-/// A sub-agent transcript enriched with the metadata Claude Code records *around* it: the
-/// `*.meta.json` sidecar (agent type / human description / the spawning tool_use id), the workflow
-/// it belongs to (when spawned by a `Workflow`), and — for workflow agents — the structured result
-/// the orchestrator journaled (`status` + `summary`, the agent's *real* return value).
-///
-/// This is the second dimension of a Claude session that flat parsing misses entirely: a deep
-/// session fans out into hundreds of these, and the meta/journal sidecars are where their *purpose*
-/// and *outcome* live.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct SubagentInfo {
-    /// The transcript itself (id = `agent-<agentId>`), parseable like any other session.
-    pub session: SessionRef,
-    /// `agentType` from the sidecar: the subagent kind (`general-purpose`, `Explore`,
-    /// `workflow-subagent`, a named custom agent, …).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent_type: Option<String>,
-    /// `description` from the sidecar: the human one-line task the parent gave it.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    /// `toolUseId` from the sidecar: the `Agent`/`Task` tool_use in the *parent* transcript that
-    /// spawned this agent. Links the child back to the exact turn that launched it.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_use_id: Option<String>,
-    /// The workflow run id (`wf_…`) this agent belongs to, or `None` for a directly-spawned
-    /// (`Agent`/`Task`) sub-agent.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub workflow: Option<String>,
-    /// For workflow agents: the journaled outcome status (`done` / `partial` / `failed` / …).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result_status: Option<String>,
-    /// For workflow agents: the journaled result summary — the agent's structured return value.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result_summary: Option<String>,
-}
-
-impl SubagentInfo {
-    /// `agentId` (the `agent-<id>` stem with the `agent-` prefix stripped) — the key the workflow
-    /// journal and the transcript records use.
-    pub fn agent_id(&self) -> &str {
-        self.session.id.strip_prefix("agent-").unwrap_or(&self.session.id)
-    }
-}
-
 /// The full sub-agent forest a Claude session spawned: every directly-spawned (`Agent`/`Task`)
 /// sub-agent **and** every `Workflow` sub-agent (which live one level deeper, under
 /// `subagents/workflows/<wf>/`), each enriched with its `*.meta.json` sidecar and — for workflow
@@ -726,7 +683,7 @@ impl SubagentInfo {
 ///
 /// The workflow tier is, on a heavy session, the *majority* of the agents, and the meta/journal
 /// sidecars carry each agent's purpose and outcome. Newest first.
-pub fn subagent_tree(parent_path: &std::path::Path) -> Vec<SubagentInfo> {
+pub fn subagent_tree(parent_path: &std::path::Path) -> Vec<AgentRef> {
     subagent_tree_inner(parent_path, crate::SubagentDemand::Rich, None, &|_, _| true)
 }
 
@@ -744,7 +701,7 @@ pub(crate) fn subagent_tree_filtered(
     demand: crate::SubagentDemand,
     workflow: Option<&str>,
     select: &(impl Fn(&str, Option<&str>) -> bool + Sync),
-) -> Vec<SubagentInfo> {
+) -> Vec<AgentRef> {
     subagent_tree_inner(parent_path, demand, workflow, select)
 }
 
@@ -753,12 +710,12 @@ fn subagent_tree_inner(
     demand: crate::SubagentDemand,
     workflow: Option<&str>,
     select: &(impl Fn(&str, Option<&str>) -> bool + Sync),
-) -> Vec<SubagentInfo> {
+) -> Vec<AgentRef> {
     let Some(base) = sidecar::subagents_dir(parent_path) else {
         return vec![];
     };
 
-    let mut out: Vec<SubagentInfo> = Vec::new();
+    let mut out: Vec<AgentRef> = Vec::new();
 
     // Tier 1: directly-spawned sub-agents at `subagents/agent-*.jsonl`.
     if workflow.is_none() {
@@ -809,7 +766,7 @@ fn agents_in_dir(
     wf: Option<&str>,
     demand: crate::SubagentDemand,
     select: &(impl Fn(&str, Option<&str>) -> bool + Sync),
-) -> Vec<SubagentInfo> {
+) -> Vec<AgentRef> {
     let mut paths: Vec<PathBuf> = Vec::new();
     if let Ok(rd) = fs::read_dir(dir) {
         for e in rd.flatten() {
@@ -856,7 +813,7 @@ fn agents_in_dir(
             .and_then(|_| journal.get(&agent_id))
             .map(sidecar::result_summary)
             .unwrap_or((None, None));
-        Some(SubagentInfo {
+        Some(AgentRef {
             session,
             agent_type: meta.0,
             description: meta.1,

@@ -547,7 +547,7 @@ fn show_agent_fleetwide(agent_id: &str, want: Option<Harness>, json: bool, windo
 
 /// List the sub-agent forest a session spawned (the `--subagents` view): every direct/`Workflow`
 /// sub-agent with its type, journaled outcome, and final return value. `json` emits the structured
-/// [`SubagentInfo`] forest (each annotated with its return) for machine consumption.
+/// [`AgentRef`] forest (each annotated with its return) for machine consumption.
 fn show_subagents(r: &SessionRef, json: bool) -> Result<()> {
     let subs = cv_core::subagent_tree_of(r);
 
@@ -599,12 +599,12 @@ fn show_subagents(r: &SessionRef, json: bool) -> Result<()> {
 
 /// One sub-agent of `parent` by its `agent-…` id, bare agentId, or a unique prefix of either — the
 /// resolution `cv show --agent` and `cv rewind --agent` share. No match / several → exit 2.
-pub(crate) fn resolve_subagent(parent: &SessionRef, agent_id: &str) -> Result<cv_core::SubagentInfo> {
+pub(crate) fn resolve_subagent(parent: &SessionRef, agent_id: &str) -> Result<cv_core::AgentRef> {
     let subs = cv_core::subagent_tree_filtered_of(parent, cv_core::SubagentDemand::Rich, None, |id, _| {
         id.starts_with(agent_id) || id.strip_prefix("agent-").is_some_and(|bare| bare.starts_with(agent_id))
     });
     // Match on the full session id (`agent-…`), the bare agentId, or a prefix of either.
-    let matches: Vec<&cv_core::SubagentInfo> = subs
+    let matches: Vec<&cv_core::AgentRef> = subs
         .iter()
         .filter(|s| {
             s.session.id == agent_id
@@ -899,9 +899,9 @@ fn render_subagent_forest(r: &SessionRef) {
         return;
     }
 
-    let direct: Vec<&cv_core::SubagentInfo> = subs.iter().filter(|s| s.workflow.is_none()).collect();
+    let direct: Vec<&cv_core::AgentRef> = subs.iter().filter(|s| s.workflow.is_none()).collect();
     // Workflow agents grouped by run id (BTreeMap → stable run order).
-    let mut by_wf: BTreeMap<&str, Vec<&cv_core::SubagentInfo>> = BTreeMap::new();
+    let mut by_wf: BTreeMap<&str, Vec<&cv_core::AgentRef>> = BTreeMap::new();
     for s in subs.iter().filter(|s| s.workflow.is_some()) {
         by_wf.entry(s.workflow.as_deref().unwrap_or("")).or_default().push(s);
     }
@@ -931,7 +931,7 @@ fn render_subagent_forest(r: &SessionRef) {
 /// One line describing a sub-agent — `cv show --tree`'s forest and `cv show --subagents` share it: short
 /// id, type, the journaled status (workflow agents), message count, and the journaled summary or,
 /// failing that, the task description — capped and sanitized (both are transcript-derived).
-fn subagent_line(s: &cv_core::SubagentInfo) -> String {
+fn subagent_line(s: &cv_core::AgentRef) -> String {
     let id = short_id(s.agent_id());
     let kind = s.agent_type.as_deref().unwrap_or("agent");
     let status = s

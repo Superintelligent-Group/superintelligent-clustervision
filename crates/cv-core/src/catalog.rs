@@ -338,14 +338,12 @@ mod imp {
             return Ok(None);
         };
         Ok(Some(SessionRef {
-            harness,
-            id: row.get(1)?,
-            path: PathBuf::from(row.get::<_, String>(2)?),
             cwd: optional_hint(row, 3, overrides[0])?.map(PathBuf::from),
             title: optional_hint(row, 4, overrides[1])?,
             created_at: ts_col(row, 8, 5)?,
             updated_at: ts_col(row, 9, 6)?,
             message_count: row.get::<_, Option<i64>>(7)?.map(|n| n as usize),
+            ..SessionRef::new(row.get::<_, String>(1)?, harness, PathBuf::from(row.get::<_, String>(2)?))
         }))
     }
 
@@ -418,14 +416,12 @@ mod imp {
                 return Ok(None);
             };
             Ok(Some(SessionRef {
-                harness,
-                id: row.get(1)?,
-                path: PathBuf::from(row.get::<_, String>(2)?),
                 cwd: None,
                 title: None,
                 created_at: None,
                 updated_at: None,
                 message_count: None,
+                ..SessionRef::new(row.get::<_, String>(1)?, harness, PathBuf::from(row.get::<_, String>(2)?))
             }))
         }) else {
             return Default::default();

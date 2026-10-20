@@ -683,14 +683,12 @@ fn scan(id: &str, transcript: &Path, dir: &Path, cwd: Option<PathBuf>) -> Option
         .unwrap_or((mtime, mtime));
 
     Some(SessionRef {
-        id: id.to_string(),
-        harness: Harness::Kimi,
-        path: dir.to_path_buf(),
         cwd,
         title,
         created_at: created,
         updated_at: updated,
         message_count: None,
+        ..SessionRef::new(id.to_string(), Harness::Kimi, dir.to_path_buf())
     })
 }
 

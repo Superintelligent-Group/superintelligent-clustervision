@@ -383,7 +383,7 @@ pub trait Adapter: Send + Sync {
         _demand: crate::SubagentDemand,
         _workflow: Option<&str>,
         _select: &(dyn Fn(&str, Option<&str>) -> bool + Sync),
-    ) -> Vec<crate::SubagentInfo> {
+    ) -> Vec<crate::AgentRef> {
         Vec::new()
     }
 
@@ -397,10 +397,10 @@ pub trait Adapter: Send + Sync {
 /// The members of a forest read whole that `workflow` and `select` admit, in order: the
 /// [`Adapter::forest`] of a store that cannot select before reading.
 pub(crate) fn select_forest(
-    forest: Vec<crate::SubagentInfo>,
+    forest: Vec<crate::AgentRef>,
     workflow: Option<&str>,
     select: &(dyn Fn(&str, Option<&str>) -> bool + Sync),
-) -> Vec<crate::SubagentInfo> {
+) -> Vec<crate::AgentRef> {
     forest
         .into_iter()
         .filter(|s| {

@@ -265,9 +265,6 @@ impl Adapter for OpenCode {
             }
             let message_count = Some(self.message_dir(&id).map_or(0, |d| count_turns(&d)));
             out.push(SessionRef {
-                id,
-                harness: Harness::OpenCode,
-                path: path.to_path_buf(),
                 cwd: v.get("directory").and_then(Value::as_str).map(PathBuf::from),
                 title: v
                     .get("title")
@@ -276,6 +273,7 @@ impl Adapter for OpenCode {
                 created_at: v.pointer("/time/created").and_then(super::ts_from_value),
                 updated_at: v.pointer("/time/updated").and_then(super::ts_from_value),
                 message_count,
+                ..SessionRef::new(id, Harness::OpenCode, path.to_path_buf())
             });
         }
         Ok(out)
@@ -585,9 +583,6 @@ mod db {
 
     fn session_ref(db: &Path, r: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRef> {
         Ok(SessionRef {
-            id: r.get(0)?,
-            harness: Harness::OpenCode,
-            path: db.to_path_buf(),
             cwd: r
                 .get::<_, Option<String>>(1)?
                 .filter(|d| !d.is_empty())
@@ -599,6 +594,7 @@ mod db {
             created_at: r.get::<_, Option<i64>>(3)?.and_then(ts_from_epoch),
             updated_at: r.get::<_, Option<i64>>(4)?.and_then(ts_from_epoch),
             message_count: None,
+            ..SessionRef::new(r.get::<_, String>(0)?, Harness::OpenCode, db.to_path_buf())
         })
     }
 

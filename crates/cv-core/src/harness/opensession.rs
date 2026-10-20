@@ -246,14 +246,16 @@ fn doc_ref(path: &Path) -> Option<SessionRef> {
                 }
             }
             Ok(SessionRef {
-                id: string("id").context("document id")?.to_owned(),
-                harness: Harness::OpenSession,
-                path: path.to_owned(),
                 cwd: string("cwd").map(PathBuf::from),
                 title: string("title").map(str::to_owned),
                 created_at: o.get("created_at").and_then(ts_from_value),
                 updated_at: o.get("updated_at").and_then(ts_from_value),
                 message_count: Some(message_count),
+                ..SessionRef::new(
+                    string("id").context("document id")?.to_owned(),
+                    Harness::OpenSession,
+                    path.to_owned(),
+                )
             })
         })
         .ok()

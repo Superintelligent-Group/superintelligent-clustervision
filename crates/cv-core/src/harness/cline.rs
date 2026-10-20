@@ -304,14 +304,12 @@ fn scan(dir: &Path, id: &str, harness: Harness) -> Option<SessionRef> {
     }
 
     Some(SessionRef {
-        id: id.to_string(),
-        harness,
-        path: dir.to_path_buf(),
         cwd,
         title,
         created_at,
         updated_at,
         message_count: Some(message_count),
+        ..SessionRef::new(id.to_string(), harness, dir.to_path_buf())
     })
 }
 

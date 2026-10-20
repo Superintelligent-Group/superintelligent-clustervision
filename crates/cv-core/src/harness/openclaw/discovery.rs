@@ -139,8 +139,6 @@ pub(super) fn scan(path: &Path, index: &Index) -> Result<SessionRef> {
     };
     let entry = index.get(&id);
     Ok(SessionRef {
-        harness: Harness::OpenClaw,
-        path: path.to_path_buf(),
         title: entry
             .and_then(|e| e.title.clone())
             .or(acc.session_name)
@@ -149,7 +147,7 @@ pub(super) fn scan(path: &Path, index: &Index) -> Result<SessionRef> {
         created_at: acc.created_at,
         updated_at: entry.and_then(|e| e.updated_at).or(acc.updated_at),
         message_count: Some(acc.message_count),
-        id,
+        ..SessionRef::new(id, Harness::OpenClaw, path.to_path_buf())
     })
 }
 

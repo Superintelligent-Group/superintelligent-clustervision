@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use crate::harness::claude::{subagent_end, task_notices, ApiErrorNotice, SubagentEnd, TaskNotice};
 use crate::ir::{Block, Message, MessageKind, Role, SessionRef, Usage};
 use crate::stream::{Demand, Flow};
-use crate::SubagentInfo;
+use crate::AgentRef;
 
 /// Token totals for one lane, following [`Usage`]'s disjoint convention.
 #[derive(Debug, Clone, Default, Serialize, PartialEq)]
@@ -134,7 +134,7 @@ pub fn read_ledger() -> Vec<LaneEvent> {
 
 /// Codex hook membership is a native UUID/parent relation, verified against each child's header.
 /// This also makes the registered forest available to tools and query consumers of the one API.
-pub(crate) fn codex_hook_forest(parent: &SessionRef) -> Vec<SubagentInfo> {
+pub(crate) fn codex_hook_forest(parent: &SessionRef) -> Vec<AgentRef> {
     let rows = read_ledger();
     let mut known = std::collections::HashSet::from([parent.id.clone()]);
     let mut out = Vec::new();
@@ -159,7 +159,7 @@ pub(crate) fn codex_hook_forest(parent: &SessionRef) -> Vec<SubagentInfo> {
             session.cwd = head.cwd;
             session.created_at = head.created_at.or(Some(row.ts));
             session.updated_at = Some(row.ts);
-            out.push(SubagentInfo {
+            out.push(AgentRef {
                 session,
                 agent_type: row.agent_type.clone(),
                 description: None,
@@ -657,7 +657,7 @@ fn pass(r: &SessionRef) -> Result<Pass> {
 /// Resolve the status of one lane from its three possible sources, most authoritative first;
 /// with none of them, the transcript's own shape decides between `running` and `returned`.
 fn status_of(
-    sub: &SubagentInfo,
+    sub: &AgentRef,
     end: &SubagentEnd,
     notice: Option<&TaskNotice>,
     ledger_stop: Option<DateTime<Utc>>,
@@ -701,7 +701,7 @@ fn status_of(
 }
 
 fn lane_of(
-    sub: SubagentInfo,
+    sub: AgentRef,
     notices: &HashMap<String, TaskNotice>,
     ledger: &HashMap<String, DateTime<Utc>>,
 ) -> Result<Lane> {
@@ -1141,7 +1141,7 @@ mod tests {
     /// lane was resumed since); and a transcript that recorded its own stop keeps that source.
     #[test]
     fn a_ledger_stop_parks_a_lane_the_transcript_has_not_stopped() {
-        let sub = SubagentInfo {
+        let sub = AgentRef {
             session: SessionRef {
                 id: "agent-a1".into(),
                 harness: crate::ir::Harness::Claude,

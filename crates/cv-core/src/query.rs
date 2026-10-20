@@ -747,14 +747,10 @@ fn date_match(op: Op, val: &Val, when: Option<DateTime<Utc>>) -> Tri {
 /// A throwaway ref view of a parsed session so `matches_session` can reuse the catalog-field logic.
 fn session_as_ref(s: &Session) -> SessionRef {
     SessionRef {
-        id: s.id.clone(),
-        harness: s.harness,
-        path: s.source_path.clone().unwrap_or_default(),
         cwd: s.cwd.clone(),
         title: s.title.clone(),
         created_at: s.created_at,
-        updated_at: s.updated_at,
-        // `SessionRef.message_count` is contractually user+assistant turns only (see ir.rs), so
+        updated_at: s.updated_at, // `SessionRef.message_count` is contractually user+assistant turns only (see ir.rs), so
         // `msgs:` must count the same way here as the catalog prefilter does.
         message_count: Some(
             s.messages
@@ -762,6 +758,7 @@ fn session_as_ref(s: &Session) -> SessionRef {
                 .filter(|m| matches!(m.role, crate::ir::Role::User | crate::ir::Role::Assistant))
                 .count(),
         ),
+        ..SessionRef::new(s.id.clone(), s.harness, s.source_path.clone().unwrap_or_default())
     }
 }
 

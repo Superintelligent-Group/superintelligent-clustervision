@@ -396,8 +396,6 @@ where
     }
 }
 
-pub use harness::claude::SubagentInfo;
-
 /// Fields demanded from the sub-agent forest's metadata and workflow journals.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SubagentDemand {
@@ -416,7 +414,7 @@ pub fn subagent_tree_filtered_of(
     demand: SubagentDemand,
     workflow: Option<&str>,
     select: impl Fn(&str, Option<&str>) -> bool + Sync,
-) -> Vec<SubagentInfo> {
+) -> Vec<AgentRef> {
     harness::rootless(r.harness).map_or_else(Vec::new, |a| a.forest(r, demand, workflow, &select))
 }
 
@@ -425,7 +423,7 @@ pub fn subagent_tree_filtered_of(
 /// sidecar (agent type / task description / spawning tool_use) and, for workflow agents, the
 /// orchestrator's journaled result (`status` + `summary`). Newest first. The adapter's
 /// [`harness::Adapter::forest`]: empty for a store that records none.
-pub fn subagent_tree_of(r: &SessionRef) -> Vec<SubagentInfo> {
+pub fn subagent_tree_of(r: &SessionRef) -> Vec<AgentRef> {
     subagent_tree_filtered_of(r, SubagentDemand::Rich, None, |_, _| true)
 }
 

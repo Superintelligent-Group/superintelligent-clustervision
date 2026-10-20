@@ -182,9 +182,6 @@ fn discover_db(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
             .and_then(|cell| cells.read(cell, listing).ok().flatten());
         let cwd = thread.flatten();
         out.push(SessionRef {
-            id,
-            harness: Harness::Zed,
-            path: db.to_path_buf(),
             cwd: cwd.or_else(|| first_folder_path(folders.as_deref(), order.as_deref())),
             title: summary
                 .filter(|s| !s.trim().is_empty())
@@ -192,6 +189,7 @@ fn discover_db(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
             created_at: created.as_deref().and_then(super::parse_ts),
             updated_at: updated.as_deref().and_then(super::parse_ts),
             message_count: None,
+            ..SessionRef::new(id, Harness::Zed, db.to_path_buf())
         });
     }
     Ok(out)

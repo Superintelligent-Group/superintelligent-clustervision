@@ -56,7 +56,7 @@ pub struct SessionFacts<'a> {
     text_sets: &'a TextSets,
     events: OnceCell<Vec<Event>>,
     forest: OnceCell<crate::tools::ForestTools>,
-    tree: OnceCell<Vec<crate::SubagentInfo>>,
+    tree: OnceCell<Vec<crate::AgentRef>>,
     workflows: OnceCell<Vec<crate::Workflow>>,
     compactions: OnceCell<usize>,
     affordances: OnceCell<HashSet<crate::affordance::Kind>>,
@@ -99,7 +99,7 @@ impl<'a> SessionFacts<'a> {
     }
 
     /// The sub-agent forest as lightweight infos (type + ref + journaled outcome).
-    fn tree(&self) -> &[crate::SubagentInfo] {
+    fn tree(&self) -> &[crate::AgentRef] {
         self.tree.get_or_init(|| crate::subagent_tree_of(self.r))
     }
 

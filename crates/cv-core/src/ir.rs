@@ -1153,6 +1153,48 @@ impl SessionRef {
     }
 }
 
+/// One member of a session's sub-agent forest, in any harness: the agent's transcript as a
+/// [`SessionRef`] plus what the harness recorded *around* it (Claude's `*.meta.json` sidecar and
+/// workflow journal, Codex's spawn records, Devin's node tree). The row `cv events --subagents`,
+/// `cv tools`, lanes and `/api/session/{harness}/{id}/subagents` read.
+///
+/// A deep session fans out into hundreds of these, and the sidecars are where their *purpose* and
+/// *outcome* live.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AgentRef {
+    /// The transcript itself (Claude: id = `agent-<agentId>`), parseable like any other session.
+    pub session: SessionRef,
+    /// The agent kind (Claude's sidecar `agentType`: `general-purpose`, `Explore`,
+    /// `workflow-subagent`, a named custom agent, …).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
+    /// The human one-line task the parent gave it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// The tool call in the *parent* transcript that spawned this agent: links the child back to
+    /// the exact turn that launched it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_use_id: Option<String>,
+    /// The workflow run id (`wf_…`) this agent belongs to, or `None` for a directly-spawned
+    /// sub-agent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workflow: Option<String>,
+    /// For workflow agents: the journaled outcome status (`done` / `partial` / `failed` / …).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_status: Option<String>,
+    /// For workflow agents: the journaled result summary — the agent's structured return value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_summary: Option<String>,
+}
+
+impl AgentRef {
+    /// The agent's own id: the transcript id with Claude's `agent-` prefix stripped, the key the
+    /// workflow journal and the transcript records use.
+    pub fn agent_id(&self) -> &str {
+        self.session.id.strip_prefix("agent-").unwrap_or(&self.session.id)
+    }
+}
+
 /// A short human label from a title and/or the first [`Message::prompt_title`] — the projection
 /// [`Session::label`] makes, exposed so streaming consumers can build it without a whole `Session`.
 pub fn label_from(title: Option<&str>, prompt: Option<&str>) -> String {

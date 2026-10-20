@@ -202,7 +202,7 @@ impl Adapter for Devin {
         _demand: crate::SubagentDemand,
         workflow: Option<&str>,
         select: &(dyn Fn(&str, Option<&str>) -> bool + Sync),
-    ) -> Vec<crate::SubagentInfo> {
+    ) -> Vec<crate::AgentRef> {
         super::select_forest(subagent_tree(&r.path, &r.id), workflow, select)
     }
 
@@ -420,14 +420,12 @@ fn child_ref(
         None => format!("[{agent}]"),
     };
     Some(SessionRef {
-        id: format!("{session_id}/{agent}"),
-        harness: Harness::Devin,
-        path: db.to_path_buf(),
         cwd: parent.cwd.clone(),
         title: Some(crate::ir::truncate(&title, crate::ir::Head::TITLE)),
         created_at: parent.created_at,
         updated_at: updated.and_then(ts_from_epoch).or(parent.updated_at),
         message_count: Some(chain_message_count(forest, Some(head))),
+        ..SessionRef::new(format!("{session_id}/{agent}"), Harness::Devin, db.to_path_buf())
     })
 }
 
@@ -459,9 +457,6 @@ fn discover_conn(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
         let forest = load_forest(conn, &id, &cells)?;
         let (head, _) = chain_head(&forest, main_chain_id);
         let parent = SessionRef {
-            id: id.clone(),
-            harness: Harness::Devin,
-            path: db.to_path_buf(),
             cwd: wd.filter(|s| !s.is_empty()).map(PathBuf::from),
             title: title
                 .filter(|s| !s.trim().is_empty())
@@ -469,6 +464,7 @@ fn discover_conn(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
             created_at: created.and_then(ts_from_epoch),
             updated_at: last.and_then(ts_from_epoch).or_else(|| created.and_then(ts_from_epoch)),
             message_count: Some(chain_message_count(&forest, head)),
+            ..SessionRef::new(id.clone(), Harness::Devin, db.to_path_buf())
         };
         out.push(parent.clone());
         for (agent, head, updated) in subagent_head_rows(conn, &id, &forest) {
@@ -495,7 +491,7 @@ fn spawning_call(agent: &str, forest: &Forest) -> Option<String> {
 /// turns into `<session_id>/<agent_id>` child refs — as the forest [`crate::subagent_tree_of`]
 /// surfaces. `agent_id` is the child's `agent_type`; a completion receipt provides its spawning
 /// tool call. Devin records no per-agent description.
-pub fn subagent_tree(db: &Path, session_id: &str) -> Vec<crate::harness::claude::SubagentInfo> {
+pub fn subagent_tree(db: &Path, session_id: &str) -> Vec<crate::AgentRef> {
     let Ok(conn) = open_ro(db) else {
         return Vec::new();
     };
@@ -537,7 +533,7 @@ pub fn subagent_tree(db: &Path, session_id: &str) -> Vec<crate::harness::claude:
         let mut out = Vec::new();
         for (agent, head, updated) in subagent_head_rows(conn, session_id, &forest) {
             if let Some(session) = child_ref(db, session_id, &agent, head, updated, &forest, &parent) {
-                out.push(crate::harness::claude::SubagentInfo {
+                out.push(crate::AgentRef {
                     session,
                     tool_use_id: spawning_call(&agent, &forest),
                     agent_type: Some(agent),

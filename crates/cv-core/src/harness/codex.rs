@@ -185,7 +185,7 @@ impl Adapter for Codex {
         _demand: crate::SubagentDemand,
         workflow: Option<&str>,
         select: &(dyn Fn(&str, Option<&str>) -> bool + Sync),
-    ) -> Vec<crate::SubagentInfo> {
+    ) -> Vec<crate::AgentRef> {
         super::select_forest(crate::lanes::codex_hook_forest(r), workflow, select)
     }
 
@@ -1013,14 +1013,12 @@ fn scan_rollout(path: &Path, full_scan_cap: u64) -> Result<(SessionRef, Option<R
     }
 
     let r = SessionRef {
-        id: s.id,
-        harness: Harness::Codex,
-        path: path.to_path_buf(),
         cwd: s.cwd,
         title: s.title,
         created_at: s.created_at,
         updated_at: s.updated_at,
         message_count: None,
+        ..SessionRef::new(s.id, Harness::Codex, path.to_path_buf())
     };
     crate::discover_cache::read::Context::current().observe_writer(&r, ctx.writer_version.as_deref());
     Ok((r, decoded))

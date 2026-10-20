@@ -93,7 +93,7 @@ pub(crate) fn cmd_events(
 fn subagent_events(
     r: &cv_core::SessionRef,
     kind: Option<&str>,
-) -> Result<Vec<(cv_core::SubagentInfo, Vec<cv_core::events::Event>)>> {
+) -> Result<Vec<(cv_core::AgentRef, Vec<cv_core::events::Event>)>> {
     use cv_core::events::EventSink;
     use cv_core::Demand;
     let subs = cv_core::subagent_tree_of(r);

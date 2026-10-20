@@ -706,14 +706,12 @@ fn scan(session_dir: &Path, id: &str, fallback_cwd: Option<PathBuf>) -> Option<S
     let updated = state_updated.or(w.last_ts).or_else(|| file_mtime(&wire));
 
     Some(SessionRef {
-        id: id.to_string(),
-        harness: Harness::KimiCode,
-        path: session_dir.to_path_buf(),
         cwd,
         title,
         created_at: created,
         updated_at: updated,
         message_count: None,
+        ..SessionRef::new(id.to_string(), Harness::KimiCode, session_dir.to_path_buf())
     })
 }
 

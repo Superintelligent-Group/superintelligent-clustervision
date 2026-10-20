@@ -363,14 +363,12 @@ fn discover_global(conn: &Connection, db: &Path, cwd_map: &HashMap<String, PathB
             .filter(|s| !s.trim().is_empty())
             .map(|s| crate::ir::truncate(s, crate::ir::Head::TITLE));
         out.push(SessionRef {
-            id: composer_id.to_string(),
-            harness: Harness::Cursor,
-            path: db.to_path_buf(),
             cwd: cwd_map.get(composer_id).cloned(),
             title,
             created_at: created.and_then(ts_from_epoch),
             updated_at: updated.and_then(ts_from_epoch),
             message_count: Some(count),
+            ..SessionRef::new(composer_id.to_string(), Harness::Cursor, db.to_path_buf())
         });
     }
 }
