@@ -163,25 +163,36 @@ impl Adapter for KimiCode {
         let mut shared_reads = crate::source::ReadSet::default();
         shared_reads.record(&root.join("session_index.jsonl"));
         shared_reads.record(&root.join("workspaces.json"));
-        let index = read_session_index(&root.join("session_index.jsonl"));
+        // An unreadable index, dir or wire log is skipped and reported; a torn index keeps the
+        // tombstones read before the tear.
+        let mut out = crate::Discovered::default();
+        let (index, index_read) = read_session_index(&root.join("session_index.jsonl"));
+        out.keep(&root.join("session_index.jsonl"), index_read);
         let workspaces = read_workspaces(&root.join("workspaces.json"));
 
         // Walk `sessions/wd_*/session_*/` — the index is append-only and can lag a live session, so
         // the directory tree is the source of truth; the index only contributes tombstones + cwd.
         let mut dirs: Vec<(PathBuf, String, Option<PathBuf>)> = Vec::new();
-        let Ok(wds) = fs::read_dir(root.join("sessions")) else {
-            return Ok(Default::default());
+        let sessions = root.join("sessions");
+        let Some(wds) = out.keep(&sessions, fs::read_dir(&sessions).map_err(Into::into)) else {
+            return Ok(out);
         };
-        for wd in wds.filter_map(|e| e.ok()) {
+        for wd in wds {
+            let Some(wd) = out.keep(&sessions, wd.map_err(Into::into)) else {
+                continue;
+            };
             let wd_path = wd.path();
             if !wd_path.is_dir() {
                 continue;
             }
             let wd_name = wd.file_name().to_string_lossy().into_owned();
-            let Ok(sessions) = fs::read_dir(&wd_path) else {
+            let Some(sessions) = out.keep(&wd_path, fs::read_dir(&wd_path).map_err(Into::into)) else {
                 continue;
             };
-            for sd in sessions.filter_map(|e| e.ok()) {
+            for sd in sessions {
+                let Some(sd) = out.keep(&wd_path, sd.map_err(Into::into)) else {
+                    continue;
+                };
                 let sdir = sd.path();
                 let name = sd.file_name().to_string_lossy().into_owned();
                 let Some(id) = name.strip_prefix("session_") else {
@@ -201,17 +212,23 @@ impl Adapter for KimiCode {
                 dirs.push((sdir, id.to_string(), fallback_cwd));
             }
         }
-        Ok(crate::par_discovery_flat_map(dirs, |(sdir, id, fallback_cwd)| {
+        let scanned = crate::par_discovery_filter_map(dirs, |(sdir, id, fallback_cwd)| {
             let mut reads = shared_reads.clone();
             reads.record(&sdir.join("state.json"));
             let key = main_wire(&sdir);
             reads.record(&key);
             let key = if key.exists() { key } else { sdir.join("state.json") };
-            crate::discover_cache::cached_scan_with_reads(&key, reads, || scan(&sdir, &id, fallback_cwd))
-                .into_iter()
-                .collect()
-        })
-        .into())
+            let mut failure = None;
+            let r = crate::discover_cache::cached_scan_with_reads(&key, reads, || {
+                scan(&sdir, &id, fallback_cwd)
+                    .map_err(|e| failure = Some(e))
+                    .ok()
+                    .flatten()
+            });
+            crate::Skipped::listed(&key, failure.map_or(Ok(r), Err))
+        });
+        scanned.into_iter().for_each(|found| out.push(found));
+        Ok(out)
     }
 
     fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
@@ -634,7 +651,8 @@ struct SessionIndex {
 
 /// `session_index.jsonl`: an append log, later lines win (a tombstone after an entry deletes it; an
 /// entry after a tombstone — a re-created id — revives it).
-fn read_session_index(path: &Path) -> SessionIndex {
+/// What it read before any failure is kept: a torn tail loses none of the tombstones before it.
+fn read_session_index(path: &Path) -> (SessionIndex, Result<()>) {
     let mut idx = SessionIndex::default();
     let read = jsonl::for_each_record(path, |view| {
         let Some(record) = Fields::parse(view, &["sessionId", "deleted", "workDir"])? else {
@@ -654,10 +672,7 @@ fn read_session_index(path: &Path) -> SessionIndex {
         }
         Ok(())
     });
-    if read.is_err() {
-        return SessionIndex::default();
-    }
-    idx
+    (idx, read.map(drop))
 }
 
 /// `workspaces.json`: workspace dir name (`wd_<slug>_<hash>`) → its root path.
@@ -678,11 +693,11 @@ fn read_workspaces(path: &Path) -> HashMap<String, PathBuf> {
 
 /// Native state metadata wins; read wire only for missing titles/timestamps. Exact turn counts
 /// are deferred to complete reads or indexing.
-fn scan(session_dir: &Path, id: &str, fallback_cwd: Option<PathBuf>) -> Option<SessionRef> {
+fn scan(session_dir: &Path, id: &str, fallback_cwd: Option<PathBuf>) -> Result<Option<SessionRef>> {
     let state = read_discovery_state(session_dir);
     let wire = main_wire(session_dir);
     if !wire.exists() && state.is_null() {
-        return None;
+        return Ok(None);
     }
     let cwd = state
         .get("cwd")
@@ -695,7 +710,7 @@ fn scan(session_dir: &Path, id: &str, fallback_cwd: Option<PathBuf>) -> Option<S
         .is_none_or(|t| t.trim().is_empty());
     let state_created = state.get("createdAt").and_then(super::ts_from_value);
     let state_updated = state.get("updatedAt").and_then(super::ts_from_value);
-    let w = scan_wire_with_title(&wire, title_needed, state_created.is_none() || state_updated.is_none()).ok()?;
+    let w = scan_wire_with_title(&wire, title_needed, state_created.is_none() || state_updated.is_none())?;
     let title = state
         .get("title")
         .and_then(Value::as_str)
@@ -706,14 +721,14 @@ fn scan(session_dir: &Path, id: &str, fallback_cwd: Option<PathBuf>) -> Option<S
     let created = state_created.or(w.first_ts).or_else(|| file_mtime(&wire));
     let updated = state_updated.or(w.last_ts).or_else(|| file_mtime(&wire));
 
-    Some(SessionRef {
+    Ok(Some(SessionRef {
         cwd,
         title,
         created_at: created,
         updated_at: updated,
         message_count: None,
         ..SessionRef::new(id.to_string(), Harness::KimiCode, session_dir.to_path_buf())
-    })
+    }))
 }
 
 /// What one pass over a wire log yields for a listing.
@@ -2070,18 +2085,18 @@ mod tests {
             r#"{"title":" native raw title ","createdAt":100,"updatedAt":101}"#,
         )?;
         jsonl::OPENED.with(|paths| paths.borrow_mut().clear());
-        let summary = scan(&dir, "summary", None).unwrap();
+        let summary = scan(&dir, "summary", None).unwrap().unwrap();
         assert_eq!(summary.title.as_deref(), Some(" native raw title "));
         assert_eq!(summary.created_at, super::super::ts_from_value(&serde_json::json!(100)));
         assert_eq!(summary.updated_at, super::super::ts_from_value(&serde_json::json!(101)));
         assert!(!jsonl::OPENED.with(|paths| paths.borrow().contains(&wire)));
         fs::write(dir.join("state.json"), r#"{"title":"native title","createdAt":100}"#)?;
-        let partial = scan(&dir, "summary", None).unwrap();
+        let partial = scan(&dir, "summary", None).unwrap().unwrap();
         assert_eq!(partial.created_at, summary.created_at);
         assert_eq!(partial.updated_at, super::super::ts_from_value(&serde_json::json!(15)));
         fs::write(dir.join("state.json"), r#"{"createdAt":100,"updatedAt":101}"#)?;
         assert_eq!(
-            scan(&dir, "summary", None).unwrap().title.as_deref(),
+            scan(&dir, "summary", None).unwrap().unwrap().title.as_deref(),
             Some("wire prompt")
         );
         Ok(())
@@ -2157,7 +2172,7 @@ mod tests {
         ] {
             let state = serde_json::json!({"cwd":"/p","title":title,"createdAt":3,"updatedAt":11,"lastPrompt":body,"unknown":body});
             fs::write(dir.join("state.json"), serde_json::to_vec(&state)?)?;
-            let actual = scan(&dir, "id", None).unwrap();
+            let actual = scan(&dir, "id", None).unwrap().unwrap();
             let old = reducer(&wire);
             assert_eq!(actual.message_count, None);
             assert_eq!(
@@ -2817,7 +2832,7 @@ mod tests {
             }
             Flow::Continue
         });
-        let actual = read_session_index(&path);
+        let actual = read_session_index(&path).0;
         assert_eq!(actual.deleted, expected.deleted);
         assert_eq!(actual.cwd, expected.cwd);
         assert_eq!(actual.cwd.get("a"), Some(&PathBuf::from("/last")));
@@ -2826,7 +2841,7 @@ mod tests {
         let mut invalid_utf8 = text.into_bytes();
         invalid_utf8.extend_from_slice(b"\n\xff");
         fs::write(&path, invalid_utf8).unwrap();
-        let actual = read_session_index(&path);
+        let actual = read_session_index(&path).0;
         assert_eq!((actual.deleted, actual.cwd), (expected.deleted, expected.cwd));
     }
 
