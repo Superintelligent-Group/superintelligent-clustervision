@@ -218,7 +218,7 @@ mod tests {
         fs::write(&path, text)?;
         let context = crate::discover_cache::read::Context::current();
         let _scope = context.enter();
-        let reference = cached_metadata(&path, false).unwrap();
+        let reference = cached_metadata(&path).unwrap().unwrap();
         assert_eq!(reference.message_count, Some(2), "discovery counts the turns it reads");
         crate::catalog::sync(std::slice::from_ref(&reference));
         crate::discover_cache::persist(false);
@@ -230,12 +230,12 @@ mod tests {
             &mut crate::stream::CollectSink::default(),
             crate::stream::Pass::RECORD,
         )?;
-        assert_eq!(cached_metadata(&path, false).unwrap().message_count, Some(2));
+        assert_eq!(cached_metadata(&path).unwrap().unwrap().message_count, Some(2));
         fs::write(
             &path,
             format!("{text}{{\"type\":\"custom-title\",\"customTitle\":\"late rename\"}}\n"),
         )?;
-        let grown = cached_metadata(&path, false).unwrap();
+        let grown = cached_metadata(&path).unwrap().unwrap();
         assert_eq!(grown.message_count, Some(2), "a title record is not a turn");
         assert_eq!(grown.title.as_deref(), Some("late rename"));
         Ok(())
@@ -273,7 +273,7 @@ mod tests {
             {
                 use std::io::Write;
                 fs::write(&path, &old).unwrap();
-                cached_metadata(&path, false).unwrap();
+                cached_metadata(&path).unwrap().unwrap();
                 crate::discover_cache::persist(false);
                 let conn = crate::catalog::open_db().unwrap();
                 crate::discover_cache::invalidate_interpretation(Path::new(conn.path().unwrap()));
@@ -285,7 +285,7 @@ mod tests {
                     .unwrap();
                 FRAMED.with(|frames| frames.borrow_mut().clear());
                 assert_eq!(
-                    reading(cached_metadata(&path, false).unwrap()),
+                    reading(cached_metadata(&path).unwrap().unwrap()),
                     frozen(grown.as_bytes())
                 );
                 assert_eq!(
@@ -307,7 +307,7 @@ mod tests {
         fs::write(&path, &prefix).unwrap();
         let check = |expected: &str, extent: Option<(u64, u64)>| {
             FRAMED.with(|frames| frames.borrow_mut().clear());
-            let actual = cached_metadata(&path, false).unwrap();
+            let actual = cached_metadata(&path).unwrap().unwrap();
             assert_eq!(reading(actual), frozen(expected.as_bytes()));
             assert_eq!(
                 FRAMED.with(|frames| frames.borrow().clone()),
@@ -379,7 +379,7 @@ mod tests {
         let path = world.base.join("s.jsonl");
         let mut text = String::from("{\"type\":\"ai-title\",\"aiTitle\":\"initial\"}\n");
         fs::write(&path, &text).unwrap();
-        cached_metadata(&path, false).unwrap();
+        cached_metadata(&path).unwrap().unwrap();
         crate::discover_cache::persist(false);
         let conn = crate::catalog::open_db().unwrap();
         let append = "{\"type\":\"user\"}\n";
@@ -391,7 +391,7 @@ mod tests {
             .unwrap();
         text.push_str(append);
         assert_eq!(
-            cached_metadata(&path, false).unwrap().message_count,
+            cached_metadata(&path).unwrap().unwrap().message_count,
             Some(1),
             "growth recounts"
         );
@@ -439,7 +439,10 @@ mod tests {
                 .unwrap();
             text.push_str(append);
             FRAMED.with(|frames| frames.borrow_mut().clear());
-            assert_eq!(reading(cached_metadata(&path, false).unwrap()), frozen(text.as_bytes()));
+            assert_eq!(
+                reading(cached_metadata(&path).unwrap().unwrap()),
+                frozen(text.as_bytes())
+            );
             assert_eq!(
                 FRAMED.with(|frames| frames.borrow().clone()),
                 vec![(0, text.len() as u64)],
@@ -461,14 +464,14 @@ mod tests {
             .unwrap();
         text.push_str(append);
         FRAMED.with(|frames| frames.borrow_mut().clear());
-        cached_metadata(&path, false).unwrap();
+        cached_metadata(&path).unwrap().unwrap();
         assert_eq!(
             FRAMED.with(|frames| frames.borrow().clone()),
             vec![(0, text.len() as u64)]
         );
         fs::write(&path, "{\"type\":\"user\"}\n").unwrap();
         FRAMED.with(|frames| frames.borrow_mut().clear());
-        assert_eq!(cached_metadata(&path, false).unwrap().message_count, Some(1));
+        assert_eq!(cached_metadata(&path).unwrap().unwrap().message_count, Some(1));
         assert_eq!(
             FRAMED.with(|frames| frames.borrow().clone()),
             vec![(0, append.len() as u64)]
@@ -517,7 +520,9 @@ mod tests {
             let _stop = Stop(&stop);
             FRAMED.with(|frames| frames.borrow_mut().clear());
             for _ in 0..8 {
-                cached_metadata(&path, false).expect("a growing transcript stays listed");
+                cached_metadata(&path)
+                    .unwrap()
+                    .expect("a growing transcript stays listed");
             }
             FRAMED.with(|frames| frames.borrow().clone())
         });
@@ -536,7 +541,7 @@ mod tests {
             .split(|byte| *byte == b'\n')
             .filter(|line| !line.is_empty())
             .count();
-        assert_eq!(cached_metadata(&path, false).unwrap().message_count, Some(turns));
+        assert_eq!(cached_metadata(&path).unwrap().unwrap().message_count, Some(turns));
     }
 
     #[test]

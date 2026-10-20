@@ -324,11 +324,13 @@ impl Adapter for Claude {
         // Collect paths (cheap), then scan (read + parse) them in parallel. The same session id in
         // two roots (a transcript copied into another config dir to resume there) is listed twice,
         // once per file; `crate::find` resolves such an id to the most recently updated copy.
+        // An unreadable directory, and a transcript whose scan fails, are skipped and reported.
+        let mut walk_errors = Vec::new();
         let paths: Vec<_> = self
             .resolve_roots()
             .iter()
             .flat_map(|root| WalkDir::new(root).min_depth(2).max_depth(2))
-            .filter_map(|e| e.ok())
+            .filter_map(|e| e.map_err(|e| walk_errors.extend(crate::Skipped::walk(&e))).ok())
             .map(|e| e.into_path())
             .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("jsonl"))
             // `cv prune` writes a `<id>.flat.jsonl` sidecar next to the session it creates; it has the
@@ -339,7 +341,12 @@ impl Adapter for Claude {
                     .is_some_and(|n| n.ends_with(".flat.jsonl"))
             })
             .collect();
-        Ok(crate::par_discovery_filter_map(paths, |path| cached_metadata(&path, true)).into())
+        let mut found: crate::Discovered =
+            crate::par_discovery_filter_map(paths, |path| crate::Skipped::listed(&path, cached_metadata(&path)))
+                .into_iter()
+                .collect();
+        found.skipped.extend(walk_errors);
+        Ok(found)
     }
 
     fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
@@ -799,7 +806,7 @@ fn agents_in_dir(
         } else {
             // Retain the old open-failure exclusion even on a metadata cache hit.
             fs::File::open(&p).ok()?;
-            cached_metadata(&p, false)?
+            cached_metadata(&p).ok()??
         };
         let meta = match demand {
             crate::SubagentDemand::Rich => read_meta(&p.with_extension("meta.json")),
@@ -1122,26 +1129,30 @@ pub fn task_notices(parent_path: &std::path::Path) -> std::collections::HashMap<
 }
 
 /// Cheap metadata-only scan for `discover`.
-fn cached_metadata(path: &Path, warn: bool) -> Option<SessionRef> {
-    crate::discover_cache::cached_scan_continued(path, metadata::LAYER, |from| match scan_at(path, from) {
-        Ok((reference, checkpoint)) => {
-            let continuation = checkpoint.and_then(|checkpoint| {
-                let head = crate::resume::MarkHead::of(path, &checkpoint, metadata::LAYER)?;
-                Some(crate::discover_cache::ScanContinuation {
-                    head,
-                    checkpoint,
-                    dependencies: Default::default(),
-                })
-            });
-            (Some(reference), continuation)
-        }
-        Err(error) => {
-            if warn {
-                eprintln!("cv: skipping {}: {error:#}", path.display());
+/// The cached metadata scan of one transcript: `Ok(None)` only when the cache refuses the
+/// result, `Err` with the reason a scan failed.
+fn cached_metadata(path: &Path) -> Result<Option<SessionRef>> {
+    let mut failure = None;
+    let scanned = crate::discover_cache::cached_scan_continued(path, metadata::LAYER, |from| {
+        match scan_at(path, from) {
+            Ok((reference, checkpoint)) => {
+                let continuation = checkpoint.and_then(|checkpoint| {
+                    let head = crate::resume::MarkHead::of(path, &checkpoint, metadata::LAYER)?;
+                    Some(crate::discover_cache::ScanContinuation {
+                        head,
+                        checkpoint,
+                        dependencies: Default::default(),
+                    })
+                });
+                (Some(reference), continuation)
             }
-            (None, None)
+            Err(error) => {
+                failure = Some(error);
+                (None, None)
+            }
         }
-    })
+    });
+    failure.map_or(Ok(scanned), Err)
 }
 
 fn scan(path: &Path) -> Result<SessionRef> {

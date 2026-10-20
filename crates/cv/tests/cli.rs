@@ -3975,3 +3975,55 @@ fn index_json_reports_unreadable_sessions_and_an_unreadable_tool_output_only_deg
     assert!(hits.contains("degraded"), "{hits}");
     fs::set_permissions(&output, fs::Permissions::from_mode(0o644)).unwrap();
 }
+
+/// The skip policy's second channel, under an injected failure: a project directory cv cannot
+/// read hides its sessions, and `cv doctor` names it (INTERFACE-V2 §8: the store has bytes, the
+/// listing has zero), while a healthy store records nothing.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_project_dir_is_named_by_doctor_not_silently_empty() {
+    use std::os::unix::fs::PermissionsExt;
+    let w = World::new("skipped-source-doctor");
+    w.write_session("visible", &[user_line("u", "2026-01-01T10:00:00Z", "hello")]);
+    let (healthy, _) = w.cv_ok(&["doctor", "visible", "--json"]);
+    let healthy: serde_json::Value = serde_json::from_str(&healthy).unwrap();
+    assert!(healthy.get("skipped_sources").is_none(), "{healthy}");
+
+    let locked = w.home.join(".claude/projects/-work-locked");
+    fs::create_dir_all(&locked).unwrap();
+    fs::write(
+        locked.join("hidden.jsonl"),
+        cv_testkit::jsonl(&[user_line("h", "2026-01-01T11:00:00Z", "unseen")]),
+    )
+    .unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    let denied = fs::read_dir(&locked).is_err();
+    let run = || {
+        let (ls, ls_err) = w.cv_ok(&["ls", "--json", "--fresh"]);
+        let (doctor, _) = w.cv_ok(&["doctor", "visible", "--json"]);
+        let (human, _) = w.cv_ok(&["doctor", "visible"]);
+        (ls, ls_err, doctor, human)
+    };
+    let (ls, ls_err, doctor, human) = run();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+    if !denied {
+        return; // a superuser reads through mode 000: there is no failure to inject
+    }
+    assert!(ls.contains("visible") && !ls.contains("hidden"), "{ls}");
+    assert!(ls_err.contains("1 source(s) could not be read"), "{ls_err}");
+    let doctor: serde_json::Value = serde_json::from_str(&doctor).unwrap();
+    let skipped = doctor["skipped_sources"].as_array().expect("the doctor row");
+    assert_eq!(skipped.len(), 1, "{doctor}");
+    assert_eq!(skipped[0]["harness"], "claude");
+    assert_eq!(skipped[0]["path"], locked.to_str().unwrap());
+    assert!(
+        human.contains("Unreadable sources: 1 (the store has bytes, the listing has zero)"),
+        "{human}"
+    );
+
+    // Readable again, the next discovery replaces the row: nothing is skipped.
+    w.cv_ok(&["ls", "--fresh"]);
+    let (doctor, _) = w.cv_ok(&["doctor", "visible", "--json"]);
+    let doctor: serde_json::Value = serde_json::from_str(&doctor).unwrap();
+    assert!(doctor.get("skipped_sources").is_none(), "{doctor}");
+}
