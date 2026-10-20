@@ -478,10 +478,11 @@ fn session_events(harness: &str, id: &str, query: &str) -> (u16, Value) {
             return err(500, &format!("event ingest failed: {e:#}"));
         }
     }
-    let out: Vec<Value> = events::events_for(r.harness.as_str(), &r.id, kind.as_deref())
-        .iter()
-        .map(crate::rows::event_row)
-        .collect();
+    let rows = match events::events_for(r.harness.as_str(), &r.id, kind.as_deref()) {
+        Ok(rows) => rows,
+        Err(e) => return err(500, &format!("event catalog: {e:#}")),
+    };
+    let out: Vec<Value> = rows.iter().map(crate::rows::event_row).collect();
     ok(json!(out))
 }
 
@@ -517,16 +518,18 @@ fn compactions(harness: &str, id: &str) -> (u16, Value) {
 }
 
 /// `GET /api/touched?path=&edits_only=` — sessions whose tool events touched a file (exact or
-/// suffix path match), newest activity first, as `cv touched --json` rows. Empty on a cold catalog.
+/// suffix path match), newest activity first, as `cv touched --json` rows. Empty on a cold catalog;
+/// a catalog error is a 500, never an empty list.
 fn touched(query: &str) -> (u16, Value) {
     let params = Query::parse(query);
     let Some(path) = params.get("path") else {
         return err(400, "missing path parameter");
     };
-    let out: Vec<Value> = crate::events::sessions_touching(&path, params.flag("edits_only"))
-        .iter()
-        .map(crate::rows::touched_row)
-        .collect();
+    let rows = match crate::events::sessions_touching(&path, params.flag("edits_only")) {
+        Ok(rows) => rows,
+        Err(e) => return err(500, &format!("event catalog: {e:#}")),
+    };
+    let out: Vec<Value> = rows.iter().map(crate::rows::touched_row).collect();
     ok(json!(out))
 }
 

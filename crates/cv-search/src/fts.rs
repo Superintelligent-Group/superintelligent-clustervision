@@ -3364,7 +3364,7 @@ mod tests {
             assert!(!cv_core::events::needs_ingest(r));
             assert!(cv_core::catalog::AffordanceTable::load().counts(r).is_some());
             if n < copies {
-                let events = cv_core::events::events_for("claude", &r.id, None);
+                let events = cv_core::events::events_for("claude", &r.id, None).unwrap();
                 assert_eq!(events.len(), 1);
                 assert_eq!(events[0].target.as_deref(), Some("/perf/a.rs"));
             } else {
@@ -3961,7 +3961,7 @@ mod tests {
         writer.record_counted(&r, &source, counted);
         drop(writer);
         let wall = start.elapsed().as_secs_f64();
-        let rows = cv_core::events::events_for("claude", "perf", None);
+        let rows = cv_core::events::events_for("claude", "perf", None).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].kind, "file_edit");
         assert_eq!(rows[0].target.as_deref(), Some("/perf/a.rs"));
@@ -4722,7 +4722,7 @@ mod tests {
             .counts_with_source(&r, &source)
             .unwrap();
         let before = observe(&dir, std::slice::from_ref(&r), &["zanzibar".into()]);
-        let rows = cv_core::events::events_for("kimi-code", &r.id, None);
+        let rows = cv_core::events::events_for("kimi-code", &r.id, None).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].kind, "file_read");
         let events = format!("{rows:?}");
@@ -4731,7 +4731,7 @@ mod tests {
         assert_eq!(before, observe(&dir, std::slice::from_ref(&r), &["zanzibar".into()]));
         assert_eq!(
             events,
-            format!("{:?}", cv_core::events::events_for("kimi-code", &r.id, None))
+            format!("{:?}", cv_core::events::events_for("kimi-code", &r.id, None).unwrap())
         );
         std::fs::write(&controls, "{\"cwd\":\"/changed\"}").unwrap();
         let changed = refresh(false);
@@ -5134,6 +5134,7 @@ mod tests {
         assert_eq!((replay.changed, replay.resumed, replay.errors), (1, 0, 0));
         let events = || {
             cv_core::events::events_for("claude", "copy-events", None)
+                .unwrap()
                 .into_iter()
                 .map(|e| {
                     (
@@ -5204,7 +5205,12 @@ mod tests {
         assert!(cv_core::catalog::AffordanceTable::load().stale(&r));
         assert_eq!(sweep(&dir, vec![r.clone()], false, false).unwrap().changed, 1);
         assert_eq!(text_search(&dir, "zqafterchild", 10).unwrap().len(), 1);
-        assert_eq!(cv_core::events::events_for("grok", &r.id, Some("file_read")).len(), 1);
+        assert_eq!(
+            cv_core::events::events_for("grok", &r.id, Some("file_read"))
+                .unwrap()
+                .len(),
+            1
+        );
         assert!(!cv_core::events::needs_ingest(&r));
         assert!(!cv_core::catalog::AffordanceTable::load().stale(&r));
         for d in [dir, sdir] {
@@ -5274,7 +5280,12 @@ mod tests {
         assert!(cv_core::catalog::AffordanceTable::load().stale(&r));
         assert_eq!(sweep(&dir, vec![r.clone()], false, false).unwrap().changed, 1);
         assert_eq!(text_search(&dir, "zqafterwal", 10).unwrap().len(), 1);
-        assert_eq!(cv_core::events::events_for("hermes", &r.id, Some("file_read")).len(), 1);
+        assert_eq!(
+            cv_core::events::events_for("hermes", &r.id, Some("file_read"))
+                .unwrap()
+                .len(),
+            1
+        );
         assert!(!cv_core::events::needs_ingest(&r));
         assert!(!cv_core::catalog::AffordanceTable::load().stale(&r));
         for d in [dir, sdir] {
@@ -5562,14 +5573,14 @@ mod tests {
         assert_eq!(hits[0].id, "tee-evt");
 
         // …and the SAME pass landed events in the catalog.
-        let rows = cv_core::events::events_for("claude", "tee-evt", None);
+        let rows = cv_core::events::events_for("claude", "tee-evt", None).unwrap();
         let edit = rows.iter().find(|e| e.kind == "file_edit").expect("edit event");
         assert_eq!(edit.target.as_deref(), Some("/repo/crates/cv-search/src/fts.rs"));
         let cmd = rows.iter().find(|e| e.kind == "command").expect("command event");
         assert_eq!(cmd.target.as_deref(), Some("cargo test -p cv-search"));
 
         // The touched query resolves it by path suffix.
-        let touched = cv_core::events::sessions_touching("crates/cv-search/src/fts.rs", true);
+        let touched = cv_core::events::sessions_touching("crates/cv-search/src/fts.rs", true).unwrap();
         assert_eq!(touched.len(), 1);
         assert_eq!(touched[0].session_id, "tee-evt");
         assert_eq!(touched[0].edits, 1);
@@ -5759,7 +5770,9 @@ mod tests {
             assert!(text_search(&dir, "zqspanpartial", 10).unwrap().is_empty());
             assert!(!read_indexed_sigs(&index, &f).unwrap().0.contains_key(&r.id));
             assert!(cv_core::catalog::AffordanceTable::load().counts(&r).is_none());
-            assert!(cv_core::events::events_for(r.harness.as_str(), &r.id, None).is_empty());
+            assert!(cv_core::events::events_for(r.harness.as_str(), &r.id, None)
+                .unwrap()
+                .is_empty());
             assert!(cv_core::events::needs_ingest(&r));
             assert!(cv_core::resume::MarkTable::load().get(&r).is_none());
             std::fs::remove_dir_all(dir).unwrap();
@@ -5863,7 +5876,9 @@ mod tests {
         assert!(text_search(&dir, "zqconsumer", 10).unwrap().is_empty());
         assert!(!read_indexed_sigs(&index, &f).unwrap().0.contains_key(&r.id));
         assert!(cv_core::catalog::AffordanceTable::load().counts(&r).is_none());
-        assert!(cv_core::events::events_for(r.harness.as_str(), &r.id, None).is_empty());
+        assert!(cv_core::events::events_for(r.harness.as_str(), &r.id, None)
+            .unwrap()
+            .is_empty());
         assert!(cv_core::events::needs_ingest(&r));
         assert!(cv_core::resume::MarkTable::load().get(&r).is_none());
         std::fs::remove_dir_all(dir).ok();
@@ -6219,7 +6234,12 @@ mod tests {
         };
         sweep(&dir, vec![parent.clone()], true, true).unwrap();
         assert_eq!(attribution().as_deref(), Some("parent"));
-        assert_eq!(cv_core::events::events_for("claude", "agent-shared", None).len(), 1);
+        assert_eq!(
+            cv_core::events::events_for("claude", "agent-shared", None)
+                .unwrap()
+                .len(),
+            1
+        );
         assert_eq!(
             sweep(&dir, vec![parent.clone(), direct.clone()], false, true)
                 .unwrap()
@@ -6244,7 +6264,12 @@ mod tests {
             "folded authority must restore its parent"
         );
         assert_eq!(sweep(&dir, vec![parent.clone()], false, true).unwrap().changed, 0);
-        assert_eq!(cv_core::events::events_for("claude", "agent-shared", None).len(), 1);
+        assert_eq!(
+            cv_core::events::events_for("claude", "agent-shared", None)
+                .unwrap()
+                .len(),
+            1
+        );
         // Another actual producer can publish direct attribution without touching FTS.
         cv_core::events::ingest_ref(&direct).unwrap();
         assert_eq!(attribution(), None);
@@ -6289,7 +6314,7 @@ mod tests {
         index_refs_with_subagents(&dir, std::slice::from_ref(&parent), true).unwrap();
 
         // The sub-agent's edit is in the catalog, attributed to it + its parent.
-        let touched = cv_core::events::sessions_touching("/repo/src/only_subagent.rs", true);
+        let touched = cv_core::events::sessions_touching("/repo/src/only_subagent.rs", true).unwrap();
         assert_eq!(touched.len(), 1, "sub-agent edit must be catalogued");
         let t = &touched[0];
         assert_eq!(t.session_id, "agent-ed1");
@@ -6297,7 +6322,7 @@ mod tests {
         assert_eq!(t.agent_id.as_deref(), Some("ed1"));
 
         // And the per-session events carry it too.
-        let rows = cv_core::events::events_for("claude", "agent-ed1", None);
+        let rows = cv_core::events::events_for("claude", "agent-ed1", None).unwrap();
         let edit = rows.iter().find(|e| e.kind == "file_edit").expect("edit event");
         assert_eq!(edit.parent_id.as_deref(), Some("evt-parent"));
         assert_eq!(edit.agent_id.as_deref(), Some("ed1"));
@@ -6470,7 +6495,7 @@ mod tests {
         for r in refs {
             out.push(format!(
                 "{:?}",
-                cv_core::events::events_for(r.harness.as_str(), &r.id, None)
+                cv_core::events::events_for(r.harness.as_str(), &r.id, None).unwrap()
             ));
             out.push(format!("{:?}", counts.counts(r)));
         }
@@ -6780,7 +6805,12 @@ mod tests {
         assert!(refs.iter().all(|r| cv_core::resume::MarkTable::load().get(r).is_some()));
         let before: Vec<_> = refs
             .iter()
-            .map(|r| format!("{:?}", cv_core::events::events_for(r.harness.as_str(), &r.id, None)))
+            .map(|r| {
+                format!(
+                    "{:?}",
+                    cv_core::events::events_for(r.harness.as_str(), &r.id, None).unwrap()
+                )
+            })
             .collect();
         let conn = rusqlite::Connection::open(home.home.join("catalog.db")).unwrap();
         conn.execute_batch(
@@ -6804,7 +6834,10 @@ mod tests {
         // must be removed. An events-only retry over an unchanged source must read whole.
         for (r, expected) in refs.iter().zip(&before) {
             assert_eq!(
-                format!("{:?}", cv_core::events::events_for(r.harness.as_str(), &r.id, None)),
+                format!(
+                    "{:?}",
+                    cv_core::events::events_for(r.harness.as_str(), &r.id, None).unwrap()
+                ),
                 *expected
             );
             assert!(cv_core::events::needs_ingest(r));
@@ -7069,7 +7102,7 @@ mod tests {
         let r = sref("identity", "stabletitle", path.to_string_lossy().into_owned());
         sweep(&dir, vec![r.clone()], false, false).unwrap();
         let old_counts = cv_core::catalog::AffordanceTable::load().counts(&r).unwrap();
-        let old_events = cv_core::events::events_for(r.harness.as_str(), &r.id, None);
+        let old_events = cv_core::events::events_for(r.harness.as_str(), &r.id, None).unwrap();
         let head = cv_core::resume::MarkTable::load().get(&r).unwrap().clone();
         let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
         let rewritten = body
@@ -7096,7 +7129,10 @@ mod tests {
         );
         assert_ne!(
             format!("{old_events:?}"),
-            format!("{:?}", cv_core::events::events_for(r.harness.as_str(), &r.id, None))
+            format!(
+                "{:?}",
+                cv_core::events::events_for(r.harness.as_str(), &r.id, None).unwrap()
+            )
         );
         let words = ["oldneedle", "newneedle"].map(str::to_string);
         assert_eq!(

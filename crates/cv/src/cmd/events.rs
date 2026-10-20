@@ -23,7 +23,7 @@ pub(crate) fn cmd_events(
         events::ingest_ref(&r)?;
     }
 
-    let rows = events::events_for(r.harness.as_str(), &r.id, kind.as_deref());
+    let rows = events::events_for(r.harness.as_str(), &r.id, kind.as_deref())?;
     if json {
         // One array: the session's own events, then (with --subagents) each sub-agent's, tagged.
         // Every row is `rows::event_row` — the same function `/api/session/{h}/{id}/events` prints
@@ -187,7 +187,7 @@ fn print_event_row(
 }
 
 pub(crate) fn cmd_touched(path: &str, edits_only: bool, json: bool) -> Result<()> {
-    let rows = cv_core::events::sessions_touching(path, edits_only);
+    let rows = cv_core::events::sessions_touching(path, edits_only)?;
     if json {
         // `rows::touched_row`: the same row `/api/touched` serves.
         let out: Vec<serde_json::Value> = rows.iter().map(cv_core::rows::touched_row).collect();

@@ -1233,7 +1233,13 @@ fn hook_edit(ev: &Event) -> Result<Option<Value>> {
                 .join(file.trim_start_matches("./"))
         };
         let mut live: Vec<(String, i64)> = Vec::new();
-        for t in cv_core::events::sessions_editing(&abs.to_string_lossy()) {
+        // The guard answers in milliseconds and never blocks an edit on its own failure: an event
+        // catalog that cannot answer degrades once, as an accelerator does.
+        let editing = cv_core::events::sessions_editing(&abs.to_string_lossy()).unwrap_or_else(|e| {
+            cv_core::env::warn_once("the event catalog", format_args!("{e:#}"));
+            Vec::new()
+        });
+        for t in editing {
             let Some(path) = cv_core::hooks::transcript_of(&t) else {
                 continue;
             };

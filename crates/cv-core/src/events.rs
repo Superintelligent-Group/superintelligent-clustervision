@@ -1045,10 +1045,10 @@ mod db {
     }
 
     /// All persisted events of one session in transcript order, optionally filtered by kind.
-    /// Empty on any error or an un-ingested session.
-    pub fn events_for(harness: &str, session_id: &str, kind: Option<&str>) -> Vec<EventRow> {
-        let Some(conn) = open() else { return Vec::new() };
-        let Ok(mut stmt) = conn.prepare(
+    /// Empty for an un-ingested session; an event catalog that cannot open or answer is an error.
+    pub fn events_for(harness: &str, session_id: &str, kind: Option<&str>) -> Result<Vec<EventRow>> {
+        let conn = open().context("the event catalog cannot be opened")?;
+        let mut stmt = conn.prepare(
             "SELECT es.harness, es.session_id, e.msg_idx, e.ts, e.kind, e.tool, t.target, e.detail,
                     es.parent_id, es.agent_id, es.workflow
              FROM events e
@@ -1056,9 +1056,7 @@ mod db {
              LEFT JOIN event_targets t ON t.id = e.target_id
              WHERE es.harness=?1 AND es.session_id=?2 AND (?3 IS NULL OR e.kind=?3)
              ORDER BY e.msg_idx, e.kind",
-        ) else {
-            return Vec::new();
-        };
+        )?;
         let rows = stmt.query_map(params![harness, session_id, kind], |row| {
             Ok(EventRow {
                 harness: row.get(0)?,
@@ -1073,11 +1071,8 @@ mod db {
                 agent_id: row.get(9)?,
                 workflow: row.get(10)?,
             })
-        });
-        match rows {
-            Ok(rows) => rows.flatten().collect(),
-            Err(_) => Vec::new(),
-        }
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// THE query: sessions whose file events touched `path`, newest activity first.
@@ -1085,12 +1080,12 @@ mod db {
     /// `path` is lexically absolutized against the current directory, and *also* matched by
     /// suffix (`…/<path>`), so `cv touched src/ir.rs` finds `/repo/src/ir.rs` from anywhere.
     /// `edits_only` keeps only sessions with at least one `file_edit`. Titles come from a join
-    /// against the `sessions` catalog. Empty on any error or a cold catalog.
+    /// against the `sessions` catalog. Empty on a cold catalog; a catalog error is an error.
     ///
     /// The leading-`%` LIKE can never use an index; since v2 it scans `event_targets` (the
     /// distinct targets, ~⅓ of the event rows) and joins matches back through `idx_events_target`
     /// instead of scanning every event row.
-    pub fn sessions_touching(path: &str, edits_only: bool) -> Vec<TouchedSession> {
+    pub fn sessions_touching(path: &str, edits_only: bool) -> Result<Vec<TouchedSession>> {
         let abs = absolutize(path, std::env::current_dir().ok().as_deref());
         // Escape LIKE metacharacters in the user's path, then match any target ending in /<path>.
         let escaped = path
@@ -1110,12 +1105,12 @@ mod db {
     /// indexed point lookup behind the `cv hook edit` guard, which must answer in milliseconds on
     /// a store of millions of events. No suffix match, so no scan of `event_targets` — the
     /// `target` UNIQUE index resolves the path and `idx_events_target` the rows. Newest first.
-    pub fn sessions_editing(abs: &str) -> Vec<TouchedSession> {
+    pub fn sessions_editing(abs: &str) -> Result<Vec<TouchedSession>> {
         touching(abs, None, true)
     }
 
-    fn touching(abs: &str, suffix: Option<&str>, edits_only: bool) -> Vec<TouchedSession> {
-        let Some(conn) = open() else { return Vec::new() };
+    fn touching(abs: &str, suffix: Option<&str>, edits_only: bool) -> Result<Vec<TouchedSession>> {
+        let conn = open().context("the event catalog cannot be opened")?;
         let having = if edits_only { "HAVING edits > 0" } else { "" };
         // With a suffix: `target = ?1 OR target LIKE ?2` — the IN-subquery (not a join) pins the
         // plan to one scan over the distinct targets, then matching event rows through
@@ -1140,9 +1135,7 @@ mod db {
              {having}
              ORDER BY last_ts DESC, es.session_id"
         );
-        let Ok(mut stmt) = conn.prepare(&sql) else {
-            return Vec::new();
-        };
+        let mut stmt = conn.prepare(&sql)?;
         // rusqlite refuses a parameter the SQL never references, so bind exactly what it names.
         let map = |row: &rusqlite::Row| {
             Ok(TouchedSession {
@@ -1158,13 +1151,10 @@ mod db {
             })
         };
         let rows = match suffix {
-            Some(sfx) => stmt.query_map(params![abs, sfx], map),
-            None => stmt.query_map(params![abs], map),
+            Some(sfx) => stmt.query_map(params![abs, sfx], map)?,
+            None => stmt.query_map(params![abs], map)?,
         };
-        match rows {
-            Ok(rows) => rows.flatten().collect(),
-            Err(_) => Vec::new(),
-        }
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// Every `file_edit` event on one file, with session metadata riding along, oldest first.
@@ -1173,14 +1163,14 @@ mod db {
     /// path in the *current* checkout) and by repo-relative suffix `rel` (target equals `rel` or
     /// ends with `/<rel>`), so edits recorded by a session whose checkout lived at a different
     /// path still surface. The LEFT JOIN is grouped per event row because a session may be
-    /// cataloged at more than one path. Empty on any error or a cold catalog.
-    pub fn edits_touching_file(abs: &str, rel: &str) -> Vec<EditEvent> {
-        let Some(conn) = open() else { return Vec::new() };
+    /// cataloged at more than one path. Empty on a cold catalog; a catalog error is an error.
+    pub fn edits_touching_file(abs: &str, rel: &str) -> Result<Vec<EditEvent>> {
+        let conn = open().context("the event catalog cannot be opened")?;
         let escaped = rel.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
         let suffix = format!("%/{escaped}");
         // IN-subquery for the same plan-pinning reason as [`sessions_touching`]; the extra join
         // back to event_targets only resolves the matched rows' target strings by rowid.
-        let Ok(mut stmt) = conn.prepare(
+        let mut stmt = conn.prepare(
             "SELECT es.harness, es.session_id, e.msg_idx, e.ts, t.target,
                     MAX(s.title), MAX(s.cwd), MAX(s.created_at), MAX(s.updated_at), MAX(es.parent_id)
              FROM events e
@@ -1192,9 +1182,7 @@ mod db {
                                    WHERE target = ?1 OR target = ?2 OR target LIKE ?3 ESCAPE '\\')
              GROUP BY es.harness, es.session_id, e.msg_idx, e.ts, t.target
              ORDER BY e.ts, e.msg_idx",
-        ) else {
-            return Vec::new();
-        };
+        )?;
         let rows = stmt.query_map(params![abs, rel, suffix], |row| {
             Ok(EditEvent {
                 harness: row.get(0)?,
@@ -1208,11 +1196,8 @@ mod db {
                 updated_at: row.get(8)?,
                 parent_id: row.get(9)?,
             })
-        });
-        match rows {
-            Ok(rows) => rows.flatten().collect(),
-            Err(_) => Vec::new(),
-        }
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// Whether *any* events have ever been ingested — lets callers distinguish "no sessions
@@ -1385,17 +1370,17 @@ mod db_stub {
     pub fn ingest_all(_force: bool, _subagents: bool) -> Result<usize> {
         Ok(0)
     }
-    pub fn events_for(_harness: &str, _session_id: &str, _kind: Option<&str>) -> Vec<EventRow> {
-        Vec::new()
+    pub fn events_for(_harness: &str, _session_id: &str, _kind: Option<&str>) -> Result<Vec<EventRow>> {
+        Ok(Vec::new())
     }
-    pub fn sessions_touching(_path: &str, _edits_only: bool) -> Vec<TouchedSession> {
-        Vec::new()
+    pub fn sessions_touching(_path: &str, _edits_only: bool) -> Result<Vec<TouchedSession>> {
+        Ok(Vec::new())
     }
-    pub fn sessions_editing(_abs: &str) -> Vec<TouchedSession> {
-        Vec::new()
+    pub fn sessions_editing(_abs: &str) -> Result<Vec<TouchedSession>> {
+        Ok(Vec::new())
     }
-    pub fn edits_touching_file(_abs: &str, _rel: &str) -> Vec<EditEvent> {
-        Vec::new()
+    pub fn edits_touching_file(_abs: &str, _rel: &str) -> Result<Vec<EditEvent>> {
+        Ok(Vec::new())
     }
     pub fn catalog_has_events() -> bool {
         false
@@ -1833,7 +1818,7 @@ mod tests {
             let source = probe.snapshot(r);
             SyncTable::load().needs_ingest(r, &source, prov, &mut probe)
         };
-        let rows = || format!("{:?}", events_for("claude", "shared", None));
+        let rows = || format!("{:?}", events_for("claude", "shared", None).unwrap());
         ingest_ref(&a).unwrap();
         assert!(!stale(&a, &direct));
         let planned = SyncTable::load();
@@ -1844,7 +1829,7 @@ mod tests {
         assert!(!needs_ingest(&b));
         assert!(!SyncTable::load().can_resume(&a, &direct));
         assert_eq!(
-            events_for("claude", "shared", None)[0].target.as_deref(),
+            events_for("claude", "shared", None).unwrap()[0].target.as_deref(),
             Some("/first/b.rs")
         );
         let before = rows();
@@ -1864,7 +1849,7 @@ mod tests {
         assert!(needs_ingest(&b));
         assert!(!stale(&b, &folded));
         assert_eq!(
-            events_for("claude", "shared", None)[0].parent_id.as_deref(),
+            events_for("claude", "shared", None).unwrap()[0].parent_id.as_deref(),
             Some("parent")
         );
         let source = crate::source::Probe::default().snapshot(&b);
@@ -1872,14 +1857,14 @@ mod tests {
         ingest_ref(&b).unwrap();
         assert!(!stale(&b, &direct));
         assert!(stale(&b, &folded));
-        assert!(events_for("claude", "shared", None)[0].parent_id.is_none());
+        assert!(events_for("claude", "shared", None).unwrap()[0].parent_id.is_none());
         let mut changed = b.clone();
         changed.cwd = Some("/second".into());
         assert!(stale(&changed, &direct));
         assert!(!SyncTable::load().can_resume(&changed, &direct));
         ingest_ref(&changed).unwrap();
         assert_eq!(
-            events_for("claude", "shared", None)[0].target.as_deref(),
+            events_for("claude", "shared", None).unwrap()[0].target.as_deref(),
             Some("/second/b.rs")
         );
         assert!(!stale(&changed, &direct));
@@ -1987,7 +1972,7 @@ mod tests {
         );
         for (r, provenance) in selected.iter().filter(|(_, provenance)| !provenance.is_empty()) {
             ingest_subagent(r, provenance).unwrap();
-            let rows = events_for(r.harness.as_str(), &r.id, None);
+            let rows = events_for(r.harness.as_str(), &r.id, None).unwrap();
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].parent_id.as_deref(), Some("parent"));
         }
@@ -2083,7 +2068,7 @@ mod tests {
         assert!(!needs_ingest(&r));
         ingest_ref(&r).unwrap();
 
-        let rows = events_for("claude", "evt-e2e", None);
+        let rows = events_for("claude", "evt-e2e", None).unwrap();
         assert_eq!(rows.len(), n, "re-ingest must not duplicate rows");
         let edit = rows.iter().find(|e| e.kind == "file_edit").unwrap();
         assert_eq!(edit.target.as_deref(), Some("/repo/src/parser.rs"));
@@ -2095,7 +2080,7 @@ mod tests {
         assert!(err.detail.as_deref().unwrap().contains("E0308"));
 
         // Kind filter narrows.
-        assert_eq!(events_for("claude", "evt-e2e", Some("command")).len(), 1);
+        assert_eq!(events_for("claude", "evt-e2e", Some("command")).unwrap().len(), 1);
 
         // A same-size rewrite must invalidate events, even for this normally append-only log.
         let content = std::fs::read(&path).unwrap();
@@ -2111,7 +2096,7 @@ mod tests {
             .unwrap();
         assert!(needs_ingest(&r), "same-size rewrites must force an event re-ingest");
         ingest_ref(&r).unwrap();
-        let edited_rows = events_for("claude", "evt-e2e", Some("file_edit"));
+        let edited_rows = events_for("claude", "evt-e2e", Some("file_edit")).unwrap();
         assert_eq!(edited_rows.len(), 1);
         assert_eq!(edited_rows[0].target.as_deref(), Some("/repo/src/reader.rs"));
         assert!(!needs_ingest(&r));
@@ -2134,25 +2119,25 @@ mod tests {
         assert!(!needs_ingest(&r));
 
         // The touched query finds the session by absolute path and by suffix.
-        let touched = sessions_touching("/repo/src/parser.rs", false);
+        let touched = sessions_touching("/repo/src/parser.rs", false).unwrap();
         assert_eq!(touched.len(), 1);
         assert_eq!(touched[0].session_id, "evt-e2e");
         assert_eq!(touched[0].edits, 1);
         assert_eq!(touched[0].reads, 0);
-        let by_suffix = sessions_touching("src/parser.rs", true);
+        let by_suffix = sessions_touching("src/parser.rs", true).unwrap();
         assert_eq!(by_suffix.len(), 1, "suffix match + edits_only should still hit");
         // A file nobody touched stays quiet.
-        assert!(sessions_touching("src/nonexistent.rs", false).is_empty());
+        assert!(sessions_touching("src/nonexistent.rs", false).unwrap().is_empty());
         // The edit guard's exact lookup: the absolute path hits, a suffix never does.
-        let exact = sessions_editing("/repo/src/parser.rs");
+        let exact = sessions_editing("/repo/src/parser.rs").unwrap();
         assert_eq!(exact.len(), 1);
         assert_eq!(exact[0].session_id, "evt-e2e");
-        assert!(sessions_editing("src/parser.rs").is_empty());
+        assert!(sessions_editing("src/parser.rs").unwrap().is_empty());
 
         // blame's edit query: abs + repo-relative-suffix matching, session metadata joined in.
         crate::catalog::sync(std::slice::from_ref(&r));
         assert!(catalog_has_events());
-        let edits = edits_touching_file("/repo/src/parser.rs", "src/parser.rs");
+        let edits = edits_touching_file("/repo/src/parser.rs", "src/parser.rs").unwrap();
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].session_id, "evt-e2e");
         assert_eq!(edits[0].msg_idx, 1);
@@ -2160,12 +2145,16 @@ mod tests {
         assert_eq!(edits[0].cwd.as_deref(), Some("/repo"));
         assert_eq!(edits[0].title.as_deref(), Some("fix the parser"));
         // Suffix-only match from a *different* checkout path still hits.
-        let edits = edits_touching_file("/elsewhere/src/parser.rs", "src/parser.rs");
+        let edits = edits_touching_file("/elsewhere/src/parser.rs", "src/parser.rs").unwrap();
         assert_eq!(edits.len(), 1);
-        assert!(edits_touching_file("/repo/src/other.rs", "src/other.rs").is_empty());
+        assert!(edits_touching_file("/repo/src/other.rs", "src/other.rs")
+            .unwrap()
+            .is_empty());
         // A suffix must start at a path-component boundary, and a relative path equals only itself.
-        assert!(edits_touching_file("/x/rser.rs", "rser.rs").is_empty());
-        assert!(edits_touching_file("/x/src/parser.rs.bak", "src/parser.rs.bak").is_empty());
+        assert!(edits_touching_file("/x/rser.rs", "rser.rs").unwrap().is_empty());
+        assert!(edits_touching_file("/x/src/parser.rs.bak", "src/parser.rs.bak")
+            .unwrap()
+            .is_empty());
     }
 
     /// Migration e2e: a v1-shaped (0.9.10) catalog opened by v2 code is dropped wholesale —
@@ -2243,10 +2232,10 @@ mod tests {
         let n = ingest_ref(&r).unwrap();
         assert_eq!(n, 1);
         assert!(!needs_ingest(&r));
-        let rows = events_for("claude", "mig-e2e", None);
+        let rows = events_for("claude", "mig-e2e", None).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].target.as_deref(), Some("/repo/src/lib.rs"));
-        assert_eq!(sessions_touching("src/lib.rs", true).len(), 1);
+        assert_eq!(sessions_touching("src/lib.rs", true).unwrap().len(), 1);
 
         // The stamp stuck, so the next open did NOT re-drop (the ingested rows are still there).
         {
@@ -2264,6 +2253,6 @@ mod tests {
         );
         assert!(needs_ingest(&r));
         ingest_ref(&r).unwrap();
-        assert_eq!(events_for("claude", "mig-e2e", None).len(), 1);
+        assert_eq!(events_for("claude", "mig-e2e", None).unwrap().len(), 1);
     }
 }

@@ -365,7 +365,7 @@ fn build_source(hit: &cv_search::Hit, task: &str, llm_model: Option<&Option<Stri
 
     // Stale events ride the excerpt pass; event failure remains best effort.
     let (excerpt, excerpt_range) = best_window_and_ingest(adapter.as_ref(), &r, task)?;
-    let rows = cv_core::events::events_for(r.harness.as_str(), &r.id, None);
+    let rows = cv_core::events::events_for(r.harness.as_str(), &r.id, None)?;
     let EventFacts { edits, reads, commands } = event_facts(&rows);
 
     // Optional abstractive pass over just this span (never the whole session).
@@ -979,7 +979,7 @@ mod tests {
             .unwrap();
     }
     fn rows(r: &cv_core::SessionRef) -> Vec<cv_core::events::EventRow> {
-        cv_core::events::events_for(r.harness.as_str(), &r.id, None)
+        cv_core::events::events_for(r.harness.as_str(), &r.id, None).unwrap()
     }
 
     #[test]

@@ -168,6 +168,7 @@ fn blame_end_to_end() {
     cv_core::catalog::sync(&[r.clone(), rx]);
     // The edit's msg_idx as the catalog recorded it — asserted against, never assumed.
     let edit_idx = cv_core::events::events_for("claude", "blame-e2e", Some("file_edit"))
+        .unwrap()
         .first()
         .expect("edit event ingested")
         .msg_idx;

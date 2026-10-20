@@ -407,7 +407,7 @@ pub fn cmd_blame(file: &str, lines: Option<&str>, show: bool) -> Result<()> {
     }
 
     // Candidate edits from the event catalog, matched absolutely and by repo-relative suffix.
-    let edits = events::edits_touching_file(&abs.to_string_lossy(), &rel);
+    let edits = events::edits_touching_file(&abs.to_string_lossy(), &rel)?;
     if edits.is_empty() && !events::catalog_has_events() {
         eprintln!("(event catalog is empty — run `cv index` first to ingest tool events)");
     }
@@ -638,7 +638,7 @@ fn show_best(harness: &str, session_id: &str, msg_idx: i64) -> Result<()> {
 fn blame_event_only(file: &str, abs: &Path) -> Result<()> {
     println!("(not inside a git repository — event-catalog matches only, no commit correlation)\n");
     let rel = file.trim_start_matches("./");
-    let edits = events::edits_touching_file(&abs.to_string_lossy(), rel);
+    let edits = events::edits_touching_file(&abs.to_string_lossy(), rel)?;
     if edits.is_empty() {
         if !events::catalog_has_events() {
             println!("no edit events found — run `cv index` first to ingest tool events");
