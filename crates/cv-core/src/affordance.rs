@@ -417,17 +417,9 @@ pub struct DeferredWrapper {
     pub args_key: &'static str,
 }
 
-/// The `(name key, arguments key)` of `h`'s deferred-tool wrapper.
-pub(crate) fn deferred_keys(h: Harness) -> (&'static str, &'static str) {
-    match h {
-        Harness::OpenClaw => ("id", "args"),
-        _ => ("name", "arguments"),
-    }
-}
-
 /// `tool_call{name, arguments}` (or OpenClaw's `{id, args}`) → the inner tool's call, namespaced
 /// [`DEFERRED`]. Anything else (including a wrapper without a string name) is left alone.
-pub fn unwrap_deferred(h: Harness, b: &mut Block) -> Result<()> {
+pub fn unwrap_deferred(wrapper: DeferredWrapper, b: &mut Block) -> Result<()> {
     if let Block::ToolUse {
         name, input, namespace, ..
     } = b
@@ -435,7 +427,7 @@ pub fn unwrap_deferred(h: Harness, b: &mut Block) -> Result<()> {
         if name != DEFERRED || namespace.is_some() {
             return Ok(());
         }
-        let (name_key, args_key) = deferred_keys(h);
+        let DeferredWrapper { name_key, args_key } = wrapper;
         let Some(inner) = input.with_view(|view| input::field_string(view, name_key))? else {
             return Ok(());
         };
@@ -460,7 +452,7 @@ pub fn unwrap_deferred(h: Harness, b: &mut Block) -> Result<()> {
 /// Complete replay boundary for stores that spell deferred calls as wrappers. The returned
 /// owned wire object demands every argument; ordinary classification uses the unwrapped source
 /// descriptor and never calls this materializing operation.
-pub fn rewrap_deferred(h: Harness, b: &Block) -> Result<Option<Block>> {
+pub fn rewrap_deferred(wrapper: DeferredWrapper, b: &Block) -> Result<Option<Block>> {
     Ok(match b {
         Block::ToolUse {
             id,
@@ -468,7 +460,7 @@ pub fn rewrap_deferred(h: Harness, b: &Block) -> Result<Option<Block>> {
             input,
             namespace: Some(ns),
         } if ns == DEFERRED => {
-            let (name_key, args_key) = deferred_keys(h);
+            let DeferredWrapper { name_key, args_key } = wrapper;
             let mut wrapped = serde_json::Map::new();
             wrapped.insert(name_key.into(), Value::String(name.clone()));
             wrapped.insert(args_key.into(), input.resolve()?.into_owned());
@@ -483,13 +475,14 @@ pub fn rewrap_deferred(h: Harness, b: &Block) -> Result<Option<Block>> {
     })
 }
 
-/// A sink wrapper an adapter puts around its sink. It unwraps `tool_call` (for the harnesses whose
-/// reader does not: Hermes, OpenClaw), then: a `Reply` that calls a spawn tool becomes a
+/// A sink wrapper an adapter puts around its sink. It unwraps the deferred `tool_call` wrapper (for
+/// an adapter whose reader leaves it, [`AffordanceSink::unwrapping`]), then: a `Reply` that calls a spawn tool becomes a
 /// [`MessageKind::SubagentSpawn`], and the tool-result turn answering a synchronous spawn a
 /// [`MessageKind::SubagentReturn`] with [`Origin::Subagent`]. The state is the set of open
 /// synchronous spawn ids, so it stays O(spawns).
 pub struct AffordanceSink<'a> {
     harness: Harness,
+    deferred: Option<DeferredWrapper>,
     inner: &'a mut dyn MessageSink,
     open: std::collections::HashMap<String, Returns>,
     latch: crate::stream::Latch,
@@ -499,10 +492,18 @@ impl<'a> AffordanceSink<'a> {
     pub fn new(harness: Harness, inner: &'a mut dyn MessageSink) -> Self {
         AffordanceSink {
             harness,
+            deferred: None,
             inner,
             open: Default::default(),
             latch: Default::default(),
         }
+    }
+
+    /// Unwrap `wrapper`'s deferred calls too: an adapter whose reader leaves them passes its
+    /// [`crate::harness::Adapter::deferred_wrapper`].
+    pub fn unwrapping(mut self, wrapper: Option<DeferredWrapper>) -> Self {
+        self.deferred = wrapper;
+        self
     }
 }
 
@@ -523,9 +524,9 @@ impl MessageSink for AffordanceSink<'_> {
         if self.latch.failed() {
             return Flow::Stop;
         }
-        if matches!(self.harness, Harness::Hermes | Harness::OpenClaw) {
+        if let Some(wrapper) = self.deferred {
             for block in &mut m.content {
-                if let Err(error) = unwrap_deferred(self.harness, block) {
+                if let Err(error) = unwrap_deferred(wrapper, block) {
                     self.latch.fail(error);
                     return Flow::Stop;
                 }
@@ -1817,6 +1818,10 @@ mod tests {
 
     #[test]
     fn deferred_source_child_remains_lazy_and_failure_stops_delivery() {
+        const NAME_ARGUMENTS: DeferredWrapper = DeferredWrapper {
+            name_key: "name",
+            args_key: "arguments",
+        };
         let path = std::env::temp_dir().join(format!("cv-deferred-source-{}", uuid::Uuid::new_v4()));
         let wrapped = json!({"name":"delegate_task", "arguments":{"prompt":"λ".repeat(400_000),"id":7}});
         let raw = serde_json::to_vec(&wrapped).unwrap();
@@ -1828,7 +1833,7 @@ mod tests {
             namespace: None,
             input: source.clone(),
         };
-        unwrap_deferred(Harness::Hermes, &mut block).unwrap();
+        unwrap_deferred(NAME_ARGUMENTS, &mut block).unwrap();
         let Block::ToolUse {
             input, name, namespace, ..
         } = &block
@@ -1838,7 +1843,7 @@ mod tests {
         assert!(matches!(input, Json::Source(_)));
         assert_eq!(name, "delegate_task");
         assert_eq!(namespace.as_deref(), Some(DEFERRED));
-        let replay = rewrap_deferred(Harness::Hermes, &block).unwrap().unwrap();
+        let replay = rewrap_deferred(NAME_ARGUMENTS, &block).unwrap().unwrap();
         let Block::ToolUse { input, .. } = replay else {
             unreachable!()
         };
@@ -1849,7 +1854,7 @@ mod tests {
             delivered += 1;
             Flow::Continue
         };
-        let mut sink = AffordanceSink::new(Harness::Hermes, &mut inner);
+        let mut sink = AffordanceSink::new(Harness::Hermes, &mut inner).unwrapping(Some(NAME_ARGUMENTS));
         let mut message = Message::new(Role::Assistant);
         message.content.push(Block::ToolUse {
             id: "c".into(),
@@ -1994,6 +1999,14 @@ mod tests {
                 json!({"id": "sessions_spawn", "args": {"task": "ok"}}),
             ),
         ] {
+            // Each adapter states its own spelling; Hermes is absent from a build without SQLite.
+            let wrapper = crate::harness::rootless(h).and_then(|a| a.deferred_wrapper());
+            #[cfg(not(feature = "sqlite"))]
+            if h == Harness::Hermes {
+                assert_eq!(wrapper, None);
+                continue;
+            }
+            let wrapper = wrapper.unwrap_or_else(|| panic!("{h} names its deferred wrapper"));
             let orig = Block::ToolUse {
                 id: "c".into(),
                 name: DEFERRED.into(),
@@ -2001,13 +2014,13 @@ mod tests {
                 namespace: None,
             };
             let mut b = orig.clone();
-            unwrap_deferred(h, &mut b).unwrap();
+            unwrap_deferred(wrapper, &mut b).unwrap();
             let Block::ToolUse { name, namespace, .. } = &b else {
                 unreachable!()
             };
             assert_ne!(name, DEFERRED);
             assert_eq!(namespace.as_deref(), Some(DEFERRED));
-            let Some(Block::ToolUse { name, input, .. }) = rewrap_deferred(h, &b).unwrap() else {
+            let Some(Block::ToolUse { name, input, .. }) = rewrap_deferred(wrapper, &b).unwrap() else {
                 panic!("rewraps")
             };
             assert_eq!(name, DEFERRED);

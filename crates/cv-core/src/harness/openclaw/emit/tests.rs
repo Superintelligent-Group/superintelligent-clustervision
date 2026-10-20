@@ -248,7 +248,7 @@ fn checked_openclaw_borrowed_wrapper_matches_replay_definition_and_none() -> Res
             input: input.clone(),
             namespace: namespace.map(str::to_owned),
         };
-        let rewrapped = crate::affordance::rewrap_deferred(Harness::OpenClaw, &block)?;
+        let rewrapped = crate::affordance::rewrap_deferred(crate::harness::openclaw::DEFERRED_WRAPPER, &block)?;
         assert_eq!(rewrapped.is_some(), namespace == Some(crate::affordance::DEFERRED));
         let expected = anthropic::assistant_blocks(&[rewrapped.unwrap_or(block.clone())], &anthropic::OPENCLAW)?;
         let mut bytes = Vec::new();

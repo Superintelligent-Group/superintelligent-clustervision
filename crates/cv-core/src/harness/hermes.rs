@@ -179,6 +179,12 @@ pub struct Hermes {
 
 /// This adapter with no roots: it discovers nothing and answers every fact that does not depend on
 /// where the store lives ([`super::rootless`]).
+/// Hermes's deferred-tool wrapper: `tool_call{name, arguments}`.
+pub(crate) const DEFERRED_WRAPPER: crate::affordance::DeferredWrapper = crate::affordance::DeferredWrapper {
+    name_key: "name",
+    args_key: "arguments",
+};
+
 pub(crate) static ROOTLESS: Hermes = Hermes { dbs: Vec::new() };
 
 impl Hermes {
@@ -258,10 +264,17 @@ impl Adapter for Hermes {
         Ok(out)
     }
 
+    /// Hermes routes lazily loaded tools through `tool_call{name, arguments}` and its reader
+    /// leaves the wrapper in place.
+    fn deferred_wrapper(&self) -> Option<crate::affordance::DeferredWrapper> {
+        Some(DEFERRED_WRAPPER)
+    }
+
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| {
             // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
-            let mut spawns = crate::affordance::AffordanceSink::new(Harness::Hermes, sink);
+            let mut spawns =
+                crate::affordance::AffordanceSink::new(Harness::Hermes, sink).unwrapping(self.deferred_wrapper());
             let sink: &mut dyn MessageSink = &mut spawns;
             // Route by the ref's own DB path (set at discovery time), NOT a single self.db — this is
             // what lets one Hermes adapter span many profile DBs without id collisions.

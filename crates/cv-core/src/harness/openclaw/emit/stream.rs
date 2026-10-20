@@ -34,8 +34,9 @@ pub(super) fn content(writer: &mut dyn Write, blocks: &[Block], mode: ThinkingMo
         } = block
         {
             if namespace == crate::affordance::DEFERRED {
-                // The shared replay definition supplies OpenClaw's distinct {id,args} keys.
-                let (name_key, args_key) = crate::affordance::deferred_keys(Harness::OpenClaw);
+                // The adapter's own wrapper supplies OpenClaw's distinct {id,args} keys.
+                let crate::affordance::DeferredWrapper { name_key, args_key } =
+                    crate::harness::openclaw::DEFERRED_WRAPPER;
                 let mut call = ObjectWriter::new(writer)?;
                 call.field("type", anthropic::OPENCLAW.tool_use.0)?;
                 call.field("id", id)?;

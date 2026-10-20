@@ -528,7 +528,7 @@ fn tool_calls(blocks: &[Block]) -> Result<Option<String>> {
     let mut bytes = vec![b'['];
     let mut first = true;
     for block in blocks {
-        let rewrapped = crate::affordance::rewrap_deferred(Harness::Hermes, block)?;
+        let rewrapped = crate::affordance::rewrap_deferred(super::DEFERRED_WRAPPER, block)?;
         let block = rewrapped.as_ref().unwrap_or(block);
         if let Block::ToolUse { id, name, input, .. } = block {
             if !first {

@@ -142,6 +142,12 @@ pub struct OpenClaw {
 
 /// This adapter with no roots: it discovers nothing and answers every fact that does not depend on
 /// where the store lives ([`super::rootless`]).
+/// OpenClaw 10.1's deferred-tool wrapper: `tool_call{id, args}`.
+pub(crate) const DEFERRED_WRAPPER: crate::affordance::DeferredWrapper = crate::affordance::DeferredWrapper {
+    name_key: "id",
+    args_key: "args",
+};
+
 pub(crate) static ROOTLESS: OpenClaw = OpenClaw { roots: Vec::new() };
 
 impl OpenClaw {
@@ -250,10 +256,17 @@ impl Adapter for OpenClaw {
         Ok(out)
     }
 
+    /// OpenClaw 10.1 routes lazily loaded tools through `tool_call{id, args}` and its reader
+    /// leaves the wrapper in place.
+    fn deferred_wrapper(&self) -> Option<crate::affordance::DeferredWrapper> {
+        Some(DEFERRED_WRAPPER)
+    }
+
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| {
             // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
-            let mut spawns = crate::affordance::AffordanceSink::new(Harness::OpenClaw, sink);
+            let mut spawns =
+                crate::affordance::AffordanceSink::new(Harness::OpenClaw, sink).unwrapping(self.deferred_wrapper());
             let sink: &mut dyn MessageSink = &mut spawns;
             if is_sqlite_store_path(&r.path) {
                 return stream_sqlite(r, opts, sink);
