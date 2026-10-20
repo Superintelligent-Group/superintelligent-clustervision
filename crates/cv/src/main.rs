@@ -614,9 +614,10 @@ enum Cmd {
         /// cut (the default: what a resume loads).
         #[arg(long)]
         full: bool,
-        /// Reasoning policy. native keeps the source's reasoning and identifiers; portable demotes
-        /// plaintext thinking to text, removes signature-only reasoning and repairs tool IDs.
-        /// Default: native when every model the window records is `claude-*`, else portable.
+        /// Reasoning policy, two of the four `--thinking` values (a rewind writes Claude): `native`
+        /// keeps the source's reasoning and identifiers; `portable` demotes plaintext thinking to
+        /// text, removes signature-only reasoning and repairs tool IDs. `text` and `drop` are
+        /// refused here. Default: native when every model the window records is `claude-*`, else portable.
         #[arg(long, value_parser = ["native", "portable"])]
         thinking: Option<String>,
         /// Report the window that would be written without writing anything.
@@ -1421,7 +1422,7 @@ fn run() -> Result<()> {
                      pass `--full` for the whole history",
                 );
             }
-            compose::cmd_rewind(&id, harness, agent, at.as_deref(), out, to, full, thinking.as_deref().map(str::parse).transpose()?, dry_run, json, BUILD_VERSION)
+            compose::cmd_rewind(&id, harness, agent, at.as_deref(), out, to, full, thinking.as_deref().map(util::parse_thinking).transpose()?, dry_run, json, BUILD_VERSION)
         }
         Cmd::Config { add_export, rm_export } => config::cmd_config(add_export, rm_export),
         Cmd::Schema { json, commands } => schema::cmd_schema(&build_cli(), json, commands),

@@ -737,8 +737,9 @@ fn show_range_windowing() {
     assert_eq!(v["messages"].as_array().unwrap().len(), 0, "{out}");
 }
 
-/// `--thinking <native|text|drop>` means the same thing on every command that emits a session, and
-/// nothing else answers to that word. The modes differ in whether a turn whose only content is
+/// `--thinking <native|text|drop|portable>` means the same thing on every command that emits a
+/// session, and nothing else answers to that word. `rewind` writes Claude only and offers the two
+/// it can honor (`native`, `portable`), says so in its help, and refuses the others. The modes differ in whether a turn whose only content is
 /// provider-signed reasoning survives a target that cannot hold the signature.
 #[test]
 fn thinking_mode_is_one_word_on_every_emitting_command() {
@@ -756,6 +757,22 @@ fn thinking_mode_is_one_word_on_every_emitting_command() {
             );
         }
     }
+
+    let (ok, _, out, err) = w.cv(&["rewind", "--help"]);
+    assert!(ok, "cv rewind --help failed:\n{err}");
+    for mode in ["native", "portable"] {
+        assert!(
+            out.contains(mode),
+            "cv rewind --help must offer --thinking {mode}:\n{out}"
+        );
+    }
+    assert!(
+        out.contains("`text` and `drop` are"),
+        "rewind's help names the values it refuses:\n{out}"
+    );
+    let (_, code, _, err) = w.cv(&["rewind", "alphasess", "--thinking", "drop"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("drop"), "the refused value is quoted back:\n{err}");
 
     // An unknown mode is rejected by name, listing what is valid.
     let (_, _, _, err) = w.cv(&["port", "alphasess", "--thinking", "sideways"]);
