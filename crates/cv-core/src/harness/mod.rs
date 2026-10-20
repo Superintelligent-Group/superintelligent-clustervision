@@ -294,6 +294,13 @@ pub trait Adapter: Send + Sync {
     // (`docs/INTERFACE-V2.md` §4). Each default is "no opinion"; none depends on the adapter's
     // roots, so a shared module asks them of [`rootless`] without detecting a store.
 
+    /// The hook call `payload` (the JSON the harness pipes to `cv hook <name>`) as one
+    /// [`crate::hooks::Event`], decoded by the adapter that owns the payload's shape. Default:
+    /// `None`, the harness has no verified hook contract.
+    fn hook_event(&self, _payload: &Value) -> Result<Option<crate::hooks::Event>> {
+        Ok(None)
+    }
+
     /// The native keys a derived copy of a session (`cv prune`, `cv rewind`, `cv adopt`) rewrites,
     /// for the shared writer in `derive`. Default: none; the harness has no derived copies.
     fn identity(&self) -> Option<Identity> {

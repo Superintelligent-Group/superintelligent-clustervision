@@ -14,6 +14,7 @@ use crate::source::{Dependencies, Probe};
 pub mod adopt;
 pub(crate) mod emit;
 mod fork;
+mod hook;
 mod metadata;
 pub(crate) mod record;
 pub(crate) mod replay;
@@ -225,6 +226,10 @@ fn projects_dir(entry: PathBuf) -> Option<PathBuf> {
 impl Adapter for Claude {
     fn harness(&self) -> Harness {
         Harness::Claude
+    }
+
+    fn hook_event(&self, payload: &serde_json::Value) -> Result<Option<crate::hooks::Event>> {
+        hook::hook_event(payload)
     }
 
     fn identity(&self) -> Option<super::Identity> {

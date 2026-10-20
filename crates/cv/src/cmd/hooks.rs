@@ -19,10 +19,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use clap::{Subcommand, ValueEnum};
+use cv_core::hooks::Event;
 use cv_core::ir::{home_rel, Harness, SessionRef};
 use cv_core::lanes::LaneEvent;
 use cv_core::sanitize::sanitize_line;
-use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 use crate::short_id;
@@ -851,23 +851,6 @@ pub(crate) fn doctor_json() -> Value {
 
 // ───────────────────────────── the hook bodies ─────────────────────────────
 
-/// The fields the five bodies read from the hook JSON (every other field is ignored).
-#[derive(Deserialize, Default)]
-struct Input {
-    #[serde(skip)]
-    codex: bool,
-    #[serde(default)]
-    session_id: String,
-    transcript_path: Option<PathBuf>,
-    cwd: Option<PathBuf>,
-    hook_event_name: Option<String>,
-    agent_id: Option<String>,
-    agent_type: Option<String>,
-    agent_transcript_path: Option<PathBuf>,
-    last_assistant_message: Option<String>,
-    tool_input: Option<Value>,
-}
-
 /// `cv hook <name>`: read stdin, run the body, print its one-line JSON (or nothing). A body that
 /// fails prints its error on stderr and still exits 0 — a hook must never block the harness. A
 /// terminal on stdin means no harness is calling: usage, exit 2, instead of waiting for JSON.
@@ -881,8 +864,8 @@ pub(crate) fn cmd_hook(name: HookName) -> Result<()> {
     }
     let mut raw = String::new();
     let _ = std::io::stdin().read_to_string(&mut raw);
-    let mut input: Input = match serde_json::from_str(&raw) {
-        Ok(i) => i,
+    let payload: Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
         Err(e) => {
             eprintln!(
                 "cv hook {}: stdin is not the hook JSON ({e}); nothing to do",
@@ -891,13 +874,24 @@ pub(crate) fn cmd_hook(name: HookName) -> Result<()> {
             return Ok(());
         }
     };
-    input.codex = cv_core::env::var_os("CV_HOOK_HARNESS").as_deref() == Some(std::ffi::OsStr::new("codex"));
-    let out = match name {
-        HookName::Compact => hook_compact(&input),
-        HookName::Start => hook_start(&input),
-        HookName::Lane => hook_lane(&input),
-        HookName::Decisions => hook_decisions(&input),
-        HookName::Edit => hook_edit(&input),
+    let harness = if cv_core::env::var_os("CV_HOOK_HARNESS").as_deref() == Some(std::ffi::OsStr::new("codex")) {
+        Harness::Codex
+    } else {
+        Harness::Claude
+    };
+    let decoded = cv_core::harness::rootless(harness)
+        .context("no adapter")
+        .and_then(|adapter| adapter.hook_event(&payload));
+    let out = match decoded {
+        Ok(None) => Ok(None),
+        Ok(Some(event)) => match name {
+            HookName::Compact => hook_compact(&event),
+            HookName::Start => hook_start(&event),
+            HookName::Lane => hook_lane(&event),
+            HookName::Decisions => hook_decisions(&event),
+            HookName::Edit => hook_edit(&event),
+        },
+        Err(e) => Err(e),
     };
     match out {
         Ok(Some(v)) => println!("{v}"),
@@ -909,19 +903,6 @@ pub(crate) fn cmd_hook(name: HookName) -> Result<()> {
 
 fn context(event: &str, text: String) -> Value {
     json!({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}})
-}
-
-fn claude_ref(id: &str, path: &Path) -> SessionRef {
-    SessionRef {
-        id: id.to_string(),
-        harness: Harness::Claude,
-        path: path.to_path_buf(),
-        cwd: None,
-        title: None,
-        created_at: None,
-        updated_at: None,
-        message_count: None,
-    }
 }
 
 /// Read the last [`COMPACT_TAIL_BYTES`] of `path`.
@@ -958,23 +939,20 @@ fn not_recorded_yet(id: &str) -> Value {
 /// compaction_boundary` does it (exact message index and ordinal); a larger one is read from its tail (trigger and
 /// size exact, the index left to that view), so the hook stays inside its budget however
 /// long the session has run.
-fn hook_compact(input: &Input) -> Result<Option<Value>> {
-    let Some(path) = input.transcript_path.as_deref() else {
+fn hook_compact(ev: &Event) -> Result<Option<Value>> {
+    let codex = ev.harness == Harness::Codex;
+    let Some(path) = ev.transcript() else {
         return Ok(None);
     };
-    let id = if input.codex {
-        format!("codex:{}", input.session_id)
+    let id = if codex {
+        format!("codex:{}", ev.session.id)
     } else {
-        short_id(&input.session_id)
+        short_id(&ev.session.id)
     };
     let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     if size > COMPACT_FULL_SCAN_MAX {
         // A tail without a boundary (one far back in a long transcript) still gets the pointers.
-        let what = match if input.codex {
-            None
-        } else {
-            last_boundary_in_tail(path)?
-        } {
+        let what = match if codex { None } else { last_boundary_in_tail(path)? } {
             Some((trigger, pre_tokens)) => format!(
                 " ({}, {})",
                 trigger.as_deref().unwrap_or("compaction"),
@@ -991,16 +969,12 @@ fn hook_compact(input: &Input) -> Result<Option<Value>> {
                  boundaries with their message indexes; `cv show {id} --pre-compaction N` reads what the Nth discarded (`cv show \
                  {id} --kind prompt,answer --pre-compaction N` just its prompts); {rewind} \
                  {AFFORDANCE_POINTER}",
-                rewind = if input.codex { String::new() } else { format!("`cv rewind {id} --at <msg>` resumes the agent as of a message.") },
+                rewind = if codex { String::new() } else { format!("`cv rewind {id} --at <msg>` resumes the agent as of a message.") },
                 AFFORDANCE_POINTER = affordance_pointer(&id)
             ),
         )));
     }
-    let mut reference = claude_ref(&input.session_id, path);
-    if input.codex {
-        reference.harness = Harness::Codex;
-    }
-    let comps = cv_core::compaction::detect(&reference, false)?;
+    let comps = cv_core::compaction::detect(&ev.session, false)?;
     let Some(last) = comps.last() else {
         return Ok(Some(not_recorded_yet(&id)));
     };
@@ -1015,7 +989,7 @@ fn hook_compact(input: &Input) -> Result<Option<Value>> {
         "context compacted ({trigger}, {pre}) at message {idx} — compaction #{k} of this session. \
          `cv show {id} --pre-compaction {k}` reads what was lost (`cv show {id} --kind prompt,answer --pre-compaction {k}` just its prompts)"
     );
-    if idx > 0 && !input.codex {
+    if idx > 0 && !codex {
         text.push_str(&format!(
             "; `cv rewind {id} --at {}` resumes the agent as of before it.",
             idx - 1
@@ -1065,8 +1039,8 @@ fn owed_decisions() -> Result<(String, usize)> {
 
 /// `SessionStart` (`startup|resume`): this directory's last sessions from the catalog as it stands
 /// (ids, ages, titles, last commit shas) and the decisions owed — capped, nothing else.
-fn hook_start(input: &Input) -> Result<Option<Value>> {
-    let cwd = match &input.cwd {
+fn hook_start(ev: &Event) -> Result<Option<Value>> {
+    let cwd = match &ev.cwd {
         Some(c) => c.clone(),
         None => std::env::current_dir()?,
     };
@@ -1075,7 +1049,7 @@ fn hook_start(input: &Input) -> Result<Option<Value>> {
     let canon = std::fs::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone());
     let mut rows: Vec<SessionRef> = cv_core::cataloged_sessions()
         .into_iter()
-        .filter(|r| r.id != input.session_id && !r.id.starts_with("agent-"))
+        .filter(|r| r.id != ev.session.id && !r.id.starts_with("agent-"))
         .filter(|r| r.cwd.as_deref().is_some_and(|c| c == cwd || c == canon))
         .collect();
     rows.sort_by_key(|r| std::cmp::Reverse(r.updated_at.or(r.created_at)));
@@ -1127,108 +1101,30 @@ fn hook_start(input: &Input) -> Result<Option<Value>> {
     Ok(Some(context("SessionStart", text)))
 }
 
-fn edit_paths(input: &Input) -> Vec<String> {
-    let Some(tool) = input.tool_input.as_ref() else {
-        return Vec::new();
-    };
-    if !input.codex {
-        return tool
-            .get("file_path")
-            .or_else(|| tool.get("notebook_path"))
-            .and_then(Value::as_str)
-            .map(|s| vec![s.to_string()])
-            .unwrap_or_default();
-    }
-    // Codex apply_patch's hook input is command-shaped even for freeform calls.
-    let Some(patch) = tool.get("command").and_then(Value::as_str) else {
-        return Vec::new();
-    };
-    if patch.trim().lines().next() != Some("*** Begin Patch") {
-        return Vec::new();
-    }
-    let mut paths: Vec<String> = patch
-        .trim()
-        .lines()
-        .filter_map(|line| {
-            [
-                "*** Add File: ",
-                "*** Update File: ",
-                "*** Delete File: ",
-                "*** Move to: ",
-            ]
-            .into_iter()
-            .find_map(|prefix| line.strip_prefix(prefix))
-            .map(str::to_string)
-        })
-        .collect();
-    paths.sort();
-    paths.dedup();
-    paths
-}
-
 /// `SubagentStart` / `SubagentStop`: one row in the lane ledger; no output, no model action.
-fn hook_lane(input: &Input) -> Result<Option<Value>> {
-    let event = match input.hook_event_name.as_deref() {
+fn hook_lane(ev: &Event) -> Result<Option<Value>> {
+    let event = match ev.event.as_deref() {
         Some("SubagentStart") => "start",
         Some("SubagentStop") => "stop",
         _ => return Ok(None),
     };
-    let Some(agent_id) = input.agent_id.as_deref() else {
+    let Some(agent) = ev.agent.as_ref() else {
         return Ok(None);
     };
-    let agent_id = if input.codex {
-        agent_id
-    } else {
-        agent_id.strip_prefix("agent-").unwrap_or(agent_id)
-    }
-    .to_string();
-    let expand = |p: &Path| -> PathBuf {
-        match (p.strip_prefix("~"), crate::util::dirs_home()) {
-            (Ok(rest), Some(h)) => h.join(rest),
-            _ => p.to_path_buf(),
-        }
-    };
-    let mut transcript_path = input.transcript_path.as_deref().map(expand);
-    let agent_transcript_path = input.agent_transcript_path.as_deref().map(expand).or_else(|| {
-        if input.codex {
-            return (event == "start").then(|| transcript_path.clone()).flatten();
-        }
-        transcript_path
-            .as_deref()
-            .and_then(cv_core::harness::claude::sidecar::subagents_dir)
-            .map(|d| d.join(format!("agent-{agent_id}.jsonl")))
-    });
-    let session_id = if input.codex {
-        let path = agent_transcript_path
-            .as_deref()
-            .context("Codex lane hook has no child transcript")?;
-        let parent = cv_core::harness::codex::hook_header(path)?
-            .and_then(|s| s.lineage.parent)
-            .context("Codex child transcript has no parent identity")?;
-        if event == "start" {
-            transcript_path = cv_core::catalog::lookup(&parent, Some(Harness::Codex))
-                .into_iter()
-                .next()
-                .map(|r| r.path);
-        }
-        parent
-    } else {
-        input.session_id.clone()
-    };
-    let last_text = input
-        .last_assistant_message
+    let last_text = agent
+        .last_message
         .as_deref()
         .and_then(|t| t.lines().find(|l| !l.trim().is_empty()))
         .map(|l| cv_core::ir::truncate(l.trim(), 200));
     cv_core::lanes::append_lane_event(&LaneEvent {
         ts: chrono::Utc::now(),
         event: event.into(),
-        session_id,
-        agent_id,
-        agent_type: input.agent_type.clone(),
-        transcript_path,
-        agent_transcript_path,
-        cwd: input.cwd.clone(),
+        session_id: ev.session.id.clone(),
+        agent_id: agent.id.clone(),
+        agent_type: agent.kind.clone(),
+        transcript_path: ev.transcript().map(Path::to_path_buf),
+        agent_transcript_path: agent.transcript.clone(),
+        cwd: ev.cwd.clone(),
         last_text,
     })
     .context("appending to the lane ledger")?;
@@ -1236,7 +1132,7 @@ fn hook_lane(input: &Input) -> Result<Option<Value>> {
 }
 
 /// `UserPromptSubmit`: one line when decisions are owed, else nothing at all.
-fn hook_decisions(_input: &Input) -> Result<Option<Value>> {
+fn hook_decisions(_ev: &Event) -> Result<Option<Value>> {
     let (who, n) = owed_decisions()?;
     if n == 0 {
         return Ok(None);
@@ -1312,27 +1208,21 @@ fn codex_root(id: &str, path: Option<&Path>, ledger: &[LaneEvent]) -> String {
 /// says which are live. Nothing printed = allow. A Claude session's own lane is not another
 /// session; neither is any thread under a Codex session's root (its parent, its children), since
 /// Codex only takes `deny` and a swarm shares its files on purpose.
-fn hook_edit(input: &Input) -> Result<Option<Value>> {
-    let files = edit_paths(input);
+fn hook_edit(ev: &Event) -> Result<Option<Value>> {
+    let codex = ev.harness == Harness::Codex;
     let mut conflicts = Vec::new();
-    let my_agent = input
-        .agent_id
-        .as_deref()
-        .map(|a| a.strip_prefix("agent-").unwrap_or(a).to_string());
-    let ledger = if input.codex {
+    let my_agent = ev.agent.as_ref().map(|a| a.id.as_str());
+    let ledger = if codex {
         cv_core::lanes::read_ledger()
     } else {
         Vec::new()
     };
-    let my_root = input
-        .codex
-        .then(|| codex_root(&input.session_id, input.transcript_path.as_deref(), &ledger));
-    for file in files {
-        let abs = if Path::new(&file).is_absolute() {
-            PathBuf::from(&file)
+    let my_root = codex.then(|| codex_root(&ev.session.id, ev.transcript(), &ledger));
+    for file in &ev.edits {
+        let abs = if Path::new(file).is_absolute() {
+            PathBuf::from(file)
         } else {
-            input
-                .cwd
+            ev.cwd
                 .clone()
                 .or_else(|| std::env::current_dir().ok())
                 .unwrap_or_default()
@@ -1340,7 +1230,7 @@ fn hook_edit(input: &Input) -> Result<Option<Value>> {
         };
         let mut live: Vec<(String, i64)> = Vec::new();
         for t in cv_core::events::sessions_editing(&abs.to_string_lossy()) {
-            if !input.codex && is_current_editor(&t, &input.session_id, my_agent.as_deref()) {
+            if !codex && is_current_editor(&t, &ev.session.id, my_agent) {
                 continue;
             }
             let Some(path) = transcript_of(&t) else { continue };
@@ -1383,7 +1273,7 @@ fn hook_edit(input: &Input) -> Result<Option<Value>> {
     let reason = conflicts.join("\n");
     Ok(Some(json!({"hookSpecificOutput": {
         "hookEventName": "PreToolUse",
-        "permissionDecision": if input.codex { "deny" } else { "ask" },
+        "permissionDecision": if codex { "deny" } else { "ask" },
         "permissionDecisionReason": reason,
     }})))
 }
@@ -1449,26 +1339,6 @@ mod tests {
         assert!(rows
             .iter()
             .any(|r| r.key == "/home/u/.codex/hooks.json:pre_tool_use:0:0" && r.hash == recorded[5].2));
-    }
-
-    #[test]
-    fn codex_patch_guards_all_destinations_without_treating_shell_as_a_patch() {
-        let input = Input {
-            codex: true,
-            tool_input: Some(
-                json!({"command": "*** Begin Patch\n*** Update File: from name.rs\n*** Move to: to name.rs\n@@\n-old\n+new\n*** Add File: added.rs\n+hello\n*** Delete File: deleted.rs\n*** End Patch"}),
-            ),
-            ..Input::default()
-        };
-        assert_eq!(
-            edit_paths(&input),
-            ["added.rs", "deleted.rs", "from name.rs", "to name.rs"]
-        );
-        let shell = Input {
-            tool_input: Some(json!({"command": "echo '*** Update File: pretend.rs'"})),
-            ..input
-        };
-        assert!(edit_paths(&shell).is_empty());
     }
 
     #[test]

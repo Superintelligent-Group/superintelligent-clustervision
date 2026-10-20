@@ -31,6 +31,7 @@ pub mod env;
 pub mod events;
 pub mod formats;
 pub mod harness;
+pub mod hooks;
 pub mod html;
 pub mod ingest;
 pub mod ir;

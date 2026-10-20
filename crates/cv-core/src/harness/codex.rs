@@ -38,6 +38,7 @@
 //! `extra["codex"]`, the only bag this adapter writes; images become `Block::Image` references.
 
 mod emit;
+mod hook;
 mod legacy;
 mod record;
 pub use emit::emit;
@@ -135,6 +136,10 @@ impl Codex {
 impl Adapter for Codex {
     fn harness(&self) -> Harness {
         Harness::Codex
+    }
+
+    fn hook_event(&self, payload: &serde_json::Value) -> Result<Option<crate::hooks::Event>> {
+        hook::hook_event(payload)
     }
 
     /// An app-server `FileChange` item, completed, records its edit in the Codex bag (code mode
