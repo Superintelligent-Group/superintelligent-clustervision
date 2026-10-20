@@ -64,7 +64,16 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
     // defaulting to `legacy` when absent, and the legacy→paginated migration canonicalizes it.
     meta.insert("history_mode".into(), json!("legacy"));
     meta.insert("originator".into(), json!("clustervision"));
-    meta.insert("cli_version".into(), json!(env!("CARGO_PKG_VERSION")));
+    // `SessionMeta.cli_version: String` has no serde default: without the key Codex's reader
+    // rejects the rollout ("does not start with session metadata"). It names the Codex CLI that
+    // wrote the file, which cv is not: carry a Codex source's recorded version, else Codex's own
+    // spelling of unknown, `""` (its `SessionMeta` default, which `state::extract` skips).
+    let cli_version = session
+        .harness_extra(Harness::Codex)
+        .and_then(|bag| bag.get("cli_version"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    meta.insert("cli_version".into(), json!(cli_version));
     // Codex persists this field into `state_5.sqlite.threads.model_provider` when it first
     // discovers the rollout. Omitting it creates an empty provider entry which the TUI then
     // cannot resume (`Model provider `` not found`), even though `turn_context.model` is valid.
