@@ -189,11 +189,7 @@ pub struct Skipped {
 impl Skipped {
     /// `error` at `path` as a skip, or `None` when the error is a `NotFound` (nothing there).
     pub fn of(path: impl Into<PathBuf>, error: &anyhow::Error) -> Option<Skipped> {
-        let absent = error
-            .chain()
-            .filter_map(|e| e.downcast_ref::<std::io::Error>())
-            .any(|e| e.kind() == std::io::ErrorKind::NotFound);
-        (!absent).then(|| Skipped {
+        (!is_not_found(error)).then(|| Skipped {
             path: path.into(),
             why: format!("{error:#}"),
         })
@@ -233,6 +229,14 @@ impl Skipped {
             why: error.to_string(),
         })
     }
+}
+
+/// `error` is a `NotFound` somewhere in its chain: the source is not there, the only honest empty.
+pub(crate) fn is_not_found(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .filter_map(|e| e.downcast_ref::<std::io::Error>())
+        .any(|e| e.kind() == std::io::ErrorKind::NotFound)
 }
 
 /// What [`Adapter::discover`] found: the sessions it could list and the sources it could not open.

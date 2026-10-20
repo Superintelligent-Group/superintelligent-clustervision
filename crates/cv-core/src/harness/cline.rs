@@ -440,9 +440,14 @@ pub fn stream_task_dir(
     // metadata fallback after the body if the transcript yielded nothing.
     session.cwd = None;
 
-    let Some(source) = JsonSource::capture(&history).ok() else {
-        session.cwd = meta_cwd;
-        return Ok(session);
+    // A task with no history file is an empty session; one that cannot be read is an error.
+    let source = match JsonSource::capture(&history) {
+        Ok(source) => source,
+        Err(error) if super::is_not_found(&error) => {
+            session.cwd = meta_cwd;
+            return Ok(session);
+        }
+        Err(error) => return Err(error),
     };
     let span_path = if history.is_absolute() {
         history.clone()
@@ -454,10 +459,15 @@ pub fn stream_task_dir(
         return Err(error);
     }
     let mut stamped_first_user = false;
+    // An item that is not one JSON value, and a history that does not decode, are counted.
+    let mut unparsed = super::Unparsed::default();
     let result = source.read_archive(|items| {
         let mut has_sources = false;
         for view in items.into_iter().flatten() {
-            let Some(view) = view? else { continue };
+            let Some(view) = view? else {
+                unparsed.count();
+                continue;
+            };
             let (boundary, message) = record(view, &mut session, opts.spans, Some(&span_path))?;
             if let Some(boundary) = boundary {
                 if sink.try_message(boundary)? == Flow::Stop {
@@ -502,7 +512,9 @@ pub fn stream_task_dir(
         if !error.is::<InvalidJson>() {
             return Err(error);
         }
+        unparsed.count();
     }
+    unparsed.note(&mut session);
 
     // cwd fallback: the first user turn's <environment_details> wins; only if it yielded nothing do
     // we fall back to the task_metadata.json hint (matching the old parse order).
@@ -1185,6 +1197,8 @@ mod tests {
                 DateTime::<Utc>::from_timestamp_millis(1717000000001)
             );
             assert_eq!(expected.system_prompt.as_deref(), Some(body.as_str()));
+            // The two children that are not one JSON value are counted, not dropped silently.
+            assert_eq!(expected.extra["cv"]["skipped_lines"], 2);
             for opts in [Demand::LEAN.with_spans(), Demand::RICH, Demand::COMPLETE] {
                 let mut sink = CollectSink::default();
                 let mut actual = stream_task_dir(&dir, "1717000000000", harness, &opts, &mut sink).unwrap();
