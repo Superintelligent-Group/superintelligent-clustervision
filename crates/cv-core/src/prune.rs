@@ -31,6 +31,7 @@
 //! `--range` indices or `--window` sizing. Model-visible `attachment` records (those with
 //! `rendered[]`) DO count toward byte estimates — that text is in the prompt.
 
+use crate::harness::claude::record::Facts;
 use crate::harness::store::{
     bytes::{ByteSource, ByteStage},
     jsonl::ranges::{self, Range},
@@ -221,37 +222,38 @@ pub fn sidecar_line(id: &str, name: &str, input: &Value, content: &str) -> Strin
     serde_json::to_string(&BorrowedSidecarEntry::text(id, name, input, content)).unwrap_or_default()
 }
 
-/// Sub-agent (Task tool) lines carry `isSidechain: true`; their usage belongs to the sub-agent's
-/// own context window, not the main thread's.
-pub(crate) fn is_sidechain(v: &Value) -> bool {
-    v.get("isSidechain").and_then(Value::as_bool).unwrap_or(false)
+/// What prune decides one record on: the codec's typed [`Facts`] plus prune's own pricing.
+#[derive(Debug, Clone, Default)]
+struct Decision {
+    facts: Facts,
+    /// The record's estimated prompt contribution (only under `--window`/`--revive`); after a
+    /// snip, the estimate of what is left.
+    est: Est,
+    /// A tool payload (`toolUseResult` or a `tool_result` body) larger than `--min-size`.
+    payload: bool,
+    thinking: bool,
 }
 
-/// Classify a line as a main-thread conversational turn: `Some(is_user)` for a real user/assistant
-/// turn, `None` for everything else — bookkeeping records, sidechain (sub-agent) lines, and Claude
-/// Code's synthetic assistant notices (see [`is_synthetic_assistant`]), which are never sent to the
-/// API and must not shift turn indices or eat `--keep-last` budget.
-pub(crate) fn turn_kind(v: &Value) -> Option<bool> {
-    if is_sidechain(v) {
-        return None;
+impl Decision {
+    /// Sub-agent (Task tool) lines carry `isSidechain: true`; their usage belongs to the
+    /// sub-agent's own context window, not the main thread's.
+    fn sidechain(&self) -> bool {
+        self.facts.sidechain
     }
-    match v.get("type").and_then(Value::as_str) {
-        Some("user") => Some(true),
-        Some("assistant") if !is_synthetic_assistant(v) => Some(false),
-        _ => None,
+    /// A main-thread conversational turn: `Some(is_user)`; `None` for bookkeeping, sidechain
+    /// lines and Claude Code's synthetic notices, which never shift turn indices or eat
+    /// `--keep-last` budget.
+    fn turn_kind(&self) -> Option<bool> {
+        self.facts.turn_kind()
     }
-}
-
-/// A main-thread conversational turn (sidechain lines and synthetic notices don't count).
-fn is_main_turn(v: &Value) -> bool {
-    turn_kind(v).is_some()
-}
-
-/// Claude Code's client-side assistant notices — an `isApiErrorMessage` ("Prompt is too long", …)
-/// or any `message.model == "<synthetic>"` row ("No response requested."). Not model output.
-fn is_synthetic_assistant(v: &Value) -> bool {
-    v.get("isApiErrorMessage").and_then(Value::as_bool).unwrap_or(false)
-        || v.pointer("/message/model").and_then(Value::as_str) == Some("<synthetic>")
+    fn is_main_turn(&self) -> bool {
+        self.turn_kind().is_some()
+    }
+    /// The prompt size the record carries: `_cv_orig_ctx` (the real count a prior revive
+    /// stashed) over the live usage, which revive may have overwritten with a pinned figure.
+    fn recorded(&self) -> u64 {
+        self.facts.orig_ctx.or(self.facts.usage_in).unwrap_or(0)
+    }
 }
 
 /// Session-level records written once (or rarely) that a windowed tail must not lose — the label
@@ -280,7 +282,7 @@ const SINGLETON_RECORDS: &[&str] = &[
 /// it does not measure the standalone request after rewriting or guarantee its size on resume.
 /// Older compaction segments cannot be treated as a clean shared prefix. Sidechain usage belongs
 /// to a different prompt and is excluded from this main-thread calculation.
-fn usage_window_cutoff(parsed: &[Option<Value>], budget: u64) -> Option<(usize, u64, bool)> {
+fn usage_window_cutoff(parsed: &[Option<Decision>], budget: u64) -> Option<(usize, u64, bool)> {
     // Per main-thread turn that carries a usage record: (turn index, cumulative usage, starts a new
     // compaction segment). Cumulative usage is monotonic WITHIN a segment but resets across a
     // compaction boundary, so we can't subtract across the whole session — we work in per-turn deltas.
@@ -288,33 +290,18 @@ fn usage_window_cutoff(parsed: &[Option<Value>], budget: u64) -> Option<(usize, 
     let mut recs: Vec<(usize, u64, bool)> = Vec::new();
     let mut boundary_pending = false;
     for v in parsed.iter().flatten() {
-        if is_sidechain(v) {
+        if v.sidechain() {
             continue;
         }
-        match v.get("type").and_then(Value::as_str) {
-            _ if turn_kind(v).is_some() => {
-                // Prefer `_cv_orig_ctx` (the real count a prior revive stashed) over the live usage,
-                // which revive may have overwritten with a pinned figure.
-                let tot = v
-                    .get("_cv_orig_ctx")
-                    .and_then(Value::as_u64)
-                    .or_else(|| {
-                        v.get("message")
-                            .and_then(|m| m.get("usage"))
-                            .and_then(Value::as_object)
-                            .map(usage_total)
-                    })
-                    .unwrap_or(0);
-                if tot > 0 {
-                    recs.push((ti, tot, boundary_pending));
-                    boundary_pending = false;
-                }
-                ti += 1;
+        if v.is_main_turn() {
+            let tot = v.recorded();
+            if tot > 0 {
+                recs.push((ti, tot, boundary_pending));
+                boundary_pending = false;
             }
-            Some("system") if v.get("subtype").and_then(Value::as_str) == Some("compact_boundary") => {
-                boundary_pending = true;
-            }
-            _ => {}
+            ti += 1;
+        } else if v.facts.is_compact_boundary() {
+            boundary_pending = true;
         }
     }
     if recs.is_empty() {
@@ -363,7 +350,7 @@ fn usage_window_cutoff(parsed: &[Option<Value>], budget: u64) -> Option<(usize, 
 /// Claude's recorded usage (falling back to a byte estimate only when usage is absent), snapped back
 /// to a user turn so the tail opens on a prompt. Neither set ⇒ the whole session.
 fn select_kept_turns(
-    parsed: &[Option<Value>],
+    parsed: &[Option<Decision>],
     opts: &PruneOptions,
     total_turns: usize,
 ) -> (usize, usize, Option<u64>, bool) {
@@ -375,7 +362,7 @@ fn select_kept_turns(
         return (0, total_turns, None, false);
     };
 
-    let is_user: Vec<bool> = parsed.iter().flatten().filter_map(turn_kind).collect();
+    let is_user: Vec<bool> = parsed.iter().flatten().filter_map(Decision::turn_kind).collect();
     let snap = |mut start: usize| {
         // Snap back to a user turn so the tail opens on a prompt, not a bare assistant reply.
         while start > 0 && !is_user.get(start).copied().unwrap_or(true) {
@@ -394,12 +381,12 @@ fn select_kept_turns(
     // Model-visible attachments (system reminders) ride with the turn they precede.
     let mut per_turn: Vec<u64> = Vec::new();
     let mut pending = 0u64;
-    for v in parsed.iter().flatten().filter(|v| !is_sidechain(v)) {
-        if is_main_turn(v) {
-            per_turn.push(fact_est(v).total() + pending);
+    for v in parsed.iter().flatten().filter(|v| !v.sidechain()) {
+        if v.is_main_turn() {
+            per_turn.push(v.est.total() + pending);
             pending = 0;
         } else {
-            pending += fact_est(v).total();
+            pending += v.est.total();
         }
     }
     // Trailing rendered reminders still belong to the retained tail even without a following
@@ -446,7 +433,6 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
     let mut lines = Vec::new();
     let mut parsed = Vec::new();
     let mut tool_names = HashMap::new();
-    let mut id_spans = HashMap::new();
     // Retain only decision facts; payload trees live for one record. Preserve the old global
     // trim_end contract (including whitespace-only trailing records) without copying the file.
     let mut line_no = 0usize;
@@ -460,10 +446,7 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
         let (range, _) = record?;
         line_no += 1;
         let facts = match source.read_range_value(range.offset, range.len, |view| {
-            let spans = crate::restamp::source_id_spans(view)?;
-            let facts = decision_facts_source(view, range, opts, &mut tool_names)?;
-            id_spans.insert(range.offset, spans);
-            Ok(facts)
+            decide(view, range, opts, &mut tool_names)
         }) {
             Ok(facts) => Some(facts),
             Err(e) if e.is::<crate::json::InvalidJson>() => {
@@ -489,11 +472,10 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
             }
             Err(e) => return Err(e),
         };
-        let facts = facts.map(|mut facts| {
-            if subagent && facts.get("isSidechain").and_then(Value::as_bool) == Some(true) {
-                facts["isSidechain"] = Value::Bool(false);
-            }
-            facts
+        let facts = facts.map(|mut decision| {
+            // A sub-agent transcript pruned on its own is its own main thread.
+            decision.facts.sidechain &= !subagent;
+            decision
         });
         parsed.push(facts);
         lines.push(range);
@@ -519,7 +501,7 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
     let source_id = parsed
         .iter()
         .flatten()
-        .find_map(|v| v.get("sessionId")?.as_str().map(String::from))
+        .find_map(|v| v.facts.session_id.clone())
         .unwrap_or_default();
     let parent_session_id = subagent.then(|| source_id.clone()).filter(|id| !id.is_empty());
     let source_id = if subagent { reference.id.clone() } else { source_id };
@@ -561,7 +543,7 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
     // Conversational-turn index per line, so keep-last can spare the most recent turns. A line is
     // "old" (eligible to snip) iff its turn index is before the keep-last window. Sidechain lines
     // are positioned by the surrounding main-thread turn but never counted.
-    let total_turns = parsed.iter().flatten().filter(|v| is_main_turn(v)).count();
+    let total_turns = parsed.iter().flatten().filter(|v| v.is_main_turn()).count();
     let keep_from = total_turns.saturating_sub(opts.keep_last);
 
     // `--window`/`--range`: select which conversational turns survive; the rest are dropped and the
@@ -574,7 +556,7 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
     if windowing {
         let mut last: HashMap<&str, usize> = HashMap::new();
         for (i, v) in parsed.iter().enumerate() {
-            if let Some(t) = v.as_ref().and_then(|v| v.get("type")).and_then(Value::as_str) {
+            if let Some(t) = v.as_ref().map(|v| v.facts.ty.as_str()) {
                 if SINGLETON_RECORDS.contains(&t) {
                     last.insert(t, i);
                 }
@@ -595,7 +577,7 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
     // Revive weighs each record's estimate before and after pruning against recorded usage. Records
     // map one-to-one onto output records unless turns are dropped.
     let before: Option<Vec<Option<Est>>> =
-        (opts.revive && !windowing).then(|| parsed.iter().map(|f| f.as_ref().map(fact_est)).collect());
+        (opts.revive && !windowing).then(|| parsed.iter().map(|f| f.as_ref().map(|f| f.est)).collect());
     let mut output = std::io::BufWriter::with_capacity(64 * 1024, ByteStage::new());
     let mut output_facts = Vec::new();
     let mut output_pruned = Vec::new();
@@ -637,9 +619,10 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
             }
             continue;
         };
-        let ty = facts.get("type").and_then(Value::as_str).unwrap_or("");
-        let is_turn_line = ty == "user" || ty == "assistant";
-        let is_turn = turn_kind(&facts).is_some();
+        let mut facts = facts;
+        let (user, assistant) = (facts.facts.ty == "user", facts.facts.ty == "assistant");
+        let is_turn_line = user || assistant;
+        let is_turn = facts.is_main_turn();
         let this_turn = turn;
         if is_turn {
             turn += 1;
@@ -671,15 +654,12 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
             }
         }
 
-        let needs_root = (subagent || (windowing && keep_start > 0)) && !rooted && is_main_turn(&facts);
+        let needs_root = (subagent || (windowing && keep_start > 0)) && !rooted && facts.is_main_turn();
         rooted |= needs_root;
         let may_prune = is_turn_line
             && (opts.declassify
-                || (is_old && ty == "user" && facts["_prune_payload"].as_bool().unwrap_or(true))
-                || (is_old
-                    && ty == "assistant"
-                    && opts.thinking
-                    && facts["_prune_thinking"].as_bool().unwrap_or(true)));
+                || (is_old && user && facts.payload)
+                || (is_old && assistant && opts.thinking && facts.thinking));
         let plan = if may_prune {
             source_turn_prune(
                 &source,
@@ -688,19 +668,18 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
                 &new_id,
                 idx,
                 &tool_names,
-                is_old && ty == "user",
-                is_old && ty == "assistant" && opts.thinking,
+                is_old && user,
+                is_old && assistant && opts.thinking,
             )?
         } else {
             None
         };
-        let mut facts = facts;
         let mut selection = crate::derive::Select {
             range: *range,
             newline: true,
             record: Some(source.validated_range(range.offset, range.len)?),
             blank: false,
-            ids: id_spans.remove(&range.offset).unwrap_or_default(),
+            ids: std::mem::take(&mut facts.facts.ids),
             replacements: Vec::new(),
             root: needs_root,
         };
@@ -717,9 +696,7 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
                 }
             }
             if opts.revive {
-                if let Some(facts) = facts.as_object_mut() {
-                    plan.estimate.store(facts);
-                }
+                facts.est = plan.estimate;
             }
         }
         let mut scan = MarkerWriter::new(&mut output);
@@ -847,195 +824,60 @@ fn stage(destination: &Path, bytes: &ByteSource, mode: u32) -> Result<crate::pub
     Ok(staged)
 }
 
-fn decision_facts_source(
+/// One record's [`Decision`]: the codec's facts, the payload/thinking flags against `opts`, the
+/// estimate when `--window`/`--revive` will weigh it, and each assistant `tool_use` block's
+/// name and position into `tools` (results carry only the id).
+fn decide(
     view: crate::json::JsonView<'_>,
     range: Range,
     opts: &PruneOptions,
     tools: &mut HashMap<String, (String, Range, usize)>,
-) -> Result<Value> {
+) -> Result<Decision> {
     use crate::harness::store::document::Fields;
-    let keys = [
-        "type",
-        "subtype",
-        "isSidechain",
-        "isApiErrorMessage",
-        "sessionId",
-        "_cv_orig_ctx",
-        "message",
-        "parentUuid",
-        "toolUseResult",
-        "rendered",
-        "uuid",
-        "logicalParentUuid",
-    ];
-    let Some(fields) = Fields::parse(view, &keys)? else {
-        return Ok(decision_facts(&Value::Null, false));
-    };
-    let mut facts = fields.project(&keys[..6])?;
-    let (uuid, parent, logical) = (
-        fields.value("uuid")?,
-        fields.value("parentUuid")?,
-        fields.value("logicalParentUuid")?,
-    );
-    link_facts(&mut facts, uuid.as_ref(), parent.as_ref(), logical.as_ref());
-    let ty = facts.get("type").and_then(Value::as_str).unwrap_or("");
-    let mut message = serde_json::Map::new();
-    let mut content = None;
-    if let Some(native) = fields.get("message") {
-        if let Some(native) = Fields::parse(native, &["model", "usage", "content"])? {
-            if let Some(model) = native.value("model")? {
-                message.insert("model".into(), model);
-            }
-            if let Some(usage) = native.get("usage") {
-                if let Some(usage) = source_usage_total(usage)? {
-                    message.insert("usage".into(), serde_json::json!({"input_tokens":usage}));
-                }
-            }
-            content = native.get("content");
-        }
+    let (facts, body) = Facts::parse(view)?;
+    let large = |v: crate::json::JsonView<'_>| value_byte_size_source(v).map(|n| n > opts.min_size);
+    let mut payload = body.tool_use_result.map(large).transpose()?.unwrap_or(false);
+    for result in &body.results {
+        payload |= large(*result)?;
     }
-    let mut payload = fields
-        .get("toolUseResult")
-        .map(|v| value_byte_size_source(v).map(|n| n > opts.min_size))
-        .transpose()?
-        .unwrap_or(false);
-    let mut thinking = false;
-    if let Some(blocks) = content.map(|c| c.array()).transpose()?.flatten() {
-        for (index, block) in blocks.enumerate() {
-            let Some(block) = Fields::parse(block?, &["type", "id", "name", "content"])? else {
-                continue;
-            };
-            match block.string("type")?.as_deref() {
-                Some("tool_use") if ty == "assistant" => {
-                    if let Some(id) = block.string("id")? {
-                        tools.insert(id, (block.string("name")?.unwrap_or_default(), range, index));
-                    }
-                }
-                Some("tool_result") => {
-                    payload |= block
-                        .get("content")
-                        .map(|v| value_byte_size_source(v).map(|n| n > opts.min_size))
-                        .transpose()?
-                        .unwrap_or(false);
-                }
-                Some("thinking") => thinking = true,
-                _ => {}
+    let thinking = facts.blocks.iter().any(|b| b.ty.as_deref() == Some("thinking"));
+    if facts.ty == "assistant" {
+        for (index, block) in facts.blocks.iter().enumerate() {
+            if let (Some("tool_use"), Some(id)) = (block.ty.as_deref(), &block.id) {
+                tools.insert(id.clone(), (block.name.clone().unwrap_or_default(), range, index));
             }
         }
     }
-    let estimate = if opts.window.is_some() || opts.revive {
-        match ty {
-            "user" | "assistant" => content
-                .map(|c| est_content_source(c, &[]))
-                .transpose()?
-                .unwrap_or_default(),
+    let mut est = Est::default();
+    if opts.window.is_some() || opts.revive {
+        match facts.ty.as_str() {
+            "user" | "assistant" => {
+                if let Some(content) = body.content {
+                    est = est_content_source(content, &[])?;
+                }
+            }
             "attachment" => {
-                let mut estimate = Est::default();
-                if let Some(items) = fields.get("rendered").map(|v| v.array()).transpose()?.flatten() {
+                if let Some(items) = body.rendered.map(|v| v.array()).transpose()?.flatten() {
                     for item in items {
                         if let Some(item) = Fields::parse(item?, &["content"])? {
                             if let Some(text) = item.get("content") {
                                 if text.is_string()? {
-                                    estimate.tokens += BLOCK_TOKENS + source_string_tokens(text)?;
+                                    est.tokens += BLOCK_TOKENS + source_string_tokens(text)?;
                                 }
                             }
                         }
                     }
                 }
-                estimate
             }
-            _ => Est::default(),
-        }
-    } else {
-        Est::default()
-    };
-    let parent = fields
-        .get("parentUuid")
-        .map(|v| v.is_null().map(|n| !n))
-        .transpose()?
-        .unwrap_or(false);
-    facts.insert("message".into(), Value::Object(message));
-    estimate.store(&mut facts);
-    facts.insert("_prune_payload".into(), Value::from(payload));
-    facts.insert("_prune_thinking".into(), Value::from(thinking));
-    facts.insert("_prune_parent".into(), Value::from(parent));
-    Ok(Value::Object(facts))
-}
-
-/// Retain only the counters and the last non-auxiliary iteration that usage_total consumes.
-fn source_usage_total(view: crate::json::JsonView<'_>) -> Result<Option<u64>> {
-    use crate::harness::store::document::Fields;
-    let Some(fields) = Fields::parse(
-        view,
-        &[
-            "input_tokens",
-            "cache_read_input_tokens",
-            "cache_creation_input_tokens",
-            "iterations",
-        ],
-    )?
-    else {
-        return Ok(None);
-    };
-    let mut usage = serde_json::Map::new();
-    for key in USAGE_CTX_KEYS {
-        if let Some(value) = fields
-            .get(key)
-            .map(|v| v.as_number())
-            .transpose()?
-            .flatten()
-            .and_then(|n| n.as_u64())
-        {
-            usage.insert(key.into(), Value::from(value));
+            _ => {}
         }
     }
-    if ctx_sum(&usage) > 0 {
-        if let Some(iterations) = fields.get("iterations").map(|v| v.array()).transpose()?.flatten() {
-            let mut last = None;
-            for iteration in iterations {
-                let Some(fields) = Fields::parse(
-                    iteration?,
-                    &[
-                        "type",
-                        "input_tokens",
-                        "cache_read_input_tokens",
-                        "cache_creation_input_tokens",
-                        "output_tokens",
-                    ],
-                )?
-                else {
-                    last = Some(Value::Null);
-                    continue;
-                };
-                let mut record = serde_json::Map::new();
-                if let Some(kind) = fields.string("type")? {
-                    record.insert("type".into(), Value::String(kind));
-                }
-                if matches!(
-                    record.get("type").and_then(Value::as_str),
-                    Some("advisor_message" | "compaction")
-                ) {
-                    continue;
-                }
-                for key in USAGE_CTX_KEYS.into_iter().chain(["output_tokens"]) {
-                    if let Some(value) = fields
-                        .get(key)
-                        .map(|v| v.as_number())
-                        .transpose()?
-                        .flatten()
-                        .and_then(|n| n.as_u64())
-                    {
-                        record.insert(key.into(), Value::from(value));
-                    }
-                }
-                last = Some(Value::Object(record));
-            }
-            if let Some(last) = last {
-                usage.insert("iterations".into(), Value::Array(vec![last]));
-            }
-        }
-    }
-    Ok(Some(usage_total(&usage)))
+    Ok(Decision {
+        facts,
+        est,
+        payload,
+        thinking,
+    })
 }
 
 /// A string view priced at `kind`, read in chunks (prune markers at their own rate).
@@ -1987,64 +1829,6 @@ impl<W: Write> Write for MarkerWriter<'_, W> {
     }
 }
 
-/// Compact decision roster: no message content, thinking, image or tool-result payloads.
-fn decision_facts(v: &Value, estimate: bool) -> Value {
-    let mut facts = serde_json::Map::new();
-    for key in [
-        "type",
-        "subtype",
-        "isSidechain",
-        "isApiErrorMessage",
-        "sessionId",
-        "_cv_orig_ctx",
-    ] {
-        if let Some(value) = v.get(key) {
-            facts.insert(key.into(), value.clone());
-        }
-    }
-    link_facts(
-        &mut facts,
-        v.get("uuid"),
-        v.get("parentUuid"),
-        v.get("logicalParentUuid"),
-    );
-    let mut message = serde_json::Map::new();
-    if let Some(model) = v.pointer("/message/model") {
-        message.insert("model".into(), model.clone());
-    }
-    if let Some(usage) = v.pointer("/message/usage").and_then(Value::as_object) {
-        message.insert("usage".into(), serde_json::json!({"input_tokens": usage_total(usage)}));
-    }
-    facts.insert("message".into(), Value::Object(message));
-    if estimate { line_est(v) } else { Est::default() }.store(&mut facts);
-    Value::Object(facts)
-}
-
-/// The record's place in the conversation tree (`_uuid`, `_parent`), so revive can tell the
-/// branch Claude Code resumes from abandoned ones.
-fn link_facts(
-    facts: &mut serde_json::Map<String, Value>,
-    uuid: Option<&Value>,
-    parent: Option<&Value>,
-    logical: Option<&Value>,
-) {
-    if let Some(uuid) = uuid.filter(|u| u.is_string()) {
-        facts.insert("_uuid".into(), uuid.clone());
-    }
-    // A root records `parentUuid: null`; a record with no `parentUuid` at all carries no tree.
-    if let Some(parent) = parent {
-        let parent = Some(parent)
-            .filter(|p| p.is_string())
-            .or(logical.filter(|p| p.is_string()));
-        facts.insert("_parent".into(), parent.cloned().unwrap_or(Value::Null));
-    }
-}
-
-/// A record's stored estimate, or one computed from the record itself.
-fn fact_est(v: &Value) -> Est {
-    Est::load(v).unwrap_or_else(|| line_est(v))
-}
-
 /// Rewrite trailing recorded usage using an estimated post-prune prompt size (`--revive`).
 /// Claude Code checks saved usage before making another provider request. The estimate combines
 /// recorded-usage deltas across transcript spans with byte estimates for the content after the last
@@ -2055,7 +1839,7 @@ fn fact_est(v: &Value) -> Est {
 fn revive_staged(
     source: &crate::json::JsonSource,
     output: ByteSource,
-    parsed: &[Option<Value>],
+    parsed: &[Option<Decision>],
     pruned: &[bool],
     before: Option<&[Option<Est>]>,
     windowed: bool,
@@ -2066,12 +1850,7 @@ fn revive_staged(
     } else {
         parsed
             .iter()
-            .rposition(|p| {
-                p.as_ref().is_some_and(|v| {
-                    v.get("type").and_then(Value::as_str) == Some("system")
-                        && v.get("subtype").and_then(Value::as_str) == Some("compact_boundary")
-                })
-            })
+            .rposition(|p| p.as_ref().is_some_and(|v| v.facts.is_compact_boundary()))
             .map_or(0, |i| i + 1)
     };
     let honest = before
@@ -2089,8 +1868,8 @@ fn revive_staged(
     for (i, facts) in parsed.iter().enumerate() {
         let total = facts
             .as_ref()
-            .filter(|v| !is_sidechain(v))
-            .and_then(|v| v.pointer("/message/usage").and_then(Value::as_object).map(usage_total))
+            .filter(|v| !v.sidechain())
+            .and_then(|v| v.facts.usage_in)
             .unwrap_or(0);
         let rewrite = i >= window && total > honest;
         let mut start = None;
@@ -2222,28 +2001,23 @@ const UNKNOWN_OVERHEAD_TOKENS: u64 = 20_000;
 /// Removed thinking signatures are credited only for [`SIGNATURES_COUNTED`] models; everywhere
 /// else they are still counted as present (the estimate errs high). `None` when the window holds
 /// no turns.
-fn anchored_window_tokens(parsed: &[Option<Value>], before: &[Option<Est>], window: usize) -> Option<u64> {
+fn anchored_window_tokens(parsed: &[Option<Decision>], before: &[Option<Est>], window: usize) -> Option<u64> {
     // Claude Code resumes the branch ending at the newest turn; records on abandoned branches
     // (edits, rewinds) are not sent, so their pruning frees nothing.
     let chain = resumed_branch(parsed, window);
     let main = |i: usize| {
         parsed[i]
             .as_ref()
-            .filter(|v| !is_sidechain(v) && chain.as_ref().is_none_or(|c| c.contains(&i)))
+            .filter(|v| !v.sidechain() && chain.as_ref().is_none_or(|c| c.contains(&i)))
     };
     let lines = |lo: usize, hi: usize| (lo..hi).filter(move |i| main(*i).is_some());
     let pre = |i: usize| before[i].unwrap_or_default();
-    let post = |i: usize| main(i).map(fact_est).unwrap_or_default();
+    let post = |i: usize| main(i).map(|v| v.est).unwrap_or_default();
     lines(window, parsed.len()).next()?;
     // One entry per provider response: the first record carrying its prompt size.
     let mut responses: Vec<(usize, u64)> = Vec::new();
     for i in lines(window, parsed.len()) {
-        let v = main(i)?;
-        let total = v
-            .get("_cv_orig_ctx")
-            .and_then(Value::as_u64)
-            .or_else(|| v.pointer("/message/usage").and_then(Value::as_object).map(usage_total))
-            .unwrap_or(0);
+        let total = main(i)?.recorded();
         if total > 0 && responses.last().is_none_or(|(_, t)| *t != total) {
             responses.push((i, total));
         }
@@ -2254,11 +2028,7 @@ fn anchored_window_tokens(parsed: &[Option<Value>], before: &[Option<Est>], wind
     let model = (window..parsed.len())
         .rev()
         .filter_map(main)
-        .find_map(|v| {
-            v.pointer("/message/model")
-                .and_then(Value::as_str)
-                .filter(|m| *m != "<synthetic>")
-        })
+        .find_map(|v| v.facts.model.as_deref().filter(|m| *m != "<synthetic>"))
         .unwrap_or("");
     let scale = crate::ir::tokenizer_scale(model);
     let size = |e: Est| e.tokens + e.signature + e.images * IMAGE_TOKENS;
@@ -2317,26 +2087,26 @@ fn anchored_window_tokens(parsed: &[Option<Value>], before: &[Option<Est>], wind
 
 /// Record indices on the branch ending at the window's newest turn, walking `parentUuid` (or
 /// `logicalParentUuid`) back. `None` when the newest turn records no `parentUuid` (no tree to walk).
-fn resumed_branch(parsed: &[Option<Value>], window: usize) -> Option<HashSet<usize>> {
-    let id = |i: usize, key: &str| parsed[i].as_ref()?.get(key)?.as_str();
+fn resumed_branch(parsed: &[Option<Decision>], window: usize) -> Option<HashSet<usize>> {
+    let facts = |i: usize| parsed[i].as_ref().map(|v| &v.facts);
     let mut by_id = HashMap::new();
     for i in window..parsed.len() {
-        if let Some(uuid) = id(i, "_uuid") {
+        if let Some(uuid) = facts(i).and_then(|f| f.uuid.as_deref()) {
             by_id.insert(uuid, i);
         }
     }
     let leaf = (window..parsed.len()).rev().find(|&i| {
         parsed[i].as_ref().is_some_and(|v| {
-            !is_sidechain(v)
-                && matches!(v.get("type").and_then(Value::as_str), Some("user" | "assistant"))
-                && v.get("_uuid").is_some()
+            !v.sidechain() && matches!(v.facts.ty.as_str(), "user" | "assistant") && v.facts.uuid.is_some()
         })
     })?;
-    parsed[leaf].as_ref()?.get("_parent")?;
+    facts(leaf)?.link()?;
     let mut chain = HashSet::new();
     let mut at = Some(leaf);
     while let Some(i) = at.filter(|i| chain.insert(*i)) {
-        at = id(i, "_parent").and_then(|p| by_id.get(p).copied());
+        at = facts(i)
+            .and_then(|f| f.link().flatten())
+            .and_then(|p| by_id.get(p).copied());
     }
     Some(chain)
 }
@@ -2356,13 +2126,13 @@ fn resumed_branch(parsed: &[Option<Value>], window: usize) -> Option<HashSet<usi
 ///  * Lines after the last record (or when there are no records at all): byte estimate.
 ///
 /// Sidechain lines contribute neither usage nor bytes — they aren't re-sent on the main thread.
-fn honest_window_tokens(parsed: &[Option<Value>], pruned: &[bool], window: usize, first_trusted: bool) -> u64 {
+fn honest_window_tokens(parsed: &[Option<Decision>], pruned: &[bool], window: usize, first_trusted: bool) -> u64 {
     let span_est = |lo: usize, hi: usize| -> u64 {
         parsed[lo..hi]
             .iter()
             .flatten()
-            .filter(|v| !is_sidechain(v))
-            .map(|v| fact_est(v).total())
+            .filter(|v| !v.sidechain())
+            .map(|v| v.est.total())
             .sum()
     };
     let mut sum = 0u64;
@@ -2371,20 +2141,14 @@ fn honest_window_tokens(parsed: &[Option<Value>], pruned: &[bool], window: usize
     let mut span_start = window;
     for i in window..parsed.len() {
         let Some(v) = &parsed[i] else { continue };
-        if v.get("type").and_then(Value::as_str) == Some("system")
-            && v.get("subtype").and_then(Value::as_str) == Some("compact_boundary")
-        {
+        if v.facts.is_compact_boundary() {
             seg_start = true;
             continue;
         }
-        if is_sidechain(v) {
+        if v.sidechain() {
             continue;
         }
-        let total = v
-            .get("_cv_orig_ctx")
-            .and_then(Value::as_u64)
-            .or_else(|| v.pointer("/message/usage").and_then(Value::as_object).map(usage_total))
-            .unwrap_or(0);
+        let total = v.recorded();
         if total == 0 {
             continue;
         }
@@ -2402,41 +2166,6 @@ fn honest_window_tokens(parsed: &[Option<Value>], pruned: &[bool], window: usize
     sum + span_est(span_start, parsed.len())
 }
 
-/// The three context-bearing counters of a Claude `usage` object (input + both cache buckets).
-const USAGE_CTX_KEYS: [&str; 3] = ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"];
-
-fn ctx_sum(m: &serde_json::Map<String, Value>) -> u64 {
-    USAGE_CTX_KEYS
-        .iter()
-        .map(|k| m.get(*k).and_then(Value::as_u64).unwrap_or(0))
-        .sum()
-}
-
-/// The context-token count of a Claude `usage` object — read the way Claude Code reads it.
-///
-/// Since 2.1.277 Claude Code sizes the loaded context from a record's `usage.iterations` when that
-/// array is present: it takes the LAST iteration that is not an auxiliary request (`advisor_message`
-/// / `compaction`), and if that one is a well-formed request iteration (`message` /
-/// `fallback_message`, all four counts present, non-zero context) reads input + both cache buckets
-/// from IT — the top-level counters are only the fallback (and the whole thing short-circuits to the
-/// top-level when the top-level total is zero). `--window` sizing, the honest-figure arithmetic and
-/// `--revive`'s stale-record detection all go through here so cv reasons about the same number the
-/// resume gate will see.
-fn usage_total(usage: &serde_json::Map<String, Value>) -> u64 {
-    let top = ctx_sum(usage);
-    if top == 0 {
-        return 0;
-    }
-    usage
-        .get("iterations")
-        .and_then(Value::as_array)
-        .and_then(|iters| iters.iter().rev().find(|it| !is_aux_iteration(it)))
-        .and_then(Value::as_object)
-        .filter(|it| is_request_iteration(it))
-        .map(ctx_sum)
-        .unwrap_or(top)
-}
-
 /// `advisor_message` / `compaction` iterations are side requests Claude Code skips when reading
 /// context size.
 fn is_aux_iteration(it: &Value) -> bool {
@@ -2444,23 +2173,6 @@ fn is_aux_iteration(it: &Value) -> bool {
         it.get("type").and_then(Value::as_str),
         Some("advisor_message" | "compaction")
     )
-}
-
-/// A request iteration Claude Code will read the context size from: `message` / `fallback_message`
-/// with all four counts present as non-negative numbers and a non-zero context total.
-fn is_request_iteration(it: &serde_json::Map<String, Value>) -> bool {
-    matches!(
-        it.get("type").and_then(Value::as_str),
-        Some("message" | "fallback_message")
-    ) && [
-        "input_tokens",
-        "output_tokens",
-        "cache_creation_input_tokens",
-        "cache_read_input_tokens",
-    ]
-    .iter()
-    .all(|k| it.get(*k).and_then(Value::as_u64).is_some())
-        && ctx_sum(it) > 0
 }
 
 /// Pin a `usage` record to `honest` context tokens everywhere Claude Code might read it: the
@@ -2524,44 +2236,6 @@ impl Est {
     }
     fn total(self) -> u64 {
         self.tokens + self.signature + self.images * IMAGE_TOKENS
-    }
-    fn store(self, facts: &mut serde_json::Map<String, Value>) {
-        facts.insert("_prune_est".into(), Value::from(self.tokens));
-        facts.insert("_prune_sig".into(), Value::from(self.signature));
-        facts.insert("_prune_img".into(), Value::from(self.images));
-    }
-    fn load(facts: &Value) -> Option<Est> {
-        let part = |key: &str| facts.get(key).and_then(Value::as_u64);
-        Some(Est {
-            tokens: part("_prune_est")?,
-            signature: part("_prune_sig").unwrap_or(0),
-            images: part("_prune_img").unwrap_or(0),
-        })
-    }
-}
-
-/// Estimated tokens one line contributes to the loaded prompt: `message.content` for a turn,
-/// `rendered[].content` for a model-visible attachment (Claude Code appends exactly that text to
-/// the prompt; an attachment with nothing rendered costs nothing), zero for bookkeeping. Sidechain
-/// filtering is the caller's job.
-fn line_est(v: &Value) -> Est {
-    match v.get("type").and_then(Value::as_str) {
-        Some("user" | "assistant") => v.pointer("/message/content").map(est_content).unwrap_or_default(),
-        Some("attachment") => Est {
-            tokens: v
-                .get("rendered")
-                .and_then(Value::as_array)
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter_map(|i| i.get("content").and_then(Value::as_str))
-                        .map(|text| BLOCK_TOKENS + str_tokens(text))
-                        .sum()
-                })
-                .unwrap_or(0),
-            ..Est::default()
-        },
-        _ => Est::default(),
     }
 }
 

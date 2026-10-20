@@ -219,9 +219,13 @@ pub(crate) struct Facts {
 }
 
 /// The body views a [`Facts`] read leaves in the source, for a consumer that prices them.
-#[derive(Default, Clone, Copy)]
+#[derive(Default)]
 pub(crate) struct Body<'a> {
     pub content: Option<JsonView<'a>>,
+    pub tool_use_result: Option<JsonView<'a>>,
+    pub rendered: Option<JsonView<'a>>,
+    /// The `content` of each `tool_result` block, in order.
+    pub results: Vec<JsonView<'a>>,
 }
 
 impl Facts {
@@ -245,10 +249,12 @@ impl Facts {
         self.ty == "system" && self.subtype.as_deref() == Some("compact_boundary")
     }
 
-    /// Facts and body views of one record. A record that is not an object has no facts.
+    /// Facts and body views of one record. A record that is not an object has no facts but its
+    /// id spans (a positional `["<id>"]` row is restamped like a keyed one).
     pub(crate) fn parse(view: JsonView<'_>) -> Result<(Self, Body<'_>)> {
+        let ids = crate::restamp::source_id_spans(view)?;
         let Some(Head { top, ty }) = Head::parse(view, Demand::Facts)? else {
-            return Ok((Self::default(), Body::default()));
+            return Ok((Self { ids, ..Self::default() }, Body::default()));
         };
         let flag =
             |key: &str| -> Result<bool> { Ok(top.get(key).map(|v| v.as_bool()).transpose()?.flatten() == Some(true)) };
@@ -274,10 +280,14 @@ impl Facts {
             },
             logical_parent: top.string("logicalParentUuid")?,
             orig_ctx: number("_cv_orig_ctx")?,
-            ids: crate::restamp::source_id_spans(view)?,
+            ids,
             ..Self::default()
         };
-        let mut body = Body { content: None };
+        let mut body = Body {
+            tool_use_result: top.get("toolUseResult"),
+            rendered: top.get("rendered"),
+            ..Body::default()
+        };
         if let Some(message) = top
             .get("message")
             .map(|m| Fields::parse(m, &["model", "usage", "content"]))
@@ -290,14 +300,20 @@ impl Facts {
             body.content = message.get("content");
             if let Some(blocks) = body.content.map(|c| c.array()).transpose()?.flatten() {
                 for block in blocks {
-                    let block = Fields::parse(block?, &["type", "id", "name", "tool_use_id"])?;
+                    let block = Fields::parse(block?, &["type", "id", "name", "tool_use_id", "content"])?;
                     facts.blocks.push(match block {
-                        Some(b) => FactBlock {
-                            ty: b.string("type")?,
-                            id: b.string("id")?,
-                            name: b.string("name")?,
-                            tool_use_id: b.string("tool_use_id")?,
-                        },
+                        Some(b) => {
+                            let ty = b.string("type")?;
+                            if ty.as_deref() == Some("tool_result") {
+                                body.results.extend(b.get("content"));
+                            }
+                            FactBlock {
+                                ty,
+                                id: b.string("id")?,
+                                name: b.string("name")?,
+                                tool_use_id: b.string("tool_use_id")?,
+                            }
+                        }
                         None => FactBlock::default(),
                     });
                 }

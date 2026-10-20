@@ -35,9 +35,34 @@ fn assistant_usage(total: u64) -> Value {
         "message":{"usage":{"input_tokens":total,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}})
 }
 
-/// Parse fixture values into the shared one-pass representation the sizing helpers read.
-fn pv(lines: &[Value]) -> Vec<Option<Value>> {
-    lines.iter().cloned().map(Some).collect()
+/// Read fixture values through prune's own decision pass (estimates included), as JSONL.
+fn pv(lines: &[Value]) -> Vec<Option<Decision>> {
+    let dir = tmpdir();
+    let path = dir.join("decisions.jsonl");
+    std::fs::write(&path, lines.iter().map(|l| l.to_string() + "\n").collect::<String>()).unwrap();
+    let source = crate::json::JsonSource::capture(&path).unwrap();
+    let file = std::fs::File::open(&path).unwrap();
+    let options = PruneOptions {
+        revive: true,
+        ..Default::default()
+    };
+    let mut tools = HashMap::new();
+    let decisions = ranges::records(
+        &file,
+        Range {
+            offset: 0,
+            len: source.len(),
+        },
+    )
+    .unwrap()
+    .map(|row| {
+        let (range, _) = row.unwrap();
+        let read = source.read_range_value(range.offset, range.len, |v| decide(v, range, &options, &mut tools));
+        Some(read.unwrap())
+    })
+    .collect();
+    std::fs::remove_dir_all(dir).ok();
+    decisions
 }
 
 #[test]
@@ -311,7 +336,11 @@ fn revive_rewrites_stale_usage_below_loaded_content() {
 fn usage_total_reads_the_last_request_iteration_like_claude_code() {
     // Claude Code ≥ 2.1.277 sizes context from `usage.iterations` (the last non-advisor/compaction
     // request) — the top-level counters are only a fallback. cv must see the same number.
-    let u = |v: Value| usage_total(v.as_object().unwrap());
+    let u = |v: Value| {
+        crate::harness::claude::record::usage_context((&v).into())
+            .unwrap()
+            .unwrap()
+    };
     let top =
         |t: u64| serde_json::json!({"input_tokens":t,"cache_read_input_tokens":0,"cache_creation_input_tokens":0});
     // iterations present: the last request iteration wins over a top-level that says otherwise,
@@ -424,7 +453,38 @@ fn revive_pins_usage_iterations_too() {
     let adv = &u["iterations"][1];
     assert_eq!(adv["cache_read_input_tokens"], 777, "advisor iteration left alone");
     // and what Claude Code will read back is the pinned figure
-    assert_eq!(usage_total(u.as_object().unwrap()), honest);
+    assert_eq!(
+        crate::harness::claude::record::usage_context(u.into()).unwrap(),
+        Some(honest)
+    );
+
+    // The produced file's own reader needs the stash: a later `--window` prune of the revived
+    // session sizes its tail from `_cv_orig_ctx`, not the pinned usage. Without it the same
+    // file reads as a tail that fits, and the window would hand back a session that cannot resume.
+    let window = |source: &Path, to: &str| {
+        let opts = PruneOptions {
+            window: Some(100_000),
+            new_id: Some(to.into()),
+            dry_run: true,
+            ..Default::default()
+        };
+        prune_session(source, &opts).unwrap().window_real_tokens
+    };
+    assert_eq!(
+        window(&r.new_path, "55555555-5555-4555-8555-555555555555"),
+        Some(975_298)
+    );
+    let stripped = dir.join("66666666-6666-4666-8666-666666666666.jsonl");
+    let without: String = out
+        .lines()
+        .map(|l| {
+            let mut v: Value = serde_json::from_str(l).unwrap();
+            v.as_object_mut().unwrap().remove("_cv_orig_ctx");
+            v.to_string() + "\n"
+        })
+        .collect();
+    std::fs::write(&stripped, without).unwrap();
+    assert_eq!(window(&stripped, "77777777-7777-4777-8777-777777777777"), Some(honest));
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -470,10 +530,8 @@ fn synthetic_notices_are_not_turns() {
         2,
         "notices are kept as records, just not counted"
     );
-    let turns = out
-        .lines()
-        .filter(|l| serde_json::from_str::<Value>(l).is_ok_and(|v| turn_kind(&v).is_some()))
-        .count();
+    let lines: Vec<Value> = out.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+    let turns = pv(&lines).iter().flatten().filter(|d| d.is_main_turn()).count();
     assert_eq!(turns, 2);
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -588,7 +646,11 @@ fn rendered_attachments_count_toward_byte_estimates() {
         honest >= 10_000,
         "35k bytes of rendered reminder ≈ 10k tokens must be counted (got {honest})"
     );
-    assert_eq!(line_est(&lines[2]).total(), 0, "an unrendered attachment costs nothing");
+    assert_eq!(
+        parsed[2].as_ref().unwrap().est.total(),
+        0,
+        "an unrendered attachment costs nothing"
+    );
 }
 
 #[test]
@@ -1085,25 +1147,27 @@ fn decision_roster_preserves_selection_and_revive_evidence() {
         serde_json::json!({"type":"user","message":{"content":[{"type":"tool_result","content":"[PRUNED id=t]"}]}}),
         serde_json::json!({"type":"assistant","_cv_orig_ctx":120,"message":{"content":"answer","usage":{"input_tokens":100}}}),
     ];
-    let original = pv(&rows);
-    let facts: Vec<_> = rows.iter().map(|v| Some(decision_facts(v, true))).collect();
-    for budget in [0, 1, 30, 100, 200, 1000] {
+    // Recorded from the owned-row and decision-roster readings, which agreed, before both were
+    // replaced by the typed facts.
+    let facts = pv(&rows);
+    for (budget, kept) in [
+        (0, (2, 4, Some(120), true)),
+        (1, (2, 4, Some(120), true)),
+        (30, (2, 4, Some(120), true)),
+        (100, (2, 4, Some(120), true)),
+        (200, (0, 4, Some(155), false)),
+        (1000, (0, 4, Some(155), false)),
+    ] {
         let options = PruneOptions {
             window: Some(budget),
             ..Default::default()
         };
-        assert_eq!(
-            select_kept_turns(&original, &options, 4),
-            select_kept_turns(&facts, &options, 4)
-        );
+        assert_eq!(select_kept_turns(&facts, &options, 4), kept, "budget {budget}");
     }
     let pruned: Vec<_> = rows.iter().map(|v| v.to_string().contains(MARKER_PREFIX)).collect();
-    for window in [0, 4] {
+    for (window, honest) in [(0, 89), (4, 54)] {
         for trusted in [true, false] {
-            assert_eq!(
-                honest_window_tokens(&original, &pruned, window, trusted),
-                honest_window_tokens(&facts, &pruned, window, trusted)
-            );
+            assert_eq!(honest_window_tokens(&facts, &pruned, window, trusted), honest);
         }
     }
 }
@@ -1147,39 +1211,6 @@ fn renamed_source_cannot_be_its_own_prune_destination() {
     };
     assert!(prune_session(&renamed, &options).is_err());
     assert_eq!(std::fs::read(renamed).unwrap(), original);
-    std::fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
-fn projected_source_facts_match_owned_metadata_and_token_estimates() {
-    let dir = tmpdir();
-    let path = dir.join("projection.jsonl");
-    for row in [
-        serde_json::json!({"type":"user","message":{"content":"escaped\n☃ prompt"},"ignored":"irrelevant"}),
-        serde_json::json!({"type":"assistant","isSidechain":true,"message":{"model":"<synthetic>","usage":{"input_tokens":100,"iterations":[{"type":"message","input_tokens":40,"cache_read_input_tokens":3,"cache_creation_input_tokens":4,"output_tokens":1}]},"content":[{"type":"text","text":"answer ☃"},{"type":"tool_use","id":"t","name":"Read","input":{"file_path":"/a"}},{"type":"image"}]}}),
-        serde_json::json!({"type":"user","message":{"content":[{"type":"tool_result","content":{"number":1.5,"parts":["a",null,true]}},"literal",{"type":"text","text":null}]}}),
-        serde_json::json!({"type":"attachment","rendered":[{"content":"system reminder"},{"content":1}]}),
-    ] {
-        let line = row.to_string();
-        std::fs::write(&path, &line).unwrap();
-        let source = crate::json::JsonSource::capture(&path).unwrap();
-        let options = PruneOptions {
-            revive: true,
-            ..Default::default()
-        };
-        let mut tools = HashMap::new();
-        let range = Range {
-            offset: 0,
-            len: line.len() as u64,
-        };
-        let mut facts = source
-            .read_range_value(0, range.len, |v| decision_facts_source(v, range, &options, &mut tools))
-            .unwrap();
-        for key in ["_prune_payload", "_prune_thinking", "_prune_parent"] {
-            facts.as_object_mut().unwrap().remove(key);
-        }
-        assert_eq!(facts, decision_facts(&row, true));
-    }
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -1737,7 +1768,7 @@ fn staged_usage_projection_preserves_mixed_raw_framing_and_source_guard() -> Res
     let source = crate::json::JsonSource::capture(&path)?;
     let mut stage = ByteStage::new();
     stage.write_all(raw.as_bytes())?;
-    let facts = [None, Some(decision_facts(&row, true)), None];
+    let facts = [None, pv(std::slice::from_ref(&row)).remove(0), None];
     let (output, rewritten, honest, stale) =
         revive_staged(&source, stage.finish()?, &facts, &[false; 3], None, true, None)?;
     assert_eq!(rewritten, 1);
@@ -1766,7 +1797,7 @@ fn staged_usage_trim_preserves_whitespace_only_buffers_and_eof_failure() -> Resu
     let raw = format!("{}{}{}\r\n", " ".repeat(2 * 65536), row, "\t".repeat(2 * 65536));
     std::fs::write(&path, &raw)?;
     let source = crate::json::JsonSource::capture(&path)?;
-    let facts = [Some(decision_facts(&row, true))];
+    let facts = [pv(std::slice::from_ref(&row)).remove(0)];
     let mut stage = ByteStage::new();
     stage.write_all(raw.as_bytes())?;
     let (output, rewritten, honest, _) = revive_staged(&source, stage.finish()?, &facts, &[false], None, true, None)?;
@@ -1807,7 +1838,7 @@ fn linked_tool_input_projection_matches_frozen_owned_lookup() -> Result<()> {
     };
     let mut tools = HashMap::new();
     source.read_range_value(0, range.len, |view| {
-        decision_facts_source(view, range, &PruneOptions::default(), &mut tools).map(|_| ())
+        decide(view, range, &PruneOptions::default(), &mut tools).map(|_| ())
     })?;
     assert_eq!(
         source_tool_metadata(&source, Some("duplicate"), &tools)?,
@@ -2453,20 +2484,20 @@ fn byte_window_accounts_for_trailing_reminders_and_prompt_snap_overshoot() {
         ..Default::default()
     };
     let message = |role: &str, text: &str| serde_json::json!({"type":role,"message":{"content":text}});
-    let rows = vec![
-        Some(message("user", "first")),
-        Some(message("assistant", "answer")),
-        Some(message("user", "latest")),
-        Some(message("assistant", "reply")),
-        Some(serde_json::json!({"type":"attachment","rendered":[{"content":"x".repeat(1000)}]})),
-    ];
+    let rows = pv(&[
+        message("user", "first"),
+        message("assistant", "answer"),
+        message("user", "latest"),
+        message("assistant", "reply"),
+        serde_json::json!({"type":"attachment","rendered":[{"content":"x".repeat(1000)}]}),
+    ]);
     assert_eq!(select_kept_turns(&rows, &options, 4), (2, 4, None, true));
-    let rows = vec![
-        Some(message("user", "first")),
-        Some(message("assistant", "answer")),
-        Some(message("user", &"x".repeat(1000))),
-        Some(message("assistant", "reply")),
-    ];
+    let rows = pv(&[
+        message("user", "first"),
+        message("assistant", "answer"),
+        message("user", &"x".repeat(1000)),
+        message("assistant", "reply"),
+    ]);
     assert_eq!(select_kept_turns(&rows, &options, 4), (2, 4, None, true));
     let options = PruneOptions {
         window: Some(1000),
@@ -2577,118 +2608,4 @@ fn prune_refuses_a_malformed_line_inside_the_kept_window() {
         "the source is untouched"
     );
     std::fs::remove_dir_all(&dir).ok();
-}
-
-/// The typed `record::Facts` read what prune's decision rosters (owned and source) read, field by
-/// field through their consumers' own accessors, over every corpus Claude record plus edge
-/// shapes. The parity proof for retiring those rosters.
-#[test]
-fn typed_facts_read_what_the_decision_and_selection_projections_read() {
-    use crate::harness::claude::record::Facts;
-    let edges = [
-        r#"[1,2]"#,
-        r#"{"type":7,"isSidechain":"yes","isApiErrorMessage":1,"sessionId":3,"uuid":null,"parentUuid":5,"logicalParentUuid":"lp"}"#,
-        r#"{"type":"assistant","parentUuid":null,"message":"text","uuid":"u"}"#,
-        r#"{"type":"assistant","isApiErrorMessage":true,"message":{"model":"m","content":"s"}}"#,
-        r#"{"type":"assistant","message":{"model":"<synthetic>","content":[1,{"type":"tool_use","id":"t","name":"N"},{"type":"tool_result","tool_use_id":"t"}]}}"#,
-        r#"{"type":"assistant","message":{"usage":{"input_tokens":10,"cache_read_input_tokens":5,"iterations":[{"type":"message","input_tokens":1,"output_tokens":2,"cache_read_input_tokens":3,"cache_creation_input_tokens":4},{"type":"compaction","input_tokens":99}]}}}"#,
-        r#"{"type":"assistant","message":{"usage":{"input_tokens":10,"iterations":[{"type":"message","input_tokens":1},7]}}}"#,
-        r#"{"type":"assistant","message":{"usage":{"input_tokens":0,"iterations":[{"type":"message","input_tokens":1,"output_tokens":2,"cache_read_input_tokens":3,"cache_creation_input_tokens":4}]}}}"#,
-        r#"{"type":"assistant","message":{"usage":{"input_tokens":-1,"cache_creation_input_tokens":2.5,"iterations":[]}}}"#,
-        r#"{"type":"assistant","message":{"usage":7}}"#,
-        r#"{"type":"system","subtype":"compact_boundary","compactMetadata":{"preservedSegment":{"headUuid":"h"}},"_cv_orig_ctx":12}"#,
-        r#"{"type":"system","subtype":"compact_boundary","compactMetadata":{"preservedSegment":{"headUuid":3}},"_cv_orig_ctx":-2}"#,
-        r#"{"type":"user","type":"assistant","sessionId":"a","sessionId":"b","cwd":"/c"}"#,
-    ];
-    let dir = tmpdir();
-    let edge_path = dir.join("edges.jsonl");
-    std::fs::write(&edge_path, edges.join("\n") + "\n").unwrap();
-    let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/claude");
-    let mut paths: Vec<PathBuf> = walkdir::WalkDir::new(corpus)
-        .into_iter()
-        .filter_map(Result::ok)
-        .map(|e| e.into_path())
-        .filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
-        .collect();
-    paths.push(edge_path);
-    let s = |v: Option<&Value>| v.and_then(Value::as_str).map(str::to_owned);
-    let mut records = 0usize;
-    for path in &paths {
-        let source = crate::json::JsonSource::capture(path).unwrap();
-        let file = std::fs::File::open(path).unwrap();
-        for row in ranges::records(
-            &file,
-            Range {
-                offset: 0,
-                len: source.len(),
-            },
-        )
-        .unwrap()
-        {
-            let (range, _) = row.unwrap();
-            let mut tools = HashMap::new();
-            let read = source.read_range_value(range.offset, range.len, |view| {
-                let (facts, _) = Facts::parse(view)?;
-                let decision = decision_facts_source(view, range, &PruneOptions::default(), &mut tools)?;
-                Ok((facts, decision, view.resolve()?.into_owned()))
-            });
-            let Ok((facts, decision, owned)) = read else {
-                continue;
-            };
-            records += 1;
-            let at = format!("{}@{}", path.display(), range.offset);
-            // prune, source and owned rosters
-            for roster in [&decision, &decision_facts(&owned, false)] {
-                assert_eq!(
-                    facts.ty,
-                    roster.get("type").and_then(Value::as_str).unwrap_or(""),
-                    "{at}"
-                );
-                assert_eq!(facts.subtype, s(roster.get("subtype")), "{at}");
-                assert_eq!(facts.sidechain, is_sidechain(roster), "{at}");
-                assert_eq!(facts.turn_kind(), turn_kind(roster), "{at}");
-                assert_eq!(facts.session_id, s(roster.get("sessionId")), "{at}");
-                assert_eq!(
-                    facts.orig_ctx,
-                    roster.get("_cv_orig_ctx").and_then(Value::as_u64),
-                    "{at}"
-                );
-                assert_eq!(facts.uuid, s(roster.get("_uuid")), "{at}");
-                assert_eq!(
-                    facts.link().map(|p| p.map(str::to_owned)),
-                    roster.get("_parent").map(|p| s(Some(p))),
-                    "{at}"
-                );
-                assert_eq!(facts.model, s(roster.pointer("/message/model")), "{at}");
-                assert_eq!(
-                    facts.usage_in,
-                    roster
-                        .pointer("/message/usage")
-                        .and_then(Value::as_object)
-                        .map(usage_total),
-                    "{at}"
-                );
-                assert_eq!(
-                    facts.is_compact_boundary(),
-                    roster.get("type").and_then(Value::as_str) == Some("system")
-                        && roster.get("subtype").and_then(Value::as_str) == Some("compact_boundary"),
-                    "{at}"
-                );
-            }
-            let named: HashMap<String, (String, usize)> =
-                tools.into_iter().map(|(id, (n, _, i))| (id, (n, i))).collect();
-            let mut typed = HashMap::new();
-            if facts.ty == "assistant" {
-                for (i, b) in facts.blocks.iter().enumerate() {
-                    if let (Some("tool_use"), Some(id)) = (b.ty.as_deref(), &b.id) {
-                        typed.insert(id.clone(), (b.name.clone().unwrap_or_default(), i));
-                    }
-                }
-            }
-            assert_eq!(typed, named, "{at}");
-        }
-    }
-    std::fs::remove_dir_all(dir).ok();
-    assert!(records > 1000, "the corpus is read: {records} records");
-    eprintln!("typed facts parity: {records} records in {} files", paths.len());
 }
