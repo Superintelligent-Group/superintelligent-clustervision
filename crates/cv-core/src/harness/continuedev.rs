@@ -89,10 +89,14 @@ impl Adapter for Continue {
             return Ok(Default::default());
         };
 
-        // Index entries from sessions.json, if present.
-        let index = read_index(&sessions.join("sessions.json"));
+        // An unreadable or undecodable `sessions.json` is reported; its files are still listed by
+        // the walk below, without the index's facts. An unreadable dir or session file is skipped
+        // and reported; a session file that does not decode is listed (its read is an empty,
+        // counted session).
+        let mut out = crate::Discovered::default();
+        let index_path = sessions.join("sessions.json");
+        let index = out.keep(&index_path, read_index(&index_path)).unwrap_or_default();
 
-        let mut out = Vec::new();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
         // Prefer the index, but only keep entries whose `<id>.json` actually exists.
@@ -105,13 +109,16 @@ impl Adapter for Continue {
                 continue;
             }
             // The index has the listing facts; counting would read the whole history (C1).
-            out.push(ref_from(meta, &path));
+            out.refs.push(ref_from(meta, &path));
         }
 
         // Fold in any `<id>.json` on disk that the index didn't mention (tolerant of a missing or
         // stale index).
-        if let Ok(rd) = fs::read_dir(sessions) {
-            for e in rd.filter_map(|e| e.ok()) {
+        if let Some(rd) = out.keep(sessions, fs::read_dir(sessions).map_err(Into::into)) {
+            for e in rd {
+                let Some(e) = out.keep(sessions, e.map_err(Into::into)) else {
+                    continue;
+                };
                 let p = e.path();
                 let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
                     continue;
@@ -123,18 +130,21 @@ impl Adapter for Continue {
                 if seen.contains(&id) {
                     continue;
                 }
-                let (title, cwd) = scan_session(&p).map_or((None, None), |s| (s.title, s.cwd));
+                let Some(scan) = out.keep(&p, scan_session(&p)) else {
+                    continue;
+                };
+                let (title, cwd) = scan.map_or((None, None), |s| (s.title, s.cwd));
                 let meta = IndexMeta {
                     session_id: id,
                     title,
                     cwd,
                     created_at: None,
                 };
-                out.push(ref_from(&meta, &p));
+                out.refs.push(ref_from(&meta, &p));
             }
         }
 
-        Ok(out.into())
+        Ok(out)
     }
 
     /// Project one accepted history item at a time, retaining body source ranges in lazy mode.
@@ -154,10 +164,7 @@ impl Adapter for Continue {
             if let Some(error) = sink.take_error() {
                 return Err(error);
             }
-            let Some(source) = JsonSource::capture(&r.path).ok() else {
-                sink.meta(&s);
-                return Ok(s);
-            };
+            let source = JsonSource::capture(&r.path)?;
             let result = source.read_syntax(|root| {
                 let Some(doc) = Fields::parse_struct(root, &["title", "workspaceDirectory", "history"])? else {
                     return Err(InvalidStruct("expected Continue session struct").into());
@@ -223,10 +230,12 @@ impl Adapter for Continue {
                 Ok(())
             });
             if let Err(error) = result {
-                if !error.is::<InvalidJson>() && !error.is::<InvalidStruct>() {
+                if !is_undecodable(&error) {
                     return Err(error);
                 }
                 sink.meta(&s);
+                // The document is the record: one that does not decode is counted.
+                super::Unparsed(1).note(&mut s);
             }
             Ok(s)
         })
@@ -373,39 +382,38 @@ struct IndexMeta {
     created_at: Option<DateTime<Utc>>,
 }
 
-/// Read `sessions.json` (array of `{sessionId, title, dateCreated, workspaceDirectory}`). Empty vec
-/// on any error.
-fn read_index(path: &Path) -> Vec<IndexMeta> {
-    let Some(source) = JsonSource::capture(path).ok() else {
-        return Vec::new();
-    };
-    source
-        .read_document(|root| {
-            let mut out = Vec::new();
-            if let Some(entries) = root.array()? {
-                for entry in entries {
-                    let Some(fields) =
-                        Fields::parse(entry?, &["sessionId", "title", "dateCreated", "workspaceDirectory"])?
-                    else {
-                        continue;
-                    };
-                    let Some(session_id) = fields.string("sessionId")?.filter(|s| !s.is_empty()) else {
-                        continue;
-                    };
-                    out.push(IndexMeta {
-                        session_id,
-                        title: record::title(fields.get("title"), false)?,
-                        cwd: fields
-                            .string("workspaceDirectory")?
-                            .filter(|p| !p.is_empty())
-                            .map(|p| workspace_to_path(&p)),
-                        created_at: fields.value("dateCreated")?.as_ref().and_then(parse_date),
-                    });
-                }
+/// A document that read but did not decode (as opposed to one that could not be read).
+fn is_undecodable(error: &anyhow::Error) -> bool {
+    error.is::<InvalidJson>() || error.is::<InvalidStruct>()
+}
+
+/// Read `sessions.json` (array of `{sessionId, title, dateCreated, workspaceDirectory}`); a
+/// non-array document is an empty index, a read or decode failure an error.
+fn read_index(path: &Path) -> Result<Vec<IndexMeta>> {
+    JsonSource::capture(path)?.read_document(|root| {
+        let mut out = Vec::new();
+        if let Some(entries) = root.array()? {
+            for entry in entries {
+                let Some(fields) = Fields::parse(entry?, &["sessionId", "title", "dateCreated", "workspaceDirectory"])?
+                else {
+                    continue;
+                };
+                let Some(session_id) = fields.string("sessionId")?.filter(|s| !s.is_empty()) else {
+                    continue;
+                };
+                out.push(IndexMeta {
+                    session_id,
+                    title: record::title(fields.get("title"), false)?,
+                    cwd: fields
+                        .string("workspaceDirectory")?
+                        .filter(|p| !p.is_empty())
+                        .map(|p| workspace_to_path(&p)),
+                    created_at: fields.value("dateCreated")?.as_ref().and_then(parse_date),
+                });
             }
-            Ok(out)
-        })
-        .unwrap_or_default()
+        }
+        Ok(out)
+    })
 }
 
 /// Build a `SessionRef` from index metadata + the on-disk transcript path.
@@ -431,21 +439,24 @@ struct Scan {
     cwd: Option<PathBuf>,
 }
 
-fn scan_session(path: &Path) -> Option<Scan> {
-    let source = JsonSource::capture(path).ok()?;
-    source
-        .read_document(|root| {
-            let mut scan = Scan::default();
-            if let Some(fields) = Fields::parse(root, &["title", "workspaceDirectory"])? {
-                scan.title = record::title(fields.get("title"), false)?;
-                scan.cwd = fields
-                    .string("workspaceDirectory")?
-                    .filter(|p| !p.is_empty())
-                    .map(|p| workspace_to_path(&p));
-            }
-            Ok(scan)
-        })
-        .ok()
+/// `None` for a document that does not decode; an error for one that cannot be read.
+fn scan_session(path: &Path) -> Result<Option<Scan>> {
+    let scanned = JsonSource::capture(path)?.read_document(|root| {
+        let mut scan = Scan::default();
+        if let Some(fields) = Fields::parse(root, &["title", "workspaceDirectory"])? {
+            scan.title = record::title(fields.get("title"), false)?;
+            scan.cwd = fields
+                .string("workspaceDirectory")?
+                .filter(|p| !p.is_empty())
+                .map(|p| workspace_to_path(&p));
+        }
+        Ok(scan)
+    });
+    match scanned {
+        Ok(scan) => Ok(Some(scan)),
+        Err(error) if is_undecodable(&error) => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1156,11 +1167,11 @@ mod tests {
                     .map(workspace_to_path);
                 (title, cwd)
             });
-            let actual = scan_session(&path).map(|s| (s.title, s.cwd));
+            let actual = scan_session(&path).unwrap().map(|s| (s.title, s.cwd));
             assert_eq!(actual, expected, "case prefix: {:?}", &text[..text.len().min(120)]);
         }
         fs::write(&path, b"{\"history\":[\"\xff\"]}").unwrap();
-        assert!(scan_session(&path).is_none());
+        assert!(scan_session(&path).unwrap().is_none());
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1208,6 +1219,20 @@ mod tests {
         let broken = refs.iter().find(|r| r.id == "broken").unwrap();
         assert!(broken.title.is_none());
         assert_eq!(broken.message_count, None);
+        // The undecodable file reads as an empty session that counts its one record.
+        let adapter = Continue {
+            sessions: Some(dir.clone()),
+        };
+        let read = adapter.parse(broken).unwrap();
+        assert!(read.messages.is_empty());
+        assert_eq!(read.extra["cv"]["skipped_lines"], 1);
+        // An undecodable index is reported; the walk still lists every file, without its facts.
+        fs::write(dir.join("sessions.json"), "{broken").unwrap();
+        let found = adapter.discover().unwrap();
+        assert_eq!(found.refs.len(), 3);
+        assert_eq!(found.skipped.len(), 1);
+        assert_eq!(found.skipped[0].path, dir.join("sessions.json"));
+        assert!(found.refs.iter().find(|r| r.id == "indexed").unwrap().title.as_deref() == Some("file title"));
         fs::remove_dir_all(dir).unwrap();
     }
 }
