@@ -234,14 +234,10 @@ impl Adapter for Kimi {
                         reads.record(&segment);
                     }
                 }
-                let mut failure = None;
                 let hit = crate::discover_cache::cached_scan_with_reads(&transcript, reads, || {
                     scan(&id, &transcript, &dir, cwd.clone())
-                        .map_err(|e| failure = Some(e))
-                        .ok()
-                        .flatten()
                 });
-                if let Some(found) = crate::Skipped::listed(&transcript, failure.map_or(Ok(hit), Err)) {
+                if let Some(found) = crate::Skipped::listed(&transcript, hit) {
                     out.push(found);
                 }
             }
@@ -944,15 +940,19 @@ pub fn subagent_refs(main: &SessionRef) -> Vec<SessionRef> {
             for segment in transcript_segments(&p, &transcript) {
                 reads.record(&segment);
             }
+            // A sub-agent ref view has no error channel: one that cannot be scanned is absent.
             let mut r = crate::discover_cache::cached_scan_with_reads(&transcript, reads, || {
-                let mut r = scan(&agent, &transcript, &p, None).ok()??;
+                let Some(mut r) = scan(&agent, &transcript, &p, None)? else {
+                    return Ok(None);
+                };
                 if let Some(d) =
                     subagent_meta(&p).and_then(|m| m.get("description").and_then(Value::as_str).map(str::to_string))
                 {
                     r.title = Some(crate::ir::truncate(&d, crate::ir::Head::TITLE));
                 }
-                Some(r)
-            })?;
+                Ok(Some(r))
+            })
+            .ok()??;
             // Parent display identity/cwd are supplied by the caller, not by these cached bytes.
             r.id = format!("{}/{agent}", main.id);
             r.cwd.clone_from(&main.cwd);

@@ -1132,27 +1132,18 @@ pub fn task_notices(parent_path: &std::path::Path) -> std::collections::HashMap<
 /// The cached metadata scan of one transcript: `Ok(None)` only when the cache refuses the
 /// result, `Err` with the reason a scan failed.
 fn cached_metadata(path: &Path) -> Result<Option<SessionRef>> {
-    let mut failure = None;
-    let scanned = crate::discover_cache::cached_scan_continued(path, metadata::LAYER, |from| {
-        match scan_at(path, from) {
-            Ok((reference, checkpoint)) => {
-                let continuation = checkpoint.and_then(|checkpoint| {
-                    let head = crate::resume::MarkHead::of(path, &checkpoint, metadata::LAYER)?;
-                    Some(crate::discover_cache::ScanContinuation {
-                        head,
-                        checkpoint,
-                        dependencies: Default::default(),
-                    })
-                });
-                (Some(reference), continuation)
-            }
-            Err(error) => {
-                failure = Some(error);
-                (None, None)
-            }
-        }
-    });
-    failure.map_or(Ok(scanned), Err)
+    crate::discover_cache::cached_scan_continued(path, metadata::LAYER, |from| {
+        let (reference, checkpoint) = scan_at(path, from)?;
+        let continuation = checkpoint.and_then(|checkpoint| {
+            let head = crate::resume::MarkHead::of(path, &checkpoint, metadata::LAYER)?;
+            Some(crate::discover_cache::ScanContinuation {
+                head,
+                checkpoint,
+                dependencies: Default::default(),
+            })
+        });
+        Ok((Some(reference), continuation))
+    })
 }
 
 fn scan(path: &Path) -> Result<SessionRef> {

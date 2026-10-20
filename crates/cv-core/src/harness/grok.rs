@@ -147,11 +147,8 @@ impl Adapter for Grok {
             reads.record(&self.resume_source(&reference));
             // Key by the public ref path, so the existing full-read count publication updates
             // this same cache entry. Summary and transcript identities guard its contents.
-            let mut failure = None;
-            let scanned = crate::discover_cache::cached_scan_with_reads(dir, reads, || {
-                scan(entry.path()).map_err(|e| failure = Some(e)).ok().flatten()
-            });
-            if let Some(found) = crate::Skipped::listed(entry.path(), failure.map_or(Ok(scanned), Err)) {
+            let scanned = crate::discover_cache::cached_scan_with_reads(dir, reads, || scan(entry.path()));
+            if let Some(found) = crate::Skipped::listed(entry.path(), scanned) {
                 out.push(found);
             }
         }

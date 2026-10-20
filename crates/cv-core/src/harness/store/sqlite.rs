@@ -185,14 +185,7 @@ pub(crate) fn cached_discover(
     reads.record(&path);
     reads.record(&sidecar(&path, "-wal"));
     reads.record(&sidecar(&path, "-journal"));
-    let mut failure = None;
-    let refs = crate::discover_cache::cached_scan_many_with_reads(&path, reads, || {
-        discover().unwrap_or_else(|error| {
-            failure = Some(error);
-            Vec::new()
-        })
-    });
-    failure.map_or(Ok(refs), Err)
+    crate::discover_cache::cached_scan_many_with_reads(&path, reads, discover)
 }
 
 fn sidecar(path: &Path, suffix: &str) -> std::path::PathBuf {

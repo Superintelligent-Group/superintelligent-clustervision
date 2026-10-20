@@ -214,69 +214,87 @@ pub(crate) fn cached_scan_many<F>(path: &Path, scan: F) -> Vec<SessionRef>
 where
     F: FnOnce() -> Vec<SessionRef>,
 {
-    cached_scan_inner(path, None, Default::default(), |_| (scan(), None))
+    let Ok(refs) =
+        cached_scan_inner::<std::convert::Infallible, _>(path, None, Default::default(), |_| Ok((scan(), None)));
+    refs
 }
 
 /// Single-result metadata scan with auxiliary identities captured before the caller reads them.
 /// The existing primary cache retains and revalidates the complete baseline, including absence.
-pub(crate) fn cached_scan_with_reads<F>(path: &Path, reads: crate::source::ReadSet, scan: F) -> Option<SessionRef>
+/// A failed scan is the caller's error and leaves the cache as it was.
+pub(crate) fn cached_scan_with_reads<F>(
+    path: &Path,
+    reads: crate::source::ReadSet,
+    scan: F,
+) -> anyhow::Result<Option<SessionRef>>
 where
-    F: FnOnce() -> Option<SessionRef>,
+    F: FnOnce() -> anyhow::Result<Option<SessionRef>>,
 {
-    cached_scan_inner(path, None, reads, |_| (scan().into_iter().collect(), None))
-        .into_iter()
-        .next()
+    cached_scan_inner(path, None, reads, |_| Ok((scan()?.into_iter().collect(), None)))
+        .map(|refs: Vec<SessionRef>| refs.into_iter().next())
 }
 
-/// [`cached_scan_many`] with auxiliary identities captured before the caller reads them.
+/// [`cached_scan_many`] with auxiliary identities captured before the caller reads them, over a
+/// scan that can fail (its error is returned, nothing cached).
 #[cfg(feature = "sqlite")]
-pub(crate) fn cached_scan_many_with_reads<F>(path: &Path, reads: crate::source::ReadSet, scan: F) -> Vec<SessionRef>
+pub(crate) fn cached_scan_many_with_reads<F>(
+    path: &Path,
+    reads: crate::source::ReadSet,
+    scan: F,
+) -> anyhow::Result<Vec<SessionRef>>
 where
-    F: FnOnce() -> Vec<SessionRef>,
+    F: FnOnce() -> anyhow::Result<Vec<SessionRef>>,
 {
-    cached_scan_inner(path, None, reads, |_| (scan(), None))
+    cached_scan_inner(path, None, reads, |_| Ok((scan()?, None)))
 }
 
 /// Opt-in append metadata state. Exact hits retain their existing guards; a continuation is
-/// eligible only under the adapter's immutable-prefix append contract and sampled MarkHead.
-pub(crate) fn cached_scan_continued<F>(path: &Path, version: &str, scan: F) -> Option<SessionRef>
+/// eligible only under the adapter's immutable-prefix append contract and sampled MarkHead. A
+/// failed scan is the caller's error and leaves the cache as it was.
+pub(crate) fn cached_scan_continued<F>(path: &Path, version: &str, scan: F) -> anyhow::Result<Option<SessionRef>>
 where
-    F: FnOnce(Option<&crate::stream::Checkpoint>) -> (Option<SessionRef>, Option<ScanContinuation>),
+    F: FnOnce(Option<&crate::stream::Checkpoint>) -> anyhow::Result<(Option<SessionRef>, Option<ScanContinuation>)>,
 {
     cached_scan_inner(path, Some(version), Default::default(), |from| {
-        let (reference, continuation) = scan(from);
-        (reference.into_iter().collect(), continuation)
+        let (reference, continuation) = scan(from)?;
+        Ok((reference.into_iter().collect(), continuation))
     })
-    .into_iter()
-    .next()
+    .map(|refs: Vec<SessionRef>| refs.into_iter().next())
 }
 
-fn cached_scan_inner<F>(path: &Path, version: Option<&str>, reads: crate::source::ReadSet, scan: F) -> Vec<SessionRef>
+/// The one scan-cache path. A scan's error comes straight back, before anything is cached:
+/// the cache never has to tell a failed scan's empty from a source that holds no session.
+fn cached_scan_inner<E, F>(
+    path: &Path,
+    version: Option<&str>,
+    reads: crate::source::ReadSet,
+    scan: F,
+) -> Result<Vec<SessionRef>, E>
 where
-    F: FnOnce(Option<&crate::stream::Checkpoint>) -> (Vec<SessionRef>, Option<ScanContinuation>),
+    F: FnOnce(Option<&crate::stream::Checkpoint>) -> Result<(Vec<SessionRef>, Option<ScanContinuation>), E>,
 {
     let context = read::Context::current();
-    let mut refs = cached_scan_captured(path, version, reads, scan, &context);
+    let mut refs = cached_scan_captured(path, version, reads, scan, &context)?;
     context.refill_turns(&mut refs);
-    refs
+    Ok(refs)
 }
 
-fn cached_scan_captured<F>(
+fn cached_scan_captured<E, F>(
     path: &Path,
     version: Option<&str>,
     mut reads: crate::source::ReadSet,
     scan: F,
     context: &read::Context,
-) -> Vec<SessionRef>
+) -> Result<Vec<SessionRef>, E>
 where
-    F: FnOnce(Option<&crate::stream::Checkpoint>) -> (Vec<SessionRef>, Option<ScanContinuation>),
+    F: FnOnce(Option<&crate::stream::Checkpoint>) -> Result<(Vec<SessionRef>, Option<ScanContinuation>), E>,
 {
     // One capture decides freshness: the path's full identity, inside the read set (with its
     // prefix sample when it may grow under a continuation). Its `(mtime, size)` only keys rows.
     reads.record_as(path, version.is_some());
     #[cfg_attr(not(feature = "sqlite"), allow(unused_variables))]
     let Some(key @ (_, size)) = reads.signature(path) else {
-        return scan(None).0;
+        return Ok(scan(None)?.0);
     };
     let cache = context.cache();
     clear_invalidated(&cache);
@@ -289,7 +307,7 @@ where
     };
     if let Some((refs, captured)) = candidate {
         if captured.fresh(&mut crate::source::Probe::default()) {
-            return refs;
+            return Ok(refs);
         }
     }
     // Do not reload an existing process entry, even when stale or invalid: a fresh scan replaces it.
@@ -309,7 +327,7 @@ where
             let candidate = admit_loaded(&cache, path, entry, &reads);
             if let Some((refs, captured)) = candidate {
                 if captured.fresh(&mut crate::source::Probe::default()) {
-                    return refs;
+                    return Ok(refs);
                 }
             }
         }
@@ -348,7 +366,7 @@ where
     if let Some(prior) = &prior {
         reads.merge(&prior.dependencies);
     }
-    let (refs, mut continuation) = scan(prior.as_ref().map(|prior| &prior.checkpoint));
+    let (refs, mut continuation) = scan(prior.as_ref().map(|prior| &prior.checkpoint))?;
     if let Some(state) = &mut continuation {
         if let Some(prior) = &prior {
             state.dependencies.merge(&prior.dependencies);
@@ -374,11 +392,11 @@ where
         let mut probe = crate::source::Probe::default();
         let grown = version.is_some() && !reads.fresh(&mut probe);
         if grown && !reads.fresh_or_grown(&mut probe) {
-            return refs;
+            return Ok(refs);
         }
         let mut entries = cache.entries.write().unwrap();
         if grown && entries.get(path).is_some_and(|entry| entry.size > size) {
-            return refs;
+            return Ok(refs);
         }
         entries.insert(
             path.to_path_buf(),
@@ -397,7 +415,7 @@ where
         );
         cache.any_dirty.store(true, Ordering::Relaxed);
     }
-    refs
+    Ok(refs)
 }
 
 /// Original before-read metadata, never a fresh post-discovery stamp.
@@ -429,15 +447,13 @@ where
         .next()
 }
 
-/// [`cached_scan`] over a scan that can fail: its error comes back to the caller (an empty
-/// result is never cached), for discovery to report the source as skipped.
+/// [`cached_scan`] over a scan that can fail: its error comes back to the caller, nothing
+/// cached, for discovery to report the source as skipped.
 pub(crate) fn cached_scan_checked<F>(path: &Path, scan: F) -> anyhow::Result<Option<SessionRef>>
 where
     F: FnOnce() -> anyhow::Result<Option<SessionRef>>,
 {
-    let mut failure = None;
-    let r = cached_scan(path, || scan().map_err(|e| failure = Some(e)).ok().flatten());
-    failure.map_or(Ok(r), Err)
+    cached_scan_with_reads(path, Default::default(), scan)
 }
 
 /// [`cached_scan_many`] over a scan that can fail (see [`cached_scan_checked`]).
@@ -445,14 +461,7 @@ pub(crate) fn cached_scan_many_checked<F>(path: &Path, scan: F) -> anyhow::Resul
 where
     F: FnOnce() -> anyhow::Result<Vec<SessionRef>>,
 {
-    let mut failure = None;
-    let refs = cached_scan_many(path, || {
-        scan().unwrap_or_else(|e| {
-            failure = Some(e);
-            Vec::new()
-        })
-    });
-    failure.map_or(Ok(refs), Err)
+    cached_scan_inner(path, None, Default::default(), |_| Ok((scan()?, None)))
 }
 
 fn persistence_cache(path: &Path, prune: bool) -> Option<Arc<Cache>> {
@@ -572,18 +581,20 @@ mod tests {
         };
         let reference = |id| SessionRef::new(id, crate::Harness::Claude, &path);
         assert_eq!(
-            cached_scan_with_reads(&path, baseline(), || Some(reference("absent")))
+            cached_scan_with_reads(&path, baseline(), || Ok(Some(reference("absent"))))
+                .unwrap()
                 .unwrap()
                 .id,
             "absent"
         );
-        cached_scan_with_reads(&path, baseline(), || panic!("unchanged absent sidecar must hit"));
+        cached_scan_with_reads(&path, baseline(), || panic!("unchanged absent sidecar must hit")).unwrap();
         persist(false);
         current_cache().entries.write().unwrap().clear();
-        cached_scan_with_reads(&path, baseline(), || panic!("persisted auxiliary baseline must hit"));
+        cached_scan_with_reads(&path, baseline(), || panic!("persisted auxiliary baseline must hit")).unwrap();
         std::fs::write(&sidecar, "new title").unwrap();
         assert_eq!(
-            cached_scan_with_reads(&path, baseline(), || Some(reference("present")))
+            cached_scan_with_reads(&path, baseline(), || Ok(Some(reference("present"))))
+                .unwrap()
                 .unwrap()
                 .id,
             "present"
@@ -591,13 +602,15 @@ mod tests {
         std::fs::write(&sidecar, "before race").unwrap();
         cached_scan_with_reads(&path, baseline(), || {
             std::fs::write(&sidecar, "after race").unwrap();
-            Some(reference("raced"))
-        });
+            Ok(Some(reference("raced")))
+        })
+        .unwrap();
         assert!(!captured_reads(&path)
             .unwrap()
             .fresh(&mut crate::source::Probe::default()));
         assert_eq!(
-            cached_scan_with_reads(&path, baseline(), || Some(reference("refreshed")))
+            cached_scan_with_reads(&path, baseline(), || Ok(Some(reference("refreshed"))))
+                .unwrap()
                 .unwrap()
                 .id,
             "refreshed"
@@ -626,35 +639,41 @@ mod tests {
         };
         cached_scan_continued(&path, version, |prior| {
             assert!(prior.is_none());
-            (Some(r.clone()), Some(state()))
-        });
+            Ok((Some(r.clone()), Some(state())))
+        })
+        .unwrap();
         cached_scan_continued(&path, version, |_| {
             panic!("unchanged primary and dependency must hit process cache")
-        });
+        })
+        .unwrap();
         persist(false);
         current_cache().entries.write().unwrap().clear();
         cached_scan_continued(&path, version, |_| {
             panic!("persisted exact hit must retain auxiliary guards")
-        });
+        })
+        .unwrap();
         // A dependency-only change forces complete metadata discovery, even with identical
         // primary bytes and no opportunity for append continuation.
         std::fs::write(&aux, "replacement auxiliary").unwrap();
         cached_scan_continued(&path, version, |prior| {
             assert!(prior.is_none());
-            (Some(r.clone()), Some(state()))
-        });
-        cached_scan_continued(&path, version, |_| panic!("refreshed auxiliary must hit"));
+            Ok((Some(r.clone()), Some(state())))
+        })
+        .unwrap();
+        cached_scan_continued(&path, version, |_| panic!("refreshed auxiliary must hit")).unwrap();
         std::fs::write(&path, "first\nsecond\n").unwrap();
         cached_scan_continued(&path, version, |prior| {
             assert_eq!(prior.unwrap().offset, 6);
-            (Some(r.clone()), Some(state()))
-        });
+            Ok((Some(r.clone()), Some(state())))
+        })
+        .unwrap();
         std::fs::write(&aux, "two").unwrap();
         std::fs::write(&path, "first\nsecond\nthird\n").unwrap();
         cached_scan_continued(&path, version, |prior| {
             assert!(prior.is_none(), "changed auxiliary rejects append authority");
-            (Some(r.clone()), Some(state()))
-        });
+            Ok((Some(r.clone()), Some(state())))
+        })
+        .unwrap();
         let cache = current_cache();
         let old_size = cache.entries.read().unwrap()[&path].size;
         std::fs::write(&path, "first\nsecond\nthird\nfourth\n").unwrap();
@@ -662,8 +681,9 @@ mod tests {
             assert!(prior.is_some());
             let continuation = state();
             std::fs::write(&aux, "new").unwrap();
-            (Some(r.clone()), Some(continuation))
-        });
+            Ok((Some(r.clone()), Some(continuation)))
+        })
+        .unwrap();
         assert_eq!(
             cache.entries.read().unwrap()[&path].size,
             old_size,
@@ -672,24 +692,26 @@ mod tests {
         let result = cached_scan_continued(&path, version, |_| {
             std::fs::write(&path, "first\nsecond\nthird\nfourth\nfifth\n").unwrap();
             let newer = cached_scan_continued(&path, version, |_| {
-                (
+                Ok((
                     Some(SessionRef {
                         message_count: Some(9),
                         ..r.clone()
                     }),
                     Some(state()),
-                )
+                ))
             })
+            .unwrap()
             .unwrap();
             assert_eq!(newer.message_count, Some(9));
-            (
+            Ok((
                 Some(SessionRef {
                     message_count: Some(1),
                     ..r.clone()
                 }),
                 Some(state()),
-            )
+            ))
         })
+        .unwrap()
         .unwrap();
         assert_eq!(result.message_count, Some(1));
         assert_eq!(

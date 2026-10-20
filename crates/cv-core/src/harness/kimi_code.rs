@@ -218,14 +218,8 @@ impl Adapter for KimiCode {
             let key = main_wire(&sdir);
             reads.record(&key);
             let key = if key.exists() { key } else { sdir.join("state.json") };
-            let mut failure = None;
-            let r = crate::discover_cache::cached_scan_with_reads(&key, reads, || {
-                scan(&sdir, &id, fallback_cwd)
-                    .map_err(|e| failure = Some(e))
-                    .ok()
-                    .flatten()
-            });
-            crate::Skipped::listed(&key, failure.map_or(Ok(r), Err))
+            let r = crate::discover_cache::cached_scan_with_reads(&key, reads, || scan(&sdir, &id, fallback_cwd));
+            crate::Skipped::listed(&key, r)
         });
         scanned.into_iter().for_each(|found| out.push(found));
         Ok(out)
