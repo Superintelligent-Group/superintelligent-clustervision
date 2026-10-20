@@ -565,14 +565,6 @@ impl MessageSink for AffordanceSink<'_> {
 /// Match launch receipts without retaining their decoded payload. Keep only the marker overlap
 /// between chunks, and preserve checked source errors when an early match ends the demand.
 fn source_contains(source: &crate::lazy::SourceText, marker: &str) -> Result<bool> {
-    #[derive(Debug)]
-    struct Found;
-    impl std::fmt::Display for Found {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str("receipt marker found")
-        }
-    }
-    impl std::error::Error for Found {}
     let mut window = Vec::new();
     let result = source.try_for_each_chunk(64 * 1024, |part| {
         window.extend_from_slice(part.as_bytes());
@@ -581,7 +573,7 @@ fn source_contains(source: &crate::lazy::SourceText, marker: &str) -> Result<boo
                 .windows(marker.len())
                 .any(|candidate| candidate == marker.as_bytes())
         {
-            return Err(Found.into());
+            return Err(crate::stream::Stop.into());
         }
         let keep = window.len().min(marker.len().saturating_sub(1));
         let start = window.len() - keep;
@@ -590,7 +582,7 @@ fn source_contains(source: &crate::lazy::SourceText, marker: &str) -> Result<boo
         Ok(())
     });
     match result {
-        Err(error) if error.is::<Found>() => Ok(true),
+        Err(error) if error.is::<crate::stream::Stop>() => Ok(true),
         Err(error) => Err(error),
         Ok(()) => Ok(marker.is_empty()),
     }

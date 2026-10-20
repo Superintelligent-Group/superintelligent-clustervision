@@ -750,23 +750,19 @@ fn scan_view(view: JsonView<'_>) -> Result<Scan> {
     Ok(scan)
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("LM Studio title prefix complete")]
-struct TitleComplete;
-
 /// Feed a JSON string into a title [`Head`](crate::ir::Head), stopping once it is decided. Called
 /// only inside read_document, after whole-source Value validation: a prefix stop still passes its
-/// enclosing source-identity check; only this local marker is swallowed.
+/// enclosing source-identity check; only the `Stop` it raises is swallowed.
 fn read_head(head: &mut crate::ir::Head, view: JsonView<'_>) -> Result<()> {
     let result = view.for_each_str_chunk(|text| {
         if head.push(text) {
-            Err(TitleComplete.into())
+            Err(crate::stream::Stop.into())
         } else {
             Ok(())
         }
     });
     match result {
-        Err(error) if error.downcast_ref::<TitleComplete>().is_some() => Ok(()),
+        Err(error) if error.downcast_ref::<crate::stream::Stop>().is_some() => Ok(()),
         result => result.map(|_| ()),
     }
 }

@@ -153,22 +153,19 @@ fn lexical(view: JsonView<'_>, cells: &Cells, spans: bool) -> Result<Option<Text
         }
         Ok(children.is_some())
     }
-    #[derive(Debug, thiserror::Error)]
-    #[error("nonblank text found")]
-    struct Nonblank;
     let build = |view: JsonView<'_>| -> Result<Option<Text>> {
         let Some(root) = view.get("root")? else { return Ok(None) };
         let text = built(cells, spans, |out| walk(root, out).map(|_| ()))?;
         // Stop at the first nonblank chunk; a source mutation still takes precedence.
         let check = text.try_for_each_chunk(&crate::lazy::Resolver::new(None), 1024, |part| {
             if part.chars().any(|c| !c.is_whitespace()) {
-                return Err(Nonblank.into());
+                return Err(crate::stream::Stop.into());
             }
             Ok(())
         });
         match check {
             Ok(()) => Ok(None),
-            Err(error) if error.downcast_ref::<Nonblank>().is_some() => Ok(Some(text)),
+            Err(error) if error.downcast_ref::<crate::stream::Stop>().is_some() => Ok(Some(text)),
             Err(error) => Err(error),
         }
     };

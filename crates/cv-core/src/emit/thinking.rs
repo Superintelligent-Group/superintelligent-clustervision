@@ -4,14 +4,6 @@ use crate::{lazy::Resolver, Block, Harness, Text};
 use anyhow::Result;
 use std::borrow::Cow;
 
-#[derive(Debug)]
-struct CharacterFound;
-impl std::fmt::Display for CharacterFound {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("requested text character found")
-    }
-}
-impl std::error::Error for CharacterFound {}
 /// Source strings have strict acceptance at capture; spans retain their full preflight and
 /// established lossy fallback. Checked callbacks revalidate provenance even at an early stop.
 pub(crate) fn first_character(text: &Text, resolver: &Resolver, skip_whitespace: bool) -> Result<Option<char>> {
@@ -23,12 +15,12 @@ pub(crate) fn first_character(text: &Text, resolver: &Resolver, skip_whitespace:
     match text.try_for_each_chunk(resolver, 64 * 1024, |chunk| {
         first = select(chunk);
         if first.is_some() {
-            return Err(CharacterFound.into());
+            return Err(crate::stream::Stop.into());
         }
         Ok(())
     }) {
         Ok(()) => Ok(None),
-        Err(error) if error.is::<CharacterFound>() => Ok(first),
+        Err(error) if error.is::<crate::stream::Stop>() => Ok(first),
         Err(error) => Err(error),
     }
 }

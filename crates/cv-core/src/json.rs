@@ -801,25 +801,15 @@ impl<'a> JsonView<'a> {
     }
     /// Visit a string's decoded characters until `visit` returns false; false for a nonstring.
     pub(crate) fn for_each_char(self, mut visit: impl FnMut(char) -> bool) -> Result<bool> {
-        #[derive(Debug)]
-        struct Stop;
-        impl std::fmt::Display for Stop {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str("character visit stopped")
-            }
-        }
-        impl std::error::Error for Stop {}
-        match self.for_each_str_chunk(|chunk| {
+        Ok(crate::stream::stopped(self.for_each_str_chunk(|chunk| {
             for c in chunk.chars() {
                 if !visit(c) {
-                    return Err(Stop.into());
+                    return Err(crate::stream::Stop.into());
                 }
             }
             Ok(())
-        }) {
-            Err(error) if error.is::<Stop>() => Ok(true),
-            result => result,
-        }
+        }))?
+        .unwrap_or(true))
     }
     /// Native transcript text uses the session's primary source, just like existing Text spans.
     pub(crate) fn text(self, spans: bool) -> Result<Option<crate::lazy::Text>> {

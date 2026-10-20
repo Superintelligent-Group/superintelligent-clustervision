@@ -208,6 +208,23 @@ impl ParseOptions {
     }
 }
 
+/// The one early-stop signal. A chunk, character or record callback that has what it needs
+/// returns `Err(Stop.into())`; the code that started that traversal reads it back with
+/// [`stopped`]. Source and decoder failures are never `Stop`, so they stay errors, and an
+/// enclosing checked read still revalidates its source after the stop.
+#[derive(Debug, thiserror::Error)]
+#[error("traversal stopped early")]
+pub struct Stop;
+
+/// A traversal's result with [`Stop`] read back: `Some` ran to the end, `None` was stopped.
+pub fn stopped<T>(result: Result<T>) -> Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if error.is::<Stop>() => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 /// Whether a [`MessageSink`] wants the stream to keep going. Returning [`Flow::Stop`] lets a
 /// consumer that has seen enough (e.g. a head-only embedder, or a `--range` window) end the parse
 /// without reading the rest of the transcript.

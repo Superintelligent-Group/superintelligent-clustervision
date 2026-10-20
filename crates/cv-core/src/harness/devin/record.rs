@@ -431,12 +431,12 @@ pub(super) fn compaction(view: JsonView<'_>) -> Result<serde_json::Map<String, V
         let scanned = content.for_each_str_chunk(|chunk| {
             scan.push(chunk);
             if scan.ended {
-                return Err(HistoryComplete.into());
+                return Err(crate::stream::Stop.into());
             }
             Ok(())
         });
         if let Err(error) = scanned {
-            if error.downcast_ref::<HistoryComplete>().is_none() {
+            if error.downcast_ref::<crate::stream::Stop>().is_none() {
                 return Err(error);
             }
         }
@@ -448,9 +448,6 @@ pub(super) fn compaction(view: JsonView<'_>) -> Result<serde_json::Map<String, V
     }
     Ok(out)
 }
-#[derive(Debug, thiserror::Error)]
-#[error("history path complete")]
-struct HistoryComplete;
 
 #[derive(Default)]
 struct HistoryPath {

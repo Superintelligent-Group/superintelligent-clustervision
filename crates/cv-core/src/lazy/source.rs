@@ -17,14 +17,6 @@ impl PartialEq for SourceText {
     }
 }
 impl Eq for SourceText {}
-#[derive(Debug)]
-struct PrefixComplete;
-impl std::fmt::Display for PrefixComplete {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("source text prefix complete")
-    }
-}
-impl std::error::Error for PrefixComplete {}
 impl SourceText {
     pub(crate) fn new(range: Arc<JsonRange>) -> Self {
         Self {
@@ -110,12 +102,12 @@ impl SourceText {
             }
             output.push_str(&part[..end]);
             if end < part.len() {
-                return Err(PrefixComplete.into());
+                return Err(crate::stream::Stop.into());
             }
             Ok(())
         });
         let truncated = match result {
-            Err(error) if error.downcast_ref::<PrefixComplete>().is_some() => true,
+            Err(error) if error.downcast_ref::<crate::stream::Stop>().is_some() => true,
             other => {
                 other?;
                 false

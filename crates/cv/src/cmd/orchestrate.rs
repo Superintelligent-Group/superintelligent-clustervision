@@ -115,14 +115,6 @@ fn collect_prompts(
 }
 
 fn is_question_answer(content: &cv_core::Text, resolver: &cv_core::Resolver) -> Result<bool> {
-    #[derive(Debug)]
-    struct HeadComplete;
-    impl std::fmt::Display for HeadComplete {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str("answer marker determined")
-        }
-    }
-    impl std::error::Error for HeadComplete {}
     let mut head = String::new();
     let mut started = false;
     let mut answer = false;
@@ -135,16 +127,16 @@ fn is_question_answer(content: &cv_core::Text, resolver: &cv_core::Resolver) -> 
             head.push(c);
             if ANSWER_MARKERS.iter().any(|marker| head.starts_with(marker)) {
                 answer = true;
-                return Err(HeadComplete.into());
+                return Err(cv_core::stream::Stop.into());
             }
             if !ANSWER_MARKERS.iter().any(|marker| marker.starts_with(&head)) {
-                return Err(HeadComplete.into());
+                return Err(cv_core::stream::Stop.into());
             }
         }
         Ok(())
     });
     if let Err(error) = result {
-        if !error.is::<HeadComplete>() {
+        if !error.is::<cv_core::stream::Stop>() {
             return Err(error);
         }
     }

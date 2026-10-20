@@ -156,9 +156,6 @@ pub(crate) fn part_from_view(
                 let resolver = crate::lazy::Resolver::new(None);
                 let (prefix, _) = crate::harness::store::document::text_head(&text, &resolver, 5, false)?;
                 if prefix == "data:" {
-                    #[derive(Debug, thiserror::Error)]
-                    #[error("data URL media header complete")]
-                    struct HeaderComplete;
                     let mut skip = 5;
                     let mut media = String::new();
                     match text.try_for_each_chunk(&resolver, 4096, |chunk| {
@@ -168,14 +165,14 @@ pub(crate) fn part_from_view(
                                 continue;
                             }
                             if c == ';' {
-                                return Err(HeaderComplete.into());
+                                return Err(crate::stream::Stop.into());
                             }
                             media.push(c);
                         }
                         Ok(())
                     }) {
                         Ok(()) => {}
-                        Err(error) if error.is::<HeaderComplete>() => {}
+                        Err(error) if error.is::<crate::stream::Stop>() => {}
                         Err(error) => return Err(error),
                     }
                     (media.contains('/').then_some(media), Some("base64:inline".into()))

@@ -2,14 +2,6 @@
 //! a second bounded traversal selects the same first prose/task line as the owned codec.
 
 use anyhow::Result;
-#[derive(Debug)]
-struct Selected;
-impl std::fmt::Display for Selected {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("prompt metadata selected")
-    }
-}
-impl std::error::Error for Selected {}
 use std::path::PathBuf;
 
 #[derive(Default, Debug)]
@@ -206,14 +198,14 @@ pub(super) fn summarize(mut visit: impl FnMut(&mut dyn FnMut(&str) -> Result<()>
             let title_complete = explicit.title.is_some() || (task_complete && prose.title.is_some());
             let path_complete = cwd.result.is_none_or(|(_, end)| next >= end);
             if title_complete && path_complete {
-                return Err(Selected.into());
+                return Err(crate::stream::Stop.into());
             }
         }
         position += chunk.len() as u64;
         Ok(())
     });
     if let Err(error) = selected {
-        if !error.is::<Selected>() {
+        if !error.is::<crate::stream::Stop>() {
             return Err(error);
         }
     }
@@ -266,7 +258,7 @@ mod tests {
                 passes += 1;
                 let result = view.for_each_str_chunk(feed).map(|_| ());
                 if passes == 2 {
-                    assert!(result.as_ref().is_err_and(|error| error.is::<Selected>()));
+                    assert!(result.as_ref().is_err_and(|error| error.is::<crate::stream::Stop>()));
                     std::fs::write(&path, b"\"changed\"")?;
                 }
                 result

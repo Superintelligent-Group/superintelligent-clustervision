@@ -197,29 +197,16 @@ fn chunks(text: &Text, resolver: &Resolver, mut visit: impl FnMut(&str)) -> Resu
     })
 }
 
-#[derive(Debug)]
-struct Complete;
-impl std::fmt::Display for Complete {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("text reduction complete")
-    }
-}
-impl std::error::Error for Complete {}
-
 // Checked readers validate the captured source even when the callback stops traversal.
 fn until(text: &Text, resolver: &Resolver, mut done: impl FnMut(&str) -> bool) -> Result<()> {
-    match text.try_for_each_chunk(
-        resolver,
-        CHUNK,
-        |part| {
-            if done(part) {
-                Err(Complete.into())
-            } else {
-                Ok(())
-            }
-        },
-    ) {
-        Err(error) if error.is::<Complete>() => Ok(()),
+    match text.try_for_each_chunk(resolver, CHUNK, |part| {
+        if done(part) {
+            Err(crate::stream::Stop.into())
+        } else {
+            Ok(())
+        }
+    }) {
+        Err(error) if error.is::<crate::stream::Stop>() => Ok(()),
         result => result,
     }
 }

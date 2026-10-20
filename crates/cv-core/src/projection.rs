@@ -205,26 +205,16 @@ impl Searchable for Head {
         resolver: &Resolver,
         check: &mut dyn FnMut() -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
-        #[derive(Debug)]
-        struct PrefixComplete;
-        impl std::fmt::Display for PrefixComplete {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str("searchable prefix complete")
-            }
-        }
-        impl std::error::Error for PrefixComplete {}
-        match text.try_for_each_chunk(resolver, 4096, |part| {
+        crate::stream::stopped(text.try_for_each_chunk(resolver, 4096, |part| {
             check()?;
             self.push(part);
             if Head::full(self) {
-                Err(PrefixComplete.into())
+                Err(crate::stream::Stop.into())
             } else {
                 Ok(())
             }
-        }) {
-            Err(error) if !error.is::<PrefixComplete>() => Err(error),
-            _ => Ok(()),
-        }
+        }))
+        .map(|_| ())
     }
     fn json(&mut self, json: &crate::json::Json, _: &mut dyn FnMut() -> anyhow::Result<()>) -> anyhow::Result<()> {
         self.push_json(json)

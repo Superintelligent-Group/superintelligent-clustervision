@@ -84,9 +84,6 @@ impl<'a> Fields<'a> {
             .collect()
     }
 }
-#[derive(Debug, thiserror::Error)]
-#[error("requested text head complete")]
-struct HeadComplete;
 
 /// Decode only the requested characters after optional leading whitespace. Accepted source
 /// strings retain their complete capture validation and recheck provenance at the early stop.
@@ -106,18 +103,18 @@ pub(crate) fn text_head(
                 continue;
             }
             if chars == max_chars {
-                return Err(HeadComplete.into());
+                return Err(crate::stream::Stop.into());
             }
             head.push(ch);
             chars += 1;
             if chars == max_chars {
-                return Err(HeadComplete.into());
+                return Err(crate::stream::Stop.into());
             }
         }
         Ok(())
     }) {
         Ok(()) => {}
-        Err(error) if error.is::<HeadComplete>() => {}
+        Err(error) if error.is::<crate::stream::Stop>() => {}
         Err(error) => return Err(error),
     }
     Ok((head, present))
