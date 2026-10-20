@@ -293,15 +293,12 @@ pub fn structured_arguments(s: &str) -> Value {
     }
 }
 
-/// Every entry of a `tool_calls` array (a JSON array value, or `None`).
-pub fn tool_calls(v: Option<&Value>) -> Vec<Block> {
-    v.and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(|c| tool_call_from_view(c.into(), false).ok())
-                .collect()
-        })
-        .unwrap_or_default()
+/// Every entry of a `tool_calls` array (a JSON array value; `None` or a non-array is none). An
+/// entry that fails to decode is the caller's error, not a silently shorter list.
+pub fn tool_calls(v: Option<&Value>) -> anyhow::Result<Vec<Block>> {
+    v.and_then(Value::as_array).map_or(Ok(Vec::new()), |a| {
+        a.iter().map(|c| tool_call_from_view(c.into(), false)).collect()
+    })
 }
 
 #[cfg(test)]
@@ -457,13 +454,13 @@ mod tests {
             {"id": "c1", "type": "function", "function": {"name": "shell", "arguments": "{\"cmd\":\"ls\"}"}},
             {"call_id": "c2", "name": "grep", "arguments": "{}"}
         ]);
-        let b = tool_calls(Some(&calls));
+        let b = tool_calls(Some(&calls)).unwrap();
         assert!(
             matches!(&b[0], Block::ToolUse { id, name, input, .. } if id == "c1" && name == "shell" && input.resolve().unwrap()["cmd"] == "ls")
         );
         assert!(
             matches!(&b[1], Block::ToolUse { id, name, input, .. } if id == "c2" && name == "grep" && input.resolve().unwrap().as_ref() == &json!({}))
         );
-        assert!(tool_calls(Some(&json!("not an array"))).is_empty());
+        assert!(tool_calls(Some(&json!("not an array"))).unwrap().is_empty());
     }
 }
