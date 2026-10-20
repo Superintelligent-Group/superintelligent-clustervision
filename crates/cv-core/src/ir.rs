@@ -261,6 +261,37 @@ pub const CV_NAMESPACE: &str = "cv";
 /// with complete-mode carriers writes it.
 pub const CARRIER_KEY: &str = "_record";
 
+impl Harness {
+    /// Whether this harness's complete-mode *turns* keep their verbatim record under
+    /// [`CARRIER_KEY`] once serialized (OpenCode: `CompleteRecord::attach_replay` on a turn naming
+    /// its `record_type`), so a record there does not make the message a carrier.
+    pub fn turns_keep_records(self) -> bool {
+        match self {
+            Harness::OpenCode => true,
+            Harness::Claude
+            | Harness::Codex
+            | Harness::Grok
+            | Harness::Gemini
+            | Harness::Hermes
+            | Harness::OpenClaw
+            | Harness::Cursor
+            | Harness::Kimi
+            | Harness::KimiCode
+            | Harness::Qwen
+            | Harness::LmStudio
+            | Harness::Cline
+            | Harness::Roo
+            | Harness::Continue
+            | Harness::Goose
+            | Harness::Zed
+            | Harness::Devin
+            | Harness::ChatGptExport
+            | Harness::ClaudeExport
+            | Harness::OpenSession => false,
+        }
+    }
+}
+
 impl Session {
     /// An empty session of `harness`: every optional field `None`, no messages, no extras. The one
     /// way an adapter spells a fresh session — fill in what the store says with struct-update
@@ -714,15 +745,16 @@ impl Message {
     }
 
     /// A verbatim meta record carried under `Demand::COMPLETE`, never a conversational turn:
-    /// `kind == Carrier`, or a [`CARRIER_KEY`] record on a message that is not an OpenCode
-    /// complete-mode turn (those name their `record_type` in the bag and stay turns).
+    /// `kind == Carrier`, or a [`CARRIER_KEY`] record on a message that is not a complete-mode turn
+    /// of a harness whose turns keep their record ([`Harness::turns_keep_records`]; such a turn
+    /// names its `record_type` in its bag and stays a turn).
     pub fn is_carrier(&self) -> bool {
         self.kind == MessageKind::Carrier
             || (self.extra.contains_key(CARRIER_KEY)
-                && self
-                    .harness_extra(Harness::OpenCode)
-                    .and_then(|extra| extra.get("record_type"))
-                    .is_none())
+                && !Harness::ALL.into_iter().filter(|h| h.turns_keep_records()).any(|h| {
+                    self.harness_extra(h)
+                        .is_some_and(|extra| extra.contains_key("record_type"))
+                }))
     }
 
     /// Resolve this message's lazy content spans in place against `resolver`, so its content is owned

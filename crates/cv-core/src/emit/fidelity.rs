@@ -1,6 +1,6 @@
 //! The fidelity verifier behind `port --strict`: re-parse what an emitter wrote with the target's
 //! own reader and classify every difference from the source as **expected** (a field the target
-//! cannot hold — [`HOLDS`], the one capability table, and [`policy`]) or **unexpected** (one it
+//! cannot hold — [`holds_fields`], the one capability table, and [`policy`]) or **unexpected** (one it
 //! could have kept). `emit_verified` fails on an unexpected loss only, so a strict port is a checked claim.
 
 use super::*;
@@ -255,7 +255,7 @@ pub(super) struct Features {
 }
 
 /// Whether `target`’s format can hold this block at all (the block-level half of
-/// [`HOLDS`]), under the requested [`ThinkingMode`]. A thinking block survives if
+/// [`holds_fields`]), under the requested [`ThinkingMode`]. A thinking block survives if
 /// [`thinking_fate`] writes anything for it — structurally, as text, or as a placeholder.
 pub(super) fn block_survives(target: Harness, thinking: ThinkingMode, b: &Block) -> bool {
     match b {
@@ -437,7 +437,7 @@ pub(super) fn role_str(r: Role) -> &'static str {
     }
 }
 
-/// A fact the verifier compares across the round-trip, and the vocabulary of [`HOLDS`].
+/// A fact the verifier compares across the round-trip, and the vocabulary of [`holds_fields`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Field {
     /// Text is universal; every conversational store keeps it.
@@ -513,34 +513,42 @@ impl Field {
 }
 
 /// What each emit target's native format can carry, grounded in its read side (`docs/FORMATS.md`,
-/// the `harness/*.rs` parsers): everything a row omits is reported as an **expected** loss (never
-/// fatal under `--strict`); everything it lists but lost is **unexpected**. Anthropic
+/// the `harness/*.rs` parsers): everything a harness's arm omits is reported as an **expected** loss
+/// (never fatal under `--strict`); everything it lists but lost is **unexpected**. Anthropic
 /// signature-only thinking survives only into Anthropic-shaped stores, OpenAI encrypted reasoning
-/// only into OpenAI-shaped ones; cost only into OpenCode or Continue. OpenSession is no emit
-/// target; it is listed for the one field only it holds. A harness absent here holds nothing.
+/// only into OpenAI-shaped ones; cost only into OpenCode or Continue. The arms are the table: the
+/// match is exhaustive, so a new harness has no row until it is given one. OpenSession is no emit
+/// target; it holds the one field only it has. The other read-only harnesses hold nothing.
 #[rustfmt::skip]
-pub(crate) const HOLDS: &[(Harness, &[Field])] = {
+pub(crate) fn holds_fields(h: Harness) -> &'static [Field] {
     use Field::*;
-    use Harness::*;
-    &[
-        (Claude, &[Text, ThinkingText, ThinkingSignature, Image, File, ToolUse, ToolResult, IsError, Details, Usage, UsageCacheCreation, Timestamp, TimestampToolTurn, Id, IdToolTurn, Title, Cwd, SessionModel, SystemPrompt, CompleteReparse]),
-        (Codex, &[Text, ThinkingText, ThinkingEncrypted, Image, ToolUse, ToolResult, ToolName, IsError, Usage, UsageCacheCreation, Timestamp, TimestampToolTurn, Cwd, SessionModel, SystemPrompt, CompleteReparse]),
-        (Grok, &[Text, ThinkingText, ThinkingEncrypted, ToolUse, ToolResult, IsError, UsageCacheCreation, Title, Cwd, SessionModel, CompleteReparse]),
-        (OpenCode, &[Text, ThinkingText, ThinkingSignature, Image, File, ToolUse, ToolResult, ToolName, IsError, Details, Usage, Cost, UsageCacheCreation, Timestamp, Id, Title, Cwd, SessionModel]),
-        (OpenClaw, &[Text, ThinkingText, ThinkingSignature, Image, ToolUse, ToolResult, ToolName, IsError, Usage, UsageCacheCreation, Timestamp, TimestampToolTurn, Id, IdToolTurn, Title, Cwd, SessionModel, CompleteReparse]),
-        (Gemini, &[Text, ThinkingText, Image, File, ToolUse, ToolResult, ToolName, IsError, Usage, UsageCacheCreation, Timestamp, Id, Title, Cwd, SessionModel, CompleteReparse]),
-        (Hermes, &[Text, ThinkingText, ThinkingEncrypted, Image, ToolUse, ToolResult, ToolName, Usage, UsageCacheCreation, Timestamp, TimestampToolTurn, Title, Cwd, SessionModel, SystemPrompt]),
-        (LmStudio, &[Text, Usage, UsageCacheCreation, Title, SessionModel, CompleteReparse]),
-        (Cline, &[Text, ThinkingText, Image, ToolUse, ToolResult, IsError, UsageCacheCreation, Timestamp, TimestampToolTurn, Id, IdToolTurn, Title, Cwd, SessionModel, CompleteReparse]),
-        (Roo, &[Text, ThinkingText, Image, ToolUse, ToolResult, IsError, UsageCacheCreation, Timestamp, TimestampToolTurn, Id, IdToolTurn, Title, Cwd, SessionModel, CompleteReparse]),
-        (Continue, &[Text, Image, ToolUse, ToolResult, IsError, Usage, Cost, Timestamp, TimestampToolTurn, Title, Cwd, SessionModel, CompleteReparse]),
-        (Qwen, &[Text, ThinkingText, Image, File, ToolUse, ToolResult, ToolName, IsError, Usage, UsageCacheCreation, Timestamp, TimestampToolTurn, Id, IdToolTurn, Title, Cwd, SessionModel, CompleteReparse]),
-        (OpenSession, &[Principal]),
-    ]
-};
+    match h {
+        Harness::Claude => &[Text, ThinkingText, ThinkingSignature, Image, File, ToolUse, ToolResult, IsError, Details, Usage, UsageCacheCreation, Timestamp, TimestampToolTurn, Id, IdToolTurn, Title, Cwd, SessionModel, SystemPrompt, CompleteReparse],
+        Harness::Codex => &[Text, ThinkingText, ThinkingEncrypted, Image, ToolUse, ToolResult, ToolName, IsError, Usage, UsageCacheCreation, Timestamp, TimestampToolTurn, Cwd, SessionModel, SystemPrompt, CompleteReparse],
+        Harness::Grok => &[Text, ThinkingText, ThinkingEncrypted, ToolUse, ToolResult, IsError, UsageCacheCreation, Title, Cwd, SessionModel, CompleteReparse],
+        Harness::OpenCode => &[Text, ThinkingText, ThinkingSignature, Image, File, ToolUse, ToolResult, ToolName, IsError, Details, Usage, Cost, UsageCacheCreation, Timestamp, Id, Title, Cwd, SessionModel],
+        Harness::OpenClaw => &[Text, ThinkingText, ThinkingSignature, Image, ToolUse, ToolResult, ToolName, IsError, Usage, UsageCacheCreation, Timestamp, TimestampToolTurn, Id, IdToolTurn, Title, Cwd, SessionModel, CompleteReparse],
+        Harness::Gemini => &[Text, ThinkingText, Image, File, ToolUse, ToolResult, ToolName, IsError, Usage, UsageCacheCreation, Timestamp, Id, Title, Cwd, SessionModel, CompleteReparse],
+        Harness::Hermes => &[Text, ThinkingText, ThinkingEncrypted, Image, ToolUse, ToolResult, ToolName, Usage, UsageCacheCreation, Timestamp, TimestampToolTurn, Title, Cwd, SessionModel, SystemPrompt],
+        Harness::LmStudio => &[Text, Usage, UsageCacheCreation, Title, SessionModel, CompleteReparse],
+        Harness::Cline => &[Text, ThinkingText, Image, ToolUse, ToolResult, IsError, UsageCacheCreation, Timestamp, TimestampToolTurn, Id, IdToolTurn, Title, Cwd, SessionModel, CompleteReparse],
+        Harness::Roo => &[Text, ThinkingText, Image, ToolUse, ToolResult, IsError, UsageCacheCreation, Timestamp, TimestampToolTurn, Id, IdToolTurn, Title, Cwd, SessionModel, CompleteReparse],
+        Harness::Continue => &[Text, Image, ToolUse, ToolResult, IsError, Usage, Cost, Timestamp, TimestampToolTurn, Title, Cwd, SessionModel, CompleteReparse],
+        Harness::Qwen => &[Text, ThinkingText, Image, File, ToolUse, ToolResult, ToolName, IsError, Usage, UsageCacheCreation, Timestamp, TimestampToolTurn, Id, IdToolTurn, Title, Cwd, SessionModel, CompleteReparse],
+        Harness::OpenSession => &[Principal],
+        Harness::Cursor
+        | Harness::Kimi
+        | Harness::KimiCode
+        | Harness::Goose
+        | Harness::Zed
+        | Harness::Devin
+        | Harness::ChatGptExport
+        | Harness::ClaudeExport => &[],
+    }
+}
 
 /// The fields whose classification is a decision about every target, not a fact about one store.
-/// `None` defers to [`HOLDS`].
+/// `None` defers to [`holds_fields`].
 fn policy(field: Field) -> Option<bool> {
     match field {
         // The effective per-message model: a target that records the model once per session still
@@ -559,9 +567,9 @@ fn policy(field: Field) -> Option<bool> {
     }
 }
 
-/// Whether `t`'s native format can carry `field`: [`policy`], else its [`HOLDS`] row.
+/// Whether `t`'s native format can carry `field`: [`policy`], else its [`holds_fields`] row.
 pub(super) fn target_holds(t: Harness, field: Field) -> bool {
-    policy(field).unwrap_or_else(|| HOLDS.iter().any(|(h, fields)| *h == t && fields.contains(&field)))
+    policy(field).unwrap_or_else(|| holds_fields(t).contains(&field))
 }
 
 /// Whether `target`'s store keeps a tool result **inside its originating call's record** rather
@@ -574,7 +582,7 @@ pub(super) fn target_holds(t: Harness, field: Field) -> bool {
 /// Hermes a `tool` row, Grok a `tool_result` line) and therefore keeps its id and timestamp.
 ///
 /// Derived by reading the emitters: these are exactly the two that `continue`/skip on
-/// [`Role::Tool`] instead of writing a record, and the two whose [`HOLDS`] rows omit
+/// [`Role::Tool`] instead of writing a record, and the two whose [`holds_fields`] rows omit
 /// [`Field::IdToolTurn`] and [`Field::TimestampToolTurn`] while holding the plain fields.
 #[cfg(test)]
 pub(super) fn folds_tool_result(t: Harness) -> bool {
