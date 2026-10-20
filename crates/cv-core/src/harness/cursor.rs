@@ -152,20 +152,22 @@ impl Adapter for Cursor {
     }
 
     fn discover(&self) -> Result<crate::Discovered> {
-        let mut out = Vec::new();
+        let mut out = crate::Discovered::default();
         // Map composerId -> cwd by scanning every workspace's composer.composerData. Also collect
         // metadata fallbacks (name/created) and legacy in-workspace chat threads.
         let cwd_map = self.build_cwd_map();
 
+        // Each database that cannot open or read is skipped and reported.
         if let Some(db) = self.global_db() {
-            if let Ok(conn) = open_ro(&db) {
-                if let Ok(rows) = conn.read(|conn| {
+            let rows = open_ro(&db).and_then(|conn| {
+                conn.read(|conn| {
                     let mut rows = Vec::new();
                     discover_global(conn, &db, &cwd_map, &mut rows);
                     Ok(rows)
-                }) {
-                    out.extend(rows);
-                }
+                })
+            });
+            if let Some(rows) = out.keep(&db, rows) {
+                out.refs.extend(rows);
             }
         }
 
@@ -176,20 +178,21 @@ impl Adapter for Cursor {
                 continue;
             }
             let cwd = workspace_cwd(&ws);
-            if let Ok(conn) = open_ro(&db) {
-                if let Ok(rows) = conn.read(|conn| {
+            let rows = open_ro(&db).and_then(|conn| {
+                conn.read(|conn| {
                     let mut rows = Vec::new();
                     legacy::discover(conn, &db, cwd.as_deref(), &mut rows)?;
                     Ok(rows)
-                }) {
-                    out.extend(rows);
-                }
+                })
+            });
+            if let Some(rows) = out.keep(&db, rows) {
+                out.refs.extend(rows);
             }
         }
         if let Some(home) = &self.cli_home {
             cli::discover(home, &mut out);
         }
-        Ok(out.into())
+        Ok(out)
     }
 
     /// Cursor writes its session databases in place.

@@ -17,42 +17,50 @@ pub(super) fn roots(home: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-pub(super) fn discover(home: &Path, out: &mut Vec<SessionRef>) {
+pub(super) fn discover(home: &Path, out: &mut crate::Discovered) {
     for root in roots(home) {
-        for entry in walkdir::WalkDir::new(root).max_depth(3).into_iter().flatten() {
+        for entry in walkdir::WalkDir::new(root).max_depth(3) {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(e) => {
+                    out.skipped.extend(crate::Skipped::walk(&e));
+                    continue;
+                }
+            };
             if !entry.file_type().is_file() || entry.file_name() != "store.db" {
                 continue;
             }
             let path = entry.path();
-            let Ok(conn) = open_ro(path) else { continue };
-            let result = conn.read(|conn| -> Result<SessionRef> {
-                let mut collector = Count::default();
-                let r = SessionRef::new("cli:", Harness::Cursor, path);
-                let session = read_with_reads(
-                    conn,
-                    &r,
-                    &crate::stream::Demand::LEAN.with_spans(),
-                    true,
-                    conn.reads(),
-                    &mut collector,
-                )?;
-                if let Some(error) = collector.error {
-                    return Err(error);
-                }
-                Ok(SessionRef {
-                    id: session.id,
-                    cwd: session.cwd,
-                    title: session.title.or(collector.title),
-                    created_at: session.created_at,
-                    updated_at: session.updated_at,
-                    message_count: Some(collector.count),
-                    ..r
+            let result = open_ro(path).and_then(|conn| {
+                conn.read(|conn| -> Result<SessionRef> {
+                    let mut collector = Count::default();
+                    let r = SessionRef::new("cli:", Harness::Cursor, path);
+                    let session = read_with_reads(
+                        conn,
+                        &r,
+                        &crate::stream::Demand::LEAN.with_spans(),
+                        true,
+                        conn.reads(),
+                        &mut collector,
+                    )?;
+                    if let Some(error) = collector.error {
+                        return Err(error);
+                    }
+                    Ok(SessionRef {
+                        id: session.id,
+                        cwd: session.cwd,
+                        title: session.title.or(collector.title),
+                        created_at: session.created_at,
+                        updated_at: session.updated_at,
+                        message_count: Some(collector.count),
+                        ..r
+                    })
                 })
             });
-            if let Ok(reference) = result {
+            if let Some(reference) = out.keep(path, result) {
                 // An empty or uninitialized native store is not a conversation.
                 if reference.message_count.is_some_and(|n| n > 0) {
-                    out.push(reference);
+                    out.refs.push(reference);
                 }
             }
         }
