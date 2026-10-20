@@ -87,12 +87,7 @@ impl SearchRow<'_> {
     /// `size_bytes` are the same values `ls --json` gives — all null for a sub-agent lane, which
     /// the catalog does not list) with the hit's own title/cwd/dates laid over it, plus `score`,
     /// `snippet`, and the sub-agent provenance trio — always present, null for a top-level hit.
-    pub fn to_json(&self) -> Value {
-        self.to_json_with(&SearchRowContext::new())
-    }
-
-    /// Shape a response's hits through one operation-owned exact catalog reader. Index overlays,
-    /// key order and the legacy first-exact-copy policy match the standalone row contract.
+    /// A response's hits share one operation-owned exact catalog reader (`context`).
     pub fn to_json_with(&self, context: &SearchRowContext) -> Value {
         let cataloged = context
             .catalog
@@ -255,7 +250,7 @@ mod tests {
             parent_id: Some("parent"),
             workflow: Some("wf_1"),
         }
-        .to_json();
+        .to_json_with(&SearchRowContext::new());
         let keys: Vec<&str> = row.as_object().unwrap().keys().map(String::as_str).collect();
         assert_eq!(keys, SEARCH_ROW_KEYS, "§3 search row keys, in order");
         assert_eq!(row["created_at"], "2023-11-14T22:13:20+00:00");
