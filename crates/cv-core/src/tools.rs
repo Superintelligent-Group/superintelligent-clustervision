@@ -366,19 +366,6 @@ impl ForestTools {
     pub fn agent(&self, id: &str) -> Option<&AgentTools> {
         self.agents.iter().find(|a| a.agent == id || a.agent.starts_with(id))
     }
-
-    /// Restrict to one workflow's agents (a new view sharing the same histograms).
-    #[cfg(test)]
-    pub fn for_workflow(&self, run_id: &str) -> ForestTools {
-        ForestTools {
-            agents: self
-                .agents
-                .iter()
-                .filter(|a| a.workflow.as_deref() == Some(run_id))
-                .cloned()
-                .collect(),
-        }
-    }
 }
 
 /// The sentinel agent id for the parent session's own tool calls in a forest aggregation.
@@ -830,11 +817,6 @@ mod tests {
         let agent_users = ft.agents_using("Agent");
         assert_eq!(agent_users.len(), 1);
         assert_eq!(agent_users[0].0.agent, "<orchestrator>");
-
-        // Workflow restriction.
-        let wf = ft.for_workflow("wf_1");
-        assert_eq!(wf.agents.len(), 1);
-        assert_eq!(wf.agents[0].agent, "agentA");
     }
     #[test]
     fn histogram_and_timeline_stop_on_unreadable_tool_arguments() {
