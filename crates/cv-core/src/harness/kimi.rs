@@ -182,11 +182,15 @@ impl Adapter for Kimi {
             .as_ref()
             .map(|r| load_work_dirs(&r.join("kimi.json")))
             .unwrap_or_default();
-        let mut out = Vec::new();
-        let Ok(hash_dirs) = fs::read_dir(sessions) else {
-            return Ok(out.into());
+        // An unreadable dir, and a transcript that fails to read, are skipped and reported.
+        let mut out = crate::Discovered::default();
+        let Some(hash_dirs) = out.keep(sessions, fs::read_dir(sessions).map_err(Into::into)) else {
+            return Ok(out);
         };
-        for hd in hash_dirs.filter_map(|e| e.ok()) {
+        for hd in hash_dirs {
+            let Some(hd) = out.keep(sessions, hd.map_err(Into::into)) else {
+                continue;
+            };
             let hash_path = hd.path();
             let Some(basename) = hash_path.file_name().and_then(|n| n.to_str()) else {
                 continue;
@@ -195,10 +199,13 @@ impl Adapter for Kimi {
                 continue;
             }
             let cwd = hash_to_cwd.get(basename).cloned();
-            let Ok(entries) = fs::read_dir(&hash_path) else {
+            let Some(entries) = out.keep(&hash_path, fs::read_dir(&hash_path).map_err(Into::into)) else {
                 continue;
             };
-            for e in entries.filter_map(|e| e.ok()) {
+            for e in entries {
+                let Some(e) = out.keep(&hash_path, e.map_err(Into::into)) else {
+                    continue;
+                };
                 let p = e.path();
                 let name = e.file_name();
                 let name = name.to_string_lossy();
@@ -227,15 +234,19 @@ impl Adapter for Kimi {
                         reads.record(&segment);
                     }
                 }
+                let mut failure = None;
                 let hit = crate::discover_cache::cached_scan_with_reads(&transcript, reads, || {
                     scan(&id, &transcript, &dir, cwd.clone())
+                        .map_err(|e| failure = Some(e))
+                        .ok()
+                        .flatten()
                 });
-                if let Some(r) = hit {
-                    out.push(r);
+                if let Some(found) = crate::Skipped::listed(&transcript, failure.map_or(Ok(hit), Err)) {
+                    out.push(found);
                 }
             }
         }
-        Ok(out.into())
+        Ok(out)
     }
 
     fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
@@ -643,14 +654,16 @@ fn default_model_from_config(config_toml: &Path) -> Option<String> {
 }
 
 /// Cheap scan of one transcript into a `SessionRef`. `dir` is the session's source dir (the
-/// `<uuid>/` dir for modern, the hash dir for legacy). Returns `None` only on a fully unreadable
-/// transcript path that doesn't exist.
-fn scan(id: &str, transcript: &Path, dir: &Path, cwd: Option<PathBuf>) -> Option<SessionRef> {
-    let meta = fs::metadata(transcript).ok()?;
+/// `<uuid>/` dir for modern, the hash dir for legacy). `Ok(None)` when the transcript is not a
+/// file; `Err` when it cannot be read.
+fn scan(id: &str, transcript: &Path, dir: &Path, cwd: Option<PathBuf>) -> Result<Option<SessionRef>> {
+    let meta = fs::metadata(transcript)?;
     if !meta.is_file() {
-        return None;
+        return Ok(None);
     }
-    let primary = crate::source::FileId::of(&meta)?;
+    let Some(primary) = crate::source::FileId::of(&meta) else {
+        return Ok(None);
+    };
     let mtime: Option<DateTime<Utc>> = meta
         .modified()
         .ok()
@@ -665,12 +678,11 @@ fn scan(id: &str, transcript: &Path, dir: &Path, cwd: Option<PathBuf>) -> Option
                 title = record.title()?;
             }
             Ok(if title.is_some() { Flow::Stop } else { Flow::Continue })
-        })
-        .ok()?;
+        })?;
     } else {
         // A summary title avoids body reads, while the primary path must remain present.
-        if crate::source::FileId::of(&fs::metadata(transcript).ok()?) != Some(primary) {
-            return None;
+        if crate::source::FileId::of(&fs::metadata(transcript)?) != Some(primary) {
+            return Ok(None);
         }
     }
 
@@ -682,14 +694,14 @@ fn scan(id: &str, transcript: &Path, dir: &Path, cwd: Option<PathBuf>) -> Option
         .map(|(a, b)| (Some(a), Some(b)))
         .unwrap_or((mtime, mtime));
 
-    Some(SessionRef {
+    Ok(Some(SessionRef {
         cwd,
         title,
         created_at: created,
         updated_at: updated,
         message_count: None,
         ..SessionRef::new(id.to_string(), Harness::Kimi, dir.to_path_buf())
-    })
+    }))
 }
 
 /// `state.json.custom_title`, when present and non-empty.
@@ -933,7 +945,7 @@ pub fn subagent_refs(main: &SessionRef) -> Vec<SessionRef> {
                 reads.record(&segment);
             }
             let mut r = crate::discover_cache::cached_scan_with_reads(&transcript, reads, || {
-                let mut r = scan(&agent, &transcript, &p, None)?;
+                let mut r = scan(&agent, &transcript, &p, None).ok()??;
                 if let Some(d) =
                     subagent_meta(&p).and_then(|m| m.get("description").and_then(Value::as_str).map(str::to_string))
                 {
@@ -1388,7 +1400,7 @@ mod tests {
         fs::write(dir.join("state.json"), r#"{"custom_title":"native title"}"#)?;
         fs::write(dir.join("wire.jsonl"), "{\"timestamp\":9}\n{\"timestamp\":2}\n")?;
         jsonl::OPENED.with(|paths| paths.borrow_mut().clear());
-        let native = scan("session", &live, &dir, None).unwrap();
+        let native = scan("session", &live, &dir, None).unwrap().unwrap();
         assert_eq!(native.title.as_deref(), Some("native title"));
         assert_eq!(
             (native.created_at, native.updated_at),
@@ -1398,13 +1410,13 @@ mod tests {
         assert_eq!(native.message_count, None);
         fs::write(dir.join("state.json"), "{}")?;
         assert_eq!(
-            scan("session", &live, &dir, None).unwrap().title.as_deref(),
+            scan("session", &live, &dir, None).unwrap().unwrap().title.as_deref(),
             Some("late prompt")
         );
         fs::write(dir.join("state.json"), r#"{"custom_title":"native title"}"#)?;
         fs::remove_file(&live)?;
         assert!(
-            scan("session", &live, &dir, None).is_none(),
+            !matches!(scan("session", &live, &dir, None), Ok(Some(_))),
             "a summary cannot resurrect an absent primary"
         );
         Ok(())
@@ -1639,7 +1651,7 @@ mod tests {
                 dir.join("state.json"),
                 serde_json::to_vec(&serde_json::json!({"custom_title":title,"unused":body}))?,
             )?;
-            let actual = scan("session", &live, &dir, Some("/p".into())).unwrap();
+            let actual = scan("session", &live, &dir, Some("/p".into())).unwrap().unwrap();
             // The shared prefix (prompt, blank, invalid) is read once; the rejected lines of the
             // live file count, the rotated `\xff` too.
             assert_eq!(actual.message_count, None, "{title}");
@@ -2661,7 +2673,7 @@ mod tests {
         )
         .unwrap();
         let id = "s1";
-        let r = scan(id, &dir.join("context.jsonl"), &dir, None).unwrap();
+        let r = scan(id, &dir.join("context.jsonl"), &dir, None).unwrap().unwrap();
         assert_eq!(
             r.title.as_deref(),
             Some("first"),
@@ -2758,7 +2770,7 @@ mod tests {
             r#"{"agent_id":"a1b2","subagent_type":"coder","description":"do it"}"#,
         )
         .unwrap();
-        let main = scan("p1", &dir.join("context.jsonl"), &dir, None).unwrap();
+        let main = scan("p1", &dir.join("context.jsonl"), &dir, None).unwrap().unwrap();
         let refs = subagent_refs(&main);
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].id, "p1/a1b2");
