@@ -271,11 +271,7 @@ pub(crate) fn transcript(
     )?
     .map(|row| {
         let (range, newline) = row?;
-        if !ranges::valid_utf8(&mut ranges::reader(file, range)?)? {
-            return Err(
-                std::io::Error::new(std::io::ErrorKind::InvalidData, "stream did not contain valid UTF-8").into(),
-            );
-        }
+        // Invalid UTF-8 is not one JSON value: the syntax validator rejects the row as malformed.
         Select::read(source, file, range, newline, true, &identity)
     });
     derive(

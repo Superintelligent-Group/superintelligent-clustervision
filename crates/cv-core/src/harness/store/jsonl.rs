@@ -651,6 +651,57 @@ mod tests {
         Ok(())
     }
 
+    /// Invalid UTF-8 is not one JSON value: every record reader rejects it as `InvalidJson`
+    /// (inside a string or key, between tokens, alone, as a cut scalar, past the in-memory limit),
+    /// so no reader needs a UTF-8 pass of its own before it parses.
+    #[test]
+    fn invalid_utf8_is_not_one_json_value_to_any_record_reader() {
+        let world = cv_testkit::World::new("jsonl-invalid-utf8");
+        let valid = br#"{"type":"user","sessionId":"s"}"#;
+        let mut large = br#"{"a":""#.to_vec();
+        large.extend(std::iter::repeat_n(b'x', 70_000));
+        large.extend(b"\xff\"}");
+        for (name, bad) in [
+            (
+                "string",
+                br#"{"a":""#.iter().chain(b"\xff\"}").copied().collect::<Vec<_>>(),
+            ),
+            ("key", b"{\"\xff\":1}".to_vec()),
+            ("between", b"{\"a\":1\xff}".to_vec()),
+            ("alone", b"\xff".to_vec()),
+            ("cut-scalar", b"{\"a\":\"\xe2\x82\"}".to_vec()),
+            ("large", large.clone()),
+        ] {
+            let path = world.base.join(format!("{name}.jsonl"));
+            let bytes = [&valid[..], b"\n", &bad, b"\n", valid, b"\n"].concat();
+            std::fs::write(&path, &bytes).unwrap();
+            let source = crate::json::JsonSource::capture(&path).unwrap();
+            let file = std::fs::File::open(&path).unwrap();
+            let mut lines = Vec::new();
+            super::for_each_line(&source, &file, 0, source.len(), |line| {
+                lines.push((line.blank, line.view.is_some()));
+                Ok(Flow::Continue)
+            })
+            .unwrap();
+            assert_eq!(lines, [(false, true), (false, false), (false, true)], "framer, {name}");
+            let (at, len) = (valid.len() as u64 + 1, bad.len() as u64);
+            let invalid = |result: anyhow::Result<()>| result.is_err_and(|e| e.is::<crate::json::InvalidJson>());
+            assert!(invalid(source.read_range_value(at, len, |_| Ok(()))), "value, {name}");
+            assert!(invalid(source.read_range_syntax(at, len, |_| Ok(()))), "syntax, {name}");
+            let mut records = super::Records::new(&source, &file);
+            let read = records.read_with(at, len, crate::json::Validation::Syntax, |_| Ok(()));
+            assert!(invalid(read), "records, {name}");
+            let derived = crate::derive::transcript(
+                &source,
+                &file,
+                "n",
+                crate::harness::claude::IDENTITY,
+                &mut std::io::sink(),
+            );
+            assert!(invalid(derived.map(|_| ())), "derive, {name}");
+        }
+    }
+
     /// JSON whitespace is space, tab, LF and CR. A line holding only U+2003 (EM SPACE), short or
     /// past the in-memory limit, is a rejected record to every reader of a transcript (and so
     /// refused by every writer of a derived one), and a line of JSON whitespace is blank to all.
