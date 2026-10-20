@@ -621,34 +621,30 @@ fn read_session_facts(
 
 /// The compression continuation of `id`, if any: the child whose `parent_session_id` is `id` and
 /// that carries no branch / reset / delegate marker (`_COMPRESSION_CHILD_SQL`). Only meaningful for
-/// a session that ended in compression; `None` when the store does not say.
-fn compression_child(conn: &Connection, id: &str) -> Option<String> {
+/// a session that ended in compression; `None` when the store does not say, an error when it
+/// cannot be asked. A child whose id is not text is no session cv can name.
+fn compression_child(conn: &Connection, id: &str) -> Result<Option<String>> {
     let scols = columns(conn, "sessions");
     if !scols.contains("parent_session_id") {
-        return None;
+        return Ok(None);
     }
     let model_config = if scols.contains("model_config") {
         "model_config"
     } else {
         "NULL"
     };
-    let mut stmt = conn
-        .prepare(&format!(
-            "SELECT id, {model_config} FROM sessions WHERE parent_session_id = ?1 ORDER BY started_at ASC"
-        ))
-        .ok()?;
-    let rows = stmt
-        .query_map([id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1).ok().flatten()))
-        })
-        .ok()?;
-    // Not a tail expression: `rows` borrows `stmt`, which must drop before the return.
-    #[allow(clippy::let_and_return)]
-    let found = rows
-        .flatten()
-        .find(|(_, mc)| lineage_markers(mc.as_deref()).is_empty())
-        .map(|(child, _)| child);
-    found
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id, {model_config} FROM sessions WHERE parent_session_id = ?1 ORDER BY started_at ASC"
+    ))?;
+    let mut rows = stmt.query([id])?;
+    while let Some(row) = rows.next()? {
+        let Ok(child) = row.get::<_, String>(0) else { continue };
+        let model_config = row.get::<_, Option<String>>(1).ok().flatten();
+        if lineage_markers(model_config.as_deref()).is_empty() {
+            return Ok(Some(child));
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -753,7 +749,7 @@ fn stream_conn_with_reads(
         end_reason.as_deref(),
         Some("compression") | Some("orphaned_compression")
     ) {
-        lineage.continued_in = compression_child(conn, &r.id);
+        lineage.continued_in = compression_child(conn, &r.id)?;
     }
     if let Some(reset) = marker("_reset_from").filter(|_| opts.tier >= Tier::Rich) {
         hermes_bag.insert("_reset_from".into(), Value::String(reset));
