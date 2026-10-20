@@ -2246,7 +2246,7 @@ mod tests {
 
     /// The whole session read with every string inline: what a spans read materializes to.
     fn old_wire_oracle(r: &SessionRef, opts: &Demand) -> Session {
-        let mut opts = opts.clone();
+        let mut opts = *opts;
         opts.spans = false;
         let mut kept = Kept::default();
         let mut shell = KimiCode { root: None }.try_stream(r, &opts, &mut kept).unwrap();

@@ -64,7 +64,7 @@ pub use emit::emit;
 use super::Adapter;
 use crate::ir::*;
 use crate::source::{is_sqlite_source, Dependencies, Probe};
-use crate::stream::{Demand, Flow, MessageSink, Tier};
+use crate::stream::{Demand, Flow, MessageSink};
 use anyhow::{Context, Result};
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
@@ -831,7 +831,7 @@ mod db {
         while let Some(row) = rows.next()? {
             let id: String = row.get(0)?;
             let ty: String = row.get(1)?;
-            if opts.tier == Tier::Complete && !v2::known_type(&ty) {
+            if opts.tier == crate::stream::Tier::Complete && !v2::known_type(&ty) {
                 *unknown.entry(ty.clone()).or_default() += 1;
             }
             let decoded = match cells.cell(conn, "session_message", "data", row, 2)? {
@@ -839,7 +839,7 @@ mod db {
                     let Some(mut built) = v2::build(&id, &ty, view, opts, ctx)? else {
                         return Ok(None);
                     };
-                    if opts.tier == Tier::Complete {
+                    if opts.tier == crate::stream::Tier::Complete {
                         v2::attach_complete(&mut built, &id, &ty, view.argument(opts.spans)?);
                     }
                     Ok(Some(built))

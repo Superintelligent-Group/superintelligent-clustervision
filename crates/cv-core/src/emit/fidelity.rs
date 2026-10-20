@@ -882,7 +882,7 @@ fn reparse_options(target: Harness, opts: &Demand) -> Demand {
     if matches!(target, Harness::OpenCode | Harness::Hermes) {
         Demand::RICH
     } else {
-        opts.clone()
+        *opts
     }
 }
 

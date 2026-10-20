@@ -118,6 +118,7 @@ mod record;
 mod registry;
 pub use emit::emit;
 
+#[cfg(feature = "sqlite")]
 use super::store::sqlite::open_ro;
 #[cfg(feature = "sqlite")]
 use super::ts_from_epoch;
@@ -125,7 +126,6 @@ use super::wire::anthropic;
 use super::{parse_ts, ts_from_value, Adapter};
 use crate::ir::*;
 use crate::source::{sqlite_sidecars, Dependencies, Probe};
-#[cfg(feature = "sqlite")]
 use crate::stream::{Demand, Flow, MessageSink, Tier};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
