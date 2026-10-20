@@ -24,6 +24,8 @@ pub(super) fn stream(name: &str, path: &Path, opts: &Demand, sink: &mut dyn Mess
     session.source_path = Some(path.to_path_buf());
     let mut tools = HashMap::new();
     let mut header = true;
+    // A line that is not one JSON value (header or message) is counted.
+    let mut unparsed = crate::harness::Unparsed::default();
     for record in records {
         let (range, _) = record?;
         // Empty lines are still headers when first; subsequent empty lines are ignored.
@@ -42,7 +44,10 @@ pub(super) fn stream(name: &str, path: &Path, opts: &Demand, sink: &mut dyn Mess
         };
         let message = match result {
             Ok(message) => message,
-            Err(error) if error.downcast_ref::<InvalidJson>().is_some() => None,
+            Err(error) if error.downcast_ref::<InvalidJson>().is_some() => {
+                unparsed.count();
+                None
+            }
             Err(error) => return Err(error),
         };
         if header {
@@ -59,6 +64,7 @@ pub(super) fn stream(name: &str, path: &Path, opts: &Demand, sink: &mut dyn Mess
     }
     source.check_metadata(file.metadata()?)?;
     source.check()?;
+    unparsed.note(&mut session);
     Ok(session)
 }
 

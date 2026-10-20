@@ -131,6 +131,7 @@
 - OpenCode: an unreadable message or part file errors instead of reading empty; undecodable records count as `skipped_lines`; an unopenable database is named by `cv doctor`.
 - An export archive or OpenSession document that cannot be read or decoded, and an unreadable registered dir, are named by `cv doctor`.
 - Cline and Roo: an unreadable task history errors instead of reading empty; history items that do not decode count as `skipped_lines`.
+- Goose and Zed count message cells, legacy lines and thread blobs that do not decode as `skipped_lines`.
 - `cv formats census` reports each harness's first parse error (`first_error` in `--json`) beside the count.
 - **Breaking:** `cv events`, `cv touched`, `cv blame` and their HTTP routes fail on an event-catalog error instead of answering empty.
 - **Breaking (library):** `events::events_for`, `sessions_touching`, `sessions_editing` and `edits_touching_file` return `Result`.

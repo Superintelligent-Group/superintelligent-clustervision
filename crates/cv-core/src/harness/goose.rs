@@ -546,7 +546,7 @@ fn stream_db_opts_with_reads(
         ..Default::default()
     };
 
-    let s = Session {
+    let mut s = Session {
         cwd: wd
             .filter(|s| !s.is_empty())
             .map(PathBuf::from)
@@ -585,6 +585,9 @@ fn stream_db_opts_with_reads(
     let mut tool_names: HashMap<String, String> = HashMap::new();
     let mut history = AgentHistory::default();
     let mut idx = 0;
+    // A row whose content cell is not one JSON value, or whose role is not text, is counted (it
+    // still reads as it did: empty content, an empty role).
+    let mut unparsed = super::Unparsed::default();
     while let Some(row) = rows.next()? {
         idx += 1;
         let metadata = match cells.cell(conn, "messages", metadata, row, 5)? {
@@ -594,11 +597,18 @@ fn stream_db_opts_with_reads(
         let decoded = match cells.cell(conn, "messages", "content_json", row, 1)? {
             Some(cell) => cells
                 .read(cell, |v| record::content(v, &mut tool_names, opts, Some(cells.out())))?
-                .unwrap_or_default(),
+                .unwrap_or_else(|| {
+                    unparsed.count();
+                    Decoded::default()
+                }),
             None => Decoded::default(),
         };
+        let role = row.get::<_, String>(0).unwrap_or_else(|_| {
+            unparsed.count();
+            String::new()
+        });
         let row = DbMsg {
-            role: row.get::<_, String>(0).unwrap_or_default(),
+            role,
             created: row.get::<_, Option<i64>>(3).ok().flatten(),
             id: row.get::<_, Option<String>>(4).ok().flatten(),
             metadata,
@@ -632,6 +642,7 @@ fn stream_db_opts_with_reads(
     if opts.spans {
         cells.out().0.check()?;
     }
+    unparsed.note(&mut s);
     Ok(s)
 }
 
