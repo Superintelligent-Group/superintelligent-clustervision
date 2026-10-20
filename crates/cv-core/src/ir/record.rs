@@ -1,5 +1,4 @@
 //! Checked complete records retain the public `extra._record` contract.
-use super::Block;
 use super::{Harness, Message};
 use crate::{harness::wire::write::ObjectWriter, Json};
 use anyhow::Result;
@@ -209,7 +208,7 @@ pub(crate) fn same_except_first_text(a: &Message, b: &Message) -> bool {
         && a.content.len() == b.content.len()
         && matches!(
             (a.content.first(), b.content.first()),
-            (Some(Block::Text { .. }), Some(Block::Text { .. }))
+            (Some(super::Block::Text { .. }), Some(super::Block::Text { .. }))
         )
         && a.content.iter().skip(1).eq(b.content.iter().skip(1))
 }
