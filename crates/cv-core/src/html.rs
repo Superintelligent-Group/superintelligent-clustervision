@@ -5,7 +5,7 @@
 //! session-derived string is HTML-escaped (see [`escape`]) so a transcript containing `<script>`
 //! etc. can never inject markup into the page.
 
-use crate::ir::{human_bytes, Block, Message, Role, Usage};
+use crate::ir::{human_bytes, Block, Harness, Message, Role, Usage};
 
 fn render_usage(u: &Usage, out: &mut String) {
     let mut parts: Vec<String> = Vec::new();
@@ -154,26 +154,28 @@ fn role_class(r: Role) -> &'static str {
     }
 }
 
-/// A stable, distinct color for each harness badge.
-fn harness_color(name: &str) -> &'static str {
-    match name {
-        "claude" => "#d97757",
-        "codex" => "#10a37f",
-        "grok" => "#1d1d1f",
-        "opencode" => "#5b6ee1",
-        "gemini" => "#4285f4",
-        "hermes" => "#8e44ad",
-        "openclaw" => "#b8860b",
-        "cursor" => "#111111",
-        "kimi" => "#0050ff",
-        "qwen" => "#6a3ec0",
-        "lmstudio" => "#2563eb",
-        "cline" => "#0aa",
-        "roo" => "#e0533d",
-        "continue" => "#444",
-        "goose" => "#7a5c3e",
-        "devin" => "#3b6ee8",
-        _ => "#555",
+/// A stable color for each harness badge; the five without one of their own share the neutral.
+fn harness_color(h: Harness) -> &'static str {
+    match h {
+        Harness::Claude => "#d97757",
+        Harness::Codex => "#10a37f",
+        Harness::Grok => "#1d1d1f",
+        Harness::OpenCode => "#5b6ee1",
+        Harness::Gemini => "#4285f4",
+        Harness::Hermes => "#8e44ad",
+        Harness::OpenClaw => "#b8860b",
+        Harness::Cursor => "#111111",
+        Harness::Kimi => "#0050ff",
+        Harness::Qwen => "#6a3ec0",
+        Harness::LmStudio => "#2563eb",
+        Harness::Cline => "#0aa",
+        Harness::Roo => "#e0533d",
+        Harness::Continue => "#444",
+        Harness::Goose => "#7a5c3e",
+        Harness::Devin => "#3b6ee8",
+        Harness::KimiCode | Harness::Zed | Harness::ChatGptExport | Harness::ClaudeExport | Harness::OpenSession => {
+            "#555"
+        }
     }
 }
 
@@ -218,7 +220,7 @@ pub fn share_begin(meta: &ShareMeta) -> String {
     let _ = write!(
         out,
         "<span class=\"badge\" style=\"background:{}\">{}</span>",
-        harness_color(meta.harness.as_str()),
+        harness_color(meta.harness),
         escape(meta.harness.as_str()),
     );
     if meta.redacted {
