@@ -227,7 +227,7 @@ fn act_in(store: &TaskStore, id: &str, verb: &str, who: &str, body: &Value) -> R
             let confirm = body.get("confirm").and_then(Value::as_bool).unwrap_or(false);
             let answer = task_ops::Answer::from_flags(text("choice"), accept, confirm)?;
             let out = task_ops::resolve(store, &outcome.model, &by, &id, answer, text("note"), false)?;
-            (vec![out.event], out.effective_state, out.replay_warnings)
+            (vec![out.event], out.effective_state, out.warnings)
         }
         "done" => {
             let out = task::append(
@@ -240,7 +240,7 @@ fn act_in(store: &TaskStore, id: &str, verb: &str, who: &str, body: &Value) -> R
                 },
                 Vec::new(),
             )?;
-            (vec![out.event], out.effective_state, out.replay_warnings)
+            (vec![out.event], out.effective_state, out.warnings)
         }
         "note" => {
             let Some(t) = text("text") else {
@@ -256,7 +256,7 @@ fn act_in(store: &TaskStore, id: &str, verb: &str, who: &str, body: &Value) -> R
                 },
                 Vec::new(),
             )?;
-            (vec![out.event], out.effective_state, out.replay_warnings)
+            (vec![out.event], out.effective_state, out.warnings)
         }
         "discuss" => {
             // One unit: the note and the `discuss` tag land together.
@@ -294,11 +294,11 @@ fn act_in(store: &TaskStore, id: &str, verb: &str, who: &str, body: &Value) -> R
                 },
                 Vec::new(),
             )?;
-            (vec![out.event], out.effective_state, out.replay_warnings)
+            (vec![out.event], out.effective_state, out.warnings)
         }
         "release" => {
             let out = task::append(store, Some(&id), &by, TaskEventKind::Released {}, Vec::new())?;
-            (vec![out.event], out.effective_state, out.replay_warnings)
+            (vec![out.event], out.effective_state, out.warnings)
         }
         other => bail!("unknown action {other:?}"),
     };

@@ -570,7 +570,7 @@ fn append_and_report(task_id: Option<&str>, from: &str, kind: TaskEventKind) -> 
 fn append_event(task_id: Option<&str>, from: &str, kind: TaskEventKind) -> Result<String> {
     let store = TaskStore::default_store();
     let report = task::append(&store, task_id, from, kind, Vec::new())?;
-    for w in report.replay_warnings.iter().chain(&report.warnings) {
+    for w in &report.warnings {
         eprintln!("⚠ {}", sanitize_line(w));
     }
     let state = report.effective_state.unwrap_or_else(|| "?".into());
@@ -1145,7 +1145,7 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
             let store = TaskStore::default_store();
             let answer = task_ops::Answer::from_flags(choice, accept_default, confirm)?;
             let report = task_ops::resolve(&store, &outcome.model, &from, &id, answer, note, provisional)?;
-            for w in report.replay_warnings.iter().chain(&report.warnings) {
+            for w in &report.warnings {
                 eprintln!("⚠ {}", sanitize_line(w));
             }
             if let TaskEventKind::Resolved {
