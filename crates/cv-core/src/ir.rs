@@ -256,6 +256,11 @@ impl Lineage {
 /// collide with a harness bag. See `docs/INTERFACE-V2.md` §4.
 pub const CV_NAMESPACE: &str = "cv";
 
+/// The one other top-level `extra` key: the verbatim native record a carrier (or a complete-mode
+/// turn) keeps under `Demand::COMPLETE`. Not a harness bag, and not Claude's: every adapter
+/// with complete-mode carriers writes it.
+pub const CARRIER_KEY: &str = "_record";
+
 impl Session {
     /// An empty session of `harness`: every optional field `None`, no messages, no extras. The one
     /// way an adapter spells a fresh session — fill in what the store says with struct-update
@@ -540,7 +545,7 @@ pub struct Message {
     pub usage: Option<Usage>,
     /// Harness-specific message facts, nested under the harness name
     /// (`extra["claude"]["attachment_type"]`). The only other top-level key allowed is
-    /// [`CARRIER_KEY`](crate::harness::claude::CARRIER_KEY) (`"_record"`, the verbatim record under
+    /// [`CARRIER_KEY`] (`"_record"`, the verbatim record under
     /// `Demand::COMPLETE`). Shared concepts are first-class (`kind`, `origin`, `usage`,
     /// `Block::ToolResult::details`). See `docs/INTERFACE-V2.md` §4.
     pub extra: serde_json::Map<String, serde_json::Value>,
@@ -708,6 +713,18 @@ impl Message {
         self.extra.get(h.as_str()).and_then(serde_json::Value::as_object)
     }
 
+    /// A verbatim meta record carried under `Demand::COMPLETE`, never a conversational turn:
+    /// `kind == Carrier`, or a [`CARRIER_KEY`] record on a message that is not an OpenCode
+    /// complete-mode turn (those name their `record_type` in the bag and stay turns).
+    pub fn is_carrier(&self) -> bool {
+        self.kind == MessageKind::Carrier
+            || (self.extra.contains_key(CARRIER_KEY)
+                && self
+                    .harness_extra(Harness::OpenCode)
+                    .and_then(|extra| extra.get("record_type"))
+                    .is_none())
+    }
+
     /// Resolve this message's lazy content spans in place against `resolver`, so its content is owned
     /// inline. Streaming consumers call this per message (peak = one message) instead of holding a
     /// whole materialized session.
@@ -852,6 +869,18 @@ pub enum Block {
 }
 
 impl Block {
+    /// The block's serde `type` tag (`tool_use`, …): the one spelling of the wire word.
+    pub fn type_tag(&self) -> &'static str {
+        match self {
+            Block::Text { .. } => "text",
+            Block::Thinking { .. } => "thinking",
+            Block::ToolUse { .. } => "tool_use",
+            Block::ToolResult { .. } => "tool_result",
+            Block::Image { .. } => "image",
+            Block::File { .. } => "file",
+        }
+    }
+
     /// For a tool result whose real output was too large for the transcript and went to a file
     /// (Claude Code's `<persisted-output>` stub → `<session>/tool-results/<id>.txt`): where that
     /// file lives. The block's `content` is the stub the model saw; this is the rest.
@@ -1569,7 +1598,7 @@ mod tests {
             ]
         );
         let extra: Vec<&str> = value["extra"].as_object().unwrap().keys().map(String::as_str).collect();
-        assert_eq!(extra, ["claude", crate::harness::claude::CARRIER_KEY]);
+        assert_eq!(extra, ["claude", CARRIER_KEY]);
         let mut written = Vec::new();
         m.write_json(&mut written, &crate::lazy::Resolver::new(None)).unwrap();
         assert_eq!(written, serde_json::to_vec(m).unwrap());

@@ -228,17 +228,6 @@ fn subdirs(dir: &Path) -> Vec<PathBuf> {
     v
 }
 
-fn block_type(b: &Block) -> &'static str {
-    match b {
-        Block::Text { .. } => "text",
-        Block::Thinking { .. } => "thinking",
-        Block::ToolUse { .. } => "tool_use",
-        Block::ToolResult { .. } => "tool_result",
-        Block::Image { .. } => "image",
-        Block::File { .. } => "file",
-    }
-}
-
 fn tag(v: impl serde::Serialize) -> String {
     serde_json::to_value(v).unwrap().as_str().unwrap_or("?").to_string()
 }
@@ -252,7 +241,7 @@ fn summarize_one(adapter: &dyn Adapter, r: &SessionRef, version_dir: &Path) -> V
     let mut tools = Vec::new();
     for m in &s.messages {
         for b in &m.content {
-            *blocks.entry(block_type(b)).or_default() += 1;
+            *blocks.entry(b.type_tag()).or_default() += 1;
             if let Block::ToolUse { name, namespace, .. } = b {
                 tools.push(match namespace {
                     Some(ns) => format!("{ns}/{name}"),

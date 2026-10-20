@@ -309,8 +309,7 @@ impl Reader<'_> {
             _ => ty,
         };
         bag(&mut m).insert("record_type".into(), Value::String(ty));
-        m.extra
-            .insert(super::super::claude::CARRIER_KEY.into(), v.resolve()?.into_owned());
+        m.extra.insert(crate::ir::CARRIER_KEY.into(), v.resolve()?.into_owned());
         self.out.push(m);
         Ok(())
     }

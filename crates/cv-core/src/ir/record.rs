@@ -50,7 +50,7 @@ impl CompleteRecord {
                     extra: message
                         .extra
                         .iter()
-                        .filter(|(key, _)| key.as_str() != crate::harness::claude::CARRIER_KEY)
+                        .filter(|(key, _)| key.as_str() != crate::ir::CARRIER_KEY)
                         .map(|(key, value)| (key.clone(), value.clone()))
                         .collect(),
                     complete_record: None,
@@ -59,7 +59,7 @@ impl CompleteRecord {
         } else {
             Vec::new()
         };
-        messages[0].extra.remove(crate::harness::claude::CARRIER_KEY);
+        messages[0].extra.remove(crate::ir::CARRIER_KEY);
         messages[0].complete_record = Some(std::sync::Arc::new(Self {
             harness,
             value,
@@ -166,7 +166,7 @@ impl Serialize for Extra<'_> {
 }
 /// The retained record `extra` carries: an explicit owned edit under the carrier key wins.
 fn carried(message: &Message) -> Option<&CompleteRecord> {
-    match message.extra.contains_key(crate::harness::claude::CARRIER_KEY) {
+    match message.extra.contains_key(crate::ir::CARRIER_KEY) {
         true => None,
         false => message.complete_record.as_deref(),
     }
@@ -177,7 +177,7 @@ pub(crate) fn write_extra(message: &Message, writer: &mut dyn Write) -> Result<(
         out.field(key, value)?;
     }
     if let Some(record) = carried(message) {
-        out.field_with(crate::harness::claude::CARRIER_KEY, |w| record.write(w))?;
+        out.field_with(crate::ir::CARRIER_KEY, |w| record.write(w))?;
     }
     out.finish()
 }
@@ -192,11 +192,8 @@ pub(crate) fn same_envelope(a: &Message, b: &Message) -> bool {
         && a.usage == b.usage
         && a.extra
             .iter()
-            .filter(|(key, _)| key.as_str() != crate::harness::claude::CARRIER_KEY)
-            .eq(b
-                .extra
-                .iter()
-                .filter(|(key, _)| key.as_str() != crate::harness::claude::CARRIER_KEY))
+            .filter(|(key, _)| key.as_str() != crate::ir::CARRIER_KEY)
+            .eq(b.extra.iter().filter(|(key, _)| key.as_str() != crate::ir::CARRIER_KEY))
 }
 
 pub(crate) fn same_message(a: &Message, b: &Message) -> bool {

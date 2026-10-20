@@ -250,15 +250,6 @@ pub(super) struct Features {
     dropped: usize,
 }
 
-/// A verbatim meta record carried under `Demand::COMPLETE` — never a conversational turn.
-pub(super) fn is_carrier(m: &Message) -> bool {
-    m.kind == MessageKind::Carrier
-        || (m.extra.contains_key(crate::harness::claude::CARRIER_KEY)
-            && m.harness_extra(Harness::OpenCode)
-                .and_then(|extra| extra.get("record_type"))
-                .is_none())
-}
-
 /// Whether `target`’s format can hold this block at all (the block-level half of
 /// [`target_holds`]), under the requested [`ThinkingMode`]. A thinking block survives if
 /// [`thinking_fate`] writes anything for it — structurally, as text, or as a placeholder.
@@ -329,7 +320,7 @@ impl Features {
         // Notes are presence facts (inline markers, `accumulator::project`), never source text.
         let unrepresentable = unrepresentable_checked(target, thinking, m, &crate::lazy::Resolver::new(None))
             .expect("noted facts are inline");
-        if !is_carrier(m) && unrepresentable {
+        if !m.is_carrier() && unrepresentable {
             f.dropped += 1;
         }
         // Two kinds of message are not *turns* for this comparison and are skipped whole — counting
@@ -339,7 +330,7 @@ impl Features {
         //    record) is bookkeeping the emitter replays byte-for-byte;
         //  * a turn the target cannot represent AT ALL ([`unrepresentable_checked`]), or one whose only
         //    content is unanswered calls the Claude emitter drops.
-        if is_carrier(m) || unrepresentable || (!m.content.is_empty() && m.content.iter().all(&orphan_call)) {
+        if m.is_carrier() || unrepresentable || (!m.content.is_empty() && m.content.iter().all(&orphan_call)) {
             return;
         }
         // A store whose own reader re-tags a turn on the way back in is not LOSING it, and the

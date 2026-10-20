@@ -2840,9 +2840,7 @@ mod tests {
             // The v2 shape holds on real files: nothing flat, every kind precise.
             for m in &parsed.messages {
                 assert!(
-                    m.extra
-                        .keys()
-                        .all(|k| k == "codex" || k == super::super::claude::CARRIER_KEY),
+                    m.extra.keys().all(|k| k == "codex" || k == crate::ir::CARRIER_KEY),
                     "flat extra key on {}: {:?}",
                     path.display(),
                     m.extra.keys().collect::<Vec<_>>()
@@ -3123,7 +3121,7 @@ mod tests {
             .iter()
             .filter(|m| m.kind == MessageKind::Carrier)
             .map(|m| {
-                let record = &m.extra[super::super::claude::CARRIER_KEY];
+                let record = &m.extra[crate::ir::CARRIER_KEY];
                 (
                     m.extra["codex"]["record_type"].as_str().unwrap(),
                     record
@@ -3144,10 +3142,10 @@ mod tests {
         );
         assert_eq!(complete.messages.len(), lean.messages.len() + carriers.len());
         for m in &complete.messages {
-            let allowed = |k: &String| k == "codex" || k == super::super::claude::CARRIER_KEY;
+            let allowed = |k: &String| k == "codex" || k == crate::ir::CARRIER_KEY;
             assert!(m.extra.keys().all(allowed), "{:?}", m.extra.keys().collect::<Vec<_>>());
             assert_eq!(
-                m.extra.contains_key(super::super::claude::CARRIER_KEY),
+                m.extra.contains_key(crate::ir::CARRIER_KEY),
                 m.kind == MessageKind::Carrier,
                 "`_record` marks exactly the carriers"
             );
@@ -3158,10 +3156,7 @@ mod tests {
             .find(|m| bag_get(m, "record_type").and_then(Value::as_str) == Some("world_state"))
             .unwrap();
         assert_eq!((ws.role, ws.origin), (Role::System, Origin::Harness));
-        assert_eq!(
-            ws.extra[super::super::claude::CARRIER_KEY]["payload"]["agents_md"],
-            "# AGENTS.md"
-        );
+        assert_eq!(ws.extra[crate::ir::CARRIER_KEY]["payload"]["agents_md"], "# AGENTS.md");
         assert!(ws.content.is_empty());
     }
 }

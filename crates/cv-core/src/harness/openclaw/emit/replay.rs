@@ -125,7 +125,7 @@ impl Native {
             return Ok(None);
         }
         let message = &messages[0];
-        if !message.extra.contains_key(crate::harness::claude::CARRIER_KEY) {
+        if !message.extra.contains_key(crate::ir::CARRIER_KEY) {
             if let Some(record) = &message.complete_record {
                 let group = if record.unchanged(Harness::OpenClaw, messages) {
                     Some(record.projection.len())
@@ -156,7 +156,7 @@ impl Native {
         }
         // The public IR representation also accepts explicitly owned bookkeeping carriers.
         if matches!(message.kind, MessageKind::Carrier | MessageKind::Notice) {
-            if let Some(raw) = message.extra.get(crate::harness::claude::CARRIER_KEY) {
+            if let Some(raw) = message.extra.get(crate::ir::CARRIER_KEY) {
                 self.write(raw.into(), writer, mode, resolver)?;
                 return Ok(Some(1));
             }

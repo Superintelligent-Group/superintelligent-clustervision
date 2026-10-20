@@ -12,17 +12,6 @@ fn tmpdir(tag: &str) -> PathBuf {
     d
 }
 
-fn block_type(b: &Block) -> &'static str {
-    match b {
-        Block::Text { .. } => "text",
-        Block::Thinking { .. } => "thinking",
-        Block::ToolUse { .. } => "tool_use",
-        Block::ToolResult { .. } => "tool_result",
-        Block::Image { .. } => "image",
-        Block::File { .. } => "file",
-    }
-}
-
 // ── the document boundary ─────────────────────────────────────────────────────
 
 /// The version marker is the document's FIRST key — and it is *only* on the document. A `Session`
@@ -164,8 +153,8 @@ fn round_trip_native_corpus(harness: Harness, corpus_path: &str) {
             serde_json::to_value(&o.extra).unwrap(),
             "message {i} extra"
         );
-        let bt: Vec<&str> = b.content.iter().map(block_type).collect();
-        let ot: Vec<&str> = o.content.iter().map(block_type).collect();
+        let bt: Vec<&str> = b.content.iter().map(Block::type_tag).collect();
+        let ot: Vec<&str> = o.content.iter().map(Block::type_tag).collect();
         assert_eq!(bt, ot, "message {i} block types");
         assert_eq!(
             serde_json::to_value(&b.content).unwrap(),
@@ -195,7 +184,7 @@ fn round_trip_native_corpus(harness: Harness, corpus_path: &str) {
     for m in &back.messages {
         *kinds.entry(m.kind.as_str()).or_default() += 1;
         for b in &m.content {
-            *blocks.entry(block_type(b)).or_default() += 1;
+            *blocks.entry(b.type_tag()).or_default() += 1;
         }
     }
     eprintln!("  kinds  {kinds:?}\n  blocks {blocks:?}");

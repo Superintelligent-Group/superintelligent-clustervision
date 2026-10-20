@@ -92,7 +92,7 @@
 use super::store::{document::Fields, jsonl};
 use super::wire::openai;
 use super::Adapter;
-use crate::harness::claude::CARRIER_KEY;
+use crate::ir::CARRIER_KEY;
 use crate::ir::*;
 use crate::json::{JsonSource, JsonView};
 use crate::lazy::Text;

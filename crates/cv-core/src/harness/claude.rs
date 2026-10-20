@@ -604,9 +604,6 @@ fn note_conversation_metadata(
     }
 }
 
-/// `extra` key under which a [`carrier_record`] stashes the verbatim original meta record.
-pub const CARRIER_KEY: &str = "_record";
-
 /// The record field holding a tool result's structured sidecar — and the key the sidecar is parked
 /// under inside [`Block::ToolResult::details`] when it is a bare scalar (see
 /// [`attach_tool_use_result`]). `emit_claude` writes the field back from those `details`.

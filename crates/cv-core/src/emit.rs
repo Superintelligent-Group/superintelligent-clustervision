@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 pub(crate) mod fidelity;
 mod prepare;
 pub(crate) mod thinking;
-use fidelity::{diff_features, is_carrier, reparse_features, source_features, target_holds};
+use fidelity::{diff_features, reparse_features, source_features, target_holds};
 #[cfg(test)]
 use fidelity::{diff_fidelity, reparse_emitted};
 pub use fidelity::{Delta, FidelityReport};
@@ -465,7 +465,7 @@ pub fn emit_report(
     let reparse_opts = if session
         .messages
         .iter()
-        .any(|message| is_carrier(message) || message.complete_record.is_some())
+        .any(|message| message.is_carrier() || message.complete_record.is_some())
     {
         Demand::COMPLETE
     } else {
@@ -917,13 +917,13 @@ mod tests {
         });
         session.messages.push(result);
         let mut carrier = Message::new(Role::System);
-        carrier.extra.insert(crate::harness::claude::CARRIER_KEY.into(),json!({"type":"system","uuid":"carrier","parentUuid":"missing","sessionId":"old","cwd":"old","isSidechain":true,"agentId":"old","unrecognized":{"must":"survive"}}));
+        carrier.extra.insert(crate::ir::CARRIER_KEY.into(),json!({"type":"system","uuid":"carrier","parentUuid":"missing","sessionId":"old","cwd":"old","isSidechain":true,"agentId":"old","unrecognized":{"must":"survive"}}));
         session.messages.push(carrier);
         let mut raw_carrier = Message::new(Role::System);
-        raw_carrier.extra.insert(crate::harness::claude::CARRIER_KEY.into(),json!({"type":"assistant","uuid":"raw-carrier","parentUuid":"carrier","message":{"role":"assistant","content":[{"type":"tool_use","id":"answered"},{"type":"tool_use","id":"raw-orphan"},{"type":"text","text":"verbatim carrier content"}]}}));
+        raw_carrier.extra.insert(crate::ir::CARRIER_KEY.into(),json!({"type":"assistant","uuid":"raw-carrier","parentUuid":"carrier","message":{"role":"assistant","content":[{"type":"tool_use","id":"answered"},{"type":"tool_use","id":"raw-orphan"},{"type":"text","text":"verbatim carrier content"}]}}));
         session.messages.push(raw_carrier);
         let mut raw_result = Message::new(Role::System);
-        raw_result.extra.insert(crate::harness::claude::CARRIER_KEY.into(),json!({"type":"user","uuid":"raw-result","message":{"content":[{"type":"tool_result","tool_use_id":"carrier-answer","content":"raw result"}]}}));
+        raw_result.extra.insert(crate::ir::CARRIER_KEY.into(),json!({"type":"user","uuid":"raw-result","message":{"content":[{"type":"tool_result","tool_use_id":"carrier-answer","content":"raw result"}]}}));
         session.messages.push(raw_result);
         let mut carrier_call = Message::new(Role::Assistant);
         carrier_call.id = Some("carrier-call".into());
@@ -2329,7 +2329,8 @@ mod tests {
     /// records (mode / queue-operation / ai-title) carried verbatim.
     #[test]
     fn claude_complete_round_trip_is_lossless() {
-        use crate::harness::claude::{self, stream_str, CARRIER_KEY};
+        use crate::harness::claude::stream_str;
+        use crate::ir::CARRIER_KEY;
         use crate::stream::{CollectSink, Demand};
 
         let sid = "11111111-1111-4111-8111-111111111111";
@@ -2425,7 +2426,7 @@ mod tests {
             "meta + system records carried as carriers, got {carrier_types:?}"
         );
         // sanity: CARRIER_KEY constant is the public one.
-        assert_eq!(claude::CARRIER_KEY, "_record");
+        assert_eq!(CARRIER_KEY, "_record");
 
         // For every emitted record, find its source and assert key-set + per-value parity.
         for out_rec in &emitted {
@@ -3157,7 +3158,10 @@ mod tests {
         let mut sink = CollectSink::default();
         let mut s = stream_str(sid, &text, None, &Demand::COMPLETE, &mut sink);
         s.messages = sink.messages;
-        assert!(s.messages.iter().any(is_carrier), "the `mode` record is carried");
+        assert!(
+            s.messages.iter().any(Message::is_carrier),
+            "the `mode` record is carried"
+        );
 
         let (_res, report) = emit_report(
             &s,
@@ -3712,7 +3716,7 @@ mod tests {
         session.messages.push(call);
         let mut result = Message::new(Role::System);
         result.extra.insert(
-            crate::harness::claude::CARRIER_KEY.into(),
+            crate::ir::CARRIER_KEY.into(),
             serde_json::json!({
                 "type":"user","uuid":"result","parentUuid":"call","message":{"role":"user","content":[
                     {"type":"tool_result","tool_use_id":"a:b","content":"raw output"},
@@ -3787,7 +3791,7 @@ mod tests {
         }
         let mut result = Message::new(Role::System);
         result.extra.insert(
-            crate::harness::claude::CARRIER_KEY.into(),
+            crate::ir::CARRIER_KEY.into(),
             serde_json::json!({
                 "type":"user","uuid":"result","parentUuid":"thinking-only","message":{"role":"user","content":[
                     {"type":"tool_result","tool_use_id":"a:b","content":"kept"},

@@ -102,10 +102,8 @@ fn project(message: &Message, resolver: &crate::lazy::Resolver, target: Harness)
     facts.timestamp = message.timestamp;
     facts.model = message.model.as_ref().map(|_| String::new());
     facts.usage = message.usage.clone();
-    if is_carrier(message) {
-        facts
-            .extra
-            .insert(crate::harness::claude::CARRIER_KEY.into(), Value::Null);
+    if message.is_carrier() {
+        facts.extra.insert(crate::ir::CARRIER_KEY.into(), Value::Null);
     }
     let mut text_started = false;
     for block in &message.content {

@@ -189,7 +189,7 @@ pub(super) fn write_database(
                     _ => None,
                 };
                 if let Some(group) = group {
-                    if !msg.extra.contains_key(crate::harness::claude::CARRIER_KEY)
+                    if !msg.extra.contains_key(crate::ir::CARRIER_KEY)
                         && session.messages[index..index + group]
                             .iter()
                             .filter_map(|m| m.id.as_deref())
@@ -218,7 +218,7 @@ pub(super) fn write_database(
         }
 
         if session.harness == Harness::OpenCode && msg.id.as_deref().is_some_and(|id| identities.get(id) == Some(&1)) {
-            if let Some(raw) = msg.extra.get(crate::harness::claude::CARRIER_KEY) {
+            if let Some(raw) = msg.extra.get(crate::ir::CARRIER_KEY) {
                 if let Some((ty, group)) = owned_replay(raw, &session.messages[index..]) {
                     if session.messages[index..index + group]
                         .iter()

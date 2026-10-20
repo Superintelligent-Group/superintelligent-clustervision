@@ -2400,7 +2400,7 @@ mod tests {
         // … but under `complete` a checkpoint rides along as a carrier naming its record type
         let c = context_message(&cp, &WireEnrich::default(), true, &mut BTreeMap::new()).unwrap();
         assert_eq!((c.kind, c.origin), (MessageKind::Carrier, Origin::Harness));
-        assert_eq!(c.extra[crate::harness::claude::CARRIER_KEY], cp);
+        assert_eq!(c.extra[crate::ir::CARRIER_KEY], cp);
         assert_eq!(c.extra["kimi"]["record_type"], "_checkpoint");
         // `_usage` is never a message, even under `complete`: it folds onto the message before it
         let us: Value = serde_json::from_str(r#"{"role":"_usage","token_count":7291}"#).unwrap();
@@ -2510,9 +2510,7 @@ mod tests {
         // every fact is in the harness bag; nothing flat
         for m in &s.messages {
             assert!(
-                m.extra
-                    .keys()
-                    .all(|k| k == "kimi" || k == crate::harness::claude::CARRIER_KEY),
+                m.extra.keys().all(|k| k == "kimi" || k == crate::ir::CARRIER_KEY),
                 "{:?}",
                 m.extra
             );

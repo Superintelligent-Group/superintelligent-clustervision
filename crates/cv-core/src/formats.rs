@@ -51,7 +51,7 @@
 //! characters would be a lie about what the adapter does.
 
 use crate::harness;
-use crate::ir::{Block, Harness, MessageKind, SessionRef};
+use crate::ir::{Harness, SessionRef};
 use crate::stream::{self, Demand};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -514,23 +514,11 @@ impl Census {
     }
 }
 
-fn block_type(b: &Block) -> &'static str {
-    match b {
-        Block::Text { .. } => "text",
-        Block::Thinking { .. } => "thinking",
-        Block::ToolUse { .. } => "tool_use",
-        Block::ToolResult { .. } => "tool_result",
-        Block::Image { .. } => "image",
-        Block::File { .. } => "file",
-    }
-}
-
 /// The record type a carrier message stands for: `extra[<harness>]["record_type"]` (the v2
 /// contract), else the verbatim record's own `type` under `_record` (what adapters wrote before
 /// the contract), else `(untyped)`.
 fn carrier_record_type(m: &crate::ir::Message, h: Harness) -> Option<String> {
-    let is_carrier = m.kind == MessageKind::Carrier || m.extra.contains_key("_record");
-    if !is_carrier {
+    if !m.is_carrier() {
         return None;
     }
     let from_bag = m
@@ -540,7 +528,7 @@ fn carrier_record_type(m: &crate::ir::Message, h: Harness) -> Option<String> {
         .map(String::from);
     Some(from_bag.unwrap_or_else(|| {
         m.extra
-            .get("_record")
+            .get(crate::ir::CARRIER_KEY)
             .and_then(|r| r.get("type"))
             .and_then(serde_json::Value::as_str)
             .map(String::from)
@@ -598,7 +586,7 @@ fn census_session(
     let mut sink = stream::TryFnSink::new(|message: crate::Message| {
         *sample.kinds.entry(message.kind.as_str().to_string()).or_default() += 1;
         for block in &message.content {
-            *sample.block_types.entry(block_type(block).to_string()).or_default() += 1;
+            *sample.block_types.entry(block.type_tag().to_string()).or_default() += 1;
         }
         if let Some(ty) = carrier_record_type(&message, h) {
             let status = manifest.and_then(|m| m.lookup(&ty)).map(|(_, entry)| entry.status);
@@ -680,6 +668,7 @@ pub fn census(harness: Option<Harness>, recent: usize) -> Census {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::{Block, MessageKind};
 
     #[test]
     fn bounded_recent_selection_matches_stable_sort_with_ties_and_missing_dates() {

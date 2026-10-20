@@ -65,7 +65,7 @@ pub(super) fn message(
         "_checkpoint" if complete => {
             let mut m = Message::of_kind(Role::System, MessageKind::Carrier, Origin::Harness);
             m.extra
-                .insert(crate::harness::claude::CARRIER_KEY.into(), view.resolve()?.into_owned());
+                .insert(crate::ir::CARRIER_KEY.into(), view.resolve()?.into_owned());
             m.harness_extra_mut(Harness::Kimi)
                 .insert("record_type".into(), Value::String(role.to_owned()));
             m

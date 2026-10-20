@@ -78,17 +78,15 @@ pub fn verify_claude_resumable(path: &Path, agent: Option<&str>) -> Result<()> {
 
 /// The verbatim meta record a format-complete carrier message stashed (an object under
 /// `extra["_record"]`), or `None` for an ordinary message. See
-/// [`claude::carrier_record`](crate::harness::claude::CARRIER_KEY).
+/// [`claude::carrier_record`](crate::ir::CARRIER_KEY).
 fn carrier_record_of(m: &crate::ir::Message) -> Option<&Value> {
-    m.extra
-        .get(crate::harness::claude::CARRIER_KEY)
-        .filter(|v| v.is_object())
+    m.extra.get(crate::ir::CARRIER_KEY).filter(|v| v.is_object())
 }
 
 /// Internal `extra` keys the IR adds for its own bookkeeping — never part of the source record, so
 /// they must NOT be replayed into an emitted Claude line.
 fn is_internal_extra_key(k: &str) -> bool {
-    k == crate::harness::claude::CARRIER_KEY || k == crate::offsets::OFFSET_KEY
+    k == crate::ir::CARRIER_KEY || k == crate::offsets::OFFSET_KEY
 }
 
 /// Reconstruct Claude's `message.usage` object from the IR [`Usage`], reversing

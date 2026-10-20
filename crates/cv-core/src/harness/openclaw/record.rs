@@ -354,7 +354,7 @@ fn carrier(view: JsonView<'_>, ty: &str, common: &Common, opts: &Demand) -> Resu
     m.harness_extra_mut(Harness::OpenClaw)
         .insert("record_type".into(), Value::from(ty));
     m.extra
-        .insert(crate::harness::claude::CARRIER_KEY.into(), view.resolve()?.into_owned());
+        .insert(crate::ir::CARRIER_KEY.into(), view.resolve()?.into_owned());
     Ok(vec![m])
 }
 

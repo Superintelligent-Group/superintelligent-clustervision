@@ -1381,7 +1381,7 @@ fn clear_resume_usage(message: &mut Message) {
     // The old complete native record would reintroduce stale usage or unclipped payloads
     // under complete emission. Distillation deliberately replaces that representation.
     message.complete_record = None;
-    message.extra.remove(crate::harness::claude::CARRIER_KEY);
+    message.extra.remove(crate::ir::CARRIER_KEY);
 }
 
 /// The tail as real IR turns for a resumable session: thinking dropped (unless asked), recorded
@@ -2426,10 +2426,9 @@ facts text",
                 input_tokens: Some(100000),
                 ..Default::default()
             });
-            message.extra.insert(
-                crate::harness::claude::CARRIER_KEY.into(),
-                json!({"usage":{"input_tokens":100000}}),
-            );
+            message
+                .extra
+                .insert(crate::ir::CARRIER_KEY.into(), json!({"usage":{"input_tokens":100000}}));
             crate::ir::CompleteRecord::attach(
                 std::slice::from_mut(message),
                 Harness::Claude,
@@ -2446,8 +2445,10 @@ facts text",
         assert_eq!(prepared.distilled.stats.tail_tool_calls, 3);
         let (_, resumed) = prepared.into_resumable_session(&source);
         assert!(resumed.messages.iter().all(|message| message.usage.is_none()));
-        assert!(resumed.messages.iter().all(|message| message.complete_record.is_none()
-            && !message.extra.contains_key(crate::harness::claude::CARRIER_KEY)));
+        assert!(resumed
+            .messages
+            .iter()
+            .all(|message| message.complete_record.is_none() && !message.extra.contains_key(crate::ir::CARRIER_KEY)));
         assert!(resumed.messages.iter().all(Message::is_model_visible));
         let retained = tool_index(&resumed.messages);
         for message in &resumed.messages {

@@ -2295,7 +2295,7 @@ mod tests {
         assert_eq!(l1.kind, MessageKind::Carrier);
         assert_eq!(l1.extra["openclaw"]["record_type"], "leaf");
         assert_eq!(
-            serde_json::to_value(l1).unwrap()["extra"][crate::harness::claude::CARRIER_KEY]["targetId"],
+            serde_json::to_value(l1).unwrap()["extra"][crate::ir::CARRIER_KEY]["targetId"],
             "a1"
         );
         // the session name is a notice under complete, carrying its record
@@ -2303,15 +2303,13 @@ mod tests {
         assert_eq!(si.kind, MessageKind::Notice);
         assert_eq!(si.extra["openclaw"]["record_type"], "session_info");
         assert_eq!(
-            serde_json::to_value(si).unwrap()["extra"][crate::harness::claude::CARRIER_KEY]["name"],
+            serde_json::to_value(si).unwrap()["extra"][crate::ir::CARRIER_KEY]["name"],
             "Named session"
         );
         assert_eq!(si.text().as_deref(), Some("[session named: Named session]"));
         for m in &sink.messages {
             assert!(
-                m.extra
-                    .keys()
-                    .all(|k| k == "openclaw" || k == crate::harness::claude::CARRIER_KEY),
+                m.extra.keys().all(|k| k == "openclaw" || k == crate::ir::CARRIER_KEY),
                 "{:?}",
                 m.extra
             );
@@ -2624,14 +2622,14 @@ mod tests {
         assert_eq!(cx.kind, MessageKind::Carrier);
         assert_eq!(cx.extra["openclaw"]["record_type"], "custom");
         assert_eq!(
-            serde_json::to_value(cx).unwrap()["extra"][crate::harness::claude::CARRIER_KEY]["data"]["ttl"],
+            serde_json::to_value(cx).unwrap()["extra"][crate::ir::CARRIER_KEY]["data"]["ttl"],
             60
         );
         let lb = c.messages.iter().find(|m| m.id.as_deref() == Some("lb")).unwrap();
         assert_eq!(lb.kind, MessageKind::Notice);
         assert_eq!(lb.text().as_deref(), Some("[label u2: pinned prompt]"));
         assert_eq!(
-            serde_json::to_value(lb).unwrap()["extra"][crate::harness::claude::CARRIER_KEY]["targetId"],
+            serde_json::to_value(lb).unwrap()["extra"][crate::ir::CARRIER_KEY]["targetId"],
             "u2"
         );
     }

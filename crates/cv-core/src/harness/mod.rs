@@ -134,7 +134,7 @@ fn each_json_line_inner(
 /// list that GROWS — every new cross-harness diagnostic would have to be added to it and to every
 /// consumer that walks `extra` (see `harness::claude::emit::is_internal_extra_key`). A namespace does
 /// not. So §4's exceptions stay exactly what they are today, both on `Message` only:
-/// [`claude::CARRIER_KEY`] (`_record`, the verbatim source record under `Demand::COMPLETE`)
+/// [`CARRIER_KEY`](crate::ir::CARRIER_KEY) (`_record`, the verbatim source record under `Demand::COMPLETE`)
 /// and [`crate::offsets::OFFSET_KEY`] (`cv_byte_offset`, written per message on the lazy-offset hot
 /// path, where a nested map per message would be pure allocation). `Session::extra` has **no** flat
 /// exception: every top-level key there is a namespace object — a harness name or `"cv"`.
@@ -599,7 +599,7 @@ pub fn for_harness(h: Harness) -> Option<Box<dyn Adapter>> {
 /// Every top-level key in `Session::extra` and in each `Message::extra` must be a **namespace whose
 /// value is an object** — a canonical harness name (`Harness::as_str`, so an alias like `cc` fails)
 /// or [`crate::ir::CV_NAMESPACE`]. Exactly two flat keys are allowed, both message-level and both cv's own
-/// streaming bookkeeping rather than harness facts: [`claude::CARRIER_KEY`] (`_record`, the verbatim
+/// streaming bookkeeping rather than harness facts: [`CARRIER_KEY`](crate::ir::CARRIER_KEY) (`_record`, the verbatim
 /// source record under [`Demand::COMPLETE`]) and [`crate::offsets::OFFSET_KEY`]
 /// (`cv_byte_offset`). `Session::extra` has no flat exception at all.
 #[cfg(test)]
@@ -611,7 +611,7 @@ pub(crate) fn assert_no_flat_keys(s: &Session) {
     }
     for m in &s.messages {
         for (k, v) in &m.extra {
-            if k == claude::CARRIER_KEY || k == crate::offsets::OFFSET_KEY {
+            if k == crate::ir::CARRIER_KEY || k == crate::offsets::OFFSET_KEY {
                 continue; // the two documented flat exceptions
             }
             assert!(

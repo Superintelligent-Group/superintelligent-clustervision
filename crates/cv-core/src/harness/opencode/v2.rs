@@ -549,8 +549,7 @@ fn carrier(id: &str, ty: &str, data: JsonView<'_>, ts: Option<chrono::DateTime<c
     let mut rec = data.resolve()?.as_object().cloned().unwrap_or_default();
     rec.insert("id".into(), json!(id));
     rec.insert("type".into(), json!(ty));
-    m.extra
-        .insert(crate::harness::claude::CARRIER_KEY.into(), Value::Object(rec));
+    m.extra.insert(crate::ir::CARRIER_KEY.into(), Value::Object(rec));
     Ok(m)
 }
 
@@ -680,6 +679,6 @@ mod tests {
         assert!(build("x", "from-the-future", &d, &Demand::RICH).is_none());
         let c = build("x", "from-the-future", &d, &Demand::COMPLETE).unwrap();
         assert_eq!(c[0].kind, MessageKind::Carrier);
-        assert_eq!(c[0].extra[crate::harness::claude::CARRIER_KEY]["outcome"], "succeeded");
+        assert_eq!(c[0].extra[crate::ir::CARRIER_KEY]["outcome"], "succeeded");
     }
 }

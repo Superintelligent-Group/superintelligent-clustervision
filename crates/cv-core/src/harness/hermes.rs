@@ -2442,9 +2442,8 @@ mod tests {
     /// and the `_record` carrier), so a fact leaking into some other harness's bag also fails.
     fn assert_nested_extra(s: &Session) {
         crate::harness::assert_no_flat_keys(s);
-        let allowed = |k: &str| {
-            k == Harness::Hermes.as_str() || k == crate::ir::CV_NAMESPACE || k == crate::harness::claude::CARRIER_KEY
-        };
+        let allowed =
+            |k: &str| k == Harness::Hermes.as_str() || k == crate::ir::CV_NAMESPACE || k == crate::ir::CARRIER_KEY;
         for k in s.extra.keys() {
             assert!(allowed(k), "flat session extra key {k:?}");
         }
