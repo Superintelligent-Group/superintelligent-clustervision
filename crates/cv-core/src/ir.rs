@@ -792,7 +792,7 @@ impl Message {
 
 /// A unit of message content. Tagged by `type` — the word every harness uses on the wire — so a
 /// block's `type` is never confused with its message's `kind`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Block {
     Text {
@@ -893,6 +893,22 @@ pub struct Usage {
     /// Provider-reported cost in USD, when the harness stores it (Goose, OpenCode, Codex).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
+}
+
+/// Equal iff serialized equal: a nonfinite cost serializes as `null`, so any two nonfinite costs
+/// are equal; an absent cost is omitted, so it stays distinct from one.
+impl PartialEq for Usage {
+    fn eq(&self, other: &Self) -> bool {
+        self.input_tokens == other.input_tokens
+            && self.output_tokens == other.output_tokens
+            && self.cache_read_tokens == other.cache_read_tokens
+            && self.cache_creation_tokens == other.cache_creation_tokens
+            && self.reasoning_tokens == other.reasoning_tokens
+            && match (self.cost_usd, other.cost_usd) {
+                (Some(a), Some(b)) => a == b || (!a.is_finite() && !b.is_finite()),
+                (a, b) => a.is_none() && b.is_none(),
+            }
+    }
 }
 
 impl Usage {

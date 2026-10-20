@@ -27,7 +27,9 @@ use std::sync::Arc;
 
 /// A complete JSON value. Source descriptors clone cheaply; owned values retain Value semantics.
 /// Deserialization always produces `Owned`, including objects that resemble source descriptors.
-#[derive(Clone, Debug)]
+/// Equality is the record replay's "unchanged" test: owned values by value, source descriptors
+/// by range (the same bytes of the same captured source), never an owned value against a range.
+#[derive(Clone, Debug, PartialEq)]
 pub enum Json {
     Owned(Value),
     Source(Arc<JsonRange>),
@@ -44,6 +46,21 @@ pub struct JsonRange {
     len: u64,
     decoded: Option<Arc<crate::harness::store::bytes::ByteSource>>,
 }
+
+/// The same bytes of the same captured source (and the same decoded backing, by identity).
+impl PartialEq for JsonRange {
+    fn eq(&self, other: &Self) -> bool {
+        self.source == other.source
+            && self.offset == other.offset
+            && self.len == other.len
+            && match (&self.decoded, &other.decoded) {
+                (None, None) => true,
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                _ => false,
+            }
+    }
+}
+impl Eq for JsonRange {}
 
 /// Distinguish invalid content (archives historically appear empty) from unavailable or changed
 /// sources, whose failures must abort consumers and cannot publish freshness.
@@ -436,16 +453,6 @@ impl JsonRange {
     /// append-aware consumers can handle their primary transcript identity independently.
     pub fn dependencies(&self) -> Option<&crate::source::ReadSet> {
         self.source.0.reads.as_deref()
-    }
-    pub(crate) fn same_range(&self, other: &Self) -> bool {
-        self.source == other.source
-            && self.offset == other.offset
-            && self.len == other.len
-            && match (&self.decoded, &other.decoded) {
-                (None, None) => true,
-                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
-                _ => false,
-            }
     }
     fn child(&self, offset: u64, len: u64) -> Result<Self> {
         anyhow::ensure!(

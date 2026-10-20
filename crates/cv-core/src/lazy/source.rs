@@ -13,7 +13,7 @@ pub struct SourceText {
 }
 impl PartialEq for SourceText {
     fn eq(&self, other: &Self) -> bool {
-        self.skip == other.skip && self.range.same_range(&other.range)
+        self.skip == other.skip && self.range == other.range
     }
 }
 impl Eq for SourceText {}
