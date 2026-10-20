@@ -909,7 +909,7 @@ enum Cmd {
         /// Only follow sessions whose cwd contains this substring.
         #[arg(long)]
         cwd: Option<String>,
-        /// Poll interval in seconds.
+        /// Poll interval in seconds (0.25 minimum; negative is a usage error).
         #[arg(long, default_value_t = 2.0)]
         interval: f64,
         /// Also emit the sessions that already exist at startup (default: only new activity).
@@ -925,9 +925,9 @@ enum Cmd {
     /// Follow live activity and archive every session as it changes, forever (archives what
     /// already exists on the first poll). `cv scry` is the same feed without the archive.
     Watch {
-        /// Poll interval in seconds.
-        #[arg(long, default_value_t = 3)]
-        interval: u64,
+        /// Poll interval in seconds (0.25 minimum; negative is a usage error).
+        #[arg(long, default_value_t = 3.0)]
+        interval: f64,
         /// Only this harness (e.g. claude, codex, gemini).
         #[arg(long)]
         harness: Option<String>,

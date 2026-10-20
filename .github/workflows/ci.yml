@@ -82,7 +82,8 @@ jobs:
             --accept commands.deferrals.args.since \
             --accept tools.deferrals.inputSchema.properties.since \
             --accept commands.dataset.args.out \
-            --accept tools.dataset.inputSchema.properties.out
+            --accept tools.dataset.inputSchema.properties.out \
+            --accept commands.watch.args.interval.value_type
 
       - name: Upgrade from the released 0.16.1 binary
         shell: bash

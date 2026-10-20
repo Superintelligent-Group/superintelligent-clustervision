@@ -3,7 +3,8 @@
 
 Additions are compatible; a removed or changed existing shape, default or route is not. A
 reviewed removal is named with --accept (its contract path, e.g.
-tools.workflow.inputSchema.properties.follow) beside the pinned baseline that still has it.
+tools.workflow.inputSchema.properties.follow, or commands.watch.args.interval.value_type for a
+reviewed change of one value) beside the pinned baseline that still has it.
 """
 import argparse
 import http.client
@@ -50,7 +51,8 @@ def subset(old, new, path="contract", accepted=frozenset()):
                     return False
             require(any(matches(candidate) for candidate in new), f"{path}: removed/changed {value!r}")
     else:
-        require(old == new, f"{path}: {old!r} -> {new!r}")
+        # An accepted path also covers a reviewed change of the value itself (a widened type).
+        require(old == new or path in accepted, f"{path}: {old!r} -> {new!r}")
 
 
 def named(rows):

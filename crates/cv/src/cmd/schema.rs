@@ -419,6 +419,17 @@ mod tests {
         }
     }
 
+    /// Per long flag name: each use as (command path, value type, vocabulary, units).
+    type FlagUses = std::collections::BTreeMap<
+        String,
+        Vec<(
+            String,
+            &'static str,
+            Vec<String>,
+            std::collections::BTreeSet<&'static str>,
+        )>,
+    >;
+
     /// The unit words a flag's value and help speak in; two commands that give one flag name
     /// disjoint units mean two things by it (`--since` a duration here, a message index there).
     fn flag_units(a: &clap::Arg) -> std::collections::BTreeSet<&'static str> {
@@ -466,29 +477,8 @@ mod tests {
             .spawn(|| {
                 let mut tree = crate::build_cli();
                 tree.build();
-                #[allow(clippy::type_complexity)]
-                let mut by_flag: std::collections::BTreeMap<
-                    String,
-                    Vec<(
-                        String,
-                        &'static str,
-                        Vec<String>,
-                        std::collections::BTreeSet<&'static str>,
-                    )>,
-                > = Default::default();
-                fn walk(
-                    cmd: &clap::Command,
-                    path: &str,
-                    by_flag: &mut std::collections::BTreeMap<
-                        String,
-                        Vec<(
-                            String,
-                            &'static str,
-                            Vec<String>,
-                            std::collections::BTreeSet<&'static str>,
-                        )>,
-                    >,
-                ) {
+                let mut by_flag = FlagUses::default();
+                fn walk(cmd: &clap::Command, path: &str, by_flag: &mut FlagUses) {
                     for a in cmd.get_arguments() {
                         let Some(long) = a.get_long() else { continue };
                         if a.is_hide_set() || !a.get_action().takes_values() || matches!(long, "help" | "version") {
@@ -507,7 +497,7 @@ mod tests {
                         ));
                     }
                     for sub in cmd.get_subcommands().filter(|s| visible(s)) {
-                        walk(sub, &format!("{path} {}", sub.get_name()).trim().to_string(), by_flag);
+                        walk(sub, format!("{path} {}", sub.get_name()).trim(), by_flag);
                     }
                 }
                 walk(&tree, "", &mut by_flag);

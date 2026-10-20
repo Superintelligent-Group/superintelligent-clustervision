@@ -62,5 +62,13 @@ class Compatibility(unittest.TestCase):
         with self.assertRaises(compat.Incompatible):
             compat.compare(self.old, new, {"tools.show.inputSchema.properties.follow"})
 
+    def test_an_accepted_value_change_is_exact(self):
+        new = copy.deepcopy(self.old)
+        new["tools"][0]["inputSchema"]["properties"]["id"]["type"] = "integer"
+        path = "tools.show.inputSchema.properties.id.type"
+        compat.compare(self.old, new, {path})
+        with self.assertRaises(compat.Incompatible):
+            compat.compare(self.old, new, {"tools.show.inputSchema.properties.follow.type"})
+
 
 if __name__ == "__main__": unittest.main()

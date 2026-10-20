@@ -95,6 +95,7 @@
 - **Breaking:** `cv rewind --from-compaction` (the default start, never a switch) exits 2 with a pointer to `--full`.
 - **Breaking:** `cv deferrals --since <msg>` is `--at <msg>` (`--since` is a duration on `lanes`); the old spelling exits 2 with a pointer.
 - **Breaking:** `cv dataset --out <path>` is `--file <path>` (`--out` is a directory everywhere else); the old spelling exits 2 with a pointer.
+- `cv watch --interval` takes seconds as a number like `scry`; a negative `--interval` on either exits 2 instead of clamping.
 - `cv search` no longer mentions a leftover `index.sqlite`; the sqlite full-text index was retired long ago.
 
 **Tooling and CI.**

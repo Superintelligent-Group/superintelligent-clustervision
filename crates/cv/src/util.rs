@@ -441,6 +441,19 @@ pub(crate) fn dry_run_nulls(v: &mut serde_json::Value, pinned: bool, paths: &[&s
     .into();
 }
 
+/// `--interval <SECONDS>` on `scry` and `watch`: finite and not negative (a usage error, never a
+/// silent clamp); a positive value below the quarter-second floor polls at the floor.
+pub(crate) fn poll_interval(seconds: f64) -> Result<std::time::Duration> {
+    if !seconds.is_finite() {
+        return usage("--interval must be finite");
+    }
+    if seconds < 0.0 {
+        return usage(format!("--interval must not be negative (got {seconds})"));
+    }
+    std::time::Duration::try_from_secs_f64(seconds.max(0.25))
+        .map_err(|_| UsageError("--interval exceeds the supported duration".into()).into())
+}
+
 /// `--thinking <native|text|drop>`: what an emit does with the model's reasoning on the way out.
 /// Shared by every command that writes a session into a harness (`port`, `splice`,
 /// `pack --format session`), because a flag means the same thing everywhere it appears.
@@ -632,5 +645,26 @@ mod tests {
         );
         assert!(v["title"].is_null(), "missing title is an explicit null");
         assert_eq!(v["size_bytes"], 10);
+    }
+}
+
+#[cfg(test)]
+mod interval_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn interval_rejects_negative_nonfinite_and_overflow_without_panicking() {
+        for seconds in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, f64::MAX, -1.0, -0.001] {
+            assert!(
+                poll_interval(seconds)
+                    .unwrap_err()
+                    .downcast_ref::<UsageError>()
+                    .is_some(),
+                "{seconds}"
+            );
+        }
+        assert_eq!(poll_interval(0.0).unwrap(), Duration::from_millis(250));
+        assert_eq!(poll_interval(1.5).unwrap(), Duration::from_millis(1500));
     }
 }

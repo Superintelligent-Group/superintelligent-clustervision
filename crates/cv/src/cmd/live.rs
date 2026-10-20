@@ -1,10 +1,9 @@
 //! `cv scry` — live activity across harnesses (`tail -f` for sessions).
 
-use crate::util::{home_rel, parse_harness, short_id, Wait};
+use crate::util::{home_rel, parse_harness, poll_interval, short_id, Wait};
 use anyhow::Result;
 use cv_core::ir::{truncate, SessionRef};
 use cv_core::watch::{EventKind, Filter, SessionEvent, Watcher};
-use std::time::Duration;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn cmd_scry(
@@ -74,30 +73,5 @@ fn print_event(ev: &SessionEvent) {
         if let Some(t) = m.text() {
             println!("      {} {}", cv_core::render::role_label(m.role), truncate(&t, 100));
         }
-    }
-}
-
-fn poll_interval(seconds: f64) -> Result<Duration> {
-    if !seconds.is_finite() {
-        return crate::util::usage("--interval must be finite");
-    }
-    Duration::try_from_secs_f64(seconds.max(0.25))
-        .map_err(|_| crate::util::UsageError("--interval exceeds the supported duration".into()).into())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn scry_interval_rejects_nonfinite_and_overflow_without_panicking() {
-        for seconds in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, f64::MAX] {
-            assert!(poll_interval(seconds)
-                .unwrap_err()
-                .downcast_ref::<crate::util::UsageError>()
-                .is_some());
-        }
-        assert_eq!(poll_interval(0.0).unwrap(), Duration::from_millis(250));
-        assert_eq!(poll_interval(-1.0).unwrap(), Duration::from_millis(250));
-        assert_eq!(poll_interval(1.5).unwrap(), Duration::from_millis(1500));
     }
 }

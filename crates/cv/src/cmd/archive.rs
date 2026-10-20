@@ -16,7 +16,6 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use crate::util::{parse_harness, short_id};
 
@@ -313,7 +312,7 @@ pub(crate) fn cmd_sync(archive: &Archive) -> Result<()> {
 }
 
 /// `cv watch`: follow live activity and archive sessions as they change, forever.
-pub(crate) fn cmd_watch(archive: &Archive, interval: u64, harness: Option<String>, cwd: Option<String>) -> Result<()> {
+pub(crate) fn cmd_watch(archive: &Archive, interval: f64, harness: Option<String>, cwd: Option<String>) -> Result<()> {
     let filter = Filter {
         harness: parse_harness(&harness)?,
         cwd_contains: cwd,
@@ -321,11 +320,11 @@ pub(crate) fn cmd_watch(archive: &Archive, interval: u64, harness: Option<String
     // Emit existing sessions on the first poll so a fresh watcher archives what's already there
     // before following live activity (`sync` is the dedicated one-shot, but watch is self-sufficient).
     let mut watcher = Watcher::new(filter, true);
-    let interval = Duration::from_secs(interval.max(1));
+    let interval = crate::util::poll_interval(interval)?;
 
     eprintln!(
         "cv watch: watching (interval {}s) -> {}",
-        interval.as_secs(),
+        interval.as_secs_f64(),
         archive.home().display()
     );
 
