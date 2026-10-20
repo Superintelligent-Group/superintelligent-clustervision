@@ -169,12 +169,33 @@ impl Archive {
             .join(format!("{}.json", archive_stem(&r.id)))
     }
 
+    /// The resume state a previous archive pass left for `r`, when it still applies. A miss
+    /// re-reads the source: no state yet (`NotFound`), one over the cap, one another cv version
+    /// wrote (it does not decode, or names another version) or for another artifact. A state that
+    /// is there but cannot be read degrades once per process, like every accelerator.
     fn stored(&self, r: &SessionRef) -> Option<Stored> {
         let path = self.source_path(r);
-        if fs::metadata(&path).ok()?.len() > STATE_BYTES {
+        let file = match fs::File::open(&path).and_then(|file| Ok((file.metadata()?, file))) {
+            Ok(opened) => opened,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(error) => {
+                cv_core::env::warn_once("the archive's resume state", format!("{}: {error}", path.display()));
+                return None;
+            }
+        };
+        let (metadata, file) = file;
+        if metadata.len() > STATE_BYTES {
             return None;
         }
-        let record = cv_core::source::Record::<Stored<cv_core::watch::Held>>::decode(&fs::read(path).ok()?)?;
+        let mut bytes = Vec::new();
+        if let Err(error) = file.take(STATE_BYTES + 1).read_to_end(&mut bytes) {
+            cv_core::env::warn_once("the archive's resume state", format!("{}: {error}", path.display()));
+            return None;
+        }
+        if bytes.len() as u64 > STATE_BYTES {
+            return None;
+        }
+        let record = cv_core::source::Record::<Stored<cv_core::watch::Held>>::decode(&bytes)?;
         let baseline = record.baseline;
         let stored = record
             .payload
