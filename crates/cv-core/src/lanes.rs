@@ -276,18 +276,6 @@ pub struct LaneTask {
     pub last_ts: DateTime<Utc>,
 }
 
-/// The first `CV_ENDPOINT=<kind>:<name>` a shell command sets (`export CV_ENDPOINT=lane:x; …`,
-/// `CV_ENDPOINT="lane:x" cv task …`). `<name>` never starts with `/`, so a URL
-/// (`CV_ENDPOINT=https://…`) is not an endpoint.
-#[cfg(test)]
-pub fn endpoint_in(text: &str) -> Option<String> {
-    static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
-    let re = RE.get_or_init(|| {
-        Regex::new(r#"CV_ENDPOINT=["']?([A-Za-z0-9_.@-]+:[A-Za-z0-9_.@-][A-Za-z0-9_.@/:-]*)"#).expect("endpoint regex")
-    });
-    re.captures(text).map(|c| c[1].to_string())
-}
-
 /// The description's leading token as a lane slug: `FIX-KICK: a kick ends authority…` →
 /// `fix-kick`. `None` for a description with no plausible token.
 pub fn description_slug(description: &str) -> Option<String> {
@@ -852,8 +840,15 @@ mod tests {
         assert!(forest.iter().all(|s| s.session.harness == crate::Harness::Codex));
     }
 
+    /// The first `CV_ENDPOINT=<kind>:<name>` a shell command sets (`export CV_ENDPOINT=lane:x; …`,
+    /// `CV_ENDPOINT="lane:x" cv task …`). `<name>` never starts with `/`, so a URL
+    /// (`CV_ENDPOINT=https://…`) is not an endpoint.
+    fn endpoint_in(text: &str) -> Option<String> {
+        endpoint_from(crate::json::JsonView::from(&serde_json::json!(text))).unwrap()
+    }
+
     #[test]
-    fn streamed_endpoint_matches_existing_regex_across_decoded_chunks() {
+    fn streamed_endpoint_is_the_same_across_decoded_chunks_and_sources() {
         let dir = cv_testkit::temp_dir("streamed-lane-endpoint");
         let path = dir.join("command.json");
         let mut cases = vec![
@@ -876,15 +871,17 @@ mod tests {
             "CV_ENDPOINT={} CV_ENDPOINT=lane:after-invalid",
             "x".repeat(150_000)
         ));
-        for text in cases {
-            let expected = endpoint_in(&text);
+        let mut frozen = crate::emit::frozen::Frozen::new("lanes-endpoint");
+        for (n, text) in cases.into_iter().enumerate() {
             let value = serde_json::json!(text);
-            assert_eq!(endpoint_from(crate::json::JsonView::from(&value)).unwrap(), expected);
+            let expected = endpoint_from(crate::json::JsonView::from(&value)).unwrap();
             let encoded = serde_json::to_vec(&value).unwrap();
             std::fs::write(&path, &encoded).unwrap();
             let source = crate::json::Json::source(&path, 0, encoded.len() as u64).unwrap();
             assert_eq!(source.with_view(endpoint_from).unwrap(), expected);
+            frozen.insert(format!("{n:02}"), serde_json::json!(expected));
         }
+        frozen.check().unwrap();
         std::fs::remove_dir_all(dir).unwrap();
     }
 
