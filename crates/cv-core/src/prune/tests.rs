@@ -1404,41 +1404,8 @@ fn source_reroot_preserves_owned_stamp_order_including_duplicate_ids() {
     }
 }
 
-fn retrieve_legacy_oracle(path: &Path, id: &str) -> Result<Value> {
-    let raw = std::fs::read_to_string(path).with_context(|| format!("reading sidecar {}", path.display()))?;
-    let mut available = Vec::new();
-    let mut found = None;
-    let mut duplicates = 0;
-    for line in raw.lines().filter(|line| !line.trim().is_empty()) {
-        let Ok(entry) = serde_json::from_str::<SidecarEntry>(line) else {
-            continue;
-        };
-        available.push(entry.id.clone());
-        if entry.id == id {
-            if found.is_some() {
-                duplicates += 1;
-            } else {
-                found = Some(entry.content);
-            }
-        }
-    }
-    if duplicates > 0 {
-        anyhow::bail!(
-            "id {id:?} appears {} times in sidecar {} — ambiguous, refusing to guess which payload you meant",
-            duplicates + 1,
-            path.display()
-        );
-    }
-    found.ok_or_else(|| {
-        anyhow::anyhow!(
-            "id {id:?} not found in sidecar. available: {}",
-            available.iter().take(20).cloned().collect::<Vec<_>>().join(", ")
-        )
-    })
-}
-
 #[test]
-fn retrieve_projection_matches_typed_legacy_acceptance_and_error_semantics() {
+fn retrieve_projection_acceptance_and_error_semantics_are_the_recorded_ones() {
     let world = crate::test_world("retrieve-projection-oracle");
     let path = world.base.join("session.flat.jsonl");
     let row = |input: &str, content: &str, tail: &str| {
@@ -1494,25 +1461,23 @@ fn retrieve_projection_matches_typed_legacy_acceptance_and_error_semantics() {
         missing.as_object_mut().unwrap().remove(key);
         cases.push(missing.to_string());
     }
+    let shown = |result: &Result<Value>| match result {
+        Ok(value) => serde_json::json!({ "ok": value }),
+        Err(error) => serde_json::json!({ "err": format!("{error:#}").replace(path.to_str().unwrap(), "<path>") }),
+    };
+    let mut frozen = crate::emit::frozen::Frozen::new("prune-retrieve");
     for (i, case) in cases.into_iter().enumerate() {
         std::fs::write(&path, case).unwrap();
         for id in ["wanted", "absent"] {
-            let expected = retrieve_legacy_oracle(&path, id);
             let actual = retrieve(&path, id);
-            match (expected, actual) {
-                (Ok(expected), Ok(actual)) => assert_eq!(actual, expected, "case {i}"),
-                (Err(expected), Err(actual)) => assert_eq!(actual.to_string(), expected.to_string(), "case {i}"),
-                (expected, actual) => panic!("case {i}: expected {expected:?}, actual {actual:?}"),
-            }
+            frozen.insert(format!("{i:03} {id}"), shown(&actual));
         }
     }
     let mut bytes = valid.into_bytes();
     bytes.extend_from_slice(b"\nmalformed\xff");
     std::fs::write(&path, bytes).unwrap();
-    let expected = retrieve_legacy_oracle(&path, "wanted").unwrap_err();
-    let actual = retrieve(&path, "wanted").unwrap_err();
-    assert_eq!(actual.to_string(), expected.to_string());
-    assert_eq!(format!("{actual:#}"), format!("{expected:#}"));
+    frozen.insert("invalid-utf8-tail", shown(&retrieve(&path, "wanted")));
+    frozen.check().unwrap();
 }
 
 #[test]
@@ -1529,9 +1494,13 @@ fn retrieve_bounds_available_ids_and_rejects_captured_source_changes() {
         .unwrap();
     }
     drop(out);
+    // The message names the first twenty ids, no more.
     assert_eq!(
         retrieve(&path, "absent").unwrap_err().to_string(),
-        retrieve_legacy_oracle(&path, "absent").unwrap_err().to_string()
+        format!(
+            "id \"absent\" not found in sidecar. available: {}",
+            (0..20).map(|i| format!("id-{i}")).collect::<Vec<_>>().join(", ")
+        )
     );
     let captured = crate::json::JsonSource::capture(&path).unwrap();
     let file = std::fs::File::open(&path).unwrap();
@@ -1578,15 +1547,7 @@ fn retrieve_giant_unselected_fields_return_only_requested_content() {
     serde_json::to_writer(&mut out, &entry).unwrap();
     drop(out);
     assert_eq!(retrieve(&path, "wanted").unwrap(), chosen);
-    assert_eq!(
-        retrieve(&path, "wanted").unwrap(),
-        retrieve_legacy_oracle(&path, "wanted").unwrap()
-    );
-    assert!(retrieve(&path, "absent").unwrap_err().to_string().contains(", wanted"));
-    assert_eq!(
-        retrieve(&path, "absent").unwrap_err().to_string(),
-        retrieve_legacy_oracle(&path, "absent").unwrap_err().to_string()
-    );
+    assert!(retrieve(&path, "absent").unwrap_err().to_string().ends_with(", wanted"));
 }
 
 #[test]
