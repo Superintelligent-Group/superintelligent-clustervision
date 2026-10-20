@@ -80,7 +80,9 @@ jobs:
             --accept commands.rewind.args.from_compaction \
             --accept tools.rewind.inputSchema.properties.from_compaction \
             --accept commands.deferrals.args.since \
-            --accept tools.deferrals.inputSchema.properties.since
+            --accept tools.deferrals.inputSchema.properties.since \
+            --accept commands.dataset.args.out \
+            --accept tools.dataset.inputSchema.properties.out
 
       - name: Upgrade from the released 0.16.1 binary
         shell: bash

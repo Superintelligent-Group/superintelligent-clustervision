@@ -557,10 +557,11 @@ pub(crate) fn cmd_dataset(
     min_messages: usize,
     redact: bool,
     redact_only: Option<String>,
-    out: Option<PathBuf>,
+    file: Option<PathBuf>,
     force: bool,
 ) -> Result<()> {
     use std::io::Write;
+    let out = file;
     if !matches!(format, "chatml" | "sharegpt") {
         bail!("unknown format {format:?} (use chatml or sharegpt)");
     }
@@ -591,7 +592,7 @@ pub(crate) fn cmd_dataset(
         .transpose()?
         .unwrap_or_else(crate::cmd::query::TextSets::empty);
     // File exports stage the whole operation before opening the destination. In particular,
-    // --out must never truncate a transcript before discovery or source validation.
+    // --file must never truncate a transcript before discovery or source validation.
     let sources = cv_core::discover_all();
     let mut extra_sources = Vec::new();
     let mut stage = cv_core::bytes::ByteStage::new();
@@ -659,7 +660,7 @@ pub(crate) fn cmd_dataset(
     Ok(())
 }
 
-/// Publish the dataset whole at `--out` (refused if taken unless `--force`). Naming one of its
+/// Publish the dataset whole at `--file` (refused if taken unless `--force`). Naming one of its
 /// own source transcripts is refused even with `--force`: the rename would replace it.
 fn publish_dataset<'a>(
     stage: cv_core::bytes::ByteStage,

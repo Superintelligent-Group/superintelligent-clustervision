@@ -860,9 +860,9 @@ the thing to reach for before you paste a transcript into an issue. The five
 Export the corpus as a fine-tuning dataset — JSONL, one session per line. `chatml` (default) emits `{"messages":[…]}`; `sharegpt` emits `{"conversations":[…]}`. Both import directly into Unsloth Studio / TRL / HuggingFace `datasets` with no adapter. Streamed one session at a time, so memory stays flat over a multi-GB corpus.
 
 ```sh
-cv dataset --out corpus.jsonl                                # whole corpus, chatml
+cv dataset --file corpus.jsonl                              # whole corpus, chatml
 cv dataset --format sharegpt --harness claude                # one harness, ShareGPT shape
-cv dataset -q "model:fable" --subagents --out fable.jsonl    # a queried slice + its forest
+cv dataset -q "model:fable" --subagents --file fable.jsonl   # a queried slice + its forest
 cv dataset -q "harness:claude" --redact-only private_key     # strip PEM keys, keep the rest
 ```
 

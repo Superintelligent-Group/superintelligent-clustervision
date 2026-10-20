@@ -1358,18 +1358,22 @@ fn dataset_file_publication_matches_stdout_and_preserves_transcript_aliases() {
     let (expected, _) = w.cv_ok(&["dataset"]);
     let output = w.base.join("training.jsonl");
     fs::write(&output, b"previous artifact").unwrap();
-    let (_, code, _, error) = w.cv(&["dataset", "--out", output.to_str().unwrap()]);
+    let (_, code, _, error) = w.cv(&["dataset", "--file", output.to_str().unwrap()]);
     assert_eq!(code, 2, "{error}");
     assert!(error.contains("already exists"), "{error}");
     assert_eq!(fs::read(&output).unwrap(), b"previous artifact");
-    let (stdout, _) = w.cv_ok(&["dataset", "--out", output.to_str().unwrap(), "--force"]);
+    // `--out` is a directory everywhere else; the old spelling points at `--file`.
+    let (_, code, _, error) = w.cv(&["dataset", "--out", output.to_str().unwrap()]);
+    assert_eq!(code, 2, "{error}");
+    assert!(error.contains("--file"), "{error}");
+    let (stdout, _) = w.cv_ok(&["dataset", "--file", output.to_str().unwrap(), "--force"]);
     assert!(stdout.is_empty());
     assert_eq!(fs::read(&output).unwrap(), expected.as_bytes());
 
     // Even --force never replaces one of the dataset's own source transcripts.
     let source = w.transcript("alphasess");
     let original = fs::read(&source).unwrap();
-    let (_, error) = w.cv_fails(&["dataset", "--limit", "1", "--out", source.to_str().unwrap(), "--force"]);
+    let (_, error) = w.cv_fails(&["dataset", "--limit", "1", "--file", source.to_str().unwrap(), "--force"]);
     assert!(error.contains("aliases source transcript"), "{error}");
     assert_eq!(fs::read(&source).unwrap(), original);
     assert_eq!(w.cv_ok(&["dataset"]).0, expected);
@@ -1381,7 +1385,7 @@ fn dataset_file_publication_matches_stdout_and_preserves_transcript_aliases() {
         let symlink = w.base.join("source-symlink.jsonl");
         std::os::unix::fs::symlink(&source, &symlink).unwrap();
         for alias in [&hardlink, &symlink] {
-            let (_, error) = w.cv_fails(&["dataset", "--out", alias.to_str().unwrap(), "--force"]);
+            let (_, error) = w.cv_fails(&["dataset", "--file", alias.to_str().unwrap(), "--force"]);
             assert!(error.contains("aliases source transcript"), "{error}");
             assert_eq!(fs::read(alias).unwrap(), original);
         }
@@ -1405,12 +1409,12 @@ fn dataset_file_publication_replaces_the_name_not_the_linked_file() {
     fs::hard_link(&target, &hardlink).unwrap();
     let output = w.base.join("output-symlink.jsonl");
     symlink(&target, &output).unwrap();
-    w.cv_ok(&["dataset", "--out", output.to_str().unwrap(), "--force"]);
+    w.cv_ok(&["dataset", "--file", output.to_str().unwrap(), "--force"]);
     assert!(!output.is_symlink());
     assert_eq!(fs::read(&output).unwrap(), expected.as_bytes());
     assert_eq!(fs::metadata(&output).unwrap().permissions().mode() & 0o777, 0o600);
     assert_eq!(fs::read(&target).unwrap(), b"previous artifact");
-    w.cv_ok(&["dataset", "--out", target.to_str().unwrap(), "--force"]);
+    w.cv_ok(&["dataset", "--file", target.to_str().unwrap(), "--force"]);
     assert_eq!(fs::read(&target).unwrap(), expected.as_bytes());
     assert_eq!(fs::read(&hardlink).unwrap(), b"previous artifact");
 }

@@ -422,8 +422,15 @@ mod tests {
     /// The unit words a flag's value and help speak in; two commands that give one flag name
     /// disjoint units mean two things by it (`--since` a duration here, a message index there).
     fn flag_units(a: &clap::Arg) -> std::collections::BTreeSet<&'static str> {
-        let value_name = a.get_value_names().and_then(|v| v.first()).map(|n| n.as_str().to_lowercase());
-        let help = a.get_long_help().or(a.get_help()).map(|h| h.to_string().to_lowercase()).unwrap_or_default();
+        let value_name = a
+            .get_value_names()
+            .and_then(|v| v.first())
+            .map(|n| n.as_str().to_lowercase());
+        let help = a
+            .get_long_help()
+            .or(a.get_help())
+            .map(|h| h.to_string().to_lowercase())
+            .unwrap_or_default();
         let mut units = std::collections::BTreeSet::new();
         match value_name.as_deref() {
             Some("dur" | "duration") => {
@@ -436,7 +443,12 @@ mod tests {
         }
         // Whole words only: `file_edit` is an event kind, not a file.
         let words: Vec<&str> = help.split(|c: char| !(c.is_alphanumeric() || c == '_')).collect();
-        for (word, unit) in [("directory", "directory"), ("file", "file"), ("seconds", "seconds"), ("message", "message")] {
+        for (word, unit) in [
+            ("directory", "directory"),
+            ("file", "file"),
+            ("seconds", "seconds"),
+            ("message", "message"),
+        ] {
             if words.contains(&word) {
                 units.insert(unit);
             }
@@ -455,20 +467,44 @@ mod tests {
                 let mut tree = crate::build_cli();
                 tree.build();
                 #[allow(clippy::type_complexity)]
-                let mut by_flag: std::collections::BTreeMap<String, Vec<(String, &'static str, Vec<String>, std::collections::BTreeSet<&'static str>)>> =
-                    Default::default();
+                let mut by_flag: std::collections::BTreeMap<
+                    String,
+                    Vec<(
+                        String,
+                        &'static str,
+                        Vec<String>,
+                        std::collections::BTreeSet<&'static str>,
+                    )>,
+                > = Default::default();
                 fn walk(
                     cmd: &clap::Command,
                     path: &str,
-                    by_flag: &mut std::collections::BTreeMap<String, Vec<(String, &'static str, Vec<String>, std::collections::BTreeSet<&'static str>)>>,
+                    by_flag: &mut std::collections::BTreeMap<
+                        String,
+                        Vec<(
+                            String,
+                            &'static str,
+                            Vec<String>,
+                            std::collections::BTreeSet<&'static str>,
+                        )>,
+                    >,
                 ) {
                     for a in cmd.get_arguments() {
                         let Some(long) = a.get_long() else { continue };
                         if a.is_hide_set() || !a.get_action().takes_values() || matches!(long, "help" | "version") {
                             continue;
                         }
-                        let possible = a.get_possible_values().iter().map(|p| p.get_name().to_string()).collect();
-                        by_flag.entry(long.to_string()).or_default().push((path.to_string(), value_type(a), possible, flag_units(a)));
+                        let possible = a
+                            .get_possible_values()
+                            .iter()
+                            .map(|p| p.get_name().to_string())
+                            .collect();
+                        by_flag.entry(long.to_string()).or_default().push((
+                            path.to_string(),
+                            value_type(a),
+                            possible,
+                            flag_units(a),
+                        ));
                     }
                     for sub in cmd.get_subcommands().filter(|s| visible(s)) {
                         walk(sub, &format!("{path} {}", sub.get_name()).trim().to_string(), by_flag);
@@ -484,7 +520,13 @@ mod tests {
                     // in the units, not in the clap type.
                     // `--at` is a message index on `deferrals` and an index-or-commit-sha on `rewind`:
                     // the integer is a subset of the string's grammar, and both say "message".
-                    let kind = |t: &'static str| if t == "path" || (flag == "at" && t == "integer") { "string" } else { t };
+                    let kind = |t: &'static str| {
+                        if t == "path" || (flag == "at" && t == "integer") {
+                            "string"
+                        } else {
+                            t
+                        }
+                    };
                     let types: std::collections::BTreeSet<_> = uses.iter().map(|u| kind(u.1)).collect();
                     if types.len() > 1 {
                         let rows: Vec<_> = uses.iter().map(|u| format!("{} {}", u.0, u.1)).collect();
@@ -498,12 +540,19 @@ mod tests {
                     for (i, a) in uses.iter().enumerate() {
                         for b in &uses[i + 1..] {
                             if !a.3.is_empty() && !b.3.is_empty() && a.3.is_disjoint(&b.3) {
-                                drift.push(format!("--{flag}: `{}` speaks {:?}, `{}` speaks {:?}", a.0, a.3, b.0, b.3));
+                                drift.push(format!(
+                                    "--{flag}: `{}` speaks {:?}, `{}` speaks {:?}",
+                                    a.0, a.3, b.0, b.3
+                                ));
                             }
                         }
                     }
                 }
-                assert!(drift.is_empty(), "one flag word, one grammar (INTERFACE-V2 §2):\n{}", drift.join("\n"));
+                assert!(
+                    drift.is_empty(),
+                    "one flag word, one grammar (INTERFACE-V2 §2):\n{}",
+                    drift.join("\n")
+                );
             })
             .unwrap()
             .join()

@@ -859,7 +859,10 @@ enum Cmd {
         redact_only: Option<String>,
         /// Write to this file instead of stdout.
         #[arg(long)]
-        out: Option<PathBuf>,
+        file: Option<PathBuf>,
+        // Renamed to `--file` in 0.18.0 (`--out` is a directory everywhere else) — hidden so the old flag errors with a pointer.
+        #[arg(long = "out", hide = true)]
+        out_removed: Option<PathBuf>,
         /// Replace an existing output file by atomic rename (otherwise a taken name exits 2).
         #[arg(long)]
         force: bool,
@@ -1276,9 +1279,17 @@ fn run() -> Result<()> {
             min_messages,
             redact,
             redact_only,
-            out,
+            file,
+            out_removed,
             force,
-        } => compose::cmd_dataset(
+        } => {
+            if out_removed.is_some() {
+                return usage(
+                    "`cv dataset --out` was renamed to `--file <path>` in 0.18.0 (`--out` is a directory \
+                     everywhere else)",
+                );
+            }
+            compose::cmd_dataset(
             &format,
             harness,
             query,
@@ -1287,9 +1298,10 @@ fn run() -> Result<()> {
             min_messages,
             redact,
             redact_only,
-            out,
+            file,
             force,
-        ),
+            )
+        }
         Cmd::Port {
             id,
             harness,
