@@ -138,6 +138,7 @@
 - cv no longer mentions a leftover pre-0.9.12 `discover.json`; delete it by hand if one remains.
 - **Breaking:** a `-q` with `text:` and no full-text index exits 2 naming `cv index` (`/api/stats`: 503) instead of matching nothing.
 - `cv archive`'s resume state that exists but cannot be read is said once on stderr; the session is re-read.
+- `cv pack`'s opportunistic event ingest says once on stderr when it fails instead of dropping the error twice.
 - `cv formats census` reports each harness's first parse error (`first_error` in `--json`) beside the count.
 - **Breaking:** `cv events`, `cv touched`, `cv blame` and their HTTP routes fail on an event-catalog error instead of answering empty.
 - **Breaking (library):** `events::events_for`, `sessions_touching`, `sessions_editing` and `edits_touching_file` return `Result`.

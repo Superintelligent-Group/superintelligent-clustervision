@@ -463,9 +463,13 @@ fn best_window_and_ingest(
     let mut events = cv_core::events::SpoolingSink::new(r.cwd.clone());
     let result = best_window_observing(adapter, r, task, Some(&mut events))?;
     let source = source.with_reads(events.inner().dependencies());
+    // The ingest rides the read the pack needed anyway; failing it costs only a later re-ingest.
     if cv_core::source::unchanged(r, &source) {
-        if let Ok(spool) = events.into_spool() {
-            let _ = cv_core::events::record_spooled_with_source(r, 0, spool, &source, &Default::default());
+        let recorded = events
+            .into_spool()
+            .and_then(|spool| cv_core::events::record_spooled_with_source(r, 0, spool, &source, &Default::default()));
+        if let Err(error) = recorded {
+            cv_core::env::warn_once("the event catalog", format_args!("{error:#}"));
         }
     }
     Ok(result)
