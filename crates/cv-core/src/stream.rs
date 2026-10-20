@@ -19,6 +19,82 @@ use crate::ir::{Message, Session, SessionRef};
 use anyhow::Result;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
+/// How much of a session a read asks for. The tiers are ordered: each one is everything the one
+/// below it is plus more, so `tier >= Tier::Facts` reads "at least the reducer facts".
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Tier {
+    /// The listing facts discovery reads (id, cwd, title, timestamps, writer version); a codec
+    /// that has a discovery path builds no message bodies, others read as [`Tier::Lean`].
+    Discovery,
+    /// Faithful message text and first-class IR fields, no harness metadata. The default.
+    #[default]
+    Lean,
+    /// [`Tier::Lean`] plus the provider response identity usage deduplication needs (Claude's
+    /// `message.id`), without other metadata.
+    Usage,
+    /// [`Tier::Usage`] plus the shared reducer facts (doctor, compaction, affordances), selected
+    /// before unrelated large metadata is decoded. Each adapter's facts producer names them;
+    /// adapters without one return [`Tier::Rich`] metadata.
+    Facts,
+    /// Every harness-specific field and structured sidecar (`toolUseResult` and kin).
+    Rich,
+    /// Format-complete: [`Tier::Rich`] plus every record carried, meta records included, as
+    /// round-trippable carrier messages, so `parse → emit` loses nothing.
+    Complete,
+}
+
+/// A read's demand: the [`Tier`] of content it needs, and two orthogonal delivery choices.
+///
+/// Pick the smallest tier the consumer reads: re-emit or round-trip ⇒ [`Demand::COMPLETE`];
+/// `--json` and rich views ⇒ [`Demand::RICH`]; reducers ⇒ [`Demand::FACTS`]; usage totals ⇒
+/// [`Demand::USAGE`]; text ⇒ [`Demand::LEAN`]. Add [`with_spans`](Demand::with_spans) when the
+/// consumer skips, windows or chunks large fields (they arrive as checked source ranges;
+/// adapters without a span path hand inline content, so spans are never less correct).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct Demand {
+    pub tier: Tier,
+    /// Large content stays in the source as [`Span`](crate::lazy::Span)s / checked source
+    /// ranges instead of owned strings. Adapters without span support ignore it.
+    pub spans: bool,
+    /// Stamp each message's record byte offset into
+    /// `Message.extra[`[`offsets::OFFSET_KEY`](crate::offsets::OFFSET_KEY)`]` (`cv rewind`'s
+    /// message-to-byte pass). Only span-tracking JSONL paths (Claude, Codex) stamp.
+    pub offsets: bool,
+}
+
+impl Demand {
+    pub const DISCOVERY: Demand = Demand::of(Tier::Discovery);
+    pub const LEAN: Demand = Demand::of(Tier::Lean);
+    pub const USAGE: Demand = Demand::of(Tier::Usage);
+    pub const FACTS: Demand = Demand::of(Tier::Facts);
+    pub const RICH: Demand = Demand::of(Tier::Rich);
+    pub const COMPLETE: Demand = Demand::of(Tier::Complete);
+
+    /// The tier, inline, without offsets.
+    pub const fn of(tier: Tier) -> Self {
+        Demand {
+            tier,
+            spans: false,
+            offsets: false,
+        }
+    }
+
+    /// The same demand with large content left in the source.
+    pub const fn with_spans(self) -> Self {
+        Demand { spans: true, ..self }
+    }
+
+    /// The same demand, inline.
+    pub const fn inline(self) -> Self {
+        Demand { spans: false, ..self }
+    }
+
+    /// The same demand with record offsets stamped.
+    pub const fn with_offsets(self) -> Self {
+        Demand { offsets: true, ..self }
+    }
+}
+
 /// The metadata requested when [`ParseOptions::extra`] is enabled.
 ///
 /// Facts are a shared projection for read-only reducers, not a separate output schema. Adapters
@@ -117,63 +193,48 @@ pub struct ParseOptions {
     pub complete: bool,
 }
 
+impl From<Demand> for ParseOptions {
+    fn from(demand: Demand) -> Self {
+        let extra = demand.tier >= Tier::Facts;
+        ParseOptions {
+            extra,
+            extra_projection: if demand.tier == Tier::Facts {
+                ExtraProjection::Facts
+            } else {
+                ExtraProjection::Full
+            },
+            usage_identity: matches!(demand.tier, Tier::Usage | Tier::Facts),
+            spans: demand.spans,
+            offsets: demand.offsets,
+            complete: demand.tier == Tier::Complete,
+        }
+    }
+}
+
 impl ParseOptions {
-    /// Full fidelity: every harness-specific field materialized, inline content. Used by [`collect`]
-    /// / `parse` and by conversion/round-trip paths that must lose nothing.
     pub fn full() -> Self {
-        ParseOptions {
-            extra: true,
-            ..Default::default()
-        }
+        Demand::RICH.into()
     }
-
-    /// The lean bulk-text pass: faithful message text, no fat `extra` sidecars, inline content
-    /// (these consumers read everything, so spans wouldn't help). Used by index/search/dataset.
     pub fn bulk() -> Self {
-        ParseOptions::default()
+        Demand::LEAN.into()
     }
-
-    /// Format-complete, lossless: full `extra` **and** every record carried (incl. meta records the
-    /// other passes skip), inline content. For `parse → emit` round-trips that must reproduce the
-    /// source losslessly. The strongest fidelity setting.
     pub fn complete() -> Self {
-        ParseOptions {
-            extra: true,
-            complete: true,
-            ..Default::default()
-        }
+        Demand::COMPLETE.into()
     }
-
-    /// Partial-access pass: lazy content [`Span`](crate::lazy::Span)s so unread giant fields are
-    /// never materialized. For windowed reads / pagination (Phase 2).
     pub fn lazy() -> Self {
-        ParseOptions {
-            spans: true,
-            ..Default::default()
-        }
+        Demand::LEAN.with_spans().into()
     }
-
-    /// [`lazy()`](ParseOptions::lazy) **plus** the harness-specific `extra` sidecars and metadata
-    /// (`subtype`, `compactMetadata`, `isCompactSummary`, attribution, …).
-    /// Sidecars and other rich metadata can themselves be large: only supported content fields
-    /// become spans. For rich lazy output; bounded reducers should request [`facts()`](Self::facts).
     pub fn lazy_extra() -> Self {
-        ParseOptions {
-            spans: true,
-            extra: true,
-            ..Default::default()
-        }
+        Demand::RICH.with_spans().into()
     }
-
-    /// Internal reducer pass: lazy content and the shared metadata facts projection.
-    /// Adapters that do not implement projection keep their established full-extra behavior.
     pub fn facts() -> Self {
-        ParseOptions {
-            extra: true,
-            extra_projection: ExtraProjection::Facts,
-            usage_identity: true,
-            ..Self::lazy()
-        }
+        Demand::FACTS.with_spans().into()
+    }
+    pub fn usage() -> Self {
+        Demand::USAGE.with_spans().into()
+    }
+    pub fn lazy_offsets() -> Self {
+        Demand::LEAN.with_spans().with_offsets().into()
     }
 
     /// Whether an adapter should project the shared facts instead of full rich metadata.
@@ -186,25 +247,6 @@ impl ParseOptions {
     /// continue to honor `extra` and may return full metadata for Facts requests.
     pub fn wants_full_extra(&self) -> bool {
         self.complete || (self.extra && self.extra_projection == ExtraProjection::Full)
-    }
-
-    /// Usage aggregation: lazy content and response identity, without large rich sidecars.
-    pub fn usage() -> Self {
-        ParseOptions {
-            usage_identity: true,
-            ..Self::lazy()
-        }
-    }
-
-    /// [`lazy()`](ParseOptions::lazy) plus per-message byte-offset stamping — the pass `cv rewind`
-    /// makes to map a message to its record ([`offsets`](crate::offsets)). Everything else should
-    /// use plain `lazy()`.
-    pub fn lazy_offsets() -> Self {
-        ParseOptions {
-            spans: true,
-            offsets: true,
-            ..Default::default()
-        }
     }
 }
 

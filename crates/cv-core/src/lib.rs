@@ -71,7 +71,9 @@ pub use json::{Json, JsonRange, JsonView};
 pub use lazy::{Resolver, Span, Text, INLINE_MAX};
 pub use query::SessionQuery;
 pub use restamp::{restamp, restamp_line, Restamped};
-pub use stream::{collect, CollectSink, ExtraProjection, Flow, MessageSink, ParseOptions, TeeSink, TryFnSink};
+pub use stream::{
+    collect, CollectSink, Demand, ExtraProjection, Flow, MessageSink, ParseOptions, TeeSink, Tier, TryFnSink,
+};
 
 use anyhow::Result;
 
