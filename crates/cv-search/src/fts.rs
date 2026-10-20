@@ -4287,95 +4287,6 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
-    // Frozen pre-cache implementation: keeps the old segment-local lookup behavior as oracle.
-    fn legacy_ranked_search(
-        dir: &Path,
-        query: &str,
-        limit: usize,
-        filter: crate::SearchFilter<'_>,
-        queries: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    ) -> Result<Vec<Hit>> {
-        if !dir.join("meta.json").exists() {
-            anyhow::bail!("no full-text index at {} — run `index_all` first", dir.display());
-        }
-        // Read-only open: a transient failure here must surface as an error, never as a wiped index.
-        let (index, f) = open_existing(dir)?;
-        let reader = index.reader().context("opening index reader")?;
-        let searcher = reader.searcher();
-
-        let parsed = parse_text_query(&index, &f, query, crate::Scope::Exchange)?;
-
-        // Collect sessions rather than chunks. Each segment's top `limit` sessions contains every
-        // possible global winner, even when one session has arbitrarily many matching chunks.
-        let mut collector = crate::session_collector::TopSessions::new(f.id, limit);
-        if filter.harness.is_some() || filter.cwd.is_some() {
-            let harness = filter.harness.map(str::to_owned);
-            let cwd = filter.cwd.map(str::to_owned);
-            let fields = f.clone();
-            let reader = searcher.clone();
-            let queries = queries.clone();
-            collector.filter = Some(std::sync::Arc::new(move |id, store, doc_id| {
-                // Resumed chunks can retain older labels/cwd: filter the same current meta doc that
-                // describes the returned hit, falling back only for legacy body-only documents.
-                queries.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let meta = meta_doc(&reader, &fields, id);
-                let fallback;
-                let doc = if let Some(meta) = meta.as_ref() {
-                    meta
-                } else {
-                    fallback = store.get::<TantivyDocument>(doc_id)?;
-                    &fallback
-                };
-                Ok(crate::session_collector::FilterDecision::Session(
-                    harness.as_ref().is_none_or(|wanted| {
-                        doc.get_first(fields.harness).and_then(|v| v.as_str()) == Some(wanted.as_str())
-                    }) && cwd.as_ref().is_none_or(|needle| {
-                        doc.get_first(fields.cwd)
-                            .and_then(|v| v.as_str())
-                            .is_some_and(|value| value.contains(needle))
-                    }),
-                ))
-            }));
-        }
-        let ranked = searcher.search(&parsed, &collector).context("running search")?;
-
-        let mut hits = Vec::with_capacity(ranked.len());
-        for candidate in ranked {
-            let (score, id) = (candidate.score, candidate.id);
-            let hit_doc: TantivyDocument = searcher.doc(candidate.addr).context("loading stored doc")?;
-            // What describes the session — its current label, dates, preview — is on its meta doc; a
-            // body doc carries the label it was written under.
-            let is_meta = hit_doc.get_first(f.kind).and_then(|v| v.as_str()) == Some(KIND_META);
-            let doc = if is_meta {
-                hit_doc
-            } else {
-                queries.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                meta_doc(&searcher, &f, &id).unwrap_or(hit_doc)
-            };
-            let get_str = |field: Field| -> Option<String> {
-                doc.get_first(field).and_then(|v| v.as_str()).map(|s| s.to_string())
-            };
-            let harness = get_str(f.harness).unwrap_or_default();
-            let snippet = get_str(f.preview).unwrap_or_default();
-
-            hits.push(Hit {
-                id,
-                harness,
-                cwd: get_str(f.cwd),
-                title: get_str(f.title),
-                created_at: doc.get_first(f.created_at).and_then(|v| v.as_i64()),
-                updated_at: doc.get_first(f.updated_at).and_then(|v| v.as_i64()),
-                score,
-                snippet,
-                parent_id: get_str(f.parent_id),
-                agent_id: get_str(f.agent_id),
-                workflow: get_str(f.workflow),
-                session: None,
-            });
-        }
-        Ok(hits)
-    }
-
     #[test]
     fn invalid_query_errors_remain_distinct_from_missing_index_and_empty_results() {
         let _home = IsolatedHome::new();
@@ -4434,7 +4345,7 @@ mod tests {
 
     #[test]
     fn winner_header_projection_preserves_meta_and_legacy_fallback() {
-        use std::sync::{atomic::AtomicUsize, Arc};
+        use std::sync::Arc;
         let _home = IsolatedHome::new();
         let dir = tmpdir();
         let (index, f) = open_or_create(&dir).unwrap();
@@ -4455,12 +4366,18 @@ mod tests {
         drop(writer);
         let searcher = index.reader().unwrap().searcher();
         let filter = crate::SearchFilter::default();
-        let expected = legacy_ranked_search(&dir, "needle", 10, filter, Arc::new(AtomicUsize::new(0))).unwrap();
         let decisions = Arc::new(MetadataDecisions::new(&searcher, &f, filter));
         let actual = ranked_search(&index, &f, &searcher, "needle", 10, filter, decisions).unwrap();
+        // Recorded from the retired segment-local lookup, which this projection matched hit for hit.
+        let recorded = [
+            r#"{"id":"duplicate-meta","harness":"","cwd":null,"title":"needle","score":1.5404451,"snippet":"matching meta","created_at":null,"updated_at":null,"parent_id":null,"agent_id":null,"workflow":null}"#,
+            r#"{"id":"current","harness":"","cwd":null,"title":"current title","score":0.49191087,"snippet":"current preview","created_at":null,"updated_at":null,"parent_id":null,"agent_id":null,"workflow":null}"#,
+            r#"{"id":"legacy","harness":"","cwd":null,"title":"reordered","score":0.49191087,"snippet":"legacy preview","created_at":null,"updated_at":null,"parent_id":null,"agent_id":null,"workflow":null}"#,
+            r#"{"id":"missing-kind","harness":"","cwd":null,"title":"old","score":0.49191087,"snippet":"old preview","created_at":null,"updated_at":null,"parent_id":null,"agent_id":null,"workflow":null}"#,
+        ];
         assert_eq!(
-            serde_json::to_value(&actual).unwrap(),
-            serde_json::to_value(&expected).unwrap()
+            serde_json::to_string(&actual).unwrap(),
+            format!("[{}]", recorded.join(","))
         );
         assert_eq!(
             actual.iter().find(|hit| hit.id == "current").unwrap().snippet,
@@ -4475,10 +4392,7 @@ mod tests {
 
     #[test]
     fn ranked_metadata_work_is_shared_across_many_segments() {
-        use std::sync::{
-            atomic::{AtomicUsize, Ordering},
-            Arc,
-        };
+        use std::sync::{atomic::Ordering, Arc};
         let _home = IsolatedHome::new();
         let dir = tmpdir();
         let (index, f) = open_or_create(&dir).unwrap();
@@ -4517,13 +4431,20 @@ mod tests {
             cwd: Some("current/proj"),
             ..Default::default()
         };
-        let legacy_queries = Arc::new(AtomicUsize::new(0));
-        let expected = legacy_ranked_search(&dir, "needle", 10, filter, legacy_queries.clone()).unwrap();
         let decisions = Arc::new(MetadataDecisions::new(&searcher, &f, filter));
         let actual = ranked_search(&index, &f, &searcher, "needle", 10, filter, decisions.clone()).unwrap();
+        // Recorded from the retired segment-local lookup (16 * 129 + 5 metadata queries), which
+        // this shared lookup matched hit for hit.
+        let recorded = [
+            r#"{"id":"session-000","harness":"codex","cwd":"/current/project","title":"current title 0","score":0.05895274,"snippet":"current preview 0","created_at":11,"updated_at":22,"parent_id":null,"agent_id":null,"workflow":null}"#,
+            r#"{"id":"session-001","harness":"codex","cwd":"/current/project","title":"current title 1","score":0.05895274,"snippet":"current preview 1","created_at":11,"updated_at":22,"parent_id":null,"agent_id":null,"workflow":null}"#,
+            r#"{"id":"session-002","harness":"codex","cwd":"/current/project","title":"current title 2","score":0.05895274,"snippet":"current preview 2","created_at":11,"updated_at":22,"parent_id":null,"agent_id":null,"workflow":null}"#,
+            r#"{"id":"session-003","harness":"codex","cwd":"/current/project","title":"current title 3","score":0.05895274,"snippet":"current preview 3","created_at":11,"updated_at":22,"parent_id":null,"agent_id":null,"workflow":null}"#,
+            r#"{"id":"legacy","harness":"codex","cwd":"/current/project","title":null,"score":0.051666375,"snippet":"legacy preview","created_at":null,"updated_at":null,"parent_id":null,"agent_id":null,"workflow":null}"#,
+        ];
         assert_eq!(
-            serde_json::to_value(&actual).unwrap(),
-            serde_json::to_value(&expected).unwrap()
+            serde_json::to_string(&actual).unwrap(),
+            format!("[{}]", recorded.join(","))
         );
         assert_eq!(actual.len(), 5);
         assert!(actual.iter().any(|hit| hit.id == "legacy"));
@@ -4534,12 +4455,11 @@ mod tests {
         assert_eq!(decisions.winner_body_reads.load(Ordering::Relaxed), 1);
         assert_eq!(decisions.winner_metadata_reads.load(Ordering::Relaxed), 4);
         assert_eq!(decisions.cache.lock().unwrap().len(), 129);
-        assert_eq!(legacy_queries.load(Ordering::Relaxed), 16 * 129 + 5);
         // A top-three cutoff still compares exact scores/ties and current stored previews.
         let top = text_search_indexed_filtered(&dir, "needle", 3, filter).unwrap();
         assert_eq!(
-            serde_json::to_value(top).unwrap(),
-            serde_json::to_value(&expected[..3]).unwrap()
+            serde_json::to_string(&top).unwrap(),
+            format!("[{}]", recorded[..3].join(","))
         );
         assert!(text_search_indexed_filtered(
             &dir,
