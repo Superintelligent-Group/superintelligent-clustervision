@@ -1189,7 +1189,8 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
                 since: Since::parse(since.as_deref(), now)?,
                 kinds: kind
                     .as_deref()
-                    .map(|k| k.split(',').map(task_ops::kind_tag).collect())
+                    .map(task_ops::kind_tags)
+                    .transpose()?
                     .unwrap_or_default(),
                 by,
                 not_by,

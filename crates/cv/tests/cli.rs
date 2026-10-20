@@ -2653,6 +2653,10 @@ fn task_inbox_unread_and_events_since() {
     );
     let (out, _) = w.cv_ok(&["task", "events", "--task", &b]);
     assert_eq!(out.lines().count(), 2, "{out}");
+    // An unknown kind is a usage error naming the known tags, not an empty feed.
+    let (_, code, _, err) = w.cv(&["task", "events", "--kind", "note,bogus"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("bogus") && err.contains("status_set"), "{err}");
     let (_, err) = w.cv_fails(&["task", "events", "--since", "whenever"]);
     assert!(err.contains("cannot read"), "{err}");
 

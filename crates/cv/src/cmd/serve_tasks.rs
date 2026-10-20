@@ -166,7 +166,8 @@ fn api_events(q: &Query) -> Result<String> {
         since: Since::parse(q.get("since").as_deref(), now)?,
         kinds: q
             .get("kind")
-            .map(|k| k.split(',').map(task_ops::kind_tag).collect())
+            .map(|k| task_ops::kind_tags(&k))
+            .transpose()?
             .unwrap_or_default(),
         by: q.get("by"),
         not_by: q.get("not_by"),
