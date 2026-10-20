@@ -624,6 +624,7 @@ fn search(query: &str, searcher: &cv_search::Searcher) -> Reply {
         let s = match n {
             Note::Stale(s) => s.clone(),
             Note::SnippetsUnavailable(e) => format!("live snippets unavailable ({e}); showing indexed previews"),
+            Note::Unscanned(s) => s.clone(),
             Note::NoSubagents => "sub-agent transcripts aren't searched yet — rebuild with `cv index --subagents` to \
                                   include the Agent/Workflow lanes"
                 .to_string(),

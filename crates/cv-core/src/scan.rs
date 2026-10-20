@@ -120,11 +120,13 @@ pub struct LiveHit {
     pub snippet: String,
 }
 
-/// The result of a live scan: the hits in discovery order, and whether the scan stopped early
-/// because it filled `limit` (so a caller can say "there may be more").
+/// The result of a live scan: the hits in discovery order, whether the scan stopped early
+/// because it filled `limit` (so a caller can say "there may be more"), and the sources and
+/// sessions it could not read (so a caller can say what it did not search).
 pub struct LiveSearch {
     pub hits: Vec<LiveHit>,
     pub truncated: bool,
+    pub unreadable: Vec<crate::Skipped>,
 }
 
 /// Case-insensitive substring search across every session's capped head, stopping at `limit` hits.
@@ -144,6 +146,7 @@ pub fn live_search_filtered(
     let mut out = LiveSearch {
         hits: Vec::new(),
         truncated: false,
+        unreadable: Vec::new(),
     };
     if limit == 0 {
         return Ok(out);
@@ -152,14 +155,25 @@ pub fn live_search_filtered(
         if want.is_some_and(|h| adapter.harness() != h) || adapter.roots().is_empty() {
             continue;
         }
-        for r in adapter.discover()? {
+        let found = adapter.discover()?;
+        out.unreadable.extend(found.skipped);
+        for r in found.refs {
             if !select(&r) {
                 continue;
             }
+            // One session that cannot be read is skipped and named, never the end of the scan; one
+            // that vanished since discovery is simply gone.
             let mut sink = CapSink::new(&r.path);
-            let meta = adapter
+            let meta = match adapter
                 .try_stream(&r, &Demand::LEAN.with_spans(), &mut sink)
-                .with_context(|| format!("scanning {}:{}", r.harness, r.id))?;
+                .with_context(|| format!("scanning {}:{}", r.harness, r.id))
+            {
+                Ok(meta) => meta,
+                Err(error) => {
+                    out.unreadable.extend(crate::Skipped::of(&r.path, &error));
+                    continue;
+                }
+            };
             // Lowercase only the bounded head (the match check), windowing the snippet from the
             // original-case haystack.
             let low = sink.hay.as_str().to_lowercase();
@@ -243,6 +257,29 @@ pub fn ceil_char(s: &str, mut i: usize) -> usize {
 mod tests {
     use super::*;
     use crate::ir::Role;
+
+    /// A session the scan cannot read is skipped and named; the rest are still searched.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_session_is_named_not_the_end_of_the_scan() {
+        use std::os::unix::fs::PermissionsExt;
+        let world = crate::test_world("live-unreadable");
+        let line = |text: &str| serde_json::json!({"type":"user", "message":{"role":"user", "content":text}});
+        let locked = world.write_session("locked", &[line("match locked")]);
+        world.write_session("open", &[line("match open")]);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let results = live_search_filtered("match", Some(Harness::Claude), 10, |_| true);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let results = results.unwrap();
+        assert_eq!(
+            results.hits.iter().map(|h| h.session.id.as_str()).collect::<Vec<_>>(),
+            ["open"]
+        );
+        assert_eq!(
+            results.unreadable.iter().map(|s| &s.path).collect::<Vec<_>>(),
+            [&locked]
+        );
+    }
 
     #[test]
     fn empty_live_window_skips_sources_and_snippets_saturate_extreme_positions() {

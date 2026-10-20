@@ -141,6 +141,7 @@
 - `cv pack`'s opportunistic event ingest says once on stderr when it fails instead of dropping the error twice.
 - `cv workflow --revive` says when a lane's transcript read stopped early; `LaneWork` gains `unread`.
 - `cv ls --json --enrich`: a row whose transcript cannot be read carries `enrich_error` instead of looking unenriched.
+- `cv search --scan` skips a session it cannot read and names the unscanned sources in its note, instead of failing the whole scan.
 - `cv formats census` reports each harness's first parse error (`first_error` in `--json`) beside the count.
 - **Breaking:** `cv events`, `cv touched`, `cv blame` and their HTTP routes fail on an event-catalog error instead of answering empty.
 - **Breaking (library):** `events::events_for`, `sessions_touching`, `sessions_editing` and `edits_touching_file` return `Result`.

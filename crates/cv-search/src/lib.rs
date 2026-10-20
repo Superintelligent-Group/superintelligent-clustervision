@@ -136,6 +136,8 @@ pub enum Note {
     NoSubagents,
     /// Live snippets could not be generated for the shown hits; the indexed previews stand in.
     SnippetsUnavailable(String),
+    /// A live scan could not read some sources or sessions; they were not searched.
+    Unscanned(String),
 }
 
 /// What one search found: the hits in rank order (or discovery order, live), where they came
@@ -179,6 +181,14 @@ impl Searcher {
                 })?;
                 found.hits = live.hits.into_iter().map(Hit::from).collect();
                 found.truncated = live.truncated;
+                if let Some(first) = live.unreadable.first() {
+                    found.notes.push(Note::Unscanned(format!(
+                        "{} source(s) could not be read and were not scanned (first: {}: {})",
+                        live.unreadable.len(),
+                        first.path.display(),
+                        first.why
+                    )));
+                }
                 return Ok(found);
             }
             Source::Index => found.hits = fts::text_search_indexed_filtered(&dir, query, limit, filter)?,

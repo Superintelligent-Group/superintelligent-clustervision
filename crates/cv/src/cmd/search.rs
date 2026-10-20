@@ -65,6 +65,7 @@ fn note_line(note: &Note) -> Option<String> {
         Note::SnippetsUnavailable(e) => Some(format!(
             "(note: live snippets unavailable ({e}); showing indexed previews)"
         )),
+        Note::Unscanned(s) => Some(format!("(note: {s})")),
         Note::NoSubagents => None,
     }
 }
