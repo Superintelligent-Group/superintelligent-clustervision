@@ -122,22 +122,25 @@ const SYSTEM_EXTRA: &[&str] = &[
     "direction",
 ];
 
-pub(super) enum Demand {
+pub(crate) enum Demand {
     Message,
     Metadata,
+    /// The decision facts of [`Facts`].
+    Facts,
 }
 
 /// One shared selection/type parse for metadata and message demands. Fields are lazy views;
 /// discovery never constructs a message or resolves bodies, rich extras or tool arguments.
-pub(super) struct Head<'a> {
-    pub(super) top: Fields<'a>,
-    pub(super) ty: String,
+pub(crate) struct Head<'a> {
+    pub(crate) top: Fields<'a>,
+    pub(crate) ty: String,
 }
 
 impl<'a> Head<'a> {
-    pub(super) fn parse(view: JsonView<'a>, demand: Demand) -> Result<Option<Self>> {
+    pub(crate) fn parse(view: JsonView<'a>, demand: Demand) -> Result<Option<Self>> {
         let keys = match demand {
             Demand::Message => TOP,
+            Demand::Facts => FACT_KEYS,
             Demand::Metadata => &[
                 "type",
                 "version",
@@ -155,6 +158,254 @@ impl<'a> Head<'a> {
         let ty = top.string("type")?.unwrap_or_default();
         Ok(Some(Self { top, ty }))
     }
+}
+
+/// The keys [`Demand::Facts`] selects: what prune and rewind decide on, never a body.
+const FACT_KEYS: &[&str] = &[
+    "type",
+    "subtype",
+    "isSidechain",
+    "isApiErrorMessage",
+    "sessionId",
+    "cwd",
+    "uuid",
+    "parentUuid",
+    "logicalParentUuid",
+    "_cv_orig_ctx",
+    "message",
+    "compactMetadata",
+    "toolUseResult",
+    "rendered",
+];
+
+/// One content block's identity, at its position in `message.content` (a non-object element
+/// keeps its slot with every field `None`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct FactBlock {
+    pub ty: Option<String>,
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub tool_use_id: Option<String>,
+}
+
+/// A record's decision facts, typed: what `cv prune` and `cv rewind` select on. Strings are
+/// `Some` only when the record holds a string there; flags are `true` only for a JSON `true`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Facts {
+    /// `type`, or empty when absent or not a string.
+    pub ty: String,
+    pub subtype: Option<String>,
+    pub sidechain: bool,
+    pub api_error: bool,
+    pub session_id: Option<String>,
+    pub cwd: Option<String>,
+    pub uuid: Option<String>,
+    /// `parentUuid`: `None` when the key is absent, `Some(None)` when it is null or not a string.
+    pub parent: Option<Option<String>>,
+    pub logical_parent: Option<String>,
+    /// `message` is an object (a turn with a body).
+    pub message: bool,
+    pub model: Option<String>,
+    /// The context size `message.usage` records, read the way Claude Code reads it
+    /// ([`usage_context`]); `None` without a usage object.
+    pub usage_in: Option<u64>,
+    pub blocks: Vec<FactBlock>,
+    /// `compactMetadata.preservedSegment.headUuid`.
+    pub compact_head: Option<String>,
+    /// `_cv_orig_ctx`: the recorded context size a `cv prune --revive` replaced in `usage`.
+    pub orig_ctx: Option<u64>,
+    /// Byte spans of the `sessionId`/`session_id` strings a restamp rewrites.
+    pub ids: Vec<(u64, u64)>,
+}
+
+/// The body views a [`Facts`] read leaves in the source, for a consumer that prices them.
+#[derive(Default, Clone, Copy)]
+pub(crate) struct Body<'a> {
+    pub content: Option<JsonView<'a>>,
+}
+
+impl Facts {
+    /// A main-thread conversational turn: `Some(is_user)`, `None` for bookkeeping, sub-agent
+    /// lines and synthetic notices ([`is_turn`]).
+    pub(crate) fn turn_kind(&self) -> Option<bool> {
+        if self.sidechain || !is_turn(&self.ty, self.api_error, self.model.as_deref()) {
+            return None;
+        }
+        Some(self.ty == "user")
+    }
+
+    /// The record's place in the conversation tree: `None` when it records no `parentUuid`,
+    /// else the parent (`parentUuid`, or `logicalParentUuid` across a compaction) if it has one.
+    pub(crate) fn link(&self) -> Option<Option<&str>> {
+        let parent = self.parent.as_ref()?;
+        Some(parent.as_deref().or(self.logical_parent.as_deref()))
+    }
+
+    pub(crate) fn is_compact_boundary(&self) -> bool {
+        self.ty == "system" && self.subtype.as_deref() == Some("compact_boundary")
+    }
+
+    /// Facts and body views of one record. A record that is not an object has no facts.
+    pub(crate) fn parse(view: JsonView<'_>) -> Result<(Self, Body<'_>)> {
+        let Some(Head { top, ty }) = Head::parse(view, Demand::Facts)? else {
+            return Ok((Self::default(), Body::default()));
+        };
+        let flag =
+            |key: &str| -> Result<bool> { Ok(top.get(key).map(|v| v.as_bool()).transpose()?.flatten() == Some(true)) };
+        let number = |key: &str| -> Result<Option<u64>> {
+            Ok(top
+                .get(key)
+                .map(|v| v.as_number())
+                .transpose()?
+                .flatten()
+                .and_then(|n| n.as_u64()))
+        };
+        let mut facts = Self {
+            ty,
+            subtype: top.string("subtype")?,
+            sidechain: flag("isSidechain")?,
+            api_error: flag("isApiErrorMessage")?,
+            session_id: top.string("sessionId")?,
+            cwd: top.string("cwd")?,
+            uuid: top.string("uuid")?,
+            parent: match top.get("parentUuid") {
+                Some(_) => Some(top.string("parentUuid")?),
+                None => None,
+            },
+            logical_parent: top.string("logicalParentUuid")?,
+            orig_ctx: number("_cv_orig_ctx")?,
+            ids: crate::restamp::source_id_spans(view)?,
+            ..Self::default()
+        };
+        let mut body = Body { content: None };
+        if let Some(message) = top
+            .get("message")
+            .map(|m| Fields::parse(m, &["model", "usage", "content"]))
+            .transpose()?
+            .flatten()
+        {
+            facts.message = true;
+            facts.model = message.string("model")?;
+            facts.usage_in = message.get("usage").map(usage_context).transpose()?.flatten();
+            body.content = message.get("content");
+            if let Some(blocks) = body.content.map(|c| c.array()).transpose()?.flatten() {
+                for block in blocks {
+                    let block = Fields::parse(block?, &["type", "id", "name", "tool_use_id"])?;
+                    facts.blocks.push(match block {
+                        Some(b) => FactBlock {
+                            ty: b.string("type")?,
+                            id: b.string("id")?,
+                            name: b.string("name")?,
+                            tool_use_id: b.string("tool_use_id")?,
+                        },
+                        None => FactBlock::default(),
+                    });
+                }
+            }
+        }
+        if let Some(head) = top
+            .get("compactMetadata")
+            .map(|v| v.get("preservedSegment"))
+            .transpose()?
+            .flatten()
+            .map(|v| Fields::parse(v, &["headUuid"]))
+            .transpose()?
+            .flatten()
+        {
+            facts.compact_head = head.string("headUuid")?;
+        }
+        Ok((facts, body))
+    }
+}
+
+/// A conversational turn by type: a user record, or an assistant record that is not one of
+/// Claude Code's client-side notices (`isApiErrorMessage`, or the `<synthetic>` model).
+pub(crate) fn is_turn(ty: &str, api_error: bool, model: Option<&str>) -> bool {
+    match ty {
+        "user" => true,
+        "assistant" => !api_error && model != Some(SYNTHETIC_MODEL),
+        _ => false,
+    }
+}
+
+/// The three context-bearing counters of a `usage` object (input plus both cache buckets).
+pub(crate) const USAGE_CTX_KEYS: [&str; 3] = ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"];
+
+/// The context-token count of a `usage` object, read the way Claude Code reads it. Since 2.1.277
+/// Claude Code sizes the loaded context from `usage.iterations` when present: the LAST iteration
+/// that is not an auxiliary request (`advisor_message`/`compaction`), when it is a well-formed
+/// request iteration (`message`/`fallback_message`, all four counts present, non-zero context);
+/// the top-level counters otherwise, and zero when they are zero. `None` for a non-object.
+pub(crate) fn usage_context(usage: JsonView<'_>) -> Result<Option<u64>> {
+    const ITERATION: &[&str] = &[
+        "type",
+        "input_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+        "output_tokens",
+    ];
+    let Some(fields) = Fields::parse(
+        usage,
+        &[
+            "input_tokens",
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+            "iterations",
+        ],
+    )?
+    else {
+        return Ok(None);
+    };
+    let count = |fields: &Fields<'_>, key: &str| -> Result<Option<u64>> {
+        Ok(fields
+            .get(key)
+            .map(|v| v.as_number())
+            .transpose()?
+            .flatten()
+            .and_then(|n| n.as_u64()))
+    };
+    let context = |fields: &Fields<'_>| -> Result<u64> {
+        let mut sum = 0u64;
+        for key in USAGE_CTX_KEYS {
+            sum += count(fields, key)?.unwrap_or(0);
+        }
+        Ok(sum)
+    };
+    let top = context(&fields)?;
+    if top == 0 {
+        return Ok(Some(0));
+    }
+    // The last non-auxiliary iteration; a non-object one is last too, and never a request.
+    let mut last: Option<Option<Fields<'_>>> = None;
+    if let Some(iterations) = fields.get("iterations").map(|v| v.array()).transpose()?.flatten() {
+        for iteration in iterations {
+            let Some(it) = Fields::parse(iteration?, ITERATION)? else {
+                last = Some(None);
+                continue;
+            };
+            if matches!(it.string("type")?.as_deref(), Some("advisor_message" | "compaction")) {
+                continue;
+            }
+            last = Some(Some(it));
+        }
+    }
+    if let Some(Some(it)) = last {
+        let request = matches!(it.string("type")?.as_deref(), Some("message" | "fallback_message"));
+        let mut counted = true;
+        for key in [
+            "input_tokens",
+            "output_tokens",
+            "cache_creation_input_tokens",
+            "cache_read_input_tokens",
+        ] {
+            counted &= count(&it, key)?.is_some();
+        }
+        let sum = context(&it)?;
+        if request && counted && sum > 0 {
+            return Ok(Some(sum));
+        }
+    }
+    Ok(Some(top))
 }
 
 /// One record: update `session` and hand its message (if any) to `sink`. `at` is the record's

@@ -15,7 +15,7 @@ pub mod adopt;
 pub(crate) mod emit;
 mod fork;
 mod metadata;
-mod record;
+pub(crate) mod record;
 pub(crate) mod replay;
 /// The sidecar tree beside a transcript (`subagents/`, `workflows/`, `journal.jsonl`): every path
 /// spelled once, and the one journal parser.

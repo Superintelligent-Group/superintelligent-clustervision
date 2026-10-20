@@ -2578,3 +2578,146 @@ fn prune_refuses_a_malformed_line_inside_the_kept_window() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// The typed `record::Facts` read what prune's decision rosters (owned and source) and rewind's
+/// selection projection read, field by field through their consumers' own accessors, over every
+/// corpus Claude record plus edge shapes. The parity proof for retiring those projections.
+#[test]
+fn typed_facts_read_what_the_decision_and_selection_projections_read() {
+    use crate::harness::claude::record::Facts;
+    let edges = [
+        r#"[1,2]"#,
+        r#"{"type":7,"isSidechain":"yes","isApiErrorMessage":1,"sessionId":3,"uuid":null,"parentUuid":5,"logicalParentUuid":"lp"}"#,
+        r#"{"type":"assistant","parentUuid":null,"message":"text","uuid":"u"}"#,
+        r#"{"type":"assistant","isApiErrorMessage":true,"message":{"model":"m","content":"s"}}"#,
+        r#"{"type":"assistant","message":{"model":"<synthetic>","content":[1,{"type":"tool_use","id":"t","name":"N"},{"type":"tool_result","tool_use_id":"t"}]}}"#,
+        r#"{"type":"assistant","message":{"usage":{"input_tokens":10,"cache_read_input_tokens":5,"iterations":[{"type":"message","input_tokens":1,"output_tokens":2,"cache_read_input_tokens":3,"cache_creation_input_tokens":4},{"type":"compaction","input_tokens":99}]}}}"#,
+        r#"{"type":"assistant","message":{"usage":{"input_tokens":10,"iterations":[{"type":"message","input_tokens":1},7]}}}"#,
+        r#"{"type":"assistant","message":{"usage":{"input_tokens":0,"iterations":[{"type":"message","input_tokens":1,"output_tokens":2,"cache_read_input_tokens":3,"cache_creation_input_tokens":4}]}}}"#,
+        r#"{"type":"assistant","message":{"usage":{"input_tokens":-1,"cache_creation_input_tokens":2.5,"iterations":[]}}}"#,
+        r#"{"type":"assistant","message":{"usage":7}}"#,
+        r#"{"type":"system","subtype":"compact_boundary","compactMetadata":{"preservedSegment":{"headUuid":"h"}},"_cv_orig_ctx":12}"#,
+        r#"{"type":"system","subtype":"compact_boundary","compactMetadata":{"preservedSegment":{"headUuid":3}},"_cv_orig_ctx":-2}"#,
+        r#"{"type":"user","type":"assistant","sessionId":"a","sessionId":"b","cwd":"/c"}"#,
+    ];
+    let dir = tmpdir();
+    let edge_path = dir.join("edges.jsonl");
+    std::fs::write(&edge_path, edges.join("\n") + "\n").unwrap();
+    let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/claude");
+    let mut paths: Vec<PathBuf> = walkdir::WalkDir::new(corpus)
+        .into_iter()
+        .filter_map(Result::ok)
+        .map(|e| e.into_path())
+        .filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
+        .collect();
+    paths.push(edge_path);
+    let s = |v: Option<&Value>| v.and_then(Value::as_str).map(str::to_owned);
+    let mut records = 0usize;
+    for path in &paths {
+        let source = crate::json::JsonSource::capture(path).unwrap();
+        let file = std::fs::File::open(path).unwrap();
+        for row in ranges::records(
+            &file,
+            Range {
+                offset: 0,
+                len: source.len(),
+            },
+        )
+        .unwrap()
+        {
+            let (range, _) = row.unwrap();
+            let mut tools = HashMap::new();
+            let read = source.read_range_value(range.offset, range.len, |view| {
+                let (facts, _) = Facts::parse(view)?;
+                let decision = decision_facts_source(view, range, &PruneOptions::default(), &mut tools)?;
+                let selection = crate::rewind::selection_facts(view)?;
+                Ok((facts, decision, selection, view.resolve()?.into_owned()))
+            });
+            let Ok((facts, decision, selection, owned)) = read else {
+                continue;
+            };
+            records += 1;
+            let at = format!("{}@{}", path.display(), range.offset);
+            // prune, source and owned rosters
+            for roster in [&decision, &decision_facts(&owned, false)] {
+                assert_eq!(
+                    facts.ty,
+                    roster.get("type").and_then(Value::as_str).unwrap_or(""),
+                    "{at}"
+                );
+                assert_eq!(facts.subtype, s(roster.get("subtype")), "{at}");
+                assert_eq!(facts.sidechain, is_sidechain(roster), "{at}");
+                assert_eq!(facts.turn_kind(), turn_kind(roster), "{at}");
+                assert_eq!(facts.session_id, s(roster.get("sessionId")), "{at}");
+                assert_eq!(
+                    facts.orig_ctx,
+                    roster.get("_cv_orig_ctx").and_then(Value::as_u64),
+                    "{at}"
+                );
+                assert_eq!(facts.uuid, s(roster.get("_uuid")), "{at}");
+                assert_eq!(
+                    facts.link().map(|p| p.map(str::to_owned)),
+                    roster.get("_parent").map(|p| s(Some(p))),
+                    "{at}"
+                );
+                assert_eq!(facts.model, s(roster.pointer("/message/model")), "{at}");
+                assert_eq!(
+                    facts.usage_in,
+                    roster
+                        .pointer("/message/usage")
+                        .and_then(Value::as_object)
+                        .map(usage_total),
+                    "{at}"
+                );
+                assert_eq!(
+                    facts.is_compact_boundary(),
+                    roster.get("type").and_then(Value::as_str) == Some("system")
+                        && roster.get("subtype").and_then(Value::as_str) == Some("compact_boundary"),
+                    "{at}"
+                );
+            }
+            let named: HashMap<String, (String, usize)> =
+                tools.into_iter().map(|(id, (n, _, i))| (id, (n, i))).collect();
+            let mut typed = HashMap::new();
+            if facts.ty == "assistant" {
+                for (i, b) in facts.blocks.iter().enumerate() {
+                    if let (Some("tool_use"), Some(id)) = (b.ty.as_deref(), &b.id) {
+                        typed.insert(id.clone(), (b.name.clone().unwrap_or_default(), i));
+                    }
+                }
+            }
+            assert_eq!(typed, named, "{at}");
+            // rewind's selection
+            let sel = &selection;
+            assert_eq!(facts.ty, sel.get("type").and_then(Value::as_str).unwrap_or(""), "{at}");
+            assert_eq!(facts.turn_kind(), turn_kind(sel), "{at}");
+            assert_eq!(facts.session_id, s(sel.get("sessionId")), "{at}");
+            assert_eq!(facts.cwd, s(sel.get("cwd")), "{at}");
+            assert_eq!(facts.uuid, s(sel.get("uuid")), "{at}");
+            assert_eq!(facts.message, sel.get("message").is_some(), "{at}");
+            assert_eq!(
+                facts.compact_head,
+                s(sel.pointer("/compactMetadata/preservedSegment/headUuid")),
+                "{at}"
+            );
+            let blocks: Vec<_> = sel
+                .pointer("/message/content")
+                .and_then(Value::as_array)
+                .map(|bs| {
+                    bs.iter()
+                        .map(|b| (s(b.get("type")), s(b.get("id")), s(b.get("tool_use_id"))))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let typed: Vec<_> = facts
+                .blocks
+                .iter()
+                .map(|b| (b.ty.clone(), b.id.clone(), b.tool_use_id.clone()))
+                .collect();
+            assert_eq!(typed, blocks, "{at}");
+        }
+    }
+    std::fs::remove_dir_all(dir).ok();
+    assert!(records > 1000, "the corpus is read: {records} records");
+    eprintln!("typed facts parity: {records} records in {} files", paths.len());
+}

@@ -1058,7 +1058,7 @@ fn first_cwd(path: &Path) -> Option<String> {
 }
 
 /// Project only selection facts, leaving every native payload in the checked source.
-fn selection_facts(view: crate::json::JsonView<'_>) -> Result<Value> {
+pub(crate) fn selection_facts(view: crate::json::JsonView<'_>) -> Result<Value> {
     use crate::harness::store::document::Fields;
     let keys = [
         "sessionId",
