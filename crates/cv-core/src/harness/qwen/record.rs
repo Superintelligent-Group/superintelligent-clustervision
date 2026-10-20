@@ -7,6 +7,7 @@ use crate::harness::store::document::{text_head, text_summary, Fields};
 use crate::harness::wire::genai::{self, Dialect, Part};
 use crate::json::{JsonSource, JsonView};
 use crate::lazy::{Resolver, Text};
+use crate::stream::Tier;
 
 /// How a record's bodies are resolved.
 #[derive(Clone, Copy)]
@@ -18,6 +19,20 @@ pub(super) enum Demand<'s> {
     /// Discovery: message presence, tool identities and the first prompt's title only. No
     /// argument tree, result body or system display body is decoded.
     Discovery,
+}
+
+impl<'s> Demand<'s> {
+    /// The read's demand over its captured `source`: [`Tier::Discovery`] reads only what the
+    /// listing needs, spans keep strings in the source, anything else is owned.
+    pub(super) fn of(demand: &stream::Demand, source: &'s JsonSource) -> Self {
+        if demand.tier == Tier::Discovery {
+            Demand::Discovery
+        } else if demand.spans {
+            Demand::Spans(source)
+        } else {
+            Demand::Owned
+        }
+    }
 }
 
 /// Every top-level key any record kind reads.

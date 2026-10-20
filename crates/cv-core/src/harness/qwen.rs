@@ -147,11 +147,7 @@ impl Adapter for Qwen {
         crate::stream::checked(sink, |sink| {
             if is_session_jsonl(&r.path) {
                 let source = crate::json::JsonSource::capture(&r.path)?;
-                let demand = if opts.spans {
-                    Demand::Spans(&source)
-                } else {
-                    Demand::Owned
-                };
+                let demand = Demand::of(opts, &source);
                 let s = session_shell(&r.path, sink);
                 return replay(
                     &r.path,
@@ -193,11 +189,7 @@ impl Adapter for Qwen {
                 return Ok(None);
             };
             let source = crate::json::JsonSource::capture(&r.path)?;
-            let demand = if opts.spans {
-                Demand::Spans(&source)
-            } else {
-                Demand::Owned
-            };
+            let demand = Demand::of(opts, &source);
             let (s, replay_state) = (state.session, state.replay);
             replay(
                 &r.path,
@@ -504,7 +496,7 @@ fn scan_session_jsonl(path: &Path) -> Option<SessionRef> {
         ReplayState::default(),
         0,
         None,
-        Demand::Discovery,
+        Demand::of(&stream::Demand::DISCOVERY, &source),
         &mut sink,
         &mut || Ok(()),
     )
