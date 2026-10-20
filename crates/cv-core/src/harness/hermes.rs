@@ -69,7 +69,7 @@ use super::wire::openai;
 use super::{ts_from_epoch, Adapter};
 use crate::ir::*;
 use crate::stream::{self, Flow, MessageSink, Tier};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use serde_json::Value;
@@ -248,20 +248,16 @@ impl Adapter for Hermes {
         // Iterate every DB (top-level + each profile), opening each read-only, and concatenate the
         // per-DB discovery. Each `SessionRef` carries its own `path`, so refs from different
         // profiles stay disambiguated even when their internal session ids collide. A single
-        // unreadable DB (e.g. permission-denied) is skipped rather than failing the whole scan.
-        let mut out = Vec::new();
+        // unreadable DB (permission-denied, locked, not a database) is skipped and reported rather
+        // than failing the whole scan.
+        let mut out = crate::Discovered::default();
         for db in &self.dbs {
-            let refs = super::store::sqlite::cached_discover(db, || {
-                let Ok(conn) = open_ro(db) else {
-                    return Ok(Default::default());
-                };
-                conn.read(|conn| discover_conn(conn, db))
-            });
-            if let Ok(refs) = refs {
-                out.extend(refs);
+            let refs = super::store::sqlite::cached_discover(db, || open_ro(db)?.read(|conn| discover_conn(conn, db)));
+            if let Some(refs) = out.keep(db, refs) {
+                out.refs.extend(refs);
             }
         }
-        Ok(out.into())
+        Ok(out)
     }
 
     /// Hermes routes lazily loaded tools through `tool_call{name, arguments}` and its reader
@@ -393,13 +389,12 @@ fn refs_conn(conn: &Connection, path: &Path, delegates_of: Option<&HashSet<Strin
     // Compression ancestors: parents (ended in compression) that some session continues from.
     let mut compression_parents: HashSet<String> = HashSet::new();
     if has_parent && scols.contains("end_reason") {
-        if let Ok(mut stmt) = conn.prepare(
+        let mut stmt = conn.prepare(
             "SELECT DISTINCT p.id FROM sessions p JOIN sessions c ON c.parent_session_id = p.id \
              WHERE p.end_reason IN ('compression', 'orphaned_compression')",
-        ) {
-            if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
-                compression_parents.extend(rows.flatten());
-            }
+        )?;
+        for row in stmt.query_map([], |row| row.get::<_, String>(0))? {
+            compression_parents.insert(row?);
         }
     }
     let mut stmt = conn.prepare(&sql)?;
@@ -414,7 +409,8 @@ fn refs_conn(conn: &Connection, path: &Path, delegates_of: Option<&HashSet<Strin
         Ok((id, title, started, ended, cwd, last, model_config))
     })?;
     let mut out = Vec::new();
-    for (id, title, started, ended, cwd, last, model_config) in rows.flatten() {
+    for row in rows {
+        let (id, title, started, ended, cwd, last, model_config) = row?;
         if compression_parents.contains(&id) {
             continue;
         }
@@ -711,7 +707,7 @@ fn stream_conn_with_reads(
                 row.get(10).ok().flatten(),
             ))
         })
-        .unwrap_or((None, None, None, r.title.clone(), None, None, None, None, None, None, None));
+        .with_context(|| format!("hermes session {:?}", r.id))?;
 
     // Format-complete: capture the session columns that have no first-class IR home, so emit can
     // write them back (small metadata only — text/aggregate counters, never message bodies). The tip
