@@ -104,7 +104,10 @@ pub struct FieldDef {
 
 /// The capability flags accepted by `has:` (and surfaced in the reference).
 pub const HAS_FLAGS: &[(&str, &str)] = &[
-    ("subagents", "spawned at least one sub-agent (Claude forests)"),
+    (
+        "subagents",
+        "spawned at least one sub-agent (its forest, as `agents` counts)",
+    ),
     ("errors", "has at least one error event"),
     ("tools", "used at least one tool"),
     ("images", "contains an image block"),

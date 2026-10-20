@@ -209,14 +209,14 @@ impl ExtFacts for SessionFacts<'_> {
                 },
                 |f| f.images,
             ),
-            "subagents" => {
-                self.session.harness == crate::ir::Harness::Claude
-                    && self
-                        .session
-                        .source_path
-                        .as_deref()
-                        .is_some_and(|p| !crate::harness::claude::subagent_refs(p).is_empty())
-            }
+            // The forest `agents` counts, asked for membership only unless already read.
+            "subagents" => self.tree.get().map_or_else(
+                || {
+                    !crate::subagent_tree_filtered_of(self.r, crate::SubagentDemand::Sessions, None, |_, _| true)
+                        .is_empty()
+                },
+                |tree| !tree.is_empty(),
+            ),
             "compacted" => self.compaction_count()? > 0,
             "workflows" => !self.workflows().is_empty(),
             other => match crate::affordance::Kind::parse(other) {

@@ -614,27 +614,6 @@ fn persisted_output(text: &str) -> Option<(String, Option<String>)> {
     Some((path.to_string(), size))
 }
 
-/// Sub-agent transcripts spawned by `parent_path`'s session (Claude Code's Task tool). They live at
-/// `<projects>/<encoded>/<sid>/subagents/<agent>.jsonl` — a sibling `subagents/` dir next to the
-/// parent's `<sid>.jsonl`. Returned as lightweight refs (newest first), scanned in parallel.
-pub fn subagent_refs(parent_path: &std::path::Path) -> Vec<SessionRef> {
-    let Some(dir) = sidecar::subagents_dir(parent_path) else {
-        return vec![];
-    };
-    let mut paths: Vec<PathBuf> = Vec::new();
-    if let Ok(rd) = fs::read_dir(&dir) {
-        for e in rd.flatten() {
-            let p = e.path();
-            if p.extension().and_then(|x| x.to_str()) == Some("jsonl") {
-                paths.push(p);
-            }
-        }
-    }
-    let mut refs = crate::par_filter_map(paths, |p| scan(&p).ok());
-    refs.sort_by_key(|r| std::cmp::Reverse(r.created_at));
-    refs
-}
-
 /// A sub-agent transcript enriched with the metadata Claude Code records *around* it: the
 /// `*.meta.json` sidecar (agent type / human description / the spawning tool_use id), the workflow
 /// it belongs to (when spawned by a `Workflow`), and — for workflow agents — the structured result
@@ -683,9 +662,8 @@ impl SubagentInfo {
 /// `subagents/workflows/<wf>/`), each enriched with its `*.meta.json` sidecar and — for workflow
 /// agents — the orchestrator's journaled result.
 ///
-/// Flat [`subagent_refs`] only sees the top-level `subagents/*.jsonl`, so it misses the entire
-/// workflow tier (which on a heavy session is the *majority* of the agents) and drops the
-/// meta/journal sidecars that carry each agent's purpose and outcome. Newest first.
+/// The workflow tier is, on a heavy session, the *majority* of the agents, and the meta/journal
+/// sidecars carry each agent's purpose and outcome. Newest first.
 pub fn subagent_tree(parent_path: &std::path::Path) -> Vec<SubagentInfo> {
     subagent_tree_inner(parent_path, crate::SubagentDemand::Rich, None, &|_, _| true)
 }

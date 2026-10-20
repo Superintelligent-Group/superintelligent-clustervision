@@ -64,6 +64,7 @@
 - A folded sub-agent's freshness stamp declares its parent's `tool-results` directory by identity, not entry by entry.
 
 **Titles and affordances.**
+- `has:subagents` matches the forest `agents` counts: Claude workflow agents and Codex and Devin forests too, not only Claude's top-level agents.
 - An emitted session's fallback title is its `cv ls` title (the meaningful prompt); Cursor CLI titles omit the leading `<timestamp>` metadata.
 - `has:skill` and `--kind affordances` count a Claude skill loaded by slash command (its "Base directory for this skill:" body), once per activation.
 - Kimi Code: the latest `TodoList` state is a `plan/state` row; legacy `Agent`/`AgentSwarm` calls are spawns and their completed or failed results returns.
