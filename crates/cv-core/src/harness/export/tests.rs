@@ -1,5 +1,5 @@
 use super::*;
-use crate::emit::grok_qwen_tests::Frozen;
+use crate::emit::frozen::Frozen;
 use crate::stream::{CollectSink, ParseOptions};
 use serde_json::{json, Value};
 

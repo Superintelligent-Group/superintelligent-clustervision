@@ -326,7 +326,7 @@ pub(super) fn emit(session: &Session, out_dir: &Path, opts: &crate::emit::EmitOp
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::emit::grok_qwen_tests::Frozen;
+    use crate::emit::frozen::Frozen;
 
     /// One emitted conversation, frozen: its length and SHA-256.
     fn digest(bytes: &[u8]) -> Value {

@@ -1610,7 +1610,7 @@ pub fn findings(session: &Session, opts: &DistillOptions) -> anyhow::Result<Stri
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::emit::grok_qwen_tests::Frozen;
+    use crate::emit::frozen::Frozen;
     use crate::ir::Harness;
     use serde_json::json;
 

@@ -819,7 +819,7 @@ fn file_mtime(path: &Path) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::emit::grok_qwen_tests::Frozen;
+    use crate::emit::frozen::Frozen;
     use crate::harness::Parse;
 
     /// The selected version of one `messages[]` turn, through the stream's codec.

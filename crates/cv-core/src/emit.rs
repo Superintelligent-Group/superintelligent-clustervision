@@ -560,6 +560,8 @@ pub fn parse_for_emit(
 }
 
 #[cfg(test)]
+pub(crate) mod frozen;
+#[cfg(test)]
 pub(crate) mod grok_qwen_tests;
 
 #[cfg(test)]

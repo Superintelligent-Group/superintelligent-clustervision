@@ -215,7 +215,7 @@ fn fixture(base: &Path) -> Result<Session> {
 fn checked_openclaw_matches_frozen_records_index_and_all_modes() -> Result<()> {
     let world = crate::test_world("openclaw-checked-wire");
     let session = fixture(&world.base)?;
-    let mut frozen = crate::emit::grok_qwen_tests::Frozen::new("openclaw-fixture");
+    let mut frozen = crate::emit::frozen::Frozen::new("openclaw-fixture");
     for mode in ThinkingMode::ALL {
         let options = EmitOptions {
             new_id: Some("fixed".into()),
@@ -261,7 +261,7 @@ fn checked_openclaw_borrowed_wrapper_matches_replay_definition_and_none() -> Res
 #[test]
 fn checked_openclaw_title_policy_matches_frozen_explicit_and_meaningful_prompt() -> Result<()> {
     let world = crate::test_world("openclaw-title-policy");
-    let mut frozen = crate::emit::grok_qwen_tests::Frozen::new("openclaw-title-policy");
+    let mut frozen = crate::emit::frozen::Frozen::new("openclaw-title-policy");
     for title in [None, Some(""), Some("   "), Some("explicit λ")] {
         for meaningful in [false, true] {
             let mut session = Session::new("source", Harness::Claude);

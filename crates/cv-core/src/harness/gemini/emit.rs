@@ -169,7 +169,7 @@ mod checked_tests {
     #[test]
     fn checked_gemini_matches_frozen_pretty_all_modes_and_fields() -> Result<()> {
         let world = crate::test_world("gemini-wire-oracle");
-        let mut frozen = crate::emit::grok_qwen_tests::Frozen::new("gemini-fixture");
+        let mut frozen = crate::emit::frozen::Frozen::new("gemini-fixture");
         let mut session = Session::new("source", Harness::Claude);
         let ts = "2026-10-12T12:00:00Z".parse()?;
         session.created_at = Some(ts);
