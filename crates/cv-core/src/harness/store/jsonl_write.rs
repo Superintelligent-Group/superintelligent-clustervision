@@ -44,6 +44,10 @@ impl JsonlStage {
     pub(crate) fn publish(self, path: &Path, claim: Claim) -> Result<()> {
         publish_stage(self.into_stage()?, path, claim)
     }
+    /// Stage the records for `path` as one member of `set`.
+    pub(crate) fn stage_into(self, set: &mut Set, path: &Path, claim: Claim) -> Result<()> {
+        stage_into(set, self.into_stage()?, path, claim)
+    }
     fn into_stage(self) -> Result<ByteStage> {
         anyhow::ensure!(!self.failed, "cannot publish a failed JSONL stage");
         Ok(self.output.into_inner().map_err(|e| e.into_error())?)

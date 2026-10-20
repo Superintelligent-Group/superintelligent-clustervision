@@ -203,14 +203,17 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
         }
     }
     // Checked source production completes before any destination file or directory is touched.
+    // The three files publish as one set, `summary.json` last: discovery finds a session by its
+    // summary, so a crash midway leaves nothing Grok or cv would list.
     fs::create_dir_all(&session_dir).with_context(|| format!("creating {}", session_dir.display()))?;
     let summary = serde_json::to_string_pretty(&summary)?;
-    crate::publish::publish_reader(&summary_path, "stage", summary.as_bytes(), opts.claim())?;
-    let chat_path = session_dir.join("chat_history.jsonl");
-    lines.publish(&chat_path, opts.claim())?;
+    let mut set = crate::publish::Set::new();
+    lines.stage_into(&mut set, &session_dir.join("chat_history.jsonl"), opts.claim())?;
     if !updates.is_empty() {
-        updates.publish(&session_dir.join("updates.jsonl"), opts.claim())?;
+        updates.stage_into(&mut set, &session_dir.join("updates.jsonl"), opts.claim())?;
     }
+    set.stage(&summary_path, "stage", summary.as_bytes(), opts.claim())?;
+    set.publish()?;
 
     Ok(EmitResult {
         path: session_dir,

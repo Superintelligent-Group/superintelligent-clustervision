@@ -530,3 +530,44 @@ fn checked_grok_qwen_complete_selected_producer_matches_owned() -> Result<()> {
     }
     frozen.check()
 }
+
+/// Grok's three files are one publication: a claim that fails after another has been made (a
+/// directory holds `updates.jsonl` under `--force`, `summary.json` without it) leaves every
+/// name as it was.
+#[test]
+fn grok_files_publish_together_or_not_at_all() -> Result<()> {
+    let world = crate::test_world("grok-emit-set");
+    let session = fixture(Harness::Claude);
+    for (force, blocked) in [(true, "updates.jsonl"), (false, "summary.json")] {
+        let out = world.base.join(format!("out-{force}"));
+        let opts = EmitOptions {
+            new_id: Some("fixed".into()),
+            force,
+            ..Default::default()
+        };
+        let dir = emit(&session, Harness::Grok, &out, &opts)?.path;
+        for name in ["summary.json", "chat_history.jsonl", "updates.jsonl"] {
+            fs::remove_file(dir.join(name))?;
+            if force {
+                fs::write(dir.join(name), "existing destination")?;
+            }
+        }
+        if force {
+            fs::remove_file(dir.join(blocked))?;
+        }
+        fs::create_dir(dir.join(blocked))?;
+        assert!(emit(&session, Harness::Grok, &out, &opts).is_err());
+        let mut left: Vec<_> = fs::read_dir(&dir)?
+            .map(|e| e.map(|e| e.file_name().to_string_lossy().into_owned()))
+            .collect::<std::io::Result<_>>()?;
+        left.sort();
+        if force {
+            assert_eq!(left, ["chat_history.jsonl", "summary.json", "updates.jsonl"]);
+            assert_eq!(fs::read(dir.join("chat_history.jsonl"))?, b"existing destination");
+            assert_eq!(fs::read(dir.join("summary.json"))?, b"existing destination");
+        } else {
+            assert_eq!(left, ["summary.json"], "only the blocking directory");
+        }
+    }
+    Ok(())
+}

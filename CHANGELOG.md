@@ -86,6 +86,7 @@
 - `cv port` to Continue refuses a tool turn with no tool result instead of writing an empty `toolCallId`.
 - `cv port` to Gemini derives message ids from the session id and turn index (UUID v5), so a re-emit writes the same ids.
 - Gemini emit publishes the transcript, its project marker and `projects.json` together or not at all; an unwritable registry now fails the emit.
+- Grok emit publishes `chat_history.jsonl`, `updates.jsonl` and `summary.json` together or not at all, the summary last.
 
 **Doctor and hooks.**
 - `cv doctor` adds a Writer versions row: the newest Claude/Codex version seen in the stores versus the newest the corpus verified, plus unknown sessions.
