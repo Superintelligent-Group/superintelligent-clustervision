@@ -4,7 +4,7 @@
 //! discovery when cold/stale); `cv ls --fresh` forces [`cv_core::discover_all`]'s full scan.
 
 use crate::util::{dim_cwd, parse_harness, session_row, short_id};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use cv_core::ir::{truncate, SessionRef};
 use cv_core::sanitize::sanitize_line;
 
@@ -154,7 +154,7 @@ impl cv_core::MessageSink for TitleUsers {
 }
 
 /// Read all metadata/counts through EOF, retaining only the title's deferred candidate suffix.
-fn enrich_head(adapter: &dyn cv_core::Adapter, r: &SessionRef) -> Option<(cv_core::Session, Option<String>)> {
+fn enrich_head(adapter: &dyn cv_core::Adapter, r: &SessionRef) -> Result<(cv_core::Session, Option<String>)> {
     let mut users = TitleUsers::new(r.harness);
     let session = cv_core::stream::stream_counted(
         adapter,
@@ -162,10 +162,9 @@ fn enrich_head(adapter: &dyn cv_core::Adapter, r: &SessionRef) -> Option<(cv_cor
         &cv_core::Demand::LEAN.with_spans(),
         &mut users,
         cv_core::stream::Pass::RECORD,
-    )
-    .ok()?
+    )?
     .session;
-    Some(users.finish(session, r.title.as_deref()))
+    Ok(users.finish(session, r.title.as_deref()))
 }
 
 /// Select the requested listing window. Text listings retain their exact-total contract;
@@ -276,21 +275,29 @@ pub(crate) fn cmd_ls(
                     // content on disk (memory-safe on the multi-MB "single-exchange giants" sesh
                     // warns about) while still carrying the session's git metadata and enough of the
                     // first user turn to synthesize a title.
-                    if let Some((session, display_title)) =
-                        cv_core::harness::for_harness(r.harness).and_then(|a| enrich_head(a.as_ref(), r))
-                    {
-                        let map = obj.as_object_mut().expect("json object");
-                        // `git`: the same object `cv show --json` emits (branch/commit/remote,
-                        // skip-none), omitted entirely when the transcript records no git context.
-                        if let Some(git) = &session.git {
-                            if let Ok(g) = serde_json::to_value(git) {
-                                map.insert("git".into(), g);
-                            }
+                    let enriched = cv_core::harness::for_harness(r.harness)
+                        .with_context(|| format!("no adapter for {}", r.harness))
+                        .and_then(|a| enrich_head(a.as_ref(), r));
+                    let map = obj.as_object_mut().expect("json object");
+                    match enriched {
+                        // A row whose transcript cannot be read says why, so a consumer can tell
+                        // it from "not enriched" (no key) and from "no title anywhere" (null).
+                        Err(error) => {
+                            map.insert("enrich_error".into(), serde_json::json!(format!("{error:#}")));
                         }
-                        // `display_title`: `title` with a first-real-user-text fallback. Explicit
-                        // null (not absent) when a session has neither, so consumers can tell "no
-                        // title anywhere" from "not enriched" (the key is absent without --enrich).
-                        map.insert("display_title".into(), serde_json::json!(display_title));
+                        Ok((session, display_title)) => {
+                            // `git`: the same object `cv show --json` emits (branch/commit/remote,
+                            // skip-none), omitted entirely when the transcript records no git context.
+                            if let Some(git) = &session.git {
+                                if let Ok(g) = serde_json::to_value(git) {
+                                    map.insert("git".into(), g);
+                                }
+                            }
+                            // `display_title`: `title` with a first-real-user-text fallback. Explicit
+                            // null (not absent) when a session has neither, so consumers can tell "no
+                            // title anywhere" from "not enriched" (the key is absent without --enrich).
+                            map.insert("display_title".into(), serde_json::json!(display_title));
+                        }
                     }
                 }
                 obj

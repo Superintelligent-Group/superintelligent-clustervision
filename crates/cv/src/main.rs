@@ -193,7 +193,8 @@ enum Cmd {
         /// (--json only) Enrich each row with transcript-derived `git` (branch/commit/remote, as
         /// `cv show --json` emits it) and `display_title` (the title with a first-real-user-text
         /// fallback). Costs one lazy transcript parse per emitted row — O(--limit), not the whole
-        /// fleet — so plain `ls --json` stays catalog-cheap; opt in when you need these fields.
+        /// fleet — so plain `ls --json` stays catalog-cheap; opt in when you need these fields. A
+        /// row whose transcript cannot be read carries `enrich_error` instead.
         #[arg(long)]
         enrich: bool,
     },
