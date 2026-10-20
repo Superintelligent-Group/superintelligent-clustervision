@@ -423,18 +423,29 @@ impl Disk {
             self.grow()?;
             bucket = self.find(text, hash)?.0;
         }
-        let offset = self.end.checked_add(1).context("spill offset overflow")?;
-        let end = self.end.checked_add(text.len() as u64).context("spill size overflow")?;
-        self.append(text)?;
-        self.end = end;
-        Slot {
+        let start = self.end;
+        let offset = start.checked_add(1).context("spill offset overflow")?;
+        let end = start.checked_add(text.len() as u64).context("spill size overflow")?;
+        let slot = Slot {
             hash,
             offset,
             len: text.len() as u64,
+        };
+        if let Err(error) = self.append(text).and_then(|()| slot.write(&mut self.index, bucket)) {
+            return Err(self.roll_back(start, error));
         }
-        .write(&mut self.index, bucket)?;
+        self.end = end;
         self.len += 1;
         Ok(true)
+    }
+
+    /// The one rule for a key that did not become a member: its bytes past `start` go, so the
+    /// next key is written where its slot will say it is. A rollback that fails stops reuse.
+    fn roll_back(&mut self, start: u64, error: anyhow::Error) -> anyhow::Error {
+        match self.discard_suffix(start) {
+            Ok(()) => error,
+            Err(cleanup) => error.context(format!("exact set rollback also failed: {cleanup}")),
+        }
     }
 
     #[cfg(any(feature = "sqlite", test))]
@@ -448,8 +459,13 @@ impl Disk {
         Ok(())
     }
 
-    #[cfg(any(feature = "sqlite", test))]
+    /// Forget every byte past `start`: still pending, truncate the window; already written,
+    /// truncate the file (every pending byte then lies past `start`).
     fn discard_suffix(&mut self, start: u64) -> Result<()> {
+        if let Some(kept) = start.checked_sub(self.flushed) {
+            self.pending.truncate(usize::try_from(kept).unwrap_or(usize::MAX));
+            return Ok(());
+        }
         let result = self.data.set_len(start).context("discarding unpublished exact set key");
         if result.is_err() {
             self.failed = true;
@@ -539,12 +555,7 @@ impl Disk {
                 self.discard_suffix(start)?;
                 Ok(false)
             }
-            Err(error) => {
-                if let Err(cleanup) = self.discard_suffix(start) {
-                    return Err(error.context(format!("exact set rollback also failed: {cleanup}")));
-                }
-                Err(error)
-            }
+            Err(error) => Err(self.roll_back(start, error)),
         }
     }
     fn grow(&mut self) -> Result<()> {
@@ -659,6 +670,34 @@ mod tests {
         assert!(stream(&mut disk, b"after failure", 3).unwrap());
         assert!(stream(&mut disk, b"", 1).unwrap());
         assert!(!stream(&mut disk, b"", 3).unwrap());
+    }
+
+    /// A key whose bytes fail to reach the append file is no member, and leaves no bytes behind
+    /// for the next key's offset to miss: `insert` rolls back as `insert_stream` does.
+    #[test]
+    fn a_failed_insert_leaves_no_orphan_bytes() {
+        let world = cv_testkit::World::new("exact-insert-rollback");
+        let mut disk = Disk::new(0).unwrap();
+        assert!(disk.insert(b"retained", 1).unwrap());
+        let read_only = world.base.join("read-only");
+        std::fs::write(&read_only, "").unwrap();
+        let writable = std::mem::replace(&mut disk.data, File::open(&read_only).unwrap());
+        let failed = vec![b'f'; APPEND_BYTES];
+        let error = disk.insert(&failed, 2).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("writing exact set key window"),
+            "{error:#}"
+        );
+        assert_eq!((disk.end, disk.flushed + disk.pending.len() as u64), (8, 8));
+        disk.data = writable;
+        let big = vec![b'b'; APPEND_BYTES * 2 + 3];
+        for (key, hash) in [(&b"after"[..], 3), (&big, 4)] {
+            assert!(disk.insert(key, hash).unwrap());
+        }
+        for (key, hash) in [(&b"retained"[..], 1), (&b"after"[..], 3), (&big, 4)] {
+            assert!(disk.find(key, hash).unwrap().1);
+        }
+        assert!(!disk.find(&failed, 2).unwrap().1);
     }
 
     #[cfg(feature = "sqlite")]
