@@ -265,9 +265,14 @@ impl Iterator for CachedRows {
         };
         self.failed = result.is_err();
         if self.failed {
-            if let Ok(conn) = self.eviction.lock() {
-                let _ = conn.execute_batch("ROLLBACK");
-                let _ = evict(&conn, self.reader.harness, &self.reader.id, &self.reader.path);
+            if let Ok(mut conn) = self.eviction.lock() {
+                // A publisher may own the surrounding transaction. Roll back only this
+                // reader's eviction if either deletion fails, never the pending publication.
+                if let Ok(savepoint) = conn.savepoint() {
+                    if evict(&savepoint, self.reader.harness, &self.reader.id, &self.reader.path).is_some() {
+                        let _ = savepoint.commit();
+                    }
+                }
             }
         } else {
             self.remaining -= 1;
@@ -582,6 +587,53 @@ mod tests {
         open().unwrap().execute("UPDATE usage_cache SET version=1", []).unwrap();
         std::fs::write(&r.path, "source changed").unwrap();
         assert!(load(&r, &crate::source::Probe::default().snapshot(&r)).is_none());
+    }
+    #[test]
+    fn corrupt_read_during_publication_preserves_the_writer_transaction() {
+        for fail_eviction in [false, true] {
+            let (world, r) = fixture("usage-cache-reader-transaction");
+            let cache = Cache::new().unwrap();
+            let mut writer = cache.publisher(r.clone(), source(&r, None), "old").unwrap();
+            writer.hit(&hit(0));
+            writer.finish();
+            cache.finish();
+            let conn = open().unwrap();
+            conn.execute("UPDATE usage_chunks SET digest=zeroblob(64)", []).unwrap();
+            if fail_eviction {
+                conn.execute_batch(
+                    "CREATE TRIGGER fail_eviction BEFORE DELETE ON source_dependencies
+                     BEGIN SELECT RAISE(ABORT, 'injected eviction failure'); END;",
+                )
+                .unwrap();
+            }
+            let path = world.base.join("other.jsonl");
+            std::fs::write(&path, "other source").unwrap();
+            let other = SessionRef::new("other", Harness::Claude, path);
+            let mut writer = cache.publisher(other.clone(), source(&other, None), "new").unwrap();
+            writer.hit(&hit(1));
+            writer.flush_chunk().unwrap();
+            let current = source(&r, None);
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| {
+                        let batch = cache.load(&r, &current).unwrap();
+                        let error = batch.hits.rows().unwrap().next().unwrap().err().unwrap();
+                        assert!(error.downcast_ref::<ReadError>().is_some());
+                    })
+                    .join()
+                    .unwrap();
+            });
+            assert!(!cache.writer.lock().unwrap().is_autocommit());
+            writer.finish();
+            cache.finish();
+            let batch = load(&other, &source(&other, None)).unwrap();
+            assert_eq!(batch.fallback_model, "new");
+            let mut rows = batch.hits.rows().unwrap();
+            assert_eq!(rows.next().unwrap().unwrap().key, hit(1).key);
+            assert!(rows.next().is_none());
+            // The two eviction deletes are atomic even inside the writer's transaction.
+            assert_eq!(load(&r, &current).is_some(), fail_eviction);
+        }
     }
     #[test]
     fn valid_looking_cost_corruption_is_rejected_and_evicted() {
