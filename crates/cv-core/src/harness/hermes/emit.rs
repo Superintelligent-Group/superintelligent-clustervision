@@ -18,7 +18,6 @@ use uuid::Uuid;
 /// the `\x00json:` sentinel prefix.
 #[cfg(feature = "sqlite")]
 pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<EmitResult> {
-    crate::harness::wire::write::check_source_fields(session)?;
     use rusqlite::Connection;
 
     let new_id = opts.new_id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
