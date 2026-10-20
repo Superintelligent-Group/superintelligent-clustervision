@@ -117,10 +117,6 @@ pub(super) struct Facts {
     plain: Trimmed,
     summary: Tag,
     reminder: Tag,
-    #[cfg(test)]
-    denied: Contains,
-    #[cfg(test)]
-    approval: Contains,
 }
 
 impl Default for Facts {
@@ -129,10 +125,6 @@ impl Default for Facts {
             plain: trimmed(),
             summary: Tag::new("<summary>", "</summary>"),
             reminder: Tag::new("<system-reminder>", "</system-reminder>"),
-            #[cfg(test)]
-            denied: Contains::new(" denied"),
-            #[cfg(test)]
-            approval: Contains::new("requires approval"),
         }
     }
 }
@@ -142,36 +134,6 @@ impl Facts {
         self.plain.push(chunk);
         self.summary.push(chunk);
         self.reminder.push(chunk);
-        #[cfg(test)]
-        {
-            self.denied.push(chunk);
-            self.approval.push(chunk);
-        }
-    }
-
-    #[cfg(test)]
-    fn starts_with(&self, prefix: &str) -> bool {
-        self.plain.as_str().starts_with(prefix)
-    }
-
-    #[cfg(test)]
-    fn requires_approval(&self) -> bool {
-        self.approval.found
-    }
-
-    #[cfg(test)]
-    fn denied(&self, harness: Harness) -> bool {
-        match harness {
-            Harness::Claude => {
-                (self.starts_with("Permission to use ") && self.denied.found)
-                    || self.starts_with("The user doesn't want to proceed with this tool use")
-            }
-            Harness::OpenCode => {
-                self.starts_with("The user has specified a rule which prevents you from using this specific tool call")
-                    || self.starts_with("The user rejected permission to use this specific tool call")
-            }
-            _ => false,
-        }
     }
 
     pub(super) fn summary(&self) -> String {
@@ -182,11 +144,6 @@ impl Facts {
         } else {
             self.plain.finish()
         }
-    }
-
-    #[cfg(test)]
-    fn plain_summary(&self) -> String {
-        self.plain.finish()
     }
 }
 
@@ -429,19 +386,20 @@ mod tests {
                     rest = &rest[end..];
                 }
                 assert_eq!(facts.summary(), original_summary(&text), "chunk={chunk}, text={text:?}");
-                assert_eq!(facts.plain_summary(), crate::ir::truncate(text.trim(), 120));
+                assert_eq!(facts.plain.finish(), crate::ir::truncate(text.trim(), 120));
+                let (whole, resolver) = (Text::Inline(text.clone()), Resolver::new(None));
                 assert_eq!(
-                    facts.requires_approval(),
+                    contains(&whole, &resolver, "requires approval").unwrap(),
                     text.trim_start().contains("requires approval")
                 );
                 let t = text.trim_start();
                 assert_eq!(
-                    facts.denied(Harness::Claude),
+                    denied(&whole, &resolver, Harness::Claude).unwrap(),
                     (t.starts_with("Permission to use ") && t.contains(" denied"))
                         || t.starts_with("The user doesn't want to proceed with this tool use")
                 );
                 assert_eq!(
-                    facts.denied(Harness::OpenCode),
+                    denied(&whole, &resolver, Harness::OpenCode).unwrap(),
                     t.starts_with(
                         "The user has specified a rule which prevents you from using this specific tool call"
                     ) || t.starts_with("The user rejected permission to use this specific tool call")
@@ -492,13 +450,19 @@ mod tests {
                 });
                 let reduced = facts(&span, &resolver).unwrap();
                 assert_eq!(reduced.summary(), original_summary(body));
-                assert_eq!(reduced.plain_summary(), crate::ir::truncate(body.trim(), 120));
-                assert_eq!(reduced.requires_approval(), body.contains("requires approval"));
-                let full = facts(&Text::Inline(body.clone()), &resolver).unwrap();
-                assert_eq!(reduced.denied(Harness::Claude), full.denied(Harness::Claude));
+                assert_eq!(reduced.plain.finish(), crate::ir::truncate(body.trim(), 120));
                 assert_eq!(
-                    reduced.starts_with("<task-notification>"),
-                    full.starts_with("<task-notification>")
+                    contains(&span, &resolver, "requires approval").unwrap(),
+                    body.contains("requires approval")
+                );
+                let full = Text::Inline(body.clone());
+                assert_eq!(
+                    denied(&span, &resolver, Harness::Claude).unwrap(),
+                    denied(&full, &resolver, Harness::Claude).unwrap()
+                );
+                assert_eq!(
+                    starts_with(&span, &resolver, "<task-notification>").unwrap(),
+                    body.trim_start().starts_with("<task-notification>")
                 );
             }
         }
