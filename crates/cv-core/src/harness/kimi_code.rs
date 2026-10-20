@@ -1678,14 +1678,18 @@ impl<'a> Ctx<'a> {
     }
 }
 
-/// Keep only candidate output-path lines while scanning decoded chunks. Last matching line wins,
-/// including an empty final path, exactly like output_path's reverse lines lookup.
-fn output_path_view(output: JsonView<'_>) -> Result<Option<String>> {
-    const PREFIX: &str = "output_path:";
-    let mut prefix = Some(0);
-    let mut candidate = None::<String>;
-    let mut last = None;
-    output.for_each_str_chunk(|chunk| {
+/// `output_path: <path>`: the line a truncated tool output ends with when the whole output was
+/// written to a sidecar file. Scans decoded chunks keeping only a candidate line; the last
+/// matching line wins (an empty one means none).
+#[derive(Default)]
+struct OutputPath {
+    prefix: Option<usize>,
+    candidate: Option<String>,
+    last: Option<String>,
+}
+impl OutputPath {
+    const PREFIX: &'static str = "output_path:";
+    fn push(&mut self, chunk: &str) {
         for segment in chunk.split_inclusive('\n') {
             let complete = segment.ends_with('\n');
             let mut text = if complete {
@@ -1693,34 +1697,56 @@ fn output_path_view(output: JsonView<'_>) -> Result<Option<String>> {
             } else {
                 segment
             };
-            if let Some(matched) = prefix {
-                let n = text.len().min(PREFIX.len() - matched);
-                if text.as_bytes()[..n] == PREFIX.as_bytes()[matched..matched + n] {
-                    prefix = Some(matched + n);
+            if let Some(matched) = self.prefix {
+                let n = text.len().min(Self::PREFIX.len() - matched);
+                if text.as_bytes()[..n] == Self::PREFIX.as_bytes()[matched..matched + n] {
+                    self.prefix = Some(matched + n);
                     text = &text[n..];
-                    if matched + n == PREFIX.len() {
-                        candidate.get_or_insert_with(String::new);
+                    if matched + n == Self::PREFIX.len() {
+                        self.candidate.get_or_insert_with(String::new);
                     }
                 } else {
-                    prefix = None;
+                    self.prefix = None;
                 }
             }
-            if let Some(line) = &mut candidate {
+            if let Some(line) = &mut self.candidate {
                 line.push_str(text);
             }
             if complete {
-                if let Some(line) = candidate.take() {
-                    last = Some(line);
+                if let Some(line) = self.candidate.take() {
+                    self.last = Some(line);
                 }
-                prefix = Some(0);
+                self.prefix = Some(0);
             }
         }
+    }
+    fn finish(mut self) -> Option<String> {
+        if let Some(line) = self.candidate.take() {
+            self.last = Some(line);
+        }
+        self.last
+            .map(|line| line.trim().to_owned())
+            .filter(|line| !line.is_empty())
+    }
+}
+fn output_path_view(output: JsonView<'_>) -> Result<Option<String>> {
+    let mut scan = OutputPath {
+        prefix: Some(0),
+        ..OutputPath::default()
+    };
+    output.for_each_str_chunk(|chunk| {
+        scan.push(chunk);
         Ok(())
     })?;
-    if let Some(line) = candidate {
-        last = Some(line);
-    }
-    Ok(last.map(|line| line.trim().to_owned()).filter(|line| !line.is_empty()))
+    Ok(scan.finish())
+}
+fn output_path(text: &str) -> Option<String> {
+    let mut scan = OutputPath {
+        prefix: Some(0),
+        ..OutputPath::default()
+    };
+    scan.push(text);
+    scan.finish()
 }
 
 /// A harness-side System turn of the given kind and origin, with the wire record type that
@@ -1732,17 +1758,6 @@ fn note(text: String, ts: Option<DateTime<Utc>>, kind: MessageKind, origin: Orig
     m.harness_extra_mut(Harness::KimiCode)
         .insert("event".into(), Value::String(event.to_string()));
     m
-}
-
-/// `output_path: <path>` — the line a truncated tool output ends with when the whole output was
-/// written to a sidecar file.
-fn output_path(text: &str) -> Option<String> {
-    text.lines()
-        .rev()
-        .find_map(|l| l.strip_prefix("output_path:"))
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .map(str::to_string)
 }
 
 fn usage_from(u: &Value) -> Usage {

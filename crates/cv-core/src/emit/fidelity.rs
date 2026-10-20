@@ -287,23 +287,6 @@ pub(super) fn block_survives(target: Harness, thinking: ThinkingMode, b: &Block)
     }
 }
 
-/// A turn with nothing left to write once the target has dropped the blocks it cannot hold: every
-/// block is unrepresentable there, so the emitted record is empty and the target’s own reader drops
-/// it. The real case is Claude’s **signature-only thinking** — bound reasoning with no plaintext
-/// and no portable blob (109 of 380 assistant turns in one 836-message session): ported to
-/// Codex/OpenCode it leaves an empty turn those stores never read back.
-///
-/// Such turns are excluded from BOTH sides of the diff and reported once, as an expected
-/// `unrepresentable_turns` delta — their disappearance is a consequence of a block-level loss the
-/// table already calls expected, and counting them as lost turns made `--strict` fail on every real
-/// Claude session (drowning the losses a target genuinely could have avoided).
-///
-/// [`ThinkingMode::Text`] is the answer to this: under it a signature-only block is written as a
-/// placeholder, so the turn is representable after all and nothing here fires.
-pub(crate) fn unrepresentable(target: Harness, thinking: ThinkingMode, m: &Message) -> bool {
-    !m.content.is_empty() && !m.content.iter().any(|b| block_survives(target, thinking, b))
-}
-
 #[cfg(test)]
 pub(super) fn features(target: Harness, thinking: ThinkingMode, session: &Session) -> Features {
     let mut f = Features::default();
@@ -343,7 +326,10 @@ impl Features {
         orphan_call: &impl Fn(&Block) -> bool,
     ) {
         let f = self;
-        if !is_carrier(m) && unrepresentable(target, thinking, m) {
+        // Notes are presence facts (inline markers, `accumulator::project`), never source text.
+        let unrepresentable = unrepresentable_checked(target, thinking, m, &crate::lazy::Resolver::new(None))
+            .expect("noted facts are inline");
+        if !is_carrier(m) && unrepresentable {
             f.dropped += 1;
         }
         // Two kinds of message are not *turns* for this comparison and are skipped whole — counting
@@ -351,12 +337,9 @@ impl Features {
         //
         //  * a format-complete **carrier** (empty-content System message holding a verbatim meta
         //    record) is bookkeeping the emitter replays byte-for-byte;
-        //  * a turn the target cannot represent AT ALL ([`unrepresentable`]), or one whose only
+        //  * a turn the target cannot represent AT ALL ([`unrepresentable_checked`]), or one whose only
         //    content is unanswered calls the Claude emitter drops.
-        if is_carrier(m)
-            || unrepresentable(target, thinking, m)
-            || (!m.content.is_empty() && m.content.iter().all(&orphan_call))
-        {
+        if is_carrier(m) || unrepresentable || (!m.content.is_empty() && m.content.iter().all(&orphan_call)) {
             return;
         }
         // A store whose own reader re-tags a turn on the way back in is not LOSING it, and the
@@ -903,6 +886,19 @@ fn reparse_options(target: Harness, opts: &ParseOptions) -> ParseOptions {
     }
 }
 
+/// A turn with nothing left to write once the target has dropped the blocks it cannot hold: every
+/// block is unrepresentable there, so the emitted record is empty and the target’s own reader drops
+/// it. The real case is Claude’s **signature-only thinking** — bound reasoning with no plaintext
+/// and no portable blob (109 of 380 assistant turns in one 836-message session): ported to
+/// Codex/OpenCode it leaves an empty turn those stores never read back.
+///
+/// Such turns are excluded from BOTH sides of the diff and reported once, as an expected
+/// `unrepresentable_turns` delta — their disappearance is a consequence of a block-level loss the
+/// table already calls expected, and counting them as lost turns made `--strict` fail on every real
+/// Claude session (drowning the losses a target genuinely could have avoided).
+///
+/// [`ThinkingMode::Text`] is the answer to this: under it a signature-only block is written as a
+/// placeholder, so the turn is representable after all and nothing here fires.
 pub(crate) fn unrepresentable_checked(
     target: Harness,
     thinking: ThinkingMode,

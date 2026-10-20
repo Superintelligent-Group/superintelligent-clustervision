@@ -215,8 +215,10 @@ fn is_document_file(p: &Path) -> bool {
     if !name.ends_with(".json") {
         return false;
     }
-    crate::lazy::read_head(p, SNIFF_BYTES)
-        .is_some_and(|head| head.contains(VERSION_KEY) || head.contains(VERSION_KEY_V02))
+    matches!(
+        crate::lazy::read_head_checked(p, SNIFF_BYTES),
+        Ok(crate::lazy::PersistedHead::Text(head)) if head.contains(VERSION_KEY) || head.contains(VERSION_KEY_V02)
+    )
 }
 
 /// A lightweight [`SessionRef`] for one document: metadata only, counting conversational turns

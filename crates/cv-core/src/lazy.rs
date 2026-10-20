@@ -25,17 +25,6 @@ use std::fmt;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
-/// Read at most `max_bytes` from the head of a sidecar text file (a persisted tool output, say) as
-/// lossy UTF-8. `None` if the file can't be opened. Indexers use this to make text the model never
-/// saw inline (only via a stub) searchable, without ever loading a whole multi-MB dump.
-pub fn read_head(path: &Path, max_bytes: usize) -> Option<String> {
-    use std::io::Read as _;
-    let mut f = std::fs::File::open(path).ok()?;
-    let mut buf = Vec::with_capacity(max_bytes.min(1 << 20));
-    f.by_ref().take(max_bytes as u64).read_to_end(&mut buf).ok()?;
-    Some(String::from_utf8_lossy(&buf).into_owned())
-}
-
 /// A persisted output's head as one demand found it.
 #[derive(Debug, PartialEq, Eq)]
 pub enum PersistedHead {
@@ -59,7 +48,9 @@ impl PersistedHead {
     }
 }
 
-/// Read an optional persisted output head. Absence and a file that cannot be opened are answers;
+/// Read at most `max_bytes` from the head of a sidecar text file (a persisted tool output, say) as
+/// lossy UTF-8, so indexers can search text the model saw only via a stub without loading a
+/// whole dump. Absence and a file that cannot be opened are answers;
 /// a change while it is read is an error. Identity is captured for this demand, without a
 /// historical source stamp.
 pub fn read_head_checked(path: &Path, max_bytes: usize) -> anyhow::Result<PersistedHead> {
@@ -1145,7 +1136,7 @@ mod tests {
         for cap in 0..5 {
             assert_eq!(
                 read_head_checked(&path, cap).unwrap(),
-                PersistedHead::Text(read_head(&path, cap).unwrap())
+                PersistedHead::Text(String::from_utf8_lossy(&b"a\xffb"[..cap.min(3)]).into_owned())
             );
         }
         #[cfg(unix)]
