@@ -117,27 +117,28 @@ fn discover_all_with_catalog(mut catalog: Option<catalog::Reader>) -> Vec<Sessio
         .collect();
     drop(known);
 
-    // Per-adapter outcome: refs on success, `None` on error (the catalog keeps that harness's
-    // previous rows rather than wiping them over a transient failure). Rootless adapters are a
-    // successful empty scan — their catalog rows (root deleted since last sync) must clear.
+    // Per-adapter outcome: what it found on success, `None` on error (the catalog keeps that
+    // harness's previous rows rather than wiping them over a transient failure). Rootless
+    // adapters are a successful empty scan — their catalog rows (root deleted since last sync)
+    // must clear.
     fn run(
         a: &dyn Adapter,
         known: Vec<SessionRef>,
     ) -> (
         Harness,
         Vec<std::path::PathBuf>,
-        Option<Vec<SessionRef>>,
+        Option<Discovered>,
         catalog::PrimaryReads,
     ) {
         let h = a.harness();
         let roots = a.roots();
         if roots.is_empty() {
-            return (h, roots, Some(Vec::new()), Default::default());
+            return (h, roots, Some(Discovered::default()), Default::default());
         }
         let before = catalog::capture_primary_reads_from(a, &known);
         drop(known); // Retain source guards, not a second fleet of metadata, during discovery.
         match a.discover() {
-            Ok(found) => (h, roots, Some(found.refs), before),
+            Ok(found) => (h, roots, Some(found), before),
             Err(e) => {
                 eprintln!("cv: discover failed for {h}: {e:#}");
                 (h, roots, None, before)
@@ -172,8 +173,8 @@ fn discover_all_with_catalog(mut catalog: Option<catalog::Reader>) -> Vec<Sessio
         catalog.refill_turns(
             results
                 .iter_mut()
-                .filter_map(|(_, _, refs, _)| refs.as_mut())
-                .flat_map(|refs| refs.iter_mut()),
+                .filter_map(|(_, _, found, _)| found.as_mut())
+                .flat_map(|found| found.refs.iter_mut()),
         );
         catalog.persist_discovery(true);
     } else {
@@ -184,20 +185,38 @@ fn discover_all_with_catalog(mut catalog: Option<catalog::Reader>) -> Vec<Sessio
     // unchanged rows can be retained only after comparing the complete ordered inventory.
     let publications: Vec<_> = results
         .iter()
-        .filter_map(|(h, roots, refs, before)| {
-            refs.as_ref()
+        .filter_map(|(h, roots, found, before)| {
+            found
+                .as_ref()
                 .zip(harness::rootless(*h))
-                .map(|(refs, a)| (*h, refs.as_slice(), catalog::watches_for(a, roots, refs), before))
+                .map(|(found, a)| (*h, found.refs.as_slice(), catalog::watches_for(a, roots, found), before))
         })
         .collect();
+    let skipped: Vec<_> = results
+        .iter()
+        .filter_map(|(h, _, found, _)| Some((*h, found.as_ref()?.skipped.as_slice())))
+        .collect();
+    note_skipped(&skipped);
     if let Some(catalog) = &mut catalog {
         catalog.publish_all(&publications);
+        catalog.record_skipped(&skipped);
     }
+    drop((publications, skipped));
     results
         .into_iter()
-        .filter_map(|(_, _, refs, _)| refs)
-        .flatten()
+        .filter_map(|(_, _, found, _)| found)
+        .flat_map(|found| found.refs)
         .collect()
+}
+
+/// The one stderr line a discovery that could not open some sources prints per process; the
+/// sources themselves are in the catalog, where `cv doctor` names them.
+fn note_skipped(skipped: &[(Harness, &[Skipped])]) {
+    static NOTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let n: usize = skipped.iter().map(|(_, s)| s.len()).sum();
+    if n > 0 && !NOTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        eprintln!("cv: {n} source(s) could not be read and are missing from the listing; `cv doctor` names them");
+    }
 }
 
 /// Every known session, served from the catalog when it's provably fresh — the **fast read path**
@@ -296,20 +315,22 @@ fn discover_harness(h: Harness, mut catalog: Option<&mut catalog::Reader>) -> Op
         .map(|reader| reader.capture_primary_reads(a.as_ref()))
         .unwrap_or_default();
     let roots = a.roots();
-    let mut refs = if roots.is_empty() {
-        Vec::new()
+    let Discovered { mut refs, skipped } = if roots.is_empty() {
+        Discovered::default()
     } else {
         match a.discover() {
-            Ok(found) => found.refs,
+            Ok(found) => found,
             Err(e) => {
                 eprintln!("cv: discover failed for {h}: {e:#}");
                 return None;
             }
         }
     };
+    note_skipped(&[(h, &skipped)]);
     if let Some(reader) = catalog.as_mut() {
         reader.refill_turns(refs.iter_mut());
         reader.replace_harness(h, &refs, &catalog::watches_for(a.as_ref(), &roots, &refs), &before);
+        reader.record_skipped(&[(h, &skipped)]);
     }
     Some(refs)
 }

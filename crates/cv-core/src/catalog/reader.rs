@@ -239,6 +239,17 @@ impl Reader {
         }
     }
 
+    /// Persist what each listed harness's discovery could not open (see
+    /// [`crate::harness::Discovered`]). A catalog that cannot take the write keeps its old rows.
+    pub(crate) fn record_skipped(&mut self, rows: &[(crate::Harness, &[crate::Skipped])]) {
+        #[cfg(feature = "sqlite")]
+        {
+            let _ = super::imp::record_skipped_in(&mut self.conn.lock().unwrap(), rows);
+        }
+        #[cfg(not(feature = "sqlite"))]
+        let _ = rows;
+    }
+
     pub(crate) fn publish_all(&mut self, rows: &[Publication<'_>]) {
         #[cfg(feature = "sqlite")]
         {

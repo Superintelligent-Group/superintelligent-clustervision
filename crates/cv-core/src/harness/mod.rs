@@ -178,6 +178,30 @@ impl Skipped {
             why: format!("{error:#}"),
         })
     }
+
+    /// One source's scan as an item a [`Discovered`] collects: its ref, nothing (the source holds
+    /// no session), or a skip (any error but `NotFound`).
+    pub fn listed(path: &std::path::Path, scanned: Result<Option<SessionRef>>) -> Option<Result<SessionRef, Skipped>> {
+        match scanned {
+            Ok(r) => r.map(Ok),
+            Err(e) => Skipped::of(path, &e).map(Err),
+        }
+    }
+
+    /// A directory walk's error as a skip: an unreadable directory hides every session under it.
+    /// `None` for a `NotFound` (an entry removed mid-walk).
+    pub fn walk(error: &walkdir::Error) -> Option<Skipped> {
+        if error
+            .io_error()
+            .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+        {
+            return None;
+        }
+        Some(Skipped {
+            path: error.path()?.to_path_buf(),
+            why: error.to_string(),
+        })
+    }
 }
 
 /// What [`Adapter::discover`] found: the sessions it could list and the sources it could not open.

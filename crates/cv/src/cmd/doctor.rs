@@ -38,9 +38,12 @@ pub(crate) fn cmd_doctor(id: Option<String>, harness: Option<String>, recent: us
         refs.sort_by_key(|r| std::cmp::Reverse(r.updated_at));
         refs.truncate(recent.max(1));
         if refs.is_empty() {
+            // An empty listing may be a store cv could not open: name it with the refusal.
+            let unreadable = skipped_lines(&cv_core::catalog::skipped_sources());
             anyhow::bail!(
-                "no sessions found for {} — pass an explicit <id>, or run from a project dir",
-                cwd.map(|c| c.display().to_string()).unwrap_or_default()
+                "no sessions found for {} — pass an explicit <id>, or run from a project dir{}",
+                cwd.map(|c| c.display().to_string()).unwrap_or_default(),
+                unreadable.iter().map(|l| format!("\n{l}")).collect::<String>()
             );
         }
         refs
@@ -70,6 +73,10 @@ pub(crate) fn cmd_doctor(id: Option<String>, harness: Option<String>, recent: us
         let mut v = rep.to_json();
         if let Some(obj) = v.as_object_mut() {
             obj.insert("hooks".into(), crate::cmd::hooks::doctor_json());
+            let skipped = cv_core::catalog::skipped_sources();
+            if !skipped.is_empty() {
+                obj.insert("skipped_sources".into(), skipped_json(&skipped));
+            }
         }
         println!("{}", serde_json::to_string_pretty(&v)?);
         return Ok(());
@@ -93,6 +100,9 @@ fn print_report(rep: &Report, label: &str, n_targets: usize) {
     }
 
     println!("{}", writer_versions_line(cv_core::catalog::writer_versions()));
+    for line in skipped_lines(&cv_core::catalog::skipped_sources()) {
+        println!("{line}");
+    }
 
     // Compaction summary.
     if rep.compactions == 0 {
@@ -203,6 +213,31 @@ fn print_report(rep: &Report, label: &str, n_targets: usize) {
     if n_targets == 1 && rep.sessions == 1 {
         println!("  (analyze your whole project: `cv doctor --recent 20`)");
     }
+}
+
+/// The sources the last discovery found but could not open: the store has bytes, the listing has
+/// zero. Catalog knowledge only, as [`writer_versions_line`]; nothing when there are none.
+fn skipped_lines(skipped: &[(cv_core::Harness, cv_core::Skipped)]) -> Vec<String> {
+    if skipped.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec![format!(
+        "Unreadable sources: {} (the store has bytes, the listing has zero)",
+        skipped.len()
+    )];
+    lines.extend(
+        skipped
+            .iter()
+            .map(|(h, s)| format!("  {h} {} — {}", s.path.display(), s.why)),
+    );
+    lines
+}
+
+fn skipped_json(skipped: &[(cv_core::Harness, cv_core::Skipped)]) -> serde_json::Value {
+    skipped
+        .iter()
+        .map(|(h, s)| serde_json::json!({"harness": h.as_str(), "path": s.path, "why": s.why}))
+        .collect()
 }
 
 /// Render only catalog knowledge. This helper never resolves or probes source paths.

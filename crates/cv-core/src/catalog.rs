@@ -16,8 +16,9 @@
 //! entry marks its harness for re-discovery.
 //!
 //! Sibling tables: `scan_cache` is [`crate::discover_cache`]'s per-file `(mtime, size) → refs`
-//! store (it owns the reads/writes; the DDL lives here so every opener sees one schema), and
-//! `catalog_meta` holds the `last_full_sync` stamp behind the bounded-staleness backstop.
+//! store (it owns the reads/writes; the DDL lives here so every opener sees one schema),
+//! `catalog_meta` holds the `last_full_sync` stamp behind the bounded-staleness backstop, and
+//! `skipped_sources` the sources each harness's last discovery could not open.
 //!
 //! Best-effort throughout: a catalog that cannot open says so once per process
 //! ([`crate::env::warn_once`]) and the caller falls back to scanning, so
@@ -267,6 +268,12 @@ mod imp {
              CREATE TABLE IF NOT EXISTS source_dependencies(
                  consumer TEXT NOT NULL, harness TEXT NOT NULL, id TEXT NOT NULL, path TEXT NOT NULL,
                  record BLOB NOT NULL, PRIMARY KEY(consumer, harness, id, path)
+             );
+             CREATE TABLE IF NOT EXISTS skipped_sources(
+                 harness TEXT NOT NULL,
+                 path    TEXT NOT NULL,
+                 why     TEXT NOT NULL,
+                 PRIMARY KEY(harness, path)
              );
              -- The seek store (0.14 and earlier) is gone; see `crate::offsets`.
              DROP TABLE IF EXISTS msg_offsets;
@@ -1015,6 +1022,58 @@ mod imp {
         Ok(())
     }
 
+    /// Replace each listed harness's skipped sources with the ones its discovery just reported
+    /// ([`crate::harness::Discovered::skipped`]). A healthy fleet with none recorded writes nothing.
+    pub(super) fn record_skipped_in(
+        conn: &mut Connection,
+        rows: &[(Harness, &[crate::Skipped])],
+    ) -> rusqlite::Result<()> {
+        let recorded: i64 = conn.query_row("SELECT COUNT(*) FROM skipped_sources", [], |r| r.get(0))?;
+        if recorded == 0 && rows.iter().all(|(_, skipped)| skipped.is_empty()) {
+            return Ok(());
+        }
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        for (h, skipped) in rows {
+            tx.execute("DELETE FROM skipped_sources WHERE harness=?1", [h.as_str()])?;
+            for s in *skipped {
+                tx.execute(
+                    "INSERT OR REPLACE INTO skipped_sources(harness,path,why) VALUES(?1,?2,?3)",
+                    params![h.as_str(), s.path.to_string_lossy(), s.why],
+                )?;
+            }
+        }
+        tx.commit()
+    }
+
+    /// The sources the last discovery of each harness found but could not open, by harness and
+    /// path: catalog knowledge only, as `cv doctor` shows it. Empty on a catalog without any.
+    pub fn skipped_sources() -> Vec<(Harness, crate::Skipped)> {
+        let Some(conn) = open() else { return Vec::new() };
+        let Ok(mut stmt) = conn.prepare("SELECT harness,path,why FROM skipped_sources ORDER BY harness,path") else {
+            return Vec::new();
+        };
+        let Ok(rows) = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        }) else {
+            return Vec::new();
+        };
+        rows.flatten()
+            .filter_map(|(h, path, why)| {
+                Some((
+                    Harness::parse(&h)?,
+                    crate::Skipped {
+                        path: PathBuf::from(path),
+                        why,
+                    },
+                ))
+            })
+            .collect()
+    }
+
     /// Catalog knowledge only: no transcript probes or backfill. NULL/empty/unsupported versions
     /// count as unknown; the maximum is historical evidence, not a claim of current source validity.
     pub fn writer_versions() -> Vec<crate::writer_version::Observed> {
@@ -1388,6 +1447,41 @@ mod imp {
             let conn = Connection::open(&path).unwrap();
             assert!(add_column(&conn, "sessions", "writer_version TEXT").is_ok());
             assert!(add_column(&conn, "no_such_table", "x TEXT").is_err());
+        }
+
+        #[test]
+        fn skipped_sources_replace_per_harness_and_a_healthy_fleet_writes_nothing() {
+            let _w = crate::test_world("catalog-skipped-sources");
+            let skip = |p: &str| crate::Skipped {
+                path: PathBuf::from(p),
+                why: format!("{p} is locked"),
+            };
+            let mut conn = open().unwrap();
+            record_skipped_in(&mut conn, &[(Harness::Claude, &[]), (Harness::Codex, &[])]).unwrap();
+            let changes = conn.total_changes();
+            record_skipped_in(&mut conn, &[(Harness::Claude, &[])]).unwrap();
+            assert_eq!(
+                conn.total_changes(),
+                changes,
+                "nothing recorded, nothing reported: no write"
+            );
+            record_skipped_in(
+                &mut conn,
+                &[
+                    (Harness::Claude, &[skip("/a"), skip("/b")]),
+                    (Harness::Codex, &[skip("/c")]),
+                ],
+            )
+            .unwrap();
+            assert_eq!(skipped_sources().len(), 3);
+            // A later discovery of one harness replaces its rows and leaves the other's.
+            record_skipped_in(&mut conn, &[(Harness::Claude, &[skip("/b")])]).unwrap();
+            assert_eq!(
+                skipped_sources(),
+                [(Harness::Claude, skip("/b")), (Harness::Codex, skip("/c"))]
+            );
+            record_skipped_in(&mut conn, &[(Harness::Claude, &[]), (Harness::Codex, &[])]).unwrap();
+            assert!(skipped_sources().is_empty());
         }
 
         #[test]
@@ -1961,7 +2055,7 @@ pub(crate) enum Watched {
 }
 
 #[cfg(feature = "sqlite")]
-pub use imp::{lookup, note_affordances_with_source, sync, writer_versions, AffordanceTable};
+pub use imp::{lookup, note_affordances_with_source, skipped_sources, sync, writer_versions, AffordanceTable};
 
 #[cfg(feature = "sqlite")]
 pub(crate) use imp::note_counted_with_source;
@@ -2027,6 +2121,10 @@ impl AffordanceTable {
     pub fn stale(&self, r: &SessionRef) -> bool {
         self.counts(r).is_none()
     }
+}
+#[cfg(not(feature = "sqlite"))]
+pub fn skipped_sources() -> Vec<(Harness, crate::Skipped)> {
+    Vec::new()
 }
 #[cfg(not(feature = "sqlite"))]
 pub fn writer_versions() -> Vec<crate::writer_version::Observed> {
