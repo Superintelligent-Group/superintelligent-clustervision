@@ -19,6 +19,19 @@ use std::path::{Path, PathBuf};
 /// The journal a `Workflow` run writes into its run dir.
 pub const JOURNAL: &str = "journal.jsonl";
 
+/// A JSON-object sidecar (a sub-agent's `agent-<id>.meta.json`) as its object: empty when the
+/// file is missing, unreadable, not JSON, or not an object. A sidecar is optional, so a bad one
+/// reads as none, the same way for every reader and writer that consults it.
+pub fn read_or_default(path: &Path) -> serde_json::Map<String, Value> {
+    match std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+    {
+        Some(Value::Object(object)) => object,
+        _ => serde_json::Map::new(),
+    }
+}
+
 /// `<dir>/<stem>/` for a transcript at `<dir>/<stem>.jsonl`: the session's sidecar root.
 pub fn session_dir(transcript: &Path) -> Option<PathBuf> {
     let stem = transcript.file_stem()?.to_str()?;

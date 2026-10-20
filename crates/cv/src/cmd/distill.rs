@@ -18,6 +18,7 @@
 use crate::util::{parse_harness, report, resolve, short_id, usage};
 use anyhow::{bail, Context, Result};
 use cv_core::distill::{distill_pack, findings, prepare_distill, DistillOptions, Distilled, PreparedDistillation};
+use cv_core::harness::claude::sidecar;
 use cv_core::ir::{Harness, Session, SessionRef};
 use cv_core::EmitOptions;
 use serde_json::{json, Value};
@@ -120,15 +121,12 @@ fn enrich_path_meta(s: &mut Session, p: &Path) {
     // A sub-agent transcript read by path: its label lives in the sibling `<stem>.meta.json`
     // (the resolver path reads it through the parent's sub-agent tree instead).
     if s.harness == Harness::Claude && p.is_file() {
-        if let Some(meta) = std::fs::read_to_string(p.with_extension("meta.json"))
-            .ok()
-            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-        {
-            let bag = s.harness_extra_mut(Harness::Claude);
-            for (k, key) in [("description", "agent_description"), ("agentType", "agent_type")] {
-                if let Some(v) = meta.get(k).and_then(Value::as_str) {
-                    bag.entry(key).or_insert_with(|| json!(v));
-                }
+        let meta = sidecar::read_or_default(&p.with_extension("meta.json"));
+        for (k, key) in [("description", "agent_description"), ("agentType", "agent_type")] {
+            if let Some(v) = meta.get(k).and_then(Value::as_str) {
+                s.harness_extra_mut(Harness::Claude)
+                    .entry(key)
+                    .or_insert_with(|| json!(v));
             }
         }
     }
@@ -250,18 +248,16 @@ pub(crate) fn emit_to(
 }
 
 fn agent_meta(source_path: &Path, description: &str, model: Option<&str>) -> Value {
-    let mut meta: Value = std::fs::read_to_string(source_path.with_extension("meta.json"))
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .filter(Value::is_object)
-        .unwrap_or_else(|| json!({"agentType":"general-purpose"}));
-    let object = meta.as_object_mut().expect("object metadata or object fallback");
+    let mut object = sidecar::read_or_default(&source_path.with_extension("meta.json"));
+    if object.is_empty() {
+        object.insert("agentType".into(), json!("general-purpose"));
+    }
     object.insert("description".into(), json!(description));
     object.remove("toolUseId");
     if let Some(model) = model {
         object.insert("model".into(), json!(model));
     }
-    meta
+    Value::Object(object)
 }
 
 /// Emit `ir` as a Claude transcript under `out_dir` and verify what was written: the fidelity

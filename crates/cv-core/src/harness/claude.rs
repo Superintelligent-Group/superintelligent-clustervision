@@ -846,12 +846,7 @@ fn read_agent_type(path: &Path) -> Option<String> {
 fn read_meta(path: &std::path::Path) -> (Option<String>, Option<String>, Option<String>) {
     #[cfg(test)]
     record_forest_read("metadata", path);
-    let Ok(txt) = fs::read_to_string(path) else {
-        return (None, None, None);
-    };
-    let Ok(v) = serde_json::from_str::<Value>(&txt) else {
-        return (None, None, None);
-    };
+    let v = sidecar::read_or_default(path);
     let s = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
     (s("agentType"), s("description"), s("toolUseId"))
 }

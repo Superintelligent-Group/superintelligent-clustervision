@@ -8,6 +8,7 @@
 use crate::util::{fmt_local, home_rel, report, short_id, usage};
 use anyhow::{Context, Result};
 use cv_core::harness::claude::adopt::{self, AgentFile, Plan, SessionFile};
+use cv_core::harness::claude::sidecar;
 use cv_core::ir::{human_bytes, Harness};
 use serde_json::json;
 use std::fmt::Write as _;
@@ -53,14 +54,12 @@ pub(crate) struct AdoptArgs {
 
 /// Set `model` in a sub-agent's meta sidecar, creating the sidecar when the source had none.
 fn set_meta_model(path: &std::path::Path, model: &str) -> Result<()> {
-    let mut meta: serde_json::Value = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .filter(serde_json::Value::is_object)
-        .unwrap_or_else(|| json!({"agentType": "general-purpose"}));
-    if let Some(o) = meta.as_object_mut() {
-        o.insert("model".into(), json!(model));
+    let mut meta = sidecar::read_or_default(path);
+    if meta.is_empty() {
+        meta.insert("agentType".into(), json!("general-purpose"));
     }
+    meta.insert("model".into(), json!(model));
+    let meta = serde_json::Value::Object(meta);
     // The meta adopt itself just published (or none): replaced whole.
     cv_core::publish::publish_reader(
         path,
