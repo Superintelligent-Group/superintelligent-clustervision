@@ -376,11 +376,12 @@ enum Cmd {
         /// Salvage a dead or interrupted run: emit a ready-to-paste standalone `Agent` prompt per
         /// lane — the FULL original task plus the work that lane already landed (files written,
         /// commands run, its own last note) — so lanes come back resumed rather than restarted.
-        #[arg(long)]
+        /// Prints prompts, so it excludes `--json`, `--script`, `--results` and `--follow`/`--for`.
+        #[arg(long, conflicts_with_all = ["json", "script", "results", "follow", "for"])]
         revive: bool,
         /// With `--revive`, include lanes that completed successfully too (default: only the ones
         /// that did not finish).
-        #[arg(long)]
+        #[arg(long, requires = "revive")]
         revive_all: bool,
     },
     /// The sub-agent forest as a status table: one row per lane with its model, start, duration,
