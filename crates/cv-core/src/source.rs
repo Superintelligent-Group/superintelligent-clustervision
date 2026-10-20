@@ -212,8 +212,8 @@ impl std::hash::Hash for Entry {
 
 /// The one version of everything cv stores about a session: the [`Record`] envelope, the
 /// catalog's discovery interpretation, the affordance view. A change to what any of them means
-/// bumps it, and every consumer rereads each session once (0.18 is 5; 0.17 wrote 4).
-pub const VERSION: u32 = 5;
+/// bumps it, and every consumer rereads each session once (0.18 is 6; 0.17 wrote 4).
+pub const VERSION: u32 = 6;
 
 /// Exact auxiliary records, not a content digest: the inventory a pass captured before reading
 /// (`entries`) and, once the pass completed, every path it read (`reads`; `None` is a before-pass
