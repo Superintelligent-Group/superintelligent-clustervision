@@ -283,10 +283,11 @@ impl Adapter for OpenClaw {
             with_jsonl_source(&r.path, |source| {
                 let mut reads = crate::source::ReadSet::default();
                 let facts = jsonl_key_facts_with_reads(&r.path, &r.id, &mut |path| sink.dependency(path), &mut reads)?;
-                source.check()?;
                 // Retained bodies depend on the inventory and sibling transcripts consulted
-                // for lineage, not only on their own unchanged bytes.
+                // for lineage, not only on their own unchanged bytes. The facts were read from
+                // the first capture's bytes: the guarded capture must still hold them.
                 let guarded = crate::json::JsonSource::capture_with_reads(&r.path, &reads)?;
+                anyhow::ensure!(source.admits(&guarded), "JSON source changed: {}", r.path.display());
                 stream_jsonl(r, &facts, opts, sink, &guarded)
             })
         })
@@ -299,12 +300,14 @@ impl Adapter for OpenClaw {
     }
 }
 
-/// Capture before registry/branch selection and validate the same primary source after every
-/// completion path, including owned/tree reads, callback stop and parser errors.
+/// Capture before registry/branch selection. A completed read was checked at its EOF
+/// ([`stream_jsonl`]); a failed one checks here, so a changed source outranks the error it caused.
 fn with_jsonl_source<T>(path: &Path, read: impl FnOnce(&crate::json::JsonSource) -> Result<T>) -> Result<T> {
     let source = crate::json::JsonSource::capture(path)?;
     let result = read(&source);
-    source.check()?;
+    if result.is_err() {
+        source.check()?;
+    }
     result
 }
 
