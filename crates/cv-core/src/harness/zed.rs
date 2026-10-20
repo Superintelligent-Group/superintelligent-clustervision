@@ -260,7 +260,11 @@ fn stream_thread(
     let data_type = row.get::<_, Option<String>>(6).ok().flatten();
     let branch = row.get::<_, Option<String>>(7).ok().flatten().filter(|s| !s.is_empty());
     // The whole document is validated before any message is emitted, ignored fields included.
-    let cell = thread_cell(conn, cells, &r.id, data_type.as_deref());
+    // A store error is the read's; a blob that will not decompress reads as undecodable below.
+    let cell = match thread_cell(conn, cells, &r.id, data_type.as_deref()) {
+        Err(error) if error.is::<rusqlite::Error>() => return Err(error),
+        cell => cell,
+    };
     let thread = match &cell {
         Ok(Some(cell)) => cells.read(*cell, |view| {
             let (metadata, messages) = record::header(view)?;
@@ -296,6 +300,7 @@ fn stream_thread(
         // corrupt thread never breaks listings or bulk exports.
         zed.insert("undecodable_blob".into(), Value::Bool(true));
     }
+    let undecodable = zed.contains_key("undecodable_blob");
     if let Some(branch) = branch {
         git.get_or_insert_with(GitInfo::default).branch.get_or_insert(branch);
     }
@@ -328,6 +333,10 @@ fn stream_thread(
         for (k, v) in zed {
             bag.insert(k, v);
         }
+    }
+    // The thread's one record, undecodable, is counted as well as marked.
+    if undecodable {
+        super::Unparsed(1).note(&mut s);
     }
     // All session metadata is known up front; hand it to the sink before the body.
     sink.meta(&s);
@@ -1044,6 +1053,7 @@ mod tests {
             s.harness_extra(Harness::Zed).and_then(|b| b.get("undecodable_blob")),
             Some(&Value::Bool(true))
         );
+        assert_eq!(s.extra["cv"]["skipped_lines"], 1);
         assert_eq!(s.title.as_deref(), Some("corrupt one"));
     }
 
