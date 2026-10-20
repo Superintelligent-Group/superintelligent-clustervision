@@ -19,8 +19,10 @@ be skipped in O(1); an evicted endpoint can require rescanning. Lines are trimme
 
 **Decoder.** One function per format, `record(view, demand) -> session facts + Option<Message>`
 (Claude: `harness/claude/record.rs`). It selects the fields any record kind reads in one pass
-(`Fields::parse`), then resolves only what the demand asks for: `ParseOptions` plus the sink's
-`extra_projection`. Content goes through the family's block codec (`wire::anthropic::
+(`Fields::parse`), then resolves only what the demand asks for: `stream::Demand { tier, spans,
+offsets }`, tiers ordered Discovery < Lean < Usage < Facts < Rich < Complete, the sink's `tier()`
+narrowing Rich to Facts per message (`Demand::for_sink`); an adapter's own codec demand is built
+from it once per read. Content goes through the family's block codec (`wire::anthropic::
 block_from_view_with`) with the shared text rule `JsonView::lazy_text(spans)`: decoded length
 over `INLINE_MAX` stays in the source: primary transcript text uses `Span` in both builds;
 independent files, cells and decoded backing use checked `Text::Source`. Large tool arguments

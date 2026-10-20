@@ -13,6 +13,7 @@
 - A listing racing `cv index` no longer loses a discovery update: catalog publication waits for the other writer instead of discarding.
 
 **Reading.**
+- **Breaking (library):** `ParseOptions` and `ExtraProjection` become `Demand { tier, spans, offsets }`; the five `Watcher` poll methods become `poll`/`try_poll(Poll { .. })`.
 - Gemini, Qwen, Goose, Grok, LM Studio, OpenClaw and OpenCode report the model on every turn the harness wrote it; windowed reads no longer lose it.
 - Every JSONL adapter reads its transcript through one captured source (`store::jsonl::Read`); each adapter keeps its own resume protocol.
 - A reader checks its source after a slow callback, a checkpoint and at EOF; a replaced or truncated file is an error, never a crash.
