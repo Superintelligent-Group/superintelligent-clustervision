@@ -266,12 +266,8 @@ fn read_snapshot(
         return Err(error);
     }
     // Cursor's fact reducers read native summary/context/error markers through the IR; the
-    // record and part metadata bags are full-metadata demands.
-    let demand = Demand {
-        spans: opts.spans,
-        extra: opts.tier >= Tier::Rich,
-        complete: opts.tier == Tier::Complete,
-    };
+    // record and part metadata bags are rich demands.
+    let demand = *opts;
     let mut emit = |id: &str| -> Result<Flow> {
         let decoded = match cells.row(conn, "blobs", "data", blob_rowid(conn, id)?)? {
             Some(cell) => cells.read(cell, |view| Ok((message(view, demand)?, model(view)?)))?,
@@ -435,15 +431,6 @@ fn encode_hex(bytes: &[u8]) -> String {
     text
 }
 
-/// What a read resolves: long text and arguments held in the store (`spans`), the record and part
-/// metadata bags (`extra`), and every record, carriers included (`complete`).
-#[derive(Clone, Copy)]
-struct Demand {
-    spans: bool,
-    extra: bool,
-    complete: bool,
-}
-
 fn string(view: Option<JsonView<'_>>) -> Result<Option<String>> {
     Ok(match view {
         Some(view) => view.text(false)?.and_then(|text| match text {
@@ -499,7 +486,9 @@ fn remainder(view: JsonView<'_>, taken: &[&str]) -> Result<Map<String, Value>> {
 
 /// One message record (`{role, id, content, providerOptions, ...}`); None for an unknown role or
 /// an empty message the demand does not carry.
-fn message(view: JsonView<'_>, demand: Demand) -> Result<Option<Message>> {
+/// The demand resolves long text and arguments held in the store (`spans`), the record and part
+/// metadata bags ([`Tier::Rich`]), and every record, carriers included ([`Tier::Complete`]).
+fn message(view: JsonView<'_>, demand: crate::stream::Demand) -> Result<Option<Message>> {
     let Some(fields) = Fields::parse(view, &["role", "id", "content", "providerOptions"])? else {
         return Ok(None);
     };
@@ -623,7 +612,7 @@ fn message(view: JsonView<'_>, demand: Demand) -> Result<Option<Message>> {
                     &["mimeType", "filename"]
                 }
                 _ => {
-                    if demand.complete {
+                    if demand.tier == Tier::Complete {
                         message
                             .harness_extra_mut(Harness::Cursor)
                             .entry("unhandled_parts")
@@ -635,7 +624,7 @@ fn message(view: JsonView<'_>, demand: Demand) -> Result<Option<Message>> {
                     &[]
                 }
             };
-            if demand.extra && !demand.complete {
+            if demand.tier == Tier::Rich {
                 let rest = remainder(part, taken)?;
                 if rest.len() > 1 {
                     message
@@ -650,13 +639,13 @@ fn message(view: JsonView<'_>, demand: Demand) -> Result<Option<Message>> {
         }
     }
     if message.content.is_empty() {
-        if !demand.complete {
+        if demand.tier != Tier::Complete {
             return Ok(None);
         }
         message.kind = MessageKind::Carrier;
         message.origin = Origin::Harness;
     }
-    if demand.extra || demand.complete {
+    if demand.tier >= Tier::Rich {
         let rest = remainder(view, &["id", "content", "role"])?;
         if !rest.is_empty() {
             message
@@ -664,7 +653,7 @@ fn message(view: JsonView<'_>, demand: Demand) -> Result<Option<Message>> {
                 .insert("record_metadata".into(), Value::Object(rest));
         }
     }
-    if demand.complete {
+    if demand.tier == Tier::Complete {
         message
             .harness_extra_mut(Harness::Cursor)
             .insert("record".into(), view.resolve()?.into_owned());
@@ -799,10 +788,10 @@ mod tests {
     }
     /// One record decoded from an owned value.
     fn decode(value: &Value, extra: bool, complete: bool) -> Option<Message> {
-        let demand = Demand {
-            spans: false,
-            extra,
-            complete,
+        let demand = match (extra, complete) {
+            (_, true) => crate::stream::Demand::COMPLETE,
+            (true, false) => crate::stream::Demand::RICH,
+            (false, false) => crate::stream::Demand::LEAN,
         };
         message(JsonView::owned(value), demand).unwrap()
     }
