@@ -768,6 +768,14 @@ pub(crate) fn cmd_export(
         }
         // `--format json` IS OpenSession 0.3: the IR, plus the version marker.
         "json" => {
+            if !redact && range.is_none() && window.max_bytes.is_none() {
+                // Checked and complete, like the Markdown document above.
+                let (body, _) = stage_export(adapter.as_ref(), &r, "opensession")?;
+                let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+                body.copy_to(&mut out)?;
+                out.flush()?;
+                return Ok(());
+            }
             let st = print_session_json(
                 adapter.as_ref(),
                 &r,
