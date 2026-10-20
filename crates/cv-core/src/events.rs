@@ -487,37 +487,6 @@ pub(crate) fn command_of_json(input: &Json) -> Result<Option<String>> {
     input.with_view(arguments::command_string)
 }
 
-/// File paths named by a patch body. Primary: codex apply_patch headers
-/// (`*** Update File: <path>` / `*** Add File:` / `*** Delete File:` / `*** Move to:`).
-/// Fallback: unified-diff `+++ <path>` headers — but only when `--- ` headers are present too,
-/// so an *added line* whose content begins with `++ ` can't fake a target.
-#[cfg(test)]
-fn patch_targets(patch: &str) -> Vec<String> {
-    fn push(out: &mut Vec<String>, f: &str) {
-        let f = f.trim();
-        if !f.is_empty() && f != "/dev/null" && !out.iter().any(|x| x == f) {
-            out.push(f.to_string());
-        }
-    }
-    let mut out: Vec<String> = Vec::new();
-    for line in patch.lines() {
-        let t = line.trim();
-        for pre in ["*** Update File:", "*** Add File:", "*** Delete File:", "*** Move to:"] {
-            if let Some(rest) = t.strip_prefix(pre) {
-                push(&mut out, rest);
-            }
-        }
-    }
-    if out.is_empty() && patch.lines().any(|l| l.starts_with("--- ")) {
-        for line in patch.lines() {
-            if let Some(rest) = line.strip_prefix("+++ ") {
-                push(&mut out, rest.trim().trim_start_matches("b/"));
-            }
-        }
-    }
-    out
-}
-
 /// Lexically absolutize `p` against the session cwd. Already-absolute paths pass through; with no
 /// cwd the path is stored as given (still suffix-matchable by `cv touched`).
 fn absolutize(p: &str, cwd: Option<&Path>) -> String {
@@ -1701,6 +1670,10 @@ mod tests {
         let edits: Vec<_> = ev.iter().filter(|e| e.kind == "file_edit").collect();
         assert_eq!(edits.len(), 2);
         assert_eq!(edits[0].target.as_deref(), Some("/repo/crates/cv-core/src/ir.rs"));
+    }
+
+    fn patch_targets(patch: &str) -> Vec<String> {
+        arguments::patch_rows(crate::json::JsonView::from(&json!(patch))).unwrap()
     }
 
     #[test]

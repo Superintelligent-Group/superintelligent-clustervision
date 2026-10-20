@@ -303,14 +303,19 @@ mod tests {
     }
 
     #[test]
-    fn chunked_patch_matches_owned_oracle() {
-        for text in [
-            "--- a/a\n+++ b/a\n*** Add File: later\n+body\n*** Move to: renamed\n*** Add File: later\n",
-            "--- a/a\n+++ b/a\n+++ b/b\n+++ /dev/null\n",
-            "+++ b/not-a-patch\n+irrelevant\n",
-            "\u{2003}*** Update File: λ.rs\r\n*** Delete File: /dev/null\n",
+    fn chunked_patch_yields_the_same_targets_at_every_width() {
+        for (text, expected) in [
+            (
+                "--- a/a\n+++ b/a\n*** Add File: later\n+body\n*** Move to: renamed\n*** Add File: later\n",
+                vec!["later", "renamed"],
+            ),
+            ("--- a/a\n+++ b/a\n+++ b/b\n+++ /dev/null\n", vec!["a", "b"]),
+            ("+++ b/not-a-patch\n+irrelevant\n", vec![]),
+            (
+                "\u{2003}*** Update File: λ.rs\r\n*** Delete File: /dev/null\n",
+                vec!["λ.rs"],
+            ),
         ] {
-            let expected = super::super::patch_targets(text);
             for width in 1..32 {
                 let mut patch = Patch::default();
                 let mut start = 0;
