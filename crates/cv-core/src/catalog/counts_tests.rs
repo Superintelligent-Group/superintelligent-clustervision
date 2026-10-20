@@ -1,4 +1,4 @@
-use super::imp::{count_record_in, turns_of};
+use super::imp::count_record_in;
 use super::*;
 use crate::source::{Probe, ReadSet};
 
@@ -32,20 +32,17 @@ fn demand_counts_match_batch_baselines_and_reject_stale_pairs() {
     publish(&r, 1, &ReadSet::default());
     compare(&reader, &r, Some(1));
     for mutation in [
-        "UPDATE affordance_counts SET counts='{}'",         // missing view version
-        "UPDATE affordance_counts SET counts='{\"_v\":0}'", // old view version
-        "UPDATE affordance_counts SET counts='malformed'",
-        "UPDATE affordance_counts SET counts=counts||' '", // the published output, not this text
-        "UPDATE source_dependencies SET record=substr(record,1,13)||X'01'||substr(record,15) WHERE consumer='counts'",
-        "UPDATE source_dependencies SET record=substr(record,1,53)||'{}' WHERE consumer='counts'",
-        "UPDATE source_dependencies SET record=substr(record,1,53)||'{\"version\":1}' WHERE consumer='counts'",
-        "UPDATE source_dependencies SET record=substr(record,1,53)||REPLACE(CAST(substr(record,54) AS TEXT),'\"reads\":[]','\"reads\":null') WHERE consumer='counts'",
-        "DELETE FROM source_dependencies WHERE consumer='counts'",
-        "DELETE FROM affordance_counts",
+        tamper("$.version", &(crate::source::VERSION - 1).to_string()),
+        tamper("$.tag", "'events'"),
+        tamper("$.payload.counts.plan", "'1'"),
+        tamper("$.baseline.stamp.reads", "json('null')"),
+        tamper("$.baseline.primary", "json('null')"),
+        "UPDATE source_dependencies SET record=X'00' WHERE consumer='counts'".into(),
+        "DELETE FROM source_dependencies WHERE consumer='counts'".into(),
     ] {
-        conn.execute_batch(mutation).unwrap();
+        conn.execute_batch(&mutation).unwrap();
         compare(&reader, &r, None);
-        conn.execute_batch("DELETE FROM affordance_counts; DELETE FROM source_dependencies WHERE consumer='counts';")
+        conn.execute_batch("DELETE FROM source_dependencies WHERE consumer='counts';")
             .unwrap();
         publish(&r, 1, &ReadSet::default());
         compare(&reader, &r, Some(1));
@@ -58,7 +55,7 @@ fn demand_counts_match_batch_baselines_and_reject_stale_pairs() {
     let conditional = w.base.join("conditional-sidecar");
     let mut reads = ReadSet::default();
     reads.record(&conditional); // Captured absence is part of the selected body's provenance.
-    conn.execute_batch("DELETE FROM affordance_counts; DELETE FROM source_dependencies WHERE consumer='counts';")
+    conn.execute_batch("DELETE FROM source_dependencies WHERE consumer='counts';")
         .unwrap();
     publish(&r, 1, &reads);
     compare(&reader, &r, Some(1));
@@ -70,7 +67,8 @@ fn demand_counts_match_batch_baselines_and_reject_stale_pairs() {
     publish(&r, 2, &ReadSet::default());
     compare(&reader, &r, Some(2));
     // Uncommitted writes cannot expose one half of a count/provenance publication.
-    conn.execute_batch("BEGIN IMMEDIATE; UPDATE affordance_counts SET counts='{}'; DELETE FROM source_dependencies WHERE consumer='counts';").unwrap();
+    conn.execute_batch("BEGIN IMMEDIATE; DELETE FROM source_dependencies WHERE consumer='counts';")
+        .unwrap();
     assert_eq!(
         reader
             .counts_with_probe(&r, &Probe::default().snapshot(&r), &mut Probe::default())
@@ -93,15 +91,9 @@ fn demand_counts_decode_only_selected_rows_as_inventory_grows() {
     for inventory in [8, 1024] {
         conn.execute(
             "WITH RECURSIVE numbers(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM numbers WHERE n<?1)
-             INSERT OR REPLACE INTO affordance_counts(harness,id,path,counts)
-             SELECT 'codex','irrelevant-'||n,'unused-'||n,'malformed unrelated counts' FROM numbers",
+             INSERT OR REPLACE INTO source_dependencies(consumer,harness,id,path,record)
+             SELECT 'counts','codex','irrelevant-'||n,'unused-'||n,X'00' FROM numbers",
             [inventory],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT OR REPLACE INTO source_dependencies(consumer,harness,id,path,record)
-             SELECT 'counts',harness,id,path,X'00' FROM affordance_counts WHERE id LIKE 'irrelevant-%'",
-            [],
         )
         .unwrap();
         let reader = Reader::open().unwrap();
@@ -123,20 +115,8 @@ fn previous_source_epoch_cannot_certify_current_counts() {
     publish(&r, 1, &ReadSet::default());
     assert!(AffordanceTable::load().counts(&r).is_some());
     let conn = open_db().unwrap();
-    let mut record: Vec<u8> = conn
-        .query_row(
-            "SELECT record FROM source_dependencies WHERE consumer='counts' AND id='epoch'",
-            [],
-            |row| row.get(0),
-        )
+    conn.execute_batch(&tamper("$.version", &(crate::source::VERSION - 1).to_string()))
         .unwrap();
-    let current = u32::from_le_bytes(record[..4].try_into().unwrap());
-    record[..4].copy_from_slice(&(current - 1).to_le_bytes());
-    conn.execute(
-        "UPDATE source_dependencies SET record=?1 WHERE consumer='counts' AND id='epoch'",
-        [&record],
-    )
-    .unwrap();
     assert!(
         AffordanceTable::load().counts(&r).is_none(),
         "unchanged payload and source cannot revive a previous-epoch receipt"
@@ -217,7 +197,7 @@ fn certified_turns_enrich_old_counts_refill_refresh_and_keep_partial_publication
 }
 
 #[test]
-fn exact_turn_extensions_require_valid_payload_receipt_version_and_integer() {
+fn exact_turns_require_a_valid_record_and_integer() {
     let world = crate::test_world("exact-turn-cache-controls");
     let path = world.base.join("source.jsonl");
     std::fs::write(&path, "{}\n").unwrap();
@@ -226,69 +206,29 @@ fn exact_turn_extensions_require_valid_payload_receipt_version_and_integer() {
     counted(&r, 7);
     let reader = Reader::open().unwrap();
     let conn = open_db().unwrap();
-    let original: String = conn
-        .query_row("SELECT counts FROM affordance_counts", [], |row| row.get(0))
-        .unwrap();
-    conn.execute("UPDATE affordance_counts SET counts=REPLACE(counts,'7','8')", [])
-        .unwrap();
-    assert_eq!(
-        refilled(&reader, &r),
-        None,
-        "payload tamper cannot borrow its former receipt"
-    );
-    for value in [
-        None,
-        Some(serde_json::Value::Null),
-        Some(serde_json::json!(-1)),
-        Some(serde_json::json!("7")),
-        Some(serde_json::json!(true)),
-        Some(serde_json::json!([])),
-        Some(serde_json::json!(u64::MAX)),
-    ] {
-        let mut object: serde_json::Value = serde_json::from_str(&original).unwrap();
-        match value {
-            Some(value) => object["_turns"] = value,
-            None => {
-                object.as_object_mut().unwrap().remove("_turns");
-            }
-        }
-        let text = object.to_string();
-        conn.execute("UPDATE affordance_counts SET counts=?1", [&text]).unwrap();
-        crate::source::publish_in(
-            &conn,
-            "counts",
-            &r,
-            &Probe::default().snapshot(&r),
-            text.as_bytes(),
-            &mut Probe::default(),
-        )
-        .unwrap();
+    assert_eq!(refilled(&reader, &r), Some(7));
+    for value in ["-1", "'7'", "json('true')", "json('[]')", "18446744073709551615"] {
+        conn.execute_batch(&tamper("$.payload.turns", value)).unwrap();
         let before = reader.turn_snapshots();
-        assert_eq!(refilled(&reader, &r), None);
+        assert_eq!(refilled(&reader, &r), None, "{value}");
         assert_eq!(
             reader.turn_snapshots(),
             before,
             "invalid scalar fails before dependency lookup"
         );
+        counted(&r, 7);
     }
-    let mut old: serde_json::Value = serde_json::from_str(&original).unwrap();
-    old["_v"] = 0.into();
-    let text = old.to_string();
-    conn.execute("UPDATE affordance_counts SET counts=?1", [&text]).unwrap();
-    crate::source::publish_in(
-        &conn,
-        "counts",
-        &r,
-        &Probe::default().snapshot(&r),
-        text.as_bytes(),
-        &mut Probe::default(),
+    conn.execute_batch(&tamper("$.payload.turns", "json('null')")).unwrap();
+    assert_eq!(refilled(&reader, &r), None, "counts without turns certify none");
+    counted(&r, 0);
+    assert_eq!(refilled(&reader, &r), Some(0));
+}
+
+/// Rewrite one JSON field of every counts record in place.
+fn tamper(path: &str, value: &str) -> String {
+    format!(
+        "UPDATE source_dependencies SET record=CAST(json_set(CAST(record AS TEXT),'{path}',{value}) AS BLOB) WHERE consumer='counts'"
     )
-    .unwrap();
-    assert_eq!(refilled(&reader, &r), None);
-    assert_eq!(
-        turns_of(&serde_json::json!({"_v":crate::affordance::VIEW_VERSION,"_turns":0}).to_string()),
-        Some(0)
-    );
 }
 
 #[test]

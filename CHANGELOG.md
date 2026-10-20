@@ -123,7 +123,7 @@
 
 **After upgrading, once.**
 - The first listing rediscovers the fleet (announced on stderr; `cv index` does it ahead of time): catalog interpretation 5 adds a nullable `writer_version`.
-- Every consumer (counts, events, search, usage) rereads each session once: the freshness record is version 5. An older cv re-migrates the catalog.
+- Every store (counts, events, search, usage, embeddings, archive) rereads each session once: one `source::Record` envelope, version 5; marks stop expiring each release.
 
 ## 0.17.0 — 2026-10-17 — stream, never materialize
 

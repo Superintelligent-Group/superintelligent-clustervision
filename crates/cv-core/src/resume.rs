@@ -5,8 +5,7 @@
 //! lets the next pass over the same file (grown by an append) read only what came after it. A
 //! mark passes its guards when the file's device/inode identity matches, it is at least `offset`
 //! bytes long, the sampled head and bytes immediately before `offset` hash as they did, and it was
-//! written by this very parser ([`version`]: the cv release, the affordance view, the adapter's
-//! state format and the consumer's). Anything else means a whole pass, which writes a new mark.
+//! written under this stored-format version, adapter state format and consumer ([`version`]). Anything else means a whole pass, which writes a new mark.
 //!
 //! These samples ([`Prefix`]) do not establish that the entire prefix is unchanged, here or in
 //! the append admission of a captured source ([`crate::source::FileId::admits`]), which uses the
@@ -66,14 +65,14 @@ impl MarkHead {
     }
 }
 
-/// The version a mark records and must match: the cv release, the affordance view, the adapter's
-/// checkpoint format and `consumer` (the caller's own state format). `None`: the adapter takes no
-/// checkpoints.
+/// The version a mark records and must match: the one stored-format version
+/// ([`crate::source::VERSION`], which the affordance view shares), the adapter's checkpoint
+/// format and `consumer` (the caller's own state format). Not the cv release: a release that
+/// changes what a mark means bumps one of those. `None`: the adapter takes no checkpoints.
 pub fn version(adapter: &dyn Adapter, consumer: &str) -> Option<String> {
     Some(format!(
-        "{}/view{}/{}{}/{consumer}",
-        env!("CARGO_PKG_VERSION"),
-        crate::affordance::VIEW_VERSION,
+        "v{}/{}{}/{consumer}",
+        crate::source::VERSION,
         adapter.harness().as_str(),
         adapter.resume_format()?
     ))

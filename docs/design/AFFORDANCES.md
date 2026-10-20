@@ -86,11 +86,11 @@ use … denied" / "doesn't want to proceed", OpenCode's rule refusal and rejecti
 only) is an `approval/deny` at that message; OpenCode's `patch` parts (1.x) and file-changing
 `snapshot{start,end,files}` (2.x) and Devin's `details.restorable` are a `checkpoint/create` there.
 
-**The catalog's counts carry the view's version** (`affordance::VIEW_VERSION`, stored as `_v`): a
-row counted by an older view is "not counted", so adding a kind or a reader never makes
-`has:<kind>` answer a stale no. Normally bump it with a change to what `Counter` counts.
-0.18 shares the coordinated source-stamp epoch upgrade instead: old counts/events/search
-receipts all become stale together, while the counts payload stays at view version 5.
+**The catalog's counts carry the view's version**: they are the payload of the `counts`
+`source::Record`, whose version is the one stored-format version (`affordance::VIEW_VERSION` is
+`source::VERSION`). Counts an older view recorded do not decode and read "not counted", so
+adding a kind or a reader never makes `has:<kind>` answer a stale no: bump it with a change to
+what `Counter` counts, and every consumer rereads once.
 
 **IR corrections** (existing kinds, assigned where adapters left them out; CHANGELOG'd):
 
@@ -160,7 +160,7 @@ Then closed (lane `aff-sidefiles`): Qwen `scheduled_tasks.json`; Cline schedule 
 `teams.db` runs; OpenClaw's cron and sub-agent registries; Kimi `state.json` todos; Grok
 `hook_execution`; Claude `--fork-session` and Goose fork lineage, which no store records but the
 copied records imply. A side store is read only when a full read rewrites the session's
-`affordance_counts` row (its source baseline changed), or for the view itself. Since 0.17 that
+counts record (its source baseline changed), or for the view itself. Since 0.17 that
 baseline is the one `source::Baseline` record every consumer publishes (the catalog's separate
 `affordance_sig` and the no-op `note_affordances` are gone), and `AffordanceSink` latches errors
 through the one `stream::Latch` the event and spool sinks use.

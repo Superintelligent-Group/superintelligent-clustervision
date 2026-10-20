@@ -988,6 +988,15 @@ fn sig(primary: Option<cv_core::source::FileId>) -> (i64, i64) {
     primary.map_or((0, 0), |id| (id.mtime_ns as i64, id.len as i64))
 }
 
+/// The search index's source record payload: its documents live in the index, keyed per index
+/// (`fts:<cv-index-id>`), so the record carries nothing else.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct InIndex;
+
+impl cv_core::source::Payload for InIndex {
+    const TAG: &'static str = "fts";
+}
+
 /// What planning compares each candidate with: the index's docs and the catalog's tables, read
 /// once per plan.
 struct PlanState {
@@ -1002,7 +1011,7 @@ struct PlanState {
     affordances: cv_core::catalog::AffordanceTable,
     marks: cv_core::resume::MarkTable,
     consumer: String,
-    dependencies: cv_core::source::Table,
+    dependencies: cv_core::source::Table<InIndex>,
     probe: cv_core::source::Probe,
 }
 
@@ -1048,14 +1057,14 @@ impl PlanState {
         let (mtime, size) = sig(source.primary);
         // Auxiliary inputs are judged across primary growth, against the tuple the docs were
         // indexed at; the adapter's checkpoint then decides whether the growth resumes.
-        let baseline = dependencies.get(r);
+        let baseline = dependencies.get(r).map(|record| &record.baseline);
         let indexed = existing.get(&r.id).copied().unwrap_or((mtime, size));
         let dependencies_fresh =
             baseline.is_some_and(|old| sig(old.primary) == indexed && old.dependencies_fresh(&source, probe));
         // The docs' stamp is the current tuple, then the captured source authority holds.
         let fts_fresh = mtime != 0
             && existing.get(&r.id) == Some(&(mtime, size))
-            && dependencies.fresh(r, &source, b"", probe)
+            && dependencies.admit(r, &source, probe).is_some()
             && metadata.get(&r.id) == Some(&DiscoveryMetadata::new(r, prov));
         let events = event_sync.needs_ingest(r, &source, prov, probe);
         // Unchanged on every axis → skip entirely (no re-parse beyond the metadata scan).
@@ -1223,7 +1232,7 @@ struct Ran {
 /// Publish the committed docs' baselines; a row that fails is an error of the pass (its session
 /// is read again next pass) and the rest stick.
 fn publish_dependencies(ran: &mut Ran, consumer: &str) {
-    for (r, why) in cv_core::source::update(consumer, &std::mem::take(&mut ran.dependencies)) {
+    for (r, why) in cv_core::source::update::<InIndex>(consumer, &std::mem::take(&mut ran.dependencies)) {
         let message = format!("search baseline publication failed for {} ({}): {why}", r.id, r.harness);
         eprintln!("cv-search: {message}");
         ran.errors += 1;
@@ -2841,7 +2850,7 @@ pub(crate) fn index_refs(dir: &Path, refs: &[cv_core::SessionRef], catalog: bool
         dependencies.push((r.clone(), source.with_reads(&reads)));
     }
     writer.commit().context("committing index")?;
-    if let Some((r, why)) = cv_core::source::update(&consumer, &dependencies).first() {
+    if let Some((r, why)) = cv_core::source::update::<InIndex>(&consumer, &dependencies).first() {
         anyhow::bail!("publishing the search baseline of {}: {why}", r.id);
     }
     Ok(refs.len())

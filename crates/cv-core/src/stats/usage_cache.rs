@@ -10,6 +10,17 @@ use std::{
 };
 // Bump when usage projection, response identity, model resolution or adapter interpretation changes.
 const VERSION: i64 = 1;
+/// The `usage` consumer's record payload: the digest of the cached projection's header row.
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct Projected {
+    header: u64,
+}
+
+impl crate::source::Payload for Projected {
+    const TAG: &'static str = "usage";
+}
+
+/// The records' key, kept from 0.17 so the rows it wrote are replaced, not orphaned.
 const CONSUMER: &str = "usage-v1";
 const CHUNK: usize = 64 * 1024;
 const SOURCE_LIMIT: u64 = 16 * 1024 * 1024;
@@ -199,13 +210,15 @@ impl Cache {
         })
     }
 }
-/// The output row the source baseline is published with.
-fn header(fallback: &[u8], rows: i64, bytes: u64) -> Vec<u8> {
+/// The output row the source record is published with.
+fn header(fallback: &[u8], rows: i64, bytes: u64) -> Projected {
     let mut out = VERSION.to_le_bytes().to_vec();
     out.extend(rows.to_le_bytes());
     out.extend(bytes.to_le_bytes());
     out.extend(fallback);
-    out
+    Projected {
+        header: crate::source::digest(&out),
+    }
 }
 fn chunk_digest(harness: &str, id: &str, path: &str, index: i64, payload: &[u8]) -> Vec<u8> {
     let mut hash = crate::digest::Sha256::new();

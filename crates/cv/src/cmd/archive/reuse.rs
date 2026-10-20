@@ -2,9 +2,8 @@
 use super::*;
 mod spool;
 use spool::{FirstUser, Prefix, Spool};
-use std::io::{BufReader, BufWriter, Read};
+use std::io::{BufWriter, Read};
 
-const STATE_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "/archive-full5");
 const STATE_BYTES: u64 = 1024 * 1024;
 
 /// A published archive file: its identity, plus off Unix (where `FileId` has no inode or
@@ -37,9 +36,11 @@ impl Artifact {
     }
 }
 
+/// What the archive keeps about one archived source, as the payload of its
+/// [`cv_core::source::Record`] (written to `archive-source/<harness>/<id>.json`): a record of
+/// another cv version does not decode, and its session is archived again.
 #[derive(Serialize, Deserialize)]
 struct Stored {
-    version: String,
     total: usize,
     artifact: Artifact,
     read: cv_core::watch::ReadState,
@@ -50,6 +51,10 @@ struct Stored {
     prefix_turns: usize,
     #[serde(default)]
     first_user: Option<FirstUser>,
+}
+
+impl cv_core::source::Payload for Stored {
+    const TAG: &'static str = "archive";
 }
 
 pub(super) struct StoredPass {
@@ -78,14 +83,10 @@ impl Temporary {
     fn path(&self) -> &Path {
         self.0.path()
     }
-    fn write_json(&mut self, value: &impl Serialize, pretty: bool) -> Result<()> {
-        let mut writer = BufWriter::with_capacity(64 * 1024, self.0.file());
-        if pretty {
-            serde_json::to_writer_pretty(&mut writer, value)?;
-        } else {
-            serde_json::to_writer(&mut writer, value)?;
-        }
-        writer.flush()?;
+    fn write_all(&mut self, bytes: &[u8]) -> Result<()> {
+        let file = self.0.file();
+        file.write_all(bytes)?;
+        file.flush()?;
         Ok(())
     }
     fn publish(self, dest: &Path) -> Result<()> {
@@ -150,8 +151,10 @@ impl Archive {
         if fs::metadata(&path).ok()?.len() > STATE_BYTES {
             return None;
         }
-        let stored: Stored = serde_json::from_reader(BufReader::new(fs::File::open(path).ok()?)).ok()?;
-        (stored.version == STATE_VERSION && stored.artifact.matches(&self.session_path(r.harness, &r.id)))
+        let stored = cv_core::source::Record::<Stored>::decode(&fs::read(path).ok()?)?.payload;
+        stored
+            .artifact
+            .matches(&self.session_path(r.harness, &r.id))
             .then_some(stored)
     }
 
@@ -284,7 +287,6 @@ impl Archive {
             .map_or(0, |prefix| old_turns + turns.before(prefix.messages - pass.prefix));
         if read.fits_cache(STATE_BYTES as usize - 1024) && read.fresh_with(adapter, r) {
             let stored = Stored {
-                version: STATE_VERSION.into(),
                 total,
                 artifact,
                 read: read.clone(),
@@ -295,9 +297,10 @@ impl Archive {
             };
             let dest = self.source_path(r);
             let mut temporary = Temporary::new(&dest)?;
-            temporary.write_json(&stored, false)?;
+            let record = cv_core::source::Record::new(read.source.clone(), stored);
+            temporary.write_all(&record.encode())?;
             let _lock = self.lock_catalog()?;
-            if stored.artifact.matches(&self.session_path(r.harness, &r.id)) && read.fresh_with(adapter, r) {
+            if record.payload.artifact.matches(&self.session_path(r.harness, &r.id)) && read.fresh_with(adapter, r) {
                 temporary.publish(&dest)?;
             }
         }

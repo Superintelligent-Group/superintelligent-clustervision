@@ -93,11 +93,12 @@ struct Cache {
     invalidated: AtomicBool,
 }
 
-/// Bump when discovery changes the interpretation of unchanged source bytes.
-/// 5: 0.18's one bump, covering the `sessions.writer_version` column and the discovery change
-/// that shares it. Unknown writer versions are filled only by ordinary source reads.
+/// What discovery's cached rows mean is the one stored-format version
+/// ([`crate::source::VERSION`]): bump that when discovery changes the interpretation of unchanged
+/// source bytes. 5 is 0.18's, covering the `sessions.writer_version` column; unknown writer
+/// versions are filled only by ordinary source reads.
 #[cfg(feature = "sqlite")]
-pub(crate) const INTERPRETATION_VERSION: u32 = 5;
+pub(crate) const INTERPRETATION_VERSION: u32 = crate::source::VERSION;
 /// Every live cache by catalog. Each environment ([`crate::env`]) retains its current catalog's;
 /// other homes survive only while operations use them.
 static CACHE: OnceLock<RwLock<HashMap<PathBuf, std::sync::Weak<Cache>>>> = OnceLock::new();

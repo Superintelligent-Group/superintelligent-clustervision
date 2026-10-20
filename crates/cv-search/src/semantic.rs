@@ -16,7 +16,7 @@
 //! hundreds of thousands of ASCII floats. Layout, all integers little-endian:
 //!
 //! ```text
-//! [8]  magic  b"CVEMBED\x03"
+//! [8]  magic  b"CVEMBED" + the stored-format version byte (cv_core::source::VERSION)
 //! u32  dim          (vector dimensionality)
 //! u32  count        (number of records)
 //! u64  meta_len
@@ -42,9 +42,14 @@ const PROJECTION_VERSION: u32 = 2;
 /// A small, strong static-embedding model (~30MB, 256-dim). Distilled from a sentence encoder.
 const MODEL_REPO: &str = "minishlab/potion-base-8M";
 
-/// Store header magic: `CVEMBED` + format version 3 (rows hold the discovered `SessionRef`; 2
-/// re-spelled its fields; 1 was the implicit all-JSON store).
-const MAGIC: &[u8; 8] = b"CVEMBED\x03";
+/// Store header magic: `CVEMBED` + the one stored-format version ([`cv_core::source::VERSION`]):
+/// a cv that changes what any store means re-embeds too. 5: rows hold the discovered
+/// `SessionRef`; 2 re-spelled its fields; 1 was the implicit all-JSON store.
+const MAGIC: &[u8; 8] = &{
+    let mut magic = *b"CVEMBED\0";
+    magic[7] = cv_core::source::VERSION as u8;
+    magic
+};
 
 /// Whether the store at `path` is of another `CVEMBED` format version: a refresh re-embeds it
 /// whole, where a query names the command that rebuilds it. Anything else (this version, or

@@ -65,14 +65,11 @@ impl Reader {
         {
             #[cfg(test)]
             self.counts_lookups.set(self.counts_lookups.get() + 1);
-            let (counts, record) = super::imp::count_record_in(&*self.conn.lock().ok()?, r)?;
+            let record = super::imp::count_record_in(&*self.conn.lock().ok()?, r)?;
             #[cfg(test)]
             self.counts_rows.set(self.counts_rows.get() + 1);
-            crate::source::Published::decode(&record)?
-                .of(counts.as_bytes())?
-                .fresh(source, probe)
-                .then_some(())?;
-            super::imp::counts_of(&counts)
+            let record = crate::source::Record::<super::imp::Counted>::decode(&record)?;
+            Some(record.admit(source, probe)?.counts.clone())
         }
         #[cfg(not(feature = "sqlite"))]
         {
@@ -90,28 +87,23 @@ impl Reader {
             let mut probe = crate::source::Probe::default();
             let mut candidates = 0;
             for r in refs.filter(|r| r.message_count.is_none()) {
-                let Some((text, record)) = self
+                let Some(record) = self
                     .conn
                     .lock()
                     .ok()
                     .and_then(|conn| super::imp::count_record_in(&conn, r))
+                    .and_then(|record| crate::source::Record::<super::imp::Counted>::decode(&record))
                 else {
                     continue;
                 };
-                let Some(turns) = super::imp::turns_of(&text) else {
-                    continue;
-                };
-                let Some(published) = crate::source::Published::decode(&record) else {
-                    continue;
-                };
-                let Some(old) = published.of(text.as_bytes()) else {
+                let Some(turns) = record.payload.turns else {
                     continue;
                 };
                 #[cfg(test)]
                 self.turn_snapshots.set(self.turn_snapshots.get() + 1);
                 let source = probe.snapshot(r);
-                if old.fresh(&source, &mut probe) {
-                    r.message_count = Some(turns);
+                if record.admit(&source, &mut probe).is_some() {
+                    r.message_count = Some(turns as usize);
                 }
                 // Bound retained fleet auxiliary metadata while sharing common DB identities
                 // within a batch. One exceptional certificate can still name many dependencies.

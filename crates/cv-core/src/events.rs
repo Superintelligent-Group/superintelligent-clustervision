@@ -690,23 +690,32 @@ mod db {
         Some(conn)
     }
 
-    /// What an event publication's baseline record is published with: the provenance and cwd
-    /// its rows were attributed under. Another provenance's rows are another output.
-    fn authority(r: &SessionRef, prov: &Provenance) -> Vec<u8> {
-        let cwd = r.cwd.as_ref().map(|p| p.to_string_lossy());
-        let mut bytes = Vec::new();
-        for field in [
-            prov.parent_id.as_deref(),
-            prov.agent_id.as_deref(),
-            prov.workflow.as_deref(),
-            cwd.as_deref(),
-        ] {
-            bytes.push(u8::from(field.is_some()));
-            let field = field.unwrap_or_default();
-            bytes.extend((field.len() as u64).to_le_bytes());
-            bytes.extend(field.as_bytes());
+    /// The `events` consumer's record payload: the provenance and cwd its rows were attributed
+    /// under. Another provenance's rows are another output.
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub(crate) struct Attributed {
+        parent_id: Option<String>,
+        agent_id: Option<String>,
+        workflow: Option<String>,
+        cwd: Option<String>,
+    }
+
+    impl crate::source::Payload for Attributed {
+        const TAG: &'static str = "events";
+    }
+
+    fn authority(r: &SessionRef, prov: &Provenance) -> Attributed {
+        Attributed {
+            parent_id: prov.parent_id.clone(),
+            agent_id: prov.agent_id.clone(),
+            workflow: prov.workflow.clone(),
+            cwd: r.cwd.as_ref().map(|p| p.to_string_lossy().into_owned()),
         }
-        bytes
+    }
+
+    /// `r`'s events record, whatever its source now.
+    fn attributed_in(conn: &Connection, r: &SessionRef) -> Option<Attributed> {
+        Some(crate::source::record_in::<Attributed>(conn, "events", r)?.payload)
     }
 
     /// Whether `r` needs an event (re)ingest: its source as captured now is not the one its
@@ -731,7 +740,7 @@ mod db {
     /// opened, every check returns `false` (don't re-stream the corpus into a broken db).
     pub struct SyncTable {
         /// `None` when the catalog is unavailable.
-        baselines: Option<crate::source::Table>,
+        baselines: Option<crate::source::Table<Attributed>>,
     }
 
     impl SyncTable {
@@ -752,15 +761,17 @@ mod db {
         ) -> bool {
             self.baselines
                 .as_ref()
-                .is_some_and(|table| !table.fresh(r, source, &authority(r, provenance), probe))
+                .is_some_and(|table| table.admit(r, source, probe) != Some(&authority(r, provenance)))
         }
 
         /// Whether retained prefix events belong to this source copy and expected provenance.
         /// This is separate from unchanged freshness: an ordinary append changes the identity.
         pub fn can_resume(&self, r: &SessionRef, provenance: &Provenance) -> bool {
-            self.baselines
-                .as_ref()
-                .is_some_and(|table| table.published(r, &authority(r, provenance)).is_some())
+            self.baselines.as_ref().is_some_and(|table| {
+                table
+                    .get(r)
+                    .is_some_and(|record| record.payload == authority(r, provenance))
+            })
         }
     }
 
@@ -805,7 +816,7 @@ mod db {
         prov: &Provenance,
     ) -> Result<rusqlite::Transaction<'a>> {
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        if from > 0 && crate::source::published_in(&tx, "events", r, &authority(r, prov)).is_none() {
+        if from > 0 && attributed_in(&tx, r) != Some(authority(r, prov)) {
             anyhow::bail!("event prefix belongs to another or unknown output authority");
         }
         Ok(tx)
@@ -1235,9 +1246,7 @@ mod db {
             // This is the former production sequence: the read admits a WAL snapshot, then
             // another connection commits before the initial INSERT. Waiting cannot fix it.
             let deferred = first.transaction().unwrap();
-            assert!(
-                crate::source::published_in(&deferred, "events", &r, &authority(&r, &Provenance::default())).is_some()
-            );
+            assert!(attributed_in(&deferred, &r) == Some(authority(&r, &Provenance::default())));
             // Another publication re-attributes the output: its baseline now names that workflow.
             let provenance = Provenance {
                 workflow: Some("intervening".into()),

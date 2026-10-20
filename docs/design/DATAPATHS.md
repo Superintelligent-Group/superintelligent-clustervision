@@ -145,8 +145,10 @@ refreshes that leave the source unchanged and drops it when the source changes. 
    and watch alike; a captured `.jsonl` admits growth by content (`FileId::admits`: same device
    and inode, at least as long, the sampled prefix unchanged), never by waiting. Each adapter
    declares its auxiliary inventory (`Adapter::dependencies`), and each consumer (counts, events,
-   FTS, usage) publishes one `Baseline` record per session, verified on load and carrying its
-   output's freshness; every consumer rereads once after the upgrade. Catalog DB watches include
+   FTS, usage, the archive) stores one `source::Record<T> { version, baseline, payload }` per
+   session, tagged `T::TAG`, written by `Record::encode` and decoded and admitted (`admit`) on
+   load; counts live in their record. `source::VERSION` is the one stored-format version (the
+   view, discovery interpretation and embedding store share it): a bump rereads every consumer once. Catalog DB watches include
    WAL appearance, modification and disappearance. SQL output and stamps publish atomically; FTS
    invalidates its old baseline before changes and publishes a revalidated one after commit.
    Operation-local probes share file stats. Consumers capture conditional Claude fork siblings and

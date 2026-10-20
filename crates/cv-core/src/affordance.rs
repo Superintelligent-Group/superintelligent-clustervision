@@ -26,7 +26,7 @@ use std::collections::HashSet;
 macro_rules! kinds {
     ($( $(#[$m:meta])* $name:ident => $s:literal ),+ $(,)?) => {
         /// One word of the vocabulary. Serialized as its snake_case name.
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, serde::Deserialize)]
         #[serde(rename_all = "snake_case")]
         pub enum Kind { $( $(#[$m])* $name, )+ }
 
@@ -1394,12 +1394,11 @@ fn message_rows(harness: Harness, m: &Message, i: usize, resolver: &crate::lazy:
     Ok(out)
 }
 
-/// The view's version, stored beside the catalog's counts: bump it whenever a kind, a table row or
-/// a reader changes what [`Counter`] would count, so rows an older view counted read as "not
-/// counted" and are recounted, instead of answering `has:<new kind>` with a stale no.
-/// 0.18's coordinated source-stamp epoch invalidates every consumer receipt together; its
-/// interpretation fixes share that one release reread while this payload version stays 5.
-pub const VIEW_VERSION: u32 = 5;
+/// The view's version is the one stored-format version ([`crate::source::VERSION`]): bump that
+/// whenever a kind, a table row or a reader changes what [`Counter`] would count, so counts an
+/// older view recorded no longer decode and are recounted, instead of answering `has:<new kind>`
+/// with a stale no.
+pub const VIEW_VERSION: u32 = crate::source::VERSION;
 
 /// Affordance counts by kind: what the catalog stores per session so `has:<kind>` never parses.
 pub type Counts = std::collections::BTreeMap<Kind, u32>;
