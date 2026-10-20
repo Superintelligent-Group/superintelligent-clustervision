@@ -137,6 +137,25 @@ impl Adapter for Codex {
         Harness::Codex
     }
 
+    /// An app-server `FileChange` item, completed, records its edit in the Codex bag (code mode
+    /// applies patches without an `apply_patch` call the transcript shows).
+    fn native_edit<'m>(&self, m: &'m crate::ir::Message) -> Option<crate::events::NativeEdit<'m>> {
+        let item = m.extra.get("codex")?.get("item")?;
+        if item["type"] != "FileChange" || item["status"] != "completed" {
+            return None;
+        }
+        let mut paths = Vec::new();
+        for (path, change) in item.get("changes").and_then(Value::as_object).into_iter().flatten() {
+            paths.push(path.as_str());
+            paths.extend(change.get("move_path").and_then(Value::as_str));
+        }
+        Some(crate::events::NativeEdit {
+            id: item.get("id").and_then(Value::as_str),
+            tool: "apply_patch",
+            paths,
+        })
+    }
+
     /// A plain `.jsonl` rollout only grows by appended lines; a compressed `.jsonl.zst` one's
     /// byte prefix is not a logical prefix.
     fn append_only(&self, r: &SessionRef) -> Option<super::CountPrefix> {

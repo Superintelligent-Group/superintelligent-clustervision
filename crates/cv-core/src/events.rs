@@ -348,33 +348,19 @@ fn extract_message(
 ) -> Result<()> {
     let mut staged = Vec::new();
     let ts = m.timestamp.map(|t| t.timestamp());
-    if tool.is_none_or(|name| name == "apply_patch") {
-        let item = m.extra.get("codex").and_then(|bag| bag.get("item"));
-        if let Some(item) = item.filter(|item| item["type"] == "FileChange" && item["status"] == "completed") {
-            let id = item.get("id").and_then(serde_json::Value::as_str);
-            if id.map(|id| extractor.inferred_edits.contains(id)).transpose()? == Some(false) {
-                let mut paths = std::collections::BTreeSet::new();
-                for (path, change) in item
-                    .get("changes")
-                    .and_then(serde_json::Value::as_object)
-                    .into_iter()
-                    .flatten()
-                {
-                    paths.insert(absolutize(path, cwd));
-                    if let Some(dest) = change.get("move_path").and_then(serde_json::Value::as_str) {
-                        paths.insert(absolutize(dest, cwd));
-                    }
-                }
-                staged.extend(paths.into_iter().map(|path| Event {
-                    msg_idx,
-                    ts,
-                    kind: "file_edit",
-                    tool: Some("apply_patch".into()),
-                    target: Some(path),
-                    detail: None,
-                    call: false,
-                }));
-            }
+    // A file edit the harness record states outside its tool blocks, unless a call already did.
+    if let Some(edit) = crate::harness::native_edit(m).filter(|edit| tool.is_none_or(|name| name == edit.tool)) {
+        if edit.id.map(|id| extractor.inferred_edits.contains(id)).transpose()? == Some(false) {
+            let paths: std::collections::BTreeSet<_> = edit.paths.iter().map(|path| absolutize(path, cwd)).collect();
+            staged.extend(paths.into_iter().map(|path| Event {
+                msg_idx,
+                ts,
+                kind: "file_edit",
+                tool: Some(edit.tool.into()),
+                target: Some(path),
+                detail: None,
+                call: false,
+            }));
         }
     }
     for b in &m.content {

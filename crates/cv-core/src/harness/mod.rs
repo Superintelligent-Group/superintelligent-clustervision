@@ -483,14 +483,25 @@ pub fn rootless(h: Harness) -> Option<&'static dyn Adapter> {
     })
 }
 
-/// The harness's own kind for an injected-context turn ([`Adapter::attachment_kind`]), asked of
-/// the adapter of each harness bag `m` carries, first answer wins.
-pub fn attachment_kind(m: &Message) -> Option<&str> {
+/// The adapters of the harness bags `m` carries (`extra[<harness>]`), in key order: the ones a
+/// per-message fact is asked of.
+fn bag_owners(m: &Message) -> impl Iterator<Item = &'static dyn Adapter> + '_ {
     m.extra
         .keys()
         .filter_map(|key| Harness::ALL.iter().find(|h| h.as_str() == key))
         .filter_map(|h| rootless(*h))
-        .find_map(|a| a.attachment_kind(m))
+}
+
+/// The harness's own kind for an injected-context turn ([`Adapter::attachment_kind`]), asked of
+/// each bag's adapter, first answer wins.
+pub fn attachment_kind(m: &Message) -> Option<&str> {
+    bag_owners(m).find_map(|a| a.attachment_kind(m))
+}
+
+/// The file edit `m`'s record states outside its tool blocks ([`Adapter::native_edit`]), asked
+/// of each bag's adapter, first answer wins.
+pub fn native_edit(m: &Message) -> Option<crate::events::NativeEdit<'_>> {
+    bag_owners(m).find_map(|a| a.native_edit(m))
 }
 
 /// The adapter for a specific harness, if registered. Detects only that adapter: detection stats
