@@ -21,29 +21,45 @@ use crate::util::{parse_harness, short_id};
 
 mod reuse;
 
-/// One row of the catalog (`catalog.jsonl`). Cheap metadata for listings/search; the full
-/// transcript lives in the per-session JSON under `archive/<harness>/<id>.json`.
+/// One row of the catalog (`catalog.jsonl`): the archived copy as a session row, whose `path` is
+/// the serialized session JSON (relative to the archive home) and whose `message_count` is its
+/// turns, plus how many messages the archive wrote and when.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(from = "Line")]
 pub(crate) struct CatalogEntry {
-    pub harness: String,
-    pub id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<PathBuf>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    pub message_count: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub created_at: Option<DateTime<Utc>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub updated_at: Option<DateTime<Utc>>,
+    #[serde(flatten)]
+    pub session: SessionRef,
+    pub messages_written: usize,
     pub archived_at: DateTime<Utc>,
-    /// Path to the serialized session JSON, relative to the archive home.
-    pub path: PathBuf,
+}
+
+/// A catalog line as stored. A line 0.17 wrote has no `messages_written`: its `message_count`
+/// was that raw count, so it reads as written with its turns not counted.
+#[derive(Deserialize)]
+struct Line {
+    #[serde(flatten)]
+    session: SessionRef,
+    messages_written: Option<usize>,
+    archived_at: DateTime<Utc>,
+}
+
+impl From<Line> for CatalogEntry {
+    fn from(mut line: Line) -> Self {
+        let messages_written = match line.messages_written {
+            Some(n) => n,
+            None => line.session.message_count.take().unwrap_or(0),
+        };
+        CatalogEntry {
+            session: line.session,
+            messages_written,
+            archived_at: line.archived_at,
+        }
+    }
 }
 
 impl CatalogEntry {
     fn key(&self) -> (String, String) {
-        (self.harness.clone(), self.id.clone())
+        (self.session.harness.as_str().into(), self.session.id.clone())
     }
 }
 
@@ -379,21 +395,24 @@ pub(crate) fn cmd_ls(archive: &Archive) -> Result<()> {
         return Ok(());
     }
     entries.sort_by(|a, b| {
-        b.updated_at
+        b.session
+            .updated_at
             .unwrap_or(b.archived_at)
-            .cmp(&a.updated_at.unwrap_or(a.archived_at))
+            .cmp(&a.session.updated_at.unwrap_or(a.archived_at))
     });
 
     for e in &entries {
-        let title = e.title.clone().unwrap_or_else(|| "(untitled)".to_string());
+        let title = e.session.title.clone().unwrap_or_else(|| "(untitled)".to_string());
         let archived = e.archived_at.format("%Y-%m-%d %H:%M");
         println!(
             "{:<9} {:<10} {:>4} msgs  {}  [{}]  {}",
-            e.harness,
-            short_id(&e.id),
-            e.message_count,
+            e.session.harness.as_str(),
+            short_id(&e.session.id),
+            e.session
+                .message_count
+                .map_or_else(|| "-".to_string(), |n| n.to_string()),
             archived,
-            pretty_cwd(e.cwd.as_deref()),
+            pretty_cwd(e.session.cwd.as_deref()),
             truncate(&title.replace('\n', " "), 60),
         );
     }
@@ -424,11 +443,11 @@ mod tests {
         let mut session = Session::new("../../escape", Harness::Claude);
         session.messages.push(cv_core::Message::new(cv_core::Role::User));
         let mut recorded = entry(&session.id, 1);
-        recorded.path = Archive::rel_session_path(session.harness, &session.id);
+        recorded.session.path = Archive::rel_session_path(session.harness, &session.id);
         a.upsert_catalog(recorded).unwrap();
         let catalog = a.load_catalog().unwrap();
-        assert_eq!(catalog[0].id, "../../escape");
-        assert_eq!(catalog[0].path.parent().unwrap(), Path::new("archive/claude"));
+        assert_eq!(catalog[0].session.id, "../../escape");
+        assert_eq!(catalog[0].session.path.parent().unwrap(), Path::new("archive/claude"));
         fs::remove_dir_all(a.home()).unwrap();
     }
 
@@ -439,16 +458,31 @@ mod tests {
 
     fn entry(id: &str, revision: i64) -> CatalogEntry {
         CatalogEntry {
-            harness: "claude".into(),
-            id: id.into(),
-            cwd: None,
-            title: Some(format!("revision {revision}")),
-            message_count: 1,
-            created_at: None,
-            updated_at: None,
+            session: SessionRef {
+                title: Some(format!("revision {revision}")),
+                message_count: Some(1),
+                ..SessionRef::new(id, Harness::Claude, format!("archive/claude/{id}.json"))
+            },
+            messages_written: 1,
             archived_at: DateTime::from_timestamp(revision, 0).unwrap(),
-            path: PathBuf::from(format!("archive/claude/{id}.json")),
         }
+    }
+
+    /// A 0.17 line's `message_count` was the raw count: it reads as `messages_written`, with the
+    /// turns not counted; a current line round-trips.
+    #[test]
+    fn catalog_lines_of_both_shapes_read() {
+        let old = r#"{"harness":"claude","id":"s","title":"t","message_count":48,"archived_at":"2026-10-11T02:24:54Z","path":"archive/claude/s.json"}"#;
+        let read: CatalogEntry = serde_json::from_str(old).unwrap();
+        assert_eq!((read.messages_written, read.session.message_count), (48, None));
+        assert_eq!(read.session.path, Path::new("archive/claude/s.json"));
+        let line = serde_json::to_string(&entry("s", 1)).unwrap();
+        assert_eq!(
+            line,
+            r#"{"id":"s","harness":"claude","path":"archive/claude/s.json","title":"revision 1","message_count":1,"messages_written":1,"archived_at":"1970-01-01T00:00:01Z"}"#
+        );
+        let back: CatalogEntry = serde_json::from_str(&line).unwrap();
+        assert_eq!((back.messages_written, back.session.message_count), (1, Some(1)));
     }
 
     #[test]
@@ -489,7 +523,7 @@ mod tests {
         let entries = a.load_catalog().unwrap();
         assert_eq!(entries.len(), 16);
         for e in entries {
-            let slot: i64 = e.id.rsplit('-').next().unwrap().parse().unwrap();
+            let slot: i64 = e.session.id.rsplit('-').next().unwrap().parse().unwrap();
             assert_eq!(e.archived_at.timestamp(), 248 + slot);
         }
         // Repeated updates still reclaim dead rows as growth crosses a check boundary.

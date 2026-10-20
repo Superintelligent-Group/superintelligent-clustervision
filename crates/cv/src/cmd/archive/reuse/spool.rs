@@ -14,10 +14,37 @@ pub(super) struct FirstUser {
     pub head: Option<String>,
 }
 
+/// Which spooled messages are turns ([`cv_core::Message::is_turn`]), one bit each: the turns of
+/// any stable prefix of them, counted after the pass decides where that prefix ends.
+#[derive(Default)]
+pub(super) struct Turns(Vec<u64>);
+impl Turns {
+    fn push(&mut self, ordinal: usize, turn: bool) {
+        if ordinal.is_multiple_of(64) {
+            self.0.push(0);
+        }
+        if turn {
+            *self.0.last_mut().unwrap() |= 1 << (ordinal % 64);
+        }
+    }
+    /// The turns among the first `n` spooled messages.
+    pub fn before(&self, n: usize) -> usize {
+        let (whole, rest) = (n / 64, n % 64);
+        let full: u32 = self.0.iter().take(whole).map(|word| word.count_ones()).sum();
+        let part = self
+            .0
+            .get(whole)
+            .filter(|_| rest > 0)
+            .map_or(0, |word| (word & ((1 << rest) - 1)).count_ones());
+        (full + part) as usize
+    }
+}
+
 pub(super) struct Spool {
     stage: Option<Counted<BufWriter<ByteStage>>>,
     resolver: cv_core::Resolver,
     messages: usize,
+    turns: Turns,
     error: Option<anyhow::Error>,
     first_user: Option<FirstUser>,
     written: Rc<Cell<u64>>,
@@ -32,12 +59,13 @@ impl Spool {
             }),
             resolver: cv_core::Resolver::new(Some(r.path.clone())),
             messages: 0,
+            turns: Turns::default(),
             error: None,
             first_user: None,
             written,
         }
     }
-    pub fn finish(mut self) -> Result<(ByteSource, usize, Option<FirstUser>, u64)> {
+    pub fn finish(mut self) -> Result<(ByteSource, usize, Turns, Option<FirstUser>, u64)> {
         if let Some(error) = self.error.take() {
             return Err(error);
         }
@@ -48,7 +76,13 @@ impl Spool {
             .inner
             .into_inner()
             .map_err(|error| error.into_error())?;
-        Ok((stage.finish()?, self.messages, self.first_user, self.written.get()))
+        Ok((
+            stage.finish()?,
+            self.messages,
+            self.turns,
+            self.first_user,
+            self.written.get(),
+        ))
     }
 }
 impl cv_core::MessageSink for Spool {
@@ -70,6 +104,7 @@ impl cv_core::MessageSink for Spool {
             }
             let stage = self.stage.as_mut().unwrap();
             cv_core::projection::write_frame(stage, &message, &self.resolver, None)?;
+            self.turns.push(self.messages, message.is_turn());
             self.messages += 1;
             Ok(())
         })();
@@ -98,14 +133,32 @@ mod tests {
         for message in &session.messages {
             assert_eq!(spool.message(message.clone()), Flow::Continue);
         }
-        let (bytes, count, first, _) = spool.finish().unwrap();
+        let (bytes, count, turns, first, _) = spool.finish().unwrap();
         assert_eq!(count, session.messages.len());
+        for n in 0..=count {
+            assert_eq!(
+                turns.before(n),
+                session.messages[..n].iter().filter(|m| m.is_turn()).count()
+            );
+        }
         (bytes, first)
     }
     fn message(text: &str) -> Message {
         let mut message = Message::new(Role::User);
         message.content.push(Block::Text { text: text.into() });
         message
+    }
+
+    #[test]
+    fn turns_before_counts_across_words() {
+        let mut turns = Turns::default();
+        let flags: Vec<bool> = (0..200).map(|i| i % 3 == 0 || i == 64).collect();
+        for (i, &flag) in flags.iter().enumerate() {
+            turns.push(i, flag);
+        }
+        for n in 0..=flags.len() {
+            assert_eq!(turns.before(n), flags[..n].iter().filter(|&&f| f).count());
+        }
     }
 
     #[test]

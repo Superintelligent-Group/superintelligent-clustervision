@@ -4,7 +4,7 @@ mod spool;
 use spool::{FirstUser, Prefix, Spool};
 use std::io::{BufReader, BufWriter, Read};
 
-const STATE_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "/archive-full4");
+const STATE_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "/archive-full5");
 const STATE_BYTES: u64 = 1024 * 1024;
 
 /// A published archive file: its identity, plus off Unix (where `FileId` has no inode or
@@ -45,6 +45,9 @@ struct Stored {
     read: cv_core::watch::ReadState,
     #[serde(default)]
     prefix: Option<Prefix>,
+    /// The turns among the `prefix` messages, for the next pass that copies them.
+    #[serde(default)]
+    prefix_turns: usize,
     #[serde(default)]
     first_user: Option<FirstUser>,
 }
@@ -114,17 +117,23 @@ fn equal_files(left: &Path, right: &Path) -> bool {
     compare(left, right).unwrap_or(false)
 }
 
-fn entry(session: &Session) -> CatalogEntry {
+/// The catalog row of an archived session: `turns` of its `written` messages are turns.
+fn entry(session: &Session, title: Option<String>, turns: usize, written: usize) -> CatalogEntry {
     CatalogEntry {
-        harness: session.harness.as_str().into(),
-        id: session.id.clone(),
-        cwd: session.cwd.clone(),
-        title: session.title.clone().or_else(|| Some(session.label())),
-        message_count: session.messages.len(),
-        created_at: session.created_at,
-        updated_at: session.updated_at,
+        session: SessionRef {
+            cwd: session.cwd.clone(),
+            title,
+            created_at: session.created_at,
+            updated_at: session.updated_at,
+            message_count: Some(turns),
+            ..SessionRef::new(
+                &session.id,
+                session.harness,
+                Archive::rel_session_path(session.harness, &session.id),
+            )
+        },
+        messages_written: written,
         archived_at: Utc::now(),
-        path: Archive::rel_session_path(session.harness, &session.id),
     }
 }
 
@@ -190,7 +199,7 @@ impl Archive {
             spool = Spool::new(r);
             pass = cv_core::watch::read_session_into(adapter, r, None, 0, &mut spool)?;
         }
-        let (spooled, messages, mut first_user, spool_bytes) = spool.finish()?;
+        let (spooled, messages, turns, mut first_user, spool_bytes) = spool.finish()?;
         #[cfg(not(test))]
         let _ = spool_bytes;
         #[cfg(test)]
@@ -201,6 +210,11 @@ impl Archive {
             messages.checked_add(pass.prefix) == Some(pass.total),
             "archive spool length does not match the completed read"
         );
+        anyhow::ensure!(
+            pass.prefix == 0 || old.is_some(),
+            "archive resumed without the prefix it copies"
+        );
+        let old_turns = old.map_or(0, |stored| stored.prefix_turns);
         if let Some(first) = first_user.as_mut() {
             first.ordinal += pass.prefix;
         }
@@ -241,14 +255,13 @@ impl Archive {
                     "archive artifact changed during prefix copy"
                 );
             }
-            let mut entry = entry(&session);
-            entry.message_count = total;
-            entry.title = session.title.clone().or_else(|| {
+            let title = session.title.clone().or_else(|| {
                 Some(cv_core::label_from(
                     None,
                     first_user.as_ref().and_then(|first| first.head.as_deref()),
                 ))
             });
+            let entry = entry(&session, title, old_turns + turns.before(messages), total);
             let outcome = if equal_files(temporary.path(), &dest) {
                 if previous.is_none() {
                     self.upsert_catalog_locked(entry)?;
@@ -264,6 +277,11 @@ impl Archive {
                 Artifact::of(&dest).context("archive artifact disappeared during publication")?,
             )
         };
+        // The new prefix's turns: the copied prefix's, then the spooled ones up to its end.
+        let prefix = prefix.filter(|prefix| prefix.messages >= pass.prefix);
+        let prefix_turns = prefix
+            .as_ref()
+            .map_or(0, |prefix| old_turns + turns.before(prefix.messages - pass.prefix));
         if read.fits_cache(STATE_BYTES as usize - 1024) && read.fresh_with(adapter, r) {
             let stored = Stored {
                 version: STATE_VERSION.into(),
@@ -273,6 +291,7 @@ impl Archive {
                 first_user: first_user
                     .filter(|first| prefix.as_ref().is_some_and(|prefix| first.ordinal <= prefix.messages)),
                 prefix,
+                prefix_turns,
             };
             let dest = self.source_path(r);
             let mut temporary = Temporary::new(&dest)?;
@@ -406,6 +425,19 @@ mod tests {
         assert!(appended.parsed_messages < 2048);
         assert_eq!(appended.total, 4100);
         exact(&a, adapter.as_ref(), &r);
+        let turns = adapter
+            .parse(&r)
+            .unwrap()
+            .messages
+            .iter()
+            .filter(|m| m.is_turn())
+            .count();
+        let row = &a.load_catalog().unwrap()[0];
+        assert_eq!(
+            (row.session.message_count, row.messages_written),
+            (Some(turns), 4100),
+            "a resumed archive counts the copied prefix's turns"
+        );
         fs::write(&controls, "{\"cwd\":\"/changed\"}").unwrap();
         let changed = a.store_ref(adapter.as_ref(), &r).unwrap();
         assert!(!changed.resumed);
@@ -605,7 +637,8 @@ mod tests {
         let repaired = a.store_ref(adapter.as_ref(), &r).unwrap();
         assert_eq!(repaired.total, 8193);
         assert!(a.stored(&r).unwrap().read.fresh(&r));
-        assert_eq!(a.load_catalog().unwrap()[0].message_count, 8193);
+        let row = &a.load_catalog().unwrap()[0];
+        assert_eq!((row.messages_written, row.session.message_count), (8193, Some(8193)));
         exact(&a, adapter.as_ref(), &r);
         fs::remove_dir_all(root).unwrap();
     }

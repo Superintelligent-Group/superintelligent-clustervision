@@ -11,6 +11,7 @@
 - Kimi, Kimi Code and Grok listings take the recorded native title and stop reading at the first fallback prompt.
 - Hermes and Goose listings read session metadata only; Zed projects its snapshot metadata without decoding messages.
 - A listing racing `cv index` no longer loses a discovery update: catalog publication waits for the other writer instead of discarding.
+- **Breaking:** `cv archive ls` counts turns like `cv ls`; `catalog.jsonl` rows keep the raw count as `messages_written`; 0.17's rows show a dash until resynced.
 
 **Reading.**
 - **Breaking (library):** `ParseOptions` and `ExtraProjection` become `Demand { tier, spans, offsets }`; the five `Watcher` poll methods become `poll`/`try_poll(Poll { .. })`.
