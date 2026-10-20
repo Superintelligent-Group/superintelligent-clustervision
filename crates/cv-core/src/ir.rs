@@ -1046,7 +1046,7 @@ impl Message {
 
     /// Whether this message is a conversational turn in [`SessionRef::message_count`]'s sense: a
     /// typed prompt or a model reply. Tool results, injected context, notices, errors and carriers
-    /// are not. The count a full parse writes back to the catalog ([`crate::catalog::fill_count`]).
+    /// are not. The count a full read certifies in the catalog's counts record.
     pub fn is_turn(&self) -> bool {
         matches!(
             (self.role, self.kind),

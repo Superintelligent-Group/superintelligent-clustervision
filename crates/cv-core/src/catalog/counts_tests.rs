@@ -254,7 +254,15 @@ fn exact_turn_extensions_require_valid_payload_receipt_version_and_integer() {
         }
         let text = object.to_string();
         conn.execute("UPDATE affordance_counts SET counts=?1", [&text]).unwrap();
-        crate::source::publish_in(&conn, "counts", &r, &Probe::default().snapshot(&r), text.as_bytes()).unwrap();
+        crate::source::publish_in(
+            &conn,
+            "counts",
+            &r,
+            &Probe::default().snapshot(&r),
+            text.as_bytes(),
+            &mut Probe::default(),
+        )
+        .unwrap();
         let before = reader.turn_snapshots();
         assert_eq!(refilled(&reader, &r), None);
         assert_eq!(
@@ -267,7 +275,15 @@ fn exact_turn_extensions_require_valid_payload_receipt_version_and_integer() {
     old["_v"] = 0.into();
     let text = old.to_string();
     conn.execute("UPDATE affordance_counts SET counts=?1", [&text]).unwrap();
-    crate::source::publish_in(&conn, "counts", &r, &Probe::default().snapshot(&r), text.as_bytes()).unwrap();
+    crate::source::publish_in(
+        &conn,
+        "counts",
+        &r,
+        &Probe::default().snapshot(&r),
+        text.as_bytes(),
+        &mut Probe::default(),
+    )
+    .unwrap();
     assert_eq!(refilled(&reader, &r), None);
     assert_eq!(
         turns_of(&serde_json::json!({"_v":crate::affordance::VIEW_VERSION,"_turns":0}).to_string()),

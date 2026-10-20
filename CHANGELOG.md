@@ -109,6 +109,7 @@
 - **Breaking:** an unknown `cv task events --kind` (or `/api/events?kind=`) exits 2 (400) naming the known kinds; it used to list nothing.
 - **Breaking:** `cv workflow` exits 2 where it dropped flags: run-only flags with no run named, `--revive-all` without `--revive`, `--revive` with `--json`.
 - `cv search` no longer mentions a leftover `index.sqlite`; the sqlite full-text index was retired long ago.
+- cv-core: `catalog::fill_count` is gone; nothing called it since a complete read certifies counts in the counts record.
 
 **Tooling and CI.**
 - `cv schema --json` lists `routes`: every HTTP method/path pattern `cv serve` answers, from the routers' own tables.

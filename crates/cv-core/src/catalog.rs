@@ -121,10 +121,14 @@ mod imp {
 
     /// A catalog this process may not write (a sandbox denying writes to the home, a read-only
     /// copy) still answers reads: its rows serve, and every write fails and is dropped like any
-    /// other catalog error. `mode=ro` reads a WAL catalog through an existing `-shm`; with none and
-    /// no way to create one, `immutable=1` is the only read SQLite allows, and it does not see
-    /// commits a writer elsewhere makes later. Only a catalog of the current interpretation
-    /// serves, since migrating one is a write.
+    /// other catalog error. `mode=ro` reads a WAL catalog through an existing `-shm`. The last
+    /// connection to close removes the `-shm`, and SQLite opens a WAL database read-only only
+    /// where it can create one, or `immutable=1` (wal.html, "Read-Only Databases"): the sandboxed
+    /// read 9a297dd3 (2026-10-15) measured at 1m24s of rediscovery without it. Kept for that
+    /// reason: the absent `-shm` attests that no writer is connected as it opens; an immutable
+    /// read ignores locks and the WAL, so a writer that starts later makes its reads stale or
+    /// fail, and a failed read degrades like any other. Only a catalog of the current
+    /// interpretation serves, since migrating one is a write.
     fn open_read_only(path: &Path) -> Option<Connection> {
         use rusqlite::OpenFlags;
         let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_NO_MUTEX;
@@ -148,6 +152,35 @@ mod imp {
         })
     }
 
+    /// Columns later releases added to tables an older catalog already has, in the order they
+    /// came: `sessions` gained sub-second timestamps for the catalog read path (the second-
+    /// precision columns stay; the event catalog joins them) and the discovered writer version
+    /// (NULL: not observed); `scan_cache` gained its interpretation (nullable: an older binary's
+    /// INSERT OR REPLACE omits it and leaves a stale row), its auxiliary reads and its metadata
+    /// continuation; `resume_marks` gained the device/inode identity (a row without one is read
+    /// whole).
+    const ADDED_COLUMNS: [(&str, &str); 7] = [
+        ("sessions", "created_ns INTEGER"),
+        ("sessions", "updated_ns INTEGER"),
+        ("sessions", "writer_version TEXT"),
+        ("scan_cache", "interpretation_version INTEGER"),
+        ("scan_cache", "source_reads TEXT"),
+        ("scan_cache", "continuation TEXT"),
+        ("resume_marks", "identity TEXT"),
+    ];
+
+    /// Add `column` to `table` unless an earlier (or a concurrent) open already did: "duplicate
+    /// column" is the one failure a migration that already ran leaves, and any other fails the
+    /// open, which then serves read-only.
+    fn add_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<()> {
+        match conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column};")) {
+            Err(rusqlite::Error::SqliteFailure(_, Some(message))) if message.starts_with("duplicate column name") => {
+                Ok(())
+            }
+            result => result,
+        }
+    }
+
     fn open_writable(path: &Path) -> Option<Connection> {
         let mut conn = Connection::open(path).ok()?;
         // WAL + a busy timeout so concurrent cv processes don't error each other out.
@@ -155,6 +188,8 @@ mod imp {
         // Tables of 0.16's shape are dropped: a counts table carrying its own copy of the source
         // signature (counts reread once, published with the one baseline record) and watches
         // recorded as an mtime (one full discovery records identities).
+        // A freshness table of 0.16's columns (a `stamp` beside the record) is dropped too: every
+        // consumer rereads once.
         let legacy: bool = conn
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM pragma_table_info('affordance_counts') WHERE name='sig_a')
@@ -166,6 +201,16 @@ mod imp {
         if legacy {
             conn.execute_batch("DROP TABLE IF EXISTS affordance_counts; DROP TABLE IF EXISTS watched;")
                 .ok()?;
+        }
+        let legacy_sources: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('source_dependencies') WHERE name='stamp')",
+                [],
+                |row| row.get(0),
+            )
+            .ok()?;
+        if legacy_sources {
+            conn.execute_batch("DROP TABLE source_dependencies;").ok()?;
         }
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
@@ -209,43 +254,28 @@ mod imp {
                  key   TEXT PRIMARY KEY,
                  value TEXT NOT NULL
              );
+             CREATE TABLE IF NOT EXISTS resume_marks(
+                 harness TEXT NOT NULL,
+                 id      TEXT NOT NULL,
+                 path    TEXT NOT NULL,
+                 offset  INTEGER NOT NULL,
+                 hash    INTEGER NOT NULL,
+                 version TEXT NOT NULL,
+                 state   TEXT NOT NULL,
+                 PRIMARY KEY(harness, id, path)
+             );
+             CREATE TABLE IF NOT EXISTS source_dependencies(
+                 consumer TEXT NOT NULL, harness TEXT NOT NULL, id TEXT NOT NULL, path TEXT NOT NULL,
+                 record BLOB NOT NULL, PRIMARY KEY(consumer, harness, id, path)
+             );
              -- The seek store (0.14 and earlier) is gone; see `crate::offsets`.
              DROP TABLE IF EXISTS msg_offsets;
              DROP TABLE IF EXISTS msg_offsets_schema;",
         )
         .ok()?;
-        // `sessions` predates the catalog read path, which needs sub-second timestamps to
-        // reproduce discovery's ordering exactly. The original second-precision columns stay (the
-        // event catalog joins them); these ride alongside. Errors ignored: a concurrent open may
-        // have just added them (and a pre-migration reader simply sees NULL → second fallback).
-        let has_ns: bool = conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sessions') WHERE name='updated_ns')",
-                [],
-                |r| r.get(0),
-            )
-            .ok()?;
-        if !has_ns {
-            let _ = conn.execute_batch(
-                "ALTER TABLE sessions ADD COLUMN created_ns INTEGER;
-                 ALTER TABLE sessions ADD COLUMN updated_ns INTEGER;",
-            );
+        for (table, column) in ADDED_COLUMNS {
+            add_column(&conn, table, column).ok()?;
         }
-        // NULL means not observed; recorded versions are historical evidence from discovery.
-        let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN writer_version TEXT;");
-        let has_version: bool = conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('scan_cache') WHERE name='interpretation_version')",
-                [],
-                |row| row.get(0),
-            )
-            .ok()?;
-        if !has_version {
-            // Nullable: an older binary's INSERT OR REPLACE omits it and produces a stale row.
-            let _ = conn.execute_batch("ALTER TABLE scan_cache ADD COLUMN interpretation_version INTEGER;");
-        }
-        let _ = conn.execute_batch("ALTER TABLE scan_cache ADD COLUMN source_reads TEXT;");
-        let _ = conn.execute_batch("ALTER TABLE scan_cache ADD COLUMN continuation TEXT;");
         let version = crate::discover_cache::INTERPRETATION_VERSION.to_string();
         let old: Option<String> = conn
             .query_row(
@@ -343,7 +373,11 @@ mod imp {
             created_at: ts_col(row, 8, 5)?,
             updated_at: ts_col(row, 9, 6)?,
             message_count: row.get::<_, Option<i64>>(7)?.map(|n| n as usize),
-            ..SessionRef::new(row.get::<_, String>(1)?, harness, PathBuf::from(row.get::<_, String>(2)?))
+            ..SessionRef::new(
+                row.get::<_, String>(1)?,
+                harness,
+                PathBuf::from(row.get::<_, String>(2)?),
+            )
         }))
     }
 
@@ -421,7 +455,11 @@ mod imp {
                 created_at: None,
                 updated_at: None,
                 message_count: None,
-                ..SessionRef::new(row.get::<_, String>(1)?, harness, PathBuf::from(row.get::<_, String>(2)?))
+                ..SessionRef::new(
+                    row.get::<_, String>(1)?,
+                    harness,
+                    PathBuf::from(row.get::<_, String>(2)?),
+                )
             }))
         }) else {
             return Default::default();
@@ -817,28 +855,6 @@ mod imp {
         Ok(())
     }
 
-    /// A full parse counted `n` turns in `r`: write it into `r`'s catalog row and its scan-cache
-    /// entry where they hold `NULL` ("not counted"), so listings show it and the next discovery (a
-    /// scan-cache hit while the file is unchanged) keeps it. A row with a count is never touched:
-    /// discovery's number stays the authority wherever it has one. Never creates the catalog.
-    pub fn fill_count(r: &SessionRef, n: usize) {
-        if !db_path().is_some_and(|p| p.exists()) {
-            return;
-        }
-        let Some(conn) = open() else { return };
-        fill_count_in(&conn, r, n);
-    }
-
-    pub(crate) fn fill_count_in(conn: &Connection, r: &SessionRef, n: usize) {
-        let path = r.path.to_string_lossy();
-        let _ = conn.execute(
-            "UPDATE sessions SET message_count=?1
-             WHERE harness=?2 AND id=?3 AND path=?4 AND message_count IS NULL",
-            params![n as i64, r.harness.as_str(), r.id, path],
-        );
-        crate::discover_cache::fill_count(conn, &r.path, r.harness, &r.id, n);
-    }
-
     /// `(harness, id, path)` → the counts text a full read recorded.
     type AffordanceRows = std::collections::HashMap<(String, String, String), String>;
 
@@ -958,20 +974,21 @@ mod imp {
         if turns.is_none() && current != stored {
             return;
         }
-        let write = || -> anyhow::Result<()> {
+        let mut probe = crate::source::Probe::default();
+        let mut write = || -> anyhow::Result<()> {
             if !(keep && current == stored) {
                 tx.execute(
                     "INSERT OR REPLACE INTO affordance_counts(harness,id,path,counts) VALUES(?1,?2,?3,?4)",
                     params![r.harness.as_str(), r.id, path, text],
                 )?;
-                crate::source::publish_in(&tx, "counts", r, source, text.as_bytes())?;
+                crate::source::publish_in(&tx, "counts", r, source, text.as_bytes(), &mut probe)?;
                 anyhow::ensure!(
                     crate::source::published_in(&tx, "counts", r, text.as_bytes()).is_some(),
                     "source changed before count publication"
                 );
             } else {
                 anyhow::ensure!(
-                    crate::source::unchanged(r, source),
+                    crate::source::unchanged_with(r, &probe.primary_path(r), source, &mut probe),
                     "source changed before count refill"
                 );
             }
@@ -1117,11 +1134,6 @@ mod imp {
             self.dependencies
                 .fresh(r, source, text.as_bytes(), probe)
                 .then(|| counts_of(text))?
-        }
-
-        /// Whether `r` has no fresh counts (a sweep re-reads it to fill them).
-        pub fn stale(&self, r: &SessionRef) -> bool {
-            self.counts(r).is_none()
         }
     }
 
@@ -1393,6 +1405,44 @@ mod imp {
             conn.execute_batch("DROP TABLE sessions").unwrap();
             assert!(primary_refs_in(&conn, None).is_empty());
             assert!(primary_refs_in(&conn, Some(Harness::Claude)).is_empty());
+        }
+
+        /// A catalog of the shapes before every added column migrates at open, a second open
+        /// finds each column already there, and any other ALTER failure fails the open.
+        #[test]
+        fn added_columns_migrate_once_and_other_failures_fail_the_open() {
+            let w = crate::test_world("catalog-added-columns");
+            let path = w.cv_home.join("old-catalog.db");
+            Connection::open(&path)
+                .unwrap()
+                .execute_batch(
+                    "CREATE TABLE sessions(harness TEXT NOT NULL, id TEXT NOT NULL, path TEXT NOT NULL, cwd TEXT,
+                         title TEXT, created_at INTEGER, updated_at INTEGER, message_count INTEGER,
+                         PRIMARY KEY(harness, id, path));
+                     CREATE TABLE scan_cache(path TEXT PRIMARY KEY, mtime_ns INTEGER NOT NULL, size INTEGER NOT NULL,
+                         refs TEXT NOT NULL);
+                     CREATE TABLE resume_marks(harness TEXT NOT NULL, id TEXT NOT NULL, path TEXT NOT NULL,
+                         offset INTEGER NOT NULL, hash INTEGER NOT NULL, version TEXT NOT NULL, state TEXT NOT NULL,
+                         PRIMARY KEY(harness, id, path));",
+                )
+                .unwrap();
+            for _ in 0..2 {
+                let conn = open_writable(&path).expect("the migration opens");
+                for (table, column) in ADDED_COLUMNS {
+                    let name = column.split(' ').next().unwrap();
+                    let present: bool = conn
+                        .query_row(
+                            &format!("SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name=?1)"),
+                            [name],
+                            |row| row.get(0),
+                        )
+                        .unwrap();
+                    assert!(present, "{table}.{name}");
+                }
+            }
+            let conn = Connection::open(&path).unwrap();
+            assert!(add_column(&conn, "sessions", "writer_version TEXT").is_ok());
+            assert!(add_column(&conn, "no_such_table", "x TEXT").is_err());
         }
 
         #[test]
@@ -1962,7 +2012,7 @@ pub(crate) enum Watched {
 }
 
 #[cfg(feature = "sqlite")]
-pub use imp::{fill_count, lookup, note_affordances_with_source, sync, writer_versions, AffordanceTable};
+pub use imp::{lookup, note_affordances_with_source, sync, writer_versions, AffordanceTable};
 
 #[cfg(feature = "sqlite")]
 pub(crate) use imp::note_counted_with_source;
@@ -1979,7 +2029,6 @@ pub(crate) fn last_full_sync() -> Option<i64> {
 #[cfg(not(feature = "sqlite"))]
 pub fn sync(_refs: &[SessionRef]) {}
 #[cfg(not(feature = "sqlite"))]
-pub fn fill_count(_r: &SessionRef, _n: usize) {}
 #[cfg(not(feature = "sqlite"))]
 pub fn note_affordances_with_source(
     _r: &SessionRef,
@@ -2021,8 +2070,13 @@ impl AffordanceTable {
     ) -> Option<crate::affordance::Counts> {
         None
     }
-    pub fn stale(&self, _r: &SessionRef) -> bool {
-        false
+}
+
+impl AffordanceTable {
+    /// Whether `r` has no fresh counts (a sweep re-reads it to fill them): without the catalog,
+    /// nothing is ever counted.
+    pub fn stale(&self, r: &SessionRef) -> bool {
+        self.counts(r).is_none()
     }
 }
 #[cfg(not(feature = "sqlite"))]

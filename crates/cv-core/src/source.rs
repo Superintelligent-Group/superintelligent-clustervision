@@ -774,7 +774,12 @@ pub fn unchanged(r: &SessionRef, baseline: &Baseline) -> bool {
 
 /// Publication guard against the concrete adapter's source path.
 pub fn unchanged_from(r: &SessionRef, primary: &Path, baseline: &Baseline) -> bool {
-    let mut probe = Probe::default();
+    unchanged_with(r, primary, baseline, &mut Probe::default())
+}
+
+/// [`unchanged_from`] on the publishing transaction's one probe: its rows' shared files are
+/// stat'ed once, after every pass it publishes.
+pub(crate) fn unchanged_with(r: &SessionRef, primary: &Path, baseline: &Baseline, probe: &mut Probe) -> bool {
     if baseline.primary.is_none() || probe.entry(primary).and_then(|entry| entry.state) != baseline.primary {
         return false;
     }
@@ -869,30 +874,10 @@ impl Table {
     }
 }
 
+/// The catalog connection: `source_dependencies` is part of its migration.
 #[cfg(feature = "sqlite")]
 fn open() -> Option<rusqlite::Connection> {
-    let conn = crate::catalog::open_db()?;
-    ensure_table(&conn).ok()?;
-    Some(conn)
-}
-
-/// The table, in the one-record shape. A table of the older columns is dropped: every consumer
-/// rereads once.
-#[cfg(feature = "sqlite")]
-fn ensure_table(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
-    let legacy: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('source_dependencies') WHERE name='stamp')",
-        [],
-        |row| row.get(0),
-    )?;
-    if legacy {
-        conn.execute_batch("DROP TABLE source_dependencies;")?;
-    }
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS source_dependencies(
-        consumer TEXT NOT NULL,harness TEXT NOT NULL,id TEXT NOT NULL,path TEXT NOT NULL,
-        record BLOB NOT NULL,PRIMARY KEY(consumer,harness,id,path));",
-    )
+    crate::catalog::open_db()
 }
 
 /// One stored baseline, when it was published with `output`. The consumer row and this record
@@ -929,7 +914,7 @@ pub(crate) fn fresh_in(
 
 /// Publish in the same transaction as SQL consumer output `output`. A failure, returned with
 /// its reason, must roll back both. Only a complete pass (its read set recorded) over a source
-/// still unchanged publishes.
+/// still unchanged publishes; `probe` is the transaction's one, created after its passes.
 #[cfg(feature = "sqlite")]
 pub(crate) fn publish_in(
     conn: &rusqlite::Connection,
@@ -937,8 +922,8 @@ pub(crate) fn publish_in(
     r: &SessionRef,
     baseline: &Baseline,
     output: &[u8],
+    probe: &mut Probe,
 ) -> anyhow::Result<()> {
-    ensure_table(conn)?;
     let (h, id, path) = key(r);
     conn.execute(
         "DELETE FROM source_dependencies WHERE consumer=?1 AND harness=?2 AND id=?3 AND path=?4",
@@ -948,7 +933,7 @@ pub(crate) fn publish_in(
         .stamp
         .as_ref()
         .is_some_and(|stamp| stamp.records().is_some_and(|records| records.reads.is_some()));
-    if complete && unchanged(r, baseline) {
+    if complete && unchanged_with(r, &probe.primary_path(r), baseline, probe) {
         let record = Published::encode(baseline, output).ok_or_else(|| anyhow::anyhow!("baseline without a stamp"))?;
         conn.execute(
             "INSERT INTO source_dependencies(consumer,harness,id,path,record) VALUES(?1,?2,?3,?4,?5)",
@@ -961,7 +946,6 @@ pub(crate) fn publish_in(
 /// Forget every baseline of `consumer` on the caller's connection: its output is gone.
 #[cfg(feature = "sqlite")]
 pub(crate) fn forget_in(conn: &rusqlite::Connection, consumer: &str) -> Option<()> {
-    ensure_table(conn).ok()?;
     conn.execute("DELETE FROM source_dependencies WHERE consumer=?1", [consumer])
         .ok()?;
     Some(())
@@ -1033,9 +1017,10 @@ pub fn update(consumer: &str, updates: &[Update]) -> Vec<(SessionRef, String)> {
     let mut publish = || -> anyhow::Result<()> {
         let mut conn = open().ok_or_else(|| anyhow::anyhow!("the catalog cannot be opened"))?;
         let mut tx = conn.transaction()?;
+        let mut probe = Probe::default();
         for (r, baseline) in updates {
             let row = tx.savepoint().map_err(anyhow::Error::from).and_then(|row| {
-                publish_in(&row, consumer, r, baseline, b"")?;
+                publish_in(&row, consumer, r, baseline, b"", &mut probe)?;
                 Ok(row.commit()?)
             });
             if let Err(e) = row {

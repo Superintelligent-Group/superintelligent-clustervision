@@ -381,7 +381,6 @@ mod tests {
         cached_metadata(&path, false).unwrap();
         crate::discover_cache::persist(false);
         let conn = crate::catalog::open_db().unwrap();
-        crate::discover_cache::fill_count(&conn, &path, Harness::Claude, "s", 99);
         let append = "{\"type\":\"user\"}\n";
         fs::OpenOptions::new()
             .append(true)
@@ -393,7 +392,7 @@ mod tests {
         assert_eq!(
             cached_metadata(&path, false).unwrap().message_count,
             Some(1),
-            "growth recounts; a certified fill never overrides discovery's own count"
+            "growth recounts"
         );
         for mutation in 0..8 {
             crate::discover_cache::persist(false);

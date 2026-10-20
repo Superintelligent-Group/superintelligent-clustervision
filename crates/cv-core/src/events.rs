@@ -897,8 +897,15 @@ mod db {
             "DELETE FROM source_dependencies WHERE consumer='events' AND harness=?1 AND id=?2",
             params![harness, r.id],
         )?;
-        crate::source::publish_in(&tx, "events", r, source, &authority(r, prov))
-            .context("event source baseline publication failed")?;
+        crate::source::publish_in(
+            &tx,
+            "events",
+            r,
+            source,
+            &authority(r, prov),
+            &mut crate::source::Probe::default(),
+        )
+        .context("event source baseline publication failed")?;
         tx.commit()?;
         Ok(())
     }
@@ -1236,7 +1243,15 @@ mod db {
                 workflow: Some("intervening".into()),
                 ..Default::default()
             };
-            crate::source::publish_in(&second, "events", &r, &source, &authority(&r, &provenance)).unwrap();
+            crate::source::publish_in(
+                &second,
+                "events",
+                &r,
+                &source,
+                &authority(&r, &provenance),
+                &mut Default::default(),
+            )
+            .unwrap();
             let error = deferred
                 .execute(
                     "INSERT OR IGNORE INTO event_sessions(harness,session_id) VALUES('claude','lock')",

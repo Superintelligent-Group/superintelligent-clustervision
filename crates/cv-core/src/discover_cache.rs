@@ -549,51 +549,6 @@ pub(crate) fn persist_in(conn: &mut rusqlite::Connection, prune: bool) {
         .store(g.values().any(|entry| entry.dirty), Ordering::Relaxed);
 }
 
-/// [`crate::catalog::fill_count`]'s scan-cache half: set `message_count = n` on the cached ref for
-/// `(path, harness, id)` where it is unset, both in the persisted row (left at its recorded
-/// `(mtime, size)`, so a changed file still misses and re-scans) and in this process's copy.
-#[cfg(feature = "sqlite")]
-pub(crate) fn fill_count(conn: &rusqlite::Connection, path: &Path, harness: crate::ir::Harness, id: &str, n: usize) {
-    let fill = |refs: &mut [SessionRef]| {
-        let mut hit = false;
-        for r in refs
-            .iter_mut()
-            .filter(|r| r.harness == harness && r.id == id && r.message_count.is_none())
-        {
-            r.message_count = Some(n);
-            hit = true;
-        }
-        hit
-    };
-    if let Some(cache) = existing_cache(Path::new(conn.path().unwrap_or(""))) {
-        clear_invalidated(&cache);
-        if let Some(e) = cache.entries.write().unwrap().get_mut(path) {
-            if let Some((refs, _)) = e.payload.parsed() {
-                fill(refs);
-            }
-        }
-    }
-    let key = path.to_string_lossy();
-    let Ok(json) = conn.query_row(
-        "SELECT refs FROM scan_cache WHERE path=?1 AND interpretation_version=?2",
-        rusqlite::params![key, INTERPRETATION_VERSION],
-        |row| row.get::<_, String>(0),
-    ) else {
-        return;
-    };
-    let Ok(mut refs) = serde_json::from_str::<Vec<SessionRef>>(&json) else {
-        return;
-    };
-    if fill(&mut refs) {
-        if let Ok(json) = serde_json::to_string(&refs) {
-            let _ = conn.execute(
-                "UPDATE scan_cache SET refs=?1 WHERE path=?2 AND interpretation_version=?3",
-                rusqlite::params![json, key, INTERPRETATION_VERSION],
-            );
-        }
-    }
-}
-
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::*;
@@ -739,7 +694,7 @@ mod tests {
     }
 
     #[test]
-    fn lazy_payload_preserves_demand_guards_count_updates_and_malformed_fallback() {
+    fn lazy_payload_preserves_demand_guards_and_malformed_fallback() {
         let w = crate::test_world("scan-lazy");
         let mut conn = crate::catalog::open_db().unwrap();
         let paths: Vec<_> = ["valid", "invalid", "stale", "invalid-reads"]
@@ -775,13 +730,11 @@ mod tests {
             cache.entries.read().unwrap().is_empty(),
             "no unrelated persisted payload is loaded"
         );
-        // Count publication may demand an encoded row before discovery does.
-        fill_count(&conn, &paths[0], crate::Harness::Claude, "row-0", 2);
         assert_eq!(
             cached_scan(&paths[0], || panic!("valid persisted row must hit"))
                 .unwrap()
-                .message_count,
-            Some(2)
+                .id,
+            expected[0].0.id
         );
         assert_eq!(captured_reads(&paths[0]).unwrap(), expected[0].1);
         assert!(
@@ -819,7 +772,7 @@ mod tests {
         for (i, path) in paths.iter().enumerate() {
             let mut entry = load_entry(&conn, path, stat_key(path).unwrap()).unwrap();
             let (refs, reads) = entry.payload.parsed().unwrap();
-            assert_eq!(refs[0].message_count, [Some(2), None, Some(3), None][i]);
+            assert_eq!(refs[0].message_count, [None, None, Some(3), None][i]);
             assert!(reads.fresh(&mut crate::source::Probe::default()));
         }
         std::fs::remove_file(&paths[1]).unwrap();
@@ -917,30 +870,6 @@ mod tests {
         .unwrap();
         assert!(load_entry(&conn, &path, stat_key(&path).unwrap()).is_none());
     }
-    #[test]
-    fn concurrent_count_update_wins_over_loaded_sql_snapshot() {
-        let world = crate::test_world("scan-admission-count");
-        let path = world.base.join("source");
-        std::fs::write(&path, "metadata").unwrap();
-        let reference = SessionRef::new("counted", crate::Harness::Claude, path.clone());
-        cached_scan(&path, || Some(reference));
-        persist(false);
-        let conn = crate::catalog::open_db().unwrap();
-        let key = stat_key(&path).unwrap();
-        let mut old_sql = load_entry(&conn, &path, key).unwrap();
-        assert_eq!(old_sql.payload.parsed().unwrap().0[0].message_count, None);
-        fill_count(&conn, &path, crate::Harness::Claude, "counted", 7);
-        let cache = current_cache();
-        let mut reads = crate::source::ReadSet::default();
-        reads.record(&path);
-        let actual = admit_loaded(&cache, &path, old_sql, &reads).unwrap();
-        assert_eq!(
-            actual.0[0].message_count,
-            Some(7),
-            "newer process count wins on admission AND return"
-        );
-    }
-
     #[test]
     fn failed_flush_retries_and_prunes_newly_vanished_entries() {
         let w = crate::test_world("scan-persist-retry");

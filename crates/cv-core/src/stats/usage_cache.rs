@@ -399,7 +399,7 @@ impl Publisher {
                 )
                 .ok()?;
             let output = header(&fallback, self.rows, bytes);
-            crate::source::publish_in(&conn, CONSUMER, &self.r, &self.source, &output).ok()?;
+            crate::source::publish_in(&conn, CONSUMER, &self.r, &self.source, &output, &mut Default::default()).ok()?;
             if !crate::source::fresh_in(&conn, CONSUMER, &self.r, &self.source, &output) {
                 return None;
             }

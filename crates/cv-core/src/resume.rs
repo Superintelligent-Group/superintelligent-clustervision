@@ -88,32 +88,9 @@ mod imp {
     use rusqlite::{params, Connection};
     use std::collections::HashMap;
 
+    /// The catalog connection: `resume_marks` is part of its migration.
     fn open() -> Option<Connection> {
-        let conn = crate::catalog::open_db()?;
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS resume_marks(
-                 harness TEXT NOT NULL,
-                 id      TEXT NOT NULL,
-                 path    TEXT NOT NULL,
-                 offset  INTEGER NOT NULL,
-                 hash    INTEGER NOT NULL,
-                 version TEXT NOT NULL,
-                 state   TEXT NOT NULL,
-                 PRIMARY KEY(harness, id, path)
-             );",
-        )
-        .ok()?;
-        let has_identity: bool = conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('resume_marks') WHERE name='identity')",
-                [],
-                |row| row.get(0),
-            )
-            .ok()?;
-        if !has_identity {
-            let _ = conn.execute_batch("ALTER TABLE resume_marks ADD COLUMN identity TEXT;");
-        }
-        Some(conn)
+        crate::catalog::open_db()
     }
 
     fn key(r: &SessionRef) -> (String, String, String) {
