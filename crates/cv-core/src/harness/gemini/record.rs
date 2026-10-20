@@ -96,14 +96,13 @@ fn message(view: JsonView<'_>, d: Demand<'_>, st: &mut EmitState, out: &mut Out<
             let mut m = Message::new(Role::Assistant);
             m.id = id;
             m.timestamp = ts;
-            // The first model seen becomes `Session::model`; a turn records its own only when it
-            // differs (`Message::model` is the exception, not the rule — IR diet).
+            // The first model seen becomes `Session::model`; every turn carries the model its
+            // record states, so a read that starts mid-file reports the same model a full one does.
             if let Some(model) = rec.string("model")? {
-                match st.session_model.as_deref() {
-                    None => st.session_model = Some(model),
-                    Some(m0) if m0 != model => m.model = Some(model),
-                    _ => {}
+                if st.session_model.is_none() {
+                    st.session_model = Some(model.clone());
                 }
+                m.model = Some(model);
             }
             m.usage = rec.get("tokens").map(tokens).transpose()?.flatten();
 

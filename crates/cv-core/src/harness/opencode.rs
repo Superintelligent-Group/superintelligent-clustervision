@@ -385,14 +385,11 @@ impl Adapter for OpenCode {
 }
 
 /// Session facts a message reveals as it streams past: the session model (the first one seen when
-/// the store gave none), the system prompt (a `system` record), and the IR diet — `Message::model`
-/// stays set only when it differs from the session's.
+/// the store gave none) and the system prompt (a `system` record). The message keeps the model its
+/// record states.
 fn fold_into_session(s: &mut Session, m: &mut Message) -> Result<()> {
     if s.model.is_none() {
         s.model = m.model.clone();
-    }
-    if m.model.is_some() && m.model == s.model {
-        m.model = None;
     }
     if m.kind == MessageKind::SystemPrompt && s.system_prompt.is_none() {
         // System prompts are required as owned session metadata even for bounded readers.
@@ -840,7 +837,7 @@ mod db {
                 })?,
                 None => None,
             };
-            let mut built = match decoded {
+            let built = match decoded {
                 Some(Some(built)) => built,
                 Some(None) => {
                     *unknown.entry(ty).or_default() += 1;
@@ -851,18 +848,6 @@ mod db {
                     continue;
                 }
             };
-            if let Some(record) = built.first_mut().and_then(|message| message.complete_record.as_mut()) {
-                let mut model = s.model.clone();
-                let record = std::sync::Arc::make_mut(record);
-                for original in &mut record.projection {
-                    if model.is_none() {
-                        model = original.model.clone();
-                    }
-                    if original.model.is_some() && original.model == model {
-                        original.model = None;
-                    }
-                }
-            }
             for mut m in built {
                 fold_into_session(&mut s, &mut m)?;
                 if sink.message(m) == Flow::Stop {
@@ -1665,13 +1650,13 @@ mod tests {
         let mut s = Session::new("x", Harness::OpenCode);
         fold_into_session(&mut s, &mut m).unwrap();
         assert_eq!(s.system_prompt.as_deref(), Some("You are opencode."));
-        // the IR diet: a message model equal to the session's is dropped, a different one kept
+        // the first model seen becomes the session's; every message keeps the one its record states
         let mut a: Value =
             serde_json::from_str(r#"{"id":"a","role":"assistant","time":{"created":2},"modelID":"m1"}"#).unwrap();
         let mut first = build_messages(&a, &parts(&[r#"{"type":"text","text":"hi"}"#])).remove(0);
         fold_into_session(&mut s, &mut first).unwrap();
         assert_eq!(s.model.as_deref(), Some("m1"));
-        assert_eq!(first.model, None);
+        assert_eq!(first.model.as_deref(), Some("m1"));
         a["modelID"] = json!("m2");
         let mut second = build_messages(&a, &parts(&[r#"{"type":"text","text":"hi"}"#])).remove(0);
         fold_into_session(&mut s, &mut second).unwrap();
@@ -2083,6 +2068,17 @@ mod tests {
 
     #[cfg(feature = "sqlite")]
     #[test]
+    fn windowed_reads_keep_the_model() {
+        let _world = crate::test_world("opencode-windowed");
+        let corpus = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/opencode");
+        for version in ["1.18.20", "2.0.25"] {
+            let data = corpus.join(version).join(".local/share/opencode");
+            crate::harness::assert_windowed_models(&OpenCode::with_data_dir(&data));
+        }
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
     fn db_store_discover_and_parse() {
         for with_metadata in [false, true] {
             let dir = std::env::temp_dir().join(format!("cv-opencode-db-{}", uuid::Uuid::new_v4()));
@@ -2136,8 +2132,14 @@ mod tests {
                 kinds,
                 vec![MessageKind::Prompt, MessageKind::Reply, MessageKind::ToolResult]
             );
-            // both records name the session's own model, so neither carries it (IR diet)
-            assert!(s.messages.iter().all(|m| m.model.is_none()), "{:?}", s.messages);
+            // both records name the model they ran under (the user record under `model.modelID`)
+            assert!(
+                s.messages[..2]
+                    .iter()
+                    .all(|m| m.model.as_deref() == Some("claude-sonnet-4-5")),
+                "{:?}",
+                s.messages
+            );
             assert_eq!(s.messages[1].usage.as_ref().unwrap().cost_usd, Some(0.03));
             for m in &s.messages {
                 assert!(m.extra.keys().all(|k| k == "opencode"), "{:?}", m.extra);

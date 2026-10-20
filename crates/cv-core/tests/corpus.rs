@@ -289,6 +289,7 @@ fn summarize_one(adapter: &dyn Adapter, r: &SessionRef, version_dir: &Path) -> V
         "blocks": blocks,
         "tools": tools,
         "usage_messages": s.messages.iter().filter(|m| m.usage.is_some()).count(),
+        "model_messages": s.messages.iter().filter(|m| m.model.is_some()).count(),
         "compaction_boundaries": indices(MessageKind::CompactionBoundary),
         "subagent_spawns": indices(MessageKind::SubagentSpawn).len(),
         "subagent_returns": indices(MessageKind::SubagentReturn).len(),

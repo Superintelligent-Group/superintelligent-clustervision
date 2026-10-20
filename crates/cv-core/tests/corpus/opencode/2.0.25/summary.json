@@ -19,6 +19,7 @@
         "shell"
       ],
       "usage_messages": 1,
+      "model_messages": 1,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -40,6 +41,7 @@
       },
       "tools": [],
       "usage_messages": 0,
+      "model_messages": 1,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -71,6 +73,7 @@
         "webfetch"
       ],
       "usage_messages": 3,
+      "model_messages": 3,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -109,6 +112,7 @@
         "skill"
       ],
       "usage_messages": 6,
+      "model_messages": 7,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -143,6 +147,7 @@
       },
       "tools": [],
       "usage_messages": 2,
+      "model_messages": 2,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -183,6 +188,7 @@
         "read"
       ],
       "usage_messages": 5,
+      "model_messages": 5,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -211,6 +217,7 @@
         "skill"
       ],
       "usage_messages": 2,
+      "model_messages": 2,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -241,6 +248,7 @@
         "execute"
       ],
       "usage_messages": 2,
+      "model_messages": 2,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -267,6 +275,7 @@
       },
       "tools": [],
       "usage_messages": 3,
+      "model_messages": 3,
       "compaction_boundaries": [
         2
       ],
@@ -291,6 +300,7 @@
       },
       "tools": [],
       "usage_messages": 1,
+      "model_messages": 1,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -330,6 +340,7 @@
         "subagent"
       ],
       "usage_messages": 6,
+      "model_messages": 6,
       "compaction_boundaries": [],
       "subagent_spawns": 1,
       "subagent_returns": 1,
@@ -356,6 +367,7 @@
       },
       "tools": [],
       "usage_messages": 1,
+      "model_messages": 1,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -386,6 +398,7 @@
         "subagent"
       ],
       "usage_messages": 2,
+      "model_messages": 2,
       "compaction_boundaries": [],
       "subagent_spawns": 1,
       "subagent_returns": 1,
@@ -412,6 +425,7 @@
       },
       "tools": [],
       "usage_messages": 1,
+      "model_messages": 1,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -455,6 +469,7 @@
         "shell"
       ],
       "usage_messages": 7,
+      "model_messages": 7,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -494,6 +509,7 @@
         "skill"
       ],
       "usage_messages": 5,
+      "model_messages": 6,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,

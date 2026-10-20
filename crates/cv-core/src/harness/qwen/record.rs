@@ -201,11 +201,10 @@ fn emit(
             let mut m = Message::of_kind(Role::Assistant, MessageKind::Reply, Origin::Model);
             m.content = blocks()?;
             if let Some(model) = r.string("model")? {
-                match st.session_model.as_deref() {
-                    None => st.session_model = Some(model),
-                    Some(m0) if m0 != model => m.model = Some(model),
-                    _ => {}
+                if st.session_model.is_none() {
+                    st.session_model = Some(model.clone());
                 }
+                m.model = Some(model);
             }
             if !matches!(demand, Demand::Discovery) {
                 m.usage = r.get("usageMetadata").map(usage_of).transpose()?.flatten();

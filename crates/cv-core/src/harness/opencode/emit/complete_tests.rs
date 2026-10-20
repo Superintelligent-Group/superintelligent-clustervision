@@ -188,7 +188,16 @@ fn complete_v2_edits_groups_models_and_raw_only_sources_are_guarded() -> Result<
                         }
                     }
                 }
-                "model" => edited.model = Some("changed-model".into()),
+                "model" => {
+                    // The model is a per-turn fact the emitter writes as the turn states it; an
+                    // edit changes the turns (and the session default they share).
+                    edited.model = Some("changed-model".into());
+                    for message in &mut edited.messages {
+                        if message.role == Role::Assistant {
+                            message.model = Some("changed-model".into());
+                        }
+                    }
+                }
                 "delete-derived" => edited.messages.retain(|m| {
                     m.harness_extra(Harness::OpenCode)
                         .and_then(|extra| extra.get("record_owner"))

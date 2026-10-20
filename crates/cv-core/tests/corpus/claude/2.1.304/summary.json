@@ -28,6 +28,7 @@
         "WebFetch"
       ],
       "usage_messages": 3,
+      "model_messages": 3,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -73,6 +74,7 @@
         "ExitWorktree"
       ],
       "usage_messages": 4,
+      "model_messages": 4,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -120,6 +122,7 @@
         "Read"
       ],
       "usage_messages": 6,
+      "model_messages": 6,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -178,6 +181,7 @@
         "ScheduleWakeup"
       ],
       "usage_messages": 11,
+      "model_messages": 11,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -228,6 +232,7 @@
         "Skill"
       ],
       "usage_messages": 4,
+      "model_messages": 4,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -270,6 +275,7 @@
         "Bash"
       ],
       "usage_messages": 2,
+      "model_messages": 2,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -309,6 +315,7 @@
       },
       "tools": [],
       "usage_messages": 3,
+      "model_messages": 2,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -351,6 +358,7 @@
         "Bash"
       ],
       "usage_messages": 3,
+      "model_messages": 3,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -398,6 +406,7 @@
         "Agent"
       ],
       "usage_messages": 5,
+      "model_messages": 5,
       "compaction_boundaries": [],
       "subagent_spawns": 1,
       "subagent_returns": 1,
@@ -431,6 +440,7 @@
           },
           "tools": [],
           "usage_messages": 2,
+          "model_messages": 2,
           "compaction_boundaries": [],
           "subagent_spawns": 0,
           "subagent_returns": 0,
@@ -527,6 +537,7 @@
         "NotebookEdit"
       ],
       "usage_messages": 25,
+      "model_messages": 25,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -582,6 +593,7 @@
         "mcp__corpus__add"
       ],
       "usage_messages": 9,
+      "model_messages": 9,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -621,6 +633,7 @@
         "StructuredOutput"
       ],
       "usage_messages": 2,
+      "model_messages": 2,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -666,6 +679,7 @@
         "Agent"
       ],
       "usage_messages": 5,
+      "model_messages": 5,
       "compaction_boundaries": [],
       "subagent_spawns": 1,
       "subagent_returns": 1,
@@ -699,6 +713,7 @@
             "Agent"
           ],
           "usage_messages": 3,
+          "model_messages": 3,
           "compaction_boundaries": [],
           "subagent_spawns": 1,
           "subagent_returns": 0,
@@ -746,6 +761,7 @@
         "Read"
       ],
       "usage_messages": 3,
+      "model_messages": 3,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -805,6 +821,7 @@
       },
       "tools": [],
       "usage_messages": 8,
+      "model_messages": 8,
       "compaction_boundaries": [
         19
       ],
@@ -856,6 +873,7 @@
         "TaskList"
       ],
       "usage_messages": 6,
+      "model_messages": 6,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -895,6 +913,7 @@
       },
       "tools": [],
       "usage_messages": 2,
+      "model_messages": 2,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -960,6 +979,7 @@
         "SendMessage"
       ],
       "usage_messages": 15,
+      "model_messages": 15,
       "compaction_boundaries": [],
       "subagent_spawns": 2,
       "subagent_returns": 3,
@@ -998,6 +1018,7 @@
             "Read"
           ],
           "usage_messages": 2,
+          "model_messages": 2,
           "compaction_boundaries": [],
           "subagent_spawns": 0,
           "subagent_returns": 0,
@@ -1032,6 +1053,7 @@
           },
           "tools": [],
           "usage_messages": 4,
+          "model_messages": 4,
           "compaction_boundaries": [],
           "subagent_spawns": 0,
           "subagent_returns": 0,
@@ -1078,6 +1100,7 @@
         "Workflow"
       ],
       "usage_messages": 6,
+      "model_messages": 6,
       "compaction_boundaries": [],
       "subagent_spawns": 1,
       "subagent_returns": 1,
@@ -1111,6 +1134,7 @@
           },
           "tools": [],
           "usage_messages": 2,
+          "model_messages": 2,
           "compaction_boundaries": [],
           "subagent_spawns": 0,
           "subagent_returns": 0,
@@ -1141,6 +1165,7 @@
           },
           "tools": [],
           "usage_messages": 2,
+          "model_messages": 2,
           "compaction_boundaries": [],
           "subagent_spawns": 0,
           "subagent_returns": 0,
@@ -1187,6 +1212,7 @@
       },
       "tools": [],
       "usage_messages": 6,
+      "model_messages": 6,
       "compaction_boundaries": [
         0
       ],

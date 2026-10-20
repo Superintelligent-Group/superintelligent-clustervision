@@ -407,7 +407,6 @@ fn stream_history_at(
         return Ok(None);
     }
     let spans = opts.spans.then_some(source);
-    let session_model = s.model.clone();
     let mut pending: Option<Message> = None;
     let mut stopped = false;
     let mut skipped = prior_skipped;
@@ -438,9 +437,6 @@ fn stream_history_at(
                 }
                 read.check_backing()?;
             }
-        }
-        if m.model.is_some() && m.model == session_model {
-            m.model = None;
         }
         let flow = sink.message(m);
         stopped = flow == Flow::Stop;
@@ -1518,6 +1514,13 @@ mod tests {
         // A model reply.
         let a = msg(r#"{"type":"assistant","content":"hi"}"#).unwrap();
         assert_eq!((a.kind, a.origin), (MessageKind::Reply, Origin::Model));
+    }
+
+    #[test]
+    fn windowed_reads_keep_the_model() {
+        let _world = crate::test_world("grok-windowed");
+        let home = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/grok/1.0.50/.grok");
+        crate::harness::assert_windowed_models(&Grok::with_home(&home));
     }
 
     #[test]

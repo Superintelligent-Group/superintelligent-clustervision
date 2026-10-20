@@ -129,6 +129,7 @@
         "Agent"
       ],
       "usage_messages": 36,
+      "model_messages": 0,
       "compaction_boundaries": [
         86
       ],
@@ -168,6 +169,7 @@
           },
           "tools": [],
           "usage_messages": 2,
+          "model_messages": 0,
           "compaction_boundaries": [],
           "subagent_spawns": 0,
           "subagent_returns": 0,

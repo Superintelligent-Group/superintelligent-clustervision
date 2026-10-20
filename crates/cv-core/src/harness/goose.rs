@@ -613,8 +613,7 @@ fn stream_db_opts_with_reads(
             tokens: row.get::<_, Option<i64>>(5).ok().flatten(),
             metadata,
         };
-        let Some(mut m) = row.into_message_decoded(decoded, s.model.as_deref(), &mut history, opts.wants_full_extra())
-        else {
+        let Some(mut m) = row.into_message_decoded(decoded, &mut history, opts.wants_full_extra()) else {
             continue;
         };
         if m.kind == MessageKind::Prompt {
@@ -682,13 +681,7 @@ struct AgentHistory {
 }
 
 impl DbMsg {
-    fn into_message_decoded(
-        self,
-        decoded: Decoded,
-        session_model: Option<&str>,
-        history: &mut AgentHistory,
-        rich: bool,
-    ) -> Option<Message> {
+    fn into_message_decoded(self, decoded: Decoded, history: &mut AgentHistory, rich: bool) -> Option<Message> {
         let meta = self.metadata;
         let flag = |k: &str| meta.as_ref().and_then(|m| m.get(k)).and_then(Value::as_bool);
         let agent_visible = flag("agentVisible") != Some(false);
@@ -709,7 +702,7 @@ impl DbMsg {
             decoded,
         )?;
         if let Some(meta) = meta {
-            apply_metadata(&mut m, meta, session_model, compaction_summary);
+            apply_metadata(&mut m, meta, compaction_summary);
         }
         if !rich {
             omit_rich_details(&mut m);
@@ -743,7 +736,7 @@ fn omit_rich_details(message: &mut Message) {
 /// [`MessageKind::InjectedContext`], so a user-text count or a `cv show`
 /// reads as the user saw it while the model-visible context is still there. Verified on a real
 /// 1.51.0 store.
-fn apply_metadata(m: &mut Message, meta: Value, session_model: Option<&str>, compaction_summary: bool) {
+fn apply_metadata(m: &mut Message, meta: Value, compaction_summary: bool) {
     let hidden = meta.get("userVisible") == Some(&Value::Bool(false));
     let compaction = compaction_summary || meta.pointer("/usage/isCompaction") == Some(&Value::Bool(true));
     if hidden && matches!(m.role, Role::User | Role::Assistant) {
@@ -770,21 +763,18 @@ fn apply_metadata(m: &mut Message, meta: Value, session_model: Option<&str>, com
         }
     }
     if let Some(inf) = meta.get("inference") {
-        // The same `provider/model` shape as `Session::model` (`reconstruct_model`), recorded only
-        // when it differs — the resolved snapshot, a switched provider (IR diet).
+        // The same `provider/model` shape as `Session::model` (`reconstruct_model`): the resolved
+        // snapshot the row records, else the requested model.
         let model = inf
             .get("resolvedModel")
             .or_else(|| inf.get("requestedModel"))
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty());
         let provider = inf.get("provider").and_then(Value::as_str).filter(|s| !s.is_empty());
-        let model = model.map(|name| match provider {
+        m.model = model.map(|name| match provider {
             Some(p) => format!("{p}/{name}"),
             None => name.to_string(),
         });
-        if let Some(model) = model.filter(|model| session_model != Some(model.as_str())) {
-            m.model = Some(model);
-        }
     }
     if meta.is_object() {
         m.harness_extra_mut(Harness::Goose).insert("metadata".into(), meta);
@@ -1082,6 +1072,13 @@ mod tests {
     }
 
     #[test]
+    fn windowed_reads_keep_the_model() {
+        let _world = crate::test_world("goose-windowed");
+        let sessions = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/goose/1.54.0/sessions");
+        crate::harness::assert_windowed_models(&Goose::with_sessions_dir(&sessions));
+    }
+
+    #[test]
     fn parses_modern_db_text_and_tools() {
         let c = mk(SCHEMA);
         c.execute(
@@ -1173,7 +1170,7 @@ mod tests {
 
         // A stub-provider turn: prompt, the injected `<turn-context>` row (hidden from the user →
         // System / injected context), the reply with real usage; the session model is
-        // provider/model and the reply's `openai/stub-model` is the same, so it is not repeated.
+        // provider/model and the reply records the same shape from its inference metadata.
         let s = parse_db(&c, &sref(&c, "20260919_3")).unwrap();
         assert_eq!(s.model.as_deref(), Some("openai/stub-model"));
         assert_eq!(
@@ -1193,7 +1190,11 @@ mod tests {
         assert_eq!(bag(&s.messages[1])["metadata"]["turnContext"], true);
         assert!(s.messages[1].text().unwrap().starts_with("<turn-context>"));
         let a = &s.messages[2];
-        assert_eq!(a.model, None, "same as the session model");
+        assert_eq!(
+            a.model.as_deref(),
+            Some("openai/stub-model"),
+            "the row's inference metadata"
+        );
         let u = a.usage.as_ref().unwrap();
         assert_eq!(
             (u.input_tokens, u.output_tokens, u.cache_read_tokens, u.cost_usd),

@@ -401,8 +401,8 @@ impl Features {
         if m.usage.as_ref().and_then(|u| u.cost_usd).is_some() && m.role == Role::Assistant {
             f.cost += 1;
         }
-        // Effective model: a turn's own model, else the session default (the "model only when it
-        // differs" IR rule means comparing raw `Message::model` would flag non-losses).
+        // Effective model: a turn's own model, else the session default (a target that records the
+        // model once per session still carries it, so raw `Message::model` would flag non-losses).
         if m.model.is_some() || session_model {
             f.model_eff += 1;
         }

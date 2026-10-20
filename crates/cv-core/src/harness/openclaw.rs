@@ -461,11 +461,6 @@ impl Fold {
                     }
                 }
             }
-            // IR diet: a turn names its model only when it differs from the session's. A
-            // `ModelChange` always names the model it switched to.
-            if m.kind != MessageKind::ModelChange && m.model.is_some() && m.model == s.model {
-                m.model = None;
-            }
             if m.kind == MessageKind::SystemPrompt && s.system_prompt.is_none() {
                 s.system_prompt = m.text();
             }
@@ -2241,8 +2236,15 @@ mod tests {
         // never a parent of anything on the path.
         assert_eq!(s.messages[2].parent_id.as_deref(), Some("a1"));
         assert_eq!(c1.parent_id.as_deref(), Some("si"));
-        // the session model is on the session, not repeated on every reply (IR diet)
-        assert!(s.messages.iter().all(|m| m.model.is_none()), "{:?}", s.messages);
+        // every reply states the model its row names; the first one is also the session's
+        assert!(
+            s.messages
+                .iter()
+                .filter(|m| m.role == Role::Assistant)
+                .all(|m| m.model.as_deref() == Some("claude-opus-4")),
+            "{:?}",
+            s.messages
+        );
         for m in &s.messages {
             assert!(m.extra.keys().all(|k| k == "openclaw"), "{:?}", m.extra);
         }
@@ -2635,6 +2637,13 @@ mod tests {
     }
 
     #[test]
+    fn windowed_reads_keep_the_model() {
+        let _world = crate::test_world("openclaw-windowed");
+        let state = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/openclaw/2026.1.29");
+        crate::harness::assert_windowed_models(&OpenClaw::with_state_dir(&state));
+    }
+
+    #[test]
     fn parses_v3_full_content_union() {
         let s = parse_fixture("v3-full.jsonl");
         // header cwd + created_at pulled from the session line
@@ -2647,7 +2656,11 @@ mod tests {
         // but its model is not promoted to the session model)
         assert_eq!(s.messages.len(), 4);
         assert_eq!(s.messages[3].model.as_deref(), Some("delivery-mirror"));
-        assert_eq!(s.messages[1].model, None, "the session's own model is not repeated");
+        assert_eq!(
+            s.messages[1].model.as_deref(),
+            Some("claude-opus-4"),
+            "the reply states its model"
+        );
         let user = &s.messages[0];
         assert_eq!(user.role, Role::User);
         assert_eq!((user.kind, user.origin), (MessageKind::Prompt, Origin::Human));

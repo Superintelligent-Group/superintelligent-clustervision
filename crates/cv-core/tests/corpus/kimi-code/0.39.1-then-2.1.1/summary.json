@@ -29,6 +29,7 @@
       },
       "tools": [],
       "usage_messages": 2,
+      "model_messages": 0,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -222,6 +223,7 @@
         "AgentSwarm"
       ],
       "usage_messages": 44,
+      "model_messages": 0,
       "compaction_boundaries": [
         127
       ],
@@ -269,6 +271,7 @@
           },
           "tools": [],
           "usage_messages": 2,
+          "model_messages": 0,
           "compaction_boundaries": [],
           "subagent_spawns": 0,
           "subagent_returns": 0,
@@ -301,6 +304,7 @@
           },
           "tools": [],
           "usage_messages": 2,
+          "model_messages": 0,
           "compaction_boundaries": [],
           "subagent_spawns": 0,
           "subagent_returns": 0,
@@ -333,6 +337,7 @@
           },
           "tools": [],
           "usage_messages": 2,
+          "model_messages": 0,
           "compaction_boundaries": [],
           "subagent_spawns": 0,
           "subagent_returns": 0,
@@ -360,6 +365,7 @@
       },
       "tools": [],
       "usage_messages": 0,
+      "model_messages": 0,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,

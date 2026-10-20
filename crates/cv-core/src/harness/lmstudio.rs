@@ -356,12 +356,12 @@ fn projected_step(
             let model = gen.get("indexedModelIdentifier").or_else(|| gen.get("identifier"));
             if let Some(model) = model.map(|v| v.text(false)).transpose()?.flatten() {
                 let model = model.inline_str().expect("inline metadata");
-                match session_model {
-                    None => *session_model = Some(model.to_owned()),
-                    Some(current) if current != model && message.model.is_none() => {
-                        message.model = Some(model.to_owned())
-                    }
-                    _ => {}
+                if session_model.is_none() {
+                    *session_model = Some(model.to_owned());
+                }
+                // The first step with generation info names the model the turn ran under.
+                if message.model.is_none() {
+                    message.model = Some(model.to_owned());
                 }
             }
             if message.usage.is_none() {
@@ -1101,8 +1101,8 @@ mod tests {
             _ => unreachable!(),
         }
         assert_eq!(a.text().as_deref(), Some("Hi! How can I help?"));
-        // IR diet: the assistant's model equals the session default, so it is not repeated.
-        assert!(a.model.is_none());
+        // The turn's model from its genInfo; the first one seen is also the session's.
+        assert_eq!(a.model.as_deref(), Some("openai/gpt-oss-120b"));
         assert_eq!(s.model.as_deref(), Some("openai/gpt-oss-120b"));
         assert_eq!((u.kind, u.origin), (MessageKind::Prompt, Origin::Human));
         assert_eq!((a.kind, a.origin), (MessageKind::Reply, Origin::Model));
@@ -1110,6 +1110,29 @@ mod tests {
         assert_eq!(usage.input_tokens, Some(12));
         assert_eq!(usage.output_tokens, Some(34));
         assert!(a.timestamp.is_some(), "timestamp from stepIdentifier");
+    }
+
+    #[test]
+    fn windowed_reads_keep_the_model() {
+        let _world = crate::test_world("lmstudio-windowed");
+        let dir = std::env::temp_dir().join(format!("cv-lmstudio-windowed-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let turn = |role: &str, text: &str, gen: &str| {
+            format!(
+                r#"{{"versions":[{{"type":"multiStep","role":"{role}","steps":[{{"type":"contentBlock","stepIdentifier":"1754425095001-0.91","content":[{{"type":"text","text":"{text}"}}]{gen}}}]}}],"currentlySelected":0}}"#
+            )
+        };
+        let gen = r#","genInfo":{"indexedModelIdentifier":"openai/gpt-oss-120b","stats":{"promptTokensCount":1,"predictedTokensCount":2}}"#;
+        let doc = format!(
+            r#"{{"name":"two turns","createdAt":1754425038609,"messages":[{},{},{},{}]}}"#,
+            turn("user", "hi", ""),
+            turn("assistant", "hello", gen),
+            turn("user", "again", ""),
+            turn("assistant", "hello again", gen)
+        );
+        fs::write(dir.join("two.conversation.json"), doc).unwrap();
+        crate::harness::assert_windowed_models(&LmStudio::with_root(&dir));
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1304,9 +1327,10 @@ mod tests {
             "thinking block round-trips via style.type==thinking"
         );
         assert_eq!(a.text().as_deref(), Some("Hi! How can I help?"));
-        assert!(
-            a.model.is_none(),
-            "model rides on the session, not repeated on the turn"
+        assert_eq!(
+            a.model.as_deref(),
+            Some("openai/gpt-oss-120b"),
+            "the turn's genInfo names its model"
         );
         assert_eq!(parsed.model.as_deref(), Some("openai/gpt-oss-120b"));
         let usage = a.usage.as_ref().expect("usage round-trips");
@@ -1354,8 +1378,8 @@ mod tests {
             }
             other => panic!("expected Text, got {other:?}"),
         }
-        // Model + usage still parsed from genInfo (model on the session, not repeated per message).
-        assert!(a.model.is_none());
+        // Model + usage still parsed from genInfo (on the turn, and the first one on the session).
+        assert_eq!(a.model.as_deref(), Some("openai/gpt-oss-120b"));
         assert_eq!(s.model.as_deref(), Some("openai/gpt-oss-120b"));
         assert_eq!(a.usage.as_ref().unwrap().output_tokens, Some(68));
     }

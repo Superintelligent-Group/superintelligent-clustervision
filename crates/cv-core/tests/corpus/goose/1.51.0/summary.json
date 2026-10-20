@@ -45,6 +45,7 @@
         "todo__todo_write"
       ],
       "usage_messages": 9,
+      "model_messages": 10,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -81,6 +82,7 @@
         "shell"
       ],
       "usage_messages": 2,
+      "model_messages": 3,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -111,6 +113,7 @@
         "todo__todo_write"
       ],
       "usage_messages": 1,
+      "model_messages": 1,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -137,6 +140,7 @@
       },
       "tools": [],
       "usage_messages": 1,
+      "model_messages": 1,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -160,6 +164,7 @@
       },
       "tools": [],
       "usage_messages": 1,
+      "model_messages": 1,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -194,6 +199,7 @@
         "chatrecall__chatrecall"
       ],
       "usage_messages": 2,
+      "model_messages": 3,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -218,6 +224,7 @@
       },
       "tools": [],
       "usage_messages": 0,
+      "model_messages": 0,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -271,6 +278,7 @@
         "todo__todo_write"
       ],
       "usage_messages": 9,
+      "model_messages": 10,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -307,6 +315,7 @@
         "Edit"
       ],
       "usage_messages": 0,
+      "model_messages": 0,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -390,6 +399,7 @@
         "todo__todo_write"
       ],
       "usage_messages": 13,
+      "model_messages": 20,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -428,6 +438,7 @@
         "todo__todo_write"
       ],
       "usage_messages": 3,
+      "model_messages": 4,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -469,6 +480,7 @@
         "todo__todo_write"
       ],
       "usage_messages": 4,
+      "model_messages": 4,
       "compaction_boundaries": [
         6
       ],
@@ -509,6 +521,7 @@
         "todo__todo_write"
       ],
       "usage_messages": 3,
+      "model_messages": 4,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -547,6 +560,7 @@
         "todo__todo_write"
       ],
       "usage_messages": 4,
+      "model_messages": 4,
       "compaction_boundaries": [],
       "subagent_spawns": 1,
       "subagent_returns": 1,
@@ -575,6 +589,7 @@
       },
       "tools": [],
       "usage_messages": 1,
+      "model_messages": 1,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -606,6 +621,7 @@
         "todo__todo_write"
       ],
       "usage_messages": 2,
+      "model_messages": 2,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -638,6 +654,7 @@
         "load_skill"
       ],
       "usage_messages": 2,
+      "model_messages": 2,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,

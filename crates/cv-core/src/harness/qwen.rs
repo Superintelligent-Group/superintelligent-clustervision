@@ -1182,7 +1182,20 @@ mod tests {
                 assert_eq!(k, "qwen", "flat or misfiled extra key {k:?}");
             }
         }
-        assert!(s.messages.iter().all(|m| m.model.is_none()), "one model throughout");
+        assert!(
+            s.messages
+                .iter()
+                .filter(|m| m.role == Role::Assistant)
+                .all(|m| m.model.as_deref() == Some("gemini-3-flash-preview")),
+            "one model throughout, stated on every assistant record"
+        );
+    }
+
+    #[test]
+    fn windowed_reads_keep_the_model() {
+        let _world = crate::test_world("qwen-windowed");
+        let home = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/qwen/0.25.1/.qwen");
+        crate::harness::assert_windowed_models(&Qwen::with_home(&home));
     }
 
     #[test]

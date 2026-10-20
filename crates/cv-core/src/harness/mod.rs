@@ -405,6 +405,64 @@ pub(crate) fn assert_no_flat_keys(s: &Session) {
     }
 }
 
+/// A message carries the model its record states however much of the session preceded it
+/// (INTERFACE-V2 §4). For every discovered session with a later assistant turn that a full read
+/// gives a model, a read that discards everything before that turn, which is what `cv show
+/// --range N..` and `--last N` do, reports the same model on its first delivered message.
+#[cfg(test)]
+pub(crate) fn assert_windowed_models(adapter: &dyn Adapter) {
+    use crate::ir::{Message, Role};
+    struct Window {
+        start: usize,
+        seen: usize,
+        first: Option<Option<String>>,
+    }
+    impl MessageSink for Window {
+        fn message(&mut self, m: Message) -> Flow {
+            self.seen += 1;
+            if self.seen <= self.start {
+                return Flow::Continue;
+            }
+            self.first = Some(m.model);
+            Flow::Stop
+        }
+    }
+    let mut checked = 0;
+    for r in adapter.discover().expect("discover") {
+        let s = adapter
+            .parse(&r)
+            .unwrap_or_else(|e| panic!("parsing {}: {e:#}", r.path.display()));
+        let Some(start) = s
+            .messages
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.role == Role::Assistant)
+            .skip(1)
+            .find(|(_, m)| m.model.is_some())
+            .map(|(i, _)| i)
+        else {
+            continue;
+        };
+        let mut w = Window {
+            start,
+            seen: 0,
+            first: None,
+        };
+        adapter
+            .try_stream(&r, &ParseOptions::lazy(), &mut w)
+            .unwrap_or_else(|e| panic!("windowed read of {}: {e:#}", r.id));
+        let windowed = w
+            .first
+            .unwrap_or_else(|| panic!("{}: the window from message {start} delivered nothing", r.id));
+        assert_eq!(windowed, s.messages[start].model, "{}: message {start}", r.id);
+        checked += 1;
+    }
+    assert!(
+        checked > 0,
+        "no session with a later assistant turn that states its model"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

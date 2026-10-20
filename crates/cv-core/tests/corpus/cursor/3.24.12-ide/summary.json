@@ -76,6 +76,7 @@
         "run_terminal_command_v2"
       ],
       "usage_messages": 44,
+      "model_messages": 4,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,

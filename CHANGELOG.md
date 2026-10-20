@@ -13,6 +13,7 @@
 - A listing racing `cv index` no longer loses a discovery update: catalog publication waits for the other writer instead of discarding.
 
 **Reading.**
+- Gemini, Qwen, Goose, Grok, LM Studio, OpenClaw and OpenCode report the model on every turn the harness wrote it; windowed reads no longer lose it.
 - Every JSONL adapter reads its transcript through one captured source (`store::jsonl::Read`); each adapter keeps its own resume protocol.
 - A reader checks its source after a slow callback, a checkpoint and at EOF; a replaced or truncated file is an error, never a crash.
 - Native Codex file-change records feed `cv touched`, tool histograms and query facts, including code-mode edits, without duplicating visible patch calls.

@@ -1633,8 +1633,11 @@ mod tests {
             ]
         );
         assert!(
-            s.messages.iter().all(|m| m.model.is_none()),
-            "every turn used the session model, so none repeats it"
+            s.messages
+                .iter()
+                .filter(|m| m.role == Role::Assistant)
+                .all(|m| m.model.as_deref() == Some("gemini-3-flash-preview")),
+            "every assistant record states its model"
         );
 
         let asst = &s.messages[1];
@@ -1717,12 +1720,19 @@ mod tests {
     }
 
     #[test]
-    fn message_model_only_when_it_differs_from_the_session() {
+    fn every_turn_states_the_model_its_record_names() {
         let text = fixture("session_model_fallback.jsonl");
         let s = &parse_all_str(&text, None)[0];
         assert_eq!(s.model.as_deref(), Some("gemini-3-pro"));
-        assert_eq!(s.messages[1].model, None);
+        assert_eq!(s.messages[1].model.as_deref(), Some("gemini-3-pro"));
         assert_eq!(s.messages[2].model.as_deref(), Some("gemini-3-flash"));
+    }
+
+    #[test]
+    fn windowed_reads_keep_the_model() {
+        let _world = crate::test_world("gemini-windowed");
+        let home = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/gemini/0.63.0/.gemini");
+        crate::harness::assert_windowed_models(&Gemini::with_home(&home));
     }
 
     #[test]
@@ -1853,7 +1863,13 @@ mod tests {
         assert_eq!(b.harness_extra(Harness::Gemini).unwrap()["rewind_to"], "a3");
         assert_eq!(b.harness_extra(Harness::Gemini).unwrap()["record_type"], "rewind");
         assert_eq!(s.messages[branches[0] + 1].id.as_deref(), Some("a3"));
-        assert!(s.messages.iter().all(|m| m.model.is_none()), "one model throughout");
+        assert!(
+            s.messages
+                .iter()
+                .filter(|m| m.role == Role::Assistant)
+                .all(|m| m.model.as_deref() == Some("gemini-3-pro")),
+            "one model throughout, stated on every assistant record"
+        );
         assert_nested_extra(s, Harness::Gemini);
 
         // tool call + result present

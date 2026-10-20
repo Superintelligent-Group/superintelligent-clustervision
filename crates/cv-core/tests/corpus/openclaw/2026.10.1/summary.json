@@ -31,6 +31,7 @@
         "tool_call/openclaw:core:automations"
       ],
       "usage_messages": 4,
+      "model_messages": 5,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -69,6 +70,7 @@
         "tool_call/mcp:corpus:corpus__add"
       ],
       "usage_messages": 3,
+      "model_messages": 4,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -107,6 +109,7 @@
         "sessions_yield"
       ],
       "usage_messages": 3,
+      "model_messages": 4,
       "compaction_boundaries": [],
       "subagent_spawns": 1,
       "subagent_returns": 1,
@@ -136,6 +139,7 @@
       },
       "tools": [],
       "usage_messages": 1,
+      "model_messages": 2,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -196,6 +200,7 @@
         "process"
       ],
       "usage_messages": 11,
+      "model_messages": 12,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -223,6 +228,7 @@
       },
       "tools": [],
       "usage_messages": 1,
+      "model_messages": 2,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -267,6 +273,7 @@
         "exec"
       ],
       "usage_messages": 5,
+      "model_messages": 6,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -312,6 +319,7 @@
         "read"
       ],
       "usage_messages": 5,
+      "model_messages": 7,
       "compaction_boundaries": [
         4,
         10
@@ -348,6 +356,7 @@
       },
       "tools": [],
       "usage_messages": 4,
+      "model_messages": 5,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
@@ -381,6 +390,7 @@
         "view_image"
       ],
       "usage_messages": 2,
+      "model_messages": 3,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
