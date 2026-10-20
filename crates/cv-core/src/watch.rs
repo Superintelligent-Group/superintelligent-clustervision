@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 mod read;
-pub use read::{read as read_tail, read_session, read_session_into, ReadPass, ReadState};
+pub use read::{read as read_tail, read_session, read_session_into, Held, ReadPass, ReadState};
 
 /// What changed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,7 +194,9 @@ impl State {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Pos {
     t: (Option<usize>, Option<i64>),
-    n: usize,
+    /// Absent while `b` holds the mark (a cursor issued before it was optional says 0 there).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    n: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     b: Option<u64>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -206,8 +208,8 @@ struct Pos {
 impl From<&State> for Pos {
     fn from(s: &State) -> Pos {
         let (n, b) = match s.mark {
-            Mark::Messages(n) => (n, None),
-            Mark::Bytes(len) => (0, Some(len)),
+            Mark::Messages(n) => (Some(n), None),
+            Mark::Bytes(len) => (None, Some(len)),
         };
         Pos {
             t: s.trigger,
@@ -225,7 +227,7 @@ impl From<Pos> for State {
             trigger: p.t,
             mark: match p.b {
                 Some(len) => Mark::Bytes(len),
-                None => Mark::Messages(p.n),
+                None => Mark::Messages(p.n.unwrap_or(0)),
             },
             pending: p.more,
             read: p.r,
@@ -1251,7 +1253,7 @@ mod tests {
                 "claude:original".into(),
                 Pos {
                     t: (Some(0), None),
-                    n: 12,
+                    n: Some(12),
                     b: None,
                     more: false,
                     r: None,
@@ -1616,7 +1618,16 @@ mod tests {
         assert_eq!(cursor.o.values().filter(|pos| pos.r.is_some()).count(), 8);
         assert!(cursor.encode().len() < 512 * 1024 + 4096);
         let old = Cursor::decode(r#"{"v":1,"o":{"old":{"t":[8,null],"n":3,"more":true}}}"#).unwrap();
-        assert_eq!(old.o["old"].n, 3);
+        assert_eq!(old.o["old"].n, Some(3));
+        let byte_mark = Pos::from(&State {
+            trigger: (None, None),
+            mark: Mark::Bytes(5),
+            pending: false,
+            read: None,
+        });
+        assert_eq!(serde_json::to_string(&byte_mark).unwrap(), r#"{"t":[null,null],"b":5}"#);
+        let issued: Pos = serde_json::from_str(r#"{"t":[null,null],"n":0,"b":5}"#).unwrap();
+        assert!(matches!(State::from(issued).mark, Mark::Bytes(5)));
         assert!(old.o["old"].more);
         assert!(old.o["old"].r.is_none());
     }

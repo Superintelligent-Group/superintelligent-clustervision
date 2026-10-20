@@ -39,11 +39,13 @@ impl Artifact {
 /// What the archive keeps about one archived source, as the payload of its
 /// [`cv_core::source::Record`] (written to `archive-source/<harness>/<id>.json`): a record of
 /// another cv version does not decode, and its session is archived again.
+/// On disk the read state is held without its baseline (`Stored<Held>`): the record's baseline
+/// is the one copy, rejoined on load.
 #[derive(Serialize, Deserialize)]
-struct Stored {
+struct Stored<R = cv_core::watch::ReadState> {
     total: usize,
     artifact: Artifact,
-    read: cv_core::watch::ReadState,
+    read: R,
     #[serde(default)]
     prefix: Option<Prefix>,
     /// The turns among the `prefix` messages, for the next pass that copies them.
@@ -53,8 +55,29 @@ struct Stored {
     first_user: Option<FirstUser>,
 }
 
-impl cv_core::source::Payload for Stored {
+impl cv_core::source::Payload for Stored<cv_core::watch::Held> {
     const TAG: &'static str = "archive";
+}
+
+impl<R> Stored<R> {
+    fn map_read<S>(self, f: impl FnOnce(R) -> S) -> Stored<S> {
+        let Stored {
+            total,
+            artifact,
+            read,
+            prefix,
+            prefix_turns,
+            first_user,
+        } = self;
+        Stored {
+            total,
+            artifact,
+            read: f(read),
+            prefix,
+            prefix_turns,
+            first_user,
+        }
+    }
 }
 
 pub(super) struct StoredPass {
@@ -151,7 +174,11 @@ impl Archive {
         if fs::metadata(&path).ok()?.len() > STATE_BYTES {
             return None;
         }
-        let stored = cv_core::source::Record::<Stored>::decode(&fs::read(path).ok()?)?.payload;
+        let record = cv_core::source::Record::<Stored<cv_core::watch::Held>>::decode(&fs::read(path).ok()?)?;
+        let baseline = record.baseline;
+        let stored = record
+            .payload
+            .map_read(|held| cv_core::watch::ReadState::join(baseline, held));
         stored
             .artifact
             .matches(&self.session_path(r.harness, &r.id))
@@ -286,10 +313,11 @@ impl Archive {
             .as_ref()
             .map_or(0, |prefix| old_turns + turns.before(prefix.messages - pass.prefix));
         if read.fits_cache(STATE_BYTES as usize - 1024) && read.fresh_with(adapter, r) {
+            let (baseline, held) = read.clone().split();
             let stored = Stored {
                 total,
                 artifact,
-                read: read.clone(),
+                read: held,
                 first_user: first_user
                     .filter(|first| prefix.as_ref().is_some_and(|prefix| first.ordinal <= prefix.messages)),
                 prefix,
@@ -297,7 +325,7 @@ impl Archive {
             };
             let dest = self.source_path(r);
             let mut temporary = Temporary::new(&dest)?;
-            let record = cv_core::source::Record::new(read.source.clone(), stored);
+            let record = cv_core::source::Record::new(baseline, stored);
             temporary.write_all(&record.encode())?;
             let _lock = self.lock_catalog()?;
             if record.payload.artifact.matches(&self.session_path(r.harness, &r.id)) && read.fresh_with(adapter, r) {

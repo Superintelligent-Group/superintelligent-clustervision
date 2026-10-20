@@ -64,7 +64,60 @@ pub struct ReadState {
     completed: Option<Completed>,
 }
 
+/// A [`ReadState`] without its baseline, for a store whose [`source::Record`] carries the
+/// baseline: [`ReadState::split`] and [`ReadState::join`] keep one copy of it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Held {
+    version: String,
+    path: PathBuf,
+    primary: Option<PathBuf>,
+    anchor: Option<Anchor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    completed: Option<Completed>,
+}
+
 impl ReadState {
+    /// The baseline, and everything else.
+    pub fn split(self) -> (source::Baseline, Held) {
+        let ReadState {
+            version,
+            path,
+            primary,
+            source,
+            anchor,
+            completed,
+        } = self;
+        (
+            source,
+            Held {
+                version,
+                path,
+                primary,
+                anchor,
+                completed,
+            },
+        )
+    }
+
+    /// The state [`Self::split`] took apart.
+    pub fn join(source: source::Baseline, held: Held) -> Self {
+        let Held {
+            version,
+            path,
+            primary,
+            anchor,
+            completed,
+        } = held;
+        ReadState {
+            version,
+            path,
+            primary,
+            source,
+            anchor,
+            completed,
+        }
+    }
+
     pub(crate) fn baseline(r: &SessionRef) -> Self {
         Self {
             version: crate::harness::for_harness(r.harness)
