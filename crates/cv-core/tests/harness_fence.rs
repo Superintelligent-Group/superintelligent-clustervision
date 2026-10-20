@@ -25,7 +25,6 @@ use regex::Regex;
 const ALLOWLIST: &[(&str, usize)] = &[
     ("affordance.rs", 8),
     ("affordance/text.rs", 2),
-    ("catalog.rs", 7),
     ("dataset.rs", 1),
     ("distill.rs", 1),
     ("emit.rs", 15),

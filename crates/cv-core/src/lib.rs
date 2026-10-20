@@ -184,7 +184,8 @@ fn discover_all_with_catalog(mut catalog: Option<catalog::Reader>) -> Vec<Sessio
         .iter()
         .filter_map(|(h, roots, refs, before)| {
             refs.as_ref()
-                .map(|refs| (*h, refs.as_slice(), catalog::watches_for(*h, roots, refs), before))
+                .zip(harness::rootless(*h))
+                .map(|(refs, a)| (*h, refs.as_slice(), catalog::watches_for(a, roots, refs), before))
         })
         .collect();
     if let Some(catalog) = &mut catalog {
@@ -306,7 +307,7 @@ fn discover_harness(h: Harness, mut catalog: Option<&mut catalog::Reader>) -> Op
     };
     if let Some(reader) = catalog.as_mut() {
         reader.refill_turns(refs.iter_mut());
-        reader.replace_harness(h, &refs, &catalog::watches_for(h, &roots, &refs), &before);
+        reader.replace_harness(h, &refs, &catalog::watches_for(a.as_ref(), &roots, &refs), &before);
     }
     Some(refs)
 }

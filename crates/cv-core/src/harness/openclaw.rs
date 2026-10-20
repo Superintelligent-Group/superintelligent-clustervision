@@ -256,6 +256,15 @@ impl Adapter for OpenClaw {
         Ok(out)
     }
 
+    /// An agent's `.sqlite` store is written in place; a JSONL transcript is a file like any other.
+    fn watch_policy(&self, r: &SessionRef) -> super::WatchPolicy {
+        if is_sqlite_store_path(&r.path) {
+            super::WatchPolicy::Database
+        } else {
+            super::WatchPolicy::Tree
+        }
+    }
+
     /// OpenClaw 10.1 routes lazily loaded tools through `tool_call{id, args}` and its reader
     /// leaves the wrapper in place.
     fn deferred_wrapper(&self) -> Option<crate::affordance::DeferredWrapper> {

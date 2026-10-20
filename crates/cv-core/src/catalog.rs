@@ -617,25 +617,24 @@ mod imp {
 
     /// Compute the watch set for one harness from a finished discovery: the harness roots, every
     /// ancestor directory between each session file and its root (so a new project/day directory
-    /// anywhere in the tree changes a watched identity), and — for the SQLite-backed harnesses —
-    /// each session's backing file and its WAL (in-place writes change neither directory mtimes
+    /// anywhere in the tree changes a watched identity), and — for a session the adapter writes in
+    /// place ([`crate::harness::WatchPolicy::Database`]) — its backing file and its WAL (in-place writes change neither directory mtimes
     /// nor necessarily the main database). Optional CLI metadata and absent WALs remain watched.
     /// Other paths that can't be stat'd are unknown, as are recently-modified paths
     /// (see [`WATCH_FUDGE`]).
-    pub(crate) fn watches_for(h: Harness, roots: &[PathBuf], refs: &[SessionRef]) -> Vec<(PathBuf, Watched)> {
+    pub(crate) fn watches_for(
+        adapter: &dyn crate::harness::Adapter,
+        roots: &[PathBuf],
+        refs: &[SessionRef],
+    ) -> Vec<(PathBuf, Watched)> {
         let mut paths: BTreeSet<PathBuf> = roots.iter().cloned().collect();
         let mut optional_files = BTreeSet::new();
-        let file_watch = matches!(
-            h,
-            Harness::Cursor | Harness::Goose | Harness::Hermes | Harness::Zed | Harness::Devin | Harness::OpenCode
-        );
         for r in refs {
             if let Some(metadata) = crate::source::cursor_cli_metadata(r) {
                 optional_files.insert(metadata.clone());
                 paths.insert(metadata);
             }
-            let sqlite_watch =
-                file_watch || (h == Harness::OpenClaw && r.path.extension().and_then(|e| e.to_str()) == Some("sqlite"));
+            let sqlite_watch = adapter.watch_policy(r) == crate::harness::WatchPolicy::Database;
             if sqlite_watch {
                 paths.insert(r.path.clone());
             }
@@ -1193,6 +1192,10 @@ mod imp {
     mod tests {
         use super::*;
         use std::time::UNIX_EPOCH;
+
+        fn rootless(h: Harness) -> &'static dyn crate::harness::Adapter {
+            crate::harness::rootless(h).unwrap()
+        }
 
         fn db_ref(harness: Harness, path: PathBuf) -> SessionRef {
             SessionRef {
@@ -1800,12 +1803,16 @@ mod imp {
             let path = w.base.join("custom-store");
             std::fs::write(&path, b"SQLite format 3\0native database bytes").unwrap();
             let r = db_ref(Harness::OpenCode, path.clone());
-            let watches = watches_for(r.harness, std::slice::from_ref(&w.base), std::slice::from_ref(&r));
+            let watches = watches_for(
+                rootless(r.harness),
+                std::slice::from_ref(&w.base),
+                std::slice::from_ref(&r),
+            );
             assert!(watches.iter().any(|(p, _)| p == &w.base.join("custom-store-wal")));
             let legacy = w.base.join("ses_old.json");
             std::fs::write(&legacy, "{}").unwrap();
             let r = db_ref(Harness::OpenCode, legacy);
-            assert!(!watches_for(r.harness, &[], &[r])
+            assert!(!watches_for(rootless(r.harness), &[], &[r])
                 .iter()
                 .any(|(p, _)| p == &w.base.join("ses_old.json-wal")));
         }
@@ -1818,7 +1825,7 @@ mod imp {
             let mut r = db_ref(Harness::Cursor, path);
             r.id = "cli:session".into();
             let metadata = world.base.join("meta.json");
-            let watches = watches_for(Harness::Cursor, std::slice::from_ref(&world.base), &[r]);
+            let watches = watches_for(rootless(Harness::Cursor), std::slice::from_ref(&world.base), &[r]);
             let absent = watches.iter().find(|(path, _)| path == &metadata).unwrap().1;
             assert_eq!(absent, Watched::Absent);
             assert!(watch_is_fresh(&metadata, absent));
@@ -1842,7 +1849,7 @@ mod imp {
             std::fs::write(&path, []).unwrap();
             let wal = w.base.join("openclaw-agent.sqlite-wal");
             let r = db_ref(Harness::OpenClaw, path.clone());
-            let watches = watches_for(Harness::OpenClaw, std::slice::from_ref(&w.base), &[r]);
+            let watches = watches_for(rootless(Harness::OpenClaw), std::slice::from_ref(&w.base), &[r]);
             assert!(
                 watches.iter().any(|(p, _)| *p == path),
                 "OpenClaw SQLite is file-watched"
@@ -1866,7 +1873,7 @@ mod imp {
             assert!(!watch_is_fresh(&wal, Watched::Unknown), "unknown is not stable absence");
 
             let jsonl = db_ref(Harness::OpenClaw, w.base.join("legacy.jsonl"));
-            let watches = watches_for(Harness::OpenClaw, &[], std::slice::from_ref(&jsonl));
+            let watches = watches_for(rootless(Harness::OpenClaw), &[], std::slice::from_ref(&jsonl));
             assert!(
                 !watches.iter().any(|(p, _)| *p == jsonl.path),
                 "legacy JSONL keeps the bounded file probe"
@@ -1893,7 +1900,7 @@ mod imp {
             }
             let db_sig = crate::source::FileId::at(&path);
             let r = db_ref(Harness::OpenCode, path.clone());
-            let watches = watches_for(Harness::OpenCode, std::slice::from_ref(&w.base), &[r]);
+            let watches = watches_for(rootless(Harness::OpenCode), std::slice::from_ref(&w.base), &[r]);
             assert!(watches.iter().all(|(p, stamp)| watch_is_fresh(p, *stamp)));
             conn.execute("INSERT INTO messages VALUES ('new message')", []).unwrap();
             assert_eq!(crate::source::FileId::at(&path), db_sig, "write stayed in WAL");
@@ -2028,7 +2035,7 @@ pub fn lookup(_id: &str, _harness: Option<Harness>) -> Vec<SessionRef> {
 }
 #[cfg(not(feature = "sqlite"))]
 pub(crate) fn watches_for(
-    _h: Harness,
+    _adapter: &dyn crate::harness::Adapter,
     _roots: &[std::path::PathBuf],
     _refs: &[SessionRef],
 ) -> Vec<(std::path::PathBuf, Watched)> {
