@@ -640,7 +640,7 @@ mod tests {
                         actual.title,
                         old.title
                             .filter(|t| !t.trim().is_empty())
-                            .map(|t| crate::ir::truncate(&t, 80)),
+                            .map(|t| crate::ir::truncate(&t, crate::ir::Head::TITLE)),
                         "{text}"
                     );
                     assert_eq!(
@@ -1160,7 +1160,7 @@ mod tests {
                     .get("title")
                     .and_then(Value::as_str)
                     .filter(|t| !t.trim().is_empty())
-                    .map(|t| crate::ir::truncate(t, 80));
+                    .map(|t| crate::ir::truncate(t, crate::ir::Head::TITLE));
                 let cwd = v
                     .get("workspaceDirectory")
                     .and_then(Value::as_str)

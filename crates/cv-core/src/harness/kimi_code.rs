@@ -2219,7 +2219,7 @@ mod tests {
                         let t =
                             super::super::wire::joined_owned(v.pointer("/message/content"), super::super::wire::TEXT);
                         if !t.trim().is_empty() {
-                            w.title = Some(crate::ir::truncate(&t, 80));
+                            w.title = Some(crate::ir::truncate(&t, crate::ir::Head::TITLE));
                         }
                     }
                 }

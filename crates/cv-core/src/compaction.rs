@@ -195,7 +195,7 @@ fn summary_text(
     let fallback = crate::lazy::Resolver::new(None);
     let resolver = resolver.unwrap_or(&fallback);
     let mut s = String::new();
-    let mut prefix = preview.map(crate::affordance::input::Prefix::new);
+    let mut prefix = preview.map(crate::ir::Head::bounded);
     let mut nonempty = false;
     let mut nonblank = false;
     for b in &m.content {

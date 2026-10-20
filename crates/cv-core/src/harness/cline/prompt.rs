@@ -61,47 +61,35 @@ impl Marker {
     }
 }
 
-#[derive(Default)]
+/// The first non-blank line, as a trimmed title [`Head`](crate::ir::Head).
 struct FirstLine {
-    prefix: String,
-    chars: u64,
-    last_nonwhite: u64,
+    line: crate::ir::Head,
     title: Option<String>,
+}
+impl Default for FirstLine {
+    fn default() -> Self {
+        Self {
+            line: crate::ir::Head::trimmed(crate::ir::Head::TITLE),
+            title: None,
+        }
+    }
 }
 impl FirstLine {
     fn feed(&mut self, c: char) {
         if self.title.is_some() {
             return;
         }
-        if c == '\n' {
+        if c == '\n' || self.line.push_char(c) {
             self.finish_line();
-        } else if self.chars != 0 || !c.is_whitespace() {
-            if self.chars < 81 {
-                self.prefix.push(c);
-            }
-            self.chars = self.chars.saturating_add(1);
-            if !c.is_whitespace() {
-                self.last_nonwhite = self.chars;
-                if self.last_nonwhite >= 81 {
-                    self.finish_line();
-                }
-            }
         }
     }
     fn finish_line(&mut self) {
         if self.title.is_some() {
             return;
         }
-        if self.last_nonwhite != 0 {
-            let text = if self.last_nonwhite <= 81 {
-                self.prefix.trim_end()
-            } else {
-                &self.prefix
-            };
-            self.title = Some(crate::ir::truncate(text, 80));
-        } else {
-            self.prefix.clear();
-            self.chars = 0;
+        let line = std::mem::replace(&mut self.line, crate::ir::Head::trimmed(crate::ir::Head::TITLE));
+        if !line.is_blank() {
+            self.title = Some(line.finish());
         }
     }
 }

@@ -928,28 +928,12 @@ fn consider_title(title: &mut Option<String>, candidate: String) {
     }
 }
 
-/// A listing title from a body: `text_parts(v).trim()` truncated to 80 characters, where only
-/// parts of type `only` count when given. A body can carry arbitrarily long whitespace, so this
-/// keeps the first 81 characters and the last nonwhite position until the answer is determined.
+/// A listing title from a body: the trimmed [`Head`](crate::ir::Head) of its joined text, where
+/// only parts of type `only` count when given.
 fn title_of(v: Option<JsonView<'_>>, only: Option<&str>) -> Result<String> {
-    let mut head = String::new();
-    let mut chars = 0usize;
-    let mut last_nonwhite = 0usize;
-    record::for_each_joined_char_of(v, only, |ch| {
-        if head.is_empty() && ch.is_whitespace() {
-            return true;
-        }
-        if chars < 81 {
-            head.push(ch);
-            chars += 1;
-        }
-        if !ch.is_whitespace() {
-            last_nonwhite = chars;
-        }
-        last_nonwhite < 81
-    })?;
-    let trimmed: String = head.chars().take(last_nonwhite).collect();
-    Ok(crate::ir::truncate(&trimmed, 80))
+    let mut head = crate::ir::Head::trimmed(crate::ir::Head::TITLE);
+    record::for_each_joined_char_of(v, only, |ch| !head.push_char(ch))?;
+    Ok(head.finish())
 }
 
 /// Files up to this size are scanned in full by [`scan`]; larger ones are sampled head+tail.

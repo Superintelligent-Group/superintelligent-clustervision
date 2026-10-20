@@ -196,7 +196,7 @@ pub(crate) fn check_source_fields(session: &crate::ir::Session) -> Result<()> {
 pub(crate) fn fallback_title(session: &crate::ir::Session, resolver: &Resolver) -> Result<Option<String>> {
     Ok(session
         .title_with(resolver)?
-        .map(|title| crate::ir::truncate(&title, 80)))
+        .map(|title| crate::ir::truncate(&title, crate::ir::Head::TITLE)))
 }
 
 #[cfg(test)]

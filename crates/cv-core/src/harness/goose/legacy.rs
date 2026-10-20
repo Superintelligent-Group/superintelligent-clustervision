@@ -191,7 +191,7 @@ fn note_header(view: JsonView<'_>, session: &mut SessionRef) -> Result<()> {
                 }
                 Ok(())
             })?;
-            session.title = nonwhite.then(|| crate::ir::truncate(&prefix, 80));
+            session.title = nonwhite.then(|| crate::ir::truncate(&prefix, crate::ir::Head::TITLE));
         }
     }
     session.cwd = fields
@@ -453,7 +453,7 @@ mod tests {
             .get("description")
             .and_then(Value::as_str)
             .filter(|s| !s.trim().is_empty())
-            .map(|s| crate::ir::truncate(s, 80));
+            .map(|s| crate::ir::truncate(s, crate::ir::Head::TITLE));
         let cwd = header
             .get("working_dir")
             .and_then(Value::as_str)

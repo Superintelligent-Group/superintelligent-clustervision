@@ -649,7 +649,7 @@ fn scan(summary_path: &Path) -> Result<Option<SessionRef>> {
                 .and_then(Value::as_str)
                 .filter(|s| !s.trim().is_empty())
         })
-        .map(|s| crate::ir::truncate(s, 80));
+        .map(|s| crate::ir::truncate(s, crate::ir::Head::TITLE));
     // Exact turn counts belong to index/full reads. Summary-titled sessions do not open the
     // transcript. Otherwise stream the codec's title demand until the first title or EOF;
     // absence beyond a fixed byte budget is not yet an authorized metadata tradeoff.
@@ -1256,7 +1256,7 @@ mod tests {
                 if expected_title.is_none() && ty == Some("user") {
                     let text = super::super::wire::joined_owned(v.get("content"), super::super::wire::TEXT);
                     if !text.trim().is_empty() {
-                        expected_title = Some(crate::ir::truncate(&text, 80));
+                        expected_title = Some(crate::ir::truncate(&text, crate::ir::Head::TITLE));
                     }
                 }
                 Flow::Continue

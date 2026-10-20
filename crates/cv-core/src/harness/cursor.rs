@@ -361,7 +361,7 @@ fn discover_global(conn: &Connection, db: &Path, cwd_map: &HashMap<String, PathB
             .get("name")
             .and_then(Value::as_str)
             .filter(|s| !s.trim().is_empty())
-            .map(|s| crate::ir::truncate(s, 80));
+            .map(|s| crate::ir::truncate(s, crate::ir::Head::TITLE));
         out.push(SessionRef {
             id: composer_id.to_string(),
             harness: Harness::Cursor,

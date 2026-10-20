@@ -342,7 +342,7 @@ fn discover_db(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
             cwd: wd.filter(|s| !s.is_empty()).map(PathBuf::from),
             title: title
                 .filter(|s| !s.trim().is_empty())
-                .map(|t| crate::ir::truncate(&t, 80)),
+                .map(|t| crate::ir::truncate(&t, crate::ir::Head::TITLE)),
             created_at: created.as_deref().and_then(parse_ts_text),
             updated_at: updated.as_deref().and_then(parse_ts_text),
             message_count: None,

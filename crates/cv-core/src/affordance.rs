@@ -863,7 +863,7 @@ fn call_summary(kind: Kind, view: JsonView<'_>, items: &[Item]) -> Result<String
                     .transpose()?
                     .flatten()
                 {
-                    let mut text = input::Prefix::new(120);
+                    let mut text = crate::ir::Head::bounded(120);
                     text.push(&which);
                     text.push(" → ");
                     text.push(&status);
@@ -932,7 +932,7 @@ fn call_summary(kind: Kind, view: JsonView<'_>, items: &[Item]) -> Result<String
             parts.push(status);
         }
     }
-    let mut text = input::Prefix::new(120);
+    let mut text = crate::ir::Head::bounded(120);
     for (index, part) in parts.iter().enumerate() {
         if index != 0 {
             text.push(" · ");

@@ -209,9 +209,15 @@ fn job_belongs(job: &Value, key: &str) -> bool {
     owner || run || main
 }
 
-/// The public summary is 120 characters; retain one lookahead for truncate's ellipsis.
+/// The public summary's bound.
+const SUMMARY: usize = 120;
+/// What a [`Head`](crate::ir::Head) of the summary keeps: its bound and one lookahead.
 fn summary_prefix<'a>(parts: impl IntoIterator<Item = &'a str>) -> String {
-    parts.into_iter().flat_map(str::chars).take(121).collect()
+    parts
+        .into_iter()
+        .flat_map(str::chars)
+        .take(crate::ir::Head::kept(SUMMARY))
+        .collect()
 }
 
 /// `corpus-ping · at 2026-10-11T20:48:42Z · Reply with the word pong. · last ok`.
@@ -247,7 +253,7 @@ fn job_row(job: &Value) -> Affordance {
             .enumerate()
             .flat_map(|(i, part)| [if i == 0 { "" } else { " · " }, *part]),
     );
-    Affordance::store(Kind::Schedule, "cron", truncate(&prefix, 120), Vec::new())
+    Affordance::store(Kind::Schedule, "cron", truncate(&prefix, SUMMARY), Vec::new())
 }
 
 /// `ok-reply-check · Reply with the single word ok. · ok → ok`.
@@ -271,7 +277,12 @@ fn run_row(p: &Value) -> Affordance {
         .and_then(chrono::DateTime::from_timestamp_millis);
     Affordance {
         timestamp,
-        ..Affordance::store(Kind::SubagentSpawn, "subagents", truncate(&summary, 120), Vec::new())
+        ..Affordance::store(
+            Kind::SubagentSpawn,
+            "subagents",
+            truncate(&summary, SUMMARY),
+            Vec::new(),
+        )
     }
 }
 

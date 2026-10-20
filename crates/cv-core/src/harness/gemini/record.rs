@@ -687,33 +687,41 @@ impl Demand<'_> {
         }));
         type_user_turn_from(m, &info.trimmed);
         if st.title.is_none() && info.has_text && !is_ignored_user_content(&info.trimmed) {
-            st.title = Some(crate::ir::truncate(&info.head, 80));
+            st.title = Some(info.head.finish());
         }
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct TextInfo {
-    head: String,
-    head_chars: usize,
+    head: crate::ir::Head,
     trimmed: String,
     trimmed_chars: usize,
     has_text: bool,
     nonwhite: bool,
 }
 
+impl Default for TextInfo {
+    fn default() -> Self {
+        Self {
+            head: crate::ir::Head::bounded(crate::ir::Head::TITLE),
+            trimmed: String::new(),
+            trimmed_chars: 0,
+            has_text: false,
+            nonwhite: false,
+        }
+    }
+}
+
 impl TextInfo {
     fn complete(&self) -> bool {
-        self.head_chars == 81 && self.trimmed_chars == 64
+        self.head.done() && self.trimmed_chars == 64
     }
 
     fn feed(&mut self, s: &str) {
         self.has_text |= !s.is_empty();
         for c in s.chars() {
-            if self.head_chars < 81 {
-                self.head.push(c);
-                self.head_chars += 1;
-            }
+            self.head.push_char(c);
             if !self.nonwhite && !c.is_whitespace() {
                 self.nonwhite = true;
             }

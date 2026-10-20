@@ -437,7 +437,7 @@ fn refs_conn(conn: &Connection, path: &Path, delegates_of: Option<&HashSet<Strin
             harness: Harness::Hermes,
             path: path.to_path_buf(),
             cwd: cwd.filter(|c| !c.is_empty()).map(PathBuf::from),
-            title: title.map(|t| crate::ir::truncate(&t, 80)),
+            title: title.map(|t| crate::ir::truncate(&t, crate::ir::Head::TITLE)),
             created_at: started.and_then(ts_from_epoch),
             updated_at: latest_of([ended, last, started]),
             message_count: None,

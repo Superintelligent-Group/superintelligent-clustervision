@@ -462,7 +462,7 @@ fn content_blocks(message: Option<JsonView<'_>>, demand: Demand<'_>) -> Result<V
                 if discovery {
                     // Counting needs block presence, tool identity and the first prompt's title;
                     // it never needs a decoded result body or argument tree. Keep the classifier's
-                    // trimmed hook prefix separately from the title's untrimmed 81 characters.
+                    // trimmed hook prefix separately from the title head's untrimmed characters.
                     let head = if !thought
                         && text_head(&text, &Resolver::new(None), 80, true)?
                             .0
@@ -470,7 +470,13 @@ fn content_blocks(message: Option<JsonView<'_>>, demand: Demand<'_>) -> Result<V
                     {
                         HOOK_CONTEXT_TAG.to_string()
                     } else {
-                        text_head(&text, &Resolver::new(None), 81, false)?.0
+                        text_head(
+                            &text,
+                            &Resolver::new(None),
+                            crate::ir::Head::kept(crate::ir::Head::TITLE),
+                            false,
+                        )?
+                        .0
                     };
                     text = head.into();
                 }

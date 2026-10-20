@@ -34,28 +34,21 @@ pub fn write_markdown(s: &Session, out: &mut impl Write, resolver: &crate::Resol
 /// Exact character-bounded preview of concatenated plain-text blocks, including whitespace-only
 /// text. Checked demands scan discarded tails without retaining them.
 pub fn message_text_preview(m: &Message, resolver: &crate::Resolver, chars: usize) -> anyhow::Result<Option<String>> {
-    let mut head = String::new();
-    let mut remaining = chars.saturating_add(1);
+    let mut head = crate::ir::Head::bounded(chars);
     let mut nonempty = false;
-    let mut append = |part: &str| {
-        for c in part.chars().take(remaining) {
-            head.push(c);
-            remaining -= 1;
-        }
-    };
     for block in &m.content {
         if let Block::Text { text } = block {
             if nonempty {
-                append("\n");
+                head.push("\n");
             }
             text.try_for_each_chunk(resolver, 64 * 1024, |part| {
                 nonempty |= !part.is_empty();
-                append(part);
+                head.push(part);
                 Ok(())
             })?;
         }
     }
-    Ok(nonempty.then(|| truncate(&head, chars)))
+    Ok(nonempty.then(|| head.finish()))
 }
 
 /// Write one Markdown section, preserving the owned renderer's exact formatting.
@@ -97,23 +90,19 @@ pub fn write_md_block(b: &Block, out: &mut impl Write, resolver: &crate::Resolve
             out.write_all(b"\n```\n\n")?;
         }
         Block::ToolResult { content, is_error, .. } => {
-            let mut head = String::new();
-            let mut remaining = 4001;
+            let mut head = crate::ir::Head::bounded(4000);
             content.try_for_each_chunk(resolver, 64 * 1024, |part| {
-                for c in part.chars().take(remaining) {
-                    head.push(c);
-                    remaining -= 1;
-                }
+                head.push(part);
                 Ok(())
             })?;
-            // Tool output is a literal code excerpt, so preserve its line structure.
-            // The extra scalar distinguishes an exact fit from a truncated result.
-            if remaining == 0 {
-                head.pop();
-                head.pop();
-                head.push('…');
+            // Tool output is a literal code excerpt, so preserve its line structure (the kept
+            // text, not `finish`'s flattening); the lookahead tells an exact fit from a cut.
+            let mut excerpt = head.as_str().to_owned();
+            if head.full() {
+                excerpt.pop();
+                excerpt.pop();
+                excerpt.push('…');
             }
-            let excerpt = head;
             // A tool can return Markdown containing its own fenced blocks. Keep that text
             // literal by choosing a fence longer than every run in the rendered excerpt.
             let longest = excerpt.split(|c| c != '`').map(str::len).max().unwrap_or(0);

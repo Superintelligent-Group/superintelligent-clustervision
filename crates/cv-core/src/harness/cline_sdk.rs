@@ -205,7 +205,7 @@ fn scan(path: &Path, sid: &str) -> Option<SessionRef> {
                 first = false;
             }
             r.message_count = Some(count);
-            r.title = r.title.map(|t| truncate(&t, 80));
+            r.title = r.title.map(|t| truncate(&t, crate::ir::Head::TITLE));
             r.updated_at = record
                 .string("updated_at")?
                 .as_deref()

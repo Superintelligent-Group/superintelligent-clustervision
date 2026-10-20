@@ -123,49 +123,42 @@ pub(crate) fn text_head(
     Ok((head, present))
 }
 
-/// The same joined text/title as Message::text, retaining only the first 81 characters. When
+/// The same joined text/title as Message::text, as a title [`Head`](crate::ir::Head). When
 /// discovery filters whitespace-only text, scan any remaining whitespace with bounded state.
 pub(crate) fn text_summary<T: std::borrow::Borrow<crate::lazy::Text>>(
     texts: impl Iterator<Item = T>,
     resolver: &crate::lazy::Resolver,
     require_nonwhite: bool,
 ) -> Option<String> {
-    let mut head = String::new();
-    let mut chars = 0;
+    let mut head = crate::ir::Head::bounded(crate::ir::Head::TITLE);
     let mut present = false;
-    let mut nonwhite = false;
     for (index, text) in texts.enumerate() {
         let text = text.borrow();
-        if (present || (require_nonwhite && index > 0)) && chars < 81 {
-            head.push('\n');
-            chars += 1;
+        if present || (require_nonwhite && index > 0) {
+            head.push("\n");
         }
-        let mut feed = |chunk: &str| {
-            present |= !chunk.is_empty();
-            nonwhite |= chunk.chars().any(|c| !c.is_whitespace());
-            for c in chunk.chars().take(81 - chars) {
-                head.push(c);
-                chars += 1;
-            }
-        };
         match text {
-            crate::lazy::Text::Inline(s) => feed(s),
+            crate::lazy::Text::Inline(s) => {
+                present |= !s.is_empty();
+                head.push(s);
+            }
             crate::lazy::Text::Source(_) | crate::lazy::Text::Span(_) => {
                 let prefix = text.try_resolve_prefix(resolver, 1024).unwrap_or_default();
-                feed(&prefix);
-                if require_nonwhite && !nonwhite && text.len() > 1024 {
+                present |= !prefix.is_empty();
+                head.push(&prefix);
+                if require_nonwhite && head.is_blank() && text.len() > 1024 {
                     let _ = text.try_for_each_chunk(resolver, 4096, |chunk| {
-                        nonwhite |= chunk.chars().any(|c| !c.is_whitespace());
+                        head.push(chunk);
                         Ok(())
                     });
                 }
             }
         }
-        if chars == 81 && (!require_nonwhite || nonwhite) {
+        if head.full() && (!require_nonwhite || !head.is_blank()) {
             break;
         }
     }
-    (present && (!require_nonwhite || nonwhite)).then(|| crate::ir::truncate(&head, 80))
+    (present && (!require_nonwhite || !head.is_blank())).then(|| head.finish())
 }
 
 #[cfg(test)]

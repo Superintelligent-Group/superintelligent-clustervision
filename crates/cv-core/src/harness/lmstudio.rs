@@ -687,9 +687,9 @@ fn scan_view(view: JsonView<'_>) -> Result<Scan> {
     };
     let mut scan = Scan::default();
     if let Some(name) = fields.get("name") {
-        let mut head = TitleHead::default();
-        head.read(name, true)?;
-        let name = head.finish(true);
+        let mut head = crate::ir::Head::trimmed(crate::ir::Head::TITLE);
+        read_head(&mut head, name)?;
+        let name = title(head);
         scan.name = name.filter(|name| name != "Untitled" && !name.starts_with("Untitled -"));
     }
     if let Some(created) = fields.get("createdAt") {
@@ -726,93 +726,53 @@ fn scan_view(view: JsonView<'_>) -> Result<Scan> {
         if !string_is(version.get("role"), "user")? {
             continue;
         }
-        let mut head = TitleHead::default();
+        let mut head = crate::ir::Head::bounded(crate::ir::Head::TITLE);
         if let Some(content) = version.get("content") {
             if content.is_string()? {
-                head.read(content, false)?;
+                read_head(&mut head, content)?;
             } else if let Some(parts) = content.array()? {
                 let mut first = true;
                 for part in parts {
                     let Some(text) = part?.get("text")? else { continue };
                     if text.is_string()? {
                         if !first {
-                            head.push("\n", false);
+                            head.push("\n");
                         }
                         first = false;
-                        head.read(text, false)?;
+                        read_head(&mut head, text)?;
                     }
                 }
             }
         }
-        scan.messages.title = head.finish(false);
+        scan.messages.title = title(head);
         search_title = scan.messages.title.is_none();
     }
     Ok(scan)
 }
 
-/// Preserve trim/empty detection and truncate's character semantics without retaining a title
-/// candidate or its trailing whitespace. Keep one extra character to distinguish truncation.
-#[derive(Default)]
-struct TitleHead {
-    head: String,
-    chars: usize,
-    nonwhite: usize,
-}
 #[derive(Debug, thiserror::Error)]
 #[error("LM Studio title prefix complete")]
 struct TitleComplete;
 
-impl TitleHead {
-    // Called only inside read_document, after whole-source Value validation. A prefix stop
-    // still passes its enclosing source-identity check; only this local marker is swallowed.
-    fn read(&mut self, view: JsonView<'_>, trim: bool) -> Result<()> {
-        let result = view.for_each_str_chunk(|text| {
-            self.push(text, trim);
-            if self.complete(trim) {
-                Err(TitleComplete.into())
-            } else {
-                Ok(())
-            }
-        });
-        match result {
-            Err(error) if error.downcast_ref::<TitleComplete>().is_some() => Ok(()),
-            result => result.map(|_| ()),
-        }
-    }
-    fn complete(&self, trim: bool) -> bool {
-        self.chars == 81 && (self.nonwhite == 81 || (!trim && self.nonwhite > 0))
-    }
-    fn push(&mut self, text: &str, trim: bool) {
-        if self.complete(trim) {
-            return;
-        }
-        for c in text.chars() {
-            if trim && self.chars == 0 && c.is_whitespace() {
-                continue;
-            }
-            if self.chars < 81 {
-                self.head.push(c);
-            }
-            self.chars = (self.chars + 1).min(81);
-            if !c.is_whitespace() {
-                self.nonwhite = self.chars;
-            }
-            if self.complete(trim) {
-                return;
-            }
-        }
-    }
-    fn finish(self, trim: bool) -> Option<String> {
-        if self.nonwhite == 0 {
-            return None;
-        }
-        let head = if trim {
-            self.head.chars().take(self.nonwhite).collect()
+/// Feed a JSON string into a title [`Head`](crate::ir::Head), stopping once it is decided. Called
+/// only inside read_document, after whole-source Value validation: a prefix stop still passes its
+/// enclosing source-identity check; only this local marker is swallowed.
+fn read_head(head: &mut crate::ir::Head, view: JsonView<'_>) -> Result<()> {
+    let result = view.for_each_str_chunk(|text| {
+        if head.push(text) {
+            Err(TitleComplete.into())
         } else {
-            self.head
-        };
-        Some(crate::ir::truncate(&head, 80))
+            Ok(())
+        }
+    });
+    match result {
+        Err(error) if error.downcast_ref::<TitleComplete>().is_some() => Ok(()),
+        result => result.map(|_| ()),
     }
+}
+/// A title, or none for a blank one.
+fn title(head: crate::ir::Head) -> Option<String> {
+    (!head.is_blank()).then(|| head.finish())
 }
 
 fn file_mtime(path: &Path) -> Option<DateTime<Utc>> {
@@ -1452,14 +1412,17 @@ mod tests {
             let chars: Vec<_> = text.chars().collect();
             for width in (1..19).chain(std::iter::once(chars.len().max(1))) {
                 for trim in [false, true] {
-                    let mut head = TitleHead::default();
+                    let mut head = match trim {
+                        true => crate::ir::Head::trimmed(80),
+                        false => crate::ir::Head::bounded(80),
+                    };
                     for chunk in chars.chunks(width) {
-                        head.push(&chunk.iter().collect::<String>(), trim);
+                        head.push(&chunk.iter().collect::<String>());
                     }
                     let expected = if trim { text.trim() } else { &text };
                     assert_eq!(
-                        head.finish(trim),
-                        (!text.trim().is_empty()).then(|| crate::ir::truncate(expected, 80))
+                        title(head),
+                        (!text.trim().is_empty()).then(|| crate::ir::truncate(expected, crate::ir::Head::TITLE))
                     );
                 }
             }
@@ -1475,12 +1438,12 @@ mod tests {
         std::fs::write(&path, &original).unwrap();
         let source = JsonSource::capture(&path).unwrap();
         let result = source.read_document(|view| {
-            let mut head = TitleHead::default();
-            head.read(view.get("name")?.unwrap(), true)?;
-            assert!(head.complete(true));
+            let mut head = crate::ir::Head::trimmed(80);
+            read_head(&mut head, view.get("name")?.unwrap())?;
+            assert!(head.done());
             // A prefix stop must not bypass the enclosing check when the unread tail changes.
             std::fs::write(&path, b"{}").unwrap();
-            Ok(head.finish(true))
+            Ok(title(head))
         });
         assert!(result.is_err());
         std::fs::remove_dir_all(&dir).unwrap();

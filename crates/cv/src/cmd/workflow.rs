@@ -409,8 +409,7 @@ fn render_workflow(w: &cv_core::Workflow, show_script: bool) -> Result<()> {
         println!("task: {t}");
     }
     if let Some(a) = &w.args {
-        let (head, _) = cv_core::JsonView::from(a).canonical_prefix(4 * 201)?;
-        println!("args: {}", truncate(&head, 200));
+        println!("args: {}", cv_core::ir::Head::of_json(cv_core::JsonView::from(a), 200)?);
     }
     if let Some(rf) = &w.resume_from {
         println!("resumed from: {rf}");
@@ -754,8 +753,8 @@ mod tests {
                 let truncated = old.len() > 2000;
                 let expected = if truncated { truncate(&old, 2000) } else { old };
                 assert_eq!(workflow_result_preview(&value).unwrap(), (expected, truncated));
-                let (args, _) = cv_core::JsonView::from(&value).canonical_prefix(4 * 201).unwrap();
-                assert_eq!(truncate(&args, 200), truncate(&value.to_string(), 200));
+                let args = cv_core::ir::Head::of_json(cv_core::JsonView::from(&value), 200).unwrap();
+                assert_eq!(args, truncate(&value.to_string(), 200));
             }
         }
     }

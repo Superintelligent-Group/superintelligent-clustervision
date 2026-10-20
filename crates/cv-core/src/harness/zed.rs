@@ -188,7 +188,7 @@ fn discover_db(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
             cwd: cwd.or_else(|| first_folder_path(folders.as_deref(), order.as_deref())),
             title: summary
                 .filter(|s| !s.trim().is_empty())
-                .map(|t| crate::ir::truncate(&t, 80)),
+                .map(|t| crate::ir::truncate(&t, crate::ir::Head::TITLE)),
             created_at: created.as_deref().and_then(super::parse_ts),
             updated_at: updated.as_deref().and_then(super::parse_ts),
             message_count: None,

@@ -980,7 +980,7 @@ impl Message {
                 s.push_str(&text.try_resolve_prefix(resolver, TITLE_HEAD)?);
             }
         }
-        Ok(meaningful_prompt(&s).map(|t| truncate(&t, 80)))
+        Ok(meaningful_prompt(&s).map(|t| truncate(&t, Head::TITLE)))
     }
 
     /// Whether this message is a conversational turn in [`SessionRef::message_count`]'s sense: a
@@ -1107,6 +1107,104 @@ fn meaningful_prompt(text: &str) -> Option<String> {
         return None;
     }
     Some(s.to_string())
+}
+
+/// A bounded head of a text, as [`truncate`] renders it: the first `max` characters (newlines
+/// flattened, `…` when cut), read with the one character of lookahead that tells a cut from an
+/// exact fit, and never more. A [`trimmed`](Self::trimmed) head is of the whitespace-trimmed
+/// text: leading whitespace is skipped and trailing whitespace dropped, with only the last
+/// non-whitespace position kept to decide it. Codecs bound titles with [`Head::TITLE`];
+/// renderers truncate further for their own width.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Head {
+    text: String,
+    chars: usize,
+    nonwhite: usize,
+    max: usize,
+    trim: bool,
+}
+impl Head {
+    /// The listing title bound: every codec's title, at every demand.
+    pub const TITLE: usize = 80;
+    pub fn bounded(max: usize) -> Self {
+        Self {
+            text: String::new(),
+            chars: 0,
+            nonwhite: 0,
+            max,
+            trim: false,
+        }
+    }
+    pub fn trimmed(max: usize) -> Self {
+        Self {
+            trim: true,
+            ..Self::bounded(max)
+        }
+    }
+    /// Characters a head of `max` keeps: `max` and the one of lookahead.
+    pub const fn kept(max: usize) -> usize {
+        max + 1
+    }
+    /// Feed one character; true once more input cannot change [`finish`](Self::finish) or
+    /// [`is_blank`](Self::is_blank).
+    pub fn push_char(&mut self, c: char) -> bool {
+        if self.done() || (self.trim && self.chars == 0 && c.is_whitespace()) {
+            return self.done();
+        }
+        if self.chars < Self::kept(self.max) {
+            self.text.push(c);
+            self.chars += 1;
+        }
+        if !c.is_whitespace() {
+            self.nonwhite = self.chars;
+        }
+        self.done()
+    }
+    /// Feed a chunk; true once done.
+    pub fn push(&mut self, s: &str) -> bool {
+        s.chars().any(|c| self.push_char(c)) || self.done()
+    }
+    pub fn done(&self) -> bool {
+        self.nonwhite > self.max || (!self.trim && self.chars > self.max && self.nonwhite > 0)
+    }
+    /// The lookahead is in: more characters cannot change the kept text.
+    pub fn full(&self) -> bool {
+        self.chars > self.max
+    }
+    /// Nothing but whitespace so far.
+    pub fn is_blank(&self) -> bool {
+        self.nonwhite == 0
+    }
+    /// The kept text so far (left-trimmed for a trimmed head).
+    pub fn as_str(&self) -> &str {
+        &self.text
+    }
+    pub fn finish(&self) -> String {
+        if self.trim {
+            let kept: String = self.text.chars().take(self.nonwhite).collect();
+            truncate(&kept, self.max)
+        } else {
+            truncate(&self.text, self.max)
+        }
+    }
+    /// The bounded head of a lazy text, reading at most `max + 1` characters of it.
+    pub(crate) fn of_text(
+        text: &crate::lazy::Text,
+        resolver: &crate::lazy::Resolver,
+        max: usize,
+    ) -> anyhow::Result<String> {
+        let (head, _) = crate::harness::store::document::text_head(text, resolver, Self::kept(max), false)?;
+        Ok(truncate(&head, max))
+    }
+    /// The bounded head of a JSON string; `None` for a nonstring.
+    pub(crate) fn of_string(view: crate::json::JsonView<'_>, max: usize) -> anyhow::Result<Option<String>> {
+        Ok(crate::projection::string_prefix(view, Self::kept(max))?.map(|head| truncate(&head, max)))
+    }
+    /// The bounded head of a value's canonical JSON (four bytes cover any character).
+    pub fn of_json(view: crate::json::JsonView<'_>, max: usize) -> anyhow::Result<String> {
+        let (head, _) = view.canonical_prefix(Self::kept(max).saturating_mul(4))?;
+        Ok(truncate(&head, max))
+    }
 }
 
 /// Flatten newlines to spaces and truncate to at most `max` chars, ending with `…` when cut.
@@ -1399,6 +1497,38 @@ pub fn home_rel(p: &std::path::Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A head is `truncate` (of the trimmed text, for a trimmed head) however the text is chunked,
+    /// and it stops reading once the answer cannot change.
+    #[test]
+    fn head_is_truncate_with_one_lookahead() {
+        let texts = [
+            String::new(),
+            " \n ".into(),
+            "a".repeat(79),
+            "a".repeat(80),
+            "a".repeat(81),
+            format!("  {}  ", "é".repeat(80)),
+            format!("{}\n{}", "x".repeat(40), " ".repeat(500)),
+            format!("{}{}", " ".repeat(200), "late"),
+            format!("{} {}", "λ".repeat(80), " ".repeat(300)),
+        ];
+        for text in &texts {
+            let chars: Vec<char> = text.chars().collect();
+            for width in [1, 3, 7, chars.len().max(1)] {
+                for trim in [false, true] {
+                    let mut head = if trim { Head::trimmed(80) } else { Head::bounded(80) };
+                    for chunk in chars.chunks(width) {
+                        head.push(&chunk.iter().collect::<String>());
+                    }
+                    let expected = if trim { text.trim() } else { text.as_str() };
+                    assert_eq!(head.finish(), truncate(expected, 80), "{text:?} trim={trim}");
+                    assert_eq!(head.is_blank(), text.trim().is_empty());
+                    assert!(head.as_str().chars().count() <= Head::kept(80));
+                }
+            }
+        }
+    }
 
     /// Every `Option` set and a record retained: serde emits one key per field (the destructuring
     /// in `Serialize for Message` makes a new field a compile error), the record appears only as

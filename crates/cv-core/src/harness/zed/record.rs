@@ -383,13 +383,9 @@ fn user_block(view: JsonView<'_>, spans: bool) -> Result<Option<Block>> {
         // LanguageModelImage: {source: <base64>, size}.
         let fields = Fields::parse(image, &["source"])?;
         let data_ref = match fields.as_ref() {
-            // 121 characters detect the 120-character truncation boundary; a retained source
-            // payload is never fully decoded merely to produce this reference.
+            // A bounded head: a retained source payload is never fully decoded for a reference.
             Some(fields) => text(fields, "source", spans)?
-                .map(|text| -> Result<_> {
-                    let head = text_head(&text, &Resolver::new(None), 121, false)?.0;
-                    Ok(crate::ir::truncate(&head, 120))
-                })
+                .map(|text| crate::ir::Head::of_text(&text, &Resolver::new(None), 120))
                 .transpose()?,
             None => None,
         };

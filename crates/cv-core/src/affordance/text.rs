@@ -6,42 +6,11 @@ use anyhow::Result;
 const CHUNK: usize = 64 * 1024;
 const SUMMARY_CHARS: usize = 120;
 
-/// Keep enough of a fully trimmed string to reproduce `truncate(trim(text), 120)` exactly.
-/// A long whitespace tail must not turn a 120-character summary into an ellipsis.
-#[derive(Default)]
-struct Trimmed {
-    prefix: String,
-    chars: usize,
-    started: bool,
-    later_content: bool,
-}
-
-impl Trimmed {
-    fn push(&mut self, mut text: &str) {
-        if !self.started {
-            text = text.trim_start();
-            self.started = !text.is_empty();
-        }
-        if self.chars <= SUMMARY_CHARS {
-            let mut end = 0;
-            for (offset, ch) in text.char_indices().take(SUMMARY_CHARS + 1 - self.chars) {
-                self.prefix.push(ch);
-                self.chars += 1;
-                end = offset + ch.len_utf8();
-            }
-            text = &text[end..];
-        }
-        self.later_content |= !text.trim().is_empty();
-    }
-
-    fn summary(&self) -> String {
-        let prefix = if self.later_content {
-            self.prefix.as_str()
-        } else {
-            self.prefix.trim_end()
-        };
-        crate::ir::truncate(prefix, SUMMARY_CHARS)
-    }
+/// A summary is the trimmed [`Head`](crate::ir::Head) of `SUMMARY_CHARS`: exactly
+/// `truncate(trim(text), 120)`, a long whitespace tail never turning it into an ellipsis.
+type Trimmed = crate::ir::Head;
+fn trimmed() -> Trimmed {
+    crate::ir::Head::trimmed(SUMMARY_CHARS)
 }
 
 /// The longest suffix that could continue an ASCII delimiter in the next decoded chunk.
@@ -71,7 +40,7 @@ impl Tag {
             complete: false,
             pending: String::new(),
             scratch: String::new(),
-            text: Trimmed::default(),
+            text: trimmed(),
         }
     }
 
@@ -157,7 +126,7 @@ pub(super) struct Facts {
 impl Default for Facts {
     fn default() -> Self {
         Self {
-            plain: Trimmed::default(),
+            plain: trimmed(),
             summary: Tag::new("<summary>", "</summary>"),
             reminder: Tag::new("<system-reminder>", "</system-reminder>"),
             #[cfg(test)]
@@ -182,7 +151,7 @@ impl Facts {
 
     #[cfg(test)]
     fn starts_with(&self, prefix: &str) -> bool {
-        self.plain.prefix.starts_with(prefix)
+        self.plain.as_str().starts_with(prefix)
     }
 
     #[cfg(test)]
@@ -207,17 +176,17 @@ impl Facts {
 
     pub(super) fn summary(&self) -> String {
         if self.summary.complete {
-            self.summary.text.summary()
+            self.summary.text.finish()
         } else if self.reminder.complete {
-            self.reminder.text.summary()
+            self.reminder.text.finish()
         } else {
-            self.plain.summary()
+            self.plain.finish()
         }
     }
 
     #[cfg(test)]
     fn plain_summary(&self) -> String {
-        self.plain.summary()
+        self.plain.finish()
     }
 }
 
@@ -358,9 +327,11 @@ pub(super) fn denied(text: &Text, resolver: &Resolver, harness: Harness) -> Resu
 }
 
 pub(super) fn plain_summary(text: &Text, resolver: &Resolver) -> Result<String> {
-    let mut summary = Trimmed::default();
-    chunks(text, resolver, |chunk| summary.push(chunk))?;
-    Ok(summary.summary())
+    let mut summary = trimmed();
+    chunks(text, resolver, |chunk| {
+        summary.push(chunk);
+    })?;
+    Ok(summary.finish())
 }
 
 #[cfg(test)]

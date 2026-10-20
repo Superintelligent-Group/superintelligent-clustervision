@@ -256,18 +256,10 @@ pub(super) fn title(view: Option<JsonView<'_>>, strict: bool) -> Result<Option<S
     if strict && !view.accepts_value()? {
         return Err(InvalidStruct("invalid title string").into());
     }
-    let mut prefix = String::new();
-    let mut count = 0;
-    let mut nonwhite = false;
+    let mut head = crate::ir::Head::bounded(crate::ir::Head::TITLE);
     view.for_each_str_chunk(|chunk| {
-        for c in chunk.chars() {
-            nonwhite |= !c.is_whitespace();
-            if count < 81 {
-                prefix.push(c);
-                count += 1;
-            }
-        }
+        head.push(chunk);
         Ok(())
     })?;
-    Ok(nonwhite.then(|| crate::ir::truncate(&prefix, 80)))
+    Ok((!head.is_blank()).then(|| head.finish()))
 }

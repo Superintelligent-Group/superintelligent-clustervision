@@ -272,7 +272,7 @@ impl Adapter for OpenCode {
                 title: v
                     .get("title")
                     .and_then(Value::as_str)
-                    .map(|t| crate::ir::truncate(t, 80)),
+                    .map(|t| crate::ir::truncate(t, crate::ir::Head::TITLE)),
                 created_at: v.pointer("/time/created").and_then(super::ts_from_value),
                 updated_at: v.pointer("/time/updated").and_then(super::ts_from_value),
                 message_count,
@@ -595,7 +595,7 @@ mod db {
             title: r
                 .get::<_, Option<String>>(2)?
                 .filter(|t| !t.is_empty())
-                .map(|t| crate::ir::truncate(&t, 80)),
+                .map(|t| crate::ir::truncate(&t, crate::ir::Head::TITLE)),
             created_at: r.get::<_, Option<i64>>(3)?.and_then(ts_from_epoch),
             updated_at: r.get::<_, Option<i64>>(4)?.and_then(ts_from_epoch),
             message_count: None,

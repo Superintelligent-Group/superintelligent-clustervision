@@ -934,7 +934,7 @@ pub fn subagent_refs(main: &SessionRef) -> Vec<SessionRef> {
                 if let Some(d) =
                     subagent_meta(&p).and_then(|m| m.get("description").and_then(Value::as_str).map(str::to_string))
                 {
-                    r.title = Some(crate::ir::truncate(&d, 80));
+                    r.title = Some(crate::ir::truncate(&d, crate::ir::Head::TITLE));
                 }
                 Some(r)
             })?;

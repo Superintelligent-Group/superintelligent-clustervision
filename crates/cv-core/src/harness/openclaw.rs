@@ -444,7 +444,7 @@ impl Fold {
             // first, then this name — what its session list shows), so a titled ref keeps its
             // title and `cv ls` and `cv show` agree; the name is still first-class in the bag.
             if s.title.is_none() {
-                s.title = Some(crate::ir::truncate(&name, 80));
+                s.title = Some(crate::ir::truncate(&name, crate::ir::Head::TITLE));
             }
             s.harness_extra_mut(Harness::OpenClaw)
                 .insert("session_name".into(), Value::from(name));
@@ -1126,7 +1126,7 @@ fn discover_sqlite(db: &Path) -> Result<Vec<SessionRef>> {
                 .or(n_display)
                 .or(w_display)
                 .filter(|t| !t.trim().is_empty())
-                .map(|t| crate::ir::truncate(&t, 80))
+                .map(|t| crate::ir::truncate(&t, crate::ir::Head::TITLE))
                 .or(entry.title)
                 .or(acc.session_name)
                 .or(acc.first_user);
