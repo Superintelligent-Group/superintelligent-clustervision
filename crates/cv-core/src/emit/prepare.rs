@@ -156,11 +156,8 @@ pub(super) fn selected(
                 span.offset
                     .checked_sub(1)
                     .zip(span.len.checked_add(2))
-                    .filter(|(offset, len)| {
-                        offset
-                            .checked_add(*len)
-                            .is_some_and(|end| fs::metadata(&path).is_ok_and(|metadata| end <= metadata.len()))
-                    })
+                    // Bounded by the capture just checked, not by a fresh stat of the live path.
+                    .filter(|(offset, len)| offset.checked_add(*len).is_some_and(|end| end <= source.len()))
                     .map(|(offset, len)| {
                         source.read_range_value(offset, len, |view| {
                             if view.source_range()? == Some((offset, len)) {
