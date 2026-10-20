@@ -16,12 +16,12 @@
 
 **Reading.**
 - OpenSession validates each turn before streaming delivery, keeping discarded history bounded in memory while rejecting late invalid turns before callbacks.
-- Goose, Hermes, Kimi, Kimi Code and Qwen boundaries carry no invented text; `cv show` labels them by kind, and cv-inferred turns add `· synthesized`.
-- A Cursor or LM Studio (Harmony) tool call whose wire names no id gets a declared derived one, `cv:<format>:<position>`, not `""`.
-- Codex tool results no longer carry an invented `status` (`completed`/`error`); the rollout records none, and `is_error` is unchanged.
-- Zed's session model is the thread's model (`claude-sonnet-4`, not `zed.dev/claude-sonnet-4`); the provider moves to `extra.zed.provider` and is never a model.
-- A Codex tool output starting `[error] ` is flagged and stripped only in a rollout cv wrote (`originator: clustervision`); a tool's own text stays verbatim.
-- `cv distill` and `cv adopt --model` write a sub-agent sidecar's `agentType` default (`general-purpose`) only when the source names none, one rule for both.
+- Goose, Hermes, Kimi, Kimi Code and Qwen boundaries carry no invented text; labels show their kind and mark cv-inferred turns as synthesized.
+- Cursor and LM Studio (Harmony) tool calls without native IDs receive declared position-derived IDs: `cv:<format>:<position>`.
+- Codex tool results use only recorded status, removing invented `completed` and `error` values.
+- Zed reports the recorded model; the provider moves to `extra.zed.provider` and never substitutes for a missing model.
+- Codex outputs beginning `[error] ` stay verbatim unless cv wrote the rollout; only cv provenance enables the error sentinel.
+- `cv distill` and `cv adopt --model` share the `general-purpose` agent type default, applied only when the source names none.
 - **Breaking (library):** `ParseOptions` and `ExtraProjection` become `Demand { tier, spans, offsets }`; the five `Watcher` poll methods become `poll`/`try_poll(Poll { .. })`.
 - Gemini, Qwen, Goose, Grok, LM Studio, OpenClaw and OpenCode report the model on every turn the harness wrote it; windowed reads no longer lose it.
 - Every JSONL adapter reads its transcript through one captured source (`store::jsonl::Read`); each adapter keeps its own resume protocol.
