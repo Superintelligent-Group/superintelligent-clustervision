@@ -61,7 +61,7 @@
 
 - Grok listings use native summaries and stop after finding fallback titles; exact message counts appear after indexing or a complete read.
 - `cv doctor` compares observed Claude/Codex writer versions with corpus coverage, including unknown sessions; observations come from normal discovery.
-- Cataloged writer versions and interpretation 5 trigger an announced rediscovery and consumer reread after upgrading; JSON stays unchanged.
+- Cataloged writer versions and interpretation 6 trigger an announced rediscovery and consumer reread after upgrading; JSON stays unchanged.
 - A compatibility gate checks the latest release against CLI schemas, serialized messages, session rows, MCP tools, HTTP routes, and exit codes.
 - Native Codex file-change records now feed `cv touched`, tool histograms and query facts, including code-mode edits, without duplicating visible patch calls.
 
@@ -164,8 +164,8 @@
 - `tools/dump-hash.sh` streams one sha256 per command, session and demand over `tools/dump-hash.manifest`: the byte-identity gate for output-preserving changes.
 
 **After upgrading, once.**
-- The first listing rediscovers the fleet (announced on stderr; `cv index` does it ahead of time): catalog interpretation 5 adds a nullable `writer_version`.
-- Every store, mark and watch state rereads each session once: `source::VERSION` 5 is the one version all check; nothing expires per release any more.
+- The first listing rediscovers the fleet (announced on stderr; `cv index` does it ahead of time): catalog interpretation 6 adds a nullable `writer_version`.
+- Every store, mark and watch state rereads each session once: `source::VERSION` 6 is the one version all check; nothing expires per release any more.
 
 ## 0.17.0 — 2026-10-17 — stream, never materialize
 
