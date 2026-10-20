@@ -80,6 +80,7 @@
 - `cv port` to OpenClaw no longer writes `usage.totalTokens`; OpenClaw derives the total from the recorded counts.
 - `cv port` to LM Studio no longer writes `tokenCount: 0`; cv does not know the chat's last prompt token count.
 - `cv port` to Continue refuses a tool turn with no tool result instead of writing an empty `toolCallId`.
+- `cv port` to Gemini derives message ids from the session id and turn index (UUID v5), so a re-emit writes the same ids.
 
 **Doctor and hooks.**
 - `cv doctor` adds a Writer versions row: the newest Claude/Codex version seen in the stores versus the newest the corpus verified, plus unknown sessions.

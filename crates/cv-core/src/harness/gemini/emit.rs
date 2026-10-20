@@ -148,11 +148,11 @@ mod checked_tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
+    /// The emitted chat, ids included: they are name-based on the session id, so reproducible.
     fn normalized(path: &Path) -> Result<Vec<u8>> {
-        let mut value: Value = serde_json::from_slice(&fs::read(path)?)?;
-        for (i, message) in value["messages"].as_array_mut().unwrap().iter_mut().enumerate() {
-            assert!(Uuid::parse_str(message["id"].as_str().unwrap()).is_ok());
-            message["id"] = json!(format!("generated-{i}"));
+        let value: Value = serde_json::from_slice(&fs::read(path)?)?;
+        for message in value["messages"].as_array().unwrap() {
+            assert_eq!(Uuid::parse_str(message["id"].as_str().unwrap())?.get_version_num(), 5);
         }
         Ok(serde_json::to_vec_pretty(&value)?)
     }

@@ -130,7 +130,22 @@ fn calls(
     Ok(())
 }
 
-fn messages(writer: &mut dyn Write, session: &Session, mode: ThinkingMode, resolver: &Resolver) -> Result<()> {
+/// A message's id: name-based (UUID v5) from the session id and the message's index in the IR,
+/// so emitting one session twice under one id writes the same ids.
+fn message_id(session_id: &str, index: usize) -> Uuid {
+    Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("urn:cv:gemini:{session_id}:{index}").as_bytes(),
+    )
+}
+
+fn messages(
+    writer: &mut dyn Write,
+    session: &Session,
+    session_id: &str,
+    mode: ThinkingMode,
+    resolver: &Resolver,
+) -> Result<()> {
     let mut results = Results::new();
     for message in &session.messages {
         if message.role == Role::Tool {
@@ -150,7 +165,7 @@ fn messages(writer: &mut dyn Write, session: &Session, mode: ThinkingMode, resol
     let called = called_tool_ids(session);
     writer.write_all(b"[")?;
     let mut first = true;
-    for message in &session.messages {
+    for (index, message) in session.messages.iter().enumerate() {
         let has_calls = message.content.iter().any(|block| match block {
             Block::ToolUse { .. } => message.role == Role::Assistant,
             Block::ToolResult { tool_use_id, .. } => {
@@ -175,7 +190,7 @@ fn messages(writer: &mut dyn Write, session: &Session, mode: ThinkingMode, resol
         }
         first = false;
         let mut record = ObjectWriter::new(writer)?;
-        record.field("id", Uuid::new_v4().to_string())?;
+        record.field("id", message_id(session_id, index).to_string())?;
         record.field(
             "type",
             match message.role {
@@ -277,7 +292,7 @@ pub(super) fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Res
         if let Some(cwd) = &cwd {
             record.field("directories", [cwd.to_string_lossy()])?;
         }
-        record.field_with("messages", |w| messages(w, session, opts.thinking, &resolver))?;
+        record.field_with("messages", |w| messages(w, session, &new_id, opts.thinking, &resolver))?;
         record.finish()?;
     }
     // Checked serialization completes before registry/transcript publication. Preserve the
