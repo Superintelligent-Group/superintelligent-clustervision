@@ -107,7 +107,9 @@ impl Scan {
     }
 
     fn record(&mut self, view: crate::json::JsonView<'_>) -> Result<()> {
-        let Some(record::Head { top: fields, ty }) = record::Head::parse(view, record::Demand::Metadata)? else {
+        let Some(record::Head { top: fields, ty }) =
+            record::Head::parse(view, (&crate::stream::Demand::DISCOVERY).into())?
+        else {
             return Ok(());
         };
         crate::writer_version::observe(&mut self.writer_version, fields.string("version")?.as_deref());

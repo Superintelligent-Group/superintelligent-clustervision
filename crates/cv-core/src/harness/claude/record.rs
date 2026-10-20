@@ -134,6 +134,18 @@ pub(crate) enum Demand {
     Tools,
 }
 
+/// A read's tier picks the head: [`Tier::Discovery`] selects the listing keys, every other tier
+/// the message keys. Facts, Compact and Tools are the reshape readers' own selections.
+impl From<&crate::stream::Demand> for Demand {
+    fn from(demand: &crate::stream::Demand) -> Self {
+        if demand.tier == Tier::Discovery {
+            Demand::Metadata
+        } else {
+            Demand::Message
+        }
+    }
+}
+
 /// One shared selection/type parse for metadata and message demands. Fields are lazy views;
 /// discovery never constructs a message or resolves bodies, rich extras or tool arguments.
 pub(crate) struct Head<'a> {
@@ -485,7 +497,7 @@ pub(super) fn ingest(
     sourced: &mut bool,
 ) -> Result<Flow> {
     // A record that is not an object carries nothing (Value's lookups all miss).
-    let Some(Head { top, ty }) = Head::parse(view, Demand::Message)? else {
+    let Some(Head { top, ty }) = Head::parse(view, opts.into())? else {
         return Ok(Flow::Continue);
     };
     let ty = ty.as_str();
@@ -681,6 +693,9 @@ fn deliver(msg: Message, sink: &mut dyn MessageSink, sourced: &mut bool) -> Flow
     sink.message(msg)
 }
 
+/// One record under the read's [`stream::Demand`]. At [`Tier::Facts`] Claude builds only the
+/// reducer facts: a notice's `compactMetadata` `trigger`/`preTokens`/`durationMs`, `message.id`,
+/// `sourceToolUseID`, the attachment type and a tool result's `details.restorable`.
 struct Record<'a, 'o> {
     view: JsonView<'a>,
     top: Fields<'a>,
@@ -931,7 +946,7 @@ impl<'a> Record<'a, '_> {
                 }
                 bag.insert("compactMetadata".into(), Value::Object(fields));
             }
-        } else if self.opts.tier >= Tier::Facts {
+        } else if self.opts.tier >= Tier::Rich {
             if !subtype.is_empty() {
                 bag.insert("subtype".into(), Value::String(subtype.to_string()));
             }
@@ -966,11 +981,8 @@ impl<'a> Record<'a, '_> {
             return Ok(None);
         };
         let opts = self.opts;
-        // The sink may ask for reducer facts instead of rich extras for this message.
-        let facts = opts.tier == Tier::Facts
-            || (opts.tier != Tier::Complete
-                && opts.tier >= Tier::Rich
-                && sink.extra_projection() == crate::stream::ExtraProjection::Facts);
+        // The sink may narrow a rich read to reducer facts for this message.
+        let tier = opts.for_sink(sink);
         let body = Fields::parse(
             msg,
             &[
@@ -1034,11 +1046,11 @@ impl<'a> Record<'a, '_> {
         // `Block::ToolResult::details`, not in the harness bag. Only rich demand resolves it: the
         // sidecar routinely dwarfs the visible transcript. Reducers read only `restorable`.
         let sidecar = self.top.get("toolUseResult");
-        if facts {
+        if tier == Tier::Facts {
             if let Some(restorable) = sidecar.map(|v| v.get("restorable")).transpose()?.flatten() {
                 attach_tool_use_result(&mut blocks, serde_json::json!({"restorable": restorable.resolve()?}));
             }
-        } else if opts.tier >= Tier::Rich && blocks.iter().any(|b| matches!(b, Block::ToolResult { .. })) {
+        } else if tier >= Tier::Rich && blocks.iter().any(|b| matches!(b, Block::ToolResult { .. })) {
             if let Some(sidecar) = sidecar.filter(|v| !v.is_null().unwrap_or(false)) {
                 attach_tool_use_result(&mut blocks, sidecar.resolve()?.into_owned());
             }
@@ -1092,7 +1104,7 @@ impl<'a> Record<'a, '_> {
 
         // Everything Claude-specific lands in `extra["claude"]`; the top level stays clean.
         let mut bag = Map::new();
-        if synthetic && opts.tier != Tier::Complete && !facts {
+        if synthetic && !matches!(tier, Tier::Facts | Tier::Complete) {
             for key in [
                 "isApiErrorMessage",
                 "error",
@@ -1110,11 +1122,11 @@ impl<'a> Record<'a, '_> {
         if let Some(id) = self.top.string("sourceToolUseID")? {
             bag.insert("sourceToolUseID".into(), Value::String(id));
         }
-        if facts || opts.tier == Tier::Usage {
+        if matches!(tier, Tier::Usage | Tier::Facts) {
             if let Some(id) = body_string("id")? {
                 bag.insert(format!("{MESSAGE_EXTRA_PREFIX}id"), Value::String(id));
             }
-        } else if opts.tier >= Tier::Facts {
+        } else if tier >= Tier::Rich {
             for &key in CLAUDE_EXTRA_TOP {
                 if let Some(value) = self.value(key)?.filter(|v| keep_extra_top(key, v)) {
                     bag.insert(key.to_owned(), value);

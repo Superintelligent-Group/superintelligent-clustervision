@@ -29,8 +29,7 @@ use super::record::{find_signature, get, nonempty, owned, push_extra_array, stri
 use crate::ir::*;
 use crate::json::JsonView;
 use crate::lazy::Text;
-use crate::stream::Demand;
-use crate::stream::Tier;
+use crate::stream::{Demand, Tier};
 use anyhow::Result;
 use serde_json::{json, Map, Value};
 

@@ -5,7 +5,7 @@
 //! by as lazy handles, never materialized.
 use crate::bytes::{ByteSource, ByteStage};
 use crate::source::ReadSet;
-use crate::stream::{Checkpoint, ExtraProjection, Flow, MessageSink};
+use crate::stream::{Checkpoint, Flow, MessageSink, Tier};
 use crate::{Message, Resolver, Session};
 use anyhow::{Context as _, Result};
 use serde_json::Value;
@@ -172,11 +172,11 @@ impl WindowSink {
 }
 
 impl MessageSink for WindowSink {
-    fn extra_projection(&self) -> ExtraProjection {
+    fn tier(&self) -> Tier {
         if self.tail.is_some() || (self.fail.is_none() && self.next.is_none() && self.in_window(self.idx)) {
-            ExtraProjection::Full
+            Tier::Rich
         } else {
-            ExtraProjection::Facts
+            Tier::Facts
         }
     }
     fn dependency(&mut self, path: &Path) {

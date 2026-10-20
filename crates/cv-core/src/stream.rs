@@ -33,8 +33,11 @@ pub enum Tier {
     /// `message.id`), without other metadata.
     Usage,
     /// [`Tier::Usage`] plus the shared reducer facts (doctor, compaction, affordances), selected
-    /// before unrelated large metadata is decoded. Each adapter's facts producer names them;
-    /// adapters without one return [`Tier::Rich`] metadata.
+    /// before unrelated large metadata is decoded and kept in their usual bag / tool-detail
+    /// places. An adapter with a facts path names its facts (Claude, Kimi Code, Hermes); every
+    /// other adapter returns [`Tier::Rich`] metadata, so a consumer never depends on a field's
+    /// absence. Session facts written at EOF still arrive after a selected window. Internal
+    /// reducers only: never JSON output, conversion, redaction or watch.
     Facts,
     /// Every harness-specific field and structured sidecar (`toolUseResult` and kin).
     Rich,
@@ -93,41 +96,16 @@ impl Demand {
     pub const fn with_offsets(self) -> Self {
         Demand { offsets: true, ..self }
     }
-}
 
-/// The metadata a sink asks for under a rich read ([`MessageSink::extra_projection`]).
-///
-/// Facts are a shared projection for read-only reducers, not a separate output schema. Adapters
-/// without a projection implementation may return full extras; consumers must not depend on the
-/// absence of unrelated fields. Existing full, bulk and lazy constructors retain their behavior.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum ExtraProjection {
-    /// Existing harness metadata and structured tool-result details, without field filtering.
-    #[default]
-    Full,
-    /// Only the common reducer facts, selected before decoding unrelated large metadata.
-    ///
-    /// The fixed union is:
-    /// - message attachment type and `compactMetadata` / `compact_metadata` fields `trigger`,
-    ///   `preTokens`, `durationMs` (doctor, compaction and text labels);
-    /// - Claude `message.id`, with the same precedence as full extras (usage deduplication);
-    /// - Kimi Code `origin_kind`, Hermes `display_kind`, Codex `item_type`, OpenCode
-    ///   `metadata.source` (affordance classification);
-    /// - OpenCode `patches[].hash/files`, `snapshot.start/files` and Claude/Devin tool-result
-    ///   `details.restorable` (checkpoint affordances);
-    /// - session `permission_modes`, Devin `agent_mode`, OpenCode permission rules
-    ///   (`permission`, `pattern`, `action`) and `revert.messageID/snapshot`, and common
-    ///   `checkpoints.count/tag/files`.
-    ///
-    /// Facts preserve their existing harness bags / tool-detail locations and value semantics.
-    /// Kind, origin, usage, model, IDs and other first-class IR fields remain independent of this
-    /// projection. Session facts written at EOF must still be returned, even after a selected
-    /// message window. Format-complete demand always overrides this projection with Full.
-    ///
-    /// This mode is intended for internal reducers. It must not replace full metadata on JSON
-    /// output, conversion, redaction or watch paths, or silently add extras to existing lean
-    /// output. Source validation and dependency/provenance checks remain mandatory.
-    Facts,
+    /// The tier one message is built at, given its sink's [`MessageSink::tier`]: a sink may
+    /// narrow a [`Tier::Rich`] read to [`Tier::Facts`], never below and never a complete read.
+    pub fn for_sink(&self, sink: &dyn MessageSink) -> Tier {
+        if self.tier == Tier::Rich {
+            sink.tier().clamp(Tier::Facts, Tier::Rich)
+        } else {
+            self.tier
+        }
+    }
 }
 
 /// The one early-stop signal. A chunk, character or record callback that has what it needs
@@ -166,12 +144,12 @@ pub enum Flow {
 /// full `parse`) always does. Sinks that must render a header ahead of the body (e.g. `cv show`)
 /// use it; most sinks ignore it and just read the returned `Session` afterward.
 pub trait MessageSink {
-    /// Rich fields needed for the next delivered message. This advisory construction demand
-    /// never weakens the parse options' record acceptance, source checks or EOF session metadata.
-    /// Unsupported adapters may keep full fields. Wrappers combine/forward their consumers'
-    /// demand; Facts retains the common reducer union needed by counting and affordances.
-    fn extra_projection(&self) -> ExtraProjection {
-        ExtraProjection::Full
+    /// The richest tier the next delivered message needs. Advisory: under a [`Tier::Rich`] read
+    /// an adapter with a facts path may build that message at [`Tier::Facts`]
+    /// ([`Demand::for_sink`]); record acceptance, source checks and EOF session facts never
+    /// weaken. Wrappers forward or combine their consumers' tiers.
+    fn tier(&self) -> Tier {
+        Tier::Rich
     }
 
     fn message(&mut self, m: Message) -> Flow;
@@ -280,8 +258,8 @@ struct ErrorGuard<'a> {
     latch: Latch,
 }
 impl MessageSink for ErrorGuard<'_> {
-    fn extra_projection(&self) -> ExtraProjection {
-        self.inner.extra_projection()
+    fn tier(&self) -> Tier {
+        self.inner.tier()
     }
     fn take_error(&mut self) -> Option<anyhow::Error> {
         self.latch.capture(self.inner);
@@ -452,14 +430,9 @@ impl TeeSink<'_> {
     }
 }
 impl MessageSink for TeeSink<'_> {
-    fn extra_projection(&self) -> ExtraProjection {
-        if (!self.a_stopped && self.a.extra_projection() == ExtraProjection::Full)
-            || (!self.b_stopped && self.b.extra_projection() == ExtraProjection::Full)
-        {
-            ExtraProjection::Full
-        } else {
-            ExtraProjection::Facts
-        }
+    fn tier(&self) -> Tier {
+        let live = |stopped: bool, tier: Tier| if stopped { Tier::Facts } else { tier };
+        live(self.a_stopped, self.a.tier()).max(live(self.b_stopped, self.b.tier()))
     }
     fn take_error(&mut self) -> Option<anyhow::Error> {
         self.capture();
@@ -854,8 +827,8 @@ impl<'a> Counting<'a> {
 }
 
 impl MessageSink for Counting<'_> {
-    fn extra_projection(&self) -> ExtraProjection {
-        self.inner.extra_projection()
+    fn tier(&self) -> Tier {
+        self.inner.tier()
     }
     fn take_error(&mut self) -> Option<anyhow::Error> {
         let error = self.latch.take_or(self.inner, "counting stream");
@@ -948,24 +921,24 @@ mod tests {
 
     #[test]
     fn extra_construction_demand_forwards_and_unions_without_losing_counter_facts() {
-        struct Demand(ExtraProjection);
-        impl MessageSink for Demand {
-            fn extra_projection(&self) -> ExtraProjection {
+        struct Wants(Tier);
+        impl MessageSink for Wants {
+            fn tier(&self) -> Tier {
                 self.0
             }
             fn message(&mut self, _: Message) -> Flow {
                 Flow::Stop
             }
         }
-        let mut facts = Demand(ExtraProjection::Facts);
-        let mut full = Demand(ExtraProjection::Full);
+        let mut facts = Wants(Tier::Facts);
+        let mut full = Wants(Tier::Rich);
         let mut tee = TeeSink::new(&mut facts, &mut full);
-        assert_eq!(tee.extra_projection(), ExtraProjection::Full);
+        assert_eq!(tee.tier(), Tier::Rich);
         tee.b_stopped = true;
-        assert_eq!(tee.extra_projection(), ExtraProjection::Facts);
+        assert_eq!(tee.tier(), Tier::Facts);
         let r = SessionRef::new("facts", crate::Harness::Claude, "source");
         let mut counter = Counting::new(&r, &mut facts, None);
-        assert_eq!(counter.extra_projection(), ExtraProjection::Facts);
+        assert_eq!(counter.tier(), Tier::Facts);
         let mut result = Message::new(Role::Tool);
         result.content.push(Block::ToolResult {
             tool_use_id: "c".into(),
@@ -984,9 +957,9 @@ mod tests {
             inner: &mut facts,
             latch: Latch::default(),
         };
-        assert_eq!(guard.extra_projection(), ExtraProjection::Facts);
+        assert_eq!(guard.tier(), Tier::Facts);
         let affordance = crate::affordance::AffordanceSink::new(crate::Harness::Claude, &mut guard);
-        assert_eq!(affordance.extra_projection(), ExtraProjection::Facts);
+        assert_eq!(affordance.tier(), Tier::Facts);
     }
 
     /// A sink that records the texts it saw and stops after `stop_after` messages.

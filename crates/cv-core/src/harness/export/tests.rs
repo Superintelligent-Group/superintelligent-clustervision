@@ -1,7 +1,6 @@
 use super::*;
 use crate::emit::frozen::Frozen;
-use crate::stream::Tier;
-use crate::stream::{CollectSink, Demand};
+use crate::stream::{CollectSink, Demand, Tier};
 use serde_json::{json, Value};
 
 /// A read session, frozen: its length and SHA-256, the temporary archive path aside.

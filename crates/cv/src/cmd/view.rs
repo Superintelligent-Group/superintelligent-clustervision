@@ -1756,8 +1756,8 @@ mod tests {
         let adapter = cv_core::harness::for_harness(Harness::Claude).unwrap();
         struct FactsCollect(cv_core::stream::CollectSink);
         impl cv_core::MessageSink for FactsCollect {
-            fn extra_projection(&self) -> cv_core::stream::ExtraProjection {
-                cv_core::stream::ExtraProjection::Facts
+            fn tier(&self) -> cv_core::stream::Tier {
+                cv_core::stream::Tier::Facts
             }
             fn message(&mut self, m: Message) -> cv_core::Flow {
                 self.0.message(m)

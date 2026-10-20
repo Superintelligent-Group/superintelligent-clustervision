@@ -126,8 +126,7 @@ use super::{parse_ts, ts_from_value, Adapter};
 use crate::ir::*;
 use crate::source::{sqlite_sidecars, Dependencies, Probe};
 #[cfg(feature = "sqlite")]
-use crate::stream::Tier;
-use crate::stream::{Demand, Flow, MessageSink};
+use crate::stream::{Demand, Flow, MessageSink, Tier};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::Value;

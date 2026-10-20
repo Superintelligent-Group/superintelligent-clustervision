@@ -508,8 +508,8 @@ impl<'a> AffordanceSink<'a> {
 }
 
 impl MessageSink for AffordanceSink<'_> {
-    fn extra_projection(&self) -> crate::stream::ExtraProjection {
-        self.inner.extra_projection()
+    fn tier(&self) -> crate::stream::Tier {
+        self.inner.tier()
     }
     fn dependency(&mut self, path: &std::path::Path) {
         if !self.latch.failed() {

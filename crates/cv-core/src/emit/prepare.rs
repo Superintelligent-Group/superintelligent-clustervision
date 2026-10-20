@@ -252,8 +252,8 @@ mod tests {
             };
             struct Facts(crate::stream::CollectSink);
             impl MessageSink for Facts {
-                fn extra_projection(&self) -> crate::stream::ExtraProjection {
-                    crate::stream::ExtraProjection::Facts
+                fn tier(&self) -> crate::stream::Tier {
+                    crate::stream::Tier::Facts
                 }
                 fn message(&mut self, message: Message) -> Flow {
                     self.0.message(message)
