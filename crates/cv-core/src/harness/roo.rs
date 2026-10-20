@@ -72,7 +72,7 @@ impl Adapter for Roo {
     }
 
     fn discover(&self) -> Result<crate::Discovered> {
-        Ok(discover_in(&self.roots, Harness::Roo).into())
+        Ok(discover_in(&self.roots, Harness::Roo))
     }
 
     fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {

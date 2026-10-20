@@ -146,8 +146,8 @@ impl Adapter for Cline {
 
     fn discover(&self) -> Result<crate::Discovered> {
         let mut out = discover_in(&self.roots, Harness::Cline);
-        out.extend(super::cline_sdk::discover(&self.sdk_roots));
-        Ok(out.into())
+        super::cline_sdk::discover(&self.sdk_roots, &mut out);
+        Ok(out)
     }
 
     fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
@@ -234,13 +234,17 @@ fn global_storage_roots() -> Vec<PathBuf> {
 
 /// Walk every `tasks/` root, producing one cheap `SessionRef` per `<taskId>/` dir that has an
 /// `api_conversation_history.json`. Shared by Cline and Roo (the only difference is `harness`).
-pub fn discover_in(roots: &[PathBuf], harness: Harness) -> Vec<SessionRef> {
-    let mut out = Vec::new();
+/// An unreadable `tasks/` dir, and a history that fails to read, are skipped and reported.
+pub fn discover_in(roots: &[PathBuf], harness: Harness) -> crate::Discovered {
+    let mut out = crate::Discovered::default();
     for root in roots {
-        let Ok(entries) = fs::read_dir(root) else {
+        let Some(entries) = out.keep(root, fs::read_dir(root).map_err(Into::into)) else {
             continue;
         };
-        for e in entries.filter_map(|e| e.ok()) {
+        for e in entries {
+            let Some(e) = out.keep(root, e.map_err(Into::into)) else {
+                continue;
+            };
             let dir = e.path();
             if !dir.is_dir() {
                 continue;
@@ -252,8 +256,8 @@ pub fn discover_in(roots: &[PathBuf], harness: Harness) -> Vec<SessionRef> {
             let Some(id) = dir.file_name().and_then(|n| n.to_str()).map(str::to_string) else {
                 continue;
             };
-            if let Some(r) = scan(&dir, &id, harness) {
-                out.push(r);
+            if let Some(found) = crate::Skipped::listed(&history, scan(&dir, &id, harness).map(Some)) {
+                out.push(found);
             }
         }
     }
@@ -261,37 +265,35 @@ pub fn discover_in(roots: &[PathBuf], harness: Harness) -> Vec<SessionRef> {
 }
 
 /// Cheap metadata-only scan of one task dir into a `SessionRef`.
-fn scan(dir: &Path, id: &str, harness: Harness) -> Option<SessionRef> {
+fn scan(dir: &Path, id: &str, harness: Harness) -> Result<SessionRef> {
     let history = dir.join("api_conversation_history.json");
-    let source = JsonSource::capture(&history).ok()?;
-    let (mut cwd, title, message_count) = source
-        .read_document(|view| {
-            let messages = view.array()?.context("history array")?;
-            let mut cwd = None;
-            let mut title = None;
-            let mut message_count = 0;
-            for view in messages {
-                let view = view?;
-                let Some(record) = Fields::parse(view, &["role", "content"])? else {
-                    continue;
-                };
-                let role = record.string("role")?.unwrap_or_default();
-                if matches!(role.as_str(), "user" | "assistant") {
-                    message_count += 1;
+    let source = JsonSource::capture(&history)?;
+    let (mut cwd, title, message_count) = source.read_document(|view| {
+        let messages = view.array()?.context("history array")?;
+        let mut cwd = None;
+        let mut title = None;
+        let mut message_count = 0;
+        for view in messages {
+            let view = view?;
+            let Some(record) = Fields::parse(view, &["role", "content"])? else {
+                continue;
+            };
+            let role = record.string("role")?.unwrap_or_default();
+            if matches!(role.as_str(), "user" | "assistant") {
+                message_count += 1;
+            }
+            if role == "user" && (cwd.is_none() || title.is_none()) {
+                let summary = prompt::summarize(|feed| visit_text(record.get("content"), true, feed))?;
+                if cwd.is_none() {
+                    cwd = summary.cwd;
                 }
-                if role == "user" && (cwd.is_none() || title.is_none()) {
-                    let summary = prompt::summarize(|feed| visit_text(record.get("content"), true, feed))?;
-                    if cwd.is_none() {
-                        cwd = summary.cwd;
-                    }
-                    if title.is_none() {
-                        title = summary.title;
-                    }
+                if title.is_none() {
+                    title = summary.title;
                 }
             }
-            Ok((cwd, title, message_count))
-        })
-        .ok()?;
+        }
+        Ok((cwd, title, message_count))
+    })?;
 
     // created_at from the taskId (epoch millis); fall back to history mtime.
     let created_at = task_id_to_time(id);
@@ -303,7 +305,7 @@ fn scan(dir: &Path, id: &str, harness: Harness) -> Option<SessionRef> {
         cwd = cwd_from_metadata(dir);
     }
 
-    Some(SessionRef {
+    Ok(SessionRef {
         cwd,
         title,
         created_at,
@@ -1212,7 +1214,7 @@ mod tests {
                 );
             }
             // Discovery retains its whole-Value acceptance, unlike per-child transcript replay.
-            assert!(scan(&dir, "1717000000000", harness).is_none());
+            assert!(scan(&dir, "1717000000000", harness).is_err());
         }
         fs::write(&history, serde_json::to_vec(&records).unwrap()).unwrap();
         let r = scan(&dir, "1717000000000", Harness::Cline).unwrap();

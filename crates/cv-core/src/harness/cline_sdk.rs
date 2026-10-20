@@ -99,41 +99,34 @@ pub fn is_sdk_path(path: &Path) -> bool {
 }
 
 /// One `SessionRef` per messages file under each root: the lead session first, then its children.
-pub fn discover(roots: &[PathBuf]) -> Vec<SessionRef> {
-    let mut out = Vec::new();
-    for root in roots {
-        let Ok(entries) = fs::read_dir(root) else {
-            continue;
+/// Every SDK messages file under `roots`, into `out`; an unreadable dir or file is skipped and
+/// reported.
+pub fn discover(roots: &[PathBuf], out: &mut crate::Discovered) {
+    let entries_of = |dir: &Path, out: &mut crate::Discovered| -> Vec<PathBuf> {
+        let Some(entries) = out.keep(dir, fs::read_dir(dir).map_err(Into::into)) else {
+            return Vec::new();
         };
-        let mut dirs: Vec<PathBuf> = entries
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.is_dir())
+        let mut paths: Vec<PathBuf> = entries
+            .filter_map(|e| out.keep(dir, e.map_err(Into::into)).map(|e| e.path()))
             .collect();
-        dirs.sort();
+        paths.sort();
+        paths
+    };
+    for root in roots {
+        let dirs: Vec<PathBuf> = entries_of(root, out).into_iter().filter(|p| p.is_dir()).collect();
         for dir in dirs {
             let Some(sid) = dir.file_name().and_then(|n| n.to_str()).map(str::to_string) else {
                 continue;
             };
-            let Ok(files) = fs::read_dir(&dir) else {
-                continue;
-            };
-            let mut files: Vec<PathBuf> = files
-                .filter_map(|e| e.ok().map(|e| e.path()))
-                .filter(|p| is_sdk_path(p))
-                .collect();
-            files.sort();
+            let files: Vec<PathBuf> = entries_of(&dir, out).into_iter().filter(|p| is_sdk_path(p)).collect();
             let lead = dir.join(format!("{sid}.messages.json"));
-            if let Some(r) = scan(&lead, &sid) {
-                out.push(r);
-            }
-            for f in files.iter().filter(|f| **f != lead) {
-                if let Some(r) = scan(f, &sid) {
-                    out.push(r);
+            for f in std::iter::once(&lead).chain(files.iter().filter(|f| **f != lead)) {
+                if let Some(found) = crate::Skipped::listed(f, scan(f, &sid).map(Some)) {
+                    out.push(found);
                 }
             }
         }
     }
-    out
 }
 
 /// A child file's session id: `<sid>/<stem>`; the lead's is `<sid>`.
@@ -156,65 +149,62 @@ fn mtime(path: &Path) -> Option<DateTime<Utc>> {
     fs::metadata(path).ok()?.modified().ok().map(DateTime::<Utc>::from)
 }
 
-fn scan(path: &Path, sid: &str) -> Option<SessionRef> {
-    JsonSource::capture(path)
-        .ok()?
-        .read_document(|view| {
-            let record = Fields::parse(view, &["messages", "updated_at"])?.context("SDK document object")?;
-            let messages = record.get("messages").context("SDK messages")?;
-            let id = ref_id(path, sid).context("SDK id")?;
-            let lead = id == sid;
-            let row = if lead {
-                path.parent().and_then(|dir| manifest(dir, sid))
-            } else {
-                None
-            };
-            let mut r = SessionRef::new(&id, Harness::Cline, path.to_path_buf());
-            r.cwd = row
-                .as_ref()
-                .and_then(|m| m.get("cwd"))
-                .and_then(Value::as_str)
-                .map(PathBuf::from);
-            r.title = row
-                .as_ref()
-                .and_then(|m| m.pointer("/metadata/title"))
-                .and_then(Value::as_str)
-                .map(str::to_owned);
-            r.created_at = row
-                .as_ref()
-                .and_then(|m| m.get("started_at"))
-                .and_then(Value::as_str)
-                .and_then(parse_ts);
-            let mut first = true;
-            let mut first_user = false;
-            let mut count = 0;
-            for message in messages.array()?.context("SDK messages array")? {
-                count += 1;
-                let message = message?;
-                if let Some(record) = Fields::parse(message, &["ts", "role", "content"])? {
-                    if first && r.created_at.is_none() {
-                        r.created_at = record.value("ts")?.and_then(|v| v.as_i64()).and_then(ts_from_epoch);
-                    }
-                    if !first_user && record.string("role")?.as_deref() == Some("user") {
-                        first_user = true;
-                        if r.title.is_none() {
-                            r.title = super::wire::text_title(record.get("content"))?;
-                        }
+fn scan(path: &Path, sid: &str) -> Result<SessionRef> {
+    JsonSource::capture(path)?.read_document(|view| {
+        let record = Fields::parse(view, &["messages", "updated_at"])?.context("SDK document object")?;
+        let messages = record.get("messages").context("SDK messages")?;
+        let id = ref_id(path, sid).context("SDK id")?;
+        let lead = id == sid;
+        let row = if lead {
+            path.parent().and_then(|dir| manifest(dir, sid))
+        } else {
+            None
+        };
+        let mut r = SessionRef::new(&id, Harness::Cline, path.to_path_buf());
+        r.cwd = row
+            .as_ref()
+            .and_then(|m| m.get("cwd"))
+            .and_then(Value::as_str)
+            .map(PathBuf::from);
+        r.title = row
+            .as_ref()
+            .and_then(|m| m.pointer("/metadata/title"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        r.created_at = row
+            .as_ref()
+            .and_then(|m| m.get("started_at"))
+            .and_then(Value::as_str)
+            .and_then(parse_ts);
+        let mut first = true;
+        let mut first_user = false;
+        let mut count = 0;
+        for message in messages.array()?.context("SDK messages array")? {
+            count += 1;
+            let message = message?;
+            if let Some(record) = Fields::parse(message, &["ts", "role", "content"])? {
+                if first && r.created_at.is_none() {
+                    r.created_at = record.value("ts")?.and_then(|v| v.as_i64()).and_then(ts_from_epoch);
+                }
+                if !first_user && record.string("role")?.as_deref() == Some("user") {
+                    first_user = true;
+                    if r.title.is_none() {
+                        r.title = super::wire::text_title(record.get("content"))?;
                     }
                 }
-                first = false;
             }
-            r.message_count = Some(count);
-            r.title = r.title.map(|t| truncate(&t, crate::ir::Head::TITLE));
-            r.updated_at = record
-                .string("updated_at")?
-                .as_deref()
-                .and_then(parse_ts)
-                .or_else(|| mtime(path))
-                .or(r.created_at);
-            Ok(r)
-        })
-        .ok()
+            first = false;
+        }
+        r.message_count = Some(count);
+        r.title = r.title.map(|t| truncate(&t, crate::ir::Head::TITLE));
+        r.updated_at = record
+            .string("updated_at")?
+            .as_deref()
+            .and_then(parse_ts)
+            .or_else(|| mtime(path))
+            .or(r.created_at);
+        Ok(r)
+    })
 }
 /// Read one messages file into `sink`, returning the session with empty `messages`.
 pub fn stream(path: &Path, id: &str, sink: &mut dyn MessageSink) -> Result<Session> {
@@ -793,7 +783,8 @@ mod tests {
                          {"role": "assistant", "content": [{"type": "text", "text": "ok"}]}]}),
         );
 
-        let refs = discover(std::slice::from_ref(&root));
+        let mut refs = crate::Discovered::default();
+        discover(std::slice::from_ref(&root), &mut refs);
         let ids: Vec<&str> = refs.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, ["100_abcde", "100_abcde/agent_x"]);
         assert_eq!(refs[0].title.as_deref(), Some("t"));
