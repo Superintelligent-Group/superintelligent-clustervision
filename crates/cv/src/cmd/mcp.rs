@@ -41,7 +41,7 @@
 use super::mcp_tools::CliTools;
 use anyhow::Context as _;
 use cv_core::scan::{ceil_char, floor_char};
-use cv_core::watch::{Cursor, Filter, Watcher};
+use cv_core::watch::{Cursor, Filter, Poll, Watcher};
 use cv_core::Harness;
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
@@ -966,38 +966,46 @@ fn observe_poll_checked(
     let mut chars_used = 0usize;
     let mut projection_error = None;
     let more_pending = !baseline
-        && watcher.try_poll_bounded_retained_checked(max_messages, &mut check, |ev| {
-            if projection_error.is_some() {
-                return 0;
-            }
-            let r = &ev.reference;
-            let resolver = cv_core::Resolver::new(Some(r.path.clone()));
-            let mut taken = 0;
-            for m in &ev.new_messages {
-                let room = char_cap.saturating_sub(chars_used);
-                if room == 0 {
-                    break;
+        && watcher.try_poll(
+            Poll {
+                max: max_messages,
+                strict: true,
+                retained: true,
+                checked: Some(&mut check),
+            },
+            |ev| {
+                if projection_error.is_some() {
+                    return 0;
                 }
-                let text = match project(m, &resolver, room) {
-                    Ok(text) => text,
-                    Err(error) => {
-                        projection_error = Some(error);
+                let r = &ev.reference;
+                let resolver = cv_core::Resolver::new(Some(r.path.clone()));
+                let mut taken = 0;
+                for m in &ev.new_messages {
+                    let room = char_cap.saturating_sub(chars_used);
+                    if room == 0 {
                         break;
                     }
-                };
-                chars_used += text.len();
-                out_msgs.push(json!({
-                    "harness": r.harness.as_str(),
-                    "session_id": r.id,
-                    "cwd": r.cwd.as_ref().map(|p| p.to_string_lossy().to_string()),
-                    "role": cv_core::render::role_label(m.role),
-                    "timestamp": m.timestamp.map(|t| t.to_rfc3339()),
-                    "text": text,
-                }));
-                taken += 1;
-            }
-            taken
-        })?;
+                    let text = match project(m, &resolver, room) {
+                        Ok(text) => text,
+                        Err(error) => {
+                            projection_error = Some(error);
+                            break;
+                        }
+                    };
+                    chars_used += text.len();
+                    out_msgs.push(json!({
+                        "harness": r.harness.as_str(),
+                        "session_id": r.id,
+                        "cwd": r.cwd.as_ref().map(|p| p.to_string_lossy().to_string()),
+                        "role": cv_core::render::role_label(m.role),
+                        "timestamp": m.timestamp.map(|t| t.to_rfc3339()),
+                        "text": text,
+                    }));
+                    taken += 1;
+                }
+                taken
+            },
+        )?;
     if let Some(error) = projection_error {
         return Err(error);
     }
@@ -1091,7 +1099,7 @@ mod projection_tests {
     fn owned_observe_oracle(watcher: &mut Watcher, cap: usize) -> anyhow::Result<String> {
         let mut rows = Vec::new();
         let mut used = 0usize;
-        let more = watcher.try_poll_bounded(50, |event| {
+        let more = watcher.try_poll(Poll { max: 50, strict: true, ..Poll::default() }, |event| {
             let r=&event.reference; let mut taken=0;
             for m in event.new_messages {
                 let full=message_text(&m).unwrap(); let room=cap.saturating_sub(used);
@@ -1139,11 +1147,19 @@ mod projection_tests {
         let path = world.write_session("observe-mutation", &[json!({"type":"assistant", "sessionId":"observe-mutation", "uuid":"a", "message":{"role":"assistant","content":"hello"}})]);
         let mut watcher = Watcher::with_discovery(Filter::default(), true, discover);
         let before = watcher.to_cursor().encode();
-        let result = watcher.try_poll_bounded_retained(50, |event| {
-            assert_eq!(event.new_messages.len(), 1);
-            std::fs::write(&path, b"changed").unwrap();
-            1
-        });
+        let result = watcher.try_poll(
+            Poll {
+                max: 50,
+                strict: true,
+                retained: true,
+                ..Poll::default()
+            },
+            |event| {
+                assert_eq!(event.new_messages.len(), 1);
+                std::fs::write(&path, b"changed").unwrap();
+                1
+            },
+        );
         assert!(result.is_err());
         assert_eq!(watcher.to_cursor().encode(), before);
     }
@@ -1281,10 +1297,16 @@ mod projection_tests {
                 "cannot serialize a success cursor after failed projection"
             );
             let mut recovered = 0;
-            watcher.poll_bounded(50, |event| {
-                recovered += event.new_messages.len();
-                event.new_messages.len()
-            });
+            watcher.poll(
+                Poll {
+                    max: 50,
+                    ..Poll::default()
+                },
+                |event| {
+                    recovered += event.new_messages.len();
+                    event.new_messages.len()
+                },
+            );
             assert_eq!(recovered, 1, "failed projection must leave offered messages unread");
         }
     }

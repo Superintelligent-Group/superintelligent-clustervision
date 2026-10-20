@@ -44,7 +44,13 @@ pub(crate) fn cmd_scry(
         eprintln!("cv scry: following {} sessions", watcher.following());
     }
     loop {
-        for ev in watcher.poll() {
+        let mut events = Vec::new();
+        watcher.poll(cv_core::watch::Poll::default(), |ev| {
+            let taken = ev.new_messages.len();
+            events.push(ev);
+            taken
+        });
+        for ev in events {
             print_event(&ev);
         }
         if !wait.pause(interval) {

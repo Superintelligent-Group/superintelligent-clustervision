@@ -313,56 +313,7 @@ pub fn read(
     skip: usize,
     keep: usize,
 ) -> Result<ReadPass> {
-    read_inner(
-        adapter,
-        r,
-        previous,
-        skip,
-        keep,
-        ReadMode::OwnedTail,
-        ReadControl::default(),
-    )
-}
-
-/// Checked selected messages retaining source-backed payloads for bounded projections.
-pub(super) fn read_retained(
-    adapter: &dyn Adapter,
-    r: &SessionRef,
-    previous: Option<&ReadState>,
-    skip: usize,
-    keep: usize,
-) -> Result<ReadPass> {
-    read_inner(
-        adapter,
-        r,
-        previous,
-        skip,
-        keep,
-        ReadMode::RetainedTail,
-        ReadControl::default(),
-    )
-}
-
-pub(super) fn read_retained_checked(
-    adapter: &dyn Adapter,
-    r: &SessionRef,
-    previous: Option<&ReadState>,
-    skip: usize,
-    keep: usize,
-    check: &mut dyn FnMut() -> Result<()>,
-) -> Result<ReadPass> {
-    read_inner(
-        adapter,
-        r,
-        previous,
-        skip,
-        keep,
-        ReadMode::RetainedTail,
-        ReadControl {
-            output: None,
-            check: Some(check),
-        },
-    )
+    pass(adapter, r, previous, skip, keep, Demand::default())
 }
 
 /// Full session output: on a verified append retain only the checkpoint's stable old prefix,
@@ -373,15 +324,11 @@ pub fn read_session(
     previous: Option<&ReadState>,
     previous_count: usize,
 ) -> Result<ReadPass> {
-    read_inner(
-        adapter,
-        r,
-        previous,
-        previous_count,
-        usize::MAX,
-        ReadMode::OwnedSession,
-        ReadControl::default(),
-    )
+    let demand = Demand {
+        session: true,
+        ..Demand::default()
+    };
+    pass(adapter, r, previous, previous_count, usize::MAX, demand)
 }
 
 /// Full-fidelity views through one bounded consumer, preserving final metadata and verified
@@ -395,74 +342,44 @@ pub fn read_session_into(
     previous_count: usize,
     output: &mut dyn stream::MessageSink,
 ) -> Result<ReadPass> {
-    read_inner(
-        adapter,
-        r,
-        previous,
-        previous_count,
-        usize::MAX,
-        ReadMode::StreamSession,
-        ReadControl {
-            output: Some(output),
-            check: None,
-        },
-    )
+    let demand = Demand {
+        session: true,
+        output: Some(output),
+        ..Demand::default()
+    };
+    pass(adapter, r, previous, previous_count, usize::MAX, demand)
 }
 
-/// Deliver newly observed retained messages directly. Early consumer stop returns a checked
-/// partial read without claiming EOF metadata; the caller must preserve its pending position.
-pub(super) fn read_tail_into(
-    adapter: &dyn Adapter,
-    r: &SessionRef,
-    previous: Option<&ReadState>,
-    skip: usize,
-    output: &mut dyn stream::MessageSink,
-    check: &mut dyn FnMut() -> Result<()>,
-) -> Result<ReadPass> {
-    read_inner(
-        adapter,
-        r,
-        previous,
-        skip,
-        usize::MAX,
-        ReadMode::StreamTail,
-        ReadControl {
-            output: Some(output),
-            check: Some(check),
-        },
-    )
-}
-
-enum ReadMode {
-    OwnedTail,
-    RetainedTail,
-    OwnedSession,
-    StreamSession,
-    StreamTail,
-}
-
+/// What one watch read asks for. The tail past `skip` (or, with `session`, the whole session
+/// resumed from its stable checkpoint prefix); payloads owned, or left in the source when
+/// `retained` or when `output` streams them; an `output` that receives messages as they stream
+/// (an early stop on a tail returns a checked partial read without claiming EOF metadata, so
+/// the caller keeps its pending position); and a cooperative `check` at read boundaries.
 #[derive(Default)]
-struct ReadControl<'a> {
-    output: Option<&'a mut dyn stream::MessageSink>,
-    check: Option<&'a mut dyn FnMut() -> Result<()>>,
+pub(super) struct Demand<'a> {
+    pub session: bool,
+    pub retained: bool,
+    pub output: Option<&'a mut dyn stream::MessageSink>,
+    pub check: Option<&'a mut dyn FnMut() -> Result<()>>,
 }
 
-fn read_inner<'a>(
+/// One watch read under its [`Demand`].
+pub(super) fn pass(
     adapter: &dyn Adapter,
     r: &SessionRef,
     previous: Option<&ReadState>,
     mut skip: usize,
     keep: usize,
-    mode: ReadMode,
-    control: ReadControl<'a>,
+    demand: Demand<'_>,
 ) -> Result<ReadPass> {
-    let ReadControl { output, check } = control;
-    let session_output = matches!(mode, ReadMode::OwnedSession | ReadMode::StreamSession);
-    let retained = matches!(
-        mode,
-        ReadMode::RetainedTail | ReadMode::StreamSession | ReadMode::StreamTail
-    );
-    let streaming_tail = matches!(mode, ReadMode::StreamTail);
+    let Demand {
+        session: session_output,
+        retained,
+        output,
+        check,
+    } = demand;
+    let streaming_tail = !session_output && output.is_some();
+    let retained = retained || output.is_some();
     let primary = adapter.resume_source(r);
     let captured = source::Probe::default().snapshot_from(r, &primary);
     let cached = previous

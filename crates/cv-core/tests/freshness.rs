@@ -306,7 +306,12 @@ fn quiet_session_append_refreshes_catalog_and_follower() {
         "every primary path is checked, including quiet sessions"
     );
 
-    let events = watcher.poll();
+    let mut events = Vec::new();
+    watcher.poll(cv_core::watch::Poll::default(), |ev| {
+        let taken = ev.new_messages.len();
+        events.push(ev);
+        taken
+    });
     let ev = events
         .iter()
         .find(|e| e.reference.id == "quietsess")

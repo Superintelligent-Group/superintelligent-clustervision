@@ -173,6 +173,21 @@ struct State {
     read: Option<ReadState>,
 }
 
+impl State {
+    /// Whether the session must be read again: its trigger moved, a bounded poll left messages
+    /// pending, or its source no longer matches the recorded baseline.
+    fn stale(&self, trigger: (Option<usize>, Option<i64>), r: &SessionRef) -> bool {
+        self.trigger != trigger
+            || self.pending
+            || self
+                .read
+                .as_ref()
+                .map_or(matches!(self.mark, Mark::Messages(_)), |read| {
+                    !read.baseline_unchanged(r)
+                })
+    }
+}
+
 /// One session's position, as the cursor carries it. The field names are the wire: `t` the
 /// trigger, `n` the parsed count, `b` a byte baseline not yet resolved (see [`Mark::Bytes`]),
 /// `more` the pending flag. Optional fields keep a cursor issued before they existed decoding.
@@ -265,6 +280,30 @@ pub struct Watcher {
     discover: fn() -> Vec<SessionRef>,
 }
 
+/// What one [`Watcher::poll`] asks for.
+pub struct Poll<'c> {
+    /// Messages offered across the call; the rest stay pending.
+    pub max: usize,
+    /// An unreadable session or unresolvable prior position is an error, not a skip.
+    pub strict: bool,
+    /// Offered messages keep source-backed payloads; the callback resolves them through checked
+    /// APIs, and a source change before acceptance fails the poll.
+    pub retained: bool,
+    /// Run before discovery, between sessions and at read and projection boundaries.
+    pub checked: Option<&'c mut dyn FnMut() -> anyhow::Result<()>>,
+}
+
+impl Default for Poll<'_> {
+    fn default() -> Self {
+        Poll {
+            max: usize::MAX,
+            strict: false,
+            retained: false,
+            checked: None,
+        }
+    }
+}
+
 impl Watcher {
     /// Create a watcher. If `emit_existing` is false, the current sessions are recorded silently so
     /// only activity *after* construction is reported (the usual `tail -f` feel).
@@ -328,7 +367,12 @@ impl Watcher {
                 }
                 let adapter =
                     harness::for_harness(r.harness).ok_or_else(|| anyhow::anyhow!("unknown watch harness"))?;
-                let pass = read::read_tail_into(adapter.as_ref(), &r, None, usize::MAX, &mut Baseline, &mut check)?;
+                let demand = read::Demand {
+                    output: Some(&mut Baseline),
+                    check: Some(&mut check),
+                    ..Default::default()
+                };
+                let pass = read::pass(adapter.as_ref(), &r, None, usize::MAX, usize::MAX, demand)?;
                 (Mark::Messages(pass.total), pass.accepted(pass.total))
             };
             check()?;
@@ -452,56 +496,13 @@ impl Watcher {
         refs
     }
 
-    /// Poll once and return any events since the previous poll.
-    pub fn poll(&mut self) -> Vec<SessionEvent> {
-        let mut events = Vec::new();
-        self.poll_bounded(usize::MAX, |ev| {
-            let n = ev.new_messages.len();
-            events.push(ev);
-            n
-        });
-        events
-    }
-
-    /// Poll once, offering each session's newly appended messages to `take` — at most
-    /// `max_messages` across the call — which returns how many of them it consumed. What it
-    /// leaves (and every message past the budget) stays pending: the next poll re-reads that
-    /// session even if its cheap trigger has not moved. Returns whether anything is pending.
-    pub fn poll_bounded(&mut self, max_messages: usize, mut take: impl FnMut(SessionEvent) -> usize) -> bool {
-        self.poll_bounded_inner(max_messages, &mut take, false, false, None)
-            .unwrap_or(false)
-    }
-
-    /// A demanded bounded read: source/materialization failures are errors, so callers cannot
-    /// return a successful cursor for output that could not be read. The legacy polling API
-    /// remains best effort and leaves unreadable sessions retryable.
-    pub fn try_poll_bounded(
-        &mut self,
-        max_messages: usize,
-        mut take: impl FnMut(SessionEvent) -> usize,
-    ) -> anyhow::Result<bool> {
-        self.poll_bounded_inner(max_messages, &mut take, true, false, None)
-    }
-
-    /// Checked polling retaining source-backed message payloads. The callback must resolve
-    /// demanded content through checked APIs; source changes before acceptance fail the poll.
-    pub fn try_poll_bounded_retained(
-        &mut self,
-        max_messages: usize,
-        mut take: impl FnMut(SessionEvent) -> usize,
-    ) -> anyhow::Result<bool> {
-        self.poll_bounded_inner(max_messages, &mut take, true, true, None)
-    }
-
-    /// Retained bounded polling with cooperative checks during discovery/read/projection
-    /// boundaries. Successful output and EOF/cursor semantics match the ordinary retained poll.
-    pub fn try_poll_bounded_retained_checked(
-        &mut self,
-        max_messages: usize,
-        mut check: impl FnMut() -> anyhow::Result<()>,
-        mut take: impl FnMut(SessionEvent) -> usize,
-    ) -> anyhow::Result<bool> {
-        self.poll_bounded_inner(max_messages, &mut take, true, true, Some(&mut check))
+    /// Poll once under `poll`, offering each session's newly appended messages to `take`, which
+    /// returns how many of them it consumed. What it leaves (and every message past
+    /// [`Poll::max`]) stays pending: the next poll re-reads that session even if its cheap
+    /// trigger has not moved. Returns whether anything is pending. Best effort: an error is
+    /// "nothing pending" and leaves every position retryable; [`try_poll`](Self::try_poll) says why.
+    pub fn poll(&mut self, poll: Poll<'_>, take: impl FnMut(SessionEvent) -> usize) -> bool {
+        self.try_poll(poll, take).unwrap_or(false)
     }
 
     /// Deliver new messages one at a time in discovery/message order. `check` runs before
@@ -548,16 +549,7 @@ impl Watcher {
             let trigger = Self::trigger_of(&r);
             let (kind, previous_count) = match self.seen.get(&key) {
                 None => (EventKind::New, 0),
-                Some(state)
-                    if state.trigger != trigger
-                        || state.pending
-                        || state
-                            .read
-                            .as_ref()
-                            .map_or(matches!(state.mark, Mark::Messages(_)), |read| {
-                                !read.baseline_unchanged(&r)
-                            }) =>
-                {
+                Some(state) if state.stale(trigger, &r) => {
                     let previous = resolve_checked(&r, state.mark, &mut check)?;
                     (EventKind::Updated, previous)
                 }
@@ -576,14 +568,12 @@ impl Watcher {
                 error: None,
             };
             let previous = self.seen.get(&key).and_then(|state| state.read.as_ref());
-            let pass = read::read_tail_into(
-                adapter.as_ref(),
-                &r,
-                previous,
-                previous_count,
-                &mut consumer,
-                &mut check,
-            )?;
+            let demand = read::Demand {
+                output: Some(&mut consumer),
+                check: Some(&mut check),
+                ..Default::default()
+            };
+            let pass = read::pass(adapter.as_ref(), &r, previous, previous_count, usize::MAX, demand)?;
             check()?;
             let seen_to = previous_count.min(pass.total) + consumer.taken;
             let pending = !pass.reached_eof || pass.total > seen_to;
@@ -603,14 +593,17 @@ impl Watcher {
         Ok(false)
     }
 
-    fn poll_bounded_inner(
-        &mut self,
-        max_messages: usize,
-        take: &mut impl FnMut(SessionEvent) -> usize,
-        strict: bool,
-        retained: bool,
-        mut check: Option<&mut dyn FnMut() -> anyhow::Result<()>>,
-    ) -> anyhow::Result<bool> {
+    /// [`poll`](Self::poll), with failures returned: under [`Poll::strict`] an unreadable session
+    /// or an unresolvable prior position is an error, so a caller never returns a successful
+    /// cursor for output that could not be read; otherwise such a session is skipped and stays
+    /// retryable. [`Poll::checked`] failures are always errors.
+    pub fn try_poll(&mut self, poll: Poll<'_>, mut take: impl FnMut(SessionEvent) -> usize) -> anyhow::Result<bool> {
+        let Poll {
+            max: max_messages,
+            strict,
+            retained,
+            checked: mut check,
+        } = poll;
         let controlled = check.is_some();
         let mut check = || match check.as_mut() {
             Some(check) => check(),
@@ -627,16 +620,7 @@ impl Watcher {
             let trigger = Self::trigger_of(&r);
             let (kind, prev_len) = match self.seen.get(&key) {
                 None => (EventKind::New, 0),
-                Some(state)
-                    if state.trigger != trigger
-                        || state.pending
-                        || state
-                            .read
-                            .as_ref()
-                            .map_or(matches!(state.mark, Mark::Messages(_)), |read| {
-                                !read.baseline_unchanged(&r)
-                            }) =>
-                {
+                Some(state) if state.stale(trigger, &r) => {
                     let previous = if controlled {
                         Some(resolve_checked(&r, state.mark, &mut check)?)
                     } else {
@@ -661,12 +645,12 @@ impl Watcher {
                 continue;
             };
             let previous = self.seen.get(&key).and_then(|state| state.read.as_ref());
-            let result = if retained && controlled {
-                read::read_retained_checked(adapter.as_ref(), &r, previous, prev_len, room, &mut check)
-            } else {
-                let read = if retained { read::read_retained } else { read_tail };
-                read(adapter.as_ref(), &r, previous, prev_len, room)
+            let demand = read::Demand {
+                retained,
+                check: (retained && controlled).then_some(&mut check as &mut dyn FnMut() -> anyhow::Result<()>),
+                ..Default::default()
             };
+            let result = read::pass(adapter.as_ref(), &r, previous, prev_len, room, demand);
             let mut pass = match result {
                 Ok(pass) => pass,
                 Err(error) if strict => {
@@ -757,6 +741,17 @@ impl Watcher {
 mod tests {
     use super::*;
 
+    /// Every pending event of one unbounded poll.
+    fn events(watcher: &mut Watcher) -> Vec<SessionEvent> {
+        let mut events = Vec::new();
+        watcher.poll(Poll::default(), |event| {
+            let taken = event.new_messages.len();
+            events.push(event);
+            taken
+        });
+        events
+    }
+
     fn sref(harness: Harness, path: std::path::PathBuf) -> SessionRef {
         SessionRef {
             id: "baseline-test".into(),
@@ -843,7 +838,7 @@ mod tests {
         std::fs::write(&old, row("old-copy")).unwrap();
         std::fs::write(&new, (0..3).map(|n| row(&format!("new-{n}"))).collect::<String>()).unwrap();
         let mut watcher = Watcher::with_discovery(Filter::default(), true, discovery);
-        let first = watcher.poll();
+        let first = events(&mut watcher);
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].reference.path, new);
         assert_eq!(first[0].new_messages.len(), 3);
@@ -854,11 +849,11 @@ mod tests {
             .unwrap()
             .write_all(row("new-3").as_bytes())
             .unwrap();
-        let next = watcher.poll();
+        let next = events(&mut watcher);
         assert_eq!(next.len(), 1);
         assert_eq!(next[0].new_messages.len(), 1);
         assert_eq!(next[0].new_messages[0].text().as_deref(), Some("new-3"));
-        assert!(watcher.poll().is_empty());
+        assert!(events(&mut watcher).is_empty());
     }
 
     #[test]
@@ -1001,7 +996,7 @@ mod tests {
                     )
                     .unwrap();
             } else {
-                for event in watcher.poll() {
+                for event in events(&mut watcher) {
                     for message in event.new_messages {
                         let mut text = String::new();
                         message.append_searchable(&mut text).unwrap();
@@ -1138,11 +1133,15 @@ mod tests {
         );
         stop.set(false);
         let error = watcher
-            .try_poll_bounded_retained_checked(
-                1,
-                || {
-                    anyhow::ensure!(!stop.get(), "cancelled during projection");
-                    Ok(())
+            .try_poll(
+                Poll {
+                    max: 1,
+                    strict: true,
+                    retained: true,
+                    checked: Some(&mut || {
+                        anyhow::ensure!(!stop.get(), "cancelled during projection");
+                        Ok(())
+                    }),
                 },
                 |_| {
                     stop.set(true);
@@ -1267,7 +1266,14 @@ mod tests {
                 assert_eq!(watcher.poll_sources(|_, _, _| None), 0);
             } else {
                 assert!(watcher
-                    .try_poll_bounded(1, |_| panic!("missing source emitted"))
+                    .try_poll(
+                        Poll {
+                            max: 1,
+                            strict: true,
+                            ..Poll::default()
+                        },
+                        |_| panic!("missing source emitted")
+                    )
                     .is_err());
             }
             let encoded = watcher.to_cursor().encode();
@@ -1550,12 +1556,18 @@ mod tests {
         );
         let mut w = Watcher::from_cursor(Filter::default(), Cursor::decode(&encoded).unwrap(), discover);
         let mut got = Vec::new();
-        let pending = w.poll_bounded(3, |mut ev| {
-            assert_eq!(ev.kind, EventKind::Updated);
-            assert!(ev.new_messages.len() >= 2);
-            got.push(ev.new_messages.remove(0));
-            1
-        });
+        let pending = w.poll(
+            Poll {
+                max: 3,
+                ..Poll::default()
+            },
+            |mut ev| {
+                assert_eq!(ev.kind, EventKind::Updated);
+                assert!(ev.new_messages.len() >= 2);
+                got.push(ev.new_messages.remove(0));
+                1
+            },
+        );
         assert!(pending);
         assert_eq!(got.len(), 1);
         let encoded = w.to_cursor().encode();
@@ -1563,16 +1575,16 @@ mod tests {
 
         // Resumed from that cursor with no budget: exactly the remainder, nothing twice.
         let mut w = Watcher::from_cursor(Filter::default(), Cursor::decode(&encoded).unwrap(), discover);
-        let events = w.poll();
-        assert_eq!(events.len(), 1);
-        got.extend(events.into_iter().next().unwrap().new_messages);
+        let resumed = events(&mut w);
+        assert_eq!(resumed.len(), 1);
+        got.extend(resumed.into_iter().next().unwrap().new_messages);
         assert_eq!(got.len(), after - before, "the appended tail, once");
         let want = adapter.parse(&r).unwrap().messages;
         assert_eq!(
             serde_json::to_value(&got).unwrap(),
             serde_json::to_value(&want[before..]).unwrap()
         );
-        assert!(w.poll().is_empty(), "idle: nothing pending, trigger unchanged");
+        assert!(events(&mut w).is_empty(), "idle: nothing pending, trigger unchanged");
         assert!(
             !w.to_cursor().encode().contains("more"),
             "nothing pending rides the cursor"
@@ -1659,10 +1671,23 @@ mod tests {
         }
         let mut watcher = Watcher::with_discovery(Filter::default(), true, discover);
         assert!(watcher
-            .try_poll_bounded(1, |_| panic!("failed source emitted a message"))
+            .try_poll(
+                Poll {
+                    max: 1,
+                    strict: true,
+                    ..Poll::default()
+                },
+                |_| panic!("failed source emitted a message")
+            )
             .is_err());
         assert!(watcher.to_cursor().is_empty());
-        assert!(!watcher.poll_bounded(1, |_| panic!("failed source emitted a message")));
+        assert!(!watcher.poll(
+            Poll {
+                max: 1,
+                ..Poll::default()
+            },
+            |_| panic!("failed source emitted a message")
+        ));
         assert!(watcher.to_cursor().is_empty());
     }
 }
