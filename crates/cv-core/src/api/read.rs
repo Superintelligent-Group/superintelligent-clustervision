@@ -168,7 +168,7 @@ pub(super) fn window(
     }
     let key = version.and_then(|version| Key::admitted(r, &primary, version, extra));
     let (before, reads) = captured(r, &primary);
-    let mut sink = WindowSink::page(&primary, start, end, key.is_some(), reads);
+    let mut sink = WindowSink::page(&primary, start, end, key.is_some(), reads.clone());
     let mut resumed = false;
     let mut shell = None;
     if let Some(key) = &key {
@@ -196,8 +196,8 @@ pub(super) fn window(
         }
     }
     if shell.is_none() {
-        // A declined resume promises no callbacks, but discard its initial state too.
-        let (_, reads) = captured(r, &primary);
+        // A declined resume promises no callbacks, but discard its initial state too: the
+        // stream starts from the capture taken before the cache was consulted.
         sink = WindowSink::page(&primary, start, end, key.is_some(), reads);
         shell = Some(adapter.try_stream(r, &opts, &mut sink)?);
     }
@@ -214,20 +214,22 @@ pub(super) fn window(
         verify(r, &primary, &retry_before, &whole)?;
         return Ok((shell, whole));
     }
-    verify(r, &primary, &before, &sink)?;
-    if stable {
-        if let (Some(key), Some((index, checkpoint, meta))) = (key, sink.checkpoint.take()) {
-            cache.insert(Entry {
-                key,
-                source,
-                payload: Payload::Window {
-                    index,
-                    checkpoint,
-                    meta,
-                },
-                bytes: 0,
-            });
-        }
+    // `stable` is `verify`'s primary check on this same baseline and read set.
+    anyhow::ensure!(
+        stable && sink.reads.fresh(&mut Probe::default()),
+        "API window source changed before publication"
+    );
+    if let (Some(key), Some((index, checkpoint, meta))) = (key, sink.checkpoint.take()) {
+        cache.insert(Entry {
+            key,
+            source,
+            payload: Payload::Window {
+                index,
+                checkpoint,
+                meta,
+            },
+            bytes: 0,
+        });
     }
     Ok((shell.expect("a stream or accepted resume returned metadata"), sink))
 }
