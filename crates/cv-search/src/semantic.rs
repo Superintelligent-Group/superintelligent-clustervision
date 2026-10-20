@@ -16,11 +16,11 @@
 //! hundreds of thousands of ASCII floats. Layout, all integers little-endian:
 //!
 //! ```text
-//! [8]  magic  b"CVEMBED\x02"
+//! [8]  magic  b"CVEMBED\x03"
 //! u32  dim          (vector dimensionality)
 //! u32  count        (number of records)
 //! u64  meta_len
-//! […]  meta JSON    ({ model, records: [{id, harness, cwd, title, preview, dates}…] })
+//! […]  meta JSON    ({ model, records: [{session, label, preview, source}…] })
 //! […]  vectors      (count × dim × f32 LE, record i's vector at offset i·dim)
 //! ```
 //!
@@ -42,53 +42,34 @@ const PROJECTION_VERSION: u32 = 2;
 /// A small, strong static-embedding model (~30MB, 256-dim). Distilled from a sentence encoder.
 const MODEL_REPO: &str = "minishlab/potion-base-8M";
 
-/// Store header magic: `CVEMBED` + format version 2 (version 1 was the implicit all-JSON store).
-const MAGIC: &[u8; 8] = b"CVEMBED\x02";
+/// Store header magic: `CVEMBED` + format version 3 (rows hold the discovered `SessionRef`; 2
+/// re-spelled its fields; 1 was the implicit all-JSON store).
+const MAGIC: &[u8; 8] = b"CVEMBED\x03";
 
-/// Exact discovery hints visible to the reader, kept separately from its derived metadata.
-#[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-struct ReferenceHints {
-    cwd: Option<PathBuf>,
-    title: Option<String>,
-    created_at: Option<chrono::DateTime<chrono::Utc>>,
-    updated_at: Option<chrono::DateTime<chrono::Utc>>,
-    message_count: Option<usize>,
-}
-impl From<&cv_core::SessionRef> for ReferenceHints {
-    fn from(r: &cv_core::SessionRef) -> Self {
-        Self {
-            cwd: r.cwd.clone(),
-            title: r.title.clone(),
-            created_at: r.created_at,
-            updated_at: r.updated_at,
-            message_count: r.message_count,
-        }
-    }
+/// Whether the store at `path` is of another `CVEMBED` format version: a refresh re-embeds it
+/// whole, where a query names the command that rebuilds it. Anything else (this version, or
+/// bytes that are no store at all) is for [`load_store_metadata`] to judge.
+fn older_format(path: &Path) -> bool {
+    use std::io::Read;
+    let mut head = [0u8; 8];
+    std::fs::File::open(path)
+        .and_then(|mut file| file.read_exact(&mut head))
+        .is_ok_and(|()| head[..7] == MAGIC[..7] && head != *MAGIC)
 }
 
 /// Per-session metadata, persisted as the store's JSON block (everything but the vector).
 #[derive(serde::Serialize, serde::Deserialize)]
 struct RecordMeta {
-    id: String,
-    harness: String,
-    cwd: Option<String>,
-    title: Option<String>,
+    /// The discovered ref, exactly as discovery handed it: the row is fresh while discovery hands
+    /// the same one (and its source is unchanged). Hits read their identity, cwd and dates here.
+    session: cv_core::SessionRef,
+    /// What hits call the session: its own title, else its first prompt.
+    label: Option<String>,
     /// A short preview of the body, for display in hits.
     preview: String,
-    /// Unix-seconds session dates, surfaced on hits. `serde(default)` keeps stores written
-    /// before these fields loading cleanly (their hits are just dateless until the next
-    /// `embed_all`).
-    #[serde(default)]
-    created_at: Option<i64>,
-    #[serde(default)]
-    updated_at: Option<i64>,
-    #[serde(default)]
-    source_path: Option<PathBuf>,
     /// A row stored by an older baseline shape is dateless provenance: it re-embeds once.
     #[serde(default, deserialize_with = "lenient")]
     source: Option<Baseline>,
-    #[serde(default)]
-    hints: Option<ReferenceHints>,
 }
 
 /// `None` for a value of another shape, instead of failing the whole store.
@@ -485,7 +466,7 @@ fn refresh(
     mut save: impl FnMut(&Path, &Store) -> Result<()>,
 ) -> Result<usize> {
     let refs = canonical_refs(refs);
-    let (mut old, vector_backing) = if path.exists() {
+    let (mut old, vector_backing) = if path.exists() && !older_format(path) {
         load_store_metadata(path)?
     } else {
         (
@@ -508,7 +489,7 @@ fn refresh(
     let mut lookup = std::collections::HashMap::new();
     for (i, r) in old.meta.iter().enumerate() {
         lookup
-            .entry((r.harness.as_str(), r.id.as_str()))
+            .entry((r.session.harness.as_str(), r.session.id.as_str()))
             .and_modify(|index| *index = None)
             .or_insert(Some(i));
     }
@@ -524,9 +505,8 @@ fn refresh(
                 .flatten()
                 .is_some_and(|i| {
                     let m = &old.meta[i];
-                    let fresh = m.source_path.as_ref() == Some(&r.path)
-                        && m.hints.as_ref() == Some(&ReferenceHints::from(r))
-                        && m.source.as_ref().is_some_and(|old| old.fresh(&snapshot, &mut before));
+                    let fresh =
+                        m.session == *r && m.source.as_ref().is_some_and(|old| old.fresh(&snapshot, &mut before));
                     keep[i] |= fresh;
                     fresh
                 });
@@ -570,16 +550,10 @@ fn refresh(
     for (r, snapshot) in changed {
         let (doc, reads) = read(r)?;
         pending.push(RecordMeta {
-            id: doc.id,
-            harness: doc.harness,
-            cwd: doc.cwd,
-            title: doc.title,
+            session: r.clone(),
+            label: doc.title,
             preview: preview(&doc.body, 200),
-            created_at: doc.created_at,
-            updated_at: doc.updated_at,
-            source_path: Some(r.path.clone()),
             source: Some(snapshot.with_reads(&reads)),
-            hints: Some(ReferenceHints::from(r)),
         });
         bodies.push(doc.body);
         if bodies.len() >= EMBED_BATCH {
@@ -592,7 +566,7 @@ fn refresh(
     let rows: std::collections::HashMap<_, _> = old
         .meta
         .iter()
-        .map(|m| ((m.harness.as_str(), m.id.as_str()), m))
+        .map(|m| ((m.session.harness.as_str(), m.session.id.as_str()), m))
         .collect();
     for &r in &refs {
         let row = rows
@@ -773,9 +747,9 @@ impl<M> ResidentState<M> {
             // Refresh provenance is validated by the cold decoder but has no consumer in
             // resident ranking. Keep hit fields and model guards, not unused source witnesses.
             for record in &mut store.meta {
-                record.source_path = None;
                 record.source = None;
-                record.hints = None;
+                record.session.title = None;
+                record.session.path = PathBuf::new();
             }
             self.store = Some(CachedStore { store, reads });
         }
@@ -926,8 +900,14 @@ impl Ord for RankedRow<'_> {
         other
             .score
             .total_cmp(&self.score)
-            .then_with(|| self.meta.id.cmp(&other.meta.id))
-            .then_with(|| self.meta.harness.cmp(&other.meta.harness))
+            .then_with(|| self.meta.session.id.cmp(&other.meta.session.id))
+            .then_with(|| {
+                self.meta
+                    .session
+                    .harness
+                    .as_str()
+                    .cmp(other.meta.session.harness.as_str())
+            })
     }
 }
 
@@ -938,10 +918,13 @@ fn ranked_rows<'a>(store: &'a Store, q: &[f32], k: usize, filter: crate::SearchF
     let query = CosineQuery::new(q);
     let mut winners = std::collections::BinaryHeap::new();
     for (index, meta) in store.meta.iter().enumerate() {
-        if !filter.harness.is_none_or(|h| meta.harness == h)
-            || !filter
-                .cwd
-                .is_none_or(|needle| meta.cwd.as_ref().is_some_and(|cwd| cwd.contains(needle)))
+        if !filter.harness.is_none_or(|h| meta.session.harness.as_str() == h)
+            || !filter.cwd.is_none_or(|needle| {
+                meta.session
+                    .cwd
+                    .as_ref()
+                    .is_some_and(|cwd| cwd.to_string_lossy().contains(needle))
+            })
         {
             continue;
         }
@@ -972,14 +955,14 @@ fn rank_filtered(store: &Store, q: &[f32], k: usize, filter: crate::SearchFilter
             let score = row.score;
             let r = &store.meta[row.index];
             Hit {
-                id: r.id.clone(),
-                harness: r.harness.clone(),
-                cwd: r.cwd.clone(),
-                title: r.title.clone(),
+                id: r.session.id.clone(),
+                harness: r.session.harness.as_str().into(),
+                cwd: r.session.cwd.as_ref().map(|p| p.display().to_string()),
+                title: r.label.clone(),
                 score,
                 snippet: r.preview.clone(),
-                created_at: r.created_at,
-                updated_at: r.updated_at,
+                created_at: r.session.created_at.map(|t| t.timestamp()),
+                updated_at: r.session.updated_at.map(|t| t.timestamp()),
                 // Semantic store doesn't fold the sub-agent forest (yet); no provenance to carry.
                 parent_id: None,
                 agent_id: None,
@@ -1087,18 +1070,7 @@ mod tests {
                 body.push_str(&std::fs::read_to_string(path)?);
             }
         }
-        Ok((
-            crate::Doc {
-                id: r.id.clone(),
-                harness: r.harness.as_str().into(),
-                cwd: None,
-                title: None,
-                body,
-                created_at: None,
-                updated_at: None,
-            },
-            reads,
-        ))
+        Ok((crate::Doc { title: None, body }, reads))
     }
     fn fake_encode(bodies: &[String]) -> Result<Vec<Vec<f32>>> {
         Ok(bodies
@@ -1295,7 +1267,7 @@ mod tests {
         .unwrap();
         assert_eq!(count.get(), 1);
         let saved = load_store(&path).unwrap();
-        assert_eq!(saved.meta[0].title.as_deref(), Some("Inspect the file"));
+        assert_eq!(saved.meta[0].label.as_deref(), Some("Inspect the file"));
         refresh(
             &path,
             &refs,
@@ -1423,7 +1395,6 @@ mod tests {
                 |r| {
                     count.set(count.get() + 1);
                     let (mut d, reads) = fake_doc(r, None)?;
-                    d.cwd = Some("/derived/cwd".into());
                     d.title = Some("derived title".into());
                     Ok((d, reads))
                 },
@@ -1460,6 +1431,36 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("projection version changed"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A store an older cv wrote re-embeds whole on refresh; a query still names the rebuild.
+    #[test]
+    fn semantic_refresh_replaces_an_older_format_store() {
+        let dir = std::env::temp_dir().join(format!("cv-semantic-older-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let input = dir.join("session.jsonl");
+        let path = dir.join("vectors.bin");
+        std::fs::write(&input, "body").unwrap();
+        std::fs::write(&path, [&b"CVEMBED\x02"[..], &[0; 64]].concat()).unwrap();
+        assert!(semantic_search(&path, "query", 1)
+            .unwrap_err()
+            .to_string()
+            .contains("bad magic"));
+        let r = fixture_ref(&input, "a");
+        let n = refresh(
+            &path,
+            std::slice::from_ref(&r),
+            "fake",
+            1,
+            ReadSet::default(),
+            |r| fake_doc(r, None),
+            fake_encode,
+            save_store,
+        )
+        .unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(load_store(&path).unwrap().meta[0].session, r);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1500,7 +1501,7 @@ mod tests {
             1
         );
         assert_eq!((read.get(), encoded.get(), saved.get()), (1, 1, 1));
-        assert_eq!(load_store(&store).unwrap().meta[0].source_path.as_ref(), Some(&a));
+        assert_eq!(load_store(&store).unwrap().meta[0].session.path, a);
         refresh(
             &store,
             &refs,
@@ -1615,14 +1616,17 @@ mod tests {
             stored
                 .meta
                 .iter()
-                .find(|m| m.harness == "openclaw")
-                .unwrap()
-                .source_path
-                .as_ref(),
+                .find(|m| m.session.harness == cv_core::Harness::OpenClaw)
+                .map(|m| &m.session.path),
             Some(&b)
         );
         assert_eq!(
-            stored.meta.iter().find(|m| m.harness == "openclaw").unwrap().preview,
+            stored
+                .meta
+                .iter()
+                .find(|m| m.session.harness == cv_core::Harness::OpenClaw)
+                .unwrap()
+                .preview,
             "newer divergent content"
         );
         let rebuild = dir.join("rebuilt");
@@ -1646,10 +1650,8 @@ mod tests {
                 .unwrap()
                 .meta
                 .iter()
-                .find(|m| m.harness == "openclaw")
-                .unwrap()
-                .source_path
-                .as_ref(),
+                .find(|m| m.session.harness == cv_core::Harness::OpenClaw)
+                .map(|m| &m.session.path),
             Some(&a)
         );
         refresh(
@@ -2018,16 +2020,14 @@ mod tests {
 
     fn meta(id: &str, dates: Option<(i64, i64)>) -> RecordMeta {
         RecordMeta {
-            id: id.into(),
-            harness: "claude".into(),
-            cwd: None,
-            title: Some(format!("title-{id}")),
+            session: cv_core::SessionRef {
+                created_at: dates.and_then(|(c, _)| chrono::DateTime::from_timestamp(c, 0)),
+                updated_at: dates.and_then(|(_, u)| chrono::DateTime::from_timestamp(u, 0)),
+                ..cv_core::SessionRef::new(id, cv_core::Harness::Claude, "")
+            },
+            label: Some(format!("title-{id}")),
             preview: format!("preview-{id}"),
-            created_at: dates.map(|(c, _)| c),
-            updated_at: dates.map(|(_, u)| u),
-            source_path: None,
             source: None,
-            hints: None,
         }
     }
 
@@ -2060,24 +2060,19 @@ mod tests {
     }
     fn write_resident_store(path: &Path, spec: &ModelSpec, flipped: bool) {
         let mut second = meta("b", None);
-        second.harness = "codex".into();
-        second.cwd = Some("/resident".into());
+        second.session.harness = cv_core::Harness::Codex;
+        second.session.cwd = Some("/resident".into());
         let mut store = store(vec![
             (meta("a", None), if flipped { vec![0.0, 1.0] } else { vec![1.0, 0.0] }),
             (second, if flipped { vec![1.0, 0.0] } else { vec![0.0, 1.0] }),
         ]);
-        store.meta[0].source_path = Some(path.with_extension("source"));
+        store.meta[0].session.path = path.with_extension("source");
         store.meta[0].source = Some(Baseline {
             primary: None,
             stamp: None,
         });
-        store.meta[0].hints = Some(ReferenceHints {
-            cwd: None,
-            title: Some("unused refresh title".repeat(4096)),
-            created_at: None,
-            updated_at: None,
-            message_count: Some(17),
-        });
+        store.meta[0].session.title = Some("unused refresh title".repeat(4096));
+        store.meta[0].session.message_count = Some(17);
         store.model = spec.key.clone();
         store.model_reads = Some(spec.reads.clone());
         save_store(path, &store).unwrap();
@@ -2148,7 +2143,9 @@ mod tests {
             .store
             .meta
             .iter()
-            .all(|record| record.source_path.is_none() && record.source.is_none() && record.hints.is_none()));
+            .all(|record| record.session.path.as_os_str().is_empty()
+                && record.source.is_none()
+                && record.session.title.is_none()));
         // Atomic index publication reloads only the store, retaining the unchanged model.
         write_resident_store(&path, &resident_spec(&artifact), true);
         assert_eq!(ask("horizontal", crate::SearchFilter::default()).unwrap()[0].id, "b");
@@ -2386,8 +2383,12 @@ mod tests {
             (0..4096)
                 .map(|i| {
                     let mut record = meta(&format!("session-{:04}", (i * 37) % 4096), None);
-                    record.harness = if i % 3 == 0 { "codex" } else { "claude" }.into();
-                    record.cwd = Some(format!("/repo/{}", i % 7));
+                    record.session.harness = if i % 3 == 0 {
+                        cv_core::Harness::Codex
+                    } else {
+                        cv_core::Harness::Claude
+                    };
+                    record.session.cwd = Some(format!("/repo/{}", i % 7).into());
                     let vector = match i % 19 {
                         0 => vec![0.0, 0.0],
                         1 => vec![f32::NAN, 1.0],
@@ -2417,16 +2418,20 @@ mod tests {
                     .iter()
                     .enumerate()
                     .filter(|(_, record)| {
-                        filter.harness.is_none_or(|h| record.harness == h)
-                            && filter
-                                .cwd
-                                .is_none_or(|needle| record.cwd.as_ref().is_some_and(|cwd| cwd.contains(needle)))
+                        filter.harness.is_none_or(|h| record.session.harness.as_str() == h)
+                            && filter.cwd.is_none_or(|needle| {
+                                record
+                                    .session
+                                    .cwd
+                                    .as_ref()
+                                    .is_some_and(|cwd| cwd.to_string_lossy().contains(needle))
+                            })
                     })
                     .map(|(i, record)| {
                         (
                             cosine(&[1.0, 0.0], store.vector(i)),
-                            record.id.as_str(),
-                            record.harness.as_str(),
+                            record.session.id.as_str(),
+                            record.session.harness.as_str(),
                         )
                     })
                     .collect();
@@ -2440,7 +2445,13 @@ mod tests {
                     assert!(ranked.len() <= limit);
                     let actual: Vec<_> = ranked
                         .iter()
-                        .map(|row| (row.score.to_bits(), row.meta.id.as_str(), row.meta.harness.as_str()))
+                        .map(|row| {
+                            (
+                                row.score.to_bits(),
+                                row.meta.session.id.as_str(),
+                                row.meta.session.harness.as_str(),
+                            )
+                        })
                         .collect();
                     let expected: Vec<_> = oracle
                         .iter()
@@ -2461,7 +2472,7 @@ mod tests {
     fn rank_ties_do_not_depend_on_vector_row_order() {
         let records = || {
             let mut codex = meta("a", None);
-            codex.harness = "codex".into();
+            codex.session.harness = cv_core::Harness::Codex;
             vec![
                 (meta("b", None), vec![1.0, 0.0]),
                 (codex, vec![1.0, 0.0]),
@@ -2495,8 +2506,8 @@ mod tests {
             .map(|i| (meta(&format!("other-{i}"), None), vec![1.0, 0.0]))
             .collect();
         let mut wanted = meta("wanted", None);
-        wanted.harness = "codex".into();
-        wanted.cwd = Some("/repo/mixed.Path/project".into());
+        wanted.session.harness = cv_core::Harness::Codex;
+        wanted.session.cwd = Some("/repo/mixed.Path/project".into());
         records.push((wanted, vec![0.5, 0.5]));
         let store = store(records);
         for filter in [
@@ -2588,7 +2599,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("embeddings.bin");
         let mut record = meta("escaped", None);
-        record.title = Some("\n\"\\雪".repeat(4096));
+        record.label = Some("\n\"\\雪".repeat(4096));
         // Cross multiple decode-buffer boundaries, retaining every float bit including NaNs.
         let vector: Vec<_> = (0..20_003u32)
             .map(|i| f32::from_bits(i.wrapping_mul(2_654_435_761)))
@@ -2597,7 +2608,7 @@ mod tests {
         save_store(&path, &original).unwrap();
         let encoded = std::fs::read(&path).unwrap();
         let loaded = load_store(&path).unwrap();
-        assert_eq!(loaded.meta[0].title, original.meta[0].title);
+        assert_eq!(loaded.meta[0].label, original.meta[0].label);
         assert_eq!(
             loaded.vectors.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
             original.vectors.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
@@ -2659,9 +2670,9 @@ mod tests {
         assert_eq!(back.model, "test");
         assert_eq!(back.dim, 3);
         assert_eq!(back.meta.len(), 2);
-        assert_eq!(back.meta[0].id, "a");
-        assert_eq!(back.meta[0].created_at, Some(1));
-        assert_eq!(back.meta[1].title.as_deref(), Some("title-b"));
+        assert_eq!(back.meta[0].session.id, "a");
+        assert_eq!(back.meta[0].session.created_at.map(|t| t.timestamp()), Some(1));
+        assert_eq!(back.meta[1].label.as_deref(), Some("title-b"));
         assert_eq!(back.vectors, s.vectors); // bit-exact through to_le_bytes/from_le_bytes
                                              // And the loaded store ranks like the in-memory one.
         assert_eq!(rank(&back, &[0.25, -1.5, 3.0], 1)[0].id, "a");

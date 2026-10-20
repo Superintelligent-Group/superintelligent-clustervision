@@ -111,6 +111,7 @@
 
 **Tooling and CI.**
 - `cv schema --json` lists `routes`: every HTTP method/path pattern `cv serve` answers, from the routers' own tables.
+- `cv schema --json` publishes `subagent_row` and `task_row`, the keys a sub-agent forest row and a task row carry, beside `session_row`.
 - `cv index --json` reports `changed`, `removed` and `errors` beside `indexed`, so a script need not parse the stderr summary.
 - The size gate reports each crate's and module's drift since the last release tag; `tools/size-budget.txt` and `check-size.py --write` are gone.
 - A compatibility gate downloads the released 0.17.0 binary (digest-pinned) and compares CLI schemas, session rows, messages, MCP tools, HTTP routes and exit codes.

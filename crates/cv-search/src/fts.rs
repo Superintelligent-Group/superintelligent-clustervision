@@ -610,33 +610,29 @@ pub(crate) struct Swept {
     bodies: HashMap<String, BodySummary>,
 }
 
-/// Inputs copied into retained body documents. Updated time and file signature live only on
-/// the replaceable meta document; body, preview and first-message boundaries come from the
-/// verified transcript prefix. Keep None distinct from an empty title or path.
+/// Inputs copied into retained body documents: the discovered ref, as discovery spelled it, and
+/// the forest provenance. Updated time and file signature live only on the replaceable meta
+/// document; body, preview and first-message boundaries come from the verified transcript prefix.
+/// The count is not an input (a pass fills it), so it is never held.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct DiscoveryMetadata {
-    id: String,
-    harness: String,
-    path: String,
-    cwd: Option<String>,
-    title: Option<String>,
-    created_at: Option<i64>,
-    updated_at: Option<i64>,
+    session: cv_core::SessionRef,
     parent_id: Option<String>,
     agent_id: Option<String>,
     workflow: Option<String>,
 }
 
 impl DiscoveryMetadata {
+    /// The [`cv_core::SessionRef::FIELDS`] only the meta doc carries: an append may move them
+    /// while every body document is retained.
+    const META_ONLY: [&'static str; 2] = ["updated_at", "message_count"];
+
     fn new(r: &cv_core::SessionRef, prov: &cv_core::events::Provenance) -> Self {
         Self {
-            id: r.id.clone(),
-            harness: r.harness.as_str().to_string(),
-            path: r.path.display().to_string(),
-            cwd: r.cwd.as_ref().map(|p| p.display().to_string()),
-            title: r.title.clone(),
-            created_at: r.created_at.map(|t| t.timestamp()),
-            updated_at: r.updated_at.map(|t| t.timestamp()),
+            session: cv_core::SessionRef {
+                message_count: None,
+                ..r.clone()
+            },
             parent_id: prov.parent_id.clone(),
             agent_id: prov.agent_id.clone(),
             workflow: prov.workflow.clone(),
@@ -644,29 +640,11 @@ impl DiscoveryMetadata {
     }
 
     fn same_body(&self, other: &Self) -> bool {
-        // This time is stamped only on the replaceable meta doc, so an ordinary append
-        // may update it while retaining every prefix body document.
-        (
-            &self.id,
-            &self.harness,
-            &self.path,
-            &self.cwd,
-            &self.title,
-            self.created_at,
-            &self.parent_id,
-            &self.agent_id,
-            &self.workflow,
-        ) == (
-            &other.id,
-            &other.harness,
-            &other.path,
-            &other.cwd,
-            &other.title,
-            other.created_at,
-            &other.parent_id,
-            &other.agent_id,
-            &other.workflow,
-        )
+        (&self.parent_id, &self.agent_id, &self.workflow) == (&other.parent_id, &other.agent_id, &other.workflow)
+            && self
+                .session
+                .changed_fields(&other.session)
+                .all(|field| Self::META_ONLY.contains(&field))
     }
 }
 
@@ -1644,7 +1622,7 @@ const CHECKPOINT_AT_MOST: u64 = 8 * CHUNK_BYTES as u64;
 
 /// The version of what a mark's `fts` layer and the docs behind it mean, part of every mark's
 /// version: bump it when [`FtsState`], the doc layout or [`CHECKPOINT_EVERY`] changes.
-const RESUME_TAG: &str = "fts4";
+const RESUME_TAG: &str = "fts5";
 
 /// The checkpoint `job` can resume from: the source grew, its sampled mark still matches, and
 /// its state covers every consumer this pass feeds. Growth is interpreted under the adapter's
@@ -7027,12 +7005,12 @@ mod tests {
         for field in 0..9 {
             let mut changed = base.clone();
             match field {
-                0 => changed.id.push('x'),
-                1 => changed.harness.push('x'),
-                2 => changed.path.push('x'),
-                3 => changed.cwd = None,
-                4 => changed.title = None,
-                5 => changed.created_at = None,
+                0 => changed.session.id.push('x'),
+                1 => changed.session.harness = cv_core::Harness::Codex,
+                2 => changed.session.path.push("x"),
+                3 => changed.session.cwd = None,
+                4 => changed.session.title = None,
+                5 => changed.session.created_at = None,
                 6 => changed.parent_id = Some("parent".into()),
                 7 => changed.agent_id = Some("agent".into()),
                 _ => changed.workflow = Some("workflow".into()),
@@ -7041,14 +7019,23 @@ mod tests {
         }
         assert!(alternatives.iter().all(|changed| !base.same_body(changed)));
         let mut empty = base.clone();
-        empty.title = Some(String::new());
+        empty.session.title = Some(String::new());
         let mut absent = empty.clone();
-        absent.title = None;
+        absent.session.title = None;
         assert!(!empty.same_body(&absent));
         let mut updated = base.clone();
-        updated.updated_at = None;
+        updated.session.updated_at = None;
         assert_ne!(base, updated);
         assert!(base.same_body(&updated));
+        let counted = cv_core::SessionRef {
+            message_count: Some(7),
+            ..r.clone()
+        };
+        assert_eq!(
+            DiscoveryMetadata::new(&counted, &Default::default()),
+            base,
+            "a count filled after the pass leaves the docs fresh"
+        );
         for d in [dir, sdir] {
             std::fs::remove_dir_all(d).ok();
         }

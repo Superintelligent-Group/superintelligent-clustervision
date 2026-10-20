@@ -984,7 +984,7 @@ impl Usage {
 
 /// A lightweight handle to a session discovered on disk, cheap to produce for listings/search
 /// without parsing the whole transcript.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionRef {
     pub id: String,
     pub harness: Harness,
@@ -1081,6 +1081,35 @@ impl SessionRef {
         "updated_at",
         "message_count",
     ];
+
+    /// The [`Self::FIELDS`] on which `self` and `other` differ, by name: what a stored copy of a ref
+    /// (an index's meta doc, an embedding row) compares, minus the fields it does not hold.
+    pub fn changed_fields<'a>(&'a self, other: &'a Self) -> impl Iterator<Item = &'static str> + 'a {
+        let SessionRef {
+            id,
+            harness,
+            path,
+            cwd,
+            title,
+            created_at,
+            updated_at,
+            message_count,
+        } = self;
+        let same: [bool; Self::FIELDS.len()] = [
+            *id == other.id,
+            *harness == other.harness,
+            *path == other.path,
+            *cwd == other.cwd,
+            *title == other.title,
+            *created_at == other.created_at,
+            *updated_at == other.updated_at,
+            *message_count == other.message_count,
+        ];
+        Self::FIELDS
+            .iter()
+            .zip(same)
+            .filter_map(|(field, same)| (!same).then_some(*field))
+    }
 
     /// Compare copies of one logical session, with the preferred copy sorting first.
     /// Newest update (or creation) wins; harness and path break ties deterministically.
@@ -1659,6 +1688,77 @@ mod tests {
             SessionRef::FIELDS,
             "SessionRef::FIELDS must name every serialized field, in order"
         );
+    }
+
+    /// `changed_fields` names each field by its `FIELDS` spelling: changing one field changes
+    /// exactly that name.
+    #[test]
+    fn changed_fields_names_each_field_once() {
+        let base = SessionRef::new("id", Harness::Claude, "/x.jsonl");
+        let at = chrono::DateTime::from_timestamp(1, 0);
+        let edits: [(&str, SessionRef); 8] = [
+            (
+                "id",
+                SessionRef {
+                    id: "other".into(),
+                    ..base.clone()
+                },
+            ),
+            (
+                "harness",
+                SessionRef {
+                    harness: Harness::Codex,
+                    ..base.clone()
+                },
+            ),
+            (
+                "path",
+                SessionRef {
+                    path: "/y.jsonl".into(),
+                    ..base.clone()
+                },
+            ),
+            (
+                "cwd",
+                SessionRef {
+                    cwd: Some("/w".into()),
+                    ..base.clone()
+                },
+            ),
+            (
+                "title",
+                SessionRef {
+                    title: Some("t".into()),
+                    ..base.clone()
+                },
+            ),
+            (
+                "created_at",
+                SessionRef {
+                    created_at: at,
+                    ..base.clone()
+                },
+            ),
+            (
+                "updated_at",
+                SessionRef {
+                    updated_at: at,
+                    ..base.clone()
+                },
+            ),
+            (
+                "message_count",
+                SessionRef {
+                    message_count: Some(0),
+                    ..base.clone()
+                },
+            ),
+        ];
+        assert_eq!(edits.each_ref().map(|(name, _)| *name), SessionRef::FIELDS);
+        for (name, edited) in &edits {
+            assert_eq!(base.changed_fields(edited).collect::<Vec<_>>(), [*name]);
+        }
+        assert_eq!(base.changed_fields(&base.clone()).count(), 0);
     }
 
     #[test]

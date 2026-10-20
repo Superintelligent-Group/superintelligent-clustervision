@@ -358,34 +358,20 @@ pub(crate) fn read_corpus_doc(r: &cv_core::SessionRef) -> Result<(Doc, cv_core::
     let title = cv_core::label_from(meta.title.as_deref(), sink.first_prompt.as_deref());
     Ok((
         Doc {
-            id: r.id.clone(),
-            harness: r.harness.as_str().to_string(),
-            cwd: r.cwd.as_ref().map(|p| p.display().to_string()),
             title: Some(title),
             body: sink.body.into_string(),
-            created_at: r.created_at.map(|t| t.timestamp()),
-            updated_at: r.updated_at.map(|t| t.timestamp()),
         },
         sink.reads,
     ))
 }
 
-/// One indexable document distilled from a parsed [`cv_core::Session`], for the **semantic** path
-/// ([`semantic::embed_all`]), which reads exactly these fields. The FTS path no longer goes through
-/// `Doc`: it streams straight into `fts::ChunkSink`, which reads dates/path/mtime off the
-/// [`cv_core::SessionRef`] instead (so they aren't duplicated here).
+/// What the **semantic** path ([`semantic::embed_all`]) distills from one session beside the
+/// discovered [`cv_core::SessionRef`] it embeds: the label hits show and the body it embeds.
 #[cfg(feature = "semantic")]
 #[derive(Debug, Clone)]
 pub(crate) struct Doc {
-    pub id: String,
-    pub harness: String,
-    pub cwd: Option<String>,
     pub title: Option<String>,
     pub body: String,
-    /// Unix-seconds session dates off the discovery [`cv_core::SessionRef`], so semantic hits
-    /// carry `created_at`/`updated_at` just like FTS hits do.
-    pub created_at: Option<i64>,
-    pub updated_at: Option<i64>,
 }
 
 #[cfg(all(test, feature = "probe-heap"))]

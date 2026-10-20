@@ -80,10 +80,18 @@ pub(crate) fn data_schema_json() -> Value {
     json!({
         "session_row": {
             "description": "one session in a list — identical across `ls --json` and `search --json`",
-            "keys": ["id", "harness", "path", "cwd", "title", "created_at", "updated_at", "message_count", "size_bytes"],
+            "keys": cv_core::rows::SESSION_ROW_KEYS,
             "enrich_keys": ["display_title", "git"],
-            "search_extra_keys": ["score", "snippet", "agent_id", "parent_id", "workflow"],
+            "search_extra_keys": &cv_core::rows::SEARCH_ROW_KEYS[cv_core::rows::SESSION_ROW_KEYS.len()..],
             "timestamps": "RFC 3339 strings, null when unknown",
+        },
+        "subagent_row": {
+            "description": "one sub-agent of a session's forest (`/api/session/{harness}/{id}/subagents`): the session row plus its sidecar facts",
+            "keys": cv_core::rows::SUBAGENT_ROW_KEYS,
+        },
+        "task_row": {
+            "description": "one task in a list (`task list --json`, `/api/tasks`); `detail=1` adds the backlog columns, `tags`/`blocked_by` ride only when non-empty",
+            "keys": cv_core::task::TaskRow::KEYS,
         },
         "session": {
             "description": "the IR `Session` (`show --json`, `export --format json`)",

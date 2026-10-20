@@ -917,7 +917,7 @@ mod semantic_service_tests {
         std::fs::create_dir(&dir).unwrap();
         let path = dir.join("vectors.bin");
         let metadata = br#"{"model":"unused","projection":1,"records":[]}"#;
-        let mut empty = b"CVEMBED\x02".to_vec();
+        let mut empty = b"CVEMBED\x03".to_vec();
         empty.extend_from_slice(&0u32.to_le_bytes());
         empty.extend_from_slice(&0u32.to_le_bytes());
         empty.extend_from_slice(&(metadata.len() as u64).to_le_bytes());

@@ -191,6 +191,50 @@ const fn joined<const N: usize>(head: &[&'static str], tail: &[&'static str]) ->
 /// The keys a §3 session row carries, in order: [`SessionRef::FIELDS`] plus `size_bytes`.
 pub const SESSION_ROW_KEYS: [&str; SessionRef::FIELDS.len() + 1] = joined(SessionRef::FIELDS, &["size_bytes"]);
 
+/// The keys a sub-agent forest row carries (`/api/session/{harness}/{id}/subagents`), in order:
+/// the session row plus the sidecar enrichment the forest view groups by.
+pub const SUBAGENT_ROW_KEYS: [&str; SESSION_ROW_KEYS.len() + 7] = joined(
+    &SESSION_ROW_KEYS,
+    &[
+        "agent_id",
+        "agent_type",
+        "description",
+        "tool_use_id",
+        "workflow",
+        "result_status",
+        "result_summary",
+    ],
+);
+
+/// One sub-agent of a forest as its row: [`session_row`] of its transcript, then the
+/// [`SUBAGENT_ROW_KEYS`] it adds, each an explicit `null` when the sidecar did not say.
+pub fn subagent_row(s: &crate::SubagentInfo, size_bytes: Option<u64>) -> Value {
+    let crate::SubagentInfo {
+        session,
+        agent_type,
+        description,
+        tool_use_id,
+        workflow,
+        result_status,
+        result_summary,
+    } = s;
+    let mut row = session_row(session, size_bytes);
+    let map = row.as_object_mut().expect("session_row is an object");
+    let added = [
+        json!(s.agent_id()),
+        json!(agent_type),
+        json!(description),
+        json!(tool_use_id),
+        json!(workflow),
+        json!(result_status),
+        json!(result_summary),
+    ];
+    for (key, value) in SUBAGENT_ROW_KEYS[SESSION_ROW_KEYS.len()..].iter().zip(added) {
+        map.insert((*key).into(), value);
+    }
+    row
+}
+
 /// The keys a §3 search row carries, in order: the session row plus what the search contributed.
 pub const SEARCH_ROW_KEYS: [&str; SESSION_ROW_KEYS.len() + 5] = joined(
     &SESSION_ROW_KEYS,
@@ -230,6 +274,27 @@ mod tests {
             session_row(&uncounted, None)["message_count"].is_null(),
             "not counted yet is null, never 0"
         );
+    }
+
+    #[test]
+    fn subagent_rows_carry_the_session_row_plus_the_sidecar_fields() {
+        let agent = crate::SubagentInfo {
+            session: SessionRef {
+                id: "agent-a1".into(),
+                ..a_ref()
+            },
+            agent_type: Some("Explore".into()),
+            description: None,
+            tool_use_id: Some("toolu_1".into()),
+            workflow: None,
+            result_status: None,
+            result_summary: None,
+        };
+        let row = subagent_row(&agent, None);
+        let keys: Vec<&str> = row.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(keys, SUBAGENT_ROW_KEYS);
+        assert_eq!(row["agent_id"], "a1");
+        assert!(row["description"].is_null());
     }
 
     #[test]

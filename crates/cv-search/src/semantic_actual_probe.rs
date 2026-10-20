@@ -66,7 +66,7 @@ fn vectors(store: &Store) -> std::collections::BTreeMap<(String, String), Vec<u3
         .enumerate()
         .map(|(i, m)| {
             (
-                (m.harness.clone(), m.id.clone()),
+                (m.session.harness.as_str().to_string(), m.session.id.clone()),
                 store.vector(i).iter().map(|f| f.to_bits()).collect(),
             )
         })
@@ -161,14 +161,14 @@ fn actual_model_refresh_probe() {
     assert!(initial
         .meta
         .iter()
-        .find(|m| m.id == "large-arguments")
+        .find(|m| m.session.id == "large-arguments")
         .unwrap()
         .preview
         .starts_with("Inspect large semantic arguments Edit"));
     assert!(initial
         .meta
         .iter()
-        .find(|m| m.id == "escaped-text")
+        .find(|m| m.session.id == "escaped-text")
         .unwrap()
         .preview
         .starts_with("Escaped semantic bridge"));

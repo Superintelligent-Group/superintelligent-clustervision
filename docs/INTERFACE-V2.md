@@ -151,8 +151,9 @@ every command of the clap tree on a pipe under this contract.
   session with no turns)
   (+ `display_title`, `git` under `--enrich`; + `score`, `snippet`, `agent_id`, `parent_id`,
   `workflow` from `search`). `cv schema --json` publishes this list as `session_row`, with
-  `session`, `message`, `block`, `prompt_row`, `lane`, `deferral` and `query`; the manual's
-  architecture chapter is the prose.
+  `subagent_row` (a forest member: the session row + its sidecar facts), `task_row`, `session`,
+  `message`, `block`, `prompt_row`, `lane`, `deferral` and `query`; the manual's architecture
+  chapter is the prose.
 - A **message** is the IR `Message`. A **block** is the IR `Block`, tagged by `type`.
 
 ## 4. The IR (cv-core `ir.rs`)

@@ -540,18 +540,7 @@ fn subagents(harness: &str, id: &str) -> (u16, Value) {
     };
     let out: Vec<Value> = crate::subagent_tree_of(&r)
         .iter()
-        .map(|s| {
-            let mut row = crate::rows::session_row(&s.session, size_of(&s.session));
-            let map = row.as_object_mut().expect("session_row is an object");
-            map.insert("agent_id".into(), json!(s.agent_id()));
-            map.insert("agent_type".into(), json!(s.agent_type));
-            map.insert("description".into(), json!(s.description));
-            map.insert("tool_use_id".into(), json!(s.tool_use_id));
-            map.insert("workflow".into(), json!(s.workflow));
-            map.insert("result_status".into(), json!(s.result_status));
-            map.insert("result_summary".into(), json!(s.result_summary));
-            row
-        })
+        .map(|s| crate::rows::subagent_row(s, size_of(&s.session)))
         .collect();
     ok(json!(out))
 }
