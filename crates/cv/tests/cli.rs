@@ -3512,6 +3512,40 @@ fn timeline_ids_reach_cat() {
     assert!(reads.iter().all(|event| event["tool"] == "Read"));
     let (_, error) = w.cv_fails(&["tools", "alphasess", "--timeline", "--workflow", "absent"]);
     assert!(error.contains("no workflow"), "{error}");
+
+    // One `--agent` grammar on every view: an exact id, else a unique prefix; several matches or
+    // none exit 2 and list the candidates, like a session id.
+    let twin = serde_json::json!([{"type":"tool_use","id":"twin-read","name":"Read","input":{"file_path":"t.rs"}}]);
+    fs::write(
+        w.proj
+            .join("alphasess/subagents/workflows/wf_first/agent-first-twin.jsonl"),
+        cv_testkit::jsonl(&[assistant_line("first-twin", "2026-01-03T10:00:00Z", twin)]),
+    )
+    .unwrap();
+    for extra in [&["--json"][..], &["--timeline", "--json"][..]] {
+        let mut args = vec!["tools", "alphasess", "--agent", "first"];
+        args.extend_from_slice(extra);
+        let (_, code, _, error) = w.cv(&args);
+        assert_eq!(code, 2, "{args:?}: {error}");
+        assert!(error.contains("first-agent") && error.contains("first-twin"), "{error}");
+        let mut args = vec!["tools", "alphasess", "--agent", "first-a"];
+        args.extend_from_slice(extra);
+        w.cv_ok(&args);
+        let mut args = vec!["tools", "alphasess", "--agent", "nobody"];
+        args.extend_from_slice(extra);
+        let (_, code, _, error) = w.cv(&args);
+        assert_eq!(code, 2, "{args:?}: {error}");
+    }
+
+    // Two views are not silently collapsed into one.
+    for args in [
+        &["tools", "alphasess", "--agent", "first-agent", "--tool", "Edit"][..],
+        &["tools", "alphasess", "--across", "--agent", "first-agent"][..],
+        &["tools", "alphasess", "--across", "--timeline"][..],
+    ] {
+        let (_, code, _, error) = w.cv(args);
+        assert_eq!(code, 2, "{args:?}: {error}");
+    }
 }
 
 #[test]

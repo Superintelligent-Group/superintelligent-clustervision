@@ -325,17 +325,20 @@ enum Cmd {
         id: String,
         #[arg(long)]
         harness: Option<String>,
-        /// One agent's histogram ("which tools did agent X use"). `<orchestrator>` for the parent.
+        /// One agent's histogram ("which tools did agent X use"): its full id, or a unique prefix
+        /// (several matches exit 2). `<orchestrator>` for the parent. With `--timeline` it narrows
+        /// the timeline instead.
         #[arg(long)]
         agent: Option<String>,
-        /// Which agents used this tool, across the forest (ranked by count).
+        /// Which agents used this tool, across the forest (ranked by count). Not with `--agent`
+        /// unless `--timeline` narrows by both.
         #[arg(long)]
         tool: Option<String>,
         /// Restrict the analytics to one workflow run's agents.
         #[arg(long)]
         workflow: Option<String>,
         /// Per-agent breakdown (one row per agent) instead of the aggregate histogram.
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["agent", "tool", "timeline"])]
         across: bool,
         /// The time-ordered tool-call timeline (optionally narrowed with `--agent`).
         #[arg(long)]

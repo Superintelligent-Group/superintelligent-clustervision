@@ -25,6 +25,11 @@ pub(crate) fn cmd_tools(
     timeline: bool,
     json: bool,
 ) -> Result<()> {
+    if tool.is_some() && agent.is_some() && !timeline {
+        return crate::util::usage(
+            "`cv tools --tool` and `--agent` are two different views; pass `--timeline` to narrow by both",
+        );
+    }
     let want = crate::util::parse_harness(&harness)?;
     let (r, _adapter) = crate::util::resolve(id, want)?;
 
@@ -38,13 +43,25 @@ pub(crate) fn cmd_tools(
     } else {
         None
     };
+    // One selector grammar for every view: an exact id or a unique prefix; none or several is a
+    // usage error (exit 2), like a session id.
+    let agent = agent
+        .map(|key| {
+            cv_core::tools::resolve_agent(&r, &key, workflow.as_deref()).map_err(|e| {
+                match e.downcast_ref::<cv_core::tools::AgentSelectorError>() {
+                    Some(sel) => {
+                        crate::util::UsageError(format!("{sel} (try `cv tools {} --across`)", short_id(&r.id))).into()
+                    }
+                    None => e,
+                }
+            })
+        })
+        .transpose()?;
     if timeline {
         return tools_timeline(&r, agent.as_deref(), workflow.as_deref(), tool.as_deref(), json);
     }
 
-    // --tool keeps its existing which-agent precedence over the single-agent histogram view.
-    let selected_agent = if tool.is_some() { None } else { agent.as_deref() };
-    let forest = cv_core::tools::forest_tools_selected(&r, selected_agent, workflow.as_deref(), tool.as_deref())?;
+    let forest = cv_core::tools::forest_tools_selected(&r, agent.as_deref(), workflow.as_deref(), tool.as_deref())?;
 
     // `--tool T`: which agents used it.
     if let Some(t) = &tool {

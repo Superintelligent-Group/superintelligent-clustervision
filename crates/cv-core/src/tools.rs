@@ -362,9 +362,10 @@ impl ForestTools {
         v
     }
 
-    /// One agent's histogram by id (orchestrator via `<orchestrator>`), or `None`.
+    /// One agent's histogram by its full id (orchestrator via `<orchestrator>`), or `None`. A
+    /// user-typed selector goes through [`resolve_agent`] first.
     pub fn agent(&self, id: &str) -> Option<&AgentTools> {
-        self.agents.iter().find(|a| a.agent == id || a.agent.starts_with(id))
+        self.agents.iter().find(|a| a.agent == id)
     }
 }
 
@@ -381,8 +382,8 @@ pub fn forest_tools(r: &SessionRef) -> anyhow::Result<ForestTools> {
     forest_tools_selected(r, None, None, None)
 }
 
-/// Read only the selected agent/workflow's tool histograms. Agent prefixes retain the existing
-/// first-match precedence in newest-first forest order, with the orchestrator first.
+/// Read only the selected agent/workflow's tool histograms. `agent` is a full agent id, as
+/// [`resolve_agent`] returns it.
 pub fn forest_tools_selected(
     r: &SessionRef,
     agent: Option<&str>,
@@ -406,15 +407,7 @@ pub fn forest_tools_selected(
     }
 
     // Every sub-agent in the forest (direct + workflow), each its own histogram.
-    let mut subagents = selected_tool_agents(r, agent, workflow, crate::SubagentDemand::Tools)?;
-    if agent.is_some() {
-        if !agents.is_empty() {
-            subagents.clear();
-        } else {
-            subagents.truncate(1);
-        }
-    }
-    for s in subagents {
+    for s in selected_tool_agents(r, agent, workflow, crate::SubagentDemand::Tools)? {
         let hist = ToolHistogram::from_stream_selected(adapter.as_ref(), &s.session, tool)?;
         agents.push(AgentTools {
             agent: s.agent_id().to_string(),
@@ -431,7 +424,7 @@ pub fn forest_tools_selected(
 /// Streams each agent, collects its tool rows tagged with the agent id, then sorts by `(ts,
 /// agent, msg_idx)` so calls interleave in wall-clock order (untimestamped rows sort last, stably).
 /// Selectors compose before reading transcripts or decoding call arguments. Workflow must be a
-/// resolved run ID; agent keeps the existing exact-or-prefix timeline semantics.
+/// resolved run ID; agent a full agent id, as [`resolve_agent`] returns it.
 pub fn forest_timeline_selected(
     r: &SessionRef,
     agent: Option<&str>,
@@ -469,7 +462,68 @@ pub fn forest_timeline_selected(
 }
 
 fn matches_agent(agent: Option<&str>, id: &str) -> bool {
-    agent.is_none_or(|key| id == key || id.starts_with(key))
+    agent.is_none_or(|key| id == key)
+}
+
+/// An `--agent` selector that names no agent, or more than one: the same two answers the session
+/// selector gives, and the CLI exits 2 on both.
+#[derive(Debug)]
+pub enum AgentSelectorError {
+    None { key: String },
+    Ambiguous { key: String, candidates: Vec<String> },
+}
+
+impl std::fmt::Display for AgentSelectorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::None { key } => write!(f, "no agent matching {key:?}"),
+            Self::Ambiguous { key, candidates } => write!(
+                f,
+                "ambiguous agent id {key:?} matches {} agents: {} — pass a longer id",
+                candidates.len(),
+                candidates.join(", ")
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AgentSelectorError {}
+
+/// The one `--agent` grammar: an exact agent id (`<orchestrator>` included), else a unique prefix
+/// of an id (a leading `agent-` is optional), among the orchestrator and the forest (the named
+/// workflow's agents when `workflow` is set). Returns the full id; a selector that matches none
+/// or several is an [`AgentSelectorError`].
+pub fn resolve_agent(r: &SessionRef, key: &str, workflow: Option<&str>) -> anyhow::Result<String> {
+    let bare = key.strip_prefix("agent-").unwrap_or(key);
+    let mut ids: Vec<String> = Vec::new();
+    if workflow.is_none() {
+        ids.push(ORCHESTRATOR.to_string());
+    }
+    ids.extend(
+        crate::subagent_tree_filtered_of(r, crate::SubagentDemand::Sessions, workflow, |_, run| {
+            workflow.is_none_or(|wanted| run == Some(wanted))
+        })
+        .iter()
+        .map(|s| s.agent_id().to_string()),
+    );
+    ids.sort();
+    ids.dedup();
+    if ids.iter().any(|id| id == key) {
+        return Ok(key.to_string());
+    }
+    let mut hits: Vec<String> = ids
+        .into_iter()
+        .filter(|id| id.starts_with(bare) || id.starts_with(key))
+        .collect();
+    match hits.len() {
+        0 => Err(AgentSelectorError::None { key: key.to_string() }.into()),
+        1 => Ok(hits.remove(0)),
+        _ => Err(AgentSelectorError::Ambiguous {
+            key: key.to_string(),
+            candidates: hits,
+        }
+        .into()),
+    }
 }
 
 fn selected_tool_agents(
