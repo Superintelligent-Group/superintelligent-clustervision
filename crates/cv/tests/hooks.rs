@@ -655,6 +655,24 @@ fn codex_trust_is_read_from_the_store_codex_writes() {
     );
     assert!(out.contains("Hooks:       not installed"), "{out}");
 
+    // A settings file that is not JSON is unreadable, with its path, not "not installed".
+    let project = w.base.join(".codex/hooks.json");
+    fs::create_dir_all(project.parent().unwrap()).unwrap();
+    fs::write(&project, "{ not json").unwrap();
+    let (_, _, out, _) = w.cv(&["doctor", "docsess"]);
+    assert!(
+        out.contains("6 untrusted") && out.contains("/.codex/hooks.json (Project) unreadable (key must be a string"),
+        "{out}"
+    );
+    let (_, _, out, _) = w.cv(&["doctor", "docsess", "--json"]);
+    let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let broken = &doc["hooks"]["codex"][1];
+    assert!(
+        broken["entries"].is_null() && broken["error"].as_str().unwrap().starts_with("key must be a string"),
+        "{broken}"
+    );
+    fs::remove_file(&project).unwrap();
+
     // Trust recorded for every key: trusted; a reinstall writes nothing and says so.
     write_codex_trust(
         &w,

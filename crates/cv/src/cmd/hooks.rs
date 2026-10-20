@@ -726,18 +726,80 @@ const POLICY_ENV: &[&str] = &[
     "DISABLE_AUTO_COMPACT",
 ];
 
-/// `(installed entries, settings path)` per scope, and the policy in force — what `cv doctor` prints.
-pub(crate) fn status() -> (Vec<(Scope, usize, PathBuf)>, Policy) {
+/// One scope's settings file as `cv doctor` reads it: how many of cv's entries it holds, or why
+/// it cannot be read (a file that is not JSON is not "not installed"), and Codex's trust in them.
+pub(crate) struct ScopeHooks {
+    pub scope: Scope,
+    pub path: PathBuf,
+    pub entries: std::result::Result<usize, String>,
+    trust: Vec<TrustRow>,
+}
+
+impl ScopeHooks {
+    /// Every scope of `harness` whose settings path resolves, with its parsed settings when they read.
+    fn read(harness: Harness) -> Vec<(ScopeHooks, Option<Value>)> {
+        [Scope::User, Scope::Project]
+            .into_iter()
+            .filter_map(|scope| {
+                let (path, _) = paths(harness, scope).ok()?;
+                let (entries, trust, settings) = match read_settings(&path) {
+                    Ok(settings) => {
+                        let trust = match harness {
+                            Harness::Codex => codex_trust(&path, &settings),
+                            _ => Vec::new(),
+                        };
+                        (Ok(present(harness, &settings).len()), trust, Some(settings))
+                    }
+                    Err(e) => (Err(e.root_cause().to_string()), Vec::new(), None),
+                };
+                Some((
+                    ScopeHooks {
+                        scope,
+                        path,
+                        entries,
+                        trust,
+                    },
+                    settings,
+                ))
+            })
+            .collect()
+    }
+
+    /// `6/6 in <path> (User)`, or `<path> (User) unreadable (<why>)`.
+    fn line(&self) -> String {
+        let (path, scope) = (home_rel(&self.path), self.scope);
+        match &self.entries {
+            Ok(n) => format!("{n}/{} in {path} ({scope:?})", SPECS.len()),
+            Err(why) => format!("{path} ({scope:?}) unreadable ({why})"),
+        }
+    }
+
+    /// Worth a doctor row: it holds entries of ours, or cannot be read.
+    fn reportable(&self) -> bool {
+        self.entries.as_ref().map_or(true, |n| *n > 0)
+    }
+
+    fn json(&self) -> Value {
+        let mut row = json!({
+            "scope": format!("{:?}", self.scope).to_lowercase(), "entries": self.entries.as_ref().ok(),
+            "of": SPECS.len(), "settings_path": self.path,
+        });
+        if let Err(why) = &self.entries {
+            row["error"] = json!(why);
+        }
+        row
+    }
+}
+
+/// Claude's hooks per scope, and the policy in force — what `cv doctor` prints.
+pub(crate) fn status() -> (Vec<ScopeHooks>, Policy) {
     let mut scopes = Vec::new();
     let mut auto = None;
     let mut idle = None;
     let mut env_block: HashMap<String, String> = HashMap::new();
-    for scope in [Scope::User, Scope::Project] {
-        let Ok((path, _)) = paths(Harness::Claude, scope) else {
-            continue;
-        };
-        let settings = read_settings(&path).unwrap_or(json!({}));
-        scopes.push((scope, present(Harness::Claude, &settings).len(), path));
+    for (scope, settings) in ScopeHooks::read(Harness::Claude) {
+        scopes.push(scope);
+        let Some(settings) = settings else { continue };
         if let Some(b) = settings.get("autoCompactEnabled").and_then(Value::as_bool) {
             auto = Some(b);
         }
@@ -766,28 +828,19 @@ pub(crate) fn status() -> (Vec<(Scope, usize, PathBuf)>, Policy) {
     )
 }
 
-/// Codex's hooks per scope: `(scope, entries present, hooks.json, their trust)`, scopes with entries only.
-fn codex_status() -> Vec<(Scope, usize, PathBuf, Vec<TrustRow>)> {
-    [Scope::User, Scope::Project]
+/// Codex's hooks per scope, the scopes worth a row only.
+fn codex_status() -> Vec<ScopeHooks> {
+    ScopeHooks::read(Harness::Codex)
         .into_iter()
-        .filter_map(|scope| {
-            let (path, _) = paths(Harness::Codex, scope).ok()?;
-            let settings = read_settings(&path).unwrap_or(json!({}));
-            let n = present(Harness::Codex, &settings).len();
-            (n > 0).then(|| (scope, n, path.clone(), codex_trust(&path, &settings)))
-        })
+        .map(|(scope, _)| scope)
+        .filter(ScopeHooks::reportable)
         .collect()
 }
 
 /// The three lines `cv doctor` prints under its header.
 pub(crate) fn doctor_lines() -> Vec<String> {
     let (scopes, policy) = status();
-    let total = SPECS.len();
-    let installed: Vec<String> = scopes
-        .iter()
-        .filter(|(_, n, _)| *n > 0)
-        .map(|(scope, n, path)| format!("{n}/{total} in {} ({scope:?})", home_rel(path)))
-        .collect();
+    let installed: Vec<String> = scopes.iter().filter(|s| s.reportable()).map(ScopeHooks::line).collect();
     let hooks = if installed.is_empty() {
         "not installed — `cv hooks install claude` wires compaction, session start, lanes, decisions and the edit guard"
             .to_string()
@@ -796,12 +849,9 @@ pub(crate) fn doctor_lines() -> Vec<String> {
     };
     let codex: Vec<String> = codex_status()
         .iter()
-        .map(|(scope, n, path, trust)| {
-            format!(
-                "{n}/{total} in {} ({scope:?}), {}",
-                home_rel(path),
-                trust_summary(trust, *scope)
-            )
+        .map(|s| match s.entries {
+            Ok(_) => format!("{}, {}", s.line(), trust_summary(&s.trust, s.scope)),
+            Err(_) => s.line(),
         })
         .collect();
     let codex = if codex.is_empty() {
@@ -832,13 +882,12 @@ pub(crate) fn doctor_lines() -> Vec<String> {
 pub(crate) fn doctor_json() -> Value {
     let (scopes, policy) = status();
     json!({
-        "installed": scopes.iter().map(|(scope, n, path)| json!({
-            "scope": format!("{scope:?}").to_lowercase(), "entries": n, "of": SPECS.len(), "settings_path": path
-        })).collect::<Vec<_>>(),
-        "codex": codex_status().iter().map(|(scope, n, path, trust)| json!({
-            "scope": format!("{scope:?}").to_lowercase(), "entries": n, "of": SPECS.len(), "settings_path": path,
-            "trust": trust.iter().map(|r| json!({"hook": r.name.as_str(), "key": r.key, "trust": r.trust.as_str()})).collect::<Vec<_>>(),
-        })).collect::<Vec<_>>(),
+        "installed": scopes.iter().map(ScopeHooks::json).collect::<Vec<_>>(),
+        "codex": codex_status().iter().map(|s| {
+            let mut row = s.json();
+            row["trust"] = s.trust.iter().map(|r| json!({"hook": r.name.as_str(), "key": r.key, "trust": r.trust.as_str()})).collect();
+            row
+        }).collect::<Vec<_>>(),
         "policy": {
             "auto_compact_enabled": policy.auto_compact_enabled,
             "idle_compaction": policy.idle_compaction,
