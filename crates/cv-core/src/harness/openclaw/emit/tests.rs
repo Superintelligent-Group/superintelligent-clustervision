@@ -325,7 +325,7 @@ fn checked_openclaw_source_failure_preserves_transcript_and_index_even_for_ignor
         let dir = out.join("agents/main/sessions");
         fs::create_dir_all(&dir)?;
         fs::write(dir.join("fixed.jsonl"), "old transcript")?;
-        fs::write(dir.join("sessions.json"), "old index")?;
+        fs::write(dir.join("sessions.json"), r#"{"old":{"label":"index"}}"#)?;
         fs::write(world.base.join("input.json"), "changed source")?;
         assert!(emit(
             &session,
@@ -338,7 +338,52 @@ fn checked_openclaw_source_failure_preserves_transcript_and_index_even_for_ignor
         )
         .is_err());
         assert_eq!(fs::read_to_string(dir.join("fixed.jsonl"))?, "old transcript");
-        assert_eq!(fs::read_to_string(dir.join("sessions.json"))?, "old index");
+        assert_eq!(
+            fs::read_to_string(dir.join("sessions.json"))?,
+            r#"{"old":{"label":"index"}}"#
+        );
+    }
+    Ok(())
+}
+
+/// An index cv cannot read as one is refused, never replaced by one naming only this session;
+/// the transcript is not published either, and one it would replace keeps its bytes.
+#[test]
+fn an_unreadable_index_is_refused_and_nothing_is_published() -> Result<()> {
+    let world = crate::test_world("openclaw-unreadable-index");
+    let session = fixture(&world.base)?;
+    for (case, index) in [
+        ("broken", Some("{broken index")),
+        ("array", Some("[]")),
+        ("directory", None),
+    ] {
+        for force in [false, true] {
+            let out = world.base.join(format!("out-{case}-{force}"));
+            let dir = out.join("agents/main/sessions");
+            fs::create_dir_all(&dir)?;
+            match index {
+                Some(index) => fs::write(dir.join("sessions.json"), index)?,
+                None => fs::create_dir(dir.join("sessions.json"))?,
+            }
+            if force {
+                fs::write(dir.join("fixed.jsonl"), "old transcript")?;
+            }
+            let options = EmitOptions {
+                new_id: Some("fixed".into()),
+                force,
+                ..Default::default()
+            };
+            let error = format!("{:#}", emit(&session, &out, &options).unwrap_err());
+            assert!(error.contains("refusing to replace it"), "{case}: {error}");
+            if let Some(index) = index {
+                assert_eq!(fs::read_to_string(dir.join("sessions.json"))?, index);
+            }
+            match force {
+                true => assert_eq!(fs::read_to_string(dir.join("fixed.jsonl"))?, "old transcript"),
+                false => assert!(!dir.join("fixed.jsonl").exists()),
+            }
+            assert_eq!(fs::read_dir(&dir)?.count(), 1 + force as usize, "{case}");
+        }
     }
     Ok(())
 }

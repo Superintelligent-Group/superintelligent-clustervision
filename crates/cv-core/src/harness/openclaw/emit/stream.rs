@@ -290,12 +290,20 @@ pub(super) fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Res
     }
     // All source demands complete before opening the transcript or changing its index.
     fs::create_dir_all(&sessions_dir).with_context(|| format!("creating {}", sessions_dir.display()))?;
-    lines.publish(&file_path, opts.claim())?;
     let index_path = sessions_dir.join("sessions.json");
-    let mut index: Map<String, Value> = fs::read_to_string(&index_path)
-        .ok()
-        .and_then(|t| serde_json::from_str::<Map<String, Value>>(&t).ok())
-        .unwrap_or_default();
+    // cv's update replaces OpenClaw's index whole, so an index it cannot read as one is refused,
+    // never replaced by one holding only this session.
+    let refused = || {
+        format!(
+            "reading the OpenClaw index {}; refusing to replace it",
+            index_path.display()
+        )
+    };
+    let mut index: Map<String, Value> = match fs::read(&index_path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).with_context(refused)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Map::new(),
+        Err(e) => return Err(e).with_context(refused),
+    };
     let mut entry = Map::new();
     entry.insert("sessionId".into(), json!(new_id));
     if let Some(label) = label {
@@ -311,8 +319,12 @@ pub(super) fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Res
     index.insert(new_id.clone(), Value::Object(entry));
     let mut index_stage = crate::harness::store::bytes::ByteStage::new();
     serde_json::to_writer_pretty(&mut index_stage, &index)?;
-    // OpenClaw's own index: cv's update replaces it whole.
-    crate::harness::store::publish_stage(index_stage, &index_path, crate::publish::Claim::Replace)?;
+    // The transcript and its index entry publish as one set, the index last: a crash between
+    // leaves an unlisted transcript, never an entry naming a missing one.
+    let mut set = crate::publish::Set::new();
+    lines.stage_into(&mut set, &file_path, opts.claim())?;
+    crate::harness::store::stage_into(&mut set, index_stage, &index_path, crate::publish::Claim::Replace)?;
+    set.publish()?;
     Ok(EmitResult {
         path: file_path,
         new_id: new_id.clone(),
