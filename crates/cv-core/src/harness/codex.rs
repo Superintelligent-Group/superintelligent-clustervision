@@ -137,6 +137,17 @@ impl Adapter for Codex {
         Harness::Codex
     }
 
+    /// Membership comes from installed hooks, each child verified against its own header.
+    fn forest(
+        &self,
+        r: &SessionRef,
+        _demand: crate::SubagentDemand,
+        workflow: Option<&str>,
+        select: &(dyn Fn(&str, Option<&str>) -> bool + Sync),
+    ) -> Vec<crate::SubagentInfo> {
+        super::select_forest(crate::lanes::codex_hook_forest(r), workflow, select)
+    }
+
     fn roots(&self) -> Vec<PathBuf> {
         self.roots.clone()
     }

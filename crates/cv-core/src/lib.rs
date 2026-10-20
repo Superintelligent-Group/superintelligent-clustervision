@@ -415,52 +415,39 @@ pub fn subagent_tree_filtered_of(
     workflow: Option<&str>,
     select: impl Fn(&str, Option<&str>) -> bool + Sync,
 ) -> Vec<SubagentInfo> {
-    if r.harness == Harness::Claude {
-        harness::claude::subagent_tree_filtered(&r.path, demand, workflow, &select)
-    } else {
-        subagent_tree_of(r)
-            .into_iter()
-            .filter(|s| {
-                workflow.is_none_or(|run| s.workflow.as_deref() == Some(run))
-                    && select(&s.session.id, s.workflow.as_deref())
-            })
-            .collect()
-    }
+    harness::rootless(r.harness).map_or_else(Vec::new, |a| a.forest(r, demand, workflow, &select))
 }
 
 /// The full sub-agent **forest** a session spawned: directly-spawned (`Agent`/`Task`) sub-agents
 /// *and* `Workflow` sub-agents (which live a tier deeper), each enriched with its `*.meta.json`
 /// sidecar (agent type / task description / spawning tool_use) and, for workflow agents, the
-/// orchestrator's journaled result (`status` + `summary`). Newest first. Non-Claude harnesses
-/// return empty unless supported; Codex membership comes from installed hooks and verified headers.
+/// orchestrator's journaled result (`status` + `summary`). Newest first. The adapter's
+/// [`harness::Adapter::forest`]: empty for a store that records none.
 pub fn subagent_tree_of(r: &SessionRef) -> Vec<SubagentInfo> {
-    match r.harness {
-        Harness::Claude => harness::claude::subagent_tree(&r.path),
-        Harness::Codex => lanes::codex_hook_forest(r),
-        Harness::Devin => {
-            #[cfg(feature = "sqlite")]
-            {
-                harness::devin::subagent_tree(&r.path, &r.id)
-            }
-            #[cfg(not(feature = "sqlite"))]
-            {
-                Vec::new()
-            }
-        }
-        _ => Vec::new(),
-    }
+    subagent_tree_filtered_of(r, SubagentDemand::Rich, None, |_, _| true)
+}
+
+/// The run store of `h`'s adapter, when it keeps one ([`harness::Adapter::workflows`]).
+fn workflow_store(h: Harness) -> Option<&'static dyn harness::Workflows> {
+    harness::rootless(h)?.workflows()
+}
+
+/// Every harness whose adapter keeps a run store, with its sessions (each discovered whole).
+fn workflow_sessions() -> Vec<(SessionRef, &'static dyn harness::Workflows)> {
+    Harness::ALL
+        .iter()
+        .filter_map(|h| workflow_store(*h).map(|w| (*h, w)))
+        .flat_map(|(h, w)| sessions_for(Some(h)).into_iter().map(move |r| (r, w)))
+        .collect()
 }
 
 pub use harness::claude_workflow::{Workflow, WorkflowAgent, WorkflowLaunch, WorkflowPhase};
 
 /// Every `Workflow`-tool run a session launched, as first-class [`Workflow`] objects (phase tree →
 /// agents → outcomes + the driving script), newest first. Read from the session's
-/// `workflows/wf_*.json` state files. Non-Claude harnesses return empty.
+/// `workflows/wf_*.json` state files. Empty where the adapter keeps no run store.
 pub fn workflows_of(r: &SessionRef) -> Vec<Workflow> {
-    match r.harness {
-        Harness::Claude => harness::claude_workflow::workflows(&r.path),
-        _ => Vec::new(),
-    }
+    workflow_store(r.harness).map_or_else(Vec::new, |w| w.runs(r))
 }
 
 /// Find workflow runs by **name** (exact, else prefix) across the whole catalog — so a workflow
@@ -468,15 +455,12 @@ pub fn workflows_of(r: &SessionRef) -> Vec<Workflow> {
 /// and rarely mention the workflow's name). Returns `(session, run)` pairs, newest-session first.
 /// Cheap: the sidecar `workflows/` dir is only read for sessions that have one.
 pub fn find_workflows_by_name(name: &str) -> Vec<(SessionRef, Workflow)> {
-    let mut refs = sessions_for(Some(Harness::Claude));
-    refs.sort_by_key(|r| std::cmp::Reverse(r.updated_at.or(r.created_at)));
+    let mut refs = workflow_sessions();
+    refs.sort_by_key(|(r, _)| std::cmp::Reverse(r.updated_at.or(r.created_at)));
     let want = name.to_string();
-    let per_session: Vec<Vec<(SessionRef, Workflow)>> = par_filter_map(refs, move |r| {
+    let per_session: Vec<Vec<(SessionRef, Workflow)>> = par_filter_map(refs, move |(r, store)| {
         // The cheap name index picks candidates; only matching state files get fully parsed.
-        let hits: Vec<(SessionRef, Workflow)> = harness::claude_workflow::workflows_named(&r.path, &want)
-            .into_iter()
-            .map(|w| (r.clone(), w))
-            .collect();
+        let hits: Vec<(SessionRef, Workflow)> = store.named(&r, &want).into_iter().map(|w| (r.clone(), w)).collect();
         (!hits.is_empty()).then_some(hits)
     });
     let all: Vec<(SessionRef, Workflow)> = per_session.into_iter().flatten().collect();
@@ -490,44 +474,28 @@ pub fn find_workflows_by_name(name: &str) -> Vec<(SessionRef, Workflow)> {
 
 /// Find the parent session(s) of a sub-agent by its `agent-…` id (or bare/prefix form) — so an
 /// agent can be opened directly (`cv show <agent-id>`) without first knowing which session
-/// spawned it. Pure filename scan over each Claude session's `subagents/` sidecar (both tiers:
-/// direct agents and `subagents/workflows/<run>/`), in parallel; nothing is parsed.
+/// spawned it. A filename scan of each run-store session's agent transcripts
+/// ([`harness::Workflows::has_agent`]), in parallel; nothing is parsed.
 pub fn find_subagent_parents(agent_id: &str) -> Vec<SessionRef> {
     let want = format!("agent-{}", agent_id.strip_prefix("agent-").unwrap_or(agent_id));
-    let refs = sessions_for(Some(Harness::Claude));
-    let mut out = par_filter_map(refs, move |r| {
-        let base = harness::claude::sidecar::subagents_dir(&r.path)?;
-        let has_match = |dir: &std::path::Path| {
-            std::fs::read_dir(dir).into_iter().flatten().flatten().any(|e| {
-                e.file_name()
-                    .to_str()
-                    .is_some_and(|n| n.ends_with(".jsonl") && n.starts_with(&want))
-            })
-        };
-        let hit = has_match(&base)
-            || harness::claude::sidecar::workflow_runs_dir(&r.path)
-                .and_then(|d| std::fs::read_dir(d).ok())
-                .into_iter()
-                .flatten()
-                .flatten()
-                .any(|run| has_match(&run.path()));
-        hit.then_some(r)
-    });
+    let refs = workflow_sessions();
+    let mut out = par_filter_map(refs, move |(r, store)| store.has_agent(&r, &want).then_some(r));
     out.sort_by_key(|r| std::cmp::Reverse(r.updated_at.or(r.created_at)));
     out
 }
 
-/// Fleet-wide ghost hunt by name-prefix: [`workflow_ghosts_of`] across every Claude session that
+/// Fleet-wide ghost hunt by name-prefix: [`workflow_ghosts_of`] across every session that
 /// recorded at least one workflow (the bounded set where the transcript-vs-state cross-check is
 /// meaningful), in parallel. For finding a swarm you remember by name that left no run record.
 pub fn find_ghost_launches_by_name(name: &str) -> Vec<(SessionRef, WorkflowLaunch)> {
-    let refs = sessions_for(Some(Harness::Claude));
+    let refs = workflow_sessions();
     let name = name.to_string();
-    let mut out: Vec<(SessionRef, WorkflowLaunch)> = par_filter_map(refs, move |r| {
-        if !harness::claude_workflow::has_workflow_records(&r.path) {
+    let mut out: Vec<(SessionRef, WorkflowLaunch)> = par_filter_map(refs, move |(r, store)| {
+        if !store.has_records(&r) {
             return None;
         }
-        let hits: Vec<(SessionRef, WorkflowLaunch)> = harness::claude_workflow::ghost_launches(&r.path)
+        let hits: Vec<(SessionRef, WorkflowLaunch)> = store
+            .ghosts(&r)
             .into_iter()
             .filter(|g| g.name.as_deref().is_some_and(|n| n.starts_with(name.as_str())))
             .map(|g| (r.clone(), g))
@@ -544,27 +512,19 @@ pub fn find_ghost_launches_by_name(name: &str) -> Vec<(SessionRef, WorkflowLaunc
 /// Transcript `Workflow` launches with **no recorded run** — the crash-forensics view: a power
 /// loss / hard kill can leave a launch in the transcript whose `workflows/wf_*.json` state file
 /// was never persisted (its sub-agent debris, if any, sits under `subagents/workflows/`).
-/// Non-Claude harnesses return empty.
+/// Empty where the adapter keeps no run store.
 pub fn workflow_ghosts_of(r: &SessionRef) -> Vec<WorkflowLaunch> {
-    match r.harness {
-        Harness::Claude => harness::claude_workflow::ghost_launches(&r.path),
-        _ => Vec::new(),
-    }
+    workflow_store(r.harness).map_or_else(Vec::new, |w| w.ghosts(r))
 }
 
 /// Resolve a workflow's ID/name selector without reading its undemanded rich bodies.
 pub fn workflow_id_of(r: &SessionRef, key: &str) -> Option<String> {
-    (r.harness == Harness::Claude)
-        .then(|| harness::claude_workflow::workflow_id(&r.path, key))
-        .flatten()
+    workflow_store(r.harness)?.run_id(r, key)
 }
 
 /// One workflow run by its run ID or unambiguous name; None when no run resolves.
 pub fn workflow_of(r: &SessionRef, run_id: &str) -> Option<Workflow> {
-    match r.harness {
-        Harness::Claude => harness::claude_workflow::workflow(&r.path, run_id),
-        _ => None,
-    }
+    workflow_store(r.harness)?.run(r, run_id)
 }
 
 /// Find a single session by id (optionally constrained to one harness), returning its ref + adapter.
@@ -606,13 +566,14 @@ pub fn find_cheap(id: &str, harness: Option<Harness>) -> Result<Option<(SessionR
 /// sidecars, never the main pool), so every front-end that resolves session ids — MCP
 /// `read_session`, `cv serve` routes, exports — can drill into an agent id directly.
 ///
-/// Cost discipline: gated on the literal `agent-` prefix (and a non-Claude harness constraint),
+/// Cost discipline: gated on the literal `agent-` prefix (and a harness constraint whose adapter
+/// keeps no run store),
 /// so a normal session-id miss pays **zero** extra work; only agent-shaped ids pay the same
 /// parallel filename scan `cv show <agent-id>` already does. Multiple parent sessions — or
 /// several agents matching a prefix under the one parent — are an error listing the candidates,
 /// mirroring `cv show`'s ambiguity handling rather than a silent "first one wins".
 fn find_subagent_session(id: &str, harness: Option<Harness>) -> Result<Option<FoundSession>> {
-    if !id.starts_with("agent-") || harness.is_some_and(|h| h != Harness::Claude) {
+    if !id.starts_with("agent-") || harness.is_some_and(|h| workflow_store(h).is_none()) {
         return Ok(None);
     }
     let parents = find_subagent_parents(id);

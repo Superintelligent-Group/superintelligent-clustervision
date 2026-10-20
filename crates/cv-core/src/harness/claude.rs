@@ -178,6 +178,22 @@ impl Adapter for Claude {
         Harness::Claude
     }
 
+    /// The `subagents/` sidecar: directly spawned agents and, a tier deeper, workflow agents.
+    fn forest(
+        &self,
+        r: &SessionRef,
+        demand: crate::SubagentDemand,
+        workflow: Option<&str>,
+        select: &(dyn Fn(&str, Option<&str>) -> bool + Sync),
+    ) -> Vec<crate::SubagentInfo> {
+        subagent_tree_filtered(&r.path, demand, workflow, &select)
+    }
+
+    /// The `workflows/` state files and the agent transcripts their runs left.
+    fn workflows(&self) -> Option<&'static dyn super::Workflows> {
+        Some(&super::claude_workflow::RUNS)
+    }
+
     /// Anthropic's models are named `claude-*`; Claude Code's `<synthetic>` records name no model
     /// and carry no foreign thinking.
     fn native_thinking(&self, model: &str) -> bool {

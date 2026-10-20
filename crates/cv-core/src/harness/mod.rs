@@ -340,6 +340,22 @@ pub trait Adapter: Send + Sync {
     }
 }
 
+/// The members of a forest read whole that `workflow` and `select` admit, in order: the
+/// [`Adapter::forest`] of a store that cannot select before reading.
+pub(crate) fn select_forest(
+    forest: Vec<crate::SubagentInfo>,
+    workflow: Option<&str>,
+    select: &(dyn Fn(&str, Option<&str>) -> bool + Sync),
+) -> Vec<crate::SubagentInfo> {
+    forest
+        .into_iter()
+        .filter(|s| {
+            workflow.is_none_or(|run| s.workflow.as_deref() == Some(run))
+                && select(&s.session.id, s.workflow.as_deref())
+        })
+        .collect()
+}
+
 /// How a session's change shows on disk ([`Adapter::watch_policy`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WatchPolicy {

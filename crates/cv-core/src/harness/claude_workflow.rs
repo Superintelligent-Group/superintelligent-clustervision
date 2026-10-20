@@ -282,6 +282,53 @@ fn state_paths(parent_path: &Path) -> Vec<PathBuf> {
 }
 
 /// Every recorded workflow run, newest first; empty when the state directory is absent.
+/// Claude Code's run store, as the [`crate::harness::Workflows`] capability its adapter offers.
+pub(crate) struct Runs;
+pub(crate) static RUNS: Runs = Runs;
+
+impl crate::harness::Workflows for Runs {
+    fn runs(&self, r: &crate::SessionRef) -> Vec<Workflow> {
+        workflows(&r.path)
+    }
+    fn named(&self, r: &crate::SessionRef, name: &str) -> Vec<Workflow> {
+        workflows_named(&r.path, name)
+    }
+    fn run(&self, r: &crate::SessionRef, key: &str) -> Option<Workflow> {
+        workflow(&r.path, key)
+    }
+    fn run_id(&self, r: &crate::SessionRef, key: &str) -> Option<String> {
+        workflow_id(&r.path, key)
+    }
+    fn ghosts(&self, r: &crate::SessionRef) -> Vec<WorkflowLaunch> {
+        ghost_launches(&r.path)
+    }
+    fn has_records(&self, r: &crate::SessionRef) -> bool {
+        has_workflow_records(&r.path)
+    }
+    /// A filename scan of both tiers (`subagents/` and `subagents/workflows/<run>/`); nothing is
+    /// parsed.
+    fn has_agent(&self, r: &crate::SessionRef, stem: &str) -> bool {
+        use crate::harness::claude::sidecar;
+        let Some(base) = sidecar::subagents_dir(&r.path) else {
+            return false;
+        };
+        let has_match = |dir: &Path| {
+            std::fs::read_dir(dir).into_iter().flatten().flatten().any(|e| {
+                e.file_name()
+                    .to_str()
+                    .is_some_and(|n| n.ends_with(".jsonl") && n.starts_with(stem))
+            })
+        };
+        has_match(&base)
+            || sidecar::workflow_runs_dir(&r.path)
+                .and_then(|d| std::fs::read_dir(d).ok())
+                .into_iter()
+                .flatten()
+                .flatten()
+                .any(|run| has_match(&run.path()))
+    }
+}
+
 pub fn workflows(parent_path: &Path) -> Vec<Workflow> {
     let paths = state_paths(parent_path);
     let mut out = crate::par_filter_map(paths, |p| parse_state_file(&p));

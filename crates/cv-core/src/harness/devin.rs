@@ -195,6 +195,17 @@ impl Adapter for Devin {
         Harness::Devin
     }
 
+    /// The chains the session's `subagent_heads` table names.
+    fn forest(
+        &self,
+        r: &SessionRef,
+        _demand: crate::SubagentDemand,
+        workflow: Option<&str>,
+        select: &(dyn Fn(&str, Option<&str>) -> bool + Sync),
+    ) -> Vec<crate::SubagentInfo> {
+        super::select_forest(subagent_tree(&r.path, &r.id), workflow, select)
+    }
+
     fn roots(&self) -> Vec<PathBuf> {
         self.db_path().map(|_| self.root.clone()).into_iter().collect()
     }

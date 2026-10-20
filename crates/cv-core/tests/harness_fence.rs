@@ -31,7 +31,6 @@ const ALLOWLIST: &[(&str, usize)] = &[
     ("emit/fidelity.rs", 22),
     ("emit/fidelity/accumulator.rs", 5),
     ("lanes.rs", 4),
-    ("lib.rs", 12),
     ("prune.rs", 1),
     ("query/facts.rs", 1),
     ("rewind.rs", 1),
