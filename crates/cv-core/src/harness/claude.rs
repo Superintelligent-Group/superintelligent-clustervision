@@ -178,6 +178,12 @@ impl Adapter for Claude {
         Harness::Claude
     }
 
+    /// Anthropic's models are named `claude-*`; Claude Code's `<synthetic>` records name no model
+    /// and carry no foreign thinking.
+    fn native_thinking(&self, model: &str) -> bool {
+        model == "<synthetic>" || model.starts_with("claude-")
+    }
+
     /// Claude Code records an attachment's type beside the injected turn (`hook_success`, …).
     fn attachment_kind<'m>(&self, m: &'m crate::ir::Message) -> Option<&'m str> {
         m.extra.get("claude")?.get("attachment_type")?.as_str()

@@ -116,13 +116,18 @@ impl ThinkingMode {
         }
     }
 
-    /// The `cv rewind` / `cv port` default for a session: [`Self::Native`] when every recorded
-    /// model is `claude-*` (the signatures came from Anthropic and replay as they are),
-    /// [`Self::Portable`] otherwise. Claude Code's `<synthetic>` records name no model.
+    /// The `cv rewind` / `cv port` default for a session: [`Self::Native`] when an adapter claims
+    /// every recorded model's thinking as natively replayable
+    /// ([`crate::harness::Adapter::native_thinking`]: Claude's, for `claude-*`), [`Self::Portable`]
+    /// otherwise.
     pub fn replay_default<'a>(models: impl IntoIterator<Item = &'a str>) -> Self {
-        let foreign = models
-            .into_iter()
-            .any(|m| m != "<synthetic>" && !m.starts_with("claude-"));
+        let native = |model: &str| {
+            Harness::ALL
+                .iter()
+                .filter_map(|h| crate::harness::rootless(*h))
+                .any(|adapter| adapter.native_thinking(model))
+        };
+        let foreign = models.into_iter().any(|m| !native(m));
         if foreign {
             ThinkingMode::Portable
         } else {
