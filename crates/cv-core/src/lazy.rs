@@ -343,8 +343,9 @@ impl SourceStamp {
 pub struct Resolver {
     primary: Option<PathBuf>,
     stamp: Option<SourceStamp>,
-    #[cfg(feature = "mmap")]
-    checked_files: std::cell::RefCell<std::collections::HashMap<PathBuf, FirstDemand>>,
+    /// One capture and descriptor per source path, opened by the first checked demand; later
+    /// demands check it (descriptor and path) instead of opening and capturing again.
+    files: std::cell::RefCell<std::collections::HashMap<PathBuf, std::sync::Arc<CheckedSource>>>,
 }
 
 /// A capture at demand time; [`Resolver::admit`] holds it to the parse-time stamp.
@@ -396,13 +397,6 @@ impl CheckedSource {
         reader.seek(std::io::SeekFrom::Start(offset))?;
         Ok(reader)
     }
-}
-
-/// The file a resolver's first checked demand on a path saw; later demands must see it too.
-#[cfg(feature = "mmap")]
-struct FirstDemand {
-    captured: crate::json::JsonSource,
-    file: std::fs::File,
 }
 
 /// One demand's span bytes, mapped for that demand only.
@@ -522,8 +516,7 @@ impl Resolver {
         Resolver {
             primary,
             stamp,
-            #[cfg(feature = "mmap")]
-            checked_files: std::cell::RefCell::new(std::collections::HashMap::new()),
+            files: std::cell::RefCell::new(std::collections::HashMap::new()),
         }
     }
 
@@ -531,9 +524,18 @@ impl Resolver {
         sp.source.as_deref().or(self.primary.as_deref())
     }
 
-    fn checked_source(&self, sp: &Span) -> anyhow::Result<CheckedSource> {
+    /// The demand's source, checked: the resolver's descriptor for the path when one is open and
+    /// still holds this span, else a fresh capture held to the parse-time stamp and to the one it
+    /// replaces (a file that grew past the first demand's capture is captured again).
+    fn checked_source(&self, sp: &Span) -> anyhow::Result<std::sync::Arc<CheckedSource>> {
         use anyhow::Context;
-        let source = CheckedSource::open(self.path_for(sp).context("Text span has no source path")?)?;
+        let path = std::path::absolute(self.path_for(sp).context("Text span has no source path")?)?;
+        let held = self.files.borrow().get(&path).cloned();
+        if let Some(source) = held.as_ref().filter(|source| source.bounds(sp).is_ok()) {
+            source.check()?;
+            return Ok(source.clone());
+        }
+        let source = CheckedSource::open(&path)?;
         if let Some(stamp) = self.stamp.as_ref().filter(|stamp| stamp.0.path() == source.path) {
             anyhow::ensure!(
                 stamp.0.admits(&source.captured),
@@ -541,7 +543,17 @@ impl Resolver {
                 source.path.display()
             );
         }
+        if let Some(first) = &held {
+            // The first checked demand is remembered; later demands must see that same file.
+            anyhow::ensure!(
+                first.captured.admits(&source.captured),
+                "JSON source changed: {}",
+                source.path.display()
+            );
+        }
         source.bounds(sp)?;
+        let source = std::sync::Arc::new(source);
+        self.files.borrow_mut().insert(path, source.clone());
         Ok(source)
     }
 
@@ -550,23 +562,8 @@ impl Resolver {
         if sp.len == 0 {
             return Ok(SpanBytes::Empty);
         }
-        let mut first = self.checked_files.borrow_mut();
-        if !first.contains_key(&source.path) {
-            first.insert(
-                source.path.clone(),
-                FirstDemand {
-                    captured: source.captured.clone(),
-                    file: source.file.try_clone()?,
-                },
-            );
-        }
-        let first = &first[&source.path];
-        // The first checked demand is remembered; later demands must see that same file.
-        first.captured.check_metadata(source.file.metadata()?)?;
-        source.captured.check_metadata(first.file.metadata()?)?;
-        source.check()?;
         let len = usize::try_from(sp.len)?;
-        // `checked_source` bounded the span by the captured length.
+        // `checked_source` checked the descriptor and bounded the span by its captured length.
         // SAFETY: a read-only mapping of the demand's own descriptor, dropped with the demand.
         // File identity guards detect ordinary changes around each demand, not atomic snapshots.
         let map = unsafe {
@@ -1325,7 +1322,6 @@ mod tests {
         assert_eq!(&*first_text(&session), "A".repeat(10_000));
     }
 
-    #[cfg(feature = "mmap")]
     #[test]
     fn checked_mapping_rejects_replaced_path_after_first_demand() {
         let dir = CheckedTestDir::new();
@@ -1339,6 +1335,15 @@ mod tests {
             escaped: false,
         };
         assert_eq!(resolver.try_resolve(&span).unwrap(), "before");
+        // Later demands on the path reuse the first demand's capture and descriptor.
+        let held = resolver.files.borrow().values().next().cloned().unwrap();
+        assert_eq!(resolver.try_resolved_len(&span).unwrap(), 6);
+        assert_eq!(resolver.files.borrow().len(), 1);
+        assert!(std::sync::Arc::ptr_eq(
+            &held,
+            resolver.files.borrow().values().next().unwrap()
+        ));
+        drop(held);
         let replacement = dir.path().join("replacement");
         std::fs::write(&replacement, b"after!").unwrap();
         std::fs::rename(replacement, &path).unwrap();
