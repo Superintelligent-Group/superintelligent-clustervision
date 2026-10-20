@@ -2220,7 +2220,9 @@ mod tests {
         let range = window.map(|w| w.bounds(|| Ok(session.messages.len())).unwrap());
         let start = range.map(|(start, _)| start).unwrap_or(0);
         if let Some(range) = range {
-            let (start, end) = crate::util::clamp(range, session.messages.len());
+            // A past-the-end window is empty, never a panic.
+            let end = range.1.unwrap_or(session.messages.len()).min(session.messages.len());
+            let start = range.0.min(end);
             session.messages = session.messages.drain(start..end).collect();
         }
         let mut next = None;

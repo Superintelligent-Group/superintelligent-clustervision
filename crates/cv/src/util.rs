@@ -323,13 +323,6 @@ fn next_index(n: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Clamp a `[start, end)` window to `len` messages (a past-the-end window is empty, never a panic).
-#[cfg(test)]
-pub(crate) fn clamp(range: (usize, Option<usize>), len: usize) -> (usize, usize) {
-    let end = range.1.unwrap_or(len).min(len);
-    (range.0.min(end), end)
-}
-
 /// The IR message count of a session, by one streamed pass under lazy options (content stays on
 /// disk). `SessionRef::message_count` counts conversational turns only, so `--last N` can't use it.
 pub(crate) fn count_messages(adapter: &dyn Adapter, r: &SessionRef) -> Result<usize> {
@@ -591,9 +584,6 @@ mod tests {
             ..Default::default()
         };
         assert!(bad.window().is_err());
-        assert_eq!(clamp((10, Some(20)), 5), (5, 5)); // past the end → empty, not a panic
-        assert_eq!(clamp((2, None), 5), (2, 5));
-        assert_eq!(clamp((0, Some(3)), 5), (0, 3));
     }
 
     #[test]
