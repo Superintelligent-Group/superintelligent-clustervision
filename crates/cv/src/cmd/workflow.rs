@@ -217,6 +217,7 @@ fn render_journal_results(w: &cv_core::Workflow) {
 /// several list themselves with ready-to-paste commands. A miss falls through to a ghost-launch
 /// scan — a name with no recorded run anywhere may still be a launch whose state was never
 /// persisted (crash/power loss), and that is precisely when someone hunts it by name.
+#[allow(clippy::too_many_arguments)]
 fn workflow_by_name_fleetwide(
     name: &str,
     want: Option<cv_core::ir::Harness>,
