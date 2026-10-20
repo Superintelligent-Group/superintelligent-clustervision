@@ -888,12 +888,10 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// The model a reply ran under: the binding in force (`profile.bind`, `config.update`, the
+    /// step's `llm.request`), stated on every reply whether or not it is still the session's.
     fn reply_model(&self) -> Option<String> {
-        self.model_bindings
-            .current
-            .as_ref()
-            .filter(|model| Some(*model) != self.model_bindings.first.as_ref())
-            .cloned()
+        self.model_bindings.current.clone()
     }
 
     /// The Kimi Code record codec: one wire record view in, its messages to `sink`. Every byte
@@ -1901,7 +1899,7 @@ mod tests {
                 .messages
                 .iter()
                 .filter(|m| m.role == Role::Assistant)
-                .map(|m| m.model.as_deref().or(shell.model.as_deref()))
+                .map(|m| m.model.as_deref())
                 .collect::<Vec<_>>();
             assert_eq!(
                 models,
@@ -1930,6 +1928,16 @@ mod tests {
             assert!(adapter.resume(&r, &opts, &mut Kept::default(), &old)?.is_none());
         }
         Ok(())
+    }
+
+    #[test]
+    fn windowed_reads_keep_the_model() {
+        let _world = crate::test_world("kimi_code_windowed");
+        let corpus = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/kimi-code");
+        for version in ["0.39.1", "0.39.1-then-2.1.1", "2.1.1"] {
+            let home = corpus.join(version).join(".kimi-code");
+            crate::harness::assert_windowed_models(&KimiCode::with_home(&home));
+        }
     }
 
     #[test]
