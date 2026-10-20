@@ -146,37 +146,6 @@ impl Archive {
             .then_some(stored)
     }
 
-    /// Serialize without a whole JSON/comparison Vec. Artifact rename and catalog append share
-    /// the existing cross-process archive lock; a failure never exposes a partial JSON file.
-    #[cfg(test)]
-    pub(super) fn store_streaming(&self, session: &Session) -> Result<StoreOutcome> {
-        self.store_artifact(session, false).map(|(outcome, _)| outcome)
-    }
-
-    #[cfg(test)]
-    fn store_artifact(&self, session: &Session, repair_catalog: bool) -> Result<(StoreOutcome, Artifact)> {
-        let dest = self.session_path(session.harness, &session.id);
-        let mut temporary = Temporary::new(&dest)?;
-        temporary
-            .write_json(session, true)
-            .with_context(|| format!("serializing session {}", session.id))?;
-        let _lock = self.lock_catalog()?;
-        let outcome = if equal_files(temporary.path(), &dest) {
-            // Repair an artifact whose bytes were published before a crash/error prevented the
-            // catalog append. The identity comparison and repair share the writer lock.
-            if repair_catalog {
-                self.upsert_catalog_locked(entry(session))?;
-            }
-            StoreOutcome::Skipped
-        } else {
-            temporary.publish(&dest)?;
-            self.upsert_catalog_locked(entry(session))?;
-            StoreOutcome::Archived
-        };
-        let artifact = Artifact::of(&dest).context("archive artifact disappeared during publication")?;
-        Ok((outcome, artifact))
-    }
-
     /// Skip unchanged sources before parsing. A verified append replaces the archived suffix
     /// after the checkpoint, preserving held EOF messages and exact final session metadata.
     pub(super) fn store_ref(&self, adapter: &dyn cv_core::Adapter, r: &SessionRef) -> Result<StoredPass> {
@@ -450,13 +419,8 @@ mod tests {
     }
 
     #[test]
-    fn streamed_artifact_write_is_idempotent_and_owned_temps_clean_up() {
+    fn owned_artifact_temps_clean_up() {
         let (root, a, r, _) = setup(Harness::Claude);
-        let adapter = cv_core::harness::for_harness(r.harness).unwrap();
-        let session = adapter.parse(&r).unwrap();
-        assert_eq!(a.store(&session).unwrap(), StoreOutcome::Archived);
-        assert_eq!(a.store(&session).unwrap(), StoreOutcome::Skipped);
-        exact(&a, adapter.as_ref(), &r);
         let dest = a.session_path(r.harness, &r.id);
         let temporary = Temporary::new(&dest).unwrap();
         let own = temporary.path().to_owned();

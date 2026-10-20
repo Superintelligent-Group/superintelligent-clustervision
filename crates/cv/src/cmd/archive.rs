@@ -128,14 +128,6 @@ impl Archive {
         self.home.join(Self::rel_session_path(harness, id))
     }
 
-    /// Persist a session to `archive/<harness>/<id>.json` and update the catalog. Idempotent:
-    /// if the serialized bytes are byte-identical to what's already on disk, returns `Skipped`
-    /// without rewriting anything.
-    #[cfg(test)]
-    pub fn store(&self, session: &Session) -> Result<StoreOutcome> {
-        self.store_streaming(session)
-    }
-
     /// Read the catalog, deduped by (harness, id) with the newest `archived_at` winning.
     pub fn load_catalog(&self) -> Result<Vec<CatalogEntry>> {
         let path = self.catalog_path();
@@ -432,7 +424,9 @@ mod tests {
         let a = archive();
         let mut session = Session::new("../../escape", Harness::Claude);
         session.messages.push(cv_core::Message::new(cv_core::Role::User));
-        a.store(&session).unwrap();
+        let mut recorded = entry(&session.id, 1);
+        recorded.path = Archive::rel_session_path(session.harness, &session.id);
+        a.upsert_catalog(recorded).unwrap();
         let catalog = a.load_catalog().unwrap();
         assert_eq!(catalog[0].id, "../../escape");
         assert_eq!(catalog[0].path.parent().unwrap(), Path::new("archive/claude"));
