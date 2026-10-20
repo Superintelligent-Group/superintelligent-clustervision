@@ -784,30 +784,6 @@ fn complete_utf8_prefix(raw: &[u8], limit: usize) -> usize {
     }
 }
 
-/// Build a [`Span`] for a raw JSON string value `raw` (e.g. from `serde_json::value::RawValue`) that
-/// borrows somewhere inside the record bytes `within` starting at absolute file offset `base_off`.
-/// The span covers the string *body* (between the quotes); `escaped` is set if it contains a
-/// backslash. `None` if `raw` isn't a JSON string or doesn't lie within `within`. Used by adapters'
-/// span-producing parse paths (claude, codex).
-#[cfg(test)]
-pub fn json_string_span(raw: &RawValue, within: &[u8], base_off: u64) -> Option<Span> {
-    let b = raw.get().as_bytes();
-    if b.len() < 2 || b.first() != Some(&b'"') || b.last() != Some(&b'"') {
-        return None;
-    }
-    let off = (b.as_ptr() as usize).checked_sub(within.as_ptr() as usize)?;
-    if off.checked_add(b.len())? > within.len() {
-        return None;
-    }
-    let body = &b[1..b.len() - 1];
-    Some(Span {
-        source: None,
-        offset: base_off.checked_add(off as u64)?.checked_add(1)?,
-        len: body.len() as u64,
-        escaped: body.contains(&b'\\'),
-    })
-}
-
 /// A serde_json `RawValue`, re-exported so adapters' span paths can name the type without depending
 /// on the `raw_value` feature surface directly.
 pub use serde_json::value::RawValue;
@@ -998,8 +974,6 @@ fn stream_lossy_utf8_until(reader: &mut impl std::io::BufRead, f: &mut impl FnMu
 mod tests {
     #[test]
     fn public_span_operations_reject_overflowing_offsets() {
-        let raw: &super::RawValue = serde_json::from_str("\"text\"").unwrap();
-        assert!(super::json_string_span(raw, raw.get().as_bytes(), u64::MAX).is_none());
         let text = super::Text::Span(super::Span {
             source: None,
             offset: u64::MAX,
