@@ -79,11 +79,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
     if let Some(g) = &session.git {
         meta.insert("git".into(), codex_git(g));
     }
-    lines.push(json!({
-        "type": "session_meta",
-        "timestamp": ts_str,
-        "payload": Value::Object(meta),
-    }))?;
+    writer::value(&mut lines, &ts_str, "session_meta", &Value::Object(meta))?;
 
     // The model rides in a `turn_context` record (per-turn config: model/cwd/approval/sandbox) —
     // that's the ONLY place Codex's own parser (and ours, `apply_turn_context`) reads a model id
@@ -94,18 +90,19 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
     // skipped on resume, so the model never actually came back. `on-request` + `workspace-write`
     // are Codex's own defaults (both decode with no further fields).
     if let Some(model) = &session.model {
-        lines.push(json!({
-            "type": "turn_context",
-            "timestamp": ts_str,
-            "payload": {
+        writer::value(
+            &mut lines,
+            &ts_str,
+            "turn_context",
+            &json!({
                 "turn_id": Uuid::now_v7().to_string(),
                 "cwd": cwd_str,
                 "approval_policy": "on-request",
                 "sandbox_policy": { "type": "workspace-write" },
                 "model": model,
                 "summary": "auto",
-            },
-        }))?;
+            }),
+        )?;
     }
 
     for msg in &session.messages {
@@ -229,13 +226,15 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
                         }
                         Block::File { path, source, .. } => {
                             let label = path.as_deref().or(source.as_deref()).unwrap_or("?");
-                            lines.push(codex_event_msg(
+                            writer::value(
+                                &mut lines,
                                 &ts,
-                                json!({
+                                "event_msg",
+                                &json!({
                                     "type": "agent_message",
                                     "message": format!("[file: {label}]"),
                                 }),
-                            ))?;
+                            )?;
                         }
                         Block::ToolResult { .. } | Block::Image { .. } => {}
                     }
@@ -250,10 +249,12 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
                     && !unrepresentable_checked(Harness::Codex, opts.thinking, msg, &resolver)?
                 {
                     if let Some(info) = codex_token_usage(msg.usage.as_ref()) {
-                        lines.push(codex_event_msg(
+                        writer::value(
+                            &mut lines,
                             &ts,
-                            json!({ "type": "token_count", "info": { "last_token_usage": info } }),
-                        ))?;
+                            "event_msg",
+                            &json!({ "type": "token_count", "info": { "last_token_usage": info } }),
+                        )?;
                     }
                 }
             }
@@ -279,15 +280,17 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
                         // Emit a call shell first so the pair is well-formed and the output's text
                         // still reaches the model, rather than dropping the turn.
                         if is_orphan_result(b, &called) {
-                            lines.push(codex_response_item(
+                            writer::value(
+                                &mut lines,
                                 &ts,
-                                json!({
+                                "response_item",
+                                &json!({
                                     "type": "function_call",
                                     "call_id": tool_use_id,
                                     "name": tool_name.clone().unwrap_or_else(|| "unknown".into()),
                                     "arguments": "{}",
                                 }),
-                            ))?;
+                            )?;
                         }
                         writer::record(&mut lines, &ts, "response_item", |out| {
                             out.write_all(b"{\"type\":\"function_call_output\",\"call_id\":")?;
@@ -359,14 +362,6 @@ fn codex_token_usage(usage: Option<&crate::ir::Usage>) -> Option<Value> {
     Some(Value::Object(m))
 }
 
-fn codex_event_msg(ts: &str, payload: Value) -> Value {
-    json!({ "type": "event_msg", "timestamp": ts, "payload": payload })
-}
-
-fn codex_response_item(ts: &str, payload: Value) -> Value {
-    json!({ "type": "response_item", "timestamp": ts, "payload": payload })
-}
-
 fn codex_git(g: &GitInfo) -> Value {
     let mut m = Map::new();
     if let Some(b) = &g.branch {
@@ -381,58 +376,6 @@ fn codex_git(g: &GitInfo) -> Value {
     Value::Object(m)
 }
 
-// Borrow payload strings rather than constructing a second Value tree for each text twin.
-#[derive(serde::Serialize)]
-struct Record<'a, T> {
-    r#type: &'a str,
-    timestamp: &'a str,
-    payload: T,
-}
-#[derive(serde::Serialize)]
-struct TextItem<'a> {
-    r#type: &'a str,
-    text: &'a str,
-}
-#[derive(serde::Serialize)]
-struct TextMessage<'a> {
-    r#type: &'a str,
-    role: &'a str,
-    content: [TextItem<'a>; 1],
-}
-#[derive(serde::Serialize)]
-struct TextEvent<'a> {
-    r#type: &'a str,
-    message: &'a str,
-}
-fn push_text(
-    lines: &mut JsonlStage,
-    ts: &str,
-    role: &str,
-    content_type: &str,
-    event_type: &str,
-    text: &str,
-) -> Result<()> {
-    lines.push(Record {
-        r#type: "response_item",
-        timestamp: ts,
-        payload: TextMessage {
-            r#type: "message",
-            role,
-            content: [TextItem {
-                r#type: content_type,
-                text,
-            }],
-        },
-    })?;
-    lines.push(Record {
-        r#type: "event_msg",
-        timestamp: ts,
-        payload: TextEvent {
-            r#type: event_type,
-            message: text,
-        },
-    })
-}
 #[cfg(test)]
 mod staged_tests {
     use super::*;
@@ -503,30 +446,5 @@ mod staged_tests {
         assert_eq!(value["input_tokens"], u64::MAX);
         assert_eq!(value["total_tokens"], u64::MAX);
         assert_eq!(value["cached_input_tokens"], 1);
-    }
-
-    #[test]
-    fn borrowed_text_twins_preserve_wire_bytes() -> Result<()> {
-        let world = cv_testkit::World::new("codex-text-stage");
-        for (role, content_type, event_type) in [
-            ("user", "input_text", "user_message"),
-            ("assistant", "output_text", "agent_message"),
-        ] {
-            let text = "a\"\\\nλ";
-            let mut stage = JsonlStage::new();
-            push_text(&mut stage, "fixed", role, content_type, event_type, text)?;
-            let path = world.base.join(role);
-            stage.publish(&path, crate::publish::Claim::New)?;
-            let expected = format!(
-                "{}\n{}\n",
-                serde_json::to_string(&codex_response_item(
-                    "fixed",
-                    json!({"type":"message", "role":role, "content":[{"type":content_type,"text":text}]})
-                ))?,
-                serde_json::to_string(&codex_event_msg("fixed", json!({"type":event_type,"message":text})))?
-            );
-            assert_eq!(std::fs::read(&path)?, expected.as_bytes());
-        }
-        Ok(())
     }
 }
