@@ -127,8 +127,16 @@ impl Adapter for Grok {
         let Some(root) = &self.root else {
             return Ok(Default::default());
         };
-        let mut out = Vec::new();
-        for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
+        // An unreadable dir, and a summary whose scan fails, are skipped and reported.
+        let mut out = crate::Discovered::default();
+        for entry in WalkDir::new(root) {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(e) => {
+                    out.skipped.extend(crate::Skipped::walk(&e));
+                    continue;
+                }
+            };
             if entry.file_name() != "summary.json" {
                 continue;
             }
@@ -139,18 +147,15 @@ impl Adapter for Grok {
             reads.record(&self.resume_source(&reference));
             // Key by the public ref path, so the existing full-read count publication updates
             // this same cache entry. Summary and transcript identities guard its contents.
-            let scanned = crate::discover_cache::cached_scan_with_reads(dir, reads, || match scan(entry.path()) {
-                Ok(r) => r,
-                Err(e) => {
-                    eprintln!("cv: skipping {}: {e:#}", entry.path().display());
-                    None
-                }
+            let mut failure = None;
+            let scanned = crate::discover_cache::cached_scan_with_reads(dir, reads, || {
+                scan(entry.path()).map_err(|e| failure = Some(e)).ok().flatten()
             });
-            if let Some(r) = scanned {
-                out.push(r);
+            if let Some(found) = crate::Skipped::listed(entry.path(), failure.map_or(Ok(scanned), Err)) {
+                out.push(found);
             }
         }
-        Ok(out.into())
+        Ok(out)
     }
 
     fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
