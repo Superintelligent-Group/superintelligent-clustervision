@@ -48,8 +48,10 @@ struct HarmonyMsg<'a> {
 }
 
 /// Decode Harmony channel-formatted text into IR content blocks. If no markers are present, returns
-/// the text as a single [`Block::Text`] (no-op passthrough).
-pub fn decode_content(text: &str) -> Vec<Block> {
+/// the text as a single [`Block::Text`] (no-op passthrough). Harmony names a call's recipient but
+/// carries no call id, so each [`Block::ToolUse`] takes its id from `call_id` (the caller derives
+/// one from the call's position, [`crate::ir::derived_call_id`]).
+pub fn decode_content(text: &str, call_id: &mut dyn FnMut() -> String) -> Vec<Block> {
     if !looks_like_harmony(text) {
         return vec![Block::Text {
             text: text.to_string().into(),
@@ -83,7 +85,7 @@ pub fn decode_content(text: &str) -> Vec<Block> {
                     // A tool call on the commentary channel.
                     let name = strip_tool_prefix(recipient);
                     blocks.push(Block::ToolUse {
-                        id: String::new(),
+                        id: call_id(),
                         name: name.to_string(),
                         input: parse_input(msg.body).into(),
                         namespace: None,
@@ -103,7 +105,7 @@ pub fn decode_content(text: &str) -> Vec<Block> {
             _ => {
                 if let Some(recipient) = msg.recipient {
                     blocks.push(Block::ToolUse {
-                        id: String::new(),
+                        id: call_id(),
                         name: strip_tool_prefix(recipient).to_string(),
                         input: parse_input(msg.body).into(),
                         namespace: None,
@@ -276,10 +278,19 @@ fn parse_input(body: &str) -> serde_json::Value {
 mod tests {
     use super::*;
 
+    /// Decode with numbered call ids, as a caller deriving them from position would.
+    fn decode(text: &str) -> Vec<Block> {
+        let mut n = 0;
+        decode_content(text, &mut || {
+            n += 1;
+            format!("call-{n}")
+        })
+    }
+
     #[test]
     fn recipient_before_channel_is_a_tool_call() {
         let text = "<|start|>assistant to=functions.read<|channel|>commentary<|message|>{\"path\":\"a\"}<|call|>";
-        let blocks = decode_content(text);
+        let blocks = decode(text);
         assert!(matches!(&blocks[0], Block::ToolUse { name, .. } if name == "read"));
         if let Block::ToolUse { input, .. } = &blocks[0] {
             assert_eq!(input.resolve().unwrap()["path"], "a");
@@ -295,7 +306,7 @@ mod tests {
         assert_eq!(earliest_stop("é<|unknown|><|message|>body"), None);
         let text = "<|channel|>final<|message|>body<|end|>".repeat(256);
         assert_eq!(parse_messages(&text).count(), 256);
-        assert_eq!(decode_content(&text).len(), 256);
+        assert_eq!(decode(&text).len(), 256);
     }
 
     #[test]
@@ -305,7 +316,7 @@ mod tests {
             "<|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{\"location\":\"SF\"}<|call|>",
             "<|start|>assistant<|channel|>final<|message|>It is sunny in SF.<|return|>",
         );
-        let blocks = decode_content(text);
+        let blocks = decode(text);
         assert_eq!(blocks.len(), 3, "expected thinking + tooluse + text");
 
         match &blocks[0] {
@@ -315,7 +326,7 @@ mod tests {
         match &blocks[1] {
             Block::ToolUse { name, input, id, .. } => {
                 assert_eq!(name, "get_weather", "functions. prefix stripped");
-                assert!(id.is_empty());
+                assert_eq!(id, "call-1", "the id comes from the caller, never the text");
                 assert_eq!(input.resolve().unwrap()["location"], "SF");
             }
             other => panic!("expected ToolUse, got {other:?}"),
@@ -329,7 +340,7 @@ mod tests {
     #[test]
     fn no_markers_passes_through_as_single_text() {
         let text = "Just a normal answer with no Harmony framing.";
-        let blocks = decode_content(text);
+        let blocks = decode(text);
         assert_eq!(blocks.len(), 1);
         match &blocks[0] {
             Block::Text { text: t } => assert_eq!(t, text),
@@ -342,7 +353,7 @@ mod tests {
     fn dangling_channel_without_stop_does_not_panic() {
         // No stop token at all: the body runs to EOF.
         let text = "<|channel|>final<|message|>partial answer with no end token";
-        let blocks = decode_content(text);
+        let blocks = decode(text);
         assert_eq!(blocks.len(), 1);
         match &blocks[0] {
             Block::Text { text } => assert_eq!(text, "partial answer with no end token"),
@@ -354,7 +365,7 @@ mod tests {
     fn dangling_channel_no_message_is_safe() {
         // A channel marker but no <|message|> body: nothing to decode → passthrough, no panic.
         let text = "<|start|>assistant<|channel|>analysis";
-        let blocks = decode_content(text);
+        let blocks = decode(text);
         assert_eq!(blocks.len(), 1);
         assert!(matches!(blocks[0], Block::Text { .. }));
     }
@@ -365,7 +376,7 @@ mod tests {
             "<|channel|>analysis<|message|>think think<|end|>",
             "<|channel|>final<|message|>the answer<|return|>",
         );
-        let blocks = decode_content(text);
+        let blocks = decode(text);
         assert_eq!(blocks.len(), 2);
         assert!(matches!(blocks[0], Block::Thinking { .. }));
         assert!(matches!(blocks[1], Block::Text { .. }));
@@ -374,7 +385,7 @@ mod tests {
     #[test]
     fn tool_call_with_non_json_body_keeps_raw_string() {
         let text = "<|channel|>commentary to=functions.run <|message|>not json here<|call|>";
-        let blocks = decode_content(text);
+        let blocks = decode(text);
         assert_eq!(blocks.len(), 1);
         match &blocks[0] {
             Block::ToolUse { name, input, .. } => {
@@ -391,7 +402,7 @@ mod tests {
     #[test]
     fn plain_commentary_without_recipient_becomes_text() {
         let text = "<|channel|>commentary<|message|>Let me work through this.<|end|><|channel|>final<|message|>Done.<|return|>";
-        let blocks = decode_content(text);
+        let blocks = decode(text);
         assert_eq!(blocks.len(), 2);
         match &blocks[0] {
             Block::Text { text } => assert_eq!(text, "Let me work through this."),
@@ -406,7 +417,7 @@ mod tests {
     #[test]
     fn multibyte_content_is_char_boundary_safe() {
         let text = "<|channel|>final<|message|>café 日本語 🎉 emoji<|return|>";
-        let blocks = decode_content(text);
+        let blocks = decode(text);
         assert_eq!(blocks.len(), 1);
         match &blocks[0] {
             Block::Text { text } => assert_eq!(text, "café 日本語 🎉 emoji"),
@@ -416,7 +427,7 @@ mod tests {
 
     #[test]
     fn empty_string_is_safe() {
-        let blocks = decode_content("");
+        let blocks = decode("");
         assert_eq!(blocks.len(), 1);
         assert!(matches!(blocks[0], Block::Text { .. }));
     }

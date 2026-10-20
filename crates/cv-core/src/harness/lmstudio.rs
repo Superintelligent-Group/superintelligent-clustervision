@@ -27,7 +27,8 @@
 //!
 //! Fidelity notes / variants (sniffed by content, never a version field):
 //! - There are **no first-class tool-call structures** on disk. Models like gpt-oss embed tool calls
-//!   inline in the assistant text via channel markers; we preserve that text verbatim (no `ToolUse`).
+//!   inline in the assistant text via channel markers ([`super::wire::harmony`] decodes them; a call's
+//!   id is derived from its position, since the text carries none).
 //! - File attachments are references only (`fileIdentifier`), not inlined bytes; images → [`Block::Image`],
 //!   other files → [`Block::File`]. The actual bytes live under `~/.lmstudio/.internal/files/`.
 //! - Older/newer schema drift is handled by being totally tolerant: unknown step/part types are
@@ -183,7 +184,7 @@ impl Adapter for LmStudio {
                     let mut session_model = None;
                     sink.meta(&s);
                     if let Some(messages) = doc.get("messages").map(JsonView::array).transpose()?.flatten() {
-                        'turns: for turn in messages {
+                        'turns: for (at, turn) in messages.enumerate() {
                             let turn = turn?;
                             if !turn.accepts_value()? {
                                 continue;
@@ -199,7 +200,7 @@ impl Adapter for LmStudio {
                             else {
                                 continue;
                             };
-                            let primary = projected_version(version, &mut session_model, opts)?;
+                            let primary = projected_version(version, &mut session_model, opts, At(at, selected))?;
                             let has_primary = primary.is_some();
                             if let Some(mut message) = primary {
                                 if opts.tier == Tier::Complete {
@@ -220,7 +221,7 @@ impl Adapter for LmStudio {
                                             continue;
                                         }
                                         if let Some(mut message) =
-                                            projected_version(version, &mut throwaway_model, opts)?
+                                            projected_version(version, &mut throwaway_model, opts, At(at, index))?
                                         {
                                             message.kind = MessageKind::Branch;
                                             let bag = message.harness_extra_mut(Harness::LmStudio);
@@ -308,10 +309,16 @@ fn projected_selected_version<'a>(
     Ok(selected.or(last).map(|(index, version)| (index, version, count)))
 }
 
+/// Where a version sits: `messages[.0].versions[.1]`. Harmony calls carry no id, so theirs derive
+/// from it ([`projected_text`]).
+#[derive(Clone, Copy)]
+struct At(usize, usize);
+
 fn projected_version(
     version: JsonView<'_>,
     session_model: &mut Option<String>,
     opts: &Demand,
+    at: At,
 ) -> Result<Option<Message>> {
     let Some(version) = Fields::parse(version, &["role", "type", "steps", "content"])? else {
         return Ok(None);
@@ -332,11 +339,11 @@ fn projected_version(
     if string_is(version.get("type"), "multiStep")? {
         if let Some(steps) = version.get("steps").map(JsonView::array).transpose()?.flatten() {
             for step in steps {
-                projected_step(step?, &mut message, session_model, opts)?;
+                projected_step(step?, &mut message, session_model, opts, at)?;
             }
         }
     } else {
-        projected_content(version.get("content"), &mut message, false, opts)?;
+        projected_content(version.get("content"), &mut message, false, opts, at)?;
     }
     Ok((!message.content.is_empty() || (role == Role::Assistant && message.usage.is_some())).then_some(message))
 }
@@ -346,6 +353,7 @@ fn projected_step(
     message: &mut Message,
     session_model: &mut Option<String>,
     opts: &Demand,
+    at: At,
 ) -> Result<()> {
     let Some(step) = Fields::parse(step, &["type", "genInfo", "stepIdentifier", "style", "content"])? else {
         return Ok(());
@@ -406,7 +414,7 @@ fn projected_step(
     } else {
         false
     };
-    projected_content(step.get("content"), message, thinking, opts)
+    projected_content(step.get("content"), message, thinking, opts, at)
 }
 
 /// Only the integer prefix is demanded from a step identifier. Its random suffix (or leading
@@ -454,10 +462,11 @@ fn projected_content(
     message: &mut Message,
     thinking: bool,
     opts: &Demand,
+    at: At,
 ) -> Result<()> {
     let Some(content) = content else { return Ok(()) };
     if content.is_string()? {
-        return projected_text(content, message, thinking, opts);
+        return projected_text(content, message, thinking, opts, at);
     }
     if let Some(parts) = content.array()? {
         for part in parts {
@@ -470,7 +479,7 @@ fn projected_content(
             };
             if string_is(part.get("type"), "text")? {
                 if let Some(text) = part.get("text") {
-                    projected_text(text, message, thinking, opts)?;
+                    projected_text(text, message, thinking, opts, at)?;
                 }
             } else if string_is(part.get("type"), "file")? {
                 let data_ref = part
@@ -499,7 +508,7 @@ fn projected_content(
     Ok(())
 }
 
-fn projected_text(view: JsonView<'_>, message: &mut Message, thinking: bool, opts: &Demand) -> Result<()> {
+fn projected_text(view: JsonView<'_>, message: &mut Message, thinking: bool, opts: &Demand, at: At) -> Result<()> {
     let Some(text) = view.lazy_text(opts.spans)? else {
         return Ok(());
     };
@@ -521,8 +530,19 @@ fn projected_text(view: JsonView<'_>, message: &mut Message, thinking: bool, opt
         };
         if harmony {
             let inline = view.text(false)?.expect("string view");
+            // The n-th call of `messages[turn].versions[version]`: `cv:harmony:<turn>.<version>.<n>`.
+            let mut n = message
+                .content
+                .iter()
+                .filter(|b| matches!(b, Block::ToolUse { .. }))
+                .count();
+            let mut call_id = || {
+                n += 1;
+                crate::ir::derived_call_id("harmony", format!("{}.{}.{}", at.0, at.1, n - 1))
+            };
             message.content.extend(super::wire::harmony::decode_content(
                 inline.inline_str().expect("inline decoding"),
+                &mut call_id,
             ));
         } else {
             message.content.push(Block::Text { text });
@@ -785,7 +805,7 @@ mod tests {
     fn selected(turn: &Value) -> Option<Message> {
         let fields = Fields::parse(JsonView::from(turn), &["versions", "currentlySelected"]).unwrap()?;
         let (_, version, _) = projected_selected_version(&fields, fields.get("versions")?).unwrap()?;
-        projected_version(version, &mut None, &Demand::RICH).unwrap()
+        projected_version(version, &mut None, &Demand::RICH, At(0, 0)).unwrap()
     }
 
     /// The simple oracle for [`projected_step_timestamp`]: a whole-string integer prefix.
@@ -822,7 +842,9 @@ mod tests {
                 if let Some(versions) = fields.get("versions") {
                     projected_selected_version(&fields, versions)
                         .unwrap()
-                        .and_then(|(_, version, _)| projected_version(version, &mut None, &Demand::RICH).unwrap())
+                        .and_then(|(_, version, _)| {
+                            projected_version(version, &mut None, &Demand::RICH, At(0, 0)).unwrap()
+                        })
                 } else {
                     None
                 }
@@ -837,11 +859,13 @@ mod tests {
                         projected_selected_version(&fields, versions).unwrap()
                     {
                         let mut model = None;
-                        let _ = projected_version(selected_version, &mut model, &Demand::COMPLETE).unwrap();
+                        let _ = projected_version(selected_version, &mut model, &Demand::COMPLETE, At(0, selected))
+                            .unwrap();
                         for (index, version) in versions.array().unwrap().unwrap().enumerate() {
                             if index != selected {
                                 if let Some(mut message) =
-                                    projected_version(version.unwrap(), &mut model, &Demand::COMPLETE).unwrap()
+                                    projected_version(version.unwrap(), &mut model, &Demand::COMPLETE, At(0, index))
+                                        .unwrap()
                                 {
                                     message.kind = MessageKind::Branch;
                                     message
@@ -1322,7 +1346,11 @@ mod tests {
             other => panic!("expected Thinking, got {other:?}"),
         }
         match &a.content[1] {
-            Block::ToolUse { name, input, .. } => {
+            Block::ToolUse { id, name, input, .. } => {
+                assert_eq!(
+                    id, "cv:harmony:1.0.0",
+                    "Harmony carries no id: the first call of messages[1]"
+                );
                 assert_eq!(name, "get_weather");
                 assert_eq!(input.resolve().unwrap()["location"], "San Francisco, CA");
             }

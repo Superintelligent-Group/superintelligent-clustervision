@@ -190,7 +190,9 @@ fn result_text(view: JsonView<'_>, cells: &Cells, spans: bool) -> Result<Option<
 }
 
 /// One bubble: `type` 1 is the user, anything else the assistant. None for an empty bubble.
-pub(super) fn bubble(view: JsonView<'_>, cells: &Cells, spans: bool) -> Result<Option<Message>> {
+/// `ordinal` is the bubble's place in its composer's conversation: a tool record naming no call id
+/// gets one derived from it (`cv:cursor:<ordinal>`; a bubble holds at most one call).
+pub(super) fn bubble(view: JsonView<'_>, cells: &Cells, spans: bool, ordinal: usize) -> Result<Option<Message>> {
     let Some(fields) = Fields::parse(
         view,
         &[
@@ -271,7 +273,10 @@ pub(super) fn bubble(view: JsonView<'_>, cells: &Cells, spans: bool) -> Result<O
         let name = text("name")?.unwrap_or_else(|| "tool".into());
         let id = match text("toolCallId")? {
             Some(id) => id,
-            None => text("modelCallId")?.unwrap_or_default(),
+            None => match text("modelCallId")? {
+                Some(id) => id,
+                None => crate::ir::derived_call_id("cursor", ordinal),
+            },
         };
         // The model-issued `rawArgs`, else the normalized `params` (decoded, or as stored).
         let mut input = None;

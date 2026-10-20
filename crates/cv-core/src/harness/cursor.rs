@@ -399,7 +399,7 @@ fn stream_global(
             // A header naming a bubble whose cell is missing or unreadable is a record that cannot
             // parse: counted (`skipped_lines`), never silently dropped.
             let mut unparsed = super::Unparsed::default();
-            for row in composer.rows.into_iter().flatten() {
+            for (ordinal, row) in composer.rows.into_iter().flatten().enumerate() {
                 let row = row?;
                 let message = if composer.external {
                     let Some(id) = row.get("bubbleId")?.map(record::string).transpose()?.flatten() else {
@@ -411,9 +411,11 @@ fn stream_global(
                         unparsed.count();
                         continue;
                     };
-                    cells.read(cell, |view| record::bubble(view, &cells, spans))?.flatten()
+                    cells
+                        .read(cell, |view| record::bubble(view, &cells, spans, ordinal))?
+                        .flatten()
                 } else {
-                    record::bubble(row, &cells, spans)?
+                    record::bubble(row, &cells, spans, ordinal)?
                 };
                 if let Some(message) = message {
                     if message.model.is_some() {
@@ -593,7 +595,7 @@ mod tests {
     fn bubble_to_message(b: &Value) -> Option<Message> {
         let db = mk_global();
         let cells = Cells::new(&db, &db.path, &Default::default(), "cursorDiskKV").unwrap();
-        record::bubble(crate::json::JsonView::owned(b), &cells, false).unwrap()
+        record::bubble(crate::json::JsonView::owned(b), &cells, false, 0).unwrap()
     }
 
     #[test]
@@ -1244,6 +1246,13 @@ mod tests {
             ]
         );
         assert!(messages[..6].iter().all(|m| m.model.is_none()));
+        // No bubble names a call id: each call's is derived from its bubble's place, and its
+        // result pairs with it.
+        for (ordinal, m) in messages[..6].iter().enumerate() {
+            let expected = format!("cv:cursor:{ordinal}");
+            assert!(matches!(&m.content[0], Block::ToolUse { id, .. } if *id == expected));
+            assert!(matches!(&m.content[1], Block::ToolResult { tool_use_id, .. } if *tool_use_id == expected));
+        }
         assert!(
             matches!(&messages[0].content[1], Block::ToolResult { content, is_error: true, .. } if &**content == r#"{"z":2,"a":1}"#)
         );

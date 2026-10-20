@@ -250,6 +250,14 @@ impl Lineage {
     }
 }
 
+/// A tool-call id for a call whose wire carries none, derived from where the call sits in its
+/// session (`cv:harmony:3.0.1`, `cv:cursor:12`). The `cv:` prefix declares it cv's: unique within
+/// the session and stable across reads, so a call and its result still pair, but never a value the
+/// harness wrote.
+pub fn derived_call_id(format: &str, position: impl std::fmt::Display) -> String {
+    format!("cv:{format}:{position}")
+}
+
 /// The namespace inside `extra` for facts cv itself produces rather than reads from a harness:
 /// parse diagnostics like `skipped_lines`, and the provenance cv stamps on a session it synthesized
 /// (`loom`, `splice`). It is spelled `"cv"`, which `Harness::parse` never yields, so it can never
@@ -876,6 +884,9 @@ pub enum Block {
     },
     /// A tool/function invocation by the assistant.
     ToolUse {
+        /// The call id the wire gave it. Where the wire has none (Harmony text, a Cursor tool
+        /// record naming no call id), the reader derives one from the call's position,
+        /// [`derived_call_id`]: `cv:<format>:<position>`, a shape no harness writes.
         id: String,
         name: String,
         /// Complete arguments, owned or backed by a validated source range. Serialization keeps
