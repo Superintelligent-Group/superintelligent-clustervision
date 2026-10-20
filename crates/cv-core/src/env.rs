@@ -23,6 +23,7 @@ pub struct Env {
     vars: HashMap<OsString, OsString>,
     home: Option<PathBuf>,
     cache: Option<PathBuf>,
+    frozen: bool,
     /// What the library keeps alive while this environment is in use: its current catalog's scan
     /// cache. Shared by the copies [`Scope::set`] makes, so a variable change keeps it.
     retained: Arc<Mutex<Option<Arc<dyn Any + Send + Sync>>>>,
@@ -41,6 +42,7 @@ impl Env {
             vars: std::env::vars_os().collect(),
             home: dirs::home_dir(),
             cache: dirs::cache_dir(),
+            frozen: std::env::var_os("CV_FROZEN").is_some_and(|v| v == "1"),
             retained: Default::default(),
         }
     }
@@ -56,7 +58,14 @@ impl Env {
         env
     }
 
+    /// Disable store writes, including in child commands inheriting this environment.
+    pub fn with_frozen(mut self) -> Self {
+        self.set("CV_FROZEN", Some(OsStr::new("1")));
+        self
+    }
+
     fn derive(&mut self) {
+        self.frozen = self.vars.get(OsStr::new("CV_FROZEN")).is_some_and(|v| v == "1");
         let var = |k: &str| self.var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
         let home = if cfg!(windows) { var("USERPROFILE") } else { var("HOME") };
         let cache = if cfg!(target_os = "macos") {
@@ -229,6 +238,12 @@ impl Drop for Scope {
     }
 }
 
+/// Whether this command must leave cv’s stores untouched (`--frozen` or `CV_FROZEN=1`).
+/// Resolved once with the environment; scoped callers and their workers share the same policy.
+pub fn frozen() -> bool {
+    Env::current().frozen
+}
+
 /// `std::env::var_os` over [`Env::current`].
 pub fn var_os(key: &str) -> Option<OsString> {
     Env::current().var_os(key)
@@ -306,6 +321,21 @@ mod tests {
         assert_eq!(Env::current().cv_home(), Some(PathBuf::from("/cv")));
         drop(outer);
         assert!(Env::scoped().is_none());
+    }
+
+    #[test]
+    fn frozen_is_resolved_with_the_environment_and_carried() {
+        let _outer = Env::from_vars([("CV_FROZEN", "0")]).enter();
+        assert!(!frozen());
+        {
+            let _inner = Env::from_vars([("CV_FROZEN", "1")]).enter();
+            assert!(frozen());
+            assert!(std::thread::spawn(carry(frozen)).join().unwrap());
+        }
+        assert!(!frozen());
+        let _flag = Env::default().with_frozen().enter();
+        assert!(frozen());
+        assert_eq!(var("CV_FROZEN").unwrap(), "1");
     }
 
     #[test]

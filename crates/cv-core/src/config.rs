@@ -57,6 +57,7 @@ pub fn load_for_update() -> Result<Config> {
 
 /// Persist the config (creating the dir). Returns the path written.
 pub fn save(cfg: &Config) -> Result<PathBuf> {
+    anyhow::ensure!(!crate::env::frozen(), "--frozen forbids writing config");
     let p = config_path().context("no home directory for the config file")?;
     if let Some(dir) = p.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;

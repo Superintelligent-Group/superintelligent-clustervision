@@ -4065,3 +4065,202 @@ fn a_garbled_catalog_degrades_once_per_process() {
         "{err}"
     );
 }
+
+// Frozen reads are process-level policy: exercise the real CLI and its complete store tree.
+fn frozen_store_snapshot(root: &std::path::Path) -> Vec<(PathBuf, std::time::SystemTime, Vec<u8>)> {
+    let mut out = Vec::new();
+    if root.exists() {
+        for entry in fs::read_dir(root).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                out.extend(frozen_store_snapshot(&path));
+            } else {
+                out.push((
+                    path.clone(),
+                    fs::metadata(&path).unwrap().modified().unwrap(),
+                    fs::read(path).unwrap(),
+                ));
+            }
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+#[test]
+fn frozen_show_leaves_unknown_counts_while_default_certifies() {
+    for frozen in [false, true] {
+        let w = World::new("frozen-counts");
+        let dir = w.home.join(".codex/sessions/2026/01/01");
+        fs::create_dir_all(&dir).unwrap();
+        let id = "019a0000-0000-7000-8000-0000000000aa";
+        fs::write(
+            dir.join(format!("rollout-2026-01-01T10-00-00-{id}.jsonl")),
+            cv_testkit::jsonl(&[
+                serde_json::json!({"timestamp": "2026-01-01T10:00:00Z", "type": "session_meta",
+                "payload": {"id": id, "cwd": "/work/proj", "timestamp": "2026-01-01T10:00:00Z"}}),
+                serde_json::json!({"timestamp": "2026-01-01T10:00:01Z", "type": "response_item",
+                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}}),
+            ]),
+        )
+        .unwrap();
+        let count = || {
+            let (out, _) = w.cv_ok(&["ls", "--json", "--harness", "codex"]);
+            serde_json::from_str::<serde_json::Value>(&out).unwrap()[0]["message_count"].clone()
+        };
+        assert!(count().is_null());
+        let before = frozen_store_snapshot(&w.cv_home);
+        let mut args = vec!["show", id, "--json"];
+        if frozen {
+            args.push("--frozen");
+        }
+        w.cv_ok(&args);
+        if frozen {
+            assert_eq!(before, frozen_store_snapshot(&w.cv_home));
+        }
+        assert_eq!(
+            count(),
+            if frozen {
+                serde_json::Value::Null
+            } else {
+                serde_json::json!(1)
+            }
+        );
+    }
+}
+
+#[test]
+fn frozen_reads_preserve_every_store_and_stream_stale_events() {
+    let w = World::new("frozen-stores");
+    standard_corpus(&w);
+    w.cv_ok(&["index"]);
+    // Prime the usage tables, then change a target so returning stale event rows cannot pass.
+    w.cv_ok(&["stats", "--tokens", "--json"]);
+    let path = w.proj.join("alphasess.jsonl");
+    let body = fs::read_to_string(&path)
+        .unwrap()
+        .replace("widget.rs", "frozen-refresh.rs");
+    fs::write(path, body).unwrap();
+    let before = frozen_store_snapshot(&w.cv_home);
+    assert!(before.iter().any(|(p, _, _)| p.ends_with("catalog.db")));
+    for args in [
+        vec!["ls", "--json", "--fresh"],
+        vec!["show", "alphasess", "--json"],
+        vec!["events", "alphasess", "--json"],
+        vec!["events", "alphasess", "--kind", "file_edit", "--json"],
+        vec!["search", "zebrafish", "--json"],
+        vec!["search", "zebrafish", "--scan", "--json"],
+        vec!["stats", "--json"],
+        vec!["stats", "--tokens", "--json"],
+    ] {
+        let mut frozen = vec!["--frozen"];
+        frozen.extend_from_slice(&args);
+        let (out, _) = w.cv_ok(&frozen);
+        assert_eq!(before, frozen_store_snapshot(&w.cv_home), "{args:?}");
+        if args[0] == "events" {
+            let rows: Vec<serde_json::Value> = serde_json::from_str(&out).unwrap();
+            assert!(!rows.is_empty(), "stale events must stream: {out}");
+            assert_eq!(rows[0]["target"], "/work/proj/src/frozen-refresh.rs", "{out}");
+        }
+    }
+    let (frozen, _) = w.cv_ok(&["events", "alphasess", "--json", "--frozen"]);
+    let (ordinary, _) = w.cv_ok(&["events", "alphasess", "--json"]);
+    assert_eq!(frozen, ordinary);
+    // Fresh catalog rows remain readable under the flag, too.
+    assert_eq!(ordinary, w.cv_ok(&["--frozen", "events", "alphasess", "--json"]).0);
+}
+
+#[test]
+fn frozen_env_and_cold_home_never_create_stores() {
+    let w = World::new("frozen-cold");
+    standard_corpus(&w);
+    let cold = w.cv_home.join("absent");
+    let env = [("CV_FROZEN", "1"), ("CLUSTERVISION_HOME", cold.to_str().unwrap())];
+    for args in [
+        vec!["ls", "--json"],
+        vec!["show", "alphasess", "--json"],
+        vec!["events", "alphasess", "--json"],
+        vec!["search", "zebrafish", "--scan"],
+        vec!["stats", "--tokens", "--json"],
+    ] {
+        let (ok, _, out, err) = w.cv_env(&args, &env);
+        assert!(ok, "{args:?}: {out} {err}");
+        assert!(!cold.exists(), "{args:?} created the catalog directory");
+    }
+}
+
+#[test]
+fn frozen_writer_commands_exit_two_before_resolving_or_writing() {
+    let w = World::new("frozen-writers");
+    let before = frozen_store_snapshot(&w.cv_home);
+    for args in [
+        vec!["index"],
+        vec!["hooks", "install"],
+        vec!["hooks", "remove"],
+        vec!["prune", "missing"],
+        vec!["rewind", "missing", "--at", "0"],
+        vec!["adopt", "missing"],
+        vec!["port", "missing", "--harness", "claude"],
+        vec!["task", "list"],
+        vec!["archive", "sync"],
+        vec!["watch"],
+        vec!["config", "--add-export", "/absent"],
+    ] {
+        let mut frozen = vec!["--frozen"];
+        frozen.extend_from_slice(&args);
+        let (ok, code, _, err) = w.cv(&frozen);
+        assert!(
+            !ok && code == 2 && err.contains("--frozen") && err.contains("writes"),
+            "{args:?}: {code} {err}"
+        );
+        assert_eq!(before, frozen_store_snapshot(&w.cv_home));
+    }
+    let (ok, code, _, err) = w.cv_env(&["index"], &[("CV_FROZEN", "1")]);
+    assert!(!ok && code == 2 && err.contains("--frozen"), "{err}");
+    w.cv_ok(&["ls", "--frozen", "--json"]);
+    w.cv_ok(&["hooks", "show", "--frozen", "--json"]);
+}
+
+#[test]
+fn frozen_events_match_catalog_order_and_deduplication() {
+    let w = World::new("frozen-event-order");
+    w.write_session("eventorder", &[
+        user_line("u1", "2026-01-01T10:00:00Z", "fix it"),
+        assistant_line("a1", "2026-01-01T10:00:01Z", serde_json::json!([
+            {"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": "/work/a"}},
+            {"type": "tool_use", "id": "t2", "name": "Edit", "input": {"file_path": "/work/a", "old_string": "a", "new_string": "b"}},
+            {"type": "tool_use", "id": "t3", "name": "Edit", "input": {"file_path": "/work/a", "old_string": "b", "new_string": "c"}},
+            {"type": "tool_use", "id": "t4", "name": "Bash", "input": {"command": "true"}}
+        ])),
+    ]);
+    let (frozen, _) = w.cv_ok(&["--frozen", "events", "eventorder", "--json"]);
+    let (ordinary, _) = w.cv_ok(&["events", "eventorder", "--json"]);
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&ordinary).unwrap();
+    assert_eq!(rows.len(), 3, "{ordinary}");
+    assert_eq!(frozen, ordinary);
+}
+
+#[test]
+fn frozen_catalog_does_not_migrate_or_touch_live_wal() {
+    let w = World::new("frozen-catalog-open");
+    standard_corpus(&w);
+    w.cv_ok(&["ls", "--json"]);
+    let conn = rusqlite::Connection::open(w.cv_home.join("catalog.db")).unwrap();
+    conn.execute_batch(
+        "PRAGMA journal_mode=WAL; CREATE TABLE frozen_probe(value); INSERT INTO frozen_probe VALUES(1);",
+    )
+    .unwrap();
+    let before = frozen_store_snapshot(&w.cv_home);
+    w.cv_ok(&["--frozen", "ls", "--json"]);
+    let (events, _) = w.cv_ok(&["--frozen", "events", "alphasess", "--json"]);
+    assert!(events.contains("file_edit"), "{events}");
+    assert_eq!(before, frozen_store_snapshot(&w.cv_home));
+    // A catalog of an older interpretation must not be upgraded by a frozen read.
+    conn.execute_batch("UPDATE catalog_meta SET value='0' WHERE key='discovery_version';")
+        .unwrap();
+    drop(conn);
+    let before = frozen_store_snapshot(&w.cv_home);
+    w.cv_ok(&["--frozen", "ls", "--json"]);
+    w.cv_ok(&["--frozen", "events", "alphasess", "--json"]);
+    assert_eq!(before, frozen_store_snapshot(&w.cv_home));
+}

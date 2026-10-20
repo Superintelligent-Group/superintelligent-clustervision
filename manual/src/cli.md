@@ -63,6 +63,7 @@ commands have it is in the [reference](reference.md)):
 | `--cwd <dir>` | a working directory: a filter when reading, the new home when reshaping |
 | `--out <dir\|file>` | write somewhere other than the real store |
 | `--json` | machine output |
+| `--frozen` | leave cv stores untouched (also `CV_FROZEN=1`); stream stale events, retain unknown counts, reject store/session writers |
 | `--limit <n>` | how many rows/records |
 | `--all` | include what is hidden by default |
 | `--thinking <mode>` | reasoning policy: `native`, `portable`, `text`, `drop`; rewind accepts native/portable |

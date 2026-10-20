@@ -474,6 +474,9 @@ fn persistence_cache(path: &Path, prune: bool) -> Option<Arc<Cache>> {
 /// *full* [`crate::discover_all`] (the stat-per-row cost belongs on the slow path; per-harness
 /// probe refreshes skip it). A failed flush means a re-scan next run, and one stderr line.
 pub(crate) fn persist(prune: bool) {
+    if crate::env::frozen() {
+        return;
+    }
     if persistence_cache(&read::Context::current().path(), prune).is_some() {
         #[cfg(feature = "sqlite")]
         read::Context::current().with_connection_mut(|conn| persist_in(conn, prune));
@@ -482,6 +485,9 @@ pub(crate) fn persist(prune: bool) {
 
 #[cfg(feature = "sqlite")]
 pub(crate) fn persist_in(conn: &mut rusqlite::Connection, prune: bool) {
+    if crate::env::frozen() {
+        return;
+    }
     let Some(cache) = persistence_cache(Path::new(conn.path().unwrap_or("")), prune) else {
         return;
     };

@@ -959,6 +959,9 @@ pub(crate) fn publish_in<T: Payload>(
     payload: &T,
     probe: &mut Probe,
 ) -> anyhow::Result<()> {
+    if crate::env::frozen() {
+        return Ok(());
+    }
     let (h, id, path) = key(r);
     conn.execute(
         "DELETE FROM source_dependencies WHERE consumer=?1 AND harness=?2 AND id=?3 AND path=?4",
@@ -980,6 +983,9 @@ pub(crate) fn publish_in<T: Payload>(
 /// Forget every baseline of `consumer` on the caller's connection: its output is gone.
 #[cfg(feature = "sqlite")]
 pub(crate) fn forget_in(conn: &rusqlite::Connection, consumer: &str) -> Option<()> {
+    if crate::env::frozen() {
+        return None;
+    }
     conn.execute("DELETE FROM source_dependencies WHERE consumer=?1", [consumer])
         .ok()?;
     Some(())
@@ -988,6 +994,9 @@ pub(crate) fn forget_in(conn: &rusqlite::Connection, consumer: &str) -> Option<(
 /// Move a consumer's baselines to a new name. Rows the new name already has are newer and kept.
 #[cfg(feature = "sqlite")]
 pub fn rename_consumer(from: &str, to: &str) -> bool {
+    if crate::env::frozen() {
+        return false;
+    }
     let rename = || -> Option<()> {
         let mut conn = open()?;
         let tx = conn.transaction().ok()?;
@@ -1013,6 +1022,9 @@ pub fn rename_consumer(_from: &str, _to: &str) -> bool {
 /// write: otherwise an older stamp could certify newer output after dependencies revert.
 #[cfg(feature = "sqlite")]
 pub fn invalidate(consumer: &str, refs: &[SessionRef]) -> bool {
+    if crate::env::frozen() {
+        return false;
+    }
     if refs.is_empty() {
         return true;
     }
@@ -1044,6 +1056,12 @@ pub fn invalidate(_consumer: &str, _refs: &[SessionRef]) -> bool {
 /// sessions are read again next pass; the rest commit together.
 #[cfg(feature = "sqlite")]
 pub fn update<T: Payload + Default>(consumer: &str, updates: &[Update]) -> Vec<(SessionRef, String)> {
+    if crate::env::frozen() {
+        return updates
+            .iter()
+            .map(|(r, _)| (r.clone(), "--frozen forbids updating source baselines".into()))
+            .collect();
+    }
     if updates.is_empty() {
         return Vec::new();
     }

@@ -110,6 +110,9 @@ pub fn ledger_path() -> PathBuf {
 /// Append one row: a single `O_APPEND` `write_all` of one line, so concurrent hooks never tear
 /// each other's records (the board's idiom; no lock needed for append-only rows).
 pub fn append_lane_event(ev: &LaneEvent) -> std::io::Result<()> {
+    if crate::env::frozen() {
+        return Err(std::io::Error::other("--frozen forbids writing lanes"));
+    }
     use std::io::Write;
     let path = ledger_path();
     if let Some(dir) = path.parent() {

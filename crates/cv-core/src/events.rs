@@ -521,6 +521,50 @@ impl Provenance {
     }
 }
 
+/// Read current events, refreshing stale rows on use. Frozen commands stream stale sources
+/// directly so the answer stays current without publishing either events or certified counts.
+pub fn read_ref(r: &crate::SessionRef, kind: Option<&str>) -> Result<Vec<EventRow>> {
+    if needs_ingest(r) {
+        if crate::env::frozen() {
+            let adapter = crate::harness::for_harness(r.harness)
+                .ok_or_else(|| anyhow::anyhow!("no adapter for {}", r.harness))?;
+            let mut sink = EventSink::new(r.cwd.clone());
+            adapter.try_stream(r, &crate::Demand::LEAN.with_spans(), &mut sink)?;
+            let mut events = sink.into_events()?;
+            // Match catalog order and its first-row-wins key, including NULL/empty targets.
+            events.sort_by_key(|e| (e.msg_idx, e.kind));
+            let mut seen = std::collections::HashSet::new();
+            let mut previous = None;
+            events.retain(|e| {
+                if previous != Some(e.msg_idx) {
+                    seen.clear();
+                }
+                previous = Some(e.msg_idx);
+                seen.insert((e.kind, e.target.clone().unwrap_or_default()))
+            });
+            return Ok(events
+                .into_iter()
+                .filter(|e| kind.is_none_or(|k| e.kind == k))
+                .map(|e| EventRow {
+                    harness: r.harness.as_str().into(),
+                    session_id: r.id.clone(),
+                    msg_idx: e.msg_idx as i64,
+                    ts: e.ts,
+                    kind: e.kind.into(),
+                    tool: e.tool,
+                    target: e.target,
+                    detail: e.detail,
+                    parent_id: None,
+                    agent_id: None,
+                    workflow: None,
+                })
+                .collect());
+        }
+        ingest_ref(r)?;
+    }
+    events_for(r.harness.as_str(), &r.id, kind)
+}
+
 /// One persisted event row, as read back from the catalog.
 #[derive(Debug, Clone)]
 pub struct EventRow {
@@ -657,6 +701,9 @@ mod db {
     ///   `(kind, ts)` which no query ever drove with a kind-prefix lookup — dropped.
     pub(crate) fn open() -> Option<Connection> {
         let conn = crate::catalog::open_db()?;
+        if crate::env::frozen() {
+            return Some(conn);
+        }
         migrate(&conn)?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS event_sessions(
@@ -726,7 +773,9 @@ mod db {
     /// Opens a fresh connection per call — fine for a one-off check (`cv events <id>`), wrong for
     /// a corpus sweep: bulk callers use [`SyncTable`] (one query for the whole table).
     pub fn needs_ingest(r: &SessionRef) -> bool {
-        let Some(conn) = open() else { return false };
+        let Some(conn) = open() else {
+            return crate::env::frozen();
+        };
         let source = crate::source::Probe::default().snapshot(r);
         !crate::source::fresh_in(&conn, "events", r, &source, &authority(r, &Provenance::default()))
     }
@@ -791,6 +840,9 @@ mod db {
         source: &crate::source::Baseline,
         prov: &Provenance,
     ) -> Result<()> {
+        if crate::env::frozen() {
+            return Ok(());
+        }
         let mut conn = open().ok_or_else(|| anyhow::anyhow!("event catalog unavailable"))?;
         record_spooled_in(&mut conn, r, from, events, source, prov)
     }
@@ -803,6 +855,9 @@ mod db {
         source: &crate::source::Baseline,
         prov: &Provenance,
     ) -> Result<()> {
+        if crate::env::frozen() {
+            return Ok(());
+        }
         let rows = events.rows()?;
         record_from_in(conn, r, from, rows, prov, source)
     }
@@ -1331,7 +1386,7 @@ mod db_stub {
     use anyhow::Result;
 
     pub fn needs_ingest(_r: &SessionRef) -> bool {
-        false
+        crate::env::frozen()
     }
     /// No-op twin of the sqlite [`SyncTable`]: nothing is ever stale.
     pub struct SyncTable;

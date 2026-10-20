@@ -97,7 +97,9 @@ mod imp {
             .var_os("CLUSTERVISION_HOME")
             .map(PathBuf::from)
             .or_else(|| Some(env.cache_dir()?.join("clustervision")))?;
-        let _ = std::fs::create_dir_all(&dir);
+        if !crate::env::frozen() {
+            let _ = std::fs::create_dir_all(&dir);
+        }
         Some(dir.join("catalog.db"))
     }
 
@@ -118,6 +120,18 @@ mod imp {
     pub(crate) fn open_at(path: &Path) -> Option<Connection> {
         #[cfg(test)]
         OPEN_COUNT.with(|n| n.set(n.get() + 1));
+        if crate::env::frozen() {
+            // Even mode=ro can create/update WAL shared memory. A frozen command uses an
+            // immutable checkpoint only; with an outstanding WAL it falls back to sources.
+            if ["-wal", "-journal"].iter().any(|suffix| {
+                let mut sidecar = path.as_os_str().to_os_string();
+                sidecar.push(suffix);
+                std::fs::metadata(sidecar).is_ok_and(|m| m.len() > 0)
+            }) {
+                return None;
+            }
+            return open_read_only(path);
+        }
         let conn = open_writable(path).or_else(|| open_read_only(path));
         if conn.is_none() {
             // Every consumer degrades to scanning; the process says so once.
@@ -148,18 +162,21 @@ mod imp {
             .replace('?', "%3f")
             .replace('#', "%23");
         let version = crate::discover_cache::INTERPRETATION_VERSION.to_string();
-        ["mode=ro", "immutable=1"].into_iter().find_map(|query| {
-            let conn = Connection::open_with_flags(format!("file:{file}?{query}"), flags).ok()?;
-            conn.busy_timeout(Duration::from_secs(5)).ok()?;
-            let stored: String = conn
-                .query_row(
-                    "SELECT value FROM catalog_meta WHERE key='discovery_version'",
-                    [],
-                    |row| row.get(0),
-                )
-                .ok()?;
-            (stored == version).then_some(conn)
-        })
+        ["mode=ro", "immutable=1"]
+            .into_iter()
+            .filter(|query| !crate::env::frozen() || *query == "immutable=1")
+            .find_map(|query| {
+                let conn = Connection::open_with_flags(format!("file:{file}?{query}"), flags).ok()?;
+                conn.busy_timeout(Duration::from_secs(5)).ok()?;
+                let stored: String = conn
+                    .query_row(
+                        "SELECT value FROM catalog_meta WHERE key='discovery_version'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .ok()?;
+                (stored == version).then_some(conn)
+            })
     }
 
     /// Columns later releases added to tables an older catalog already has, in the order they
@@ -424,6 +441,9 @@ mod imp {
     /// that know about one session (event ingest, tests). Full discovery uses [`Reader::replace_harness`]
     /// instead so vanished sessions actually disappear.
     pub fn sync(refs: &[SessionRef]) {
+        if crate::env::frozen() {
+            return;
+        }
         let Some(mut conn) = open() else { return };
         let Ok(tx) = conn.transaction() else { return };
         if insert_refs(&tx, refs, &Default::default()).is_ok()
@@ -510,6 +530,9 @@ mod imp {
         watches: &[(PathBuf, Watched)],
         sources: &SourceRows,
     ) {
+        if crate::env::frozen() {
+            return;
+        }
         // Reserve the writer before reading old rows; deferred upgrades cannot wait safely.
         let Ok(tx) = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate) else {
             return;
@@ -561,6 +584,9 @@ mod imp {
     }
 
     pub(super) fn publish_all_in(conn: &mut Connection, rows: &[Publication<'_>], sources: &[SourceRows]) {
+        if crate::env::frozen() {
+            return;
+        }
         // Reserve the writer before reading old rows; deferred upgrades cannot wait safely.
         let Ok(tx) = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate) else {
             return;
@@ -835,6 +861,9 @@ mod imp {
     /// Seconds-since-epoch of the last completed full discovery, if any. Absent = cold catalog.
     /// Consume the notice a discovery-version upgrade left; exactly one caller sees `true`.
     pub(super) fn take_rediscovery_notice_in(conn: &Connection) -> bool {
+        if crate::env::frozen() {
+            return false;
+        }
         conn.execute("DELETE FROM catalog_meta WHERE key='rediscovery_notice'", [])
             .is_ok_and(|n| n > 0)
     }
@@ -900,6 +929,9 @@ mod imp {
         turns: Option<usize>,
         counts: impl FnOnce() -> crate::affordance::Counts,
     ) {
+        if crate::env::frozen() {
+            return;
+        }
         if !db_path().is_some_and(|p| p.exists()) {
             return;
         }
@@ -919,6 +951,9 @@ mod imp {
         turns: Option<usize>,
         counts: impl FnOnce() -> crate::affordance::Counts,
     ) {
+        if crate::env::frozen() {
+            return;
+        }
         let Ok(turns) = turns.map(u32::try_from).transpose() else {
             return;
         };
@@ -1028,6 +1063,9 @@ mod imp {
         conn: &mut Connection,
         rows: &[(Harness, &[crate::Skipped])],
     ) -> rusqlite::Result<()> {
+        if crate::env::frozen() {
+            return Ok(());
+        }
         let recorded: i64 = conn.query_row("SELECT COUNT(*) FROM skipped_sources", [], |r| r.get(0))?;
         if recorded == 0 && rows.iter().all(|(_, skipped)| skipped.is_empty()) {
             return Ok(());

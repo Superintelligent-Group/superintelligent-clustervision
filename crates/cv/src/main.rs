@@ -149,6 +149,13 @@ fn grouped_help(cmd: &clap::Command) -> String {
     help_template = "{before-help}{about-with-newline}\n{usage-heading} {usage}\n\nOptions:\n{options}\n{after-help}"
 )]
 struct Cli {
+    /// Leave cv's stores untouched (also CV_FROZEN=1). Normally full reads record counts and
+    /// affordances, and events refreshes stale sessions for later reads. Frozen reads record
+    /// nothing: events streams stale sessions, ls keeps unknown counts as a dash, and scan/usage
+    /// caches and skipped sources are not saved. Commands that write stores or sessions exit 2.
+    #[arg(long, global = true)]
+    frozen: bool,
+
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -1199,6 +1206,35 @@ fn run() -> Result<()> {
         Ok(cli) => cli,
         Err(e) => e.exit(),
     };
+    // Install before any library read, and enter it so subprocesses (including MCP tools)
+    // inherit the flag as CV_FROZEN without mutating the process environment.
+    let env = cv_core::env::Env::from_process();
+    let env = if cli.frozen { env.with_frozen() } else { env };
+    cv_core::env::Env::install(env.clone());
+    let _env = env.enter();
+    if cv_core::env::frozen() {
+        let writes = match &cli.cmd {
+            Cmd::Index { .. }
+            | Cmd::Prune { .. }
+            | Cmd::Rewind { .. }
+            | Cmd::Adopt { .. }
+            | Cmd::Port { .. }
+            | Cmd::Distill { .. }
+            | Cmd::Splice { .. }
+            | Cmd::Task { .. }
+            | Cmd::Hook { .. }
+            | Cmd::Watch { .. } => true,
+            Cmd::Hooks { action } => !matches!(action, HooksCmd::Show { .. }),
+            Cmd::Archive { action, .. } => matches!(action, ArchiveCmd::Sync),
+            Cmd::Config { add_export, rm_export } => add_export.is_some() || rm_export.is_some(),
+            Cmd::Pack { format, .. } => format == "session",
+            Cmd::Resume { launch, .. } => *launch,
+            _ => false,
+        };
+        if writes {
+            return usage("--frozen (CV_FROZEN=1) forbids this command: it writes stores or sessions");
+        }
+    }
     for (old, new) in [
         ("CLAURDVOYANT_HOME", "CLUSTERVISION_HOME"),
         ("CLAURDVOYANT_MAX_STALE_SECS", "CLUSTERVISION_MAX_STALE_SECS"),

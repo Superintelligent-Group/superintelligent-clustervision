@@ -33,6 +33,7 @@ use std::process::{Command, Stdio};
 /// tokens (a token in the shell must not gate a test's requests).
 pub const CLEARED_ENV: &[&str] = &[
     "CV_ENDPOINT",
+    "CV_FROZEN",
     "CLAUDE_CONFIG_DIR",
     "CLUSTERVISION_CLAUDE_ROOTS",
     "CLUSTERVISION_MAX_STALE_SECS",

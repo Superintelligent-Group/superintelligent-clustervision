@@ -46,6 +46,8 @@ pub(crate) struct ArgSpec {
     pub long: Option<String>,
     #[serde(default)]
     pub multiple: bool,
+    #[serde(default)]
+    pub global: bool,
     pub kind: ArgKind,
     #[serde(default)]
     pub value_type: String,
@@ -324,7 +326,7 @@ fn select_tool_commands(all: Vec<CommandSpec>) -> Vec<CommandSpec> {
         .filter(|c| (TOOL_GROUPS.contains(&c.group.as_str()) && c.name != "hook") || c.name.starts_with("task "))
         .filter(|c| {
             let has_children = names.iter().any(|n| n.starts_with(&format!("{} ", c.name)));
-            !(has_children && c.args.is_empty())
+            !(has_children && c.args.iter().all(|a| a.global))
         })
         .map(|mut c| {
             c.args.retain(|a| !(a.name == "follow" && a.kind == ArgKind::Flag));
@@ -709,7 +711,8 @@ mod tests {
     #[test]
     fn subcommand_names_join_with_underscores_and_dispatchers_are_dropped() {
         let all: Vec<CommandSpec> = serde_json::from_str(
-            r#"[{"name":"formats","group":"System","about":"Formats","args":[]},
+            r#"[{"name":"formats","group":"System","about":"Formats","args":[
+                   {"name":"frozen","kind":"flag","global":true}]},
                 {"name":"formats census","group":"System","about":"Census","args":[
                    {"name":"harness","kind":"option","value_type":"string","help":"h","required":false}]},
                 {"name":"task","group":"Fleet & live","about":"Tasks","args":[]}]"#,

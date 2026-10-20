@@ -124,6 +124,9 @@ and `splice <id>:A..B` use the same `A..B` grammar.
 (write somewhere other than the real store), `--json` (machine output where supported), `--limit N`, `--fresh` (bypass the catalog), `--all` (include what is
 hidden by default: finished lanes, archived sessions, terminal tasks).
 
+**Global:** `--frozen` (`CV_FROZEN=1`) leaves cv stores untouched; commands whose purpose is to
+write stores or sessions error with exit 2.
+
 **Session selectors:** accept a unique id prefix or `harness:id`. An ambiguous prefix lists the
 candidates as `harness:full-id` lines and exits 2.
 

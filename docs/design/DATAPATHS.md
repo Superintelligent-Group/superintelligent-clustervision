@@ -36,6 +36,14 @@ output**. Calling a method `stream` bounds none of those automatically. A reader
 whole source before its first callback; a sink can collect everything; a bounded output chunker
 can decode a whole field first. Each bound must hold across the composed path.
 
+By default, a full read certifies computed counts and affordances into the catalog so later
+listings need not recompute; `cv events` refreshes a stale session's events before returning
+rows. Global `--frozen` (or `CV_FROZEN=1`), resolved once by `cv_core::env::frozen()`, records
+nothing: stale events stream directly, `cv ls` keeps the dash for an unknown count, and the
+catalog (including skipped sources), scan cache and usage cache are not written. Commands
+whose purpose is writing stores or sessions (`index`, hook installation/removal, reshaping,
+`task`, archive sync/watch and config updates) exit 2. Explicit export output is still allowed.
+
 ## Existing foundations to retain
 
 - Discovery already parallelizes adapters and many per-file scans (`cv-core/src/lib.rs`).

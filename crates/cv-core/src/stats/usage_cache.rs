@@ -43,6 +43,9 @@ impl Cache {
     /// The cache over the catalog, or `None`: a catalog that cannot open has said so at its door,
     /// and a cache whose tables cannot be set up says so once ([`crate::env::warn_once`]).
     pub(super) fn new() -> Option<Self> {
+        if crate::env::frozen() {
+            return None;
+        }
         let (writer, reader) = (crate::catalog::open_db()?, crate::catalog::open_db()?);
         Self::over(writer, reader)
             .map_err(|e| crate::env::warn_once("the usage cache", format_args!("{e:#}")))

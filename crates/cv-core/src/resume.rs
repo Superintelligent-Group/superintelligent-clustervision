@@ -165,7 +165,7 @@ mod imp {
     /// Bring each session's mark up to date in one transaction: the new mark replaces the old,
     /// `None` drops it (the next pass over that file reads it whole).
     pub fn update(marks: &[MarkUpdate]) {
-        if marks.is_empty() {
+        if crate::env::frozen() || marks.is_empty() {
             return;
         }
         let Some(mut conn) = open() else { return };

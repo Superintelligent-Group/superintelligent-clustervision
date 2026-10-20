@@ -473,12 +473,7 @@ fn session_events(harness: &str, id: &str, query: &str) -> (u16, Value) {
         Ok(x) => x,
         Err(e) => return e,
     };
-    if events::needs_ingest(&r) {
-        if let Err(e) = events::ingest_ref(&r) {
-            return err(500, &format!("event ingest failed: {e:#}"));
-        }
-    }
-    let rows = match events::events_for(r.harness.as_str(), &r.id, kind.as_deref()) {
+    let rows = match events::read_ref(&r, kind.as_deref()) {
         Ok(rows) => rows,
         Err(e) => return err(500, &format!("event catalog: {e:#}")),
     };

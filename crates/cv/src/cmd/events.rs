@@ -17,13 +17,7 @@ pub(crate) fn cmd_events(
     let want = parse_harness(&harness)?;
     let (r, _adapter) = resolve(id, want)?;
 
-    // Ensure this one session's events are current (cheap: a single streamed pass); a session
-    // already cataloged at this mtime is a no-op.
-    if events::needs_ingest(&r) {
-        events::ingest_ref(&r)?;
-    }
-
-    let rows = events::events_for(r.harness.as_str(), &r.id, kind.as_deref())?;
+    let rows = events::read_ref(&r, kind.as_deref())?;
     if json {
         // One array: the session's own events, then (with --subagents) each sub-agent's, tagged.
         // Every row is `rows::event_row` — the same function `/api/session/{h}/{id}/events` prints

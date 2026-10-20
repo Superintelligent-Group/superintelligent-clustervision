@@ -14,6 +14,9 @@ pub struct Writer {
 impl Writer {
     /// Open the shared catalog and initialize existing event/catalog schemas once.
     pub fn open() -> Option<Self> {
+        if crate::env::frozen() {
+            return None;
+        }
         #[cfg(feature = "sqlite")]
         {
             crate::events::writer_connection().map(|conn| Self { conn })

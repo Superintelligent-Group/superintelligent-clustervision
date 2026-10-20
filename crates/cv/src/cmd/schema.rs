@@ -190,7 +190,11 @@ fn push_command(out: &mut Vec<Value>, cmd: &clap::Command, parent: Option<&str>,
     // resolve --choice` in the `answer` group) means "one of the group", which clap enforces and a
     // per-argument `required` would misstate as "always this one". The derive's own group per
     // variant holds every argument; that one says nothing and is skipped.
-    let all_ids: Vec<&str> = cmd.get_arguments().map(|a| a.get_id().as_str()).collect();
+    let all_ids: Vec<&str> = cmd
+        .get_arguments()
+        .filter(|a| !a.is_global_set())
+        .map(|a| a.get_id().as_str())
+        .collect();
     let grouped: Vec<&str> = cmd
         .get_groups()
         .filter(|g| g.get_args().count() < all_ids.iter().filter(|id| !matches!(**id, "help" | "version")).count())
@@ -245,6 +249,9 @@ fn arg_json(a: &clap::Arg) -> Value {
         "required": a.is_required_set(),
     });
     let obj = v.as_object_mut().expect("json object");
+    if a.is_global_set() {
+        obj.insert("global".into(), json!(true));
+    }
     if let Some(long) = a.get_long() {
         obj.insert("long".into(), json!(long));
     }
