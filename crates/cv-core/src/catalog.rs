@@ -1038,9 +1038,13 @@ mod imp {
     pub fn writer_versions() -> Vec<crate::writer_version::Observed> {
         let mut result = crate::writer_version::empty_observations();
         let Some(conn) = open() else { return result };
-        let Ok(mut stmt) =
-            conn.prepare("SELECT harness,writer_version FROM sessions WHERE harness IN ('claude','codex')")
-        else {
+        // The roster's names, spelled into the statement: harness names are fixed identifiers.
+        let names: Vec<String> = result.iter().map(|o| format!("'{}'", o.harness)).collect();
+        let sql = format!(
+            "SELECT harness,writer_version FROM sessions WHERE harness IN ({})",
+            names.join(",")
+        );
+        let Ok(mut stmt) = conn.prepare(&sql) else {
             return result;
         };
         let Ok(rows) = stmt.query_map([], |row| {

@@ -374,6 +374,43 @@ fn every_corpus_version_reads_as_its_golden_summary() {
     );
 }
 
+/// The writer roster (`writer_version::verified`) is exactly what the corpus declares, both ways:
+/// a harness with a verified version declares it (and nothing newer) in its corpus discovery, and
+/// a harness whose corpus discovery declares any writer version has a roster entry.
+#[test]
+fn the_writer_roster_is_what_corpus_discovery_declares() {
+    let _w = World::in_process("corpus-writers", cv_core::env::Env::enter_isolated);
+    for h in HARNESSES {
+        let harness = cv_core::Harness::parse(h.name).unwrap();
+        let mut declared = Vec::new();
+        for v in subdirs(&corpus_root().join(h.name)) {
+            declared.extend(cv_core::writer_version::declared_by((h.adapter)(&v).as_ref()).unwrap());
+        }
+        match cv_core::writer_version::verified(harness) {
+            Some(verified) => {
+                assert!(
+                    declared.iter().any(|d| d == verified),
+                    "{}: verified {verified}, but the corpus declares {declared:?}",
+                    h.name
+                );
+                for d in &declared {
+                    let order = cv_core::writer_version::compare(d, verified);
+                    assert!(
+                        order.is_some_and(|o| o.is_le()),
+                        "{}: the corpus declares {d}, newer than (or unlike) the verified {verified}",
+                        h.name
+                    );
+                }
+            }
+            None => assert!(
+                declared.is_empty(),
+                "{}: corpus discovery declares writer versions {declared:?}, but the roster has none",
+                h.name
+            ),
+        }
+    }
+}
+
 /// What cv persists or prints is byte-deterministic: two reads of one session take byte-identical
 /// checkpoints at every offset an adapter allows. Each read's hash maps get their own random seed,
 /// so a map serialized in iteration order differs between them.

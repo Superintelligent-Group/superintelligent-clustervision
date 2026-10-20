@@ -1,27 +1,74 @@
 //! Writer versions observed during normal discovery, compared with frozen corpus coverage.
+use crate::Harness;
 use std::cmp::Ordering;
 
-/// Only harnesses whose discovery reads observe a writer declaration are listed here.
-/// The roster lives inside the published crate; its test checks the corpus manifests.
-pub const VERIFIED: &[(&str, &str)] = &[("claude", "2.1.304"), ("codex", "0.163.0")];
+/// The newest writer version the corpus verifies for `h`, for a harness whose discovery reads a
+/// writer declaration (Claude's record `version`, Codex's `cli_version`); `None` for the rest. The
+/// roster lives inside the published crate; the corpus test checks it against the manifests and
+/// against what each adapter's discovery declares, both ways.
+pub fn verified(h: Harness) -> Option<&'static str> {
+    match h {
+        Harness::Claude => Some("2.1.304"),
+        Harness::Codex => Some("0.163.0"),
+        Harness::Grok
+        | Harness::OpenCode
+        | Harness::Gemini
+        | Harness::Hermes
+        | Harness::OpenClaw
+        | Harness::Cursor
+        | Harness::Kimi
+        | Harness::KimiCode
+        | Harness::Qwen
+        | Harness::LmStudio
+        | Harness::Cline
+        | Harness::Roo
+        | Harness::Continue
+        | Harness::Goose
+        | Harness::Zed
+        | Harness::Devin
+        | Harness::ChatGptExport
+        | Harness::ClaudeExport
+        | Harness::OpenSession => None,
+    }
+}
+
+/// Every harness with a verified writer, in [`Harness::ALL`] order, with its version.
+pub fn roster() -> impl Iterator<Item = (Harness, &'static str)> {
+    Harness::ALL.iter().filter_map(|h| Some((*h, verified(*h)?)))
+}
 
 pub struct Observed {
     pub harness: &'static str,
+    /// [`verified`] for this harness.
+    pub verified: &'static str,
     pub newest: Option<String>,
     pub sessions: usize,
     pub unknown: usize,
 }
 
 pub(crate) fn empty_observations() -> Vec<Observed> {
-    VERIFIED
-        .iter()
-        .map(|(harness, _)| Observed {
-            harness,
+    roster()
+        .map(|(harness, verified)| Observed {
+            harness: harness.as_str(),
+            verified,
             newest: None,
             sessions: 0,
             unknown: 0,
         })
         .collect()
+}
+
+/// The writer declarations `adapter`'s discovery reads, one per declaring session: what the
+/// corpus test holds the roster to.
+#[doc(hidden)]
+pub fn declared_by(adapter: &dyn crate::Adapter) -> anyhow::Result<Vec<String>> {
+    let context = crate::discover_cache::read::Context::current();
+    context.run(|| adapter.discover())?;
+    Ok(context
+        .writer_versions(adapter.harness())
+        .into_iter()
+        .filter_map(|(_, _, version)| version)
+        .collect())
 }
 
 fn numeric(a: &str, b: &str) -> Ordering {
@@ -142,7 +189,8 @@ mod tests {
     #[test]
     fn packaged_roster_matches_newest_corpus_manifests() {
         let corpus = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus");
-        for &(harness, verified) in VERIFIED {
+        for (harness, verified) in roster() {
+            let harness = harness.as_str();
             let mut newest = None;
             for entry in std::fs::read_dir(corpus.join(harness)).unwrap() {
                 let path = entry.unwrap().path().join("MANIFEST.toml");

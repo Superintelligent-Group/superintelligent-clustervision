@@ -87,7 +87,6 @@ impl Context {
         let newest = rows.entry((r.harness, r.id.clone(), r.path.clone())).or_default();
         crate::writer_version::observe(newest, version);
     }
-    #[cfg(feature = "sqlite")]
     pub(crate) fn writer_versions(&self, harness: crate::Harness) -> Vec<(String, String, Option<String>)> {
         self.0
             .writer_versions

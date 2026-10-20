@@ -210,11 +210,7 @@ fn writer_versions_line(observations: Vec<cv_core::writer_version::Observed>) ->
     let rows: Vec<_> = observations
         .into_iter()
         .map(|o| {
-            let verified = cv_core::writer_version::VERIFIED
-                .iter()
-                .find(|(h, _)| *h == o.harness)
-                .unwrap()
-                .1;
+            let verified = o.verified;
             let status = match o
                 .newest
                 .as_deref()
@@ -245,12 +241,14 @@ mod writer_version_tests {
         let line = writer_versions_line(vec![
             cv_core::writer_version::Observed {
                 harness: "claude",
+                verified: "2.1.304",
                 newest: Some("2.10.0".into()),
                 sessions: 5,
                 unknown: 2,
             },
             cv_core::writer_version::Observed {
                 harness: "codex",
+                verified: "0.163.0",
                 newest: None,
                 sessions: 0,
                 unknown: 0,
