@@ -358,15 +358,6 @@ fn search_fallback_messaging_and_index_path() {
     assert!(out.contains("alphases"), "{out}");
     assert!(out.to_lowercase().contains("zebrafish"), "snippet expected:\n{out}");
 
-    // A stale legacy sqlite index gets a cleanup nudge.
-    fs::write(w.cv_home.join("index.sqlite"), b"stale").unwrap();
-    let (_, err) = w.cv_ok(&["search", "zebrafish", "--scan"]);
-    assert!(
-        err.contains("legacy sqlite index no longer used"),
-        "want legacy-index note, got stderr:\n{err}"
-    );
-    fs::remove_file(w.cv_home.join("index.sqlite")).unwrap();
-
     // Build the index; search must now use it (no live-scan note) and still hit.
     let (out, _) = w.cv_ok(&["index"]);
     assert!(out.contains("indexed 2 top-level session(s)"), "{out}");

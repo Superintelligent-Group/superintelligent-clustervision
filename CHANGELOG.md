@@ -88,6 +88,9 @@
 - MCP tools generated from the CLI omit `--follow` (no Ctrl-C in a tool call); `for` stays.
 - `tests/announce.rs` pins it: every command on a pipe exits within 5 s or is a daemon that announced within 1 s.
 
+**Removed.**
+- `cv search` no longer mentions a leftover `index.sqlite`; the sqlite full-text index was retired long ago.
+
 **Tooling and CI.**
 - `cv schema --json` lists `routes`: every HTTP method/path pattern `cv serve` answers, from the routers' own tables.
 - `cv index --json` reports `changed`, `removed` and `errors` beside `indexed`, so a script need not parse the stderr summary.
