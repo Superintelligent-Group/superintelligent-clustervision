@@ -425,7 +425,7 @@ pub fn hook_header(path: &Path) -> Result<Option<Session>> {
         ctx: &mut ctx,
         out: &mut out,
         has_events: false,
-        demand: Demand::from(&stream::Demand::RICH),
+        demand: Demand::from(&stream::Demand::LEAN),
         source: None,
     };
     read.prefix(1024 * 1024, |line| {
@@ -452,7 +452,7 @@ pub fn parse_str(id: &str, text: &str, is_jsonl: bool, source_path: Option<PathB
     };
     let mut ctx = CodexCtx::default();
     let mut out: Vec<Message> = Vec::new();
-    let demand = Demand::from(&stream::Demand::RICH);
+    let demand = Demand::from(&stream::Demand::LEAN);
     if is_jsonl {
         let mut det = EventDetector::default();
         let _ = super::store::jsonl::slice(text.as_bytes(), |line| {
