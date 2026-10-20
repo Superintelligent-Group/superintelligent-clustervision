@@ -2141,6 +2141,9 @@ mod tests {
         let edits = edits_touching_file("/elsewhere/src/parser.rs", "src/parser.rs");
         assert_eq!(edits.len(), 1);
         assert!(edits_touching_file("/repo/src/other.rs", "src/other.rs").is_empty());
+        // A suffix must start at a path-component boundary, and a relative path equals only itself.
+        assert!(edits_touching_file("/x/rser.rs", "rser.rs").is_empty());
+        assert!(edits_touching_file("/x/src/parser.rs.bak", "src/parser.rs.bak").is_empty());
     }
 
     /// Migration e2e: a v1-shaped (0.9.10) catalog opened by v2 code is dropped wholesale —

@@ -365,15 +365,6 @@ pub(crate) fn rank_commit<'a>(
     out
 }
 
-/// The repo-relative suffix rule [`cv_core::events::edits_touching_file`]'s SQL implements, as a
-/// pure function so the rule itself is unit-testable: a recorded target names this file when it
-/// equals the current absolute path, equals the bare relative path, or ends with `/<rel>` (the
-/// same file in a checkout living somewhere else).
-#[cfg(test)]
-pub(crate) fn target_matches(target: &str, abs: &str, rel: &str) -> bool {
-    target == abs || target == rel || target.strip_suffix(rel).is_some_and(|head| head.ends_with('/'))
-}
-
 /// The `cv show --range` window around an edit at `msg_idx`: `RANGE_CONTEXT` messages of leading
 /// context, end-exclusive (so `142` → `139-145`).
 pub(crate) fn range_hint(msg_idx: i64) -> (usize, usize) {
@@ -941,19 +932,6 @@ mod tests {
         ];
         let ids: Vec<String> = candidate_ids(&edits).into_iter().map(|(_, id)| id).collect();
         assert_eq!(ids, ["solo", "agent-a7f5", "orchestrator", "agent-b8e6"]);
-    }
-
-    #[test]
-    fn suffix_matching_rules() {
-        let abs = "/Users/em/pug/repo/src/ir.rs";
-        let rel = "src/ir.rs";
-        assert!(target_matches(abs, abs, rel));
-        assert!(target_matches("src/ir.rs", abs, rel)); // bare relative (cwd-less session)
-        assert!(target_matches("/old/clone/src/ir.rs", abs, rel)); // other checkout
-        assert!(target_matches("/w/repo-2/src/ir.rs", abs, rel));
-        assert!(!target_matches("/repo/src/xir.rs", abs, rel)); // not a path-component boundary
-        assert!(!target_matches("/repo/docs/ir.rs", abs, rel));
-        assert!(!target_matches("/repo/src/ir.rs.bak", abs, rel));
     }
 
     #[test]
