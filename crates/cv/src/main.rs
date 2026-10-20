@@ -604,10 +604,11 @@ enum Cmd {
         /// New session id (default: a fresh UUID).
         #[arg(long)]
         to: Option<String>,
-        /// Start at the last compaction boundary before the cut (the default): what a resume loads.
-        #[arg(long, conflicts_with = "full")]
+        // The default start, spelled out; removed in 0.18.0 — hidden so the old flag errors with a pointer.
+        #[arg(long, hide = true)]
         from_compaction: bool,
-        /// Start at the source's first record instead (the whole history up to the cut).
+        /// Start at the source's first record instead of the last compaction boundary before the
+        /// cut (the default: what a resume loads).
         #[arg(long)]
         full: bool,
         /// Reasoning policy. native keeps the source's reasoning and identifiers; portable demotes
@@ -1393,12 +1394,20 @@ fn run() -> Result<()> {
             agent,
             out,
             to,
-            from_compaction: _,
+            from_compaction,
             thinking,
             full,
             dry_run,
             json,
-        } => compose::cmd_rewind(&id, harness, agent, at.as_deref(), out, to, full, thinking.as_deref().map(str::parse).transpose()?, dry_run, json, BUILD_VERSION),
+        } => {
+            if from_compaction {
+                return usage(
+                    "`cv rewind --from-compaction` was removed in 0.18.0 — starting at the last compaction boundary is the default; \
+                     pass `--full` for the whole history",
+                );
+            }
+            compose::cmd_rewind(&id, harness, agent, at.as_deref(), out, to, full, thinking.as_deref().map(str::parse).transpose()?, dry_run, json, BUILD_VERSION)
+        }
         Cmd::Config { add_export, rm_export } => config::cmd_config(add_export, rm_export),
         Cmd::Schema { json, commands } => schema::cmd_schema(&build_cli(), json, commands),
         Cmd::Formats {

@@ -92,6 +92,14 @@ fn pos(hay: &str, needle: &str) -> usize {
 // ───────────────────────────── ls ─────────────────────────────
 
 #[test]
+fn removed_rewind_from_compaction_exits_two_with_a_pointer() {
+    let w = World::new("rewind-from-compaction");
+    let (ok, code, _, err) = w.cv(&["rewind", "any", "--from-compaction"]);
+    assert!(!ok && code == 2, "{err}");
+    assert!(err.contains("--from-compaction") && err.contains("--full"), "{err}");
+}
+
+#[test]
 fn removed_claurdvoyant_variables_exit_two_with_a_pointer() {
     let w = World::new("claurdvoyant-env");
     for (old, new) in [
