@@ -1708,7 +1708,7 @@ mod tests {
             Some("fix the build"),
             "only the human prompt titles"
         );
-        assert_eq!(s.first_user_text().as_deref(), Some("fix the build"));
+
         let record_type = |i: usize| s.messages[i].harness_extra(Harness::Gemini).unwrap()["record_type"].clone();
         assert_eq!(record_type(6), "info");
         assert_eq!(record_type(7), "warning");

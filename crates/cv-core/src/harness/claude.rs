@@ -3058,9 +3058,16 @@ mod tests {
                 "bulk opts must not materialize the fat sidecar onto the block either"
             );
         }
+        let searchable = |s: &Session| {
+            let mut out = String::new();
+            for m in &s.messages {
+                m.append_searchable(&mut out).unwrap();
+            }
+            out
+        };
         assert_eq!(
-            full.searchable_text().unwrap(),
-            bulk.searchable_text().unwrap(),
+            searchable(&full),
+            searchable(&bulk),
             "gating extra must not change searchable text"
         );
     }

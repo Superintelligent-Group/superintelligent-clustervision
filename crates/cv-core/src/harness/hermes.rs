@@ -3165,9 +3165,13 @@ mod tests {
         );
         assert_eq!(bag(&s.messages[8])["display_kind"], "personality_switch");
         assert_eq!(
-            s.first_user_text().as_deref(),
+            s.messages
+                .iter()
+                .filter(|m| m.role == Role::User)
+                .find_map(|m| m.text().filter(|t| !t.trim().is_empty()))
+                .as_deref(),
             Some("keep going but faster"),
-            "notices never become the title"
+            "notices never become the first user text"
         );
         assert_nested_extra(&s);
     }

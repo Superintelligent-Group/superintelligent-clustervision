@@ -303,15 +303,6 @@ impl Session {
         self.extra.get(h.as_str()).and_then(serde_json::Value::as_object)
     }
 
-    /// First non-empty user text, injected or not: what a native store's own fallback title
-    /// copies. cv's titles come from [`Message::prompt_title`].
-    pub fn first_user_text(&self) -> Option<String> {
-        self.messages
-            .iter()
-            .filter(|m| m.role == Role::User)
-            .find_map(|m| m.text().filter(|t| !t.trim().is_empty()))
-    }
-
     /// A short human label for listings: [`Session::synth_title`] at most 72 characters long.
     pub fn label(&self) -> String {
         label_from(self.synth_title().as_deref(), None)
@@ -343,22 +334,6 @@ impl Session {
         Ok(None)
     }
 
-    /// All textual content concatenated — used to build a search index.
-    ///
-    /// The per-message projection lives in [`Message::append_searchable`]; this just prepends the
-    /// title and folds every message into one `String`.
-    pub fn searchable_text(&self) -> anyhow::Result<String> {
-        let mut out = String::new();
-        if let Some(t) = &self.title {
-            out.push_str(t);
-            out.push('\n');
-        }
-        for m in &self.messages {
-            m.append_searchable(&mut out)?;
-        }
-        Ok(out)
-    }
-
     /// A [`Resolver`](crate::lazy::Resolver) for this session's lazy content spans, rooted at its
     /// `source_path` and held to its parse-time [`source_stamp`](Self::source_stamp), so a file
     /// replaced after the parse fails the first demand. Without a stamp it stamps the file now.
@@ -379,7 +354,7 @@ impl Session {
     /// Resolve every lazy content [`Span`](crate::lazy::Span) in place, so the session owns all its
     /// content inline. Whole-session consumers (cross-harness emit building output in memory, JSON
     /// serialization) call this; streaming consumers resolve per-block instead. After it, every
-    /// content `Text` is `Inline`, so `Deref`/`Display`/`searchable_text` are safe.
+    /// content `Text` is `Inline`, so `Deref`/`Display`/`append_searchable` are safe.
     pub fn materialize(&mut self) -> anyhow::Result<()> {
         let resolver = self.resolver();
         for m in &mut self.messages {
@@ -767,10 +742,8 @@ impl Message {
         }
     }
 
-    /// Append this message's searchable text to `out` — the single canonical projection behind
-    /// both [`Session::searchable_text`] (whole session) and
-    /// [`Message::append_searchable`] (streaming, per message).
-    /// Writes into the caller's buffer so neither path allocates intermediates.
+    /// Append this message's searchable text to `out`, the canonical projection (streaming, per
+    /// message). Writes into the caller's buffer so it allocates no intermediates.
     pub fn append_searchable(&self, out: &mut String) -> anyhow::Result<()> {
         for b in &self.content {
             match b {
@@ -1458,7 +1431,6 @@ mod tests {
             text: "actual prompt".into(),
         });
         session.messages.push(user);
-        assert_eq!(session.first_user_text().as_deref(), Some("actual prompt"));
         assert_eq!(session.label(), "actual prompt");
     }
 
