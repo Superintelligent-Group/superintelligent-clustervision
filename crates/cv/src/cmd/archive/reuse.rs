@@ -312,7 +312,8 @@ impl Archive {
         let prefix_turns = prefix
             .as_ref()
             .map_or(0, |prefix| old_turns + turns.before(prefix.messages - pass.prefix));
-        if read.fits_cache(STATE_BYTES as usize - 1024) && read.fresh_with(adapter, r) {
+        // Freshness is checked once, under the catalog lock, right before the state publishes.
+        if read.fits_cache(STATE_BYTES as usize - 1024) {
             let (baseline, held) = read.clone().split();
             let stored = Stored {
                 total,
