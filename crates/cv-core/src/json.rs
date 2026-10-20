@@ -168,6 +168,15 @@ impl JsonSource {
             .with_context(|| format!("reading JSON source {}", self.0.path.display()))?;
         self.check_metadata(metadata)
     }
+    /// After a sink callback that began at `started` and received a descriptor of this source:
+    /// recheck if the callback was slow ([`SLOW_CALLBACK`](crate::harness::store::jsonl::Read::SLOW_CALLBACK));
+    /// a fast one is covered by the reader's EOF check.
+    pub(crate) fn check_after(&self, started: std::time::Instant) -> Result<()> {
+        if started.elapsed() < crate::harness::store::jsonl::Read::SLOW_CALLBACK {
+            return Ok(());
+        }
+        self.check()
+    }
     /// Whether the file as observed now still carries every byte captured: identical, or for an
     /// append-only log admitted as growth ([`FileId::admits`]).
     fn holds(&self, now: &FileId) -> bool {
