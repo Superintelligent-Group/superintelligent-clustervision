@@ -206,6 +206,17 @@ impl Skipped {
         }
     }
 
+    /// One source's scan of several sessions as items a [`Discovered`] collects.
+    pub fn listed_many(
+        path: &std::path::Path,
+        scanned: Result<Vec<SessionRef>>,
+    ) -> Vec<std::result::Result<SessionRef, Skipped>> {
+        match scanned {
+            Ok(refs) => refs.into_iter().map(Ok).collect(),
+            Err(e) => Skipped::of(path, &e).map(Err).into_iter().collect(),
+        }
+    }
+
     /// A directory walk's error as a skip: an unreadable directory hides every session under it.
     /// `None` for a `NotFound` (an entry removed mid-walk).
     pub fn walk(error: &walkdir::Error) -> Option<Skipped> {

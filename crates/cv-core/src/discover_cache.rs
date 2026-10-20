@@ -456,6 +456,21 @@ where
     failure.map_or(Ok(r), Err)
 }
 
+/// [`cached_scan_many`] over a scan that can fail (see [`cached_scan_checked`]).
+pub(crate) fn cached_scan_many_checked<F>(path: &Path, scan: F) -> anyhow::Result<Vec<SessionRef>>
+where
+    F: FnOnce() -> anyhow::Result<Vec<SessionRef>>,
+{
+    let mut failure = None;
+    let refs = cached_scan_many(path, || {
+        scan().unwrap_or_else(|e| {
+            failure = Some(e);
+            Vec::new()
+        })
+    });
+    failure.map_or(Ok(refs), Err)
+}
+
 fn persistence_cache(path: &Path, prune: bool) -> Option<Arc<Cache>> {
     let cache = existing_cache(path)?;
     (cache.any_dirty.load(Ordering::Relaxed) || prune).then_some(cache)

@@ -119,17 +119,27 @@ impl Adapter for Gemini {
         }
         // Collect candidate file paths first (cheap walk over every root), then read+parse in
         // parallel. A single `logs.json` can expand into many sessions, so this is a flat-map.
+        // An unreadable dir, and a session file that fails to read, are skipped and reported.
+        let mut walk_errors = Vec::new();
         let paths: Vec<_> = self
             .roots
             .iter()
-            .flat_map(|root| WalkDir::new(root).into_iter().filter_map(|e| e.ok()))
+            .flat_map(WalkDir::new)
+            .filter_map(|e| e.map_err(|e| walk_errors.extend(crate::Skipped::walk(&e))).ok())
             .filter(|e| e.file_type().is_file())
             .map(|e| e.into_path())
             .collect();
-        let refs = crate::par_discovery_flat_map(paths, |path| {
-            crate::discover_cache::cached_scan_many(&path, || scan_session_file(&path, Harness::Gemini))
-        });
-        Ok(dedupe_by_id(refs).into())
+        let mut found: crate::Discovered = crate::par_discovery_flat_map(paths, |path| {
+            crate::Skipped::listed_many(
+                &path,
+                crate::discover_cache::cached_scan_many_checked(&path, || scan_session_file(&path, Harness::Gemini)),
+            )
+        })
+        .into_iter()
+        .collect();
+        found.refs = dedupe_by_id(std::mem::take(&mut found.refs));
+        found.skipped.extend(walk_errors);
+        Ok(found)
     }
 
     fn stream(&self, r: &SessionRef, opts: &stream::Demand, sink: &mut dyn MessageSink) -> Result<Session> {
@@ -296,18 +306,17 @@ fn registry_for(runtime: &Path) -> Registry {
 /// Shared with the [`Qwen`](crate::harness::qwen) adapter (identical on-disk format). Notably,
 /// checkpoints derive their id from the `checkpoint-<tag>` *filename* here — the same id
 /// [`stream_for`]'s bounded path produces on parse — so discover/parse/stream all agree.
-pub(crate) fn scan_session_file(path: &Path, harness: Harness) -> Vec<SessionRef> {
+pub(crate) fn scan_session_file(path: &Path, harness: Harness) -> Result<Vec<SessionRef>> {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     if name == "logs.json" {
-        if let Ok(text) = fs::read_to_string(path) {
-            return parse_logs_str(&text, Some(path.to_path_buf()))
-                .iter()
-                .map(|s| session_ref(s, path, harness))
-                .collect();
-        }
+        let text = fs::read_to_string(path)?;
+        return Ok(parse_logs_str(&text, Some(path.to_path_buf()))
+            .iter()
+            .map(|s| session_ref(s, path, harness))
+            .collect());
     } else if is_chat_recording(path) {
         let mut turns = 0usize;
         let mut sink = |m: Message| {
@@ -315,19 +324,17 @@ pub(crate) fn scan_session_file(path: &Path, harness: Harness) -> Vec<SessionRef
             Flow::Continue
         };
         let r = SessionRef::new("", harness, path.to_path_buf());
-        if let Ok(s) = stream_for(harness, &r, &stream::Demand::LEAN.with_spans(), &mut sink) {
-            let mut r = session_ref(&s, path, harness);
-            r.message_count = Some(turns);
-            return vec![r];
-        }
+        let s = stream_for(harness, &r, &stream::Demand::LEAN.with_spans(), &mut sink)?;
+        let mut r = session_ref(&s, path, harness);
+        r.message_count = Some(turns);
+        return Ok(vec![r]);
     } else if is_checkpoint(&name) {
-        if let Ok(text) = fs::read_to_string(path) {
-            if let Some(s) = parse_checkpoint(&text, &name, Some(path.to_path_buf())) {
-                return vec![session_ref(&s, path, harness)];
-            }
+        let text = fs::read_to_string(path)?;
+        if let Some(s) = parse_checkpoint(&text, &name, Some(path.to_path_buf())) {
+            return Ok(vec![session_ref(&s, path, harness)]);
         }
     }
-    Vec::new()
+    Ok(Vec::new())
 }
 
 /// Streaming parse of any Gemini-format session file, tagged as `harness` in the returned session.
@@ -2096,7 +2103,7 @@ mod tests {
                 s.materialize().unwrap();
                 assert_eq!(as_json(&s), as_json(&reference));
             }
-            let refs = scan_session_file(&file, Harness::Gemini);
+            let refs = scan_session_file(&file, Harness::Gemini).unwrap();
             assert_eq!(refs.len(), 1);
             assert_eq!(
                 refs[0].message_count,
@@ -2243,7 +2250,7 @@ mod tests {
         )
         .unwrap();
 
-        let refs = scan_session_file(&file, Harness::Gemini);
+        let refs = scan_session_file(&file, Harness::Gemini).unwrap();
         assert_eq!(
             refs[0].cwd.as_deref(),
             Some(Path::new("/Users/u/work/proj")),
@@ -2271,9 +2278,9 @@ mod tests {
         // hash-named dirs (pre-registry) have no mapping → None, as before
         let (runtime3, file3) = runtime_fixture("hash", &"ab".repeat(32), "session_modern.jsonl");
 
-        let refs = scan_session_file(&file, Harness::Gemini);
+        let refs = scan_session_file(&file, Harness::Gemini).unwrap();
         assert_eq!(refs[0].cwd.as_deref(), Some(Path::new("/Users/u/pug/claurdvoyant")));
-        let refs2 = scan_session_file(&file2, Harness::Gemini);
+        let refs2 = scan_session_file(&file2, Harness::Gemini).unwrap();
         assert_eq!(refs2[0].cwd.as_deref(), Some(Path::new("/Users/u/cvrt8/gemtest")));
         // session_legacy.json parses to user, assistant, tool, assistant, info-notice: three turns.
         assert_eq!(
@@ -2281,7 +2288,7 @@ mod tests {
             Some(3),
             "user + assistant turns, not every message"
         );
-        let refs3 = scan_session_file(&file3, Harness::Gemini);
+        let refs3 = scan_session_file(&file3, Harness::Gemini).unwrap();
         assert_eq!(refs3[0].cwd, None);
 
         // the streamed session carries it too (the sink's `meta` sees the cwd)
@@ -2314,7 +2321,7 @@ mod tests {
             fixture("registry/project_root"),
         )
         .unwrap();
-        let refs = scan_session_file(&file, Harness::Gemini);
+        let refs = scan_session_file(&file, Harness::Gemini).unwrap();
         assert_eq!(refs[0].cwd.as_deref(), Some(Path::new("/Users/u/scratch/gemtest-proj")));
 
         // The marker beside the chats is enough on its own (a runtime root with no registry file
@@ -2325,7 +2332,7 @@ mod tests {
             "/Users/u/work/solo",
         )
         .unwrap();
-        let refs2 = scan_session_file(&file2, Harness::Gemini);
+        let refs2 = scan_session_file(&file2, Harness::Gemini).unwrap();
         assert_eq!(refs2[0].cwd.as_deref(), Some(Path::new("/Users/u/work/solo")));
         for d in [runtime, runtime2] {
             let _ = fs::remove_dir_all(&d);
@@ -2345,7 +2352,7 @@ mod tests {
             fixture("registry/project_root"),
         )
         .unwrap();
-        let refs = scan_session_file(&file, Harness::Gemini);
+        let refs = scan_session_file(&file, Harness::Gemini).unwrap();
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].id, "ad7102ea-0b4f-4822-94f7-f3bbf67f1614");
         assert_eq!(refs[0].cwd.as_deref(), Some(Path::new("/Users/u/scratch/gemtest-proj")));
@@ -2386,7 +2393,7 @@ mod tests {
             .replacen(r#""kind":"main""#, r#""kind":"subagent""#, 1);
         fs::write(&child, text).unwrap();
 
-        let refs = scan_session_file(&child, Harness::Gemini);
+        let refs = scan_session_file(&child, Harness::Gemini).unwrap();
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].id, "aaaa0000-0000-0000-0000-000000000001");
         let adapter = Gemini { roots: vec![] };
@@ -2401,7 +2408,8 @@ mod tests {
         );
         assert_eq!(s.harness_extra(Harness::Gemini).unwrap()["kind"], "subagent");
         // the parent's own recording, one level up, has no parent
-        let parent_refs = scan_session_file(&runtime.join("tmp/proj/chats/session_modern.jsonl"), Harness::Gemini);
+        let parent_refs =
+            scan_session_file(&runtime.join("tmp/proj/chats/session_modern.jsonl"), Harness::Gemini).unwrap();
         let mut sink = CollectSink::default();
         let p = adapter
             .stream(&parent_refs[0], &stream::Demand::RICH, &mut sink)
