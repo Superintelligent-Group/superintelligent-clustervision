@@ -54,6 +54,39 @@ pub struct EmitOptions {
     /// Replace a session file that already holds the emitted name, by atomic rename. Without it a
     /// taken name (a pinned `new_id` emitted twice) is refused with [`crate::publish::Exists`].
     pub force: bool,
+    /// The demand the caller read `session` at. [`emit_report`] re-reads the target's output at the
+    /// same one, so both sides of the diff hold the same records.
+    pub parsed_at: ParsedAt,
+}
+
+/// The demand a session handed to [`emit`] was read at, declared by whoever read it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ParsedAt {
+    /// [`Demand::RICH`]: turns only.
+    #[default]
+    Full,
+    /// [`Demand::COMPLETE`]: turns plus every carrier and complete record.
+    Complete,
+}
+
+impl ParsedAt {
+    /// What [`parse_for_emit`] reads: a same-harness rehome format-complete, so carriers replay
+    /// verbatim; a cross-harness port at full fidelity, since no other emitter replays them.
+    pub fn for_port(source: Harness, target: Harness) -> Self {
+        if source == target {
+            ParsedAt::Complete
+        } else {
+            ParsedAt::Full
+        }
+    }
+
+    /// The demand tier this declaration names.
+    fn demand(self) -> Demand {
+        match self {
+            ParsedAt::Full => Demand::RICH,
+            ParsedAt::Complete => Demand::COMPLETE,
+        }
+    }
 }
 
 impl EmitOptions {
@@ -456,22 +489,11 @@ pub fn emit_report(
     if let Some(verify) = verifier_for(target) {
         verify(&result.path, opts.sidechain_of.as_ref().map(|(_, a)| a.as_str()))?;
     }
-    // Re-parse at the fidelity the SOURCE was parsed at. `cv port` parses a same-harness rehome
-    // format-complete (`port::parse_for_emit`), and re-parsing that plainly compared a complete
-    // session against a lean one: impossible deltas such as `per-message model: 2106 → 836` on an
-    // 836-message session, because the source's carriers (and the complete-mode roles of synthetic
-    // notices) had no counterpart. Carriers are the tell — only a complete parse produces them —
-    // and their presence is exactly what has to match on both sides.
-    let reparse_opts = if session
-        .messages
-        .iter()
-        .any(|message| message.is_carrier() || message.complete_record.is_some())
-    {
-        Demand::COMPLETE
-    } else {
-        Demand::RICH
-    };
-    let report = match reparse_features(target, opts.thinking, &result, &reparse_opts) {
+    // Re-parse at the fidelity the SOURCE was parsed at, as its reader declared. Re-parsing a
+    // complete session plainly compared it against a lean one: impossible deltas such as
+    // `per-message model: 2106 → 836` on an 836-message session, because the source's carriers (and
+    // the complete-mode roles of synthetic notices) had no counterpart.
+    let report = match reparse_features(target, opts.thinking, &result, &opts.parsed_at.demand()) {
         Ok((reparsed, after)) => diff_features(target, opts.thinking, session, &reparsed, before, after),
         Err(e) => FidelityReport {
             deltas: vec![Divergence {
@@ -581,11 +603,7 @@ pub fn parse_for_emit(
     reference: &SessionRef,
     target: Harness,
 ) -> Result<Session> {
-    let mut options = if reference.harness == target {
-        Demand::COMPLETE
-    } else {
-        Demand::RICH
-    };
+    let mut options = ParsedAt::for_port(reference.harness, target).demand();
     let checked = emitter_for(target).is_some();
     if checked {
         options.spans = true;

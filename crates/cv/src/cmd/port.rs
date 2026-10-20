@@ -61,6 +61,7 @@ pub(crate) fn cmd_port(
             new_cwd: cwd,
             strict,
             thinking,
+            parsed_at: cv_core::emit::ParsedAt::for_port(r.harness, to_h),
             ..Default::default()
         },
     )?;
