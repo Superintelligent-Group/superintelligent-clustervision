@@ -287,8 +287,8 @@ mod tests {
             fn roots(&self) -> Vec<PathBuf> {
                 Vec::new()
             }
-            fn discover(&self) -> Result<Vec<cv_core::SessionRef>> {
-                Ok(Vec::new())
+            fn discover(&self) -> Result<cv_core::Discovered> {
+                Ok(Default::default())
             }
             fn stream(&self, r: &cv_core::SessionRef, _: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
                 let mut message = Message::new(Role::User);

@@ -211,7 +211,7 @@ impl Adapter for OpenClaw {
         self.roots.clone()
     }
 
-    fn discover(&self) -> Result<Vec<SessionRef>> {
+    fn discover(&self) -> Result<crate::Discovered> {
         let mut out = Vec::new();
         // Sessions the sqlite store owns; a legacy JSONL twin (pre-migration copy) is skipped.
         let mut seen: HashSet<String> = HashSet::new();
@@ -253,7 +253,7 @@ impl Adapter for OpenClaw {
             }
         }
         indexes.check()?;
-        Ok(out)
+        Ok(out.into())
     }
 
     /// An agent's `.sqlite` store is written in place; a JSONL transcript is a file like any other.

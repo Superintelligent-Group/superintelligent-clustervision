@@ -113,9 +113,9 @@ impl Adapter for Gemini {
         self.roots.clone()
     }
 
-    fn discover(&self) -> Result<Vec<SessionRef>> {
+    fn discover(&self) -> Result<crate::Discovered> {
         if self.roots.is_empty() {
-            return Ok(vec![]);
+            return Ok(Default::default());
         }
         // Collect candidate file paths first (cheap walk over every root), then read+parse in
         // parallel. A single `logs.json` can expand into many sessions, so this is a flat-map.
@@ -129,7 +129,7 @@ impl Adapter for Gemini {
         let refs = crate::par_discovery_flat_map(paths, |path| {
             crate::discover_cache::cached_scan_many(&path, || scan_session_file(&path, Harness::Gemini))
         });
-        Ok(dedupe_by_id(refs))
+        Ok(dedupe_by_id(refs).into())
     }
 
     fn stream(&self, r: &SessionRef, opts: &stream::Demand, sink: &mut dyn MessageSink) -> Result<Session> {

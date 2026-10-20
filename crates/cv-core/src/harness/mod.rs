@@ -152,6 +152,114 @@ pub(crate) fn note_skipped_lines(s: &mut Session, skipped: u64) {
     }
 }
 
+/// A source [`Adapter::discover`] found but could not open (a locked or corrupt database, an
+/// unreadable directory, a file that fails to decode at open): its sessions are absent from the
+/// listing, and this says why. The skip policy is one rule in three channels: a record that
+/// cannot parse is counted ([`note_skipped_lines`]); a source that cannot open is reported here,
+/// persisted by the catalog and shown by `cv doctor`; an accelerator that cannot open degrades
+/// once (one stderr line per process). A source that is not there (`NotFound`) is the only honest
+/// empty and is never a `Skipped`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Skipped {
+    pub path: PathBuf,
+    /// The error's one-line rendering (its whole cause chain).
+    pub why: String,
+}
+
+impl Skipped {
+    /// `error` at `path` as a skip, or `None` when the error is a `NotFound` (nothing there).
+    pub fn of(path: impl Into<PathBuf>, error: &anyhow::Error) -> Option<Skipped> {
+        let absent = error
+            .chain()
+            .filter_map(|e| e.downcast_ref::<std::io::Error>())
+            .any(|e| e.kind() == std::io::ErrorKind::NotFound);
+        (!absent).then(|| Skipped {
+            path: path.into(),
+            why: format!("{error:#}"),
+        })
+    }
+}
+
+/// What [`Adapter::discover`] found: the sessions it could list and the sources it could not open.
+/// Reads as its `refs` (`Deref` to the `Vec`, `IntoIterator` over them); `skipped` rides beside.
+#[derive(Debug, Default)]
+pub struct Discovered {
+    pub refs: Vec<SessionRef>,
+    pub skipped: Vec<Skipped>,
+}
+
+impl Discovered {
+    /// `result` read at `path`: its value, or `None` with the error recorded as a skip (dropped
+    /// when it is a `NotFound`).
+    pub fn keep<T>(&mut self, path: &std::path::Path, result: Result<T>) -> Option<T> {
+        result.map_err(|e| self.skipped.extend(Skipped::of(path, &e))).ok()
+    }
+
+    /// Append another discovery's refs and skips.
+    pub fn append(&mut self, other: Discovered) {
+        self.refs.extend(other.refs);
+        self.skipped.extend(other.skipped);
+    }
+}
+
+impl From<Vec<SessionRef>> for Discovered {
+    fn from(refs: Vec<SessionRef>) -> Self {
+        Discovered {
+            refs,
+            skipped: Vec::new(),
+        }
+    }
+}
+
+impl FromIterator<SessionRef> for Discovered {
+    fn from_iter<I: IntoIterator<Item = SessionRef>>(iter: I) -> Self {
+        Vec::from_iter(iter).into()
+    }
+}
+
+/// Per-source outcomes of a parallel scan, a ref or a skip each.
+impl FromIterator<Result<SessionRef, Skipped>> for Discovered {
+    fn from_iter<I: IntoIterator<Item = Result<SessionRef, Skipped>>>(iter: I) -> Self {
+        let mut out = Discovered::default();
+        for item in iter {
+            match item {
+                Ok(r) => out.refs.push(r),
+                Err(s) => out.skipped.push(s),
+            }
+        }
+        out
+    }
+}
+
+impl std::ops::Deref for Discovered {
+    type Target = Vec<SessionRef>;
+    fn deref(&self) -> &Vec<SessionRef> {
+        &self.refs
+    }
+}
+
+impl std::ops::DerefMut for Discovered {
+    fn deref_mut(&mut self) -> &mut Vec<SessionRef> {
+        &mut self.refs
+    }
+}
+
+impl IntoIterator for Discovered {
+    type Item = SessionRef;
+    type IntoIter = std::vec::IntoIter<SessionRef>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.refs.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a Discovered {
+    type Item = &'a SessionRef;
+    type IntoIter = std::slice::Iter<'a, SessionRef>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.refs.iter()
+    }
+}
+
 /// Result of emitting an IR session into a harness's native on-disk format.
 #[derive(Debug, Clone)]
 pub struct EmitResult {
@@ -196,8 +304,9 @@ pub trait Adapter: Send + Sync {
     /// no watch for. Empty when the harness is not installed.
     fn roots(&self) -> Vec<PathBuf>;
 
-    /// Cheaply enumerate sessions without fully parsing them.
-    fn discover(&self) -> Result<Vec<SessionRef>>;
+    /// Cheaply enumerate sessions without fully parsing them, and name the sources found but
+    /// unreadable ([`Discovered::skipped`]). `Err` only when the whole store cannot be listed.
+    fn discover(&self) -> Result<Discovered>;
 
     /// Stream a session's messages into `sink` one at a time, dropping each before the next, so
     /// peak memory is O(largest message) rather than O(transcript). Returns the session's metadata

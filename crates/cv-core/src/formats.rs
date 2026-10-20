@@ -824,8 +824,8 @@ mod tests {
             fn roots(&self) -> Vec<PathBuf> {
                 Vec::new()
             }
-            fn discover(&self) -> Result<Vec<SessionRef>> {
-                Ok(Vec::new())
+            fn discover(&self) -> Result<crate::Discovered> {
+                Ok(Default::default())
             }
             fn stream(
                 &self,

@@ -89,15 +89,15 @@ impl Adapter for LmStudio {
             .collect()
     }
 
-    fn discover(&self) -> Result<Vec<SessionRef>> {
+    fn discover(&self) -> Result<crate::Discovered> {
         let _cache_scope = crate::discover_cache::read::Context::current().enter();
         let Some(root) = &self.root else {
-            return Ok(vec![]);
+            return Ok(Default::default());
         };
         let mut out = Vec::new();
         let entries = match fs::read_dir(root) {
             Ok(e) => e,
-            Err(_) => return Ok(vec![]),
+            Err(_) => return Ok(Default::default()),
         };
         for entry in entries.filter_map(|e| e.ok()) {
             let path = entry.path();
@@ -114,7 +114,7 @@ impl Adapter for LmStudio {
                 out.push(reference);
             }
         }
-        Ok(out)
+        Ok(out.into())
     }
 
     /// Walk the validated document and selected versions with scoped source views. Lazy text

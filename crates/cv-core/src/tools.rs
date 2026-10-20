@@ -640,8 +640,8 @@ mod tests {
             fn roots(&self) -> Vec<std::path::PathBuf> {
                 vec![]
             }
-            fn discover(&self) -> anyhow::Result<Vec<SessionRef>> {
-                Ok(vec![])
+            fn discover(&self) -> anyhow::Result<crate::Discovered> {
+                Ok(Default::default())
             }
             fn stream(
                 &self,

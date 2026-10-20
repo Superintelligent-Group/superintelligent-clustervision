@@ -1093,6 +1093,7 @@ mod projection_tests {
             .unwrap()
             .discover()
             .unwrap()
+            .refs
     }
 
     // Independent pre-change owned observer: whole searchable strings, then truncation.
@@ -1571,6 +1572,7 @@ mod admission_tests {
                 .unwrap()
                 .discover()
                 .unwrap()
+                .refs
         }
         let mut watcher = Watcher::with_discovery(Filter::default(), true, discover_omen);
         let matched = await_poll(

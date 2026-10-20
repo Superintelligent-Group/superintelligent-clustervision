@@ -84,9 +84,9 @@ impl Adapter for Continue {
         self.sessions.clone().into_iter().collect()
     }
 
-    fn discover(&self) -> Result<Vec<SessionRef>> {
+    fn discover(&self) -> Result<crate::Discovered> {
         let Some(sessions) = &self.sessions else {
-            return Ok(vec![]);
+            return Ok(Default::default());
         };
 
         // Index entries from sessions.json, if present.
@@ -134,7 +134,7 @@ impl Adapter for Continue {
             }
         }
 
-        Ok(out)
+        Ok(out.into())
     }
 
     /// Project one accepted history item at a time, retaining body source ranges in lazy mode.

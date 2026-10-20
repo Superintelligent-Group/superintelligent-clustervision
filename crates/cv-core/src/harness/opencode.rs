@@ -235,12 +235,12 @@ impl Adapter for OpenCode {
             .collect()
     }
 
-    fn discover(&self) -> Result<Vec<SessionRef>> {
+    fn discover(&self) -> Result<crate::Discovered> {
         // The database first (it is the live store), then the frozen JSON tree for anything the
         // database doesn't have — a session present in both (the import left copies) appears once.
         let (mut out, seen) = self.discover_db();
         let Some(root) = &self.root else {
-            return Ok(out);
+            return Ok(out.into());
         };
         let session_dir = root.join("session");
         for entry in WalkDir::new(&session_dir).into_iter().filter_map(|e| e.ok()) {
@@ -275,7 +275,7 @@ impl Adapter for OpenCode {
                 ..SessionRef::new(id, Harness::OpenCode, path.to_path_buf())
             });
         }
-        Ok(out)
+        Ok(out.into())
     }
 
     /// OpenCode's sessions are rows of its database (or files beside it), written in place.

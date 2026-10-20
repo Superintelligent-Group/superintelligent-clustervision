@@ -272,7 +272,7 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
             let mut refs = if a.operation == "sessions" {
                 cv_core::sessions()
             } else {
-                adapter.discover()?
+                adapter.discover()?.refs
             };
             // A store whose count is free (a row count) reports it; one that would have to decode
             // every body reports "not counted" (`None`) until a full read or `cv index` certifies it.

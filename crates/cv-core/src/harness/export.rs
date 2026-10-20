@@ -51,8 +51,8 @@ impl Adapter for ChatGptExport {
     fn roots(&self) -> Vec<PathBuf> {
         export_dirs()
     }
-    fn discover(&self) -> Result<Vec<SessionRef>> {
-        Ok(discover_kind(Kind::ChatGpt))
+    fn discover(&self) -> Result<crate::Discovered> {
+        Ok(discover_kind(Kind::ChatGpt).into())
     }
     fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| native::stream(Kind::ChatGpt, r, opts, sink))
@@ -66,8 +66,8 @@ impl Adapter for ClaudeExport {
     fn roots(&self) -> Vec<PathBuf> {
         export_dirs()
     }
-    fn discover(&self) -> Result<Vec<SessionRef>> {
-        Ok(discover_kind(Kind::Claude))
+    fn discover(&self) -> Result<crate::Discovered> {
+        Ok(discover_kind(Kind::Claude).into())
     }
     fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| native::stream(Kind::Claude, r, opts, sink))
@@ -103,11 +103,8 @@ impl Adapter for RootedExport {
     fn roots(&self) -> Vec<PathBuf> {
         self.roots.clone()
     }
-    fn discover(&self) -> Result<Vec<SessionRef>> {
-        Ok(discover_kind_in(
-            self.kind,
-            files_under(self.roots.clone(), is_conversations_file),
-        ))
+    fn discover(&self) -> Result<crate::Discovered> {
+        Ok(discover_kind_in(self.kind, files_under(self.roots.clone(), is_conversations_file)).into())
     }
     fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| native::stream(self.kind, r, opts, sink))

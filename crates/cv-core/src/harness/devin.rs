@@ -210,16 +210,17 @@ impl Adapter for Devin {
         self.db_path().map(|_| self.root.clone()).into_iter().collect()
     }
 
-    fn discover(&self) -> Result<Vec<SessionRef>> {
+    fn discover(&self) -> Result<crate::Discovered> {
         let Some(db) = self.db_path() else {
-            return Ok(vec![]);
+            return Ok(Default::default());
         };
         super::store::sqlite::cached_discover(&db, || {
             let Ok(conn) = open_ro(&db) else {
-                return Ok(vec![]);
+                return Ok(Default::default());
             };
             conn.read(|conn| discover_conn(conn, &db))
         })
+        .map(Into::into)
     }
 
     /// Devin writes its session database in place.
@@ -1079,7 +1080,7 @@ mod tests {
             CREATE VIEW message_nodes AS SELECT * FROM stored_nodes;",
         )?;
         let view = adapter.discover()?;
-        assert_eq!(serde_json::to_value(&view)?, serde_json::to_value(&table)?);
+        assert_eq!(serde_json::to_value(&view.refs)?, serde_json::to_value(&table.refs)?);
         for (r, expected) in view.iter().zip(expected) {
             assert_eq!(serde_json::to_value(parsed(r))?, expected, "{}", r.id);
         }

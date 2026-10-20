@@ -156,9 +156,9 @@ impl Adapter for KimiCode {
         self.root.clone().into_iter().collect()
     }
 
-    fn discover(&self) -> Result<Vec<SessionRef>> {
+    fn discover(&self) -> Result<crate::Discovered> {
         let Some(root) = &self.root else {
-            return Ok(vec![]);
+            return Ok(Default::default());
         };
         let mut shared_reads = crate::source::ReadSet::default();
         shared_reads.record(&root.join("session_index.jsonl"));
@@ -170,7 +170,7 @@ impl Adapter for KimiCode {
         // the directory tree is the source of truth; the index only contributes tombstones + cwd.
         let mut dirs: Vec<(PathBuf, String, Option<PathBuf>)> = Vec::new();
         let Ok(wds) = fs::read_dir(root.join("sessions")) else {
-            return Ok(vec![]);
+            return Ok(Default::default());
         };
         for wd in wds.filter_map(|e| e.ok()) {
             let wd_path = wd.path();
@@ -210,7 +210,8 @@ impl Adapter for KimiCode {
             crate::discover_cache::cached_scan_with_reads(&key, reads, || scan(&sdir, &id, fallback_cwd))
                 .into_iter()
                 .collect()
-        }))
+        })
+        .into())
     }
 
     fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {

@@ -244,7 +244,7 @@ impl Adapter for Hermes {
         roots
     }
 
-    fn discover(&self) -> Result<Vec<SessionRef>> {
+    fn discover(&self) -> Result<crate::Discovered> {
         // Iterate every DB (top-level + each profile), opening each read-only, and concatenate the
         // per-DB discovery. Each `SessionRef` carries its own `path`, so refs from different
         // profiles stay disambiguated even when their internal session ids collide. A single
@@ -253,7 +253,7 @@ impl Adapter for Hermes {
         for db in &self.dbs {
             let refs = super::store::sqlite::cached_discover(db, || {
                 let Ok(conn) = open_ro(db) else {
-                    return Ok(Vec::new());
+                    return Ok(Default::default());
                 };
                 conn.read(|conn| discover_conn(conn, db))
             });
@@ -261,7 +261,7 @@ impl Adapter for Hermes {
                 out.extend(refs);
             }
         }
-        Ok(out)
+        Ok(out.into())
     }
 
     /// Hermes routes lazily loaded tools through `tool_call{name, arguments}` and its reader

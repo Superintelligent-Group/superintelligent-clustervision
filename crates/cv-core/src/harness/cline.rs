@@ -144,10 +144,10 @@ impl Adapter for Cline {
         self.roots.iter().chain(&self.sdk_roots).cloned().collect()
     }
 
-    fn discover(&self) -> Result<Vec<SessionRef>> {
+    fn discover(&self) -> Result<crate::Discovered> {
         let mut out = discover_in(&self.roots, Harness::Cline);
         out.extend(super::cline_sdk::discover(&self.sdk_roots));
-        Ok(out)
+        Ok(out.into())
     }
 
     fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {

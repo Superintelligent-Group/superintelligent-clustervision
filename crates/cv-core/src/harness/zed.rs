@@ -124,14 +124,15 @@ impl Adapter for Zed {
             .collect()
     }
 
-    fn discover(&self) -> Result<Vec<SessionRef>> {
+    fn discover(&self) -> Result<crate::Discovered> {
         let Some(db) = &self.db else {
-            return Ok(vec![]);
+            return Ok(Default::default());
         };
         super::store::sqlite::cached_discover(db, || {
             let conn = open_ro(db)?;
             conn.read(|conn| discover_db(conn, db))
         })
+        .map(Into::into)
     }
 
     /// Zed writes `threads.db` in place.

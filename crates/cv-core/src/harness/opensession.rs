@@ -151,8 +151,8 @@ impl Adapter for OpenSession {
         super::export::export_dirs()
     }
 
-    fn discover(&self) -> Result<Vec<SessionRef>> {
-        Ok(discover_documents(document_files()))
+    fn discover(&self) -> Result<crate::Discovered> {
+        Ok(discover_documents(document_files()).into())
     }
 
     fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
@@ -176,11 +176,8 @@ impl Adapter for RootedOpenSession {
     fn roots(&self) -> Vec<PathBuf> {
         self.roots.clone()
     }
-    fn discover(&self) -> Result<Vec<SessionRef>> {
-        Ok(discover_documents(super::export::files_under(
-            self.roots.clone(),
-            is_document_file,
-        )))
+    fn discover(&self) -> Result<crate::Discovered> {
+        Ok(discover_documents(super::export::files_under(self.roots.clone(), is_document_file)).into())
     }
     fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| stream_document(&r.path, opts, sink))

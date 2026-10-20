@@ -71,8 +71,8 @@ impl Adapter for Roo {
         self.roots.clone()
     }
 
-    fn discover(&self) -> Result<Vec<SessionRef>> {
-        Ok(discover_in(&self.roots, Harness::Roo))
+    fn discover(&self) -> Result<crate::Discovered> {
+        Ok(discover_in(&self.roots, Harness::Roo).into())
     }
 
     fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {

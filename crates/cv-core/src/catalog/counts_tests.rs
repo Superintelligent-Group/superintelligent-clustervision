@@ -291,8 +291,8 @@ fn stopped_stream_never_certifies_exact_turns() {
         fn roots(&self) -> Vec<std::path::PathBuf> {
             Vec::new()
         }
-        fn discover(&self) -> anyhow::Result<Vec<SessionRef>> {
-            Ok(Vec::new())
+        fn discover(&self) -> anyhow::Result<crate::Discovered> {
+            Ok(Default::default())
         }
         fn stream(
             &self,

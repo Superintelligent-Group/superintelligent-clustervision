@@ -446,7 +446,7 @@ fn doctor_lazy_report_matches_full_corpus() -> anyhow::Result<()> {
     for harness in HARNESSES {
         for version in subdirs(&corpus_root().join(harness.name)) {
             let adapter = (harness.adapter)(&version);
-            let mut refs = adapter.discover().unwrap();
+            let mut refs = adapter.discover().unwrap().refs;
             if let Some(children) = harness.children {
                 refs.extend(refs.clone().iter().flat_map(children));
             }

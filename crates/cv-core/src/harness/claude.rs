@@ -318,7 +318,7 @@ impl Adapter for Claude {
         self.resolve_roots()
     }
 
-    fn discover(&self) -> Result<Vec<SessionRef>> {
+    fn discover(&self) -> Result<crate::Discovered> {
         // Session files sit at projects/<encoded>/<sid>.jsonl (depth 2) in every root. Subagent
         // transcripts live deeper (…/<sid>/subagents/…), which max_depth(2) naturally excludes.
         // Collect paths (cheap), then scan (read + parse) them in parallel. The same session id in
@@ -339,9 +339,7 @@ impl Adapter for Claude {
                     .is_some_and(|n| n.ends_with(".flat.jsonl"))
             })
             .collect();
-        Ok(crate::par_discovery_filter_map(paths, |path| {
-            cached_metadata(&path, true)
-        }))
+        Ok(crate::par_discovery_filter_map(paths, |path| cached_metadata(&path, true)).into())
     }
 
     fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {

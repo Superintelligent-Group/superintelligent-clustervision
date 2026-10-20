@@ -928,8 +928,8 @@ mod tests {
         fn roots(&self) -> Vec<PathBuf> {
             Vec::new()
         }
-        fn discover(&self) -> Result<Vec<cv_core::SessionRef>> {
-            Ok(Vec::new())
+        fn discover(&self) -> Result<cv_core::Discovered> {
+            Ok(Default::default())
         }
         fn stream(&self, r: &cv_core::SessionRef, options: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
             struct Counter<'a> {
@@ -1142,8 +1142,8 @@ mod tests {
         fn roots(&self) -> Vec<PathBuf> {
             Vec::new()
         }
-        fn discover(&self) -> Result<Vec<cv_core::SessionRef>> {
-            Ok(Vec::new())
+        fn discover(&self) -> Result<cv_core::Discovered> {
+            Ok(Default::default())
         }
         fn stream(&self, r: &cv_core::SessionRef, _: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
             for message in &self.0 {
@@ -1212,7 +1212,7 @@ mod tests {
         fn roots(&self) -> Vec<PathBuf> {
             vec![PathBuf::from("recall-fixture")]
         }
-        fn discover(&self) -> Result<Vec<cv_core::SessionRef>> {
+        fn discover(&self) -> Result<cv_core::Discovered> {
             Ok(self
                 .0
                 .iter()

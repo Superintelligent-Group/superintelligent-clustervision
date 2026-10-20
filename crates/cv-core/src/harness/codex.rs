@@ -193,7 +193,7 @@ impl Adapter for Codex {
         self.roots.clone()
     }
 
-    fn discover(&self) -> Result<Vec<SessionRef>> {
+    fn discover(&self) -> Result<crate::Discovered> {
         // Walk (cheap) to collect candidate paths, then scan (file read + parse) them in parallel.
         let mut paths = Vec::new();
         for root in &self.roots {
@@ -229,7 +229,8 @@ impl Adapter for Codex {
                     None
                 }
             })
-        }))
+        })
+        .into())
     }
 
     fn stream(&self, r: &SessionRef, opts: &stream::Demand, sink: &mut dyn MessageSink) -> Result<Session> {

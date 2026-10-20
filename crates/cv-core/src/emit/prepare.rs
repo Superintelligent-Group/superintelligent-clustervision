@@ -563,8 +563,8 @@ mod tests {
         fn roots(&self) -> Vec<PathBuf> {
             Vec::new()
         }
-        fn discover(&self) -> Result<Vec<SessionRef>> {
-            Ok(Vec::new())
+        fn discover(&self) -> Result<crate::Discovered> {
+            Ok(Default::default())
         }
         fn stream(&self, reference: &SessionRef, _: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
             let mut session = Session::new(&reference.id, Harness::Claude);

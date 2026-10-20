@@ -1628,8 +1628,8 @@ mod tests {
             fn roots(&self) -> Vec<PathBuf> {
                 Vec::new()
             }
-            fn discover(&self) -> Result<Vec<SessionRef>> {
-                Ok(Vec::new())
+            fn discover(&self) -> Result<cv_core::Discovered> {
+                Ok(Default::default())
             }
             fn stream(
                 &self,
@@ -1836,8 +1836,8 @@ mod tests {
             fn roots(&self) -> Vec<PathBuf> {
                 Vec::new()
             }
-            fn discover(&self) -> Result<Vec<SessionRef>> {
-                Ok(Vec::new())
+            fn discover(&self) -> Result<cv_core::Discovered> {
+                Ok(Default::default())
             }
             fn stream(
                 &self,
@@ -1875,8 +1875,8 @@ mod tests {
             fn roots(&self) -> Vec<PathBuf> {
                 Vec::new()
             }
-            fn discover(&self) -> Result<Vec<SessionRef>> {
-                Ok(Vec::new())
+            fn discover(&self) -> Result<cv_core::Discovered> {
+                Ok(Default::default())
             }
             fn stream(
                 &self,
@@ -2147,8 +2147,8 @@ mod tests {
             fn roots(&self) -> Vec<PathBuf> {
                 vec![]
             }
-            fn discover(&self) -> Result<Vec<SessionRef>> {
-                Ok(vec![])
+            fn discover(&self) -> Result<cv_core::Discovered> {
+                Ok(Default::default())
             }
             fn stream(
                 &self,
@@ -2221,8 +2221,8 @@ mod tests {
             fn roots(&self) -> Vec<PathBuf> {
                 Vec::new()
             }
-            fn discover(&self) -> Result<Vec<SessionRef>> {
-                Ok(Vec::new())
+            fn discover(&self) -> Result<cv_core::Discovered> {
+                Ok(Default::default())
             }
             fn stream(
                 &self,
@@ -2296,8 +2296,8 @@ mod tests {
             fn roots(&self) -> Vec<PathBuf> {
                 Vec::new()
             }
-            fn discover(&self) -> Result<Vec<SessionRef>> {
-                Ok(Vec::new())
+            fn discover(&self) -> Result<cv_core::Discovered> {
+                Ok(Default::default())
             }
             fn stream(
                 &self,
@@ -2508,8 +2508,8 @@ mod tests {
             fn roots(&self) -> Vec<PathBuf> {
                 Vec::new()
             }
-            fn discover(&self) -> Result<Vec<SessionRef>> {
-                Ok(Vec::new())
+            fn discover(&self) -> Result<cv_core::Discovered> {
+                Ok(Default::default())
             }
             fn stream(
                 &self,
@@ -2551,8 +2551,8 @@ mod tests {
             fn roots(&self) -> Vec<PathBuf> {
                 Vec::new()
             }
-            fn discover(&self) -> Result<Vec<SessionRef>> {
-                Ok(Vec::new())
+            fn discover(&self) -> Result<cv_core::Discovered> {
+                Ok(Default::default())
             }
             fn stream(
                 &self,
@@ -2869,8 +2869,8 @@ mod tests {
             fn roots(&self) -> Vec<PathBuf> {
                 Vec::new()
             }
-            fn discover(&self) -> Result<Vec<SessionRef>> {
-                Ok(Vec::new())
+            fn discover(&self) -> Result<cv_core::Discovered> {
+                Ok(Default::default())
             }
             fn stream(
                 &self,

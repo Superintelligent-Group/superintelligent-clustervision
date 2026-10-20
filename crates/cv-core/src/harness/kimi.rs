@@ -167,10 +167,10 @@ impl Adapter for Kimi {
             .collect()
     }
 
-    fn discover(&self) -> Result<Vec<SessionRef>> {
+    fn discover(&self) -> Result<crate::Discovered> {
         let _cache_scope = crate::discover_cache::read::Context::current().enter();
         let Some(sessions) = &self.sessions else {
-            return Ok(vec![]);
+            return Ok(Default::default());
         };
         let mut shared_reads = crate::source::ReadSet::default();
         if let Some(root) = &self.root {
@@ -184,7 +184,7 @@ impl Adapter for Kimi {
             .unwrap_or_default();
         let mut out = Vec::new();
         let Ok(hash_dirs) = fs::read_dir(sessions) else {
-            return Ok(out);
+            return Ok(out.into());
         };
         for hd in hash_dirs.filter_map(|e| e.ok()) {
             let hash_path = hd.path();
@@ -235,7 +235,7 @@ impl Adapter for Kimi {
                 }
             }
         }
-        Ok(out)
+        Ok(out.into())
     }
 
     fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {

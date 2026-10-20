@@ -206,9 +206,9 @@ impl Adapter for Goose {
         self.dir.clone().into_iter().collect()
     }
 
-    fn discover(&self) -> Result<Vec<SessionRef>> {
+    fn discover(&self) -> Result<crate::Discovered> {
         let Some(dir) = &self.dir else {
-            return Ok(vec![]);
+            return Ok(Default::default());
         };
         let mut out = Vec::new();
         let mut seen_ids = std::collections::HashSet::new();
@@ -217,7 +217,7 @@ impl Adapter for Goose {
         if let Some(db) = self.db_path() {
             let refs = super::store::sqlite::cached_discover(&db, || {
                 let Ok(conn) = open_ro(&db) else {
-                    return Ok(Vec::new());
+                    return Ok(Default::default());
                 };
                 conn.read(|reader| discover_db(reader, &db))
             });
@@ -238,7 +238,7 @@ impl Adapter for Goose {
                 out.push(r);
             }
         }
-        Ok(out)
+        Ok(out.into())
     }
 
     /// Goose writes `sessions.db` in place.

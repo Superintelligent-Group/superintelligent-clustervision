@@ -645,8 +645,8 @@ mod tests {
             fn roots(&self) -> Vec<PathBuf> {
                 Vec::new()
             }
-            fn discover(&self) -> Result<Vec<SessionRef>> {
-                Ok(Vec::new())
+            fn discover(&self) -> Result<crate::Discovered> {
+                Ok(Default::default())
             }
             fn resume_source(&self, _: &SessionRef) -> PathBuf {
                 self.0.clone()
@@ -707,8 +707,8 @@ mod tests {
             fn roots(&self) -> Vec<PathBuf> {
                 Vec::new()
             }
-            fn discover(&self) -> Result<Vec<SessionRef>> {
-                Ok(Vec::new())
+            fn discover(&self) -> Result<crate::Discovered> {
+                Ok(Default::default())
             }
             fn stream(
                 &self,

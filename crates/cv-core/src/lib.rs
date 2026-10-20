@@ -65,7 +65,7 @@ pub(crate) mod utf8;
 pub mod watch;
 
 pub use emit::{emit, EmitOptions};
-pub use harness::{Adapter, EmitResult};
+pub use harness::{Adapter, Discovered, EmitResult, Skipped};
 pub use ir::*;
 pub use json::{Json, JsonRange, JsonView};
 pub use lazy::{Resolver, Span, Text, INLINE_MAX};
@@ -137,7 +137,7 @@ fn discover_all_with_catalog(mut catalog: Option<catalog::Reader>) -> Vec<Sessio
         let before = catalog::capture_primary_reads_from(a, &known);
         drop(known); // Retain source guards, not a second fleet of metadata, during discovery.
         match a.discover() {
-            Ok(refs) => (h, roots, Some(refs), before),
+            Ok(found) => (h, roots, Some(found.refs), before),
             Err(e) => {
                 eprintln!("cv: discover failed for {h}: {e:#}");
                 (h, roots, None, before)
@@ -300,7 +300,7 @@ fn discover_harness(h: Harness, mut catalog: Option<&mut catalog::Reader>) -> Op
         Vec::new()
     } else {
         match a.discover() {
-            Ok(refs) => refs,
+            Ok(found) => found.refs,
             Err(e) => {
                 eprintln!("cv: discover failed for {h}: {e:#}");
                 return None;

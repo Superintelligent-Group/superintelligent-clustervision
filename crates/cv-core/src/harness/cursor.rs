@@ -151,7 +151,7 @@ impl Adapter for Cursor {
         roots
     }
 
-    fn discover(&self) -> Result<Vec<SessionRef>> {
+    fn discover(&self) -> Result<crate::Discovered> {
         let mut out = Vec::new();
         // Map composerId -> cwd by scanning every workspace's composer.composerData. Also collect
         // metadata fallbacks (name/created) and legacy in-workspace chat threads.
@@ -189,7 +189,7 @@ impl Adapter for Cursor {
         if let Some(home) = &self.cli_home {
             cli::discover(home, &mut out);
         }
-        Ok(out)
+        Ok(out.into())
     }
 
     /// Cursor writes its session databases in place.

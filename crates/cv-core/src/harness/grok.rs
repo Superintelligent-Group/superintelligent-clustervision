@@ -123,9 +123,9 @@ impl Adapter for Grok {
         self.root.clone().into_iter().collect()
     }
 
-    fn discover(&self) -> Result<Vec<SessionRef>> {
+    fn discover(&self) -> Result<crate::Discovered> {
         let Some(root) = &self.root else {
-            return Ok(vec![]);
+            return Ok(Default::default());
         };
         let mut out = Vec::new();
         for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
@@ -150,7 +150,7 @@ impl Adapter for Grok {
                 out.push(r);
             }
         }
-        Ok(out)
+        Ok(out.into())
     }
 
     fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {

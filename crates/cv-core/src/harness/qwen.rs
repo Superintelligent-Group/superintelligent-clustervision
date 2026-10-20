@@ -106,7 +106,7 @@ impl Adapter for Qwen {
         self.projects.iter().chain(self.root.iter()).cloned().collect()
     }
 
-    fn discover(&self) -> Result<Vec<SessionRef>> {
+    fn discover(&self) -> Result<crate::Discovered> {
         let mut paths: Vec<PathBuf> = Vec::new();
         if let Some(projects) = &self.projects {
             paths.extend(
@@ -140,7 +140,8 @@ impl Adapter for Qwen {
                     crate::harness::gemini::scan_session_file(&path, Harness::Qwen)
                 }
             })
-        }))
+        })
+        .into())
     }
 
     fn stream(&self, r: &SessionRef, opts: &stream::Demand, sink: &mut dyn MessageSink) -> Result<Session> {

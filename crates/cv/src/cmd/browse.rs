@@ -855,8 +855,8 @@ mod enrich_tests {
         fn roots(&self) -> Vec<std::path::PathBuf> {
             Vec::new()
         }
-        fn discover(&self) -> Result<Vec<SessionRef>> {
-            Ok(Vec::new())
+        fn discover(&self) -> Result<cv_core::Discovered> {
+            Ok(Default::default())
         }
         fn stream(&self, _: &SessionRef, _: &cv_core::Demand, sink: &mut dyn MessageSink) -> Result<Session> {
             for message in &self.messages {

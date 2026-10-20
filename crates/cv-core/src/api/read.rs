@@ -352,7 +352,7 @@ mod tests {
         fn roots(&self) -> Vec<std::path::PathBuf> {
             self.inner.roots()
         }
-        fn discover(&self) -> Result<Vec<SessionRef>> {
+        fn discover(&self) -> Result<crate::Discovered> {
             self.inner.discover()
         }
         fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
@@ -441,8 +441,8 @@ mod tests {
             fn roots(&self) -> Vec<std::path::PathBuf> {
                 Vec::new()
             }
-            fn discover(&self) -> Result<Vec<SessionRef>> {
-                Ok(Vec::new())
+            fn discover(&self) -> Result<crate::Discovered> {
+                Ok(Default::default())
             }
             fn resume_format(&self) -> Option<u32> {
                 self.0.then_some(1)
@@ -601,8 +601,8 @@ mod tests {
             fn roots(&self) -> Vec<std::path::PathBuf> {
                 Vec::new()
             }
-            fn discover(&self) -> Result<Vec<SessionRef>> {
-                Ok(Vec::new())
+            fn discover(&self) -> Result<crate::Discovered> {
+                Ok(Default::default())
             }
             fn stream(&self, r: &SessionRef, _: &Demand, _: &mut dyn MessageSink) -> Result<Session> {
                 self.0.fetch_add(1, Ordering::Relaxed);
@@ -659,8 +659,8 @@ mod tests {
             fn roots(&self) -> Vec<std::path::PathBuf> {
                 Vec::new()
             }
-            fn discover(&self) -> Result<Vec<SessionRef>> {
-                Ok(Vec::new())
+            fn discover(&self) -> Result<crate::Discovered> {
+                Ok(Default::default())
             }
             fn resume_source(&self, _: &SessionRef) -> std::path::PathBuf {
                 self.0.clone()
@@ -898,8 +898,8 @@ mod tests {
             fn roots(&self) -> Vec<std::path::PathBuf> {
                 Vec::new()
             }
-            fn discover(&self) -> Result<Vec<SessionRef>> {
-                Ok(Vec::new())
+            fn discover(&self) -> Result<crate::Discovered> {
+                Ok(Default::default())
             }
             fn stream(&self, r: &SessionRef, _: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
                 self.calls.fetch_add(1, Ordering::Relaxed);
