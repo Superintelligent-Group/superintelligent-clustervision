@@ -49,8 +49,7 @@ use super::{parse_ts, Adapter};
 use crate::ir::*;
 use crate::json::{JsonSource, JsonView};
 use crate::lazy::Text;
-use crate::stream::Tier;
-use crate::stream::{self, Checkpoint, Flow, MessageSink};
+use crate::stream::{self, Checkpoint, Flow, MessageSink, Tier};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use record::{Demand, Reader};
@@ -426,7 +425,7 @@ pub fn hook_header(path: &Path) -> Result<Option<Session>> {
         ctx: &mut ctx,
         out: &mut out,
         has_events: false,
-        demand: Demand::of(&stream::Demand::RICH),
+        demand: Demand::from(&stream::Demand::RICH),
         source: None,
     };
     read.prefix(1024 * 1024, |line| {
@@ -453,7 +452,7 @@ pub fn parse_str(id: &str, text: &str, is_jsonl: bool, source_path: Option<PathB
     };
     let mut ctx = CodexCtx::default();
     let mut out: Vec<Message> = Vec::new();
-    let demand = Demand::of(&stream::Demand::RICH);
+    let demand = Demand::from(&stream::Demand::RICH);
     if is_jsonl {
         let mut det = EventDetector::default();
         let _ = super::store::jsonl::slice(text.as_bytes(), |line| {
@@ -749,7 +748,7 @@ fn read(
             ctx: &mut ctx,
             out: &mut scratch,
             has_events,
-            demand: Demand::of(opts),
+            demand: opts.into(),
             source: Some(rollout.input.source()),
         }
         .record(view)?;
@@ -969,7 +968,7 @@ fn scan_rollout(path: &Path, full_scan_cap: u64) -> Result<(SessionRef, Option<R
             ctx: &mut ctx,
             out: &mut out,
             has_events: false,
-            demand: Demand::metadata(),
+            demand: (&stream::Demand::DISCOVERY).into(),
             source: None,
         };
         let rollout = Rollout::open(path)?;
@@ -1189,7 +1188,7 @@ mod tests {
             ctx: &mut ctx,
             out: &mut out,
             has_events: false,
-            demand: Demand::metadata(),
+            demand: (&stream::Demand::DISCOVERY).into(),
             source: None,
         };
         jsonl::slice(raw.as_bytes(), |line| {

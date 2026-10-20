@@ -108,7 +108,7 @@ pub(super) fn stream(r: &SessionRef, opts: &stream::Demand, sink: &mut dyn Messa
                 ctx,
                 out,
                 has_events: false,
-                demand: Demand::of(opts),
+                demand: opts.into(),
                 source: Some(source),
             }
         }

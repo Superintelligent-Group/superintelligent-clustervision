@@ -57,26 +57,21 @@ pub(super) struct Demand {
     /// Large bodies stay in the source ([`JsonView::lazy_text`]) and large tool arguments become
     /// checked source JSON.
     pub spans: bool,
-    /// Discovery: only the listing facts (id, cwd, title, timestamps, the writer's version) are
-    /// read; no message, session bag or system prompt is built.
+    /// [`Tier::Discovery`]: only the listing facts (id, cwd, title, timestamps, the writer's
+    /// version) are read; no message, session bag or system prompt is built.
     pub metadata: bool,
 }
 
+impl From<&stream::Demand> for Demand {
+    fn from(demand: &stream::Demand) -> Self {
+        Demand {
+            spans: demand.spans,
+            metadata: demand.tier == Tier::Discovery,
+        }
+    }
+}
+
 impl Demand {
-    pub(super) fn of(opts: &stream::Demand) -> Self {
-        Demand {
-            spans: opts.spans,
-            metadata: false,
-        }
-    }
-
-    pub(super) fn metadata() -> Self {
-        Demand {
-            spans: false,
-            metadata: true,
-        }
-    }
-
     /// A body string by the demand's text rule; None for a nonstring.
     fn text(self, v: JsonView<'_>) -> Result<Option<Text>> {
         if !v.is_string()? {
