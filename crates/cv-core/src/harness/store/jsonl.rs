@@ -680,7 +680,13 @@ mod tests {
             assert_eq!(codec, [(false, true), (blank, false)], "codec, {name}");
 
             let lines = 1 + usize::from(!blank);
-            match crate::derive::transcript(&source, &file, "n", &mut std::io::sink()) {
+            match crate::derive::transcript(
+                &source,
+                &file,
+                "n",
+                crate::harness::claude::IDENTITY,
+                &mut std::io::sink(),
+            ) {
                 Ok(counts) => assert!(blank && counts.lines == 1, "restamp, {name}: {counts:?}"),
                 Err(error) => assert!(
                     !blank

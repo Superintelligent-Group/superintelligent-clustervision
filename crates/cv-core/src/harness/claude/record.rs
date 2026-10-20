@@ -252,7 +252,7 @@ impl Facts {
     /// Facts and body views of one record. A record that is not an object has no facts but its
     /// id spans (a positional `["<id>"]` row is restamped like a keyed one).
     pub(crate) fn parse(view: JsonView<'_>) -> Result<(Self, Body<'_>)> {
-        let ids = crate::restamp::source_id_spans(view)?;
+        let ids = crate::restamp::source_id_spans(view, super::IDENTITY.session_keys)?;
         let Some(Head { top, ty }) = Head::parse(view, Demand::Facts)? else {
             return Ok((Self { ids, ..Self::default() }, Body::default()));
         };

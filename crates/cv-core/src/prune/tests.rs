@@ -1413,6 +1413,7 @@ fn source_reroot_preserves_owned_stamp_order_including_duplicate_ids() {
             },
             true,
             false,
+            &crate::harness::claude::IDENTITY,
         )
         .unwrap();
         selected.root = true;
@@ -1427,6 +1428,7 @@ fn source_reroot_preserves_owned_stamp_order_including_duplicate_ids() {
             &crate::derive::Rewrite {
                 session_id: "new",
                 standalone: false,
+                identity: crate::harness::claude::IDENTITY,
             },
             &mut actual,
         )
@@ -2512,7 +2514,14 @@ fn assert_frozen_plan(key: &str, plan: Option<&SourcePrune>) {
     let actual = if let Some(p) = plan {
         let mut output = Vec::new();
         p.record
-            .with_view(|v| crate::derive::write_modified(v, &p.replacements, "new", false, &mut output))
+            .with_view(|v| {
+                let rewrite = crate::derive::Rewrite {
+                    session_id: "new",
+                    standalone: false,
+                    identity: crate::harness::claude::IDENTITY,
+                };
+                crate::derive::write_modified(v, &p.replacements, &rewrite, &mut output)
+            })
             .unwrap();
         let mut sidecar = Vec::new();
         for payload in &p.payloads {

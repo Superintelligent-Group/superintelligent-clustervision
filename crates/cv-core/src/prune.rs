@@ -426,6 +426,7 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
     }
     let reference = crate::ir::SessionRef::from_path(src_path, crate::ir::Harness::Claude);
     let subagent = crate::rewind::is_subagent(&reference);
+    let identity = crate::derive::identity(reference.harness)?;
     let source = crate::json::JsonSource::capture(src_path)?;
     let file = std::fs::File::open(src_path)?;
     source.check_metadata(file.metadata()?)?;
@@ -610,6 +611,7 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
                 &crate::derive::Rewrite {
                     session_id: &new_id,
                     standalone: subagent,
+                    identity,
                 },
                 &mut scan,
             )?;
@@ -707,6 +709,7 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
             &crate::derive::Rewrite {
                 session_id: &new_id,
                 standalone: subagent,
+                identity,
             },
             &mut scan,
         )?;

@@ -47,6 +47,15 @@ pub struct Claude {
 /// where the store lives ([`super::rootless`]).
 pub(crate) static ROOTLESS: Claude = Claude { entries: Vec::new() };
 
+/// What a derived Claude copy rewrites: `sessionId` (and the `session_id` some hook records
+/// carry), `agentId`/`isSidechain` on a sub-agent line made standalone, `parentUuid` at a re-root.
+pub(crate) const IDENTITY: super::Identity = super::Identity {
+    session_keys: &["sessionId", "session_id"],
+    agent_key: "agentId",
+    sidechain_key: "isSidechain",
+    parent_key: "parentUuid",
+};
+
 /// Files Claude Code keeps at the top of a config dir. A directory that holds one of them but no
 /// `projects/` is a config dir with no sessions yet, not a projects dir: reading it as one would
 /// list its other `.jsonl` files (e.g. `transcripts/*.jsonl`) as sessions.
@@ -176,6 +185,10 @@ fn projects_dir(entry: PathBuf) -> Option<PathBuf> {
 impl Adapter for Claude {
     fn harness(&self) -> Harness {
         Harness::Claude
+    }
+
+    fn identity(&self) -> Option<super::Identity> {
+        Some(IDENTITY)
     }
 
     /// A `.jsonl` transcript only ever grows by appended lines.

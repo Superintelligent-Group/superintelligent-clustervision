@@ -277,7 +277,7 @@ fn execute_after_stage(
         let dir = p.dest.parent().context("destination has no parent dir")?;
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         let mut output = std::io::BufWriter::new(Staged::create(dir, "adopt", 0o600)?);
-        let counts = crate::derive::transcript(&source, &file, &p.into_session, &mut output)
+        let counts = crate::derive::transcript(&source, &file, &p.into_session, super::IDENTITY, &mut output)
             .with_context(|| format!("adopting {}", p.agent.path.display()))?;
         transcript = Some(output.into_inner().map_err(|e| e.into_error())?);
         if let (Some(src), Some(dest)) = (&p.agent.meta_path, &p.dest_meta) {
@@ -291,7 +291,7 @@ fn execute_after_stage(
         }
         counts
     } else {
-        crate::derive::transcript(&source, &file, &p.into_session, &mut std::io::sink())
+        crate::derive::transcript(&source, &file, &p.into_session, super::IDENTITY, &mut std::io::sink())
             .with_context(|| format!("adopting {}", p.agent.path.display()))?
     };
     after_stage()?;

@@ -586,6 +586,7 @@ fn rewind_session_after_scan(
             r.harness
         );
     }
+    let identity = crate::derive::identity(r.harness)?;
     let (source_guard, file) =
         PrefixReadGuard::capture(&r.path).with_context(|| format!("reading {}", r.path.display()))?;
     let size = source_guard.source.len();
@@ -766,33 +767,34 @@ fn rewind_session_after_scan(
         // Only JSON whitespace is an empty physical record, copied verbatim; the selector refuses
         // any other range that is not one JSON value, a line the new session could not read back,
         // before anything is published (akapug, #27).
-        let mut selected = match crate::derive::Select::read(&source_guard.source, &file, range, newline, false) {
-            Ok(selected) => selected,
-            Err(error) if error.is::<crate::json::InvalidJson>() => {
-                // Past an explicit cut only a record that closes an open call is copied, and a
-                // line that does not parse closes nothing: it is omitted like any other.
-                if phase == Phase::Closing {
-                    omitted_lines += 1;
-                    omitted_bytes += n;
-                    continue;
-                }
-                // The captured prefix can end inside a record the session is still appending.
-                let why = if range.offset + range.len == size && !newline {
-                    format!(
-                        "is unterminated at the end of the {size} bytes captured; if the session is still \
+        let mut selected =
+            match crate::derive::Select::read(&source_guard.source, &file, range, newline, false, &identity) {
+                Ok(selected) => selected,
+                Err(error) if error.is::<crate::json::InvalidJson>() => {
+                    // Past an explicit cut only a record that closes an open call is copied, and a
+                    // line that does not parse closes nothing: it is omitted like any other.
+                    if phase == Phase::Closing {
+                        omitted_lines += 1;
+                        omitted_bytes += n;
+                        continue;
+                    }
+                    // The captured prefix can end inside a record the session is still appending.
+                    let why = if range.offset + range.len == size && !newline {
+                        format!(
+                            "is unterminated at the end of the {size} bytes captured; if the session is still \
                          being written, rerun the rewind; if it was cut short, repair it"
-                    )
-                } else {
-                    "is not a complete JSON record; repair it".into()
-                };
-                drop(writer.take());
-                bail!(
-                    "{}: line {line_no} {why} or cut before it with `--at <MSG_IDX>`",
-                    r.path.display()
-                );
-            }
-            Err(error) => return Err(error),
-        };
+                        )
+                    } else {
+                        "is not a complete JSON record; repair it".into()
+                    };
+                    drop(writer.take());
+                    bail!(
+                        "{}: line {line_no} {why} or cut before it with `--at <MSG_IDX>`",
+                        r.path.display()
+                    );
+                }
+                Err(error) => return Err(error),
+            };
         if let Some(record) = &selected.record {
             let facts = record.with_view(|view| Ok(Facts::parse(view)?.0))?;
             if source_session_id.is_none() {
@@ -841,6 +843,7 @@ fn rewind_session_after_scan(
         let rewrite = crate::derive::Rewrite {
             session_id: &new_id,
             standalone: subagent,
+            identity,
         };
         let selected = std::iter::once(Ok(selected));
         let counts = if thinking == crate::emit::ThinkingMode::Portable {

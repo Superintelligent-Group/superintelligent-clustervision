@@ -65,16 +65,19 @@ pub fn restamp_line(line: &str, new_id: &str) -> Option<String> {
 }
 
 /// Selected during strict producer validation; preserve derived-struct id acceptance.
-pub(crate) fn source_id_spans(view: crate::json::JsonView<'_>) -> anyhow::Result<Vec<(u64, u64)>> {
+pub(crate) fn source_id_spans(
+    view: crate::json::JsonView<'_>,
+    keys: &[&'static str],
+) -> anyhow::Result<Vec<(u64, u64)>> {
     use crate::harness::store::document::{Fields, InvalidStruct};
-    let ids = match Fields::parse_struct(view, &["sessionId", "session_id"]) {
+    let ids = match Fields::parse_struct(view, keys) {
         Ok(Some(ids)) => ids,
         Ok(None) => return Ok(Vec::new()),
         Err(e) if e.is::<InvalidStruct>() => return Ok(Vec::new()),
         Err(e) => return Err(e),
     };
     let mut spans = Vec::new();
-    for key in ["sessionId", "session_id"] {
+    for key in keys {
         if let Some(value) = ids.get(key) {
             if value.is_string()? {
                 let (offset, len) = value
@@ -187,7 +190,8 @@ mod tests {
         let mut spans = if len == 0 {
             Vec::new()
         } else {
-            match source.read_range_syntax(offset, len, source_id_spans) {
+            let keys = crate::harness::claude::IDENTITY.session_keys;
+            match source.read_range_syntax(offset, len, |view| source_id_spans(view, keys)) {
                 Ok(spans) => spans,
                 Err(e) if e.is::<crate::json::InvalidJson>() || e.is::<InvalidStruct>() => Vec::new(),
                 Err(e) => return Err(e),
@@ -217,7 +221,14 @@ mod tests {
             let file = std::fs::File::open(&path).unwrap();
             let expected = restamp(original, "new\"id\\λ");
             let mut actual = Vec::new();
-            let counts = write_restamped_transcript(&source, &file, "new\"id\\λ", &mut actual).unwrap();
+            let counts = write_restamped_transcript(
+                &source,
+                &file,
+                "new\"id\\λ",
+                crate::harness::claude::IDENTITY,
+                &mut actual,
+            )
+            .unwrap();
             assert_eq!(actual, expected.body.as_bytes());
             assert_eq!(
                 counts,
@@ -236,7 +247,9 @@ mod tests {
             let source = crate::json::JsonSource::capture(&path).unwrap();
             let file = std::fs::File::open(&path).unwrap();
             let mut actual = Vec::new();
-            let error = write_restamped_transcript(&source, &file, "new", &mut actual).unwrap_err();
+            let error =
+                write_restamped_transcript(&source, &file, "new", crate::harness::claude::IDENTITY, &mut actual)
+                    .unwrap_err();
             assert!(error.is::<crate::json::InvalidJson>(), "{error:#}");
             assert!(
                 error.to_string().contains(&format!("byte {}", small.len() + 1)),

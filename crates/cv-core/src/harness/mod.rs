@@ -163,6 +163,19 @@ pub struct EmitResult {
     pub resume_hint: Option<String>,
 }
 
+/// The keys of a native record that carry its identity, as a derived copy rewrites them
+/// ([`Adapter::identity`]): the session id is restamped, a standalone copy of a sub-agent
+/// transcript drops the agent id and clears the sidechain flag, and a re-rooted record's parent
+/// link is nulled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Identity {
+    /// Top-level keys whose string value is the session id.
+    pub session_keys: &'static [&'static str],
+    pub agent_key: &'static str,
+    pub sidechain_key: &'static str,
+    pub parent_key: &'static str,
+}
+
 /// A harness adapter: where a harness keeps its sessions ([`roots`](Adapter::roots)), how to list
 /// them cheaply ([`discover`](Adapter::discover)), and how to read one as a message stream
 /// ([`stream`](Adapter::stream)). Implementors live in submodules and are registered in [`all`].
@@ -280,6 +293,12 @@ pub trait Adapter: Send + Sync {
     // The facts below are what a shared module asks instead of naming a harness
     // (`docs/INTERFACE-V2.md` §4). Each default is "no opinion"; none depends on the adapter's
     // roots, so a shared module asks them of [`rootless`] without detecting a store.
+
+    /// The native keys a derived copy of a session (`cv prune`, `cv rewind`, `cv adopt`) rewrites,
+    /// for the shared writer in `derive`. Default: none; the harness has no derived copies.
+    fn identity(&self) -> Option<Identity> {
+        None
+    }
 
     /// The deferred-tool wrapper this store's reader leaves in its calls, for
     /// [`crate::affordance::AffordanceSink`] to unwrap. Default: the reader leaves none.

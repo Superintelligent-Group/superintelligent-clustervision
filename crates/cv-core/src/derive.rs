@@ -1,6 +1,8 @@
 //! Lossless native-record derivation: selectors choose checked source ranges and replacement
 //! nodes; one writer applies identity/standalone changes and preserves every untouched byte.
 use crate::harness::store::jsonl::ranges::{self, Range};
+use crate::harness::Identity;
+use crate::ir::Harness;
 use crate::json::{Json, JsonSource};
 use anyhow::Result;
 use serde_json::Value;
@@ -44,8 +46,20 @@ impl std::fmt::Display for Malformed {
 }
 
 impl Select {
-    pub fn read(source: &JsonSource, file: &std::fs::File, range: Range, newline: bool, syntax: bool) -> Result<Self> {
-        let read = |view: crate::json::JsonView<'_>| Ok((view.to_json()?, crate::restamp::source_id_spans(view)?));
+    pub fn read(
+        source: &JsonSource,
+        file: &std::fs::File,
+        range: Range,
+        newline: bool,
+        syntax: bool,
+        identity: &Identity,
+    ) -> Result<Self> {
+        let read = |view: crate::json::JsonView<'_>| {
+            Ok((
+                view.to_json()?,
+                crate::restamp::source_id_spans(view, identity.session_keys)?,
+            ))
+        };
         let projected = if syntax {
             source.read_range_syntax(range.offset, range.len, read)
         } else {
@@ -76,6 +90,15 @@ impl Select {
 pub(crate) struct Rewrite<'a> {
     pub session_id: &'a str,
     pub standalone: bool,
+    pub identity: Identity,
+}
+
+/// The identity keys `harness`'s adapter declares, or an error naming a harness with no
+/// derived copies.
+pub(crate) fn identity(harness: Harness) -> Result<Identity> {
+    crate::harness::rootless(harness)
+        .and_then(|adapter| adapter.identity())
+        .ok_or_else(|| anyhow::anyhow!("{harness} sessions have no derived copies"))
 }
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Counts {
@@ -131,12 +154,18 @@ pub(crate) fn derive(
             .as_ref()
             .filter(|_| rewrite.standalone || selection.root)
         {
+            let keys = &rewrite.identity;
             record.with_view(|view| {
                 normalize = rewrite.standalone
-                    && (view.get("agentId")?.is_some()
-                        || view.get("isSidechain")?.map(|v| v.as_bool()).transpose()?.flatten() == Some(true));
+                    && (view.get(keys.agent_key)?.is_some()
+                        || view
+                            .get(keys.sidechain_key)?
+                            .map(|v| v.as_bool())
+                            .transpose()?
+                            .flatten()
+                            == Some(true));
                 if selection.root {
-                    if let Some(parent) = view.get("parentUuid")? {
+                    if let Some(parent) = view.get(keys.parent_key)? {
                         if !parent.is_null()? {
                             selection.replacements.push((parent.to_json()?, Value::Null));
                         }
@@ -152,13 +181,7 @@ pub(crate) fn derive(
                 .expect("replacements require a checked record");
             let stamped = record.with_view(|view| {
                 if normalize || payload_rewrite {
-                    write_modified(
-                        view,
-                        &selection.replacements,
-                        rewrite.session_id,
-                        rewrite.standalone,
-                        &mut output,
-                    )
+                    write_modified(view, &selection.replacements, rewrite, &mut output)
                 } else {
                     // A pure reroot keeps the producer's accepted id roster (duplicate known fields reject restamp).
                     for &(start, end) in &selection.ids {
@@ -196,10 +219,10 @@ pub(crate) fn derive(
 pub(crate) fn write_modified(
     view: crate::json::JsonView<'_>,
     replacements: &[(Json, Value)],
-    new_id: &str,
-    standalone: bool,
+    rewrite: &Rewrite<'_>,
     writer: &mut impl Write,
 ) -> Result<bool> {
+    let (keys, standalone) = (&rewrite.identity, rewrite.standalone);
     if !view.is_object()? {
         view.write_canonical_replacing(replacements, writer)?;
         return Ok(false);
@@ -208,7 +231,7 @@ pub(crate) fn write_modified(
     let mut first = true;
     let mut stamped = false;
     view.for_each_entry(|key, child| {
-        if standalone && key == "agentId" {
+        if standalone && key == keys.agent_key {
             return Ok(());
         }
         if !first {
@@ -217,10 +240,10 @@ pub(crate) fn write_modified(
         first = false;
         serde_json::to_writer(&mut *writer, key)?;
         writer.write_all(b":")?;
-        if standalone && key == "isSidechain" && child.as_bool()? == Some(true) {
+        if standalone && key == keys.sidechain_key && child.as_bool()? == Some(true) {
             writer.write_all(b"false")?;
-        } else if matches!(key, "sessionId" | "session_id") && child.is_string()? {
-            serde_json::to_writer(&mut *writer, new_id)?;
+        } else if keys.session_keys.contains(&key) && child.is_string()? {
+            serde_json::to_writer(&mut *writer, rewrite.session_id)?;
             stamped = true;
         } else {
             child.write_canonical_replacing(replacements, writer)?;
@@ -236,6 +259,7 @@ pub(crate) fn transcript(
     source: &JsonSource,
     file: &std::fs::File,
     new_id: &str,
+    identity: Identity,
     output: &mut impl Write,
 ) -> Result<Counts> {
     let selected = ranges::records(
@@ -252,7 +276,7 @@ pub(crate) fn transcript(
                 std::io::Error::new(std::io::ErrorKind::InvalidData, "stream did not contain valid UTF-8").into(),
             );
         }
-        Select::read(source, file, range, newline, true)
+        Select::read(source, file, range, newline, true, &identity)
     });
     derive(
         source,
@@ -261,6 +285,7 @@ pub(crate) fn transcript(
         &Rewrite {
             session_id: new_id,
             standalone: false,
+            identity,
         },
         output,
     )
