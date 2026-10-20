@@ -2,7 +2,7 @@
 use super::*;
 use crate::{
     harness::{
-        store::{bytes::ByteStage, publish_stage},
+        store::bytes::ByteStage,
         wire::write::{text, ObjectWriter},
     },
     ir_json::PrettyJson,
@@ -10,15 +10,14 @@ use crate::{
 };
 use std::io::{BufWriter, Write};
 
+/// The checked transcript bytes, staged for publication.
 pub(super) fn transcript(
     session: &Session,
     id: &str,
     title: Option<&str>,
     cwd: Option<&str>,
-    path: &Path,
     mode: crate::emit::ThinkingMode,
-    claim: crate::publish::Claim,
-) -> Result<()> {
+) -> Result<ByteStage> {
     let resolver = Resolver::new(session.source_path.clone());
     let mut stage = BufWriter::with_capacity(64 * 1024, ByteStage::new());
     {
@@ -69,8 +68,7 @@ pub(super) fn transcript(
         })?;
         root.finish()?;
     }
-    let stage = stage.into_inner().map_err(|e| e.into_error())?;
-    publish_stage(stage, path, claim)
+    Ok(stage.into_inner().map_err(|e| e.into_error())?)
 }
 /// Continue's OpenAI usage counts include cache reads in the prompt total.
 pub(super) fn native_usage(usage: &Usage, model: Option<&str>) -> Result<Map<String, Value>> {
@@ -593,15 +591,8 @@ fn wide_grouped_tool_results_preserve_each_item_and_empty_context() -> Result<()
         });
         session.messages.push(tool);
         let path = world.base.join(format!("wide-{count}.json"));
-        transcript(
-            &session,
-            "copy",
-            None,
-            None,
-            &path,
-            crate::emit::ThinkingMode::Native,
-            crate::publish::Claim::New,
-        )?;
+        let stage = transcript(&session, "copy", None, None, crate::emit::ThinkingMode::Native)?;
+        crate::harness::store::publish_stage(stage, &path, crate::publish::Claim::New)?;
         let actual: Value = serde_json::from_slice(&fs::read(path)?)?;
         assert_eq!(actual, json!({"sessionId":"copy","history":expected}));
     }

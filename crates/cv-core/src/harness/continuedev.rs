@@ -292,15 +292,9 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &crate::emit::EmitOptions) 
     let resolver = crate::lazy::Resolver::new(session.source_path.clone());
     let title = super::wire::write::fallback_title(session, &resolver)?;
     let file_path = out_dir.join(format!("{new_id}.json"));
-    emit::transcript(
-        session,
-        &new_id,
-        title.as_deref(),
-        cwd_str.as_deref(),
-        &file_path,
-        opts.thinking,
-        opts.claim(),
-    )?;
+    let mut set = crate::publish::Set::new();
+    let transcript = emit::transcript(session, &new_id, title.as_deref(), cwd_str.as_deref(), opts.thinking)?;
+    super::store::stage_into(&mut set, transcript, &file_path, opts.claim())?;
 
     // ── index: sessions.json (merge-or-create) ──
     // Drop any stale entry for this id, then append a fresh one.
@@ -323,8 +317,10 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &crate::emit::EmitOptions) 
     entries.push(Value::Object(entry));
     let mut stage = super::store::bytes::ByteStage::new();
     serde_json::to_writer_pretty(&mut stage, &entries)?;
-    // Continue's own index: cv's update replaces it whole.
-    super::store::publish_stage(stage, &index_path, crate::publish::Claim::Replace)?;
+    // Continue's own index: cv's update replaces it whole. Transcript and index publish as one
+    // set, the index last: a crash between leaves an unlisted transcript.
+    super::store::stage_into(&mut set, stage, &index_path, crate::publish::Claim::Replace)?;
+    set.publish()?;
 
     Ok(super::EmitResult {
         path: file_path,

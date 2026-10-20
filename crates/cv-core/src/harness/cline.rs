@@ -826,7 +826,9 @@ pub fn emit_with_harness(
     let task_dir = out_dir.join("tasks").join(&new_id);
     fs::create_dir_all(&task_dir).with_context(|| format!("creating {}", task_dir.display()))?;
     let history_path = task_dir.join("api_conversation_history.json");
-    super::store::publish_stage(stage, &history_path, opts.claim())?;
+    // The three files publish as one set, the transcript last: discovery finds a task by its
+    // transcript, so a crash midway leaves nothing listed.
+    let mut set = crate::publish::Set::new();
 
     // ── task_metadata.json (cwd + model hints; sidecar the parser falls back to for cwd) ──
     let mut meta = Map::new();
@@ -839,7 +841,7 @@ pub fn emit_with_harness(
     }
     let meta_path = task_dir.join("task_metadata.json");
     let meta = serde_json::to_string_pretty(&Value::Object(meta))?;
-    crate::publish::publish_reader(&meta_path, "stage", meta.as_bytes(), opts.claim())?;
+    set.stage(&meta_path, "stage", meta.as_bytes(), opts.claim())?;
 
     // ── ui_messages.json (minimal event log carrying created/updated timestamps) ──
     let created_ms = created.timestamp_millis();
@@ -859,7 +861,9 @@ pub fn emit_with_harness(
     }
     let ui_path = task_dir.join("ui_messages.json");
     let ui = serde_json::to_string_pretty(&Value::Array(ui))?;
-    crate::publish::publish_reader(&ui_path, "stage", ui.as_bytes(), opts.claim())?;
+    set.stage(&ui_path, "stage", ui.as_bytes(), opts.claim())?;
+    super::store::stage_into(&mut set, stage, &history_path, opts.claim())?;
+    set.publish()?;
 
     let resume = match &cwd {
         Some(c) => format!(
@@ -1040,6 +1044,39 @@ mod tests {
             task_roots(ROO_EXT_IDS, ".roo"),
             vec![storage.join(ROO_EXT_IDS[0]).join("tasks")]
         );
+    }
+
+    /// The task's three files are one publication: the transcript's claim fails after the
+    /// metadata and UI log were claimed (a directory holds its name), and every name is left as
+    /// it was, replaced files (`--force`) included.
+    #[test]
+    fn task_files_publish_together_or_not_at_all() {
+        let world = crate::test_world("cline-emit-set");
+        let mut source = Session::new("source", Harness::Claude);
+        source.messages.push(Message::new(Role::User));
+        for force in [false, true] {
+            let out = world.base.join(format!("out-{force}"));
+            let task = out.join("tasks/fixed");
+            fs::create_dir_all(task.join("api_conversation_history.json")).unwrap();
+            if force {
+                fs::write(task.join("task_metadata.json"), "old metadata").unwrap();
+                fs::write(task.join("ui_messages.json"), "old ui").unwrap();
+            }
+            let opts = crate::emit::EmitOptions {
+                new_id: Some("fixed".into()),
+                force,
+                ..Default::default()
+            };
+            assert!(emit(&source, &out, &opts).is_err());
+            assert_eq!(fs::read_dir(&task).unwrap().count(), 1 + 2 * force as usize);
+            if force {
+                assert_eq!(
+                    fs::read_to_string(task.join("task_metadata.json")).unwrap(),
+                    "old metadata"
+                );
+                assert_eq!(fs::read_to_string(task.join("ui_messages.json")).unwrap(), "old ui");
+            }
+        }
     }
 
     #[test]
