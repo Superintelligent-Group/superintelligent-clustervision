@@ -96,10 +96,10 @@
 - **Breaking:** `cv deferrals --since <msg>` is `--at <msg>` (`--since` is a duration on `lanes`); the old spelling exits 2 with a pointer.
 - **Breaking:** `cv dataset --out <path>` is `--file <path>` (`--out` is a directory everywhere else); the old spelling exits 2 with a pointer.
 - `cv watch --interval` takes seconds as a number like `scry`; a negative `--interval` on either exits 2 instead of clamping.
-- **Breaking:** `cv tools --agent` takes an exact id or a unique prefix on every view; none or several matches exit 2. `--across` with `--agent`, `--tool` or `--timeline` exits 2.
+- **Breaking:** `cv tools --agent` takes an exact id or unique prefix on every view, else exits 2; `--across` with `--agent`, `--tool` or `--timeline` exits 2.
 - `cv pack --format` is checked by the parser: an unknown value exits 2 and names the choices (`md`, `prompt`, `session`).
-- **Breaking:** `cv task events --kind` (and `GET /api/events?kind=`) with an unknown kind exits 2 (400) naming the known kinds; it listed nothing.
-- **Breaking:** `cv workflow` exits 2 for flags it used to drop: `--script`, `--results`, `--follow`, `--revive` with no run named; `--revive-all` without `--revive`; `--revive` with `--json`.
+- **Breaking:** an unknown `cv task events --kind` (or `/api/events?kind=`) exits 2 (400) naming the known kinds; it used to list nothing.
+- **Breaking:** `cv workflow` exits 2 where it dropped flags: run-only flags with no run named, `--revive-all` without `--revive`, `--revive` with `--json`.
 - `cv search` no longer mentions a leftover `index.sqlite`; the sqlite full-text index was retired long ago.
 
 **Tooling and CI.**
