@@ -50,6 +50,7 @@ pub const CLEARED_ENV: &[&str] = &[
     "CLINE_DATA_DIR",
     "CLINE_DIR",
     "CV_EXPORTS",
+    "CLAURDVOYANT_HOME",
     "CLAURDVOYANT_MAX_STALE_SECS",
     "CV_PACK_LLM",
     "CV_SERVE_TOKEN",

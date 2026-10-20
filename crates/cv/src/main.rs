@@ -1183,6 +1183,14 @@ fn run() -> Result<()> {
         Ok(cli) => cli,
         Err(e) => e.exit(),
     };
+    for (old, new) in [
+        ("CLAURDVOYANT_HOME", "CLUSTERVISION_HOME"),
+        ("CLAURDVOYANT_MAX_STALE_SECS", "CLUSTERVISION_MAX_STALE_SECS"),
+    ] {
+        if cv_core::env::var_os(old).is_some() {
+            return usage(format!("`${old}` was removed in 0.18.0 — use `${new}`; unset `${old}`"));
+        }
+    }
     let mcp_tree = retain_mcp_tree(tree, &cli);
     // Long-running services scope reuse per request/poll, so cold private snapshots do not
     // survive idle server time. Ordinary commands share one cache across their session reads.

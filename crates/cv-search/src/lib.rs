@@ -211,24 +211,11 @@ impl Searcher {
 }
 
 /// Root directory for cv-search's on-disk state: `$CLUSTERVISION_HOME` or `~/.clustervision`.
-///
-/// Back-compat: the project was once "claurdvoyant", so we still honor `$CLAURDVOYANT_HOME` and an
-/// existing `~/.claurdvoyant` (kept only if the new dir hasn't been created) — so a previously-built
-/// index/embedding store isn't orphaned by the rename.
 pub fn home_dir() -> PathBuf {
-    if let Some(v) = cv_core::env::var_os("CLUSTERVISION_HOME").or_else(|| cv_core::env::var_os("CLAURDVOYANT_HOME")) {
+    if let Some(v) = cv_core::env::var_os("CLUSTERVISION_HOME") {
         return PathBuf::from(v);
     }
-    let Some(home) = cv_core::env::home_dir() else {
-        return PathBuf::from(".");
-    };
-    let new = home.join(".clustervision");
-    let legacy = home.join(".claurdvoyant");
-    if !new.exists() && legacy.exists() {
-        legacy
-    } else {
-        new
-    }
+    cv_core::env::home_dir().map_or_else(|| PathBuf::from("."), |home| home.join(".clustervision"))
 }
 
 /// Default location of the tantivy full-text index.

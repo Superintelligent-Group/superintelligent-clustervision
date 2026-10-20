@@ -246,7 +246,6 @@ pub fn cataloged_sessions() -> Vec<SessionRef> {
 /// escalate to a second full scan).
 fn sessions_impl() -> (Vec<SessionRef>, bool) {
     let max_stale = env::var("CLUSTERVISION_MAX_STALE_SECS")
-        .or_else(|_| env::var("CLAURDVOYANT_MAX_STALE_SECS")) // back-compat with the old name
         .ok()
         .and_then(|s| s.parse::<i64>().ok())
         .unwrap_or(900);

@@ -90,20 +90,11 @@ mod imp {
     }
 
     pub(crate) fn db_path() -> Option<PathBuf> {
-        // Back-compat: also honor the legacy `$CLAURDVOYANT_HOME` / `claurdvoyant` cache dir so a
-        // catalog built before the rename keeps being used.
         let env = crate::env::Env::current();
         let dir = env
             .var_os("CLUSTERVISION_HOME")
-            .or_else(|| env.var_os("CLAURDVOYANT_HOME"))
             .map(PathBuf::from)
-            .or_else(|| {
-                let cache = env.cache_dir()?;
-
-                let new = cache.join("clustervision");
-                let legacy = cache.join("claurdvoyant");
-                Some(if !new.exists() && legacy.exists() { legacy } else { new })
-            })?;
+            .or_else(|| Some(env.cache_dir()?.join("clustervision")))?;
         let _ = std::fs::create_dir_all(&dir);
         Some(dir.join("catalog.db"))
     }

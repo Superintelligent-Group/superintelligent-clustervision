@@ -20,15 +20,8 @@ pub struct Config {
 }
 
 /// `$XDG_CONFIG_HOME/clustervision` (or `~/.config/clustervision`). `None` only if there's no home.
-///
-/// Back-compat: if the legacy `…/claurdvoyant` dir still exists and the new one hasn't been created,
-/// keep using it — so registered export sources survive the rename without a manual move.
 pub fn config_dir() -> Option<PathBuf> {
-    let base = crate::env::Env::current().config_home()?;
-
-    let new = base.join("clustervision");
-    let legacy = base.join("claurdvoyant");
-    Some(if !new.exists() && legacy.exists() { legacy } else { new })
+    Some(crate::env::Env::current().config_home()?.join("clustervision"))
 }
 
 /// The config file path.

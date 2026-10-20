@@ -89,6 +89,7 @@
 - `tests/announce.rs` pins it: every command on a pipe exits within 5 s or is a daemon that announced within 1 s.
 
 **Removed.**
+- **Breaking:** `$CLAURDVOYANT_HOME` and `$CLAURDVOYANT_MAX_STALE_SECS` exit 2 with a pointer to the `CLUSTERVISION_` names; the `claurdvoyant` config, cache and home directories are no longer read.
 - `cv search` no longer mentions a leftover `index.sqlite`; the sqlite full-text index was retired long ago.
 
 **Tooling and CI.**
