@@ -55,6 +55,10 @@ pub struct Continue {
     sessions: Option<PathBuf>,
 }
 
+/// This adapter with no roots: it discovers nothing and answers every fact that does not depend on
+/// where the store lives ([`super::rootless`]).
+pub(crate) static ROOTLESS: Continue = Continue { sessions: None };
+
 impl Continue {
     pub fn detect() -> Self {
         let root = crate::env::var_os("CONTINUE_GLOBAL_DIR")

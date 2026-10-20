@@ -50,6 +50,10 @@ pub struct LmStudio {
     root: Option<PathBuf>,
 }
 
+/// This adapter with no roots: it discovers nothing and answers every fact that does not depend on
+/// where the store lives ([`super::rootless`]).
+pub(crate) static ROOTLESS: LmStudio = LmStudio { root: None };
+
 impl LmStudio {
     /// Read an explicit conversations directory, without consulting installed harness homes.
     pub fn with_root(conversations: &Path) -> Self {

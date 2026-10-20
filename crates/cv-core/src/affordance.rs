@@ -409,6 +409,14 @@ pub fn spawn_returns(h: Harness, name: &str) -> Option<Returns> {
 /// IR the call is the inner tool's, with this namespace.
 pub const DEFERRED: &str = "tool_call";
 
+/// The keys of a store's deferred-tool wrapper ([`DEFERRED`]): the inner tool's name and its
+/// arguments ([`crate::harness::Adapter::deferred_wrapper`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeferredWrapper {
+    pub name_key: &'static str,
+    pub args_key: &'static str,
+}
+
 /// The `(name key, arguments key)` of `h`'s deferred-tool wrapper.
 pub(crate) fn deferred_keys(h: Harness) -> (&'static str, &'static str) {
     match h {

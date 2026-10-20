@@ -160,6 +160,10 @@ pub struct Devin {
     root: PathBuf,
 }
 
+/// This adapter with no roots: it discovers nothing and answers every fact that does not depend on
+/// where the store lives ([`super::rootless`]).
+pub(crate) static ROOTLESS: Devin = Devin { root: PathBuf::new() };
+
 impl Devin {
     pub fn detect() -> Self {
         // The literal path Devin CLI uses (even on macOS — not Application Support): the XDG data

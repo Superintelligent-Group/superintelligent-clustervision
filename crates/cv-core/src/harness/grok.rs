@@ -54,6 +54,10 @@ pub struct Grok {
     root: Option<PathBuf>,
 }
 
+/// This adapter with no roots: it discovers nothing and answers every fact that does not depend on
+/// where the store lives ([`super::rootless`]).
+pub(crate) static ROOTLESS: Grok = Grok { root: None };
+
 impl Grok {
     pub fn detect() -> Self {
         let root = crate::env::home_dir().map(|h| h.join(".grok").join("sessions"));

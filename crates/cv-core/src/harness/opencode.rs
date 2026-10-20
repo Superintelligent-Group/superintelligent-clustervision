@@ -79,6 +79,10 @@ pub struct OpenCode {
     db: Option<PathBuf>,
 }
 
+/// This adapter with no roots: it discovers nothing and answers every fact that does not depend on
+/// where the store lives ([`super::rootless`]).
+pub(crate) static ROOTLESS: OpenCode = OpenCode { root: None, db: None };
+
 impl OpenCode {
     pub fn detect() -> Self {
         let data = data_dir();

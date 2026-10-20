@@ -70,6 +70,10 @@ pub struct Zed {
     db: Option<PathBuf>,
 }
 
+/// This adapter with no roots: it discovers nothing and answers every fact that does not depend on
+/// where the store lives ([`super::rootless`]).
+pub(crate) static ROOTLESS: Zed = Zed { db: None };
+
 impl Zed {
     pub fn detect() -> Self {
         Zed { db: threads_db() }

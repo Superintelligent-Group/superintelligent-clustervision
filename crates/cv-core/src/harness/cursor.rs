@@ -47,6 +47,13 @@ pub struct Cursor {
     cli_home: Option<PathBuf>,
 }
 
+/// This adapter with no roots: it discovers nothing and answers every fact that does not depend on
+/// where the store lives ([`super::rootless`]).
+pub(crate) static ROOTLESS: Cursor = Cursor {
+    user_dir: None,
+    cli_home: None,
+};
+
 impl Cursor {
     pub fn detect() -> Self {
         // CURSOR_USER_DIR overrides the platform default (used by tests / non-mac).

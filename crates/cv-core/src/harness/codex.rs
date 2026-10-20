@@ -105,6 +105,10 @@ pub struct Codex {
     roots: Vec<PathBuf>,
 }
 
+/// This adapter with no roots: it discovers nothing and answers every fact that does not depend on
+/// where the store lives ([`super::rootless`]).
+pub(crate) static ROOTLESS: Codex = Codex { roots: Vec::new() };
+
 impl Codex {
     pub fn detect() -> Self {
         // Codex resolves its home as `$CODEX_HOME`, else `~/.codex` (codex-rs/utils/home-dir/src/lib.rs

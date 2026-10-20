@@ -177,6 +177,10 @@ pub struct Hermes {
     dbs: Vec<PathBuf>,
 }
 
+/// This adapter with no roots: it discovers nothing and answers every fact that does not depend on
+/// where the store lives ([`super::rootless`]).
+pub(crate) static ROOTLESS: Hermes = Hermes { dbs: Vec::new() };
+
 impl Hermes {
     pub fn detect() -> Self {
         // HERMES_HOME overrides ~/.hermes.

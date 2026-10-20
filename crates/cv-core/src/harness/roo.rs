@@ -26,6 +26,10 @@ pub struct Roo {
     roots: Vec<PathBuf>,
 }
 
+/// This adapter with no roots: it discovers nothing and answers every fact that does not depend on
+/// where the store lives ([`super::rootless`]).
+pub(crate) static ROOTLESS: Roo = Roo { roots: Vec::new() };
+
 impl Roo {
     pub fn detect() -> Self {
         let mut roots = task_roots(ROO_EXT_IDS, ".roo");

@@ -45,6 +45,13 @@ pub struct Qwen {
     projects: Option<PathBuf>,
 }
 
+/// This adapter with no roots: it discovers nothing and answers every fact that does not depend on
+/// where the store lives ([`super::rootless`]).
+pub(crate) static ROOTLESS: Qwen = Qwen {
+    root: None,
+    projects: None,
+};
+
 impl Qwen {
     pub fn detect() -> Self {
         match crate::env::home_dir() {

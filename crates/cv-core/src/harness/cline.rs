@@ -71,6 +71,13 @@ pub struct Cline {
     sdk_roots: Vec<PathBuf>,
 }
 
+/// This adapter with no roots: it discovers nothing and answers every fact that does not depend on
+/// where the store lives ([`super::rootless`]).
+pub(crate) static ROOTLESS: Cline = Cline {
+    roots: Vec::new(),
+    sdk_roots: Vec::new(),
+};
+
 impl Cline {
     pub fn detect() -> Self {
         Cline {

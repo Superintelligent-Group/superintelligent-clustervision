@@ -110,6 +110,10 @@ pub struct KimiCode {
     root: Option<PathBuf>,
 }
 
+/// This adapter with no roots: it discovers nothing and answers every fact that does not depend on
+/// where the store lives ([`super::rootless`]).
+pub(crate) static ROOTLESS: KimiCode = KimiCode { root: None };
+
 impl KimiCode {
     pub fn detect() -> Self {
         let root = crate::env::var_os("KIMI_CODE_HOME")

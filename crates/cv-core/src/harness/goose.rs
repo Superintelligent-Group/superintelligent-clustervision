@@ -133,6 +133,10 @@ pub struct Goose {
     dir: Option<PathBuf>,
 }
 
+/// This adapter with no roots: it discovers nothing and answers every fact that does not depend on
+/// where the store lives ([`super::rootless`]).
+pub(crate) static ROOTLESS: Goose = Goose { dir: None };
+
 impl Goose {
     pub fn detect() -> Self {
         Goose { dir: sessions_dir() }

@@ -140,6 +140,10 @@ pub struct OpenClaw {
     roots: Vec<PathBuf>,
 }
 
+/// This adapter with no roots: it discovers nothing and answers every fact that does not depend on
+/// where the store lives ([`super::rootless`]).
+pub(crate) static ROOTLESS: OpenClaw = OpenClaw { roots: Vec::new() };
+
 impl OpenClaw {
     pub fn detect() -> Self {
         let mut roots = Vec::new();

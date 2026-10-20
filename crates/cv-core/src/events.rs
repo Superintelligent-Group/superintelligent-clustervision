@@ -322,6 +322,18 @@ impl EventExtractor {
     }
 }
 
+/// A file edit a harness record states outside its tool blocks
+/// ([`crate::harness::Adapter::native_edit`]): one `file_edit` event per path, under `tool`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeEdit<'m> {
+    /// The edit's own id, which a tool call that already produced its events carries too.
+    pub id: Option<&'m str>,
+    /// The tool the edit is attributed to.
+    pub tool: &'static str,
+    /// Every path the edit touches (sources and move destinations), as the record spells them.
+    pub paths: Vec<&'m str>,
+}
+
 pub(crate) fn extract_into(m: &Message, msg_idx: usize, cwd: Option<&Path>, out: &mut Vec<Event>) -> Result<()> {
     EventExtractor::default().extract(m, msg_idx, cwd, None, out)
 }

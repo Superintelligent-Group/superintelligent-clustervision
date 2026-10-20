@@ -1,7 +1,7 @@
 //! Per-harness adapters: discover sessions on disk, parse them into the IR, and (optionally)
 //! emit the IR back into a harness's native format for cross-harness porting.
 
-use crate::ir::{Harness, Session, SessionRef};
+use crate::ir::{Harness, Message, Session, SessionRef};
 #[cfg(test)]
 use crate::stream::Flow;
 use crate::stream::{MessageSink, ParseOptions};
@@ -276,6 +276,100 @@ pub trait Adapter: Send + Sync {
     ) -> Result<Option<Session>> {
         Ok(None)
     }
+
+    // The facts below are what a shared module asks instead of naming a harness
+    // (`docs/INTERFACE-V2.md` §4). Each default is "no opinion"; none depends on the adapter's
+    // roots, so a shared module asks them of [`rootless`] without detecting a store.
+
+    /// The deferred-tool wrapper this store's reader leaves in its calls, for
+    /// [`crate::affordance::AffordanceSink`] to unwrap. Default: the reader leaves none.
+    fn deferred_wrapper(&self) -> Option<crate::affordance::DeferredWrapper> {
+        None
+    }
+
+    /// How a change to `r` shows on disk, so the catalog's freshness probe knows what to watch.
+    /// Default: as a directory change ([`WatchPolicy::Tree`]).
+    fn watch_policy(&self, _r: &SessionRef) -> WatchPolicy {
+        WatchPolicy::Tree
+    }
+
+    /// When `r`'s transcript only ever grows by appending lines, so its first `n` bytes pin a past
+    /// state: the function that counts the messages a parse of those bytes returns. A follower
+    /// records a byte mark for such a session and resolves it later. Default: not append-only.
+    fn append_only(&self, _r: &SessionRef) -> Option<CountPrefix> {
+        None
+    }
+
+    /// The file edit `m`'s harness record states outside its tool blocks (Codex's `FileChange`
+    /// item), so the event extractor counts it without reading the harness bag itself. Default:
+    /// none.
+    fn native_edit<'m>(&self, _m: &'m Message) -> Option<crate::events::NativeEdit<'m>> {
+        None
+    }
+
+    /// The harness's own kind for an injected-context turn it recorded (Claude's
+    /// `attachment_type`, e.g. `hook_success`). Default: the store records none.
+    fn attachment_kind<'m>(&self, _m: &'m Message) -> Option<&'m str> {
+        None
+    }
+
+    /// Whether thinking recorded under `model` came from the provider this harness replays
+    /// natively (its signatures are valid as they are). [`crate::emit::ThinkingMode::replay_default`]
+    /// replays natively only when every recorded model is one some adapter claims. Default: no.
+    fn native_thinking(&self, _model: &str) -> bool {
+        false
+    }
+
+    /// The sub-agent forest `r` spawned, newest first, keeping the members `select(id, workflow)`
+    /// admits (and only `workflow`'s, when given) before their bodies or optional metadata are
+    /// read. `demand` bounds what each member carries. Default: the store records no forest.
+    fn forest(
+        &self,
+        _r: &SessionRef,
+        _demand: crate::SubagentDemand,
+        _workflow: Option<&str>,
+        _select: &(dyn Fn(&str, Option<&str>) -> bool + Sync),
+    ) -> Vec<crate::SubagentInfo> {
+        Vec::new()
+    }
+
+    /// The `Workflow`-tool runs this store records beside a session, when it records any.
+    /// Default: none.
+    fn workflows(&self) -> Option<&'static dyn Workflows> {
+        None
+    }
+}
+
+/// How a session's change shows on disk ([`Adapter::watch_policy`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchPolicy {
+    /// A new or rewritten file changes its directory: watching the tree is enough.
+    Tree,
+    /// The file is a database written in place, which changes no directory: watch the file and
+    /// its write-ahead log.
+    Database,
+}
+
+/// Counts the messages a parse of `r`'s first `len` bytes returns ([`Adapter::append_only`]),
+/// calling `check` at its cooperative boundaries.
+pub type CountPrefix = fn(r: &SessionRef, len: u64, check: &mut dyn FnMut() -> Result<()>) -> Result<usize>;
+
+/// The `Workflow`-tool runs a store records beside its sessions ([`Adapter::workflows`]).
+pub trait Workflows: Sync {
+    /// Every run `r` launched, newest first.
+    fn runs(&self, r: &SessionRef) -> Vec<crate::Workflow>;
+    /// The runs of `r` named `name` (exact or prefix), reading only matching state files.
+    fn named(&self, r: &SessionRef, name: &str) -> Vec<crate::Workflow>;
+    /// One run by its id or unambiguous name.
+    fn run(&self, r: &SessionRef, key: &str) -> Option<crate::Workflow>;
+    /// The id `key` (an id or name) resolves to, without reading undemanded bodies.
+    fn run_id(&self, r: &SessionRef, key: &str) -> Option<String>;
+    /// Launches in `r`'s transcript with no recorded run.
+    fn ghosts(&self, r: &SessionRef) -> Vec<crate::WorkflowLaunch>;
+    /// Whether `r` recorded any run at all (a cheap gate before [`Self::ghosts`]).
+    fn has_records(&self, r: &SessionRef) -> bool;
+    /// Whether one of `r`'s sub-agent transcripts (either tier) has a file name starting `stem`.
+    fn has_agent(&self, r: &SessionRef, stem: &str) -> bool;
 }
 
 /// `parse` on a concrete adapter (`Claude::detect().parse(&r)`): the same
@@ -335,6 +429,42 @@ const ORDER: [Harness; Harness::COUNT] = [
 /// All registered adapters.
 pub fn all() -> Vec<Box<dyn Adapter>> {
     ORDER.into_iter().filter_map(for_harness).collect()
+}
+
+/// The adapter for `h` with no roots, `None` when it is not registered in this build. It
+/// discovers nothing; a shared module asks it the facts that do not depend on where the store
+/// lives (the [`Adapter`] methods after [`Adapter::resume`]) without detecting the store.
+pub fn rootless(h: Harness) -> Option<&'static dyn Adapter> {
+    Some(match h {
+        Harness::Claude => &claude::ROOTLESS,
+        Harness::Codex => &codex::ROOTLESS,
+        Harness::Grok => &grok::ROOTLESS,
+        Harness::OpenCode => &opencode::ROOTLESS,
+        Harness::Gemini => &gemini::ROOTLESS,
+        Harness::OpenClaw => &openclaw::ROOTLESS,
+        Harness::Kimi => &kimi::ROOTLESS,
+        Harness::KimiCode => &kimi_code::ROOTLESS,
+        Harness::Qwen => &qwen::ROOTLESS,
+        Harness::LmStudio => &lmstudio::ROOTLESS,
+        Harness::Cline => &cline::ROOTLESS,
+        Harness::Roo => &roo::ROOTLESS,
+        Harness::Continue => &continuedev::ROOTLESS,
+        Harness::ChatGptExport => &export::ChatGptExport,
+        Harness::ClaudeExport => &export::ClaudeExport,
+        Harness::OpenSession => &opensession::OpenSession,
+        #[cfg(feature = "sqlite")]
+        Harness::Hermes => &hermes::ROOTLESS,
+        #[cfg(feature = "sqlite")]
+        Harness::Cursor => &cursor::ROOTLESS,
+        #[cfg(feature = "sqlite")]
+        Harness::Goose => &goose::ROOTLESS,
+        #[cfg(feature = "sqlite")]
+        Harness::Zed => &zed::ROOTLESS,
+        #[cfg(feature = "sqlite")]
+        Harness::Devin => &devin::ROOTLESS,
+        #[cfg(not(feature = "sqlite"))]
+        Harness::Hermes | Harness::Cursor | Harness::Goose | Harness::Zed | Harness::Devin => return None,
+    })
 }
 
 /// The adapter for a specific harness, if registered. Detects only that adapter: detection stats

@@ -43,6 +43,10 @@ pub struct Claude {
     entries: Vec<PathBuf>,
 }
 
+/// This adapter with no roots: it discovers nothing and answers every fact that does not depend on
+/// where the store lives ([`super::rootless`]).
+pub(crate) static ROOTLESS: Claude = Claude { entries: Vec::new() };
+
 /// Files Claude Code keeps at the top of a config dir. A directory that holds one of them but no
 /// `projects/` is a config dir with no sessions yet, not a projects dir: reading it as one would
 /// list its other `.jsonl` files (e.g. `transcripts/*.jsonl`) as sessions.
