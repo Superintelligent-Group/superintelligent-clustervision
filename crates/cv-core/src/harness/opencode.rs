@@ -297,8 +297,8 @@ impl Adapter for OpenCode {
             // OpenCode stores a session as a *directory* of per-message JSON files (plus per-message
             // part files), each one document viewed by the record codec:
             //   1. read the small session meta file,
-            //   2. order the message files by their `time/created` key alone,
-            //   3. view each message file in order, then its part files one at a time, emit its IR
+            //   2. view each message file once: its header record and its `time/created` key,
+            //   3. in that order, view each header's part files one at a time, emit its IR
             //      message(s) to `sink`, and drop it before touching the next.
             let text = fs::read_to_string(&r.path).with_context(|| format!("reading {}", r.path.display()))?;
             let meta: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
@@ -320,37 +320,37 @@ impl Adapter for OpenCode {
                 ..Session::new(r.id.clone(), Harness::OpenCode)
             };
 
-            // Order message files by `time/created` (same ordering as before) while holding only the
-            // sort key + path per file — never all message bodies at once.
-            let mut order: Vec<(i64, PathBuf)> = Vec::new();
+            // All regenerated payloads share one private file for this session pass.
+            let arena = std::sync::Arc::new(crate::harness::store::bytes::ByteSource::arena()?);
+
+            // Each message file is captured and viewed once: its header (small: the parts hold
+            // the bodies) is held with its `time/created` sort key until every header is read.
+            let mut order: Vec<(i64, PathBuf, Option<record::Record>)> = Vec::new();
             if let Some(mdir) = self.message_dir(&r.id) {
                 if let Ok(rd) = fs::read_dir(&mdir) {
                     for e in rd.filter_map(|e| e.ok()) {
                         let path = e.path();
-                        let when = document(&path, |view, _| {
-                            Ok(record::owned(record::get(view.get("time")?, "created")?)?
+                        let header = document(&path, |view, source| {
+                            let when = record::owned(record::get(view.get("time")?, "created")?)?
                                 .and_then(|created| created.as_i64())
-                                .unwrap_or(0))
+                                .unwrap_or(0);
+                            let header =
+                                record::Record::header(view, None, record::Ctx::new(opts.spans, source, &arena))?;
+                            Ok((when, header))
                         })?;
-                        if let Some(when) = when {
-                            order.push((when, path));
+                        if let Some((when, header)) = header {
+                            order.push((when, path, header));
                         }
                     }
                 }
             }
-            order.sort();
+            order.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
 
             sink.meta(&s);
 
-            // All regenerated payloads share one private file for this session pass.
-            let arena = std::sync::Arc::new(crate::harness::store::bytes::ByteSource::arena()?);
-
-            // Re-read one message file at a time, emit, then drop before the next.
-            for (_, path) in &order {
-                let Some(mut record) = document(path, |view, source| {
-                    record::Record::header(view, None, record::Ctx::new(opts.spans, source, &arena))
-                })?
-                .flatten() else {
+            // One message at a time: its parts, emit, then drop before the next.
+            for (_, _, record) in order {
+                let Some(mut record) = record else {
                     continue;
                 };
                 if let Some(dir) = self.part_dir(record.id().unwrap_or("")) {
