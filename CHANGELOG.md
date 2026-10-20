@@ -74,6 +74,7 @@
 - Roo: a `new_task` result carried beside user text is a `subagent_return` detail; the turn stays a prompt.
 
 **Reshaping.**
+- Hermes and OpenCode exports reject unreadable sources before creating output directories or databases, while retaining transaction publication guards.
 - `cv prune`, `cv rewind` and agent adoption refuse a source line that is not one JSON record instead of copying it; blank lines pass.
 - `cv rewind` copies to the end of the file (`cost-state` and other tail records were dropped).
 - `cv rewind`: an explicit cut omits a malformed later line while closing open calls; an unterminated last line asks for a rerun.

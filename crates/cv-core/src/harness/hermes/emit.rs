@@ -20,6 +20,8 @@ use uuid::Uuid;
 pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<EmitResult> {
     use rusqlite::Connection;
 
+    // Reject unreadable sources before creating output; the commit guard covers later changes.
+    crate::harness::wire::write::check_source_fields(session)?;
     let new_id = opts.new_id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
 
     // `out_dir` is a directory — the Hermes home or a profile dir, which is what the adapter's

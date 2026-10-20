@@ -20,8 +20,9 @@
 //! (`jsonl::Read::check_backing_after`, `SLOW_CALLBACK`), once per window of mapped input
 //! (`check_backing_at`), at a checkpoint, and at EOF (`Read::check`: descriptor and path). A
 //! consumer that publishes (a writer's commit, a cache insert, an archive rename) rechecks once,
-//! immediately before publishing; a span demand checks its own source (`lazy::Resolver`). Any other
-//! recheck duplicates one of these.
+//! immediately before publishing; a span demand checks its own source (`lazy::Resolver`). Emitters
+//! also preflight before creating output so an already-unreadable source leaves no files behind.
+//! Any other recheck duplicates one of these.
 
 use crate::harness::Adapter;
 use crate::ir::{Message, Session, SessionRef};
