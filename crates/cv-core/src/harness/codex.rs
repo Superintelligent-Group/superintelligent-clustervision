@@ -137,6 +137,15 @@ impl Adapter for Codex {
         Harness::Codex
     }
 
+    /// A plain `.jsonl` rollout only grows by appended lines; a compressed `.jsonl.zst` one's
+    /// byte prefix is not a logical prefix.
+    fn append_only(&self, r: &SessionRef) -> Option<super::CountPrefix> {
+        r.path
+            .extension()
+            .is_some_and(|e| e == "jsonl")
+            .then_some(count_prefix_checked as super::CountPrefix)
+    }
+
     /// Membership comes from installed hooks, each child verified against its own header.
     fn forest(
         &self,
@@ -537,10 +546,6 @@ fn flush_all_but_held(
 /// parse would have returned when the file was `len` bytes long, since a live rollout only grows by
 /// appending. Both passes read only the prefix, so `has_events` is decided exactly as it was then.
 /// Not for `.jsonl.zst` (a byte prefix of a zstd stream is not a prefix of the rollout).
-pub(crate) fn count_prefix(r: &SessionRef, len: u64) -> Result<usize> {
-    count_prefix_checked(r, len, &mut || Ok(()))
-}
-
 pub(crate) fn count_prefix_checked(r: &SessionRef, len: u64, check: &mut dyn FnMut() -> Result<()>) -> Result<usize> {
     let rollout = Rollout::open(&r.path)?;
     let len = len.min(rollout.len);
@@ -1108,7 +1113,7 @@ mod tests {
             r#"{"type":"response_item","payload":{"type":"message","role":"user","content":"snapshot question"}}"#;
         fs::write(&path, format!("{first}\n{{\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":\"later question\"}}}}\n"))?;
         let r = SessionRef::new("prefix", Harness::Codex, &path);
-        assert_eq!(count_prefix(&r, first.len() as u64)?, 1);
+        assert_eq!(count_prefix_checked(&r, first.len() as u64, &mut || Ok(()))?, 1);
         assert_eq!(adapter().parse(&r)?.messages.iter().filter(|m| m.is_turn()).count(), 2);
         Ok(())
     }

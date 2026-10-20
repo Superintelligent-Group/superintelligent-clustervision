@@ -36,7 +36,6 @@ const ALLOWLIST: &[(&str, usize)] = &[
     ("rewind.rs", 1),
     ("source.rs", 2),
     ("stats.rs", 5),
-    ("watch.rs", 9),
     ("watch/read.rs", 2),
 ];
 

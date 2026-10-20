@@ -66,11 +66,9 @@ fn resolve_checked(r: &SessionRef, mark: Mark, check: &mut dyn FnMut() -> anyhow
     check()?;
     let count = match mark {
         Mark::Messages(n) => n,
-        Mark::Bytes(len) => match r.harness {
-            Harness::Claude => harness::claude::count_prefix_checked(r, len, check)?,
-            Harness::Codex => harness::codex::count_prefix_checked(r, len, check)?,
-            Harness::Qwen => harness::qwen::count_prefix_checked(r, len, check)?,
-            _ => anyhow::bail!("watch byte mark unsupported for {}", r.harness),
+        Mark::Bytes(len) => match append_only(r) {
+            Some(count_prefix) => count_prefix(r, len, check)?,
+            None => anyhow::bail!("watch byte mark unsupported for {}", r.harness),
         },
     };
     check()?;
@@ -89,12 +87,11 @@ pub enum Mark {
     Bytes(u64),
 }
 
-/// Transcripts that only ever grow by appending lines, so a byte length pins a past state: Claude
-/// and plain Codex `.jsonl`, plus Qwen's chronological `projects/...` ChatRecords. Compressed
-/// Codex and Qwen's legacy Gemini replay are excluded: their byte prefix is not a logical prefix.
-fn append_only(r: &SessionRef) -> bool {
-    (matches!(r.harness, Harness::Claude | Harness::Codex) && r.path.extension().is_some_and(|e| e == "jsonl"))
-        || (r.harness == Harness::Qwen && harness::qwen::is_session_jsonl(&r.path))
+/// A transcript that only ever grows by appending lines, so a byte length pins a past state, and
+/// how to count a prefix's messages: the adapter's [`harness::Adapter::append_only`]. A byte mark
+/// on any other session (a compressed rollout, a rewritten recording) resolves to nothing.
+fn append_only(r: &SessionRef) -> Option<harness::CountPrefix> {
+    harness::rootless(r.harness)?.append_only(r)
 }
 
 /// Record where `r` stands now, as cheaply as possible: one `stat` for an append-only transcript,
@@ -104,7 +101,7 @@ fn append_only(r: &SessionRef) -> bool {
 /// message count — tens of seconds and ~1 GB transient on a large corpus, almost all of it for
 /// sessions that never change while followed. A byte mark defers that parse to [`resolve`].
 pub fn baseline(r: &SessionRef) -> Option<Mark> {
-    if append_only(r) {
+    if append_only(r).is_some() {
         if let Ok(md) = std::fs::metadata(&r.path) {
             return Some(Mark::Bytes(md.len()));
         }
@@ -160,12 +157,7 @@ pub fn tail(r: &SessionRef, skip: usize, keep: usize) -> Option<(usize, Vec<Mess
 pub fn resolve(r: &SessionRef, mark: Mark) -> Option<usize> {
     match mark {
         Mark::Messages(n) => Some(n),
-        Mark::Bytes(len) => match r.harness {
-            Harness::Claude => harness::claude::count_prefix(r, len).ok(),
-            Harness::Codex => harness::codex::count_prefix(r, len).ok(),
-            Harness::Qwen => harness::qwen::count_prefix(r, len).ok(),
-            _ => None,
-        },
+        Mark::Bytes(len) => append_only(r)?(r, len, &mut || Ok(())).ok(),
     }
 }
 
@@ -324,7 +316,7 @@ impl Watcher {
         check()?;
         for r in refs {
             check()?;
-            let (mark, read) = if append_only(&r) {
+            let (mark, read) = if append_only(&r).is_some() {
                 let (mark, read) = capture_baseline(&r, || {
                     std::fs::metadata(&r.path).map(|metadata| Mark::Bytes(metadata.len()))
                 });
@@ -1377,7 +1369,7 @@ mod tests {
             let Ok(parsed) = harness::for_harness(h).unwrap().parse(&r) else {
                 continue;
             };
-            if !append_only(&r) {
+            if append_only(&r).is_none() {
                 assert_eq!(baseline(&r), Some(Mark::Messages(parsed.messages.len())), "{h} {rel}");
             }
             // The streamed tail is the parse's tail, message for message, at every split.
@@ -1467,10 +1459,40 @@ mod tests {
         assert_eq!(baseline(&sref(Harness::Claude, jsonl.clone())), Some(Mark::Bytes(len)));
         assert_eq!(baseline(&sref(Harness::Codex, jsonl.clone())), Some(Mark::Bytes(len)));
         // A compressed rollout's byte prefix is not a transcript prefix: parse it instead.
-        assert!(!append_only(&sref(Harness::Codex, dir.join("r.jsonl.zst"))));
+        assert!(append_only(&sref(Harness::Codex, dir.join("r.jsonl.zst"))).is_none());
         // Missing file: no mark, as before.
         assert_eq!(baseline(&sref(Harness::Gemini, dir.join("absent.json"))), None);
         assert_eq!(resolve(&sref(Harness::Claude, jsonl), Mark::Messages(3)), Some(3));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A byte mark carried in on a compressed rollout (a cursor from elsewhere, a hand-made
+    /// position) is not resumed: its byte prefix is not a transcript prefix, so it resolves to
+    /// nothing instead of a count of the decoded stream's first bytes.
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn a_compressed_rollout_is_never_byte_resumed() {
+        let _world = crate::test_world("watch-a_compressed_rollout_is_never_byte_resumed");
+        let dir = std::env::temp_dir().join(format!("cv-watch-zst-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let zst = dir.join("rollout-2026-01-01T00-00-00-019e0000-0000-7000-8000-000000000001.jsonl.zst");
+        std::fs::write(&zst, zstd::encode_all(CODEX.as_bytes(), 1).unwrap()).unwrap();
+        let r = sref(Harness::Codex, zst);
+        let full = harness::for_harness(Harness::Codex).unwrap().parse(&r).unwrap();
+        assert!(!full.messages.is_empty(), "the compressed fixture parses");
+        // The decoder would count a prefix of the DECODED stream, which is what a byte mark
+        // resolved to before the adapter declared the rollout not append-only.
+        let decoded = crate::harness::codex::count_prefix_checked(&r, CODEX.len() as u64, &mut || Ok(()));
+        assert!(decoded.is_ok_and(|n| n > 0));
+        assert_ne!(baseline(&r), Some(Mark::Bytes(CODEX.len() as u64)));
+        for len in [1, CODEX.len() as u64 / 2, CODEX.len() as u64] {
+            assert_eq!(resolve(&r, Mark::Bytes(len)), None, "byte mark {len}");
+            assert!(
+                resolve_checked(&r, Mark::Bytes(len), &mut || Ok(())).is_err(),
+                "byte mark {len}"
+            );
+        }
+        assert_eq!(resolve(&r, Mark::Messages(2)), Some(2));
         std::fs::remove_dir_all(&dir).ok();
     }
 

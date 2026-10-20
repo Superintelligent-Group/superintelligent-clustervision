@@ -87,6 +87,7 @@
 - `cv hook` with a terminal on stdin exits 2 with usage; `cv mcp` and `cv task … -` say what they are reading.
 - MCP tools generated from the CLI omit `--follow` (no Ctrl-C in a tool call); `for` stays.
 - `tests/announce.rs` pins it: every command on a pipe exits within 5 s or is a daemon that announced within 1 s.
+- A follower cursor's byte mark on a compressed Codex rollout no longer resumes from a decoded-stream prefix; it is unresolved, like any non-append-only session.
 
 **Removed.**
 - **Breaking:** `$CLAURDVOYANT_HOME` and `$CLAURDVOYANT_MAX_STALE_SECS` exit 2 with a pointer to the `CLUSTERVISION_` names; the `claurdvoyant` config, cache and home directories are no longer read.

@@ -79,6 +79,12 @@ impl Adapter for Qwen {
         Harness::Qwen
     }
 
+    /// The chronological `projects/.../chats/*.jsonl` ChatRecords grow by appended lines; the
+    /// legacy gemini-shaped recording is rewritten whole.
+    fn append_only(&self, r: &SessionRef) -> Option<super::CountPrefix> {
+        is_session_jsonl(&r.path).then_some(count_prefix_checked as super::CountPrefix)
+    }
+
     fn dependencies(&self, r: &SessionRef, _probe: &mut Probe, deps: &mut Dependencies) -> Option<()> {
         deps.files.push(r.path.with_extension("meta.json"));
         if let Some(chats) = r.path.parent().filter(|p| p.file_name().is_some_and(|n| n == "chats")) {
@@ -560,10 +566,6 @@ fn session_shell(path: &Path, sink: &mut dyn MessageSink) -> Session {
 /// The message count an append-only project transcript had at a byte baseline, including an
 /// incomplete final physical record exactly as the whole parser would have accepted it then.
 /// Legacy Gemini shapes cannot pin old logical output with a physical byte prefix.
-pub(crate) fn count_prefix(r: &SessionRef, len: u64) -> Result<usize> {
-    count_prefix_checked(r, len, &mut || Ok(()))
-}
-
 pub(crate) fn count_prefix_checked(r: &SessionRef, len: u64, check: &mut dyn FnMut() -> Result<()>) -> Result<usize> {
     anyhow::ensure!(
         is_session_jsonl(&r.path),

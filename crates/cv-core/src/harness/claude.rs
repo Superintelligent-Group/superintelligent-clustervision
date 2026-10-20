@@ -178,6 +178,14 @@ impl Adapter for Claude {
         Harness::Claude
     }
 
+    /// A `.jsonl` transcript only ever grows by appended lines.
+    fn append_only(&self, r: &SessionRef) -> Option<super::CountPrefix> {
+        r.path
+            .extension()
+            .is_some_and(|e| e == "jsonl")
+            .then_some(count_prefix_checked as super::CountPrefix)
+    }
+
     /// The `subagents/` sidecar: directly spawned agents and, a tier deeper, workflow agents.
     fn forest(
         &self,
@@ -355,10 +363,6 @@ pub fn stream_str(
 /// How many messages a full parse of the transcript's first `len` bytes yields — the count a
 /// parse would have returned when the file was `len` bytes long, since a Claude transcript only
 /// grows by appending. `check` runs at every line, including lines that emit no message.
-pub(crate) fn count_prefix(r: &SessionRef, len: u64) -> Result<usize> {
-    count_prefix_checked(r, len, &mut || Ok(()))
-}
-
 pub(crate) fn count_prefix_checked(r: &SessionRef, len: u64, check: &mut dyn FnMut() -> Result<()>) -> Result<usize> {
     let mut n = 0usize;
     let mut count = |_: Message| {
