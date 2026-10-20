@@ -13,6 +13,15 @@
 //! [`collect`]). Adapters override **one** of the two: a native `stream` (memory-savings) *or* the
 //! existing `parse` (and inherit a `stream` that bridges through it). No mutual recursion, so
 //! migration is incremental.
+//!
+//! **Who owns the source guarantee.** A reader captures its source (identity, length, the
+//! dependencies it consults) before it reads a byte and binds its descriptor to that capture. It
+//! rechecks only where something can have changed under it: after a sink callback that was slow
+//! (`jsonl::Read::check_backing_after`, `SLOW_CALLBACK`), once per window of mapped input
+//! (`check_backing_at`), at a checkpoint, and at EOF (`Read::check`: descriptor and path). A
+//! consumer that publishes (a writer's commit, a cache insert, an archive rename) rechecks once,
+//! immediately before publishing; a span demand checks its own source (`lazy::Resolver`). Any other
+//! recheck duplicates one of these.
 
 use crate::harness::Adapter;
 use crate::ir::{Message, Session, SessionRef};
