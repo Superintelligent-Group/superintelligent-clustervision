@@ -91,7 +91,7 @@ fn old_catalog_migrates_once_and_normal_publication_observes() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(stored, "5");
+    assert_eq!(stored, crate::source::VERSION.to_string());
 }
 
 #[test]
