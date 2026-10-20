@@ -26,11 +26,6 @@ pub(super) fn retrieve_captured(
             offset: 0,
             len: source.len(),
         };
-        if !ranges::valid_utf8(&mut ranges::reader(file, extent)?)? {
-            return Err(
-                std::io::Error::new(std::io::ErrorKind::InvalidData, "stream did not contain valid UTF-8").into(),
-            );
-        }
         let mut available = Vec::new();
         let mut found = None;
         let mut duplicates = 0usize;
@@ -45,6 +40,17 @@ pub(super) fn retrieve_captured(
             let projected = reader.read_with(row.offset, row.len, crate::json::Validation::Syntax, |view| {
                 project_sidecar_entry(view, id, available.len() < 20)
             });
+            // The validator rejected the row: invalid UTF-8 fails the whole sidecar under its own
+            // name, as in prune's walk; any other malformed entry is skipped.
+            if projected
+                .as_ref()
+                .is_err_and(|error| error.downcast_ref::<crate::json::InvalidJson>().is_some())
+                && !ranges::valid_utf8(&mut ranges::reader(file, row)?)?
+            {
+                return Err(
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, "stream did not contain valid UTF-8").into(),
+                );
+            }
             accept_sidecar_entry(projected, &mut available, &mut found, &mut duplicates)?;
         }
         if duplicates > 0 {
