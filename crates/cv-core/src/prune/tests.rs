@@ -1196,6 +1196,32 @@ fn sidecar_preparation_failure_preserves_existing_transcript() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// Sidecar and transcript are one publication: under `--force` the sidecar replaces its name,
+/// the transcript's claim then fails (a directory holds its name), and the replaced sidecar is
+/// put back rather than lost.
+#[test]
+fn a_failed_transcript_claim_restores_the_replaced_sidecar() {
+    let dir = tmpdir();
+    let src = fixture(&dir, &"payload".repeat(1024));
+    let new_id = "22222222-2222-4222-8222-222222222222";
+    let sidecar = dir.join(format!("{new_id}.flat.jsonl"));
+    std::fs::write(&sidecar, "prior sidecar").unwrap();
+    std::fs::create_dir(dir.join(format!("{new_id}.jsonl"))).unwrap();
+    let options = PruneOptions {
+        new_id: Some(new_id.into()),
+        keep_last: 0,
+        force: true,
+        ..Default::default()
+    };
+    let error = format!("{:#}", prune_session(&src, &options).unwrap_err());
+    assert!(error.contains("is a directory"), "{error}");
+    assert_eq!(std::fs::read_to_string(&sidecar).unwrap(), "prior sidecar");
+    assert!(!std::fs::read_dir(&dir)
+        .unwrap()
+        .any(|e| e.unwrap().file_name().to_string_lossy().starts_with(".cv-")));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn renamed_source_cannot_be_its_own_prune_destination() {
     let dir = tmpdir();

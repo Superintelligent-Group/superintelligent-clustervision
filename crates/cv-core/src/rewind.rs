@@ -949,16 +949,16 @@ fn rewind_session_after_scan(
     };
 
     if let Some(w) = writer.take() {
-        use crate::publish::{Claim, Staged};
+        use crate::publish::{Claim, Set, Staged};
         let transcript = w.into_inner().map_err(|e| e.into_error())?;
         let body = serde_json::to_string_pretty(&provenance(&res, opts))? + "\n";
         let mut provenance_file = Staged::create(&out_dir, "rewind", mode)?;
         provenance_file.write_all(body.as_bytes())?;
-        // Provenance first: a published transcript always has the receipt that explains it.
-        let published = provenance_file.publish(&res.provenance_path, Claim::New)?;
-        if let Err(error) = transcript.publish(&res.new_path, Claim::New) {
-            return Err(crate::publish::retract(&res.provenance_path, &published, error));
-        }
+        // One set, provenance first: a published transcript always has the receipt that explains it.
+        let mut set = Set::new();
+        set.add(provenance_file, &res.provenance_path, Claim::New);
+        set.add(transcript, &res.new_path, Claim::New);
+        set.publish()?;
     }
     Ok(res)
 }

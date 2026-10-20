@@ -305,17 +305,15 @@ fn execute_after_stage(
         refuse_destinations()?;
     }
     let claim = if force { Claim::Replace } else { Claim::New };
-    let metadata = metadata
-        .map(|(_, _, staged, destination)| staged.publish(destination, claim).map(|file| (destination, file)))
-        .transpose()?;
-    if let Some(staged) = transcript {
-        if let Err(error) = staged.publish(&p.dest, claim) {
-            return Err(match &metadata {
-                Some((destination, file)) => crate::publish::retract(destination, file, error),
-                None => error,
-            });
-        }
+    // One set, the metadata first: a published transcript always has its metadata.
+    let mut set = crate::publish::Set::new();
+    if let Some((_, _, staged, destination)) = metadata {
+        set.add(staged, destination, claim);
     }
+    if let Some(staged) = transcript {
+        set.add(staged, &p.dest, claim);
+    }
+    set.publish()?;
     Ok(Adopted {
         agent_id: p.agent.agent_id.clone(),
         lines: counts.lines,

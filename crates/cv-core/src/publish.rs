@@ -165,19 +165,11 @@ impl Drop for Staged {
     }
 }
 
-/// Undo a publication whose companion then failed, returning `cause` with any failure to undo it.
-/// Only the file `published` refers to is removed, never one someone else has put there since: the
-/// name is moved to a private one in one step, and what it held is removed only if it is that file;
-/// another writer's file is put back without replacing a newer one. Without inode identity (off
-/// Unix) nothing can be checked, so nothing is removed and the error says so.
-pub fn retract(destination: &Path, published: &File, cause: anyhow::Error) -> anyhow::Error {
-    match retract_racing(destination, published, || {}) {
-        Ok(()) => cause,
-        Err(e) => cause.context(format!("{} is left published: {e:#}", destination.display())),
-    }
-}
-
-/// [`retract`], running `race` between looking at the name and taking it.
+/// Undo a [`Set`] member's claim of a new name. Only the file `published` refers to is removed,
+/// never one someone else has put there since: the name is moved to a private one in one step,
+/// and what it held is removed only if it is that file; another writer's file is put back without
+/// replacing a newer one. Without inode identity (off Unix) nothing can be checked, so nothing is
+/// removed and the error says so. `race` runs between looking at the name and taking it.
 fn retract_racing(destination: &Path, published: &File, race: impl FnOnce()) -> Result<()> {
     if !holds(destination, published)? {
         return Ok(());
@@ -989,12 +981,11 @@ pub(crate) mod tests {
         assert_eq!(mode_of(&file), umask_applied);
         std::fs::remove_file(&path).unwrap();
         std::fs::write(&path, "someone else").unwrap();
-        let cause = || anyhow::anyhow!("companion failed");
-        assert_eq!(format!("{:#}", retract(&path, &file, cause())), "companion failed");
+        retract_racing(&path, &file, || {}).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"someone else");
         std::fs::remove_file(&path).unwrap();
         let file = staged(dir, b"ours").publish(&path, Claim::New).unwrap();
-        assert_eq!(format!("{:#}", retract(&path, &file, cause())), "companion failed");
+        retract_racing(&path, &file, || {}).unwrap();
         assert!(!path.exists());
         assert_eq!(temporaries(dir), 0);
     }

@@ -765,20 +765,15 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
             .transpose()?;
         source.check_metadata(file.metadata()?)?;
         source.check()?;
-        // Serialization and writes complete before publication. The sidecar is published first,
-        // so a transcript never names markers its sidecar cannot answer; a transcript that then
-        // fails to publish takes its sidecar back with it.
-        let sidecar_published = sidecar_out
-            .as_ref()
-            .zip(sidecar_file)
-            .map(|(p, staged)| staged.publish(p, claim).map(|file| (p, file)))
-            .transpose()?;
-        if let Err(error) = transcript.publish(&new_path, claim) {
-            return Err(match &sidecar_published {
-                Some((p, file)) => crate::publish::retract(p, file, error),
-                None => error,
-            });
+        // Serialization and writes complete before publication. Sidecar and transcript publish
+        // as one set, the sidecar first, so a transcript never names markers its sidecar cannot
+        // answer.
+        let mut set = crate::publish::Set::new();
+        if let Some((p, staged)) = sidecar_out.as_ref().zip(sidecar_file) {
+            set.add(staged, p, claim);
         }
+        set.add(transcript, &new_path, claim);
+        set.publish()?;
         if opts.force && sidecar_out.is_none() {
             // The replaced session's own sidecar would answer `cv cat <new-id>` with its payloads.
             match std::fs::remove_file(&sidecar_path) {
