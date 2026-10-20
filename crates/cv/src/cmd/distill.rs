@@ -162,7 +162,7 @@ fn write_sidecar(transcript: &Path, elided: &[cv_core::distill::Elided]) -> Resu
 }
 
 fn resume_hint(id: &str, cwd: Option<&Path>) -> String {
-    use crate::cmd::port::shell_quote;
+    use crate::util::shell_quote;
     format!(
         "{}claude -p --resume {} \"<next instruction>\"",
         cwd.map(|dir| format!("cd {} && ", shell_quote(&dir.display().to_string())))

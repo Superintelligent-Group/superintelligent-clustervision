@@ -26,7 +26,7 @@ use cv_core::sanitize::sanitize_line;
 use serde_json::{json, Map, Value};
 
 use crate::short_id;
-use crate::util::fmt_int;
+use crate::util::{fmt_int, shell_quote};
 
 /// The skill installed beside the hooks. It lives inside this crate (`crates/cv/skill/SKILL.md`) so the
 /// published package carries it; a path outside the crate builds in the repo and nowhere else.
@@ -427,16 +427,6 @@ fn publish_hook_file(path: &Path, text: &str) -> Result<()> {
     let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     cv_core::publish::publish_reader(&target, "hooks", text.as_bytes(), cv_core::publish::Claim::Replace)
         .with_context(|| format!("writing {}", path.display()))
-}
-
-/// Shell-quote a path for a `command` string (shell form): bare when it is plain, single-quoted otherwise.
-fn shell_quote(p: &str) -> String {
-    let plain = |c: char| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '+' | ':' | '~');
-    if !p.is_empty() && p.chars().all(plain) {
-        p.to_string()
-    } else {
-        format!("'{}'", p.replace('\'', "'\\''"))
-    }
 }
 
 /// The `command` string for one hook: this binary, absolute, then `hook <name> --harness <h>`.
@@ -1440,6 +1430,10 @@ mod tests {
         );
         assert_eq!(shell_quote("/a b/cv"), "'/a b/cv'");
         assert_eq!(shell_quote("/usr/local/bin/cv"), "/usr/local/bin/cv");
+        assert_eq!(shell_quote("~/bin/cv"), "'~/bin/cv'", "a bare leading ~ would expand");
+        assert_eq!(shell_quote("/opt/cv@1/cv"), "/opt/cv@1/cv");
+        assert_eq!(shell_quote("it's"), "'it'\\''s'");
+        assert_eq!(shell_quote(""), "''");
     }
 
     #[test]

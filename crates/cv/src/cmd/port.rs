@@ -11,7 +11,7 @@
 //! place, different harness) and `port` (different place) were the same act, so `--harness` picks
 //! the target harness (default: the source's) and `--cwd` the new home. The source is never touched.
 
-use crate::util::{home_rel, parse_harness, resolve, usage};
+use crate::util::{home_rel, parse_harness, resolve, shell_quote, usage};
 use anyhow::{bail, Context, Result};
 use cv_core::ir::{Harness, Session, SessionRef};
 use cv_core::{Adapter, EmitOptions};
@@ -232,19 +232,6 @@ fn resume_command(h: Harness, id: &str) -> (String, Vec<String>) {
             format!("# no CLI resume for {h}; open the app and find the session"),
             vec![id.into()],
         ),
-    }
-}
-
-pub(crate) fn shell_quote(s: &str) -> String {
-    if s.is_empty() {
-        return "''".into();
-    }
-    if s.bytes()
-        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-' | b'+' | b':' | b'@'))
-    {
-        s.to_string()
-    } else {
-        format!("'{}'", s.replace('\'', r"'\''"))
     }
 }
 

@@ -400,6 +400,19 @@ pub(crate) fn dim_cwd(p: Option<&Path>) -> String {
     p.map(home_rel).unwrap_or_else(|| "(no cwd)".into())
 }
 
+/// One word for a POSIX shell command line: bare when every byte is inert in a word (letters,
+/// digits, `/ . _ - + : @`), single-quoted otherwise. `~` is not inert: a bare leading `~` expands.
+pub(crate) fn shell_quote(s: &str) -> String {
+    if !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-' | b'+' | b':' | b'@'))
+    {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', r"'\''"))
+    }
+}
+
 pub(crate) fn dirs_home() -> Option<std::path::PathBuf> {
     cv_core::env::var_os("HOME").map(std::path::PathBuf::from)
 }
