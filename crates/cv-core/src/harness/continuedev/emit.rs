@@ -54,6 +54,13 @@ pub(super) fn transcript(
                         write(Some(result))?;
                     }
                 } else {
+                    // A native tool message answers one call by `toolCallId`; a tool turn with no
+                    // result has none to name, and an empty id is not one. Fail closed.
+                    anyhow::ensure!(
+                        msg.role != Role::Tool,
+                        "Continue cannot hold a tool turn with no tool result ({}): it has no toolCallId",
+                        msg.id.as_deref().unwrap_or("no id")
+                    );
                     write(None)?;
                 }
             }
@@ -120,15 +127,9 @@ fn item(
                 Role::System => "system",
             },
         )?;
-        if msg.role == Role::Tool {
-            message.field("toolCallId", result.map(|r| r.0).unwrap_or(""))?;
-            message.field_with("content", |w| match result {
-                Some((_, content)) => text(w, content, resolver),
-                None => {
-                    serde_json::to_writer(w, "")?;
-                    Ok(())
-                }
-            })?;
+        if let (Role::Tool, Some((id, content))) = (msg.role, result) {
+            message.field("toolCallId", id)?;
+            message.field_with("content", |w| text(w, content, resolver))?;
         } else {
             message.field_with("content", |w| {
                 w.write_all(b"[")?;
@@ -604,5 +605,25 @@ fn wide_grouped_tool_results_preserve_each_item_and_empty_context() -> Result<()
         let actual: Value = serde_json::from_slice(&fs::read(path)?)?;
         assert_eq!(actual, json!({"sessionId":"copy","history":expected}));
     }
+    Ok(())
+}
+/// A tool turn with no result has no `toolCallId` to write: the emit fails and publishes nothing.
+#[test]
+fn tool_turn_without_result_fails_closed() -> Result<()> {
+    let world = crate::test_world("continue-tool-without-result");
+    let mut session = Session::new("source", Harness::Continue);
+    let mut tool = Message::new(Role::Tool);
+    tool.content.push(Block::Text {
+        text: "prose only".into(),
+    });
+    session.messages.push(tool);
+    let dest = world.base.join("output");
+    let opts = crate::emit::EmitOptions {
+        new_id: Some("fixed".into()),
+        ..Default::default()
+    };
+    let err = super::emit(&session, &dest, &opts).unwrap_err();
+    assert!(format!("{err:#}").contains("toolCallId"), "{err:#}");
+    assert!(!dest.join("fixed.json").exists());
     Ok(())
 }

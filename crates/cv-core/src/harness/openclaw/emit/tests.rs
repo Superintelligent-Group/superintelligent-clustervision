@@ -16,7 +16,10 @@ fn usage_writes_recorded_counts_and_no_total() {
         cost_usd: Some(0.5),
         ..Default::default()
     };
-    assert_eq!(openclaw_usage(Some(&cost_only)).unwrap(), json!({"cost": {"total": 0.5}}));
+    assert_eq!(
+        openclaw_usage(Some(&cost_only)).unwrap(),
+        json!({"cost": {"total": 0.5}})
+    );
 }
 
 fn normalized(path: &Path) -> Result<Vec<u8>> {

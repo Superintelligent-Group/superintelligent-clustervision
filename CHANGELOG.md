@@ -79,6 +79,7 @@
 - `cv port` to Codex writes the source's recorded `cli_version`, or Codex's empty unknown, instead of cv's own version.
 - `cv port` to OpenClaw no longer writes `usage.totalTokens`; OpenClaw derives the total from the recorded counts.
 - `cv port` to LM Studio no longer writes `tokenCount: 0`; cv does not know the chat's last prompt token count.
+- `cv port` to Continue refuses a tool turn with no tool result instead of writing an empty `toolCallId`.
 
 **Doctor and hooks.**
 - `cv doctor` adds a Writer versions row: the newest Claude/Codex version seen in the stores versus the newest the corpus verified, plus unknown sessions.
