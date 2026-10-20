@@ -1088,11 +1088,9 @@ fn track_tool_calls(facts: &Facts, open: &mut HashSet<String>, mut closed: Optio
                     open.insert(id.clone());
                 }
             }
-            Some("tool_result") => {
-                if open.remove(b.tool_use_id.as_deref().unwrap_or("")) {
-                    if let Some(c) = closed.as_deref_mut() {
-                        *c += 1;
-                    }
+            Some("tool_result") if open.remove(b.tool_use_id.as_deref().unwrap_or("")) => {
+                if let Some(c) = closed.as_deref_mut() {
+                    *c += 1;
                 }
             }
             _ => {}

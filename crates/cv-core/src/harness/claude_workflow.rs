@@ -877,14 +877,12 @@ impl Miner {
                 let mut first = None;
                 if let Some(blocks) = content.array()? {
                     for block in blocks {
-                        if let Some(text) = Fields::parse(block?, &["text"])?
+                        if let Some(Some(text)) = Fields::parse(block?, &["text"])?
                             .map(|b| b.string("text"))
                             .transpose()?
                         {
-                            if let Some(text) = text {
-                                first = Some(text);
-                                break;
-                            }
+                            first = Some(text);
+                            break;
                         }
                     }
                 }
