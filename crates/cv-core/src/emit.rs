@@ -23,10 +23,10 @@ use std::path::{Path, PathBuf};
 pub(crate) mod fidelity;
 mod prepare;
 pub(crate) mod thinking;
-use fidelity::{diff_features, reparse_features, source_features, target_holds};
+use fidelity::{diff_features, reparse_features, source_features, target_holds, Field};
 #[cfg(test)]
 use fidelity::{diff_fidelity, reparse_emitted};
-pub use fidelity::{Delta, FidelityReport};
+pub use fidelity::{Divergence, FidelityReport};
 
 /// Knobs for emitting/porting a session.
 #[derive(Debug, Clone, Default)]
@@ -339,9 +339,9 @@ pub(crate) fn thinking_fate_with_presence(
     redacted: bool,
 ) -> ThinkingFate {
     // Whether the target can hold this block AS a thinking block: any one payload is enough.
-    let structural = (has_text && target_holds(target, "thinking_text"))
-        || (signature.is_some() && target_holds(target, "thinking_signature"))
-        || (encrypted.is_some() && target_holds(target, "thinking_encrypted"));
+    let structural = (has_text && target_holds(target, Field::ThinkingText))
+        || (signature.is_some() && target_holds(target, Field::ThinkingSignature))
+        || (encrypted.is_some() && target_holds(target, Field::ThinkingEncrypted));
     let mode = if mode == ThinkingMode::Portable {
         if target == Harness::Claude {
             return if has_text {
@@ -429,7 +429,7 @@ pub fn emit_verified(
 ) -> Result<(EmitResult, Vec<String>)> {
     let (result, report) = emit_report(session, target, out_dir, opts)?;
     if opts.strict {
-        let unexpected: Vec<&Delta> = report.deltas.iter().filter(|d| !d.expected).collect();
+        let unexpected: Vec<&Divergence> = report.deltas.iter().filter(|d| !d.expected).collect();
         if !unexpected.is_empty() {
             let joined = unexpected.iter().map(|d| d.describe()).collect::<Vec<_>>().join("; ");
             anyhow::bail!(
@@ -474,11 +474,12 @@ pub fn emit_report(
     let report = match reparse_features(target, opts.thinking, &result, &reparse_opts) {
         Ok((reparsed, after)) => diff_features(target, opts.thinking, session, &reparsed, before, after),
         Err(e) => FidelityReport {
-            deltas: vec![Delta {
-                field: "round_trip".into(),
-                before: "parseable".into(),
-                after: format!("re-parse failed ({e:#})"),
+            deltas: vec![Divergence {
+                what: "round_trip".into(),
+                a: "parseable".into(),
+                b: format!("re-parse failed ({e:#})"),
                 expected: false,
+                at: target.as_str().to_string(),
             }],
         },
     };
@@ -2465,11 +2466,12 @@ mod tests {
     #[test]
     fn fidelity_report_gate_and_rendering() {
         let expected_only = FidelityReport {
-            deltas: vec![Delta {
-                field: "block:image".into(),
-                before: "1".into(),
-                after: "0".into(),
+            deltas: vec![Divergence {
+                what: "block:image".into(),
+                a: "1".into(),
+                b: "0".into(),
                 expected: true,
+                at: "test".into(),
             }],
         };
         assert!(!expected_only.has_unexpected(), "expected losses never fail strict");
@@ -2477,11 +2479,12 @@ mod tests {
         assert!(expected_only.lost_lines()[0].contains("expected"));
 
         let unexpected = FidelityReport {
-            deltas: vec![Delta {
-                field: "usage".into(),
-                before: "1".into(),
-                after: "0".into(),
+            deltas: vec![Divergence {
+                what: "usage".into(),
+                a: "1".into(),
+                b: "0".into(),
                 expected: false,
+                at: "test".into(),
             }],
         };
         assert!(unexpected.has_unexpected());
@@ -2754,7 +2757,7 @@ mod tests {
         }
         let (res, report) = emit_report(&s, Harness::Codex, &temp_dir(), &EmitOptions::default()).unwrap();
         assert!(
-            !report.deltas.iter().any(|d| d.field == "usage"),
+            !report.deltas.iter().any(|d| d.what == "usage"),
             "usage must survive into Codex, got {:?}",
             report.deltas
         );
@@ -2787,7 +2790,7 @@ mod tests {
         }
         let (res, report) = emit_report(&s, Harness::OpenClaw, &temp_dir(), &EmitOptions::default()).unwrap();
         assert!(
-            !report.deltas.iter().any(|d| d.field == "usage"),
+            !report.deltas.iter().any(|d| d.what == "usage"),
             "usage must survive into OpenClaw, got {:?}",
             report.deltas
         );
@@ -2818,7 +2821,7 @@ mod tests {
         }
         let (res, report) = emit_report(&s, Harness::OpenCode, &temp_dir(), &EmitOptions::default()).unwrap();
         assert!(
-            !report.deltas.iter().any(|d| d.field == "details"),
+            !report.deltas.iter().any(|d| d.what == "details"),
             "details must survive into OpenCode, got {:?}",
             report.deltas
         );
@@ -2867,14 +2870,14 @@ mod tests {
         let d = report
             .deltas
             .iter()
-            .find(|d| d.field == "unrepresentable_turns")
+            .find(|d| d.what == "unrepresentable_turns")
             .expect("the dropped turn is reported");
-        assert_eq!((d.before.as_str(), d.after.as_str()), ("1", "0"));
+        assert_eq!((d.a.as_str(), d.b.as_str()), ("1", "0"));
 
         // Into Claude itself the same turn is perfectly representable, so nothing is reported.
         let (_res, report) = emit_report(&s, Harness::Claude, &temp_dir(), &EmitOptions::default()).unwrap();
         assert!(
-            !report.deltas.iter().any(|d| d.field == "unrepresentable_turns"),
+            !report.deltas.iter().any(|d| d.what == "unrepresentable_turns"),
             "Claude holds signature-only thinking, got {:?}",
             report.deltas
         );
@@ -2889,34 +2892,34 @@ mod tests {
         for t in [Harness::OpenCode, Harness::Gemini] {
             assert!(folds_tool_result(t), "{t} folds a result into its call's record");
             assert!(
-                !target_holds(t, "id:tool_turn"),
+                !target_holds(t, Field::IdToolTurn),
                 "{t}: a tool turn has no id of its own"
             );
             assert!(
-                !target_holds(t, "timestamp:tool_turn"),
+                !target_holds(t, Field::TimestampToolTurn),
                 "{t}: a tool turn has no timestamp of its own"
             );
             // …and that must NOT have excused the ordinary fields.
-            assert!(target_holds(t, "id"), "{t} still holds a normal turn's id");
+            assert!(target_holds(t, Field::Id), "{t} still holds a normal turn's id");
             assert!(
-                target_holds(t, "timestamp"),
+                target_holds(t, Field::Timestamp),
                 "{t} still holds a normal turn's timestamp"
             );
         }
         // A target that gives the result its own record answers exactly as it does for any turn.
-        for t in [Harness::Claude, Harness::OpenClaw, Harness::Kimi] {
+        for t in [Harness::Claude, Harness::OpenClaw, Harness::Qwen] {
             assert!(!folds_tool_result(t));
-            assert!(target_holds(t, "id:tool_turn"), "{t} keeps a tool turn's id");
+            assert!(target_holds(t, Field::IdToolTurn), "{t} keeps a tool turn's id");
             assert!(
-                target_holds(t, "timestamp:tool_turn"),
+                target_holds(t, Field::TimestampToolTurn),
                 "{t} keeps a tool turn's timestamp"
             );
         }
         // Codex has no per-message id at all, so a tool turn's is expected there for the older
         // reason — the narrow key never *adds* a capability.
-        assert!(!target_holds(Harness::Codex, "id"));
-        assert!(!target_holds(Harness::Codex, "id:tool_turn"));
-        assert!(target_holds(Harness::Codex, "timestamp:tool_turn"));
+        assert!(!target_holds(Harness::Codex, Field::Id));
+        assert!(!target_holds(Harness::Codex, Field::IdToolTurn));
+        assert!(target_holds(Harness::Codex, Field::TimestampToolTurn));
     }
 
     /// Both directions of the new classification, through the real diff: a folding target losing
@@ -2943,12 +2946,12 @@ mod tests {
         let d = report
             .deltas
             .iter()
-            .find(|d| d.field == "message ids (tool turns)")
+            .find(|d| d.what == "message ids (tool turns)")
             .expect("the tool turn's lost id is reported");
-        assert_eq!((d.before.as_str(), d.after.as_str()), ("1", "0"));
+        assert_eq!((d.a.as_str(), d.b.as_str()), ("1", "0"));
         assert!(d.expected, "OpenCode cannot give a tool turn an id");
         assert!(
-            report.deltas.iter().any(|d| d.field == "timestamps (tool turns)"),
+            report.deltas.iter().any(|d| d.what == "timestamps (tool turns)"),
             "and its timestamp too: {:?}",
             report.deltas
         );
@@ -2965,7 +2968,7 @@ mod tests {
         let d = report
             .deltas
             .iter()
-            .find(|d| d.field == "message ids")
+            .find(|d| d.what == "message ids")
             .expect("a normal turn's lost id is reported");
         assert!(!d.expected, "a normal turn's id loss stays unexpected");
         assert!(report.has_unexpected(), "and --strict still fails on it");
@@ -3112,11 +3115,12 @@ mod tests {
     /// the full value for `--json`.
     #[test]
     fn delta_describe_briefs_long_values() {
-        let d = Delta {
-            field: "system prompt".into(),
-            before: format!("\n\nYou are an interactive agent{}\nand more\n", "…".repeat(4000)),
-            after: "(none)".into(),
+        let d = Divergence {
+            what: "system prompt".into(),
+            a: format!("\n\nYou are an interactive agent{}\nand more\n", "…".repeat(4000)),
+            b: "(none)".into(),
             expected: true,
+            at: "test".into(),
         };
         let line = d.describe();
         assert!(
@@ -3130,7 +3134,7 @@ mod tests {
         );
         assert!(line.contains("chars)"), "says how much was cut: {line}");
         assert!(line.ends_with("→ (none)"), "short values pass through: {line}");
-        assert!(d.before.len() > 1000, "the delta itself keeps the full value");
+        assert!(d.a.len() > 1000, "the delta itself keeps the full value");
     }
 
     /// Same-harness verification compares like with like. `cv port` parses a rehome
@@ -3198,7 +3202,7 @@ mod tests {
         }
         let (res, report) = emit_report(&s, Harness::Claude, &temp_dir(), &EmitOptions::default()).unwrap();
         assert!(
-            !report.deltas.iter().any(|d| d.field == "details"),
+            !report.deltas.iter().any(|d| d.what == "details"),
             "details must survive a port into Claude, got {:?}",
             report.deltas
         );
@@ -3260,7 +3264,7 @@ mod tests {
     /// [`claude_carries_usage_from_a_foreign_source`]). It is now the **text of a foreign System
     /// turn**: Claude's transcript has no standalone system record, so `emit_claude` drops the turn
     /// — but its text is not inherently unportable there (a foreign `InjectedContext` turn is
-    /// carried into an `attachment` record a few lines away), so `target_holds(Claude, "text")` is
+    /// carried into an `attachment` record a few lines away), so `target_holds(Claude, Field::Text)` is
     /// rightly true and the loss is rightly unexpected. If that gap is ever closed, point this test
     /// at another real one rather than weakening the check.
     /// Every emitter claims its session files: a pinned id emitted twice is refused with nothing
@@ -3325,7 +3329,7 @@ mod tests {
             report
                 .deltas
                 .iter()
-                .any(|d| d.field == "block:text" && !d.expected && d.before == "3" && d.after == "2"),
+                .any(|d| d.what == "block:text" && !d.expected && d.a == "3" && d.b == "2"),
             "expected an unexpected text loss, got {:?}",
             report.deltas
         );
@@ -3347,7 +3351,7 @@ mod tests {
     }
 
     /// Per-turn token usage survives a port into Claude **from another harness**. Claude keeps the
-    /// counts at `message.usage` and `target_holds(Claude, "usage")` says so, but `emit_claude`
+    /// counts at `message.usage` and `target_holds(Claude, Field::Usage)` says so, but `emit_claude`
     /// rebuilt that block only when replaying a Claude session from its own fact bag — so a real
     /// Codex session ported here read back `usage: 2032 → 0`, an unexpected loss on every port.
     #[test]
@@ -3368,7 +3372,7 @@ mod tests {
             }
             let (res, report) = emit_report(&s, Harness::Claude, &temp_dir(), &EmitOptions::default()).unwrap();
             assert!(
-                !report.deltas.iter().any(|d| d.field == "usage"),
+                !report.deltas.iter().any(|d| d.what == "usage"),
                 "usage must survive {src} → Claude, got {:?}",
                 report.deltas
             );
@@ -3419,7 +3423,7 @@ mod tests {
         let d = report
             .deltas
             .iter()
-            .find(|d| d.field == "tool result is_error")
+            .find(|d| d.what == "tool result is_error")
             .expect("the flag is reported as lost");
         assert!(d.expected, "Hermes has no column for it: {d:?}");
         // …so `--strict` does not fail on it.
@@ -3436,7 +3440,7 @@ mod tests {
         // A target that *does* have a slot still has to fill it.
         let (_res, report) = emit_report(&s, Harness::Grok, &temp_dir(), &EmitOptions::default()).unwrap();
         assert!(
-            !report.deltas.iter().any(|d| d.field == "tool result is_error"),
+            !report.deltas.iter().any(|d| d.what == "tool result is_error"),
             "Grok carries it in updates.jsonl, got {:?}",
             report.deltas
         );
@@ -3455,13 +3459,10 @@ mod tests {
         let d = report
             .deltas
             .iter()
-            .find(|d| d.field.starts_with("session model"))
+            .find(|d| d.what.starts_with("session model"))
             .expect("the substitution is reported");
-        assert_eq!(d.field, "session model (foreign)");
-        assert_eq!(
-            (d.before.as_str(), d.after.as_str()),
-            ("claude-fable-5-1", "grok-build")
-        );
+        assert_eq!(d.what, "session model (foreign)");
+        assert_eq!((d.a.as_str(), d.b.as_str()), ("claude-fable-5-1", "grok-build"));
         assert!(d.expected, "a pinned model is not an avoidable loss: {d:?}");
         let summary: Value = serde_json::from_str(&fs::read_to_string(res.path.join("summary.json")).unwrap()).unwrap();
         assert_eq!(summary["current_model_id"], json!("grok-build"));
@@ -3474,7 +3475,7 @@ mod tests {
         }
         let (res, report) = emit_report(&g, Harness::Grok, &temp_dir(), &EmitOptions::default()).unwrap();
         assert!(
-            !report.deltas.iter().any(|d| d.field.starts_with("session model")),
+            !report.deltas.iter().any(|d| d.what.starts_with("session model")),
             "a Grok model round-trips, got {:?}",
             report.deltas
         );
@@ -3564,7 +3565,7 @@ mod tests {
         let (res, report) = emit_report(&base, Harness::Codex, &temp_dir(), &opts(ThinkingMode::Native)).unwrap();
         assert!(report.deltas.iter().all(|d| d.expected), "{:?}", report.deltas);
         assert!(
-            report.deltas.iter().any(|d| d.field == "unrepresentable_turns"),
+            report.deltas.iter().any(|d| d.what == "unrepresentable_turns"),
             "the sig-only turn is dropped, got {:?}",
             report.deltas
         );
@@ -3579,14 +3580,14 @@ mod tests {
         // --- text: the turn survives, and the lost signature is still reported.
         let (res, report) = emit_report(&base, Harness::Codex, &temp_dir(), &opts(ThinkingMode::Text)).unwrap();
         assert!(
-            !report.deltas.iter().any(|d| d.field == "unrepresentable_turns"),
+            !report.deltas.iter().any(|d| d.what == "unrepresentable_turns"),
             "no turn is lost under --thinking text, got {:?}",
             report.deltas
         );
         let sig = report
             .deltas
             .iter()
-            .find(|d| d.field == "thinking(signature)")
+            .find(|d| d.what == "thinking(signature)")
             .expect("the signature loss is STILL reported — this mode saves the turn, not the blob");
         assert!(sig.expected, "Codex cannot hold an Anthropic signature: {sig:?}");
         assert!(report.deltas.iter().all(|d| d.expected), "{:?}", report.deltas);
@@ -3630,7 +3631,7 @@ mod tests {
                 report.deltas
             );
             assert!(
-                report.deltas.iter().any(|d| d.field.starts_with("thinking(")),
+                report.deltas.iter().any(|d| d.what.starts_with("thinking(")),
                 "…and it is still REPORTED into {target}, got {:?}",
                 report.deltas
             );

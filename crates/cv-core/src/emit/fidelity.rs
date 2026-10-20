@@ -1,7 +1,7 @@
 //! The fidelity verifier behind `port --strict`: re-parse what an emitter wrote with the target's
 //! own reader and classify every difference from the source as **expected** (a field the target
-//! cannot hold — [`target_holds`], the one capability table) or **unexpected** (one it could have
-//! kept). `emit_verified` fails on an unexpected loss only, so a strict port is a checked claim.
+//! cannot hold — [`HOLDS`], the one capability table, and [`policy`]) or **unexpected** (one it
+//! could have kept). `emit_verified` fails on an unexpected loss only, so a strict port is a checked claim.
 
 use super::*;
 mod accumulator;
@@ -154,24 +154,28 @@ fn reparse_hermes(
 // Fidelity verifier v2
 // ------------------------------------------------------------------------------------------------
 
-/// One field that changed across the emit→re-parse round-trip. `before`/`after` are human strings
-/// (counts, option values). `expected` is true when the target format inherently cannot carry the
-/// field (a known, non-fatal loss); false when it could have and didn't (an `--strict` failure).
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct Delta {
-    pub field: String,
-    pub before: String,
-    pub after: String,
+/// Two representations of one thing disagree, and a judge has ruled whether that is expected
+/// (`docs/INTERFACE-V2.md` §8). The emit verifier reports one per field that changed across the
+/// emit→re-parse round-trip (`a` the source's human value, `b` what the target's reader returned;
+/// `expected` when the target cannot carry the field, else an `--strict` failure). The format
+/// manifest check reports one per manifest entry its adapter source contradicts (`a` the
+/// [`FindingKind`](crate::formats::FindingKind) tag, `b` the detail). `where` is the harness.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Divergence {
+    pub what: String,
+    pub a: String,
+    pub b: String,
     pub expected: bool,
+    #[serde(rename = "where")]
+    pub at: String,
 }
 
-impl Delta {
-    /// A one-line `<field>: <before> → <after>` description (used in `--strict` errors and the
-    /// `⚠ lost` lines). Values are [`brief`]ed: a real session's system prompt is thousands of
-    /// lines, and dumping it into the terminal buried every other delta. The struct keeps the full
-    /// values for `--json` consumers.
+impl Divergence {
+    /// A one-line `<what>: <a> → <b>` description (used in `--strict` errors and the `⚠ lost`
+    /// lines). Values are [`brief`]ed: a real session's system prompt is thousands of lines, and
+    /// dumping it into the terminal buried every other delta. The struct keeps the full values.
     pub fn describe(&self) -> String {
-        format!("{}: {} → {}", self.field, brief(&self.before), brief(&self.after))
+        format!("{}: {} → {}", self.what, brief(&self.a), brief(&self.b))
     }
 }
 
@@ -192,7 +196,7 @@ pub(super) fn brief(s: &str) -> String {
 /// each classified expected/unexpected. An empty `deltas` is a fully clean round-trip.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct FidelityReport {
-    pub deltas: Vec<Delta>,
+    pub deltas: Vec<Divergence>,
 }
 
 impl FidelityReport {
@@ -241,7 +245,7 @@ pub(super) struct Features {
     continue_cache_creation: usize,
     // Timestamps and ids are counted separately for TOOL turns, because a store that keeps a tool
     // result inside its originating call's record gives that turn no record of its own to carry
-    // them on — see the `id:tool_turn` arm of [`target_holds`].
+    // them on — see [`Field::IdToolTurn`].
     timestamps: usize,
     timestamps_tool: usize,
     ids: usize,
@@ -251,7 +255,7 @@ pub(super) struct Features {
 }
 
 /// Whether `target`’s format can hold this block at all (the block-level half of
-/// [`target_holds`]), under the requested [`ThinkingMode`]. A thinking block survives if
+/// [`HOLDS`]), under the requested [`ThinkingMode`]. A thinking block survives if
 /// [`thinking_fate`] writes anything for it — structurally, as text, or as a placeholder.
 pub(super) fn block_survives(target: Harness, thinking: ThinkingMode, b: &Block) -> bool {
     match b {
@@ -271,10 +275,10 @@ pub(super) fn block_survives(target: Harness, thinking: ThinkingMode, b: &Block)
                 *redacted,
             ) != ThinkingFate::Drop
         }
-        Block::ToolUse { .. } => target_holds(target, "tool_use"),
-        Block::ToolResult { .. } => target_holds(target, "tool_result"),
-        Block::Image { .. } => target_holds(target, "image"),
-        Block::File { .. } => target_holds(target, "file"),
+        Block::ToolUse { .. } => target_holds(target, Field::ToolUse),
+        Block::ToolResult { .. } => target_holds(target, Field::ToolResult),
+        Block::Image { .. } => target_holds(target, Field::Image),
+        Block::File { .. } => target_holds(target, Field::File),
     }
 }
 
@@ -433,76 +437,131 @@ pub(super) fn role_str(r: Role) -> &'static str {
     }
 }
 
-/// Whether `target`'s native format can carry `field`. Everything it cannot is reported as an
-/// **expected** loss (never fatal under `--strict`); everything it can but didn't is **unexpected**.
-/// Grounded in each adapter's read side (`docs/FORMATS.md`, the `harness/*.rs` parsers):
-/// Anthropic signature-only thinking survives only into Anthropic-shaped stores; OpenAI encrypted
-/// reasoning only into OpenAI-shaped ones; per-message ids not into Codex/Hermes; a standalone tool
-/// name on a *result* only where the format has a slot for it; structured `details` only into
-/// Claude's `toolUseResult` / OpenCode's tool `state`; cost into OpenCode or Continue.
-pub(super) fn target_holds(t: Harness, field: &str) -> bool {
-    use Harness::*;
-    match field {
-        // Text is universal; every conversational store keeps it.
-        "text" => true,
-        "thinking_text" => !matches!(t, LmStudio | Continue),
-        "thinking_signature" => matches!(t, Claude | OpenCode | OpenClaw),
-        "thinking_encrypted" => matches!(t, Codex | Grok | Hermes),
-        "image" => !matches!(t, Grok | LmStudio),
-        "file" => matches!(t, Claude | OpenCode | Gemini | Qwen),
-        "tool_use" | "tool_result" => !matches!(t, LmStudio),
-        "tool_name" => matches!(t, OpenClaw | Hermes | Codex | Gemini | OpenCode | Qwen),
-        // Hermes has no slot for a tool result's error flag. Its `messages` table (schema v30,
-        // `hermes_state_common.py` `SCHEMA_SQL`) is
-        //   id, session_id, role, content, tool_call_id, tool_calls, tool_name,
-        //   effect_disposition, timestamp, token_count, finish_reason, reasoning*,
-        //   codex_*_items, platform_message_id, observed, _compressed_summary, active,
-        //   compacted, api_content, display_kind, display_metadata, display_identity,
-        //   display_order
-        // — no error/status column. The near misses are not it: `effect_disposition` is the
-        // *side-effect* classification (`"none"` when a call was blocked, `"unknown"` on timeout;
-        // `agent/tool_executor.py`, consumed by `agent/replay_cleanup.py`), and `finish_reason` is
-        // the assistant turn's stop reason. Hermes's own writer proves it: `append_message` /
-        // `make_tool_result_message` (`agent/tool_dispatch_helpers.py`) take no error argument —
-        // a failure reaches the store only as the text of `content`. So the read side has nothing
-        // to read: `hermes.rs` builds every tool row's block with `is_error: false`.
-        "is_error" => !matches!(t, LmStudio | Hermes),
-        "details" => matches!(t, Claude | OpenCode),
-        "usage" => !matches!(t, Grok | Cline | Roo),
-        "cost" => matches!(t, OpenCode | Continue),
-        "usage:cache_creation" => t != Continue,
-        // Grok's `chat_history.jsonl` turns carry no per-message timestamp; LM Studio none either.
-        "timestamp" => !matches!(t, LmStudio | Grok),
-        // Per-message ids: kept by the stores that thread by a stable id.
-        "id" => matches!(t, Claude | OpenCode | OpenClaw | Gemini | Kimi | Cline | Roo | Qwen),
-        // A TOOL turn's own id/timestamp, which is a narrower question than the turn above. Where
-        // the store keeps a tool result INSIDE its originating call's record ([`folds_tool_result`])
-        // the tool turn has no record of its own, so there is nowhere for an id or a timestamp to
-        // live — the reader rebuilds the turn out of the call. (Gemini's reader does recover a
-        // timestamp from the enclosing record, so in practice only the id is ever reported there;
-        // the classification is about what the STORE can hold.) Everywhere else the ordinary
-        // `id`/`timestamp` answer stands, so a real id loss on a tool turn stays unexpected.
-        "id:tool_turn" => !folds_tool_result(t) && target_holds(t, "id"),
-        "timestamp:tool_turn" => !folds_tool_result(t) && target_holds(t, "timestamp"),
-        "model" => true,
-        "title" => !matches!(t, Codex),
-        "cwd" => !matches!(t, LmStudio),
-        "session_model" => true,
-        // A session model the target must *replace* to stay runnable there. Grok resumes a session
-        // against `summary.json`'s `current_model_id`, so a foreign id (`claude-fable-5-1`,
-        // `gpt-5.5`) would make it replay the history against a backend that cannot serve it;
-        // [`grok_model_id`] pins those to `grok-build` on purpose. The substitution is the correct
-        // behaviour, so the verifier reports it, but never as a loss the emitter could have
-        // avoided. A Grok model (or a Grok→Grok rehome) is carried verbatim and is still checked
-        // under plain `session_model`, so a genuine model loss there is still unexpected.
-        "session_model_foreign" => false,
-        "principal" => t == OpenSession,
-        "system_prompt" => matches!(t, Claude | Codex | Hermes | Kimi),
-        // Lineage reconstruction on a standalone emit needs a target the pointer resolves in; treat
-        // any lineage change as expected (a fresh single-session port has nothing to point at).
-        "lineage" => false,
-        _ => true,
+/// A fact the verifier compares across the round-trip, and the vocabulary of [`HOLDS`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Field {
+    /// Text is universal; every conversational store keeps it.
+    Text,
+    ThinkingText,
+    ThinkingSignature,
+    ThinkingEncrypted,
+    Image,
+    File,
+    ToolUse,
+    ToolResult,
+    /// A standalone tool name on a *result*, only where the format has a slot for it.
+    ToolName,
+    /// A tool result's error flag. Hermes has no slot for it. Its `messages` table (schema v30,
+    /// `hermes_state_common.py` `SCHEMA_SQL`) is
+    ///   id, session_id, role, content, tool_call_id, tool_calls, tool_name,
+    ///   effect_disposition, timestamp, token_count, finish_reason, reasoning*,
+    ///   codex_*_items, platform_message_id, observed, _compressed_summary, active,
+    ///   compacted, api_content, display_kind, display_metadata, display_identity,
+    ///   display_order
+    /// — no error/status column. The near misses are not it: `effect_disposition` is the
+    /// *side-effect* classification (`"none"` when a call was blocked, `"unknown"` on timeout;
+    /// `agent/tool_executor.py`, consumed by `agent/replay_cleanup.py`), and `finish_reason` is
+    /// the assistant turn's stop reason. Hermes's own writer proves it: `append_message` /
+    /// `make_tool_result_message` (`agent/tool_dispatch_helpers.py`) take no error argument —
+    /// a failure reaches the store only as the text of `content`. So the read side has nothing
+    /// to read: `hermes.rs` builds every tool row's block with `is_error: false`.
+    IsError,
+    /// Structured `details`: Claude's `toolUseResult`, OpenCode's tool `state`.
+    Details,
+    Usage,
+    Cost,
+    /// Continue carries usage/cost but has no native cache-write field.
+    UsageCacheCreation,
+    /// Grok's `chat_history.jsonl` turns carry no per-message timestamp; LM Studio none either.
+    Timestamp,
+    /// A TOOL turn's own timestamp; see [`Field::IdToolTurn`].
+    TimestampToolTurn,
+    /// Per-message ids: kept by the stores that thread by a stable id.
+    Id,
+    /// A TOOL turn's own id, a narrower question than [`Field::Id`]. Where the store keeps a tool
+    /// result INSIDE its originating call's record ([`folds_tool_result`]) the tool turn has no
+    /// record of its own, so there is nowhere for an id or a timestamp to live — the reader
+    /// rebuilds the turn out of the call. (Gemini's reader does recover a timestamp from the
+    /// enclosing record, so in practice only the id is ever reported there; the classification is
+    /// about what the STORE can hold.) Everywhere else the ordinary id/timestamp answer stands, so
+    /// a real id loss on a tool turn stays unexpected.
+    IdToolTurn,
+    /// Per-message model, effective (a turn's own, else the session default): a [`policy`].
+    Model,
+    Title,
+    Cwd,
+    SessionModel,
+    /// A session model the target must *replace* to stay runnable there: a [`policy`].
+    SessionModelForeign,
+    SystemPrompt,
+    Principal,
+    /// Lineage pointers: a [`policy`].
+    Lineage,
+    /// The target's reader re-reads its own output at the source's demand, format-complete
+    /// included. OpenCode and Hermes do not: their verifier read is `Demand::RICH` (the
+    /// database branches historically called `parse()`), whatever the source was read at.
+    CompleteReparse,
+}
+
+impl Field {
+    fn is_thinking(self) -> bool {
+        matches!(
+            self,
+            Field::ThinkingText | Field::ThinkingSignature | Field::ThinkingEncrypted
+        )
     }
+}
+
+/// What each emit target's native format can carry, grounded in its read side (`docs/FORMATS.md`,
+/// the `harness/*.rs` parsers): everything a row omits is reported as an **expected** loss (never
+/// fatal under `--strict`); everything it lists but lost is **unexpected**. Anthropic
+/// signature-only thinking survives only into Anthropic-shaped stores, OpenAI encrypted reasoning
+/// only into OpenAI-shaped ones; cost only into OpenCode or Continue. OpenSession is no emit
+/// target; it is listed for the one field only it holds. A harness absent here holds nothing.
+#[rustfmt::skip]
+pub(crate) const HOLDS: &[(Harness, &[Field])] = {
+    use Field::*;
+    use Harness::*;
+    &[
+        (Claude, &[Text, ThinkingText, ThinkingSignature, Image, File, ToolUse, ToolResult, IsError, Details, Usage, UsageCacheCreation, Timestamp, TimestampToolTurn, Id, IdToolTurn, Title, Cwd, SessionModel, SystemPrompt, CompleteReparse]),
+        (Codex, &[Text, ThinkingText, ThinkingEncrypted, Image, ToolUse, ToolResult, ToolName, IsError, Usage, UsageCacheCreation, Timestamp, TimestampToolTurn, Cwd, SessionModel, SystemPrompt, CompleteReparse]),
+        (Grok, &[Text, ThinkingText, ThinkingEncrypted, ToolUse, ToolResult, IsError, UsageCacheCreation, Title, Cwd, SessionModel, CompleteReparse]),
+        (OpenCode, &[Text, ThinkingText, ThinkingSignature, Image, File, ToolUse, ToolResult, ToolName, IsError, Details, Usage, Cost, UsageCacheCreation, Timestamp, Id, Title, Cwd, SessionModel]),
+        (OpenClaw, &[Text, ThinkingText, ThinkingSignature, Image, ToolUse, ToolResult, ToolName, IsError, Usage, UsageCacheCreation, Timestamp, TimestampToolTurn, Id, IdToolTurn, Title, Cwd, SessionModel, CompleteReparse]),
+        (Gemini, &[Text, ThinkingText, Image, File, ToolUse, ToolResult, ToolName, IsError, Usage, UsageCacheCreation, Timestamp, Id, Title, Cwd, SessionModel, CompleteReparse]),
+        (Hermes, &[Text, ThinkingText, ThinkingEncrypted, Image, ToolUse, ToolResult, ToolName, Usage, UsageCacheCreation, Timestamp, TimestampToolTurn, Title, Cwd, SessionModel, SystemPrompt]),
+        (LmStudio, &[Text, Usage, UsageCacheCreation, Title, SessionModel, CompleteReparse]),
+        (Cline, &[Text, ThinkingText, Image, ToolUse, ToolResult, IsError, UsageCacheCreation, Timestamp, TimestampToolTurn, Id, IdToolTurn, Title, Cwd, SessionModel, CompleteReparse]),
+        (Roo, &[Text, ThinkingText, Image, ToolUse, ToolResult, IsError, UsageCacheCreation, Timestamp, TimestampToolTurn, Id, IdToolTurn, Title, Cwd, SessionModel, CompleteReparse]),
+        (Continue, &[Text, Image, ToolUse, ToolResult, IsError, Usage, Cost, Timestamp, TimestampToolTurn, Title, Cwd, SessionModel, CompleteReparse]),
+        (Qwen, &[Text, ThinkingText, Image, File, ToolUse, ToolResult, ToolName, IsError, Usage, UsageCacheCreation, Timestamp, TimestampToolTurn, Id, IdToolTurn, Title, Cwd, SessionModel, CompleteReparse]),
+        (OpenSession, &[Principal]),
+    ]
+};
+
+/// The fields whose classification is a decision about every target, not a fact about one store.
+/// `None` defers to [`HOLDS`].
+fn policy(field: Field) -> Option<bool> {
+    match field {
+        // The effective per-message model: a target that records the model once per session still
+        // carries it (`Features::note`), so a drop is always one the emitter could have avoided.
+        Field::Model => Some(true),
+        // Grok resumes a session against `summary.json`'s `current_model_id`, so a foreign id
+        // (`claude-fable-5-1`, `gpt-5.5`) would make it replay the history against a backend that
+        // cannot serve it; [`grok_model_id`] pins those to `grok-build` on purpose. The verifier
+        // reports the substitution, never as a loss the emitter could have avoided. A Grok model
+        // (or a Grok→Grok rehome) is carried verbatim and still checked as `SessionModel`.
+        Field::SessionModelForeign => Some(false),
+        // Lineage reconstruction on a standalone emit needs a target the pointer resolves in; any
+        // lineage change is expected (a fresh single-session port has nothing to point at).
+        Field::Lineage => Some(false),
+        _ => None,
+    }
+}
+
+/// Whether `t`'s native format can carry `field`: [`policy`], else its [`HOLDS`] row.
+pub(super) fn target_holds(t: Harness, field: Field) -> bool {
+    policy(field).unwrap_or_else(|| HOLDS.iter().any(|(h, fields)| *h == t && fields.contains(&field)))
 }
 
 /// Whether `target`'s store keeps a tool result **inside its originating call's record** rather
@@ -515,7 +574,13 @@ pub(super) fn target_holds(t: Harness, field: &str) -> bool {
 /// Hermes a `tool` row, Grok a `tool_result` line) and therefore keeps its id and timestamp.
 ///
 /// Derived by reading the emitters: these are exactly the two that `continue`/skip on
-/// [`Role::Tool`] instead of writing a record.
+/// [`Role::Tool`] instead of writing a record, and the two whose [`HOLDS`] rows omit
+/// [`Field::IdToolTurn`] and [`Field::TimestampToolTurn`] while holding the plain fields.
+#[cfg(test)]
+pub(super) fn folds_tool_result(t: Harness) -> bool {
+    matches!(t, Harness::OpenCode | Harness::Gemini)
+}
+
 /// Targets whose reader applies gemini-cli's `isIgnoredUserContent` rule
 /// (`utils/sessionUtils.ts`): a user turn beginning `/` or `?` is a command typed AT the client,
 /// never a prompt sent to the model, so reading one back yields a System / `injected_context` turn
@@ -537,17 +602,13 @@ pub(super) fn is_client_command(m: &Message) -> bool {
             .unwrap_or(false)
 }
 
-pub(super) fn folds_tool_result(t: Harness) -> bool {
-    matches!(t, Harness::OpenCode | Harness::Gemini)
-}
-
 /// [`target_holds`] under the requested [`ThinkingMode`]: `drop` is the user saying "lose the
 /// reasoning", so a thinking loss there is expected no matter what the target could have held.
 /// (`text` needs no override — the text lands in a [`Block::Text`] and the structured payloads are
 /// still classified by the target's own capability, which is what makes the report stay honest.)
-pub(crate) fn holds(target: Harness, thinking: ThinkingMode, field: &str) -> bool {
+pub(crate) fn holds(target: Harness, thinking: ThinkingMode, field: Field) -> bool {
     if (thinking == ThinkingMode::Drop || (thinking == ThinkingMode::Portable && target == Harness::Claude))
-        && field.starts_with("thinking_")
+        && field.is_thinking()
     {
         return false;
     }
@@ -582,41 +643,45 @@ pub(super) fn diff_features(
     let mut deltas = Vec::new();
 
     // A count loss (after < before) for `field`, classified via the target's capability table.
-    let count_delta = |deltas: &mut Vec<Delta>, field: &str, label: &str, b: usize, a: usize| {
+    let at = || target.as_str().to_string();
+    let count_delta = |deltas: &mut Vec<Divergence>, field: Field, label: &str, b: usize, a: usize| {
         if a < b {
-            deltas.push(Delta {
-                field: label.to_string(),
-                before: b.to_string(),
-                after: a.to_string(),
+            deltas.push(Divergence {
+                what: label.to_string(),
+                a: b.to_string(),
+                b: a.to_string(),
                 expected: !holds(target, thinking, field),
+                at: at(),
             });
         }
     };
     // A dropped-or-changed session-level option field.
     fn opt_delta(
-        deltas: &mut Vec<Delta>,
+        deltas: &mut Vec<Divergence>,
         target: Harness,
-        field: &str,
+        field: Field,
         label: &str,
         b: Option<String>,
         a: Option<String>,
     ) {
         if b.is_some() && a != b {
-            deltas.push(Delta {
-                field: label.to_string(),
-                before: b.unwrap_or_default(),
-                after: a.unwrap_or_else(|| "(none)".into()),
+            deltas.push(Divergence {
+                what: label.to_string(),
+                a: b.unwrap_or_default(),
+                b: a.unwrap_or_else(|| "(none)".into()),
                 expected: !target_holds(target, field),
+                at: target.as_str().to_string(),
             });
         }
     }
 
     if dropped > 0 {
-        deltas.push(Delta {
-            field: "unrepresentable_turns".into(),
-            before: dropped.to_string(),
-            after: "0".into(),
+        deltas.push(Divergence {
+            what: "unrepresentable_turns".into(),
+            a: dropped.to_string(),
+            b: "0".into(),
             expected: true,
+            at: at(),
         });
     }
     // Role / kind census. A lost *conversational* turn (user/assistant/tool) is always unexpected;
@@ -624,11 +689,12 @@ pub(super) fn diff_features(
     for (role, &b) in &before.role_counts {
         let a = after.role_counts.get(role).copied().unwrap_or(0);
         if a < b {
-            deltas.push(Delta {
-                field: format!("role:{role}"),
-                before: b.to_string(),
-                after: a.to_string(),
+            deltas.push(Divergence {
+                what: format!("role:{role}"),
+                a: b.to_string(),
+                b: a.to_string(),
                 expected: *role == "system",
+                at: at(),
             });
         }
     }
@@ -642,11 +708,12 @@ pub(super) fn diff_features(
         let b = before.kind_counts.get(kind).copied().unwrap_or(0);
         let a = after.kind_counts.get(kind).copied().unwrap_or(0);
         if a < b {
-            deltas.push(Delta {
-                field: format!("kind:{kind}"),
-                before: b.to_string(),
-                after: a.to_string(),
+            deltas.push(Divergence {
+                what: format!("kind:{kind}"),
+                a: b.to_string(),
+                b: a.to_string(),
                 expected: false,
+                at: at(),
             });
         }
     }
@@ -663,107 +730,108 @@ pub(super) fn diff_features(
         .map(|(_, n)| *n)
         .sum();
     if meta_after < meta_before {
-        deltas.push(Delta {
-            field: "kind:meta".into(),
-            before: meta_before.to_string(),
-            after: meta_after.to_string(),
+        deltas.push(Divergence {
+            what: "kind:meta".into(),
+            a: meta_before.to_string(),
+            b: meta_after.to_string(),
             expected: true,
+            at: at(),
         });
     }
 
-    count_delta(&mut deltas, "text", "block:text", before.text, after.text);
+    count_delta(&mut deltas, Field::Text, "block:text", before.text, after.text);
     count_delta(
         &mut deltas,
-        "tool_use",
+        Field::ToolUse,
         "block:tool_use",
         before.tool_use,
         after.tool_use,
     );
     count_delta(
         &mut deltas,
-        "tool_result",
+        Field::ToolResult,
         "block:tool_result",
         before.tool_result,
         after.tool_result,
     );
-    count_delta(&mut deltas, "image", "block:image", before.image, after.image);
-    count_delta(&mut deltas, "file", "block:file", before.file, after.file);
+    count_delta(&mut deltas, Field::Image, "block:image", before.image, after.image);
+    count_delta(&mut deltas, Field::File, "block:file", before.file, after.file);
     count_delta(
         &mut deltas,
-        "thinking_text",
+        Field::ThinkingText,
         "thinking(text)",
         before.thinking_text,
         after.thinking_text,
     );
     count_delta(
         &mut deltas,
-        "thinking_signature",
+        Field::ThinkingSignature,
         "thinking(signature)",
         before.thinking_sig,
         after.thinking_sig,
     );
     count_delta(
         &mut deltas,
-        "thinking_encrypted",
+        Field::ThinkingEncrypted,
         "thinking(encrypted)",
         before.thinking_enc,
         after.thinking_enc,
     );
     count_delta(
         &mut deltas,
-        "tool_name",
+        Field::ToolName,
         "tool_name on result",
         before.results_with_name,
         after.results_with_name,
     );
     count_delta(
         &mut deltas,
-        "is_error",
+        Field::IsError,
         "tool result is_error",
         before.results_is_error,
         after.results_is_error,
     );
     count_delta(
         &mut deltas,
-        "details",
+        Field::Details,
         "tool result details",
         before.results_with_details,
         after.results_with_details,
     );
-    count_delta(&mut deltas, "usage", "usage", before.usage, after.usage);
-    count_delta(&mut deltas, "cost", "usage cost", before.cost, after.cost);
+    count_delta(&mut deltas, Field::Usage, "usage", before.usage, after.usage);
+    count_delta(&mut deltas, Field::Cost, "usage cost", before.cost, after.cost);
     count_delta(
         &mut deltas,
-        "usage:cache_creation",
+        Field::UsageCacheCreation,
         "usage cache creation tokens",
         before.continue_cache_creation,
         after.continue_cache_creation,
     );
     count_delta(
         &mut deltas,
-        "timestamp",
+        Field::Timestamp,
         "timestamps",
         before.timestamps,
         after.timestamps,
     );
     count_delta(
         &mut deltas,
-        "timestamp:tool_turn",
+        Field::TimestampToolTurn,
         "timestamps (tool turns)",
         before.timestamps_tool,
         after.timestamps_tool,
     );
-    count_delta(&mut deltas, "id", "message ids", before.ids, after.ids);
+    count_delta(&mut deltas, Field::Id, "message ids", before.ids, after.ids);
     count_delta(
         &mut deltas,
-        "id:tool_turn",
+        Field::IdToolTurn,
         "message ids (tool turns)",
         before.ids_tool,
         after.ids_tool,
     );
     count_delta(
         &mut deltas,
-        "model",
+        Field::Model,
         "per-message model",
         before.model_eff,
         after.model_eff,
@@ -773,7 +841,7 @@ pub(super) fn diff_features(
     opt_delta(
         &mut deltas,
         target,
-        "title",
+        Field::Title,
         "session title",
         input.title.clone(),
         reparsed.title.clone(),
@@ -781,22 +849,22 @@ pub(super) fn diff_features(
     opt_delta(
         &mut deltas,
         target,
-        "cwd",
+        Field::Cwd,
         "session cwd",
         input.cwd.as_ref().map(|p| p.to_string_lossy().into_owned()),
         reparsed.cwd.as_ref().map(|p| p.to_string_lossy().into_owned()),
     );
     // The session model. A target that deliberately *pins* its own model rather than carrying a
-    // foreign one (Grok — see `session_model_foreign` in [`target_holds`]) is classified under that
+    // foreign one (Grok — see [`Field::SessionModelForeign`] in [`policy`]) is classified under that
     // key, so the substitution is reported but not counted against the emitter.
     let model_pinned = target == Harness::Grok && input.model.as_deref().is_some_and(|m| grok_model_id(input) != m);
     opt_delta(
         &mut deltas,
         target,
         if model_pinned {
-            "session_model_foreign"
+            Field::SessionModelForeign
         } else {
-            "session_model"
+            Field::SessionModel
         },
         if model_pinned {
             "session model (foreign)"
@@ -809,7 +877,7 @@ pub(super) fn diff_features(
     opt_delta(
         &mut deltas,
         target,
-        "system_prompt",
+        Field::SystemPrompt,
         "system prompt",
         input.system_prompt.clone(),
         reparsed.system_prompt.clone(),
@@ -817,21 +885,22 @@ pub(super) fn diff_features(
     opt_delta(
         &mut deltas,
         target,
-        "principal",
+        Field::Principal,
         "session principal",
         input.principal.as_ref().map(|p| serde_json::json!(p).to_string()),
         reparsed.principal.as_ref().map(|p| serde_json::json!(p).to_string()),
     );
     if !input.lineage.is_empty() && input.lineage != reparsed.lineage {
-        deltas.push(Delta {
-            field: "lineage".into(),
-            before: "present".into(),
-            after: if reparsed.lineage.is_empty() {
+        deltas.push(Divergence {
+            what: "lineage".into(),
+            a: "present".into(),
+            b: if reparsed.lineage.is_empty() {
                 "(none)".into()
             } else {
                 "changed".into()
             },
-            expected: !target_holds(target, "lineage"),
+            expected: !target_holds(target, Field::Lineage),
+            at: at(),
         });
     }
 
@@ -868,9 +937,7 @@ pub(super) fn reparse_features(
 }
 
 fn reparse_options(target: Harness, opts: &Demand) -> Demand {
-    // These database branches historically called parse(), which requests full rather than
-    // format-complete records. Preserve that comparison contract while changing retention.
-    if matches!(target, Harness::OpenCode | Harness::Hermes) {
+    if !target_holds(target, Field::CompleteReparse) {
         Demand::RICH
     } else {
         *opts
@@ -940,19 +1007,19 @@ mod principal_tests {
             let delta = report
                 .deltas
                 .iter()
-                .find(|delta| delta.field == "session principal")
+                .find(|delta| delta.what == "session principal")
                 .unwrap();
             assert!(delta.expected, "{target} has no principal field");
-            assert!(delta.before.contains("opaque-owner"));
+            assert!(delta.a.contains("opaque-owner"));
         }
         let retained = diff_fidelity(Harness::OpenSession, ThinkingMode::Native, &input, &input);
-        assert!(!retained.deltas.iter().any(|delta| delta.field == "session principal"));
+        assert!(!retained.deltas.iter().any(|delta| delta.what == "session principal"));
         let lost = diff_fidelity(Harness::OpenSession, ThinkingMode::Native, &input, &output);
         assert!(
             !lost
                 .deltas
                 .iter()
-                .find(|delta| delta.field == "session principal")
+                .find(|delta| delta.what == "session principal")
                 .unwrap()
                 .expected
         );

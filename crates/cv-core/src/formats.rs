@@ -185,17 +185,22 @@ pub fn manifests() -> Vec<(Harness, Result<Manifest>)> {
 
 // ───────────────────────────── check: source vs manifest ─────────────────────────────
 
-/// One inconsistency between an adapter's source and its manifest.
-#[derive(Debug, Clone, Serialize)]
-pub struct Finding {
-    pub harness: String,
-    pub kind: FindingKind,
-    pub item: String,
-    pub detail: String,
+/// One inconsistency between an adapter's source and its manifest is a [`Divergence`]: `what` the
+/// manifest item, `a` its [`FindingKind`] tag, `b` the detail, `where` the harness, never expected.
+pub use crate::emit::Divergence;
+
+fn finding(harness: &str, kind: FindingKind, item: impl Into<String>, detail: impl Into<String>) -> Divergence {
+    Divergence {
+        what: item.into(),
+        a: kind.as_str().into(),
+        b: detail.into(),
+        expected: false,
+        at: harness.into(),
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
+/// The classes of manifest/source disagreement (a finding's `a`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FindingKind {
     /// The manifest says `handled`, but the literal never appears in the adapter source.
     HandledMissingInSource,
@@ -206,6 +211,17 @@ pub enum FindingKind {
     IgnoreLiteralUnused,
     /// The manifest names a source file that does not exist.
     SourceFileMissing,
+}
+
+impl FindingKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FindingKind::HandledMissingInSource => "handled_missing_in_source",
+            FindingKind::HandledRestatesArm => "handled_restates_arm",
+            FindingKind::IgnoreLiteralUnused => "ignore_literal_unused",
+            FindingKind::SourceFileMissing => "source_file_missing",
+        }
+    }
 }
 
 /// `source` with its `#[cfg(test)] mod tests` block removed.
@@ -254,18 +270,18 @@ pub fn type_literals(source: &str) -> BTreeSet<String> {
 /// Read the manifest's `source_files` under `src_root` (`crates/cv-core/src`). A missing file
 /// becomes a [`FindingKind::SourceFileMissing`] rather than an error, so one bad path never hides
 /// the vocabulary findings of the others.
-pub fn read_sources(m: &Manifest, src_root: &Path) -> (Vec<(String, String)>, Vec<Finding>) {
+pub fn read_sources(m: &Manifest, src_root: &Path) -> (Vec<(String, String)>, Vec<Divergence>) {
     let mut sources = Vec::new();
     let mut findings = Vec::new();
     for f in &m.source_files {
         match std::fs::read_to_string(src_root.join(f)) {
             Ok(text) => sources.push((f.clone(), text)),
-            Err(e) => findings.push(Finding {
-                harness: m.harness.clone(),
-                kind: FindingKind::SourceFileMissing,
-                item: f.clone(),
-                detail: e.to_string(),
-            }),
+            Err(e) => findings.push(finding(
+                &m.harness,
+                FindingKind::SourceFileMissing,
+                f.clone(),
+                e.to_string(),
+            )),
         }
     }
     (sources, findings)
@@ -309,7 +325,7 @@ fn contains_word(text: &str, word: &str) -> bool {
 }
 
 /// Compare `m` against its adapter sources (`(relative path, text)`), both directions.
-pub fn check(m: &Manifest, sources: &[(String, String)]) -> Vec<Finding> {
+pub fn check(m: &Manifest, sources: &[(String, String)]) -> Vec<Divergence> {
     let mut findings = Vec::new();
     let all_text: String = sources
         .iter()
@@ -322,12 +338,12 @@ pub fn check(m: &Manifest, sources: &[(String, String)]) -> Vec<Finding> {
             continue;
         }
         if ty.ends_with(".*") {
-            findings.push(Finding {
-                harness: m.harness.clone(),
-                kind: FindingKind::HandledMissingInSource,
-                item: ty.clone(),
-                detail: "a `.*` family key names no single literal; use carried/ignored/generic".into(),
-            });
+            findings.push(finding(
+                &m.harness,
+                FindingKind::HandledMissingInSource,
+                ty.clone(),
+                "a `.*` family key names no single literal; use carried/ignored/generic",
+            ));
             continue;
         }
         let cands = key_candidates(ty);
@@ -338,16 +354,16 @@ pub fn check(m: &Manifest, sources: &[(String, String)]) -> Vec<Finding> {
         };
         if !found {
             let quoted: Vec<String> = cands.iter().map(|c| format!("{c:?}")).collect();
-            findings.push(Finding {
-                harness: m.harness.clone(),
-                kind: FindingKind::HandledMissingInSource,
-                item: ty.clone(),
-                detail: format!(
+            findings.push(finding(
+                &m.harness,
+                FindingKind::HandledMissingInSource,
+                ty.clone(),
+                format!(
                     "manifest says handled, but none of {} appears in {:?}",
                     quoted.join(" / "),
                     m.source_files
                 ),
-            });
+            ));
         }
     }
     // 2. the adapter's own match arms (not a shared `harness/wire/` codec, which carries every
@@ -361,22 +377,22 @@ pub fn check(m: &Manifest, sources: &[(String, String)]) -> Vec<Finding> {
             continue;
         }
         if let Some(arm) = key_candidates(ty).into_iter().find(|c| arms.contains(c)) {
-            findings.push(Finding {
-                harness: m.harness.clone(),
-                kind: FindingKind::HandledRestatesArm,
-                item: ty.clone(),
-                detail: format!("the adapter has a match arm for {arm:?}: it is handled; drop the entry"),
-            });
+            findings.push(finding(
+                &m.harness,
+                FindingKind::HandledRestatesArm,
+                ty.clone(),
+                format!("the adapter has a match arm for {arm:?}: it is handled; drop the entry"),
+            ));
         }
     }
     for lit in &m.ignore_literals {
         if !arms.contains(lit) {
-            findings.push(Finding {
-                harness: m.harness.clone(),
-                kind: FindingKind::IgnoreLiteralUnused,
-                item: lit.clone(),
-                detail: "no match arm uses this literal any more; drop it from ignore_literals".into(),
-            });
+            findings.push(finding(
+                &m.harness,
+                FindingKind::IgnoreLiteralUnused,
+                lit.clone(),
+                "no match arm uses this literal any more; drop it from ignore_literals",
+            ));
         }
     }
     findings
@@ -411,7 +427,7 @@ pub fn handled(m: &Manifest, sources: &[(String, String)]) -> BTreeSet<String> {
 }
 
 /// [`check`] for every harness whose manifest parses, reading sources under `src_root`.
-pub fn check_all(src_root: &Path) -> Vec<Finding> {
+pub fn check_all(src_root: &Path) -> Vec<Divergence> {
     let mut out = Vec::new();
     for (h, m) in manifests() {
         match m {
@@ -428,12 +444,12 @@ pub fn check_all(src_root: &Path) -> Vec<Finding> {
                     out.append(&mut check(&m, &sources));
                 }
             }
-            Err(e) => out.push(Finding {
-                harness: h.as_str().to_string(),
-                kind: FindingKind::SourceFileMissing,
-                item: format!("formats/{}.toml", h.as_str()),
-                detail: format!("{e:#}"),
-            }),
+            Err(e) => out.push(finding(
+                h.as_str(),
+                FindingKind::SourceFileMissing,
+                format!("formats/{}.toml", h.as_str()),
+                format!("{e:#}"),
+            )),
         }
     }
     out
@@ -453,11 +469,11 @@ mod check_all_tests {
         let findings = check_all(Path::new("/nonexistent/cv/crates/cv-core/src"));
         assert!(!findings.is_empty(), "the missing root is still reported");
         assert!(
-            findings.iter().all(|f| f.kind == FindingKind::SourceFileMissing),
+            findings.iter().all(|f| f.a == FindingKind::SourceFileMissing.as_str()),
             "only file-missing findings, got: {:?}",
             findings
                 .iter()
-                .filter(|f| f.kind != FindingKind::SourceFileMissing)
+                .filter(|f| f.a != FindingKind::SourceFileMissing.as_str())
                 .take(3)
                 .collect::<Vec<_>>()
         );
@@ -920,7 +936,7 @@ mod tests {
         );
         let src = r#"let t = "context.append_message";"#;
         let f = check(&m, &[("x.rs".into(), src.into())]);
-        let items: Vec<&str> = f.iter().map(|f| f.item.as_str()).collect();
+        let items: Vec<&str> = f.iter().map(|f| f.what.as_str()).collect();
         assert_eq!(
             items,
             vec!["record.turn.*"],
@@ -954,7 +970,7 @@ mod tests {
         );
         let src = r#"conn.prepare("SELECT event_json FROM transcript_events WHERE session_id = ?1")"#;
         let f = check(&m, &[("x.rs".into(), src.into())]);
-        let items: Vec<&str> = f.iter().map(|f| f.item.as_str()).collect();
+        let items: Vec<&str> = f.iter().map(|f| f.what.as_str()).collect();
         assert_eq!(items, vec!["table.gone"]);
         assert!(
             !contains_word("transcript_events_archive", "transcript_events"),
@@ -1022,10 +1038,10 @@ mod tests {
         let src = r#"match ty { "user" => 1, "jsonl" => 2, "novel" => 3, "blanket" => 4, _ => 0 }"#;
         let sources = [("x.rs".to_string(), src.to_string())];
         let f = check(&m, &sources);
-        let items: Vec<(FindingKind, &str)> = f.iter().map(|f| (f.kind, f.item.as_str())).collect();
-        assert!(items.contains(&(FindingKind::HandledMissingInSource, "ghost")));
-        assert!(items.contains(&(FindingKind::HandledRestatesArm, "user")));
-        assert!(items.contains(&(FindingKind::IgnoreLiteralUnused, "stale")));
+        let items: Vec<(&str, &str)> = f.iter().map(|f| (f.a.as_str(), f.what.as_str())).collect();
+        assert!(items.contains(&(FindingKind::HandledMissingInSource.as_str(), "ghost")));
+        assert!(items.contains(&(FindingKind::HandledRestatesArm.as_str(), "user")));
+        assert!(items.contains(&(FindingKind::IgnoreLiteralUnused.as_str(), "stale")));
         assert_eq!(
             items.len(),
             3,

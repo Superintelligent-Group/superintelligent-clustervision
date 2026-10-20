@@ -127,7 +127,7 @@ fn embedded_v2_attachments_keep_bytes_external_references_report_loss() -> Resul
         .unwrap()
         .contains("Image attachment unavailable"));
     assert!(
-        report.deltas.iter().any(|d| d.field == "block:image" && !d.expected),
+        report.deltas.iter().any(|d| d.what == "block:image" && !d.expected),
         "unavailable model input is an explicit fidelity loss"
     );
     fs::remove_dir_all(root)?;

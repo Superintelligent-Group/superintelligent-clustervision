@@ -266,7 +266,7 @@ mod tests {
         assert!(!report
             .deltas
             .iter()
-            .any(|delta| delta.field == "usage" || delta.field == "usage cost"));
+            .any(|delta| delta.what == "usage" || delta.what == "usage cost"));
         let reparsed = crate::stream::collect_with(
             &adapter,
             &crate::SessionRef::new("copy", Harness::Continue, &emitted.path),
@@ -291,13 +291,13 @@ mod tests {
         let loss = report
             .deltas
             .iter()
-            .find(|delta| delta.field == "usage cache creation tokens")
+            .find(|delta| delta.what == "usage cache creation tokens")
             .expect("native cache-write absence is reported");
         assert!(loss.expected);
         assert!(!report
             .deltas
             .iter()
-            .any(|delta| delta.field == "usage" || delta.field == "usage cost"));
+            .any(|delta| delta.what == "usage" || delta.what == "usage cost"));
         let before = fs::read(&emitted.path)?;
         let index_before = fs::read(store.join("sessions/sessions.json"))?;
         let mut overflow = session.clone();
