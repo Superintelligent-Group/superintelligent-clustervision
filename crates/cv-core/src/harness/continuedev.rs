@@ -331,98 +331,6 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &crate::emit::EmitOptions) 
 
 mod emit;
 
-#[cfg(test)]
-/// Build one `history` item (`{message, contextItems}`) from an IR message.
-fn history_item(msg: &Message, session_model: Option<&str>) -> Result<Value> {
-    let role_str = match msg.role {
-        Role::System => "system",
-        Role::Assistant => "assistant",
-        Role::Tool => "tool",
-        Role::User => "user",
-    };
-
-    let mut message = Map::new();
-    message.insert("role".into(), json!(role_str));
-
-    let mut context_items: Vec<Value> = Vec::new();
-
-    match msg.role {
-        Role::Tool => {
-            // A tool result: Continue stores output in `content`, keyed by `toolCallId`.
-            let (tool_use_id, content) = tool_result_of(&msg.content);
-            message.insert("toolCallId".into(), json!(tool_use_id));
-            message.insert("content".into(), json!(content));
-        }
-        _ => {
-            // content: array of text/image parts (the array shape the parser handles).
-            let mut parts: Vec<Value> = Vec::new();
-            let mut tool_calls: Vec<Value> = Vec::new();
-            for b in &msg.content {
-                match b {
-                    Block::Text { text } => {
-                        parts.push(json!({ "type": "text", "text": text }));
-                    }
-                    Block::Thinking { text, .. } => {
-                        // Continue's ChatMessage has no thinking part; preserve as text so it's
-                        // searchable and survives a round-trip as content.
-                        if !text.is_empty() {
-                            parts.push(json!({ "type": "text", "text": text }));
-                        }
-                    }
-                    Block::Image { data_ref, .. } => {
-                        if let Some(url) = data_ref {
-                            parts.push(json!({
-                                "type": "imageUrl",
-                                "imageUrl": { "url": url },
-                            }));
-                        }
-                    }
-                    Block::ToolUse { id, name, input, .. } => {
-                        tool_calls.push(json!({
-                            "id": id,
-                            "type": "function",
-                            "function": {
-                                "name": name,
-                                // `arguments` is a JSON-encoded *string*.
-                                "arguments": serde_json::to_string(input.resolve()?.as_ref())?,
-                            },
-                        }));
-                    }
-                    Block::File { path, source, mime } => {
-                        context_items.push(file_context_item(path, source, mime));
-                    }
-                    Block::ToolResult { .. } => {}
-                }
-            }
-            message.insert("content".into(), Value::Array(parts));
-            if msg.role == Role::Assistant && !tool_calls.is_empty() {
-                message.insert("toolCalls".into(), Value::Array(tool_calls));
-            }
-        }
-    }
-
-    // The owned control includes the same newly supported native usage field; body construction
-    // remains independent of the checked writer and the native roundtrip pins numeric semantics.
-    if msg.role == Role::Assistant {
-        if let Some(usage) = &msg.usage {
-            message.insert(
-                "usage".into(),
-                Value::Object(emit::native_usage(usage, msg.model.as_deref())?),
-            );
-        }
-    }
-    let mut item = Map::new();
-    item.insert("message".into(), Value::Object(message));
-    item.insert("contextItems".into(), Value::Array(context_items));
-    // Carry the model so the parser can backfill it (assistant turns).
-    if msg.role == Role::Assistant {
-        if let Some(model) = msg.model.as_deref().or(session_model) {
-            item.insert("promptLogs".into(), json!([{ "modelTitle": model }]));
-        }
-    }
-    Ok(Value::Object(item))
-}
-
 /// Map a `Block::File` to a Continue `contextItem` (`{name, description, uri:{type, value}}`) that
 /// the parser's `record::context_item` round-trips back into a `File` block.
 fn file_context_item(path: &Option<String>, source: &Option<String>, mime: &Option<String>) -> Value {
@@ -452,20 +360,6 @@ fn file_context_item(path: &Option<String>, source: &Option<String>, mime: &Opti
 /// Basename of a path-ish string, for a `contextItem` name.
 fn file_name_of(p: &str) -> String {
     p.rsplit(['/', '\\']).next().unwrap_or(p).to_string()
-}
-
-/// Pull `(toolCallId, content)` from a Tool turn's first ToolResult block.
-#[cfg(test)]
-fn tool_result_of(content: &[Block]) -> (String, String) {
-    for b in content {
-        if let Block::ToolResult {
-            tool_use_id, content, ..
-        } = b
-        {
-            return (tool_use_id.clone(), content.to_string());
-        }
-    }
-    (String::new(), String::new())
 }
 
 // ---------------------------------------------------------------------------

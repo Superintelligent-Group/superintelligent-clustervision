@@ -199,11 +199,6 @@ pub fn emit(session: &Session, target: Harness, out_dir: &Path, opts: &EmitOptio
     f(session, out_dir, opts)
 }
 
-#[cfg(test)]
-pub(crate) fn project_owned_thinking_for_test(session: &mut Session, target: Harness, mode: ThinkingMode) {
-    apply_thinking_mode(session, target, mode);
-}
-
 /// Rewrite every [`Block::Thinking`] in `session` as [`EmitOptions::thinking`] asks, for `target`.
 /// A no-op under [`ThinkingMode::Native`] (the emitters' own drop-what-I-cannot-write behaviour is
 /// already that mode). [`thinking_fate`] is the single decision function, shared with

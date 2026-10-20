@@ -236,82 +236,6 @@ fn item(
 }
 
 #[cfg(test)]
-fn legacy_emit(
-    session: &Session,
-    out_dir: &Path,
-    opts: &crate::emit::EmitOptions,
-) -> Result<crate::harness::EmitResult> {
-    let session = crate::emit::materialized_session(session)?;
-    let session = session.as_ref();
-    use anyhow::Context;
-
-    let new_id = opts.new_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let cwd = opts.new_cwd.clone().or_else(|| session.cwd.clone());
-    let cwd_str = cwd
-        .as_ref()
-        .map(|p| p.to_string_lossy().to_string())
-        .filter(|s| !s.is_empty());
-
-    fs::create_dir_all(out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
-
-    // ── transcript: <sessionId>.json ──
-    let title = session.synth_title().map(|t| crate::ir::truncate(&t, 80));
-
-    let mut history: Vec<Value> = Vec::new();
-    for msg in &session.messages {
-        history.push(history_item(msg, session.model.as_deref())?);
-    }
-
-    let mut transcript = Map::new();
-    transcript.insert("sessionId".into(), json!(new_id));
-    if let Some(t) = &title {
-        transcript.insert("title".into(), json!(t));
-    }
-    if let Some(c) = &cwd_str {
-        transcript.insert("workspaceDirectory".into(), json!(c));
-    }
-    transcript.insert("history".into(), Value::Array(history));
-
-    let file_path = out_dir.join(format!("{new_id}.json"));
-    fs::write(&file_path, serde_json::to_string_pretty(&Value::Object(transcript))?)
-        .with_context(|| format!("writing {}", file_path.display()))?;
-
-    // ── index: sessions.json (merge-or-create) ──
-    let index_path = out_dir.join("sessions.json");
-    let mut entries: Vec<Value> = fs::read_to_string(&index_path)
-        .ok()
-        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-        .and_then(|v| v.as_array().cloned())
-        .unwrap_or_default();
-    // Drop any stale entry for this id, then append a fresh one.
-    entries.retain(|e| e.get("sessionId").and_then(Value::as_str) != Some(new_id.as_str()));
-    let created = session
-        .created_at
-        .or(session.updated_at)
-        .unwrap_or_else(chrono::Utc::now);
-    let mut entry = Map::new();
-    entry.insert("sessionId".into(), json!(new_id));
-    if let Some(t) = &title {
-        entry.insert("title".into(), json!(t));
-    }
-    // `dateCreated` is a string holding millisecond epoch (the older-build shape, which the parser
-    // accepts alongside ISO).
-    entry.insert("dateCreated".into(), json!(created.timestamp_millis().to_string()));
-    if let Some(c) = &cwd_str {
-        entry.insert("workspaceDirectory".into(), json!(c));
-    }
-    entries.push(Value::Object(entry));
-    fs::write(&index_path, serde_json::to_string_pretty(&Value::Array(entries))?)
-        .with_context(|| format!("writing {}", index_path.display()))?;
-
-    Ok(crate::harness::EmitResult {
-        path: file_path,
-        new_id,
-        resume_hint: None,
-    })
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     #[test]
@@ -484,8 +408,7 @@ mod tests {
             encrypted: None,
             redacted: false,
         });
-        let mut owned = lazy.clone();
-        owned.materialize()?;
+        let mut frozen = crate::emit::frozen::Frozen::new("continuedev-emit");
         for mode in [
             crate::emit::ThinkingMode::Native,
             crate::emit::ThinkingMode::Text,
@@ -496,20 +419,11 @@ mod tests {
                 thinking: mode,
                 ..Default::default()
             };
-            let mut oracle = owned.clone();
-            // The native title is the prompt (cv's listing policy), independent of how thinking is projected.
-            oracle.title = owned.synth_title();
-            crate::emit::project_owned_thinking_for_test(&mut oracle, Harness::Continue, mode);
-            let old = legacy_emit(&oracle, &world.base.join(format!("old-{mode:?}")), &opts)?;
             let new = super::super::emit(&lazy, &world.base.join(format!("new-{mode:?}")), &opts)?;
-            let old = fs::read(old.path)?;
             let new = fs::read(new.path)?;
-            assert!(
-                old == new,
-                "wire mismatch {mode:?} at {:?}",
-                old.iter().zip(&new).position(|(a, b)| a != b)
-            );
+            frozen.insert(format!("{mode:?}"), json!([new.len(), crate::digest::sha256_hex(&new)]));
         }
+        frozen.check()?;
         let dest = world.base.join("mutation");
         fs::create_dir_all(&dest)?;
         let opts = crate::emit::EmitOptions {
@@ -593,12 +507,10 @@ mod tests {
         let index = dest.join("sessions.json");
         let index_before = fs::read(&index).ok();
         fs::remove_file(&path)?;
-        assert!(legacy_emit(&session, &world.base.join("old"), &opts).is_err());
         assert!(super::super::emit(&session, &dest, &opts).is_err());
         assert_eq!(fs::read(&emitted.path)?, before);
         assert_eq!(fs::read(&index).ok(), index_before);
-        // Drop does not demand legacy raw spans. Project the owned oracle before
-        // checked materialization, which correctly rejects an unprojected invalid span.
+        // Drop does not demand the unreadable span, so the checked writer still emits.
         fs::write(&path, b"short")?;
         if let Block::Thinking { text, .. } = &mut session.messages[0].content[0] {
             *text = crate::Text::Span(crate::lazy::Span {
@@ -608,17 +520,11 @@ mod tests {
                 escaped: true,
             });
         }
-        let mut owned = session.clone();
-        assert!(owned.materialize().is_err());
-        // The general owned projection helper expects materialized text. This
-        // oracle deliberately has an unreadable span, which Drop never demands.
-        for message in &mut owned.messages {
-            message.content.retain(|block| !matches!(block, Block::Thinking { .. }));
-        }
-        owned.materialize()?;
-        let oracle = legacy_emit(&owned, &world.base.join("span-oracle"), &opts)?;
         let new = super::super::emit(&session, &dest, &opts)?;
-        assert_eq!(fs::read(oracle.path)?, fs::read(new.path)?);
+        let bytes = fs::read(&new.path)?;
+        let mut frozen = crate::emit::frozen::Frozen::new("continuedev-emit-drop-span");
+        frozen.insert("drop", json!([bytes.len(), crate::digest::sha256_hex(&bytes)]));
+        frozen.check()?;
         assert_eq!(fs::read(&emitted.path)?, before);
         assert_eq!(fs::read(index).ok(), index_before);
         Ok(())
@@ -648,7 +554,6 @@ mod tests {
         let index = dest.join("sessions.json");
         let index_before = fs::read(&index)?;
         fs::remove_file(path)?;
-        assert!(legacy_emit(&session, &world.base.join("old"), &opts).is_err());
         assert!(super::super::emit(&session, &dest, &opts).is_err());
         assert_eq!(fs::read(emitted.path)?, before);
         assert_eq!(fs::read(index)?, index_before);
