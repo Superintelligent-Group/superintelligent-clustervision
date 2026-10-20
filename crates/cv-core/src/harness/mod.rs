@@ -467,6 +467,16 @@ pub fn rootless(h: Harness) -> Option<&'static dyn Adapter> {
     })
 }
 
+/// The harness's own kind for an injected-context turn ([`Adapter::attachment_kind`]), asked of
+/// the adapter of each harness bag `m` carries, first answer wins.
+pub fn attachment_kind(m: &Message) -> Option<&str> {
+    m.extra
+        .keys()
+        .filter_map(|key| Harness::ALL.iter().find(|h| h.as_str() == key))
+        .filter_map(|h| rootless(*h))
+        .find_map(|a| a.attachment_kind(m))
+}
+
 /// The adapter for a specific harness, if registered. Detects only that adapter: detection stats
 /// roots and reads config, so a per-session lookup must not detect the other twenty.
 pub fn for_harness(h: Harness) -> Option<Box<dyn Adapter>> {

@@ -178,6 +178,11 @@ impl Adapter for Claude {
         Harness::Claude
     }
 
+    /// Claude Code records an attachment's type beside the injected turn (`hook_success`, …).
+    fn attachment_kind<'m>(&self, m: &'m crate::ir::Message) -> Option<&'m str> {
+        m.extra.get("claude")?.get("attachment_type")?.as_str()
+    }
+
     fn dependencies(&self, r: &SessionRef, _probe: &mut Probe, deps: &mut Dependencies) -> Option<()> {
         if r.path
             .file_name()

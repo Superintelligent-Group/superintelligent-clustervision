@@ -18,13 +18,10 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 
 /// The bucket name for an injected-context turn: the harness's own attachment kind when it recorded
-/// one (`extra[h]["attachment_type"]`, e.g. Claude's `hook_success`), else the IR kind name.
+/// one ([`crate::harness::Adapter::attachment_kind`], e.g. Claude's `hook_success`), else the IR
+/// kind name.
 fn injected_kind(m: &Message) -> String {
-    m.extra
-        .values()
-        .filter_map(Value::as_object)
-        .find_map(|bag| bag.get("attachment_type"))
-        .and_then(Value::as_str)
+    crate::harness::attachment_kind(m)
         .map(str::to_string)
         .unwrap_or_else(|| m.kind.as_str().to_string())
 }

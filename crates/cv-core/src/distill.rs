@@ -404,13 +404,6 @@ fn when(m: &Message) -> String {
         .unwrap_or_default()
 }
 
-fn attachment_type(m: &Message) -> Option<&str> {
-    m.extra
-        .get("claude")
-        .and_then(|b| b.get("attachment_type"))
-        .and_then(Value::as_str)
-}
-
 fn est(s: &str) -> u64 {
     est_tokens_bytes(s.len(), PACK_KIND)
 }
@@ -683,7 +676,8 @@ fn analyze(session: &Session, opts: &DistillOptions, demand: Demand) -> anyhow::
     let mut referenced: std::collections::HashSet<String> = std::collections::HashSet::new();
     for m in msgs.iter().filter(|_| demand != Demand::Findings) {
         let incoming = (m.role == Role::User && m.kind == MessageKind::Prompt)
-            || (m.kind == MessageKind::InjectedContext && matches!(attachment_type(m), Some("queued_command")));
+            || (m.kind == MessageKind::InjectedContext
+                && matches!(crate::harness::attachment_kind(m), Some("queued_command")));
         if !incoming {
             continue;
         }
@@ -794,7 +788,7 @@ fn analyze(session: &Session, opts: &DistillOptions, demand: Demand) -> anyhow::
             }
             (_, MessageKind::InjectedContext) if !in_tail && demand != Demand::Findings => {
                 // A message delivered mid-run (peer agent, coordinator, queued user input).
-                if matches!(attachment_type(m), Some("queued_command")) {
+                if matches!(crate::harness::attachment_kind(m), Some("queued_command")) {
                     timeline.push(Entry {
                         idx: i,
                         when: when(m),
@@ -1448,7 +1442,9 @@ fn resumable_tail(
                 owned.materialize(resolver)?;
                 out.push(owned);
             }
-            (_, MessageKind::InjectedContext) if matches!(attachment_type(m), Some("queued_command")) => {
+            (_, MessageKind::InjectedContext)
+                if matches!(crate::harness::attachment_kind(m), Some("queued_command")) =>
+            {
                 let mut u = Message::of_kind(Role::User, MessageKind::Prompt, Origin::Subagent);
                 u.id = m.id.clone();
                 u.parent_id = m.parent_id.clone();

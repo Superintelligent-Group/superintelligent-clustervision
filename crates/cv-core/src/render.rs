@@ -203,13 +203,7 @@ pub fn turn_label(m: &Message) -> String {
     if m.kind == MessageKind::for_role(m.role) {
         return role.to_string();
     }
-    let attachment_kind = m
-        .extra
-        .values()
-        .filter_map(serde_json::Value::as_object)
-        .find_map(|bag| bag.get("attachment_type"))
-        .and_then(serde_json::Value::as_str);
-    match (m.kind, attachment_kind) {
+    match (m.kind, crate::harness::attachment_kind(m)) {
         (MessageKind::InjectedContext, Some(k)) => format!("{role} · {}/{k}", m.kind.as_str()),
         _ => format!("{role} · {}", m.kind.as_str()),
     }
