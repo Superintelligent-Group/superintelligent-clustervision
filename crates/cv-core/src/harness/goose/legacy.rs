@@ -106,7 +106,7 @@ fn read_message(
         Some(content) => record::content(content, tools, opts, Some((source, arena)))?,
         None => Decoded::default(),
     };
-    let Some(mut message) = build_message(&role, id, timestamp, None, decoded) else {
+    let Some(mut message) = build_message(&role, id, timestamp, decoded) else {
         return Ok(None);
     };
     if !opts.wants_full_extra() {
@@ -309,7 +309,7 @@ mod tests {
                         record::content(c.into(), &mut tools, &ParseOptions::full(), Some((&source, &arena))).unwrap()
                     })
                     .unwrap_or_default();
-                build_message(role, id, timestamp, None, decoded)
+                build_message(role, id, timestamp, decoded)
             })
             .collect()
     }

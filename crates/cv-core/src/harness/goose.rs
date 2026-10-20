@@ -574,14 +574,13 @@ fn stream_db_opts_with_reads(
     let mcols = columns(conn, "messages");
     let has_msg = |c: &str| mcols.contains(c);
     let msg_id = if has_msg("message_id") { "message_id" } else { "NULL" };
-    let tokens = if has_msg("tokens") { "tokens" } else { "NULL" };
     let metadata = if has_msg("metadata_json") {
         "metadata_json"
     } else {
         "NULL"
     };
     let sql = format!(
-        "SELECT role, {}, created_timestamp, {msg_id}, {tokens}, {} \
+        "SELECT role, {}, created_timestamp, {msg_id}, {} \
          FROM messages WHERE session_id = ?1 ORDER BY created_timestamp, id",
         cells.select("content_json"),
         cells.select(metadata),
@@ -596,7 +595,7 @@ fn stream_db_opts_with_reads(
     let mut idx = 0;
     while let Some(row) = rows.next()? {
         idx += 1;
-        let metadata = match cells.cell(conn, "messages", metadata, row, 6)? {
+        let metadata = match cells.cell(conn, "messages", metadata, row, 5)? {
             Some(cell) => cells.read(cell, |v| record::metadata(v, rich))?,
             None => None,
         };
@@ -610,7 +609,6 @@ fn stream_db_opts_with_reads(
             role: row.get::<_, String>(0).unwrap_or_default(),
             created: row.get::<_, Option<i64>>(3).ok().flatten(),
             id: row.get::<_, Option<String>>(4).ok().flatten(),
-            tokens: row.get::<_, Option<i64>>(5).ok().flatten(),
             metadata,
         };
         let Some(mut m) = row.into_message_decoded(decoded, &mut history, opts.wants_full_extra()) else {
@@ -662,7 +660,6 @@ struct DbMsg {
     role: String,
     created: Option<i64>,
     id: Option<String>,
-    tokens: Option<i64>,
     /// `messages.metadata_json` — the only place Goose records per-message usage and model.
     metadata: Option<Value>,
 }
@@ -694,13 +691,7 @@ impl DbMsg {
         history.rows += 1;
         history.any_agent_visible |= agent_visible;
 
-        let mut m = build_message(
-            &self.role,
-            self.id,
-            self.created.and_then(ts_from_epoch),
-            self.tokens,
-            decoded,
-        )?;
+        let mut m = build_message(&self.role, self.id, self.created.and_then(ts_from_epoch), decoded)?;
         if let Some(meta) = meta {
             apply_metadata(&mut m, meta, compaction_summary);
         }
@@ -842,13 +833,7 @@ struct Decoded {
 /// [`Role::Tool`] turn; an `error` block makes the message a [`MessageKind::Error`]; control
 /// content alone makes it a [`MessageKind::Notice`]. The row's `metadata_json` may refine the kind
 /// afterwards ([`apply_metadata`]).
-fn build_message(
-    role: &str,
-    id: Option<String>,
-    ts: Option<DateTime<Utc>>,
-    tokens: Option<i64>,
-    decoded: Decoded,
-) -> Option<Message> {
+fn build_message(role: &str, id: Option<String>, ts: Option<DateTime<Utc>>, decoded: Decoded) -> Option<Message> {
     let Decoded {
         blocks,
         error,
@@ -886,17 +871,6 @@ fn build_message(
     }
     m.id = id;
     m.timestamp = ts;
-    if let Some(t) = tokens {
-        if t > 0 {
-            let mut u = Usage::default();
-            if ir_role == Role::Assistant {
-                u.output_tokens = Some(t as u64);
-            } else {
-                u.input_tokens = Some(t as u64);
-            }
-            m.usage = Some(u);
-        }
-    }
     m.content = blocks;
     Some(m)
 }
@@ -1088,15 +1062,15 @@ mod tests {
         ).unwrap();
         // user text
         c.execute(
-            "INSERT INTO messages (session_id, role, content_json, created_timestamp, tokens) \
-             VALUES ('s1','user','[{\"type\":\"text\",\"text\":\"Hello\"}]',1704110400,3)",
+            "INSERT INTO messages (session_id, role, content_json, created_timestamp) \
+             VALUES ('s1','user','[{\"type\":\"text\",\"text\":\"Hello\"}]',1704110400)",
             [],
         )
         .unwrap();
         // assistant: thinking + text + tool request
         let asst = r#"[{"type":"thinking","thinking":"let me think","signature":"sig"},{"type":"text","text":"Working on it"},{"type":"toolRequest","id":"call_1","toolCall":{"status":"success","value":{"name":"shell","arguments":{"command":"ls"}}}}]"#;
         c.execute(
-            "INSERT INTO messages (session_id, role, content_json, created_timestamp, tokens) VALUES ('s1','assistant',?1,1704110401,42)",
+            "INSERT INTO messages (session_id, role, content_json, created_timestamp) VALUES ('s1','assistant',?1,1704110401)",
             [asst],
         ).unwrap();
         // tool response carried on a user message
@@ -1116,7 +1090,6 @@ mod tests {
         // user
         assert_eq!(s.messages[0].role, Role::User);
         assert_eq!(s.messages[0].text().as_deref(), Some("Hello"));
-        assert_eq!(s.messages[0].usage.as_ref().unwrap().input_tokens, Some(3));
 
         // assistant: thinking, text, tooluse
         let a = &s.messages[1];
@@ -1128,7 +1101,6 @@ mod tests {
         assert!(
             matches!(&a.content[2], Block::ToolUse { name, id, input , ..} if name == "shell" && id == "call_1" && input.resolve().unwrap().get("command").and_then(Value::as_str) == Some("ls"))
         );
-        assert_eq!(a.usage.as_ref().unwrap().output_tokens, Some(42));
 
         // tool response reclassified to Role::Tool, paired name recovered
         let t = &s.messages[2];
