@@ -613,34 +613,8 @@ pub(crate) fn with_cell_reader<T>(
 
 /// Strict streaming UTF-8 acceptance, including scalars crossing native read windows. False is
 /// a typed-string rejection, not a read failure; callers discard any unpublished prefix output.
-pub(crate) fn for_each_utf8(reader: &mut dyn std::io::Read, mut visit: impl FnMut(&str) -> Result<()>) -> Result<bool> {
-    let mut buffer = [0u8; 64 * 1024 + 3];
-    let mut pending = 0;
-    loop {
-        let read = match reader.read(&mut buffer[pending..64 * 1024]) {
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            result => result?,
-        };
-        if read == 0 {
-            return Ok(pending == 0);
-        }
-        let end = pending + read;
-        match std::str::from_utf8(&buffer[..end]) {
-            Ok(text) => {
-                visit(text)?;
-                pending = 0;
-            }
-            Err(error) => {
-                if error.error_len().is_some() {
-                    return Ok(false);
-                }
-                let accepted = error.valid_up_to();
-                visit(std::str::from_utf8(&buffer[..accepted]).unwrap())?;
-                pending = end - accepted;
-                buffer.copy_within(accepted..end, 0);
-            }
-        }
-    }
+pub(crate) fn for_each_utf8(reader: &mut dyn std::io::Read, visit: impl FnMut(&str) -> Result<()>) -> Result<bool> {
+    crate::utf8::read(reader, crate::utf8::Verdict::Reject, visit)
 }
 
 /// The columns present on `table` (`PRAGMA table_info`). Every SQLite-backed harness grows its

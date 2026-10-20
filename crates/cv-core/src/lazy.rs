@@ -900,37 +900,6 @@ impl<F: FnMut(&str) -> bool> ChunkOutput<'_, F> {
     }
 }
 
-fn peek_byte(reader: &mut impl std::io::BufRead) -> Option<u8> {
-    reader.fill_buf().ok()?.first().copied()
-}
-
-/// Read exactly one scalar, consuming the same invalid subsequence as `from_utf8_lossy`.
-/// A byte that starts the next scalar is left in the reader, including after an invalid prefix.
-fn read_scalar(reader: &mut impl std::io::BufRead) -> Result<char, ()> {
-    let mut bytes = [0; 4];
-    let mut n = 0;
-    while let Some(byte) = peek_byte(reader) {
-        bytes[n] = byte;
-        n += 1;
-        match std::str::from_utf8(&bytes[..n]) {
-            Ok(s) => {
-                reader.consume(1);
-                return Ok(s.chars().next().unwrap());
-            }
-            Err(e) => match e.error_len() {
-                Some(invalid) => {
-                    if invalid == n {
-                        reader.consume(1);
-                    }
-                    return Err(());
-                }
-                None => reader.consume(1),
-            },
-        }
-    }
-    Err(())
-}
-
 fn stream_lossy_utf8(reader: &mut impl std::io::BufRead, f: &mut impl FnMut(&str)) {
     stream_lossy_utf8_until(reader, &mut |text| {
         f(text);
@@ -939,34 +908,20 @@ fn stream_lossy_utf8(reader: &mut impl std::io::BufRead, f: &mut impl FnMut(&str
 }
 
 fn stream_lossy_utf8_until(reader: &mut impl std::io::BufRead, f: &mut impl FnMut(&str) -> bool) {
+    let mut chunks = crate::utf8::Chunks::new(crate::utf8::Verdict::Replace);
+    // `Err(())` is the caller's stop; a read failure ends the stream the same way.
+    let mut visit = |text: &str| if f(text) { Ok(()) } else { Err(()) };
     loop {
         let Ok(bytes) = reader.fill_buf() else { return };
         if bytes.is_empty() {
+            let _ = chunks.finish(&mut visit);
             return;
         }
-        let valid = match std::str::from_utf8(bytes) {
-            Ok(s) => {
-                if !f(s) {
-                    return;
-                }
-                s.len()
-            }
-            Err(e) => {
-                let valid = e.valid_up_to();
-                // SAFETY: `valid_up_to` is the validated UTF-8 prefix.
-                if !f(unsafe { std::str::from_utf8_unchecked(&bytes[..valid]) }) {
-                    return;
-                }
-                valid
-            }
-        };
-        reader.consume(valid);
-        if valid == 0 {
-            let scalar = read_scalar(reader).unwrap_or('\u{fffd}');
-            if !f(scalar.encode_utf8(&mut [0; 4])) {
-                return;
-            }
+        let n = bytes.len();
+        if chunks.feed(bytes, &mut visit).is_err() {
+            return;
         }
+        reader.consume(n);
     }
 }
 

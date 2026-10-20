@@ -61,6 +61,7 @@ pub mod stats;
 pub mod stream;
 pub mod task;
 pub mod tools;
+pub(crate) mod utf8;
 pub mod watch;
 
 pub use emit::{emit, EmitOptions};

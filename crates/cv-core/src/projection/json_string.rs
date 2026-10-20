@@ -5,49 +5,8 @@ use std::io::{self, Read, Write};
 
 /// Equivalent to `String::from_utf8_lossy` over the complete reader, including split scalars.
 /// Callback chunks are temporary and bounded; failures stop reading immediately.
-pub fn for_each_lossy_utf8_chunk(mut input: impl Read, mut f: impl FnMut(&str) -> io::Result<()>) -> io::Result<()> {
-    let mut bytes = [0; 64 * 1024 + 4];
-    let mut pending = 0;
-    loop {
-        let n = match input.read(&mut bytes[pending..64 * 1024]) {
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            result => result?,
-        };
-        if n == 0 {
-            if pending != 0 {
-                f(&String::from_utf8_lossy(&bytes[..pending]))?;
-            }
-            return Ok(());
-        }
-        let end = pending + n;
-        let mut start = 0;
-        pending = 0;
-        while start < end {
-            match std::str::from_utf8(&bytes[start..end]) {
-                Ok(text) => {
-                    f(text)?;
-                    break;
-                }
-                Err(error) => {
-                    let valid = start + error.valid_up_to();
-                    if valid > start {
-                        f(std::str::from_utf8(&bytes[start..valid]).unwrap())?;
-                    }
-                    match error.error_len() {
-                        Some(invalid) => {
-                            f("\u{fffd}")?;
-                            start = valid + invalid;
-                        }
-                        None => {
-                            pending = end - valid;
-                            bytes.copy_within(valid..end, 0);
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    }
+pub fn for_each_lossy_utf8_chunk(input: impl Read, f: impl FnMut(&str) -> io::Result<()>) -> io::Result<()> {
+    crate::utf8::read(input, crate::utf8::Verdict::Replace, f).map(|_| ())
 }
 
 /// Write one quoted JSON string without retaining its complete decoded or escaped bytes.

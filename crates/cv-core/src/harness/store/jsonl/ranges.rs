@@ -266,33 +266,15 @@ pub(crate) fn read_exact_at<S: At + ?Sized>(file: &S, mut bytes: &mut [u8], mut 
 /// Whole-range UTF-8 validates ignored/discarded fields too. At most one incomplete scalar is
 /// carried over a window boundary; JSON callers independently validate their grammar.
 pub(crate) fn valid_utf8(cursor: &mut impl BufRead) -> io::Result<bool> {
-    let mut pending = [0; 4];
-    let mut len = 0;
+    let mut chunks = crate::utf8::Chunks::new(crate::utf8::Verdict::Reject);
+    let mut ignore = |_: &str| Ok::<(), io::Error>(());
     loop {
         let bytes = cursor.fill_buf()?;
         if bytes.is_empty() {
-            return Ok(len == 0);
+            return chunks.finish(&mut ignore);
         }
-        let mut start = 0;
-        while len > 0 && start < bytes.len() {
-            pending[len] = bytes[start];
-            len += 1;
-            start += 1;
-            match std::str::from_utf8(&pending[..len]) {
-                Ok(_) => len = 0,
-                Err(e) if e.error_len().is_none() && len < 4 => {}
-                Err(_) => return Ok(false),
-            }
-        }
-        if start < bytes.len() {
-            if let Err(e) = std::str::from_utf8(&bytes[start..]) {
-                if e.error_len().is_some() {
-                    return Ok(false);
-                }
-                let tail = &bytes[start + e.valid_up_to()..];
-                pending[..tail.len()].copy_from_slice(tail);
-                len = tail.len();
-            }
+        if !chunks.feed(bytes, &mut ignore)? {
+            return Ok(false);
         }
         let n = bytes.len();
         cursor.consume(n);
