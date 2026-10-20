@@ -152,6 +152,24 @@ pub(crate) fn note_skipped_lines(s: &mut Session, skipped: u64) {
     }
 }
 
+/// The first channel of the skip policy: the records one read could not parse, COUNTED, never
+/// dropped silently. An adapter keeps one per read and writes it once with [`Unparsed::note`]
+/// (`extra["cv"]["skipped_lines"]`, nothing when zero, so a clean read is unchanged).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Unparsed(pub(crate) u64);
+
+impl Unparsed {
+    /// One record that decoded to nothing.
+    pub(crate) fn count(&mut self) {
+        self.0 += 1;
+    }
+
+    /// Write the count on `s` ([`note_skipped_lines`]).
+    pub(crate) fn note(self, s: &mut Session) {
+        note_skipped_lines(s, self.0);
+    }
+}
+
 /// A source [`Adapter::discover`] found but could not open (a locked or corrupt database, an
 /// unreadable directory, a file that fails to decode at open): its sessions are absent from the
 /// listing, and this says why. The skip policy is one rule in three channels: a record that
