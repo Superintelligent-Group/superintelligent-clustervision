@@ -94,27 +94,26 @@ impl Adapter for LmStudio {
         let Some(root) = &self.root else {
             return Ok(Default::default());
         };
-        let mut out = Vec::new();
-        let entries = match fs::read_dir(root) {
-            Ok(e) => e,
-            Err(_) => return Ok(Default::default()),
+        // An unreadable conversations dir, and a file whose scan fails, are skipped and reported.
+        let mut out = crate::Discovered::default();
+        let Some(entries) = out.keep(root, fs::read_dir(root).map_err(Into::into)) else {
+            return Ok(out);
         };
-        for entry in entries.filter_map(|e| e.ok()) {
+        for entry in entries {
+            let Some(entry) = out.keep(root, entry.map_err(Into::into)) else {
+                continue;
+            };
             let path = entry.path();
             if !is_conversation_file(&path) {
                 continue;
             }
-            if let Some(reference) = crate::discover_cache::cached_scan(&path, || match scan(&path) {
-                Ok(reference) => reference,
-                Err(error) => {
-                    eprintln!("cv: skipping {}: {error:#}", path.display());
-                    None
-                }
-            }) {
-                out.push(reference);
+            if let Some(found) =
+                crate::Skipped::listed(&path, crate::discover_cache::cached_scan_checked(&path, || scan(&path)))
+            {
+                out.push(found);
             }
         }
-        Ok(out.into())
+        Ok(out)
     }
 
     /// Walk the validated document and selected versions with scoped source views. Lazy text
