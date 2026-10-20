@@ -4027,3 +4027,27 @@ fn an_unreadable_project_dir_is_named_by_doctor_not_silently_empty() {
     let doctor: serde_json::Value = serde_json::from_str(&doctor).unwrap();
     assert!(doctor.get("skipped_sources").is_none(), "{doctor}");
 }
+
+/// The skip policy's third channel under an injected failure: a catalog that is not a database
+/// (a truncated or overwritten file) degrades ONCE. Every consumer that opens it in one process
+/// falls back to scanning, the listing is the same, and stderr says so in exactly one line.
+#[test]
+fn a_garbled_catalog_degrades_once_per_process() {
+    let w = World::new("garbled-catalog-warns-once");
+    w.write_session("listed", &[user_line("u", "2026-01-01T10:00:00Z", "hello")]);
+    let (healthy, healthy_err) = w.cv_ok(&["ls", "--json"]);
+    assert!(!healthy_err.contains("unavailable"), "{healthy_err}");
+    let catalog = w.cv_home.join("catalog.db");
+    for sidecar in ["catalog.db-wal", "catalog.db-shm"] {
+        let _ = fs::remove_file(w.cv_home.join(sidecar));
+    }
+    fs::write(&catalog, b"SQLite format 3\0 truncated").unwrap();
+    let (degraded, err) = w.cv_ok(&["ls", "--json"]);
+    assert_eq!(degraded, healthy, "scanning lists what the catalog listed");
+    let warnings: Vec<_> = err.lines().filter(|l| l.contains("unavailable")).collect();
+    assert_eq!(warnings.len(), 1, "{err}");
+    assert!(
+        warnings[0].starts_with("cv: the catalog unavailable, continuing without it:"),
+        "{err}"
+    );
+}
