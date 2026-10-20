@@ -412,20 +412,21 @@ def codex_thinking_gate(binary, root, env):
 
 CODEX_THINKING_EXPECTED = {'text': ['cc7670ce4e3e93f0ae3099f76bb771d2ff100c393486ed6302c3cefd4e16aa5d',
           14,
-          {'deltas': [{'field': 'thinking(signature)', 'before': '1', 'after': '0', 'expected': True},
-                      {'field': 'message ids', 'before': '4', 'after': '0', 'expected': True},
-                      {'field': 'message ids (tool turns)', 'before': '1', 'after': '0', 'expected': True}]}],
+          {'deltas': [{'what': 'thinking(signature)', 'a': '1', 'b': '0', 'expected': True, 'where': 'codex'},
+                      {'what': 'message ids', 'a': '4', 'b': '0', 'expected': True, 'where': 'codex'},
+                      {'what': 'message ids (tool turns)', 'a': '1', 'b': '0', 'expected': True, 'where': 'codex'}]}],
  'drop': ['cb0d4dd02494a631c0d197a4951f4536fb5d27016d62f39e61dc88b5fd298562',
           13,
-          {'deltas': [{'field': 'thinking(text)', 'before': '1', 'after': '0', 'expected': True},
-                      {'field': 'thinking(signature)', 'before': '1', 'after': '0', 'expected': True},
-                      {'field': 'message ids', 'before': '4', 'after': '0', 'expected': True},
-                      {'field': 'message ids (tool turns)', 'before': '1', 'after': '0', 'expected': True}]}]}
+          {'deltas': [{'what': 'thinking(text)', 'a': '1', 'b': '0', 'expected': True, 'where': 'codex'},
+                      {'what': 'thinking(signature)', 'a': '1', 'b': '0', 'expected': True, 'where': 'codex'},
+                      {'what': 'message ids', 'a': '4', 'b': '0', 'expected': True, 'where': 'codex'},
+                      {'what': 'message ids (tool turns)', 'a': '1', 'b': '0', 'expected': True, 'where': 'codex'}]}]}
 
 
 def gemini_output_digest(path):
-    """Fixed pretty fixture: normalize only validated messages[].id lines, not payload/tool IDs."""
-    pattern = re.compile(rb'(      "id": ")([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})(",\n)')
+    """Fixed pretty fixture: normalize only validated messages[].id lines (name-based UUID v5),
+    not payload/tool IDs."""
+    pattern = re.compile(rb'(      "id": ")([0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})(",\n)')
     digest = hashlib.sha256()
     ids = 0
     with path.open("rb") as source:
@@ -478,8 +479,8 @@ def cline_port_gate(binary, root, env):
     peak = checked_peak(json.loads(child.stderr))
     # Frozen legacy format loses timestamps and IDs; ownership changes preserve its report.
     assert report["messages"] == 4 and report["fidelity"] == dict(deltas=[
-        dict(field="timestamps", before="4", after="1", expected=False),
-        dict(field="message ids", before="4", after="0", expected=False)])
+        dict(what="timestamps", a="4", b="1", expected=False, where="cline"),
+        dict(what="message ids", a="4", b="0", expected=False, where="cline")])
     output = Path(report["path"])
     files = {
         "api_conversation_history.json": (33555154, "ce2ed1d91cd5c44afd871021a6a417c7a3bcde99ac31369715447509f515286c"),
