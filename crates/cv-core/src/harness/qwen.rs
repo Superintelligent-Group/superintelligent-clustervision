@@ -107,13 +107,17 @@ impl Adapter for Qwen {
     }
 
     fn discover(&self) -> Result<crate::Discovered> {
+        // An unreadable dir, and a session file that fails to read, are skipped and reported.
+        let mut walk_errors = Vec::new();
+        let mut walked =
+            |e: walkdir::Result<walkdir::DirEntry>| e.map_err(|e| walk_errors.extend(crate::Skipped::walk(&e))).ok();
         let mut paths: Vec<PathBuf> = Vec::new();
         if let Some(projects) = &self.projects {
             paths.extend(
                 WalkDir::new(projects)
                     .max_depth(4)
                     .into_iter()
-                    .filter_map(|e| e.ok())
+                    .filter_map(&mut walked)
                     .filter(|e| e.file_type().is_file())
                     .map(|e| e.into_path())
                     .filter(|p| is_session_jsonl(p)),
@@ -126,22 +130,26 @@ impl Adapter for Qwen {
             paths.extend(
                 WalkDir::new(root)
                     .into_iter()
-                    .filter_map(|e| e.ok())
+                    .filter_map(&mut walked)
                     .filter(|e| e.file_type().is_file())
                     .map(|e| e.into_path())
                     .filter(|p| is_session_file(p)),
             );
         }
-        Ok(crate::par_discovery_flat_map(paths, |path| {
-            crate::discover_cache::cached_scan_many(&path, || {
+        let mut found: crate::Discovered = crate::par_discovery_flat_map(paths, |path| {
+            let scanned = crate::discover_cache::cached_scan_many_checked(&path, || {
                 if is_session_jsonl(&path) {
-                    scan_session_jsonl(&path).into_iter().collect()
+                    Ok(scan_session_jsonl(&path)?.into_iter().collect())
                 } else {
                     crate::harness::gemini::scan_session_file(&path, Harness::Qwen)
                 }
-            })
+            });
+            crate::Skipped::listed_many(&path, scanned)
         })
-        .into())
+        .into_iter()
+        .collect();
+        found.skipped.extend(walk_errors);
+        Ok(found)
     }
 
     fn stream(&self, r: &SessionRef, opts: &stream::Demand, sink: &mut dyn MessageSink) -> Result<Session> {
@@ -480,7 +488,7 @@ fn subagent_parent(path: &Path) -> Option<String> {
         .flatten()
 }
 
-fn scan_session_jsonl(path: &Path) -> Option<SessionRef> {
+fn scan_session_jsonl(path: &Path) -> Result<Option<SessionRef>> {
     let mut messages = 0usize;
     let mut turns = 0usize;
     let mut sink = |m: Message| {
@@ -488,9 +496,9 @@ fn scan_session_jsonl(path: &Path) -> Option<SessionRef> {
         turns += usize::from(matches!(m.role, Role::User | Role::Assistant));
         Flow::Continue
     };
-    let source = crate::json::JsonSource::capture(path).ok()?;
+    let source = crate::json::JsonSource::capture(path)?;
     let shell = session_shell(path, &mut sink);
-    let s = replay(
+    let Some(s) = replay(
         path,
         &source,
         shell,
@@ -500,10 +508,12 @@ fn scan_session_jsonl(path: &Path) -> Option<SessionRef> {
         Demand::of(&stream::Demand::DISCOVERY, &source),
         &mut sink,
         &mut || Ok(()),
-    )
-    .ok()??;
+    )?
+    else {
+        return Ok(None);
+    };
     if messages == 0 && s.created_at.is_none() {
-        return None;
+        return Ok(None);
     }
     let mut r = SessionRef::new(s.id.clone(), Harness::Qwen, path.to_path_buf());
     r.cwd = s.cwd.clone();
@@ -511,7 +521,7 @@ fn scan_session_jsonl(path: &Path) -> Option<SessionRef> {
     r.created_at = s.created_at;
     r.updated_at = s.updated_at;
     r.message_count = Some(turns);
-    Some(r)
+    Ok(Some(r))
 }
 
 /// Cross-record state of one session file's emission.
@@ -883,7 +893,7 @@ mod tests {
             );
             fs::write(&path, bytes)?;
             assert_eq!(
-                serde_json::to_value(scan_session_jsonl(&path))?,
+                serde_json::to_value(scan_session_jsonl(&path)?)?,
                 serde_json::to_value(oracle(&path)?)?
             );
             for payload in [
@@ -907,7 +917,7 @@ mod tests {
                         )?,
                     )?;
                     assert_eq!(
-                        serde_json::to_value(scan_session_jsonl(&path))?,
+                        serde_json::to_value(scan_session_jsonl(&path)?)?,
                         serde_json::to_value(oracle(&path)?)?,
                         "{subtype}/{payload}"
                     );
@@ -930,7 +940,7 @@ mod tests {
             ];
             fs::write(&path, rows.iter().map(|row| format!("{row}\n")).collect::<String>())?;
             assert_eq!(
-                serde_json::to_value(scan_session_jsonl(&path))?,
+                serde_json::to_value(scan_session_jsonl(&path)?)?,
                 serde_json::to_value(oracle(&path)?)?
             );
         }
@@ -940,7 +950,7 @@ mod tests {
                 continue;
             }
             assert_eq!(
-                serde_json::to_value(scan_session_jsonl(&reference.path))?,
+                serde_json::to_value(scan_session_jsonl(&reference.path)?)?,
                 serde_json::to_value(oracle(&reference.path)?)?
             );
         }
@@ -1289,8 +1299,8 @@ mod tests {
         fs::write(&p1, &text).unwrap();
         fs::write(&p2, &text).unwrap();
 
-        let refs1 = crate::harness::gemini::scan_session_file(&p1, Harness::Qwen);
-        let refs2 = crate::harness::gemini::scan_session_file(&p2, Harness::Qwen);
+        let refs1 = crate::harness::gemini::scan_session_file(&p1, Harness::Qwen).unwrap();
+        let refs2 = crate::harness::gemini::scan_session_file(&p2, Harness::Qwen).unwrap();
         assert_eq!(refs1.len(), 1);
         assert_eq!(refs2.len(), 1);
         assert_eq!(refs1[0].id, "checkpoint-alpha");
