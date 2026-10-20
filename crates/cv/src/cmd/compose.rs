@@ -382,7 +382,7 @@ pub(crate) fn cmd_splice(
     }
     let parsed: Vec<SpliceSpec> = specs.iter().map(|s| parse_splice_spec(s)).collect::<Result<_>>()?;
 
-    let mut composition = cv_core::loom::Composition::default();
+    let mut composition = cv_core::splice::Composition::default();
     let mut first_path = None;
     for sp in &parsed {
         let (reference, adapter) = crate::cmd::distill::resolve_source(&sp.id, None)?;

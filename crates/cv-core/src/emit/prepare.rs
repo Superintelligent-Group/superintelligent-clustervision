@@ -535,10 +535,10 @@ mod tests {
             &selected.messages[0].content[0],
             Block::Text { text: Text::Source(_) }
         ));
-        let mut builder = crate::loom::Composition::default();
+        let mut builder = crate::splice::Composition::default();
         builder.push(selected.clone(), 12, 5, Some(6));
         let actual = builder.finish(Some("00000000-0000-0000-0000-000000000002".into()), Harness::Claude);
-        let expected = crate::loom::tests::compose(&[(&old, 5, Some(6))], Some(actual.id.clone()), Harness::Claude);
+        let expected = crate::splice::tests::compose(&[(&old, 5, Some(6))], Some(actual.id.clone()), Harness::Claude);
         let mut owned_actual = actual.clone();
         owned_actual.materialize()?;
         assert_eq!(serde_json::to_value(&owned_actual)?, serde_json::to_value(&expected)?);
@@ -666,13 +666,13 @@ mod tests {
         legacy.materialize()?;
         let (selected, total) = super::super::prepare_selected(&adapter, &reference, 1, Some(2))?;
         assert_eq!(selected.harness, Harness::Codex);
-        let mut builder = crate::loom::Composition::default();
+        let mut builder = crate::splice::Composition::default();
         builder.push(selected, total, 1, Some(2));
         let default_target = builder.first_harness().unwrap();
         assert_eq!(default_target, legacy.harness);
         let mut actual = builder.finish(Some("fixed".into()), default_target);
         actual.materialize()?;
-        let expected = crate::loom::tests::compose(&[(&legacy, 1, Some(2))], Some("fixed".into()), legacy.harness);
+        let expected = crate::splice::tests::compose(&[(&legacy, 1, Some(2))], Some("fixed".into()), legacy.harness);
         assert_eq!(serde_json::to_value(actual)?, serde_json::to_value(expected)?);
         Ok(())
     }
@@ -697,7 +697,7 @@ mod tests {
         let adapter = crate::harness::claude::Claude::detect();
         let mut old = crate::stream::collect_with(&adapter, &reference, &ParseOptions::full())?;
         old.materialize()?;
-        let mut builder = crate::loom::Composition::default();
+        let mut builder = crate::splice::Composition::default();
         for (start, end) in [(1, Some(3)), (2, Some(3))] {
             let (source, total) = super::super::prepare_selected(&adapter, &reference, start, end)?;
             assert_eq!(total, old.messages.len());
@@ -706,7 +706,7 @@ mod tests {
         }
         let mut actual = builder.finish(Some("fixed".into()), Harness::Claude);
         actual.materialize()?;
-        let expected = crate::loom::tests::compose(
+        let expected = crate::splice::tests::compose(
             &[(&old, 1, Some(3)), (&old, 2, Some(3))],
             Some("fixed".into()),
             Harness::Claude,

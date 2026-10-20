@@ -1346,7 +1346,7 @@ mod tests {
     #[test]
     fn reshape_verbs_emit_resumable() {
         use crate::distill::{distill, resumable_session, DistillOptions};
-        use crate::loom::tests::compose;
+        use crate::splice::tests::compose;
 
         let src = reshape_source();
         // Six turns: the hook attachment is not one (the IR never carries it), so a2's parent `h1`

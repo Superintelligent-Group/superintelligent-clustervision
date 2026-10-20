@@ -1,5 +1,5 @@
 //! LLM-backed features over sessions: the abstractive digest behind `cv pack` (`CV_PACK_LLM`) and
-//! the `--generate` continuation of `cv splice`/`cv loom`, via OpenRouter / Anthropic / a local
+//! the `--generate` continuation of `cv splice`, via OpenRouter / Anthropic / a local
 //! OpenAI-compatible server. Two blocking POSTs on `ureq`; no async stack.
 //!
 //! Provider is chosen by environment: `LMSTUDIO_API_BASE` (local, wins), then `OPENROUTER_API_KEY`,
@@ -398,7 +398,7 @@ pub(crate) struct GenerateOptions {
 }
 
 /// Generate the next assistant turn given a session's conversation — the generative half of looming.
-/// Forking/grafting happens in [`cv_core::loom`]; this produces a fresh continuation to append. With
+/// Forking/grafting happens in [`cv_core::splice`]; this produces a fresh continuation to append. With
 /// `LMSTUDIO_API_BASE` set this runs against a local model — free, offline looming.
 pub(crate) fn generate(session: &cv_core::Session, opts: &GenerateOptions) -> Result<String> {
     let provider = provider_from_env().ok_or_else(|| {
