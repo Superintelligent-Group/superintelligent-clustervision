@@ -104,7 +104,8 @@ impl Adapter for Continue {
             if !seen.insert(meta.session_id.clone()) {
                 continue;
             }
-            out.push(ref_from(meta, &path, scan_session(&path).map(|s| s.message_count)));
+            // The index has the listing facts; counting would read the whole history (C1).
+            out.push(ref_from(meta, &path));
         }
 
         // Fold in any `<id>.json` on disk that the index didn't mention (tolerant of a missing or
@@ -122,15 +123,14 @@ impl Adapter for Continue {
                 if seen.contains(&id) {
                     continue;
                 }
-                let scan = scan_session(&p);
-                let (title, cwd, count) = scan.map_or((None, None, None), |s| (s.title, s.cwd, Some(s.message_count)));
+                let (title, cwd) = scan_session(&p).map_or((None, None), |s| (s.title, s.cwd));
                 let meta = IndexMeta {
                     session_id: id,
                     title,
                     cwd,
                     created_at: None,
                 };
-                out.push(ref_from(&meta, &p, count));
+                out.push(ref_from(&meta, &p));
             }
         }
 
@@ -413,26 +413,26 @@ fn read_index(path: &Path) -> Vec<IndexMeta> {
 }
 
 /// Build a `SessionRef` from index metadata + the on-disk transcript path.
-fn ref_from(meta: &IndexMeta, path: &Path, message_count: Option<usize>) -> SessionRef {
+fn ref_from(meta: &IndexMeta, path: &Path) -> SessionRef {
     let updated = mtime(path);
     SessionRef {
         cwd: meta.cwd.clone(),
         title: meta.title.clone(),
         created_at: meta.created_at.or(updated),
         updated_at: updated,
-        message_count,
+        // Uncounted (`SessionRef::new`): counting would read the whole history (C1).
         ..SessionRef::new(meta.session_id.clone(), Harness::Continue, path.to_path_buf())
     }
 }
 
-/// Discovery keeps metadata and a count, never a whole history. Validate each discarded item
-/// before dropping it: IgnoredAny would accept malformed Unicode that the old Value rejected.
-/// Duplicate fields retain their last value, including null/wrong-type replacements.
+/// Discovery keeps the listing metadata of an unindexed session, never its history or a count
+/// (counting means reading every history item: `None` until a full read certifies it). The
+/// document is still validated whole, as Value. Duplicate fields retain their last value,
+/// including null/wrong-type replacements.
 #[derive(Default)]
 struct Scan {
     title: Option<String>,
     cwd: Option<PathBuf>,
-    message_count: usize,
 }
 
 fn scan_session(path: &Path) -> Option<Scan> {
@@ -440,18 +440,12 @@ fn scan_session(path: &Path) -> Option<Scan> {
     source
         .read_document(|root| {
             let mut scan = Scan::default();
-            if let Some(fields) = Fields::parse(root, &["title", "workspaceDirectory", "history"])? {
+            if let Some(fields) = Fields::parse(root, &["title", "workspaceDirectory"])? {
                 scan.title = record::title(fields.get("title"), false)?;
                 scan.cwd = fields
                     .string("workspaceDirectory")?
                     .filter(|p| !p.is_empty())
                     .map(|p| workspace_to_path(&p));
-                if let Some(history) = fields.get("history").map(JsonView::array).transpose()?.flatten() {
-                    for item in history {
-                        item?;
-                        scan.message_count += 1;
-                    }
-                }
             }
             Ok(scan)
         })
@@ -1064,7 +1058,7 @@ mod tests {
             .expect("indexed session discovered");
         assert_eq!(r.title.as_deref(), Some("Refactor the parser"));
         assert_eq!(r.cwd.as_deref(), Some(Path::new("/Users/me/proj")));
-        assert!(r.message_count.is_some_and(|n| n >= 3));
+        assert_eq!(r.message_count, None, "uncounted until a full read");
         assert!(r.created_at.is_some());
     }
 
@@ -1164,10 +1158,9 @@ mod tests {
                     .and_then(Value::as_str)
                     .filter(|p| !p.is_empty())
                     .map(workspace_to_path);
-                let count = v.get("history").and_then(Value::as_array).map_or(0, Vec::len);
-                (title, cwd, count)
+                (title, cwd)
             });
-            let actual = scan_session(&path).map(|s| (s.title, s.cwd, s.message_count));
+            let actual = scan_session(&path).map(|s| (s.title, s.cwd));
             assert_eq!(actual, expected, "case prefix: {:?}", &text[..text.len().min(120)]);
         }
         fs::write(&path, b"{\"history\":[\"\xff\"]}").unwrap();
@@ -1210,12 +1203,12 @@ mod tests {
         assert_eq!(indexed.title.as_deref(), Some("index title"));
         assert_eq!(indexed.cwd.as_deref(), Some(Path::new("/index")));
         assert_eq!(indexed.created_at.unwrap().timestamp_millis(), 1700000000000);
-        assert_eq!(indexed.message_count, Some(2));
+        assert_eq!(indexed.message_count, None);
         let extra = refs.iter().find(|r| r.id == "extra").unwrap();
         assert_eq!(extra.title.as_deref(), Some("extra title"));
         assert_eq!(extra.cwd.as_deref(), Some(Path::new("/extra")));
         assert_eq!(extra.created_at, extra.updated_at);
-        assert_eq!(extra.message_count, Some(3));
+        assert_eq!(extra.message_count, None);
         let broken = refs.iter().find(|r| r.id == "broken").unwrap();
         assert!(broken.title.is_none());
         assert_eq!(broken.message_count, None);
