@@ -63,7 +63,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
     // say so — Codex ≥ 0.147 keys its persistence policy and ordinal handling off `history_mode`,
     // defaulting to `legacy` when absent, and the legacy→paginated migration canonicalizes it.
     meta.insert("history_mode".into(), json!("legacy"));
-    meta.insert("originator".into(), json!("clustervision"));
+    meta.insert("originator".into(), json!(super::CV_ORIGINATOR));
     // `SessionMeta.cli_version: String` has no serde default: without the key Codex's reader
     // rejects the rollout ("does not start with session metadata"). It names the Codex CLI that
     // wrote the file, which cv is not: carry a Codex source's recorded version, else Codex's own

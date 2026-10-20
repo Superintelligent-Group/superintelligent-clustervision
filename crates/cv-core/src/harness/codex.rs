@@ -389,6 +389,10 @@ struct CodexCtx {
     /// The canonical (first) `session_meta` has been applied — a fork embeds the parent's as a
     /// second line, whose thread-level fields must not overwrite the child's.
     meta_seen: bool,
+    /// That `session_meta` names cv as the writer ([`CV_ORIGINATOR`]): only then is a tool
+    /// output's [`ERROR_PREFIX`] cv's sentinel.
+    #[serde(default)]
+    cv_wrote: bool,
     /// Usage from the last `token_usage_record`, until its `token_count` twin (same numbers, a few
     /// records later) has been seen — so the twin never double-counts as a second carrier.
     pending_record_usage: Option<Usage>,
@@ -916,8 +920,14 @@ const USAGE_FROM_RECORD: &str = "token_usage_record";
 /// cv's emitter writes a failed tool result as the string `"[error] <content>"`: Codex's
 /// `FunctionCallOutputPayload` persists only a string or a content-item array — never an error
 /// bit (models.rs:2252-2275) — so this prefix is the one form that both decodes in Codex and
-/// round-trips `is_error` through cv. Recognized on parse and stripped from the content.
+/// round-trips `is_error` through cv. Recognized on parse and stripped from the content only in a
+/// rollout cv wrote ([`CV_ORIGINATOR`]): a tool's own output that happens to start `[error] ` is
+/// the tool's text, not cv's sentinel.
 const ERROR_PREFIX: &str = "[error] ";
+
+/// `session_meta.originator` of a rollout cv's emitter wrote: the provenance [`ERROR_PREFIX`]
+/// is read under.
+const CV_ORIGINATOR: &str = "clustervision";
 
 /// A listing title candidate, already trimmed and truncated ([`title_of`]): the first that is
 /// not one of Codex's injected preambles ([`is_injected_text`]) wins.
@@ -2546,31 +2556,40 @@ mod tests {
         assert_eq!(s.messages[2].extra["codex"]["num_turns"], 2);
     }
 
-    #[test]
-    fn error_prefix_marks_tool_failure_and_is_stripped() {
-        let s = parse_fixture("error_prefix_marks_tool_failure_and_is_stripped.jsonl");
-        let results: Vec<(&str, bool, Option<&str>)> = s
-            .messages
+    /// `(content, is_error)` of every tool result in `s`.
+    fn results(s: &Session) -> Vec<(String, bool)> {
+        s.messages
             .iter()
             .flat_map(|m| &m.content)
             .filter_map(|b| match b {
-                Block::ToolResult {
-                    content,
-                    is_error,
-                    status,
-                    ..
-                } => Some((&**content, *is_error, status.as_deref())),
+                Block::ToolResult { content, is_error, .. } => Some((content.to_string(), *is_error)),
                 _ => None,
             })
-            .collect();
-        assert_eq!(
-            results,
+            .collect()
+    }
+
+    #[test]
+    fn error_prefix_marks_tool_failure_and_is_stripped() {
+        // In a rollout cv wrote, `[error] ` is cv's sentinel: the failure bit, stripped.
+        let meta = r#"{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"id":"x","originator":"clustervision"}}"#;
+        let mut lines = vec![meta.to_string()];
+        lines.extend(fixture_lines("error_prefix_marks_tool_failure_and_is_stripped.jsonl"));
+        let expected = |plain: bool| {
+            let p = |t: &str| if plain { format!("[error] {t}") } else { t.to_string() };
             vec![
-                ("command not found: frobnicate", true, None),
-                ("is only a marker at the very start", true, None),
-                ("[error] inside an array is plain text", false, None),
+                (p("command not found: frobnicate"), !plain),
+                (p("is only a marker at the very start"), !plain),
+                ("[error] inside an array is plain text".to_string(), false),
             ]
+        };
+        assert_eq!(results(&parse_jsonl(&lines)), expected(false));
+        // Anywhere else it is the tool's own text: no provenance, or another writer's.
+        assert_eq!(
+            results(&parse_fixture("error_prefix_marks_tool_failure_and_is_stripped.jsonl")),
+            expected(true)
         );
+        lines[0] = meta.replace("clustervision", "codex_cli_rs");
+        assert_eq!(results(&parse_jsonl(&lines)), expected(true));
     }
 
     #[cfg(feature = "mmap")]
@@ -2578,9 +2597,11 @@ mod tests {
     fn error_prefix_survives_the_giant_span_path() {
         use std::io::Write;
         let body = format!("[error] {}", "boom line\n".repeat(600)); // > INLINE_MAX
-        let line = serde_json::json!({"timestamp":"2026-01-01T00:00:01Z","type":"response_item",
-            "payload":{"type":"function_call_output","call_id":"c1","output":body}})
-        .to_string();
+        let meta = serde_json::json!({"timestamp":"2026-01-01T00:00:00Z","type":"session_meta",
+            "payload":{"id":"x","originator":CV_ORIGINATOR}});
+        let output = serde_json::json!({"timestamp":"2026-01-01T00:00:01Z","type":"response_item",
+            "payload":{"type":"function_call_output","call_id":"c1","output":body}});
+        let line = format!("{meta}\n{output}");
         let dir = std::env::temp_dir().join(format!("cv-codex-err-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("rollout-2026-01-01T00-00-00-err.jsonl");

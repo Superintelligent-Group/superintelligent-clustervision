@@ -403,6 +403,7 @@ impl Reader<'_> {
             s.system_prompt = str_at(p.get("base_instructions")?, "text")?.filter(|t| !t.trim().is_empty());
             self.ctx.inherit_before = u64_at(Some(p), "subagent_history_start_ordinal")?;
             self.ctx.agent_path = s.lineage.agent_path.clone();
+            self.ctx.cv_wrote = str_at(Some(p), "originator")?.as_deref() == Some(CV_ORIGINATOR);
         }
         if s.cwd.is_none() {
             s.cwd = str_at(Some(p), "cwd")?.map(PathBuf::from);
@@ -1137,18 +1138,21 @@ impl Reader<'_> {
             }
             "function_call_output" | "custom_tool_call_output" => {
                 let call_id = field("call_id")?;
-                // Error-ness: cv's own `[error] ` string convention (see [`ERROR_PREFIX`]), or the
-                // legacy object form `{success:false}` / `{metadata:{exit_code≠0}}` some older
-                // recorders wrote. Real Codex 0.147+ files carry neither — a failed command's exit
-                // code lives only in the `item_completed CommandExecution` note.
+                // Error-ness: cv's own `[error] ` string convention (see [`ERROR_PREFIX`]) in a
+                // rollout cv wrote, or the legacy object form `{success:false}` /
+                // `{metadata:{exit_code≠0}}` some older recorders wrote. Real Codex 0.147+ files
+                // carry neither — a failed command's exit code lives only in the `item_completed
+                // CommandExecution` note.
                 let output = p.get("output")?;
                 let (content, images, is_error) = match output {
                     Some(o) if o.is_string()? => {
                         let mut prefix = String::new();
-                        o.for_each_char(|c| {
-                            prefix.push(c);
-                            prefix.len() < ERROR_PREFIX.len()
-                        })?;
+                        if self.ctx.cv_wrote {
+                            o.for_each_char(|c| {
+                                prefix.push(c);
+                                prefix.len() < ERROR_PREFIX.len()
+                            })?;
+                        }
                         let mut text = d.text(o)?.unwrap_or_default();
                         let is_error = prefix == ERROR_PREFIX;
                         if is_error {
