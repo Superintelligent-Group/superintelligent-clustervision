@@ -127,6 +127,10 @@ pub(crate) enum Demand {
     Metadata,
     /// The decision facts of [`Facts`].
     Facts,
+    /// A compaction boundary's `subtype` and `compactMetadata`.
+    Compact,
+    /// The `message` whose role, text and tool calls the workflow readers mine.
+    Tools,
 }
 
 /// One shared selection/type parse for metadata and message demands. Fields are lazy views;
@@ -141,6 +145,8 @@ impl<'a> Head<'a> {
         let keys = match demand {
             Demand::Message => TOP,
             Demand::Facts => FACT_KEYS,
+            Demand::Compact => &["type", "subtype", "compactMetadata"],
+            Demand::Tools => &["type", "timestamp", "message"],
             Demand::Metadata => &[
                 "type",
                 "version",

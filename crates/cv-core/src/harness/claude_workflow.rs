@@ -728,146 +728,75 @@ pub struct WorkflowLaunch {
     pub journal_result_count: Option<usize>,
 }
 
-/// A selective prefilter only: the full Value codec still validates any candidate record.
-/// RawValue skips unrelated payloads without allocating them; wrong/duplicate selected fields
-/// conservatively admit the ordinary parser instead of hiding a potentially relevant receipt.
-fn pending_result(line: &str, is_pending: impl Fn(&str) -> bool) -> bool {
-    use serde::Deserialize;
-    use serde_json::value::RawValue;
-    #[derive(Deserialize)]
-    struct Top<'a> {
-        #[serde(borrow)]
-        message: Option<&'a RawValue>,
-    }
-    #[derive(Deserialize)]
-    struct Message<'a> {
-        #[serde(borrow)]
-        content: Option<&'a RawValue>,
-    }
-    #[derive(Deserialize)]
-    struct Block<'a> {
-        #[serde(borrow, rename = "type")]
-        kind: Option<&'a RawValue>,
-        #[serde(borrow)]
-        tool_use_id: Option<&'a RawValue>,
-    }
-    let scan = || -> serde_json::Result<bool> {
-        let top: Top<'_> = serde_json::from_str(line)?;
-        let Some(message) = top.message.filter(|value| value.get().starts_with('{')) else {
-            return Ok(false);
-        };
-        let message: Message<'_> = serde_json::from_str(message.get())?;
-        let Some(content) = message.content.filter(|value| value.get().starts_with('[')) else {
-            return Ok(false);
-        };
-        struct Blocks<'a, F>(&'a F);
-        impl<'de, F: Fn(&str) -> bool> serde::de::Visitor<'de> for Blocks<'_, F> {
-            type Value = bool;
-            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str("content blocks")
-            }
-            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut blocks: A) -> std::result::Result<bool, A::Error> {
-                let mut found = false;
-                while let Some(block) = blocks.next_element::<&RawValue>()? {
-                    if found || !block.get().starts_with('{') {
-                        continue;
-                    }
-                    let block: Block<'_> = serde_json::from_str(block.get()).map_err(serde::de::Error::custom)?;
-                    let kind = block
-                        .kind
-                        .map(|kind| serde_json::from_str::<String>(kind.get()))
-                        .transpose()
-                        .map_err(serde::de::Error::custom)?;
-                    if kind.as_deref() != Some("tool_result") {
-                        continue;
-                    }
-                    if let Some(id) = block.tool_use_id {
-                        if let Ok(id) = serde_json::from_str::<String>(id.get()) {
-                            found |= (self.0)(&id);
-                        }
-                    }
-                }
-                Ok(found)
-            }
-        }
-        let mut parser = serde_json::Deserializer::from_str(content.get());
-        let found = serde::Deserializer::deserialize_seq(&mut parser, Blocks(&is_pending))?;
-        parser.end()?;
-        Ok(found)
-    };
-    scan().unwrap_or(true)
-}
-
-/// Every `Workflow` tool invocation in a session's transcript, in order. Reads the `.jsonl`
-/// directly (cheap substring prefilter, then a JSON parse per candidate line).
+/// Every `Workflow` tool invocation in a session's transcript, in order, with whether its
+/// paired tool result was an error. Read through the one line reader and the record codec's
+/// tool demand; a read failure ends the scan with the launches before it (a ghost listing is a
+/// best-effort recovery).
 pub fn launches(session_path: &Path) -> Vec<WorkflowLaunch> {
-    let Ok(file) = fs::File::open(session_path) else {
-        return vec![];
-    };
-    use std::io::BufRead;
-    let reader = std::io::BufReader::new(file);
-    // tool_use_id → index into `out`, so the (later) tool_result line can set `errored`.
+    use super::claude::record::{Demand, Head};
+    use super::store::document::Fields;
+    // tool_use_id -> index into `out`, so the (later) tool_result line can set `errored`.
     let mut by_use_id: BTreeMap<String, usize> = BTreeMap::new();
     let mut out: Vec<WorkflowLaunch> = Vec::new();
-    for line in reader.lines() {
-        let Ok(line) = line else { break };
-        // Select actual result IDs before owning payloads. Scanning this whole line once for
-        // every pending launch grows quadratically when many receipts are outstanding.
-        let is_launch = line.contains("\"Workflow\"");
-        if !is_launch
-            && (by_use_id.is_empty()
-                || !line.contains("tool_use_id")
-                || !pending_result(&line, |id| by_use_id.contains_key(id)))
-        {
-            continue;
-        }
-        let Ok(v) = serde_json::from_str::<Value>(&line) else {
-            continue;
+    let _ = super::store::jsonl::for_each_record(session_path, |view| {
+        let Some(head) = Head::parse(view, Demand::Tools)? else {
+            return Ok(());
         };
-        let ts = v
-            .get("timestamp")
-            .and_then(Value::as_str)
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-            .map(|d| d.with_timezone(&chrono::Utc));
-        let Some(content) = v
+        let Some(blocks) = head
+            .top
             .get("message")
+            .map(|m| Fields::parse(m, &["content"]))
+            .transpose()?
+            .flatten()
             .and_then(|m| m.get("content"))
-            .and_then(Value::as_array)
+            .map(|c| c.array())
+            .transpose()?
+            .flatten()
         else {
-            continue;
+            return Ok(());
         };
-        for c in content {
-            match c.get("type").and_then(Value::as_str) {
-                Some("tool_use") if c.get("name").and_then(Value::as_str) == Some("Workflow") => {
-                    let input = c.get("input");
-                    let g = |k: &str| input.and_then(|i| i.get(k)).and_then(Value::as_str);
-                    let (path_name, path_run) = g("scriptPath").map(script_path_identity).unwrap_or((None, None));
+        for block in blocks {
+            let Some(b) = Fields::parse(block?, &["type", "name", "id", "input", "tool_use_id", "is_error"])? else {
+                continue;
+            };
+            match b.string("type")?.as_deref() {
+                Some("tool_use") if b.string("name")?.as_deref() == Some("Workflow") => {
+                    let input = b
+                        .get("input")
+                        .map(|i| Fields::parse(i, &["script", "scriptPath", "name", "resumeFromRunId"]))
+                        .transpose()?
+                        .flatten();
+                    let g = |k: &str| -> anyhow::Result<Option<String>> {
+                        Ok(input.as_ref().map(|i| i.string(k)).transpose()?.flatten())
+                    };
+                    let (path_name, path_run) = g("scriptPath")?
+                        .as_deref()
+                        .map(script_path_identity)
+                        .unwrap_or((None, None));
+                    let ts = head
+                        .top
+                        .string("timestamp")?
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+                        .map(|d| d.with_timezone(&chrono::Utc));
                     let launch = WorkflowLaunch {
                         ts,
-                        name: g("script")
-                            .and_then(meta_name)
-                            .or_else(|| g("name").map(str::to_string))
-                            .or(path_name),
+                        name: g("script")?.as_deref().and_then(meta_name).or(g("name")?).or(path_name),
                         script_run_id: path_run,
-                        resume_from: g("resumeFromRunId").map(str::to_string),
+                        resume_from: g("resumeFromRunId")?,
                         errored: false,
                         run_id: None,
                         debris_agents: None,
                         journal_result_count: None,
                     };
-                    if let Some(id) = c.get("id").and_then(Value::as_str) {
-                        by_use_id.insert(id.to_string(), out.len());
+                    if let Some(id) = b.string("id")? {
+                        by_use_id.insert(id, out.len());
                     }
                     out.push(launch);
                 }
                 Some("tool_result") => {
                     // Resolve and retire the matching launch with one indexed lookup.
-                    if let Some(idx) = c
-                        .get("tool_use_id")
-                        .and_then(Value::as_str)
-                        .and_then(|id| by_use_id.remove(id))
-                    {
-                        if c.get("is_error").and_then(Value::as_bool).unwrap_or(false) {
+                    if let Some(idx) = b.string("tool_use_id")?.and_then(|id| by_use_id.remove(&id)) {
+                        if b.get("is_error").map(|v| v.as_bool()).transpose()?.flatten() == Some(true) {
                             out[idx].errored = true;
                         }
                     }
@@ -875,8 +804,150 @@ pub fn launches(session_path: &Path) -> Vec<WorkflowLaunch> {
                 _ => {}
             }
         }
-    }
+        Ok(())
+    });
     out
+}
+
+/// What a workflow lane's transcript shows it did, for `cv workflow --revive`: the FULL first
+/// user prompt the orchestrator handed it, the files it wrote or edited, its distinct Bash
+/// commands (first line, 70 characters) and its last substantive (over 80 bytes) assistant note.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct LaneWork {
+    pub prompt: Option<String>,
+    pub files: Vec<String>,
+    pub commands: Vec<String>,
+    pub last_note: Option<String>,
+}
+
+impl LaneWork {
+    /// Mine a lane transcript. Rejected records are omitted; a read failure ends this
+    /// best-effort recovery scan with what it found.
+    pub fn mine(path: &Path) -> Self {
+        let mut miner = Miner::default();
+        let _ = super::store::jsonl::for_each_record(path, |view| miner.record(view));
+        miner.work
+    }
+
+    /// [`Self::mine`] over JSONL bytes.
+    pub fn mine_bytes(bytes: &[u8]) -> Self {
+        let mut miner = Miner::default();
+        let _ = super::store::jsonl::slice(bytes, |line| {
+            if let Some(view) = line.view {
+                miner.record(view)?;
+            }
+            Ok(crate::stream::Flow::Continue)
+        });
+        miner.work
+    }
+}
+
+#[derive(Default)]
+struct Miner {
+    work: LaneWork,
+    files: std::collections::BTreeSet<String>,
+    commands: std::collections::BTreeSet<String>,
+}
+
+impl Miner {
+    fn record(&mut self, view: crate::json::JsonView<'_>) -> anyhow::Result<()> {
+        use super::claude::record::{Demand, Head};
+        use super::store::document::Fields;
+        let Some(head) = Head::parse(view, Demand::Tools)? else {
+            return Ok(());
+        };
+        let Some(message) = head
+            .top
+            .get("message")
+            .map(|m| Fields::parse(m, &["role", "content"]))
+            .transpose()?
+            .flatten()
+        else {
+            return Ok(());
+        };
+        let role = message.string("role")?.unwrap_or_default();
+        let Some(content) = message.get("content") else {
+            return Ok(());
+        };
+        // The lane's task is the first user message: its text, or its first block's text.
+        if role == "user" && self.work.prompt.is_none() {
+            let full = if content.is_string()? {
+                content.resolve()?.as_str().map(str::to_owned)
+            } else {
+                let mut first = None;
+                if let Some(blocks) = content.array()? {
+                    for block in blocks {
+                        if let Some(text) = Fields::parse(block?, &["text"])?
+                            .map(|b| b.string("text"))
+                            .transpose()?
+                        {
+                            if let Some(text) = text {
+                                first = Some(text);
+                                break;
+                            }
+                        }
+                    }
+                }
+                first
+            };
+            if let Some(full) = full.filter(|f| !f.trim().is_empty()) {
+                self.work.prompt = Some(full);
+            }
+        }
+        let Some(blocks) = content.array()? else {
+            return Ok(());
+        };
+        for block in blocks {
+            let Some(b) = Fields::parse(block?, &["type", "name", "input", "text"])? else {
+                continue;
+            };
+            match b.string("type")?.as_deref() {
+                Some("tool_use") => {
+                    let input = b
+                        .get("input")
+                        .map(|i| Fields::parse(i, &["file_path", "command"]))
+                        .transpose()?
+                        .flatten();
+                    let arg = |k: &str| -> anyhow::Result<Option<String>> {
+                        Ok(input.as_ref().map(|i| i.string(k)).transpose()?.flatten())
+                    };
+                    match b.string("name")?.as_deref().unwrap_or("") {
+                        "Write" | "Edit" | "NotebookEdit" => {
+                            if let Some(file) = arg("file_path")? {
+                                if self.files.insert(file.clone()) {
+                                    self.work.files.push(file);
+                                }
+                            }
+                        }
+                        "Bash" => {
+                            if let Some(command) = arg("command")? {
+                                let head: String = command
+                                    .split('\n')
+                                    .next()
+                                    .unwrap_or(&command)
+                                    .chars()
+                                    .take(70)
+                                    .collect();
+                                if self.commands.insert(head.clone()) {
+                                    self.work.commands.push(head);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Some("text") if role == "assistant" => {
+                    if let Some(text) = b.string("text")? {
+                        if text.trim().len() > 80 {
+                            self.work.last_note = Some(text);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Transcript launches with **no recorded run**: launched successfully per the transcript, but no
@@ -1476,41 +1547,6 @@ mod tests {
             assert_eq!(launch.name, Some(format!("workflow-{n}")));
             assert_eq!(launch.errored, n % 3 == 0);
         }
-    }
-
-    #[test]
-    fn pending_result_prefilter_bounds_lookups_independently_of_pending_launches() {
-        use std::cell::Cell;
-        for count in [64, 1024, 4096] {
-            let pending: BTreeMap<_, _> = (0..count).map(|n| (format!("pending-{n}"), n)).collect();
-            let line = json!({"message":{"content":[{"type":"tool_result","tool_use_id":"unrelated","content":"ordinary output"}]}}).to_string();
-            let lookups = Cell::new(0);
-            assert!(!pending_result(&line, |id| {
-                lookups.set(lookups.get() + 1);
-                pending.contains_key(id)
-            }));
-            assert_eq!(lookups.get(), 1);
-            let mut old_scans = 0;
-            assert!(!pending.keys().any(|id| {
-                old_scans += 1;
-                line.contains(id)
-            }));
-            assert_eq!(old_scans, count);
-        }
-        let large = json!({"message":{"content":[{"type":"tool_result","tool_use_id":"other","content":format!("pending-1 {}", "x".repeat(1100000))}]}}).to_string();
-        assert!(
-            !pending_result(&large, |id| id == "pending-1"),
-            "an ID quoted inside a tool body is not its receipt"
-        );
-        let duplicate = r#"{"message":{"content":[],"content":[{"type":"tool_result","tool_use_id":"pending-1"}]}}"#;
-        assert!(
-            pending_result(duplicate, |_| false),
-            "duplicate fields conservatively select the authoritative full codec"
-        );
-        let matching =
-            json!({"message":{"content":[{"type":"tool_result","tool_use_id":"pending-1","is_error":true}]}})
-                .to_string();
-        assert!(pending_result(&matching, |id| id == "pending-1"));
     }
 
     #[test]

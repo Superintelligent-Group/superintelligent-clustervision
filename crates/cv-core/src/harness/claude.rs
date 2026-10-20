@@ -47,6 +47,46 @@ pub struct Claude {
 /// where the store lives ([`super::rootless`]).
 pub(crate) static ROOTLESS: Claude = Claude { entries: Vec::new() };
 
+/// The newest `compact_boundary` record in the last `tail` bytes of a transcript: its
+/// `compactMetadata` `(trigger, preTokens)`. The tail is read through the one line reader from
+/// `len - tail` (the cut line is rejected, never guessed at); `None` when the file cannot be
+/// opened or the tail holds no boundary.
+pub fn last_compact_boundary(path: &Path, tail: u64) -> Result<Option<(Option<String>, Option<u64>)>> {
+    let Ok(read) = jsonl::Read::open(path) else {
+        return Ok(None);
+    };
+    let len = read.source().len();
+    let mut last = None;
+    read.snapshot(len.saturating_sub(tail), len, |line| {
+        let Some(head) = line
+            .view
+            .map(|view| record::Head::parse(view, record::Demand::Compact))
+            .transpose()?
+            .flatten()
+        else {
+            return Ok(Flow::Continue);
+        };
+        if head.top.string("subtype")?.as_deref() == Some("compact_boundary") {
+            let meta = head
+                .top
+                .get("compactMetadata")
+                .map(|m| super::store::document::Fields::parse(m, &["trigger", "preTokens"]))
+                .transpose()?
+                .flatten();
+            let pre = meta
+                .as_ref()
+                .and_then(|m| m.get("preTokens"))
+                .map(|v| v.as_number())
+                .transpose()?
+                .flatten()
+                .and_then(|n| n.as_u64());
+            last = Some((meta.as_ref().map(|m| m.string("trigger")).transpose()?.flatten(), pre));
+        }
+        Ok(Flow::Continue)
+    })?;
+    Ok(last)
+}
+
 /// What a derived Claude copy rewrites: `sessionId` (and the `session_id` some hook records
 /// carry), `agentId`/`isSidechain` on a sub-agent line made standalone, `parentUuid` at a re-root.
 pub(crate) const IDENTITY: super::Identity = super::Identity {

@@ -441,7 +441,7 @@ fn workflow_sessions() -> Vec<(SessionRef, &'static dyn harness::Workflows)> {
         .collect()
 }
 
-pub use harness::claude_workflow::{Workflow, WorkflowAgent, WorkflowLaunch, WorkflowPhase};
+pub use harness::claude_workflow::{LaneWork, Workflow, WorkflowAgent, WorkflowLaunch, WorkflowPhase};
 
 /// Every `Workflow`-tool run a session launched, as first-class [`Workflow`] objects (phase tree →
 /// agents → outcomes + the driving script), newest first. Read from the session's

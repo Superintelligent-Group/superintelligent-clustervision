@@ -937,22 +937,10 @@ fn tail_text(path: &Path, bytes: u64) -> Option<String> {
 }
 
 /// The newest `compact_boundary` record in a transcript's tail: `(trigger, preTokens)`. Reads
-/// one line's JSON, never the file — the large-transcript path of [`hook_compact`].
-fn last_boundary_in_tail(path: &Path) -> Option<(Option<String>, Option<u64>)> {
-    let text = tail_text(path, COMPACT_TAIL_BYTES)?;
-    let v: Value = text
-        .lines()
-        .rev()
-        .filter(|l| l.contains("\"compact_boundary\""))
-        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-        .find(|v| v.get("subtype").and_then(Value::as_str) == Some("compact_boundary"))?;
-    let meta = v.get("compactMetadata");
-    Some((
-        meta.and_then(|m| m.get("trigger"))
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        meta.and_then(|m| m.get("preTokens")).and_then(Value::as_u64),
-    ))
+/// the last [`COMPACT_TAIL_BYTES`] through the record codec, never the file — the
+/// large-transcript path of [`hook_compact`].
+fn last_boundary_in_tail(path: &Path) -> Result<Option<(Option<String>, Option<u64>)>> {
+    cv_core::harness::claude::last_compact_boundary(path, COMPACT_TAIL_BYTES)
 }
 
 fn not_recorded_yet(id: &str) -> Value {
@@ -982,7 +970,11 @@ fn hook_compact(input: &Input) -> Result<Option<Value>> {
     let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     if size > COMPACT_FULL_SCAN_MAX {
         // A tail without a boundary (one far back in a long transcript) still gets the pointers.
-        let what = match if input.codex { None } else { last_boundary_in_tail(path) } {
+        let what = match if input.codex {
+            None
+        } else {
+            last_boundary_in_tail(path)?
+        } {
             Some((trigger, pre_tokens)) => format!(
                 " ({}, {})",
                 trigger.as_deref().unwrap_or("compaction"),
@@ -1595,11 +1587,14 @@ mod tests {
         // A user turn that merely quotes the word is not a boundary record.
         let quote = json!({"type": "user", "message": {"content": "grep \"compact_boundary\" x"}}).to_string();
         std::fs::write(&p, format!("{}\n{}\n{quote}\n", b("manual", 1), b("auto", 180_412))).unwrap();
-        assert_eq!(last_boundary_in_tail(&p), Some((Some("auto".into()), Some(180_412))));
+        assert_eq!(
+            last_boundary_in_tail(&p).unwrap(),
+            Some((Some("auto".into()), Some(180_412)))
+        );
         std::fs::write(&p, format!("{}\n{quote}\n", b("auto", 5))).unwrap();
-        assert_eq!(last_boundary_in_tail(&p), Some((Some("auto".into()), Some(5))));
+        assert_eq!(last_boundary_in_tail(&p).unwrap(), Some((Some("auto".into()), Some(5))));
         std::fs::write(&p, format!("{quote}\n")).unwrap();
-        assert_eq!(last_boundary_in_tail(&p), None);
+        assert_eq!(last_boundary_in_tail(&p).unwrap(), None);
         std::fs::remove_dir_all(&dir).ok();
     }
 

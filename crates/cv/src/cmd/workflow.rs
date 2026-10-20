@@ -617,98 +617,24 @@ fn mine_lane(a: &cv_core::WorkflowAgent, run_id: &str, session_path: Option<&std
     };
     let bare = id.strip_prefix("agent-").unwrap_or(id);
     let path = dir.join(format!("agent-{bare}.jsonl"));
-    let Ok(file) = std::fs::File::open(&path) else {
-        return rev;
-    };
-    mine_transcript_reader(std::io::BufReader::new(file), &mut rev);
+    apply(cv_core::LaneWork::mine(&path), &mut rev);
     rev
 }
 
-/// The transcript-mining half of [`mine_lane`], split from path resolution so it can be tested
-/// on JSONL text alone: the FULL first user prompt, the files the lane wrote or edited, its distinct
-/// Bash commands (first line, capped), and its last substantive note.
-#[cfg(test)]
-fn mine_transcript(text: &str, rev: &mut Revivable) {
-    mine_transcript_reader(std::io::Cursor::new(text.as_bytes()), rev);
+/// The transcript-mining half of [`mine_lane`]: what the lane's transcript shows it did. A
+/// mined prompt replaces the preview; with none, the preview stands.
+fn apply(work: cv_core::LaneWork, rev: &mut Revivable) {
+    if work.prompt.is_some() {
+        rev.prompt = work.prompt;
+    }
+    rev.files = work.files;
+    rev.commands = work.commands;
+    rev.last_note = work.last_note;
 }
 
-fn mine_transcript_reader(reader: impl std::io::BufRead, rev: &mut Revivable) {
-    let mut seen_files = std::collections::BTreeSet::new();
-    let mut seen_cmds = std::collections::BTreeSet::new();
-    let mut got_prompt = false;
-
-    // Retain one physical record rather than the whole transcript alongside its parsed record.
-    // Corrupt records are omitted; a read failure ends this best-effort recovery scan.
-    for line in std::io::BufRead::lines(reader) {
-        let line = match line {
-            Ok(line) => line,
-            Err(error) if error.kind() == std::io::ErrorKind::InvalidData => continue,
-            Err(_) => break,
-        };
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
-            continue;
-        };
-        let role = v.pointer("/message/role").and_then(|r| r.as_str()).unwrap_or("");
-        let content = match v.pointer("/message/content") {
-            Some(c) => c,
-            None => continue,
-        };
-
-        // The lane's task is the first user message — the FULL text the orchestrator handed it.
-        if role == "user" && !got_prompt {
-            let full = match content {
-                serde_json::Value::String(s) => Some(s.clone()),
-                serde_json::Value::Array(bs) => bs
-                    .iter()
-                    .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
-                    .next()
-                    .map(str::to_string),
-                _ => None,
-            };
-            if let Some(f) = full.filter(|f| !f.trim().is_empty()) {
-                rev.prompt = Some(f);
-                got_prompt = true;
-            }
-        }
-
-        let serde_json::Value::Array(blocks) = content else {
-            continue;
-        };
-        for b in blocks {
-            match b.get("type").and_then(|t| t.as_str()) {
-                Some("tool_use") => {
-                    let name = b.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                    let input = b.get("input");
-                    match name {
-                        "Write" | "Edit" | "NotebookEdit" => {
-                            if let Some(f) = input.and_then(|i| i.get("file_path")).and_then(|f| f.as_str()) {
-                                if seen_files.insert(f.to_string()) {
-                                    rev.files.push(f.to_string());
-                                }
-                            }
-                        }
-                        "Bash" => {
-                            if let Some(c) = input.and_then(|i| i.get("command")).and_then(|c| c.as_str()) {
-                                let head: String = c.split('\n').next().unwrap_or(c).chars().take(70).collect();
-                                if seen_cmds.insert(head.clone()) {
-                                    rev.commands.push(head);
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                Some("text") if role == "assistant" => {
-                    if let Some(t) = b.get("text").and_then(|t| t.as_str()) {
-                        if t.trim().len() > 80 {
-                            rev.last_note = Some(t.to_string());
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
+#[cfg(test)]
+fn mine_transcript(text: &str, rev: &mut Revivable) {
+    apply(cv_core::LaneWork::mine_bytes(text.as_bytes()), rev);
 }
 
 fn print_revive_block(rev: &Revivable) {
@@ -817,10 +743,7 @@ mod tests {
             commands: vec![],
             last_note: None,
         };
-        mine_transcript_reader(
-            std::io::BufReader::with_capacity(17, std::io::Cursor::new(input)),
-            &mut rev,
-        );
+        apply(cv_core::LaneWork::mine_bytes(&input), &mut rev);
         assert_eq!(rev.prompt.as_deref(), Some("full task"));
         assert_eq!(rev.files, vec!["recovered.rs"]);
     }
