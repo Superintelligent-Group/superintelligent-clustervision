@@ -196,8 +196,12 @@ impl Adapter for Codex {
     fn discover(&self) -> Result<crate::Discovered> {
         // Walk (cheap) to collect candidate paths, then scan (file read + parse) them in parallel.
         let mut paths = Vec::new();
+        let mut walk_errors = Vec::new();
         for root in &self.roots {
-            for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
+            for entry in WalkDir::new(root)
+                .into_iter()
+                .filter_map(|e| e.map_err(|e| walk_errors.extend(crate::Skipped::walk(&e))).ok())
+            {
                 let path = entry.path();
                 let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                 if !name.starts_with("rollout-") {
@@ -213,7 +217,8 @@ impl Adapter for Codex {
                 paths.push(path.to_path_buf());
             }
         }
-        Ok(crate::par_discovery_filter_map(paths, |path| {
+        // An unreadable dir, and a rollout whose scan fails, are skipped and reported.
+        let mut found: crate::Discovered = crate::par_discovery_filter_map(paths, |path| {
             let scanned = || match is_zst_path(&path) {
                 // Decoded in full: an index running beside discovery streams these same bytes.
                 true => crate::codex_handoff::decode_and_offer(
@@ -222,15 +227,15 @@ impl Adapter for Codex {
                 ),
                 false => scan(&path),
             };
-            crate::discover_cache::cached_scan(&path, || match scanned() {
-                Ok(r) => Some(r),
-                Err(e) => {
-                    eprintln!("cv: skipping {}: {e:#}", path.display());
-                    None
-                }
-            })
+            crate::Skipped::listed(
+                &path,
+                crate::discover_cache::cached_scan_checked(&path, || scanned().map(Some)),
+            )
         })
-        .into())
+        .into_iter()
+        .collect();
+        found.skipped.extend(walk_errors);
+        Ok(found)
     }
 
     fn stream(&self, r: &SessionRef, opts: &stream::Demand, sink: &mut dyn MessageSink) -> Result<Session> {

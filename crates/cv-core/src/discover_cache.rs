@@ -445,6 +445,17 @@ where
         .next()
 }
 
+/// [`cached_scan`] over a scan that can fail: its error comes back to the caller (an empty
+/// result is never cached), for discovery to report the source as skipped.
+pub(crate) fn cached_scan_checked<F>(path: &Path, scan: F) -> anyhow::Result<Option<SessionRef>>
+where
+    F: FnOnce() -> anyhow::Result<Option<SessionRef>>,
+{
+    let mut failure = None;
+    let r = cached_scan(path, || scan().map_err(|e| failure = Some(e)).ok().flatten());
+    failure.map_or(Ok(r), Err)
+}
+
 fn persistence_cache(path: &Path, prune: bool) -> Option<Arc<Cache>> {
     let cache = existing_cache(path)?;
     (cache.any_dirty.load(Ordering::Relaxed) || prune).then_some(cache)
