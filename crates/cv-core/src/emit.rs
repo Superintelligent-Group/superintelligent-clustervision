@@ -1333,7 +1333,7 @@ mod tests {
     /// file, and the distill fixture's own lane.
     #[test]
     fn reshape_verbs_emit_resumable() {
-        use crate::distill::{distill, resumable_session, DistillOptions};
+        use crate::distill::{prepare_distill, resumable_session, DistillOptions};
         use crate::splice::tests::compose;
 
         let src = reshape_source();
@@ -1344,12 +1344,12 @@ mod tests {
             keep_last: 1,
             ..Default::default()
         };
-        let d = distill(&src, &opts).unwrap();
+        let d = prepare_distill(&src, &opts).unwrap().distilled;
         let distilled = resumable_session(&src, &d, &opts).unwrap();
         let fork = compose(&[(&src, 0, Some(2))], None, Harness::Claude);
         let two = compose(&[(&src, 0, Some(3)), (&src, 4, None)], None, Harness::Claude);
         let lane = crate::distill::tests::lane();
-        let dl = distill(&lane, &opts).unwrap();
+        let dl = prepare_distill(&lane, &opts).unwrap().distilled;
         let lane_distilled = resumable_session(&lane, &dl, &opts).unwrap();
 
         let verbs: [(&str, &Session); 5] = [

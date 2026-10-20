@@ -76,8 +76,12 @@ fn json_consumers_owned_and_source_full_outputs_match() {
         serde_json::to_value(redacted_source).unwrap()
     );
     let options = cv_core::distill::DistillOptions::default();
-    let owned = cv_core::distill::distill(&fixture.owned, &options).unwrap();
-    let source = cv_core::distill::distill(&fixture.sourced, &options).unwrap();
+    let owned = cv_core::distill::prepare_distill(&fixture.owned, &options)
+        .unwrap()
+        .distilled;
+    let source = cv_core::distill::prepare_distill(&fixture.sourced, &options)
+        .unwrap()
+        .distilled;
     assert_eq!(owned.pack(), source.pack());
     assert_eq!(owned.stats.source_est_tokens, source.stats.source_est_tokens);
     assert_eq!(
@@ -108,7 +112,7 @@ fn json_consumers_unreadable_sources_return_errors_before_emit_writes() {
     )
     .is_err());
     assert!(cv_core::redact::redact(&fixture.sourced).is_err());
-    assert!(cv_core::distill::distill(&fixture.sourced, &cv_core::distill::DistillOptions::default()).is_err());
+    assert!(cv_core::distill::prepare_distill(&fixture.sourced, &cv_core::distill::DistillOptions::default()).is_err());
     assert!(cv_core::distill::findings(&fixture.sourced, &cv_core::distill::DistillOptions::default()).is_err());
     for target in cv_core::emit::supported_targets() {
         let out = fixture.dir.join(target.as_str());
@@ -167,7 +171,7 @@ fn json_consumers_changed_source_is_an_error_in_full_and_mutable_paths() {
         None
     )
     .is_err());
-    assert!(cv_core::distill::distill(&fixture.sourced, &cv_core::distill::DistillOptions::default()).is_err());
+    assert!(cv_core::distill::prepare_distill(&fixture.sourced, &cv_core::distill::DistillOptions::default()).is_err());
     assert!(serde_json::to_value(&fixture.sourced).is_err());
 }
 
@@ -175,7 +179,9 @@ fn json_consumers_changed_source_is_an_error_in_full_and_mutable_paths() {
 fn json_consumers_resumable_selection_does_not_read_elided_input() {
     let fixture = Fixture::new();
     let options = cv_core::distill::DistillOptions::default();
-    let mut distilled = cv_core::distill::distill(&fixture.owned, &options).unwrap();
+    let mut distilled = cv_core::distill::prepare_distill(&fixture.owned, &options)
+        .unwrap()
+        .distilled;
     distilled.tail_start = fixture.owned.messages.len();
     fixture.invalidate();
     assert!(cv_core::distill::resumable_session(&fixture.sourced, &distilled, &options).is_ok());

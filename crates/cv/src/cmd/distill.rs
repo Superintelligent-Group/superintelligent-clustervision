@@ -17,8 +17,6 @@
 
 use crate::util::{parse_harness, report, resolve, short_id, usage};
 use anyhow::{bail, Context, Result};
-#[cfg(test)]
-use cv_core::distill::distill;
 use cv_core::distill::{distill_pack, findings, prepare_distill, DistillOptions, Distilled, PreparedDistillation};
 use cv_core::ir::{Harness, Session, SessionRef};
 use cv_core::EmitOptions;
@@ -472,7 +470,7 @@ mod tests {
             );
             assert_eq!(
                 distill_pack(&actual, &Default::default())?.pack(),
-                distill(&expected, &Default::default())?.pack()
+                prepare_distill(&expected, &Default::default())?.distilled.pack()
             );
         }
         Ok(())
@@ -618,8 +616,8 @@ mod tests {
             assert_eq!(actual_path, original_path);
             assert_eq!(serde_json::to_value(&actual)?, serde_json::to_value(&expected)?);
             let opts = DistillOptions::default();
-            let old = distill(&expected, &opts)?;
-            let new = distill(&actual, &opts)?;
+            let old = prepare_distill(&expected, &opts)?.distilled;
+            let new = prepare_distill(&actual, &opts)?.distilled;
             assert_eq!(new.pack(), old.pack());
             assert_eq!(serde_json::to_value(new.stats)?, serde_json::to_value(old.stats)?);
         }

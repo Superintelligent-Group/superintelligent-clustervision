@@ -38,7 +38,7 @@ use std::sync::OnceLock;
 /// priced like tool-call JSON. Blocks use the shared [`crate::ir::est_tokens`].
 const PACK_KIND: crate::ir::TokenKind = crate::ir::TokenKind::ToolInput;
 
-/// Knobs for [`distill`].
+/// Knobs for [`prepare_distill`].
 #[derive(Debug, Clone)]
 pub struct DistillOptions {
     /// Keep the last N tool calls (and the turns around them) verbatim as the tail.
@@ -105,7 +105,7 @@ pub struct DistillStats {
     pub elided_outputs: usize,
 }
 
-/// The result of [`distill`].
+/// The result of [`prepare_distill`].
 #[derive(Debug, Clone)]
 pub struct Distilled {
     /// Brief + timeline + facts + ledger (the part that replaces the head of the transcript).
@@ -569,16 +569,9 @@ fn note_paths(p: &str) -> bool {
         && !p.starts_with("/etc/")
 }
 
-/// Distill `session` (any harness; owned or checked source-backed) into a context pack, a tail cut point and the
-/// elided-output list. Source-backed values are validated before analysis; failures propagate.
-/// Only demanded messages, fields and products become owned.
-pub fn distill(session: &Session, opts: &DistillOptions) -> anyhow::Result<Distilled> {
-    Ok(prepare_distill(session, opts)?.distilled)
-}
-
 /// Prepare only the pack and identical statistics, without retaining the sidecar roster.
-/// `elided` is empty even when `stats.elided_outputs` is nonzero; use [`distill`] or
-/// [`prepare_distill`] when complete sidecar entries or resumable products are needed.
+/// `elided` is empty even when `stats.elided_outputs` is nonzero; use [`prepare_distill`]
+/// when complete sidecar entries or resumable products are needed.
 pub fn distill_pack(session: &Session, opts: &DistillOptions) -> anyhow::Result<Distilled> {
     Ok(analyze(session, opts, Demand::Pack)?.distilled)
 }
@@ -1780,7 +1773,7 @@ body λ",
                     }
                 }
                 frozen.insert(format!("keep{keep_last}-result{tail_result_max}"), entry);
-                same_products(&distill(&source, &opts)?, &actual);
+                same_products(&prepare_distill(&source, &opts)?.distilled, &actual);
                 assert_eq!(
                     serde_json::to_value(resumable_session(&source, &actual, &opts)?)?,
                     serde_json::to_value(&actual_session)?
@@ -1834,7 +1827,7 @@ body λ",
         ));
         std::fs::write(&path, b"changed")?;
         assert!(prepare_distill(&source, &opts).is_err());
-        assert!(distill(&source, &opts).is_err());
+        assert!(prepare_distill(&source, &opts).is_err());
         assert!(findings(&source, &opts).is_err());
         Ok(())
     }
@@ -1935,7 +1928,7 @@ facts text",
             };
             let prepared = prepare_distill(&source, &opts)?;
             let (actual, actual_session) = prepared.into_resumable_session(&source);
-            same_products(&distill(&source, &opts)?, &actual);
+            same_products(&prepare_distill(&source, &opts)?.distilled, &actual);
             WORK.with(|cell| cell.set(Work::default()));
             let pack = distill_pack(&source, &opts)?;
             let work = WORK.with(|cell| cell.get());
@@ -2013,13 +2006,13 @@ facts text",
                 }],
             ));
             if body.is_none() {
-                assert!(distill(&source, &opts).is_err());
+                assert!(prepare_distill(&source, &opts).is_err());
                 assert!(prepare_distill(&source, &opts).is_err());
                 assert!(distill_pack(&source, &opts).is_err());
                 assert!(findings(&source, &opts).is_err());
                 continue;
             }
-            let expected = distill(&source, &opts)?;
+            let expected = prepare_distill(&source, &opts)?.distilled;
             frozen.insert(body.unwrap(), products(&expected));
             let pack = distill_pack(&source, &opts)?;
             assert_eq!(pack.pack(), expected.pack());
@@ -2092,7 +2085,7 @@ facts text",
                 keep_last: 0,
                 ..Default::default()
             };
-            let expected = distill(&session, &options)?;
+            let expected = prepare_distill(&session, &options)?.distilled;
             frozen.insert(format!("input{i}"), products(&expected));
             let pack = distill_pack(&session, &options)?;
             assert_eq!(pack.pack(), expected.pack());
@@ -2272,14 +2265,15 @@ facts text",
     #[test]
     fn keeps_brief_words_commits_errors_and_collapses_polls() {
         let s = lane();
-        let d = distill(
+        let d = prepare_distill(
             &s,
             &DistillOptions {
                 keep_last: 2,
                 ..Default::default()
             },
         )
-        .unwrap();
+        .unwrap()
+        .distilled;
         let p = d.pack();
         assert!(p.contains("You are lane X. Build the thing on box1."));
         assert!(p.contains("Chose rebase over merge"));
@@ -2296,14 +2290,15 @@ facts text",
     #[test]
     fn tail_opens_on_an_assistant_turn_and_keeps_the_source_threading() {
         let s = lane();
-        let d = distill(
+        let d = prepare_distill(
             &s,
             &DistillOptions {
                 keep_last: 2,
                 ..Default::default()
             },
         )
-        .unwrap();
+        .unwrap()
+        .distilled;
         assert_eq!(s.messages[d.tail_start].role, Role::Assistant);
         let r = resumable_session(
             &s,
