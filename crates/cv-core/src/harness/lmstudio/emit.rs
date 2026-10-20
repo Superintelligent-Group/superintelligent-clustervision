@@ -307,7 +307,8 @@ pub(super) fn emit(session: &Session, out_dir: &Path, opts: &crate::emit::EmitOp
             w.write_all(b"]")?;
             Ok(())
         })?;
-        root.field("tokenCount", 0)?;
+        // No `tokenCount`: LM Studio records the last generation's prompt token count there, a
+        // fact the IR does not hold, and writing 0 claimed an empty context.
         root.field("pinned", false)?;
         if let Some(sp) = &session.system_prompt {
             root.field("systemPrompt", sp)?;
