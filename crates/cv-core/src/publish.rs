@@ -635,7 +635,7 @@ pub fn mode_of(source: &File) -> u32 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]

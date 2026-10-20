@@ -3,7 +3,7 @@ use super::*;
 use crate::harness::wire::genai;
 use crate::{
     harness::{
-        store::{bytes::ByteStage, publish_stage},
+        store::{bytes::ByteStage, stage_into},
         wire::write::{self, ObjectWriter},
     },
     ir::Message,
@@ -295,16 +295,23 @@ pub(super) fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Res
         record.field_with("messages", |w| messages(w, session, &new_id, opts.thinking, &resolver))?;
         record.finish()?;
     }
-    // Checked serialization completes before registry/transcript publication. Preserve the
-    // legacy registry layout and fs::write-compatible links/permissions on the transcript.
+    // Checked serialization completes before anything is published. The transcript and its
+    // project registration publish as one set, the transcript first: a crash between them leaves
+    // a session Gemini re-registers from its directory, never a registration with no session.
     let stage = stage.into_inner().map_err(|error| error.into_error())?;
-    let chats = match gemini_register_project(out_dir, &cwd_str)? {
+    let slug = project_slug(out_dir, &cwd_str);
+    let chats = match &slug {
         Some(slug) => out_dir.join(slug).join("chats"),
         None => out_dir.join("chats"),
     };
     fs::create_dir_all(&chats).with_context(|| format!("creating {}", chats.display()))?;
     let path = chats.join(format!("session-{new_id}.json"));
-    publish_stage(stage, &path, opts.claim())?;
+    let mut set = crate::publish::Set::new();
+    stage_into(&mut set, stage, &path, opts.claim())?;
+    if let Some(slug) = &slug {
+        stage_project(out_dir, slug, &cwd_str, &mut set)?;
+    }
+    set.publish()?;
     Ok(EmitResult {
         path,
         new_id: new_id.clone(),

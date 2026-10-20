@@ -1,6 +1,6 @@
 //! Bounded JSONL staging: serialize successfully before opening the destination.
 use super::bytes::ByteStage;
-use crate::publish::Claim;
+use crate::publish::{Claim, Set};
 use anyhow::Result;
 use serde::Serialize;
 use std::io::{BufReader, BufWriter, Write};
@@ -42,9 +42,11 @@ impl JsonlStage {
         Ok(self.output.into_inner().map_err(|e| e.into_error())?.finish()?)
     }
     pub(crate) fn publish(self, path: &Path, claim: Claim) -> Result<()> {
+        publish_stage(self.into_stage()?, path, claim)
+    }
+    fn into_stage(self) -> Result<ByteStage> {
         anyhow::ensure!(!self.failed, "cannot publish a failed JSONL stage");
-        let stage = self.output.into_inner().map_err(|e| e.into_error())?;
-        publish_stage(stage, path, claim)
+        Ok(self.output.into_inner().map_err(|e| e.into_error())?)
     }
 }
 
@@ -54,6 +56,13 @@ pub(crate) fn publish_stage(stage: ByteStage, path: &Path, claim: Claim) -> Resu
     let source = stage.finish()?;
     let reader = BufReader::with_capacity(256 * 1024, source.reader()?);
     crate::publish::publish_reader(path, "stage", reader, claim)
+}
+
+/// [`publish_stage`] as one member of `set`.
+pub(crate) fn stage_into(set: &mut Set, stage: ByteStage, path: &Path, claim: Claim) -> Result<()> {
+    let source = stage.finish()?;
+    let reader = BufReader::with_capacity(256 * 1024, source.reader()?);
+    set.stage(path, "stage", reader, claim)
 }
 
 #[cfg(test)]
