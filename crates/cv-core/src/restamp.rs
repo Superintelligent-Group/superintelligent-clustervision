@@ -64,33 +64,6 @@ pub fn restamp_line(line: &str, new_id: &str) -> Option<String> {
     Some(out)
 }
 
-/// Stream a captured UTF-8 record with the same top-level id surgery as `restamp_line`.
-/// The producer chooses UTF-8/JSON acceptance and owns staging of partial writes. Malformed JSON
-/// and duplicate known id fields are copied verbatim, matching the borrowed serde struct above.
-#[cfg(test)]
-pub(crate) fn write_restamped_source(
-    source: &crate::json::JsonSource,
-    file: &std::fs::File,
-    offset: u64,
-    len: u64,
-    new_id: &str,
-    output: &mut impl std::io::Write,
-) -> anyhow::Result<bool> {
-    use crate::harness::store::document::InvalidStruct;
-    source.check_metadata(file.metadata()?)?;
-    source.check()?;
-    let mut spans = if len == 0 {
-        Vec::new()
-    } else {
-        match source.read_range_syntax(offset, len, source_id_spans) {
-            Ok(spans) => spans,
-            Err(e) if e.is::<crate::json::InvalidJson>() || e.is::<InvalidStruct>() => Vec::new(),
-            Err(e) => return Err(e),
-        }
-    };
-    write_restamped_spans(source, file, offset, len, new_id, &mut spans, output)
-}
-
 /// Selected during strict producer validation; preserve derived-struct id acceptance.
 pub(crate) fn source_id_spans(view: crate::json::JsonView<'_>) -> anyhow::Result<Vec<(u64, u64)>> {
     use crate::harness::store::document::{Fields, InvalidStruct};
@@ -196,6 +169,32 @@ pub fn restamp(text: &str, new_id: &str) -> Restamped {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Stream a captured UTF-8 record with the same top-level id surgery as `restamp_line`.
+    /// The producer chooses UTF-8/JSON acceptance and owns staging of partial writes. Malformed JSON
+    /// and duplicate known id fields are copied verbatim, matching the borrowed serde struct above.
+    fn write_restamped_source(
+        source: &crate::json::JsonSource,
+        file: &std::fs::File,
+        offset: u64,
+        len: u64,
+        new_id: &str,
+        output: &mut impl std::io::Write,
+    ) -> anyhow::Result<bool> {
+        use crate::harness::store::document::InvalidStruct;
+        source.check_metadata(file.metadata()?)?;
+        source.check()?;
+        let mut spans = if len == 0 {
+            Vec::new()
+        } else {
+            match source.read_range_syntax(offset, len, source_id_spans) {
+                Ok(spans) => spans,
+                Err(e) if e.is::<crate::json::InvalidJson>() || e.is::<InvalidStruct>() => Vec::new(),
+                Err(e) => return Err(e),
+            }
+        };
+        write_restamped_spans(source, file, offset, len, new_id, &mut spans, output)
+    }
 
     #[test]
     fn transcript_writer_matches_old_restamp_bytes_and_counts_for_mixed_rows() {
