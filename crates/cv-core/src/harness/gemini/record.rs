@@ -34,7 +34,16 @@ pub(super) struct Demand<'a> {
     pub resolver: &'a Resolver,
 }
 
-impl Demand<'_> {
+impl<'a> Demand<'a> {
+    /// The read's demand over its captured `source`: under spans, large fields stay in it.
+    pub fn of(harness: Harness, demand: &stream::Demand, source: &'a JsonSource, resolver: &'a Resolver) -> Self {
+        Demand {
+            harness,
+            source: demand.spans.then_some(source),
+            resolver,
+        }
+    }
+
     fn spans(self) -> bool {
         self.source.is_some()
     }

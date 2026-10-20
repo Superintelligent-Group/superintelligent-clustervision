@@ -426,20 +426,6 @@ fn is_checkpoint(name: &str) -> bool {
 // Chat recordings: one reader per era, both feeding the message codec in `record.rs`.
 // ---------------------------------------------------------------------------
 
-/// The demand a recording read puts to the codec: under spans, large fields stay in `source`.
-fn demand<'a>(
-    harness: Harness,
-    opts: &stream::Demand,
-    source: &'a JsonSource,
-    resolver: &'a crate::lazy::Resolver,
-) -> record::Demand<'a> {
-    record::Demand {
-        harness,
-        source: opts.spans.then_some(source),
-        resolver,
-    }
-}
-
 /// Read a *legacy whole-file* chat recording (`{sessionId, messages:[…]}` as one JSON document):
 /// a streaming visitor over `messages[]`, one message through the codec at a time, so the
 /// document is never materialized. Mapped builds borrow it from one mapping; positioned builds
@@ -456,7 +442,7 @@ fn read_document(
         return Ok(None);
     }
     let resolver = crate::lazy::Resolver::new(Some(path.to_path_buf()));
-    let d = demand(harness, opts, &source, &resolver);
+    let d = record::Demand::of(harness, opts, &source, &resolver);
     // Nearly every recording is one Value-compatible document: one validating pass, and its
     // messages need no check of their own. One that is not (a field Value rejects) is read as
     // serde's typed envelope: syntax only, each message accepted on its own. Either way the
@@ -584,7 +570,7 @@ fn read_jsonl(
     let mut records = super::store::jsonl::Records::new(&source, &file);
     let mut published = false;
     let session = replay.emit(
-        demand(harness, opts, &source, &resolver),
+        record::Demand::of(harness, opts, &source, &resolver),
         Some(path),
         Some(&mut records),
         sink,
