@@ -579,6 +579,8 @@ struct Revivable {
     commands: Vec<String>,
     /// The lane's last substantive note to itself, which usually says where it had got to.
     last_note: Option<String>,
+    /// Why mining stopped before the transcript's end: the log above it may be partial.
+    unread: Option<String>,
 }
 
 /// `--revive`: turn a dead or interrupted workflow run into per-lane resume prompts.
@@ -646,6 +648,7 @@ fn mine_lane(a: &cv_core::WorkflowAgent, run_id: &str, session_path: Option<&std
         files: Vec::new(),
         commands: Vec::new(),
         last_note: None,
+        unread: None,
     };
 
     let (Some(id), Some(sp)) = (a.agent_id.as_deref(), session_path) else {
@@ -669,6 +672,7 @@ fn apply(work: cv_core::LaneWork, rev: &mut Revivable) {
     rev.files = work.files;
     rev.commands = work.commands;
     rev.last_note = work.last_note;
+    rev.unread = work.unread;
 }
 
 #[cfg(test)]
@@ -692,6 +696,12 @@ fn print_revive_block(rev: &Revivable) {
     println!();
     if let Some(e) = &rev.error {
         println!("died: {}", truncate(e, 200));
+    }
+    if let Some(why) = &rev.unread {
+        println!(
+            "transcript read stopped early (the work log may be partial): {}",
+            truncate(why, 200)
+        );
     }
     if rev.prompt.is_none() {
         println!("\n(no prompt recoverable — neither transcript nor preview; re-issue by hand)");
@@ -781,6 +791,7 @@ mod tests {
             files: vec![],
             commands: vec![],
             last_note: None,
+            unread: None,
         };
         apply(cv_core::LaneWork::mine_bytes(&input), &mut rev);
         assert_eq!(rev.prompt.as_deref(), Some("full task"));
@@ -809,6 +820,7 @@ mod tests {
             files: vec![],
             commands: vec![],
             last_note: None,
+            unread: None,
         };
         mine_transcript(&lines, &mut rev);
         assert_eq!(

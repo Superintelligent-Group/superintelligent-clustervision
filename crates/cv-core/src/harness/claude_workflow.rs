@@ -818,26 +818,36 @@ pub struct LaneWork {
     pub files: Vec<String>,
     pub commands: Vec<String>,
     pub last_note: Option<String>,
+    /// Why the scan ended before the transcript did (a read or decode failure); what it found up
+    /// to there stands. `None` for a whole read, and for no transcript at all.
+    pub unread: Option<String>,
 }
 
 impl LaneWork {
     /// Mine a lane transcript. Rejected records are omitted; a read failure ends this
-    /// best-effort recovery scan with what it found.
+    /// best-effort recovery scan with what it found, and says so in [`LaneWork::unread`].
     pub fn mine(path: &Path) -> Self {
         let mut miner = Miner::default();
-        let _ = super::store::jsonl::for_each_record(path, |view| miner.record(view));
+        if let Err(error) = super::store::jsonl::for_each_record(path, |view| miner.record(view)) {
+            if !super::is_not_found(&error) {
+                miner.work.unread = Some(format!("{error:#}"));
+            }
+        }
         miner.work
     }
 
     /// [`Self::mine`] over JSONL bytes.
     pub fn mine_bytes(bytes: &[u8]) -> Self {
         let mut miner = Miner::default();
-        let _ = super::store::jsonl::slice(bytes, |line| {
+        let scanned = super::store::jsonl::slice(bytes, |line| {
             if let Some(view) = line.view {
                 miner.record(view)?;
             }
             Ok(crate::stream::Flow::Continue)
         });
+        if let Err(error) = scanned {
+            miner.work.unread = Some(format!("{error:#}"));
+        }
         miner.work
     }
 }
