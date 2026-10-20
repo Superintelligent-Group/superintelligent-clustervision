@@ -212,25 +212,28 @@ impl Adapter for OpenClaw {
     }
 
     fn discover(&self) -> Result<crate::Discovered> {
-        let mut out = Vec::new();
+        // An unreadable store, dir or transcript is skipped and reported.
+        let mut out = crate::Discovered::default();
         // Sessions the sqlite store owns; a legacy JSONL twin (pre-migration copy) is skipped.
         let mut seen: HashSet<String> = HashSet::new();
         let mut indexes = discovery::Indexes::default();
         for root in &self.roots {
             // 1. The sqlite store (OpenClaw ≥ 2026-07-11): agents/<agentId>/agent/openclaw-agent*.sqlite
             for db in sqlite_stores(root) {
-                match discover_sqlite(&db) {
-                    Ok(refs) => {
-                        for r in refs {
-                            seen.insert(r.id.clone());
-                            out.push(r);
-                        }
-                    }
-                    Err(e) => eprintln!("cv: skipping {}: {e:#}", db.display()),
+                for r in out.keep(&db, discover_sqlite(&db)).into_iter().flatten() {
+                    seen.insert(r.id.clone());
+                    out.refs.push(r);
                 }
             }
             // 2. Legacy JSONL transcripts at agents/<agentId>/sessions/<sid>.jsonl.
-            for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
+            for entry in WalkDir::new(root) {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(e) => {
+                        out.skipped.extend(crate::Skipped::walk(&e));
+                        continue;
+                    }
+                };
                 let path = entry.path();
                 let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
                     continue;
@@ -242,18 +245,14 @@ impl Adapter for OpenClaw {
                     continue;
                 }
                 let index = indexes.get(path.parent().unwrap());
-                match discovery::scan(path, index) {
-                    Ok(r) => {
-                        if !seen.contains(&r.id) {
-                            out.push(r);
-                        }
-                    }
-                    Err(e) => eprintln!("cv: skipping {}: {e:#}", path.display()),
+                let scanned = discovery::scan(path, index).map(|r| (!seen.contains(&r.id)).then_some(r));
+                if let Some(found) = crate::Skipped::listed(path, scanned) {
+                    out.push(found);
                 }
             }
         }
         indexes.check()?;
-        Ok(out.into())
+        Ok(out)
     }
 
     /// An agent's `.sqlite` store is written in place; a JSONL transcript is a file like any other.
