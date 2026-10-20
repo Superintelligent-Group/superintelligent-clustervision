@@ -278,10 +278,10 @@ fn stream_document(path: &Path, opts: &Demand, sink: &mut dyn MessageSink) -> Re
 }
 
 /// The document codec, the only decoder of this format: the session envelope through the IR's own
-/// `Deserialize`, messages and blocks projected so text follows [`JsonView::lazy_text`]. Every
-/// message is decoded once, all before the first callback, so a document is all-or-error. `file`
-/// is the document and its capture, which a source-backed message is rechecked against; None for
-/// an owned view.
+/// `Deserialize`, messages and blocks projected so text follows [`JsonView::lazy_text`]. Shape
+/// validation finishes before the first callback, so a document is all-or-error without retaining
+/// its decoded history. `file` is the document and its capture, which a source-backed message is
+/// rechecked against; None for an owned view.
 fn read(
     view: JsonView<'_>,
     file: Option<(&Path, &JsonSource)>,
@@ -309,14 +309,15 @@ fn read(
             "not an OpenSession 0.3 document: messages must be an array"
         );
         session.source_path = file.map(|(path, _)| path.to_path_buf());
-        let messages = messages
-            .array()?
-            .unwrap()
-            .map(|view| ir_message(view?, opts.spans))
-            .collect::<Result<Vec<_>>>()?;
+        // Validate and discard one turn at a time before publishing even metadata. Keep payloads
+        // lazy in this pass regardless of delivery demand; only their shape needs validation.
+        for view in messages.array()?.unwrap() {
+            ir_message(view?, true)?;
+        }
         sink.meta(&session);
         let mut has_sources = false;
-        for message in messages {
+        for view in messages.array()?.unwrap() {
+            let message = ir_message(view?, opts.spans)?;
             let sourced = message.content.iter().any(|block| {
                 matches!(
                     block,
