@@ -203,6 +203,20 @@ fn ls_json_emits_the_same_rows_machine_readably() {
     assert!(rows.is_empty(), "{out}");
 }
 
+/// `text:` with no full-text index has no answer: exit 2 naming `cv index`, never an empty
+/// (or, under `NOT`, a full) listing that looks like one.
+#[test]
+fn a_text_query_with_no_index_is_a_usage_error() {
+    let w = World::new("ls-text-no-index");
+    standard_corpus(&w);
+    for query in ["text:needle", "NOT text:needle"] {
+        let (ok, code, out, err) = w.cv(&["ls", "--json", "-q", query]);
+        assert!(!ok && code == 2, "{query}: exit {code}\n{out}\n{err}");
+        assert!(out.trim().is_empty(), "{query}: {out}");
+        assert!(err.contains("cv index"), "{query}: {err}");
+    }
+}
+
 #[test]
 fn ls_json_zero_limit_validates_inputs_without_creating_a_catalog() {
     let w = World::new("ls-json-zero");

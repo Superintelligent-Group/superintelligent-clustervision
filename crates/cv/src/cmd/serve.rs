@@ -486,7 +486,8 @@ const SEARCH_LIMIT: usize = 20;
 /// reason to guess at them.
 ///
 /// The optional `q` is cv's query calculus (`cv schema`), the same string `cv stats -q` takes; a
-/// parse error is a 400 quoting the core's own message.
+/// parse error is a 400 quoting the core's own message; a `text:` term with no full-text index is
+/// a 503 naming `cv index`.
 fn stats(query: &str) -> (u16, Value) {
     let params = Query::parse(query);
     let q = match params.get("q") {
@@ -502,7 +503,13 @@ fn stats(query: &str) -> (u16, Value) {
         if let Err(error) =
             crate::cmd::query::text_sets(q).and_then(|texts| cv_core::query::filter_refs(&mut refs, q, &texts))
         {
-            return err(500, &format!("{error:#}"));
+            // No index for `text:` is the service lacking it (as `/api/search` says), not a fault.
+            let status = if error.downcast_ref::<crate::util::UsageError>().is_some() {
+                503
+            } else {
+                500
+            };
+            return err(status, &format!("{error:#}"));
         }
     }
     ok(cv_core::stats::CorpusStats::compute(&refs).to_json())
