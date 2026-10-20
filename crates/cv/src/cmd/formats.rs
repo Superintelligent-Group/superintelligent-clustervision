@@ -68,6 +68,9 @@ fn census(harness: Option<Harness>, recent: usize, json_out: bool) -> Result<()>
             h.sessions, h.parse_errors
         );
         println!("  {cover}");
+        if let Some(error) = &h.first_error {
+            println!("  first parse error: {error}");
+        }
         if !h.kinds.is_empty() {
             println!("  kinds:  {}", tally(&h.kinds));
         }

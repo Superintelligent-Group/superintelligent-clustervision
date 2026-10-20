@@ -498,6 +498,10 @@ pub struct RecordStat {
 pub struct HarnessCensus {
     pub sessions: usize,
     pub parse_errors: usize,
+    /// The first parse error, `<path>: <error>`: the census counts failed samples, and says why
+    /// the first one failed rather than dropping it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_error: Option<String>,
     /// Message kinds seen (`MessageKind::as_str`).
     pub kinds: BTreeMap<String, u64>,
     /// Block types seen (`text`, `thinking`, …).
@@ -653,7 +657,11 @@ pub fn census(harness: Option<Harness>, recent: usize) -> Census {
         let mut c = HarnessCensus::default();
         for r in &refs {
             match census_session(adapter.as_ref(), r, h, manifest.as_ref()) {
-                Err(_) => c.parse_errors += 1,
+                Err(e) => {
+                    c.parse_errors += 1;
+                    c.first_error
+                        .get_or_insert_with(|| format!("{}: {e:#}", r.path.display()));
+                }
                 Ok(sample) => {
                     c.sessions += 1;
                     for (kind, count) in sample.kinds {

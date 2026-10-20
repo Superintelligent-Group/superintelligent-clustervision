@@ -119,6 +119,16 @@
 - `cv search` no longer mentions a leftover `index.sqlite`; the sqlite full-text index was retired long ago.
 - cv-core: `catalog::fill_count` is gone; nothing called it since a complete read certifies counts in the counts record.
 
+**Skips: counted, reported, or warned once.**
+- A source discovery cannot open (an unreadable dir, a locked or corrupt database) is no longer silently empty: `cv doctor` names it.
+- `cv doctor --json` gains `skipped_sources` when discovery skipped any; per-file `cv: skipping` lines become one stderr summary.
+- **Breaking (library):** `Adapter::discover` returns `Discovered { refs, skipped }`; an out-of-tree adapter returns `Ok(refs.into())`.
+- A catalog, usage cache or scan cache that cannot open prints one stderr line per process; a failed open is retried, never remembered.
+- Devin, Hermes and Goose sessions whose row vanished error instead of reading as an empty session.
+- Zed's unreadable `threads.db` lists nothing and is named by `cv doctor`, instead of failing discovery and keeping the old listing.
+- A Cursor bubble a header names but the store lacks counts as `skipped_lines` instead of vanishing.
+- `cv formats census` reports each harness's first parse error (`first_error` in `--json`) beside the count.
+
 **Tooling and CI.**
 - `cv schema --json` lists `routes`: every HTTP method/path pattern `cv serve` answers, from the routers' own tables.
 - `cv schema --json` publishes `subagent_row` and `task_row`, the keys a sub-agent forest row and a task row carry, beside `session_row`.
