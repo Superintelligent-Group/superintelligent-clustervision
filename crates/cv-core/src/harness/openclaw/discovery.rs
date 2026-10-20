@@ -112,21 +112,23 @@ pub(super) fn scan(path: &Path, index: &Index) -> Result<SessionRef> {
     let source = JsonSource::capture(path)?;
     let file = fs::File::open(path)?;
     source.check_metadata(file.metadata()?)?;
-    // The prior read_to_string rejected every invalid byte, even on malformed/ignored rows.
-    anyhow::ensure!(
-        ranges::valid_utf8(&mut ranges::reader(
-            &file,
-            ranges::Range {
-                offset: 0,
-                len: source.len()
-            }
-        )?)?,
-        "OpenClaw discovery transcript did not contain valid UTF-8"
-    );
     let mut acc = ScanAcc::default();
     jsonl::for_each_line(&source, &file, 0, source.len(), |line| {
-        if let Some(view) = line.view {
-            feed(view, &mut acc)?;
+        match line.view {
+            Some(view) => feed(view, &mut acc)?,
+            // Invalid UTF-8 is not one JSON value, so only a rejected line can hold it; the prior
+            // read_to_string rejected every invalid byte, even on malformed rows.
+            None if !line.blank => anyhow::ensure!(
+                ranges::valid_utf8(&mut ranges::reader(
+                    &file,
+                    ranges::Range {
+                        offset: line.at,
+                        len: line.end - line.at
+                    }
+                )?)?,
+                "OpenClaw discovery transcript did not contain valid UTF-8"
+            ),
+            None => {}
         }
         Ok(Flow::Continue)
     })?;
