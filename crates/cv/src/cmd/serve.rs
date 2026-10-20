@@ -519,7 +519,7 @@ fn stats(query: &str) -> (u16, Value) {
 ///
 /// **The index answers, or says why not.** A missing or unusable index is a 503 naming the cause
 /// and the fix, as `cv search` errors; `scan=1` asks for the head-capped live scan instead
-/// ([`cv_core::scan::live_search`]). Which path answered rides on `X-Cv-Search-Source` (`index` |
+/// ([`cv_core::scan::live_search_filtered`]). Which path answered rides on `X-Cv-Search-Source` (`index` |
 /// `semantic` | `live`), with a human sentence in `X-Cv-Search-Note` whenever the answer may be
 /// partial (a stale index, a live scan, a truncation). Both headers are CORS-exposed. The body
 /// stays exactly the CLI's array.

@@ -131,11 +131,8 @@ pub struct LiveSearch {
 ///
 /// Trade-off, stated plainly: a match beyond a session's capped head is missed here; finding those
 /// is the index's job (`cv index`).
-pub fn live_search(query: &str, want: Option<Harness>, limit: usize) -> Result<LiveSearch> {
-    live_search_filtered(query, want, limit, |_| true)
-}
-
-/// Live search with caller metadata selection applied before payload reads and the hit budget.
+///
+/// Caller metadata selection is applied before payload reads and the hit budget.
 pub fn live_search_filtered(
     query: &str,
     want: Option<Harness>,
@@ -254,7 +251,7 @@ mod tests {
             "match",
             &[serde_json::json!({"type":"user", "message":{"role":"user", "content":"match"}})],
         );
-        let results = live_search("match", Some(Harness::Claude), 0).unwrap();
+        let results = live_search_filtered("match", Some(Harness::Claude), 0, |_| true).unwrap();
         assert!(results.hits.is_empty());
         assert!(!results.truncated);
         assert!(
