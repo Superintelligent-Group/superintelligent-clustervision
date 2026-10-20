@@ -1507,6 +1507,9 @@ mod tests {
                 self.calls += 1;
                 if self.calls == self.at {
                     fs::remove_file(&self.path).unwrap();
+                    // The contract: a callback slow enough to mutate the source is rechecked on
+                    // return; a fast one is the EOF check's.
+                    std::thread::sleep(crate::harness::store::jsonl::Read::SLOW_CALLBACK * 10);
                 }
                 Flow::Continue
             }

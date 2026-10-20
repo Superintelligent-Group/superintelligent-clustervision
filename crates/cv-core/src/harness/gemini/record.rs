@@ -61,8 +61,9 @@ impl<'a> Demand<'a> {
     }
 }
 
-/// The sink, rechecking the source after each delivered message that holds a source
-/// descriptor: a consumer must not go on with a descriptor of a source that has changed.
+/// The sink, rechecking the source after a slow callback handed a source descriptor (a consumer
+/// must not go on with a descriptor of a source that has changed); the reader's EOF check covers
+/// the fast ones.
 struct Out<'s> {
     sink: &'s mut dyn MessageSink,
     published: &'s mut bool,
@@ -77,11 +78,12 @@ impl Out<'_> {
             Block::ToolUse { input, .. } => matches!(input, crate::Json::Source(_)),
             _ => false,
         });
+        let started = std::time::Instant::now();
         let flow = self.sink.message(m);
         if sourced {
             *self.published = true;
             if let Some(source) = d.source {
-                source.check()?;
+                source.check_after(started)?;
             }
         }
         Ok(flow)
