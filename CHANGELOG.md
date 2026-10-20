@@ -9,6 +9,7 @@
 - `cv stats` reports "N not counted yet" beside the total (`uncounted` in `--json` and `/api/stats`); `--sort-by messages` ranks uncounted sessions last.
 - A certified count survives metadata refreshes that leave the source unchanged and is dropped when the source changes.
 - Kimi, Kimi Code and Grok listings take the recorded native title and stop reading at the first fallback prompt.
+- Continue and OpenCode's JSON tree no longer read every history or message file to count at discovery; their `message_count` is `null` until certified.
 - Hermes and Goose listings read session metadata only; Zed projects its snapshot metadata without decoding messages.
 - A listing racing `cv index` no longer loses a discovery update: catalog publication waits for the other writer instead of discarding.
 - **Breaking:** `cv archive ls` counts turns like `cv ls`; `catalog.jsonl` rows keep the raw count as `messages_written`; 0.17's rows show a dash until resynced.

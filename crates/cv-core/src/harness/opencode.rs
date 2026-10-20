@@ -263,7 +263,6 @@ impl Adapter for OpenCode {
             if seen.contains(&id) {
                 continue;
             }
-            let message_count = Some(self.message_dir(&id).map_or(0, |d| count_turns(&d)));
             out.push(SessionRef {
                 cwd: v.get("directory").and_then(Value::as_str).map(PathBuf::from),
                 title: v
@@ -272,7 +271,7 @@ impl Adapter for OpenCode {
                     .map(|t| crate::ir::truncate(t, crate::ir::Head::TITLE)),
                 created_at: v.pointer("/time/created").and_then(super::ts_from_value),
                 updated_at: v.pointer("/time/updated").and_then(super::ts_from_value),
-                message_count,
+                // Uncounted (`SessionRef::new`): counting means opening every message file (C1).
                 ..SessionRef::new(id, Harness::OpenCode, path.to_path_buf())
             });
         }
@@ -404,23 +403,6 @@ fn fold_into_session(s: &mut Session, m: &mut Message) -> Result<()> {
         s.system_prompt = m.text();
     }
     Ok(())
-}
-
-/// Count a session's conversational turns: message records whose `role` is `user`/`assistant`.
-/// The [`SessionRef::message_count`] contract is user+assistant turns only — counting directory
-/// entries (the old behavior) also picked up system/summary records and any stray files, so the
-/// number disagreed with every other adapter. Only the role is selected; older headers can
-/// contain large inline summaries. This never touches part files.
-fn count_turns(dir: &std::path::Path) -> usize {
-    let Ok(rd) = fs::read_dir(dir) else { return 0 };
-    rd.filter_map(|e| e.ok())
-        .filter(|entry| {
-            document(&entry.path(), |view, _| is_turn(view))
-                .ok()
-                .flatten()
-                .unwrap_or(false)
-        })
-        .count()
 }
 
 /// A message record whose `role` is `user` or `assistant`.

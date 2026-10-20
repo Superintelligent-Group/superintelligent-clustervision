@@ -124,10 +124,11 @@ Key sources: `cv/src/cmd/view.rs`, `cv-core/src/{api,affordance,watch,lazy,strea
 
 A listing reports what the metadata read already produced and nothing it would have to read more
 for. A JSONL adapter whose discovery walks every record head anyway (Claude, and the adapters that
-read every turn: Cursor, Cline, Continue, Devin, Gemini, Qwen, LM Studio, OpenClaw, OpenCode,
+read every turn: Cursor, Cline, Devin, Gemini, Qwen, LM Studio, OpenClaw, OpenCode's database,
 OpenSession, the exports) counts for free and reports `Some(n)`, so `Some(0)` is a session with no
-turns. An adapter for which counting means decoding message bodies or opening a second store
-(Codex, Grok, Kimi, Kimi Code, Zed, Hermes, Goose) reports `None`, "not counted", until a full
+turns. An adapter for which counting means decoding message bodies, opening a second store or
+reading files the listing does not need (Codex, Grok, Kimi, Kimi Code, Zed, Hermes, Goose,
+Continue, OpenCode's JSON tree) reports `None`, "not counted", until a full
 read or `cv index` certifies the number; the catalog keeps a certified count across metadata
 refreshes that leave the source unchanged and drops it when the source changes. `--json` emits
 `null`, the table a dash, `--sort-by messages` ranks uncounted sessions last, `cv stats` reports
