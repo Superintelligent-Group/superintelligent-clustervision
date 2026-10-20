@@ -907,28 +907,15 @@ impl ReplayDedup {
         Ok(true)
     }
 
-    /// Fold an *emitted* message into the look-back state.
+    /// Fold an *emitted* message that `admit` did not take as a new trailing prompt into the
+    /// look-back state: a substantive assistant turn (text or tool call) ends the window.
     fn observe(&mut self, m: &Message) -> Result<()> {
-        match m.role {
-            Role::User => {
-                if let Some(text) = single_text(m) {
-                    if !text.is_empty() {
-                        self.recent_user_texts
-                            .insert_source(text, &crate::lazy::Resolver::new(None))?;
-                    }
-                }
-            }
-            Role::Assistant => {
-                // A substantive assistant turn (text or tool call) ends the look-back window.
-                let has_content = m
-                    .content
-                    .iter()
-                    .any(|b| matches!(b, Block::Text { .. } | Block::ToolUse { .. }));
-                if has_content {
-                    self.recent_user_texts.clear();
-                }
-            }
-            _ => {}
+        if m.role == Role::Assistant
+            && m.content
+                .iter()
+                .any(|b| matches!(b, Block::Text { .. } | Block::ToolUse { .. }))
+        {
+            self.recent_user_texts.clear();
         }
         Ok(())
     }
@@ -2387,7 +2374,7 @@ mod tests {
         let mut message = Message::new(Role::User);
         message.content.push(Block::Text { text: "".into() });
         for _ in 0..40000 {
-            dedup.observe(&message).unwrap();
+            dedup.admit(&message).unwrap();
         }
         assert!(!dedup.recent_user_texts.contains("").unwrap());
         assert!(!dedup.recent_user_texts.is_spilled());
