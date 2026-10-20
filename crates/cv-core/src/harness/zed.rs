@@ -293,7 +293,11 @@ fn stream_thread(
         blob_updated = t.get("updated_at").and_then(super::ts_from_value);
         cwd = snapshot_cwd(t);
         git = snapshot_git(t);
-        model = t.get("model").and_then(model_string);
+        let (name, provider) = t.get("model").map(model_and_provider).unwrap_or_default();
+        model = name;
+        if let Some(p) = provider {
+            zed.insert("provider".into(), Value::String(p));
+        }
         thread_extras(t, &mut zed, &mut parent_thread_id);
     } else if !matches!(cell, Ok(None)) {
         // The row has a blob that wouldn't decode — surface that instead of erroring, so one
@@ -350,16 +354,16 @@ fn stream_thread(
 // Thread-level metadata
 // ---------------------------------------------------------------------------
 
-/// `{provider, model}` → `"provider/model"` (matching the goose/hermes convention).
-fn model_string(v: &Value) -> Option<String> {
-    let provider = v.get("provider").and_then(Value::as_str).filter(|s| !s.is_empty());
-    let model = v.get("model").and_then(Value::as_str).filter(|s| !s.is_empty());
-    match (provider, model) {
-        (Some(p), Some(m)) => Some(format!("{p}/{m}")),
-        (None, Some(m)) => Some(m.to_string()),
-        (Some(p), None) => Some(p.to_string()),
-        (None, None) => None,
-    }
+/// `{provider, model}` → the model, and the provider beside it (`extra["zed"]["provider"]`): a
+/// thread that names only its provider has no model.
+fn model_and_provider(v: &Value) -> (Option<String>, Option<String>) {
+    let field = |k: &str| {
+        v.get(k)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    (field("model"), field("provider"))
 }
 
 /// First worktree path of `initial_project_snapshot` — the cwd the thread was created against.
@@ -747,7 +751,7 @@ mod tests {
 
         assert_eq!(s.title.as_deref(), Some("Fix the flaky test"));
         assert_eq!(s.cwd.as_deref(), Some(Path::new("/Users/u/proj")));
-        assert_eq!(s.model.as_deref(), Some("zed.dev/claude-sonnet-4-thinking"));
+        assert_eq!(s.model.as_deref(), Some("claude-sonnet-4-thinking"));
         let git = s.git.as_ref().unwrap();
         assert_eq!(git.branch.as_deref(), Some("main"));
         assert_eq!(git.commit.as_deref(), Some("abc123"));
@@ -825,7 +829,13 @@ mod tests {
         crate::harness::assert_no_flat_keys(&s);
 
         assert_eq!(s.title.as_deref(), Some("Refactor the parser"));
-        assert_eq!(s.model.as_deref(), Some("openai/gpt-5-mini"));
+        assert_eq!(s.model.as_deref(), Some("gpt-5-mini"), "the model is the model");
+        assert_eq!(s.harness_extra(Harness::Zed).unwrap()["provider"], "openai");
+        // A thread naming only its provider has no model; the provider is never promoted to one.
+        assert_eq!(
+            model_and_provider(&serde_json::json!({"provider": "zed.dev", "model": ""})),
+            (None, Some("zed.dev".into()))
+        );
         assert_eq!(s.git.as_ref().unwrap().branch.as_deref(), Some("dev"));
         assert_eq!(s.lineage.parent.as_deref(), Some("parent-1"));
         assert_eq!(
@@ -1005,14 +1015,14 @@ mod tests {
         };
         let cells = Cells::new(&reader, &path, &crate::source::ReadSet::default(), "threads").unwrap();
         let session = stream_thread(&reader, &sref("t"), &mut sink, &cells, false).unwrap();
-        assert_eq!(session.model.as_deref(), Some("zed.dev/claude-sonnet-4-thinking"));
+        assert_eq!(session.model.as_deref(), Some("claude-sonnet-4-thinking"));
         assert_eq!(sink.messages.len(), 4);
         assert_eq!(sink.messages[0].text().as_deref(), Some("why is test_foo flaky?"));
         // A live WAL store is read through a private snapshot (cv never touches its -shm), so
         // even an unchecked second pass sees the snapshot, not the writer's later commit.
         assert_eq!(
             parse_thread(&reader, &sref("t")).unwrap().model.as_deref(),
-            Some("zed.dev/claude-sonnet-4-thinking")
+            Some("claude-sonnet-4-thinking")
         );
         // The internal SQLite snapshot remains consistent, but publication through the real
         // adapter must reject a source changed by a callback rather than recapture its identity.
