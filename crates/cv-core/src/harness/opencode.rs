@@ -405,14 +405,6 @@ fn fold_into_session(s: &mut Session, m: &mut Message) -> Result<()> {
     Ok(())
 }
 
-/// A message record whose `role` is `user` or `assistant`.
-fn is_turn(view: crate::json::JsonView<'_>) -> Result<bool> {
-    Ok(matches!(
-        record::string(view.get("role")?)?.as_deref(),
-        Some("user" | "assistant")
-    ))
-}
-
 /// One JSON document of the tree, validated and viewed once; None for a file that cannot be
 /// captured or is not exactly one JSON value.
 fn document<T>(
@@ -446,6 +438,14 @@ mod db {
     use super::*;
     use rusqlite::types::ValueRef;
     use std::collections::HashMap;
+
+    /// A message record whose `role` is `user` or `assistant`.
+    fn is_turn(view: crate::json::JsonView<'_>) -> Result<bool> {
+        Ok(matches!(
+            record::string(view.get("role")?)?.as_deref(),
+            Some("user" | "assistant")
+        ))
+    }
 
     /// Session columns the IR first-classes (`parent_id` is `Lineage::parent`; everything else lands
     /// in `Session::extra["opencode"]` verbatim).
