@@ -135,6 +135,7 @@
 - A Hermes read whose compression continuation cannot be queried errors instead of dropping `continued_in`.
 - `cv index`/`cv search` stderr speaks as `cv:` only; a hit whose source cannot be read says so once instead of silently showing its preview.
 - An unreadable or malformed `config.toml` is said once per process (`cv: the config file unavailable…`) and no longer read as absent silently.
+- cv no longer mentions a leftover pre-0.9.12 `discover.json`; delete it by hand if one remains.
 - `cv formats census` reports each harness's first parse error (`first_error` in `--json`) beside the count.
 - **Breaking:** `cv events`, `cv touched`, `cv blame` and their HTTP routes fail on an event-catalog error instead of answering empty.
 - **Breaking (library):** `events::events_for`, `sessions_touching`, `sessions_editing` and `edits_touching_file` return `Result`.

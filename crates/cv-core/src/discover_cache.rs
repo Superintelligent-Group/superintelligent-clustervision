@@ -7,10 +7,8 @@
 //!
 //! It's process-global and shared by `cv` and the desktop app via the `scan_cache` table in
 //! the shared catalog db (see [`crate::catalog`], which owns the DDL; the rows also feed the
-//! freshness probe's append detection). Earlier releases kept a whole-loaded `discover.json`
-//! instead — a second, redundant representation of the same facts that every command paid to parse;
-//! [`load`] leaves a "safe to delete" note if one is still lying around. Reads are tolerant — a
-//! missing or unreadable cache simply means everything is re-scanned (and the cache rebuilt).
+//! freshness probe's append detection). Reads are tolerant — a missing or unreadable cache simply
+//! means everything is re-scanned (and the cache rebuilt), said once per process.
 //! Entries are reused only when interpretation, tuple, and captured file identity match.
 //! Captured source identities also reject replacement or rewrites with restored timestamps.
 //! Opted-in adapters may continue metadata on growth under their immutable-prefix contract,
@@ -139,22 +137,8 @@ fn clear_invalidated(cache: &Cache) {
     }
 }
 
-/// One-time nudge about the pre-0.9.12 JSON cache this module replaced.
-fn note_legacy_json() {
-    let Some(path) = crate::env::cache_dir().map(|d| d.join("clustervision").join("discover.json")) else {
-        return;
-    };
-    if path.exists() {
-        eprintln!(
-            "cv: note: stale discover.json no longer used (the scan cache lives in catalog.db now); safe to delete {}",
-            path.display()
-        );
-    }
-}
-
 /// Start empty. Persisted payloads enter this existing cache only on exact keyed demand.
 fn load() -> Cache {
-    note_legacy_json();
     Cache {
         entries: Default::default(),
         any_dirty: AtomicBool::new(false),
