@@ -159,7 +159,7 @@ fn enrich_head(adapter: &dyn cv_core::Adapter, r: &SessionRef) -> Option<(cv_cor
     let session = cv_core::stream::stream_counted(
         adapter,
         r,
-        &cv_core::ParseOptions::lazy(),
+        &cv_core::Demand::LEAN.with_spans(),
         &mut users,
         cv_core::stream::Pass::RECORD,
     )
@@ -858,7 +858,7 @@ mod enrich_tests {
         fn discover(&self) -> Result<Vec<SessionRef>> {
             Ok(Vec::new())
         }
-        fn stream(&self, _: &SessionRef, _: &cv_core::ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+        fn stream(&self, _: &SessionRef, _: &cv_core::Demand, sink: &mut dyn MessageSink) -> Result<Session> {
             for message in &self.messages {
                 self.callbacks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 assert_eq!(sink.message(message.clone()), Flow::Continue);
@@ -877,7 +877,7 @@ mod enrich_tests {
         let mut baseline = cv_core::stream::stream_counted(
             adapter,
             reference,
-            &cv_core::ParseOptions::lazy(),
+            &cv_core::Demand::LEAN.with_spans(),
             &mut old,
             cv_core::stream::Pass::RECORD,
         )
@@ -940,7 +940,7 @@ mod enrich_tests {
         let mut baseline = cv_core::stream::stream_counted(
             &old_adapter,
             &old_reference,
-            &cv_core::ParseOptions::lazy(),
+            &cv_core::Demand::LEAN.with_spans(),
             &mut old,
             cv_core::stream::Pass::RECORD,
         )

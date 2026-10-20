@@ -349,7 +349,7 @@ pub(crate) fn read_corpus_doc(r: &cv_core::SessionRef) -> Result<(Doc, cv_core::
     let meta = cv_core::stream::stream_counted(
         &*adapter,
         r,
-        &cv_core::ParseOptions::lazy(),
+        &cv_core::Demand::LEAN.with_spans(),
         &mut sink,
         cv_core::stream::Pass::RECORD,
     )

@@ -571,7 +571,13 @@ fn reduce_streamed(
         .iter()
         .any(|flag| crate::affordance::Kind::parse(flag).is_some());
     let source = probe.snapshot(r);
-    let read = crate::stream::stream_counted(adapter, r, &crate::ParseOptions::lazy(), &mut sink, Default::default())?;
+    let read = crate::stream::stream_counted(
+        adapter,
+        r,
+        &crate::Demand::LEAN.with_spans(),
+        &mut sink,
+        Default::default(),
+    )?;
     let (session, counted) = (read.session, read.counted);
     if affordances {
         sink.facts.counts = counted.as_ref().map(|c| c.counts.clone());
@@ -1139,7 +1145,7 @@ mod tests {
         r.cwd = Some("/Stale/Discovery".into());
         r.title = Some("discovery title".into());
         let adapter = crate::harness::for_harness(r.harness).unwrap();
-        let full = crate::stream::collect_with(adapter.as_ref(), &r, &crate::ParseOptions::lazy()).unwrap();
+        let full = crate::stream::collect_with(adapter.as_ref(), &r, &crate::Demand::LEAN.with_spans()).unwrap();
         assert_eq!(full.cwd.as_deref(), Some(std::path::Path::new("/Late/Work")));
         for required in [
             "model=earlymodel AND model=latemodel",
@@ -1375,7 +1381,7 @@ mod tests {
         .unwrap();
         let r = SessionRef::new("invalid-sidecar", crate::Harness::Claude, path);
         let adapter = crate::harness::for_harness(r.harness).unwrap();
-        let full = crate::stream::collect_with(adapter.as_ref(), &r, &crate::ParseOptions::lazy()).unwrap();
+        let full = crate::stream::collect_with(adapter.as_ref(), &r, &crate::Demand::LEAN.with_spans()).unwrap();
         let query = SessionQuery::parse("compactions=0").unwrap();
         let texts = TextSets::default();
         assert_eq!(full.messages.len(), 0);

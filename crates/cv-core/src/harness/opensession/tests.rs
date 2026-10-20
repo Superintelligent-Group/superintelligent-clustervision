@@ -410,7 +410,7 @@ fn discovers_documents_in_registered_sources() {
 
 #[test]
 fn native_messages_read_back_what_was_written_and_reject_late_invalid_turns() {
-    use crate::stream::{CollectSink, ParseOptions};
+    use crate::stream::{CollectSink, Demand};
     let dir = tmpdir("native");
     let path = dir.join("native.opensession.json");
     let mut original = every_field_session();
@@ -438,7 +438,7 @@ fn native_messages_read_back_what_was_written_and_reject_late_invalid_turns() {
     // The writer is the oracle: unknown fields are skipped, everything written reads back.
     let mut expected = original.clone();
     expected.source_path = Some(path.clone());
-    for opts in [ParseOptions::full(), ParseOptions::lazy(), ParseOptions::complete()] {
+    for opts in [Demand::RICH, Demand::LEAN.with_spans(), Demand::COMPLETE] {
         let mut sink = CollectSink::default();
         let mut actual = stream_document(&path, &opts, &mut sink).unwrap();
         actual.messages = sink.messages;
@@ -500,7 +500,7 @@ fn native_messages_read_back_what_was_written_and_reject_late_invalid_turns() {
         }
     };
     assert!(
-        stream_document(&path, &ParseOptions::lazy(), &mut mutate).is_err(),
+        stream_document(&path, &Demand::LEAN.with_spans(), &mut mutate).is_err(),
         "source mutation after publication must reject completion"
     );
     assert!(
@@ -511,16 +511,16 @@ fn native_messages_read_back_what_was_written_and_reject_late_invalid_turns() {
     bad["messages"].as_array_mut().unwrap().push(json!({"role":"invalid"}));
     std::fs::write(&path, serde_json::to_vec(&bad).unwrap()).unwrap();
     let mut sink = CollectSink::default();
-    assert!(stream_document(&path, &ParseOptions::lazy(), &mut sink).is_err());
+    assert!(stream_document(&path, &Demand::LEAN.with_spans(), &mut sink).is_err());
     assert!(sink.messages.is_empty());
     for scalar in ["1e400", "\"\\ud800\""] {
         let text = format!("{{\"id\":\"x\",\"messages\":[],\"unknown\":{scalar}}}");
         std::fs::write(&path, &text).unwrap();
         assert!(from_str(&text).is_err());
-        assert!(stream_document(&path, &ParseOptions::lazy(), &mut sink).is_err());
+        assert!(stream_document(&path, &Demand::LEAN.with_spans(), &mut sink).is_err());
     }
     std::fs::write(&path, r#"{"open_session":"0.2","messages":null}"#).unwrap();
-    assert!(stream_document(&path, &ParseOptions::lazy(), &mut sink)
+    assert!(stream_document(&path, &Demand::LEAN.with_spans(), &mut sink)
         .unwrap_err()
         .to_string()
         .contains("reads 0.3 only"));
@@ -825,7 +825,7 @@ fn opaque_principal_round_trips_in_owned_positioned_and_checked_json_paths() -> 
         std::fs::write(&path, text)?;
         assert_eq!(read_document(&path)?.principal, owned.principal);
         let mut sink = crate::stream::CollectSink::default();
-        let lazy = stream_document(&path, &ParseOptions::lazy(), &mut sink)?;
+        let lazy = stream_document(&path, &Demand::LEAN.with_spans(), &mut sink)?;
         assert_eq!(lazy.principal, owned.principal);
         let (redacted, _) = crate::redact::redact_with(&owned, &Default::default())?;
         assert_eq!(redacted.principal, owned.principal);

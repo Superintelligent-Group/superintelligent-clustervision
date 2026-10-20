@@ -223,7 +223,7 @@ mod tests {
         crate::stream::stream_counted(
             &adapter,
             &reference,
-            &ParseOptions::facts(),
+            &Demand::FACTS.with_spans(),
             &mut crate::stream::CollectSink::default(),
             crate::stream::Pass::RECORD,
         )?;

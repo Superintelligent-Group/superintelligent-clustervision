@@ -84,7 +84,7 @@ pub(super) fn scan(path: &Path) -> Result<Session> {
     Ok(listing.unwrap_or_else(|| Session::new(String::new(), Harness::Codex)))
 }
 
-pub(super) fn stream(r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+pub(super) fn stream(r: &SessionRef, opts: &stream::Demand, sink: &mut dyn MessageSink) -> Result<Session> {
     let empty = || Session {
         source_path: Some(r.path.clone()),
         ..Session::new(r.id.clone(), Harness::Codex)
@@ -100,7 +100,7 @@ pub(super) fn stream(r: &SessionRef, opts: &ParseOptions, sink: &mut dyn Message
             session: &'s mut Session,
             ctx: &'s mut CodexCtx,
             out: &'s mut Vec<Message>,
-            opts: &ParseOptions,
+            opts: &stream::Demand,
             source: &'s JsonSource,
         ) -> Reader<'s> {
             Reader {
@@ -143,7 +143,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn collected(path: &Path, opts: &ParseOptions) -> Session {
+    fn collected(path: &Path, opts: &stream::Demand) -> Session {
         let r = SessionRef::new("fallback", Harness::Codex, path);
         let mut sink = crate::stream::CollectSink::default();
         let mut session = Codex { roots: Vec::new() }.stream(&r, opts, &mut sink).unwrap();
@@ -169,7 +169,7 @@ mod tests {
         ] {
             // Not exactly a serde Value (or no items): an empty session, an empty listing.
             fs::write(&path, raw).unwrap();
-            let actual = collected(&path, &ParseOptions::lazy());
+            let actual = collected(&path, &stream::Demand::LEAN.with_spans());
             assert!(actual.messages.is_empty(), "{raw}");
             assert_eq!(actual.id, "fallback");
             let listing = scan(&path).unwrap();
@@ -183,7 +183,7 @@ mod tests {
         fs::write(&path, bad_utf8).unwrap();
         let r = SessionRef::new("fallback", Harness::Codex, &path);
         let mut sink = crate::stream::CollectSink::default();
-        assert!(stream(&r, &ParseOptions::lazy(), &mut sink).is_err());
+        assert!(stream(&r, &stream::Demand::LEAN.with_spans(), &mut sink).is_err());
         assert!(sink.messages.is_empty());
         assert!(scan(&path).is_err());
 
@@ -197,7 +197,7 @@ mod tests {
             saved = Some(m);
             Flow::Stop
         };
-        let meta = stream(&r, &ParseOptions::lazy(), &mut stop).unwrap();
+        let meta = stream(&r, &stream::Demand::LEAN.with_spans(), &mut stop).unwrap();
         assert_eq!(meta.id, "legacy");
         let saved = saved.unwrap();
         assert!(matches!(saved.content.first(), Some(Block::Text { text }) if text.inline_str().is_none()));
@@ -210,6 +210,6 @@ mod tests {
             fs::write(&path, "replacement source").unwrap();
             Flow::Stop
         };
-        assert!(stream(&r, &ParseOptions::lazy(), &mut mutate).is_err());
+        assert!(stream(&r, &stream::Demand::LEAN.with_spans(), &mut mutate).is_err());
     }
 }

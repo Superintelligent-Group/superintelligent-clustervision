@@ -81,7 +81,7 @@
 //! runs when a transcript holds a `leaf` control (OpenClaw's own rule for legacy flat readers,
 //! `selectSessionTranscriptLeafControlledPath`). Entries off the active branch are dropped by the
 //! lean passes and carried, tagged `extra["openclaw"]["inactive_branch"]`, under
-//! [`ParseOptions::complete`].
+//! [`Demand::COMPLETE`].
 //!
 //! Canonical entry types beyond `message` (`session-manager-types.ts:28-95`): `compaction`
 //! (`summary, firstKeptEntryId, tokensBefore, details?, fromHook?`), `reset` (`reason:
@@ -102,7 +102,7 @@
 //! `Branch`; `model_change` / `thinking_level_change` → `ModelChange` (`Message::model` = the new
 //! model); `branch_summary` / `custom_message` → `Notice`. `session_info` and `label` are session
 //! facts (`Session::title` + `extra["openclaw"]["session_name"]`, `extra["openclaw"]["labels"]`)
-//! and surface only under [`ParseOptions::complete`], as `Notice` turns; `custom`, `leaf`,
+//! and surface only under [`Demand::COMPLETE`], as `Notice` turns; `custom`, `leaf`,
 //! `thinking_level_change`-like bookkeeping and unknown types surface only under `complete`, as
 //! `Carrier` turns. Every carried record is the top-level `_record`; every harness fact is in
 //! `extra["openclaw"]` (`record_type` = the entry type, `message_role` = a custom message role,
@@ -118,7 +118,6 @@ mod record;
 mod registry;
 pub use emit::emit;
 
-#[cfg(feature = "sqlite")]
 use super::store::sqlite::open_ro;
 #[cfg(feature = "sqlite")]
 use super::ts_from_epoch;
@@ -126,7 +125,9 @@ use super::wire::anthropic;
 use super::{parse_ts, ts_from_value, Adapter};
 use crate::ir::*;
 use crate::source::{sqlite_sidecars, Dependencies, Probe};
-use crate::stream::{Flow, MessageSink, ParseOptions};
+#[cfg(feature = "sqlite")]
+use crate::stream::Tier;
+use crate::stream::{Demand, Flow, MessageSink};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -271,7 +272,7 @@ impl Adapter for OpenClaw {
         Some(DEFERRED_WRAPPER)
     }
 
-    fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+    fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| {
             // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
             let mut spawns =
@@ -324,7 +325,7 @@ fn is_leaf_entry(view: crate::json::JsonView<'_>) -> Result<bool> {
 fn stream_jsonl(
     r: &SessionRef,
     facts: &KeyFacts,
-    opts: &ParseOptions,
+    opts: &Demand,
     sink: &mut dyn MessageSink,
     source: &crate::json::JsonSource,
 ) -> Result<Session> {
@@ -354,7 +355,7 @@ fn stream_jsonl(
             }
             Ok(Flow::Continue)
         })?;
-        let navigation = select_navigation(&descriptors, opts.complete);
+        let navigation = select_navigation(&descriptors, opts.tier == Tier::Complete);
         drop(descriptors);
         for row in navigation {
             let (offset, len) = records[row.index];
@@ -387,7 +388,7 @@ struct Fold {
 }
 
 impl Fold {
-    fn new(r: &SessionRef, facts: &KeyFacts, opts: &ParseOptions) -> Self {
+    fn new(r: &SessionRef, facts: &KeyFacts, opts: &Demand) -> Self {
         let mut s = Session {
             cwd: r.cwd.clone(),
             title: r.title.clone(),
@@ -408,7 +409,8 @@ impl Fold {
             prompt_origin: facts.prompt_origin(),
             header_version: None,
             meta_sent: false,
-            owned: (opts.complete && !opts.spans).then(|| crate::lazy::Resolver::new(Some(r.path.clone()))),
+            owned: (opts.tier == Tier::Complete && !opts.spans)
+                .then(|| crate::lazy::Resolver::new(Some(r.path.clone()))),
         }
     }
 
@@ -1260,7 +1262,7 @@ fn discover_sqlite(_db: &Path) -> Result<Vec<SessionRef>> {
 /// JSONL path uses — `event_json` IS the JSONL line. Branch selection reads the navigation fields
 /// of every cell, then decodes only the selected ones.
 #[cfg(feature = "sqlite")]
-fn stream_sqlite(r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+fn stream_sqlite(r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
     super::store::sqlite::read(&r.path, |conn| {
         // Navigation and payload reads must see the same history: a concurrent leaf update cannot
         // change which rows the second pass emits. A deferred read transaction writes no store data.
@@ -1299,7 +1301,7 @@ fn stream_sqlite(r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink
             for cell in &cells {
                 descriptors.push(events.cells.read(*cell, record::navigation)?.unwrap_or(Value::Null));
             }
-            for row in select_navigation(&descriptors, opts.complete) {
+            for row in select_navigation(&descriptors, opts.tier == Tier::Complete) {
                 if emit(row.index, row.active, row.parent)? == Flow::Stop {
                     break;
                 }
@@ -1318,7 +1320,7 @@ fn stream_sqlite(r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink
 }
 
 #[cfg(not(feature = "sqlite"))]
-fn stream_sqlite(r: &SessionRef, _opts: &ParseOptions, _sink: &mut dyn MessageSink) -> Result<Session> {
+fn stream_sqlite(r: &SessionRef, _opts: &Demand, _sink: &mut dyn MessageSink) -> Result<Session> {
     anyhow::bail!(
         "{} is an OpenClaw sqlite store; cv-core was built without the `sqlite` feature",
         r.path.display()
@@ -1742,10 +1744,10 @@ mod tests {
 
     /// `text` read as a transcript file through the adapter, as `r` (full fidelity, collected).
     fn parse_text(text: &str, r: &SessionRef) -> Session {
-        parse_text_with(text, r, &ParseOptions::full())
+        parse_text_with(text, r, &Demand::RICH)
     }
 
-    fn parse_text_with(text: &str, r: &SessionRef, opts: &ParseOptions) -> Session {
+    fn parse_text_with(text: &str, r: &SessionRef, opts: &Demand) -> Session {
         let dir = std::env::temp_dir().join(format!("cv-openclaw-text-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         let mut file_ref = r.clone();
@@ -1905,7 +1907,7 @@ mod tests {
         d
     }
 
-    fn collect(r: &SessionRef, opts: &ParseOptions) -> Result<Session> {
+    fn collect(r: &SessionRef, opts: &Demand) -> Result<Session> {
         let mut sink = crate::stream::CollectSink::default();
         let mut session = OpenClaw { roots: vec![] }.stream(r, opts, &mut sink)?;
         session.messages = sink.messages;
@@ -1924,7 +1926,7 @@ mod tests {
         fs::write(&jsonl, events.join("\n")).unwrap();
         let mut line_ref = r.clone();
         line_ref.path = jsonl;
-        for opts in [ParseOptions::full(), ParseOptions::complete()] {
+        for opts in [Demand::RICH, Demand::COMPLETE] {
             let rows = collect(&r, &opts).unwrap();
             let lines = collect(&line_ref, &opts).unwrap();
             assert_eq!(rows.extra["cv"]["skipped_lines"], 2);
@@ -1941,7 +1943,7 @@ mod tests {
             }
         }
         let mut sink = StopAfterOne(0);
-        let s = stream_sqlite(&r, &ParseOptions::lazy(), &mut sink).unwrap();
+        let s = stream_sqlite(&r, &Demand::LEAN.with_spans(), &mut sink).unwrap();
         assert_eq!(sink.0, 1);
         assert_eq!(s.extra["cv"]["skipped_lines"], 2);
         fs::remove_dir_all(agents.parent().unwrap()).unwrap();
@@ -1989,12 +1991,9 @@ mod tests {
             writer.execute("INSERT INTO transcript_events (session_id,seq,event_json,event_zstd,created_at) VALUES ('checked',999,NULL,?1,1)", [b"invalid compressed frame".as_slice()]).unwrap();
             let r = discover_sqlite(&db).unwrap().remove(0);
             for complete in [false, true] {
-                let options = ParseOptions {
-                    complete,
-                    ..ParseOptions::full()
-                };
+                let options = if complete { Demand::COMPLETE } else { Demand::RICH };
                 let inline = collect(&r, &options).unwrap();
-                let mut spans = collect(&r, &ParseOptions { spans: true, ..options }).unwrap();
+                let mut spans = collect(&r, &Demand { spans: true, ..options }).unwrap();
                 assert_eq!(inline.extra["cv"]["skipped_lines"], 4);
                 assert!(spans.messages.iter().any(|m| m.content.iter().any(|b| matches!(
                     b,
@@ -2011,9 +2010,9 @@ mod tests {
             }
             let mut retained = collect(
                 &r,
-                &ParseOptions {
+                &Demand {
                     spans: true,
-                    ..ParseOptions::complete()
+                    ..Demand::COMPLETE
                 },
             )
             .unwrap();
@@ -2041,7 +2040,7 @@ mod tests {
             "message":{"role":"user","content":"long λ\n".repeat(4096)}})
         .to_string();
         let db = write_store(&agents, "compat", &events);
-        let expected = collect(&discover_sqlite(&db).unwrap().remove(0), &ParseOptions::complete()).unwrap();
+        let expected = collect(&discover_sqlite(&db).unwrap().remove(0), &Demand::COMPLETE).unwrap();
         let writer = rusqlite::Connection::open(&db).unwrap();
         writer.execute_batch("ALTER TABLE transcript_events RENAME TO old_events;
             CREATE TABLE transcript_events (session_id TEXT NOT NULL,seq INTEGER NOT NULL,event_json TEXT,created_at INTEGER NOT NULL,PRIMARY KEY(session_id,seq)) WITHOUT ROWID;
@@ -2051,9 +2050,9 @@ mod tests {
         let r = discover_sqlite(&db).unwrap().remove(0);
         let mut actual = collect(
             &r,
-            &ParseOptions {
+            &Demand {
                 spans: true,
-                ..ParseOptions::complete()
+                ..Demand::COMPLETE
             },
         )
         .unwrap();
@@ -2096,9 +2095,9 @@ mod tests {
                     }
                 }
                 let r = SessionRef::new("identity", Harness::OpenClaw, &path);
-                let options = ParseOptions {
+                let options = Demand {
                     spans,
-                    ..ParseOptions::complete()
+                    ..Demand::COMPLETE
                 };
                 let error = OpenClaw { roots: vec![] }
                     .stream(&r, &options, &mut MutateFallible(&path))
@@ -2136,10 +2135,7 @@ mod tests {
                 .join("\n");
             fs::write(&path, &text)?;
             for spans in [false, true] {
-                let options = ParseOptions {
-                    spans,
-                    ..ParseOptions::full()
-                };
+                let options = Demand { spans, ..Demand::RICH };
                 let s = collect(&r, &options)?;
                 let ids: Vec<&str> = s.messages.iter().filter_map(|m| m.id.as_deref()).collect();
                 assert_eq!(ids, ["u1", "a1", "u2", "c1", "a3"], "{leaf}");
@@ -2164,7 +2160,7 @@ mod tests {
         };
         let r = discover_sqlite(&db).unwrap().remove(0);
         let mut expected = crate::stream::CollectSink::default();
-        stream_sqlite(&r, &ParseOptions::full(), &mut expected).unwrap();
+        stream_sqlite(&r, &Demand::RICH, &mut expected).unwrap();
         assert!(!expected.messages.is_empty());
         assert!(!sidecar("-wal").exists());
         assert!(!sidecar("-shm").exists());
@@ -2172,7 +2168,7 @@ mod tests {
             fs::write(sidecar("-journal"), b"changed during callback").unwrap();
             Flow::Stop
         };
-        let error = stream_sqlite(&r, &ParseOptions::lazy(), &mut mutate).unwrap_err();
+        let error = stream_sqlite(&r, &Demand::LEAN.with_spans(), &mut mutate).unwrap_err();
         assert!(error.to_string().contains("dependencies changed"), "{error:#}");
         fs::remove_dir_all(agents.parent().unwrap()).unwrap();
     }
@@ -2277,7 +2273,7 @@ mod tests {
 
         // Complete parse: everything rides along; off-branch rows are tagged.
         let mut sink = crate::stream::CollectSink::default();
-        adapter.stream(r, &ParseOptions::complete(), &mut sink).unwrap();
+        adapter.stream(r, &Demand::COMPLETE, &mut sink).unwrap();
         let ids: Vec<&str> = sink.messages.iter().filter_map(|m| m.id.as_deref()).collect();
         assert_eq!(ids, ["u1", "a1", "a2", "l1", "u2", "si", "c1", "a3"]);
         let inactive: Vec<&str> = sink
@@ -2461,7 +2457,7 @@ mod tests {
 
         // complete: the abandoned branch, the side-mode note and the leaf controls ride along, tagged
         let mut sink = crate::stream::CollectSink::default();
-        adapter.stream(main, &ParseOptions::complete(), &mut sink).unwrap();
+        adapter.stream(main, &Demand::COMPLETE, &mut sink).unwrap();
         let inactive: Vec<String> = sink
             .messages
             .iter()
@@ -2622,7 +2618,7 @@ mod tests {
         assert_eq!(cm.extra["openclaw"]["display"], true);
         assert_eq!(cm.text().as_deref(), Some("an extension note"));
 
-        let c = parse_text_with(&text, &r, &ParseOptions::complete());
+        let c = parse_text_with(&text, &r, &Demand::COMPLETE);
         let ids: Vec<&str> = c.messages.iter().filter_map(|m| m.id.as_deref()).collect();
         assert_eq!(ids, ["mc", "u1", "r1", "u2", "lb", "cx", "cm"]);
         let cx = c.messages.iter().find(|m| m.id.as_deref() == Some("cx")).unwrap();
@@ -3002,7 +2998,7 @@ mod tests {
         )?;
         let adapter = OpenClaw::with_state_dir(&world.base);
         let reference = SessionRef::new("child", Harness::OpenClaw, &path);
-        let mut child = crate::stream::collect_with(&adapter, &reference, &ParseOptions::lazy())?;
+        let mut child = crate::stream::collect_with(&adapter, &reference, &Demand::LEAN.with_spans())?;
         assert_eq!(child.lineage.parent.as_deref(), Some("parent"));
         fs::write(&parent, "changed parent")?;
         assert!(child.materialize().is_err());
@@ -3015,7 +3011,7 @@ mod tests {
             }
         }
         assert!(adapter
-            .stream(&reference, &ParseOptions::full(), &mut ChangeParent(parent))
+            .stream(&reference, &Demand::RICH, &mut ChangeParent(parent))
             .is_err());
         Ok(())
     }
@@ -3077,7 +3073,7 @@ mod tests {
                 serde_json::json!({"sessionId":format!("child-{i}")}),
             );
         }
-        let read = |i, opts: &ParseOptions| {
+        let read = |i, opts: &Demand| {
             crate::stream::collect_with(
                 &adapter,
                 &SessionRef::new(
@@ -3091,13 +3087,13 @@ mod tests {
         JSON_KEY_READS.with(|count| count.set(0));
         {
             let _scope = crate::source::read_scope();
-            let mut absent = read(0, &ParseOptions::lazy())?;
+            let mut absent = read(0, &Demand::LEAN.with_spans())?;
             for i in 1..40 {
-                assert_eq!(read(i, &ParseOptions::full())?.messages[0].origin, Origin::Human);
+                assert_eq!(read(i, &Demand::RICH)?.messages[0].origin, Origin::Human);
             }
             assert_eq!(JSON_KEY_READS.with(|count| count.get()), 1);
             fs::write(dir.join("sessions.json"), Value::Object(index).to_string())?;
-            assert_eq!(read(1, &ParseOptions::full())?.messages[0].origin, Origin::Scheduler);
+            assert_eq!(read(1, &Demand::RICH)?.messages[0].origin, Origin::Scheduler);
             assert_eq!(JSON_KEY_READS.with(|count| count.get()), 2);
             assert!(
                 absent.materialize().is_err(),
@@ -3106,7 +3102,7 @@ mod tests {
         }
         JSON_KEY_READS.with(|count| count.set(0));
         for i in 0..3 {
-            assert_eq!(read(i, &ParseOptions::full())?.messages[0].origin, Origin::Scheduler);
+            assert_eq!(read(i, &Demand::RICH)?.messages[0].origin, Origin::Scheduler);
         }
         assert_eq!(
             JSON_KEY_READS.with(|count| count.get()),
@@ -3356,11 +3352,7 @@ mod tests {
         drop(conn);
         let adapter = OpenClaw::with_state_dir(&world.base);
         let read = |id: &str| {
-            crate::stream::collect_with(
-                &adapter,
-                &SessionRef::new(id, Harness::OpenClaw, &path),
-                &ParseOptions::full(),
-            )
+            crate::stream::collect_with(&adapter, &SessionRef::new(id, Harness::OpenClaw, &path), &Demand::RICH)
         };
         SQL_PARENT_ROWS.with(|count| count.set(0));
         SQL_PARENT_FULLSCANS.with(|count| count.set(0));

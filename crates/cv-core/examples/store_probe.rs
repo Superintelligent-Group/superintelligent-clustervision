@@ -1,7 +1,7 @@
 //! One explicitly rooted, read-only operation per process. See examples/store_probe.md.
 
 use anyhow::{bail, Context, Result};
-use cv_core::{Adapter, Block, Flow, Harness, Message, ParseOptions, Session, SessionRef};
+use cv_core::{Adapter, Block, Demand, Flow, Harness, Message, Session, SessionRef};
 use serde_json::{json, Map, Value};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -133,14 +133,14 @@ fn args() -> Result<Args> {
     })
 }
 
-fn options(mode: &str) -> ParseOptions {
+fn options(mode: &str) -> Demand {
     match mode {
-        "bulk" => ParseOptions::bulk(),
-        "full" => ParseOptions::full(),
-        "complete" => ParseOptions::complete(),
-        "lazy-extra" => ParseOptions::lazy_extra(),
-        "facts" => ParseOptions::facts(),
-        _ => ParseOptions::lazy(),
+        "bulk" => Demand::LEAN,
+        "full" => Demand::RICH,
+        "complete" => Demand::COMPLETE,
+        "lazy-extra" => Demand::RICH.with_spans(),
+        "facts" => Demand::FACTS.with_spans(),
+        _ => Demand::LEAN.with_spans(),
     }
 }
 
@@ -379,7 +379,7 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
                 // The production path before histogram reduction: includes EventSink's unused
                 // per-record checkpoints, because the forest reader requested them too.
                 let mut sink = cv_core::events::EventSink::new(r.cwd.clone());
-                adapter.try_stream(r, &ParseOptions::lazy(), &mut sink)?;
+                adapter.try_stream(r, &Demand::LEAN.with_spans(), &mut sink)?;
                 cv_core::tools::ToolHistogram::from_events(&sink.into_events()?)
             };
             out.detail = serde_json::to_value(histogram)?;
@@ -464,7 +464,7 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
             let matched = if a.operation == "query" {
                 cv_core::query::matches_streamed(&query, adapter, r, &texts)?
             } else {
-                let session = cv_core::stream::collect_with(adapter, r, &ParseOptions::lazy())?;
+                let session = cv_core::stream::collect_with(adapter, r, &Demand::LEAN.with_spans())?;
                 let matched = cv_core::query::matches_full(&query, r, &session, &texts)?;
                 out.session = Some(session);
                 matched
@@ -473,7 +473,7 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
         }
         "collect" | "affordances" => {
             let opts = if a.operation == "affordances" {
-                ParseOptions::full()
+                Demand::RICH
             } else {
                 opts
             };

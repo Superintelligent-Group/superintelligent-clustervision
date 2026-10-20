@@ -11,7 +11,7 @@
 //! abstractive digest; without it, `cv pack` does zero network and loads zero models.
 //!
 //! Streaming discipline: recall works off the index (or a head-capped live scan), excerpts are
-//! pulled with a windowed streaming sink under [`ParseOptions::lazy`], and events come from
+//! pulled with a windowed streaming sink under [`Demand::with_spans`], and events come from
 //! catalog queries — whole sessions are never materialized.
 
 use crate::util::{home_rel, short_id};
@@ -20,7 +20,7 @@ use chrono::Utc;
 use cv_core::ir::{Block, Harness, Message, Role, Session};
 use cv_core::lazy::Resolver;
 use cv_core::scan::{ceil_char, floor_char, CapSink};
-use cv_core::stream::{Flow, MessageSink, ParseOptions};
+use cv_core::stream::{Demand, Flow, MessageSink};
 use cv_core::EmitOptions;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
@@ -285,7 +285,7 @@ fn live_scan_adapters<'a>(
         for r in adapter.discover()? {
             let mut sink = CapSink::new(&r.path);
             let meta = adapter
-                .try_stream(&r, &ParseOptions::lazy(), &mut sink)
+                .try_stream(&r, &Demand::LEAN.with_spans(), &mut sink)
                 .with_context(|| format!("scanning {}:{} for pack", r.harness, r.id))?;
             let low = sink.hay.as_str().to_lowercase();
             let mut score = words.iter().filter(|w| low.contains(**w)).count() as i64;
@@ -589,7 +589,7 @@ fn best_window_observing(
         pending: 0,
         error: None,
     };
-    adapter.try_stream(r, &ParseOptions::lazy(), &mut sink)?;
+    adapter.try_stream(r, &Demand::LEAN.with_spans(), &mut sink)?;
     Ok((sink.window, sink.range))
 }
 
@@ -931,12 +931,7 @@ mod tests {
         fn discover(&self) -> Result<Vec<cv_core::SessionRef>> {
             Ok(Vec::new())
         }
-        fn stream(
-            &self,
-            r: &cv_core::SessionRef,
-            options: &ParseOptions,
-            sink: &mut dyn MessageSink,
-        ) -> Result<Session> {
+        fn stream(&self, r: &cv_core::SessionRef, options: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
             struct Counter<'a> {
                 sink: &'a mut dyn MessageSink,
                 calls: &'a AtomicUsize,
@@ -1033,7 +1028,7 @@ mod tests {
         // The old independent ingestion traversal, through the same real adapter.
         let source = cv_core::source::Probe::default().snapshot(&r);
         let mut events = cv_core::events::SpoolingSink::new(r.cwd.clone());
-        adapter.try_stream(&r, &ParseOptions::lazy(), &mut events)?;
+        adapter.try_stream(&r, &Demand::LEAN.with_spans(), &mut events)?;
         let source = source.with_reads(events.inner().dependencies());
         cv_core::events::record_spooled_with_source(&r, 0, events.into_spool()?, &source, &Default::default())?;
         assert_eq!(adapter.calls.load(Ordering::Relaxed), 2 * session.messages.len());
@@ -1150,7 +1145,7 @@ mod tests {
         fn discover(&self) -> Result<Vec<cv_core::SessionRef>> {
             Ok(Vec::new())
         }
-        fn stream(&self, r: &cv_core::SessionRef, _: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+        fn stream(&self, r: &cv_core::SessionRef, _: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
             for message in &self.0 {
                 if sink.message(message.clone()) == Flow::Stop {
                     break;
@@ -1228,7 +1223,7 @@ mod tests {
                 })
                 .collect())
         }
-        fn stream(&self, r: &cv_core::SessionRef, _: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+        fn stream(&self, r: &cv_core::SessionRef, _: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
             let (_, text) = self.0.iter().find(|(id, _)| id == &r.id).unwrap();
             let mut message = Message::new(Role::User);
             message.content.push(Block::Text {

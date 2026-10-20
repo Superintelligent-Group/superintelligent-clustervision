@@ -13,7 +13,7 @@
 
 use crate::events::{self, Event};
 use crate::ir::{Block, Message, SessionRef};
-use crate::stream::{Flow, MessageSink, ParseOptions};
+use crate::stream::{Demand, Flow, MessageSink};
 use std::collections::BTreeMap;
 
 /// A per-tool tally with the kind breakdown the event classifier assigns.
@@ -129,7 +129,7 @@ impl ToolHistogram {
             scratch: Vec::new(),
             fail: None,
         };
-        adapter.try_stream(r, &ParseOptions::lazy(), &mut sink)?;
+        adapter.try_stream(r, &Demand::LEAN.with_spans(), &mut sink)?;
         Ok(sink.histogram)
     }
 
@@ -438,14 +438,14 @@ pub fn forest_timeline_selected(
     if workflow.is_none() && matches_agent(agent, ORCHESTRATOR) {
         let mut sink = CallSink::new(r.cwd.clone());
         sink.tool = tool.map(str::to_owned);
-        adapter.try_stream(r, &ParseOptions::lazy(), &mut sink)?;
+        adapter.try_stream(r, &Demand::LEAN.with_spans(), &mut sink)?;
         timeline_calls(ORCHESTRATOR, sink.rows, &mut out);
     }
 
     for s in selected_tool_agents(r, agent, workflow, crate::SubagentDemand::Sessions)? {
         let mut sink = CallSink::new(s.session.cwd.clone());
         sink.tool = tool.map(str::to_owned);
-        adapter.try_stream(&s.session, &ParseOptions::lazy(), &mut sink)?;
+        adapter.try_stream(&s.session, &Demand::LEAN.with_spans(), &mut sink)?;
         timeline_calls(s.agent_id(), sink.rows, &mut out);
     }
 
@@ -646,7 +646,7 @@ mod tests {
             fn stream(
                 &self,
                 _r: &SessionRef,
-                _opts: &ParseOptions,
+                _opts: &Demand,
                 sink: &mut dyn MessageSink,
             ) -> anyhow::Result<crate::Session> {
                 sink.message(asst(vec![tool_use("Read", json!({"file_path":"a.rs"}))]));

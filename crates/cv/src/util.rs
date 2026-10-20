@@ -3,7 +3,7 @@
 
 use anyhow::{bail, Context, Result};
 use cv_core::ir::{Harness, Message, SessionRef};
-use cv_core::{Adapter, Flow, MessageSink, ParseOptions};
+use cv_core::{Adapter, Demand, Flow, MessageSink};
 use std::path::Path;
 
 // ---------- exit codes ----------
@@ -334,7 +334,7 @@ pub(crate) fn count_messages(adapter: &dyn Adapter, r: &SessionRef) -> Result<us
         }
     }
     let mut c = Count(0);
-    adapter.try_stream(r, &ParseOptions::lazy(), &mut c)?;
+    adapter.try_stream(r, &Demand::LEAN.with_spans(), &mut c)?;
     Ok(c.0)
 }
 

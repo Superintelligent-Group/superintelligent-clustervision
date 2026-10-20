@@ -7,6 +7,7 @@ use super::*;
 use crate::harness::store::{document::Fields, text};
 use crate::json::JsonView;
 use crate::lazy::Text;
+use crate::stream::Tier;
 
 /// Array text joined from several strings stays in the source above this many bytes when spans
 /// are demanded, as Claude's tool-result arrays do.
@@ -273,10 +274,10 @@ impl Common {
 }
 
 /// One entry → its session facts and messages.
-pub(super) fn record(view: JsonView<'_>, opts: &ParseOptions) -> Result<Record> {
+pub(super) fn record(view: JsonView<'_>, opts: &Demand) -> Result<Record> {
     // A complete read keeps text in the source too: its reader materializes each turn whole,
     // together with the record it carries, never a second inline copy beside it.
-    let spans = opts.spans || opts.complete;
+    let spans = opts.spans || opts.tier == Tier::Complete;
     let top = Fields::parse(view, TOP)?;
     let ty = top
         .as_ref()
@@ -296,8 +297,7 @@ pub(super) fn record(view: JsonView<'_>, opts: &ParseOptions) -> Result<Record> 
             cwd: top.string("cwd")?,
             created_at: top.string("timestamp")?.as_deref().and_then(parse_ts),
             forked_from: top.string("parentSession")?,
-            record: opts
-                .complete
+            record: (opts.tier == Tier::Complete)
                 .then(|| view.resolve())
                 .transpose()?
                 .map(|v| v.into_owned()),
@@ -334,20 +334,20 @@ pub(super) fn record(view: JsonView<'_>, opts: &ParseOptions) -> Result<Record> 
         // newer: bookkeeping, carried only under `complete`.
         _ => carrier(view, &ty, &common, opts)?,
     };
-    if opts.complete && out.messages.is_empty() {
+    if opts.tier == Tier::Complete && out.messages.is_empty() {
         out.messages = carrier(view, &ty, &common, opts)?;
     }
-    if opts.complete && view.is_object()? {
+    if opts.tier == Tier::Complete && view.is_object()? {
         out.native = Some(view.to_json()?);
     }
     Ok(out)
 }
 
-/// Under [`ParseOptions::complete`], a bookkeeping entry (`custom`, `leaf`, …) rides along verbatim
+/// Under [`Demand::COMPLETE`], a bookkeeping entry (`custom`, `leaf`, …) rides along verbatim
 /// as a `Carrier` turn: the raw record at the top-level `_record`, its type in
 /// `extra["openclaw"]["record_type"]`. The lean passes drop it.
-fn carrier(view: JsonView<'_>, ty: &str, common: &Common, opts: &ParseOptions) -> Result<Vec<Message>> {
-    if !opts.complete {
+fn carrier(view: JsonView<'_>, ty: &str, common: &Common, opts: &Demand) -> Result<Vec<Message>> {
+    if opts.tier != Tier::Complete {
         return Ok(Vec::new());
     }
     let mut m = common.message(Role::System, MessageKind::Carrier, Origin::Harness);
@@ -358,10 +358,10 @@ fn carrier(view: JsonView<'_>, ty: &str, common: &Common, opts: &ParseOptions) -
     Ok(vec![m])
 }
 
-/// Under [`ParseOptions::complete`], a session-fact entry the user saw as a notice (`session_info`,
+/// Under [`Demand::COMPLETE`], a session-fact entry the user saw as a notice (`session_info`,
 /// `label`) rides along as a `Notice` turn with `text`, the raw record at `_record` and its type in
 /// the bag. Lean passes keep only the fact's first-class home.
-fn notice(view: JsonView<'_>, ty: &str, common: &Common, opts: &ParseOptions, text: String) -> Result<Vec<Message>> {
+fn notice(view: JsonView<'_>, ty: &str, common: &Common, opts: &Demand, text: String) -> Result<Vec<Message>> {
     let mut out = carrier(view, ty, common, opts)?;
     if let Some(m) = out.first_mut() {
         m.kind = MessageKind::Notice;

@@ -86,7 +86,7 @@ fn text_mut(block: &mut crate::Block) -> Option<&mut crate::Text> {
 pub(super) fn parse(
     adapter: &dyn crate::harness::Adapter,
     reference: &SessionRef,
-    options: &ParseOptions,
+    options: &Demand,
 ) -> Result<Session> {
     Ok(selected(adapter, reference, options, 0, None)?.0)
 }
@@ -94,7 +94,7 @@ pub(super) fn parse(
 pub(super) fn selected(
     adapter: &dyn crate::harness::Adapter,
     reference: &SessionRef,
-    options: &ParseOptions,
+    options: &Demand,
     start: usize,
     end: Option<usize>,
 ) -> Result<(Session, usize)> {
@@ -237,19 +237,16 @@ mod tests {
         fs::write(&path, &wire)?;
         let reference = SessionRef::new("session", Harness::Claude, &path);
         let adapter = crate::harness::claude::Claude::detect();
-        for (extra, usage_identity) in [(true, false), (false, false), (false, true)] {
-            let owned_options = ParseOptions {
-                extra,
-                usage_identity,
-                ..ParseOptions::complete()
-            };
+        {
+            let extra = "complete";
+            let owned_options = Demand::COMPLETE;
             let expected = crate::stream::collect_with(&adapter, &reference, &owned_options)?;
             assert!(expected
                 .messages
                 .iter()
                 .flat_map(|m| &m.content)
                 .all(|block| text(block).is_none_or(|t| t.inline_str().is_some())));
-            let checked_options = ParseOptions {
+            let checked_options = Demand {
                 spans: true,
                 ..owned_options
             };
@@ -342,7 +339,7 @@ mod tests {
         fs::write(&path, &wire)?;
         let reference = SessionRef::new("session", Harness::Codex, &path);
         let adapter = crate::harness::codex::Codex::detect();
-        let expected = crate::stream::collect_with(&adapter, &reference, &ParseOptions::complete())?;
+        let expected = crate::stream::collect_with(&adapter, &reference, &Demand::COMPLETE)?;
         let actual = super::super::parse_for_emit(&adapter, &reference, Harness::Codex)?;
         assert!(actual
             .messages
@@ -412,7 +409,7 @@ mod tests {
             };
             fs::write(&path, &wire)?;
             let reference = SessionRef::new("source", Harness::Gemini, &path);
-            let expected = crate::stream::collect_with(&adapter, &reference, &ParseOptions::complete())?;
+            let expected = crate::stream::collect_with(&adapter, &reference, &Demand::COMPLETE)?;
             assert!(expected
                 .messages
                 .iter()
@@ -427,17 +424,9 @@ mod tests {
             let mut materialized = actual.clone();
             materialized.materialize()?;
             assert_serialized_equal(&materialized, &expected)?;
-            for extra in [false, true] {
-                let options = ParseOptions {
-                    spans: true,
-                    extra,
-                    usage_identity: !extra,
-                    ..ParseOptions::complete()
-                };
-                let mut custom = crate::stream::collect_with(&adapter, &reference, &options)?;
-                custom.materialize()?;
-                assert_serialized_equal(&custom, &expected)?;
-            }
+            let mut custom = crate::stream::collect_with(&adapter, &reference, &Demand::COMPLETE.with_spans())?;
+            custom.materialize()?;
+            assert_serialized_equal(&custom, &expected)?;
             let options = EmitOptions {
                 new_id: Some("00000000-0000-0000-0000-000000000001".into()),
                 ..Default::default()
@@ -515,7 +504,7 @@ mod tests {
         fs::write(&path, bytes)?;
         let reference = SessionRef::new("session", Harness::Claude, &path);
         let adapter = crate::harness::claude::Claude::detect();
-        let mut old = crate::stream::collect_with(&adapter, &reference, &ParseOptions::full())?;
+        let mut old = crate::stream::collect_with(&adapter, &reference, &Demand::RICH)?;
         old.materialize()?;
         for (start, end) in [(5, Some(6)), (0, Some(0)), (8, Some(2)), (30, None), (11, None)] {
             let (mut selected, total) = super::super::prepare_selected(&adapter, &reference, start, end)?;
@@ -580,7 +569,7 @@ mod tests {
         fn discover(&self) -> Result<Vec<SessionRef>> {
             Ok(Vec::new())
         }
-        fn stream(&self, reference: &SessionRef, _: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+        fn stream(&self, reference: &SessionRef, _: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
             let mut session = Session::new(&reference.id, Harness::Claude);
             session.source_path = Some(reference.path.clone());
             sink.meta(&session);
@@ -662,7 +651,7 @@ mod tests {
         )?;
         let reference = SessionRef::new("wrapped-codex", Harness::OpenSession, &path);
         let adapter = crate::harness::opensession::OpenSession;
-        let mut legacy = crate::stream::collect_with(&adapter, &reference, &ParseOptions::full())?;
+        let mut legacy = crate::stream::collect_with(&adapter, &reference, &Demand::RICH)?;
         legacy.materialize()?;
         let (selected, total) = super::super::prepare_selected(&adapter, &reference, 1, Some(2))?;
         assert_eq!(selected.harness, Harness::Codex);
@@ -695,7 +684,7 @@ mod tests {
         fs::write(&path, bytes)?;
         let reference = SessionRef::new("rich", Harness::Claude, &path);
         let adapter = crate::harness::claude::Claude::detect();
-        let mut old = crate::stream::collect_with(&adapter, &reference, &ParseOptions::full())?;
+        let mut old = crate::stream::collect_with(&adapter, &reference, &Demand::RICH)?;
         old.materialize()?;
         let mut builder = crate::splice::Composition::default();
         for (start, end) in [(1, Some(3)), (2, Some(3))] {

@@ -20,7 +20,7 @@
 //! | `compaction` | `CompactionBoundary`/Harness, then (status `completed`) a `CompactionSummary` with `summary` |
 //! | `model-switched` | `ModelChange`/Harness, `Message::model` = the new model |
 //! | `agent-switched`, `location-switched` | `Notice`/Harness |
-//! | `idle` | a turn-end marker: a `Carrier` under `ParseOptions::complete`, otherwise skipped |
+//! | `idle` | a turn-end marker: a `Carrier` under `Demand::COMPLETE`, otherwise skipped |
 //!
 //! Anything else is kept verbatim as a `Carrier` under `complete`, and is counted in
 //! `extra["opencode"]["unknown_message_types"]` on the session otherwise — never silently dropped.
@@ -29,7 +29,8 @@ use super::record::{find_signature, get, nonempty, owned, push_extra_array, stri
 use crate::ir::*;
 use crate::json::JsonView;
 use crate::lazy::Text;
-use crate::stream::ParseOptions;
+use crate::stream::Demand;
+use crate::stream::Tier;
 use anyhow::Result;
 use serde_json::{json, Map, Value};
 
@@ -80,7 +81,7 @@ pub(super) fn build(
     id: &str,
     ty: &str,
     data: JsonView<'_>,
-    opts: &ParseOptions,
+    opts: &Demand,
     ctx: Ctx<'_>,
 ) -> Result<Option<Vec<Message>>> {
     let ts = owned(get(data.get("time")?, "created")?)?
@@ -257,12 +258,12 @@ pub(super) fn build(
             out.push(m);
         }
         "idle" => {
-            if opts.complete {
+            if opts.tier == Tier::Complete {
                 out.push(carrier(id, ty, data, ts)?);
             }
         }
         _ => {
-            if !opts.complete {
+            if opts.tier != Tier::Complete {
                 return Ok(None);
             }
             out.push(carrier(id, ty, data, ts)?);
@@ -573,11 +574,11 @@ fn finish(m: &mut Message, bag: Map<String, Value>) {
 mod tests {
     use super::*;
 
-    fn build(id: &str, ty: &str, data: &Value, opts: &ParseOptions) -> Option<Vec<Message>> {
+    fn build(id: &str, ty: &str, data: &Value, opts: &Demand) -> Option<Vec<Message>> {
         super::build(id, ty, JsonView::owned(data), opts, Ctx::Owned).unwrap()
     }
     fn one(ty: &str, data: &str) -> Vec<Message> {
-        build("msg_1", ty, &serde_json::from_str(data).unwrap(), &ParseOptions::full()).unwrap()
+        build("msg_1", ty, &serde_json::from_str(data).unwrap(), &Demand::RICH).unwrap()
     }
 
     #[test]
@@ -674,11 +675,11 @@ mod tests {
     #[test]
     fn idle_and_unknown_types_are_carried_only_when_complete() {
         let d = serde_json::json!({"time": {"created": 1}, "outcome": "succeeded"});
-        assert!(build("i", "idle", &d, &ParseOptions::full()).unwrap().is_empty());
-        let c = build("i", "idle", &d, &ParseOptions::complete()).unwrap();
+        assert!(build("i", "idle", &d, &Demand::RICH).unwrap().is_empty());
+        let c = build("i", "idle", &d, &Demand::COMPLETE).unwrap();
         assert_eq!(c[0].kind, MessageKind::Carrier);
-        assert!(build("x", "from-the-future", &d, &ParseOptions::full()).is_none());
-        let c = build("x", "from-the-future", &d, &ParseOptions::complete()).unwrap();
+        assert!(build("x", "from-the-future", &d, &Demand::RICH).is_none());
+        let c = build("x", "from-the-future", &d, &Demand::COMPLETE).unwrap();
         assert_eq!(c[0].kind, MessageKind::Carrier);
         assert_eq!(c[0].extra[crate::harness::claude::CARRIER_KEY]["outcome"], "succeeded");
     }

@@ -1,12 +1,13 @@
 //! The Claude record codec: one validated record view and the reader's demand in, session facts
 //! and at most one IR message out. Every byte source feeds this one function: mapped lines,
 //! positioned records and parsed strings differ only in the [`JsonView`] they hand it. A demand
-//! (`ParseOptions` plus the sink's projection) chooses which fields are resolved, never which code
+//! (`crate::stream::Demand` plus the sink's projection) chooses which fields are resolved, never which code
 //! runs; a field nobody asked for is skipped by the view, not decoded and dropped.
 
 use super::*;
 use crate::harness::store::document::Fields;
 use crate::json::JsonView;
+use crate::stream::Tier;
 
 /// Every top-level key any record kind reads. One selection pass per record; a field is
 /// resolved only by the branch that needs it.
@@ -479,7 +480,7 @@ pub(super) fn ingest(
     session: &mut Session,
     view: JsonView<'_>,
     at: Option<u64>,
-    opts: &ParseOptions,
+    opts: &crate::stream::Demand,
     sink: &mut dyn MessageSink,
     sourced: &mut bool,
 ) -> Result<Flow> {
@@ -684,7 +685,7 @@ struct Record<'a, 'o> {
     view: JsonView<'a>,
     top: Fields<'a>,
     at: Option<u64>,
-    opts: &'o ParseOptions,
+    opts: &'o crate::stream::Demand,
 }
 
 impl<'a> Record<'a, '_> {
@@ -709,14 +710,14 @@ impl<'a> Record<'a, '_> {
     /// Carry the record verbatim under `complete`, skip it otherwise — the shared tail of every
     /// non-conversational record arm.
     fn carry_or_skip(&self, sink: &mut dyn MessageSink) -> Result<Flow> {
-        Ok(if self.opts.complete {
+        Ok(if self.opts.tier == Tier::Complete {
             sink.message(self.carrier()?)
         } else {
             Flow::Continue
         })
     }
 
-    /// A non-conversational meta record carried verbatim under [`ParseOptions::complete`] so a
+    /// A non-conversational meta record carried verbatim under [`crate::stream::Demand::COMPLETE`] so a
     /// `parse → emit` round-trip reproduces it. Modeled as an empty-content `System` message —
     /// render/dataset/count all skip empty turns — with the full original record stashed under
     /// `extra["_record"]` for the emitter to replay byte-for-byte.
@@ -771,7 +772,7 @@ impl<'a> Record<'a, '_> {
             .map(|v| v.resolve().map(|v| v.as_str().unwrap_or_default().to_owned()))
             .transpose()?
             .unwrap_or_else(|| "attachment".into());
-        let mut m = if self.opts.complete {
+        let mut m = if self.opts.tier == Tier::Complete {
             self.carrier()?
         } else {
             Message::new(Role::System)
@@ -787,7 +788,7 @@ impl<'a> Record<'a, '_> {
         m.timestamp = self.timestamp()?;
         m.content = blocks;
         let mut rich = Vec::new();
-        if self.opts.wants_full_extra() {
+        if self.opts.tier >= Tier::Rich {
             rich.push(("attachment", attachment.resolve()?.into_owned()));
             for key in ["renderedInHumanTurn", "agentId"] {
                 if let Some(val) = self.value(key)? {
@@ -814,7 +815,7 @@ impl<'a> Record<'a, '_> {
         // (slash-command distillation, the synthesized `[conversation compacted]` marker, the ⛓
         // hook one-liner), which is lossy; carrying the raw record (system bodies are small
         // notices) is the only way `parse → emit` reproduces it.
-        if self.opts.complete {
+        if self.opts.tier == Tier::Complete {
             return Ok(Some(self.carrier()?));
         }
         let subtype = self.top.string("subtype")?.unwrap_or_default();
@@ -910,7 +911,7 @@ impl<'a> Record<'a, '_> {
             _ => (MessageKind::Notice, Origin::Harness),
         };
         let mut bag = Map::new();
-        if self.opts.facts_only() {
+        if self.opts.tier == Tier::Facts {
             // Reducers read only the compaction facts: trigger and the two counters.
             if let Some(meta) = self
                 .top
@@ -930,7 +931,7 @@ impl<'a> Record<'a, '_> {
                 }
                 bag.insert("compactMetadata".into(), Value::Object(fields));
             }
-        } else if self.opts.extra {
+        } else if self.opts.tier >= Tier::Facts {
             if !subtype.is_empty() {
                 bag.insert("subtype".into(), Value::String(subtype.to_string()));
             }
@@ -966,9 +967,9 @@ impl<'a> Record<'a, '_> {
         };
         let opts = self.opts;
         // The sink may ask for reducer facts instead of rich extras for this message.
-        let facts = opts.facts_only()
-            || (!opts.complete
-                && opts.wants_full_extra()
+        let facts = opts.tier == Tier::Facts
+            || (opts.tier != Tier::Complete
+                && opts.tier >= Tier::Rich
                 && sink.extra_projection() == crate::stream::ExtraProjection::Facts);
         let body = Fields::parse(
             msg,
@@ -1037,7 +1038,7 @@ impl<'a> Record<'a, '_> {
             if let Some(restorable) = sidecar.map(|v| v.get("restorable")).transpose()?.flatten() {
                 attach_tool_use_result(&mut blocks, serde_json::json!({"restorable": restorable.resolve()?}));
             }
-        } else if opts.wants_full_extra() && blocks.iter().any(|b| matches!(b, Block::ToolResult { .. })) {
+        } else if opts.tier >= Tier::Rich && blocks.iter().any(|b| matches!(b, Block::ToolResult { .. })) {
             if let Some(sidecar) = sidecar.filter(|v| !v.is_null().unwrap_or(false)) {
                 attach_tool_use_result(&mut blocks, sidecar.resolve()?.into_owned());
             }
@@ -1082,12 +1083,16 @@ impl<'a> Record<'a, '_> {
                 && (head_text.starts_with("<command-name>") || head_text.starts_with("<local-command-stdout>")),
             user,
         };
-        let (role, kind, origin) = classify_conversation(role, class, opts.complete);
-        let model = if synthetic && !opts.complete { None } else { model };
+        let (role, kind, origin) = classify_conversation(role, class, opts.tier == Tier::Complete);
+        let model = if synthetic && opts.tier != Tier::Complete {
+            None
+        } else {
+            model
+        };
 
         // Everything Claude-specific lands in `extra["claude"]`; the top level stays clean.
         let mut bag = Map::new();
-        if synthetic && !opts.complete && !facts {
+        if synthetic && opts.tier != Tier::Complete && !facts {
             for key in [
                 "isApiErrorMessage",
                 "error",
@@ -1105,11 +1110,11 @@ impl<'a> Record<'a, '_> {
         if let Some(id) = self.top.string("sourceToolUseID")? {
             bag.insert("sourceToolUseID".into(), Value::String(id));
         }
-        if facts || (!opts.extra && opts.usage_identity) {
+        if facts || opts.tier == Tier::Usage {
             if let Some(id) = body_string("id")? {
                 bag.insert(format!("{MESSAGE_EXTRA_PREFIX}id"), Value::String(id));
             }
-        } else if opts.extra {
+        } else if opts.tier >= Tier::Facts {
             for &key in CLAUDE_EXTRA_TOP {
                 if let Some(value) = self.value(key)?.filter(|v| keep_extra_top(key, v)) {
                     bag.insert(key.to_owned(), value);
@@ -1131,7 +1136,7 @@ impl<'a> Record<'a, '_> {
         // first-classed ones) so `parse → emit` reproduces the record with no dropped keys. The
         // already-captured fields are re-confirmed, not duplicated. This is also the only producer
         // of the bag's verbatim `toolUseResult`, the complete-mode replay fallback.
-        if opts.complete {
+        if opts.tier == Tier::Complete {
             self.view.for_each_entry(|key, value| {
                 if !CLAUDE_FIRSTCLASS_TOP.contains(&key) && !bag.contains_key(key) {
                     bag.insert(key.to_owned(), value.resolve()?.into_owned());

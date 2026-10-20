@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use cv_core::html::{self, ShareMeta};
 use cv_core::ir::{human_bytes, label_from, Harness, Message, Session};
 use cv_core::redact::{redact_message, redact_text, RedactOptions, RedactStats};
-use cv_core::{Flow, MessageSink, ParseOptions};
+use cv_core::{Demand, Flow, MessageSink};
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -83,7 +83,7 @@ fn share_session(
         guard: true,
         ..cv_core::stream::Pass::RECORD
     };
-    let guard = cv_core::stream::stream_counted(adapter, r, &ParseOptions::bulk(), &mut sink, pass)?
+    let guard = cv_core::stream::stream_counted(adapter, r, &Demand::LEAN, &mut sink, pass)?
         .guard
         .expect("guarded pass");
     sink.finish(env!("CARGO_PKG_VERSION"));
@@ -290,7 +290,7 @@ mod tests {
             fn discover(&self) -> Result<Vec<cv_core::SessionRef>> {
                 Ok(Vec::new())
             }
-            fn stream(&self, r: &cv_core::SessionRef, _: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+            fn stream(&self, r: &cv_core::SessionRef, _: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
                 let mut message = Message::new(Role::User);
                 message.content.push(Block::Text {
                     text: "partial output".into(),

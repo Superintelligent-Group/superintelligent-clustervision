@@ -67,7 +67,7 @@ use crate::ir::{Block, Harness, Message, MessageKind, SessionRef};
 use crate::lazy::Resolver;
 use crate::offsets::OFFSET_KEY;
 use crate::prune::new_uuid;
-use crate::stream::{Flow, MessageSink, ParseOptions};
+use crate::stream::{Demand, Flow, MessageSink};
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -329,7 +329,7 @@ pub fn commit_evidence(r: &SessionRef, shas: &[String]) -> Result<Vec<CommitEvid
     }
     let adapter = crate::harness::for_harness(r.harness).with_context(|| format!("no adapter for {}", r.harness))?;
     let mut sink = CommitEvidenceSink::new(want, Some(r.path.clone()));
-    adapter.try_stream(r, &ParseOptions::lazy(), &mut sink)?;
+    adapter.try_stream(r, &Demand::LEAN.with_spans(), &mut sink)?;
     Ok(sink.found)
 }
 
@@ -615,7 +615,7 @@ fn rewind_session_after_scan(
         }),
         foreign: Vec::new(),
     };
-    crate::harness::claude::stream_prefix(r, size, &ParseOptions::lazy_offsets(), &mut scan)?;
+    crate::harness::claude::stream_prefix(r, size, &Demand::LEAN.with_spans().with_offsets(), &mut scan)?;
     if let Some(error) = scan.take_error() {
         return Err(error);
     }

@@ -47,7 +47,7 @@ use super::{parse_ts, Adapter};
 use crate::ir::*;
 use crate::json::JsonSource;
 use crate::source::{Dependencies, Probe};
-use crate::stream::{CollectSink, Flow, MessageSink, ParseOptions};
+use crate::stream::{self, CollectSink, Flow, MessageSink};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -132,7 +132,7 @@ impl Adapter for Gemini {
         Ok(dedupe_by_id(refs))
     }
 
-    fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+    fn stream(&self, r: &SessionRef, opts: &stream::Demand, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| stream_for(Harness::Gemini, r, opts, sink))
     }
 
@@ -315,7 +315,7 @@ pub(crate) fn scan_session_file(path: &Path, harness: Harness) -> Vec<SessionRef
             Flow::Continue
         };
         let r = SessionRef::new("", harness, path.to_path_buf());
-        if let Ok(s) = stream_for(harness, &r, &ParseOptions::lazy(), &mut sink) {
+        if let Ok(s) = stream_for(harness, &r, &stream::Demand::LEAN.with_spans(), &mut sink) {
             let mut r = session_ref(&s, path, harness);
             r.message_count = Some(turns);
             return vec![r];
@@ -336,7 +336,7 @@ pub(crate) fn scan_session_file(path: &Path, harness: Harness) -> Vec<SessionRef
 pub(crate) fn stream_for(
     harness: Harness,
     r: &SessionRef,
-    opts: &ParseOptions,
+    opts: &stream::Demand,
     sink: &mut dyn MessageSink,
 ) -> Result<Session> {
     let name = r
@@ -429,7 +429,7 @@ fn is_checkpoint(name: &str) -> bool {
 /// The demand a recording read puts to the codec: under spans, large fields stay in `source`.
 fn demand<'a>(
     harness: Harness,
-    opts: &ParseOptions,
+    opts: &stream::Demand,
     source: &'a JsonSource,
     resolver: &'a crate::lazy::Resolver,
 ) -> record::Demand<'a> {
@@ -448,7 +448,7 @@ fn demand<'a>(
 fn read_document(
     path: &Path,
     harness: Harness,
-    opts: &ParseOptions,
+    opts: &stream::Demand,
     sink: &mut dyn MessageSink,
 ) -> Result<Option<Session>> {
     let source = JsonSource::capture(path)?;
@@ -567,7 +567,7 @@ fn document(
 fn read_jsonl(
     path: &Path,
     harness: Harness,
-    opts: &ParseOptions,
+    opts: &stream::Demand,
     sink: &mut dyn MessageSink,
 ) -> Result<Option<Session>> {
     let source = JsonSource::capture(path)?;
@@ -1232,10 +1232,10 @@ mod tests {
     use super::*;
     use crate::harness::Parse;
 
-    fn checked_complete() -> ParseOptions {
-        ParseOptions {
+    fn checked_complete() -> stream::Demand {
+        stream::Demand {
             spans: true,
-            ..ParseOptions::complete()
+            ..stream::Demand::COMPLETE
         }
     }
 
@@ -1313,7 +1313,7 @@ mod tests {
         }
         for (i, (text, accepted)) in cases.into_iter().enumerate() {
             fs::write(&path, &text).unwrap();
-            for opts in [ParseOptions::full(), ParseOptions::lazy()] {
+            for opts in [stream::Demand::RICH, stream::Demand::LEAN.with_spans()] {
                 let mut sink = CollectSink::default();
                 let session = read_document(&path, Harness::Gemini, &opts, &mut sink).unwrap();
                 assert_eq!(session.is_some(), accepted, "case {i}");
@@ -1381,12 +1381,12 @@ mod tests {
             let pure = parse_all_str(&text, Some(path.clone())).remove(0);
             assert!(json_inputs(&pure).iter().all(|j| matches!(j, crate::Json::Owned(_))));
             for opts in [
-                ParseOptions::full(),
-                ParseOptions::bulk(),
-                ParseOptions::complete(),
+                stream::Demand::RICH,
+                stream::Demand::LEAN,
+                stream::Demand::COMPLETE,
                 checked_complete(),
-                ParseOptions::lazy(),
-                ParseOptions::lazy_extra(),
+                stream::Demand::LEAN.with_spans(),
+                stream::Demand::RICH.with_spans(),
             ] {
                 let mut actual = crate::stream::collect_with(&adapter, &reference, &opts).unwrap();
                 let inputs = json_inputs(&actual);
@@ -1440,8 +1440,8 @@ mod tests {
         fs::write(&path, bytes).unwrap();
         let adapter = Gemini { roots: vec![] };
         let reference = SessionRef::new("source", Harness::Gemini, path);
-        let expected = crate::stream::collect_with(&adapter, &reference, &ParseOptions::full()).unwrap();
-        let mut actual = crate::stream::collect_with(&adapter, &reference, &ParseOptions::lazy()).unwrap();
+        let expected = crate::stream::collect_with(&adapter, &reference, &stream::Demand::RICH).unwrap();
+        let mut actual = crate::stream::collect_with(&adapter, &reference, &stream::Demand::LEAN.with_spans()).unwrap();
         assert_eq!(json_inputs(&actual).len(), 3);
         assert!(json_inputs(&actual).iter().all(|j| matches!(j, crate::Json::Source(_))));
         actual.materialize().unwrap();
@@ -1473,8 +1473,9 @@ mod tests {
             };
             fs::write(&path, &bytes).unwrap();
             let reference = SessionRef::new("selected", Harness::Gemini, path.clone());
-            let expected = crate::stream::collect_with(&adapter, &reference, &ParseOptions::full()).unwrap();
-            let mut actual = crate::stream::collect_with(&adapter, &reference, &ParseOptions::lazy()).unwrap();
+            let expected = crate::stream::collect_with(&adapter, &reference, &stream::Demand::RICH).unwrap();
+            let mut actual =
+                crate::stream::collect_with(&adapter, &reference, &stream::Demand::LEAN.with_spans()).unwrap();
             assert!(matches!(
                 actual.messages[0].content[0],
                 Block::Thinking {
@@ -1484,7 +1485,8 @@ mod tests {
             ));
             actual.materialize().unwrap();
             assert_eq!(as_json(&actual), as_json(&expected));
-            let mut retained = crate::stream::collect_with(&adapter, &reference, &ParseOptions::lazy()).unwrap();
+            let mut retained =
+                crate::stream::collect_with(&adapter, &reference, &stream::Demand::LEAN.with_spans()).unwrap();
             fs::write(&path, b"{}").unwrap();
             assert!(retained.materialize().is_err());
             for at in [1, 2] {
@@ -1499,7 +1501,7 @@ mod tests {
                     Ok(Flow::Continue)
                 });
                 let error = adapter
-                    .stream(&reference, &ParseOptions::lazy(), &mut sink)
+                    .stream(&reference, &stream::Demand::LEAN.with_spans(), &mut sink)
                     .unwrap_err();
                 assert!(format!("{error:#}").contains("changed"), "{error:#}");
                 assert!(!format!("{error:#}").contains("consumer cap"));
@@ -1549,7 +1551,7 @@ mod tests {
                 };
                 let result = Gemini { roots: vec![] }.stream(
                     &SessionRef::new("source", Harness::Gemini, path.clone()),
-                    &ParseOptions::lazy(),
+                    &stream::Demand::LEAN.with_spans(),
                     &mut sink,
                 );
                 assert!(result.is_err());
@@ -1579,19 +1581,21 @@ mod tests {
         fs::write(&path, text).unwrap();
         let adapter = Gemini { roots: vec![] };
         let reference = SessionRef::new("source", Harness::Gemini, path.clone());
-        let full = crate::stream::collect_with(&adapter, &reference, &ParseOptions::full()).unwrap();
+        let full = crate::stream::collect_with(&adapter, &reference, &stream::Demand::RICH).unwrap();
         let mut expected = crate::events::EventSink::new(None);
         for message in &full.messages {
             expected.try_message(message.clone()).unwrap();
         }
         let mut actual = crate::events::EventSink::new(None);
-        adapter.stream(&reference, &ParseOptions::lazy(), &mut actual).unwrap();
+        adapter
+            .stream(&reference, &stream::Demand::LEAN.with_spans(), &mut actual)
+            .unwrap();
         assert_eq!(actual.into_events().unwrap(), expected.into_events().unwrap());
         assert_eq!(
             serde_json::to_value(crate::affordance::read(&adapter, &reference).unwrap()).unwrap(),
             serde_json::to_value(crate::affordance::of_session(&full).unwrap()).unwrap()
         );
-        let lazy = crate::stream::collect_with(&adapter, &reference, &ParseOptions::lazy()).unwrap();
+        let lazy = crate::stream::collect_with(&adapter, &reference, &stream::Demand::LEAN.with_spans()).unwrap();
         assert!(json_inputs(&lazy).iter().all(|j| matches!(j, crate::Json::Source(_))));
         fs::remove_file(path).unwrap();
         assert!(json_inputs(&lazy)[0].resolve().is_err());
@@ -1978,7 +1982,7 @@ mod tests {
         );
 
         // Native stream and explicit checked complete preparation retain the existing codec.
-        for opts in [ParseOptions::full(), ParseOptions::complete(), checked_complete()] {
+        for opts in [stream::Demand::RICH, stream::Demand::COMPLETE, checked_complete()] {
             let mut sink = CollectSink::default();
             let mut streamed = adapter.stream(&r, &opts, &mut sink).expect("on-disk stream");
             assert!(streamed.messages.is_empty(), "stream returns empty messages");
@@ -2007,7 +2011,7 @@ mod tests {
         fs::write(&file, text).unwrap();
         let mut sink = CollectSink::default();
         // Call this path directly: a fallback would hide the borrowing failure.
-        let mut streamed = read_document(&file, Harness::Gemini, &ParseOptions::full(), &mut sink)
+        let mut streamed = read_document(&file, Harness::Gemini, &stream::Demand::RICH, &mut sink)
             .unwrap()
             .expect("escaped strings are a legacy recording");
         streamed.messages = sink.messages;
@@ -2046,7 +2050,7 @@ mod tests {
         let mut s = Gemini { roots: vec![] }
             .stream(
                 &SessionRef::new("lazy", Harness::Gemini, file.clone()),
-                &ParseOptions::lazy(),
+                &stream::Demand::LEAN.with_spans(),
                 &mut sink,
             )
             .unwrap();
@@ -2089,9 +2093,9 @@ mod tests {
             fs::write(&file, &text).unwrap();
             let reference = parse_all_str(&text, Some(file.clone())).remove(0);
             for opts in [
-                ParseOptions::full(),
-                ParseOptions::lazy(),
-                ParseOptions::complete(),
+                stream::Demand::RICH,
+                stream::Demand::LEAN.with_spans(),
+                stream::Demand::COMPLETE,
                 checked_complete(),
             ] {
                 let mut sink = CollectSink::default();
@@ -2139,9 +2143,9 @@ mod tests {
             let reference = parse_all_str(&text, Some(file.clone())).remove(0);
             assert_eq!(reference.messages.len(), 2);
             for opts in [
-                ParseOptions::lazy(),
-                ParseOptions::full(),
-                ParseOptions::complete(),
+                stream::Demand::LEAN.with_spans(),
+                stream::Demand::RICH,
+                stream::Demand::COMPLETE,
                 checked_complete(),
             ] {
                 let mut sink = CollectSink::default();
@@ -2160,9 +2164,9 @@ mod tests {
         fs::write(&file, text).unwrap();
         let mut sessions = Vec::new();
         for opts in [
-            ParseOptions::lazy(),
-            ParseOptions::full(),
-            ParseOptions::complete(),
+            stream::Demand::LEAN.with_spans(),
+            stream::Demand::RICH,
+            stream::Demand::COMPLETE,
             checked_complete(),
         ] {
             let mut sink = CollectSink::default();
@@ -2190,7 +2194,7 @@ mod tests {
             seen += 1;
             Flow::Stop
         };
-        let _ = adapter.stream(&r, &ParseOptions::full(), &mut sink).unwrap();
+        let _ = adapter.stream(&r, &stream::Demand::RICH, &mut sink).unwrap();
         assert_eq!(seen, 1, "Stop after the first message must halt streaming");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -2297,7 +2301,7 @@ mod tests {
         // the streamed session carries it too (the sink's `meta` sees the cwd)
         let adapter = Gemini { roots: vec![] };
         let mut sink = CollectSink::default();
-        let s = adapter.stream(&refs[0], &ParseOptions::full(), &mut sink).unwrap();
+        let s = adapter.stream(&refs[0], &stream::Demand::RICH, &mut sink).unwrap();
         assert_eq!(s.cwd.as_deref(), Some(Path::new("/Users/u/pug/claurdvoyant")));
         // a record's own `directories[]` still wins (unchanged behaviour): covered by
         // `parses_legacy_chat_recording` fixtures carrying no registry at all.
@@ -2363,7 +2367,7 @@ mod tests {
 
         let adapter = Gemini { roots: vec![] };
         let mut sink = CollectSink::default();
-        let s = adapter.stream(&refs[0], &ParseOptions::full(), &mut sink).unwrap();
+        let s = adapter.stream(&refs[0], &stream::Demand::RICH, &mut sink).unwrap();
         assert_eq!(s.title, None);
         assert_eq!(sink.messages.len(), 1, "the preamble turn is still in the transcript");
         let m = &sink.messages[0];
@@ -2401,7 +2405,7 @@ mod tests {
         assert_eq!(refs[0].id, "aaaa0000-0000-0000-0000-000000000001");
         let adapter = Gemini { roots: vec![] };
         let mut sink = CollectSink::default();
-        let s = adapter.stream(&refs[0], &ParseOptions::full(), &mut sink).unwrap();
+        let s = adapter.stream(&refs[0], &stream::Demand::RICH, &mut sink).unwrap();
         assert_eq!(
             s.lineage,
             Lineage {
@@ -2414,7 +2418,7 @@ mod tests {
         let parent_refs = scan_session_file(&runtime.join("tmp/proj/chats/session_modern.jsonl"), Harness::Gemini);
         let mut sink = CollectSink::default();
         let p = adapter
-            .stream(&parent_refs[0], &ParseOptions::full(), &mut sink)
+            .stream(&parent_refs[0], &stream::Demand::RICH, &mut sink)
             .unwrap();
         assert!(p.lineage.is_empty());
         let _ = fs::remove_dir_all(&runtime);

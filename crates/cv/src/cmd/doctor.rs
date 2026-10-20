@@ -56,7 +56,7 @@ pub(crate) fn cmd_doctor(id: Option<String>, harness: Option<String>, recent: us
         cv_core::stream::stream_counted(
             adapter.as_ref(),
             &rr,
-            &cv_core::ParseOptions::facts(),
+            &cv_core::Demand::FACTS.with_spans(),
             &mut pass,
             cv_core::stream::Pass::RECORD,
         )?;

@@ -39,7 +39,8 @@ use super::Adapter;
 use super::EmitResult;
 use crate::ir::*;
 use crate::json::{JsonSource, JsonView};
-use crate::stream::{Flow, MessageSink, ParseOptions};
+use crate::stream::Tier;
+use crate::stream::{Demand, Flow, MessageSink};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Map, Value};
@@ -119,7 +120,7 @@ impl Adapter for LmStudio {
 
     /// Walk the validated document and selected versions with scoped source views. Lazy text
     /// keeps byte spans; unused versions, unknown fields and internal steps never become Values.
-    fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+    fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| {
             let source = JsonSource::capture(&r.path)?;
             source
@@ -203,7 +204,7 @@ impl Adapter for LmStudio {
                             let primary = projected_version(version, &mut session_model, opts)?;
                             let has_primary = primary.is_some();
                             if let Some(mut message) = primary {
-                                if opts.complete {
+                                if opts.tier == Tier::Complete {
                                     let bag = message.harness_extra_mut(Harness::LmStudio);
                                     bag.insert("currentlySelected".into(), Value::Number(selected.into()));
                                     bag.insert("version_count".into(), Value::Number(version_count.into()));
@@ -212,7 +213,7 @@ impl Adapter for LmStudio {
                                     break;
                                 }
                             }
-                            if opts.complete {
+                            if opts.tier == Tier::Complete {
                                 let mut throwaway_model = session_model.clone();
                                 if let Some(variants) = versions.array()? {
                                     for (index, version) in variants.enumerate() {
@@ -312,7 +313,7 @@ fn projected_selected_version<'a>(
 fn projected_version(
     version: JsonView<'_>,
     session_model: &mut Option<String>,
-    opts: &ParseOptions,
+    opts: &Demand,
 ) -> Result<Option<Message>> {
     let Some(version) = Fields::parse(version, &["role", "type", "steps", "content"])? else {
         return Ok(None);
@@ -346,7 +347,7 @@ fn projected_step(
     step: JsonView<'_>,
     message: &mut Message,
     session_model: &mut Option<String>,
-    opts: &ParseOptions,
+    opts: &Demand,
 ) -> Result<()> {
     let Some(step) = Fields::parse(step, &["type", "genInfo", "stepIdentifier", "style", "content"])? else {
         return Ok(());
@@ -454,7 +455,7 @@ fn projected_content(
     content: Option<JsonView<'_>>,
     message: &mut Message,
     thinking: bool,
-    opts: &ParseOptions,
+    opts: &Demand,
 ) -> Result<()> {
     let Some(content) = content else { return Ok(()) };
     if content.is_string()? {
@@ -500,7 +501,7 @@ fn projected_content(
     Ok(())
 }
 
-fn projected_text(view: JsonView<'_>, message: &mut Message, thinking: bool, opts: &ParseOptions) -> Result<()> {
+fn projected_text(view: JsonView<'_>, message: &mut Message, thinking: bool, opts: &Demand) -> Result<()> {
     let Some(text) = view.lazy_text(opts.spans)? else {
         return Ok(());
     };
@@ -786,7 +787,7 @@ mod tests {
     fn selected(turn: &Value) -> Option<Message> {
         let fields = Fields::parse(JsonView::from(turn), &["versions", "currentlySelected"]).unwrap()?;
         let (_, version, _) = projected_selected_version(&fields, fields.get("versions")?).unwrap()?;
-        projected_version(version, &mut None, &ParseOptions::full()).unwrap()
+        projected_version(version, &mut None, &Demand::RICH).unwrap()
     }
 
     /// The simple oracle for [`projected_step_timestamp`]: a whole-string integer prefix.
@@ -823,9 +824,7 @@ mod tests {
                 if let Some(versions) = fields.get("versions") {
                     projected_selected_version(&fields, versions)
                         .unwrap()
-                        .and_then(|(_, version, _)| {
-                            projected_version(version, &mut None, &ParseOptions::full()).unwrap()
-                        })
+                        .and_then(|(_, version, _)| projected_version(version, &mut None, &Demand::RICH).unwrap())
                 } else {
                     None
                 }
@@ -840,11 +839,11 @@ mod tests {
                         projected_selected_version(&fields, versions).unwrap()
                     {
                         let mut model = None;
-                        let _ = projected_version(selected_version, &mut model, &ParseOptions::complete()).unwrap();
+                        let _ = projected_version(selected_version, &mut model, &Demand::COMPLETE).unwrap();
                         for (index, version) in versions.array().unwrap().unwrap().enumerate() {
                             if index != selected {
                                 if let Some(mut message) =
-                                    projected_version(version.unwrap(), &mut model, &ParseOptions::complete()).unwrap()
+                                    projected_version(version.unwrap(), &mut model, &Demand::COMPLETE).unwrap()
                                 {
                                     message.kind = MessageKind::Branch;
                                     message
@@ -905,7 +904,7 @@ mod tests {
         for (case, text) in cases.into_iter().enumerate() {
             fs::write(&path, &text).unwrap();
             let r = SessionRef::new("schema", Harness::LmStudio, path.clone());
-            let actual = crate::stream::collect_with(&LmStudio { root: None }, &r, &ParseOptions::full());
+            let actual = crate::stream::collect_with(&LmStudio { root: None }, &r, &Demand::RICH);
             frozen.insert(
                 format!("{case:02}"),
                 actual
@@ -936,7 +935,7 @@ mod tests {
             }
         }
         let error = LmStudio { root: None }
-            .stream(&r, &ParseOptions::lazy(), &mut MutatingSink(path))
+            .stream(&r, &Demand::LEAN.with_spans(), &mut MutatingSink(path))
             .unwrap_err();
         assert!(format!("{error:#}").contains("source changed"));
         fs::remove_dir_all(dir).unwrap();
@@ -958,11 +957,11 @@ mod tests {
         ]}]});
         fs::write(&path, value.to_string()).unwrap();
         let r = SessionRef::new("lazy", Harness::LmStudio, path.clone());
-        let lazy = crate::stream::collect_with(&LmStudio { root: None }, &r, &ParseOptions::lazy()).unwrap();
+        let lazy = crate::stream::collect_with(&LmStudio { root: None }, &r, &Demand::LEAN.with_spans()).unwrap();
         assert_eq!(lazy.messages.len(), 1);
         assert!(matches!(&lazy.messages[0].content[0], Block::Thinking { text, .. } if text.is_span()));
         assert!(matches!(&lazy.messages[0].content[1], Block::Text { text } if text.is_span()));
-        let full = crate::stream::collect_with(&LmStudio { root: None }, &r, &ParseOptions::full()).unwrap();
+        let full = crate::stream::collect_with(&LmStudio { root: None }, &r, &Demand::RICH).unwrap();
         let mut lazy = lazy;
         lazy.materialize().unwrap();
         assert_eq!(
@@ -1144,7 +1143,7 @@ mod tests {
 
     #[test]
     fn variant_versions_emitted_as_branches_under_complete() {
-        use crate::stream::{collect_with, ParseOptions};
+        use crate::stream::{collect_with, Demand};
         use std::sync::atomic::{AtomicU32, Ordering};
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -1173,7 +1172,7 @@ mod tests {
         assert!(normal.messages.iter().all(|m| m.kind != MessageKind::Branch));
 
         // Complete parse: the non-selected version rides along as a Branch turn.
-        let full = collect_with(&LmStudio { root: None }, &r, &ParseOptions::complete()).unwrap();
+        let full = collect_with(&LmStudio { root: None }, &r, &Demand::COMPLETE).unwrap();
         let branch = full
             .messages
             .iter()
@@ -1380,9 +1379,7 @@ mod tests {
             }
         }
         let mut sink = StopFirst { seen: Vec::new() };
-        let s = LmStudio { root: None }
-            .stream(&r, &ParseOptions::full(), &mut sink)
-            .unwrap();
+        let s = LmStudio { root: None }.stream(&r, &Demand::RICH, &mut sink).unwrap();
 
         assert_eq!(sink.seen, vec!["one".to_string()]);
         assert!(s.messages.is_empty(), "stream returns empty messages");

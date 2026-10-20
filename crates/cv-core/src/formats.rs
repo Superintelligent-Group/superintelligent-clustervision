@@ -11,7 +11,7 @@
 //!    [`Harness::ALL`] entry, by the macro that declares the harness list): the upstream commit the
 //!    adapter was verified against, the store paths, and what the source cannot say about the
 //!    persisted vocabulary — `generic` (interpreted by a blanket rule, so no per-item literal
-//!    exists), `carried` (kept verbatim under `ParseOptions::complete` only), `ignored` (known and
+//!    exists), `carried` (kept verbatim under `Demand::COMPLETE` only), `ignored` (known and
 //!    deliberately skipped), and `handled` only for an item no match arm names (a SQL identifier,
 //!    a store path, a tool name). An item the adapter matches on is `handled` by inference
 //!    ([`handled`]): the arm is the spec. `docs/FORMATS.md` stays the prose.
@@ -52,7 +52,7 @@
 
 use crate::harness;
 use crate::ir::{Block, Harness, MessageKind, SessionRef};
-use crate::stream::{self, ParseOptions};
+use crate::stream::{self, Demand};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -67,7 +67,7 @@ pub enum Status {
     /// The adapter interprets it through a generic rule (e.g. every rendered Claude attachment becomes
     /// injected context whatever its kind), so no per-item literal exists in the source.
     Generic,
-    /// Kept verbatim as a carrier under `ParseOptions::complete`, dropped otherwise.
+    /// Kept verbatim as a carrier under `Demand::COMPLETE`, dropped otherwise.
     Carried,
     /// Known and deliberately skipped (transient, UI-only, or a duplicate of another item).
     Ignored,
@@ -615,7 +615,7 @@ fn census_session(
         }
         Ok(stream::Flow::Continue)
     });
-    let mut opts = ParseOptions::complete();
+    let mut opts = Demand::COMPLETE;
     opts.spans = true;
     adapter.try_stream(r, &opts, &mut sink)?;
     Ok(sample)
@@ -825,10 +825,10 @@ mod tests {
             fn stream(
                 &self,
                 r: &SessionRef,
-                opts: &ParseOptions,
+                opts: &Demand,
                 sink: &mut dyn stream::MessageSink,
             ) -> Result<crate::Session> {
-                assert!(opts.complete && opts.spans);
+                assert!(opts.tier == crate::stream::Tier::Complete && opts.spans);
                 let mut prompt = crate::Message::new(crate::Role::User);
                 prompt.content.push(Block::Text { text: "body".into() });
                 sink.message(prompt);

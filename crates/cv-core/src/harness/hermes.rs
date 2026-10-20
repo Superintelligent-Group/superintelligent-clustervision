@@ -68,7 +68,8 @@ use super::store::sqlite::{columns, open_ro, table_exists, Cells};
 use super::wire::openai;
 use super::{ts_from_epoch, Adapter};
 use crate::ir::*;
-use crate::stream::{Flow, MessageSink, ParseOptions};
+use crate::stream::Tier;
+use crate::stream::{self, Flow, MessageSink};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
@@ -275,7 +276,7 @@ impl Adapter for Hermes {
         super::WatchPolicy::Database
     }
 
-    fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+    fn stream(&self, r: &SessionRef, opts: &stream::Demand, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| {
             // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
             let mut spawns =
@@ -518,11 +519,11 @@ fn read_session_facts(
     id: &str,
     source: Option<&str>,
     end_reason: Option<&str>,
-    opts: &ParseOptions,
+    opts: &stream::Demand,
 ) -> Result<SessionFacts> {
     let mut meta = serde_json::Map::new();
     let scols = columns(conn, "sessions");
-    if opts.wants_full_extra() {
+    if opts.tier >= Tier::Rich {
         if let Some(s) = source.filter(|s| !s.is_empty()) {
             meta.insert("source".into(), Value::String(s.to_string()));
         }
@@ -600,7 +601,7 @@ fn read_session_facts(
         {
             imported_from = cells
                 .read(cell, |view| match view.get("imported_from")? {
-                    Some(from) if from.is_object()? => Ok(Some(if opts.wants_full_extra() {
+                    Some(from) if from.is_object()? => Ok(Some(if opts.tier >= Tier::Rich {
                         from.resolve()?.into_owned()
                     } else {
                         Value::Null
@@ -611,7 +612,7 @@ fn read_session_facts(
         }
     }
     let imported = imported_from.is_some();
-    let imported_from = imported_from.filter(|_| opts.wants_full_extra());
+    let imported_from = imported_from.filter(|_| opts.tier >= Tier::Rich);
     if let Some(imported_from) = imported_from {
         bag.insert("imported_from".into(), imported_from);
     }
@@ -658,14 +659,19 @@ fn compression_child(conn: &Connection, id: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-fn stream_conn(conn: &Connection, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+fn stream_conn(
+    conn: &Connection,
+    r: &SessionRef,
+    opts: &stream::Demand,
+    sink: &mut dyn MessageSink,
+) -> Result<Session> {
     stream_conn_with_reads(conn, r, opts, sink, &crate::source::ReadSet::default())
 }
 
 fn stream_conn_with_reads(
     conn: &Connection,
     r: &SessionRef,
-    opts: &ParseOptions,
+    opts: &stream::Demand,
     sink: &mut dyn MessageSink,
     reads: &crate::source::ReadSet,
 ) -> Result<Session> {
@@ -756,10 +762,10 @@ fn stream_conn_with_reads(
     ) {
         lineage.continued_in = compression_child(conn, &r.id);
     }
-    if let Some(reset) = marker("_reset_from").filter(|_| opts.wants_full_extra()) {
+    if let Some(reset) = marker("_reset_from").filter(|_| opts.tier >= Tier::Rich) {
         hermes_bag.insert("_reset_from".into(), Value::String(reset));
     }
-    if opts.wants_full_extra() && chain.len() == 1 && markers.is_empty() {
+    if opts.tier >= Tier::Rich && chain.len() == 1 && markers.is_empty() {
         if let Some(p) = parent.filter(|p| !p.is_empty()) {
             hermes_bag.insert("parent_session_id".into(), Value::String(p));
         }
@@ -829,7 +835,7 @@ fn stream_conn_with_reads(
     // — live rows plus the history a compaction summarized away — which drops rewound rows and the
     // superseded originals of carried tails. `complete` reads every row instead and tags the flags.
     let has_flags = has("active") && has("compacted");
-    let visibility = if has_flags && !opts.complete {
+    let visibility = if has_flags && opts.tier != Tier::Complete {
         " AND (active = 1 OR compacted = 1)"
     } else {
         ""
@@ -837,7 +843,7 @@ fn stream_conn_with_reads(
     // Display-generation dedup (`_dedupe_display_generations`): a compaction copies the protected
     // tail into each generation — same role/content/timestamp/tool fields, different id/flags — so
     // each logical message is emitted once (its first row; the copies are byte-identical).
-    let dedup_generations = has("compacted") && !opts.complete;
+    let dedup_generations = has("compacted") && opts.tier != Tier::Complete;
     let mut generations = GenerationDedup::default();
 
     // Hand the session-level metadata to the sink before the body (header-rendering sinks use it).
@@ -886,7 +892,7 @@ fn stream_conn_with_reads(
                 continue;
             }
             // Dedup the replayed first user message at compression boundaries (`complete` keeps it).
-            if !opts.complete && !dedup.admit(&m)? {
+            if opts.tier != Tier::Complete && !dedup.admit(&m)? {
                 continue;
             }
             if sink.message(m) == Flow::Stop {
@@ -1314,7 +1320,7 @@ const CELL_COLS: &[&str] = &[
 
 /// Row materialization follows the shared parse demand and SQLite cell access mode.
 struct Demand<'a> {
-    opts: &'a ParseOptions,
+    opts: &'a stream::Demand,
     incremental: bool,
 }
 
@@ -1334,7 +1340,7 @@ fn read_row(
     demand: &Demand<'_>,
 ) -> Result<MsgRow> {
     let opts = demand.opts;
-    let (spans, full) = (opts.spans, opts.wants_full_extra());
+    let (spans, full) = (opts.spans, opts.tier >= Tier::Rich);
     let get_str =
         |name: &str| -> Option<String> { idx(name).and_then(|i| row.get::<_, Option<String>>(i).ok().flatten()) };
     let get_i64 = |name: &str| -> Option<i64> { idx(name).and_then(|i| row.get::<_, Option<i64>>(i).ok().flatten()) };
@@ -1664,7 +1670,7 @@ struct MsgRow {
 impl MsgRow {
     /// The IR message for this row. `session_origin` overrides every message's origin when the
     /// session as a whole came from somewhere else (a foreign import).
-    fn into_message(self, session_origin: Option<Origin>, opts: &ParseOptions) -> Option<Message> {
+    fn into_message(self, session_origin: Option<Origin>, opts: &stream::Demand) -> Option<Message> {
         let (mut role, mut kind, mut origin) = match self.role.as_str() {
             "assistant" => (Role::Assistant, MessageKind::Reply, Origin::Model),
             "tool" => (Role::Tool, MessageKind::ToolResult, Origin::Harness),
@@ -1702,15 +1708,15 @@ impl MsgRow {
         // In-place compaction / rewind flags (non-default values only, so old-schema rows carry
         // nothing): `compacted` = summarized away but still displayed history; `active = false`
         // alone = a rewound or superseded row (only reachable under `complete`).
-        if opts.wants_full_extra() && matches!(self.compacted, Some(c) if c != 0) {
+        if opts.tier >= Tier::Rich && matches!(self.compacted, Some(c) if c != 0) {
             bag.insert("compacted".into(), Value::Bool(true));
         }
-        if opts.wants_full_extra() && matches!(self.active, Some(0)) {
+        if opts.tier >= Tier::Rich && matches!(self.active, Some(0)) {
             bag.insert("active".into(), Value::Bool(false));
         }
         if let Some(k) = self
             .display_kind
-            .filter(|s| !s.is_empty() && (opts.wants_full_extra() || opts.facts_only()))
+            .filter(|s| !s.is_empty() && (opts.tier >= Tier::Rich || opts.tier == Tier::Facts))
         {
             bag.insert("display_kind".into(), Value::String(k));
         }
@@ -1764,7 +1770,7 @@ impl MsgRow {
         if let Some(pmid) = self.platform_message_id.filter(|s| !s.is_empty()) {
             bag.insert("platform_message_id".into(), Value::String(pmid));
         }
-        if opts.wants_full_extra() && matches!(self.observed, Some(o) if o != 0) {
+        if opts.tier >= Tier::Rich && matches!(self.observed, Some(o) if o != 0) {
             bag.insert("observed".into(), Value::Bool(true));
         }
         // Format-complete capture: the reasoning sidecars and the raw reasoning columns verbatim,
@@ -1866,11 +1872,11 @@ impl FailedNotice {
 /// reattach the messages. The production path goes through `Adapter::parse` → `stream::collect`.
 #[cfg(test)]
 fn parse_conn(conn: &Connection, r: &SessionRef) -> Result<Session> {
-    parse_conn_with(conn, r, &ParseOptions::full())
+    parse_conn_with(conn, r, &stream::Demand::RICH)
 }
 
 #[cfg(test)]
-fn parse_conn_with(conn: &Connection, r: &SessionRef, opts: &ParseOptions) -> Result<Session> {
+fn parse_conn_with(conn: &Connection, r: &SessionRef, opts: &stream::Demand) -> Result<Session> {
     let mut sink = crate::stream::CollectSink::default();
     let mut s = stream_conn(conn, r, opts, &mut sink)?;
     s.messages = sink.messages;
@@ -1975,7 +1981,7 @@ mod tests {
             }
         }
         let failure = adapter
-            .stream(&reference, &ParseOptions::default(), &mut MutatingSink(&writer))
+            .stream(&reference, &stream::Demand::LEAN, &mut MutatingSink(&writer))
             .unwrap_err();
         assert!(failure.to_string().contains("dependencies changed"), "{failure:#}");
     }
@@ -2058,11 +2064,11 @@ mod tests {
         let typed = Hermes::with_db(legacy_path.clone());
         let typed_ref = SessionRef::new("s", Harness::Hermes, &legacy_path);
         for options in [
-            ParseOptions::bulk(),
-            ParseOptions::full(),
-            ParseOptions::lazy(),
-            ParseOptions::facts(),
-            ParseOptions::complete(),
+            stream::Demand::LEAN,
+            stream::Demand::RICH,
+            stream::Demand::LEAN.with_spans(),
+            stream::Demand::FACTS.with_spans(),
+            stream::Demand::COMPLETE,
         ] {
             let mut actual = crate::stream::collect_with(&adapter, &reference, &options)?;
             let mut expected = crate::stream::collect_with(&typed, &typed_ref, &options)?;
@@ -2113,7 +2119,7 @@ mod tests {
         drop(writer);
         let adapter = Hermes::with_db(path.clone());
         let reference = adapter.discover()?.remove(0);
-        let owned = crate::stream::collect_with(&adapter, &reference, &ParseOptions::complete())?;
+        let owned = crate::stream::collect_with(&adapter, &reference, &stream::Demand::COMPLETE)?;
         let checked = crate::emit::parse_for_emit(&adapter, &reference, Harness::Hermes)?;
         assert_eq!(
             checked.messages.len(),
@@ -2205,7 +2211,7 @@ mod tests {
         drop(writer);
         let adapter = Hermes::with_db(path.clone());
         let reference = adapter.discover()?.remove(0);
-        let owned = crate::stream::collect_with(&adapter, &reference, &ParseOptions::complete())?;
+        let owned = crate::stream::collect_with(&adapter, &reference, &stream::Demand::COMPLETE)?;
         let checked = crate::emit::parse_for_emit(&adapter, &reference, Harness::Hermes)?;
         assert_eq!(checked.messages.len(), 8);
         for message in checked.messages.iter().take(3) {
@@ -2276,16 +2282,16 @@ mod tests {
         drop(writer);
         let adapter = Hermes::with_db(path.clone());
         let reference = adapter.discover()?.into_iter().find(|r| r.id == "s").unwrap();
-        let full = crate::stream::collect_with(&adapter, &reference, &ParseOptions::full())?;
+        let full = crate::stream::collect_with(&adapter, &reference, &stream::Demand::RICH)?;
         assert_eq!(full.messages.len(), 12);
         assert_eq!(full.lineage.continues.as_deref(), Some("root"));
         assert!(full.messages.iter().all(|message| message.origin == Origin::Import));
         for options in [
-            ParseOptions::bulk(),
-            ParseOptions::lazy(),
-            ParseOptions::usage(),
-            ParseOptions::facts(),
-            ParseOptions::lazy_extra(),
+            stream::Demand::LEAN,
+            stream::Demand::LEAN.with_spans(),
+            stream::Demand::USAGE.with_spans(),
+            stream::Demand::FACTS.with_spans(),
+            stream::Demand::RICH.with_spans(),
         ] {
             let mut actual = crate::stream::collect_with(&adapter, &reference, &options)?;
             if options.spans {
@@ -2302,7 +2308,7 @@ mod tests {
                         ..
                     }
                 )));
-                if !options.wants_full_extra() {
+                if options.tier < Tier::Rich {
                     assert!(actual.messages.iter().flat_map(|m| &m.content).any(|block| matches!(
                         block,
                         Block::Thinking {
@@ -2314,7 +2320,7 @@ mod tests {
             }
             actual.materialize()?;
             let mut expected = full.clone();
-            if !options.wants_full_extra() {
+            if options.tier < Tier::Rich {
                 expected.extra.clear();
                 for message in &mut expected.messages {
                     let kind = message
@@ -2322,7 +2328,7 @@ mod tests {
                         .and_then(|bag| bag.get("display_kind"))
                         .cloned();
                     message.extra.clear();
-                    if options.facts_only() {
+                    if options.tier == Tier::Facts {
                         if let Some(kind) = kind {
                             message
                                 .harness_extra_mut(Harness::Hermes)
@@ -2337,15 +2343,9 @@ mod tests {
                 "{options:?}"
             );
         }
-        let complete = crate::stream::collect_with(&adapter, &reference, &ParseOptions::complete())?;
-        let mut override_facts = crate::stream::collect_with(
-            &adapter,
-            &reference,
-            &ParseOptions {
-                complete: true,
-                ..ParseOptions::facts()
-            },
-        )?;
+        let complete = crate::stream::collect_with(&adapter, &reference, &stream::Demand::COMPLETE)?;
+        let mut override_facts =
+            crate::stream::collect_with(&adapter, &reference, &stream::Demand::COMPLETE.with_spans())?;
         override_facts.materialize()?;
         assert_eq!(serde_json::to_value(override_facts)?, serde_json::to_value(complete)?);
         assert_eq!(
@@ -2359,7 +2359,7 @@ mod tests {
         // Every retained lean body/argument uses the producer read set, including WAL-only writes.
         let writer = Connection::open(&path)?;
         writer.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_checkpoint(TRUNCATE)")?;
-        let lean = crate::stream::collect_with(&adapter, &reference, &ParseOptions::facts())?;
+        let lean = crate::stream::collect_with(&adapter, &reference, &stream::Demand::FACTS.with_spans())?;
         let before_main = std::fs::read(&path)?;
         writer.execute("UPDATE messages SET content='changed' WHERE id=2", [])?;
         assert_eq!(std::fs::read(&path)?, before_main);
@@ -2842,7 +2842,7 @@ mod tests {
         assert_nested_extra(&s);
 
         // Complete: every row, flags tagged, no dedup.
-        let c = parse_conn_with(&conn, &sref(&conn, "s"), &ParseOptions::complete()).unwrap();
+        let c = parse_conn_with(&conn, &sref(&conn, "s"), &stream::Demand::COMPLETE).unwrap();
         assert_eq!(c.messages.len(), 8, "7 rows + 1 boundary marker");
         let typo = c.messages.iter().find(|m| m.text().as_deref() == Some("typo")).unwrap();
         assert_eq!(bag(typo)["active"], Value::Bool(false));
@@ -3388,7 +3388,7 @@ mod tests {
             "actual listing must not stage the undemanded reply body"
         );
         let (session, collection_bytes) =
-            observe(|| crate::stream::collect_with(&adapter, &references[0], &ParseOptions::lazy()))?;
+            observe(|| crate::stream::collect_with(&adapter, &references[0], &stream::Demand::LEAN.with_spans()))?;
         assert_eq!(session.messages.len(), 1);
         assert!(
             collection_bytes.iter().sum::<u64>() >= body.len() as u64,
@@ -3440,7 +3440,7 @@ mod tests {
             }
         }
         let mut count = CountSink(0);
-        stream_conn(&writer, &reference, &ParseOptions::lazy(), &mut count)?;
+        stream_conn(&writer, &reference, &stream::Demand::LEAN.with_spans(), &mut count)?;
         assert_eq!(count.0, parsed.messages.iter().filter(|m| m.is_turn()).count());
         Ok(())
     }
@@ -3468,7 +3468,7 @@ mod tests {
         let reference = adapter.discover()?.remove(0);
         assert_eq!(reference.message_count, None);
         let owned = parse_conn(&writer, &reference)?;
-        let mut checked = crate::stream::collect_with(&adapter, &reference, &ParseOptions::lazy_extra())?;
+        let mut checked = crate::stream::collect_with(&adapter, &reference, &stream::Demand::RICH.with_spans())?;
         assert_eq!(checked.messages.len(), 3);
         assert!(matches!(
             &checked.messages[0].content[0],
@@ -3518,12 +3518,12 @@ mod tests {
         assert!(references.iter().all(|r| r.message_count.is_none()));
         crate::catalog::sync(&references);
         for reference in references {
-            let parsed = crate::stream::collect_with(&adapter, &reference, &ParseOptions::full())?;
+            let parsed = crate::stream::collect_with(&adapter, &reference, &stream::Demand::RICH)?;
             imported |= parsed.messages.iter().any(|message| message.origin == Origin::Import);
             let done = crate::stream::stream_counted(
                 &adapter,
                 &reference,
-                &ParseOptions::facts(),
+                &stream::Demand::FACTS.with_spans(),
                 &mut crate::stream::Discard,
                 crate::stream::Pass::RECORD,
             )?;
@@ -3535,11 +3535,11 @@ mod tests {
             assert_eq!(refreshed.message_count, Some(turns), "{}", reference.id);
             for child in subagent_refs(&reference) {
                 assert_eq!(child.message_count, None);
-                let parsed = crate::stream::collect_with(&adapter, &child, &ParseOptions::full())?;
+                let parsed = crate::stream::collect_with(&adapter, &child, &stream::Demand::RICH)?;
                 let done = crate::stream::stream_counted(
                     &adapter,
                     &child,
-                    &ParseOptions::facts(),
+                    &stream::Demand::FACTS.with_spans(),
                     &mut crate::stream::Discard,
                     crate::stream::Pass::RECORD,
                 )?;
@@ -3690,7 +3690,7 @@ mod tests {
         assert!(a.lineage.is_empty(), "{:?}", a.lineage);
         assert_nested_extra(&a);
         // complete: the superseded originals of the carried tail are present, tagged as rewind rows.
-        let ac = parse_conn_with(&conn, &sref(&conn, A), &ParseOptions::complete()).unwrap();
+        let ac = parse_conn_with(&conn, &sref(&conn, A), &stream::Demand::COMPLETE).unwrap();
         assert!(ac.messages.len() > a.messages.len());
         // (Flags are recorded as non-default values only: a superseded original carries
         // `active: false` and no `compacted` key — the same shape as a rewound row.)

@@ -2,7 +2,7 @@ use super::*;
 use crate::Harness;
 use crate::{
     harness::{opencode::OpenCode, Adapter},
-    stream::ParseOptions,
+    stream::Demand,
 };
 use rusqlite::Connection;
 use serde_json::Value;
@@ -37,7 +37,7 @@ fn complete_v2_replay_matches_native_rows_owned_and_public_ir() -> Result<()> {
             checked.messages.iter().any(|m| m.complete_record.is_some()),
             "checked complete records retained"
         );
-        let owned = crate::stream::collect_with(&adapter, reference, &ParseOptions::complete())?;
+        let owned = crate::stream::collect_with(&adapter, reference, &Demand::COMPLETE)?;
         let serialized: Session = serde_json::from_slice(&serde_json::to_vec(&checked)?)?;
         let mut materialized = checked.clone();
         materialized.materialize()?;
@@ -356,7 +356,7 @@ fn complete_legacy_producers_match_owned_preparation() -> Result<()> {
     for (kind, adapter) in adapters.iter().enumerate() {
         for reference in adapter.discover()? {
             let checked = crate::emit::parse_for_emit(adapter, &reference, Harness::OpenCode)?;
-            let owned = crate::stream::collect_with(adapter, &reference, &ParseOptions::complete())?;
+            let owned = crate::stream::collect_with(adapter, &reference, &Demand::COMPLETE)?;
             assert_eq!(
                 serde_json::to_value(&checked)?,
                 serde_json::to_value(&owned)?,

@@ -479,9 +479,9 @@ fn read_inner<'a>(
     // Native Claude/Codex spans retain the same full-extra metadata. Exact materialized parity
     // is checked against the independent full collector; discarded payloads remain unowned.
     let opts = if matches!(r.harness, Harness::Claude | Harness::Codex) {
-        stream::ParseOptions::lazy_extra()
+        stream::Demand::RICH.with_spans()
     } else {
-        stream::ParseOptions::full()
+        stream::Demand::RICH
     };
     let mut sink = Tail {
         check,
@@ -688,7 +688,7 @@ mod tests {
             fn stream(
                 &self,
                 r: &SessionRef,
-                _: &stream::ParseOptions,
+                _: &stream::Demand,
                 sink: &mut dyn stream::MessageSink,
             ) -> Result<Session> {
                 let mut session = Session::new(&r.id, r.harness);
@@ -747,7 +747,7 @@ mod tests {
             fn stream(
                 &self,
                 r: &SessionRef,
-                _: &stream::ParseOptions,
+                _: &stream::Demand,
                 sink: &mut dyn stream::MessageSink,
             ) -> Result<Session> {
                 let mut message = Message::new(crate::Role::Assistant);

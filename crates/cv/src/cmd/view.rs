@@ -300,7 +300,7 @@ fn session_json_window(
     let mut session = cv_core::stream::stream_counted(
         adapter,
         r,
-        &cv_core::ParseOptions::lazy_extra(),
+        &cv_core::Demand::RICH.with_spans(),
         &mut sink,
         cv_core::stream::Pass::RECORD,
     )?
@@ -335,7 +335,7 @@ fn staged_session_json_inner(
         guard: checked,
         ..cv_core::stream::Pass::RECORD
     };
-    let read = cv_core::stream::stream_counted(adapter, r, &cv_core::ParseOptions::lazy_extra(), &mut sink, pass)?;
+    let read = cv_core::stream::stream_counted(adapter, r, &cv_core::Demand::RICH.with_spans(), &mut sink, pass)?;
     let frames = sink.finish()?;
     let mut output = std::io::BufWriter::with_capacity(64 * 1024, cv_core::bytes::ByteStage::default());
     super::session_json::write_document(&mut output, &read.session, &frames, sink.selected, document)?;
@@ -859,7 +859,7 @@ fn read_tree(r: &SessionRef, adapter: &dyn Adapter) -> Result<(Session, Vec<Tree
         guard: true,
         ..cv_core::stream::Pass::RECORD
     };
-    let read = cv_core::stream::stream_counted(adapter, r, &cv_core::ParseOptions::facts(), &mut sink, pass)?;
+    let read = cv_core::stream::stream_counted(adapter, r, &cv_core::Demand::FACTS.with_spans(), &mut sink, pass)?;
     let session = read.session;
     if let Some(error) = sink.error {
         return Err(error);
@@ -1097,7 +1097,7 @@ fn stream_session_render_inner<W: std::io::Write>(
     opts: RenderOpts,
     checked: bool,
 ) -> Result<RenderOutcome> {
-    use cv_core::{Flow, MessageSink, ParseOptions};
+    use cv_core::{Demand, Flow, MessageSink};
     const HOLDBACK: usize = 24;
     anyhow::ensure!(
         !checked || (opts.range.is_none() && opts.max_bytes.is_none()),
@@ -1438,9 +1438,9 @@ fn stream_session_render_inner<W: std::io::Write>(
     // in-window messages materialize (the sink already resolves per message). A full show reads
     // every byte regardless — spans would only add resolve overhead there (floor = C).
     let parse_opts = if checked || opts.range.is_some() {
-        ParseOptions::lazy()
+        Demand::LEAN.with_spans()
     } else {
-        ParseOptions::bulk()
+        Demand::LEAN
     };
     let pass = cv_core::stream::Pass {
         guard: checked,
@@ -1667,7 +1667,7 @@ mod tests {
             fn stream(
                 &self,
                 r: &SessionRef,
-                opts: &cv_core::ParseOptions,
+                opts: &cv_core::Demand,
                 sink: &mut dyn cv_core::MessageSink,
             ) -> Result<Session> {
                 assert!(opts.spans, "complete Markdown download eagerly decoded leaves");
@@ -1706,7 +1706,7 @@ mod tests {
             fn stream(
                 &self,
                 r: &SessionRef,
-                opts: &cv_core::ParseOptions,
+                opts: &cv_core::Demand,
                 sink: &mut dyn cv_core::MessageSink,
             ) -> Result<Session> {
                 sink.dependency(&self.0);
@@ -1767,7 +1767,7 @@ mod tests {
         let expected_counts = cv_core::stream::stream_counted(
             adapter.as_ref(),
             &r,
-            &cv_core::ParseOptions::lazy_extra(),
+            &cv_core::Demand::RICH.with_spans(),
             &mut rich,
             Default::default(),
         )?
@@ -1776,7 +1776,7 @@ mod tests {
         let actual_counts = cv_core::stream::stream_counted(
             adapter.as_ref(),
             &r,
-            &cv_core::ParseOptions::lazy_extra(),
+            &cv_core::Demand::RICH.with_spans(),
             &mut facts,
             Default::default(),
         )?
@@ -1792,8 +1792,8 @@ mod tests {
         );
         let mut complete = FactsCollect(Default::default());
         let mut complete_full = cv_core::stream::CollectSink::default();
-        adapter.try_stream(&r, &cv_core::ParseOptions::complete(), &mut complete)?;
-        adapter.try_stream(&r, &cv_core::ParseOptions::complete(), &mut complete_full)?;
+        adapter.try_stream(&r, &cv_core::Demand::COMPLETE, &mut complete)?;
+        adapter.try_stream(&r, &cv_core::Demand::COMPLETE, &mut complete_full)?;
         assert_eq!(
             serde_json::to_value(&complete.0.messages)?,
             serde_json::to_value(&complete_full.messages)?
@@ -1854,7 +1854,7 @@ mod tests {
         let old = cv_core::stream::stream_counted(
             adapter.as_ref(),
             &r,
-            &cv_core::ParseOptions::full(),
+            &cv_core::Demand::RICH,
             &mut rich,
             Default::default(),
         )?
@@ -1862,7 +1862,7 @@ mod tests {
         let new = cv_core::stream::stream_counted(
             adapter.as_ref(),
             &r,
-            &cv_core::ParseOptions::lazy_extra(),
+            &cv_core::Demand::RICH.with_spans(),
             &mut lazy,
             Default::default(),
         )?
@@ -1978,7 +1978,7 @@ mod tests {
             fn stream(
                 &self,
                 r: &SessionRef,
-                _: &cv_core::ParseOptions,
+                _: &cv_core::Demand,
                 sink: &mut dyn cv_core::MessageSink,
             ) -> Result<Session> {
                 let mut session = Session::new(&r.id, r.harness);
@@ -2052,7 +2052,7 @@ mod tests {
             fn stream(
                 &self,
                 _: &SessionRef,
-                _: &cv_core::ParseOptions,
+                _: &cv_core::Demand,
                 sink: &mut dyn cv_core::MessageSink,
             ) -> Result<Session> {
                 cv_core::stream::replay(self.0.clone(), sink)
@@ -2127,7 +2127,7 @@ mod tests {
             fn stream(
                 &self,
                 _: &SessionRef,
-                _: &cv_core::ParseOptions,
+                _: &cv_core::Demand,
                 sink: &mut dyn cv_core::MessageSink,
             ) -> Result<Session> {
                 cv_core::stream::replay(self.0.clone(), sink)
@@ -2339,7 +2339,7 @@ mod tests {
             fn stream(
                 &self,
                 r: &SessionRef,
-                _: &cv_core::ParseOptions,
+                _: &cv_core::Demand,
                 sink: &mut dyn cv_core::MessageSink,
             ) -> Result<Session> {
                 let mut session = Session::new(&r.id, r.harness);
@@ -2382,10 +2382,10 @@ mod tests {
             fn stream(
                 &self,
                 r: &SessionRef,
-                opts: &cv_core::ParseOptions,
+                opts: &cv_core::Demand,
                 sink: &mut dyn cv_core::MessageSink,
             ) -> Result<Session> {
-                assert!(opts.extra);
+                assert!(opts.tier >= cv_core::stream::Tier::Facts);
                 let mut s = Session::new(r.id.clone(), r.harness);
                 s.title = Some("early title".into());
                 sink.meta(&s);
@@ -2521,7 +2521,7 @@ mod tests {
     fn assert_window_matches_full_parse(r: &SessionRef, range: (usize, Option<usize>)) -> String {
         let adapter = cv_core::harness::for_harness(r.harness).unwrap();
         let mut all = cv_core::CollectSink::default();
-        adapter.stream(r, &cv_core::ParseOptions::bulk(), &mut all).unwrap();
+        adapter.stream(r, &cv_core::Demand::LEAN, &mut all).unwrap();
         let end = range.1.unwrap_or(usize::MAX).min(all.messages.len());
         let want: String = all.messages[range.0..end]
             .iter()
@@ -2700,7 +2700,7 @@ mod tests {
             fn stream(
                 &self,
                 r: &SessionRef,
-                _: &cv_core::ParseOptions,
+                _: &cv_core::Demand,
                 sink: &mut dyn cv_core::MessageSink,
             ) -> Result<Session> {
                 let mut s = Session::new(r.id.clone(), Harness::Codex);

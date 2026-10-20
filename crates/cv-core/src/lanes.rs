@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::harness::claude::{subagent_end, task_notices, ApiErrorNotice, SubagentEnd, TaskNotice};
 use crate::ir::{Block, Message, MessageKind, Role, SessionRef, Usage};
-use crate::stream::{Flow, ParseOptions};
+use crate::stream::{Demand, Flow};
 use crate::SubagentInfo;
 
 /// Token totals for one lane, following [`Usage`]'s disjoint convention.
@@ -583,7 +583,7 @@ fn pass(r: &SessionRef) -> Result<Pass> {
     let mut seen = std::collections::HashSet::new();
     // Only response identity is needed beyond the ordinary IR. Keep source-backed arguments
     // without unrelated raw result metadata; demanded assistant reports retain their full text.
-    let opts = ParseOptions::usage();
+    let opts = Demand::USAGE.with_spans();
     let resolver = crate::lazy::Resolver::new(Some(r.path.clone()));
     let session = adapter.try_stream(
         r,

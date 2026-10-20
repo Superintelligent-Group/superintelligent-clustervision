@@ -388,7 +388,7 @@ fn checked_openclaw_late_source_failure_cannot_publish_staged_records() -> Resul
 
 #[test]
 fn checked_openclaw_complete_preparation_preserves_ir_wire_report_and_late_failure() -> Result<()> {
-    use crate::stream::ParseOptions;
+    use crate::stream::Demand;
     let world = crate::test_world("openclaw-complete-preparation");
     let source = world.base.join("source.jsonl");
     let rows = [
@@ -410,7 +410,7 @@ fn checked_openclaw_complete_preparation_preserves_ir_wire_report_and_late_failu
     fs::write(&source, &bytes)?;
     let reference = crate::SessionRef::new("complete", Harness::OpenClaw, &source);
     let adapter = crate::harness::for_harness(Harness::OpenClaw).unwrap();
-    let owned = crate::stream::collect_with(adapter.as_ref(), &reference, &ParseOptions::complete())?;
+    let owned = crate::stream::collect_with(adapter.as_ref(), &reference, &Demand::COMPLETE)?;
     let checked = crate::emit::parse_for_emit(adapter.as_ref(), &reference, Harness::OpenClaw)?;
     assert!(checked.messages.iter().any(|m| m.content.iter().any(|b| matches!(
         b,
@@ -491,7 +491,7 @@ fn tool_export_preserves_every_result_structured_details_and_images() -> Result<
     let result = emit(&source, &world.base.join("output"), &EmitOptions::default())?;
     let adapter = crate::harness::for_harness(Harness::OpenClaw).unwrap();
     let reference = crate::SessionRef::new(&result.new_id, Harness::OpenClaw, &result.path);
-    let parsed = crate::stream::collect_with(adapter.as_ref(), &reference, &crate::stream::ParseOptions::full())?;
+    let parsed = crate::stream::collect_with(adapter.as_ref(), &reference, &crate::stream::Demand::RICH)?;
     assert_eq!(parsed.messages.len(), 2);
     assert!(
         matches!(&parsed.messages[0].content[0], Block::ToolResult { tool_use_id, tool_name, is_error:false, details:Some(details), content, .. }
@@ -511,7 +511,7 @@ fn tool_export_preserves_every_result_structured_details_and_images() -> Result<
 
 #[test]
 fn native_complete_export_preserves_records_branch_links_and_one_compaction_pair() -> Result<()> {
-    use crate::stream::ParseOptions;
+    use crate::stream::Demand;
     let world = crate::test_world("openclaw-native-complete-export");
     let original =
         fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/openclaw/branchy-v4.jsonl"))?;
@@ -608,7 +608,7 @@ fn native_complete_export_preserves_records_branch_links_and_one_compaction_pair
             assert_eq!(actual, expected, "row {index} mode {mode}");
         }
         let emitted = crate::SessionRef::new(&result.new_id, Harness::OpenClaw, &result.path);
-        let parsed = crate::stream::collect_with(adapter.as_ref(), &emitted, &ParseOptions::full())?;
+        let parsed = crate::stream::collect_with(adapter.as_ref(), &emitted, &Demand::RICH)?;
         assert_eq!(
             parsed
                 .messages
@@ -642,7 +642,7 @@ fn native_complete_export_preserves_records_branch_links_and_one_compaction_pair
     };
     let result = emit(&edited, &world.base.join("edited"), &EmitOptions::default())?;
     let emitted = crate::SessionRef::new(&result.new_id, Harness::OpenClaw, &result.path);
-    let parsed = crate::stream::collect_with(adapter.as_ref(), &emitted, &ParseOptions::full())?;
+    let parsed = crate::stream::collect_with(adapter.as_ref(), &emitted, &Demand::RICH)?;
     assert!(parsed
         .messages
         .iter()
@@ -659,7 +659,7 @@ fn native_complete_export_preserves_records_branch_links_and_one_compaction_pair
         .timestamp = Some("2026-10-13T01:02:03Z".parse()?);
     let changed = emit(&owned_edit, &world.base.join("owned-edited"), &EmitOptions::default())?;
     let changed_ref = crate::SessionRef::new(&changed.new_id, Harness::OpenClaw, &changed.path);
-    let reparsed = crate::stream::collect_with(adapter.as_ref(), &changed_ref, &ParseOptions::full())?;
+    let reparsed = crate::stream::collect_with(adapter.as_ref(), &changed_ref, &Demand::RICH)?;
     assert!(reparsed
         .messages
         .iter()

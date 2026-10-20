@@ -1257,7 +1257,7 @@ mod tests {
         let adapter = crate::harness::claude::Claude::with_config_dir(&world.proj);
         let reference = SessionRef::new("windowed", Harness::Claude, path.clone());
         let mut session =
-            crate::stream::collect_with(&adapter, &reference, &crate::stream::ParseOptions::lazy()).unwrap();
+            crate::stream::collect_with(&adapter, &reference, &crate::stream::Demand::LEAN.with_spans()).unwrap();
         assert!(session.messages.iter().any(|m| m.content.iter().any(|b| matches!(b,
             crate::ir::Block::Text { text } if text.is_span()))));
         session.materialize().unwrap();
@@ -1290,7 +1290,7 @@ mod tests {
         let parse = || {
             let adapter = crate::harness::claude::Claude::with_config_dir(&world.proj);
             let reference = SessionRef::new("stamped", Harness::Claude, path.clone());
-            crate::stream::collect_with(&adapter, &reference, &crate::stream::ParseOptions::lazy()).unwrap()
+            crate::stream::collect_with(&adapter, &reference, &crate::stream::Demand::LEAN.with_spans()).unwrap()
         };
         let first_text = |session: &crate::Session| match &session.messages[0].content[0] {
             Block::Text { text } => text.clone(),

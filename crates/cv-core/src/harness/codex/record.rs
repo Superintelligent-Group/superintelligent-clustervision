@@ -63,7 +63,7 @@ pub(super) struct Demand {
 }
 
 impl Demand {
-    pub(super) fn of(opts: &ParseOptions) -> Self {
+    pub(super) fn of(opts: &stream::Demand) -> Self {
         Demand {
             spans: opts.spans,
             metadata: false,
@@ -298,7 +298,7 @@ impl Reader<'_> {
         Ok(())
     }
 
-    /// Under `ParseOptions::complete`, a record with no conversational shape — one no arm knows, or
+    /// Under `stream::Demand::COMPLETE`, a record with no conversational shape — one no arm knows, or
     /// a lifecycle marker the lean passes drop — becomes a [`MessageKind::Carrier`]: the verbatim
     /// record under the top-level `_record` key and its type in `extra["codex"]["record_type"]`, so
     /// a same-harness round-trip loses nothing and `cv formats` can count what the adapter does not
@@ -479,7 +479,7 @@ impl Reader<'_> {
     /// the items don't — except the last agent message, which is stashed session-level as a preview.
     ///
     /// Returns whether the record is represented in the IR (as a message, merged usage or session
-    /// metadata); `false` lets the record carry verbatim under `ParseOptions::complete`.
+    /// metadata); `false` lets the record carry verbatim under `stream::Demand::COMPLETE`.
     fn event(&mut self, payload: Option<JsonView<'_>>, ts: Option<DateTime<Utc>>) -> Result<bool> {
         let Some(p) = payload else { return Ok(false) };
         let has_events = self.has_events;

@@ -64,7 +64,7 @@ pub struct Report {
 
 impl Report {
     /// Start folding one session into the report. Stream its messages into the returned sink (a
-    /// [`ParseOptions::facts`](crate::ParseOptions::facts) pass: attribution counts
+    /// [`Demand::FACTS`](crate::Demand::FACTS) pass: attribution counts
     /// decoded text in bounded chunks, and attachment/compaction metadata live in `extra`), then
     /// call [`SessionPass::finish`]. Adapters without a facts projection retain their full metadata.
     pub fn session(&mut self, source: Option<std::path::PathBuf>) -> SessionPass<'_> {

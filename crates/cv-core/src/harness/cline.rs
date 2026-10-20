@@ -52,7 +52,7 @@ use super::Adapter;
 use crate::ir::*;
 use crate::json::{InvalidJson, JsonSource, JsonView};
 use crate::source::{sqlite_sidecars, Dependencies, Probe};
-use crate::stream::{Flow, MessageSink, ParseOptions};
+use crate::stream::{Demand, Flow, MessageSink};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Map, Value};
@@ -150,7 +150,7 @@ impl Adapter for Cline {
         Ok(out)
     }
 
-    fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+    fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| {
             // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
             let mut spawns = crate::affordance::AffordanceSink::new(Harness::Cline, sink);
@@ -324,7 +324,7 @@ fn scan(dir: &Path, id: &str, harness: Harness) -> Option<SessionRef> {
 pub(crate) fn parse_task_dir(dir: &Path, id: &str, harness: Harness) -> Result<Session> {
     use crate::stream::CollectSink;
     let mut sink = CollectSink::default();
-    let mut session = stream_task_dir(dir, id, harness, &ParseOptions::full(), &mut sink)?;
+    let mut session = stream_task_dir(dir, id, harness, &Demand::RICH, &mut sink)?;
     session.messages = sink.messages;
     Ok(session)
 }
@@ -336,7 +336,7 @@ pub fn stream_task_dir(
     dir: &Path,
     id: &str,
     harness: Harness,
-    opts: &ParseOptions,
+    opts: &Demand,
     sink: &mut dyn MessageSink,
 ) -> Result<Session> {
     let history = dir.join("api_conversation_history.json");
@@ -1092,7 +1092,7 @@ mod tests {
             assert_eq!(owned.messages[2].timestamp.unwrap().timestamp_millis(), 1717000000022);
             assert_eq!(owned.messages[3].kind, MessageKind::CompactionBoundary);
             assert_eq!(owned.messages[3].timestamp, owned.messages[4].timestamp);
-            for opts in [ParseOptions::full(), ParseOptions::lazy(), ParseOptions::complete()] {
+            for opts in [Demand::RICH, Demand::LEAN.with_spans(), Demand::COMPLETE] {
                 let mut sink = CollectSink::default();
                 stream_task_dir(&dir, "1717000000000", harness, &opts, &mut sink).unwrap();
                 assert_eq!(
@@ -1148,7 +1148,7 @@ mod tests {
                 DateTime::<Utc>::from_timestamp_millis(1717000000001)
             );
             assert_eq!(expected.system_prompt.as_deref(), Some(body.as_str()));
-            for opts in [ParseOptions::lazy(), ParseOptions::full(), ParseOptions::complete()] {
+            for opts in [Demand::LEAN.with_spans(), Demand::RICH, Demand::COMPLETE] {
                 let mut sink = CollectSink::default();
                 let mut actual = stream_task_dir(&dir, "1717000000000", harness, &opts, &mut sink).unwrap();
                 actual.messages = sink.messages;

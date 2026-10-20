@@ -64,7 +64,8 @@ pub use emit::emit;
 use super::Adapter;
 use crate::ir::*;
 use crate::source::{is_sqlite_source, Dependencies, Probe};
-use crate::stream::{Flow, MessageSink, ParseOptions};
+use crate::stream::Tier;
+use crate::stream::{Demand, Flow, MessageSink};
 use anyhow::{Context, Result};
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
@@ -286,7 +287,7 @@ impl Adapter for OpenCode {
         super::WatchPolicy::Database
     }
 
-    fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+    fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| {
             // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
             let mut spawns = crate::affordance::AffordanceSink::new(Harness::OpenCode, sink);
@@ -668,14 +669,14 @@ mod db {
 
     /// Stream one db-backed session: the `session` row → [`Session`] metadata + `extra`, then each
     /// `message` row with its `part` rows hydrated and mapped one message at a time.
-    pub(super) fn stream(r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+    pub(super) fn stream(r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
         let conn = open_ro(&r.path)?;
         conn.read(|reader| stream_snapshot(r, opts, sink, reader.reads(), reader))
     }
 
     fn stream_snapshot(
         r: &SessionRef,
-        opts: &ParseOptions,
+        opts: &Demand,
         sink: &mut dyn MessageSink,
         reads: &crate::source::ReadSet,
         conn: &rusqlite::Connection,
@@ -815,7 +816,7 @@ mod db {
     fn stream_v2(
         conn: &rusqlite::Connection,
         mut s: Session,
-        opts: &ParseOptions,
+        opts: &Demand,
         sink: &mut dyn MessageSink,
         cells: &Cells,
     ) -> Result<Session> {
@@ -831,7 +832,7 @@ mod db {
         while let Some(row) = rows.next()? {
             let id: String = row.get(0)?;
             let ty: String = row.get(1)?;
-            if opts.complete && !v2::known_type(&ty) {
+            if opts.tier == Tier::Complete && !v2::known_type(&ty) {
                 *unknown.entry(ty.clone()).or_default() += 1;
             }
             let decoded = match cells.cell(conn, "session_message", "data", row, 2)? {
@@ -839,7 +840,7 @@ mod db {
                     let Some(mut built) = v2::build(&id, &ty, view, opts, ctx)? else {
                         return Ok(None);
                     };
-                    if opts.complete {
+                    if opts.tier == Tier::Complete {
                         v2::attach_complete(&mut built, &id, &ty, view.argument(opts.spans)?);
                     }
                     Ok(Some(built))
@@ -1349,7 +1350,7 @@ mod tests {
             );
             fs::write(&path, &wire).unwrap();
             let (owned, spans) = both_demands(&path, |view, ctx| {
-                Ok(v2::build("message", "shell", view, &ParseOptions::complete(), ctx)?.unwrap())
+                Ok(v2::build("message", "shell", view, &Demand::COMPLETE, ctx)?.unwrap())
             });
             assert_eq!(serde_json::to_vec(&owned).unwrap(), serde_json::to_vec(&spans).unwrap());
             assert_eq!(owned[0].text(), expected, "{}", &wire[..wire.len().min(200)]);
@@ -1365,7 +1366,7 @@ mod tests {
                     "message",
                     "shell",
                     view,
-                    &ParseOptions::lazy(),
+                    &Demand::LEAN.with_spans(),
                     record::Ctx::new(true, &source, &arena),
                 )?
                 .unwrap())
@@ -1397,11 +1398,11 @@ mod tests {
         let adapter = OpenCode::with_db(db.clone());
         let reference = SessionRef::new("session", Harness::OpenCode, &db);
         for opts in [
-            ParseOptions::lazy(),
-            ParseOptions::facts(),
-            ParseOptions {
+            Demand::LEAN.with_spans(),
+            Demand::FACTS.with_spans(),
+            Demand {
                 spans: true,
-                ..ParseOptions::complete()
+                ..Demand::COMPLETE
             },
         ] {
             let mut actual = crate::stream::collect_with(&adapter, &reference, &opts).unwrap();
@@ -1414,7 +1415,7 @@ mod tests {
             actual.materialize().unwrap();
             // Complete demand now retains the actual native record. Compare against the
             // same owned demand, rather than the bulk projection that omits rich metadata.
-            let owned_opts = ParseOptions { spans: false, ..opts };
+            let owned_opts = Demand { spans: false, ..opts };
             let owned = crate::stream::collect_with(&adapter, &reference, &owned_opts).unwrap();
             let actual = serde_json::to_vec(&actual).unwrap();
             let expected = serde_json::to_vec(&owned).unwrap();
@@ -1436,7 +1437,7 @@ mod tests {
                 context(&expected)
             );
         }
-        let mut retained = crate::stream::collect_with(&adapter, &reference, &ParseOptions::lazy()).unwrap();
+        let mut retained = crate::stream::collect_with(&adapter, &reference, &Demand::LEAN.with_spans()).unwrap();
         connection.execute("UPDATE session_message SET data='{}'", []).unwrap();
         assert!(retained.materialize().is_err());
         connection
@@ -1447,7 +1448,7 @@ mod tests {
             anyhow::bail!("consumer cap")
         });
         let error = adapter
-            .stream(&reference, &ParseOptions::lazy(), &mut sink)
+            .stream(&reference, &Demand::LEAN.with_spans(), &mut sink)
             .unwrap_err();
         assert!(format!("{error:#}").contains("changed"), "{error:#}");
         assert!(!format!("{error:#}").contains("consumer cap"));
@@ -1468,9 +1469,9 @@ mod tests {
             )
             .unwrap();
         let corpus_reference = SessionRef::new(id, Harness::OpenCode, &corpus);
-        let expected = crate::stream::collect_with(&corpus_adapter, &corpus_reference, &ParseOptions::bulk()).unwrap();
+        let expected = crate::stream::collect_with(&corpus_adapter, &corpus_reference, &Demand::LEAN).unwrap();
         let mut actual =
-            crate::stream::collect_with(&corpus_adapter, &corpus_reference, &ParseOptions::lazy()).unwrap();
+            crate::stream::collect_with(&corpus_adapter, &corpus_reference, &Demand::LEAN.with_spans()).unwrap();
         actual.materialize().unwrap();
         assert_eq!(
             serde_json::to_vec(&actual).unwrap(),
@@ -1500,7 +1501,7 @@ mod tests {
         let data = json!({"content":content,"model":{"id":"model"},"tokens":{"input":1},"metadata":{"preserve":true}});
         std::fs::write(&path, serde_json::to_vec(&data).unwrap()).unwrap();
         let (owned, spans) = both_demands(&path, |view, ctx| {
-            Ok(v2::build("message", "assistant", view, &ParseOptions::lazy(), ctx)?.unwrap())
+            Ok(v2::build("message", "assistant", view, &Demand::LEAN.with_spans(), ctx)?.unwrap())
         });
         assert_eq!(
             serde_json::to_value(&owned).unwrap(),
@@ -1537,7 +1538,7 @@ mod tests {
                     "message",
                     "assistant",
                     view,
-                    &ParseOptions::lazy(),
+                    &Demand::LEAN.with_spans(),
                     record::Ctx::new(true, &source, &arena),
                 )?
                 .unwrap())
@@ -1568,22 +1569,15 @@ mod tests {
         let adapter = OpenCode::with_db(path.clone());
         let reference = adapter.discover()?.remove(0);
         for spans in [false, true] {
-            let full = crate::stream::collect_with(
-                &adapter,
-                &reference,
-                &ParseOptions {
-                    spans,
-                    ..ParseOptions::full()
-                },
-            )?;
+            let full = crate::stream::collect_with(&adapter, &reference, &Demand { spans, ..Demand::RICH })?;
             assert!(full.messages.is_empty());
             assert_eq!(full.extra["opencode"]["unknown_message_types"]["future-event"], 1);
             let complete = crate::stream::collect_with(
                 &adapter,
                 &reference,
-                &ParseOptions {
+                &Demand {
                     spans,
-                    ..ParseOptions::complete()
+                    ..Demand::COMPLETE
                 },
             )?;
             assert_eq!(complete.messages.len(), 1);
@@ -1627,14 +1621,7 @@ mod tests {
         let adapter = OpenCode::with_root(root);
         let reference = adapter.discover()?.remove(0);
         for spans in [false, true] {
-            let session = crate::stream::collect_with(
-                &adapter,
-                &reference,
-                &ParseOptions {
-                    spans,
-                    ..ParseOptions::full()
-                },
-            )?;
+            let session = crate::stream::collect_with(&adapter, &reference, &Demand { spans, ..Demand::RICH })?;
             assert_eq!(
                 session
                     .messages
@@ -1886,7 +1873,7 @@ mod tests {
             let refs = adapter.discover().unwrap();
             assert_eq!(refs.len(), 1);
             for reference in &refs {
-                let mut session = crate::stream::collect_with(&adapter, reference, &ParseOptions::lazy()).unwrap();
+                let mut session = crate::stream::collect_with(&adapter, reference, &Demand::LEAN.with_spans()).unwrap();
                 session.materialize().unwrap();
                 assert!(session
                     .messages
@@ -1925,7 +1912,7 @@ mod tests {
                 connection
                     .execute_batch(&format!("UPDATE session_message SET data = {expression}"))
                     .unwrap();
-                for opts in [ParseOptions::bulk(), ParseOptions::lazy()] {
+                for opts in [Demand::LEAN, Demand::LEAN.with_spans()] {
                     let session = crate::stream::collect_with(&adapter, &reference, &opts).unwrap();
                     assert!(session.messages.is_empty(), "{expression}");
                     assert_eq!(session.extra["cv"]["skipped_lines"], 1, "{expression}");
@@ -2027,7 +2014,9 @@ mod tests {
             messages.push(message);
             Ok(crate::stream::Flow::Continue)
         });
-        adapter.stream(&reference, &ParseOptions::lazy(), &mut sink).unwrap();
+        adapter
+            .stream(&reference, &Demand::LEAN.with_spans(), &mut sink)
+            .unwrap();
         let Block::Text { text } = &messages[0].content[0] else {
             panic!("selected text")
         };
@@ -2067,7 +2056,7 @@ mod tests {
             anyhow::bail!("consumer cap")
         });
         let error = adapter
-            .stream(&reference, &ParseOptions::lazy(), &mut sink)
+            .stream(&reference, &Demand::LEAN.with_spans(), &mut sink)
             .unwrap_err();
         assert!(format!("{error:#}").contains("changed"), "{error:#}");
         assert!(!format!("{error:#}").contains("consumer cap"));

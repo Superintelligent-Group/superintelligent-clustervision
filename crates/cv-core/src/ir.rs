@@ -419,7 +419,7 @@ pub enum MessageKind {
     SubagentReturn,
     /// A branch / rewind / reset marker: what follows does not continue what precedes.
     Branch,
-    /// A verbatim non-conversational record carried only under `ParseOptions::complete`.
+    /// A verbatim non-conversational record carried only under `Demand::COMPLETE`.
     Carrier,
 }
 
@@ -541,7 +541,7 @@ pub struct Message {
     /// Harness-specific message facts, nested under the harness name
     /// (`extra["claude"]["attachment_type"]`). The only other top-level key allowed is
     /// [`CARRIER_KEY`](crate::harness::claude::CARRIER_KEY) (`"_record"`, the verbatim record under
-    /// `ParseOptions::complete`). Shared concepts are first-class (`kind`, `origin`, `usage`,
+    /// `Demand::COMPLETE`). Shared concepts are first-class (`kind`, `origin`, `usage`,
     /// `Block::ToolResult::details`). See `docs/INTERFACE-V2.md` §4.
     pub extra: serde_json::Map<String, serde_json::Value>,
     /// Checked complete native backing; serializes through `extra._record`, never as a new field.

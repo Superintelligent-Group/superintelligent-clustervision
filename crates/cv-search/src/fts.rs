@@ -1797,7 +1797,7 @@ fn job_pass(
         )?
         .map(|(_, done, reads)| (done, reads))
     } else {
-        let opts = cv_core::ParseOptions::lazy();
+        let opts = cv_core::Demand::LEAN.with_spans();
         resumed(cv_core::stream::stream_counted(
             adapter,
             &job.r,
@@ -1866,7 +1866,7 @@ fn index_session(
     prov: cv_core::events::Provenance,
     from: Option<&cv_core::stream::Checkpoint>,
 ) -> Result<Option<(usize, cv_core::stream::Streamed, cv_core::source::ReadSet)>> {
-    let opts = cv_core::ParseOptions::lazy();
+    let opts = cv_core::Demand::LEAN.with_spans();
     let mut sink = match from {
         Some(cp) => ChunkSink::resume(out, f, r, mtime, size, prov, cp).context("checkpoint without fts state")?,
         None => ChunkSink::new(out, f, r, mtime, size, prov),
@@ -3128,13 +3128,13 @@ const SNIPPET_SCAN_CAP: usize = 256 * 1024;
 /// Generate a snippet for a hit by re-reading **just that one session** (streamed, capped), finding
 /// the first query term, and windowing around it — instead of keeping a stored copy of every body.
 ///
-/// Streams under [`ParseOptions::lazy`] and resolves span content **capped at the remaining scan
+/// Streams under [`Demand::with_spans`] and resolves span content **capped at the remaining scan
 /// budget**, so a session fronted by a giant record (e.g. a 700 MB tool dump) costs at most
 /// [`SNIPPET_SCAN_CAP`] here — the old `bulk()` + materialize path owned the whole record before
 /// the cap check could run. Trade-off: a term that only occurs *beyond* the cap inside one giant
 /// field now falls back to the head/preview snippet (it already did for terms in later messages).
 fn live_snippet(path: &str, harness: &str, query: &str, scope: crate::Scope) -> Option<String> {
-    use cv_core::{Block, Flow, Message, MessageSink, ParseOptions, SessionRef};
+    use cv_core::{Block, Demand, Flow, Message, MessageSink, SessionRef};
     let h = cv_core::Harness::parse(harness)?;
     let adapter = cv_core::harness::for_harness(h)?;
     let sref = SessionRef {
@@ -3245,7 +3245,7 @@ fn live_snippet(path: &str, harness: &str, query: &str, scope: crate::Scope) -> 
     cv_core::stream::stream_counted(
         &*adapter,
         &sref,
-        &ParseOptions::lazy(),
+        &Demand::LEAN.with_spans(),
         &mut acc,
         cv_core::stream::Pass::RECORD,
     )
@@ -5710,7 +5710,7 @@ mod tests {
             fn stream(
                 &self,
                 r: &cv_core::SessionRef,
-                _: &cv_core::ParseOptions,
+                _: &cv_core::Demand,
                 sink: &mut dyn cv_core::MessageSink,
             ) -> Result<cv_core::Session> {
                 let mut first = cv_core::Message::new(cv_core::Role::User);
@@ -5803,7 +5803,7 @@ mod tests {
             fn stream(
                 &self,
                 r: &cv_core::SessionRef,
-                _: &cv_core::ParseOptions,
+                _: &cv_core::Demand,
                 sink: &mut dyn MessageSink,
             ) -> Result<cv_core::Session> {
                 for n in 0..6 {
@@ -5906,7 +5906,7 @@ mod tests {
             fn stream(
                 &self,
                 _r: &cv_core::SessionRef,
-                _opts: &cv_core::ParseOptions,
+                _opts: &cv_core::Demand,
                 sink: &mut dyn cv_core::MessageSink,
             ) -> Result<cv_core::Session> {
                 let mut m = cv_core::Message::new(cv_core::Role::User);

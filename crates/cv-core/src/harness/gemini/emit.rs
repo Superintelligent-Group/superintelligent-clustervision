@@ -351,9 +351,9 @@ mod checked_tests {
             .iter()
             .any(|block| matches!(block,Block::Text {text} if text.is_span())));
         prepared.materialize()?;
-        let full = crate::stream::collect_with(&adapter, &reference, &crate::ParseOptions::full())?;
+        let full = crate::stream::collect_with(&adapter, &reference, &crate::Demand::RICH)?;
         assert_eq!(serde_json::to_value(&prepared)?, serde_json::to_value(&full)?);
-        let complete = crate::stream::collect_with(&adapter, &reference, &crate::ParseOptions::complete())?;
+        let complete = crate::stream::collect_with(&adapter, &reference, &crate::Demand::COMPLETE)?;
         assert!(complete.messages[0]
             .content
             .iter()

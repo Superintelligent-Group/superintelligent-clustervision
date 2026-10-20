@@ -580,7 +580,7 @@ pub fn stage_record(
     let read = crate::stream::stream_counted(
         adapter,
         r,
-        &crate::ParseOptions::lazy(),
+        &crate::Demand::LEAN.with_spans(),
         &mut sink,
         crate::stream::Pass::RECORD,
     );
@@ -856,7 +856,7 @@ mod tests {
         );
         let r = crate::ir::SessionRef::new("dataset", Harness::Claude, path);
         let adapter = crate::harness::for_harness(r.harness).unwrap();
-        let full = crate::stream::collect_with(adapter.as_ref(), &r, &crate::ParseOptions::lazy()).unwrap();
+        let full = crate::stream::collect_with(adapter.as_ref(), &r, &crate::Demand::LEAN.with_spans()).unwrap();
         let opts = crate::redact::RedactOptions::default();
         for fmt in [Format::Chatml, Format::ShareGpt] {
             for redact in [None, Some(&opts)] {
@@ -1013,7 +1013,7 @@ mod tests {
             fn stream(
                 &self,
                 r: &crate::ir::SessionRef,
-                _: &crate::ParseOptions,
+                _: &crate::Demand,
                 sink: &mut dyn crate::MessageSink,
             ) -> anyhow::Result<Session> {
                 for message in &self.0 {
@@ -1100,7 +1100,7 @@ mod tests {
             fn stream(
                 &self,
                 r: &crate::ir::SessionRef,
-                _: &crate::ParseOptions,
+                _: &crate::Demand,
                 sink: &mut dyn crate::MessageSink,
             ) -> anyhow::Result<Session> {
                 let mut message = msg(
@@ -1159,7 +1159,7 @@ mod tests {
             fn stream(
                 &self,
                 _: &crate::ir::SessionRef,
-                _: &crate::ParseOptions,
+                _: &crate::Demand,
                 sink: &mut dyn crate::MessageSink,
             ) -> anyhow::Result<Session> {
                 sink.try_message(msg(
@@ -1277,7 +1277,7 @@ mod tests {
         fn stream(
             &self,
             reference: &crate::SessionRef,
-            _: &crate::ParseOptions,
+            _: &crate::Demand,
             sink: &mut dyn crate::MessageSink,
         ) -> anyhow::Result<Session> {
             let mut meta = Session::new(reference.id.clone(), reference.harness);
@@ -1470,7 +1470,7 @@ mod tests {
         )?;
         let adapter = crate::harness::lmstudio::LmStudio::with_root(&world.base);
         let reference = crate::SessionRef::from_path(&path, Harness::LmStudio);
-        let collected = crate::stream::collect_with(&adapter, &reference, &crate::ParseOptions::lazy())?;
+        let collected = crate::stream::collect_with(&adapter, &reference, &crate::Demand::LEAN.with_spans())?;
         assert_eq!(collected.system_prompt.as_deref(), Some("Follow the house style."));
         assert!(collected
             .messages

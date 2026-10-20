@@ -42,7 +42,7 @@ use crate::ir::*;
 use crate::json::{JsonSource, JsonView};
 use crate::lazy::Text;
 use crate::source::{Dependencies, Probe};
-use crate::stream::{Checkpoint, Flow, MessageSink, ParseOptions};
+use crate::stream::{Checkpoint, Demand, Flow, MessageSink};
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -153,7 +153,7 @@ impl Adapter for Grok {
         Ok(out)
     }
 
-    fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+    fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| {
             // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
             let mut spawns = crate::affordance::AffordanceSink::new(Harness::Grok, sink);
@@ -175,7 +175,7 @@ impl Adapter for Grok {
     fn resume(
         &self,
         r: &SessionRef,
-        opts: &ParseOptions,
+        opts: &Demand,
         sink: &mut dyn MessageSink,
         from: &Checkpoint,
     ) -> Result<Option<Session>> {
@@ -402,7 +402,7 @@ fn stream_history_at(
     mut s: Session,
     enrich: &HashMap<String, ToolEnrich>,
     prior_skipped: u64,
-    opts: &ParseOptions,
+    opts: &Demand,
     sink: &mut dyn MessageSink,
 ) -> Result<Option<Session>> {
     let read = jsonl::Read::open(wire).with_context(|| format!("reading {}", wire.display()))?;
@@ -717,7 +717,7 @@ mod tests {
     }
 
     /// A whole stream of `r`, messages collected.
-    fn whole(adapter: &Grok, r: &SessionRef, opts: &ParseOptions) -> Session {
+    fn whole(adapter: &Grok, r: &SessionRef, opts: &Demand) -> Session {
         let mut all = ResumeKeep::default();
         let mut s = adapter.try_stream(r, opts, &mut all).unwrap();
         s.messages = all.messages;
@@ -767,11 +767,11 @@ mod tests {
         let adapter = Grok::with_home(&world.home.join(".grok"));
         let r = SessionRef::new("session", Harness::Grok, &dir);
         let mut full = ResumeKeep::default();
-        let shell = adapter.stream(&r, &ParseOptions::full(), &mut full).unwrap();
+        let shell = adapter.stream(&r, &Demand::RICH, &mut full).unwrap();
         let (count, checkpoint) = &full.checkpoints[0];
         let mut resumed = ResumeKeep::default();
         let suffix = adapter
-            .resume(&r, &ParseOptions::lazy(), &mut resumed, checkpoint)
+            .resume(&r, &Demand::LEAN.with_spans(), &mut resumed, checkpoint)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -820,10 +820,10 @@ mod tests {
             }
             let r = SessionRef::new("corpus", Harness::Grok, file.path().parent().unwrap());
             for opts in [
-                ParseOptions::lazy(),
-                ParseOptions::lazy_extra(),
-                ParseOptions::full(),
-                ParseOptions::complete(),
+                Demand::LEAN.with_spans(),
+                Demand::RICH.with_spans(),
+                Demand::RICH,
+                Demand::COMPLETE,
             ] {
                 let mut full = ResumeKeep::default();
                 let shell = adapter.try_stream(&r, &opts, &mut full).unwrap();
@@ -868,7 +868,7 @@ mod tests {
         fs::write(dir.join("chat_history.jsonl"), &prefix).unwrap();
         let mut r = SessionRef::new("session", Harness::Grok, &dir);
         let adapter = Grok::with_home(&world.home.join(".grok"));
-        let opts = ParseOptions::lazy();
+        let opts = Demand::LEAN.with_spans();
         let mut first = ResumeKeep::default();
         adapter.try_stream(&r, &opts, &mut first).unwrap();
         let (count, cp) = first.checkpoints.last().unwrap();
@@ -1057,11 +1057,7 @@ mod tests {
                             changed: false,
                             first: None,
                         };
-                        let opts = if lazy {
-                            ParseOptions::lazy()
-                        } else {
-                            ParseOptions::full()
-                        };
+                        let opts = if lazy { Demand::LEAN.with_spans() } else { Demand::RICH };
                         let result = adapter.try_stream(&reference, &opts, &mut sink);
                         assert_eq!(
                             result.is_err(),
@@ -1166,7 +1162,7 @@ mod tests {
         let done = crate::stream::stream_counted(
             &grok,
             &r,
-            &ParseOptions::facts(),
+            &Demand::FACTS.with_spans(),
             &mut sink,
             crate::stream::Pass::RECORD,
         )?;
@@ -1204,7 +1200,7 @@ mod tests {
         crate::stream::stream_counted(
             &grok,
             &grown,
-            &ParseOptions::facts(),
+            &Demand::FACTS.with_spans(),
             &mut sink,
             crate::stream::Pass::RECORD,
         )?;

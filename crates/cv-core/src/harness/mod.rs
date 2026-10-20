@@ -4,7 +4,7 @@
 use crate::ir::{Harness, Message, Session, SessionRef};
 #[cfg(test)]
 use crate::stream::Flow;
-use crate::stream::{MessageSink, ParseOptions};
+use crate::stream::{Demand, MessageSink};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -134,7 +134,7 @@ fn each_json_line_inner(
 /// list that GROWS — every new cross-harness diagnostic would have to be added to it and to every
 /// consumer that walks `extra` (see `harness::claude::emit::is_internal_extra_key`). A namespace does
 /// not. So §4's exceptions stay exactly what they are today, both on `Message` only:
-/// [`claude::CARRIER_KEY`] (`_record`, the verbatim source record under `ParseOptions::complete`)
+/// [`claude::CARRIER_KEY`] (`_record`, the verbatim source record under `Demand::COMPLETE`)
 /// and [`crate::offsets::OFFSET_KEY`] (`cv_byte_offset`, written per message on the lazy-offset hot
 /// path, where a nested map per message would be pure allocation). `Session::extra` has **no** flat
 /// exception: every top-level key there is a namespace object — a harness name or `"cv"`.
@@ -202,14 +202,14 @@ pub trait Adapter: Send + Sync {
     /// Stream a session's messages into `sink` one at a time, dropping each before the next, so
     /// peak memory is O(largest message) rather than O(transcript). Returns the session's metadata
     /// (id/cwd/title/model/git/timestamps) with an **empty** `messages` vec — the messages went to
-    /// the sink. `opts` controls how much of each message is materialized (see [`ParseOptions`]).
+    /// the sink. `opts` controls how much of each message is materialized (see [`Demand`]).
     /// See [`claude`](crate::harness::claude) for the reference; a store that can only be read
     /// whole hands its parsed session to [`crate::stream::replay`].
-    fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session>;
+    fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session>;
 
     /// Checked stream boundary for all implementations, including third-party adapters which
     /// implement only [`Self::stream`]. Consumer failures are errors, never successful stops.
-    fn try_stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+    fn try_stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| self.stream(r, opts, sink))
     }
 
@@ -218,7 +218,7 @@ pub trait Adapter: Send + Sync {
     fn try_resume(
         &self,
         r: &SessionRef,
-        opts: &ParseOptions,
+        opts: &Demand,
         sink: &mut dyn MessageSink,
         from: &crate::stream::Checkpoint,
     ) -> Result<Option<Session>> {
@@ -283,7 +283,7 @@ pub trait Adapter: Send + Sync {
     fn resume(
         &self,
         _r: &SessionRef,
-        _opts: &ParseOptions,
+        _opts: &Demand,
         _sink: &mut dyn MessageSink,
         _from: &crate::stream::Checkpoint,
     ) -> Result<Option<Session>> {
@@ -600,7 +600,7 @@ pub fn for_harness(h: Harness) -> Option<Box<dyn Adapter>> {
 /// value is an object** — a canonical harness name (`Harness::as_str`, so an alias like `cc` fails)
 /// or [`crate::ir::CV_NAMESPACE`]. Exactly two flat keys are allowed, both message-level and both cv's own
 /// streaming bookkeeping rather than harness facts: [`claude::CARRIER_KEY`] (`_record`, the verbatim
-/// source record under [`ParseOptions::complete`]) and [`crate::offsets::OFFSET_KEY`]
+/// source record under [`Demand::COMPLETE`]) and [`crate::offsets::OFFSET_KEY`]
 /// (`cv_byte_offset`). `Session::extra` has no flat exception at all.
 #[cfg(test)]
 pub(crate) fn assert_no_flat_keys(s: &Session) {
@@ -669,7 +669,7 @@ pub(crate) fn assert_windowed_models(adapter: &dyn Adapter) {
             first: None,
         };
         adapter
-            .try_stream(&r, &ParseOptions::lazy(), &mut w)
+            .try_stream(&r, &Demand::LEAN.with_spans(), &mut w)
             .unwrap_or_else(|e| panic!("windowed read of {}: {e:#}", r.id));
         let windowed = w
             .first

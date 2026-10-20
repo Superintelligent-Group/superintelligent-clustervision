@@ -62,11 +62,11 @@
 //! - Everything else (`usage.record`, `llm.request`, `llm.tools_snapshot`, `turn.*`,
 //!   `permission.*`, `tools.*`, `token_counting.*`, `task.started`, `plan_mode.*`,
 //!   `swarm_mode.*`, `full_compaction.*`, …) is bookkeeping: dropped by the lean passes, carried
-//!   verbatim under [`ParseOptions::complete`] as `Carrier` turns (`_record` = the record,
+//!   verbatim under [`Demand::COMPLETE`] as `Carrier` turns (`_record` = the record,
 //!   `extra["kimi-code"]["record_type"]` = its `type`) like the Claude adapter's carriers.
 //!
 //! Every harness fact lives in `extra["kimi-code"]` (message: `event`, `origin_kind`,
-//! `finishReason`, `compactedCount`, `record_type`, and under `ParseOptions::extra` the step
+//! `finishReason`, `compactedCount`, `record_type`, and under `Demand::extra` the step
 //! telemetry `stepUuid`/`turnId`/`step`/`traceId`/`llm*`; session: `native_id`, `archived`,
 //! `lastTurnReason`, `titleKind`, `isCustomTitle`, `lastPrompt`, `agents`, `protocol_version`, and
 //! on a sub-agent `agent_id`/`parentAgentId`/`labels`).
@@ -97,7 +97,8 @@ use crate::ir::*;
 use crate::json::{JsonSource, JsonView};
 use crate::lazy::Text;
 use crate::source::{Dependencies, Probe};
-use crate::stream::{Checkpoint, Flow, MessageSink, ParseOptions};
+use crate::stream::Tier;
+use crate::stream::{Checkpoint, Demand, Flow, MessageSink};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
@@ -213,7 +214,7 @@ impl Adapter for KimiCode {
         }))
     }
 
-    fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+    fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| {
             let (s, wire) = session_header(r);
             sink.meta(&s);
@@ -236,7 +237,7 @@ impl Adapter for KimiCode {
     fn resume(
         &self,
         r: &SessionRef,
-        opts: &ParseOptions,
+        opts: &Demand,
         sink: &mut dyn MessageSink,
         from: &Checkpoint,
     ) -> Result<Option<Session>> {
@@ -358,13 +359,13 @@ struct Flavor {
     facts: bool,
 }
 impl Flavor {
-    fn of(opts: &ParseOptions) -> Self {
+    fn of(opts: &Demand) -> Self {
         Self {
-            extra: opts.extra,
+            extra: opts.tier >= Tier::Facts,
             spans: opts.spans,
             offsets: opts.offsets,
-            complete: opts.complete,
-            facts: opts.facts_only(),
+            complete: opts.tier == Tier::Complete,
+            facts: opts.tier == Tier::Facts,
         }
     }
 }
@@ -388,9 +389,9 @@ struct SavedCtx {
     facts: Map<String, Value>,
 }
 impl SavedCtx {
-    fn restore(self, opts: &ParseOptions) -> Ctx<'_> {
+    fn restore(self, opts: &Demand) -> Ctx<'_> {
         let mut facts = self.facts;
-        if opts.facts_only() {
+        if opts.tier == Tier::Facts {
             facts.remove("todo");
         }
         Ctx {
@@ -836,7 +837,7 @@ struct ModelBindings {
 #[derive(serde::Serialize)]
 struct Ctx<'a> {
     #[serde(skip)]
-    opts: &'a ParseOptions,
+    opts: &'a Demand,
     #[serde(skip)]
     step: Option<StepBuf>,
     model_bindings: ModelBindings,
@@ -855,7 +856,7 @@ struct Ctx<'a> {
 }
 
 impl<'a> Ctx<'a> {
-    fn new(opts: &'a ParseOptions) -> Self {
+    fn new(opts: &'a Demand) -> Self {
         Self {
             opts,
             step: None,
@@ -906,7 +907,7 @@ impl<'a> Ctx<'a> {
     fn record(&mut self, view: JsonView<'_>, input: Option<&jsonl::Read>, sink: &mut dyn MessageSink) -> Result<Flow> {
         let spans = input.filter(|_| self.opts.spans).map(jsonl::Read::source);
         let Some(head) = WireRecord::of(view)? else {
-            return Ok(if self.opts.complete {
+            return Ok(if self.opts.tier == Tier::Complete {
                 self.bookkeeping(view.resolve()?.as_ref(), sink)
             } else {
                 Flow::Continue
@@ -918,7 +919,7 @@ impl<'a> Ctx<'a> {
             if let Some(fields) = Fields::parse(view, &["key", "value"])? {
                 if fields.string("key")?.as_deref() == Some("todo") {
                     if let Some(values) = fields.get("value").map(JsonView::array).transpose()?.flatten() {
-                        if self.opts.facts_only() {
+                        if self.opts.tier == Tier::Facts {
                             let mut present = false;
                             for value in values {
                                 if crate::affordance::item_present(value?)? {
@@ -939,11 +940,11 @@ impl<'a> Ctx<'a> {
                     }
                 }
             }
-            if !self.opts.complete {
+            if self.opts.tier != Tier::Complete {
                 return Ok(Flow::Continue);
             }
         }
-        if !self.opts.complete && matches!(ty.as_str(), "llm.request" | "usage.record") {
+        if self.opts.tier != Tier::Complete && matches!(ty.as_str(), "llm.request" | "usage.record") {
             let loop_request = loop_request(ty, record.string("kind")?.as_deref());
             if ty == "usage.record" || loop_request {
                 self.bind_model(record.string("modelAlias")?, loop_request);
@@ -967,7 +968,7 @@ impl<'a> Ctx<'a> {
             )?;
             let role = message.as_ref().and_then(|m| m.role.as_deref());
             let origin = message.as_ref().and_then(|m| m.origin.as_deref());
-            let raw = match (self.opts.complete, spans) {
+            let raw = match (self.opts.tier == Tier::Complete, spans) {
                 (false, _) => None,
                 (true, Some(_)) => Some(view.to_json()?),
                 (true, None) => Some(crate::Json::Owned(view.resolve()?.into_owned())),
@@ -977,7 +978,7 @@ impl<'a> Ctx<'a> {
         }
         if ty != "context.append_loop_event" {
             // Bookkeeping has no semantic output in lazy passes and need not become a Value.
-            if !self.opts.complete
+            if self.opts.tier != Tier::Complete
                 && !matches!(
                     ty.as_str(),
                     "permission.set_mode"
@@ -1018,7 +1019,7 @@ impl<'a> Ctx<'a> {
             ],
         )?
         else {
-            return Ok(if self.opts.complete {
+            return Ok(if self.opts.tier == Tier::Complete {
                 self.carry(view.resolve()?.as_ref(), ts, sink)
             } else {
                 Flow::Continue
@@ -1098,7 +1099,7 @@ impl<'a> Ctx<'a> {
                 }
                 self.step_event(&Value::Object(metadata), ts, sink)
             }
-            _ if self.opts.complete => self.carry(view.resolve()?.as_ref(), ts, sink),
+            _ if self.opts.tier == Tier::Complete => self.carry(view.resolve()?.as_ref(), ts, sink),
             _ => Flow::Continue,
         };
         Ok(if flow == Flow::Stop { self.stop() } else { flow })
@@ -1234,14 +1235,14 @@ impl<'a> Ctx<'a> {
             status: None,
             details: (!details.is_empty()).then(|| Value::Object(details)),
         });
-        if self.opts.extra {
+        if self.opts.tier >= Tier::Facts {
             if let Some(trace) = fields.value("traceId")? {
                 message
                     .harness_extra_mut(Harness::KimiCode)
                     .insert("traceId".into(), trace);
             }
         }
-        if self.opts.complete {
+        if self.opts.tier == Tier::Complete {
             let time = ts.map(|t| t.timestamp_millis());
             match spans {
                 Some(source) => {
@@ -1356,7 +1357,7 @@ impl<'a> Ctx<'a> {
                     Origin::Harness,
                     ty,
                 );
-                if self.opts.extra {
+                if self.opts.tier >= Tier::Facts {
                     let bag = m.harness_extra_mut(Harness::KimiCode);
                     bag.insert("task".into(), info);
                     if let Some(tail) = v.get("outputTail") {
@@ -1467,7 +1468,7 @@ impl<'a> Ctx<'a> {
 
     /// Bookkeeping record: carried verbatim under `complete`, dropped otherwise.
     fn carry(&mut self, v: &Value, ts: Option<DateTime<Utc>>, sink: &mut dyn MessageSink) -> Flow {
-        if !self.opts.complete {
+        if self.opts.tier != Tier::Complete {
             return Flow::Continue;
         }
         let mut m = Message::of_kind(Role::System, MessageKind::Carrier, Origin::Harness);
@@ -1494,7 +1495,7 @@ impl<'a> Ctx<'a> {
             return self.carry(v, ts, sink);
         }
         let mut m = Message::of_kind(Role::System, MessageKind::SystemPrompt, Origin::Harness);
-        if self.opts.complete {
+        if self.opts.tier == Tier::Complete {
             m.extra.insert(CARRIER_KEY.into(), v.clone());
         }
         m.timestamp = ts;
@@ -1503,7 +1504,7 @@ impl<'a> Ctx<'a> {
         });
         let bag = m.harness_extra_mut(Harness::KimiCode);
         bag.insert("event".into(), Value::String(ty.to_string()));
-        if self.opts.extra {
+        if self.opts.tier >= Tier::Facts {
             for key in ["modelAlias", "profileName", "thinkingEffort"] {
                 if let Some(x) = v.get(key) {
                     bag.insert(key.to_string(), x.clone());
@@ -1593,7 +1594,7 @@ impl<'a> Ctx<'a> {
                     if let Some(fr) = e.get("finishReason") {
                         bag.insert("finishReason".into(), fr.clone());
                     }
-                    if self.opts.extra {
+                    if self.opts.tier >= Tier::Facts {
                         for key in [
                             "llmFirstTokenLatencyMs",
                             "llmStreamDurationMs",
@@ -1617,7 +1618,7 @@ impl<'a> Ctx<'a> {
         msg.model = self.reply_model();
         msg.id = Some(uuid.clone());
         msg.timestamp = ts;
-        if self.opts.extra {
+        if self.opts.tier >= Tier::Facts {
             let bag = msg.harness_extra_mut(Harness::KimiCode);
             bag.insert("stepUuid".into(), Value::String(uuid.clone()));
             for key in ["turnId", "step"] {
@@ -1781,10 +1782,10 @@ mod tests {
     fn leftovers_todo_updates_keep_latest_state_and_facts_presence() -> Result<()> {
         use crate::affordance::{self, Kind};
         for opts in [
-            ParseOptions::full(),
-            ParseOptions::lazy(),
-            ParseOptions::facts(),
-            ParseOptions::complete(),
+            Demand::RICH,
+            Demand::LEAN.with_spans(),
+            Demand::FACTS.with_spans(),
+            Demand::COMPLETE,
         ] {
             let mut ctx = Ctx::new(&opts);
             let mut sink = crate::stream::CollectSink::default();
@@ -1800,7 +1801,7 @@ mod tests {
             let rows = affordance::session_rows(&session);
             assert_eq!(rows.len(), 1);
             assert_eq!((rows[0].kind, rows[0].action), (Kind::Plan, "state"));
-            if opts.facts_only() {
+            if opts.tier == Tier::Facts {
                 assert!(
                     !ctx.facts.contains_key("todo"),
                     "reducers retain presence, not arbitrary-size plan text"
@@ -1816,7 +1817,7 @@ mod tests {
             assert!(affordance::session_rows(&session).is_empty());
         }
         assert!(
-            Flavor::of(&ParseOptions::facts()) != Flavor::of(&ParseOptions::lazy()),
+            Flavor::of(&Demand::FACTS.with_spans()) != Flavor::of(&Demand::LEAN.with_spans()),
             "rich and presence-only checkpoints cannot substitute for one another"
         );
         Ok(())
@@ -1825,7 +1826,7 @@ mod tests {
     #[test]
     fn leftovers_legacy_agent_calls_infer_spawn_and_completed_returns() -> Result<()> {
         for status in ["completed", "failed", "running"] {
-            let opts = ParseOptions::full();
+            let opts = Demand::RICH;
             let mut ctx = Ctx::new(&opts);
             let mut sink = crate::stream::CollectSink::default();
             let records = [
@@ -1904,11 +1905,11 @@ mod tests {
         let adapter = KimiCode::with_home(&home);
         let r = SessionRef::new("models", Harness::KimiCode, &dir);
         for opts in [
-            ParseOptions::full(),
-            ParseOptions::lazy(),
-            ParseOptions {
+            Demand::RICH,
+            Demand::LEAN.with_spans(),
+            Demand {
                 spans: true,
-                ..ParseOptions::complete()
+                ..Demand::COMPLETE
             },
         ] {
             let mut full = Kept::default();
@@ -2102,9 +2103,9 @@ mod tests {
         for tail in [String::new(), format!("{swap}{}", "{}\n".repeat(2000))] {
             let raw = format!("{begin}{part}{tail}");
             fs::write(&wire, &raw)?;
-            adapter.stream(&reference, &ParseOptions::full(), &mut |_: Message| Flow::Continue)?;
+            adapter.stream(&reference, &Demand::RICH, &mut |_: Message| Flow::Continue)?;
             let mut calls = 0;
-            let result = adapter.stream(&reference, &ParseOptions::full(), &mut |_: Message| {
+            let result = adapter.stream(&reference, &Demand::RICH, &mut |_: Message| {
                 calls += 1;
                 fs::OpenOptions::new()
                     .write(true)
@@ -2245,7 +2246,7 @@ mod tests {
     }
 
     /// The whole session read with every string inline: what a spans read materializes to.
-    fn old_wire_oracle(r: &SessionRef, opts: &ParseOptions) -> Session {
+    fn old_wire_oracle(r: &SessionRef, opts: &Demand) -> Session {
         let mut opts = opts.clone();
         opts.spans = false;
         let mut kept = Kept::default();
@@ -2277,9 +2278,9 @@ mod tests {
         fs::write(&path, &body).unwrap();
         let adapter = KimiCode::with_home(&world.home.join(".kimi-code"));
         let r = SessionRef::new("checked", Harness::KimiCode, &dir);
-        let opts = ParseOptions {
+        let opts = Demand {
             spans: true,
-            ..ParseOptions::complete()
+            ..Demand::COMPLETE
         };
         let expected = old_wire_oracle(&r, &opts);
         let mut kept = Kept::default();
@@ -2336,7 +2337,7 @@ mod tests {
         )?;
         let adapter = KimiCode::with_home(&world.home);
         let reference = SessionRef::new("calls", Harness::KimiCode, &dir);
-        for options in [ParseOptions::full(), ParseOptions::lazy()] {
+        for options in [Demand::RICH, Demand::LEAN.with_spans()] {
             let expected = old_wire_oracle(&reference, &options);
             let mut full = Kept::default();
             adapter.try_stream(&reference, &options, &mut full)?;
@@ -2456,13 +2457,13 @@ mod tests {
             };
             let r = SessionRef::new("corpus", Harness::KimiCode, path);
             for opts in [
-                ParseOptions::lazy(),
-                ParseOptions::lazy_extra(),
-                ParseOptions::full(),
-                ParseOptions::complete(),
-                ParseOptions {
+                Demand::LEAN.with_spans(),
+                Demand::RICH.with_spans(),
+                Demand::RICH,
+                Demand::COMPLETE,
+                Demand {
                     spans: true,
-                    ..ParseOptions::complete()
+                    ..Demand::COMPLETE
                 },
             ] {
                 let expected = old_wire_oracle(&r, &opts);
@@ -2535,10 +2536,10 @@ mod tests {
         let r = resume_fixture(&world, text.as_bytes());
         let adapter = KimiCode::with_home(&world.home.join(".kimi-code"));
         for opts in [
-            ParseOptions::lazy(),
-            ParseOptions::lazy_extra(),
-            ParseOptions::full(),
-            ParseOptions::complete(),
+            Demand::LEAN.with_spans(),
+            Demand::RICH.with_spans(),
+            Demand::RICH,
+            Demand::COMPLETE,
         ] {
             let expected = old_wire_oracle(&r, &opts);
             let mut actual = crate::stream::collect_with(&adapter, &r, &opts).unwrap();
@@ -2557,7 +2558,7 @@ mod tests {
                 serde_json::to_value(expected).unwrap()
             );
         }
-        let mut lazy = crate::stream::collect_with(&adapter, &r, &ParseOptions::lazy()).unwrap();
+        let mut lazy = crate::stream::collect_with(&adapter, &r, &Demand::LEAN.with_spans()).unwrap();
         fs::write(adapter.resume_source(&r), "{}\n").unwrap();
         assert!(lazy.materialize().is_err());
     }
@@ -2577,8 +2578,8 @@ mod tests {
                 ];
                 let wire = records.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n";
                 let session = resume_fixture(&world, wire.as_bytes());
-                let expected = old_wire_oracle(&session, &ParseOptions::lazy());
-                let mut actual = crate::stream::collect_with(&adapter, &session, &ParseOptions::lazy()).unwrap();
+                let expected = old_wire_oracle(&session, &Demand::LEAN.with_spans());
+                let mut actual = crate::stream::collect_with(&adapter, &session, &Demand::LEAN.with_spans()).unwrap();
                 assert!(actual.messages.iter().flat_map(|m| &m.content).any(|block| matches!(
                     block,
                     Block::ToolResult {
@@ -2609,7 +2610,7 @@ mod tests {
         );
         let r = resume_fixture(&world, prefix.as_bytes());
         let adapter = KimiCode::with_home(&world.home.join(".kimi-code"));
-        let opts = ParseOptions::lazy_extra();
+        let opts = Demand::RICH.with_spans();
         let mut first = Kept::default();
         adapter.try_stream(&r, &opts, &mut first).unwrap();
         let (count, cp) = first.checkpoints.last().unwrap();
@@ -2638,7 +2639,7 @@ mod tests {
         // Wrong option flavor and a different agent's path decline before metadata/callbacks.
         let mut none = Kept::default();
         assert!(adapter
-            .try_resume(&r, &ParseOptions::complete(), &mut none, cp)
+            .try_resume(&r, &Demand::COMPLETE, &mut none, cp)
             .unwrap()
             .is_none());
         let mut other = r.clone();
@@ -2666,7 +2667,7 @@ mod tests {
         let line = "{\"type\":\"context.append_message\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n";
         let mut r = resume_fixture(&world, line.repeat(20_000).as_bytes());
         let adapter = KimiCode::with_home(&world.home.join(".kimi-code"));
-        let opts = ParseOptions::lazy();
+        let opts = Demand::LEAN.with_spans();
         let mut first = Kept::default();
         adapter.try_stream(&r, &opts, &mut first).unwrap();
         let (count, cp) = first.checkpoints.last().unwrap();
@@ -3082,7 +3083,7 @@ mod tests {
         let root = fixture_root();
         let a = KimiCode::with_home(&root);
         let r = a.discover().unwrap().remove(0);
-        let s = crate::stream::collect_with(&a, &r, &ParseOptions::complete()).unwrap();
+        let s = crate::stream::collect_with(&a, &r, &Demand::COMPLETE).unwrap();
         let carried: Vec<&str> = s
             .messages
             .iter()

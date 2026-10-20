@@ -1521,7 +1521,7 @@ mod imp {
             crate::stream::stream_counted(
                 &crate::harness::claude::Claude::detect(),
                 &refreshed[0],
-                &crate::stream::ParseOptions::facts(),
+                &crate::stream::Demand::FACTS.with_spans(),
                 &mut crate::stream::Discard,
                 crate::stream::Pass::RECORD,
             )

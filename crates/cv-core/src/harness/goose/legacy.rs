@@ -2,10 +2,11 @@
 use super::*;
 use crate::harness::store::{document::Fields, jsonl::ranges};
 use crate::json::{InvalidJson, JsonSource, JsonView};
+use crate::stream::Tier;
 
 /// The first physical record is always the header, including when it is malformed or empty.
-/// Rich fields follow ParseOptions demand; unrelated legacy fields never become owned trees.
-pub(super) fn stream(name: &str, path: &Path, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+/// Rich fields follow Demand demand; unrelated legacy fields never become owned trees.
+pub(super) fn stream(name: &str, path: &Path, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
     let source = JsonSource::capture(path)?;
     let file = std::fs::File::open(path)?;
     let metadata = file.metadata()?;
@@ -86,7 +87,7 @@ fn read_header(view: JsonView<'_>, session: &mut Session) -> Result<()> {
 fn read_message(
     view: JsonView<'_>,
     tools: &mut HashMap<String, String>,
-    opts: &ParseOptions,
+    opts: &Demand,
     source: &JsonSource,
     arena: &std::sync::Arc<crate::harness::store::bytes::ByteSource>,
 ) -> Result<Option<Message>> {
@@ -109,7 +110,7 @@ fn read_message(
     let Some(mut message) = build_message(&role, id, timestamp, decoded) else {
         return Ok(None);
     };
-    if !opts.wants_full_extra() {
+    if opts.tier < Tier::Rich {
         omit_rich_details(&mut message);
     }
     Ok(Some(message))
@@ -281,7 +282,7 @@ mod tests {
         );
     }
 
-    fn collected(path: &Path, opts: &ParseOptions) -> Session {
+    fn collected(path: &Path, opts: &Demand) -> Session {
         let mut sink = crate::stream::CollectSink::default();
         let mut session = stream("legacy", path, opts, &mut sink).unwrap();
         session.messages = sink.messages;
@@ -305,9 +306,7 @@ mod tests {
                 let timestamp = value.get("created").and_then(Value::as_i64).and_then(ts_from_epoch);
                 let decoded = value
                     .get("content")
-                    .map(|c| {
-                        record::content(c.into(), &mut tools, &ParseOptions::full(), Some((&source, &arena))).unwrap()
-                    })
+                    .map(|c| record::content(c.into(), &mut tools, &Demand::RICH, Some((&source, &arena))).unwrap())
                     .unwrap_or_default();
                 build_message(role, id, timestamp, decoded)
             })
@@ -345,11 +344,7 @@ mod tests {
         std::fs::write(&path, &bytes).unwrap();
         let expected = owned_messages(&path);
         let observe = |messages: Vec<Message>| serde_json::to_value(messages).unwrap();
-        for opts in [
-            ParseOptions::full(),
-            ParseOptions::complete(),
-            ParseOptions::lazy_extra(),
-        ] {
+        for opts in [Demand::RICH, Demand::COMPLETE, Demand::RICH.with_spans()] {
             let actual = collected(&path, &opts);
             assert_eq!(actual.title.as_deref(), Some("old"));
             assert_eq!(actual.cwd.as_deref(), Some(Path::new("/repo")));
@@ -365,10 +360,10 @@ mod tests {
             }
         }
         for opts in [
-            ParseOptions::lazy(),
-            ParseOptions::bulk(),
-            ParseOptions::facts(),
-            ParseOptions::usage(),
+            Demand::LEAN.with_spans(),
+            Demand::LEAN,
+            Demand::FACTS.with_spans(),
+            Demand::USAGE.with_spans(),
         ] {
             assert_eq!(
                 observe(collected(&path, &opts).messages),
@@ -399,7 +394,7 @@ mod tests {
             }
         }
         let mut stop = Stop(None);
-        let session = stream("legacy", &path, &ParseOptions::lazy(), &mut stop).unwrap();
+        let session = stream("legacy", &path, &Demand::LEAN.with_spans(), &mut stop).unwrap();
         assert_eq!(session.title.as_deref(), Some("before"));
         let mut message = stop.0.unwrap();
         assert!(matches!(
@@ -439,7 +434,13 @@ mod tests {
                 Flow::Stop
             }
         }
-        assert!(stream("legacy", &path, &ParseOptions::lazy(), &mut ChangeAtStop(path.clone())).is_err());
+        assert!(stream(
+            "legacy",
+            &path,
+            &Demand::LEAN.with_spans(),
+            &mut ChangeAtStop(path.clone())
+        )
+        .is_err());
     }
 
     fn legacy_oracle(name: &str, path: &Path) -> Option<SessionRef> {

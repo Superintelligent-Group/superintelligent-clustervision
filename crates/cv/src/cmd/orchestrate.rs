@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 use cv_core::ir::{truncate, Block, Message, MessageKind, Origin, Role, SessionRef};
 use cv_core::lanes::Lane;
 use cv_core::sanitize::sanitize_line;
-use cv_core::stream::{Flow, ParseOptions};
+use cv_core::stream::{Demand, Flow};
 use regex::Regex;
 use serde::Serialize;
 
@@ -53,7 +53,7 @@ fn collect_prompts(
     let mut idx = 0usize;
     let resolver = cv_core::Resolver::new(Some(r.path.clone()));
     let mut error = None;
-    adapter.try_stream(r, &ParseOptions::lazy(), &mut |m: Message| {
+    adapter.try_stream(r, &Demand::LEAN.with_spans(), &mut |m: Message| {
         let i = idx;
         idx += 1;
         if let Some((s, e)) = window {
@@ -908,7 +908,7 @@ fn collect_deferrals(
 ) -> Result<Vec<Deferral>> {
     let mut out = Vec::new();
     let mut idx = 0usize;
-    adapter.try_stream(r, &ParseOptions::default(), &mut |m: Message| {
+    adapter.try_stream(r, &Demand::LEAN, &mut |m: Message| {
         let i = idx;
         idx += 1;
         if i < since || m.role != Role::Assistant || m.kind != MessageKind::Reply || m.origin != Origin::Model {
@@ -1046,7 +1046,7 @@ mod tests {
             fn stream(
                 &self,
                 r: &SessionRef,
-                opts: &ParseOptions,
+                opts: &Demand,
                 sink: &mut dyn cv_core::MessageSink,
             ) -> Result<cv_core::Session> {
                 assert!(opts.spans);

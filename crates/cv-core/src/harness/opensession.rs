@@ -30,7 +30,7 @@ use super::store::document::Fields;
 use super::{ts_from_value, Adapter};
 use crate::ir::*;
 use crate::json::{JsonSource, JsonView};
-use crate::stream::{Flow, MessageSink, ParseOptions};
+use crate::stream::{Demand, Flow, MessageSink};
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use serde_json::Value;
@@ -155,7 +155,7 @@ impl Adapter for OpenSession {
         Ok(discover_documents(document_files()))
     }
 
-    fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+    fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| stream_document(&r.path, opts, sink))
     }
 }
@@ -182,7 +182,7 @@ impl Adapter for RootedOpenSession {
             is_document_file,
         )))
     }
-    fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+    fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| stream_document(&r.path, opts, sink))
     }
 }
@@ -264,13 +264,13 @@ fn doc_ref(path: &Path) -> Option<SessionRef> {
 /// Read one OpenSession document into the IR. The inverse of [`document`].
 pub fn read_document(path: &Path) -> Result<Session> {
     let mut sink = crate::stream::CollectSink::default();
-    let mut session = stream_document(path, &ParseOptions::full(), &mut sink)?;
+    let mut session = stream_document(path, &Demand::RICH, &mut sink)?;
     session.messages = sink.messages;
     Ok(session)
 }
 
 /// Traverse the document's IR messages without retaining a complete Session.
-fn stream_document(path: &Path, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+fn stream_document(path: &Path, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
     let source = JsonSource::capture(path)?;
     source.read_document(|view| read(view, Some((path, &source)), opts, sink))
 }
@@ -283,7 +283,7 @@ fn stream_document(path: &Path, opts: &ParseOptions, sink: &mut dyn MessageSink)
 fn read(
     view: JsonView<'_>,
     file: Option<(&Path, &JsonSource)>,
-    opts: &ParseOptions,
+    opts: &Demand,
     sink: &mut dyn MessageSink,
 ) -> Result<Session> {
     let check = || file.map_or(Ok(()), |(_, source)| source.check());
@@ -439,7 +439,7 @@ fn ir_block(view: JsonView<'_>, spans: bool) -> Result<Block> {
 pub fn from_str(text: &str) -> Result<Session> {
     let v: Value = serde_json::from_str(text).context("not JSON")?;
     let mut sink = crate::stream::CollectSink::default();
-    let mut session = read((&v).into(), None, &ParseOptions::full(), &mut sink)?;
+    let mut session = read((&v).into(), None, &Demand::RICH, &mut sink)?;
     session.messages = sink.messages;
     Ok(session)
 }

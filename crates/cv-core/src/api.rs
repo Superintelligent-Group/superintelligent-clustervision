@@ -334,7 +334,7 @@ fn complete_session_json(adapter: &dyn crate::Adapter, reference: &SessionRef) -
         guard: true,
         ..crate::stream::Pass::RECORD
     };
-    let read = crate::stream::stream_counted(adapter, reference, &crate::ParseOptions::full(), &mut sink, pass)?;
+    let read = crate::stream::stream_counted(adapter, reference, &crate::Demand::RICH, &mut sink, pass)?;
     let mut session = read.session;
     session.messages = sink.messages;
     session.materialize()?;
@@ -684,7 +684,7 @@ fn err(status: u16, msg: &str) -> (u16, Value) {
 mod tests {
     use super::*;
     use crate::stream::{Flow, MessageSink};
-    use crate::{Message, ParseOptions};
+    use crate::{Demand, Message};
 
     fn window(start: usize, end: Option<usize>) -> WindowSink {
         WindowSink::page(
@@ -723,7 +723,7 @@ mod tests {
             fn stream(
                 &self,
                 reference: &SessionRef,
-                _: &crate::ParseOptions,
+                _: &crate::Demand,
                 sink: &mut dyn crate::MessageSink,
             ) -> anyhow::Result<Session> {
                 sink.dependency(&self.0);
@@ -830,7 +830,7 @@ mod tests {
         let mut callbacks = 0usize;
         for start in (0..records).step_by(page) {
             let mut sink = window(start, Some(start + page));
-            adapter.try_stream(&r, &ParseOptions::lazy(), &mut sink).unwrap();
+            adapter.try_stream(&r, &Demand::LEAN.with_spans(), &mut sink).unwrap();
             assert_eq!(sink.selected, page);
             assert_eq!(sink.more, start + page < records);
             callbacks += sink.idx;
@@ -839,7 +839,7 @@ mod tests {
         assert_eq!(callbacks, expected);
         let mut head_callbacks = 0usize;
         adapter
-            .try_stream(&r, &ParseOptions::lazy(), &mut |_m| {
+            .try_stream(&r, &Demand::LEAN.with_spans(), &mut |_m| {
                 head_callbacks += 1;
                 Flow::Continue
             })

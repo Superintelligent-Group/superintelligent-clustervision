@@ -247,7 +247,7 @@ fn detect_with_preview(
     sink.resolver = Some(crate::lazy::Resolver::new(Some(r.path.clone())));
     // Boundary kinds and compactMetadata are reducer facts; summary bodies remain lazy until
     // requested. Adapters without a Facts projection conservatively retain their existing extra.
-    adapter.try_stream(r, &crate::stream::ParseOptions::facts(), &mut sink)?;
+    adapter.try_stream(r, &crate::stream::Demand::FACTS.with_spans(), &mut sink)?;
     sink.into_boundaries()
 }
 

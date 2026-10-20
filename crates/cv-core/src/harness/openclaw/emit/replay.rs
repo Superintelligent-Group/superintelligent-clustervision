@@ -4,7 +4,7 @@ use crate::{
     harness::wire::write::{self as wire, ObjectWriter},
     json::JsonView,
     lazy::Resolver,
-    stream::ParseOptions,
+    stream::Demand,
     Json, Message,
 };
 use std::collections::HashMap;
@@ -166,7 +166,7 @@ impl Native {
     // A full owned read has no retained payload witness: rebuild just this record using
     // the native codec, then apply the session-level normalization used by the reader.
     fn owned_group(&self, value: &Value, envelopes: &[Message], messages: &[Message]) -> Option<usize> {
-        let mut original = super::super::record::record(JsonView::from(value), &ParseOptions::complete())
+        let mut original = super::super::record::record(JsonView::from(value), &Demand::COMPLETE)
             .ok()?
             .messages;
         if original.len() != envelopes.len() || messages.len() < original.len() {

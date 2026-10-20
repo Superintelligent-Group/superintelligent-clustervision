@@ -9,7 +9,7 @@
 
 use crate::ir::{home_rel, Harness, Message, SessionRef, Usage};
 use crate::spill::{ExactStrings, Ordered, Record};
-use crate::stream::{Flow, ParseOptions};
+use crate::stream::{Demand, Flow};
 #[cfg(feature = "sqlite")]
 mod usage_cache;
 use anyhow::{Context, Result};
@@ -295,7 +295,7 @@ fn usage_hits(
         reads.record(&adapter.resume_source(r));
     }
     // Usage identity is selected without materializing unrelated rich sidecars.
-    let session = adapter.try_stream(r, &ParseOptions::usage(), &mut sink);
+    let session = adapter.try_stream(r, &Demand::USAGE.with_spans(), &mut sink);
     if let Some(error) = sink.error.take() {
         return Err(error);
     }
@@ -879,7 +879,7 @@ mod tests {
             let adapter = crate::harness::for_harness(r.harness)?;
             let mut hits = Vec::new();
             let session = adapter
-                .try_stream(&r, &ParseOptions::lazy_extra(), &mut |m: Message| {
+                .try_stream(&r, &Demand::RICH.with_spans(), &mut |m: Message| {
                     if let Some(usage) = m
                         .usage
                         .as_ref()

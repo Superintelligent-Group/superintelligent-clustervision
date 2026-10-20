@@ -31,7 +31,7 @@
 //!   (`Context.write_system_prompt`, the first record of every segment).
 //! - `{"role":"_checkpoint","id":N}` → a per-step rewind target (`KimiSoul._checkpoint()` runs at the
 //!   top of EVERY step, `kimisoul.py:1036`; `Context.revert_to(id)` truncates back to it). It marks
-//!   nothing the reader needs, so it is a `Carrier` under [`ParseOptions::complete`] and dropped
+//!   nothing the reader needs, so it is a `Carrier` under [`Demand::COMPLETE`] and dropped
 //!   otherwise — NOT a `Branch` and NOT a `CompactionBoundary`: the segment rotation
 //!   (`context.jsonl` → `context_N.jsonl`) is done by `revert_to` (rewind) and `clear` (compaction,
 //!   `kimisoul.py:1577`), never by a checkpoint.
@@ -81,7 +81,8 @@ use crate::ir::*;
 use crate::json::{JsonSource, JsonView};
 use crate::lazy::{Text, INLINE_MAX};
 use crate::source::{Dependencies, Probe};
-use crate::stream::{Checkpoint, Flow, MessageSink, ParseOptions};
+use crate::stream::Tier;
+use crate::stream::{Checkpoint, Demand, Flow, MessageSink};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -238,7 +239,7 @@ impl Adapter for Kimi {
         Ok(out)
     }
 
-    fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+    fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| {
             // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
             let mut spawns = crate::affordance::AffordanceSink::new(Harness::Kimi, sink);
@@ -305,7 +306,7 @@ impl Adapter for Kimi {
     fn resume(
         &self,
         r: &SessionRef,
-        opts: &ParseOptions,
+        opts: &Demand,
         sink: &mut dyn MessageSink,
         from: &Checkpoint,
     ) -> Result<Option<Session>> {
@@ -354,7 +355,7 @@ fn note_config_dependency(adapter: &Kimi, sink: &mut dyn MessageSink) {
 fn session_header(
     adapter: &Kimi,
     r: &SessionRef,
-    opts: &ParseOptions,
+    opts: &Demand,
     segments: &[PathBuf],
     wire: Option<&Path>,
 ) -> (Session, WireEnrich) {
@@ -403,8 +404,13 @@ fn session_header(
     (s, enrich)
 }
 
-fn context_flavor(opts: &ParseOptions) -> [bool; 4] {
-    [opts.extra, opts.spans, opts.offsets, opts.complete]
+fn context_flavor(opts: &Demand) -> [bool; 4] {
+    [
+        opts.tier >= Tier::Facts,
+        opts.spans,
+        opts.offsets,
+        opts.tier == Tier::Complete,
+    ]
 }
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]
@@ -433,7 +439,7 @@ fn stream_context(
     mut s: Session,
     segments: &[PathBuf],
     enrich: &WireEnrich,
-    opts: &ParseOptions,
+    opts: &Demand,
     mut ctx: ContextState,
     start: ContextStart,
     sink: &mut dyn MessageSink,
@@ -468,7 +474,7 @@ fn stream_context(
             &record,
             opts.spans.then_some(input.source()),
             enrich,
-            opts.complete,
+            opts.tier == Tier::Complete,
             &ctx.call_names,
         )?;
         let Some(mut m) = message else {
@@ -1476,7 +1482,7 @@ mod tests {
                 stage,
                 hit: false,
             };
-            assert!(adapter.stream(&reference, &ParseOptions::full(), &mut sink).is_err());
+            assert!(adapter.stream(&reference, &Demand::RICH, &mut sink).is_err());
             assert!(sink.hit, "callback stage {stage}");
         }
         Ok(())
@@ -1500,7 +1506,7 @@ mod tests {
                 "{\"timestamp\":9,\"message\":{\"type\":\"TurnBegin\",\"payload\":{}}}\n",
             )?;
             let mut kept = None;
-            let result = adapter.stream(&reference, &ParseOptions::full(), &mut |m: Message| {
+            let result = adapter.stream(&reference, &Demand::RICH, &mut |m: Message| {
                 kept = Some(m);
                 fs::remove_file(target).unwrap();
                 Flow::Continue
@@ -1510,9 +1516,9 @@ mod tests {
         }
         // Optional malformed/absent wire remains tolerated before any enrichment is admitted.
         fs::write(&wire, "invalid-json\n")?;
-        adapter.stream(&reference, &ParseOptions::full(), &mut |_: Message| Flow::Continue)?;
+        adapter.stream(&reference, &Demand::RICH, &mut |_: Message| Flow::Continue)?;
         fs::remove_file(&wire)?;
-        adapter.stream(&reference, &ParseOptions::full(), &mut |_: Message| Flow::Continue)?;
+        adapter.stream(&reference, &Demand::RICH, &mut |_: Message| Flow::Continue)?;
         Ok(())
     }
 
@@ -1535,7 +1541,7 @@ mod tests {
         crate::stream::stream_counted(
             &adapter,
             &r,
-            &ParseOptions::facts(),
+            &Demand::FACTS.with_spans(),
             &mut sink,
             crate::stream::Pass::RECORD,
         )?;
@@ -1676,7 +1682,7 @@ mod tests {
         }
     }
     /// A whole stream of `r`, materialized.
-    fn whole(adapter: &Kimi, r: &SessionRef, opts: &ParseOptions) -> Session {
+    fn whole(adapter: &Kimi, r: &SessionRef, opts: &Demand) -> Session {
         let mut kept = ResumeKeep::default();
         let mut s = adapter.try_stream(r, opts, &mut kept).unwrap();
         s.messages = kept.messages;
@@ -1737,7 +1743,7 @@ mod tests {
             sessions: None,
         };
         let reference = SessionRef::new("session", Harness::Kimi, &dir);
-        for options in [ParseOptions::full(), ParseOptions::lazy()] {
+        for options in [Demand::RICH, Demand::LEAN.with_spans()] {
             let mut full = ResumeKeep::default();
             adapter.try_stream(&reference, &options, &mut full)?;
             let last = full.checkpoints.last().unwrap();
@@ -1852,10 +1858,10 @@ mod tests {
             let adapter = Kimi::with_home(home);
             assert_eq!(adapter.resume_source(&r), file.path());
             for opts in [
-                ParseOptions::lazy(),
-                ParseOptions::lazy_extra(),
-                ParseOptions::full(),
-                ParseOptions::complete(),
+                Demand::LEAN.with_spans(),
+                Demand::RICH.with_spans(),
+                Demand::RICH,
+                Demand::COMPLETE,
             ] {
                 let mut full = ResumeKeep::default();
                 let shell = adapter.try_stream(&r, &opts, &mut full).unwrap();
@@ -1912,7 +1918,7 @@ mod tests {
         fs::write(dir.join("context.jsonl"), &body).unwrap();
         let mut r = SessionRef::new("session", Harness::Kimi, &dir);
         let adapter = Kimi::with_home(&home);
-        let opts = ParseOptions::lazy();
+        let opts = Demand::LEAN.with_spans();
         let mut first = ResumeKeep::default();
         adapter.try_stream(&r, &opts, &mut first).unwrap();
         let (count, cp) = first.checkpoints.last().unwrap();
@@ -1976,12 +1982,12 @@ mod tests {
         fs::write(dir.join("context.jsonl"), body).unwrap();
         let r = SessionRef::new("session", Harness::Kimi, &dir);
         let adapter = Kimi::with_home(&home);
-        for opts in [ParseOptions::lazy(), ParseOptions::complete()] {
+        for opts in [Demand::LEAN.with_spans(), Demand::COMPLETE] {
             let mut first = ResumeKeep::default();
             let mut full = adapter.try_stream(&r, &opts, &mut first).unwrap();
             // The shared prefix is read once: system prompt, old turn, new turn, answer, and a
             // branch marker for the rotation (plus the checkpoint carrier in complete).
-            assert_eq!(first.messages.len(), if opts.complete { 6 } else { 5 });
+            assert_eq!(first.messages.len(), if opts.tier == Tier::Complete { 6 } else { 5 });
             for (count, cp) in &first.checkpoints {
                 let mut suffix = ResumeKeep::default();
                 let shell = adapter.try_resume(&r, &opts, &mut suffix, cp).unwrap().unwrap();
@@ -2007,7 +2013,7 @@ mod tests {
         let mut bytes = fs::read(adapter.resume_source(&r)).unwrap();
         bytes.extend_from_slice(b"\xff\n{\"role\":\"user\",\"content\":\"tail\"}\n");
         fs::write(adapter.resume_source(&r), bytes).unwrap();
-        let opts = ParseOptions::complete();
+        let opts = Demand::COMPLETE;
         let after = whole(&adapter, &r, &opts);
         assert_eq!(after.messages.last().unwrap().text().as_deref(), Some("tail"));
         assert_eq!(after.cv_extra().unwrap()["skipped_lines"], 1);
@@ -2177,20 +2183,20 @@ mod tests {
         let r = SessionRef::new("session", Harness::Kimi, dir);
         let mut lean = None;
         for opts in [
-            ParseOptions::full(),
-            ParseOptions::bulk(),
-            ParseOptions::lazy(),
-            ParseOptions::lazy_extra(),
-            ParseOptions::complete(),
-            ParseOptions {
+            Demand::RICH,
+            Demand::LEAN,
+            Demand::LEAN.with_spans(),
+            Demand::RICH.with_spans(),
+            Demand::COMPLETE,
+            Demand {
                 spans: true,
-                ..ParseOptions::complete()
+                ..Demand::COMPLETE
             },
         ] {
             let mut sink = crate::stream::CollectSink::default();
             let mut session = adapter.stream(&r, &opts, &mut sink).unwrap();
             session.messages = sink.messages;
-            assert_eq!(session.messages.len(), if opts.complete { 4 } else { 3 });
+            assert_eq!(session.messages.len(), if opts.tier == Tier::Complete { 4 } else { 3 });
             let tool = session.messages.last().unwrap();
             let Block::ToolResult { content, .. } = &tool.content[0] else {
                 panic!("tool result")
@@ -2264,10 +2270,7 @@ mod tests {
             assert_eq!(default_model_from_config(&config).as_deref(), expected);
             let mut sink = |_: Message| Flow::Continue;
             assert_eq!(
-                adapter
-                    .stream(&reference, &ParseOptions::full(), &mut sink)?
-                    .model
-                    .as_deref(),
+                adapter.stream(&reference, &Demand::RICH, &mut sink)?.model.as_deref(),
                 expected
             );
         }
@@ -2516,7 +2519,7 @@ mod tests {
             );
         }
         // complete: the checkpoints ride as carriers, `_usage` still folds (the emitter re-creates it)
-        let c = crate::stream::collect_with(&adapter, &r, &ParseOptions::complete()).unwrap();
+        let c = crate::stream::collect_with(&adapter, &r, &Demand::COMPLETE).unwrap();
         let record_types: Vec<&str> = c
             .messages
             .iter()
@@ -2548,9 +2551,7 @@ mod tests {
         let parsed = adapter.parse(&r).unwrap();
 
         let mut sink = crate::stream::CollectSink::default();
-        let mut streamed = adapter
-            .stream(&r, &crate::stream::ParseOptions::full(), &mut sink)
-            .unwrap();
+        let mut streamed = adapter.stream(&r, &crate::stream::Demand::RICH, &mut sink).unwrap();
         streamed.messages = sink.messages;
 
         assert_eq!(

@@ -436,9 +436,7 @@ fn every_corpus_checkpoint_serializes_deterministically() {
             for r in adapter.discover().expect("discover") {
                 let read = || {
                     let mut sink = Checkpoints(Vec::new());
-                    let session = adapter
-                        .try_stream(&r, &cv_core::ParseOptions::full(), &mut sink)
-                        .unwrap();
+                    let session = adapter.try_stream(&r, &cv_core::Demand::RICH, &mut sink).unwrap();
                     (sink.0, serde_json::to_vec(&session).unwrap())
                 };
                 let first = read();
@@ -464,7 +462,7 @@ fn doctor_lazy_report_matches_full_corpus() -> anyhow::Result<()> {
                 refs.extend(refs.clone().iter().flat_map(children));
             }
             for session in refs {
-                let report = |options: &cv_core::ParseOptions| -> anyhow::Result<Value> {
+                let report = |options: &cv_core::Demand| -> anyhow::Result<Value> {
                     let mut report = cv_core::doctor::Report::default();
                     let mut pass = report.session(Some(session.path.clone()));
                     adapter.try_stream(&session, options, &mut pass)?;
@@ -472,8 +470,8 @@ fn doctor_lazy_report_matches_full_corpus() -> anyhow::Result<()> {
                     Ok(report.to_json())
                 };
                 assert_eq!(
-                    report(&cv_core::ParseOptions::lazy_extra())?,
-                    report(&cv_core::ParseOptions::full())?,
+                    report(&cv_core::Demand::RICH.with_spans())?,
+                    report(&cv_core::Demand::RICH)?,
                     "doctor changed for {}:{} ({})",
                     harness.name,
                     session.id,
@@ -905,7 +903,8 @@ fn query_facts_match_collected_corpus() {
             copy_tree(&version, &scratch);
             let adapter = (harness.adapter)(&scratch);
             for r in adapter.discover().unwrap() {
-                let full = cv_core::stream::collect_with(adapter.as_ref(), &r, &cv_core::ParseOptions::lazy()).unwrap();
+                let full =
+                    cv_core::stream::collect_with(adapter.as_ref(), &r, &cv_core::Demand::LEAN.with_spans()).unwrap();
                 let rows = cv_core::affordance::of_session(&full)
                     .unwrap()
                     .into_iter()
@@ -994,7 +993,7 @@ fn query_facts_match_collected_corpus() {
                 // from the whole-session convenience path (which resolves against final cwd).
                 let mut old_sink = cv_core::events::EventSink::new(r.cwd.clone());
                 adapter
-                    .stream(&r, &cv_core::ParseOptions::lazy(), &mut old_sink)
+                    .stream(&r, &cv_core::Demand::LEAN.with_spans(), &mut old_sink)
                     .unwrap();
                 let expected = serde_json::to_value(legacy_histogram(old_sink.events())).unwrap();
                 let actual = cv_core::tools::ToolHistogram::from_stream(adapter.as_ref(), &r).unwrap();
@@ -1024,7 +1023,7 @@ fn query_facts_match_collected_corpus() {
                 let counted = cv_core::stream::stream_counted(
                     adapter.as_ref(),
                     &r,
-                    &cv_core::ParseOptions::lazy(),
+                    &cv_core::Demand::LEAN.with_spans(),
                     &mut discard,
                     Default::default(),
                 )

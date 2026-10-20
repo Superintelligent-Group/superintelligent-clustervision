@@ -391,7 +391,7 @@ mod tests {
         )?;
         let adapter = LmStudio::with_root(&world.home);
         let reference = SessionRef::new("source", Harness::LmStudio, &path);
-        let complete = crate::stream::collect_with(&adapter, &reference, &ParseOptions::complete())?;
+        let complete = crate::stream::collect_with(&adapter, &reference, &Demand::COMPLETE)?;
         assert_eq!(complete.messages.len(), 3);
         assert_eq!(complete.model.as_deref(), Some("selected"));
         let selected = &complete.messages[1];
@@ -404,7 +404,7 @@ mod tests {
         assert_eq!(alternate.model.as_deref(), Some("alternate"));
         assert!(alternate.content.is_empty());
         assert_eq!(alternate.usage.as_ref().unwrap().output_tokens, Some(2));
-        for options in [ParseOptions::full(), ParseOptions::default()] {
+        for options in [Demand::RICH, Demand::LEAN] {
             let visible = crate::stream::collect_with(&adapter, &reference, &options)?;
             assert_eq!(visible.messages.len(), 2);
             assert!(visible.messages[1].content.is_empty());
@@ -426,7 +426,7 @@ mod tests {
         let reparsed = crate::stream::collect_with(
             &adapter,
             &SessionRef::new("copy", Harness::LmStudio, &emitted.path),
-            &ParseOptions::complete(),
+            &Demand::COMPLETE,
         )?;
         assert_eq!(reparsed.model, complete.model);
         assert_eq!(
@@ -471,9 +471,9 @@ mod tests {
         fs::write(&path, serde_json::to_vec(&doc)?)?;
         let adapter = LmStudio::with_root(&world.home);
         let r = SessionRef::new("source", Harness::LmStudio, &path);
-        let opts = ParseOptions {
+        let opts = Demand {
             spans: true,
-            ..ParseOptions::complete()
+            ..Demand::COMPLETE
         };
         let session = crate::stream::collect_with(&adapter, &r, &opts)?;
         assert_eq!(session.messages.len(), 5);
@@ -500,7 +500,7 @@ mod tests {
             "invalid selection fell back to the last version"
         );
         let copied = SessionRef::new("copy", Harness::LmStudio, &emitted.path);
-        let reparsed = crate::stream::collect_with(&adapter, &copied, &ParseOptions::complete())?;
+        let reparsed = crate::stream::collect_with(&adapter, &copied, &Demand::COMPLETE)?;
         let mut expected = session.clone();
         expected.materialize()?;
         assert_eq!(
@@ -508,7 +508,7 @@ mod tests {
             serde_json::to_value(&expected.messages)?
         );
         assert_eq!(reparsed.model, expected.model);
-        let visible = crate::stream::collect_with(&adapter, &copied, &ParseOptions::full())?;
+        let visible = crate::stream::collect_with(&adapter, &copied, &Demand::RICH)?;
         assert_eq!(visible.messages.len(), 2);
         assert_eq!(visible.messages[0].text().as_deref(), Some(payload.as_str()));
         assert_eq!(visible.messages[1].text().as_deref(), Some(payload.as_str()));
@@ -542,7 +542,7 @@ mod tests {
         let session = crate::stream::collect_with(
             &adapter,
             &SessionRef::new("source", Harness::LmStudio, &path),
-            &ParseOptions::complete(),
+            &Demand::COMPLETE,
         )?;
         assert_eq!(session.messages.len(), 3);
         assert_eq!(

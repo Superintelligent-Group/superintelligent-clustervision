@@ -4,7 +4,7 @@ use super::frozen::Frozen;
 use super::*;
 use crate::harness::Adapter;
 use crate::ir::{GitInfo, Message, Origin, Usage};
-use crate::stream::ParseOptions;
+use crate::stream::Demand;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -217,7 +217,7 @@ fn entry(target: Harness, result: &EmitResult, owned: &Session, mode: ThinkingMo
             }
         }
     }
-    let reread = fidelity::reparse_emitted(target, result, &ParseOptions::full())?;
+    let reread = fidelity::reparse_emitted(target, result, &Demand::RICH)?;
     let report = serde_json::to_vec(&fidelity::diff_fidelity(target, mode, owned, &reread))?;
     Ok(json!({ "files": files, "fidelity": crate::digest::sha256_hex(&report) }))
 }
@@ -435,7 +435,7 @@ fn checked_grok_qwen_complete_selected_producer_matches_owned() -> Result<()> {
         ),
     ] {
         for reference in adapter.discover()? {
-            let owned = crate::stream::collect_with(adapter.as_ref(), &reference, &ParseOptions::complete())?;
+            let owned = crate::stream::collect_with(adapter.as_ref(), &reference, &Demand::COMPLETE)?;
             let selected = parse_for_emit(adapter.as_ref(), &reference, target)
                 .map_err(|error| anyhow::anyhow!("{target} {}: {error:#}", reference.path.display()))?;
             let mut materialized = selected.clone();
@@ -497,7 +497,7 @@ fn checked_grok_qwen_complete_selected_producer_matches_owned() -> Result<()> {
         };
         append.write_all(unicode.as_bytes())?;
         drop(append);
-        let owned = crate::stream::collect_with(adapter.as_ref(), &reference, &ParseOptions::complete())?;
+        let owned = crate::stream::collect_with(adapter.as_ref(), &reference, &Demand::COMPLETE)?;
         let selected = parse_for_emit(adapter.as_ref(), &reference, target)
             .map_err(|error| anyhow::anyhow!("{target} {}: {error:#}", reference.path.display()))?;
         assert!(

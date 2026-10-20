@@ -33,7 +33,7 @@
 //! Every message carries a precise `kind`/`origin` (INTERFACE-V2 §4): a human prompt vs. Codex's
 //! injected preambles, swarm `agent_message`s from `Origin::Subagent`, `item_completed` notes,
 //! compaction boundaries, model/effort changes, rollbacks (`Branch`), persisted errors, and — under
-//! `ParseOptions::complete` — verbatim `Carrier`s for every record with no conversational shape.
+//! `stream::Demand::COMPLETE` — verbatim `Carrier`s for every record with no conversational shape.
 //! Harness-specific facts (rate limits, turn ids, the structured `item`, swarm routing) live in
 //! `extra["codex"]`, the only bag this adapter writes; images become `Block::Image` references.
 
@@ -49,7 +49,8 @@ use super::{parse_ts, Adapter};
 use crate::ir::*;
 use crate::json::{JsonSource, JsonView};
 use crate::lazy::Text;
-use crate::stream::{Checkpoint, Flow, MessageSink, ParseOptions};
+use crate::stream::Tier;
+use crate::stream::{self, Checkpoint, Flow, MessageSink};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use record::{Demand, Reader};
@@ -232,7 +233,7 @@ impl Adapter for Codex {
         }))
     }
 
-    fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+    fn stream(&self, r: &SessionRef, opts: &stream::Demand, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| {
             if !is_jsonl_path(&r.path) {
                 return legacy::stream(r, opts, sink);
@@ -256,7 +257,7 @@ impl Adapter for Codex {
     fn resume(
         &self,
         r: &SessionRef,
-        opts: &ParseOptions,
+        opts: &stream::Demand,
         sink: &mut dyn MessageSink,
         from: &Checkpoint,
     ) -> Result<Option<Session>> {
@@ -268,8 +269,8 @@ impl Adapter for Codex {
                 return Ok(None);
             };
             if state.reading.flavor != Flavor::of(opts)
-                || state.ctx.complete != opts.complete
-                || (opts.complete && opts.spans && state.reading.complete_projection != 1)
+                || state.ctx.complete != (opts.tier == Tier::Complete)
+                || (opts.tier == Tier::Complete && opts.spans && state.reading.complete_projection != 1)
                 || state.session.source_path.as_deref() != Some(r.path.as_path())
             {
                 return Ok(None);
@@ -317,12 +318,12 @@ struct Flavor {
 }
 
 impl Flavor {
-    fn of(opts: &ParseOptions) -> Self {
+    fn of(opts: &stream::Demand) -> Self {
         Self {
-            extra: opts.extra,
+            extra: opts.tier >= Tier::Facts,
             spans: opts.spans,
             offsets: opts.offsets,
-            complete: opts.complete,
+            complete: opts.tier == Tier::Complete,
         }
     }
 }
@@ -336,7 +337,7 @@ struct Reading {
 }
 
 impl ResumeState {
-    fn new(source_path: Option<PathBuf>, has_events: bool, opts: &ParseOptions) -> Self {
+    fn new(source_path: Option<PathBuf>, has_events: bool, opts: &stream::Demand) -> Self {
         Self {
             session: Session {
                 source_path,
@@ -348,7 +349,7 @@ impl ResumeState {
             skipped: 0,
             reading: Reading {
                 flavor: Flavor::of(opts),
-                complete_projection: u8::from(opts.complete && opts.spans),
+                complete_projection: u8::from(opts.tier == Tier::Complete && opts.spans),
             },
         }
     }
@@ -400,9 +401,9 @@ struct CodexCtx {
 }
 
 impl CodexCtx {
-    fn for_opts(opts: &ParseOptions) -> Self {
+    fn for_opts(opts: &stream::Demand) -> Self {
         CodexCtx {
-            complete: opts.complete,
+            complete: opts.tier == Tier::Complete,
             ..Default::default()
         }
     }
@@ -425,7 +426,7 @@ pub fn hook_header(path: &Path) -> Result<Option<Session>> {
         ctx: &mut ctx,
         out: &mut out,
         has_events: false,
-        demand: Demand::of(&ParseOptions::full()),
+        demand: Demand::of(&stream::Demand::RICH),
         source: None,
     };
     read.prefix(1024 * 1024, |line| {
@@ -452,7 +453,7 @@ pub fn parse_str(id: &str, text: &str, is_jsonl: bool, source_path: Option<PathB
     };
     let mut ctx = CodexCtx::default();
     let mut out: Vec<Message> = Vec::new();
-    let demand = Demand::of(&ParseOptions::full());
+    let demand = Demand::of(&stream::Demand::RICH);
     if is_jsonl {
         let mut det = EventDetector::default();
         let _ = super::store::jsonl::slice(text.as_bytes(), |line| {
@@ -599,7 +600,7 @@ fn flush_all_but_held(
 pub(crate) fn count_prefix_checked(r: &SessionRef, len: u64, check: &mut dyn FnMut() -> Result<()>) -> Result<usize> {
     let rollout = Rollout::open(&r.path)?;
     let len = len.min(rollout.len);
-    let opts = ParseOptions::full();
+    let opts = stream::Demand::RICH;
     let state = ResumeState::new(Some(r.path.clone()), rollout.events(len)?, &opts);
     let mut n = 0usize;
     let mut count = |_: Message| {
@@ -721,7 +722,7 @@ fn read(
     state: ResumeState,
     from: u64,
     to: u64,
-    opts: &ParseOptions,
+    opts: &stream::Demand,
     sink: &mut dyn MessageSink,
     check: &mut dyn FnMut() -> Result<()>,
 ) -> Result<Session> {
@@ -1122,7 +1123,7 @@ mod tests {
                 mutated: false,
             };
             assert!(
-                adapter().stream(&reference, &ParseOptions::full(), &mut sink).is_err(),
+                adapter().stream(&reference, &stream::Demand::RICH, &mut sink).is_err(),
                 "callback stage {stage}"
             );
             assert!(sink.mutated, "the intended callback must actually run");
@@ -1139,13 +1140,13 @@ mod tests {
         for stop in [Flow::Stop, Flow::Continue] {
             fs::write(&path, raw)?;
             let mut calls = 0;
-            adapter().stream(&reference, &ParseOptions::full(), &mut |_: Message| {
+            adapter().stream(&reference, &stream::Demand::RICH, &mut |_: Message| {
                 calls += 1;
                 stop
             })?;
             assert_eq!(calls, 1, "unchanged source accepts either callback outcome");
             let mut retained = None;
-            let result = adapter().stream(&reference, &ParseOptions::full(), &mut |m: Message| {
+            let result = adapter().stream(&reference, &stream::Demand::RICH, &mut |m: Message| {
                 retained = Some(m);
                 fs::remove_file(&path).unwrap();
                 stop
@@ -1165,7 +1166,7 @@ mod tests {
         fs::write(&path, raw)?;
         assert!(
             adapter()
-                .stream(&reference, &ParseOptions::full(), &mut RemoveAtFinalMeta(path))
+                .stream(&reference, &stream::Demand::RICH, &mut RemoveAtFinalMeta(path))
                 .is_err(),
             "the last metadata callback is inside completion verification too"
         );
@@ -1235,7 +1236,7 @@ mod tests {
         let done = crate::stream::stream_counted(
             &adapter,
             &r,
-            &ParseOptions::facts(),
+            &stream::Demand::FACTS.with_spans(),
             &mut sink,
             crate::stream::Pass::RECORD,
         )?;
@@ -1252,7 +1253,7 @@ mod tests {
         crate::stream::stream_counted(
             &adapter,
             &changed,
-            &ParseOptions::facts(),
+            &stream::Demand::FACTS.with_spans(),
             &mut sink,
             crate::stream::Pass::RECORD,
         )?;
@@ -1291,12 +1292,12 @@ mod tests {
         Codex { roots: Vec::new() }
     }
 
-    fn buffered_pass(r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Session {
+    fn buffered_pass(r: &SessionRef, opts: &stream::Demand, sink: &mut dyn MessageSink) -> Session {
         adapter().stream(r, opts, sink).unwrap()
     }
 
     /// The whole stream of `r`, messages collected.
-    fn whole(r: &SessionRef, opts: &ParseOptions) -> Session {
+    fn whole(r: &SessionRef, opts: &stream::Demand) -> Session {
         let mut sink = crate::stream::CollectSink::default();
         let mut s = buffered_pass(r, opts, &mut sink);
         s.messages = sink.messages;
@@ -1304,7 +1305,7 @@ mod tests {
     }
 
     /// `text` as a rollout file streamed under `opts`, resolved before the file goes.
-    fn stream_text(id: &str, text: &str, opts: &ParseOptions) -> Session {
+    fn stream_text(id: &str, text: &str, opts: &stream::Demand) -> Session {
         let dir = cv_testkit::temp_dir("codex-stream-text");
         let path = dir.join("rollout-text.jsonl");
         fs::write(&path, text).unwrap();
@@ -1348,7 +1349,7 @@ mod tests {
             std::fs::write(&path, &bytes).unwrap();
             let r = SessionRef::new("source", Harness::Codex, &path);
             let mut sink = crate::stream::CollectSink::default();
-            let session = buffered_pass(&r, &ParseOptions::lazy(), &mut sink);
+            let session = buffered_pass(&r, &stream::Demand::LEAN.with_spans(), &mut sink);
             assert_eq!(session.source_path.as_deref(), Some(path.as_path()));
             let Block::ToolResult { content, .. } = &sink.messages[0].content[0] else {
                 panic!("missing result")
@@ -1357,7 +1358,7 @@ mod tests {
             let resolver = session.resolver();
             assert_eq!(content.try_resolve(&resolver).unwrap(), text);
             let mut owned = crate::stream::CollectSink::default();
-            buffered_pass(&r, &ParseOptions::full(), &mut owned);
+            buffered_pass(&r, &stream::Demand::RICH, &mut owned);
             let Block::ToolResult {
                 content: owned_text, ..
             } = &owned.messages[0].content[0]
@@ -1374,7 +1375,9 @@ mod tests {
                 std::fs::write(&path, b"changed during read").unwrap();
                 Flow::Stop
             };
-            assert!(adapter().stream(&r, &ParseOptions::lazy(), &mut mutate).is_err());
+            assert!(adapter()
+                .stream(&r, &stream::Demand::LEAN.with_spans(), &mut mutate)
+                .is_err());
         }
     }
 
@@ -1392,11 +1395,11 @@ mod tests {
             files += 1;
             let r = SessionRef::new("oracle", Harness::Codex, entry.path().to_path_buf());
             for opts in [
-                ParseOptions::lazy(),
-                ParseOptions::lazy_extra(),
-                ParseOptions::full(),
-                ParseOptions::bulk(),
-                ParseOptions::complete(),
+                stream::Demand::LEAN.with_spans(),
+                stream::Demand::RICH.with_spans(),
+                stream::Demand::RICH,
+                stream::Demand::LEAN,
+                stream::Demand::COMPLETE,
             ] {
                 let mut full = BufferedKept::default();
                 let mut shell = buffered_pass(&r, &opts, &mut full);
@@ -1443,9 +1446,9 @@ mod tests {
         .unwrap();
         let r = SessionRef::new("s", Harness::Codex, path);
         let adapter = Codex::with_home(&world.home.join(".codex"));
-        let opts = ParseOptions {
+        let opts = stream::Demand {
             spans: true,
-            ..ParseOptions::complete()
+            ..stream::Demand::COMPLETE
         };
         let mut prefix = BufferedKept::default();
         buffered_pass(&r, &opts, &mut prefix);
@@ -1504,7 +1507,7 @@ mod tests {
         fs::write(&path, &prefix).unwrap();
         let r = SessionRef::new("fallback", Harness::Codex, path);
         let adapter = Codex::with_home(&world.home.join(".codex"));
-        let opts = ParseOptions::full();
+        let opts = stream::Demand::RICH;
         let mut first = BufferedKept::default();
         buffered_pass(&r, &opts, &mut first);
         let (count, cp) = first.checkpoints.last().unwrap();
@@ -1536,7 +1539,7 @@ mod tests {
 
         let mut untouched = BufferedKept::default();
         assert!(adapter
-            .try_resume(&r, &ParseOptions::complete(), &mut untouched, cp)
+            .try_resume(&r, &stream::Demand::COMPLETE, &mut untouched, cp)
             .unwrap()
             .is_none());
         let mut elsewhere = r.clone();
@@ -1570,7 +1573,7 @@ mod tests {
         fs::write(&path, line.repeat(20_000)).unwrap();
         let r = SessionRef::new("fallback", Harness::Codex, path);
         let adapter = Codex::with_home(&world.home.join(".codex"));
-        let opts = ParseOptions::full();
+        let opts = stream::Demand::RICH;
         let mut first = BufferedKept::default();
         buffered_pass(&r, &opts, &mut first);
         let (count, cp) = first.checkpoints.last().unwrap();
@@ -1822,7 +1825,7 @@ mod tests {
         let data = std::fs::read(&path).unwrap();
         let s = whole(
             &SessionRef::new("fallback", Harness::Codex, &path),
-            &ParseOptions::lazy(),
+            &stream::Demand::LEAN.with_spans(),
         );
 
         let content = s
@@ -1867,7 +1870,7 @@ mod tests {
         std::fs::write(&path, text).unwrap();
         let mut lazy = whole(
             &SessionRef::new("fallback", Harness::Codex, &path),
-            &ParseOptions::lazy(),
+            &stream::Demand::LEAN.with_spans(),
         );
         lazy.materialize().unwrap();
         let full = parse_str("fallback", text, true, Some(path));
@@ -1940,7 +1943,7 @@ mod tests {
         fs::write(&path, &data).unwrap();
         let s = whole(
             &SessionRef::new("fb", Harness::Codex, &path),
-            &ParseOptions::lazy_offsets(),
+            &stream::Demand::LEAN.with_spans().with_offsets(),
         );
         let full = s.messages.clone();
         assert_eq!(s.model.as_deref(), Some("gpt-test"));
@@ -2040,7 +2043,7 @@ mod tests {
         let text = lines.join("\n");
         let parsed = parse_str("s", &text, true, None);
 
-        let streamed = stream_text("s", &text, &ParseOptions::full());
+        let streamed = stream_text("s", &text, &stream::Demand::RICH);
 
         assert_eq!(
             serde_json::to_value(&parsed).unwrap(),
@@ -2153,7 +2156,7 @@ mod tests {
             "the diagnostic is namespaced, never flat"
         );
 
-        let streamed = stream_text("s", &text, &ParseOptions::full());
+        let streamed = stream_text("s", &text, &stream::Demand::RICH);
         assert_eq!(
             serde_json::to_value(&parsed).unwrap(),
             serde_json::to_value(&streamed).unwrap(),
@@ -2284,7 +2287,7 @@ mod tests {
 
     /// Stream a `.jsonl` transcript's lines under explicit options, collecting messages like
     /// `parse_jsonl` does.
-    fn stream_jsonl_with(lines: &[impl std::borrow::Borrow<str>], opts: &ParseOptions) -> Session {
+    fn stream_jsonl_with(lines: &[impl std::borrow::Borrow<str>], opts: &stream::Demand) -> Session {
         stream_text("fallback-id", &lines.join("\n"), opts)
     }
 
@@ -2342,7 +2345,7 @@ mod tests {
         assert_eq!(m.timestamp.map(|t| t.timestamp()), Some(1789845000));
         assert_eq!(m.extra["codex"]["turn_id"], "t1");
 
-        let complete = stream_jsonl_with(&lines, &ParseOptions::complete());
+        let complete = stream_jsonl_with(&lines, &stream::Demand::COMPLETE);
         let texts: Vec<_> = complete.messages.iter().filter_map(|m| m.text()).collect();
         assert_eq!(texts, vec!["parent's original prompt", "child's own reply"]);
         assert_eq!(complete.messages[0].extra["codex"]["inherited"], true);
@@ -2354,7 +2357,7 @@ mod tests {
         assert!(bag_get(&complete.messages[1], "inherited").is_none());
 
         // parse == stream for the lean pass too
-        let streamed = stream_jsonl_with(&lines, &ParseOptions::full());
+        let streamed = stream_jsonl_with(&lines, &stream::Demand::RICH);
         assert_eq!(
             serde_json::to_value(&lean).unwrap(),
             serde_json::to_value(&streamed).unwrap()
@@ -2400,7 +2403,7 @@ mod tests {
         assert_eq!(outbound.extra["codex"]["trigger_turn"], false);
         assert!(outbound.extra["codex"].get("encrypted").is_none());
         // identical on the streaming path (the pairing lives in parser state, not the sink)
-        let streamed = stream_jsonl_with(&lines, &ParseOptions::full());
+        let streamed = stream_jsonl_with(&lines, &stream::Demand::RICH);
         assert_eq!(
             serde_json::to_value(&s).unwrap(),
             serde_json::to_value(&streamed).unwrap()
@@ -2506,7 +2509,7 @@ mod tests {
         );
         assert_eq!(m.extra["codex"]["model_context_window"], 258400);
         // and the streaming path (which holds the message across the two records) agrees
-        let streamed = stream_jsonl_with(&lines, &ParseOptions::full());
+        let streamed = stream_jsonl_with(&lines, &stream::Demand::RICH);
         assert_eq!(
             serde_json::to_value(&s).unwrap(),
             serde_json::to_value(&streamed).unwrap()
@@ -2589,7 +2592,10 @@ mod tests {
             .unwrap()
             .write_all(line.as_bytes())
             .unwrap();
-        let s = whole(&SessionRef::new("x", Harness::Codex, &path), &ParseOptions::lazy());
+        let s = whole(
+            &SessionRef::new("x", Harness::Codex, &path),
+            &stream::Demand::LEAN.with_spans(),
+        );
         let m = &s.messages[0];
         let Block::ToolResult { content, is_error, .. } = &m.content[0] else {
             panic!()
@@ -2637,7 +2643,7 @@ mod tests {
         );
         // Resolved lazy streaming matches the full compressed parse.
         let mut sink = crate::stream::CollectSink::default();
-        let mut st = cx.stream(r, &ParseOptions::lazy(), &mut sink).unwrap();
+        let mut st = cx.stream(r, &stream::Demand::LEAN.with_spans(), &mut sink).unwrap();
         st.messages = sink.messages;
         assert_eq!(serde_json::to_value(&s).unwrap(), serde_json::to_value(&st).unwrap());
         std::fs::remove_dir_all(&root).ok();
@@ -2680,13 +2686,13 @@ mod tests {
             !Arc::ptr_eq(&handed, &arena(Rollout::open(&cold).unwrap())),
             "only inside run"
         );
-        let read = |opts: &ParseOptions| {
+        let read = |opts: &stream::Demand| {
             let mut sink = crate::stream::CollectSink::default();
             let mut session = cx.stream(&r, opts, &mut sink).unwrap();
             session.messages = sink.messages;
             serde_json::to_value(session).unwrap()
         };
-        assert_eq!(bytes.run(|| read(&ParseOptions::full())), read(&ParseOptions::full()));
+        assert_eq!(bytes.run(|| read(&stream::Demand::RICH)), read(&stream::Demand::RICH));
 
         std::fs::write(
             &cold,
@@ -2774,7 +2780,7 @@ mod tests {
             let r = scan(&path).unwrap();
             let parsed = cx.parse(&r).unwrap();
             let mut sink = crate::stream::CollectSink::default();
-            let mut streamed = cx.stream(&r, &ParseOptions::full(), &mut sink).unwrap();
+            let mut streamed = cx.stream(&r, &stream::Demand::RICH, &mut sink).unwrap();
             streamed.messages = sink.messages;
             assert_eq!(
                 serde_json::to_value(&parsed).unwrap(),
@@ -3101,7 +3107,7 @@ mod tests {
         assert_eq!(keys(11), vec!["codex_event", "num_turns"]);
         assert_eq!(keys(12), vec!["codex_event", "error"]);
         // parse == stream
-        let streamed = stream_jsonl_with(&every_arm(), &ParseOptions::full());
+        let streamed = stream_jsonl_with(&every_arm(), &stream::Demand::RICH);
         assert_eq!(
             serde_json::to_value(&s).unwrap(),
             serde_json::to_value(&streamed).unwrap()
@@ -3112,7 +3118,7 @@ mod tests {
     fn complete_mode_carries_lifecycle_and_unknown_records_verbatim() {
         let lean = parse_jsonl(&every_arm());
         assert!(lean.messages.iter().all(|m| m.kind != MessageKind::Carrier));
-        let complete = stream_jsonl_with(&every_arm(), &ParseOptions::complete());
+        let complete = stream_jsonl_with(&every_arm(), &stream::Demand::COMPLETE);
         let carriers: Vec<(&str, &str)> = complete
             .messages
             .iter()

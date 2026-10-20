@@ -10,7 +10,7 @@
 use crate::util::{parse_harness, resolve, short_id, usage};
 use anyhow::{Context, Result};
 use cv_core::ir::Block;
-use cv_core::ParseOptions;
+use cv_core::Demand;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -27,7 +27,7 @@ pub(crate) fn cmd_cat(session: &str, tool_use_id: &str, harness: Option<String>,
     let mut parsed = cv_core::stream::stream_counted(
         adapter.as_ref(),
         &r,
-        &ParseOptions::lazy(),
+        &Demand::LEAN.with_spans(),
         &mut found,
         cv_core::stream::Pass::RECORD,
     )?

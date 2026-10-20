@@ -95,7 +95,7 @@ fn subagent_events(
     kind: Option<&str>,
 ) -> Result<Vec<(cv_core::SubagentInfo, Vec<cv_core::events::Event>)>> {
     use cv_core::events::EventSink;
-    use cv_core::ParseOptions;
+    use cv_core::Demand;
     let subs = cv_core::subagent_tree_of(r);
     if subs.is_empty() {
         return Ok(Vec::new());
@@ -105,7 +105,10 @@ fn subagent_events(
     for s in subs {
         let mut sink = EventSink::new(s.session.cwd.clone());
         // Best-effort: a single unreadable sub-agent transcript shouldn't abort the whole forest.
-        if adapter.stream(&s.session, &ParseOptions::lazy(), &mut sink).is_err() {
+        if adapter
+            .stream(&s.session, &Demand::LEAN.with_spans(), &mut sink)
+            .is_err()
+        {
             continue;
         }
         let evs: Vec<_> = sink

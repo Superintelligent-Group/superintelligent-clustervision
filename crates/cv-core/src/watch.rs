@@ -142,9 +142,7 @@ pub fn tail(r: &SessionRef, skip: usize, keep: usize) -> Option<(usize, Vec<Mess
         total += 1;
         crate::stream::Flow::Continue
     };
-    let session = adapter
-        .try_stream(r, &crate::stream::ParseOptions::full(), &mut sink)
-        .ok()?;
+    let session = adapter.try_stream(r, &crate::stream::Demand::RICH, &mut sink).ok()?;
     // As `stream::collect` does: own any lazy content (full-fidelity streams rarely produce any).
     let resolver = session.resolver();
     for m in &mut kept {

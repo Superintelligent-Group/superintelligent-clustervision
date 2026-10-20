@@ -6,6 +6,7 @@ use super::*;
 use crate::harness::store::{bytes::ByteSource, document::Fields, sqlite::Cells};
 use crate::json::JsonView;
 use crate::lazy::Text;
+use crate::stream::Tier;
 use std::io::Read;
 
 pub(super) fn roots(home: &Path) -> Vec<PathBuf> {
@@ -27,7 +28,14 @@ pub(super) fn discover(home: &Path, out: &mut Vec<SessionRef>) {
             let result = conn.read(|conn| -> Result<SessionRef> {
                 let mut collector = Count::default();
                 let r = SessionRef::new("cli:", Harness::Cursor, path);
-                let session = read_with_reads(conn, &r, &ParseOptions::lazy(), true, conn.reads(), &mut collector)?;
+                let session = read_with_reads(
+                    conn,
+                    &r,
+                    &crate::stream::Demand::LEAN.with_spans(),
+                    true,
+                    conn.reads(),
+                    &mut collector,
+                )?;
                 if let Some(error) = collector.error {
                     return Err(error);
                 }
@@ -76,7 +84,7 @@ impl MessageSink for Count {
 pub(super) fn stream(
     conn: &crate::harness::store::sqlite::ReadConnection,
     r: &SessionRef,
-    opts: &ParseOptions,
+    opts: &crate::stream::Demand,
     sink: &mut dyn MessageSink,
 ) -> Result<Session> {
     read_with_reads(conn, r, opts, false, conn.reads(), sink)
@@ -86,7 +94,7 @@ pub(super) fn stream(
 fn read(
     conn: &Connection,
     r: &SessionRef,
-    opts: &ParseOptions,
+    opts: &crate::stream::Demand,
     counting: bool,
     sink: &mut dyn MessageSink,
 ) -> Result<Session> {
@@ -96,7 +104,7 @@ fn read(
 fn read_with_reads(
     conn: &Connection,
     r: &SessionRef,
-    opts: &ParseOptions,
+    opts: &crate::stream::Demand,
     counting: bool,
     reads: &crate::source::ReadSet,
     sink: &mut dyn MessageSink,
@@ -120,7 +128,7 @@ fn read_with_reads(
 fn read_snapshot(
     conn: &Connection,
     r: &SessionRef,
-    opts: &ParseOptions,
+    opts: &crate::stream::Demand,
     counting: bool,
     sink: &mut dyn MessageSink,
     cells: &Cells,
@@ -261,8 +269,8 @@ fn read_snapshot(
     // record and part metadata bags are full-metadata demands.
     let demand = Demand {
         spans: opts.spans,
-        extra: opts.wants_full_extra(),
-        complete: opts.complete,
+        extra: opts.tier >= Tier::Rich,
+        complete: opts.tier == Tier::Complete,
     };
     let mut emit = |id: &str| -> Result<Flow> {
         let decoded = match cells.row(conn, "blobs", "data", blob_rowid(conn, id)?)? {
@@ -720,7 +728,7 @@ mod tests {
         let record = json!({"role":"user","content":body}).to_string().into_bytes();
         let (conn, r) = fixture(field(1, &[1; 32]), &[(1, record)], &world.base);
         let mut count = Count::default();
-        let session = read(&conn, &r, &ParseOptions::full(), true, &mut count).unwrap();
+        let session = read(&conn, &r, &crate::stream::Demand::RICH, true, &mut count).unwrap();
         assert_eq!(count.title.as_deref(), Some("ask about otters"));
         assert_eq!(count.count, 1);
         let _ = session;
@@ -782,7 +790,7 @@ mod tests {
                 &world.base.join(archive_field.to_string()),
             );
             let mut sink = CollectSink::default();
-            let session = read(&conn, &r, &ParseOptions::default(), false, &mut sink).unwrap();
+            let session = read(&conn, &r, &crate::stream::Demand::LEAN, false, &mut sink).unwrap();
             assert_eq!(sink.messages.len(), 2);
             assert_eq!(sink.messages[0].text().as_deref(), Some("older"));
             assert_eq!(session.lineage.parent.as_deref(), Some("cli:parent"));
@@ -838,7 +846,7 @@ mod tests {
             .collect();
         let (conn, r) = fixture(root, &records, &world.base);
         let mut count = Count::default();
-        read(&conn, &r, &ParseOptions::lazy(), true, &mut count).unwrap();
+        read(&conn, &r, &crate::stream::Demand::LEAN.with_spans(), true, &mut count).unwrap();
         assert_eq!(count.count, 3);
         // A blank first prompt titles nothing, so the next prompt titles the session.
         let expected = crate::ir::truncate(&format!("first line\n\n{}", "y".repeat(200)), 80);
@@ -901,10 +909,10 @@ mod tests {
             .enumerate()
         {
             let (conn, r) = fixture(root, &[], &world.base.join(index.to_string()));
-            assert!(read(&conn, &r, &ParseOptions::default(), false, &mut Count::default()).is_err());
+            assert!(read(&conn, &r, &crate::stream::Demand::LEAN, false, &mut Count::default()).is_err());
         }
         let (conn, r) = fixture(field(1, &[1; 32]), &[], &world.base.join("missing"));
-        assert!(read(&conn, &r, &ParseOptions::default(), false, &mut Count::default()).is_err());
+        assert!(read(&conn, &r, &crate::stream::Demand::LEAN, false, &mut Count::default()).is_err());
         let mut root = field(1, &[1; 32]);
         root.extend(field(1, &[2; 32]));
         let (conn, r) = fixture(
@@ -918,7 +926,7 @@ mod tests {
                 Flow::Stop
             }
         }
-        assert!(read(&conn, &r, &ParseOptions::default(), false, &mut Stop).is_ok());
+        assert!(read(&conn, &r, &crate::stream::Demand::LEAN, false, &mut Stop).is_ok());
     }
     #[test]
     fn acp_sidecar_creation_change_and_identity_invalidate() {
@@ -940,12 +948,12 @@ mod tests {
             }
         }
         let mut absent = Reads(crate::source::ReadSet::default());
-        read(&conn, &reference, &ParseOptions::bulk(), false, &mut absent).unwrap();
+        read(&conn, &reference, &crate::stream::Demand::LEAN, false, &mut absent).unwrap();
         assert!(absent.0.fresh(&mut crate::source::Probe::default()));
         std::fs::write(dir.join("meta.json"), r#"{"cwd":"/scratch/project","title":"ACP"}"#).unwrap();
         assert!(!absent.0.fresh(&mut crate::source::Probe::default()));
         let mut current = Reads(crate::source::ReadSet::default());
-        let session = read(&conn, &reference, &ParseOptions::bulk(), false, &mut current).unwrap();
+        let session = read(&conn, &reference, &crate::stream::Demand::LEAN, false, &mut current).unwrap();
         assert_eq!(session.cwd.as_deref(), Some(Path::new("/scratch/project")));
         assert_eq!(session.title.as_deref(), Some("ACP"));
         std::fs::write(
@@ -955,7 +963,14 @@ mod tests {
         .unwrap();
         assert!(!current.0.fresh(&mut crate::source::Probe::default()));
         reference.id = "cli:replacement".into();
-        assert!(read(&conn, &reference, &ParseOptions::bulk(), false, &mut Count::default()).is_err());
+        assert!(read(
+            &conn,
+            &reference,
+            &crate::stream::Demand::LEAN,
+            false,
+            &mut Count::default()
+        )
+        .is_err());
     }
     #[test]
     fn updated_time_observes_active_wal() {
@@ -974,7 +989,14 @@ mod tests {
             )
             .unwrap();
         }
-        let session = read(&conn, &reference, &ParseOptions::bulk(), false, &mut Count::default()).unwrap();
+        let session = read(
+            &conn,
+            &reference,
+            &crate::stream::Demand::LEAN,
+            false,
+            &mut Count::default(),
+        )
+        .unwrap();
         assert_eq!(session.updated_at.unwrap().timestamp(), 2);
     }
     #[test]
@@ -991,7 +1013,7 @@ mod tests {
         let journal = r.path.with_file_name("store.db-journal");
         assert!(!wal.exists() && !shm.exists());
         let adapter = Cursor::with_cli_home(&world.base);
-        let retained = crate::stream::collect_with(&adapter, &r, &ParseOptions::facts()).unwrap();
+        let retained = crate::stream::collect_with(&adapter, &r, &crate::stream::Demand::FACTS.with_spans()).unwrap();
         assert!(!wal.exists() && !shm.exists());
         let Block::Text {
             text: crate::lazy::Text::Source(text),
@@ -1010,7 +1032,7 @@ mod tests {
             }
         }
         assert!(adapter
-            .stream(&r, &ParseOptions::bulk(), &mut Stop(journal))
+            .stream(&r, &crate::stream::Demand::LEAN, &mut Stop(journal))
             .unwrap_err()
             .to_string()
             .contains("dependencies changed"));
@@ -1033,8 +1055,9 @@ mod tests {
             .collect();
         let (_conn, reference) = fixture(root, &records, &world.base.join("source"));
         let adapter = Cursor::with_cli_home(&world.base);
-        let owned = crate::stream::collect_with(&adapter, &reference, &ParseOptions::bulk()).unwrap();
-        let mut lazy = crate::stream::collect_with(&adapter, &reference, &ParseOptions::lazy()).unwrap();
+        let owned = crate::stream::collect_with(&adapter, &reference, &crate::stream::Demand::LEAN).unwrap();
+        let mut lazy =
+            crate::stream::collect_with(&adapter, &reference, &crate::stream::Demand::LEAN.with_spans()).unwrap();
         let mut owned_output = Vec::new();
         let mut lazy_output = Vec::new();
         crate::dataset::write_record(&owned, &mut owned_output, crate::dataset::Format::Chatml, None).unwrap();
@@ -1095,8 +1118,14 @@ mod tests {
             );
             let mut owned = CollectSink::default();
             let mut selected = CollectSink::default();
-            let full = read(&conn, &reference, &ParseOptions::bulk(), false, &mut owned);
-            let lazy = read(&conn, &reference, &ParseOptions::lazy(), false, &mut selected);
+            let full = read(&conn, &reference, &crate::stream::Demand::LEAN, false, &mut owned);
+            let lazy = read(
+                &conn,
+                &reference,
+                &crate::stream::Demand::LEAN.with_spans(),
+                false,
+                &mut selected,
+            );
             assert_eq!(full.is_ok(), lazy.is_ok(), "case {index}");
             if full.is_ok() {
                 let resolver = crate::lazy::Resolver::new(Some(reference.path.clone()));
@@ -1132,7 +1161,10 @@ mod tests {
         let mut reports = Vec::new();
         let mut sessions = Vec::new();
         let mut counts = Vec::new();
-        for options in [ParseOptions::lazy_extra(), ParseOptions::facts()] {
+        for options in [
+            crate::stream::Demand::RICH.with_spans(),
+            crate::stream::Demand::FACTS.with_spans(),
+        ] {
             let mut report = crate::doctor::Report::default();
             let mut pass = report.session(Some(reference.path.clone()));
             let session = read(&conn, &reference, &options, false, &mut pass).unwrap();
@@ -1146,7 +1178,7 @@ mod tests {
                 counter.note(message).unwrap();
             }
             counts.push(counter.finish(&session, &[]));
-            if options.facts_only() {
+            if options.tier == Tier::Facts {
                 assert!(retained.messages.iter().all(|message| message.extra.is_empty()));
                 assert!(matches!(
                     &retained.messages[1].content[0],
@@ -1168,8 +1200,7 @@ mod tests {
         assert_eq!(counts[0], counts[1]);
         assert_eq!(sessions[0].model, sessions[1].model);
         assert_eq!(sessions[0].extra, sessions[1].extra);
-        let mut complete = ParseOptions::facts();
-        complete.complete = true;
+        let complete = crate::stream::Demand::COMPLETE.with_spans();
         let mut retained = CollectSink::default();
         read(&conn, &reference, &complete, false, &mut retained).unwrap();
         assert!(retained.messages[1]
@@ -1183,7 +1214,14 @@ mod tests {
         let record=json!({"role":"assistant","content":[{"type":"tool-call","toolCallId":"call","toolName":"Read","args":{"body":"x".repeat(8192)}},{"type":"text","text":"日本語\n".repeat(4096)}]}).to_string().into_bytes();
         let (conn, reference) = fixture(field(1, &[1; 32]), &[(1, record)], &world.base.join("source"));
         let mut retained = CollectSink::default();
-        read(&conn, &reference, &ParseOptions::lazy(), false, &mut retained).unwrap();
+        read(
+            &conn,
+            &reference,
+            &crate::stream::Demand::LEAN.with_spans(),
+            false,
+            &mut retained,
+        )
+        .unwrap();
         let input = match &retained.messages[0].content[0] {
             Block::ToolUse { input, .. } => input,
             _ => panic!("expected tool"),
@@ -1228,7 +1266,14 @@ mod tests {
                 Flow::Stop
             }
         }
-        let error = read(&conn, &reference, &ParseOptions::lazy(), false, &mut Mutate(wal)).unwrap_err();
+        let error = read(
+            &conn,
+            &reference,
+            &crate::stream::Demand::LEAN.with_spans(),
+            false,
+            &mut Mutate(wal),
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("dependencies changed"), "{error:#}");
     }
 }

@@ -528,7 +528,7 @@ fn owned_replay_data(id: &str, ty: &str, data: &Value, current: &[Message]) -> O
         id,
         ty,
         crate::json::JsonView::owned(data),
-        &crate::stream::ParseOptions::complete(),
+        &crate::stream::Demand::COMPLETE,
         super::super::record::Ctx::Owned,
     )
     .ok()??;

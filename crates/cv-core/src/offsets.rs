@@ -1,6 +1,6 @@
 //! Per-message byte offsets: the stamp, not a store.
 //!
-//! Under [`ParseOptions::lazy_offsets`](crate::ParseOptions::lazy_offsets) the claude and codex
+//! Under [`Demand::with_offsets`](crate::Demand::with_offsets) the claude and codex
 //! JSONL adapters stamp each message with the byte offset of the record line that produced it
 //! ([`OFFSET_KEY`]). `cv rewind` reads the stamp to map a message index to the byte where its
 //! record starts, so it can cut the transcript there.
@@ -17,5 +17,5 @@
 
 /// `Message.extra` key the claude/codex adapters stamp with the message's source byte offset
 /// (the start of the JSON record line that produced it) under
-/// [`ParseOptions::lazy_offsets`](crate::ParseOptions::lazy_offsets).
+/// [`Demand::with_offsets`](crate::Demand::with_offsets).
 pub const OFFSET_KEY: &str = "cv_byte_offset";

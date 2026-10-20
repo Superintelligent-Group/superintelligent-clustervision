@@ -42,7 +42,7 @@ mod record;
 use super::wire::openai;
 use super::{ts_from_epoch, Adapter};
 use crate::ir::*;
-use crate::stream::{Flow, MessageSink, ParseOptions};
+use crate::stream::{Demand, Flow, MessageSink};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 
@@ -138,7 +138,7 @@ impl Adapter for Continue {
     }
 
     /// Project one accepted history item at a time, retaining body source ranges in lazy mode.
-    fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+    fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| {
             let mut spawns = crate::affordance::AffordanceSink::new(Harness::Continue, sink);
             let sink: &mut dyn MessageSink = &mut spawns;
@@ -624,7 +624,7 @@ mod tests {
             let reference = SessionRef::new("s", Harness::Continue, path.clone());
             let mut sink = crate::stream::CollectSink::default();
             let actual = Continue { sessions: None }
-                .stream(&reference, &ParseOptions::lazy(), &mut sink)
+                .stream(&reference, &Demand::LEAN.with_spans(), &mut sink)
                 .unwrap();
             match serde_json::from_str::<OldDoc<'_>>(text) {
                 Ok(old) => {
@@ -753,7 +753,7 @@ mod tests {
             }
         };
         assert!(Continue { sessions: None }
-            .stream(&reference, &ParseOptions::lazy(), &mut mutate)
+            .stream(&reference, &Demand::LEAN.with_spans(), &mut mutate)
             .is_err());
         assert!(published.unwrap().resolve().is_err());
     }
@@ -1107,7 +1107,7 @@ mod tests {
         }
         let mut sink = StopFirst { seen: Vec::new() };
         let s = Continue { sessions: None }
-            .stream(&r, &ParseOptions::full(), &mut sink)
+            .stream(&r, &Demand::RICH, &mut sink)
             .unwrap();
 
         // Only the first message was ever materialized; the returned Session is metadata-only.

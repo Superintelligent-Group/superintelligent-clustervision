@@ -14,7 +14,7 @@ use anyhow::Context;
 /// Re-parse a just-emitted session back into the IR using `target`'s adapter, so we can diff it
 /// against the source. Mirrors how each adapter's `parse` keys off a [`SessionRef`].
 #[cfg(test)]
-pub(super) fn reparse_emitted(target: Harness, result: &EmitResult, opts: &ParseOptions) -> Result<Session> {
+pub(super) fn reparse_emitted(target: Harness, result: &EmitResult, opts: &Demand) -> Result<Session> {
     let opts = reparse_options(target, opts);
     reparse_with(target, result, &|adapter, reference| {
         crate::stream::collect_with(adapter, reference, &opts)
@@ -250,7 +250,7 @@ pub(super) struct Features {
     dropped: usize,
 }
 
-/// A verbatim meta record carried under `ParseOptions::complete` — never a conversational turn.
+/// A verbatim meta record carried under `Demand::COMPLETE` — never a conversational turn.
 pub(super) fn is_carrier(m: &Message) -> bool {
     m.kind == MessageKind::Carrier
         || (m.extra.contains_key(crate::harness::claude::CARRIER_KEY)
@@ -851,7 +851,7 @@ pub(super) fn reparse_features(
     target: Harness,
     thinking: ThinkingMode,
     result: &EmitResult,
-    opts: &ParseOptions,
+    opts: &Demand,
 ) -> Result<(Session, Features)> {
     let mut opts = reparse_options(target, opts);
     // Verification retains the same full/complete metadata and roles, but consumes bodies
@@ -876,11 +876,11 @@ pub(super) fn reparse_features(
     Ok((metadata, features))
 }
 
-fn reparse_options(target: Harness, opts: &ParseOptions) -> ParseOptions {
+fn reparse_options(target: Harness, opts: &Demand) -> Demand {
     // These database branches historically called parse(), which requests full rather than
     // format-complete records. Preserve that comparison contract while changing retention.
     if matches!(target, Harness::OpenCode | Harness::Hermes) {
-        ParseOptions::full()
+        Demand::RICH
     } else {
         opts.clone()
     }

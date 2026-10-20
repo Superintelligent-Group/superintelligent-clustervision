@@ -19,7 +19,7 @@
 use super::wire::anthropic;
 use super::{ts_from_value, Adapter};
 use crate::ir::*;
-use crate::stream::{MessageSink, ParseOptions};
+use crate::stream::{Demand, MessageSink};
 use anyhow::{Context, Result};
 
 mod native;
@@ -54,7 +54,7 @@ impl Adapter for ChatGptExport {
     fn discover(&self) -> Result<Vec<SessionRef>> {
         Ok(discover_kind(Kind::ChatGpt))
     }
-    fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+    fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| native::stream(Kind::ChatGpt, r, opts, sink))
     }
 }
@@ -69,7 +69,7 @@ impl Adapter for ClaudeExport {
     fn discover(&self) -> Result<Vec<SessionRef>> {
         Ok(discover_kind(Kind::Claude))
     }
-    fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+    fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| native::stream(Kind::Claude, r, opts, sink))
     }
 }
@@ -109,7 +109,7 @@ impl Adapter for RootedExport {
             files_under(self.roots.clone(), is_conversations_file),
         ))
     }
-    fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+    fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| native::stream(self.kind, r, opts, sink))
     }
 }

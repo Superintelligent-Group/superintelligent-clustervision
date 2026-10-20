@@ -18,7 +18,7 @@ use super::cline::{discover_in, emit_with_harness, stream_task_dir, task_dir_dep
 use super::Adapter;
 use crate::ir::*;
 use crate::source::{Dependencies, Probe};
-use crate::stream::{MessageSink, ParseOptions};
+use crate::stream::{Demand, MessageSink};
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
@@ -75,7 +75,7 @@ impl Adapter for Roo {
         Ok(discover_in(&self.roots, Harness::Roo))
     }
 
-    fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+    fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| {
             // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
             let mut spawns = crate::affordance::AffordanceSink::new(Harness::Roo, sink);

@@ -1460,7 +1460,7 @@ pub fn read(adapter: &dyn crate::harness::Adapter, r: &crate::ir::SessionRef) ->
     let s = crate::stream::stream_counted(
         adapter,
         r,
-        &crate::stream::ParseOptions::facts(),
+        &crate::stream::Demand::FACTS.with_spans(),
         &mut |m: Message| {
             match message_rows(r.harness, &m, index, &resolver) {
                 Ok(rows) => messages.extend(rows),
@@ -1589,10 +1589,13 @@ mod tests {
             fn stream(
                 &self,
                 r: &crate::SessionRef,
-                opts: &crate::ParseOptions,
+                opts: &crate::Demand,
                 sink: &mut dyn MessageSink,
             ) -> anyhow::Result<Session> {
-                assert!(opts.extra, "the view must preserve full metadata");
+                assert!(
+                    opts.tier >= crate::stream::Tier::Facts,
+                    "the view must preserve full metadata"
+                );
                 let mut s = Session::new(r.id.clone(), r.harness);
                 sink.meta(&s);
                 // Many large irrelevant outputs must be dropped; only affordance rows survive.
@@ -1685,7 +1688,7 @@ mod tests {
             fn stream(
                 &self,
                 r: &crate::SessionRef,
-                _: &crate::ParseOptions,
+                _: &crate::Demand,
                 sink: &mut dyn crate::MessageSink,
             ) -> Result<Session> {
                 sink.try_message(self.0.clone())?;

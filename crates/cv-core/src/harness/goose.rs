@@ -117,7 +117,8 @@ use super::store::sqlite::{columns, open_ro, Cells};
 use super::wire::anthropic;
 use super::{ts_from_epoch, Adapter};
 use crate::ir::*;
-use crate::stream::{Flow, MessageSink, ParseOptions};
+use crate::stream::Tier;
+use crate::stream::{Demand, Flow, MessageSink};
 use anyhow::Result;
 use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
 use rusqlite::Connection;
@@ -246,7 +247,7 @@ impl Adapter for Goose {
         super::WatchPolicy::Database
     }
 
-    fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+    fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| {
             // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
             let mut spawns = crate::affordance::AffordanceSink::new(Harness::Goose, sink);
@@ -468,23 +469,18 @@ fn fork_source_scoped(
 
 #[cfg(test)]
 fn stream_db(conn: &Connection, r: &SessionRef, sink: &mut dyn MessageSink) -> Result<Session> {
-    stream_db_opts(conn, r, &ParseOptions::full(), sink)
+    stream_db_opts(conn, r, &Demand::RICH, sink)
 }
 
 #[cfg(test)]
-fn stream_db_opts(
-    conn: &Connection,
-    r: &SessionRef,
-    opts: &ParseOptions,
-    sink: &mut dyn MessageSink,
-) -> Result<Session> {
+fn stream_db_opts(conn: &Connection, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
     stream_db_opts_with_reads(conn, r, opts, sink, &crate::source::ReadSet::default())
 }
 
 fn stream_db_opts_with_reads(
     conn: &Connection,
     r: &SessionRef,
-    opts: &ParseOptions,
+    opts: &Demand,
     sink: &mut dyn MessageSink,
     captured: &crate::source::ReadSet,
 ) -> Result<Session> {
@@ -596,7 +592,7 @@ fn stream_db_opts_with_reads(
     );
     let mut stmt = conn.prepare(&sql)?;
     let mut rows = stmt.query([&r.id])?;
-    let rich = opts.wants_full_extra();
+    let rich = opts.tier >= Tier::Rich;
 
     // Track tool-request names so we can label later tool responses (forward-only state).
     let mut tool_names: HashMap<String, String> = HashMap::new();
@@ -620,7 +616,7 @@ fn stream_db_opts_with_reads(
             id: row.get::<_, Option<String>>(4).ok().flatten(),
             metadata,
         };
-        let Some(mut m) = row.into_message_decoded(decoded, &mut history, opts.wants_full_extra()) else {
+        let Some(mut m) = row.into_message_decoded(decoded, &mut history, opts.tier >= Tier::Rich) else {
             continue;
         };
         if m.kind == MessageKind::Prompt {
@@ -928,7 +924,7 @@ fn parse_db(conn: &Connection, r: &SessionRef) -> Result<Session> {
 #[cfg(test)]
 fn parse_legacy(name: &str, path: &Path) -> Result<Session> {
     let mut sink = crate::stream::CollectSink::default();
-    let mut s = legacy::stream(name, path, &ParseOptions::full(), &mut sink)?;
+    let mut s = legacy::stream(name, path, &Demand::RICH, &mut sink)?;
     s.messages = sink.messages;
     Ok(s)
 }
@@ -1373,7 +1369,7 @@ mod tests {
         let adapter = Goose::with_sessions_dir(&world.base);
         let read = |i| -> Result<Session> {
             let reference = SessionRef::new(format!("family-{i:03}"), Harness::Goose, &path);
-            crate::stream::collect_with(&adapter, &reference, &ParseOptions::full())
+            crate::stream::collect_with(&adapter, &reference, &Demand::RICH)
         };
         FORK_HOLDER_ROWS.with(|rows| rows.set(0));
         {
@@ -1720,7 +1716,7 @@ mod tests {
             crate::stream::stream_counted(
                 &adapter,
                 reference,
-                &ParseOptions::facts(),
+                &Demand::FACTS.with_spans(),
                 &mut crate::stream::Discard,
                 crate::stream::Pass::RECORD,
             )?;
@@ -1866,7 +1862,7 @@ mod tests {
             let parsed = parse_db(&conn, &sref(&conn, &reference.id)).unwrap();
             assert_eq!(reference.message_count, None);
             let mut sink = crate::stream::CollectSink::default();
-            stream_db_opts(&conn, &reference, &ParseOptions::lazy(), &mut sink).unwrap();
+            stream_db_opts(&conn, &reference, &Demand::LEAN.with_spans(), &mut sink).unwrap();
             assert_eq!(
                 sink.messages.iter().filter(|m| m.is_turn()).count(),
                 parsed.messages.iter().filter(|m| m.is_turn()).count(),
@@ -2030,7 +2026,7 @@ mod tests {
         assert!(g.roots().is_empty());
     }
 
-    fn projected_session(conn: &Connection, r: &SessionRef, opts: &ParseOptions) -> Session {
+    fn projected_session(conn: &Connection, r: &SessionRef, opts: &Demand) -> Session {
         let mut sink = crate::stream::CollectSink::default();
         let mut session = stream_db_opts(conn, r, opts, &mut sink).unwrap();
         session.messages = sink.messages;
@@ -2038,7 +2034,7 @@ mod tests {
         session
     }
 
-    // ParseOptions explicitly reserves native sidecars and structured result details for full
+    // Demand explicitly reserves native sidecars and structured result details for full
     // extra demand. Lean output must retain every first-class field and ordinary content block.
     fn without_rich_message_fields(mut session: Session) -> Value {
         for message in &mut session.messages {
@@ -2069,7 +2065,7 @@ mod tests {
         c.execute("INSERT INTO messages (session_id,role,content_json,created_timestamp,metadata_json) VALUES ('large','user',?1,1,?2)", rusqlite::params![content.to_string(),metadata.to_string()]).unwrap();
         let r = sref(&c, "large");
         let mut sink = crate::stream::CollectSink::default();
-        stream_db_opts(&c, &r, &ParseOptions::lazy(), &mut sink).unwrap();
+        stream_db_opts(&c, &r, &Demand::LEAN.with_spans(), &mut sink).unwrap();
         let m = &sink.messages[0];
         assert!(matches!(
             &m.content[0],
@@ -2101,8 +2097,8 @@ mod tests {
             Some((Some(9), Some(0.25)))
         );
         assert!(m.extra.is_empty());
-        let lazy = projected_session(&c, &r, &ParseOptions::lazy());
-        let full = projected_session(&c, &r, &ParseOptions::full());
+        let lazy = projected_session(&c, &r, &Demand::LEAN.with_spans());
+        let full = projected_session(&c, &r, &Demand::RICH);
         assert_eq!(
             serde_json::to_value(lazy).unwrap(),
             without_rich_message_fields(full.clone())
@@ -2146,7 +2142,7 @@ mod tests {
             message: None,
         };
         let r = SessionRef::new("guard", Harness::Goose, path);
-        assert!(stream_db_opts(&conn, &r, &ParseOptions::lazy(), &mut stop).is_err());
+        assert!(stream_db_opts(&conn, &r, &Demand::LEAN.with_spans(), &mut stop).is_err());
         let mut message = stop.message.unwrap();
         assert!(message.materialize(&crate::lazy::Resolver::new(None)).is_err());
         drop(conn);
@@ -2167,15 +2163,15 @@ mod tests {
         conn.execute("INSERT INTO messages (session_id,role,content_json,created_timestamp,metadata_json) VALUES ('history','user','not JSON',1,'{\"agentVisible\":false}')", []).unwrap();
         conn.execute("INSERT INTO messages (session_id,role,content_json,created_timestamp,metadata_json) VALUES ('history','user','[{\"type\":\"text\",\"text\":\"summary\"}]',2,'{\"userVisible\":false,\"agentVisible\":true}')", []).unwrap();
         let r = SessionRef::new("history", Harness::Goose, path);
-        let full = projected_session(&conn, &r, &ParseOptions::full());
+        let full = projected_session(&conn, &r, &Demand::RICH);
         assert_eq!(full.messages.len(), 2);
         assert_eq!(full.messages[1].kind, MessageKind::CompactionSummary);
         assert_eq!(
-            serde_json::to_value(projected_session(&conn, &r, &ParseOptions::lazy())).unwrap(),
-            without_rich_message_fields(projected_session(&conn, &r, &ParseOptions::full()))
+            serde_json::to_value(projected_session(&conn, &r, &Demand::LEAN.with_spans())).unwrap(),
+            without_rich_message_fields(projected_session(&conn, &r, &Demand::RICH))
         );
         assert_eq!(
-            kinds(&projected_session(&conn, &r, &ParseOptions::facts())),
+            kinds(&projected_session(&conn, &r, &Demand::FACTS.with_spans())),
             kinds(&full)
         );
         drop(conn);

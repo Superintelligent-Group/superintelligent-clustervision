@@ -341,7 +341,7 @@ fn stopped_stream_never_certifies_exact_turns() {
         fn stream(
             &self,
             r: &SessionRef,
-            _: &crate::ParseOptions,
+            _: &crate::Demand,
             sink: &mut dyn crate::MessageSink,
         ) -> anyhow::Result<crate::Session> {
             for _ in 0..2 {
@@ -365,7 +365,7 @@ fn stopped_stream_never_certifies_exact_turns() {
     let read = crate::stream::stream_counted(
         &Two,
         &r,
-        &crate::ParseOptions::lazy(),
+        &crate::Demand::LEAN.with_spans(),
         &mut |_| crate::Flow::Stop,
         crate::stream::Pass::RECORD,
     )

@@ -535,7 +535,7 @@ mod tests {
             fn stream(
                 &self,
                 r: &SessionRef,
-                _: &cv_core::ParseOptions,
+                _: &cv_core::Demand,
                 sink: &mut dyn cv_core::MessageSink,
             ) -> Result<Session> {
                 let mut session = Session::new(&r.id, r.harness);

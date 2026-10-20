@@ -29,7 +29,7 @@
 use super::store::sqlite::{open_ro, Cells};
 use super::{ts_from_epoch, Adapter};
 use crate::ir::*;
-use crate::stream::{Flow, MessageSink, ParseOptions};
+use crate::stream::{Demand, Flow, MessageSink};
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 use serde_json::{Map, Value};
@@ -197,7 +197,7 @@ impl Adapter for Cursor {
         super::WatchPolicy::Database
     }
 
-    fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+    fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| {
             // `path` is the DB the thread lives in. Legacy refs carry a `legacy:` id prefix.
             for suffix in ["-wal", "-journal"] {
@@ -660,7 +660,7 @@ mod tests {
             super::super::parse_ts("2026-10-14T00:49:06.803Z")
         );
         assert!(session.messages.iter().all(|m| m.timestamp.is_some()));
-        for opts in [ParseOptions::lazy(), ParseOptions::complete()] {
+        for opts in [Demand::LEAN.with_spans(), Demand::COMPLETE] {
             let mut sink = crate::stream::CollectSink::default();
             adapter.stream(&refs[0], &opts, &mut sink).unwrap();
             assert_eq!(
@@ -1122,7 +1122,7 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[1].content.len(), 4);
         let adapter = Cursor::with_user_dir(&world.base);
-        let owned = crate::stream::collect_with(&adapter, &r, &ParseOptions::bulk()).unwrap();
+        let owned = crate::stream::collect_with(&adapter, &r, &Demand::LEAN).unwrap();
         assert_eq!(owned.title.as_deref(), Some("composer"));
         assert_eq!(owned.lineage.agent_path.as_deref(), Some("researcher"));
         assert_eq!(owned.model.as_deref(), Some("native-model"));
@@ -1146,7 +1146,7 @@ mod tests {
             actual.pop();
             assert_eq!(expected, actual);
         }
-        for options in [ParseOptions::facts(), ParseOptions::lazy()] {
+        for options in [Demand::FACTS.with_spans(), Demand::LEAN.with_spans()] {
             let collected = crate::stream::collect_with(&adapter, &r, &options).unwrap();
             let content = &collected.messages[1].content;
             assert!(matches!(&content[1], Block::Text { text: Text::Source(_) }));
@@ -1298,7 +1298,7 @@ mod tests {
         let journal = r.path.with_file_name("state.vscdb-journal");
         assert!(!wal.exists() && !shm.exists());
         let adapter = Cursor::with_user_dir(&world.base);
-        let retained = crate::stream::collect_with(&adapter, &r, &ParseOptions::lazy_extra()).unwrap();
+        let retained = crate::stream::collect_with(&adapter, &r, &Demand::RICH.with_spans()).unwrap();
         assert!(!wal.exists() && !shm.exists());
         let Block::Text {
             text: crate::lazy::Text::Source(text),
@@ -1317,7 +1317,7 @@ mod tests {
             }
         }
         assert!(adapter
-            .stream(&r, &ParseOptions::bulk(), &mut Stop(journal))
+            .stream(&r, &Demand::LEAN, &mut Stop(journal))
             .unwrap_err()
             .to_string()
             .contains("dependencies changed"));

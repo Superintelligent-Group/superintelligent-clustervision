@@ -353,7 +353,7 @@ fn node_role(kind: Kind, view: JsonView<'_>) -> Result<Option<String>> {
     };
     author.string("role")
 }
-pub(super) fn stream(kind: Kind, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+pub(super) fn stream(kind: Kind, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
     let archive = load(&r.path, Some(&r.id))?;
     let entry = archive
         .entry(&r.id)
@@ -789,7 +789,7 @@ mod tests {
         let mut sink = crate::stream::CollectSink::default();
         std::fs::write(&path, format!("[{first},]")).unwrap();
         let r = SessionRef::new("target", Harness::ClaudeExport, path.clone());
-        assert!(stream(Kind::Claude, &r, &ParseOptions::lazy(), &mut sink).is_err());
+        assert!(stream(Kind::Claude, &r, &Demand::LEAN.with_spans(), &mut sink).is_err());
         assert!(
             sink.messages.is_empty(),
             "whole archive syntax must pass before callbacks"

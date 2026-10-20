@@ -58,7 +58,7 @@ use super::wire::{self, anthropic};
 use super::{parse_ts, ts_from_epoch};
 use crate::ir::*;
 use crate::json::{JsonSource, JsonView};
-use crate::stream::{Flow, MessageSink, ParseOptions};
+use crate::stream::{Demand, Flow, MessageSink};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
@@ -218,15 +218,10 @@ fn scan(path: &Path, sid: &str) -> Option<SessionRef> {
 }
 /// Read one messages file into `sink`, returning the session with empty `messages`.
 pub fn stream(path: &Path, id: &str, sink: &mut dyn MessageSink) -> Result<Session> {
-    stream_with_options(path, id, &ParseOptions::full(), sink)
+    stream_with_options(path, id, &Demand::RICH, sink)
 }
 
-pub(crate) fn stream_with_options(
-    path: &Path,
-    id: &str,
-    opts: &ParseOptions,
-    sink: &mut dyn MessageSink,
-) -> Result<Session> {
+pub(crate) fn stream_with_options(path: &Path, id: &str, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
     let source = JsonSource::capture(path)?;
     source.read_document(|view| {
         let keys = [
@@ -753,8 +748,7 @@ mod tests {
                 }),
             );
             let mut sink = ChildSink::default();
-            let session =
-                stream_with_options(&path, &format!("lead/{stem}"), &ParseOptions::full(), &mut sink).unwrap();
+            let session = stream_with_options(&path, &format!("lead/{stem}"), &Demand::RICH, &mut sink).unwrap();
             assert!(sink.dependencies.contains(&manifest));
             assert_eq!(session.cwd, None);
             assert_eq!(session.model.as_deref(), Some("child-model"));
@@ -849,7 +843,7 @@ mod tests {
         ]});
         fs::write(&path, serde_json::to_vec(&doc).unwrap()).unwrap();
         let mut expected = None;
-        for opts in [ParseOptions::full(), ParseOptions::lazy(), ParseOptions::complete()] {
+        for opts in [Demand::RICH, Demand::LEAN.with_spans(), Demand::COMPLETE] {
             let mut sink = CollectSink::default();
             let mut actual = stream_with_options(&path, "sdk", &opts, &mut sink).unwrap();
             actual.messages = sink.messages;
@@ -899,7 +893,7 @@ mod tests {
             }
         };
         assert!(
-            stream_with_options(&path, "sdk", &ParseOptions::lazy(), &mut mutate).is_err(),
+            stream_with_options(&path, "sdk", &Demand::LEAN.with_spans(), &mut mutate).is_err(),
             "source mutation after publication must reject completion"
         );
         assert!(
@@ -913,7 +907,7 @@ mod tests {
             )
             .unwrap();
             let mut sink = CollectSink::default();
-            assert!(stream_with_options(&path, "sdk", &ParseOptions::lazy(), &mut sink).is_err());
+            assert!(stream_with_options(&path, "sdk", &Demand::LEAN.with_spans(), &mut sink).is_err());
             assert!(sink.messages.is_empty());
         }
         fs::remove_dir_all(dir).unwrap();

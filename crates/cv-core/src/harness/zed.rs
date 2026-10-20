@@ -58,7 +58,7 @@ use super::store::sqlite::{columns, open_ro, Cell, Cells};
 use super::wire::anthropic;
 use super::Adapter;
 use crate::ir::*;
-use crate::stream::{Flow, MessageSink, ParseOptions};
+use crate::stream::{Demand, Flow, MessageSink};
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 use serde_json::Value;
@@ -139,7 +139,7 @@ impl Adapter for Zed {
         super::WatchPolicy::Database
     }
 
-    fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+    fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| {
             let conn = open_ro(&r.path)?;
             conn.read(|conn| {
@@ -684,7 +684,7 @@ mod tests {
         let complete = crate::stream::stream_counted(
             &adapter,
             &reference,
-            &ParseOptions::facts(),
+            &Demand::FACTS.with_spans(),
             &mut crate::stream::Discard,
             crate::stream::Pass::RECORD,
         )?;
@@ -716,7 +716,7 @@ mod tests {
         let complete = crate::stream::stream_counted(
             &adapter,
             &unknown,
-            &ParseOptions::facts(),
+            &Demand::FACTS.with_spans(),
             &mut crate::stream::Discard,
             crate::stream::Pass::RECORD,
         )?;
@@ -1008,9 +1008,7 @@ mod tests {
         let adapter = Zed::with_root(&world.base);
         let mut reference = sref("t");
         reference.path = path;
-        let failure = adapter
-            .stream(&reference, &ParseOptions::default(), &mut sink)
-            .unwrap_err();
+        let failure = adapter.stream(&reference, &Demand::LEAN, &mut sink).unwrap_err();
         assert!(failure.to_string().contains("dependencies changed"));
     }
 
@@ -1097,8 +1095,8 @@ mod tests {
         let zed = Zed::with_root(&world.base);
         let mut reference = sref("t");
         reference.path = path;
-        let full = crate::stream::collect_with(&zed, &reference, &ParseOptions::full()).unwrap();
-        let lazy = crate::stream::collect_with(&zed, &reference, &ParseOptions::lazy()).unwrap();
+        let full = crate::stream::collect_with(&zed, &reference, &Demand::RICH).unwrap();
+        let lazy = crate::stream::collect_with(&zed, &reference, &Demand::LEAN.with_spans()).unwrap();
         assert_eq!(
             serde_json::to_value(&full).unwrap(),
             serde_json::to_value(&lazy).unwrap()
@@ -1294,7 +1292,7 @@ mod tests {
         for r in &refs {
             let parsed = zed.parse(r).unwrap();
             let mut sink = crate::stream::CollectSink::default();
-            let mut streamed = zed.stream(r, &crate::stream::ParseOptions::full(), &mut sink).unwrap();
+            let mut streamed = zed.stream(r, &crate::stream::Demand::RICH, &mut sink).unwrap();
             streamed.messages = sink.messages;
             assert_eq!(
                 serde_json::to_value(&parsed).unwrap(),
@@ -1340,12 +1338,12 @@ mod tests {
                 reference.path = path.clone();
                 let expected = zed.parse(&reference).unwrap();
                 for options in [
-                    ParseOptions::lazy(),
-                    ParseOptions::facts(),
-                    ParseOptions::lazy_extra(),
-                    ParseOptions {
+                    Demand::LEAN.with_spans(),
+                    Demand::FACTS.with_spans(),
+                    Demand::RICH.with_spans(),
+                    Demand {
                         spans: true,
-                        ..ParseOptions::complete()
+                        ..Demand::COMPLETE
                     },
                 ] {
                     let mut sink = crate::stream::CollectSink::default();
@@ -1375,7 +1373,7 @@ mod tests {
         let mut reference = sref("t");
         reference.path = path;
         let mut sink = crate::stream::CollectSink::default();
-        zed.stream(&reference, &ParseOptions::lazy(), &mut sink).unwrap();
+        zed.stream(&reference, &Demand::LEAN.with_spans(), &mut sink).unwrap();
         let Block::Text { text } = &sink.messages[0].content[0] else {
             panic!("text")
         };

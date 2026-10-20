@@ -13,7 +13,7 @@
 use crate::harness::claude::verify_claude_resumable;
 use crate::harness::EmitResult;
 use crate::ir::{Block, Harness, Message, MessageKind, Role, Session, SessionRef};
-use crate::stream::ParseOptions;
+use crate::stream::Demand;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -467,9 +467,9 @@ pub fn emit_report(
         .iter()
         .any(|message| is_carrier(message) || message.complete_record.is_some())
     {
-        ParseOptions::complete()
+        Demand::COMPLETE
     } else {
-        ParseOptions::full()
+        Demand::RICH
     };
     let report = match reparse_features(target, opts.thinking, &result, &reparse_opts) {
         Ok((reparsed, after)) => diff_features(target, opts.thinking, session, &reparsed, before, after),
@@ -566,7 +566,7 @@ pub fn prepare_selected(
     start: usize,
     end: Option<usize>,
 ) -> Result<(Session, usize)> {
-    let mut options = ParseOptions::full();
+    let mut options = Demand::RICH;
     options.spans = true;
     prepare::selected(adapter, reference, &options, start, end)
 }
@@ -581,9 +581,9 @@ pub fn parse_for_emit(
     target: Harness,
 ) -> Result<Session> {
     let mut options = if reference.harness == target {
-        ParseOptions::complete()
+        Demand::COMPLETE
     } else {
-        ParseOptions::full()
+        Demand::RICH
     };
     let checked = emitter_for(target).is_some();
     if checked {
@@ -2322,7 +2322,7 @@ mod tests {
         );
     }
 
-    /// Format-complete losslessness: a rich Claude transcript parsed under `ParseOptions::complete`
+    /// Format-complete losslessness: a rich Claude transcript parsed under `Demand::COMPLETE`
     /// and re-emitted reproduces EVERY record with the same top-level key set and the same value
     /// per key (key order may differ). Covers a user turn, an assistant turn (text + tool_use), a
     /// user tool_result turn (with a `toolUseResult` mirror), a `system` record, and three meta
@@ -2330,7 +2330,7 @@ mod tests {
     #[test]
     fn claude_complete_round_trip_is_lossless() {
         use crate::harness::claude::{self, stream_str, CARRIER_KEY};
-        use crate::stream::{CollectSink, ParseOptions};
+        use crate::stream::{CollectSink, Demand};
 
         let sid = "11111111-1111-4111-8111-111111111111";
         // A transcript exercising every covered record shape, with assorted top-level + message-level
@@ -2370,7 +2370,7 @@ mod tests {
         // Parse format-complete: every record is carried (meta/system as carriers, user/assistant/
         // tool with exhaustive `extra`).
         let mut sink = CollectSink::default();
-        let session = stream_str(sid, &src_text, None, &ParseOptions::complete(), &mut sink);
+        let session = stream_str(sid, &src_text, None, &Demand::COMPLETE, &mut sink);
         let mut session = session;
         session.messages = sink.messages;
         assert_eq!(
@@ -2757,7 +2757,7 @@ mod tests {
             "usage must survive into Codex, got {:?}",
             report.deltas
         );
-        let re = reparse_emitted(Harness::Codex, &res, &ParseOptions::full()).unwrap();
+        let re = reparse_emitted(Harness::Codex, &res, &Demand::RICH).unwrap();
         let u = re
             .messages
             .iter()
@@ -2790,7 +2790,7 @@ mod tests {
             "usage must survive into OpenClaw, got {:?}",
             report.deltas
         );
-        let re = reparse_emitted(Harness::OpenClaw, &res, &ParseOptions::full()).unwrap();
+        let re = reparse_emitted(Harness::OpenClaw, &res, &Demand::RICH).unwrap();
         let u = re
             .messages
             .iter()
@@ -2821,7 +2821,7 @@ mod tests {
             "details must survive into OpenCode, got {:?}",
             report.deltas
         );
-        let re = reparse_emitted(Harness::OpenCode, &res, &ParseOptions::full()).unwrap();
+        let re = reparse_emitted(Harness::OpenCode, &res, &Demand::RICH).unwrap();
         let d = re
             .messages
             .iter()
@@ -3155,7 +3155,7 @@ mod tests {
         .join("\n");
 
         let mut sink = CollectSink::default();
-        let mut s = stream_str(sid, &text, None, &ParseOptions::complete(), &mut sink);
+        let mut s = stream_str(sid, &text, None, &Demand::COMPLETE, &mut sink);
         s.messages = sink.messages;
         assert!(s.messages.iter().any(is_carrier), "the `mode` record is carried");
 
@@ -3369,7 +3369,7 @@ mod tests {
                 report.deltas
             );
             // …and it is really Claude's own `message.usage` shape, read back by Claude's parser.
-            let re = reparse_emitted(Harness::Claude, &res, &ParseOptions::full()).unwrap();
+            let re = reparse_emitted(Harness::Claude, &res, &Demand::RICH).unwrap();
             let u = re
                 .messages
                 .iter()
@@ -3547,7 +3547,7 @@ mod tests {
             thinking: t,
             ..Default::default()
         };
-        let reparse = |res: &EmitResult| reparse_emitted(Harness::Codex, res, &ParseOptions::full()).unwrap();
+        let reparse = |res: &EmitResult| reparse_emitted(Harness::Codex, res, &Demand::RICH).unwrap();
         let thinking_blocks = |s: &Session| -> usize {
             s.messages
                 .iter()
@@ -3612,7 +3612,7 @@ mod tests {
         // --- drop: no thinking at all, even into a target that could hold every payload.
         for target in [Harness::Codex, Harness::Claude] {
             let (res, report) = emit_report(&base, target, &temp_dir(), &opts(ThinkingMode::Drop)).unwrap();
-            let re = reparse_emitted(target, &res, &ParseOptions::full()).unwrap();
+            let re = reparse_emitted(target, &res, &Demand::RICH).unwrap();
             assert_eq!(thinking_blocks(&re), 0, "--thinking drop emits none into {target}");
             assert!(
                 !re.messages
@@ -3681,7 +3681,7 @@ mod tests {
                 };
                 let (result, actual) =
                     emit_report(&source, target, &world.base.join(format!("{target}-{thinking}")), &opts).unwrap();
-                let reparsed = reparse_emitted(target, &result, &ParseOptions::full()).unwrap();
+                let reparsed = reparse_emitted(target, &result, &Demand::RICH).unwrap();
                 let expected = diff_fidelity(target, thinking, &source, &reparsed);
                 assert_eq!(
                     serde_json::to_value(actual).unwrap(),

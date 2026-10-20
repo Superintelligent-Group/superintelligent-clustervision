@@ -558,7 +558,7 @@ fn tool_calls(blocks: &[Block]) -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn parsed(connection: &rusqlite::Connection, options: &crate::stream::ParseOptions) -> Result<Session> {
+    fn parsed(connection: &rusqlite::Connection, options: &crate::stream::Demand) -> Result<Session> {
         super::super::parse_conn_with(
             connection,
             &crate::SessionRef::new("fixed", Harness::Hermes, connection.path().expect("file store")),
@@ -616,7 +616,7 @@ mod tests {
                     '{"call":"occurrence"}');
         "#,
         )?;
-        let complete = crate::stream::ParseOptions::complete();
+        let complete = crate::stream::Demand::COMPLETE;
         let session = parsed(&source, &complete)?;
         assert_eq!(
             session.messages.len(),
@@ -655,10 +655,10 @@ mod tests {
                     r.get(0)
                 })?;
             assert_eq!(native_rows, 7);
-            let display = parsed(&output, &crate::stream::ParseOptions::full())?;
+            let display = parsed(&output, &crate::stream::Demand::RICH)?;
             assert_eq!(
                 message_values(&display),
-                message_values(&parsed(&source, &crate::stream::ParseOptions::full())?)
+                message_values(&parsed(&source, &crate::stream::Demand::RICH)?)
             );
             if old_schema {
                 let other: String =
@@ -722,7 +722,7 @@ mod tests {
             |r| r.get(0),
         )?;
         assert_eq!(retained, 0);
-        let replay = parsed(&output, &crate::stream::ParseOptions::full())?;
+        let replay = parsed(&output, &crate::stream::Demand::RICH)?;
         assert_eq!(replay.messages.len(), 2);
         assert!(replay
             .messages

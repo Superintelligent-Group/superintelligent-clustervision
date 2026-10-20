@@ -95,7 +95,7 @@ impl Demand {
     }
 }
 
-/// The metadata requested when [`ParseOptions::extra`] is enabled.
+/// The metadata a sink asks for under a rich read ([`MessageSink::extra_projection`]).
 ///
 /// Facts are a shared projection for read-only reducers, not a separate output schema. Adapters
 /// without a projection implementation may return full extras; consumers must not depend on the
@@ -128,126 +128,6 @@ pub enum ExtraProjection {
     /// output, conversion, redaction or watch paths, or silently add extras to existing lean
     /// output. Source validation and dependency/provenance checks remain mandatory.
     Facts,
-}
-
-/// Knobs controlling how much of each message an adapter materializes. Everything off (the
-/// [`Default`]) is the cheapest faithful pass; full-fidelity callers opt back in.
-///
-/// # Which constructor? (the decision rule)
-///
-/// - [`full()`](ParseOptions::full) — you will **re-emit or round-trip** the session (convert,
-///   port, `--json`, splice/loom, redact-to-file). Everything materialized, inline. Most
-///   expensive; rich read-only consumers can use lazy metadata or reducer facts.
-/// - [`bulk()`](ParseOptions::bulk) — you read **all** the text once, forward-only, and never
-///   touch `extra` (live search over small/whole-doc harnesses, dataset-style flattening of
-///   sessions you'll fully consume). Inline content, no sidecars.
-/// - [`lazy()`](ParseOptions::lazy) — you skip, partially read, or consume fields in bounded
-///   chunks: windowed/`--range` reads, metadata/event extraction, snippet scans, head-only
-///   embedding, chunk-wise indexing. Supported large fields arrive as [`Span`](crate::lazy::Span)s
-///   you resolve (possibly capped via [`Resolver::resolve_prefix`](crate::lazy::Resolver::
-///   resolve_prefix) or chunked via `for_each_chunk`). Checked sources retain descriptors and
-///   may use private backing; payload ownership is deferred until a consumer requests it.
-///   Adapters without a span path just hand you inline content, so `lazy()` is
-///   never *less* correct than `bulk()`, only cheaper when spans exist.
-///
-/// - [`facts()`](ParseOptions::facts) — doctor, compaction and affordance reducers need their
-///   shared metadata facts, but not unrelated raw sidecars. Unsupported adapters may still return
-///   full metadata. Use [`lazy_extra()`](ParseOptions::lazy_extra) when all extras are part of the
-///   requested output.
-///
-/// Rule of thumb: owned round-trip ⇒ `full`, bounded content ⇒ `lazy`, reducers ⇒ `facts`.
-#[derive(Debug, Clone, Default)]
-pub struct ParseOptions {
-    /// Populate the harness-specific `extra` maps — most importantly Claude's `toolUseResult`
-    /// sidecar (structured patches, file contents, command stdout), which is `clone`d per tool
-    /// turn and can dwarf the visible transcript. Bulk text consumers (index/search/dataset) never
-    /// read it; only full-fidelity paths (json export, cross-harness convert/port, round-trips) do.
-    pub extra: bool,
-    /// Select the metadata projection when `extra` is enabled. Ignored when `extra` is false;
-    /// `complete` always demands full metadata. Unsupported adapters may retain full extras.
-    pub extra_projection: ExtraProjection,
-    /// Request provider response identity needed to deduplicate usage, without unrelated rich
-    /// extras. Claude retains its string `message.id`; other harnesses may ignore this demand.
-    /// Full `extra` remains authoritative when both are requested.
-    pub usage_identity: bool,
-    /// Emit large content as lazy [`Span`](crate::lazy::Span)s into the source instead of owned
-    /// strings. Partial readers and chunk-wise reducers can avoid retaining complete decoded
-    /// fields. Resolving every span into an owned string loses that benefit. Adapters without
-    /// span support ignore this flag; adapters may still allocate during record interpretation.
-    pub spans: bool,
-    /// Stamp each message's source **byte offset** into
-    /// `Message.extra[`[`offsets::OFFSET_KEY`](crate::offsets::OFFSET_KEY)`]` (the offset of the
-    /// record line that produced it). Only `cv rewind`'s message-to-byte pass turns this on —
-    /// ordinary lazy/bulk/full consumers never see the stamp, so their output is unchanged.
-    /// Adapters that don't track byte positions (everything but claude/codex JSONL) ignore it.
-    /// Implies nothing by itself: the adapters only stamp on their span-tracking paths, so use
-    /// [`lazy_offsets()`](ParseOptions::lazy_offsets) (spans + offsets) rather than setting it solo.
-    pub offsets: bool,
-    /// **Format-complete**: lose nothing on parse. Carry every record — including the
-    /// non-conversational meta records the lean passes skip (mode/permission-mode/attachment/
-    /// queue-operation/last-prompt/hook telemetry/…) — as round-trippable carrier messages, so a
-    /// `parse → emit` round-trip reproduces the original byte-for-byte (modulo key order). Off by
-    /// default so the conversational passes (render/dataset/index) stay exactly as they were; turned
-    /// on by conversion/round-trip/[`prune`](crate::prune)-via-IR paths that must not drop a field.
-    /// Implies [`extra`](ParseOptions::extra). Adapters that can't yet carry every record ignore it.
-    pub complete: bool,
-}
-
-impl From<Demand> for ParseOptions {
-    fn from(demand: Demand) -> Self {
-        let extra = demand.tier >= Tier::Facts;
-        ParseOptions {
-            extra,
-            extra_projection: if demand.tier == Tier::Facts {
-                ExtraProjection::Facts
-            } else {
-                ExtraProjection::Full
-            },
-            usage_identity: matches!(demand.tier, Tier::Usage | Tier::Facts),
-            spans: demand.spans,
-            offsets: demand.offsets,
-            complete: demand.tier == Tier::Complete,
-        }
-    }
-}
-
-impl ParseOptions {
-    pub fn full() -> Self {
-        Demand::RICH.into()
-    }
-    pub fn bulk() -> Self {
-        Demand::LEAN.into()
-    }
-    pub fn complete() -> Self {
-        Demand::COMPLETE.into()
-    }
-    pub fn lazy() -> Self {
-        Demand::LEAN.with_spans().into()
-    }
-    pub fn lazy_extra() -> Self {
-        Demand::RICH.with_spans().into()
-    }
-    pub fn facts() -> Self {
-        Demand::FACTS.with_spans().into()
-    }
-    pub fn usage() -> Self {
-        Demand::USAGE.with_spans().into()
-    }
-    pub fn lazy_offsets() -> Self {
-        Demand::LEAN.with_spans().with_offsets().into()
-    }
-
-    /// Whether an adapter should project the shared facts instead of full rich metadata.
-    pub fn facts_only(&self) -> bool {
-        self.extra && !self.complete && self.extra_projection == ExtraProjection::Facts
-    }
-
-    /// Whether full metadata is demanded, including the overriding format-complete mode.
-    /// Projection-aware producers use this for large sidecars; producers without a facts path
-    /// continue to honor `extra` and may return full metadata for Facts requests.
-    pub fn wants_full_extra(&self) -> bool {
-        self.complete || (self.extra && self.extra_projection == ExtraProjection::Full)
-    }
 }
 
 /// The one early-stop signal. A chunk, character or record callback that has what it needs
@@ -534,7 +414,7 @@ impl<F: FnMut(Message) -> Result<Flow>> MessageSink for TryFnSink<F> {
 /// Fans one adapter pass into two sinks, so a single read of a transcript feeds multiple consumers
 /// — e.g. `cv index` driving the FTS [`ChunkSink`] and the event-catalog
 /// [`EventSink`](crate::events::EventSink) off the same `stream()`. Each message is cloned once
-/// while both sinks are live; under [`ParseOptions::lazy`] large content is a
+/// while both sinks are live; under [`Demand::with_spans`] large content is a
 /// [`Span`](crate::lazy::Span) handle, so the clone stays O(small).
 ///
 /// Flow semantics: the stream continues until **both** sinks have said [`Flow::Stop`], and a sink
@@ -685,18 +565,18 @@ pub fn replay(mut session: Session, sink: &mut dyn MessageSink) -> Result<Sessio
 /// at full fidelity. This is the default body of [`Adapter::parse`](crate::harness::Adapter::parse)
 /// for adapters that implement a native `stream`.
 pub fn collect(adapter: &dyn Adapter, r: &SessionRef) -> Result<Session> {
-    let mut session = collect_with(adapter, r, &ParseOptions::full())?;
+    let mut session = collect_with(adapter, r, &Demand::RICH)?;
     // Full-fidelity parse: resolve any lazy content spans so the returned `Session` owns all its
     // content inline (safe for `--json` serialization, cross-harness emit, `Deref` reads, etc.).
     session.materialize()?;
     Ok(session)
 }
 
-/// Like [`collect`] but with explicit [`ParseOptions`] and **without** materializing — the returned
+/// Like [`collect`] but with explicit [`Demand`] and **without** materializing — the returned
 /// session may carry lazy content [`Span`]s. Consumers that hold the whole session but read it once
 /// (e.g. dataset export) use this and resolve per block, so a giant field is never owned wholesale.
 /// Use [`collect`] (or call `.materialize()`) when you need owned inline content.
-pub fn collect_with(adapter: &dyn Adapter, r: &SessionRef, opts: &ParseOptions) -> Result<Session> {
+pub fn collect_with(adapter: &dyn Adapter, r: &SessionRef, opts: &Demand) -> Result<Session> {
     let mut sink = CollectSink::default();
     let mut session = stream_counted(adapter, r, opts, &mut sink, Pass::RECORD)?.session;
     session.messages = sink.messages;
@@ -790,7 +670,7 @@ impl StagedReadGuard {
 pub fn stream_counted(
     adapter: &dyn Adapter,
     r: &SessionRef,
-    opts: &ParseOptions,
+    opts: &Demand,
     sink: &mut dyn MessageSink,
     pass: Pass<'_>,
 ) -> Result<Streamed> {
@@ -1057,35 +937,6 @@ impl MessageSink for Counting<'_> {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn metadata_projection_preserves_existing_modes_and_complete_precedence() {
-        for opts in [
-            ParseOptions::full(),
-            ParseOptions::lazy_extra(),
-            ParseOptions::complete(),
-        ] {
-            assert!(opts.wants_full_extra());
-            assert!(!opts.facts_only());
-        }
-        for opts in [ParseOptions::bulk(), ParseOptions::lazy(), ParseOptions::usage()] {
-            assert!(!opts.wants_full_extra());
-            assert!(!opts.facts_only());
-        }
-        let facts = ParseOptions::facts();
-        assert!(facts.extra && facts.spans && facts.usage_identity);
-        assert!(facts.facts_only());
-        assert!(!facts.wants_full_extra());
-        let complete = ParseOptions {
-            complete: true,
-            ..facts.clone()
-        };
-        assert!(complete.wants_full_extra());
-        assert!(!complete.facts_only());
-        let disabled = ParseOptions { extra: false, ..facts };
-        assert!(!disabled.facts_only());
-        assert!(!disabled.wants_full_extra());
-    }
-
     use super::*;
     use crate::ir::{Block, Role};
 
@@ -1399,7 +1250,7 @@ mod tests {
         fn discover(&self) -> Result<Vec<SessionRef>> {
             Ok(Vec::new())
         }
-        fn stream(&self, r: &SessionRef, _: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+        fn stream(&self, r: &SessionRef, _: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
             let session = Session::new(&r.id, r.harness);
             sink.meta(&session);
             for n in 1..=3 {
@@ -1446,7 +1297,7 @@ mod tests {
                     stream_counted(
                         &adapter,
                         &r,
-                        &ParseOptions::lazy(),
+                        &Demand::LEAN.with_spans(),
                         &mut failing,
                         crate::stream::Pass {
                             every: Some(1),
@@ -1456,7 +1307,7 @@ mod tests {
                     )
                     .map(|_| ())
                 } else {
-                    stream_counted(&adapter, &r, &ParseOptions::lazy(), &mut failing, Pass::RECORD).map(|_| ())
+                    stream_counted(&adapter, &r, &Demand::LEAN.with_spans(), &mut failing, Pass::RECORD).map(|_| ())
                 };
                 assert!(
                     result
@@ -1531,9 +1382,9 @@ mod tests {
         for checked_entry in [false, true] {
             let mut failing = FailingSink::new(FailAt::Message, Default::default());
             let result = if checked_entry {
-                adapter.try_stream(&r, &ParseOptions::lazy(), &mut failing)
+                adapter.try_stream(&r, &Demand::LEAN.with_spans(), &mut failing)
             } else {
-                adapter.stream(&r, &ParseOptions::lazy(), &mut failing)
+                adapter.stream(&r, &Demand::LEAN.with_spans(), &mut failing)
             };
             assert_eq!(result.unwrap_err().to_string(), "source projection unavailable");
             assert_eq!(failing.seen, 2);
@@ -1586,7 +1437,7 @@ mod tests {
         let done = stream_counted(
             &*adapter,
             r,
-            &ParseOptions::lazy(),
+            &Demand::LEAN.with_spans(),
             &mut keep,
             crate::stream::Pass {
                 from,
@@ -1722,7 +1573,7 @@ mod tests {
                 .unwrap()
                 .stream(
                     &transcript(crate::Harness::Qwen, before.clone()),
-                    &ParseOptions::full(),
+                    &Demand::RICH,
                     &mut sink,
                 )
                 .unwrap();
@@ -1741,7 +1592,7 @@ mod tests {
         let adapter = crate::harness::for_harness(crate::Harness::Qwen).unwrap();
         let mut keep = Keep::default();
         assert!(adapter
-            .resume(&legacy, &ParseOptions::lazy(), &mut keep, cp)
+            .resume(&legacy, &Demand::LEAN.with_spans(), &mut keep, cp)
             .unwrap()
             .is_none());
         assert!(
@@ -1785,7 +1636,7 @@ mod tests {
             let done = stream_counted(
                 &*adapter,
                 &r,
-                &ParseOptions::lazy(),
+                &Demand::LEAN.with_spans(),
                 &mut Keep::default(),
                 crate::stream::Pass {
                     from: Some(final_cp),

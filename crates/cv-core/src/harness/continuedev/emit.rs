@@ -255,7 +255,7 @@ mod tests {
         let session = crate::stream::collect_with(
             &adapter,
             &crate::SessionRef::new("source", Harness::Continue, &path),
-            &crate::stream::ParseOptions::lazy(),
+            &crate::stream::Demand::LEAN.with_spans(),
         )?;
         let opts = crate::emit::EmitOptions {
             new_id: Some("copy".into()),
@@ -270,7 +270,7 @@ mod tests {
         let reparsed = crate::stream::collect_with(
             &adapter,
             &crate::SessionRef::new("copy", Harness::Continue, &emitted.path),
-            &crate::stream::ParseOptions::full(),
+            &crate::stream::Demand::RICH,
         )?;
         assert_eq!(reparsed.messages.len(), session.messages.len());
         for (source, copied) in session.messages.iter().zip(&reparsed.messages) {
@@ -335,7 +335,7 @@ mod tests {
         fs::write(&path, serde_json::to_vec(&doc)?)?;
         let adapter = crate::harness::continuedev::Continue::with_root(&store);
         let r = crate::SessionRef::new("source", Harness::Continue, &path);
-        let session = crate::stream::collect_with(&adapter, &r, &crate::stream::ParseOptions::lazy())?;
+        let session = crate::stream::collect_with(&adapter, &r, &crate::stream::Demand::LEAN.with_spans())?;
         let grouped = session.messages.iter().find(|m| m.role == Role::Tool).unwrap();
         assert_eq!(grouped.content.len(), 2);
         let opts = crate::emit::EmitOptions {
@@ -347,7 +347,7 @@ mod tests {
         let reparsed = crate::stream::collect_with(
             &adapter,
             &crate::SessionRef::new("copy", Harness::Continue, &emitted.path),
-            &crate::stream::ParseOptions::full(),
+            &crate::stream::Demand::RICH,
         )?;
         let outputs = reparsed
             .messages

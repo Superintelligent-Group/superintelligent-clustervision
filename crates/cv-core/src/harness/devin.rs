@@ -148,7 +148,7 @@ use super::store::sqlite::{columns, open_ro, table_exists, Cell, Cells};
 use super::store::xdg_data_dir;
 use super::{note_skipped_lines, ts_from_epoch, Adapter};
 use crate::ir::*;
-use crate::stream::{Flow, MessageSink, ParseOptions};
+use crate::stream::{Demand, Flow, MessageSink};
 use anyhow::Result;
 use rusqlite::Connection;
 use serde_json::{json, Value};
@@ -227,7 +227,7 @@ impl Adapter for Devin {
         super::WatchPolicy::Database
     }
 
-    fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+    fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| {
             // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
             let mut spawns = crate::affordance::AffordanceSink::new(Harness::Devin, sink);
@@ -981,7 +981,7 @@ mod tests {
             }
         }
         let failure = adapter
-            .stream(&reference, &ParseOptions::default(), &mut MutatingSink(&writer))
+            .stream(&reference, &Demand::LEAN, &mut MutatingSink(&writer))
             .unwrap_err();
         assert!(failure.to_string().contains("dependencies changed"), "{failure:#}");
     }
@@ -1006,8 +1006,8 @@ mod tests {
             "UPDATE message_nodes SET chat_message=json_set(chat_message,'$.content',?1) WHERE session_id=?2",
             rusqlite::params!["large body ".repeat(10000), reference.id],
         )?;
-        let inline = crate::stream::collect_with(&adapter, &reference, &ParseOptions::full())?;
-        let mut large = crate::stream::collect_with(&adapter, &reference, &ParseOptions::lazy_extra())?;
+        let inline = crate::stream::collect_with(&adapter, &reference, &Demand::RICH)?;
+        let mut large = crate::stream::collect_with(&adapter, &reference, &Demand::RICH.with_spans())?;
         let source = |s: &Session| {
             s.messages.iter().any(|m| {
                 m.content.iter().any(|b| {
@@ -1060,7 +1060,7 @@ mod tests {
         let adapter = Devin::with_root(&world.base);
         let refs = adapter.discover()?;
         let reference = refs.iter().find(|r| r.id == "fixture-beta").unwrap();
-        for options in [ParseOptions::full(), ParseOptions::lazy_extra(), ParseOptions::facts()] {
+        for options in [Demand::RICH, Demand::RICH.with_spans(), Demand::FACTS.with_spans()] {
             let s = crate::stream::collect_with(&adapter, reference, &options)?;
             assert_eq!(s.model.as_deref(), Some("fallback-model"));
             assert_eq!(s.system_prompt.as_deref(), Some("You are a checked prefix."));
@@ -1075,7 +1075,7 @@ mod tests {
         std::fs::copy(fixture(), &path)?;
         let adapter = Devin::with_root(&world.base);
         let table = adapter.discover()?;
-        let parsed = |r: &SessionRef| crate::stream::collect_with(&adapter, r, &ParseOptions::full()).unwrap();
+        let parsed = |r: &SessionRef| crate::stream::collect_with(&adapter, r, &Demand::RICH).unwrap();
         let expected: Vec<Value> = table.iter().map(|r| serde_json::to_value(parsed(r)).unwrap()).collect();
         let writer = Connection::open(&path)?;
         writer.execute_batch(
@@ -1098,7 +1098,7 @@ mod tests {
         let writer = Connection::open(&path)?;
         let adapter = Devin::with_root(&world.base);
         let reference = SessionRef::new("fixture-beta", Harness::Devin, &path);
-        let base = crate::stream::collect_with(&adapter, &reference, &ParseOptions::full())?;
+        let base = crate::stream::collect_with(&adapter, &reference, &Demand::RICH)?;
         for (cell, skipped) in [
             (
                 "CAST('{\"role\":\"assistant\",\"content\":\"blob body\"}' AS BLOB)",
@@ -1113,7 +1113,7 @@ mod tests {
                 "UPDATE message_nodes SET chat_message={cell} \
                 WHERE session_id='fixture-beta' AND node_id=3;"
             ))?;
-            for options in [ParseOptions::full(), ParseOptions::lazy_extra()] {
+            for options in [Demand::RICH, Demand::RICH.with_spans()] {
                 let s = crate::stream::collect_with(&adapter, &reference, &options)?;
                 let noted = |s: &Session| {
                     s.cv_extra()
@@ -1186,7 +1186,7 @@ mod tests {
         )?;
         let adapter = Devin::with_root(&world.base);
         for reference in adapter.discover()? {
-            let parsed = crate::stream::collect_with(&adapter, &reference, &ParseOptions::full())?;
+            let parsed = crate::stream::collect_with(&adapter, &reference, &Demand::RICH)?;
             assert_eq!(
                 reference.message_count,
                 Some(parsed.messages.iter().filter(|m| m.is_turn()).count()),

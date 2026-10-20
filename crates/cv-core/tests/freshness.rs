@@ -230,7 +230,7 @@ fn a_full_parse_fills_a_not_counted_catalog_row() {
     cv_core::stream::stream_counted(
         adapter.as_ref(),
         &r,
-        &cv_core::ParseOptions::lazy(),
+        &cv_core::Demand::LEAN.with_spans(),
         &mut head,
         cv_core::stream::Pass::RECORD,
     )
@@ -245,7 +245,7 @@ fn a_full_parse_fills_a_not_counted_catalog_row() {
     cv_core::stream::stream_counted(
         adapter.as_ref(),
         &r,
-        &cv_core::ParseOptions::lazy(),
+        &cv_core::Demand::LEAN.with_spans(),
         &mut all,
         cv_core::stream::Pass::RECORD,
     )

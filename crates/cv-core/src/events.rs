@@ -16,7 +16,7 @@
 //! Memory discipline (the project's core value): the sink owns only the small classified rows.
 //! Tool arguments are projected from owned or validated source-backed JSON; only selected paths,
 //! command prefixes and actual patch target lines are retained. Tool result content is never
-//! materialized — under [`ParseOptions::lazy()`](crate::stream::ParseOptions::lazy) a large result
+//! materialized — under [`Demand::LEAN.with_spans()`](crate::stream::Demand::with_spans) a large result
 //! is an unresolved [`Span`](crate::lazy::Span) and the error `detail` is simply skipped for it.
 //! Like [`crate::catalog`], the persistence side is best-effort: SQLite errors degrade to empty
 //! results / no-ops, never failing the caller.
@@ -912,7 +912,7 @@ mod db {
             crate::harness::for_harness(r.harness).ok_or_else(|| anyhow::anyhow!("no adapter for {}", r.harness))?;
         let source = crate::source::Probe::default().snapshot(r);
         let mut sink = SpoolingSink::new(r.cwd.clone());
-        adapter.try_stream(r, &crate::stream::ParseOptions::lazy(), &mut sink)?;
+        adapter.try_stream(r, &crate::stream::Demand::LEAN.with_spans(), &mut sink)?;
         let source = source.with_reads(sink.inner().dependencies());
         let events = sink.into_spool()?;
         let len = events.len();
@@ -928,7 +928,7 @@ mod db {
             crate::harness::for_harness(r.harness).ok_or_else(|| anyhow::anyhow!("no adapter for {}", r.harness))?;
         let source = crate::source::Probe::default().snapshot(r);
         let mut sink = SpoolingSink::new(r.cwd.clone());
-        adapter.try_stream(r, &crate::stream::ParseOptions::lazy(), &mut sink)?;
+        adapter.try_stream(r, &crate::stream::Demand::LEAN.with_spans(), &mut sink)?;
         let source = source.with_reads(sink.inner().dependencies());
         let events = sink.into_spool()?;
         let len = events.len();

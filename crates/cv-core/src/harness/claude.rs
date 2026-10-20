@@ -27,7 +27,7 @@ use crate::ir::*;
 use crate::ir::{MessageKind, Origin};
 use crate::json::{Json, JsonSource};
 use crate::lazy::Text;
-use crate::stream::{Checkpoint, CollectSink, Flow, MessageSink, ParseOptions, ADAPTER_LAYER};
+use crate::stream::{Checkpoint, CollectSink, Demand, Flow, MessageSink, Tier, ADAPTER_LAYER};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 pub use emit::{emit, verify_claude_resumable};
@@ -344,7 +344,7 @@ impl Adapter for Claude {
         }))
     }
 
-    fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+    fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| {
             let session = new_session_for(&r.id, Some(r.path.clone()), opts);
             let s = read(session, &r.path, 0, None, opts, sink, &mut || Ok(()))?;
@@ -361,7 +361,7 @@ impl Adapter for Claude {
     fn resume(
         &self,
         r: &SessionRef,
-        opts: &ParseOptions,
+        opts: &Demand,
         sink: &mut dyn MessageSink,
         from: &Checkpoint,
     ) -> Result<Option<Session>> {
@@ -405,7 +405,7 @@ fn with_fork_source(mut s: Session, path: &Path, sink: &mut dyn MessageSink) -> 
 /// for provenance when known. This is the whole-`Session` convenience over [`stream_str`].
 pub fn parse_str(id: &str, text: &str, source_path: Option<PathBuf>) -> Session {
     let mut sink = CollectSink::default();
-    let mut session = stream_str(id, text, source_path, &ParseOptions::full(), &mut sink);
+    let mut session = stream_str(id, text, source_path, &Demand::RICH, &mut sink);
     session.messages = sink.messages;
     session
 }
@@ -417,7 +417,7 @@ pub fn stream_str(
     id: &str,
     text: &str,
     source_path: Option<PathBuf>,
-    opts: &ParseOptions,
+    opts: &Demand,
     sink: &mut dyn MessageSink,
 ) -> Session {
     let mut session = new_session_for(id, source_path, opts);
@@ -439,7 +439,7 @@ pub(crate) fn count_prefix_checked(r: &SessionRef, len: u64, check: &mut dyn FnM
         n += 1;
         Flow::Continue
     };
-    let opts = ParseOptions::full();
+    let opts = Demand::RICH;
     read(
         new_session_for(&r.id, Some(r.path.clone()), &opts),
         &r.path,
@@ -453,12 +453,7 @@ pub(crate) fn count_prefix_checked(r: &SessionRef, len: u64, check: &mut dyn FnM
 }
 
 /// Stream the transcript's first `len` bytes: the session as it was at that length.
-pub(crate) fn stream_prefix(
-    r: &SessionRef,
-    len: u64,
-    opts: &ParseOptions,
-    sink: &mut dyn MessageSink,
-) -> Result<Session> {
+pub(crate) fn stream_prefix(r: &SessionRef, len: u64, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
     crate::stream::checked(sink, |sink| {
         read(
             new_session_for(&r.id, Some(r.path.clone()), opts),
@@ -482,7 +477,7 @@ fn read(
     path: &Path,
     from: u64,
     to: Option<u64>,
-    opts: &ParseOptions,
+    opts: &Demand,
     sink: &mut dyn MessageSink,
     check: &mut dyn FnMut() -> Result<()>,
 ) -> Result<Session> {
@@ -526,16 +521,16 @@ fn read(
 /// path) starts with its lineage already filled in — see [`apply_subagent_lineage`].
 #[cfg(test)]
 fn new_session(id: &str, source_path: Option<PathBuf>) -> Session {
-    new_session_for(id, source_path, &ParseOptions::full())
+    new_session_for(id, source_path, &Demand::RICH)
 }
 
-fn new_session_for(id: &str, source_path: Option<PathBuf>, opts: &ParseOptions) -> Session {
+fn new_session_for(id: &str, source_path: Option<PathBuf>, opts: &Demand) -> Session {
     let mut s = Session {
         source_path,
         ..Session::new(id.to_string(), Harness::Claude)
     };
     if let Some(p) = s.source_path.clone() {
-        apply_subagent_lineage(&mut s, &p, !opts.usage_identity || opts.extra || opts.complete);
+        apply_subagent_lineage(&mut s, &p, opts.tier != Tier::Usage);
     }
     s
 }
@@ -1451,7 +1446,7 @@ mod tests {
             serde_json::json!({"type":"user","uuid":"tool-body","isMeta":true,"sourceToolUseID":"skill-call","message":{"role":"user","content":body}}),
         ];
         let wire = records.iter().map(|r| format!("{r}\n")).collect::<String>();
-        for opts in [ParseOptions::full(), ParseOptions::facts(), ParseOptions::complete()] {
+        for opts in [Demand::RICH, Demand::FACTS.with_spans(), Demand::COMPLETE] {
             let mut sink = CollectSink::default();
             let mut session = stream_str("skills", &wire, None, &opts, &mut sink);
             session.messages = sink.messages;
@@ -1489,7 +1484,7 @@ mod tests {
 
         // Default (full, not complete): meta records dropped — only the 2 conversational turns.
         let mut sink = CollectSink::default();
-        stream_str(sid, &text, None, &ParseOptions::full(), &mut sink);
+        stream_str(sid, &text, None, &Demand::RICH, &mut sink);
         let convo: Vec<_> = sink
             .messages
             .iter()
@@ -1500,7 +1495,7 @@ mod tests {
 
         // Complete: every record present; the 3 meta records become carriers holding the original.
         let mut sink = CollectSink::default();
-        let session = stream_str(sid, &text, None, &ParseOptions::complete(), &mut sink);
+        let session = stream_str(sid, &text, None, &Demand::COMPLETE, &mut sink);
         let carriers: Vec<_> = sink
             .messages
             .iter()
@@ -1540,10 +1535,10 @@ mod tests {
         ]
         .join("\n");
         let mut sink = CollectSink::default();
-        stream_str("s1", &text, None, &ParseOptions::full(), &mut sink);
+        stream_str("s1", &text, None, &Demand::RICH, &mut sink);
         assert_eq!(sink.messages.len(), 2, "full mode: the two turns only");
         let mut sink = CollectSink::default();
-        stream_str("s1", &text, None, &ParseOptions::complete(), &mut sink);
+        stream_str("s1", &text, None, &Demand::COMPLETE, &mut sink);
         let carried: Vec<&str> = sink
             .messages
             .iter()
@@ -1622,7 +1617,7 @@ mod tests {
         ]
         .join("\n");
         let mut sink = CollectSink::default();
-        stream_str("s1", &text, None, &ParseOptions::bulk(), &mut sink);
+        stream_str("s1", &text, None, &Demand::LEAN, &mut sink);
         assert_eq!(
             sink.messages.len(),
             3,
@@ -1641,13 +1636,13 @@ mod tests {
 
         // full: the attachment object rides along
         let mut sink = CollectSink::default();
-        stream_str("s1", &text, None, &ParseOptions::full(), &mut sink);
+        stream_str("s1", &text, None, &Demand::RICH, &mut sink);
         assert_eq!(cl(&sink.messages[1])["attachment"]["filename"], "/x.md");
         assert_eq!(cl(&sink.messages[1])["renderedInHumanTurn"], true);
 
         // complete: both attachments carried verbatim; the rendered one still carries its text
         let mut sink = CollectSink::default();
-        stream_str("s1", &text, None, &ParseOptions::complete(), &mut sink);
+        stream_str("s1", &text, None, &Demand::COMPLETE, &mut sink);
         assert_eq!(sink.messages.len(), 4);
         let carried: Vec<_> = sink
             .messages
@@ -1673,7 +1668,7 @@ mod tests {
         ]
         .join("\n");
         let mut sink = CollectSink::default();
-        let session = stream_str("s1", &text, None, &ParseOptions::full(), &mut sink);
+        let session = stream_str("s1", &text, None, &Demand::RICH, &mut sink);
         let e1 = &sink.messages[1];
         assert_eq!(e1.role, Role::System);
         assert_eq!(e1.kind, MessageKind::Error);
@@ -1694,7 +1689,7 @@ mod tests {
 
         // complete: the record keeps its own shape for round-trip
         let mut sink = CollectSink::default();
-        stream_str("s1", &text, None, &ParseOptions::complete(), &mut sink);
+        stream_str("s1", &text, None, &Demand::COMPLETE, &mut sink);
         assert_eq!(sink.messages[1].role, Role::Assistant);
         assert_eq!(
             sink.messages[1].kind,
@@ -1728,7 +1723,7 @@ mod tests {
         ]
         .join("\n");
         let mut sink = CollectSink::default();
-        let session = stream_str("s1", &text, None, &ParseOptions::full(), &mut sink);
+        let session = stream_str("s1", &text, None, &Demand::RICH, &mut sink);
         assert_eq!(
             session.title.as_deref(),
             Some("My rename"),
@@ -1750,7 +1745,7 @@ mod tests {
         assert_eq!(sink.messages.len(), 1, "bookkeeping records are not turns");
 
         let mut sink = CollectSink::default();
-        stream_str("s1", &text, None, &ParseOptions::complete(), &mut sink);
+        stream_str("s1", &text, None, &Demand::COMPLETE, &mut sink);
         assert_eq!(
             sink.messages.len(),
             9,
@@ -1781,7 +1776,7 @@ mod tests {
             "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":stub}]}})
         .to_string();
         let mut sink = CollectSink::default();
-        stream_str("s1", &line, None, &ParseOptions::bulk(), &mut sink);
+        stream_str("s1", &line, None, &Demand::LEAN, &mut sink);
         let Block::ToolResult { content, details, .. } = &sink.messages[0].content[0] else {
             panic!("expected a tool result");
         };
@@ -1797,7 +1792,7 @@ mod tests {
             "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2","content":"ok"}]}})
         .to_string();
         let mut sink = CollectSink::default();
-        stream_str("s1", &plain, None, &ParseOptions::bulk(), &mut sink);
+        stream_str("s1", &plain, None, &Demand::LEAN, &mut sink);
         let Block::ToolResult { details, .. } = &sink.messages[0].content[0] else {
             panic!()
         };
@@ -1896,13 +1891,7 @@ mod tests {
         let path = dir.join("s1.jsonl");
         // A bookkeeping record so the carrier key is exercised too.
         std::fs::write(&path, format!("{{\"type\":\"mode\",\"sessionId\":\"s1\"}}\n{text}")).unwrap();
-        let opts = ParseOptions {
-            extra: true,
-            complete: true,
-            spans: true,
-            offsets: true,
-            ..Default::default()
-        };
+        let opts = Demand::COMPLETE.with_spans().with_offsets();
         let mut sink = CollectSink::default();
         stream_file("s1", &path, &opts, &mut sink);
         let allowed = ["claude", CARRIER_KEY, crate::offsets::OFFSET_KEY];
@@ -2427,23 +2416,13 @@ mod tests {
         let usage = stream_file(
             "a111",
             &subs.join("agent-a111.jsonl"),
-            &ParseOptions::usage(),
+            &Demand::USAGE.with_spans(),
             &mut sink,
         );
         assert_eq!(usage.lineage.parent.as_deref(), Some("sess"));
         assert!(usage.lineage.spawned_by_tool_use.is_none());
         assert!(!usage.extra.contains_key("claude"));
-        let path = Some(subs.join("agent-a111.jsonl"));
-        let full = new_session_for("a111", path.clone(), &ParseOptions::full());
-        let both = new_session_for(
-            "a111",
-            path,
-            &ParseOptions {
-                usage_identity: true,
-                ..ParseOptions::full()
-            },
-        );
-        assert_eq!(serde_json::to_vec(&full).unwrap(), serde_json::to_vec(&both).unwrap());
+        let full = new_session_for("a111", Some(subs.join("agent-a111.jsonl")), &Demand::RICH);
         assert_eq!(full.lineage.spawned_by_tool_use.as_deref(), Some("toolu_77"));
 
         let direct = tree.iter().find(|s| s.agent_id() == "a111").expect("direct agent");
@@ -2509,11 +2488,11 @@ mod tests {
         let reference = SessionRef::new("source", Harness::Claude, path.clone());
         let adapter = Claude::with_config_dir(&world.proj);
         for opts in [
-            ParseOptions::lazy(),
-            ParseOptions::lazy_extra(),
-            ParseOptions::bulk(),
-            ParseOptions::full(),
-            ParseOptions::complete(),
+            Demand::LEAN.with_spans(),
+            Demand::RICH.with_spans(),
+            Demand::LEAN,
+            Demand::RICH,
+            Demand::COMPLETE,
         ] {
             let mut sink = CollectSink::default();
             let mut actual = adapter.stream(&reference, &opts, &mut sink).unwrap();
@@ -2525,13 +2504,23 @@ mod tests {
                 };
                 match input {
                     Json::Source(range) => {
-                        assert!(opts.spans && !opts.complete && i < inputs.len() && inputs[i].len() > INLINE_MAX);
+                        assert!(
+                            opts.spans
+                                && opts.tier != Tier::Complete
+                                && i < inputs.len()
+                                && inputs[i].len() > INLINE_MAX
+                        );
                         let start = range.offset() as usize;
                         assert_eq!(&text[start..start + range.len() as usize], inputs[i]);
                         assert_eq!(range.path(), path);
                     }
                     Json::Owned(_) => {
-                        assert!(!opts.spans || opts.complete || i == inputs.len() || inputs[i].len() <= INLINE_MAX);
+                        assert!(
+                            !opts.spans
+                                || opts.tier == Tier::Complete
+                                || i == inputs.len()
+                                || inputs[i].len() <= INLINE_MAX
+                        );
                     }
                 }
                 let expected = inputs
@@ -2542,7 +2531,13 @@ mod tests {
         }
         // Strings have no source file: their inputs are always owned.
         let mut sink = CollectSink::default();
-        stream_str("source", &text, Some(path.clone()), &ParseOptions::lazy(), &mut sink);
+        stream_str(
+            "source",
+            &text,
+            Some(path.clone()),
+            &Demand::LEAN.with_spans(),
+            &mut sink,
+        );
         assert!(sink.messages.iter().flat_map(|m| &m.content).all(|b| !matches!(
             b,
             Block::ToolUse {
@@ -2565,7 +2560,7 @@ mod tests {
         fs::write(&path, text).unwrap();
         let adapter = Claude::with_config_dir(&world.proj);
         let reference = SessionRef::new("source", Harness::Claude, path.clone());
-        for opts in [ParseOptions::lazy(), ParseOptions::lazy_extra()] {
+        for opts in [Demand::LEAN.with_spans(), Demand::RICH.with_spans()] {
             let mut sink = CollectSink::default();
             let mut actual = adapter.stream(&reference, &opts, &mut sink).unwrap();
             actual.messages = sink.messages;
@@ -2598,7 +2593,7 @@ mod tests {
         cp.put(ADAPTER_LAYER, &new_session("source", Some(path.clone())));
         let mut sink = CollectSink::default();
         adapter
-            .resume(&reference, &ParseOptions::lazy(), &mut sink, &cp)
+            .resume(&reference, &Demand::LEAN.with_spans(), &mut sink, &cp)
             .unwrap()
             .unwrap();
         assert_eq!(sink.messages.len(), 1);
@@ -2642,7 +2637,7 @@ mod tests {
             captured: None,
         };
         assert!(adapter
-            .stream(&reference, &ParseOptions::lazy(), &mut deleting)
+            .stream(&reference, &Demand::LEAN.with_spans(), &mut deleting)
             .is_err());
         assert_eq!(deleting.calls, 1);
         assert_eq!(deleting.checkpoints, 0);
@@ -2766,11 +2761,7 @@ mod tests {
                         held: None,
                     };
                     let reference = SessionRef::new("source", Harness::Claude, path.clone());
-                    let opts = if spans {
-                        ParseOptions::lazy()
-                    } else {
-                        ParseOptions::full()
-                    };
+                    let opts = if spans { Demand::LEAN.with_spans() } else { Demand::RICH };
                     let result = Claude::with_config_dir(&world.proj).stream(&reference, &opts, &mut sink);
                     assert_eq!(result.is_err(), mutate, "spans={spans},at={at},replace={replace}");
                     if mutate {
@@ -2821,7 +2812,7 @@ mod tests {
         fs::write(&path, tiny.clone() + &tiny).unwrap();
         let mut stable_calls = 0;
         adapter
-            .stream(&reference, &ParseOptions::lazy(), &mut |_: Message| {
+            .stream(&reference, &Demand::LEAN.with_spans(), &mut |_: Message| {
                 stable_calls += 1;
                 Flow::Stop
             })
@@ -2857,7 +2848,7 @@ mod tests {
             checkpoints: 0,
         };
         assert!(adapter
-            .stream(&reference, &ParseOptions::lazy(), &mut deleting)
+            .stream(&reference, &Demand::LEAN.with_spans(), &mut deleting)
             .is_err());
         assert_eq!((deleting.calls, deleting.checkpoints), (1, 0));
         let Block::ToolUse {
@@ -2881,7 +2872,7 @@ mod tests {
             Flow::Continue
         };
         assert!(adapter
-            .stream(&reference, &ParseOptions::lazy(), &mut remove_later)
+            .stream(&reference, &Demand::LEAN.with_spans(), &mut remove_later)
             .is_err());
         assert_eq!(calls, 2);
     }
@@ -2911,7 +2902,7 @@ mod tests {
         };
         // Lazy parse → expect a Span; resolving it must equal `big`.
         let mut sink = CollectSink::default();
-        let mut s = stream_file(&r.id, &path, &ParseOptions::lazy(), &mut sink);
+        let mut s = stream_file(&r.id, &path, &Demand::LEAN.with_spans(), &mut sink);
         s.messages = sink.messages;
         match &s.messages[0].content[0] {
             Block::Text { text } => {
@@ -2934,7 +2925,7 @@ mod tests {
     }
 
     /// Stream a transcript file through the one reader.
-    fn stream_file(id: &str, path: &Path, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Session {
+    fn stream_file(id: &str, path: &Path, opts: &Demand, sink: &mut dyn MessageSink) -> Session {
         read(
             new_session_for(id, Some(path.to_path_buf()), opts),
             path,
@@ -2994,9 +2985,9 @@ mod tests {
             fs::write(&path, &text).unwrap();
             let r = scan(&path).unwrap();
             for opts in [
-                ParseOptions::lazy(),
-                ParseOptions::lazy_offsets(),
-                ParseOptions::lazy_extra(),
+                Demand::LEAN.with_spans(),
+                Demand::LEAN.with_spans().with_offsets(),
+                Demand::RICH.with_spans(),
             ] {
                 let mut whole = Capture::default();
                 let session = Claude::with_config_dir(&dir).stream(&r, &opts, &mut whole).unwrap();
@@ -3071,7 +3062,7 @@ mod tests {
         }
         drop(f);
 
-        let opts = ParseOptions::lazy_offsets();
+        let opts = Demand::LEAN.with_spans().with_offsets();
         let mut full = CollectSink::default();
         stream_file("s", &path, &opts, &mut full);
         let full = full.messages;
@@ -3106,7 +3097,7 @@ mod tests {
 
         // And bulk/full options never stamp (their output stays byte-identical to before).
         let mut bulk = CollectSink::default();
-        stream_file("s", &path, &ParseOptions::bulk(), &mut bulk);
+        stream_file("s", &path, &Demand::LEAN, &mut bulk);
         assert!(bulk
             .messages
             .iter()
@@ -3117,7 +3108,7 @@ mod tests {
 
     #[test]
     fn bulk_opts_skip_extra_but_keep_text() {
-        // The bulk path (`ParseOptions::bulk()`) must NOT materialize the fat `toolUseResult`
+        // The bulk path (`Demand::LEAN`) must NOT materialize the fat `toolUseResult`
         // sidecar — that's the whole point of gating `extra` for index/search/dataset — while the
         // full path (`parse`) keeps it. The searchable text must be identical either way.
         let text = fixture("rich_blocks.jsonl");
@@ -3130,7 +3121,7 @@ mod tests {
         );
 
         let mut sink = CollectSink::default();
-        let mut bulk = stream_str("s1", &text, None, &ParseOptions::bulk(), &mut sink);
+        let mut bulk = stream_str("s1", &text, None, &Demand::LEAN, &mut sink);
         bulk.messages = sink.messages;
         for m in &bulk.messages {
             assert!(m.extra.is_empty(), "bulk opts must leave every message's extra empty");
@@ -3164,7 +3155,7 @@ mod tests {
             seen += 1;
             Flow::Stop
         };
-        let _ = stream_str("s1", &text, None, &ParseOptions::bulk(), &mut sink);
+        let _ = stream_str("s1", &text, None, &Demand::LEAN, &mut sink);
         assert_eq!(seen, 1, "Stop after the first message must halt streaming");
     }
 }

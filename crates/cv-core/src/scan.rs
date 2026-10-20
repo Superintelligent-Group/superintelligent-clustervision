@@ -14,7 +14,7 @@
 use crate::ir::{truncate, Block, Harness, Message, SessionRef};
 use crate::lazy::{Resolver, Text};
 use crate::projection::Head;
-use crate::stream::{Flow, MessageSink, ParseOptions};
+use crate::stream::{Demand, Flow, MessageSink};
 use anyhow::{Context, Result};
 use std::path::Path;
 
@@ -24,7 +24,7 @@ pub const LIVE_HAY_BYTES: usize = 256 * 1024;
 /// Builds a capped searchable head (`hay`, at most [`LIVE_HAY_BYTES`]) as messages stream past
 /// (each dropped immediately), keeping the first [`Message::prompt_title`] for the label; stops the
 /// parse once the cap is hit and the label is known. Stream it under
-/// [`ParseOptions::lazy`] so large content arrives as spans resolved only up to the remaining
+/// [`Demand::with_spans`] so large content arrives as spans resolved only up to the remaining
 /// budget — peak per session is O(cap), never O(session).
 ///
 /// The no-index live path for `cv pack`, `cv search` and `cv serve`'s `/api/search` alike.
@@ -158,7 +158,7 @@ pub fn live_search_filtered(
             }
             let mut sink = CapSink::new(&r.path);
             let meta = adapter
-                .try_stream(&r, &ParseOptions::lazy(), &mut sink)
+                .try_stream(&r, &Demand::LEAN.with_spans(), &mut sink)
                 .with_context(|| format!("scanning {}:{}", r.harness, r.id))?;
             // Lowercase only the bounded head (the match check), windowing the snippet from the
             // original-case haystack.

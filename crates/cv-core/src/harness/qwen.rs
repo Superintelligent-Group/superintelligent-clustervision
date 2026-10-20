@@ -19,7 +19,7 @@
 use super::{parse_ts, Adapter};
 use crate::ir::*;
 use crate::source::{Dependencies, Probe};
-use crate::stream::{Checkpoint, Flow, MessageSink, ParseOptions, ADAPTER_LAYER};
+use crate::stream::{self, Checkpoint, Flow, MessageSink, ADAPTER_LAYER};
 use anyhow::{Context, Result};
 use record::Demand;
 use serde::{Deserialize, Serialize};
@@ -143,7 +143,7 @@ impl Adapter for Qwen {
         }))
     }
 
-    fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+    fn stream(&self, r: &SessionRef, opts: &stream::Demand, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| {
             if is_session_jsonl(&r.path) {
                 let source = crate::json::JsonSource::capture(&r.path)?;
@@ -181,7 +181,7 @@ impl Adapter for Qwen {
     fn resume(
         &self,
         r: &SessionRef,
-        opts: &ParseOptions,
+        opts: &stream::Demand,
         sink: &mut dyn MessageSink,
         from: &Checkpoint,
     ) -> Result<Option<Session>> {
@@ -706,7 +706,7 @@ mod tests {
             let done = stream_counted(
                 &adapter,
                 &r,
-                &ParseOptions::lazy(),
+                &stream::Demand::LEAN.with_spans(),
                 &mut full,
                 crate::stream::Pass {
                     every: Some(cadence),
@@ -736,7 +736,7 @@ mod tests {
                 let resumed = stream_counted(
                     &adapter,
                     &r,
-                    &ParseOptions::lazy(),
+                    &stream::Demand::LEAN.with_spans(),
                     &mut rest,
                     crate::stream::Pass {
                         from: Some(cp),
@@ -792,11 +792,11 @@ mod tests {
         let adapter = Qwen::with_home(&home);
         let r = SessionRef::new("session", Harness::Qwen, &path);
         let mut full = Kept::default();
-        let shell = adapter.stream(&r, &ParseOptions::full(), &mut full).unwrap();
+        let shell = adapter.stream(&r, &stream::Demand::RICH, &mut full).unwrap();
         let (count, checkpoint) = full.checkpoints.iter().find(|(count, _)| *count == 1).unwrap();
         let mut resumed = Kept::default();
         let suffix = adapter
-            .resume(&r, &ParseOptions::lazy(), &mut resumed, checkpoint)
+            .resume(&r, &stream::Demand::LEAN.with_spans(), &mut resumed, checkpoint)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1267,7 +1267,7 @@ mod tests {
         let r = SessionRef::new("11112222-3333-4444-5555-666677778888", Harness::Qwen, path);
         let mut sink = crate::stream::CollectSink::default();
         let s = Qwen::detect()
-            .stream(&r, &crate::stream::ParseOptions::full(), &mut sink)
+            .stream(&r, &crate::stream::Demand::RICH, &mut sink)
             .expect("stream");
         assert_eq!(s.harness, Harness::Qwen);
 

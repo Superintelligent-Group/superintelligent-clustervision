@@ -1,6 +1,7 @@
 use super::*;
 use crate::emit::frozen::Frozen;
-use crate::stream::{CollectSink, ParseOptions};
+use crate::stream::Tier;
+use crate::stream::{CollectSink, Demand};
 use serde_json::{json, Value};
 
 /// A read session, frozen: its length and SHA-256, the temporary archive path aside.
@@ -26,7 +27,7 @@ fn read(kind: Kind, conv: &Value) -> (SessionRef, Session) {
     std::fs::write(&path, serde_json::to_vec(&json!([conv])).unwrap()).unwrap();
     let r = discover_kind_in(kind, vec![path]).remove(0);
     let mut sink = CollectSink::default();
-    let mut session = native::stream(kind, &r, &ParseOptions::full(), &mut sink).unwrap();
+    let mut session = native::stream(kind, &r, &Demand::RICH, &mut sink).unwrap();
     session.messages = sink.messages;
     std::fs::remove_dir_all(dir).unwrap();
     (r, session)
@@ -216,7 +217,7 @@ fn read_finds_conversation_in_file_and_sniffs_kind() {
         ..SessionRef::new("b", Harness::ClaudeExport, path.clone())
     };
     let mut sink = CollectSink::default();
-    let mut s = native::stream(Kind::Claude, &r, &ParseOptions::full(), &mut sink).unwrap();
+    let mut s = native::stream(Kind::Claude, &r, &Demand::RICH, &mut sink).unwrap();
     s.messages = sink.messages;
     assert_eq!(s.id, "b");
     assert_eq!(s.messages.len(), 1);
@@ -237,7 +238,7 @@ fn real_downloads_exports_parse() {
         eprintln!("{:?}: {} conversation(s)", kind, refs.len());
         if let Some(r) = refs.iter().find(|r| r.message_count.is_some_and(|n| n > 0)) {
             let mut sink = CollectSink::default();
-            let mut s = native::stream(kind, r, &ParseOptions::full(), &mut sink).unwrap();
+            let mut s = native::stream(kind, r, &Demand::RICH, &mut sink).unwrap();
             s.messages = sink.messages;
             let tools = s
                 .messages
@@ -336,12 +337,7 @@ fn account_archive_full_output_oracle(payload_bytes: usize) {
         assert_eq!(refs.len(), 2);
         let expected_ref = refs.into_iter().find(|r| r.id == "selected").unwrap();
         assert_eq!(expected_ref.message_count, Some(3));
-        for opts in [
-            ParseOptions::lazy(),
-            ParseOptions::bulk(),
-            ParseOptions::full(),
-            ParseOptions::complete(),
-        ] {
+        for opts in [Demand::LEAN.with_spans(), Demand::LEAN, Demand::RICH, Demand::COMPLETE] {
             let mut sink = CollectSink::default();
             let mut actual = native::stream(kind, &expected_ref, &opts, &mut sink).unwrap();
             actual.messages = sink.messages;
@@ -367,8 +363,8 @@ fn account_archive_full_output_oracle(payload_bytes: usize) {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-fn mode(opts: &ParseOptions) -> &'static str {
-    match (opts.spans, opts.complete, opts.extra) {
+fn mode(opts: &Demand) -> &'static str {
+    match (opts.spans, opts.tier == Tier::Complete, opts.tier >= Tier::Facts) {
         (true, _, _) => "lazy",
         (false, true, _) => "complete",
         (false, false, true) => "full",
@@ -428,7 +424,7 @@ fn native_archive_matches_frozen_across_modes_and_invalidation() {
             .unwrap();
         frozen.insert(format!("{kind:?} ref"), reference(&expected_ref));
         let mut title = None;
-        for opts in [ParseOptions::lazy(), ParseOptions::full(), ParseOptions::complete()] {
+        for opts in [Demand::LEAN.with_spans(), Demand::RICH, Demand::COMPLETE] {
             let mut sink = CollectSink::default();
             let mut actual = native::stream(kind, &expected_ref, &opts, &mut sink).unwrap();
             actual.messages = sink.messages;
@@ -474,7 +470,7 @@ fn native_archive_matches_frozen_across_modes_and_invalidation() {
             }
         };
         assert!(
-            native::stream(kind, &expected_ref, &ParseOptions::lazy(), &mut mutate).is_err(),
+            native::stream(kind, &expected_ref, &Demand::LEAN.with_spans(), &mut mutate).is_err(),
             "source mutation after publication must reject completion"
         );
         assert!(
@@ -482,7 +478,7 @@ fn native_archive_matches_frozen_across_modes_and_invalidation() {
             "published descriptor must retain its captured identity"
         );
         assert_eq!(
-            native::stream(kind, &expected_ref, &ParseOptions::lazy(), &mut Stop)
+            native::stream(kind, &expected_ref, &Demand::LEAN.with_spans(), &mut Stop)
                 .unwrap()
                 .title,
             title
@@ -496,7 +492,7 @@ fn native_archive_matches_frozen_across_modes_and_invalidation() {
         std::fs::rename(&replacement, &path).unwrap();
         let fresh = discover_kind_in(kind, vec![path.clone()]);
         assert_eq!(fresh[0].id, "changed");
-        assert!(native::stream(kind, &expected_ref, &ParseOptions::lazy(), &mut Stop).is_err());
+        assert!(native::stream(kind, &expected_ref, &Demand::LEAN.with_spans(), &mut Stop).is_err());
     }
     frozen.check().unwrap();
     std::fs::remove_dir_all(dir).unwrap();
@@ -516,7 +512,7 @@ fn native_archive_keeps_raw_value_acceptance_and_duplicate_precedence() {
         assert!(discover_kind_in(Kind::Claude, vec![path.clone()]).is_empty());
         let r = SessionRef::new("same", Harness::ClaudeExport, path.clone());
         let mut sink = CollectSink::default();
-        let mut actual = native::stream(Kind::Claude, &r, &ParseOptions::lazy(), &mut sink).unwrap();
+        let mut actual = native::stream(Kind::Claude, &r, &Demand::LEAN.with_spans(), &mut sink).unwrap();
         actual.messages = sink.messages;
         actual.materialize().unwrap();
         assert_eq!(actual.messages.len(), 1);
@@ -538,12 +534,15 @@ fn native_archive_keeps_raw_value_acceptance_and_duplicate_precedence() {
     std::fs::write(&path, "").unwrap();
     assert!(discover_kind_in(Kind::Claude, vec![path.clone()]).is_empty());
     let r = SessionRef::new("missing", Harness::ClaudeExport, path.clone());
-    assert!(
-        native::stream(Kind::Claude, &r, &ParseOptions::lazy(), &mut CollectSink::default())
-            .unwrap_err()
-            .to_string()
-            .contains("conversation missing not found")
-    );
+    assert!(native::stream(
+        Kind::Claude,
+        &r,
+        &Demand::LEAN.with_spans(),
+        &mut CollectSink::default()
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("conversation missing not found"));
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -574,7 +573,7 @@ fn native_chatgpt_fallback_keeps_insertion_order_and_final_duplicate_value() {
     }}]"#;
     std::fs::write(&path, archive).unwrap();
     let r = SessionRef::new("ordered", Harness::ChatGptExport, path.clone());
-    for opts in [ParseOptions::lazy(), ParseOptions::full(), ParseOptions::complete()] {
+    for opts in [Demand::LEAN.with_spans(), Demand::RICH, Demand::COMPLETE] {
         let mut sink = CollectSink::default();
         let mut actual = native::stream(Kind::ChatGpt, &r, &opts, &mut sink).unwrap();
         actual.messages = sink.messages;
@@ -601,7 +600,7 @@ fn multipart_chatgpt_read_keeps_lazy_payloads_and_breaks_parent_cycles() -> Resu
     std::fs::write(&path, serde_json::to_vec(&json!([conversation]))?)?;
     let reference = discover_kind_in(Kind::ChatGpt, vec![path.clone()]).remove(0);
     let mut sink = crate::stream::CollectSink::default();
-    let mut actual = native::stream(Kind::ChatGpt, &reference, &ParseOptions::lazy(), &mut sink)?;
+    let mut actual = native::stream(Kind::ChatGpt, &reference, &Demand::LEAN.with_spans(), &mut sink)?;
     actual.messages = sink.messages;
     assert!(
         actual.messages.iter().all(|m| matches!(
@@ -623,7 +622,7 @@ fn multipart_chatgpt_read_keeps_lazy_payloads_and_breaks_parent_cycles() -> Resu
     let refs = discover_kind_in(Kind::ChatGpt, vec![path.clone()]);
     assert_eq!(refs[0].message_count, Some(1));
     let mut sink = crate::stream::CollectSink::default();
-    native::stream(Kind::ChatGpt, &refs[0], &ParseOptions::lazy(), &mut sink)?;
+    native::stream(Kind::ChatGpt, &refs[0], &Demand::LEAN.with_spans(), &mut sink)?;
     assert_eq!(
         sink.messages.len(),
         1,

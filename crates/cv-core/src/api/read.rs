@@ -1,7 +1,7 @@
 //! Small verified continuations for repeated API reads. No messages are cached.
 use super::{session_meta_json, WindowSink};
 use crate::source::{Baseline, Probe, ReadSet};
-use crate::stream::{Checkpoint, Flow, ParseOptions};
+use crate::stream::{Checkpoint, Demand, Flow};
 use crate::{Adapter, Session, SessionRef};
 use anyhow::Result;
 use serde::Serialize;
@@ -156,10 +156,7 @@ pub(super) fn window(
     end: Option<usize>,
     extra: bool,
 ) -> Result<(Session, WindowSink)> {
-    let opts = ParseOptions {
-        extra,
-        ..ParseOptions::lazy()
-    };
+    let opts = if extra { Demand::RICH } else { Demand::LEAN }.with_spans();
     let version = crate::resume::version(adapter, "api-window1");
     let primary = adapter.resume_source(r);
     if version.is_none() {
@@ -276,7 +273,7 @@ pub(super) fn head(cache: &Cache, adapter: &dyn Adapter, r: &SessionRef) -> Resu
         total: 0,
         reads,
     };
-    let shell = adapter.try_stream(r, &ParseOptions::lazy(), &mut counter)?;
+    let shell = adapter.try_stream(r, &Demand::LEAN.with_spans(), &mut counter)?;
     let mut value = session_meta_json(&shell);
     let map = value.as_object_mut().expect("session metadata is an object");
     map.insert("total".into(), json!(counter.total));
@@ -356,7 +353,7 @@ mod tests {
         fn discover(&self) -> Result<Vec<SessionRef>> {
             self.inner.discover()
         }
-        fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+        fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
             if let Some(path) = &self.dependency {
                 sink.dependency(path);
             }
@@ -378,7 +375,7 @@ mod tests {
         fn resume(
             &self,
             r: &SessionRef,
-            opts: &ParseOptions,
+            opts: &Demand,
             sink: &mut dyn MessageSink,
             cp: &Checkpoint,
         ) -> Result<Option<Session>> {
@@ -411,10 +408,7 @@ mod tests {
         let shell = adapter
             .try_stream(
                 r,
-                &ParseOptions {
-                    extra,
-                    ..ParseOptions::lazy()
-                },
+                &if extra { Demand::RICH } else { Demand::LEAN }.with_spans(),
                 &mut sink,
             )
             .unwrap();
@@ -451,7 +445,7 @@ mod tests {
             fn resume_format(&self) -> Option<u32> {
                 self.0.then_some(1)
             }
-            fn stream(&self, r: &SessionRef, _: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+            fn stream(&self, r: &SessionRef, _: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
                 let mut message = Message::new(crate::Role::Assistant);
                 message.content.push(crate::Block::Text {
                     text: "selected".into(),
@@ -608,7 +602,7 @@ mod tests {
             fn discover(&self) -> Result<Vec<SessionRef>> {
                 Ok(Vec::new())
             }
-            fn stream(&self, r: &SessionRef, _: &ParseOptions, _: &mut dyn MessageSink) -> Result<Session> {
+            fn stream(&self, r: &SessionRef, _: &Demand, _: &mut dyn MessageSink) -> Result<Session> {
                 self.0.fetch_add(1, Ordering::Relaxed);
                 let mut shell = Session::new(&r.id, r.harness);
                 shell.title = r.title.clone();
@@ -669,7 +663,7 @@ mod tests {
             fn resume_source(&self, _: &SessionRef) -> std::path::PathBuf {
                 self.0.clone()
             }
-            fn stream(&self, r: &SessionRef, _: &ParseOptions, _: &mut dyn MessageSink) -> Result<Session> {
+            fn stream(&self, r: &SessionRef, _: &Demand, _: &mut dyn MessageSink) -> Result<Session> {
                 self.1.fetch_add(1, Ordering::Relaxed);
                 let mut s = Session::new(&r.id, r.harness);
                 s.title = Some(std::fs::read_to_string(&self.0)?);
@@ -905,7 +899,7 @@ mod tests {
             fn discover(&self) -> Result<Vec<SessionRef>> {
                 Ok(Vec::new())
             }
-            fn stream(&self, r: &SessionRef, _: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+            fn stream(&self, r: &SessionRef, _: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
                 self.calls.fetch_add(1, Ordering::Relaxed);
                 let input = crate::json::Json::source(&self.path, 0, std::fs::metadata(&self.path)?.len())?;
                 let mut message = Message::new(crate::Role::Assistant);
@@ -933,7 +927,7 @@ mod tests {
         assert_eq!(adapter.calls.load(Ordering::Relaxed), 1);
         let (before, reads) = captured(&r, &crate::source::primary_path(&r));
         let mut sink = WindowSink::page(&crate::source::primary_path(&r), 1, Some(2), false, reads);
-        adapter.try_stream(&r, &ParseOptions::lazy(), &mut sink).unwrap();
+        adapter.try_stream(&r, &Demand::LEAN.with_spans(), &mut sink).unwrap();
         let source = before.with_reads(&sink.reads);
         assert!(fresh(&r, &source, &crate::source::primary_path(&r)));
         std::fs::write(path, r#"{"command":"updated"}"#).unwrap();
