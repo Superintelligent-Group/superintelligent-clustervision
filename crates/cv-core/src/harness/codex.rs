@@ -164,7 +164,7 @@ impl Adapter for Codex {
         Ok(crate::par_discovery_filter_map(paths, |path| {
             let scanned = || match is_zst_path(&path) {
                 // Decoded in full: an index running beside discovery streams these same bytes.
-                true => crate::handoff::decode_and_offer(
+                true => crate::codex_handoff::decode_and_offer(
                     || super::store::zst::content_size(&path),
                     || scan_rollout(&path, FULL_SCAN_CAP),
                 ),
@@ -2688,8 +2688,8 @@ mod tests {
         let cx = Codex {
             roots: vec![root.join("sessions")],
         };
-        let (handoff, decoded) = crate::handoff::channel(1);
-        let refs = crate::handoff::within(&Some(handoff), || cx.discover().unwrap());
+        let (handoff, decoded) = crate::codex_handoff::channel(1);
+        let refs = crate::codex_handoff::within(&Some(handoff), || cx.discover().unwrap());
         assert_eq!(refs.len(), 2);
         let (r, bytes) = decoded.recv().expect("the compressed rollout is handed over");
         assert!(decoded.recv().is_none(), "once, and never the plain rollout");

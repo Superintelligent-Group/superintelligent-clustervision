@@ -418,7 +418,7 @@ pub fn index_all(
 /// Discovery beside [`sweep_decoded`], then the full sweep over what discovery found.
 fn sweep_all(dir: &Path, rebuild: bool, subagents: bool) -> Result<(Swept, Vec<cv_core::SessionRef>)> {
     let sources = cv_core::source::read_scope();
-    let (handoff, decoded) = cv_core::handoff::channel(DECODED_WINDOW);
+    let (handoff, decoded) = cv_core::codex_handoff::channel(DECODED_WINDOW);
     let (early, refs) = std::thread::scope(|scope| {
         let sources = &sources;
         let discovery = scope.spawn(cv_core::env::carry(move || {
@@ -450,7 +450,7 @@ fn sweep_all(dir: &Path, rebuild: bool, subagents: bool) -> Result<(Swept, Vec<c
 /// the full plan finds them fresh. A second copy of an id is left to the full plan, which picks
 /// the preferred copy (rewriting the early one's docs and events if it was not). `None` when
 /// discovery decoded nothing, which opens no writer.
-fn sweep_decoded(dir: &Path, rebuild: bool, decoded: cv_core::handoff::Receiver) -> Result<Option<Ran>> {
+fn sweep_decoded(dir: &Path, rebuild: bool, decoded: cv_core::codex_handoff::Receiver) -> Result<Option<Ran>> {
     let Some(first) = decoded.recv() else {
         return Ok(None);
     };
@@ -690,7 +690,7 @@ struct Job {
     /// Where the last pass over this file left off, if it left a mark.
     mark: Option<cv_core::resume::MarkHead>,
     /// The bytes discovery already decoded for it, read instead of decoding again.
-    decoded: Option<cv_core::handoff::Decoded>,
+    decoded: Option<cv_core::codex_handoff::Decoded>,
 }
 
 /// What a sweep worker hands the writer thread, in order per session.

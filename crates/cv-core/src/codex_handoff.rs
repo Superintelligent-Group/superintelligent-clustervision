@@ -1,4 +1,5 @@
-//! Decode once per index. `cv index` runs discovery beside the search sweep: a compressed
+//! Decode once per index, for Codex (its only user; named for it until a second harness hands
+//! off). `cv index` runs discovery beside the search sweep: a compressed Codex
 //! rollout that discovery decoded in full is handed, with its ref, to the sweep, which streams
 //! those decoded bytes instead of decoding the file again. A window bounds the decoded bytes
 //! alive at once (discovery waits for the sweep), so temp disk holds a window, never the fleet.

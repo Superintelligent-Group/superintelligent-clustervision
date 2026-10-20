@@ -19,6 +19,7 @@ pub mod bytes {
     pub use crate::harness::store::bytes::{ByteSource, ByteStage};
 }
 
+pub mod codex_handoff;
 pub mod dataset;
 pub mod digest;
 pub mod discover_cache;
@@ -29,7 +30,6 @@ pub mod env;
 
 pub mod events;
 pub mod formats;
-pub mod handoff;
 pub mod harness;
 pub mod html;
 pub mod ingest;
@@ -88,8 +88,8 @@ pub fn discover_all() -> Vec<SessionRef> {
 
 /// [`discover_all`], handing every rollout it decodes in full to `handoff`'s consumer (an index
 /// sweep running beside it), so that consumer reads each one without decoding it again.
-pub fn discover_all_handing_off(handoff: handoff::Handoff) -> Vec<SessionRef> {
-    handoff::within(&Some(handoff), discover_all)
+pub fn discover_all_handing_off(handoff: codex_handoff::Handoff) -> Vec<SessionRef> {
+    codex_handoff::within(&Some(handoff), discover_all)
 }
 
 fn discover_all_with_catalog(mut catalog: Option<catalog::Reader>) -> Vec<SessionRef> {
@@ -145,9 +145,9 @@ fn discover_all_with_catalog(mut catalog: Option<catalog::Reader>) -> Vec<Sessio
 
     let inventory = source::inventory_context();
     let env = env::Env::scoped();
-    let handoff = handoff::current();
+    let handoff = codex_handoff::current();
     let run_job = |(a, known): (Box<dyn Adapter>, Vec<SessionRef>)| {
-        let discover = || handoff::within(&handoff, || discovery.run(|| run(a.as_ref(), known)));
+        let discover = || codex_handoff::within(&handoff, || discovery.run(|| run(a.as_ref(), known)));
         env::within(&env, || match &inventory {
             Some(context) => context.run(discover),
             None => discover(),
@@ -349,8 +349,10 @@ where
     F: Fn(T) -> Option<R> + Sync + Send,
 {
     let context = discover_cache::read::Context::current();
-    let handoff = handoff::current();
-    par_filter_map(items, |item| handoff::within(&handoff, || context.run(|| f(item))))
+    let handoff = codex_handoff::current();
+    par_filter_map(items, |item| {
+        codex_handoff::within(&handoff, || context.run(|| f(item)))
+    })
 }
 pub(crate) fn par_discovery_flat_map<T, R, F>(items: Vec<T>, f: F) -> Vec<R>
 where
@@ -359,8 +361,10 @@ where
     F: Fn(T) -> Vec<R> + Sync + Send,
 {
     let context = discover_cache::read::Context::current();
-    let handoff = handoff::current();
-    par_flat_map(items, |item| handoff::within(&handoff, || context.run(|| f(item))))
+    let handoff = codex_handoff::current();
+    par_flat_map(items, |item| {
+        codex_handoff::within(&handoff, || context.run(|| f(item)))
+    })
 }
 
 /// Like [`par_filter_map`] but each input may yield zero, one, or many results (e.g. a Gemini
