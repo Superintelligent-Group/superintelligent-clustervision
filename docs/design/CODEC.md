@@ -59,7 +59,7 @@ store_probe] --scratch DIR [--home DIR]`: over `tools/dump-hash.manifest` (every
 staged as a fake HOME, four synthetic Claude edges, any external home of real sessions) it prints
 one sorted `sha256  command  session  demand` line per `ls`/`show`/`export`/`search`/`events`/
 `tools`/`stats`/`doctor`/`pack` form, per reshape output and sidecar, and per `store_probe hash`
-demand in both builds. Two runs of one binary print equal sets; a commit that changes output
+demand in both builds. Two runs of one binary print equal sets whatever `--scratch` is called (the path is masked); a commit that changes output
 pastes the lines it moved into its message. Results are never committed.
 
 **Byte sources by family.** JSONL (Claude, the OpenAI family, Gemini's jsonl era): `for_each_line`.

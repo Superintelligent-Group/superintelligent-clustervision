@@ -21,10 +21,11 @@
 # DIR/cvhome/<root> is the one scratch CLUSTERVISION_HOME per root, reused across runs (a warm
 # catalog and index must read the same as a cold one; `index` itself is run, never hashed).
 # Masked as build identity, not output: `rewind`'s provenance `derived_at` (the clock) and `cv_version`
-# (the binary's `git describe`, which differs between any two commits). `pack` prints the day it ran.
+# (the binary's `git describe`, which differs between any two commits); the `--scratch` path is masked to
+# `<scratch>` in every hashed stream, so two runs of one binary agree whatever `--scratch` names. `pack` prints the day it ran.
 set -euo pipefail
 
-usage() { sed -n '2,24p' "$0" >&2; exit 2; }
+usage() { sed -n '2,25p' "$0" >&2; exit 2; }
 
 CV= PROBE= PROBE_POS= SCRATCH= MANIFEST=
 HOMES=() ONLY=()
@@ -50,6 +51,7 @@ CV=$(cd "$(dirname "$CV")" && pwd)/$(basename "$CV")
 mkdir -p "$SCRATCH"
 SCRATCH=$(cd "$SCRATCH" && pwd)
 STAGE=$SCRATCH/stage
+MASK="s#$SCRATCH#<scratch>#g"   # the scratch dir is where, not what: it leaks into paths cv prints
 rm -rf "$STAGE"
 mkdir -p "$STAGE" "$SCRATCH/cvhome"
 OUT=$(mktemp "$SCRATCH/lines.XXXXXX")
@@ -79,7 +81,7 @@ emit() {
   local command=$1 session=$2 demand=$3; shift 3
   local sum code
   set +e
-  sum=$("$@" </dev/null 2>/dev/null | $SHA | cut -c1-64; exit "${PIPESTATUS[0]}"); code=$?
+  sum=$("$@" </dev/null 2>/dev/null | LC_ALL=C sed "$MASK" | $SHA | cut -c1-64; exit "${PIPESTATUS[0]}"); code=$?
   set -e
   [ "$code" -eq 0 ] || command="$command!$code"
   printf '%s  %s  %s  %s\n' "$sum" "$command" "$session" "$demand" >>"$OUT"
@@ -88,7 +90,7 @@ emit() {
 # `!missing`); the filter masks a line the file stamps with the wall clock
 emit_file() {
   local kind=$1 session=$2 path=$3 filter=${4:-} sum
-  if [ -f "$path" ]; then sum=$(sed "${filter:-p;d}" "$path" | $SHA | cut -c1-64); else sum=$(printf '%064d' 0); kind="$kind!missing"; fi
+  if [ -f "$path" ]; then sum=$(sed "${filter:-p;d}" "$path" | LC_ALL=C sed "$MASK" | $SHA | cut -c1-64); else sum=$(printf '%064d' 0); kind="$kind!missing"; fi
   printf '%s  file:%s  %s  -\n' "$sum" "$kind" "$session" >>"$OUT"
 }
 
