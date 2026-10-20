@@ -339,9 +339,13 @@ fn deferrals_find_the_phrases_and_open_tasks_gates_on_unmatched() {
         "no cross-reference without --open-tasks:\n{out}"
     );
 
-    // --since skips the earlier reply entirely.
-    let (out, _) = w.cv_ok(&["deferrals", SID, "--since", "10"]);
+    // --at skips the earlier reply entirely.
+    let (out, _) = w.cv_ok(&["deferrals", SID, "--at", "10"]);
     assert!(!out.contains("after FINAL") && out.contains("later lane"), "{out}");
+
+    // The old spelling errors with a pointer: `--since` is a duration, on `lanes`.
+    let (ok, code, _, err) = w.cv(&["deferrals", SID, "--since", "10"]);
+    assert!(!ok && code == 2 && err.contains("--at"), "{code}\n{err}");
 
     // No tasks yet: everything is UNMATCHED and the exit status says so.
     let (ok, code, out, _) = w.cv(&["deferrals", SID, "--open-tasks"]);

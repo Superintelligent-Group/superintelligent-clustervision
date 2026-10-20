@@ -480,7 +480,7 @@ A linter for promises. Every place the assistant put something off — "later la
 
 ```sh
 cv deferrals 0c315aee                      # every deferral, oldest first
-cv deferrals 0c315aee --since 1591         # only the post-compaction region
+cv deferrals 0c315aee --at 1591            # only the post-compaction region
 cv deferrals 0c315aee --open-tasks         # cross-reference the task store; exit 1 while any is UNMATCHED
 cv deferrals 0c315aee --open-tasks --json  # [{index, timestamp, phrase, context, matched?: {task_id, title, state, shared}}]
 cv deferrals 0c315aee --phrases-file deferrals.txt   # your project's phrase table instead of the built-in one

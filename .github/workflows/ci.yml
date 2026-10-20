@@ -78,7 +78,9 @@ jobs:
           python3 -I tools/check-compatibility.py --baseline "$baseline/cv" --candidate target/debug/cv \
             --accept tools.workflow.inputSchema.properties.follow \
             --accept commands.rewind.args.from_compaction \
-            --accept tools.rewind.inputSchema.properties.from_compaction
+            --accept tools.rewind.inputSchema.properties.from_compaction \
+            --accept commands.deferrals.args.since \
+            --accept tools.deferrals.inputSchema.properties.since
 
       - name: Upgrade from the released 0.16.1 binary
         shell: bash

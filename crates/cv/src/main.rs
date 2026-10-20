@@ -432,9 +432,12 @@ enum Cmd {
         id: String,
         #[arg(long)]
         harness: Option<String>,
-        /// Only messages from this index on (e.g. the post-compaction region).
+        /// Only messages from this message index on (e.g. the post-compaction region).
         #[arg(long, value_name = "MSG")]
-        since: Option<usize>,
+        at: Option<usize>,
+        // Renamed to `--at` in 0.18.0 (`--since` is a duration on `lanes`) — hidden so the old flag errors with a pointer.
+        #[arg(long = "since", hide = true)]
+        since_removed: Option<String>,
         /// Cross-reference every task in the store (terminal ones included): a deferral MATCHES a
         /// task when they share three or more significant words.
         #[arg(long)]
@@ -1482,13 +1485,20 @@ fn run() -> Result<()> {
         Cmd::Deferrals {
             id,
             harness,
-            since,
+            at,
+            since_removed,
             open_tasks,
             phrases_file,
             json,
         } => {
+            if since_removed.is_some() {
+                return usage(
+                    "`cv deferrals --since` was renamed to `--at <MSG>` in 0.18.0 (`--since` is a duration \
+                     on `cv lanes`)",
+                );
+            }
             // An unmatched deferral is a finding, not a failure: plain exit 1, no error text.
-            if !orchestrate::cmd_deferrals(&id, harness, since, open_tasks, phrases_file, json)? {
+            if !orchestrate::cmd_deferrals(&id, harness, at, open_tasks, phrases_file, json)? {
                 std::process::exit(1);
             }
             Ok(())

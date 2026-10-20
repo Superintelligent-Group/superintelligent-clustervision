@@ -482,7 +482,9 @@ mod tests {
                     }
                     // A path is a string the command reads as a location; `--cwd` stays one word
                     // in the units, not in the clap type.
-                    let kind = |t: &'static str| if t == "path" { "string" } else { t };
+                    // `--at` is a message index on `deferrals` and an index-or-commit-sha on `rewind`:
+                    // the integer is a subset of the string's grammar, and both say "message".
+                    let kind = |t: &'static str| if t == "path" || (flag == "at" && t == "integer") { "string" } else { t };
                     let types: std::collections::BTreeSet<_> = uses.iter().map(|u| kind(u.1)).collect();
                     if types.len() > 1 {
                         let rows: Vec<_> = uses.iter().map(|u| format!("{} {}", u.0, u.1)).collect();
