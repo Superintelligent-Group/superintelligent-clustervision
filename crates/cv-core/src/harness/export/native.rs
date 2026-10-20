@@ -420,12 +420,10 @@ pub(super) fn stream(kind: Kind, r: &SessionRef, opts: &Demand, sink: &mut dyn M
                     )
                 });
                 has_sources |= sourced;
-                if sourced {
-                    archive.source.check()?;
-                }
+                let started = std::time::Instant::now();
                 let flow = sink.try_message(message)?;
                 if sourced {
-                    archive.source.check()?;
+                    archive.source.check_after(started)?;
                 }
                 if flow == Flow::Stop {
                     break;
