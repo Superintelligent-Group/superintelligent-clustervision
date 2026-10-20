@@ -21,6 +21,7 @@
 - Codex tool results no longer carry an invented `status` (`completed`/`error`); the rollout records none, and `is_error` is unchanged.
 - Zed's session model is the thread's model (`claude-sonnet-4`, not `zed.dev/claude-sonnet-4`); the provider moves to `extra.zed.provider` and is never a model.
 - A Codex tool output starting `[error] ` is flagged and stripped only in a rollout cv wrote (`originator: clustervision`); a tool's own text stays verbatim.
+- `cv distill` and `cv adopt --model` write a sub-agent sidecar's `agentType` default (`general-purpose`) only when the source names none, one rule for both.
 - **Breaking (library):** `ParseOptions` and `ExtraProjection` become `Demand { tier, spans, offsets }`; the five `Watcher` poll methods become `poll`/`try_poll(Poll { .. })`.
 - Gemini, Qwen, Goose, Grok, LM Studio, OpenClaw and OpenCode report the model on every turn the harness wrote it; windowed reads no longer lose it.
 - Every JSONL adapter reads its transcript through one captured source (`store::jsonl::Read`); each adapter keeps its own resume protocol.

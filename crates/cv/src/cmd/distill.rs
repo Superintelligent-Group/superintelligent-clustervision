@@ -248,10 +248,7 @@ pub(crate) fn emit_to(
 }
 
 fn agent_meta(source_path: &Path, description: &str, model: Option<&str>) -> Value {
-    let mut object = sidecar::read_or_default(&source_path.with_extension("meta.json"));
-    if object.is_empty() {
-        object.insert("agentType".into(), json!("general-purpose"));
-    }
+    let mut object = sidecar::agent_meta(&source_path.with_extension("meta.json"));
     object.insert("description".into(), json!(description));
     object.remove("toolUseId");
     if let Some(model) = model {

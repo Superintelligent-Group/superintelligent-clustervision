@@ -32,6 +32,20 @@ pub fn read_or_default(path: &Path) -> serde_json::Map<String, Value> {
     }
 }
 
+/// The type Claude Code gives a sub-agent spawned without one.
+pub const DEFAULT_AGENT_TYPE: &str = "general-purpose";
+
+/// The meta sidecar cv writes for a sub-agent it publishes (`cv distill`, `cv adopt --model`):
+/// the source's own object at `path` ([`read_or_default`]), with `agentType` set to
+/// [`DEFAULT_AGENT_TYPE`] only where the source names none. Every other key is the source's.
+pub fn agent_meta(path: &Path) -> serde_json::Map<String, Value> {
+    let mut meta = read_or_default(path);
+    if !meta.get("agentType").is_some_and(Value::is_string) {
+        meta.insert("agentType".into(), Value::from(DEFAULT_AGENT_TYPE));
+    }
+    meta
+}
+
 /// `<dir>/<stem>/` for a transcript at `<dir>/<stem>.jsonl`: the session's sidecar root.
 pub fn session_dir(transcript: &Path) -> Option<PathBuf> {
     let stem = transcript.file_stem()?.to_str()?;

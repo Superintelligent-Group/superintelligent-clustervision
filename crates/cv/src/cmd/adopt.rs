@@ -54,10 +54,7 @@ pub(crate) struct AdoptArgs {
 
 /// Set `model` in a sub-agent's meta sidecar, creating the sidecar when the source had none.
 fn set_meta_model(path: &std::path::Path, model: &str) -> Result<()> {
-    let mut meta = sidecar::read_or_default(path);
-    if meta.is_empty() {
-        meta.insert("agentType".into(), json!("general-purpose"));
-    }
+    let mut meta = sidecar::agent_meta(path);
     meta.insert("model".into(), json!(model));
     let meta = serde_json::Value::Object(meta);
     // The meta adopt itself just published (or none): replaced whole.
@@ -281,7 +278,16 @@ mod metadata_tests {
         let updated: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(
             updated,
-            json!({"model":"requested-model","description":"keep","extra":{"a":1}})
+            json!({"agentType":"general-purpose","model":"requested-model","description":"keep","extra":{"a":1}}),
+            "a sidecar naming no type gets the default; every other key is the source's"
+        );
+        std::fs::write(&path, r#"{"agentType":"Explore","model":"old"}"#).unwrap();
+        set_meta_model(&path, "requested-model").unwrap();
+        let updated: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            updated,
+            json!({"agentType":"Explore","model":"requested-model"}),
+            "never overwritten"
         );
     }
 }
