@@ -167,6 +167,7 @@ fn publish(writer: &mut dyn Write, b: &Block, q: &Quirks, user: bool, leaf: Leaf
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     #[test]
     fn block_contracts_match_frozen_dialects_roles_and_leaf_publication() -> Result<()> {
         let world = cv_testkit::World::new("anthropic-wire-frozen");

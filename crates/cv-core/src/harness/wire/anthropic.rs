@@ -3,12 +3,10 @@
 //! persist it verbatim; the claude.ai export, OpenClaw, Goose and Zed's legacy threads renamed a
 //! key or two, which a [`Quirks`] constant names so the adapter does not re-type the shape.
 
-use super::{coerce_text, str_field};
+use super::coerce_text;
 pub(crate) mod write;
 use crate::ir::Block;
 use crate::lazy::Text;
-#[cfg(test)]
-use serde_json::json;
 use serde_json::Value;
 
 /// How a store spells the shape. Every field is the Anthropic spelling in [`ANTHROPIC`].
@@ -71,87 +69,6 @@ pub const ZED: Quirks = Quirks {
     empty_signature_is_none: true,
     ..ANTHROPIC
 };
-
-/// A content string's [`Text`], given the string and the key it came from. The default makes an
-/// inline copy; Claude's lazy reader supplies one that spans the source bytes instead.
-pub type Texter<'a> = &'a mut dyn FnMut(&str, &'static str) -> Text;
-
-/// One content block → one [`Block`]; `None` for a type the IR has no home for.
-pub fn block_from(item: &Value, q: &Quirks) -> Option<Block> {
-    block_from_with(item, q, &mut |s, _| Text::Inline(s.to_string()))
-}
-
-/// [`block_from`] with the caller choosing how each content string becomes a [`Text`]: `text` is
-/// called with the string and its key (`text`, `thinking`, `content`) for every field a span could
-/// replace — a tool result's `content` only when it is a plain string (array content is coerced and
-/// can never be a verbatim slice).
-pub fn block_from_with(item: &Value, q: &Quirks, text: Texter<'_>) -> Option<Block> {
-    block_from_fields(item, q, &mut |key| {
-        let value = item.get(key).and_then(Value::as_str);
-        if item.get("type").and_then(Value::as_str) == Some("thinking") && key == q.thinking.0 {
-            Some(text(value.unwrap_or(""), key))
-        } else {
-            value.map(|s| text(s, key))
-        }
-    })
-}
-
-fn block_from_fields(item: &Value, q: &Quirks, text: &mut dyn FnMut(&'static str) -> Option<Text>) -> Option<Block> {
-    let ty = item.get("type").and_then(Value::as_str)?;
-    if ty == "text" {
-        let value = text("text")?;
-        if q.skip_empty_text && value.is_empty() {
-            return None;
-        }
-        return Some(Block::Text { text: value });
-    }
-    if ty == "thinking" {
-        let (text_key, sig_key) = q.thinking;
-        let value = text(text_key).unwrap_or_default();
-        let signature = item
-            .get(sig_key)
-            .and_then(Value::as_str)
-            .filter(|s| !(q.empty_signature_is_none && s.is_empty()))
-            .map(str::to_string);
-        return Some(Block::Thinking {
-            text: value,
-            signature,
-            encrypted: None,
-            redacted: false,
-        });
-    }
-    // Encrypted reasoning the API returns when thinking can't be shown in the clear. The plaintext
-    // is intentionally absent; the opaque blob rides in `encrypted` so it is not silently lost.
-    if Some(ty) == q.redacted_thinking {
-        return Some(Block::Thinking {
-            text: String::new().into(),
-            signature: None,
-            encrypted: item.get("data").and_then(Value::as_str).map(str::to_string),
-            redacted: true,
-        });
-    }
-    if ty == q.tool_use.0 || matches!(ty, "image" | "document") {
-        // These shapes do not use the caller's text callback. Owned entry points use the
-        // same field selection and conversion as the source-backed codec.
-        return block_from_view_with(item.into(), q, false, &mut |v| v.text(false), u64::MAX)
-            .expect("an owned JSON value has no source reads");
-    }
-    match ty {
-        "tool_result" => {
-            let cv = item.get("content");
-            let content = text("content").unwrap_or_else(|| Text::Inline(coerce_text(cv)));
-            Some(Block::ToolResult {
-                tool_use_id: str_field(item, "tool_use_id"),
-                content,
-                is_error: item.get("is_error").and_then(Value::as_bool).unwrap_or(false),
-                tool_name: None,
-                status: None,
-                details: None,
-            })
-        }
-        _ => None,
-    }
-}
 
 /// A content block from a view, with the caller's text rule for content strings, `spans` for tool
 /// arguments, and the size above which a source-backed tool-result array becomes checked joined
@@ -264,40 +181,66 @@ pub(crate) fn block_from_view_with(
             }
         }));
     }
-    let keys: &[&str] = if ty == "text" {
-        &["type"]
-    } else if ty == "thinking" {
-        &["type", q.thinking.1]
-    } else if Some(ty.as_str()) == q.redacted_thinking {
-        &["type", "data"]
-    } else if ty == "tool_result" {
-        &["type", "tool_use_id", "is_error"]
-    } else {
-        return Ok(None);
+    let text_of = |key: &str, text: &mut dyn FnMut(crate::json::JsonView<'_>) -> anyhow::Result<Option<Text>>| {
+        record.get(key).map(text).transpose().map(Option::flatten)
     };
-    let mut fields = record.project(keys)?;
-    let mut result = record.get("content").map(&mut *text).transpose()?.flatten();
-    if ty == "tool_result" && result.is_none() {
-        if let Some(content) = record.get("content") {
-            if content.is_array()? && content.source_range()?.is_some_and(|(_, len)| len > joined_over) {
-                result = Some(coerce_selected_array(content)?);
-            } else {
-                fields.insert("content".into(), content.resolve()?.into_owned());
-            }
+    if ty == "text" {
+        let Some(value) = text_of("text", text)? else {
+            return Ok(None);
+        };
+        if q.skip_empty_text && value.is_empty() {
+            return Ok(None);
         }
+        return Ok(Some(Block::Text { text: value }));
     }
-    let body = record.get("text").map(&mut *text).transpose()?.flatten();
-    let thinking = record.get(q.thinking.0).map(&mut *text).transpose()?.flatten();
-    Ok(block_from_fields(&Value::Object(fields), q, &mut |key| {
-        if key == "content" {
-            result.clone()
-        } else if key == q.thinking.0 {
-            thinking.clone()
-        } else if key == "text" {
-            body.clone()
-        } else {
-            None
+    if ty == "thinking" {
+        let (text_key, sig_key) = q.thinking;
+        return Ok(Some(Block::Thinking {
+            text: text_of(text_key, text)?.unwrap_or_default(),
+            signature: record
+                .string(sig_key)?
+                .filter(|s| !(q.empty_signature_is_none && s.is_empty())),
+            encrypted: None,
+            redacted: false,
+        }));
+    }
+    // Encrypted reasoning the API returns when thinking can't be shown in the clear. The plaintext
+    // is intentionally absent; the opaque blob rides in `encrypted` so it is not silently lost.
+    if Some(ty.as_str()) == q.redacted_thinking {
+        return Ok(Some(Block::Thinking {
+            text: String::new().into(),
+            signature: None,
+            encrypted: record.string("data")?,
+            redacted: true,
+        }));
+    }
+    if ty != "tool_result" {
+        return Ok(None);
+    }
+    let content = match (text_of("content", text)?, record.get("content")) {
+        (Some(content), _) => content,
+        (None, Some(content))
+            if content.is_array()? && content.source_range()?.is_some_and(|(_, len)| len > joined_over) =>
+        {
+            coerce_selected_array(content)?
         }
+        (None, content) => {
+            let content = content.map(|v| v.resolve().map(|v| v.into_owned())).transpose()?;
+            Text::Inline(coerce_text(content.as_ref()))
+        }
+    };
+    Ok(Some(Block::ToolResult {
+        tool_use_id: record.string("tool_use_id")?.unwrap_or_default(),
+        content,
+        is_error: record
+            .get("is_error")
+            .map(|v| v.as_bool())
+            .transpose()?
+            .flatten()
+            .unwrap_or(false),
+        tool_name: None,
+        status: None,
+        details: None,
     }))
 }
 
@@ -352,17 +295,6 @@ fn coerce_selected_array(content: crate::json::JsonView<'_>) -> anyhow::Result<T
         }
         Ok(())
     })
-}
-
-/// Every block of a `content` array; a bare string is one text block. (Claude's lazy reader spans
-/// the bare-string case itself, so it walks the array with [`block_from_with`] instead.)
-#[cfg(test)]
-pub fn blocks_from(content: Option<&Value>, q: &Quirks) -> Vec<Block> {
-    match content {
-        Some(Value::String(s)) => vec![Block::Text { text: s.clone().into() }],
-        Some(Value::Array(items)) => items.iter().filter_map(|i| block_from(i, q)).collect(),
-        _ => Vec::new(),
-    }
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -425,9 +357,27 @@ pub fn image_block(media_type: &Option<String>, data_ref: &Option<String>, q: &Q
     .expect("image is an assistant block")
 }
 
+/// The owned entry point, for tests: a `Value` through the one view codec, `(&Value).into()`.
+#[cfg(test)]
+pub(crate) fn block_from(item: &Value, q: &Quirks) -> Option<Block> {
+    block_from_view_with(item.into(), q, false, &mut |v| v.text(false), u64::MAX)
+        .expect("an owned value has no source reads")
+}
+
+/// Every block of a `content` array; a bare string is one text block.
+#[cfg(test)]
+fn blocks_from(content: Option<&Value>, q: &Quirks) -> Vec<Block> {
+    match content {
+        Some(Value::String(s)) => vec![Block::Text { text: s.clone().into() }],
+        Some(Value::Array(items)) => items.iter().filter_map(|i| block_from(i, q)).collect(),
+        _ => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn reads_every_anthropic_block() {
@@ -539,6 +489,7 @@ mod tests {
 #[cfg(test)]
 mod selected_media_tests {
     use super::*;
+    use serde_json::json;
     #[test]
     fn owned_codec_returns_changed_text_errors_instead_of_panicking() -> anyhow::Result<()> {
         let world = crate::test_world("anthropic-owned-source-error");

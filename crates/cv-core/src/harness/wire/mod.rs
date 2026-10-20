@@ -148,10 +148,6 @@ pub(crate) fn text_title(content: Option<crate::json::JsonView<'_>>) -> anyhow::
     Ok(title)
 }
 
-fn str_field(v: &Value, key: &str) -> String {
-    v.get(key).and_then(Value::as_str).unwrap_or("").to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
