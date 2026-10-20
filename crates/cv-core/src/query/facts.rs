@@ -629,7 +629,9 @@ struct RefQuery<'a> {
     heavy: bool,
     table: Option<crate::catalog::AffordanceTable>,
     demand_counts: bool,
-    reader: Option<Option<crate::catalog::Reader>>,
+    /// Opened on the first counted demand. A failed open is not remembered (the catalog's door
+    /// warns once): the next demand tries again.
+    reader: Option<crate::catalog::Reader>,
     probe: crate::source::Probe,
 }
 
@@ -671,9 +673,11 @@ impl<'a> RefQuery<'a> {
             if !matches!(without_counts, Tri::Unknown) || !self.query.needs_counted() {
                 return Ok(without_counts);
             }
+            if self.reader.is_none() {
+                self.reader = crate::catalog::Reader::open();
+            }
             let counts = self
                 .reader
-                .get_or_insert_with(crate::catalog::Reader::open)
                 .as_ref()
                 .and_then(|reader| reader.counts_with_probe(r, &self.probe.snapshot(r), &mut self.probe));
             return self.query.eval(&Facts {
@@ -739,7 +743,7 @@ pub fn filter_refs_limited(
     }
     let _reads = crate::source::read_scope();
     let mut plan = RefQuery::with_counts_mode(query, text_sets, true);
-    let mut writer: Option<Option<crate::catalog::Writer>> = None;
+    let mut writer: Option<crate::catalog::Writer> = None;
     let mut keep = vec![false; refs.len()];
     let mut selected = 0;
     for (index, r) in refs.iter().enumerate() {
@@ -753,7 +757,10 @@ pub fn filter_refs_limited(
             Tri::Unknown => {
                 let matched = plan.reduce(r)?;
                 if let Some(counted) = matched.counted {
-                    if let Some(writer) = writer.get_or_insert_with(crate::catalog::Writer::open) {
+                    if writer.is_none() {
+                        writer = crate::catalog::Writer::open();
+                    }
+                    if let Some(writer) = &mut writer {
                         writer.record_counted(r, &matched.source, counted);
                     }
                 }
@@ -934,10 +941,10 @@ mod tests {
         let mut plan = RefQuery::with_counts_mode(&query, &texts, true);
         assert!(matches!(plan.cheap(&refs[0]).unwrap(), Tri::False));
         assert!(matches!(plan.cheap(&refs[1]).unwrap(), Tri::True));
-        assert_eq!(plan.reader.as_ref().unwrap().as_ref().unwrap().counts_work(), (2, 2));
+        assert_eq!(plan.reader.as_ref().unwrap().counts_work(), (2, 2));
         assert!(plan.table.is_none());
         assert!(matches!(plan.cheap(&refs[2]).unwrap(), Tri::Unknown));
-        assert_eq!(plan.reader.as_ref().unwrap().as_ref().unwrap().counts_work(), (3, 2));
+        assert_eq!(plan.reader.as_ref().unwrap().counts_work(), (3, 2));
         for source in ["has:plan,errors", "has:errors,plan"] {
             let mixed = SessionQuery::parse(source).unwrap();
             assert!(mixed.needs_counted() && mixed.needs_events());

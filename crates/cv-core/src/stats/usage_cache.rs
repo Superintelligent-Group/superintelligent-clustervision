@@ -40,10 +40,17 @@ pub(super) struct Cache {
     pending: Arc<Mutex<Pending>>,
 }
 impl Cache {
+    /// The cache over the catalog, or `None`: a catalog that cannot open has said so at its door,
+    /// and a cache whose tables cannot be set up says so once ([`crate::env::warn_once`]).
     pub(super) fn new() -> Option<Self> {
-        let writer = crate::catalog::open_db()?;
+        let (writer, reader) = (crate::catalog::open_db()?, crate::catalog::open_db()?);
+        Self::over(writer, reader)
+            .map_err(|e| crate::env::warn_once("the usage cache", format_args!("{e:#}")))
+            .ok()
+    }
+    fn over(writer: Connection, reader: Connection) -> rusqlite::Result<Self> {
         configure(&writer)?;
-        writer.execute_batch("BEGIN IMMEDIATE").ok()?;
+        writer.execute_batch("BEGIN IMMEDIATE")?;
         writer.execute_batch(
             "CREATE TABLE IF NOT EXISTS usage_cache(
              harness TEXT NOT NULL,id TEXT NOT NULL,path TEXT NOT NULL,version INTEGER NOT NULL,
@@ -55,35 +62,30 @@ impl Cache {
              PRIMARY KEY(harness,id,path,chunk),
              FOREIGN KEY(harness,id,path) REFERENCES usage_cache(harness,id,path) ON DELETE CASCADE);
              CREATE TABLE IF NOT EXISTS usage_budget(singleton INTEGER PRIMARY KEY CHECK(singleton=1),bytes INTEGER NOT NULL,sources INTEGER NOT NULL);"
-        ).ok()?;
+        )?;
         if writer
             .query_row("SELECT singleton FROM usage_budget WHERE singleton=1", [], |r| {
                 r.get::<_, i64>(0)
             })
             .is_err()
         {
-            writer
-                .execute(
-                    "INSERT OR IGNORE INTO usage_budget SELECT 1,COALESCE(SUM(bytes),0),COUNT(*) FROM usage_cache",
-                    [],
-                )
-                .ok()?;
+            writer.execute(
+                "INSERT OR IGNORE INTO usage_budget SELECT 1,COALESCE(SUM(bytes),0),COUNT(*) FROM usage_cache",
+                [],
+            )?;
         }
-        writer
-            .execute_batch(
-                "CREATE TRIGGER IF NOT EXISTS usage_insert AFTER INSERT ON usage_cache BEGIN
+        writer.execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS usage_insert AFTER INSERT ON usage_cache BEGIN
              UPDATE usage_budget SET bytes=bytes+NEW.bytes,sources=sources+1 WHERE singleton=1; END;
              CREATE TRIGGER IF NOT EXISTS usage_delete AFTER DELETE ON usage_cache BEGIN
              UPDATE usage_budget SET bytes=bytes-OLD.bytes,sources=sources-1 WHERE singleton=1; END;
              CREATE TRIGGER IF NOT EXISTS usage_update AFTER UPDATE OF bytes ON usage_cache BEGIN
              UPDATE usage_budget SET bytes=bytes+NEW.bytes-OLD.bytes WHERE singleton=1; END;",
-            )
-            .ok()?;
-        writer.execute_batch("COMMIT").ok()?;
-        let reader = crate::catalog::open_db()?;
+        )?;
+        writer.execute_batch("COMMIT")?;
         configure(&reader)?;
-        reader.execute_batch("BEGIN").ok()?;
-        Some(Self {
+        reader.execute_batch("BEGIN")?;
+        Ok(Self {
             reader: Arc::new(Mutex::new(reader)),
             writer: Arc::new(Mutex::new(writer)),
             pending: Arc::new(Mutex::new(Pending::default())),
@@ -230,9 +232,8 @@ fn chunk_digest(harness: &str, id: &str, path: &str, index: i64, payload: &[u8])
     hash.update(payload);
     hash.finish_hex().into_bytes()
 }
-fn configure(conn: &Connection) -> Option<()> {
+fn configure(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch("PRAGMA foreign_keys=ON; PRAGMA cache_size=-128; PRAGMA mmap_size=0;")
-        .ok()
 }
 #[derive(Debug, thiserror::Error)]
 #[error("invalid persisted usage projection")]

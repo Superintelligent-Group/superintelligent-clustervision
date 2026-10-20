@@ -453,7 +453,7 @@ fn persistence_cache(path: &Path, prune: bool) -> Option<Arc<Cache>> {
 /// Flush freshly-scanned entries to the catalog db in one transaction. With `prune`, also drop
 /// rows whose files no longer exist so the table doesn't grow without bound — pass it after a
 /// *full* [`crate::discover_all`] (the stat-per-row cost belongs on the slow path; per-harness
-/// probe refreshes skip it). Best-effort: a failed flush just means a re-scan next run.
+/// probe refreshes skip it). A failed flush means a re-scan next run, and one stderr line.
 pub(crate) fn persist(prune: bool) {
     if persistence_cache(&read::Context::current().path(), prune).is_some() {
         #[cfg(feature = "sqlite")]
@@ -467,18 +467,21 @@ pub(crate) fn persist_in(conn: &mut rusqlite::Connection, prune: bool) {
         return;
     };
     clear_invalidated(&cache);
+    if let Err(e) = flush(conn, &cache, prune) {
+        // The rows stay dirty for the next flush; this process says once that they did not land.
+        crate::env::warn_once("the scan cache", e);
+    }
+}
+
+#[cfg(feature = "sqlite")]
+fn flush(conn: &mut rusqlite::Connection, cache: &Cache, prune: bool) -> rusqlite::Result<()> {
     // Full discovery still checks every persisted path, including deferred or malformed
     // payloads. Pruning therefore keeps its existing completeness semantics.
     let mut prune_paths: std::collections::HashSet<String> = if prune {
-        let Ok(mut stmt) = conn.prepare("SELECT path FROM scan_cache") else {
-            return;
-        };
-        let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) else {
-            return;
-        };
-        let Ok(paths) = rows.collect::<rusqlite::Result<_>>() else {
-            return;
-        };
+        let mut stmt = conn.prepare("SELECT path FROM scan_cache")?;
+        let paths = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<_>>()?;
         paths
     } else {
         Default::default()
@@ -495,12 +498,12 @@ pub(crate) fn persist_in(conn: &mut rusqlite::Connection, prune: bool) {
     }
     let vanished: Vec<_> = prune_paths.into_iter().filter(|p| !Path::new(p).exists()).collect();
     if vanished.is_empty() && !g.values().any(|entry| entry.dirty) {
-        return;
+        return Ok(());
     }
-    let Ok(tx) = conn.transaction() else { return };
+    let tx = conn.transaction()?;
     let mut written = Vec::new();
     {
-        let Ok(mut stmt) = tx.prepare("INSERT OR REPLACE INTO scan_cache(path,mtime_ns,size,refs,interpretation_version,source_reads,continuation) VALUES(?1,?2,?3,?4,?5,?6,?7)") else { return };
+        let mut stmt = tx.prepare("INSERT OR REPLACE INTO scan_cache(path,mtime_ns,size,refs,interpretation_version,source_reads,continuation) VALUES(?1,?2,?3,?4,?5,?6,?7)")?;
         for (path, e) in g.iter().filter(|(_, e)| e.dirty) {
             let Some((refs, reads)) = e.payload.known() else {
                 continue;
@@ -511,31 +514,22 @@ pub(crate) fn persist_in(conn: &mut rusqlite::Connection, prune: bool) {
             let Ok(reads) = serde_json::to_string(reads) else {
                 continue;
             };
-            if stmt
-                .execute(rusqlite::params![
-                    path.to_string_lossy(),
-                    e.mtime_ns as i64,
-                    e.size as i64,
-                    refs,
-                    INTERPRETATION_VERSION,
-                    reads,
-                    e.continuation
-                ])
-                .is_err()
-            {
-                return;
-            }
+            stmt.execute(rusqlite::params![
+                path.to_string_lossy(),
+                e.mtime_ns as i64,
+                e.size as i64,
+                refs,
+                INTERPRETATION_VERSION,
+                reads,
+                e.continuation
+            ])?;
             written.push(path.clone());
         }
     }
     for path in &vanished {
-        if tx.execute("DELETE FROM scan_cache WHERE path=?1", [path]).is_err() {
-            return;
-        }
+        tx.execute("DELETE FROM scan_cache WHERE path=?1", [path])?;
     }
-    if tx.commit().is_err() {
-        return;
-    }
+    tx.commit()?;
     // A failed transaction retains dirty flags for retry rather than losing its writes.
     for path in written {
         if let Some(entry) = g.get_mut(&path) {
@@ -548,6 +542,7 @@ pub(crate) fn persist_in(conn: &mut rusqlite::Connection, prune: bool) {
     cache
         .any_dirty
         .store(g.values().any(|entry| entry.dirty), Ordering::Relaxed);
+    Ok(())
 }
 
 #[cfg(all(test, feature = "sqlite"))]
