@@ -246,8 +246,10 @@ impl Adapter for Codex {
         })
     }
 
+    /// A checkpoint's adapter state ([`ResumeState`], [`CodexCtx`], what a record parses to) is
+    /// versioned by the one stored-format version: bump [`crate::source::VERSION`] when it changes.
     fn resume_format(&self) -> Option<u32> {
-        Some(RESUME_FORMAT)
+        Some(crate::source::VERSION)
     }
 
     /// Plain JSONL resumes from a physical record boundary with the same option flavor as its
@@ -269,7 +271,6 @@ impl Adapter for Codex {
             };
             if state.reading.flavor != Flavor::of(opts)
                 || state.ctx.complete != (opts.tier == Tier::Complete)
-                || (opts.tier == Tier::Complete && opts.spans && state.reading.complete_projection != 1)
                 || state.session.source_path.as_deref() != Some(r.path.as_path())
             {
                 return Ok(None);
@@ -292,10 +293,6 @@ impl Adapter for Codex {
         })
     }
 }
-
-/// What a checkpoint's adapter state means: bump when [`ResumeState`], [`CodexCtx`], or what a
-/// record parses to, changes.
-const RESUME_FORMAT: u32 = 3;
 
 /// Whole state between records, when no message awaits a following usage record.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -330,9 +327,6 @@ impl Flavor {
 #[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 struct Reading {
     flavor: Flavor,
-    // Older complete+spans readers could omit native carriers or truncate portable late events.
-    #[serde(default)]
-    complete_projection: u8,
 }
 
 impl ResumeState {
@@ -348,7 +342,6 @@ impl ResumeState {
             skipped: 0,
             reading: Reading {
                 flavor: Flavor::of(opts),
-                complete_projection: u8::from(opts.tier == Tier::Complete && opts.spans),
             },
         }
     }
@@ -1451,20 +1444,20 @@ mod tests {
         buffered_pass(&r, &opts, &mut prefix);
         let (count, checkpoint) = prefix.checkpoints.last().unwrap();
         assert!(*count > 0);
-        assert_eq!(
+        assert!(
             checkpoint
                 .get::<ResumeState>(crate::stream::ADAPTER_LAYER)
                 .unwrap()
                 .reading
-                .complete_projection,
-            1
+                .flavor
+                .spans
         );
         writeln!(fs::OpenOptions::new().append(true).open(&r.path).unwrap(), "{}",
             serde_json::json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"appended"}]}})).unwrap();
         for old_native in [false, true] {
             let mut old = checkpoint.clone();
             let layer = old.state.get_mut(crate::stream::ADAPTER_LAYER).unwrap();
-            layer["reading"].as_object_mut().unwrap().remove("complete_projection");
+            layer["reading"]["flavor"]["spans"] = Value::Bool(false);
             if old_native {
                 layer["ctx"]["complete"] = Value::Bool(false);
             }

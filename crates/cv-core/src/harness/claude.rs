@@ -1125,25 +1125,23 @@ pub fn task_notices(parent_path: &std::path::Path) -> std::collections::HashMap<
 
 /// Cheap metadata-only scan for `discover`.
 fn cached_metadata(path: &Path, warn: bool) -> Option<SessionRef> {
-    crate::discover_cache::cached_scan_continued(path, metadata::CONTINUATION_VERSION, |from| {
-        match scan_at(path, from) {
-            Ok((reference, checkpoint)) => {
-                let continuation = checkpoint.and_then(|checkpoint| {
-                    let head = crate::resume::MarkHead::of(path, &checkpoint, metadata::CONTINUATION_VERSION)?;
-                    Some(crate::discover_cache::ScanContinuation {
-                        head,
-                        checkpoint,
-                        dependencies: Default::default(),
-                    })
-                });
-                (Some(reference), continuation)
+    crate::discover_cache::cached_scan_continued(path, metadata::LAYER, |from| match scan_at(path, from) {
+        Ok((reference, checkpoint)) => {
+            let continuation = checkpoint.and_then(|checkpoint| {
+                let head = crate::resume::MarkHead::of(path, &checkpoint, metadata::LAYER)?;
+                Some(crate::discover_cache::ScanContinuation {
+                    head,
+                    checkpoint,
+                    dependencies: Default::default(),
+                })
+            });
+            (Some(reference), continuation)
+        }
+        Err(error) => {
+            if warn {
+                eprintln!("cv: skipping {}: {error:#}", path.display());
             }
-            Err(error) => {
-                if warn {
-                    eprintln!("cv: skipping {}: {error:#}", path.display());
-                }
-                (None, None)
-            }
+            (None, None)
         }
     })
 }

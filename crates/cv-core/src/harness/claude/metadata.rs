@@ -9,8 +9,9 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 thread_local! { pub(super) static FRAMED: std::cell::RefCell<Vec<(u64,u64)>> = const { std::cell::RefCell::new(Vec::new()) }; }
 
-pub(super) const CONTINUATION_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "/claude.discovery/2");
-const LAYER: &str = "claude.discovery.v2";
+/// The continuation's checkpoint layer, and with the scan cache's interpretation (the one
+/// stored-format version, [`crate::source::VERSION`]) its whole version: not the cv release.
+pub(super) const LAYER: &str = "claude.discovery.v2";
 
 #[derive(Clone, Serialize, Deserialize)]
 struct State {

@@ -123,7 +123,7 @@
 
 **After upgrading, once.**
 - The first listing rediscovers the fleet (announced on stderr; `cv index` does it ahead of time): catalog interpretation 5 adds a nullable `writer_version`.
-- Every store (counts, events, search, usage, embeddings, archive) rereads each session once: one `source::Record` envelope, version 5; marks stop expiring each release.
+- Every store, mark and watch state rereads each session once: `source::VERSION` 5 is the one version all check; nothing expires per release any more.
 
 ## 0.17.0 — 2026-10-17 — stream, never materialize
 
