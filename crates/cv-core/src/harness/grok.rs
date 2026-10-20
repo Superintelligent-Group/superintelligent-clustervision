@@ -1254,7 +1254,7 @@ mod tests {
                 let ty = v.get("type").and_then(Value::as_str);
                 expected_count += usize::from(matches!(ty, Some("user" | "assistant")));
                 if expected_title.is_none() && ty == Some("user") {
-                    let text = super::super::wire::text_parts(v.get("content"));
+                    let text = super::super::wire::joined_owned(v.get("content"), super::super::wire::TEXT);
                     if !text.trim().is_empty() {
                         expected_title = Some(crate::ir::truncate(&text, 80));
                     }

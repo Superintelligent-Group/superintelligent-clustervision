@@ -2216,7 +2216,8 @@ mod tests {
                 {
                     let kind = v.pointer("/message/origin/kind").and_then(Value::as_str);
                     if w.title.is_none() && kind.unwrap_or("user") == "user" {
-                        let t = super::super::wire::text_parts(v.pointer("/message/content"));
+                        let t =
+                            super::super::wire::joined_owned(v.pointer("/message/content"), super::super::wire::TEXT);
                         if !t.trim().is_empty() {
                             w.title = Some(crate::ir::truncate(&t, 80));
                         }

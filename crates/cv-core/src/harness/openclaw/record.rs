@@ -164,37 +164,9 @@ fn joined(container: JsonView<'_>, spans: bool, pieces: &[Piece<'_>]) -> Result<
 /// `content` as text: a string whole, an array's string `text` fields joined by newlines,
 /// anything else "".
 fn text_parts(content: Option<JsonView<'_>>, spans: bool) -> Result<Text> {
-    let Some(content) = content else {
-        return Ok(Text::default());
-    };
-    if content.is_string()? {
-        return lazy(Some(content), spans);
-    }
-    let Some(items) = content.array()? else {
-        return Ok(Text::default());
-    };
-    let mut parts = Vec::new();
-    for item in items {
-        if let Some(text) = item?.get("text")? {
-            if text.is_string()? {
-                parts.push(text);
-            }
-        }
-    }
-    match parts.as_slice() {
-        [] => Ok(Text::default()),
-        [one] => lazy(Some(*one), spans),
-        _ => {
-            let mut pieces = Vec::with_capacity(parts.len() * 2);
-            for (i, part) in parts.into_iter().enumerate() {
-                if i > 0 {
-                    pieces.push(Piece::Literal("\n"));
-                }
-                pieces.push(Piece::String(part));
-            }
-            joined(content, spans, &pieces)
-        }
-    }
+    use crate::harness::wire;
+    let backing = wire::Backing::Over(if spans { JOINED_OVER } else { u64::MAX });
+    wire::joined(content, wire::TEXT, backing, &mut |v| text_of(v, spans))
 }
 
 /// One `(TextContent|ThinkingContent|ToolCall|ImageContent)` item: the Anthropic shape under

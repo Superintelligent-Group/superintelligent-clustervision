@@ -54,7 +54,7 @@
 
 use super::store::document::text_summary;
 use super::store::document::Fields;
-use super::wire::{anthropic, coerce_text};
+use super::wire::{self, anthropic};
 use super::{parse_ts, ts_from_epoch};
 use crate::ir::*;
 use crate::json::{JsonSource, JsonView};
@@ -393,7 +393,9 @@ pub(crate) fn stream_with_options(
 
 fn result_text(c: Option<&Value>) -> String {
     match c {
-        Some(Value::Array(items)) if items.iter().all(|i| i.get("type").is_some()) => coerce_text(c),
+        Some(Value::Array(items)) if items.iter().all(|i| i.get("type").is_some()) => {
+            wire::joined_owned(c, wire::RESULT)
+        }
         Some(Value::String(s)) => s.clone(),
         None | Some(Value::Null) => String::new(),
         Some(other) => serde_json::to_string(other).unwrap_or_default(),

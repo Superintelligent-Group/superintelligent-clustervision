@@ -125,47 +125,11 @@ pub(super) fn message(
 /// joined by newlines. Under spans a large string stays in the source and a part list is joined
 /// into the source's private decoded backing, never owned.
 pub(super) fn join(content: Option<JsonView<'_>>, spans: Option<&JsonSource>) -> Result<Text> {
-    let Some(content) = content else {
-        return Ok(Text::default());
-    };
-    if content.is_string()? {
-        return Ok(match spans {
-            Some(_) => content.source_text()?,
-            None => content.text(false)?,
-        }
-        .unwrap_or_default());
-    }
-    let Some(parts) = content.array()? else {
-        return Ok(Text::default());
-    };
-    let Some(source) = spans else {
-        let mut joined = String::new();
-        let mut first = true;
-        for part in parts {
-            if let Some(text) = part?.get("text")?.filter(|v| v.is_string().unwrap_or(false)) {
-                if !first {
-                    joined.push('\n');
-                }
-                first = false;
-                joined.push_str(text.resolve()?.as_str().unwrap_or_default());
-            }
-        }
-        return Ok(Text::Inline(joined));
-    };
-    crate::harness::store::text::append(source, &source.decoded_backing()?, |writer| {
-        let mut first = true;
-        for part in parts {
-            let Some(text) = part?.get("text")? else { continue };
-            if !text.is_string()? {
-                continue;
-            }
-            if !first {
-                writer.push("\n")?;
-            }
-            first = false;
-            writer.push_string(text)?;
-        }
-        Ok(())
+    use crate::harness::wire;
+    let backing = spans.map_or(wire::Backing::Inline, wire::Backing::Source);
+    wire::joined(content, wire::TEXT, backing, &mut |v| match spans {
+        Some(_) => v.source_text(),
+        None => v.text(false),
     })
 }
 

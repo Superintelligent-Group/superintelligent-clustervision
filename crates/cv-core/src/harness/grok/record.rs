@@ -217,7 +217,9 @@ pub(super) fn message(
 /// `text` of each part joined by newlines. Under spans, one large string stays in the source and
 /// several parts are joined into the source's private decoded backing, never owned.
 fn join(view: Option<JsonView<'_>>, spans: Option<&JsonSource>) -> Result<Text> {
-    super::super::wire::joined_text(view, spans, &mut |view| match spans {
+    use super::super::wire;
+    let backing = spans.map_or(wire::Backing::Inline, wire::Backing::Source);
+    wire::joined(view, wire::TEXT, backing, &mut |view| match spans {
         Some(_) => view.source_text(),
         None => view.text(false),
     })

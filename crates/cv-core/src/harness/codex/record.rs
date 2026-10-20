@@ -89,7 +89,11 @@ impl Demand {
     /// newlines) by the demand's text rule. Several parts under spans are joined into the
     /// source's private decoded backing, never owned.
     fn joined(self, v: Option<JsonView<'_>>, source: Option<&crate::json::JsonSource>) -> Result<Text> {
-        super::super::wire::joined_text(v, source.filter(|_| self.spans), &mut |v| self.text(v))
+        use crate::harness::wire;
+        let backing = source
+            .filter(|_| self.spans)
+            .map_or(wire::Backing::Inline, wire::Backing::Source);
+        wire::joined(v, wire::TEXT, backing, &mut |v| self.text(v))
     }
 }
 

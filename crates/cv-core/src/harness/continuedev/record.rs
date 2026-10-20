@@ -188,64 +188,10 @@ fn context_item(item: JsonView<'_>) -> Result<Option<Block>> {
     }))
 }
 
-/// A single selected text remains a range. Joining several is requested composite output.
-fn join_text<'a>(values: impl Iterator<Item = Result<Option<JsonView<'a>>>>, spans: bool) -> Result<crate::Text> {
-    let mut first = None::<JsonView<'a>>;
-    let mut joined = None::<String>;
-    for value in values {
-        let Some(value) = value? else { continue };
-        if !value.is_string()? {
-            continue;
-        }
-        if let Some(joined) = &mut joined {
-            joined.push('\n');
-            value.for_each_str_chunk(|chunk| {
-                joined.push_str(chunk);
-                Ok(())
-            })?;
-        } else if let Some(first) = first.take() {
-            let mut text = String::new();
-            first.for_each_str_chunk(|chunk| {
-                text.push_str(chunk);
-                Ok(())
-            })?;
-            text.push('\n');
-            value.for_each_str_chunk(|chunk| {
-                text.push_str(chunk);
-                Ok(())
-            })?;
-            joined = Some(text);
-        } else {
-            first = Some(value);
-        }
-    }
-    match joined {
-        Some(text) => Ok(text.into()),
-        None => first
-            .map(|view| view.text(spans))
-            .transpose()
-            .map(|text| text.flatten().unwrap_or_default()),
-    }
-}
+/// A string by `text(spans)`; parts' `text` joined, owned (a single part stays a range).
 fn joined_content(content: Option<JsonView<'_>>, spans: bool) -> Result<crate::Text> {
-    let Some(content) = content else {
-        return Ok(crate::Text::default());
-    };
-    if let Some(text) = content.text(spans)? {
-        return Ok(text);
-    }
-    let Some(parts) = content.array()? else {
-        return Ok(crate::Text::default());
-    };
-    join_text(
-        parts.map(|part| {
-            let Some(part) = Fields::parse(part?, &["text"])? else {
-                return Ok(None);
-            };
-            Ok(part.get("text"))
-        }),
-        spans,
-    )
+    use crate::harness::wire;
+    wire::joined(content, wire::TEXT, wire::Backing::Inline, &mut |v| v.text(spans))
 }
 fn tool_states(states: Option<JsonView<'_>>, spans: bool) -> Result<Option<Message>> {
     let Some(states) = states.map(JsonView::array).transpose()?.flatten() else {
@@ -256,17 +202,20 @@ fn tool_states(states: Option<JsonView<'_>>, spans: bool) -> Result<Option<Messa
         let Some(state) = Fields::parse(state?, &["output", "status", "toolCallId", "toolCall"])? else {
             continue;
         };
-        let Some(output) = state.get("output").map(JsonView::array).transpose()?.flatten() else {
+        let Some(output) = state.get("output") else {
             continue;
         };
-        let content = join_text(
-            output.map(|output| {
-                let Some(output) = Fields::parse(output?, &["content"])? else {
-                    return Ok(None);
-                };
-                Ok(output.get("content"))
-            }),
-            spans,
+        if !output.is_array()? {
+            continue;
+        }
+        let content = crate::harness::wire::joined(
+            Some(output),
+            crate::harness::wire::Parts {
+                text: "content",
+                image: None,
+            },
+            crate::harness::wire::Backing::Inline,
+            &mut |v| v.text(spans),
         )?;
         let status = state.string("status")?;
         let call = state

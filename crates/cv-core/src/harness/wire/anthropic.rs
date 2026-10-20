@@ -3,7 +3,6 @@
 //! persist it verbatim; the claude.ai export, OpenClaw, Goose and Zed's legacy threads renamed a
 //! key or two, which a [`Quirks`] constant names so the adapter does not re-type the shape.
 
-use super::coerce_text;
 pub(crate) mod write;
 use crate::ir::Block;
 use crate::lazy::Text;
@@ -217,16 +216,21 @@ pub(crate) fn block_from_view_with(
     if ty != "tool_result" {
         return Ok(None);
     }
-    let content = match (text_of("content", text)?, record.get("content")) {
-        (Some(content), _) => content,
-        (None, Some(content))
-            if content.is_array()? && content.source_range()?.is_some_and(|(_, len)| len > joined_over) =>
-        {
-            coerce_selected_array(content)?
-        }
-        (None, content) => {
-            let content = content.map(|v| v.resolve().map(|v| v.into_owned())).transpose()?;
-            Text::Inline(coerce_text(content.as_ref()))
+    // A string by the caller's rule; else the parts, which stay in the source only when the
+    // array is over `joined_over` (a single part then as source text), and are otherwise owned.
+    let content = match text_of("content", text)? {
+        Some(content) => content,
+        None => {
+            let content = record.get("content");
+            let large = match content {
+                Some(c) => c.is_array()? && c.source_range()?.is_some_and(|(_, len)| len > joined_over),
+                None => false,
+            };
+            let backing = super::Backing::Over(if large { joined_over } else { u64::MAX });
+            super::joined(content, super::RESULT, backing, &mut |v| match large {
+                true => v.source_text(),
+                false => v.text(false),
+            })?
         }
     };
     Ok(Some(Block::ToolResult {
@@ -242,59 +246,6 @@ pub(crate) fn block_from_view_with(
         status: None,
         details: None,
     }))
-}
-
-/// The exact coerce_text array policy: images become a marker, all string text parts (even
-/// empty ones) retain their separator positions. Original capture guards follow joined backing.
-fn coerce_selected_array(content: crate::json::JsonView<'_>) -> anyhow::Result<Text> {
-    use crate::harness::store::{document::Fields, text};
-    let mut parts = content.array()?.unwrap().filter_map(|item| {
-        let selected = (|| -> anyhow::Result<Option<Option<crate::json::JsonView<'_>>>> {
-            let Some(item) = Fields::parse(item?, &["type", "text"])? else {
-                return Ok(None);
-            };
-            if item.string("type")?.as_deref().is_some_and(super::is_image_part) {
-                return Ok(Some(None));
-            }
-            if let Some(value) = item.get("text") {
-                if value.is_string()? {
-                    return Ok(Some(Some(value)));
-                }
-            }
-            Ok(None)
-        })();
-        match selected {
-            Ok(Some(part)) => Some(Ok(part)),
-            Ok(None) => None,
-            Err(error) => Some(Err(error)),
-        }
-    });
-    let Some(first) = parts.next().transpose()? else {
-        return Ok(Text::default());
-    };
-    let Some(second) = parts.next().transpose()? else {
-        return match first {
-            None => Ok("[image]".into()),
-            Some(value) => Ok(value.source_text()?.unwrap()),
-        };
-    };
-    let crate::Json::Source(range) = content.to_json()? else {
-        unreachable!("selected array has source backing")
-    };
-    let source = range.captured_source();
-    text::append(source, &source.decoded_backing()?, |builder| {
-        for (i, part) in [Ok(first), Ok(second)].into_iter().chain(parts).enumerate() {
-            if i != 0 {
-                builder.push("\n")?;
-            }
-            if let Some(part) = part? {
-                anyhow::ensure!(builder.push_string(part)?, "selected tool-result text");
-            } else {
-                builder.push("[image]")?;
-            }
-        }
-        Ok(())
-    })
 }
 
 // ------------------------------------------------------------------------------------------------
