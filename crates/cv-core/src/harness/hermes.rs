@@ -68,8 +68,7 @@ use super::store::sqlite::{columns, open_ro, table_exists, Cells};
 use super::wire::openai;
 use super::{ts_from_epoch, Adapter};
 use crate::ir::*;
-use crate::stream::Tier;
-use crate::stream::{self, Flow, MessageSink};
+use crate::stream::{self, Flow, MessageSink, Tier};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
@@ -853,7 +852,7 @@ fn stream_conn_with_reads(
     // look-back (the trailing run of user single-texts since the last substantive assistant turn),
     // not the whole transcript, so peak stays O(one message).
     let mut dedup = ReplayDedup::default();
-    let demand = Demand { opts, incremental };
+    let demand = Demand::of(opts, incremental);
     'lineage: for sid in &chain {
         // `ORDER BY id`, as Hermes itself reads (`_ACTIVE_IDS_SQL`, `_fetch_conversation_rows`):
         // timestamps are not monotonic and would split a tool call from its result.
@@ -868,7 +867,7 @@ fn stream_conn_with_reads(
             }
             let row = read_row(conn, &cells, row, &idx, &demand)?;
             let row_id = row.id;
-            let Some(mut m) = row.into_message(session_origin, opts) else {
+            let Some(mut m) = row.into_message(session_origin, demand.tier) else {
                 continue;
             };
             // A compaction summary row: emit the boundary marker first, then the summary linked to
@@ -1318,10 +1317,21 @@ const CELL_COLS: &[&str] = &[
     "codex_message_items",
 ];
 
-/// Row materialization follows the shared parse demand and SQLite cell access mode.
-struct Demand<'a> {
-    opts: &'a stream::Demand,
+/// Row materialization: the read's tier and spans, and the SQLite cell access mode.
+struct Demand {
+    tier: Tier,
+    spans: bool,
     incremental: bool,
+}
+
+impl Demand {
+    fn of(demand: &stream::Demand, incremental: bool) -> Self {
+        Demand {
+            tier: demand.tier,
+            spans: demand.spans,
+            incremental,
+        }
+    }
 }
 
 /// A row's `content`: text by the codec's rule, or the parts of a `\x00json:` multimodal document.
@@ -1337,10 +1347,9 @@ fn read_row(
     cells: &Cells,
     row: &rusqlite::Row<'_>,
     idx: &impl Fn(&str) -> Option<usize>,
-    demand: &Demand<'_>,
+    demand: &Demand,
 ) -> Result<MsgRow> {
-    let opts = demand.opts;
-    let (spans, full) = (opts.spans, opts.tier >= Tier::Rich);
+    let (spans, full) = (demand.spans, demand.tier >= Tier::Rich);
     let get_str =
         |name: &str| -> Option<String> { idx(name).and_then(|i| row.get::<_, Option<String>>(i).ok().flatten()) };
     let get_i64 = |name: &str| -> Option<i64> { idx(name).and_then(|i| row.get::<_, Option<i64>>(i).ok().flatten()) };
@@ -1670,7 +1679,7 @@ struct MsgRow {
 impl MsgRow {
     /// The IR message for this row. `session_origin` overrides every message's origin when the
     /// session as a whole came from somewhere else (a foreign import).
-    fn into_message(self, session_origin: Option<Origin>, opts: &stream::Demand) -> Option<Message> {
+    fn into_message(self, session_origin: Option<Origin>, tier: Tier) -> Option<Message> {
         let (mut role, mut kind, mut origin) = match self.role.as_str() {
             "assistant" => (Role::Assistant, MessageKind::Reply, Origin::Model),
             "tool" => (Role::Tool, MessageKind::ToolResult, Origin::Harness),
@@ -1708,16 +1717,13 @@ impl MsgRow {
         // In-place compaction / rewind flags (non-default values only, so old-schema rows carry
         // nothing): `compacted` = summarized away but still displayed history; `active = false`
         // alone = a rewound or superseded row (only reachable under `complete`).
-        if opts.tier >= Tier::Rich && matches!(self.compacted, Some(c) if c != 0) {
+        if tier >= Tier::Rich && matches!(self.compacted, Some(c) if c != 0) {
             bag.insert("compacted".into(), Value::Bool(true));
         }
-        if opts.tier >= Tier::Rich && matches!(self.active, Some(0)) {
+        if tier >= Tier::Rich && matches!(self.active, Some(0)) {
             bag.insert("active".into(), Value::Bool(false));
         }
-        if let Some(k) = self
-            .display_kind
-            .filter(|s| !s.is_empty() && (opts.tier >= Tier::Rich || opts.tier == Tier::Facts))
-        {
+        if let Some(k) = self.display_kind.filter(|s| !s.is_empty() && (tier >= Tier::Facts)) {
             bag.insert("display_kind".into(), Value::String(k));
         }
         if let Some(ed) = self.effect_disposition.filter(|s| !s.is_empty()) {
@@ -1770,7 +1776,7 @@ impl MsgRow {
         if let Some(pmid) = self.platform_message_id.filter(|s| !s.is_empty()) {
             bag.insert("platform_message_id".into(), Value::String(pmid));
         }
-        if opts.tier >= Tier::Rich && matches!(self.observed, Some(o) if o != 0) {
+        if tier >= Tier::Rich && matches!(self.observed, Some(o) if o != 0) {
             bag.insert("observed".into(), Value::Bool(true));
         }
         // Format-complete capture: the reasoning sidecars and the raw reasoning columns verbatim,
