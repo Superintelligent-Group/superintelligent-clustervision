@@ -1234,7 +1234,7 @@ struct Ran {
 fn publish_dependencies(ran: &mut Ran, consumer: &str) {
     for (r, why) in cv_core::source::update::<InIndex>(consumer, &std::mem::take(&mut ran.dependencies)) {
         let message = format!("search baseline publication failed for {} ({}): {why}", r.id, r.harness);
-        eprintln!("cv-search: {message}");
+        eprintln!("cv: {message}");
         ran.errors += 1;
         ran.first_error
             .get_or_insert_with(|| cv_core::ir::truncate(&message, 512));
@@ -1453,7 +1453,7 @@ fn run_fed(
                                         )
                                     });
                                     eprintln!(
-                                        "cv-search: event publication failed for {} ({}): {err:#}",
+                                        "cv: event publication failed for {} ({}): {err:#}",
                                         job.r.id, job.r.harness
                                     );
                                     false
@@ -1498,7 +1498,7 @@ fn run_fed(
                     if job.mark.is_some() {
                         ran.marks.push((job.r.clone(), None));
                     }
-                    eprintln!("cv-search: parse failed for {} ({}): {err:#}", job.r.id, job.r.harness);
+                    eprintln!("cv: parse failed for {} ({}): {err:#}", job.r.id, job.r.harness);
                 }
             }
             if since_commit >= COMMIT_EVERY && failure.is_none() {
@@ -2347,7 +2347,7 @@ impl<'w> ChunkSink<'w> {
                     match cv_core::lazy::read_head_checked(std::path::Path::new(p), PERSISTED_INDEX_CAP) {
                         Ok(head) => {
                             if let cv_core::lazy::PersistedHead::Unreadable(reason) = &head {
-                                eprintln!("cv-search: {} indexed without {p}: {reason}", self.id);
+                                eprintln!("cv: {} indexed without {p}: {reason}", self.id);
                             }
                             if let Some(t) = head.indexed_text(p) {
                                 for piece in t.as_bytes().chunks(CHUNK_BYTES) {
@@ -2937,17 +2937,23 @@ pub fn enrich_text_snippets(dir: &Path, query: &str, scope: crate::Scope, hits: 
     for hit in hits {
         let doc = meta_doc(&searcher, &f, &hit.id);
         let path = doc.as_ref().and_then(|d| d.get_first(f.path)).and_then(|v| v.as_str());
-        if let Some(snippet) = path
-            .and_then(|p| live_snippet(p, &hit.harness, query, scope))
-            .filter(|s| !s.is_empty())
-        {
-            hit.snippet = snippet;
-        } else if path.is_none_or(|p| !Path::new(p).exists()) {
-            hit.snippet = if hit.snippet.is_empty() {
-                "(source file moved)".to_string()
-            } else {
-                format!("{} (source file moved)", hit.snippet)
-            };
+        // The stored preview stands in when the live read cannot: marked when the source is
+        // gone, said once on stderr when it is there but cannot be read. A hit whose meta doc
+        // names no path (a legacy body-only index) keeps its preview unmarked.
+        let Some(path) = path else { continue };
+        match live_snippet(path, &hit.harness, query, scope) {
+            Ok(snippet) if !snippet.is_empty() => hit.snippet = snippet,
+            Ok(_) => {}
+            Err(_) if !Path::new(path).exists() => {
+                hit.snippet = if hit.snippet.is_empty() {
+                    "(source file moved)".to_string()
+                } else {
+                    format!("{} (source file moved)", hit.snippet)
+                };
+            }
+            Err(error) => {
+                cv_core::env::warn_once("live search snippets", format!("{} ({}): {error:#}", hit.id, hit.harness));
+            }
         }
     }
     Ok(())
@@ -3120,10 +3126,10 @@ const SNIPPET_SCAN_CAP: usize = 256 * 1024;
 /// [`SNIPPET_SCAN_CAP`] here — the old `bulk()` + materialize path owned the whole record before
 /// the cap check could run. Trade-off: a term that only occurs *beyond* the cap inside one giant
 /// field now falls back to the head/preview snippet (it already did for terms in later messages).
-fn live_snippet(path: &str, harness: &str, query: &str, scope: crate::Scope) -> Option<String> {
+fn live_snippet(path: &str, harness: &str, query: &str, scope: crate::Scope) -> Result<String> {
     use cv_core::{Block, Demand, Flow, Message, MessageSink, SessionRef};
-    let h = cv_core::Harness::parse(harness)?;
-    let adapter = cv_core::harness::for_harness(h)?;
+    let h = cv_core::Harness::parse(harness).with_context(|| format!("unknown harness {harness:?}"))?;
+    let adapter = cv_core::harness::for_harness(h).with_context(|| format!("no adapter for {harness}"))?;
     let sref = SessionRef {
         cwd: None,
         title: None,
@@ -3233,9 +3239,8 @@ fn live_snippet(path: &str, harness: &str, query: &str, scope: crate::Scope) -> 
         &Demand::LEAN.with_spans(),
         &mut acc,
         cv_core::stream::Pass::RECORD,
-    )
-    .ok()?;
-    Some(make_snippet(acc.head.as_str(), query))
+    )?;
+    Ok(make_snippet(acc.head.as_str(), query))
 }
 
 /// Window the body around the first matching query term; fall back to a head if nothing matches.
