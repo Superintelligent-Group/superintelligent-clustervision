@@ -419,6 +419,95 @@ mod tests {
         }
     }
 
+    /// The unit words a flag's value and help speak in; two commands that give one flag name
+    /// disjoint units mean two things by it (`--since` a duration here, a message index there).
+    fn flag_units(a: &clap::Arg) -> std::collections::BTreeSet<&'static str> {
+        let value_name = a.get_value_names().and_then(|v| v.first()).map(|n| n.as_str().to_lowercase());
+        let help = a.get_long_help().or(a.get_help()).map(|h| h.to_string().to_lowercase()).unwrap_or_default();
+        let mut units = std::collections::BTreeSet::new();
+        match value_name.as_deref() {
+            Some("dur" | "duration") => {
+                units.insert("duration");
+            }
+            Some("msg") => {
+                units.insert("message");
+            }
+            _ => {}
+        }
+        // Whole words only: `file_edit` is an event kind, not a file.
+        let words: Vec<&str> = help.split(|c: char| !(c.is_alphanumeric() || c == '_')).collect();
+        for (word, unit) in [("directory", "directory"), ("file", "file"), ("seconds", "seconds"), ("message", "message")] {
+            if words.contains(&word) {
+                units.insert(unit);
+            }
+        }
+        units
+    }
+
+    /// `docs/INTERFACE-V2.md` §2: the same word means the same thing everywhere. Every long flag
+    /// that appears on more than one command has one value type, a vocabulary no command widens
+    /// past the shared one, and compatible units in its help.
+    #[test]
+    fn a_repeated_flag_name_has_one_type_and_one_grammar() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let mut tree = crate::build_cli();
+                tree.build();
+                #[allow(clippy::type_complexity)]
+                let mut by_flag: std::collections::BTreeMap<String, Vec<(String, &'static str, Vec<String>, std::collections::BTreeSet<&'static str>)>> =
+                    Default::default();
+                fn walk(
+                    cmd: &clap::Command,
+                    path: &str,
+                    by_flag: &mut std::collections::BTreeMap<String, Vec<(String, &'static str, Vec<String>, std::collections::BTreeSet<&'static str>)>>,
+                ) {
+                    for a in cmd.get_arguments() {
+                        let Some(long) = a.get_long() else { continue };
+                        if a.is_hide_set() || !a.get_action().takes_values() || matches!(long, "help" | "version") {
+                            continue;
+                        }
+                        let possible = a.get_possible_values().iter().map(|p| p.get_name().to_string()).collect();
+                        by_flag.entry(long.to_string()).or_default().push((path.to_string(), value_type(a), possible, flag_units(a)));
+                    }
+                    for sub in cmd.get_subcommands().filter(|s| visible(s)) {
+                        walk(sub, &format!("{path} {}", sub.get_name()).trim().to_string(), by_flag);
+                    }
+                }
+                walk(&tree, "", &mut by_flag);
+                let mut drift = Vec::new();
+                for (flag, uses) in &by_flag {
+                    if uses.len() < 2 {
+                        continue;
+                    }
+                    // A path is a string the command reads as a location; `--cwd` stays one word
+                    // in the units, not in the clap type.
+                    let kind = |t: &'static str| if t == "path" { "string" } else { t };
+                    let types: std::collections::BTreeSet<_> = uses.iter().map(|u| kind(u.1)).collect();
+                    if types.len() > 1 {
+                        let rows: Vec<_> = uses.iter().map(|u| format!("{} {}", u.0, u.1)).collect();
+                        drift.push(format!("--{flag}: value types differ: {}", rows.join("; ")));
+                    }
+                    let vocab: std::collections::BTreeSet<&String> = uses.iter().flat_map(|u| u.2.iter()).collect();
+                    let widest = uses.iter().map(|u| u.2.len()).max().unwrap_or(0);
+                    if !vocab.is_empty() && vocab.len() > widest {
+                        drift.push(format!("--{flag}: no command offers the whole vocabulary {vocab:?}"));
+                    }
+                    for (i, a) in uses.iter().enumerate() {
+                        for b in &uses[i + 1..] {
+                            if !a.3.is_empty() && !b.3.is_empty() && a.3.is_disjoint(&b.3) {
+                                drift.push(format!("--{flag}: `{}` speaks {:?}, `{}` speaks {:?}", a.0, a.3, b.0, b.3));
+                            }
+                        }
+                    }
+                }
+                assert!(drift.is_empty(), "one flag word, one grammar (INTERFACE-V2 §2):\n{}", drift.join("\n"));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
     /// `doc` with the text between `<!-- begin: {key} -->` and `<!-- end: {key} -->` replaced.
     fn splice_marked(doc: &str, key: &str, body: &str) -> String {
         let (begin, end) = (format!("<!-- begin: {key} -->\n"), format!("<!-- end: {key} -->"));
