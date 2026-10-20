@@ -354,7 +354,7 @@ impl Session {
     /// Resolve every lazy content [`Span`](crate::lazy::Span) in place, so the session owns all its
     /// content inline. Whole-session consumers (cross-harness emit building output in memory, JSON
     /// serialization) call this; streaming consumers resolve per-block instead. After it, every
-    /// content `Text` is `Inline`, so `Deref`/`Display`/`append_searchable` are safe.
+    /// content `Text` is `Inline`, so `Deref`/`Display` are safe.
     pub fn materialize(&mut self) -> anyhow::Result<()> {
         let resolver = self.resolver();
         for m in &mut self.messages {
@@ -549,40 +549,57 @@ pub struct Message {
     pub complete_record: Option<std::sync::Arc<CompleteRecord>>,
 }
 
+/// serde by derive over the fields themselves. The destructuring is exhaustive, so a new field is
+/// a compile error here until it is serialized or deliberately skipped; `complete_record` reaches
+/// the output only as `extra._record`, through [`record::Extra`].
 impl Serialize for Message {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeStruct;
-        let count = 4
-            + usize::from(self.id.is_some())
-            + usize::from(self.parent_id.is_some())
-            + usize::from(self.timestamp.is_some())
-            + usize::from(self.model.is_some())
-            + usize::from(self.usage.is_some())
-            + usize::from(!self.extra.is_empty() || self.complete_record.is_some());
-        let mut out = serializer.serialize_struct("Message", count)?;
-        if let Some(value) = &self.id {
-            out.serialize_field("id", value)?;
+        let Message {
+            id,
+            parent_id,
+            role,
+            kind,
+            origin,
+            timestamp,
+            model,
+            content,
+            usage,
+            extra: _,
+            complete_record: _,
+        } = self;
+        #[derive(Serialize)]
+        #[serde(rename = "Message")]
+        struct Wire<'a> {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            id: Option<&'a String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            parent_id: Option<&'a String>,
+            role: &'a Role,
+            kind: &'a MessageKind,
+            origin: &'a Origin,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            timestamp: Option<&'a DateTime<Utc>>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            model: Option<&'a String>,
+            content: &'a Vec<Block>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            usage: Option<&'a Usage>,
+            #[serde(skip_serializing_if = "record::Extra::is_empty")]
+            extra: record::Extra<'a>,
         }
-        if let Some(value) = &self.parent_id {
-            out.serialize_field("parent_id", value)?;
+        Wire {
+            id: id.as_ref(),
+            parent_id: parent_id.as_ref(),
+            role,
+            kind,
+            origin,
+            timestamp: timestamp.as_ref(),
+            model: model.as_ref(),
+            content,
+            usage: usage.as_ref(),
+            extra: record::Extra(self),
         }
-        out.serialize_field("role", &self.role)?;
-        out.serialize_field("kind", &self.kind)?;
-        out.serialize_field("origin", &self.origin)?;
-        if let Some(value) = &self.timestamp {
-            out.serialize_field("timestamp", value)?;
-        }
-        if let Some(value) = &self.model {
-            out.serialize_field("model", value)?;
-        }
-        out.serialize_field("content", &self.content)?;
-        if let Some(value) = &self.usage {
-            out.serialize_field("usage", value)?;
-        }
-        if !self.extra.is_empty() || self.complete_record.is_some() {
-            out.serialize_field("extra", &record::Extra(self))?;
-        }
-        out.end()
+        .serialize(serializer)
     }
 }
 
@@ -742,36 +759,14 @@ impl Message {
         }
     }
 
-    /// Append this message's searchable text to `out`, the canonical projection (streaming, per
-    /// message). Writes into the caller's buffer so it allocates no intermediates.
+    /// Append this message's searchable text to `out`: [`crate::projection::searchable_text_checked`]
+    /// with no cancellation, resolving any span content through the default resolver.
     pub fn append_searchable(&self, out: &mut String) -> anyhow::Result<()> {
-        for b in &self.content {
-            match b {
-                Block::Text { text } | Block::Thinking { text, .. } => {
-                    out.push_str(text);
-                    out.push('\n');
-                }
-                Block::ToolUse { name, input, .. } => {
-                    out.push_str(name);
-                    out.push(' ');
-                    // Reuse the demanded output allocation while the canonical walker emits
-                    // source fields. No intermediate serialized copy of a giant input.
-                    crate::projection::append_json(out, input)?;
-                    out.push('\n');
-                }
-                Block::ToolResult { content, .. } => {
-                    out.push_str(content);
-                    out.push('\n');
-                }
-                Block::File { path, source, .. } => {
-                    if let Some(p) = path.as_deref().or(source.as_deref()) {
-                        out.push_str(p);
-                        out.push('\n');
-                    }
-                }
-                Block::Image { .. } => {}
-            }
-        }
+        out.push_str(&crate::projection::searchable_text_checked(
+            self,
+            &crate::lazy::Resolver::new(None),
+            || Ok(()),
+        )?);
         Ok(())
     }
 
@@ -1404,6 +1399,56 @@ pub fn home_rel(p: &std::path::Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every `Option` set and a record retained: serde emits one key per field (the destructuring
+    /// in `Serialize for Message` makes a new field a compile error), the record appears only as
+    /// `extra._record`, the streaming writer agrees byte for byte, and the output reads back.
+    #[test]
+    fn message_key_set_is_its_fields_and_the_record_rides_extra() {
+        let mut messages = vec![Message::new(Role::Assistant)];
+        let m = &mut messages[0];
+        m.id = Some("a".into());
+        m.parent_id = Some("p".into());
+        m.timestamp = Some(chrono::DateTime::from_timestamp(1, 0).unwrap());
+        m.model = Some("m".into());
+        m.content.push(Block::Text { text: "t".into() });
+        m.usage = Some(Usage::default());
+        m.extra.insert("claude".into(), serde_json::json!({"k": 1}));
+        CompleteRecord::attach(
+            &mut messages,
+            Harness::Claude,
+            crate::json::Json::Owned(serde_json::json!({"type": "assistant", "uuid": "a"})),
+            serde_json::Map::new(),
+        );
+        let m = &messages[0];
+        let value = serde_json::to_value(m).unwrap();
+        let keys: Vec<&str> = value.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            [
+                "id",
+                "parent_id",
+                "role",
+                "kind",
+                "origin",
+                "timestamp",
+                "model",
+                "content",
+                "usage",
+                "extra"
+            ]
+        );
+        let extra: Vec<&str> = value["extra"].as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(extra, ["claude", crate::harness::claude::CARRIER_KEY]);
+        let mut written = Vec::new();
+        m.write_json(&mut written, &crate::lazy::Resolver::new(None)).unwrap();
+        assert_eq!(written, serde_json::to_vec(m).unwrap());
+        let back: Message = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&back).unwrap(), value);
+        let bare = serde_json::to_value(Message::new(Role::User)).unwrap();
+        let keys: Vec<&str> = bare.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(keys, ["role", "kind", "origin", "content"]);
+    }
 
     /// Every `Option` set, so serde emits every field: the key set is exactly `FIELDS`, in order.
     #[test]

@@ -100,6 +100,137 @@ impl Head {
     }
 }
 
+/// Where [`searchable`] writes: the complete projection, or a bounded head of it.
+trait Searchable {
+    fn full(&self) -> bool {
+        false
+    }
+    fn str(&mut self, s: &str);
+    fn text(
+        &mut self,
+        text: &Text,
+        resolver: &Resolver,
+        check: &mut dyn FnMut() -> anyhow::Result<()>,
+    ) -> anyhow::Result<()>;
+    fn json(&mut self, json: &crate::json::Json, check: &mut dyn FnMut() -> anyhow::Result<()>) -> anyhow::Result<()>;
+}
+
+/// The searchable projection of one message, spelled once: text, thinking and tool-result text
+/// each followed by a newline; a tool call as `name input` (canonical JSON) and a newline; a
+/// file's path (else its source) and a newline; an image nothing. `check` runs before each
+/// block, at each decoded text chunk and JSON write, and once at the end.
+fn searchable(
+    message: &crate::Message,
+    resolver: &Resolver,
+    out: &mut impl Searchable,
+    check: &mut dyn FnMut() -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    for block in &message.content {
+        check()?;
+        if out.full() {
+            break;
+        }
+        match block {
+            crate::Block::Text { text }
+            | crate::Block::Thinking { text, .. }
+            | crate::Block::ToolResult { content: text, .. } => {
+                out.text(text, resolver, check)?;
+                out.str("\n");
+            }
+            crate::Block::ToolUse { name, input, .. } => {
+                out.str(name);
+                out.str(" ");
+                out.json(input, check)?;
+                out.str("\n");
+            }
+            crate::Block::File { path, source, .. } => {
+                if let Some(path) = path.as_deref().or(source.as_deref()) {
+                    out.str(path);
+                    out.str("\n");
+                }
+            }
+            crate::Block::Image { .. } => {}
+        }
+    }
+    check()
+}
+
+/// The complete projection, as bytes (a JSON write may end inside a scalar; the whole is UTF-8).
+impl Searchable for Vec<u8> {
+    fn str(&mut self, s: &str) {
+        self.extend_from_slice(s.as_bytes());
+    }
+    fn text(
+        &mut self,
+        text: &Text,
+        resolver: &Resolver,
+        check: &mut dyn FnMut() -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        text.try_for_each_chunk(resolver, 4096, |part| {
+            check()?;
+            self.extend_from_slice(part.as_bytes());
+            Ok(())
+        })
+    }
+    fn json(&mut self, json: &crate::json::Json, check: &mut dyn FnMut() -> anyhow::Result<()>) -> anyhow::Result<()> {
+        struct Checked<'a, 'b> {
+            bytes: &'a mut Vec<u8>,
+            check: &'a mut (dyn FnMut() -> anyhow::Result<()> + 'b),
+        }
+        impl std::io::Write for Checked<'_, '_> {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                (self.check)().map_err(std::io::Error::other)?;
+                self.bytes.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        json.write_canonical(&mut Checked { bytes: self, check })
+    }
+}
+
+/// A bounded head: decoding stops once the budget is spent.
+impl Searchable for Head {
+    fn full(&self) -> bool {
+        Head::full(self)
+    }
+    fn str(&mut self, s: &str) {
+        self.push(s);
+    }
+    fn text(
+        &mut self,
+        text: &Text,
+        resolver: &Resolver,
+        check: &mut dyn FnMut() -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        #[derive(Debug)]
+        struct PrefixComplete;
+        impl std::fmt::Display for PrefixComplete {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("searchable prefix complete")
+            }
+        }
+        impl std::error::Error for PrefixComplete {}
+        match text.try_for_each_chunk(resolver, 4096, |part| {
+            check()?;
+            self.push(part);
+            if Head::full(self) {
+                Err(PrefixComplete.into())
+            } else {
+                Ok(())
+            }
+        }) {
+            Err(error) if !error.is::<PrefixComplete>() => Err(error),
+            _ => Ok(()),
+        }
+    }
+    fn json(&mut self, json: &crate::json::Json, _: &mut dyn FnMut() -> anyhow::Result<()>) -> anyhow::Result<()> {
+        self.push_json(json)
+    }
+}
+
 /// Complete searchable projection with cooperative cancellation between text chunks and
 /// canonical JSON writes. The joined output is demanded one message at a time.
 pub fn searchable_text_checked(
@@ -107,53 +238,8 @@ pub fn searchable_text_checked(
     resolver: &Resolver,
     mut check: impl FnMut() -> anyhow::Result<()>,
 ) -> anyhow::Result<String> {
-    struct Checked<'a, F> {
-        bytes: &'a mut Vec<u8>,
-        check: &'a mut F,
-    }
-    impl<F: FnMut() -> anyhow::Result<()>> std::io::Write for Checked<'_, F> {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            (self.check)().map_err(std::io::Error::other)?;
-            self.bytes.extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
     let mut bytes = Vec::new();
-    for block in &message.content {
-        check()?;
-        match block {
-            crate::Block::Text { text }
-            | crate::Block::Thinking { text, .. }
-            | crate::Block::ToolResult { content: text, .. } => {
-                text.try_for_each_chunk(resolver, 4096, |part| {
-                    check()?;
-                    bytes.extend_from_slice(part.as_bytes());
-                    Ok(())
-                })?;
-                bytes.push(b'\n');
-            }
-            crate::Block::ToolUse { name, input, .. } => {
-                bytes.extend_from_slice(name.as_bytes());
-                bytes.push(b' ');
-                input.write_canonical(&mut Checked {
-                    bytes: &mut bytes,
-                    check: &mut check,
-                })?;
-                bytes.push(b'\n');
-            }
-            crate::Block::File { path, source, .. } => {
-                if let Some(path) = path.as_deref().or(source.as_deref()) {
-                    bytes.extend_from_slice(path.as_bytes());
-                    bytes.push(b'\n');
-                }
-            }
-            crate::Block::Image { .. } => {}
-        }
-    }
-    check()?;
+    searchable(message, resolver, &mut bytes, &mut check)?;
     Ok(String::from_utf8(bytes)?)
 }
 
@@ -175,61 +261,13 @@ pub fn searchable_prefix_checked(
     limit: usize,
     mut check: impl FnMut() -> anyhow::Result<()>,
 ) -> anyhow::Result<(String, bool)> {
-    #[derive(Debug)]
-    struct PrefixComplete;
-    impl std::fmt::Display for PrefixComplete {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str("searchable prefix complete")
-        }
-    }
-    impl std::error::Error for PrefixComplete {}
     // Four witness bytes distinguish an exact fit from the next UTF8 scalar not fitting.
     let mut head = Head {
         text: String::with_capacity(limit.saturating_add(4).min(64 * 1024)),
         limit: limit.saturating_add(4),
         stopped: false,
     };
-    for block in &message.content {
-        check()?;
-        if head.full() {
-            break;
-        }
-        match block {
-            crate::Block::Text { text }
-            | crate::Block::Thinking { text, .. }
-            | crate::Block::ToolResult { content: text, .. } => {
-                let result = text.try_for_each_chunk(resolver, 4096, |part| {
-                    check()?;
-                    head.push(part);
-                    if head.full() {
-                        Err(PrefixComplete.into())
-                    } else {
-                        Ok(())
-                    }
-                });
-                if let Err(error) = result {
-                    if !error.is::<PrefixComplete>() {
-                        return Err(error);
-                    }
-                }
-                head.push("\n");
-            }
-            crate::Block::ToolUse { name, input, .. } => {
-                head.push(name);
-                head.push(" ");
-                head.push_json(input)?;
-                head.push("\n");
-            }
-            crate::Block::File { path, source, .. } => {
-                if let Some(path) = path.as_deref().or(source.as_deref()) {
-                    head.push(path);
-                    head.push("\n");
-                }
-            }
-            crate::Block::Image { .. } => {}
-        }
-    }
-    check()?;
+    searchable(message, resolver, &mut head, &mut check)?;
     let mut text = head.into_string();
     let truncated = text.len() > limit;
     let mut end = text.len().min(limit);

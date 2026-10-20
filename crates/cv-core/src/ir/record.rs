@@ -151,6 +151,12 @@ impl Serialize for CompleteRecord {
 /// `Message::extra` with the retained record under the carrier key: the owned map when there is
 /// no record to carry, else [`write_extra`]'s bytes.
 pub(crate) struct Extra<'a>(pub &'a Message);
+impl Extra<'_> {
+    /// No owned facts and no record to carry: `extra` is omitted.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.extra.is_empty() && self.0.complete_record.is_none()
+    }
+}
 impl Serialize for Extra<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
         match carried(self.0) {
