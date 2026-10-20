@@ -2579,9 +2579,9 @@ fn prune_refuses_a_malformed_line_inside_the_kept_window() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// The typed `record::Facts` read what prune's decision rosters (owned and source) and rewind's
-/// selection projection read, field by field through their consumers' own accessors, over every
-/// corpus Claude record plus edge shapes. The parity proof for retiring those projections.
+/// The typed `record::Facts` read what prune's decision rosters (owned and source) read, field by
+/// field through their consumers' own accessors, over every corpus Claude record plus edge
+/// shapes. The parity proof for retiring those rosters.
 #[test]
 fn typed_facts_read_what_the_decision_and_selection_projections_read() {
     use crate::harness::claude::record::Facts;
@@ -2630,10 +2630,9 @@ fn typed_facts_read_what_the_decision_and_selection_projections_read() {
             let read = source.read_range_value(range.offset, range.len, |view| {
                 let (facts, _) = Facts::parse(view)?;
                 let decision = decision_facts_source(view, range, &PruneOptions::default(), &mut tools)?;
-                let selection = crate::rewind::selection_facts(view)?;
-                Ok((facts, decision, selection, view.resolve()?.into_owned()))
+                Ok((facts, decision, view.resolve()?.into_owned()))
             });
-            let Ok((facts, decision, selection, owned)) = read else {
+            let Ok((facts, decision, owned)) = read else {
                 continue;
             };
             records += 1;
@@ -2687,34 +2686,6 @@ fn typed_facts_read_what_the_decision_and_selection_projections_read() {
                 }
             }
             assert_eq!(typed, named, "{at}");
-            // rewind's selection
-            let sel = &selection;
-            assert_eq!(facts.ty, sel.get("type").and_then(Value::as_str).unwrap_or(""), "{at}");
-            assert_eq!(facts.turn_kind(), turn_kind(sel), "{at}");
-            assert_eq!(facts.session_id, s(sel.get("sessionId")), "{at}");
-            assert_eq!(facts.cwd, s(sel.get("cwd")), "{at}");
-            assert_eq!(facts.uuid, s(sel.get("uuid")), "{at}");
-            assert_eq!(facts.message, sel.get("message").is_some(), "{at}");
-            assert_eq!(
-                facts.compact_head,
-                s(sel.pointer("/compactMetadata/preservedSegment/headUuid")),
-                "{at}"
-            );
-            let blocks: Vec<_> = sel
-                .pointer("/message/content")
-                .and_then(Value::as_array)
-                .map(|bs| {
-                    bs.iter()
-                        .map(|b| (s(b.get("type")), s(b.get("id")), s(b.get("tool_use_id"))))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let typed: Vec<_> = facts
-                .blocks
-                .iter()
-                .map(|b| (b.ty.clone(), b.id.clone(), b.tool_use_id.clone()))
-                .collect();
-            assert_eq!(typed, blocks, "{at}");
         }
     }
     std::fs::remove_dir_all(dir).ok();

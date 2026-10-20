@@ -62,10 +62,11 @@
 //! or whose output was silenced (`-q` with no rev-parse) leaves no evidence; a rebase/cherry-pick
 //! mints a new sha the session never printed.
 
+use crate::harness::claude::record::Facts;
 use crate::ir::{Block, Harness, Message, MessageKind, SessionRef};
 use crate::lazy::Resolver;
 use crate::offsets::OFFSET_KEY;
-use crate::prune::{new_uuid, turn_kind};
+use crate::prune::new_uuid;
 use crate::stream::{Flow, MessageSink, ParseOptions};
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
@@ -671,11 +672,7 @@ fn rewind_session_after_scan(
         Some(b) => {
             let b_off = scan.offsets[b];
             let head = read_line_at(&source_guard.source, &file, b_off)?
-                .and_then(|v| {
-                    v.pointer("/compactMetadata/preservedSegment/headUuid")
-                        .and_then(Value::as_str)
-                        .map(String::from)
-                })
+                .and_then(|facts| facts.compact_head)
                 .and_then(|h| scan.uuid_off.get(&h).copied())
                 .filter(|h| *h < b_off);
             match head {
@@ -797,9 +794,9 @@ fn rewind_session_after_scan(
             Err(error) => return Err(error),
         };
         if let Some(record) = &selected.record {
-            let facts = record.with_view(selection_facts)?;
+            let facts = record.with_view(|view| Ok(Facts::parse(view)?.0))?;
             if source_session_id.is_none() {
-                source_session_id = facts.get("sessionId").and_then(Value::as_str).map(String::from);
+                source_session_id = facts.session_id.clone();
             }
             // A `user`/`assistant` record with no `message` body: the Claude codec carries it
             // verbatim on a byte copy, but a re-emitted copy walks it through the reader, which
@@ -813,7 +810,7 @@ fn rewind_session_after_scan(
                          re-emitted copy would drop it: repair or remove that record, rewind without \
                          re-emitting, or cut before it with `--at <MSG_IDX>`",
                         r.path.display(),
-                        facts.get("uuid").and_then(Value::as_str).unwrap_or("(none)"),
+                        facts.uuid.as_deref().unwrap_or("(none)"),
                     );
                 }
             }
@@ -832,7 +829,7 @@ fn rewind_session_after_scan(
                     None
                 },
             );
-            if let Some(c) = facts.get("cwd").and_then(Value::as_str) {
+            if let Some(c) = facts.cwd.as_deref() {
                 if cwds.last().map(String::as_str) != Some(c) {
                     cwds.retain(|x| x != c);
                     cwds.push(c.to_string());
@@ -1057,62 +1054,8 @@ fn first_cwd(path: &Path) -> Option<String> {
     None
 }
 
-/// Project only selection facts, leaving every native payload in the checked source.
-pub(crate) fn selection_facts(view: crate::json::JsonView<'_>) -> Result<Value> {
-    use crate::harness::store::document::Fields;
-    let keys = [
-        "sessionId",
-        "cwd",
-        "type",
-        "subtype",
-        "isSidechain",
-        "isApiErrorMessage",
-        "uuid",
-        "message",
-        "compactMetadata",
-    ];
-    let Some(fields) = Fields::parse(view, &keys)? else {
-        return Ok(Value::Null);
-    };
-    let mut facts = fields.project(&keys[..7])?;
-    if let Some(message) = fields
-        .get("message")
-        .map(|v| Fields::parse(v, &["model", "content"]))
-        .transpose()?
-        .flatten()
-    {
-        let mut projected = message.project(&["model"])?;
-        if let Some(blocks) = message.get("content").map(|v| v.array()).transpose()?.flatten() {
-            let mut content = Vec::new();
-            for block in blocks {
-                content.push(match Fields::parse(block?, &["type", "id", "tool_use_id"])? {
-                    Some(block) => Value::Object(block.project(&["type", "id", "tool_use_id"])?),
-                    None => Value::Null,
-                });
-            }
-            projected.insert("content".into(), Value::Array(content));
-        }
-        facts.insert("message".into(), Value::Object(projected));
-    }
-    if let Some(head) = fields
-        .get("compactMetadata")
-        .map(|v| v.get("preservedSegment"))
-        .transpose()?
-        .flatten()
-        .map(|v| v.get("headUuid"))
-        .transpose()?
-        .flatten()
-    {
-        facts.insert(
-            "compactMetadata".into(),
-            serde_json::json!({"preservedSegment":{"headUuid":head.resolve()?.into_owned()}}),
-        );
-    }
-    Ok(Value::Object(facts))
-}
-
 /// Read only the decision fields of the record starting at `off`.
-fn read_line_at(source: &crate::json::JsonSource, file: &std::fs::File, off: u64) -> Result<Option<Value>> {
+fn read_line_at(source: &crate::json::JsonSource, file: &std::fs::File, off: u64) -> Result<Option<Facts>> {
     use crate::harness::store::jsonl::ranges::{self, Range};
     let Some(row) = ranges::records(
         file,
@@ -1125,7 +1068,7 @@ fn read_line_at(source: &crate::json::JsonSource, file: &std::fs::File, off: u64
         return Ok(None);
     };
     let (range, _) = row?;
-    match source.read_range_value(range.offset, range.len, selection_facts) {
+    match source.read_range_value(range.offset, range.len, |view| Ok(Facts::parse(view)?.0)) {
         Ok(value) => Ok(Some(value)),
         Err(error) if error.is::<crate::json::InvalidJson>() => Ok(None),
         Err(error) => Err(error),
@@ -1134,20 +1077,16 @@ fn read_line_at(source: &crate::json::JsonSource, file: &std::fs::File, off: u64
 
 /// Update the open tool-call set from one record: an assistant's `tool_use` blocks open calls, a
 /// user record's `tool_result` blocks close them (counted into `closed` past the cut).
-fn track_tool_calls(v: &Value, open: &mut HashSet<String>, mut closed: Option<&mut usize>) {
-    let Some(blocks) = v.pointer("/message/content").and_then(Value::as_array) else {
-        return;
-    };
-    for b in blocks {
-        match b.get("type").and_then(Value::as_str) {
+fn track_tool_calls(facts: &Facts, open: &mut HashSet<String>, mut closed: Option<&mut usize>) {
+    for b in &facts.blocks {
+        match b.ty.as_deref() {
             Some("tool_use") => {
-                if let Some(id) = b.get("id").and_then(Value::as_str) {
-                    open.insert(id.to_string());
+                if let Some(id) = &b.id {
+                    open.insert(id.clone());
                 }
             }
             Some("tool_result") => {
-                let id = b.get("tool_use_id").and_then(Value::as_str).unwrap_or("");
-                if open.remove(id) {
+                if open.remove(b.tool_use_id.as_deref().unwrap_or("")) {
                     if let Some(c) = closed.as_deref_mut() {
                         *c += 1;
                     }
@@ -1161,17 +1100,11 @@ fn track_tool_calls(v: &Value, open: &mut HashSet<String>, mut closed: Option<&m
 /// Past the cut, a record still belongs to the cut's moment when it isn't a new turn: bookkeeping
 /// (attachments, hooks, system notes) or a user record carrying tool results. The next assistant
 /// turn or a real prompt ends the copy.
-fn closes_open_call(v: &Value) -> bool {
-    match turn_kind(v) {
+fn closes_open_call(facts: &Facts) -> bool {
+    match facts.turn_kind() {
         None => true,
         Some(false) => false,
-        Some(true) => v
-            .pointer("/message/content")
-            .and_then(Value::as_array)
-            .is_some_and(|bs| {
-                bs.iter()
-                    .any(|b| b.get("type").and_then(Value::as_str) == Some("tool_result"))
-            }),
+        Some(true) => facts.blocks.iter().any(|b| b.ty.as_deref() == Some("tool_result")),
     }
 }
 
@@ -1180,9 +1113,8 @@ fn closes_open_call(v: &Value) -> bool {
 /// other shape is one cv knows how to place — a known bookkeeping type is carried, an unknown type
 /// without a body is a meta record, and a `system` row without content is a bodyless notice — so
 /// only a record that *claims* to be a turn and has no turn in it is unreadable.
-fn unreadable_record(v: &Value) -> Option<&str> {
-    let ty = v.get("type")?.as_str()?;
-    (matches!(ty, "user" | "assistant") && v.get("message").is_none()).then_some(ty)
+fn unreadable_record(facts: &Facts) -> Option<&str> {
+    (matches!(facts.ty.as_str(), "user" | "assistant") && !facts.message).then_some(facts.ty.as_str())
 }
 
 #[cfg(test)]
