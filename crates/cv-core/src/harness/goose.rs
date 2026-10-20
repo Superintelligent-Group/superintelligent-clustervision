@@ -118,7 +118,7 @@ use super::wire::anthropic;
 use super::{ts_from_epoch, Adapter};
 use crate::ir::*;
 use crate::stream::{Demand, Flow, MessageSink, Tier};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
 use rusqlite::Connection;
 use serde_json::Value;
@@ -210,40 +210,30 @@ impl Adapter for Goose {
         let Some(dir) = &self.dir else {
             return Ok(Default::default());
         };
-        let mut out = Vec::new();
+        let mut out = crate::Discovered::default();
         let mut seen_ids = std::collections::HashSet::new();
 
-        // Modern SQLite store.
+        // Modern SQLite store: one that cannot open or read is skipped and reported.
         if let Some(db) = self.db_path() {
-            let refs = super::store::sqlite::cached_discover(&db, || {
-                let Ok(conn) = open_ro(&db) else {
-                    return Ok(Default::default());
-                };
-                conn.read(|reader| discover_db(reader, &db))
-            });
-            if let Ok(refs) = refs {
-                for r in refs {
-                    seen_ids.insert(r.id.clone());
-                    out.push(r);
-                }
+            let refs =
+                super::store::sqlite::cached_discover(&db, || open_ro(&db)?.read(|reader| discover_db(reader, &db)));
+            for r in out.keep(&db, refs).into_iter().flatten() {
+                seen_ids.insert(r.id.clone());
+                out.refs.push(r);
             }
         }
 
         // Legacy `.jsonl` files not already represented by a DB row of the same id.
-        for (name, path) in list_legacy(dir) {
+        let legacy = out.keep(dir, list_legacy(dir)).unwrap_or_default();
+        for (name, path) in legacy {
             if seen_ids.contains(&name) {
                 continue;
             }
-            if let Some(r) = discover_legacy(&name, &path) {
-                out.push(r);
+            if let Some(found) = crate::Skipped::listed(&path, legacy::discover(&name, &path).map(Some)) {
+                out.push(found);
             }
         }
-        Ok(out.into())
-    }
-
-    /// Goose writes `sessions.db` in place.
-    fn watch_policy(&self, _r: &SessionRef) -> super::WatchPolicy {
-        super::WatchPolicy::Database
+        Ok(out)
     }
 
     fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
@@ -333,8 +323,8 @@ fn discover_db(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
         Ok((id, title, wd, created, updated))
     })?;
     let mut out = Vec::new();
-    for row in rows.flatten() {
-        let (id, title, wd, created, updated) = row;
+    for row in rows {
+        let (id, title, wd, created, updated) = row?;
         out.push(SessionRef {
             cwd: wd.filter(|s| !s.is_empty()).map(PathBuf::from),
             title: title
@@ -535,7 +525,7 @@ fn stream_db_opts_with_reads(
                 row.get(7).ok().flatten(),
             ))
         })
-        .unwrap_or((None, None, None, None, None, None, None, None));
+        .with_context(|| format!("goose session {:?}", r.id))?;
 
     let model = reconstruct_model(provider.as_deref(), model_cfg.as_deref());
     // The session's kind (`user`/`scheduled`/`sub_agent`/`hidden`/…, v13+) is a Goose fact and
@@ -791,25 +781,17 @@ fn reconstruct_model(provider: Option<&str>, model_cfg: Option<&str>) -> Option<
 // Legacy `.jsonl`
 // ---------------------------------------------------------------------------
 
-fn list_legacy(dir: &Path) -> Vec<(String, PathBuf)> {
+fn list_legacy(dir: &Path) -> Result<Vec<(String, PathBuf)>> {
     let mut out = Vec::new();
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return out;
-    };
-    for entry in rd.flatten() {
-        let path = entry.path();
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
         if path.extension().is_some_and(|e| e == "jsonl") {
             if let Some(stem) = path.file_stem() {
                 out.push((stem.to_string_lossy().into_owned(), path));
             }
         }
     }
-    out
-}
-
-/// Project the native metadata header while retaining legacy whole-file UTF-8 acceptance.
-fn discover_legacy(name: &str, path: &Path) -> Option<SessionRef> {
-    legacy::discover(name, path)
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -1953,7 +1935,7 @@ mod tests {
         std::fs::write(&path, content).unwrap();
 
         // discover (header-only)
-        let r = discover_legacy("20240101_120000", &path).unwrap();
+        let r = legacy::discover("20240101_120000", &path).unwrap();
         assert_eq!(r.title.as_deref(), Some("legacy chat"));
         assert_eq!(r.cwd.as_deref().map(|p| p.to_str().unwrap()), Some("/home/u/old"));
         assert_eq!(

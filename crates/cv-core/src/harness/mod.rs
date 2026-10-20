@@ -237,10 +237,12 @@ impl Discovered {
         result.map_err(|e| self.skipped.extend(Skipped::of(path, &e))).ok()
     }
 
-    /// Append another discovery's refs and skips.
-    pub fn append(&mut self, other: Discovered) {
-        self.refs.extend(other.refs);
-        self.skipped.extend(other.skipped);
+    /// One source's outcome ([`Skipped::listed`]): a ref or a skip.
+    pub fn push(&mut self, found: std::result::Result<SessionRef, Skipped>) {
+        match found {
+            Ok(r) => self.refs.push(r),
+            Err(s) => self.skipped.push(s),
+        }
     }
 }
 
@@ -263,12 +265,7 @@ impl FromIterator<SessionRef> for Discovered {
 impl FromIterator<Result<SessionRef, Skipped>> for Discovered {
     fn from_iter<I: IntoIterator<Item = Result<SessionRef, Skipped>>>(iter: I) -> Self {
         let mut out = Discovered::default();
-        for item in iter {
-            match item {
-                Ok(r) => out.refs.push(r),
-                Err(s) => out.skipped.push(s),
-            }
-        }
+        iter.into_iter().for_each(|found| out.push(found));
         out
     }
 }

@@ -116,10 +116,7 @@ fn read_message(
     Ok(Some(message))
 }
 
-pub(super) fn discover(name: &str, path: &Path) -> Option<SessionRef> {
-    discover_checked(name, path).ok()
-}
-fn discover_checked(name: &str, path: &Path) -> Result<SessionRef> {
+pub(super) fn discover(name: &str, path: &Path) -> Result<SessionRef> {
     let source = JsonSource::capture(path)?;
     let file = std::fs::File::open(path)?;
     let metadata = file.metadata()?;
@@ -248,7 +245,7 @@ mod tests {
         for bytes in cases {
             std::fs::write(&path, bytes).unwrap();
             assert_eq!(
-                observe(discover("legacy", &path)),
+                observe(discover("legacy", &path).ok()),
                 observe(legacy_oracle("legacy", &path))
             );
         }
@@ -259,7 +256,7 @@ mod tests {
             let text = format!("{header}\n{row}\n{{\"role\":\"assistant\",\"content\":[]}}");
             std::fs::write(&path, text).unwrap();
             assert_eq!(
-                observe(discover("legacy", &path)),
+                observe(discover("legacy", &path).ok()),
                 observe(legacy_oracle("legacy", &path))
             );
         }
@@ -270,14 +267,14 @@ mod tests {
         ] {
             std::fs::write(&path, serde_json::json!({"description":title}).to_string()).unwrap();
             assert_eq!(
-                observe(discover("legacy", &path)),
+                observe(discover("legacy", &path).ok()),
                 observe(legacy_oracle("legacy", &path))
             );
         }
         let deep = format!("{{}}\n{}0{}\n{{\"role\":\"user\"}}\n", "[".repeat(129), "]".repeat(129));
         std::fs::write(&path, deep).unwrap();
         assert_eq!(
-            observe(discover("legacy", &path)),
+            observe(discover("legacy", &path).ok()),
             observe(legacy_oracle("legacy", &path))
         );
     }
