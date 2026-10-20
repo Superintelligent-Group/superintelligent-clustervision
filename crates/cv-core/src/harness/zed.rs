@@ -128,11 +128,14 @@ impl Adapter for Zed {
         let Some(db) = &self.db else {
             return Ok(Default::default());
         };
-        super::store::sqlite::cached_discover(db, || {
-            let conn = open_ro(db)?;
-            conn.read(|conn| discover_db(conn, db))
-        })
-        .map(Into::into)
+        // The one database: one that cannot open or read is skipped and reported (the harness
+        // lists nothing), not a discovery failure that keeps the previous listing.
+        let mut found = crate::Discovered::default();
+        let refs = super::store::sqlite::cached_discover(db, || open_ro(db)?.read(|conn| discover_db(conn, db)));
+        if let Some(refs) = found.keep(db, refs) {
+            found.refs = refs;
+        }
+        Ok(found)
     }
 
     /// Zed writes `threads.db` in place.
@@ -169,7 +172,8 @@ fn discover_db(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
     let mut rows = stmt.query([])?;
     let mut out = Vec::new();
     while let Some(row) = rows.next()? {
-        // One unreadable row never fails the harness.
+        // A row without a text id is not an addressable thread (nothing could open it); the
+        // rest of the row's columns are optional facts.
         let Ok(id) = row.get::<_, String>(0) else { continue };
         let summary = row.get::<_, Option<String>>(1).ok().flatten();
         let updated = row.get::<_, Option<String>>(2).ok().flatten();
