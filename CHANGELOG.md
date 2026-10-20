@@ -97,6 +97,7 @@
 - **Breaking:** `cv dataset --out <path>` is `--file <path>` (`--out` is a directory everywhere else); the old spelling exits 2 with a pointer.
 - `cv watch --interval` takes seconds as a number like `scry`; a negative `--interval` on either exits 2 instead of clamping.
 - **Breaking:** `cv tools --agent` takes an exact id or a unique prefix on every view; none or several matches exit 2. `--across` with `--agent`, `--tool` or `--timeline` exits 2.
+- `cv pack --format` is checked by the parser: an unknown value exits 2 and names the choices (`md`, `prompt`, `session`).
 - `cv search` no longer mentions a leftover `index.sqlite`; the sqlite full-text index was retired long ago.
 
 **Tooling and CI.**

@@ -591,6 +591,24 @@ fn invalid(msg: String) -> anyhow::Error {
 mod tests {
     use super::*;
 
+    /// `WINDOW_SELECTORS` is `WindowArgs`' own flags plus `pre_compaction`: a window flag added to
+    /// the shared struct must reach the MCP default-window rule, never a hand copy of the list.
+    #[test]
+    fn window_selectors_are_the_window_args_table() {
+        use clap::Args;
+        let cmd = crate::util::WindowArgs::augment_args(clap::Command::new("window"));
+        let mut table: Vec<&str> = cmd
+            .get_arguments()
+            .map(|a| a.get_id().as_str())
+            .filter(|id| *id != "context")
+            .collect();
+        table.push("pre_compaction");
+        table.sort_unstable();
+        let mut have = WINDOW_SELECTORS.to_vec();
+        have.sort_unstable();
+        assert_eq!(have, table);
+    }
+
     fn spec(json_src: &str) -> CommandSpec {
         serde_json::from_str(json_src).expect("command spec")
     }

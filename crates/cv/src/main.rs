@@ -877,7 +877,7 @@ enum Cmd {
         task: String,
         /// Output shape: `md` (CLAUDE.md-style digest, default), `prompt` (system prompt),
         /// or `session` (a synthetic resumable session — see `--harness`).
-        #[arg(long, default_value = "md")]
+        #[arg(long, default_value = "md", value_parser = ["md", "prompt", "session"])]
         format: String,
         /// Target harness when `--format session`.
         #[arg(long)]

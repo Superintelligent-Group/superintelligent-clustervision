@@ -48,9 +48,6 @@ pub(crate) fn cmd_pack(
     force: bool,
     thinking: cv_core::emit::ThinkingMode,
 ) -> Result<()> {
-    if !matches!(format, "md" | "prompt" | "session") {
-        bail!("unknown format {format:?} (use md, prompt, or session)");
-    }
     if let (Some(path), "md" | "prompt") = (&out, format) {
         crate::util::user_file_claim(path, force)?;
     }

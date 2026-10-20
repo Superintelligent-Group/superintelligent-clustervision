@@ -258,8 +258,12 @@ fn pack_rejects_bad_arguments() {
     let w = World::new("args");
     pack_corpus(&w);
 
-    let (_, err) = w.cv_fails(&["pack", "x", "--format", "docx"]);
-    assert!(err.contains("unknown format"), "{err}");
+    let (_, code, _, err) = w.cv(&["pack", "x", "--format", "docx"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(
+        err.contains("docx") && err.contains("session"),
+        "clap names the value and the choices:\n{err}"
+    );
 
     // --harness is the target-harness flag, and only --format session has a target.
     let (_, err) = w.cv_fails(&["pack", "x", "--harness", "claude"]);
