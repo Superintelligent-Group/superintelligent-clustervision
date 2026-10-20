@@ -268,9 +268,8 @@ pub(super) fn build(
             out.push(carrier(id, ty, data, ts)?);
         }
     }
-    Ok(crate::affordance::refine_complete_group(Harness::OpenCode, &mut out)
-        .is_ok()
-        .then_some(out))
+    crate::affordance::refine_complete_group(Harness::OpenCode, &mut out)?;
+    Ok(Some(out))
 }
 
 fn nonempty_array(view: Option<JsonView<'_>>) -> Result<Option<JsonView<'_>>> {

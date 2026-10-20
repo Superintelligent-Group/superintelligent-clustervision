@@ -128,6 +128,7 @@
 - Zed's unreadable `threads.db` lists nothing and is named by `cv doctor`, instead of failing discovery and keeping the old listing.
 - A Cursor bubble a header names but the store lacks counts as `skipped_lines` instead of vanishing.
 - Continue: an unreadable session file errors instead of reading empty, an undecodable one counts one `skipped_lines`, a corrupt `sessions.json` is named by `cv doctor`.
+- OpenCode: an unreadable message or part file errors instead of reading empty; undecodable records count as `skipped_lines`; an unopenable database is named by `cv doctor`.
 - `cv formats census` reports each harness's first parse error (`first_error` in `--json`) beside the count.
 - **Breaking:** `cv events`, `cv touched`, `cv blame` and their HTTP routes fail on an event-catalog error instead of answering empty.
 - **Breaking (library):** `events::events_for`, `sessions_touching`, `sessions_editing` and `edits_touching_file` return `Result`.

@@ -122,26 +122,21 @@ impl OpenCode {
         }
     }
 
-    /// Sessions from the SQLite store, plus their ids so the JSON walk can skip duplicates.
+    /// Sessions from the SQLite store (a database that cannot open is a reported skip), plus
+    /// their ids so the JSON walk can skip duplicates.
     #[cfg(feature = "sqlite")]
-    fn discover_db(&self) -> (Vec<SessionRef>, HashSet<String>) {
+    fn discover_db(&self) -> (crate::Discovered, HashSet<String>) {
+        let mut out = crate::Discovered::default();
         let Some(db) = &self.db else {
-            return (Vec::new(), HashSet::new());
+            return (out, HashSet::new());
         };
-        match db::discover(db) {
-            Ok(refs) => {
-                let ids = refs.iter().map(|r| r.id.clone()).collect();
-                (refs, ids)
-            }
-            Err(e) => {
-                eprintln!("cv: skipping {}: {e:#}", db.display());
-                (Vec::new(), HashSet::new())
-            }
-        }
+        out.refs = out.keep(db, db::discover(db)).unwrap_or_default();
+        let ids = out.refs.iter().map(|r| r.id.clone()).collect();
+        (out, ids)
     }
     #[cfg(not(feature = "sqlite"))]
-    fn discover_db(&self) -> (Vec<SessionRef>, HashSet<String>) {
-        (Vec::new(), HashSet::new())
+    fn discover_db(&self) -> (crate::Discovered, HashSet<String>) {
+        (crate::Discovered::default(), HashSet::new())
     }
 
     fn message_dir(&self, sid: &str) -> Option<PathBuf> {
@@ -219,8 +214,12 @@ impl Adapter for OpenCode {
                 #[serde(default)]
                 id: String,
             }
+            // A file that cannot be opened is undetermined; one that does not decode names no part
+            // dir (the stream skips it too), and the message dir's own entry covers its repair.
             let file = fs::File::open(message).ok()?;
-            let id: MessageId = serde_json::from_reader(std::io::BufReader::new(file)).ok()?;
+            let Ok(id) = serde_json::from_reader::<_, MessageId>(std::io::BufReader::new(file)) else {
+                continue;
+            };
             deps.directories.push(storage.join("part").join(id.id));
         }
         deps.directories.push(messages);
@@ -238,21 +237,30 @@ impl Adapter for OpenCode {
     fn discover(&self) -> Result<crate::Discovered> {
         // The database first (it is the live store), then the frozen JSON tree for anything the
         // database doesn't have — a session present in both (the import left copies) appears once.
+        // An unreadable directory, and a session file that cannot be read or decoded, are
+        // skipped and reported.
         let (mut out, seen) = self.discover_db();
         let Some(root) = &self.root else {
-            return Ok(out.into());
+            return Ok(out);
         };
         let session_dir = root.join("session");
-        for entry in WalkDir::new(&session_dir).into_iter().filter_map(|e| e.ok()) {
+        for entry in WalkDir::new(&session_dir) {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    out.skipped.extend(crate::Skipped::walk(&error));
+                    continue;
+                }
+            };
             let path = entry.path();
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if !name.starts_with("ses_") || !name.ends_with(".json") {
                 continue;
             }
-            let Ok(text) = fs::read_to_string(path) else {
+            let Some(text) = out.keep(path, fs::read_to_string(path).map_err(Into::into)) else {
                 continue;
             };
-            let Ok(v) = serde_json::from_str::<Value>(&text) else {
+            let Some(v) = out.keep(path, serde_json::from_str::<Value>(&text).map_err(Into::into)) else {
                 continue;
             };
             let id = v
@@ -263,7 +271,7 @@ impl Adapter for OpenCode {
             if seen.contains(&id) {
                 continue;
             }
-            out.push(SessionRef {
+            out.refs.push(SessionRef {
                 cwd: v.get("directory").and_then(Value::as_str).map(PathBuf::from),
                 title: v
                     .get("title")
@@ -275,7 +283,7 @@ impl Adapter for OpenCode {
                 ..SessionRef::new(id, Harness::OpenCode, path.to_path_buf())
             });
         }
-        Ok(out.into())
+        Ok(out)
     }
 
     /// OpenCode's sessions are rows of its database (or files beside it), written in place.
@@ -300,7 +308,12 @@ impl Adapter for OpenCode {
             //   3. in that order, view each header's part files one at a time, emit its IR
             //      message(s) to `sink`, and drop it before touching the next.
             let text = fs::read_to_string(&r.path).with_context(|| format!("reading {}", r.path.display()))?;
-            let meta: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+            // A document that does not decode is a counted record, read as no facts.
+            let mut unparsed = super::Unparsed::default();
+            let meta: Value = serde_json::from_str(&text).unwrap_or_else(|_| {
+                unparsed.count();
+                Value::Null
+            });
 
             let mut s = Session {
                 cwd: meta.get("directory").and_then(Value::as_str).map(PathBuf::from),
@@ -326,20 +339,17 @@ impl Adapter for OpenCode {
             // the bodies) is held with its `time/created` sort key until every header is read.
             let mut order: Vec<(i64, PathBuf, Option<record::Record>)> = Vec::new();
             if let Some(mdir) = self.message_dir(&r.id) {
-                if let Ok(rd) = fs::read_dir(&mdir) {
-                    for e in rd.filter_map(|e| e.ok()) {
-                        let path = e.path();
-                        let header = document(&path, |view, source| {
-                            let when = record::owned(record::get(view.get("time")?, "created")?)?
-                                .and_then(|created| created.as_i64())
-                                .unwrap_or(0);
-                            let header =
-                                record::Record::header(view, None, record::Ctx::new(opts.spans, source, &arena))?;
-                            Ok((when, header))
-                        })?;
-                        if let Some((when, header)) = header {
-                            order.push((when, path, header));
-                        }
+                for path in listing(&mdir)? {
+                    let header = document(&path, |view, source| {
+                        let when = record::owned(record::get(view.get("time")?, "created")?)?
+                            .and_then(|created| created.as_i64())
+                            .unwrap_or(0);
+                        let header = record::Record::header(view, None, record::Ctx::new(opts.spans, source, &arena))?;
+                        Ok((when, header))
+                    })?;
+                    match header {
+                        Some((when, header)) => order.push((when, path, header)),
+                        None => unparsed.count(),
                     }
                 }
             }
@@ -354,26 +364,27 @@ impl Adapter for OpenCode {
                 };
                 if let Some(dir) = self.part_dir(record.id().unwrap_or("")) {
                     // Parts in file-name order, one file at a time.
-                    let mut paths: Vec<PathBuf> = fs::read_dir(dir)
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|e| e.ok().map(|e| e.path()))
-                        .collect();
+                    let mut paths = listing(&dir)?;
                     paths.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
                     for path in paths {
-                        document(&path, |view, source| {
+                        let part = document(&path, |view, source| {
                             record.part(view, None, record::Ctx::new(opts.spans, source, &arena))
                         })?;
+                        if part.is_none() {
+                            unparsed.count();
+                        }
                     }
                 }
                 for mut built in record.finish() {
                     fold_into_session(&mut s, &mut built)?;
                     if sink.message(built) == Flow::Stop {
+                        unparsed.note(&mut s);
                         return Ok(s);
                     }
                 }
             }
 
+            unparsed.note(&mut s);
             Ok(s)
         })
     }
@@ -405,15 +416,25 @@ fn fold_into_session(s: &mut Session, m: &mut Message) -> Result<()> {
     Ok(())
 }
 
-/// One JSON document of the tree, validated and viewed once; None for a file that cannot be
-/// captured or is not exactly one JSON value.
+/// The entries of one tree directory: none when it is absent, an error when it cannot be read.
+fn listing(dir: &Path) -> Result<Vec<PathBuf>> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error).with_context(|| format!("reading {}", dir.display())),
+    };
+    entries
+        .map(|e| Ok(e.with_context(|| format!("reading {}", dir.display()))?.path()))
+        .collect()
+}
+
+/// One JSON document of the tree, validated and viewed once; None for a file that is not exactly
+/// one JSON value. A file that cannot be read is an error.
 fn document<T>(
     path: &Path,
     f: impl for<'a> FnOnce(crate::json::JsonView<'a>, &crate::json::JsonSource) -> Result<T>,
 ) -> Result<Option<T>> {
-    let Ok(source) = crate::json::JsonSource::capture(path) else {
-        return Ok(None);
-    };
+    let source = crate::json::JsonSource::capture(path)?;
     match source.read_syntax(|view| {
         if view.accepts_value()? {
             f(view, &source).map(Some)
@@ -755,36 +776,50 @@ mod db {
             "SELECT id, {} FROM part WHERE message_id = ?1 ORDER BY id",
             parts.select("data")
         ))?;
+        // A cell that is not one JSON value, and a part id that is not text, are counted.
+        let mut unparsed = super::super::Unparsed::default();
         let mut rows = message_rows.query(rusqlite::params![r.id])?;
         while let Some(row) = rows.next()? {
             let mid: String = row.get(0)?;
-            let Some(cell) = messages.cell(conn, "message", "data", row, 1)? else {
-                continue;
+            let header = match messages.cell(conn, "message", "data", row, 1)? {
+                Some(cell) => messages.read(cell, |view| {
+                    record::Record::header(view, Some(&mid), ctx(opts.spans, &messages))
+                })?,
+                None => None,
             };
-            let Some(Some(mut record)) = messages.read(cell, |view| {
-                record::Record::header(view, Some(&mid), ctx(opts.spans, &messages))
-            })?
-            else {
-                continue;
+            let mut record = match header {
+                Some(Some(record)) => record,
+                Some(None) => continue,
+                None => {
+                    unparsed.count();
+                    continue;
+                }
             };
             let mut part_rows = part_rows.query(rusqlite::params![mid])?;
             while let Some(row) = part_rows.next()? {
                 let Ok(pid) = row.get::<_, String>(0) else {
+                    unparsed.count();
                     continue;
                 };
-                if let Some(cell) = parts.cell(conn, "part", "data", row, 1)? {
-                    parts.read(cell, |view| {
+                let read = match parts.cell(conn, "part", "data", row, 1)? {
+                    Some(cell) => parts.read(cell, |view| {
                         record.part(view, Some([&pid, &mid, &r.id]), ctx(opts.spans, &parts))
-                    })?;
+                    })?,
+                    None => None,
+                };
+                if read.is_none() {
+                    unparsed.count();
                 }
             }
             for mut built in record.finish() {
                 fold_into_session(&mut s, &mut built)?;
                 if sink.message(built) == Flow::Stop {
+                    unparsed.note(&mut s);
                     return Ok(s);
                 }
             }
         }
+        unparsed.note(&mut s);
         Ok(s)
     }
 
