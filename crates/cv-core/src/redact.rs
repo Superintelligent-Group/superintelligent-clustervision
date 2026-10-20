@@ -1435,47 +1435,19 @@ mod tests {
     }
 
     #[test]
-    fn blob_suffix_offsets_match_the_previous_suffix_table() {
-        fn legacy(re: &Regex, s: &str) -> Option<(usize, usize)> {
-            let mut from = 0;
-            while let Some(m) = re.find_at(s, from) {
-                let (start, end) = (m.start(), m.end());
-                let mut pure = vec![(true, true, true); end - start + 1];
-                for q in (start..end).rev() {
-                    let (h, u, d) = pure[q + 1 - start];
-                    let c = s.as_bytes()[q];
-                    pure[q - start] = (
-                        h && c.is_ascii_hexdigit(),
-                        u && is_token_char(c),
-                        d && is_base64_std_char(c),
-                    );
-                }
-                for p in start..end.saturating_sub(31) {
-                    let (h, u, d) = pure[p - start];
-                    if (h || u || d)
-                        && end - p >= if h { 32 } else { 40 }
-                        && boundary_before(s, p)
-                        && keyword_before(s, p, 48)
-                    {
-                        return Some((p, end));
-                    }
-                }
-                from = end;
-            }
-            None
-        }
+    fn blob_suffix_offsets_match_the_recorded_table() {
         let rule = rules().iter().find(|r| r.kind == Kind::Blob).unwrap();
+        let mut frozen = crate::emit::frozen::Frozen::new("redact-blob-offsets");
         for prefix in ["", "key ", "secret = ", "ordinary ", "clé key "] {
             for stem in ["abcdef", "abcdefghi", "abc-def_", "abc/def+", "abc==="] {
                 for repeats in [1, 5, 8, 20, 1000] {
                     let input = format!("{prefix}{}", stem.repeat(repeats));
-                    assert_eq!(
-                        next_blob(&rule.re, &input, 0).map(|h| (h.start, h.end)),
-                        legacy(&rule.re, &input)
-                    );
+                    let actual = next_blob(&rule.re, &input, 0).map(|h| (h.start, h.end));
+                    frozen.insert(format!("{prefix:?} {stem} x{repeats}"), serde_json::json!(actual));
                 }
             }
         }
+        frozen.check().unwrap();
         assert!(matches!(
             scrub_cow(
                 &"x".repeat(1_000_000),
