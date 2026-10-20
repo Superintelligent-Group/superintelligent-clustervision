@@ -377,7 +377,8 @@ fn discover_global(conn: &Connection, db: &Path, cwd_map: &HashMap<String, PathB
 }
 
 /// One composer: its session facts, then each bubble of its authoritative conversation, inline or
-/// external (`bubbleId:<composer>:<bubble>` cells; missing or malformed ones are skipped).
+/// external (`bubbleId:<composer>:<bubble>` cells; missing or unreadable ones are counted as
+/// `skipped_lines`).
 fn stream_global(
     conn: &Connection,
     reads: &crate::source::ReadSet,
@@ -395,14 +396,19 @@ fn stream_global(
             let mut session = global_session(&composer.metadata, r);
             // The session model is the latest message's, else the composer's modelConfig.
             let mut last_model = None;
+            // A header naming a bubble whose cell is missing or unreadable is a record that cannot
+            // parse: counted (`skipped_lines`), never silently dropped.
+            let mut unparsed = super::Unparsed::default();
             for row in composer.rows.into_iter().flatten() {
                 let row = row?;
                 let message = if composer.external {
                     let Some(id) = row.get("bubbleId")?.map(record::string).transpose()?.flatten() else {
+                        unparsed.count();
                         continue;
                     };
                     let key = format!("bubbleId:{}:{id}", r.id);
                     let Ok(Some(cell)) = source::cell(conn, &cells, "cursorDiskKV", &key) else {
+                        unparsed.count();
                         continue;
                     };
                     cells.read(cell, |view| record::bubble(view, &cells, spans))?.flatten()
@@ -426,6 +432,7 @@ fn stream_global(
                     .filter(|s| !s.is_empty())
                     .map(str::to_owned)
             });
+            unparsed.note(&mut session);
             Ok(session)
         })?
         .context("composerData JSON")?;
@@ -688,6 +695,42 @@ mod tests {
         assert!(results
             .iter()
             .any(|(text, error)| !error && text.contains("Ran 7 tests")));
+    }
+
+    /// The skip policy's first channel under an injected failure: a header whose bubble row is
+    /// gone was dropped without a trace; it is counted.
+    #[test]
+    fn a_missing_external_bubble_is_counted_not_silently_dropped() {
+        let conn = mk_global();
+        let cid = "comp-gone";
+        let composer = |headers: &str| {
+            format!(
+                r#"{{"composerId":"{cid}","name":"Torn","createdAt":1700000000000,"_v":3,"fullConversationHeadersOnly":{headers}}}"#
+            )
+        };
+        put(
+            &conn,
+            &format!("bubbleId:{cid}:b1"),
+            r#"{"bubbleId":"b1","type":1,"text":"kept"}"#,
+        );
+        put(
+            &conn,
+            &format!("composerData:{cid}"),
+            &composer(r#"[{"bubbleId":"b1","type":1}]"#),
+        );
+        let clean = parse_global(&conn, &conn.sref(cid)).unwrap();
+        assert!(clean.cv_extra().is_none(), "a whole composer notes nothing");
+        conn.execute(
+            "UPDATE cursorDiskKV SET value=?2 WHERE key=?1",
+            rusqlite::params![
+                format!("composerData:{cid}"),
+                composer(r#"[{"bubbleId":"b1","type":1},{"bubbleId":"gone","type":2}]"#)
+            ],
+        )
+        .unwrap();
+        let torn = parse_global(&conn, &conn.sref(cid)).unwrap();
+        assert_eq!(torn.messages.len(), 1);
+        assert_eq!(torn.cv_extra().unwrap()["skipped_lines"], 1);
     }
 
     #[test]
