@@ -856,25 +856,18 @@ fn stream_conn_with_reads(
                 continue;
             }
             let row = read_row(conn, &cells, row, &idx, &demand)?;
-            let row_id = row.id;
-            let Some(mut m) = row.into_message(session_origin, demand.tier) else {
+            let Some(m) = row.into_message(session_origin, demand.tier) else {
                 continue;
             };
-            // A compaction summary row: emit the boundary marker first, then the summary linked to
-            // it by `parent_id` — the `CompactionBoundary` + `CompactionSummary` pair
-            // `crate::compaction` detects for every harness.
+            // A compaction summary row: Hermes keeps no row for the compaction itself, so cv
+            // synthesizes the boundary before it (no content, no id); `crate::compaction` pairs the
+            // two by adjacency.
             if m.kind == MessageKind::CompactionSummary {
-                let boundary_id = format!("compact-{row_id}");
-                let mut boundary = Message::of_kind(Role::System, MessageKind::CompactionBoundary, m.origin);
-                boundary.id = Some(boundary_id.clone());
+                let mut boundary = Message::synthesized(MessageKind::CompactionBoundary, m.origin);
                 boundary.timestamp = m.timestamp;
-                boundary.content.push(Block::Text {
-                    text: "[conversation compacted]".to_string().into(),
-                });
                 if sink.message(boundary) == Flow::Stop {
                     break 'lineage;
                 }
-                m.parent_id = Some(boundary_id);
                 if sink.message(m) == Flow::Stop {
                     break 'lineage;
                 }
@@ -1447,7 +1440,6 @@ fn read_row(
                 .flatten()
                 .is_some());
     Ok(MsgRow {
-        id: get_i64("id").unwrap_or(0),
         role: get_str("role").unwrap_or_default(),
         body,
         untyped_failed_turn,
@@ -1633,7 +1625,6 @@ fn row_has_extra(row: &rusqlite::Row<'_>, index: &impl Fn(&str) -> Option<usize>
 }
 
 struct MsgRow {
-    id: i64,
     role: String,
     body: Option<Body>,
     untyped_failed_turn: bool,
@@ -2323,7 +2314,7 @@ mod tests {
                         .harness_extra(Harness::Hermes)
                         .and_then(|bag| bag.get("display_kind"))
                         .cloned();
-                    message.extra.clear();
+                    message.extra.retain(|k, _| k == crate::ir::CV_NAMESPACE);
                     if options.tier == Tier::Facts {
                         if let Some(kind) = kind {
                             message
@@ -2798,14 +2789,7 @@ mod tests {
         let s = parse_conn(&conn, &sref(&conn, "s")).unwrap();
         assert_eq!(
             texts(&s),
-            vec![
-                "q1",
-                "a1",
-                "q2",
-                "[conversation compacted]",
-                "[CONTEXT COMPACTION] earlier turns…",
-                "a2"
-            ]
+            vec!["q1", "a1", "q2", "[CONTEXT COMPACTION] earlier turns…", "a2"]
         );
         assert!(
             !texts(&s).contains(&"typo".to_string()),
@@ -2820,14 +2804,25 @@ mod tests {
             (boundary.kind, boundary.origin),
             (MessageKind::CompactionBoundary, Origin::Harness)
         );
-        assert!(boundary.extra.is_empty(), "the boundary is its kind; no flat subtype");
+        assert!(
+            boundary.content.is_empty() && boundary.id.is_none(),
+            "cv invents no text, no id"
+        );
+        assert!(boundary.is_synthesized(), "the boundary is cv's, and says so");
+        assert!(
+            boundary.harness_extra(Harness::Hermes).is_none(),
+            "no harness facts on it"
+        );
         let summary = &s.messages[4];
         assert_eq!(summary.role, Role::System);
         assert_eq!(
             (summary.kind, summary.origin),
             (MessageKind::CompactionSummary, Origin::Harness)
         );
-        assert_eq!(summary.parent_id, boundary.id, "summary links to its boundary");
+        assert_eq!(
+            summary.parent_id, None,
+            "no invented link: the detector pairs by adjacency"
+        );
         assert_eq!(bag(summary)["display_kind"], "hidden");
         assert!(!bag(summary).contains_key("isCompactSummary"), "the kind carries it");
         // the shared detector sees one compaction with its summary

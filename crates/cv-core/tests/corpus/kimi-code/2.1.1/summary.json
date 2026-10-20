@@ -254,7 +254,7 @@
         "assistant/reply"
       ],
       "blocks": {
-        "text": 94,
+        "text": 93,
         "thinking": 16,
         "tool_result": 26,
         "tool_use": 26

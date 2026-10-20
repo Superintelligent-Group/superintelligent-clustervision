@@ -379,7 +379,7 @@
         "assistant/reply"
       ],
       "blocks": {
-        "text": 9,
+        "text": 8,
         "thinking": 2
       },
       "tools": [],

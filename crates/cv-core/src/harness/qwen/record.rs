@@ -272,9 +272,6 @@ fn emit(
             // `{info: {originalTokenCount, newTokenCount, triggerReason, ...}, compressedHistory:
             // Content[]}`: the boundary, then the summary turn that seeds the new window.
             let mut m = Message::of_kind(Role::System, MessageKind::CompactionBoundary, Origin::Harness);
-            m.content.push(Block::Text {
-                text: "[conversation compressed]".to_string().into(),
-            });
             let info = payload.map(|p| p.get("info")).transpose()?.flatten();
             if let Some(info) = info.filter(|v| v.is_object().unwrap_or(false)) {
                 let mut kept = Vec::new();
@@ -308,13 +305,7 @@ fn emit(
             m.content = blocks()?;
             m
         }
-        ("system", Some("rewind")) => {
-            let mut m = Message::of_kind(Role::System, MessageKind::Branch, Origin::Harness);
-            m.content.push(Block::Text {
-                text: "[rewound]".to_string().into(),
-            });
-            m
-        }
+        ("system", Some("rewind")) => Message::of_kind(Role::System, MessageKind::Branch, Origin::Harness),
         ("system", Some("session_model")) => {
             let mut m = Message::of_kind(Role::System, MessageKind::ModelChange, Origin::Harness);
             m.model = payload_str(payload, &["model", "modelId"])?;
@@ -344,9 +335,14 @@ fn emit(
     finish(m, r, subtype.as_deref(), sink)
 }
 
-/// Stamp a message with its record's identity and hand it to the sink (an empty one is dropped).
+/// Stamp a message with its record's identity and hand it to the sink. An empty turn is dropped
+/// unless its kind is the fact: a model change, a compression boundary, a rewind.
 fn finish(mut m: Message, r: &Fields<'_>, subtype: Option<&str>, sink: &mut dyn MessageSink) -> Result<Flow> {
-    if m.content.is_empty() && m.kind != MessageKind::ModelChange {
+    let marker = matches!(
+        m.kind,
+        MessageKind::ModelChange | MessageKind::CompactionBoundary | MessageKind::Branch
+    );
+    if m.content.is_empty() && !marker {
         return Ok(Flow::Continue);
     }
     m.id = r.string("uuid")?;

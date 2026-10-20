@@ -575,8 +575,9 @@ pub struct Message {
     pub content: Vec<Block>,
     pub usage: Option<Usage>,
     /// Harness-specific message facts, nested under the harness name
-    /// (`extra["claude"]["attachment_type"]`). The only other top-level key allowed is
-    /// [`CARRIER_KEY`] (`"_record"`, the verbatim record under
+    /// (`extra["claude"]["attachment_type"]`); cv's own facts go under [`CV_NAMESPACE`]
+    /// ([`Message::synthesized`]). The only other top-level key allowed is
+    /// [`CARRIER_KEY`](crate::ir::CARRIER_KEY) (`"_record"`, the verbatim record under
     /// `Demand::COMPLETE`). Shared concepts are first-class (`kind`, `origin`, `usage`,
     /// `Block::ToolResult::details`). See `docs/INTERFACE-V2.md` §4.
     pub extra: serde_json::Map<String, serde_json::Value>,
@@ -731,6 +732,26 @@ impl Message {
         m.kind = kind;
         m.origin = origin;
         m
+    }
+
+    /// A turn cv inferred that the store never wrote as a record of its own (the compaction
+    /// boundary before a summary row, where the harness keeps only the summary). It has no content
+    /// and no id: nothing is invented but the turn itself, and that is declared in
+    /// `extra["cv"]["synthesized"] = {kind, origin}`. Renderers label it by kind
+    /// ([`crate::render::turn_label`]), so the text a reader sees comes from cv, not the transcript.
+    pub fn synthesized(kind: MessageKind, origin: Origin) -> Self {
+        let mut m = Message::of_kind(Role::System, kind, origin);
+        let tag = serde_json::json!({ "kind": kind, "origin": origin });
+        bag_mut(&mut m.extra, CV_NAMESPACE).insert("synthesized".into(), tag);
+        m
+    }
+
+    /// Did cv synthesize this turn ([`Message::synthesized`])?
+    pub fn is_synthesized(&self) -> bool {
+        self.extra
+            .get(CV_NAMESPACE)
+            .and_then(|bag| bag.get("synthesized"))
+            .is_some()
     }
 
     /// The harness-specific fact bag for `h` — `extra[h.as_str()]` as an object, created on demand.

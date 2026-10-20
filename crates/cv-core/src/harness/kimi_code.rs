@@ -1316,14 +1316,9 @@ impl<'a> Ctx<'a> {
                     return self.stop();
                 }
                 // Two turns, as the kinds vocabulary has it: the boundary (where the harness cut
-                // the context), then the summary that seeds the next window, when there is one.
-                let mut boundary = note(
-                    "[conversation compacted]".into(),
-                    ts,
-                    MessageKind::CompactionBoundary,
-                    Origin::Harness,
-                    ty,
-                );
+                // the context; the record carries no text of its own, so neither does the turn),
+                // then the summary that seeds the next window, when there is one.
+                let mut boundary = note(String::new(), ts, MessageKind::CompactionBoundary, Origin::Harness, ty);
                 if let Some(n) = v.get("compactedCount") {
                     boundary
                         .harness_extra_mut(Harness::KimiCode)
@@ -1758,11 +1753,13 @@ fn output_path(text: &str) -> Option<String> {
 }
 
 /// A harness-side System turn of the given kind and origin, with the wire record type that
-/// produced it in `extra["kimi-code"]["event"]`.
+/// produced it in `extra["kimi-code"]["event"]`. An empty `text` is no block at all.
 fn note(text: String, ts: Option<DateTime<Utc>>, kind: MessageKind, origin: Origin, event: &str) -> Message {
     let mut m = Message::of_kind(Role::System, kind, origin);
     m.timestamp = ts;
-    m.content.push(Block::Text { text: Text::from(text) });
+    if !text.is_empty() {
+        m.content.push(Block::Text { text: Text::from(text) });
+    }
     m.harness_extra_mut(Harness::KimiCode)
         .insert("event".into(), Value::String(event.to_string()));
     m
@@ -3070,7 +3067,7 @@ mod tests {
         // step 2
         assert_eq!(s.messages[5].text().as_deref(), Some("Fixed it."));
         // compaction: the boundary (what the compaction detector keys on) then the summary
-        assert_eq!(s.messages[7].text().as_deref(), Some("[conversation compacted]"));
+        assert!(s.messages[7].content.is_empty() && !s.messages[7].is_synthesized());
         assert_eq!(s.messages[7].extra["kimi-code"]["compactedCount"], 4);
         assert_eq!(s.messages[7].extra["kimi-code"]["event"], "context.apply_compaction");
         assert!(s.messages[8].text().unwrap().contains("Current Focus"));

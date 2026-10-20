@@ -190,7 +190,7 @@
         "assistant/reply"
       ],
       "blocks": {
-        "text": 95,
+        "text": 94,
         "thinking": 21,
         "tool_result": 25,
         "tool_use": 25

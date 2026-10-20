@@ -584,12 +584,10 @@ fn stream_db_opts_with_reads(
     // Track tool-request names so we can label later tool responses (forward-only state).
     let mut tool_names: HashMap<String, String> = HashMap::new();
     let mut history = AgentHistory::default();
-    let mut idx = 0;
     // A row whose content cell is not one JSON value, or whose role is not text, is counted (it
     // still reads as it did: empty content, an empty role).
     let mut unparsed = super::Unparsed::default();
     while let Some(row) = rows.next()? {
-        idx += 1;
         let metadata = match cells.cell(conn, "messages", metadata, row, 5)? {
             Some(cell) => cells.read(cell, |v| record::metadata(v, rich))?,
             None => None,
@@ -619,21 +617,15 @@ fn stream_db_opts_with_reads(
         if m.kind == MessageKind::Prompt {
             m.origin = prompt_origin;
         }
-        // A compaction summary: emit the boundary marker first, then the summary linked to it by
-        // `parent_id` — the `CompactionBoundary` + `CompactionSummary` pair `crate::compaction`
-        // detects for every harness.
+        // A compaction summary: Goose keeps no record of the compaction itself, so cv synthesizes
+        // the boundary before it (no content, no id); `crate::compaction` pairs the two by
+        // adjacency, as it does for every harness without a parent link.
         if m.kind == MessageKind::CompactionSummary {
-            let boundary_id = format!("compact-{}", m.id.as_deref().unwrap_or(&(idx - 1).to_string()));
-            let mut boundary = Message::of_kind(Role::System, MessageKind::CompactionBoundary, Origin::Harness);
-            boundary.id = Some(boundary_id.clone());
+            let mut boundary = Message::synthesized(MessageKind::CompactionBoundary, Origin::Harness);
             boundary.timestamp = m.timestamp;
-            boundary.content.push(Block::Text {
-                text: "[conversation compacted]".to_string().into(),
-            });
             if sink.message(boundary) == Flow::Stop {
                 break;
             }
-            m.parent_id = Some(boundary_id);
         }
         if sink.message(m) == Flow::Stop {
             break;
@@ -1016,14 +1008,19 @@ mod tests {
         m.harness_extra(Harness::Goose).expect("extra[\"goose\"]")
     }
 
-    /// Every `extra` key, on the session and on each message, is `goose`: no flat keys anywhere.
+    /// Every `extra` key, on the session and on each message, is `goose` (or cv's own namespace,
+    /// on a turn cv synthesized): no flat keys anywhere.
     fn assert_nested_extra(s: &Session) {
         for k in s.extra.keys() {
             assert_eq!(k, Harness::Goose.as_str(), "flat session extra key {k:?}");
         }
         for (i, m) in s.messages.iter().enumerate() {
             for k in m.extra.keys() {
-                assert_eq!(k, Harness::Goose.as_str(), "flat extra key {k:?} on message {i}");
+                let cv = k == crate::ir::CV_NAMESPACE && m.is_synthesized();
+                assert!(
+                    cv || k == Harness::Goose.as_str(),
+                    "flat extra key {k:?} on message {i}"
+                );
             }
         }
     }

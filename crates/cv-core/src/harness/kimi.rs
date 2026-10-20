@@ -963,17 +963,13 @@ pub fn subagent_refs(main: &SessionRef) -> Vec<SessionRef> {
     out
 }
 
-/// The marker for a segment that a `/clear` or a rewind rotated in (a compaction's rotation gets
-/// [`compaction_boundary`] from its summary instead).
+/// The synthesized marker for a segment that a `/clear` or a rewind rotated in (a compaction's
+/// rotation gets [`compaction_boundary`] from its summary instead).
 fn rotation_branch(ts: Option<DateTime<Utc>>, segment: String) -> Message {
-    let mut m = Message::of_kind(Role::System, MessageKind::Branch, Origin::Harness);
+    let mut m = Message::synthesized(MessageKind::Branch, Origin::Harness);
     m.timestamp = ts;
-    m.content.push(Block::Text {
-        text: "[context cleared or rewound]".into(),
-    });
-    let x = m.harness_extra_mut(Harness::Kimi);
-    x.insert("synthetic".into(), Value::Bool(true));
-    x.insert("segment".into(), Value::String(segment));
+    m.harness_extra_mut(Harness::Kimi)
+        .insert("segment".into(), Value::String(segment));
     m
 }
 
@@ -1024,13 +1020,8 @@ fn note_call_names(message: &Message, names: &mut BTreeMap<String, String>) {
 /// summary is the only trace — and the compaction detector pairs a summary with the boundary
 /// before it.
 fn compaction_boundary(ts: Option<DateTime<Utc>>) -> Message {
-    let mut m = Message::of_kind(Role::System, MessageKind::CompactionBoundary, Origin::Harness);
+    let mut m = Message::synthesized(MessageKind::CompactionBoundary, Origin::Harness);
     m.timestamp = ts;
-    m.content.push(Block::Text {
-        text: "[conversation compacted]".into(),
-    });
-    m.harness_extra_mut(Harness::Kimi)
-        .insert("synthetic".into(), Value::Bool(true));
     m
 }
 
@@ -2506,7 +2497,7 @@ mod tests {
             ],
             "{kinds:?}"
         );
-        assert_eq!(s.messages[1].extra["kimi"]["synthetic"], true);
+        assert!(s.messages[1].is_synthesized() && s.messages[1].content.is_empty());
         assert_eq!(s.messages[2].extra["kimi"]["token_count"], 900);
         assert!(s.messages[2].usage.is_none(), "token_count is usage only on a Reply");
         let reply = &s.messages[4];
@@ -2517,10 +2508,12 @@ mod tests {
         assert_eq!(comps.len(), 1);
         assert_eq!(comps[0].summary_msg_idx, Some(2));
         assert!(comps[0].summary.as_deref().unwrap_or("").contains("summary body"));
-        // every fact is in the harness bag; nothing flat
+        // every fact is in the harness bag (cv's own on the turn it synthesized); nothing flat
         for m in &s.messages {
             assert!(
-                m.extra.keys().all(|k| k == "kimi" || k == crate::ir::CARRIER_KEY),
+                m.extra.keys().all(|k| k == "kimi"
+                    || k == crate::ir::CARRIER_KEY
+                    || (k == crate::ir::CV_NAMESPACE && m.is_synthesized())),
                 "{:?}",
                 m.extra
             );

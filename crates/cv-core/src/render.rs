@@ -187,14 +187,22 @@ pub fn role_label(r: Role) -> &'static str {
 /// the role does (`system · compaction_boundary`, `user · compaction_summary`, `system · error`),
 /// and for injected context by the harness's own attachment kind when it recorded one
 /// (`system · injected_context/hook_success`). A plain prompt or reply is just `user` / `assistant`.
+/// A turn cv inferred rather than read ([`Message::synthesized`]) says so:
+/// `system · compaction_boundary · synthesized`.
 pub fn turn_label(m: &Message) -> String {
     let role = role_label(m.role);
-    if m.kind == MessageKind::for_role(m.role) {
-        return role.to_string();
-    }
-    match (m.kind, crate::harness::attachment_kind(m)) {
-        (MessageKind::InjectedContext, Some(k)) => format!("{role} · {}/{k}", m.kind.as_str()),
-        _ => format!("{role} · {}", m.kind.as_str()),
+    let label = if m.kind == MessageKind::for_role(m.role) {
+        role.to_string()
+    } else {
+        match (m.kind, crate::harness::attachment_kind(m)) {
+            (MessageKind::InjectedContext, Some(k)) => format!("{role} · {}/{k}", m.kind.as_str()),
+            _ => format!("{role} · {}", m.kind.as_str()),
+        }
+    };
+    if m.is_synthesized() {
+        format!("{label} · synthesized")
+    } else {
+        label
     }
 }
 

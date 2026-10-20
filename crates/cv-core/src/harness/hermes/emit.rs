@@ -229,8 +229,8 @@ fn write_database(session: &Session, opts: &EmitOptions, new_id: &str, conn: &mu
         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
                 ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)",
     )?;
-    // Hermes synthesizes a boundary when reading a summary row. Persisting the linked IR marker
-    // as another row would duplicate it and change the native replay.
+    // cv synthesizes a boundary when reading a summary row. Persisting it (or a source's own
+    // marker linked to its summary) as another row would duplicate it and change the native replay.
     let summary_parents: std::collections::HashSet<&str> = session
         .messages
         .iter()
@@ -240,7 +240,7 @@ fn write_database(session: &Session, opts: &EmitOptions, new_id: &str, conn: &mu
     let mut base_ts = started;
     for msg in &session.messages {
         if msg.kind == MessageKind::CompactionBoundary
-            && msg.id.as_deref().is_some_and(|id| summary_parents.contains(id))
+            && (msg.is_synthesized() || msg.id.as_deref().is_some_and(|id| summary_parents.contains(id)))
         {
             continue;
         }
