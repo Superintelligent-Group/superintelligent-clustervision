@@ -27,6 +27,7 @@ pub(crate) fn records<S: At + ?Sized>(file: &S, range: Range) -> Result<Records<
         small: Vec::new(),
         small_limit: 0,
         small_complete: false,
+        digest: None,
     })
 }
 
@@ -287,8 +288,19 @@ pub(crate) struct Records<'a, S: ?Sized = fs::File> {
     small: Vec<u8>,
     small_limit: usize,
     small_complete: bool,
+    digest: Option<crate::digest::Sha256>,
 }
 impl<S: ?Sized> Records<'_, S> {
+    /// Hash every byte the framer reads, in order, so a consumer that walks the whole range has
+    /// its digest from this one read ([`Self::finish_digest`]).
+    pub(crate) fn hashing(mut self) -> Self {
+        self.digest = Some(crate::digest::Sha256::new());
+        self
+    }
+    /// The SHA-256 of every byte framed so far (all of them once iteration returned `None`).
+    pub(crate) fn finish_digest(self) -> Option<String> {
+        self.digest.map(crate::digest::Sha256::finish_hex)
+    }
     /// Optionally retain small physical records during framing, avoiding a second positioned
     /// read. Above this fixed cap the scratch is cleared; giant records remain only ranges.
     /// The scratch grows with the records it holds, never past the cap.
@@ -324,6 +336,9 @@ impl<S: At + ?Sized> Iterator for Records<'_, S> {
             }
             let newline = memchr::memchr(b'\n', bytes);
             let n = newline.map_or(bytes.len(), |i| i + 1);
+            if let Some(digest) = &mut self.digest {
+                digest.update(&bytes[..n]);
+            }
             if self.small_complete {
                 let payload = n - usize::from(newline.is_some());
                 if payload <= self.small_limit - self.small.len() {

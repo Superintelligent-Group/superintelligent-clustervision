@@ -693,7 +693,8 @@ fn rewind_session_after_scan(
     // Only a portable replay walks every record back through the reader; a native copy is bytes.
     let reemits = thinking == crate::emit::ThinkingMode::Portable;
 
-    // Pass 2 — one sequential read of the prefix: hash every byte, count lines, copy the window.
+    // Pass 2 — one sequential read of the prefix frames, hashes and counts every line; the
+    // window's records are then read by range to be rewritten.
     let new_id = opts.new_id.clone().unwrap_or_else(new_uuid);
     let out_dir = opts.out_dir.clone().unwrap_or_else(|| project_dir(&r.path));
     let new_path = out_dir.join(format!("{new_id}.jsonl"));
@@ -716,19 +717,6 @@ fn rewind_session_after_scan(
         )?))
     };
 
-    let mut hasher = crate::digest::Sha256::new();
-    let mut prefix = crate::harness::store::jsonl::ranges::reader(
-        &file,
-        crate::harness::store::jsonl::ranges::Range { offset: 0, len: size },
-    )?;
-    let mut scratch = [0u8; 64 * 1024];
-    loop {
-        let n = prefix.read(&mut scratch)?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&scratch[..n]);
-    }
     let mut line_no = 0usize;
     let (mut start_line, mut cut_line, mut end_line) = (0usize, 0usize, 0usize);
     let (mut lines_written, mut bytes_written) = (0usize, 0u64);
@@ -747,7 +735,8 @@ fn rewind_session_after_scan(
     }
     let mut phase = Phase::Before;
     use crate::harness::store::jsonl::ranges::{self, Range};
-    for row in ranges::records(&file, Range { offset: 0, len: size })? {
+    let mut rows = ranges::records(&file, Range { offset: 0, len: size })?.hashing();
+    for row in rows.by_ref() {
         let (range, newline) = row?;
         let at = range.offset;
         let n = range.len + u64::from(newline);
@@ -876,7 +865,7 @@ fn rewind_session_after_scan(
         );
     }
     source_guard.verify(&file)?;
-    let source_sha256 = hasher.finish_hex();
+    let source_sha256 = rows.finish_digest().expect("the framer was hashing");
 
     // The launch dir: among the cwds the window recorded (plus the owning session's first one — a
     // sub-agent's records may all sit in a worktree), the one Claude would file this session under.
