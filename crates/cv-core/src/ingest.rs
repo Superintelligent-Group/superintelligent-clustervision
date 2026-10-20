@@ -156,21 +156,8 @@ fn sniff(name: &str, text: &str) -> Sniff {
                 r.get("parentUuid").is_some() || r.get("sessionId").is_some(),
             )
         }) {
-            if matches!(
-                ty.as_str(),
-                "summary"
-                    | "file-history-snapshot"
-                    | "ai-title"
-                    | "mode"
-                    | "permission-mode"
-                    | "last-prompt"
-                    | "attachment"
-                    | "progress"
-                    | "started"
-                    | "result"
-                    | "queue-operation"
-                    | "x-quota"
-            ) {
+            // A record the Claude codec knows is no turn says nothing either way.
+            if crate::harness::claude::record::META_TYPES.contains(&ty.as_str()) {
                 continue;
             }
             if has_thread && matches!(ty.as_str(), "user" | "assistant") {
@@ -280,6 +267,9 @@ mod tests {
             .map(|i| format!(r#"{{"type":"summary","summary":"topic {i}","leafUuid":"l{i}"}}"#))
             .collect();
         lines.push(r#"{"type":"file-history-snapshot","messageId":"m0","snapshot":{"trackedFileBackups":{}}}"#.into());
+        // Every type the codec knows is no turn is skipped, not just the ones sniffing once named.
+        lines.extend((0..9).map(|i| format!(r#"{{"type":"custom-title","customTitle":"t{i}"}}"#)));
+        lines.push(r#"{"type":"cost-state","totalCostUsd":0}"#.into());
         lines.push(CLAUDE_SAMPLE.to_string());
         let text = lines.join("\n");
 

@@ -160,6 +160,47 @@ impl<'a> Head<'a> {
     }
 }
 
+/// Every record type the codec knows is no conversational turn: the titles (`summary`,
+/// `ai-title`, `custom-title`), the session facts (`continued-in`, `fork-context-ref`,
+/// `agent-name`, `tag`, `relocated`, `pr-link`), model-visible `attachment`s, and pure
+/// bookkeeping / live-process records with no conversational payload: the input queue,
+/// UI/permission state, the leaf pointer, sub-agent hook/streaming telemetry, running cost, the
+/// ATIS and isolation latches, artifact watches, request-side content replacements, and the
+/// request ledger (2.1.300+: `api-request` per API call, with its `api-request-shape` system
+/// prompt + tool schemas and `api-request-blob` messages, content-addressed; a blob's `message`
+/// is a request body, not a turn). Only `user`, `assistant` and `system` records are turns.
+pub(crate) const META_TYPES: &[&str] = &[
+    "summary",
+    "ai-title",
+    "custom-title",
+    "continued-in",
+    "fork-context-ref",
+    "agent-name",
+    "tag",
+    "relocated",
+    "pr-link",
+    "attachment",
+    "mode",
+    "permission-mode",
+    "last-prompt",
+    "progress",
+    "started",
+    "result",
+    "queue-operation",
+    "x-quota",
+    "file-history-snapshot",
+    "cost-state",
+    "atis-latch",
+    "isolation-latch",
+    "frame-link",
+    "content-replacement",
+    "artifact-comment-monitor",
+    "artifact-autoreact-ledger",
+    "api-request",
+    "api-request-shape",
+    "api-request-blob",
+];
+
 /// The keys [`Demand::Facts`] selects: what prune and rewind decide on, never a body.
 const FACT_KEYS: &[&str] = &[
     "type",
@@ -589,32 +630,9 @@ pub(super) fn ingest(
                 None => r.carry_or_skip(sink),
             };
         }
-        // Pure bookkeeping / live-process records with no conversational payload: the input queue,
-        // UI/permission state, the leaf pointer, sub-agent hook/streaming telemetry, running cost,
-        // the ATIS and isolation latches, artifact watches, request-side content replacements, and
-        // the request ledger (2.1.300+: `api-request` per API call, with its `api-request-shape`
-        // system prompt + tool schemas and `api-request-blob` messages, content-addressed; a blob's
-        // `message` is a request body, not a turn). The lean passes drop them; `complete` carries
-        // them verbatim as round-trippable carrier messages.
-        "mode"
-        | "permission-mode"
-        | "last-prompt"
-        | "progress"
-        | "started"
-        | "result"
-        | "queue-operation"
-        | "x-quota"
-        | "file-history-snapshot"
-        | "cost-state"
-        | "atis-latch"
-        | "isolation-latch"
-        | "frame-link"
-        | "content-replacement"
-        | "artifact-comment-monitor"
-        | "artifact-autoreact-ledger"
-        | "api-request"
-        | "api-request-shape"
-        | "api-request-blob" => return r.carry_or_skip(sink),
+        // The rest of [`META_TYPES`]: bookkeeping. The lean passes drop it; `complete` carries it
+        // verbatim as round-trippable carrier messages.
+        t if META_TYPES.contains(&t) => return r.carry_or_skip(sink),
         "user" | "assistant" | "system" | "" => {}
         // Any other record is a bookkeeping record we haven't met yet (Claude Code adds a few per
         // release), whether or not it has a `message` field: only the three types above are turns.
