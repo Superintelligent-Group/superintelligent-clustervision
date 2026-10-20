@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Add global `--frozen` (`CV_FROZEN=1`): read without updating cv stores; stream stale events and reject commands that write stores or sessions.
+- Usage cache eviction failures warn once and preserve committed projections; later publications retry eviction.
 
 **Listing and counts.** A first `cv ls` lists without counting where counting is not free.
 - `message_count` is `null` (a dash in the table) until a full read or `cv index` certifies it; `0` means a session with no turns.

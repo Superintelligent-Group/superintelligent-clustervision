@@ -154,9 +154,9 @@ impl Cache {
         }
     }
     pub(super) fn finish(&self) {
-        if let Ok(writer) = self.writer.lock() {
-            if !writer.is_autocommit() && writer.execute_batch("COMMIT").is_err() {
-                let _ = writer.execute_batch("ROLLBACK");
+        if let Ok(mut writer) = self.writer.lock() {
+            if !writer.is_autocommit() {
+                commit_and_evict(&mut writer);
             }
             if let Ok(mut pending) = self.pending.lock() {
                 *pending = Pending {
@@ -269,7 +269,7 @@ impl Iterator for CachedRows {
                 // A publisher may own the surrounding transaction. Roll back only this
                 // reader's eviction if either deletion fails, never the pending publication.
                 if let Ok(savepoint) = conn.savepoint() {
-                    if evict(&savepoint, self.reader.harness, &self.reader.id, &self.reader.path).is_some() {
+                    if evict(&savepoint, self.reader.harness, &self.reader.id, &self.reader.path).is_ok() {
                         let _ = savepoint.commit();
                     }
                 }
@@ -328,18 +328,47 @@ impl Read for ChunkReader {
         Ok(len)
     }
 }
-fn evict(conn: &Connection, harness: &str, id: &str, path: &str) -> Option<()> {
+fn evict(conn: &Connection, harness: &str, id: &str, path: &str) -> rusqlite::Result<()> {
     conn.execute(
         "DELETE FROM usage_cache WHERE harness=?1 AND id=?2 AND path=?3",
         params![harness, id, path],
-    )
-    .ok()?;
+    )?;
     conn.execute(
         "DELETE FROM source_dependencies WHERE consumer=?1 AND harness=?2 AND id=?3 AND path=?4",
         params![CONSUMER, harness, id, path],
-    )
-    .ok()?;
-    Some(())
+    )?;
+    Ok(())
+}
+
+/// Publication is durable before budget maintenance starts. A failed eviction rolls back
+/// only maintenance; a later batch retries it without discarding any published source.
+fn commit_and_evict(conn: &mut Connection) {
+    if conn.execute_batch("COMMIT").is_err() {
+        let _ = conn.execute_batch("ROLLBACK");
+        return;
+    }
+    let result = (|| -> rusqlite::Result<()> {
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        loop {
+            let (bytes, sources): (i64, i64) =
+                tx.query_row("SELECT bytes,sources FROM usage_budget WHERE singleton=1", [], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })?;
+            if bytes <= TOTAL_LIMIT && sources <= SOURCE_COUNT_LIMIT {
+                break;
+            }
+            let (h, id, path): (String, String, String) = tx.query_row(
+                "SELECT harness,id,path FROM usage_cache ORDER BY updated LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?;
+            evict(&tx, &h, &id, &path)?;
+        }
+        tx.commit()
+    })();
+    if let Err(error) = result {
+        crate::env::warn_once("usage cache eviction", error);
+    }
 }
 
 pub(super) struct Publisher {
@@ -399,7 +428,7 @@ impl Publisher {
         if self.failed || self.flush_chunk().is_err() {
             return;
         }
-        let Ok(conn) = self.conn.lock() else { return };
+        let Ok(mut conn) = self.conn.lock() else { return };
         let result = (|| -> Option<()> {
             let bytes = self.bytes + self.fallback_bytes as u64;
             conn.execute(
@@ -425,33 +454,13 @@ impl Publisher {
             if !crate::source::fresh_in(&conn, CONSUMER, &self.r, &self.source, &output) {
                 return None;
             }
-            loop {
-                let (bytes, sources): (i64, i64) = conn
-                    .query_row("SELECT bytes,sources FROM usage_budget WHERE singleton=1", [], |r| {
-                        Ok((r.get(0)?, r.get(1)?))
-                    })
-                    .ok()?;
-                if bytes <= TOTAL_LIMIT && sources <= SOURCE_COUNT_LIMIT {
-                    break;
-                }
-                let (h, id, path): (String, String, String) = conn
-                    .query_row(
-                        "SELECT harness,id,path FROM usage_cache ORDER BY updated LIMIT 1",
-                        [],
-                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                    )
-                    .ok()?;
-                evict(&conn, &h, &id, &path)?;
-            }
             conn.execute_batch("RELEASE usage_source").ok()?;
             self.committed = true;
             let mut pending = self.pending.lock().ok()?;
             pending.sources += 1;
             pending.bytes += self.bytes + self.fallback_bytes as u64;
             if pending.sources >= 64 || pending.bytes >= SOURCE_LIMIT {
-                if conn.execute_batch("COMMIT").is_err() {
-                    let _ = conn.execute_batch("ROLLBACK");
-                }
+                commit_and_evict(&mut conn);
                 *pending = Pending {
                     checkpoint: true,
                     ..Pending::default()
@@ -633,6 +642,58 @@ mod tests {
             assert!(rows.next().is_none());
             // The two eviction deletes are atomic even inside the writer's transaction.
             assert_eq!(load(&r, &current).is_some(), fail_eviction);
+        }
+    }
+    #[test]
+    fn failed_budget_eviction_keeps_committed_publications_and_retries() {
+        for threshold_commit in [false, true] {
+            let (world, r) = fixture("usage-cache-eviction-failure");
+            let cache = Cache::new().unwrap();
+            let mut writer = cache.publisher(r.clone(), source(&r, None), "old").unwrap();
+            writer.hit(&hit(0));
+            writer.finish();
+            cache.finish();
+            let conn = open().unwrap();
+            // Force the budget boundary without allocating 256 MiB. Fail the second
+            // deletion so the test also checks that maintenance rolls back as a unit.
+            conn.execute("UPDATE usage_budget SET bytes=?1", [TOTAL_LIMIT]).unwrap();
+            conn.execute_batch(
+                "CREATE TRIGGER fail_eviction BEFORE DELETE ON source_dependencies
+                 BEGIN SELECT RAISE(ABORT, 'injected eviction failure'); END;",
+            )
+            .unwrap();
+            for i in 1..=2 {
+                let path = world.base.join(format!("new-{i}.jsonl"));
+                std::fs::write(&path, "new source").unwrap();
+                let new = SessionRef::new(format!("new-{i}"), Harness::Claude, path);
+                if threshold_commit {
+                    cache.pending.lock().unwrap().sources = 63;
+                }
+                let mut writer = cache.publisher(new.clone(), source(&new, None), "new").unwrap();
+                writer.hit(&hit(i));
+                writer.finish();
+                if !threshold_commit {
+                    cache.finish();
+                }
+                assert!(cache.writer.lock().unwrap().is_autocommit());
+                // Fresh connections prove publication actually committed, including its
+                // dependency stamps and complete projection, despite the eviction error.
+                let batch = load(&new, &source(&new, None)).unwrap();
+                assert_eq!(batch.fallback_model, "new");
+                let mut rows = batch.hits.rows().unwrap();
+                assert_eq!(rows.next().unwrap().unwrap().key, hit(i).key);
+                assert!(rows.next().is_none());
+                assert!(load(&r, &source(&r, None)).is_some());
+                assert!(!crate::env::warn_once("usage cache eviction", "already reported"));
+            }
+            conn.execute_batch("DROP TRIGGER fail_eviction").unwrap();
+            let writer = cache.publisher(r.clone(), source(&r, None), "recovered").unwrap();
+            writer.finish();
+            cache.finish();
+            let bytes: i64 = conn
+                .query_row("SELECT bytes FROM usage_budget", [], |r| r.get(0))
+                .unwrap();
+            assert!(bytes <= TOTAL_LIMIT);
         }
     }
     #[test]
