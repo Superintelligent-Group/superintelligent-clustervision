@@ -3,12 +3,12 @@
 //! Pure-Rust search over clustervision sessions, in two flavours:
 //!
 //! 1. **Full-text** via [`tantivy`] (a Lucene-like inverted index) — `index_all` builds a
-//!    persistent index, `text_search` queries it and returns highlighted snippets. This is a
+//!    persistent index, [`Searcher`] queries it and returns highlighted snippets. This is a
 //!    strict upgrade over a SQLite FTS5 index: real tokenization, BM25 scoring, fielded queries
 //!    (`harness:claude foo`), phrase/boolean operators, and fast incremental commits.
 //!
 //! 2. **Semantic** via [`model2vec-rs`] (distilled *static* embeddings — tiny, fast, no ONNX
-//!    runtime). `embed_all` embeds every session and persists the vectors; `semantic_search`
+//!    runtime). `embed_sessions` embeds sessions and persists the vectors; [`Searcher`]
 //!    embeds the query and does a brute-force cosine ranking. For ~1k sessions an in-memory
 //!    `Vec<(id, Vec<f32>)>` scan is plenty — no ANN crate needed. Gated behind the `semantic`
 //!    cargo feature (default-on, since model2vec is lightweight); a minimal FTS-only build is
@@ -260,21 +260,10 @@ pub fn index_sessions(
     )
 }
 
-/// Run a full-text query against the index at its default location.
-pub fn text_search(dir: impl Into<Option<PathBuf>>, query: &str, limit: usize) -> Result<Vec<Hit>> {
-    let dir = dir.into().unwrap_or_else(default_tantivy_dir);
-    fts::text_search(&dir, query, limit)
-}
-
 /// Distinguish an invalid full-text expression from an unavailable index. Callers may
 /// degrade storage/setup failures to live search, but a rejected query is a caller error.
 pub fn is_invalid_text_query(error: &anyhow::Error) -> bool {
     error.is::<tantivy::query::QueryParserError>()
-}
-
-/// Match every indexed session ID, without ranking or reading source transcripts.
-pub fn text_search_ids(dir: impl Into<Option<PathBuf>>, query: &str) -> Result<std::collections::HashSet<String>> {
-    fts::text_search_ids(&dir.into().unwrap_or_else(default_tantivy_dir), query)
 }
 
 /// Match several full-text needles using one index-reader snapshot. The outer result reports
@@ -333,33 +322,6 @@ impl Scope {
     }
 }
 
-/// Rank the requested number of matching sessions, applying filters before the ranking cutoff.
-pub fn text_search_indexed_filtered(
-    dir: impl Into<Option<PathBuf>>,
-    query: &str,
-    limit: usize,
-    filter: SearchFilter<'_>,
-) -> Result<Vec<Hit>> {
-    fts::text_search_indexed_filtered(&dir.into().unwrap_or_else(default_tantivy_dir), query, limit, filter)
-}
-
-/// Generate live snippets for only the selected displayed hits.
-pub fn enrich_text_snippets(
-    dir: impl Into<Option<PathBuf>>,
-    query: &str,
-    scope: Scope,
-    hits: &mut [Hit],
-) -> Result<()> {
-    fts::enrich_text_snippets(&dir.into().unwrap_or_else(default_tantivy_dir), query, scope, hits)
-}
-
-/// Discover, parse, and embed every session, persisting vectors to the default store.
-#[cfg(feature = "semantic")]
-pub fn embed_all(path: impl Into<Option<PathBuf>>) -> Result<usize> {
-    let path = path.into().unwrap_or_else(default_embeddings_path);
-    semantic::embed_all(&path)
-}
-
 /// Refresh semantic vectors using the same inventory as the full-text pass.
 #[cfg(feature = "semantic")]
 pub fn embed_sessions(path: impl Into<Option<PathBuf>>, refs: &[cv_core::SessionRef]) -> Result<usize> {
@@ -376,17 +338,6 @@ pub use semantic::SemanticSearch;
 pub fn semantic_search(path: impl Into<Option<PathBuf>>, query: &str, k: usize) -> Result<Vec<Hit>> {
     let path = path.into().unwrap_or_else(default_embeddings_path);
     semantic::semantic_search(&path, query, k)
-}
-
-/// Apply session metadata filters before the semantic ranking cutoff.
-#[cfg(feature = "semantic")]
-pub fn semantic_search_filtered(
-    path: impl Into<Option<PathBuf>>,
-    query: &str,
-    k: usize,
-    filter: SearchFilter<'_>,
-) -> Result<Vec<Hit>> {
-    semantic::semantic_search_filtered(&path.into().unwrap_or_else(default_embeddings_path), query, k, filter)
 }
 
 /// Read only the semantic projection demanded for one discovered session.
