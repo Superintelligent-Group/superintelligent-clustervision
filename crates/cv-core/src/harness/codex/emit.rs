@@ -410,7 +410,8 @@ mod staged_tests {
             content: "delivered".into(),
             is_error: false,
             tool_name: Some("send_message".into()),
-            status: Some("completed".into()),
+            // A Codex output record has no status of its own, so none survives the round trip.
+            status: None,
             details: None,
         });
         session.messages = vec![call, result];

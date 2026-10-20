@@ -2566,9 +2566,9 @@ mod tests {
         assert_eq!(
             results,
             vec![
-                ("command not found: frobnicate", true, Some("error")),
-                ("is only a marker at the very start", true, Some("error")),
-                ("[error] inside an array is plain text", false, Some("completed")),
+                ("command not found: frobnicate", true, None),
+                ("is only a marker at the very start", true, None),
+                ("[error] inside an array is plain text", false, None),
             ]
         );
     }

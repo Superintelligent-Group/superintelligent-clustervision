@@ -18,6 +18,7 @@
 - OpenSession validates each turn before streaming delivery, keeping discarded history bounded in memory while rejecting late invalid turns before callbacks.
 - Goose, Hermes, Kimi, Kimi Code and Qwen boundaries carry no invented text; `cv show` labels them by kind, and cv-inferred turns add `· synthesized`.
 - A Cursor or LM Studio (Harmony) tool call whose wire names no id gets a declared derived one, `cv:<format>:<position>`, not `""`.
+- Codex tool results no longer carry an invented `status` (`completed`/`error`); the rollout records none, and `is_error` is unchanged.
 - **Breaking (library):** `ParseOptions` and `ExtraProjection` become `Demand { tier, spans, offsets }`; the five `Watcher` poll methods become `poll`/`try_poll(Poll { .. })`.
 - Gemini, Qwen, Goose, Grok, LM Studio, OpenClaw and OpenCode report the model on every turn the harness wrote it; windowed reads no longer lose it.
 - Every JSONL adapter reads its transcript through one captured source (`store::jsonl::Read`); each adapter keeps its own resume protocol.

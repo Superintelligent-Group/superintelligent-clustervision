@@ -1177,7 +1177,9 @@ impl Reader<'_> {
                     content,
                     is_error,
                     tool_name,
-                    status: Some(if is_error { "error" } else { "completed" }.into()),
+                    // The record's own status when it has one (none through 0.163: `call_id`,
+                    // `output`, `id`); `is_error` already carries what cv can tell.
+                    status: str_at(Some(p), "status")?,
                     details: None,
                 });
                 // Structured outputs can return image content items alongside text.
