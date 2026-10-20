@@ -249,6 +249,22 @@ pub fn cache_dir() -> Option<PathBuf> {
     Env::current().cache_dir()
 }
 
+/// The third channel of the skip policy (`harness::Skipped` names all three): an accelerator
+/// (the catalog, a cache, an index) that cannot open DEGRADES ONCE. The first failure of `what`
+/// in this process prints one stderr line and cv carries on without it; later failures of the
+/// same `what` print nothing. Nothing is memoized but the line: the caller retries the open next
+/// time, so an accelerator that recovers serves again. Returns whether this call printed.
+pub fn warn_once(what: &'static str, why: impl std::fmt::Display) -> bool {
+    static WARNED: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+    let mut warned = WARNED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if warned.contains(&what) {
+        return false;
+    }
+    warned.push(what);
+    eprintln!("cv: {what} unavailable, continuing without it: {why}");
+    true
+}
+
 /// `f` wrapped to run in the caller's entered environment, for a thread the library spawns.
 pub fn carry<R>(f: impl FnOnce() -> R) -> impl FnOnce() -> R {
     let env = Env::scoped();
@@ -290,5 +306,12 @@ mod tests {
         assert_eq!(Env::current().cv_home(), Some(PathBuf::from("/cv")));
         drop(outer);
         assert!(Env::scoped().is_none());
+    }
+
+    #[test]
+    fn warn_once_prints_one_line_per_accelerator() {
+        assert!(warn_once("env test accelerator", "first"));
+        assert!(!warn_once("env test accelerator", "second"));
+        assert!(warn_once("env test other accelerator", "first"));
     }
 }

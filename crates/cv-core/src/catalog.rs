@@ -19,7 +19,8 @@
 //! store (it owns the reads/writes; the DDL lives here so every opener sees one schema), and
 //! `catalog_meta` holds the `last_full_sync` stamp behind the bounded-staleness backstop.
 //!
-//! Best-effort throughout: any sqlite error is swallowed and the caller falls back to scanning, so
+//! Best-effort throughout: a catalog that cannot open says so once per process
+//! ([`crate::env::warn_once`]) and the caller falls back to scanning, so
 //! correctness never depends on the catalog (a stale row is filtered by `path.exists()` at lookup).
 //! Behind the `sqlite` feature (default-on); no-op fallbacks keep the scan path working without it.
 
@@ -116,7 +117,15 @@ mod imp {
     pub(crate) fn open_at(path: &Path) -> Option<Connection> {
         #[cfg(test)]
         OPEN_COUNT.with(|n| n.set(n.get() + 1));
-        open_writable(path).or_else(|| open_read_only(path))
+        let conn = open_writable(path).or_else(|| open_read_only(path));
+        if conn.is_none() {
+            // Every consumer degrades to scanning; the process says so once.
+            crate::env::warn_once(
+                "the catalog",
+                format_args!("{} cannot be opened or created", path.display()),
+            );
+        }
+        conn
     }
 
     /// A catalog this process may not write (a sandbox denying writes to the home, a read-only
