@@ -2157,16 +2157,10 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// A fresh directory per call: a clock stamp collides between parallel tests (macOS clocks
+    /// tick in microseconds), and two tests then share one `sessions.db`.
     fn tempdir() -> PathBuf {
-        let mut p = std::env::temp_dir();
-        p.push(format!("cv-goose-test-{}", std::process::id()));
-        p.push(format!(
-            "{:?}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let p = std::env::temp_dir().join(format!("cv-goose-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&p).unwrap();
         p
     }

@@ -79,11 +79,15 @@ pub fn cv_bin() -> PathBuf {
 
 /// A fresh, unique directory under the system temp dir.
 pub fn temp_dir(tag: &str) -> PathBuf {
+    // The clock alone is not unique: macOS ticks in microseconds, so parallel tests with one tag
+    // shared a directory. The per-process sequence number is.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let dir = std::env::temp_dir().join(format!("cv-test-{tag}-{}-{nanos}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("cv-test-{tag}-{}-{nanos}-{seq}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
     dir
 }
