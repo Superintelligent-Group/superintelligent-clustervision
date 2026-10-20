@@ -368,6 +368,9 @@ struct CodexCtx {
     inherit_before: Option<u64>,
     /// This thread's own `agent_path` (from `session_meta`), to attribute `agent_message` authorship.
     agent_path: Option<String>,
+    /// The first `session_meta`'s `cli_version`, under the metadata demand (discovery's writer
+    /// version sensor).
+    writer_version: Option<String>,
     /// `inter_agent_communication_metadata.trigger_turn` seen, waiting for the `agent_message`
     /// record it immediately precedes.
     pending_trigger_turn: Option<bool>,
@@ -392,18 +395,33 @@ impl CodexCtx {
     }
 }
 
-/// Canonical header for a live hook's rollout, through the same codec as every other read.
-/// Hooks never scan history; an oversized or incomplete first record has no usable identity.
-pub fn hook_header(path: &Path) -> Option<Session> {
-    use std::io::{BufRead, Read};
-    let file = std::fs::File::open(path).ok()?;
-    let mut head = String::new();
-    std::io::BufReader::new(file)
-        .take(1024 * 1024)
-        .read_line(&mut head)
-        .ok()?;
-    let session = parse_str("", &head, true, Some(path.to_path_buf()));
-    (!session.id.is_empty()).then_some(session)
+/// Canonical header for a live hook's rollout: its first record, through the same captured
+/// reader and codec as every other read. Hooks never scan history; a blank, rejected, oversized
+/// (over 1 MiB) or incomplete first record has no usable identity (`None`). Read and codec
+/// errors are the caller's.
+pub fn hook_header(path: &Path) -> Result<Option<Session>> {
+    let read = jsonl::Read::open(path)?;
+    let mut s = Session {
+        source_path: Some(path.to_path_buf()),
+        ..Session::new(String::new(), Harness::Codex)
+    };
+    let mut ctx = CodexCtx::default();
+    let mut out = Vec::new();
+    let mut reader = Reader {
+        session: &mut s,
+        ctx: &mut ctx,
+        out: &mut out,
+        has_events: false,
+        demand: Demand::of(&ParseOptions::full()),
+        source: None,
+    };
+    read.prefix(1024 * 1024, |line| {
+        if let Some(view) = line.view {
+            reader.record(view)?;
+        }
+        Ok(Flow::Stop)
+    })?;
+    Ok((!s.id.is_empty()).then_some(s))
 }
 
 /// Parse a Codex transcript from its text contents into a [`Session`].
@@ -889,107 +907,11 @@ const USAGE_FROM_RECORD: &str = "token_usage_record";
 /// round-trips `is_error` through cv. Recognized on parse and stripped from the content.
 const ERROR_PREFIX: &str = "[error] ";
 
-/// Accumulates the cheap metadata `discover` needs, one record at a time. Factored out of [`scan`]
-/// so it can be fed either the whole file (small sessions) or just a head+tail sample (huge ones).
-#[derive(Default)]
-#[cfg_attr(test, derive(Debug, PartialEq))]
-struct CodexScan {
-    writer_version: Option<String>,
-    id: String,
-    cwd: Option<PathBuf>,
-    title: Option<String>,
-    created_at: Option<DateTime<Utc>>,
-    updated_at: Option<DateTime<Utc>>,
-    /// `subagent_history_start_ordinal` of the first `session_meta`: records below it are the
-    /// parent's embedded history, not this thread's (they'd title every subagent with the parent's
-    /// first prompt and count its turns).
-    inherit_before: Option<u64>,
-    /// This thread's `agent_path`, to tell a task handed TO it (title-worthy) from its own sends.
-    agent_path: Option<String>,
-    meta_seen: bool,
-}
-
-impl CodexScan {
-    /// A title candidate, already trimmed and truncated ([`title_of`]).
-    fn consider_title(&mut self, title: String) {
-        // Skip Codex's injected preambles — they aren't the user's first words (see
-        // [`is_injected_text`]).
-        if self.title.is_none() && !title.is_empty() && !is_injected_text(&title) {
-            self.title = Some(title);
-        }
-    }
-
-    /// Ingest one `.jsonl` record.
-    fn feed(&mut self, v: JsonView<'_>) -> Result<()> {
-        let string = |v: Option<JsonView<'_>>| -> Result<Option<String>> {
-            match v {
-                Some(v) if v.is_string()? => Ok(v.resolve()?.as_str().map(str::to_owned)),
-                _ => Ok(None),
-            }
-        };
-        let head = record::Head::of(v)?;
-        let ty = &head.ty;
-        if let Some(ts) = head.timestamp {
-            self.created_at.get_or_insert(ts);
-            self.updated_at = Some(ts);
-        }
-        if head.inherited(self.inherit_before) && ty.as_deref() != Some("session_meta") {
-            return Ok(());
-        }
-        let p = head.payload;
-        let payload = p.map(record::Payload::of).transpose()?;
-        let field = |key| -> Result<Option<JsonView<'_>>> { Ok(p.map(|p| p.get(key)).transpose()?.flatten()) };
-        match ty.as_deref() {
-            None => {
-                if self.id.is_empty() {
-                    if let Some(i) = string(v.get("id")?)? {
-                        self.id = i;
-                    }
-                }
-            }
-            Some("session_meta") => {
-                if self.id.is_empty() {
-                    if let Some(i) = string(field("id")?)? {
-                        self.id = i;
-                    }
-                }
-                if self.cwd.is_none() {
-                    self.cwd = string(field("cwd")?)?.map(PathBuf::from);
-                }
-                if !self.meta_seen {
-                    self.writer_version = string(field("cli_version")?)?;
-                    self.meta_seen = true;
-                    self.inherit_before = field("subagent_history_start_ordinal")?
-                        .map(JsonView::as_number)
-                        .transpose()?
-                        .flatten()
-                        .and_then(|n| n.as_u64());
-                    self.agent_path = string(field("agent_path")?)?;
-                }
-            }
-            _ if self.title.is_some() => {}
-            Some("event_msg") => {
-                if payload.as_ref().and_then(|p| p.ty.as_deref()) == Some("user_message") {
-                    if let Some(message) = field("message")?.filter(|m| m.is_string().unwrap_or(false)) {
-                        self.consider_title(title_of(Some(message), None)?);
-                    }
-                }
-            }
-            Some("response_item") => match payload.as_ref().and_then(|p| p.ty.as_deref()) {
-                // An absent role is `user`, as in the codec.
-                Some("message") if payload.as_ref().and_then(|p| p.role.as_deref()).unwrap_or("user") == "user" => {
-                    self.consider_title(title_of(field("content")?, None)?);
-                }
-                // A task handed to this thread by another agent is its prompt — the only one a
-                // subagent thread usually gets (its `user`-role messages are the developer preamble).
-                Some("agent_message") if string(field("author")?)? != self.agent_path => {
-                    self.consider_title(title_of(field("content")?, Some("input_text"))?);
-                }
-                _ => {}
-            },
-            _ => {}
-        }
-        Ok(())
+/// A listing title candidate, already trimmed and truncated ([`title_of`]): the first that is
+/// not one of Codex's injected preambles ([`is_injected_text`]) wins.
+fn consider_title(title: &mut Option<String>, candidate: String) {
+    if title.is_none() && !candidate.is_empty() && !is_injected_text(&candidate) {
+        *title = Some(candidate);
     }
 }
 
@@ -1037,16 +959,26 @@ fn scan_capped(path: &Path, full_scan_cap: u64) -> Result<SessionRef> {
 fn scan_rollout(path: &Path, full_scan_cap: u64) -> Result<(SessionRef, Option<Rollout>)> {
     const SAMPLE: u64 = 1 << 20; // 1 MiB head, 1 MiB tail
 
-    let mut s = CodexScan::default();
+    let mut s = Session::new(String::new(), Harness::Codex);
+    let mut ctx = CodexCtx::default();
+    let mut out = Vec::new();
     let mut decoded = None;
     if !is_jsonl_path(path) {
         s = legacy::scan(path)?;
     } else {
+        let mut s = Reader {
+            session: &mut s,
+            ctx: &mut ctx,
+            out: &mut out,
+            has_events: false,
+            demand: Demand::metadata(),
+            source: None,
+        };
         let rollout = Rollout::open(path)?;
         if rollout.decoded.is_some() || rollout.len <= full_scan_cap {
             rollout.lines(0, rollout.len, |line| {
                 if let Some(view) = line.view {
-                    s.feed(view)?;
+                    s.record(view)?;
                 }
                 Ok(Flow::Continue)
             })?;
@@ -1055,7 +987,7 @@ fn scan_rollout(path: &Path, full_scan_cap: u64) -> Result<(SessionRef, Option<R
             // not read.
             rollout.lines(0, SAMPLE.min(rollout.len), |line| {
                 if let (Some(view), true) = (line.view, line.complete) {
-                    s.feed(view)?;
+                    s.record(view)?;
                 }
                 Ok(Flow::Continue)
             })?;
@@ -1063,7 +995,7 @@ fn scan_rollout(path: &Path, full_scan_cap: u64) -> Result<(SessionRef, Option<R
             let mut first = true;
             rollout.lines(rollout.len.saturating_sub(SAMPLE), rollout.len, |line| {
                 if let (Some(view), false) = (line.view, std::mem::take(&mut first)) {
-                    s.feed(view)?;
+                    s.record(view)?;
                 }
                 Ok(Flow::Continue)
             })?;
@@ -1093,7 +1025,7 @@ fn scan_rollout(path: &Path, full_scan_cap: u64) -> Result<(SessionRef, Option<R
         updated_at: s.updated_at,
         message_count: None,
     };
-    crate::discover_cache::read::Context::current().observe_writer(&r, s.writer_version.as_deref());
+    crate::discover_cache::read::Context::current().observe_writer(&r, ctx.writer_version.as_deref());
     Ok((r, decoded))
 }
 
@@ -1251,16 +1183,27 @@ mod tests {
             r#"{"ordinal":2,"type":"response_item","payload":{"type":"message","content":"parent prompt"}}"#,
             r#"{"ordinal":6,"type":"response_item","payload":{"type":"message","content":"own prompt"}}"#,
         ].join("\n");
-        let mut scan = CodexScan::default();
+        let mut scan = Session::new(String::new(), Harness::Codex);
+        let mut ctx = CodexCtx::default();
+        let mut out = Vec::new();
+        let mut reader = Reader {
+            session: &mut scan,
+            ctx: &mut ctx,
+            out: &mut out,
+            has_events: false,
+            demand: Demand::metadata(),
+            source: None,
+        };
         jsonl::slice(raw.as_bytes(), |line| {
             if let Some(v) = line.view {
-                scan.feed(v)?;
+                reader.record(v)?;
             }
             Ok(Flow::Continue)
         })?;
+        assert!(out.is_empty(), "the metadata demand builds no message");
         assert_eq!(scan.id, "child");
         assert_eq!(scan.cwd.as_deref(), Some(Path::new("/child")));
-        assert_eq!(scan.writer_version.as_deref(), Some("0.163"));
+        assert_eq!(ctx.writer_version.as_deref(), Some("0.163"));
         assert_eq!(scan.title.as_deref(), Some("own prompt"));
         let session = parse_str("child", &raw, true, None);
         assert_eq!(

@@ -147,7 +147,8 @@ pub(crate) fn codex_hook_forest(parent: &SessionRef) -> Vec<SubagentInfo> {
             let Some(path) = row.agent_transcript_path.as_deref() else {
                 continue;
             };
-            let Some(head) = crate::harness::codex::hook_header(path) else {
+            // A child whose transcript cannot be read yet is not listed (the ledger keeps it).
+            let Ok(Some(head)) = crate::harness::codex::hook_header(path) else {
                 continue;
             };
             if head.id != row.agent_id || head.lineage.parent.as_deref() != Some(row.session_id.as_str()) {

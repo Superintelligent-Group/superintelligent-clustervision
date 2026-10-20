@@ -1202,7 +1202,7 @@ fn hook_lane(input: &Input) -> Result<Option<Value>> {
         let path = agent_transcript_path
             .as_deref()
             .context("Codex lane hook has no child transcript")?;
-        let parent = cv_core::harness::codex::hook_header(path)
+        let parent = cv_core::harness::codex::hook_header(path)?
             .and_then(|s| s.lineage.parent)
             .context("Codex child transcript has no parent identity")?;
         if event == "start" {
@@ -1292,7 +1292,8 @@ fn codex_root(id: &str, path: Option<&Path>, ledger: &[LaneEvent]) -> String {
             .find(|row| row.event == "start" && row.agent_id == id);
         let parent = path
             .as_deref()
-            .and_then(cv_core::harness::codex::hook_header)
+            // An unreadable child header falls back to the ledger's registration.
+            .and_then(|p| cv_core::harness::codex::hook_header(p).ok().flatten())
             .and_then(|s| s.lineage.parent)
             .or_else(|| registered.map(|row| row.session_id.clone()));
         let Some(parent) = parent else { return id };

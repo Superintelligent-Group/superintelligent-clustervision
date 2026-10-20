@@ -57,11 +57,24 @@ pub(super) struct Demand {
     /// Large bodies stay in the source ([`JsonView::lazy_text`]) and large tool arguments become
     /// checked source JSON.
     pub spans: bool,
+    /// Discovery: only the listing facts (id, cwd, title, timestamps, the writer's version) are
+    /// read; no message, session bag or system prompt is built.
+    pub metadata: bool,
 }
 
 impl Demand {
     pub(super) fn of(opts: &ParseOptions) -> Self {
-        Demand { spans: opts.spans }
+        Demand {
+            spans: opts.spans,
+            metadata: false,
+        }
+    }
+
+    pub(super) fn metadata() -> Self {
+        Demand {
+            spans: false,
+            metadata: true,
+        }
     }
 
     /// A body string by the demand's text rule; None for a nonstring.
@@ -220,6 +233,9 @@ impl Reader<'_> {
             self.session.created_at.get_or_insert(ts);
             self.session.updated_at = Some(ts);
         }
+        if self.demand.metadata {
+            return self.listing(&head);
+        }
         // Inherited prefix (fork/subagent rollouts embed the parent's history before
         // `subagent_history_start_ordinal`): those records still shape the thread's metadata — the
         // child inherits the parent's model/cwd — but they are the parent's turns, not this
@@ -297,6 +313,70 @@ impl Reader<'_> {
         m.extra
             .insert(super::super::claude::CARRIER_KEY.into(), v.resolve()?.into_owned());
         self.out.push(m);
+        Ok(())
+    }
+
+    /// The metadata demand: what a listing shows. The id and cwd come from the header or the
+    /// first `session_meta` like the full read's; the title is this thread's first user words
+    /// (an `event_msg` `user_message`, a user-role `message`, or a task another agent handed it),
+    /// never an injected preamble or the parent history a subagent rollout embeds.
+    fn listing(&mut self, head: &Head<'_>) -> Result<()> {
+        let ty = head.ty.as_deref();
+        if head.inherited(self.ctx.inherit_before) && ty != Some("session_meta") {
+            return Ok(());
+        }
+        let p = head.payload;
+        let s = &mut *self.session;
+        match ty {
+            None => {
+                if s.id.is_empty() {
+                    if let Some(id) = str_at(Some(head.view), "id")? {
+                        s.id = id;
+                    }
+                }
+            }
+            Some("session_meta") => {
+                if s.id.is_empty() {
+                    if let Some(id) = str_at(p, "id")? {
+                        s.id = id;
+                    }
+                }
+                if s.cwd.is_none() {
+                    s.cwd = str_at(p, "cwd")?.map(PathBuf::from);
+                }
+                if !self.ctx.meta_seen {
+                    self.ctx.meta_seen = true;
+                    self.ctx.writer_version = str_at(p, "cli_version")?;
+                    self.ctx.inherit_before = u64_at(p, "subagent_history_start_ordinal")?;
+                    self.ctx.agent_path = str_at(p, "agent_path")?;
+                }
+            }
+            _ if s.title.is_some() => {}
+            Some("event_msg") => {
+                let payload = p.map(Payload::of).transpose()?;
+                if payload.and_then(|p| p.ty).as_deref() == Some("user_message") {
+                    if let Some(message) = get(p, "message")?.filter(|m| m.is_string().unwrap_or(false)) {
+                        consider_title(&mut s.title, title_of(Some(message), None)?);
+                    }
+                }
+            }
+            Some("response_item") => {
+                let payload = p.map(Payload::of).transpose()?;
+                match payload.as_ref().and_then(|p| p.ty.as_deref()) {
+                    // An absent role is `user`, as in the full read.
+                    Some("message") if payload.as_ref().and_then(|p| p.role.as_deref()).unwrap_or("user") == "user" => {
+                        consider_title(&mut s.title, title_of(get(p, "content")?, None)?);
+                    }
+                    // A task handed to this thread by another agent is its prompt — the only one a
+                    // subagent thread usually gets (its `user`-role messages are the developer preamble).
+                    Some("agent_message") if str_at(p, "author")? != self.ctx.agent_path => {
+                        consider_title(&mut s.title, title_of(get(p, "content")?, Some("input_text"))?);
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
         Ok(())
     }
 
@@ -935,7 +1015,10 @@ impl Reader<'_> {
                 let (text, summary) = if raw.is_empty() {
                     (d.joined(summary_view, self.source)?, None)
                 } else {
-                    let inline = Demand { spans: false };
+                    let inline = Demand {
+                        spans: false,
+                        metadata: false,
+                    };
                     let summary = match inline.joined(summary_view, None)? {
                         Text::Inline(summary) => summary,
                         _ => unreachable!("inline demand"),

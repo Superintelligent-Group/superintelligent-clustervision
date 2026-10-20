@@ -54,9 +54,9 @@ pub(super) fn items(reader: &mut Reader<'_>, root: JsonView<'_>) -> Result<()> {
 
 /// Discovery deliberately keeps the legacy policy: only session timestamps, no cwd, no event
 /// authority; counts are deferred until full reads.
-pub(super) fn scan(path: &Path) -> Result<CodexScan> {
-    Ok(read(path, |_source, root| {
-        let mut scan = CodexScan::default();
+pub(super) fn scan(path: &Path) -> Result<Session> {
+    let listing = read(path, |_source, root| {
+        let mut scan = Session::new(String::new(), Harness::Codex);
         let meta = root
             .get("session")?
             .map(|v| Fields::parse(v, &["id", "timestamp"]))
@@ -72,7 +72,7 @@ pub(super) fn scan(path: &Path) -> Result<CodexScan> {
                 let item = item?;
                 let payload = record::Payload::of(item)?;
                 if payload.ty.as_deref() == Some("message") && payload.role.as_deref().unwrap_or("user") == "user" {
-                    scan.consider_title(title_of(payload.view.get("content")?, None)?);
+                    consider_title(&mut scan.title, title_of(payload.view.get("content")?, None)?);
                     if scan.title.is_some() {
                         break;
                     }
@@ -80,8 +80,8 @@ pub(super) fn scan(path: &Path) -> Result<CodexScan> {
             }
         }
         Ok(scan)
-    })?
-    .unwrap_or_default())
+    })?;
+    Ok(listing.unwrap_or_else(|| Session::new(String::new(), Harness::Codex)))
 }
 
 pub(super) fn stream(r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
@@ -172,7 +172,11 @@ mod tests {
             let actual = collected(&path, &ParseOptions::lazy());
             assert!(actual.messages.is_empty(), "{raw}");
             assert_eq!(actual.id, "fallback");
-            assert_eq!(scan(&path).unwrap(), CodexScan::default(), "{raw}");
+            let listing = scan(&path).unwrap();
+            assert!(
+                listing.id.is_empty() && listing.title.is_none() && listing.created_at.is_none(),
+                "{raw}"
+            );
         }
         let mut bad_utf8 = valid_prefix.as_bytes().to_vec();
         bad_utf8.extend_from_slice(b"\"\xff\"}");
