@@ -512,13 +512,13 @@ fn projected_text(view: JsonView<'_>, message: &mut Message, thinking: bool, opt
         });
     } else {
         let harmony = if let Some(text) = text.inline_str() {
-            super::harmony::looks_like_harmony(text)
+            super::wire::harmony::looks_like_harmony(text)
         } else {
             projected_harmony(view)?
         };
         if harmony {
             let inline = view.text(false)?.expect("string view");
-            message.content.extend(super::harmony::decode_content(
+            message.content.extend(super::wire::harmony::decode_content(
                 inline.inline_str().expect("inline decoding"),
             ));
         } else {
@@ -542,7 +542,7 @@ fn projected_harmony(view: JsonView<'_>) -> Result<bool> {
     let mut found = false;
     view.for_each_str_chunk(|chunk| {
         if !found {
-            found = super::harmony::looks_like_harmony(chunk);
+            found = super::wire::harmony::looks_like_harmony(chunk);
             let mut boundary = [0u8; OVERLAP * 2];
             boundary[..tail.len()].copy_from_slice(&tail);
             let head = chunk.len().min(OVERLAP);
@@ -1046,7 +1046,7 @@ mod tests {
             for padding in [0, 65_533, 65_537, 65_540] {
                 let wire = format!("\"{}{marker}\"", "x".repeat(padding));
                 let decoded: String = serde_json::from_str(&wire)?;
-                let expected = super::super::harmony::looks_like_harmony(&decoded);
+                let expected = super::super::wire::harmony::looks_like_harmony(&decoded);
                 assert_eq!(projected_harmony(JsonView::from(&Value::String(decoded)))?, expected);
                 fs::write(&path, &wire)?;
                 let source = JsonSource::capture(&path)?;

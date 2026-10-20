@@ -9,6 +9,7 @@
 //!   Continue, Grok.
 //!
 //! - [`genai`]: GenAI parts shared by Qwen and Gemini, retaining each store's tool wrappers.
+//! - [`harmony`]: gpt-oss channel text decoded into blocks (LM Studio keeps it as plain text).
 //!
 //! An adapter names its store's spelling with a `Quirks` constant and keeps only what is genuinely
 //! its own: where its files are and which records mean prompt, reply, tool, compaction.
@@ -17,6 +18,7 @@ use serde_json::Value;
 
 pub mod anthropic;
 pub(crate) mod genai;
+pub mod harmony;
 pub mod openai;
 pub(crate) mod write;
 
