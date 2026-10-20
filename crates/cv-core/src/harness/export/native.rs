@@ -22,6 +22,8 @@ struct Archive {
     // Positions sorted by id then original position; discovery keeps archive order.
     by_id: crate::harness::store::selection::Positions,
     charge: usize,
+    /// The file is not a JSON archive: read as none, reported by discovery.
+    undecodable: bool,
 }
 impl Archive {
     fn entry(&self, id: &str) -> Option<&Entry> {
@@ -159,6 +161,7 @@ fn load_bounded(path: &Path, selected: Option<&str>, admission_bytes: usize) -> 
             }
             Ok(())
         });
+        let mut undecodable = false;
         if let Err(error) = scanned {
             if source.check().is_err() {
                 continue;
@@ -167,6 +170,7 @@ fn load_bounded(path: &Path, selected: Option<&str>, admission_bytes: usize) -> 
                 return Err(error);
             }
             entries.clear();
+            undecodable = true;
         }
         source.check()?;
         if !cacheable && selected.is_some() {
@@ -178,6 +182,7 @@ fn load_bounded(path: &Path, selected: Option<&str>, admission_bytes: usize) -> 
             entries,
             by_id,
             charge,
+            undecodable,
         });
         if cacheable && charge <= CACHE_BYTES {
             let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
@@ -204,16 +209,27 @@ fn load_bounded(path: &Path, selected: Option<&str>, admission_bytes: usize) -> 
     anyhow::bail!("export changed while reading {}", path.display())
 }
 
-pub(super) fn discover(kind: Kind, paths: Vec<PathBuf>) -> Vec<SessionRef> {
-    let mut out = Vec::new();
+/// Every conversation of `kind` in the archives at `paths`; an archive that cannot be read or
+/// decoded is a reported skip.
+pub(super) fn discover(kind: Kind, paths: Vec<PathBuf>) -> crate::Discovered {
+    let mut out = crate::Discovered::default();
     let mut seen = std::collections::HashSet::new();
     for path in paths {
-        let Ok(archive) = load(&path, None) else { continue };
+        let Some(archive) = out.keep(&path, load(&path, None)) else {
+            continue;
+        };
+        if archive.undecodable {
+            out.skipped.push(crate::Skipped {
+                path: path.clone(),
+                why: "not a JSON export archive".into(),
+            });
+            continue;
+        }
         for r in archive.entries.iter().filter_map(|e| e.refs[slot(kind)].as_ref()) {
             if seen.insert(r.id.clone()) {
                 let mut r = r.clone();
                 r.path = path.clone();
-                out.push(r);
+                out.refs.push(r);
             }
         }
     }

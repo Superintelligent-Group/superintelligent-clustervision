@@ -152,7 +152,7 @@ impl Adapter for OpenSession {
     }
 
     fn discover(&self) -> Result<crate::Discovered> {
-        Ok(discover_documents(document_files()).into())
+        Ok(discover_documents(super::export::export_dirs()))
     }
 
     fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
@@ -177,28 +177,30 @@ impl Adapter for RootedOpenSession {
         self.roots.clone()
     }
     fn discover(&self) -> Result<crate::Discovered> {
-        Ok(discover_documents(super::export::files_under(self.roots.clone(), is_document_file)).into())
+        Ok(discover_documents(self.roots.clone()))
     }
     fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| stream_document(&r.path, opts, sink))
     }
 }
 
-fn discover_documents(paths: Vec<PathBuf>) -> Vec<SessionRef> {
+/// Every OpenSession document under `roots`: an unreadable dir, and a document that cannot be
+/// read, does not decode or names no `id`, is a reported skip.
+fn discover_documents(roots: Vec<PathBuf>) -> crate::Discovered {
+    let mut out = crate::Discovered::default();
+    let paths = super::export::files_under(roots, is_document_file, &mut out.skipped);
     let mut seen = std::collections::HashSet::new();
-    paths
-        .into_iter()
-        .filter_map(|path| doc_ref(&path))
-        .filter(|r| seen.insert(r.id.clone()))
-        .collect()
+    for path in paths {
+        if let Some(r) = out.keep(&path, doc_ref(&path)) {
+            if seen.insert(r.id.clone()) {
+                out.refs.push(r);
+            }
+        }
+    }
+    out
 }
 
 // ── Discovery ─────────────────────────────────────────────────────────────────
-
-/// Every OpenSession document under the registered export sources.
-fn document_files() -> Vec<PathBuf> {
-    super::export::files_under(super::export::export_dirs(), is_document_file)
-}
 
 /// Is this file an OpenSession document? By name (`*.opensession.json`), or by a head sniff of a
 /// plain `*.json` for the version key.
@@ -220,42 +222,39 @@ fn is_document_file(p: &Path) -> bool {
 
 /// A lightweight [`SessionRef`] for one document: metadata only, counting conversational turns
 /// (user + assistant, the cross-harness contract) straight off the raw records. A document with
-/// no `id` is not a session cv can name, so it is not discovered.
-fn doc_ref(path: &Path) -> Option<SessionRef> {
-    JsonSource::capture(path)
-        .ok()?
-        .read_document(|view| {
-            let record = Fields::parse(view, &["id", "cwd", "title", "created_at", "updated_at", "messages"])?
-                .context("document object")?;
-            let o = record.project(&["id", "cwd", "title", "created_at", "updated_at"])?;
-            let string = |k: &str| o.get(k).and_then(Value::as_str).filter(|s| !s.is_empty());
-            let mut message_count = 0;
-            if let Some(messages) = record.get("messages").map(JsonView::array).transpose()?.flatten() {
-                for message in messages {
-                    if let Some(message) = Fields::parse(message?, &["role"])? {
-                        if message
-                            .string("role")?
-                            .is_some_and(|role| matches!(role.as_str(), "user" | "assistant"))
-                        {
-                            message_count += 1;
-                        }
+/// no `id` is not a session cv can name: an error, as is one that cannot be read or decoded.
+fn doc_ref(path: &Path) -> Result<SessionRef> {
+    JsonSource::capture(path)?.read_document(|view| {
+        let record = Fields::parse(view, &["id", "cwd", "title", "created_at", "updated_at", "messages"])?
+            .context("document object")?;
+        let o = record.project(&["id", "cwd", "title", "created_at", "updated_at"])?;
+        let string = |k: &str| o.get(k).and_then(Value::as_str).filter(|s| !s.is_empty());
+        let mut message_count = 0;
+        if let Some(messages) = record.get("messages").map(JsonView::array).transpose()?.flatten() {
+            for message in messages {
+                if let Some(message) = Fields::parse(message?, &["role"])? {
+                    if message
+                        .string("role")?
+                        .is_some_and(|role| matches!(role.as_str(), "user" | "assistant"))
+                    {
+                        message_count += 1;
                     }
                 }
             }
-            Ok(SessionRef {
-                cwd: string("cwd").map(PathBuf::from),
-                title: string("title").map(str::to_owned),
-                created_at: o.get("created_at").and_then(ts_from_value),
-                updated_at: o.get("updated_at").and_then(ts_from_value),
-                message_count: Some(message_count),
-                ..SessionRef::new(
-                    string("id").context("document id")?.to_owned(),
-                    Harness::OpenSession,
-                    path.to_owned(),
-                )
-            })
+        }
+        Ok(SessionRef {
+            cwd: string("cwd").map(PathBuf::from),
+            title: string("title").map(str::to_owned),
+            created_at: o.get("created_at").and_then(ts_from_value),
+            updated_at: o.get("updated_at").and_then(ts_from_value),
+            message_count: Some(message_count),
+            ..SessionRef::new(
+                string("id").context("document id")?.to_owned(),
+                Harness::OpenSession,
+                path.to_owned(),
+            )
         })
-        .ok()
+    })
 }
 
 // ── Reading a document ────────────────────────────────────────────────────────

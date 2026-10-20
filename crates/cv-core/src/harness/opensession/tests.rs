@@ -859,3 +859,28 @@ fn principal_absent_and_null_are_omitted_unknown_fields_do_not_crash() -> Result
     assert!(Session::new("new", Harness::Claude).principal.is_none());
     Ok(())
 }
+
+/// cv's own format never vanishes: a document that does not decode, or names no `id`, is a
+/// reported skip beside the documents that list.
+#[test]
+fn an_undecodable_document_is_a_reported_skip() {
+    let dir = tmpdir("skip");
+    let good = Session::new("good", Harness::Claude);
+    std::fs::write(
+        dir.join("good.opensession.json"),
+        serde_json::to_string(&document(&good)).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(dir.join("torn.opensession.json"), "{\"open_session\":\"0.3\",").unwrap();
+    std::fs::write(dir.join("anonymous.opensession.json"), "{\"open_session\":\"0.3\"}").unwrap();
+    let found = OpenSession::with_roots(vec![dir.clone()]).discover().unwrap();
+    assert_eq!(found.refs.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["good"]);
+    let mut skipped: Vec<_> = found
+        .skipped
+        .iter()
+        .map(|s| s.path.file_name().unwrap().to_owned())
+        .collect();
+    skipped.sort();
+    assert_eq!(skipped, ["anonymous.opensession.json", "torn.opensession.json"]);
+    std::fs::remove_dir_all(dir).unwrap();
+}

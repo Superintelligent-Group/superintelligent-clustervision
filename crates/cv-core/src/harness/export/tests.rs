@@ -530,8 +530,11 @@ fn native_archive_keeps_raw_value_acceptance_and_duplicate_precedence() {
     assert_eq!(refs[0].message_count, Some(2));
     std::fs::write(&path, "[]").unwrap();
     assert!(discover_kind_in(Kind::Claude, vec![path.clone()]).is_empty());
+    // An archive that does not decode is reported, not silently empty.
     std::fs::write(&path, "").unwrap();
-    assert!(discover_kind_in(Kind::Claude, vec![path.clone()]).is_empty());
+    let found = discover_kind_in(Kind::Claude, vec![path.clone()]);
+    assert!(found.is_empty());
+    assert_eq!(found.skipped.iter().map(|s| &s.path).collect::<Vec<_>>(), [&path]);
     let r = SessionRef::new("missing", Harness::ClaudeExport, path.clone());
     assert!(native::stream(
         Kind::Claude,
