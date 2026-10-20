@@ -1049,15 +1049,23 @@ fn ago(t: Option<chrono::DateTime<chrono::Utc>>) -> String {
         .unwrap_or_else(|| "undated".into())
 }
 
-/// `(who, decisions owed)` from the task log, under the identity `cv task inbox` would use.
-fn owed_decisions() -> Result<(String, usize)> {
+/// `(who, n)` when the task log owes `n > 0` decisions to the identity `cv task inbox` would use.
+/// The one policy for both hooks that mention them: an unreadable task log is said on stderr and
+/// owes nothing, so it never costs the start pack its sessions.
+fn owed_decisions(hook: HookName) -> Option<(String, usize)> {
     let who = cv_core::task::actor(None, "cv");
-    let outcome = cv_core::task::replay()?;
+    let outcome = match cv_core::task::replay() {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            eprintln!("cv hook {}: {e:#}", hook.as_str());
+            return None;
+        }
+    };
     let n = cv_core::task::inbox(&outcome.model, &who)
         .iter()
         .filter(|e| matches!(e.reason, cv_core::task::InboxReason::DecisionOwed))
         .count();
-    Ok((who, n))
+    (n > 0).then_some((who, n))
 }
 
 /// `SessionStart` (`startup|resume`): this directory's last sessions from the catalog as it stands
@@ -1077,8 +1085,8 @@ fn hook_start(ev: &Event) -> Result<Option<Value>> {
         .collect();
     rows.sort_by_key(|r| std::cmp::Reverse(r.updated_at.or(r.created_at)));
     rows.truncate(START_SESSIONS);
-    let (who, owed) = owed_decisions().unwrap_or_else(|_| ("cv".into(), 0));
-    if rows.is_empty() && owed == 0 {
+    let owed = owed_decisions(HookName::Start);
+    if rows.is_empty() && owed.is_none() {
         return Ok(None);
     }
     let mut lines = Vec::new();
@@ -1107,7 +1115,7 @@ fn hook_start(ev: &Event) -> Result<Option<Value>> {
             ));
         }
     }
-    if owed > 0 {
+    if let Some((who, owed)) = owed {
         lines.push(format!(
             "- {owed} decision(s) owed to {who}: `cv task inbox` lists them."
         ));
@@ -1152,10 +1160,9 @@ fn hook_lane(ev: &Event) -> Result<Option<Value>> {
 
 /// `UserPromptSubmit`: one line when decisions are owed, else nothing at all.
 fn hook_decisions(_ev: &Event) -> Result<Option<Value>> {
-    let (who, n) = owed_decisions()?;
-    if n == 0 {
+    let Some((who, n)) = owed_decisions(HookName::Decisions) else {
         return Ok(None);
-    }
+    };
     Ok(Some(context(
         "UserPromptSubmit",
         format!("cv: {n} decision(s) owed to {who} — `cv task inbox` lists them; `cv task resolve <id> --accept-default` or `--choice <option>` answers one."),
