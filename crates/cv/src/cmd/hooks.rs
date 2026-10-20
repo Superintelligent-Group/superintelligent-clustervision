@@ -439,26 +439,24 @@ fn shell_quote(p: &str) -> String {
     }
 }
 
-/// The `command` string for one hook: this binary, absolute, then `hook <name>`.
+/// The `command` string for one hook: this binary, absolute, then `hook <name> --harness <h>`.
 fn command_for(harness: Harness, exe: &str, name: HookName) -> String {
-    format!(
-        "{}{} hook {}",
-        if harness == Harness::Codex {
-            "CV_HOOK_HARNESS=codex "
-        } else {
-            ""
-        },
-        shell_quote(exe),
-        name.as_str()
-    )
+    format!("{} hook {} --harness {harness}", shell_quote(exe), name.as_str())
 }
 
-/// Is this handler one of ours? Recognized by shape: `<something>/cv hook <name>` (quotes allowed
-/// around the program), so a reinstall from another binary path replaces rather than duplicates.
+/// Is this handler one of ours? Recognized by shape: `<something>/cv hook <name>`, optionally
+/// `--harness <h>` (quotes allowed around the program; 0.17's `CV_HOOK_HARNESS=codex` prefix
+/// too), so a reinstall from another binary path, or over 0.17's entries, replaces rather than
+/// duplicates.
 fn ours(handler: &Value) -> Option<HookName> {
     let cmd = handler.get("command")?.as_str()?.trim();
     let (prog, rest) = cmd.rsplit_once(" hook ")?;
-    let name = HookName::parse(rest.trim())?;
+    let mut words = rest.split_whitespace();
+    let name = HookName::parse(words.next()?)?;
+    match (words.next(), words.next(), words.next()) {
+        (None, ..) | (Some("--harness"), Some(_), None) => {}
+        _ => return None,
+    }
     let prog = prog.trim().trim_matches(|c| c == '\'' || c == '"');
     let base = Path::new(prog).file_name()?.to_str()?;
     (base == "cv" || base == "cv.exe").then_some(name)
@@ -851,17 +849,42 @@ pub(crate) fn doctor_json() -> Value {
 
 // ───────────────────────────── the hook bodies ─────────────────────────────
 
+/// 0.17 installed Codex's entries as `CV_HOOK_HARNESS=codex cv hook <name>`. A session running
+/// under those entries keeps working through 0.18 (with a pointer on stderr); 0.19 drops the
+/// variable, pinned by `the_legacy_harness_variable_leaves_in_0_19`.
+const LEGACY_HARNESS_ENV: &str = "CV_HOOK_HARNESS";
+
+/// The harness a `cv hook` call speaks for: `--harness`, else 0.17's variable, else Claude.
+fn hook_call_harness(name: HookName, flag: Option<&str>) -> Result<Harness> {
+    if let Some(h) = flag {
+        return hook_harness(h);
+    }
+    match cv_core::env::var_os(LEGACY_HARNESS_ENV) {
+        Some(v) if v == "codex" => {
+            eprintln!(
+                "cv hook {}: {LEGACY_HARNESS_ENV}=codex is the 0.17 entry and stops working in 0.19; \
+                 `cv hooks install codex` rewrites it as `cv hook {} --harness codex` (then re-trust it in Codex)",
+                name.as_str(),
+                name.as_str()
+            );
+            Ok(Harness::Codex)
+        }
+        _ => Ok(Harness::Claude),
+    }
+}
+
 /// `cv hook <name>`: read stdin, run the body, print its one-line JSON (or nothing). A body that
 /// fails prints its error on stderr and still exits 0 — a hook must never block the harness. A
 /// terminal on stdin means no harness is calling: usage, exit 2, instead of waiting for JSON.
-pub(crate) fn cmd_hook(name: HookName) -> Result<()> {
+pub(crate) fn cmd_hook(name: HookName, harness: Option<String>) -> Result<()> {
     if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         return crate::util::usage(format!(
-            "cv hook {} reads Claude Code's hook JSON on stdin, and stdin is a terminal; \
-             `cv hooks install claude` writes the settings entries that pipe it",
+            "cv hook {} reads the harness's hook JSON on stdin, and stdin is a terminal; \
+             `cv hooks install <claude|codex>` writes the settings entries that pipe it",
             name.as_str()
         ));
     }
+    let harness = hook_call_harness(name, harness.as_deref())?;
     let mut raw = String::new();
     let _ = std::io::stdin().read_to_string(&mut raw);
     let payload: Value = match serde_json::from_str(&raw) {
@@ -873,11 +896,6 @@ pub(crate) fn cmd_hook(name: HookName) -> Result<()> {
             );
             return Ok(());
         }
-    };
-    let harness = if cv_core::env::var_os("CV_HOOK_HARNESS").as_deref() == Some(std::ffi::OsStr::new("codex")) {
-        Harness::Codex
-    } else {
-        Harness::Claude
     };
     let decoded = cv_core::harness::rootless(harness)
         .context("no adapter")
@@ -1287,7 +1305,15 @@ mod tests {
     #[test]
     fn codex_hook_hash_matches_codex_0_162_1() {
         let exe = "/private/tmp/claude-501/-Users-ember-dev-cv/ece21c13-ee7c-4db3-b8a6-e83ade448e6a/scratchpad/target-hooks/debug/cv";
-        let settings = with_ours(Harness::Codex, json!({}), exe);
+        // Recorded for 0.17's command strings; the hash covers the command, so pin those.
+        let mut settings = with_ours(Harness::Codex, json!({}), exe);
+        for groups in settings["hooks"].as_object_mut().unwrap().values_mut() {
+            for group in groups.as_array_mut().unwrap() {
+                let handler = &mut group["hooks"][0];
+                let name = ours(handler).unwrap();
+                handler["command"] = json!(format!("CV_HOOK_HARNESS=codex {exe} hook {}", name.as_str()));
+            }
+        }
         let recorded = [
             (
                 "SessionStart",
@@ -1442,8 +1468,30 @@ mod tests {
         assert_eq!(ours(&json!({"command": "/opt/cv hook nope"})), None);
         assert_eq!(ours(&json!({"command": "/opt/other hook compact"})), None);
         assert_eq!(ours(&json!({"command": "cv-mcp"})), None);
+        assert_eq!(
+            ours(&json!({"command": "/opt/cv hook edit --harness codex"})),
+            Some(HookName::Edit)
+        );
+        assert_eq!(
+            ours(&json!({"command": "CV_HOOK_HARNESS=codex /opt/cv hook start"})),
+            Some(HookName::Start)
+        );
+        assert_eq!(ours(&json!({"command": "/opt/cv hook edit --other x"})), None);
+        assert_eq!(
+            command_for(Harness::Codex, "/opt/cv", HookName::Lane),
+            "/opt/cv hook lane --harness codex"
+        );
         assert_eq!(shell_quote("/a b/cv"), "'/a b/cv'");
         assert_eq!(shell_quote("/usr/local/bin/cv"), "/usr/local/bin/cv");
+    }
+
+    #[test]
+    fn the_legacy_harness_variable_leaves_in_0_19() {
+        let minor: u64 = env!("CARGO_PKG_VERSION").split('.').nth(1).unwrap().parse().unwrap();
+        assert!(
+            minor < 19,
+            "{LEGACY_HARNESS_ENV} was kept for one minor after 0.17: delete it from `hook_call_harness` and this test"
+        );
     }
 
     #[test]

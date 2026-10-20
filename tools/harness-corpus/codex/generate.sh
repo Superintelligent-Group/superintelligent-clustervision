@@ -137,9 +137,8 @@ for groups in settings["hooks"].values():
     for group in groups:
         for handler in group["hooks"]:
             command = handler["command"]
-            prefix = "CV_HOOK_HARNESS=codex "
-            assert command.startswith(prefix)
-            handler["command"] = prefix + shlex.join(["python3", "-I", capture, log]) + " " + command[len(prefix):]
+            assert command.endswith(" --harness codex"), command
+            handler["command"] = shlex.join(["python3", "-I", capture, log]) + " " + command
 with open(path, "w") as output:
     json.dump(settings, output)
 PYHOOK

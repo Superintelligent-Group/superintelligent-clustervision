@@ -1083,11 +1083,14 @@ enum Cmd {
         #[command(subcommand)]
         action: HooksCmd,
     },
-    /// One hook's body, run by Claude Code: reads the hook JSON on stdin, prints a line or two of
-    /// hook JSON (or nothing). `cv hooks install claude` writes the entries that call these.
+    /// One hook's body, run by the harness: reads the hook JSON on stdin, prints a line or two of
+    /// hook JSON (or nothing). `cv hooks install <harness>` writes the entries that call these.
     Hook {
         #[arg(value_enum)]
         name: HookName,
+        /// The harness whose payload is on stdin (`claude` or `codex`; default `claude`).
+        #[arg(long)]
+        harness: Option<String>,
     },
 
     // ───────────────────────────── Removed (hidden stubs: error with a pointer, exit 2) ─────────────────────────────
@@ -1438,7 +1441,7 @@ fn run() -> Result<()> {
         } => formats::cmd_formats(harness, recent, json, legacy),
         Cmd::Recipes => recipes::cmd_recipes(),
         Cmd::Hooks { action } => hooks::cmd_hooks(action),
-        Cmd::Hook { name } => hooks::cmd_hook(name),
+        Cmd::Hook { name, harness } => hooks::cmd_hook(name, harness),
         Cmd::Resume { id, harness, launch } => port::cmd_resume(&id, harness, launch),
         Cmd::Workflow {
             id,

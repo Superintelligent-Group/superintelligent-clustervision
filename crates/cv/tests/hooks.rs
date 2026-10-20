@@ -20,9 +20,20 @@ fn cv_ok(w: &World, args: &[&str]) -> String {
 
 /// `cv hook <name>` fed one payload; the hook must exit 0 whatever happens.
 fn hook(w: &World, name: &str, payload: &serde_json::Value, env: &[(&str, &str)]) -> String {
-    let (ok, code, out, err) = w.cv_full(&["hook", name], env, Some(&payload.to_string()));
+    hook_full(w, &["hook", name], payload, env).0
+}
+
+/// `cv hook <name> --harness codex`, as `cv hooks install codex` writes it.
+fn codex_hook(w: &World, name: &str, payload: &serde_json::Value, env: &[(&str, &str)]) -> String {
+    hook_full(w, &["hook", name, "--harness", "codex"], payload, env).0
+}
+
+/// `(stdout, stderr)` of one hook call, which must exit 0.
+fn hook_full(w: &World, args: &[&str], payload: &serde_json::Value, env: &[(&str, &str)]) -> (String, String) {
+    let name = args[1];
+    let (ok, code, out, err) = w.cv_full(args, env, Some(&payload.to_string()));
     assert!(ok, "cv hook {name} exited {code}\nstdout:\n{out}\nstderr:\n{err}");
-    out
+    (out, err)
 }
 
 fn settings_path(w: &World) -> PathBuf {
@@ -110,14 +121,17 @@ fn install_is_idempotent_show_reports_and_remove_restores_the_file() {
     assert_eq!(s["hooks"]["PreToolUse"][0]["matcher"], "Bash", "theirs stays first");
     assert_eq!(s["hooks"]["PreToolUse"][1]["matcher"], "Edit|Write");
     let cmd = s["hooks"]["SessionStart"][0]["hooks"][0]["command"].as_str().unwrap();
-    assert!(cmd.ends_with("/cv hook compact"), "absolute binary path: {cmd}");
+    assert!(
+        cmd.ends_with("/cv hook compact --harness claude"),
+        "absolute binary path: {cmd}"
+    );
     assert_eq!(s["hooks"]["SessionStart"][1]["matcher"], "startup|resume");
     assert_eq!(s["hooks"]["SubagentStart"][0]["hooks"][0]["async"], true);
     assert_eq!(s["hooks"]["SubagentStop"][0]["hooks"][0]["async"], true);
     assert!(s["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
         .as_str()
         .unwrap()
-        .ends_with(" hook decisions"));
+        .ends_with(" hook decisions --harness claude"));
     let skill = w.home.join(".claude/skills/cv/SKILL.md");
     assert!(
         fs::read_to_string(&skill).unwrap().starts_with("---\nname: cv\n"),
@@ -426,7 +440,7 @@ fn each_hook_answers_the_docs_payload_for_its_event() {
             "tool_name": "apply_patch", "tool_input": {"command": "*** Begin Patch\n*** Add File: src/untracked.rs\n+new\n*** Update File: src/widget.rs\n@@\n-a\n+b\n*** End Patch"}
         }),
     );
-    let out = hook(&w, "edit", &codex_patch, &[("CV_HOOK_HARNESS", "codex")]);
+    let out = codex_hook(&w, "edit", &codex_patch, &[]);
     let output: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(output["hookSpecificOutput"]["permissionDecision"], "deny");
     assert!(output["hookSpecificOutput"]["permissionDecisionReason"]
@@ -466,7 +480,7 @@ fn codex_install_scopes_preserve_unrelated_hooks_and_are_reversible() {
             .as_array()
             .unwrap()
             .iter()
-            .all(|row| row["command"].as_str().unwrap().starts_with("CV_HOOK_HARNESS=codex ")));
+            .all(|row| row["command"].as_str().unwrap().ends_with(" --harness codex")));
         cv_ok(&w, &["hooks", "remove", "codex", "--scope", scope]);
         let back: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
         assert_eq!(back, theirs);
@@ -535,12 +549,7 @@ fn codex_real_hook_payloads_compose_with_the_recorded_rollouts() {
             "PreToolUse" => ("edit", 4),
             other => panic!("unexpected recorded hook {other}"),
         };
-        let output = hook(
-            &w,
-            name,
-            &input,
-            &[("CV_HOOK_HARNESS", "codex"), ("CV_ENDPOINT", "corpus:hooks")],
-        );
+        let output = codex_hook(&w, name, &input, &[("CV_ENDPOINT", "corpus:hooks")]);
         match name {
             "compact" => assert!(context_of(&output).contains("compaction #1")),
             "start" => assert!(context_of(&output).contains("earlier session(s)")),
@@ -695,7 +704,7 @@ fn codex_trust_is_read_from_the_store_codex_writes() {
     );
     let out = cv_ok(&w, &["hooks", "show", "codex"]);
     assert!(
-        out.contains("hook edit · modified") && out.contains("hook start · trusted"),
+        out.contains("hook edit --harness codex · modified") && out.contains("hook start --harness codex · trusted"),
         "{out}"
     );
     assert!(out.contains("Codex trust: 1 modified since trusted"), "{out}");
@@ -842,31 +851,69 @@ fn codex_edit_guard_exempts_the_root_threads_lineage_and_denies_strangers() {
         json!({"session_id": sid, "transcript_path": path, "cwd": "/work/proj", "hook_event_name": "PreToolUse",
             "permission_mode": "bypassPermissions", "tool_name": "apply_patch", "tool_input": {"command": patch(file)}})
     };
-    let env = [("CV_HOOK_HARNESS", "codex")];
     // All three rollouts were just written: every editor is live. The child edited shared.txt
     // moments ago, yet the parent patching it is not a conflict, and neither is the child patching
     // what its root edited.
-    assert_eq!(hook(&w, "edit", &input(parent, &parent_path, "shared.txt"), &env), "");
-    assert_eq!(hook(&w, "edit", &input(child, &child_path, "shared.txt"), &env), "");
+    assert_eq!(
+        codex_hook(&w, "edit", &input(parent, &parent_path, "shared.txt"), &[]),
+        ""
+    );
+    assert_eq!(
+        codex_hook(&w, "edit", &input(child, &child_path, "shared.txt"), &[]),
+        ""
+    );
     // An unrelated root thread is denied, as before.
-    let out = hook(&w, "edit", &input(parent, &parent_path, "other.txt"), &env);
+    let out = codex_hook(&w, "edit", &input(parent, &parent_path, "other.txt"), &[]);
     let out: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "deny");
     assert!(out["hookSpecificOutput"]["permissionDecisionReason"]
         .as_str()
         .unwrap()
         .contains(&format!("codex:{stranger}")));
-    let out = hook(&w, "edit", &input(stranger, &stranger_path, "shared.txt"), &env);
+    let out = codex_hook(&w, "edit", &input(stranger, &stranger_path, "shared.txt"), &[]);
     assert!(out.contains("\"deny\""), "{out}");
     // A child the catalog has not indexed yet is still placed by the lane ledger's start row.
     let late = "01a14d90-0000-7000-8000-000000000004";
     let late_path = codex_rollout(&w, late, Some(parent), "shared.txt");
-    hook(
+    codex_hook(
         &w,
         "lane",
         &json!({"session_id": parent, "transcript_path": parent_path, "hook_event_name": "SubagentStart",
             "agent_id": late, "agent_type": "default", "cwd": "/work/proj"}),
-        &env,
+        &[],
     );
-    assert_eq!(hook(&w, "edit", &input(late, &late_path, "shared.txt"), &env), "");
+    assert_eq!(codex_hook(&w, "edit", &input(late, &late_path, "shared.txt"), &[]), "");
+}
+
+/// 0.17 wrote Codex's entries as `CV_HOOK_HARNESS=codex cv hook <name>`; a session still running
+/// under them gets the same answer through 0.18, with a pointer to the reinstall on stderr.
+#[test]
+fn the_0_17_codex_entry_answers_the_same_with_a_pointer() {
+    let w = World::new("codex-legacy-entry");
+    let parent = "01a14d90-0000-7000-8000-000000000001";
+    let stranger = "01a14d90-0000-7000-8000-000000000003";
+    let parent_path = codex_rollout(&w, parent, None, "shared.txt");
+    codex_rollout(&w, stranger, None, "other.txt");
+    cv_ok(&w, &["index"]);
+    let input = json!({"session_id": parent, "transcript_path": parent_path, "cwd": "/work/proj",
+        "hook_event_name": "PreToolUse", "tool_name": "apply_patch",
+        "tool_input": {"command": "*** Begin Patch\n*** Update File: other.txt\n@@\n-b\n+c\n*** End Patch"}});
+    let (flagged, quiet) = hook_full(&w, &["hook", "edit", "--harness", "codex"], &input, &[]);
+    let (legacy, pointer) = hook_full(&w, &["hook", "edit"], &input, &[("CV_HOOK_HARNESS", "codex")]);
+    assert!(flagged.contains("\"deny\""), "{flagged}");
+    assert_eq!(legacy, flagged);
+    assert!(!quiet.contains("CV_HOOK_HARNESS"), "{quiet}");
+    assert!(
+        pointer.contains("CV_HOOK_HARNESS=codex is the 0.17 entry")
+            && pointer.contains("`cv hook edit --harness codex`"),
+        "{pointer}"
+    );
+    // The flag wins over a stale variable, silently.
+    let (_, quiet) = hook_full(
+        &w,
+        &["hook", "edit", "--harness", "codex"],
+        &input,
+        &[("CV_HOOK_HARNESS", "codex")],
+    );
+    assert!(!quiet.contains("CV_HOOK_HARNESS"), "{quiet}");
 }
