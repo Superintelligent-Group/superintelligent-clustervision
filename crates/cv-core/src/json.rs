@@ -135,7 +135,8 @@ impl JsonSource {
     }
     pub(crate) fn capture_with_reads(path: &Path, reads: &crate::source::ReadSet) -> Result<Self> {
         let source = Self::capture_guarded(path, Some(Arc::new(reads.clone())))?;
-        source.check()?;
+        // The capture just stat'ed the path; only the dependencies are older than it.
+        source.check_reads()?;
         Ok(source)
     }
     fn capture_guarded(path: &Path, reads: Option<Arc<crate::source::ReadSet>>) -> Result<Self> {
@@ -436,6 +437,8 @@ impl JsonRange {
         Ok(())
     }
 
+    /// The source still holds its capture and the decoded backing still holds this range. The
+    /// backing is the arena, not the source, so one source check covers both.
     pub(crate) fn check_retained_bounds(&self) -> Result<()> {
         self.check()?;
         if let Some(bytes) = &self.decoded {
@@ -445,7 +448,7 @@ impl JsonRange {
                 "source text backing is truncated"
             );
         }
-        self.check()
+        Ok(())
     }
 
     /// Captured auxiliary source dependencies, retaining original stamps and absence.
