@@ -5,19 +5,15 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 const CONSUMER: &str = "watch-full1";
-const STATE_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "/watch-full1");
 const CHECKPOINT_EVERY: u64 = 256 * 1024;
 const ANCHOR_BYTES: usize = 64 * 1024;
 const METADATA_BYTES: usize = 16 * 1024;
 
+/// The state's version: the mark version of an adapter that takes checkpoints, else the one
+/// stored-format version and the harness. Never the cv release.
 fn state_version(adapter: &dyn Adapter) -> String {
-    crate::resume::version(adapter, CONSUMER).unwrap_or_else(|| {
-        format!(
-            "{STATE_VERSION}/view{}/{}",
-            crate::affordance::VIEW_VERSION,
-            adapter.harness().as_str()
-        )
-    })
+    crate::resume::version(adapter, CONSUMER)
+        .unwrap_or_else(|| format!("v{}/{CONSUMER}/{}", source::VERSION, adapter.harness().as_str()))
 }
 
 fn fits(value: &impl Serialize, limit: usize) -> bool {

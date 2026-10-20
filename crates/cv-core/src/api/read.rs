@@ -242,7 +242,7 @@ fn verify(r: &SessionRef, primary: &std::path::Path, before: &Baseline, sink: &W
 
 pub(super) fn head(cache: &Cache, adapter: &dyn Adapter, r: &SessionRef) -> Result<Value> {
     let primary = adapter.resume_source(r);
-    let key = Key::admitted(r, &primary, format!("{}/api-head1", env!("CARGO_PKG_VERSION")), false);
+    let key = Key::admitted(r, &primary, format!("v{}/api-head1", crate::source::VERSION), false);
     if let Some(entry) = key.as_ref().and_then(|key| cache.get(key)) {
         if fresh(r, &entry.source, &primary) {
             if let Payload::Head(value) = entry.payload {
