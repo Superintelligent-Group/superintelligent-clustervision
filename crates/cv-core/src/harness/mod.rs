@@ -301,6 +301,34 @@ pub trait Adapter: Send + Sync {
         Ok(None)
     }
 
+    /// What this harness's edit hook answers when another live writer edited the file. Default:
+    /// `None`, the harness has no edit guard.
+    fn edit_guard_decision(&self) -> Option<crate::hooks::EditGuard> {
+        None
+    }
+
+    /// The lineage a live transcript records in its header, read without parsing its history
+    /// (a hook's budget). Default: the header records none.
+    fn hook_lineage(&self, _transcript: &std::path::Path) -> Result<Option<crate::ir::Lineage>> {
+        Ok(None)
+    }
+
+    /// The transcript of `agent_session`, a sub-agent of `parent` (inside `workflow`'s run when
+    /// given), as this store lays it out beside its parent. Default: the store keeps none there.
+    fn agent_transcript(&self, _parent: &SessionRef, _agent_session: &str, _workflow: Option<&str>) -> Option<PathBuf> {
+        None
+    }
+
+    /// The newest compaction boundary in the last `tail` bytes of `transcript`:
+    /// `(trigger, tokens before)`. Default: the store records none a tail read can find.
+    fn last_compact_boundary(
+        &self,
+        _transcript: &std::path::Path,
+        _tail: u64,
+    ) -> Result<Option<(Option<String>, Option<u64>)>> {
+        Ok(None)
+    }
+
     /// The native keys a derived copy of a session (`cv prune`, `cv rewind`, `cv adopt`) rewrites,
     /// for the shared writer in `derive`. Default: none; the harness has no derived copies.
     fn identity(&self) -> Option<Identity> {

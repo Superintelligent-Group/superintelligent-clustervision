@@ -85,3 +85,174 @@ fn expand(p: &Path) -> PathBuf {
         _ => p.to_path_buf(),
     }
 }
+
+/// What a harness's edit hook can answer for a conflicting edit
+/// ([`Adapter::edit_guard_decision`](crate::harness::Adapter::edit_guard_decision)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditGuard {
+    /// The harness asks its user (Claude Code's `ask`).
+    Ask,
+    /// The harness can only block the call (Codex hooks have no `ask`).
+    Deny,
+}
+
+impl EditGuard {
+    /// The `permissionDecision` the hook answers with.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EditGuard::Ask => "ask",
+            EditGuard::Deny => "deny",
+        }
+    }
+}
+
+/// The edit guard for the session an [`Event`] speaks for, and its one lineage rule: an edit the
+/// same writer already made is never a conflict. Where the guard can ask, the writer is the
+/// session's own agent (a sibling, the parent or a child gets the question); where it can only
+/// deny, the writer is the whole lineage tree, every session the `Session::lineage` parents lead
+/// to the same root (a swarm shares its files on purpose, and a deny would stop it).
+pub struct Guard {
+    pub decision: EditGuard,
+    adapter: &'static dyn crate::harness::Adapter,
+    root: String,
+    agent: Option<String>,
+    ledger: Vec<crate::lanes::LaneEvent>,
+}
+
+impl Guard {
+    /// `None` when the harness has no edit guard.
+    pub fn of(ev: &Event) -> Option<Guard> {
+        let adapter = crate::harness::rootless(ev.harness)?;
+        let decision = adapter.edit_guard_decision()?;
+        let (root, ledger) = match decision {
+            EditGuard::Ask => (ev.session.id.clone(), Vec::new()),
+            EditGuard::Deny => {
+                let ledger = crate::lanes::read_ledger();
+                (lineage_root(adapter, &ev.session.id, ev.transcript(), &ledger), ledger)
+            }
+        };
+        Some(Guard {
+            decision,
+            adapter,
+            root,
+            agent: ev.agent.as_ref().map(|a| a.id.clone()),
+            ledger,
+        })
+    }
+
+    /// Whether `t`'s edits (its transcript at `transcript`) are this writer's own.
+    pub fn exempts(&self, t: &crate::events::TouchedSession, transcript: &Path) -> bool {
+        if t.harness != self.adapter.harness().as_str() {
+            return false;
+        }
+        match self.decision {
+            EditGuard::Ask => t.parent_id.as_deref().unwrap_or(&t.session_id) == self.root && t.agent_id == self.agent,
+            EditGuard::Deny => lineage_root(self.adapter, &t.session_id, Some(transcript), &self.ledger) == self.root,
+        }
+    }
+}
+
+/// The root of `id`'s lineage: each transcript's recorded parent
+/// ([`Adapter::hook_lineage`](crate::harness::Adapter::hook_lineage)) followed up through the
+/// catalog, the lane ledger's `start` rows standing in for a child the catalog has not indexed
+/// yet. A session without a parent is its own root. Bounded, so a cyclic ledger ends.
+fn lineage_root(
+    adapter: &dyn crate::harness::Adapter,
+    id: &str,
+    path: Option<&Path>,
+    ledger: &[crate::lanes::LaneEvent],
+) -> String {
+    let mut id = id.to_string();
+    let mut path = path.map(Path::to_path_buf);
+    for _ in 0..16 {
+        let registered = ledger
+            .iter()
+            .rev()
+            .find(|row| row.event == "start" && row.agent_id == id);
+        let parent = path
+            .as_deref()
+            // An unreadable header falls back to the ledger's registration.
+            .and_then(|p| adapter.hook_lineage(p).ok().flatten())
+            .and_then(|l| l.parent)
+            .or_else(|| registered.map(|row| row.session_id.clone()));
+        let Some(parent) = parent else { return id };
+        path = crate::catalog::lookup(&parent, Some(adapter.harness()))
+            .into_iter()
+            .find(|r| r.id == parent)
+            .map(|r| r.path)
+            .or_else(|| registered.and_then(|row| row.transcript_path.clone()));
+        id = parent;
+    }
+    id
+}
+
+/// The transcript behind a session the edit index names, without a scan: the parent's own store
+/// for a sub-agent ([`Adapter::agent_transcript`](crate::harness::Adapter::agent_transcript)),
+/// the catalog for anything else.
+pub fn transcript_of(t: &crate::events::TouchedSession) -> Option<PathBuf> {
+    let adapter = Harness::parse(&t.harness).and_then(crate::harness::rootless);
+    if let (Some(parent), Some(adapter)) = (t.parent_id.as_deref(), adapter) {
+        let parent = crate::catalog::lookup(parent, None).into_iter().next()?;
+        if let Some(path) = adapter.agent_transcript(&parent, &t.session_id, t.workflow.as_deref()) {
+            return Some(path);
+        }
+    }
+    crate::catalog::lookup(&t.session_id, None)
+        .into_iter()
+        .find(|r| r.id == t.session_id)
+        .map(|r| r.path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_asking_guard_exempts_the_same_writer_only() {
+        let event = |agent: Option<&str>| Event {
+            harness: Harness::Claude,
+            session: SessionRef::new("parent", Harness::Claude, ""),
+            event: Some("PreToolUse".into()),
+            cwd: None,
+            agent: agent.map(|id| Agent {
+                id: id.into(),
+                kind: None,
+                transcript: None,
+                last_message: None,
+            }),
+            edits: Vec::new(),
+        };
+        let exempts = |agent: Option<&str>, t: &crate::events::TouchedSession| {
+            let guard = Guard::of(&event(agent)).unwrap();
+            assert_eq!(guard.decision, EditGuard::Ask);
+            guard.exempts(t, Path::new("/t.jsonl"))
+        };
+        let mut touched = crate::events::TouchedSession {
+            harness: "claude".into(),
+            session_id: "parent".into(),
+            title: None,
+            edits: 1,
+            reads: 0,
+            last_ts: None,
+            parent_id: None,
+            agent_id: None,
+            workflow: None,
+        };
+        assert!(exempts(None, &touched));
+        assert!(
+            !exempts(Some("self"), &touched),
+            "a child and parent are separate writers"
+        );
+        touched.session_id = "agent-self".into();
+        touched.parent_id = Some("parent".into());
+        touched.agent_id = Some("self".into());
+        assert!(exempts(Some("self"), &touched));
+        assert!(!exempts(Some("sibling"), &touched));
+        assert!(!exempts(None, &touched));
+        touched.parent_id = Some("another-parent".into());
+        assert!(!exempts(Some("self"), &touched));
+        touched.parent_id = Some("parent".into());
+        touched.harness = "codex".into();
+        assert!(!exempts(Some("self"), &touched));
+    }
+}

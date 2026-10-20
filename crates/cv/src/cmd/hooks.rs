@@ -919,6 +919,20 @@ pub(crate) fn cmd_hook(name: HookName, harness: Option<String>) -> Result<()> {
     Ok(())
 }
 
+/// How a hook names a session to the `cv` commands it points at: a Claude id short, a Codex id
+/// whole (its time-ordered prefix is shared), any other harness-qualified.
+fn selector(harness: Harness, id: &str) -> String {
+    match harness {
+        Harness::Claude => short_id(id),
+        Harness::Codex => format!("codex:{id}"),
+        h => format!("{h}:{}", short_id(id)),
+    }
+}
+
+fn adapter_of(ev: &Event) -> Result<&'static dyn cv_core::harness::Adapter> {
+    cv_core::harness::rootless(ev.harness).with_context(|| format!("no {} adapter", ev.harness))
+}
+
 fn context(event: &str, text: String) -> Value {
     json!({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}})
 }
@@ -933,13 +947,6 @@ fn tail_text(path: &Path, bytes: u64) -> Option<String> {
     let mut buf = Vec::with_capacity((len - start) as usize);
     f.read_to_end(&mut buf).ok()?;
     Some(String::from_utf8_lossy(&buf).into_owned())
-}
-
-/// The newest `compact_boundary` record in a transcript's tail: `(trigger, preTokens)`. Reads
-/// the last [`COMPACT_TAIL_BYTES`] through the record codec, never the file — the
-/// large-transcript path of [`hook_compact`].
-fn last_boundary_in_tail(path: &Path) -> Result<Option<(Option<String>, Option<u64>)>> {
-    cv_core::harness::claude::last_compact_boundary(path, COMPACT_TAIL_BYTES)
 }
 
 fn not_recorded_yet(id: &str) -> Value {
@@ -958,19 +965,17 @@ fn not_recorded_yet(id: &str) -> Value {
 /// size exact, the index left to that view), so the hook stays inside its budget however
 /// long the session has run.
 fn hook_compact(ev: &Event) -> Result<Option<Value>> {
-    let codex = ev.harness == Harness::Codex;
     let Some(path) = ev.transcript() else {
         return Ok(None);
     };
-    let id = if codex {
-        format!("codex:{}", ev.session.id)
-    } else {
-        short_id(&ev.session.id)
-    };
+    let adapter = adapter_of(ev)?;
+    let id = selector(ev.harness, &ev.session.id);
+    // `cv rewind` writes a derived copy: only a harness with derived copies is pointed at it.
+    let rewinds = adapter.identity().is_some();
     let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     if size > COMPACT_FULL_SCAN_MAX {
         // A tail without a boundary (one far back in a long transcript) still gets the pointers.
-        let what = match if codex { None } else { last_boundary_in_tail(path)? } {
+        let what = match adapter.last_compact_boundary(path, COMPACT_TAIL_BYTES)? {
             Some((trigger, pre_tokens)) => format!(
                 " ({}, {})",
                 trigger.as_deref().unwrap_or("compaction"),
@@ -987,7 +992,7 @@ fn hook_compact(ev: &Event) -> Result<Option<Value>> {
                  boundaries with their message indexes; `cv show {id} --pre-compaction N` reads what the Nth discarded (`cv show \
                  {id} --kind prompt,answer --pre-compaction N` just its prompts); {rewind} \
                  {AFFORDANCE_POINTER}",
-                rewind = if codex { String::new() } else { format!("`cv rewind {id} --at <msg>` resumes the agent as of a message.") },
+                rewind = if rewinds { format!("`cv rewind {id} --at <msg>` resumes the agent as of a message.") } else { String::new() },
                 AFFORDANCE_POINTER = affordance_pointer(&id)
             ),
         )));
@@ -1007,7 +1012,7 @@ fn hook_compact(ev: &Event) -> Result<Option<Value>> {
         "context compacted ({trigger}, {pre}) at message {idx} — compaction #{k} of this session. \
          `cv show {id} --pre-compaction {k}` reads what was lost (`cv show {id} --kind prompt,answer --pre-compaction {k}` just its prompts)"
     );
-    if idx > 0 && !codex {
+    if idx > 0 && rewinds {
         text.push_str(&format!(
             "; `cv rewind {id} --at {}` resumes the agent as of before it.",
             idx - 1
@@ -1094,11 +1099,7 @@ fn hook_start(ev: &Event) -> Result<Option<Value>> {
             let commit = last_commit(&r.path)
                 .map(|s| format!(" · last commit {s}"))
                 .unwrap_or_default();
-            let id = match r.harness {
-                Harness::Claude => short_id(&r.id),
-                Harness::Codex => format!("codex:{}", r.id),
-                h => format!("{h}:{}", short_id(&r.id)),
-            };
+            let id = selector(r.harness, &r.id);
             lines.push(format!(
                 "- {id} · {} · {} msgs · {title}{commit}",
                 ago(r.updated_at.or(r.created_at)),
@@ -1161,81 +1162,20 @@ fn hook_decisions(_ev: &Event) -> Result<Option<Value>> {
     )))
 }
 
-/// The transcript behind an indexed session, without a scan: the catalog for a top-level id, the
-/// parent's `subagents/` dir for an `agent-…` id.
-fn transcript_of(t: &cv_core::events::TouchedSession) -> Option<PathBuf> {
-    if let Some(bare) = t.session_id.strip_prefix("agent-") {
-        let parent = cv_core::catalog::lookup(t.parent_id.as_deref()?, None)
-            .into_iter()
-            .next()?;
-        let dir = cv_core::harness::claude::sidecar::subagents_dir(&parent.path)?;
-        let direct = dir.join(format!("agent-{bare}.jsonl"));
-        if direct.exists() {
-            return Some(direct);
-        }
-        let wf = t.workflow.as_deref()?;
-        return Some(dir.join("workflows").join(wf).join(format!("agent-{bare}.jsonl")));
-    }
-    cv_core::catalog::lookup(&t.session_id, None)
-        .into_iter()
-        .find(|r| r.id == t.session_id)
-        .map(|r| r.path)
-}
-
 fn minutes_since_modified(path: &Path) -> Option<i64> {
     let m = std::fs::metadata(path).ok()?.modified().ok()?;
     Some(std::time::SystemTime::now().duration_since(m).ok()?.as_secs() as i64 / 60)
 }
 
-fn is_current_editor(t: &cv_core::events::TouchedSession, session_id: &str, agent_id: Option<&str>) -> bool {
-    t.harness == "claude"
-        && t.parent_id.as_deref().unwrap_or(&t.session_id) == session_id
-        && t.agent_id.as_deref() == agent_id
-}
-
-/// The root thread of a Codex session: each rollout's `parent_thread_id` header followed up
-/// through the catalog, the lane ledger's `start` rows standing in for a child the catalog has
-/// not indexed yet. A thread without a parent is its own root. Bounded, so a cyclic ledger ends.
-fn codex_root(id: &str, path: Option<&Path>, ledger: &[LaneEvent]) -> String {
-    let mut id = id.to_string();
-    let mut path = path.map(Path::to_path_buf);
-    for _ in 0..16 {
-        let registered = ledger
-            .iter()
-            .rev()
-            .find(|row| row.event == "start" && row.agent_id == id);
-        let parent = path
-            .as_deref()
-            // An unreadable child header falls back to the ledger's registration.
-            .and_then(|p| cv_core::harness::codex::hook_header(p).ok().flatten())
-            .and_then(|s| s.lineage.parent)
-            .or_else(|| registered.map(|row| row.session_id.clone()));
-        let Some(parent) = parent else { return id };
-        path = cv_core::catalog::lookup(&parent, Some(Harness::Codex))
-            .into_iter()
-            .find(|r| r.id == parent)
-            .map(|r| r.path)
-            .or_else(|| registered.and_then(|row| row.transcript_path.clone()));
-        id = parent;
-    }
-    id
-}
-
-/// `PreToolUse` (`Edit|Write`): `ask` when another live session edited this path — the edit
-/// index (`cv touched`) names the sessions, the catalog names their transcripts, one `stat` each
-/// says which are live. Nothing printed = allow. A Claude session's own lane is not another
-/// session; neither is any thread under a Codex session's root (its parent, its children), since
-/// Codex only takes `deny` and a swarm shares its files on purpose.
+/// `PreToolUse` (`Edit|Write`, Codex `apply_patch`): the harness's guard decision when another
+/// live writer edited this path. The edit index (`cv touched`) names the sessions, the catalog
+/// names their transcripts, one `stat` each says which are live, and [`cv_core::hooks::Guard`]'s
+/// lineage rule says which are this writer's own. Nothing printed = allow.
 fn hook_edit(ev: &Event) -> Result<Option<Value>> {
-    let codex = ev.harness == Harness::Codex;
-    let mut conflicts = Vec::new();
-    let my_agent = ev.agent.as_ref().map(|a| a.id.as_str());
-    let ledger = if codex {
-        cv_core::lanes::read_ledger()
-    } else {
-        Vec::new()
+    let Some(guard) = cv_core::hooks::Guard::of(ev) else {
+        return Ok(None);
     };
-    let my_root = codex.then(|| codex_root(&ev.session.id, ev.transcript(), &ledger));
+    let mut conflicts = Vec::new();
     for file in &ev.edits {
         let abs = if Path::new(file).is_absolute() {
             PathBuf::from(file)
@@ -1248,24 +1188,18 @@ fn hook_edit(ev: &Event) -> Result<Option<Value>> {
         };
         let mut live: Vec<(String, i64)> = Vec::new();
         for t in cv_core::events::sessions_editing(&abs.to_string_lossy()) {
-            if !codex && is_current_editor(&t, &ev.session.id, my_agent) {
+            let Some(path) = cv_core::hooks::transcript_of(&t) else {
+                continue;
+            };
+            if guard.exempts(&t, &path) {
                 continue;
             }
-            let Some(path) = transcript_of(&t) else { continue };
-            if let Some(root) = my_root.as_deref() {
-                if t.harness == "codex" && codex_root(&t.session_id, Some(&path), &ledger) == root {
-                    continue;
-                }
-            }
             if let Some(m) = minutes_since_modified(&path).filter(|m| *m <= LIVE_MINUTES) {
-                live.push((
-                    if t.harness == "codex" {
-                        format!("codex:{}", t.session_id)
-                    } else {
-                        short_id(&t.session_id)
-                    },
-                    m,
-                ));
+                let shown = match Harness::parse(&t.harness) {
+                    Some(h) => selector(h, &t.session_id),
+                    None => short_id(&t.session_id),
+                };
+                live.push((shown, m));
             }
         }
         if live.is_empty() {
@@ -1278,21 +1212,17 @@ fn hook_edit(ev: &Event) -> Result<Option<Value>> {
             n => format!(" (and {} more live session{})", n - 1, if n == 2 { "" } else { "s" }),
         };
         let shown = home_rel(&abs);
-        let reason = format!(
-        "cv: {shown} was edited by live session {} ({mins} min ago){more}. `cv show {} --last 10` shows its hand; proceed only if the edits do not collide.",
-        first,
-        first
-    );
-        conflicts.push(reason);
+        conflicts.push(format!(
+            "cv: {shown} was edited by live session {first} ({mins} min ago){more}. `cv show {first} --last 10` shows its hand; proceed only if the edits do not collide."
+        ));
     }
     if conflicts.is_empty() {
         return Ok(None);
     }
-    let reason = conflicts.join("\n");
     Ok(Some(json!({"hookSpecificOutput": {
         "hookEventName": "PreToolUse",
-        "permissionDecision": if codex { "deny" } else { "ask" },
-        "permissionDecisionReason": reason,
+        "permissionDecision": guard.decision.as_str(),
+        "permissionDecisionReason": conflicts.join("\n"),
     }})))
 }
 
@@ -1396,35 +1326,6 @@ mod tests {
     }
 
     #[test]
-    fn edit_conflicts_distinguish_parent_sibling_and_reused_agent_identities() {
-        let mut touched = cv_core::events::TouchedSession {
-            harness: "claude".into(),
-            session_id: "parent".into(),
-            title: None,
-            edits: 1,
-            reads: 0,
-            last_ts: None,
-            parent_id: None,
-            agent_id: None,
-            workflow: None,
-        };
-        assert!(is_current_editor(&touched, "parent", None));
-        assert!(
-            !is_current_editor(&touched, "parent", Some("self")),
-            "a child and parent are separate writers"
-        );
-        touched.session_id = "agent-self".into();
-        touched.parent_id = Some("parent".into());
-        touched.agent_id = Some("self".into());
-        assert!(is_current_editor(&touched, "parent", Some("self")));
-        assert!(!is_current_editor(&touched, "parent", Some("sibling")));
-        assert!(!is_current_editor(&touched, "parent", None));
-        assert!(!is_current_editor(&touched, "another-parent", Some("self")));
-        touched.harness = "codex".into();
-        assert!(!is_current_editor(&touched, "parent", Some("self")));
-    }
-
-    #[test]
     fn install_is_idempotent_and_remove_leaves_the_rest_untouched() {
         let theirs = json!({
             "theme": "dark",
@@ -1494,6 +1395,12 @@ mod tests {
         );
     }
 
+    fn claude_tail(p: &Path) -> Result<Option<(Option<String>, Option<u64>)>> {
+        cv_core::harness::rootless(Harness::Claude)
+            .unwrap()
+            .last_compact_boundary(p, COMPACT_TAIL_BYTES)
+    }
+
     #[test]
     fn the_large_transcript_path_reads_the_newest_boundary_from_the_tail() {
         let dir = std::env::temp_dir().join(format!("cv-hooks-{}", uuid::Uuid::now_v7()));
@@ -1506,14 +1413,11 @@ mod tests {
         // A user turn that merely quotes the word is not a boundary record.
         let quote = json!({"type": "user", "message": {"content": "grep \"compact_boundary\" x"}}).to_string();
         std::fs::write(&p, format!("{}\n{}\n{quote}\n", b("manual", 1), b("auto", 180_412))).unwrap();
-        assert_eq!(
-            last_boundary_in_tail(&p).unwrap(),
-            Some((Some("auto".into()), Some(180_412)))
-        );
+        assert_eq!(claude_tail(&p).unwrap(), Some((Some("auto".into()), Some(180_412))));
         std::fs::write(&p, format!("{}\n{quote}\n", b("auto", 5))).unwrap();
-        assert_eq!(last_boundary_in_tail(&p).unwrap(), Some((Some("auto".into()), Some(5))));
+        assert_eq!(claude_tail(&p).unwrap(), Some((Some("auto".into()), Some(5))));
         std::fs::write(&p, format!("{quote}\n")).unwrap();
-        assert_eq!(last_boundary_in_tail(&p).unwrap(), None);
+        assert_eq!(claude_tail(&p).unwrap(), None);
         std::fs::remove_dir_all(&dir).ok();
     }
 

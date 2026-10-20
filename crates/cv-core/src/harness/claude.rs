@@ -232,6 +232,18 @@ impl Adapter for Claude {
         hook::hook_event(payload)
     }
 
+    fn edit_guard_decision(&self) -> Option<crate::hooks::EditGuard> {
+        Some(crate::hooks::EditGuard::Ask)
+    }
+
+    fn agent_transcript(&self, parent: &SessionRef, agent_session: &str, workflow: Option<&str>) -> Option<PathBuf> {
+        hook::agent_transcript(&parent.path, agent_session, workflow)
+    }
+
+    fn last_compact_boundary(&self, transcript: &Path, tail: u64) -> Result<Option<(Option<String>, Option<u64>)>> {
+        last_compact_boundary(transcript, tail)
+    }
+
     fn identity(&self) -> Option<super::Identity> {
         Some(IDENTITY)
     }

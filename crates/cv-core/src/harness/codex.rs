@@ -142,6 +142,14 @@ impl Adapter for Codex {
         hook::hook_event(payload)
     }
 
+    fn edit_guard_decision(&self) -> Option<crate::hooks::EditGuard> {
+        Some(crate::hooks::EditGuard::Deny)
+    }
+
+    fn hook_lineage(&self, transcript: &Path) -> Result<Option<Lineage>> {
+        Ok(hook_header(transcript)?.map(|s| s.lineage))
+    }
+
     /// An app-server `FileChange` item, completed, records its edit in the Codex bag (code mode
     /// applies patches without an `apply_patch` call the transcript shows).
     fn native_edit<'m>(&self, m: &'m crate::ir::Message) -> Option<crate::events::NativeEdit<'m>> {

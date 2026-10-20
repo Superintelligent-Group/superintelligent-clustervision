@@ -6,6 +6,7 @@ use crate::hooks::{Agent, Event, Payload};
 use crate::ir::{Harness, SessionRef};
 use anyhow::Result;
 use serde_json::Value;
+use std::path::{Path, PathBuf};
 
 pub(super) fn hook_event(v: &Value) -> Result<Option<Event>> {
     let p = Payload::decode(v)?;
@@ -39,4 +40,19 @@ pub(super) fn hook_event(v: &Value) -> Result<Option<Event>> {
         agent,
         edits,
     }))
+}
+
+/// `subagents/agent-<id>.jsonl` beside the parent, else the `Workflow` run's copy.
+pub(super) fn agent_transcript(parent: &Path, agent_session: &str, workflow: Option<&str>) -> Option<PathBuf> {
+    let bare = agent_session.strip_prefix("agent-")?;
+    let dir = super::sidecar::subagents_dir(parent)?;
+    let direct = dir.join(format!("agent-{bare}.jsonl"));
+    if direct.exists() {
+        return Some(direct);
+    }
+    Some(
+        dir.join("workflows")
+            .join(workflow?)
+            .join(format!("agent-{bare}.jsonl")),
+    )
 }
