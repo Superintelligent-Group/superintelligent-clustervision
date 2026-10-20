@@ -46,8 +46,6 @@ use std::sync::OnceLock;
 /// Knobs for [`redact_with`]. Defaults scrub everything.
 #[derive(Debug, Clone, Default)]
 pub struct RedactOptions {
-    /// If `false` (the default), email addresses are redacted. Set `true` to keep them.
-    pub keep_emails: bool,
     /// Which classes of secret to scrub. Defaults to all of them; narrow it to scrub only some
     /// (e.g. only PEM private keys while leaving identities/fixtures intact).
     pub classes: RedactClasses,
@@ -347,7 +345,7 @@ impl Kind {
             Kind::Assignment => c.assignments,
             Kind::ApiKey => c.api_keys,
             Kind::Jwt => c.jwts,
-            Kind::Email => c.emails && !opts.keep_emails,
+            Kind::Email => c.emails,
             Kind::Blob => c.blobs,
         }
     }
@@ -819,7 +817,7 @@ mod tests {
     }
 
     #[test]
-    fn keep_emails_option() {
+    fn emails_class_off_keeps_emails() {
         let mut sess = empty_session();
         let mut m = Message::new(Role::User);
         m.content.push(Block::Text {
@@ -829,8 +827,10 @@ mod tests {
         let (out, _stats) = redact_with(
             &sess,
             &RedactOptions {
-                keep_emails: true,
-                ..Default::default()
+                classes: RedactClasses {
+                    emails: false,
+                    ..Default::default()
+                },
             },
         )
         .unwrap();
@@ -843,7 +843,6 @@ mod tests {
         // The exact ask: scrub PEM blocks, leave email/identity and api-key fixtures untouched.
         let opts = RedactOptions {
             classes: RedactClasses::parse_only("private_key").unwrap(),
-            ..Default::default()
         };
         let text = "mail me@example.com key sk-abcDEF1234567890ghijkl\n-----BEGIN PRIVATE KEY-----\nMIIBVgIBADANBgkqhkiG9w0BAQEFAASC\n-----END PRIVATE KEY-----\ndone";
         let mut stats = RedactStats::default();
