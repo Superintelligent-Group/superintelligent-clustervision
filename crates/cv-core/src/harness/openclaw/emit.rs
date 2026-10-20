@@ -27,9 +27,11 @@ mod stream;
 mod tests;
 
 /// IR [`Usage`](crate::ir::Usage) → OpenClaw's `usage{input, output, cacheRead, cacheWrite,
-/// totalTokens, cost{total}}`, reversing [`openclaw::parse_usage`]'s names. Only the fields present
-/// are written, so an OpenClaw source round-trips with the same key set; `None` when the turn
-/// carried no counts and no cost (nothing its reader would accept).
+/// cost{total}}`, reversing [`openclaw::parse_usage`]'s names. Only the fields present are written;
+/// `None` when the turn carried no counts and no cost (nothing its reader would accept).
+/// `totalTokens` is never written: the IR holds no recorded total, and OpenClaw's own reader
+/// (`normalizeUsage`, `computeUsageTokenTotals`) takes an absent total as input + output +
+/// cacheRead + cacheWrite.
 fn openclaw_usage(usage: Option<&crate::ir::Usage>) -> Option<Value> {
     let u = usage?;
     let mut m = Map::new();
@@ -46,14 +48,7 @@ fn openclaw_usage(usage: Option<&crate::ir::Usage>) -> Option<Value> {
     if let Some(c) = u.cost_usd {
         m.insert("cost".into(), json!({ "total": c }));
     }
-    if m.is_empty() {
-        return None;
-    }
-    m.insert(
-        "totalTokens".into(),
-        json!(u.input_tokens.unwrap_or(0).saturating_add(u.output_tokens.unwrap_or(0))),
-    );
-    Some(Value::Object(m))
+    (!m.is_empty()).then_some(Value::Object(m))
 }
 
 fn openclaw_short_id() -> String {

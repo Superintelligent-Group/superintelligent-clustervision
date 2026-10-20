@@ -77,6 +77,7 @@
 - `cv rewind`: an explicit cut omits a malformed later line while closing open calls; an unterminated last line asks for a rerun.
 - `cv rewind` refuses a bodyless turn record only when re-emitting (`--thinking portable`) would drop it; a native copy keeps it.
 - `cv port` to Codex writes the source's recorded `cli_version`, or Codex's empty unknown, instead of cv's own version.
+- `cv port` to OpenClaw no longer writes `usage.totalTokens`; OpenClaw derives the total from the recorded counts.
 
 **Doctor and hooks.**
 - `cv doctor` adds a Writer versions row: the newest Claude/Codex version seen in the stores versus the newest the corpus verified, plus unknown sessions.

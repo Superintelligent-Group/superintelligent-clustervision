@@ -2,17 +2,21 @@ use super::*;
 use crate::{harness::wire::anthropic, Json, Message, Origin};
 use std::collections::HashMap;
 
+/// Only recorded counts are written; OpenClaw derives the total it is not given.
 #[test]
-fn derived_usage_total_saturates_instead_of_panicking_or_wrapping() {
+fn usage_writes_recorded_counts_and_no_total() {
     let usage = crate::Usage {
         input_tokens: Some(u64::MAX),
         output_tokens: Some(1),
         ..Default::default()
     };
     let value = openclaw_usage(Some(&usage)).unwrap();
-    assert_eq!(value["input"], json!(u64::MAX));
-    assert_eq!(value["output"], json!(1));
-    assert_eq!(value["totalTokens"], json!(u64::MAX));
+    assert_eq!(value, json!({"input": u64::MAX, "output": 1}));
+    let cost_only = crate::Usage {
+        cost_usd: Some(0.5),
+        ..Default::default()
+    };
+    assert_eq!(openclaw_usage(Some(&cost_only)).unwrap(), json!({"cost": {"total": 0.5}}));
 }
 
 fn normalized(path: &Path) -> Result<Vec<u8>> {
