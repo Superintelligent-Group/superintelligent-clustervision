@@ -243,61 +243,6 @@ mod tests {
             .with_view(|view| Ok(view.source_text()?.unwrap()))
             .unwrap()
     }
-    fn old_md_block(b: &Block, out: &mut String) -> anyhow::Result<()> {
-        match b {
-            Block::Text { text } => {
-                out.push_str(text);
-                out.push_str("\n\n");
-            }
-            Block::Thinking { text, .. } => {
-                out.push_str("> 🧠 ");
-                out.push_str(&text.replace('\n', "\n> "));
-                out.push_str("\n\n");
-            }
-            Block::ToolUse { name, input, .. } => {
-                out.push_str(&format!("**🔧 {name}**\n\n```json\n"));
-                crate::projection::append_json(out, input)?;
-                out.push_str("\n```\n\n");
-            }
-            Block::ToolResult { content, is_error, .. } => {
-                out.push_str(&format!(
-                    "**↩ result{}**\n\n```\n{}\n```\n\n",
-                    if *is_error { " (error)" } else { "" },
-                    {
-                        let mut excerpt: String = content.chars().take(4000).collect();
-                        if content.chars().count() > 4000 {
-                            excerpt.pop();
-                            excerpt.push('…');
-                        }
-                        excerpt
-                    }
-                ));
-            }
-            Block::File { path, source, .. } => {
-                out.push_str(&format!("_[file: {}]_\n\n", file_label(path, source)));
-            }
-            Block::Image { .. } => out.push_str("_[image]_\n\n"),
-        }
-        Ok(())
-    }
-
-    fn old_markdown(session: &Session) -> String {
-        let mut out = md_header(
-            &session.label(),
-            session.harness,
-            &session.id,
-            session.cwd.as_deref(),
-            session.model.as_deref(),
-            session.created_at,
-        );
-        for message in &session.messages {
-            out.push_str(&format!("## {}\n\n", turn_label(message)));
-            for block in &message.content {
-                old_md_block(block, &mut out).unwrap();
-            }
-        }
-        out
-    }
     #[test]
     fn markdown_title_skips_empty_user_turns_and_propagates_candidate_errors() -> anyhow::Result<()> {
         let mut session = Session::new("title", Harness::Codex);
@@ -427,13 +372,21 @@ mod tests {
         let resolver = session.resolver();
         let mut markdown = Vec::new();
         write_markdown(&session, &mut markdown, &resolver).unwrap();
-        assert_eq!(markdown, old_markdown(&owned).as_bytes());
-        assert_eq!(to_markdown(&session).unwrap(), old_markdown(&owned));
+        assert_eq!(to_markdown(&session).unwrap().as_bytes(), markdown);
+        let mut frozen = crate::emit::frozen::Frozen::new("render-markdown");
+        frozen.insert(
+            "titled",
+            serde_json::json!([markdown.len(), crate::digest::sha256_hex(&markdown)]),
+        );
         session.title = None;
         owned.title = None;
         markdown.clear();
         write_markdown(&session, &mut markdown, &resolver).unwrap();
-        assert_eq!(markdown, old_markdown(&owned).as_bytes());
+        frozen.insert(
+            "untitled",
+            serde_json::json!([markdown.len(), crate::digest::sha256_hex(&markdown)]),
+        );
+        frozen.check().unwrap();
         let mut compact = Vec::new();
         session.write_json(&mut compact, &resolver).unwrap();
         assert_eq!(compact, serde_json::to_vec(&owned).unwrap());
