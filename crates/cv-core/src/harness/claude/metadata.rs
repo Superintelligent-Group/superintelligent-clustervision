@@ -168,13 +168,13 @@ mod tests {
     use super::*;
 
     /// What the retired owned discovery reducer produced for `bytes`, frozen before it was
-    /// deleted (`tests/fixtures/claude/discovery-frozen.jsonl`, keyed by the bytes' sha256): the
+    /// deleted (`tests/fixtures/claude-discovery-frozen.jsonl`, keyed by the bytes' sha256): the
     /// `SessionRef` without its path. Its count deliberately did not parse content, and its
     /// cwd/timestamps include metadata-only records, unlike the conversational parser.
     fn frozen(bytes: &[u8]) -> Value {
         static FROZEN: std::sync::OnceLock<std::collections::HashMap<String, Value>> = std::sync::OnceLock::new();
         let frozen = FROZEN.get_or_init(|| {
-            include_str!("../../../tests/fixtures/claude/discovery-frozen.jsonl")
+            include_str!("../../../tests/fixtures/claude-discovery-frozen.jsonl")
                 .lines()
                 .map(|line| {
                     let mut entry: Value = serde_json::from_str(line).unwrap();
