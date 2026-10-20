@@ -162,6 +162,9 @@ impl std::fmt::Display for ThinkingMode {
 /// Registered writers must accept guarded lazy fields and apply thinking policy per block.
 type EmitFn = fn(&Session, &Path, &EmitOptions) -> Result<EmitResult>;
 
+/// A check an emitter runs on what it wrote (the written path, the sub-agent id it wrote as).
+type VerifyFn = fn(&Path, Option<&str>) -> Result<()>;
+
 /// The ONE emit registry: which harnesses can be written, and by what. [`emit`] dispatches through
 /// it and [`supported_targets`] is derived from it, so the dispatcher and the CLI's `--to` list can
 /// never drift apart. Adding a target = adding an arm here (nothing else to keep in sync).
@@ -182,11 +185,49 @@ fn emitter_for(target: Harness) -> Option<EmitFn> {
         // Qwen Code 0.25's session JSONL (`~/.qwen/projects/<cwd>/chats/<id>.jsonl`), not the
         // gemini-cli recording it no longer reads.
         Harness::Qwen => crate::harness::qwen::emit,
+        #[cfg(not(feature = "sqlite"))]
+        Harness::Hermes => return None,
         // Parse-only harnesses (Cursor, Goose, desktop apps, …) aren't conversion targets. Kimi
         // (`~/.kimi`) is not one either: kimi-cli froze that store in 2026-06 and migrates it to
         // `~/.kimi-code` on open, so a session written there was a port to nowhere.
-        _ => return None,
+        Harness::Cursor
+        | Harness::Goose
+        | Harness::Zed
+        | Harness::Devin
+        | Harness::Kimi
+        | Harness::KimiCode
+        | Harness::ChatGptExport
+        | Harness::ClaudeExport
+        | Harness::OpenSession => return None,
     })
+}
+
+/// The check [`emit_report`] runs on what `target`'s emitter wrote, where the emitter owns one:
+/// Claude's resumability rules.
+fn verifier_for(target: Harness) -> Option<VerifyFn> {
+    match target {
+        Harness::Claude => Some(verify_claude_resumable),
+        Harness::Codex
+        | Harness::Grok
+        | Harness::OpenCode
+        | Harness::OpenClaw
+        | Harness::Gemini
+        | Harness::Hermes
+        | Harness::LmStudio
+        | Harness::Cline
+        | Harness::Roo
+        | Harness::Continue
+        | Harness::Qwen
+        | Harness::Cursor
+        | Harness::Goose
+        | Harness::Zed
+        | Harness::Devin
+        | Harness::Kimi
+        | Harness::KimiCode
+        | Harness::ChatGptExport
+        | Harness::ClaudeExport
+        | Harness::OpenSession => None,
+    }
 }
 
 /// Emit `session` into `target`'s native format under `out_dir` (the target harness's storage root,
@@ -411,9 +452,9 @@ pub fn emit_report(
 ) -> Result<(EmitResult, FidelityReport)> {
     let before = source_features(target, opts.thinking, session)?;
     let result = emit(session, target, out_dir, opts)?;
-    // The emitter owns resumability for Claude; assert the three rules on what it wrote.
-    if target == Harness::Claude {
-        verify_claude_resumable(&result.path, opts.sidechain_of.as_ref().map(|(_, a)| a.as_str()))?;
+    // An emitter that owns a check on its output (Claude's three resumability rules) runs it.
+    if let Some(verify) = verifier_for(target) {
+        verify(&result.path, opts.sidechain_of.as_ref().map(|(_, a)| a.as_str()))?;
     }
     // Re-parse at the fidelity the SOURCE was parsed at. `cv port` parses a same-harness rehome
     // format-complete (`port::parse_for_emit`), and re-parsing that plainly compared a complete

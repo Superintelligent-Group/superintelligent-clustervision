@@ -27,7 +27,7 @@ const ALLOWLIST: &[(&str, usize)] = &[
     ("affordance/text.rs", 2),
     ("dataset.rs", 1),
     ("distill.rs", 1),
-    ("emit.rs", 15),
+    ("emit.rs", 2),
     ("emit/fidelity.rs", 22),
     ("emit/fidelity/accumulator.rs", 5),
     ("lanes.rs", 4),
