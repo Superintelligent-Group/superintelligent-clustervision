@@ -1401,7 +1401,7 @@ fn clear_resume_usage(message: &mut Message) {
 /// usage stripped (so a resume gate never reads the source's stale near-limit size), oversized
 /// results clipped with a `cv cat` pointer, queued messages turned into user turns, harness-only
 /// records dropped. A trailing call with no result stays here (the pack shows the lane stopped
-/// mid-call); the Claude emitter drops it from a resumable session (`harness::claude::emit::make_resumable`).
+/// mid-call); the Claude emitter drops it from a resumable session (`harness::claude::emit::emit`).
 fn resumable_tail(
     msgs: &[Message],
     tail_start: usize,
@@ -1553,7 +1553,7 @@ pub fn resume_preamble(d: &Distilled, keep_last: usize) -> String {
 /// The caller emits it (as a session, or as a sub-agent of a root) with the Claude emitter, which
 /// owns the resumability rules: the first tail turn's parent names a record the tail does not
 /// carry and is re-linked to the opening prompt, a hook attachment's child is re-linked over the
-/// gap, an unanswered trailing call is dropped (`harness::claude::emit::make_resumable`). This is a selector.
+/// gap, an unanswered trailing call is dropped (`harness::claude::emit::emit`). This is a selector.
 pub fn resumable_session(session: &Session, d: &Distilled, opts: &DistillOptions) -> anyhow::Result<Session> {
     let tail = resumable_tail(
         &session.messages,

@@ -790,7 +790,6 @@ mod tests {
 
     #[test]
     fn claude_checked_writer_matches_legacy_payloads_metadata_and_resumability() -> Result<()> {
-        use crate::harness::claude::emit::emit_legacy;
         let world = crate::test_world("claude-checked-legacy");
         let text_path = world.base.join("text.json");
         let args_path = world.base.join("args.json");
@@ -918,6 +917,7 @@ mod tests {
         ];
         session.messages.push(future);
         // Portable is a new wire policy; frozen legacy dispatch has no corresponding oracle.
+        let mut frozen = crate::emit::frozen::Frozen::new("claude-checked-writer");
         for mode in [ThinkingMode::Native, ThinkingMode::Text, ThinkingMode::Drop] {
             for sidechain in [None, Some(("root".to_owned(), "agent".to_owned()))] {
                 let opts = EmitOptions {
@@ -926,19 +926,6 @@ mod tests {
                     sidechain_of: sidechain,
                     ..Default::default()
                 };
-                // This oracle models old dispatch. Legacy direct calls ignored thinking options.
-                let mut owned = session.clone();
-                owned.materialize()?;
-                if mode != ThinkingMode::Native {
-                    apply_thinking_mode(&mut owned, Harness::Claude, mode);
-                }
-                let old = emit_legacy(
-                    &owned,
-                    &world
-                        .base
-                        .join(format!("old-{}-{}", mode.as_str(), opts.sidechain_of.is_some())),
-                    &opts,
-                )?;
                 let new = emit(
                     &session,
                     Harness::Claude,
@@ -947,13 +934,12 @@ mod tests {
                         .join(format!("new-{}-{}", mode.as_str(), opts.sidechain_of.is_some())),
                     &opts,
                 )?;
-                assert_eq!(
-                    fs::read(&old.path)?,
-                    fs::read(&new.path)?,
-                    "mode={mode:?}, sidechain={:?}",
-                    opts.sidechain_of
-                );
                 verify_claude_resumable(&new.path, opts.sidechain_of.as_ref().map(|(_, a)| a.as_str()))?;
+                let bytes = fs::read(&new.path)?;
+                frozen.insert(
+                    format!("{}-{}", mode.as_str(), opts.sidechain_of.is_some()),
+                    json!([bytes.len(), crate::digest::sha256_hex(&bytes)]),
+                );
                 let direct = crate::harness::claude::emit::emit(
                     &session,
                     &world
@@ -968,12 +954,14 @@ mod tests {
                 );
             }
         }
+        frozen.check()?;
         Ok(())
     }
 
     #[test]
     fn claude_checked_writer_type_and_content_only_overrides_match_old_dispatch() -> Result<()> {
         let world = crate::test_world("claude-extra-overrides");
+        let mut frozen = crate::emit::frozen::Frozen::new("claude-extra-overrides");
         for (case, role, override_content) in [
             (0, Role::Assistant, false),
             (1, Role::User, false),
@@ -1014,16 +1002,19 @@ mod tests {
                 new_id: Some("fixed-id".into()),
                 ..Default::default()
             };
-            let old =
-                crate::harness::claude::emit::emit_legacy(&session, &world.base.join(format!("old-{case}")), &opts)?;
             let new = emit(
                 &session,
                 Harness::Claude,
                 &world.base.join(format!("new-{case}")),
                 &opts,
             )?;
-            assert_eq!(fs::read(old.path)?, fs::read(new.path)?, "case {case}");
+            let bytes = fs::read(&new.path)?;
+            frozen.insert(
+                format!("case-{case}"),
+                json!([bytes.len(), crate::digest::sha256_hex(&bytes)]),
+            );
         }
+        frozen.check()?;
         Ok(())
     }
 

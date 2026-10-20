@@ -7,7 +7,7 @@
 //! you `emit` into any harness.
 //!
 //! Splice is a **selector**: it chooses messages and nothing more. Threading, open tool calls and
-//! sidechain identity are the Claude emitter's rules (`harness::claude::emit::make_resumable`): a span's source
+//! sidechain identity are the Claude emitter's rules (`harness::claude::emit::emit`): a span's source
 //! parents that still resolve are kept, the cut points are re-linked, a span lifted from a sub-agent
 //! joins the main thread. `cv splice` calls this.
 
@@ -171,7 +171,7 @@ pub(crate) mod tests {
         assert_eq!(texts(&spliced), vec!["A#1", "A#2", "B#0", "B#1"]);
 
         // (b) a selector copies messages as they are: source ids and parents ride along, and the
-        // emitter re-links the cut points (`harness::claude::emit::make_resumable`).
+        // emitter re-links the cut points (`harness::claude::emit::emit`).
         assert_eq!(spliced.messages[0].id.as_deref(), Some("A-m1"));
         assert_eq!(spliced.messages[0].parent_id.as_deref(), Some("A-m0"));
         assert_eq!(spliced.messages[2].parent_id, None);

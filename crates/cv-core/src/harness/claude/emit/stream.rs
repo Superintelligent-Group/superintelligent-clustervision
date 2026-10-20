@@ -869,9 +869,11 @@ mod parent_tests {
             new_id: Some("destination".into()),
             ..Default::default()
         };
-        let old = super::super::emit_legacy(&session, &world.base.join("old"), &opts)?;
         let new = emit(&session, &world.base.join("new"), &opts)?;
-        assert_eq!(fs::read(old.path)?, fs::read(&new.path)?);
+        let bytes = fs::read(&new.path)?;
+        let mut frozen = crate::emit::frozen::Frozen::new("claude-parent-fanout");
+        frozen.insert("destination", json!([bytes.len(), crate::digest::sha256_hex(&bytes)]));
+        frozen.check()?;
         super::super::verify_claude_resumable(&new.path, None)?;
         Ok(())
     }

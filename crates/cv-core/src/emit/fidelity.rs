@@ -307,7 +307,7 @@ pub(crate) fn unrepresentable(target: Harness, thinking: ThinkingMode, m: &Messa
 #[cfg(test)]
 pub(super) fn features(target: Harness, thinking: ThinkingMode, session: &Session) -> Features {
     let mut f = Features::default();
-    // The Claude emitter drops a `tool_use` the transcript never answered (`make_resumable`, rule
+    // The Claude emitter drops a `tool_use` the transcript never answered (`claude::emit`, rule
     // 1), and an assistant turn that held nothing else goes with it. That is the format's
     // resumability rule, not a loss the target could have avoided, so the verifier compares both
     // sides without them. For every other target the set is unused.
