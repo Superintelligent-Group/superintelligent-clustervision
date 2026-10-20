@@ -647,7 +647,7 @@ fn replay(
     source.check()?;
     s.model = st.session_model.take();
     s.title = st.title.take().or(st.first_prompt.take());
-    super::note_skipped_lines(&mut s, st.skipped);
+    super::Unparsed(st.skipped).note(&mut s);
     Ok(Some(s))
 }
 

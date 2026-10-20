@@ -477,7 +477,7 @@ pub fn parse_str(id: &str, text: &str, is_jsonl: bool, source_path: Option<PathB
             }
             Ok(Flow::Continue)
         });
-        super::note_skipped_lines(&mut s, skipped);
+        super::Unparsed(skipped).note(&mut s);
     } else if let Ok(root) = serde_json::from_str::<Value>(text) {
         let root = JsonView::from(&root);
         let mut reader = Reader {
@@ -802,7 +802,7 @@ fn read(
         }
         Ok(Flow::Continue)
     })?;
-    super::note_skipped_lines(&mut s, skipped);
+    super::Unparsed(skipped).note(&mut s);
     if !stopped {
         // EOF: emit the held trailing message, if any (no token_count followed it).
         for m in scratch.drain(..) {

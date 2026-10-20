@@ -521,7 +521,7 @@ fn stream_wire(
         s.harness_extra_mut(Harness::KimiCode)
             .insert("protocol_version".into(), Value::String(pv));
     }
-    super::note_skipped_lines(&mut s, skipped);
+    super::Unparsed(skipped).note(&mut s);
     Ok(Some(s))
 }
 

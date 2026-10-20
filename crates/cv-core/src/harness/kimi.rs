@@ -583,7 +583,7 @@ fn stream_context(
     if ctx.checkpoints > 0 {
         crate::affordance::note_checkpoints(s.harness_extra_mut(Harness::Kimi), ctx.checkpoints, []);
     }
-    super::note_skipped_lines(&mut s, prior_skipped + skipped);
+    super::Unparsed(prior_skipped + skipped).note(&mut s);
     Ok(s)
 }
 

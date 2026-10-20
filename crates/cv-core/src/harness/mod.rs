@@ -159,7 +159,9 @@ pub(crate) fn note_skipped_lines(s: &mut Session, skipped: u64) {
 pub(crate) struct Unparsed(pub(crate) u64);
 
 impl Unparsed {
-    /// One record that decoded to nothing.
+    /// One record that decoded to nothing. (Its callers today are SQLite stores; the line
+    /// readers carry their count in resumable state and hand it to [`Unparsed::note`].)
+    #[cfg_attr(not(feature = "sqlite"), allow(dead_code))]
     pub(crate) fn count(&mut self) {
         self.0 += 1;
     }

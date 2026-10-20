@@ -1313,7 +1313,7 @@ fn stream_sqlite(r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> R
             }
         }
         let mut s = fold.finish(sink);
-        super::note_skipped_lines(&mut s, skipped);
+        super::Unparsed(skipped).note(&mut s);
         Ok(s)
     })
 }

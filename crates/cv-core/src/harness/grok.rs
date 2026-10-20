@@ -472,7 +472,7 @@ fn stream_history_at(
         // Held reasoning is delivered after lines() already performed its completion check.
         read.check()?;
     }
-    super::note_skipped_lines(&mut s, skipped);
+    super::Unparsed(skipped).note(&mut s);
     Ok(Some(s))
 }
 

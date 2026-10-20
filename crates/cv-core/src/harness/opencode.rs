@@ -846,7 +846,7 @@ mod db {
             s.harness_extra_mut(Harness::OpenCode)
                 .insert("unknown_message_types".into(), json!(unknown));
         }
-        super::super::note_skipped_lines(&mut s, unreadable);
+        super::super::Unparsed(unreadable).note(&mut s);
         Ok(s)
     }
     #[cfg(test)]
