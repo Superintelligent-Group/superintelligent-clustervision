@@ -195,8 +195,10 @@ impl Searcher {
         });
         found.hits.truncate(limit);
         if source == Source::Index {
-            if let Err(e) = fts::enrich_text_snippets(&dir, query, filter.scope, &mut found.hits) {
-                found.notes.push(Note::SnippetsUnavailable(format!("{e:#}")));
+            match fts::enrich_text_snippets(&dir, query, filter.scope, &mut found.hits) {
+                Ok(None) => {}
+                Ok(Some(why)) => found.notes.push(Note::SnippetsUnavailable(why)),
+                Err(e) => found.notes.push(Note::SnippetsUnavailable(format!("{e:#}"))),
             }
             // Named on hits and misses: a hit list can be missing rows, not only an empty one.
             if let Some(stale) = fts::staleness_note(&dir) {

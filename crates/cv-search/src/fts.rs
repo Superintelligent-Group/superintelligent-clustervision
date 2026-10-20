@@ -2926,20 +2926,22 @@ fn matching_ids(index: &Index, f: &Fields, searcher: &tantivy::Searcher, query: 
 }
 
 /// Add live snippets to selected ranked hits. Only these source transcripts are read; unavailable
-/// sources keep their stored preview, with the same moved-file annotation as [`text_search`].
-pub fn enrich_text_snippets(dir: &Path, query: &str, scope: crate::Scope, hits: &mut [Hit]) -> Result<()> {
+/// sources keep their stored preview, with the same moved-file annotation as [`text_search`]. A
+/// source that is there but cannot be read is counted into the returned note (`None`: none was).
+pub fn enrich_text_snippets(dir: &Path, query: &str, scope: crate::Scope, hits: &mut [Hit]) -> Result<Option<String>> {
     if hits.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     let (index, f) = open_existing(dir)?;
     let reader = index.reader().context("opening index reader")?;
     let searcher = reader.searcher();
+    let (mut unreadable, mut first) = (0usize, None);
     for hit in hits {
         let doc = meta_doc(&searcher, &f, &hit.id);
         let path = doc.as_ref().and_then(|d| d.get_first(f.path)).and_then(|v| v.as_str());
         // The stored preview stands in when the live read cannot: marked when the source is
-        // gone, said once on stderr when it is there but cannot be read. A hit whose meta doc
-        // names no path (a legacy body-only index) keeps its preview unmarked.
+        // gone, returned as the search's note when it is there but cannot be read. A hit whose
+        // meta doc names no path (a legacy body-only index) keeps its preview unmarked.
         let Some(path) = path else { continue };
         match live_snippet(path, &hit.harness, query, scope) {
             Ok(snippet) if !snippet.is_empty() => hit.snippet = snippet,
@@ -2952,11 +2954,12 @@ pub fn enrich_text_snippets(dir: &Path, query: &str, scope: crate::Scope, hits: 
                 };
             }
             Err(error) => {
-                cv_core::env::warn_once("live search snippets", format!("{} ({}): {error:#}", hit.id, hit.harness));
+                unreadable += 1;
+                first.get_or_insert_with(|| format!("{} ({}): {error:#}", hit.id, hit.harness));
             }
         }
     }
-    Ok(())
+    Ok(first.map(|first| format!("{unreadable} hit(s), first {first}")))
 }
 
 /// Run a full-text query, returning up to `limit` hits ranked by BM25, each with a live snippet and
@@ -2967,6 +2970,9 @@ pub fn enrich_text_snippets(dir: &Path, query: &str, scope: crate::Scope, hits: 
 ///
 /// The query supports tantivy's syntax: bare terms search title+body+cwd, and fielded terms like
 /// `harness:claude`, phrases `"foo bar"`, and booleans `a AND b` work too.
+///
+/// A hit whose present source cannot be read keeps its preview here; [`crate::Searcher::search`]
+/// is the door that reports it (`Note::SnippetsUnavailable`).
 pub fn text_search(dir: &Path, query: &str, limit: usize) -> Result<Vec<Hit>> {
     let mut hits = text_search_indexed(dir, query, limit)?;
     enrich_text_snippets(dir, query, crate::Scope::Exchange, &mut hits)?;

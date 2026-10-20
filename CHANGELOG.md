@@ -133,7 +133,7 @@
 - Cline and Roo: an unreadable task history errors instead of reading empty; history items that do not decode count as `skipped_lines`.
 - Goose and Zed count message cells, legacy lines and thread blobs that do not decode as `skipped_lines`.
 - A Hermes read whose compression continuation cannot be queried errors instead of dropping `continued_in`.
-- `cv index`/`cv search` stderr speaks as `cv:` only; a hit whose source cannot be read says so once instead of silently showing its preview.
+- `cv index`/`cv search` stderr speaks as `cv:` only; a hit whose source cannot be read is named in the search's note, not silently previewed.
 - An unreadable or malformed `config.toml` is said once per process (`cv: the config file unavailable…`) and no longer read as absent silently.
 - cv no longer mentions a leftover pre-0.9.12 `discover.json`; delete it by hand if one remains.
 - **Breaking:** a `-q` with `text:` and no full-text index exits 2 naming `cv index` (`/api/stats`: 503) instead of matching nothing.
