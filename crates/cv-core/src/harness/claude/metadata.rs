@@ -129,29 +129,30 @@ impl Scan {
             self.session.created_at = Some(self.session.created_at.map_or(ts, |old| old.min(ts)));
             self.session.updated_at = Some(self.session.updated_at.map_or(ts, |old| old.max(ts)));
         }
-        // Discovery already reads every record's head, so the turn count is free here: user and
-        // assistant records, minus synthetic assistants (API errors and `<synthetic>` replies),
-        // the same rule the conversational parser applies.
-        if matches!(ty.as_str(), "user" | "assistant") {
-            let synthetic = ty == "assistant"
-                && (fields
-                    .get("isApiErrorMessage")
-                    .map(|v| v.as_bool())
+        // Discovery already reads every record's head, so the turn count is free here: the
+        // codec's one turn rule (user and assistant records, minus synthetic assistants). Only an
+        // assistant's error flag and model are read.
+        let (mut api_error, mut model) = (false, None);
+        if ty == "assistant" {
+            api_error = fields
+                .get("isApiErrorMessage")
+                .map(|v| v.as_bool())
+                .transpose()?
+                .flatten()
+                == Some(true);
+            if !api_error {
+                if let Some(message) = fields
+                    .get("message")
+                    .map(|m| Fields::parse(m, &["model"]))
                     .transpose()?
                     .flatten()
-                    == Some(true)
-                    || match fields
-                        .get("message")
-                        .map(|m| Fields::parse(m, &["model"]))
-                        .transpose()?
-                        .flatten()
-                    {
-                        Some(message) => message.string("model")?.as_deref() == Some(SYNTHETIC_MODEL),
-                        None => false,
-                    });
-            if !synthetic {
-                self.session.message_count = self.session.message_count.map(|n| n + 1);
+                {
+                    model = message.string("model")?;
+                }
             }
+        }
+        if record::is_turn(&ty, api_error, model.as_deref()) {
+            self.session.message_count = self.session.message_count.map(|n| n + 1);
         }
         Ok(())
     }
@@ -166,53 +167,43 @@ impl Scan {
 mod tests {
     use super::*;
 
-    // The former discovery reducer is the oracle: its count deliberately does not parse content,
-    // and cwd/timestamps still include metadata-only records unlike the conversational parser.
-    fn owned(path: &Path, bytes: &[u8]) -> SessionRef {
-        let mut out = Scan::new(path);
-        for v in bytes
-            .split(|byte| *byte == b'\n')
-            .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
-        {
-            let ty = v.get("type").and_then(Value::as_str).unwrap_or("");
-            if ty == "custom-title" {
-                if let Some(t) = v.get("customTitle").and_then(Value::as_str) {
-                    out.session.title = Some(t.into());
-                    out.custom_title = true;
-                }
-            }
-            if ty == "ai-title" && !out.custom_title {
-                if let Some(t) = v.get("aiTitle").and_then(Value::as_str) {
-                    out.session.title = Some(t.into());
-                }
-            }
-            if out.session.cwd.is_none() {
-                out.session.cwd = v.get("cwd").and_then(Value::as_str).map(PathBuf::from);
-            }
-            if let Some(ts) = v.get("timestamp").and_then(Value::as_str).and_then(parse_ts) {
-                out.session.created_at = Some(out.session.created_at.map_or(ts, |c| c.min(ts)));
-                out.session.updated_at = Some(out.session.updated_at.map_or(ts, |u| u.max(ts)));
-            }
-            let synthetic = ty == "assistant"
-                && (v.get("isApiErrorMessage").and_then(Value::as_bool) == Some(true)
-                    || v.pointer("/message/model").and_then(Value::as_str) == Some(SYNTHETIC_MODEL));
-            if matches!(ty, "user" | "assistant") && !synthetic {
-                out.session.message_count = out.session.message_count.map(|n| n + 1);
-            }
-        }
-        out.finish()
+    /// What the retired owned discovery reducer produced for `bytes`, frozen before it was
+    /// deleted (`tests/fixtures/claude/discovery-frozen.jsonl`, keyed by the bytes' sha256): the
+    /// `SessionRef` without its path. Its count deliberately did not parse content, and its
+    /// cwd/timestamps include metadata-only records, unlike the conversational parser.
+    fn frozen(bytes: &[u8]) -> Value {
+        static FROZEN: std::sync::OnceLock<std::collections::HashMap<String, Value>> = std::sync::OnceLock::new();
+        let frozen = FROZEN.get_or_init(|| {
+            include_str!("../../../tests/fixtures/claude/discovery-frozen.jsonl")
+                .lines()
+                .map(|line| {
+                    let mut entry: Value = serde_json::from_str(line).unwrap();
+                    let sha = entry["sha256"].as_str().unwrap().to_owned();
+                    (sha, entry["session"].take())
+                })
+                .collect()
+        });
+        let mut digest = crate::digest::Sha256::new();
+        digest.update(bytes);
+        let sha = digest.finish_hex();
+        frozen
+            .get(&sha)
+            .cloned()
+            .unwrap_or_else(|| panic!("no frozen reading for {sha}"))
+    }
+
+    /// A discovered `SessionRef` as the frozen readings hold it: without the path.
+    fn reading(session: SessionRef) -> Value {
+        let mut value = serde_json::to_value(session).unwrap();
+        value.as_object_mut().unwrap().remove("path");
+        value
     }
 
     fn check(path: &Path, bytes: &[u8]) {
         let world = crate::test_world("claude-discovery-oracle");
         let file = world.base.join(path.file_name().unwrap());
         fs::write(&file, bytes).unwrap();
-        assert_eq!(
-            serde_json::to_value(scan(&file).unwrap()).unwrap(),
-            serde_json::to_value(owned(&file, bytes)).unwrap(),
-            "{}",
-            path.display()
-        );
+        assert_eq!(reading(scan(&file).unwrap()), frozen(bytes), "{}", path.display());
     }
 
     #[cfg(feature = "sqlite")]
@@ -262,20 +253,14 @@ mod tests {
             let old = format!("{prefix}{tail}");
             fs::write(&path, &old).unwrap();
             let (before, cp) = scan_at(&path, None).unwrap();
-            assert_eq!(
-                serde_json::to_value(before).unwrap(),
-                serde_json::to_value(owned(&path, old.as_bytes())).unwrap()
-            );
+            assert_eq!(reading(before), frozen(old.as_bytes()));
             let cp = cp.unwrap();
             assert_eq!(cp.offset, prefix.len() as u64);
             let grown = format!("{old}{appended}");
             fs::write(&path, &grown).unwrap();
             FRAMED.with(|frames| frames.borrow_mut().clear());
             let (resumed, next) = scan_at(&path, Some(&cp)).unwrap();
-            assert_eq!(
-                serde_json::to_value(resumed).unwrap(),
-                serde_json::to_value(owned(&path, grown.as_bytes())).unwrap()
-            );
+            assert_eq!(reading(resumed), frozen(grown.as_bytes()));
             assert_eq!(
                 FRAMED.with(|frames| frames.borrow().clone()),
                 vec![(cp.offset, (grown.len() - prefix.len()) as u64)]
@@ -297,8 +282,8 @@ mod tests {
                     .unwrap();
                 FRAMED.with(|frames| frames.borrow_mut().clear());
                 assert_eq!(
-                    serde_json::to_value(cached_metadata(&path, false).unwrap()).unwrap(),
-                    serde_json::to_value(owned(&path, grown.as_bytes())).unwrap()
+                    reading(cached_metadata(&path, false).unwrap()),
+                    frozen(grown.as_bytes())
                 );
                 assert_eq!(
                     FRAMED.with(|frames| frames.borrow().clone()),
@@ -320,10 +305,7 @@ mod tests {
         let check = |expected: &str, extent: Option<(u64, u64)>| {
             FRAMED.with(|frames| frames.borrow_mut().clear());
             let actual = cached_metadata(&path, false).unwrap();
-            assert_eq!(
-                serde_json::to_value(actual).unwrap(),
-                serde_json::to_value(owned(&path, expected.as_bytes())).unwrap()
-            );
+            assert_eq!(reading(actual), frozen(expected.as_bytes()));
             assert_eq!(
                 FRAMED.with(|frames| frames.borrow().clone()),
                 extent.into_iter().collect::<Vec<_>>()
@@ -455,10 +437,7 @@ mod tests {
                 .unwrap();
             text.push_str(append);
             FRAMED.with(|frames| frames.borrow_mut().clear());
-            assert_eq!(
-                serde_json::to_value(cached_metadata(&path, false).unwrap()).unwrap(),
-                serde_json::to_value(owned(&path, text.as_bytes())).unwrap()
-            );
+            assert_eq!(reading(cached_metadata(&path, false).unwrap()), frozen(text.as_bytes()));
             assert_eq!(
                 FRAMED.with(|frames| frames.borrow().clone()),
                 vec![(0, text.len() as u64)],
@@ -549,11 +528,13 @@ mod tests {
         let read: u64 = frames.iter().map(|&(_, len)| len).sum();
         let bound = fs::metadata(&path).unwrap().len() + (frames.len() * record(0).len()) as u64;
         assert!(read <= bound, "read {read} bytes for a {bound}-byte bound: {frames:?}");
+        // The writer stops between records, so every line it appended is one counted user turn.
         let bytes = fs::read(&path).unwrap();
-        assert_eq!(
-            serde_json::to_value(cached_metadata(&path, false).unwrap()).unwrap(),
-            serde_json::to_value(owned(&path, &bytes)).unwrap()
-        );
+        let turns = bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .count();
+        assert_eq!(cached_metadata(&path, false).unwrap().message_count, Some(turns));
     }
 
     #[test]
@@ -622,10 +603,7 @@ mod tests {
         let path = dir.join("s.jsonl");
         let bytes = b"\n{\"type\":\"user\"}\r\n{\"type\":\"assistant\",\"message\":{\"model\":\"<synthetic>\"}}\n{\"type\":\"custom-title\",\"customTitle\":\"tail\"}";
         fs::write(&path, bytes).unwrap();
-        assert_eq!(
-            serde_json::to_value(scan(&path).unwrap()).unwrap(),
-            serde_json::to_value(owned(&path, bytes)).unwrap()
-        );
+        assert_eq!(reading(scan(&path).unwrap()), frozen(bytes));
         fs::write(&path, []).unwrap();
         assert_eq!(
             scan(&path).unwrap().message_count,
