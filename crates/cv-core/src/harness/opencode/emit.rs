@@ -39,7 +39,6 @@ fn opencode_db_path(out_dir: &Path) -> PathBuf {
 /// `session_v2`/`session_message`. Fresh bootstrap and row publication are atomic.
 /// Tool results fold onto assistant tools; native v2 uses content[] and structured errors.
 pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<EmitResult> {
-    crate::harness::wire::write::check_source_fields(session)?;
     #[cfg(not(feature = "sqlite"))]
     {
         let _ = (session, out_dir, opts);
