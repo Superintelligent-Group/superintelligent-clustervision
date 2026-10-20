@@ -558,9 +558,8 @@ impl Watcher {
                 Some(_) => continue,
             };
             check()?;
-            let Some(adapter) = harness::for_harness(r.harness) else {
-                continue;
-            };
+            let adapter = harness::for_harness(r.harness)
+                .ok_or_else(|| anyhow::anyhow!("no adapter for watched {} session {}", r.harness, r.path.display()))?;
             let mut consumer = Consumer {
                 kind,
                 reference: &r,
@@ -644,6 +643,12 @@ impl Watcher {
             };
             let room = max_messages.saturating_sub(consumed);
             let Some(adapter) = harness::for_harness(r.harness) else {
+                anyhow::ensure!(
+                    !strict,
+                    "no adapter for watched {} session {}",
+                    r.harness,
+                    r.path.display()
+                );
                 continue;
             };
             let previous = self.seen.get(&key).and_then(|state| state.read.as_ref());
