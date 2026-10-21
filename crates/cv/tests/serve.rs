@@ -868,7 +868,7 @@ fn serve_static_web_hub() {
 
     // Path traversal cannot escape the web root: the sibling secret is unreachable.
     let (status, body) = http(port, "GET", "/../secret.txt");
-    assert!(status == 403 || status == 200, "status {status}");
+    assert_eq!(status, 403, "path traversal must be refused: {body}");
     assert!(!body.contains("TOP SECRET"), "traversal leaked the secret:\n{body}");
     // Encoded traversal too.
     for path in [

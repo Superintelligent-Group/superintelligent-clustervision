@@ -263,10 +263,6 @@ fn lanes_table_status_tokens_and_the_strand_class() {
         out.contains("STRANDED") && out.contains("→ resume: SendMessage to bbb2"),
         "{out}"
     );
-    assert!(
-        out.contains("4m45s") || out.contains("4m"),
-        "duration from first to last turn:\n{out}"
-    );
 
     let (out, _) = w.cv_ok(&["lanes", SID, "--stranded"]);
     assert!(
@@ -285,8 +281,8 @@ fn lanes_table_status_tokens_and_the_strand_class() {
     // one empties it).
     let (out, _) = w.cv_ok(&["lanes", SID, "--since", "9000h"]);
     assert!(out.contains("4 sub-agents") && out.contains("active since"), "{out}");
-    let (out, _) = w.cv_ok(&["lanes", SID, "--since", "1s"]);
-    assert!(out.contains("no sub-agents") || out.contains("0 sub-agents"), "{out}");
+    let (out, _) = w.cv_ok(&["lanes", SID, "--since", "1s", "--json"]);
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&out).unwrap(), json!([]));
     let (ok, _, _, err) = w.cv(&["lanes", SID, "--since", "soon"]);
     assert!(!ok && err.contains("--since takes a duration"), "{err}");
 
@@ -299,6 +295,7 @@ fn lanes_table_status_tokens_and_the_strand_class() {
     assert_eq!(d["stranded"], false);
     let by_id = |id: &str| rows.iter().find(|r| r["agent_id"] == id).unwrap().clone();
     let a = by_id("aaa1");
+    assert_eq!(a["duration_ms"], 285_000, "duration from first to last turn");
     assert_eq!(a["status"], "completed");
     assert_eq!(a["status_source"], "task_notification");
     assert_eq!(a["stranded"], false);
@@ -395,8 +392,12 @@ fn deferrals_find_the_phrases_and_open_tasks_gates_on_unmatched() {
 fn lanes_tasks_join_by_exported_endpoint_then_description() {
     let w = build_world("lanes-tasks");
     let open = |title: &str, who: &str| -> String {
-        let (out, _) = w.cv_ok(&["task", "open", title, "--assignee", who]);
-        out.lines().last().unwrap().trim().to_string()
+        w.cv_ok(&["task", "open", title, "--assignee", who]);
+        let (out, _) = w.cv_ok(&["task", "list", "--json"]);
+        let tasks: Vec<serde_json::Value> = serde_json::from_str(&out).unwrap();
+        let matches: Vec<_> = tasks.iter().filter(|task| task["title"] == title).collect();
+        assert_eq!(matches.len(), 1, "one newly opened task with title {title:?}");
+        matches[0]["id"].as_str().expect("task id").to_owned()
     };
     let a = open("A: the first lane's task", "lane:lane-a");
     w.cv_ok(&[
