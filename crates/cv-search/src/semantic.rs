@@ -173,10 +173,8 @@ impl VectorBacking {
         );
         Ok(())
     }
-    fn decode(mut self) -> Result<Vec<f32>> {
+    fn decode_vectors(mut self) -> Result<Vec<f32>> {
         use std::io::Read;
-        #[cfg(test)]
-        VECTOR_DECODES.with(|count| count.set(count.get() + 1));
         let mut vectors = Vec::with_capacity(self.bytes / 4);
         let mut wire = [0u8; 16 * 1024];
         let mut remaining = self.bytes;
@@ -195,6 +193,19 @@ impl VectorBacking {
             self.path.display()
         );
         Ok(vectors)
+    }
+}
+#[cfg(not(test))]
+impl VectorBacking {
+    fn decode(self) -> Result<Vec<f32>> {
+        self.decode_vectors()
+    }
+}
+#[cfg(test)]
+impl VectorBacking {
+    fn decode(self) -> Result<Vec<f32>> {
+        VECTOR_DECODES.with(|count| count.set(count.get() + 1));
+        self.decode_vectors()
     }
 }
 #[cfg(test)]

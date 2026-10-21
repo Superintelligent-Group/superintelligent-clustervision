@@ -65,3 +65,11 @@ impl Sweep {
         }
     }
 }
+
+#[derive(Default)]
+pub(super) struct Query {
+    pub(super) queries: std::sync::atomic::AtomicUsize,
+    pub(super) stored_reads: std::sync::atomic::AtomicUsize,
+    pub(super) winner_body_reads: std::sync::atomic::AtomicUsize,
+    pub(super) winner_metadata_reads: std::sync::atomic::AtomicUsize,
+}

@@ -2200,13 +2200,7 @@ struct MetadataDecisions {
     cwd: Option<String>,
     cache: std::sync::Mutex<HashMap<String, MetadataDecision>>,
     #[cfg(test)]
-    queries: std::sync::atomic::AtomicUsize,
-    #[cfg(test)]
-    stored_reads: std::sync::atomic::AtomicUsize,
-    #[cfg(test)]
-    winner_body_reads: std::sync::atomic::AtomicUsize,
-    #[cfg(test)]
-    winner_metadata_reads: std::sync::atomic::AtomicUsize,
+    observed: observe::Query,
 }
 impl MetadataDecisions {
     fn new(searcher: &tantivy::Searcher, fields: &Fields, filter: crate::SearchFilter<'_>) -> Self {
@@ -2217,13 +2211,7 @@ impl MetadataDecisions {
             cwd: filter.cwd.map(str::to_owned),
             cache: Default::default(),
             #[cfg(test)]
-            queries: Default::default(),
-            #[cfg(test)]
-            stored_reads: Default::default(),
-            #[cfg(test)]
-            winner_body_reads: Default::default(),
-            #[cfg(test)]
-            winner_metadata_reads: Default::default(),
+            observed: Default::default(),
         }
     }
     fn resolve(&self, id: &str) -> MetadataDecision {
@@ -2239,11 +2227,13 @@ impl MetadataDecisions {
         // Errors remain retryable and keep the existing per-body fallback. A definite missing
         // meta doc is stable in this searcher's snapshot, but its body filter is segment-local.
         #[cfg(test)]
-        self.queries.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.observed.queries.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let decision = match meta_addr(&self.searcher, &self.fields, id) {
             Ok(Some(address)) => {
                 #[cfg(test)]
-                self.stored_reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.observed
+                    .stored_reads
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 match self.searcher.doc::<TantivyDocument>(address) {
                     Ok(doc) => MetadataDecision::Present {
                         address,
@@ -2649,6 +2639,7 @@ fn ranked_search(
         let load_candidate = || -> Result<TantivyDocument> {
             #[cfg(test)]
             decisions
+                .observed
                 .winner_body_reads
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             searcher.doc(candidate.addr).context("loading stored doc")
@@ -2676,6 +2667,7 @@ fn ranked_search(
                 Some(MetadataDecision::Present { address, .. }) => {
                     #[cfg(test)]
                     decisions
+                        .observed
                         .winner_metadata_reads
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     searcher.doc(address).ok()
@@ -4089,12 +4081,12 @@ mod tests {
         );
         assert_eq!(actual.len(), 5);
         assert!(actual.iter().any(|hit| hit.id == "legacy"));
-        let queries = decisions.queries.load(Ordering::Relaxed);
-        let reads = decisions.stored_reads.load(Ordering::Relaxed);
+        let queries = decisions.observed.queries.load(Ordering::Relaxed);
+        let reads = decisions.observed.stored_reads.load(Ordering::Relaxed);
         assert_eq!(queries, 129);
         assert_eq!(reads, 128);
-        assert_eq!(decisions.winner_body_reads.load(Ordering::Relaxed), 1);
-        assert_eq!(decisions.winner_metadata_reads.load(Ordering::Relaxed), 4);
+        assert_eq!(decisions.observed.winner_body_reads.load(Ordering::Relaxed), 1);
+        assert_eq!(decisions.observed.winner_metadata_reads.load(Ordering::Relaxed), 4);
         assert_eq!(decisions.cache.lock().unwrap().len(), 129);
         // A top-three cutoff still compares exact scores/ties and current stored previews.
         let top = text_search_indexed_filtered(&dir, "needle", 3, filter).unwrap();
