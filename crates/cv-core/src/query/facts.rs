@@ -314,6 +314,11 @@ struct FactSink {
     exact_targets: Vec<String>,
     pending_targets: crate::spill::Ordered<String>,
     events: bool,
+    /// The same extractor [`SessionFacts::events`] runs over a collected session, fed one streamed
+    /// message at a time: one extraction path, so a native edit and its visible call count once.
+    extractor: events::EventExtractor,
+    index: usize,
+    rows: Vec<events::Event>,
     fail: Option<anyhow::Error>,
 }
 
@@ -339,6 +344,9 @@ impl FactSink {
             targets,
             exact_targets: query.exact_needles(FieldId::Touched),
             pending_targets: Default::default(),
+            extractor: Default::default(),
+            index: 0,
+            rows: Vec::new(),
             fail: None,
         }
     }
@@ -412,8 +420,10 @@ impl FactSink {
         }
         self.facts.images |= m.content.iter().any(|b| matches!(b, Block::Image { .. }));
         if self.events {
-            let rows = events::extract(m, 0, None)?;
-            for e in rows {
+            let mut rows = std::mem::take(&mut self.rows);
+            self.extractor.extract(m, self.index, None, None, &mut rows)?;
+            self.index += 1;
+            for e in rows.drain(..) {
                 self.facts.errors |= e.kind == "error";
                 self.facts.has_tools |= e.tool.is_some();
                 if !self.tools.is_empty() {
@@ -437,6 +447,8 @@ impl FactSink {
                     }
                 }
             }
+            events::release_scratch(&mut rows);
+            self.rows = rows;
         }
         Ok(())
     }
