@@ -552,7 +552,7 @@ fn hosts_in(cmd: &str) -> Vec<String> {
     out
 }
 
-fn note_paths(p: &str) -> bool {
+fn plausible_path(p: &str) -> bool {
     p.len() >= 8
         && !p.starts_with("/dev/")
         && !p.starts_with("/proc/")
@@ -915,7 +915,7 @@ fn analyze(session: &Session, opts: &DistillOptions, demand: Demand) -> anyhow::
                 if let Block::Text { .. } = b {
                     for c in path_re().captures_iter(reader.block(index)?) {
                         let p = c[1].trim_end_matches(['.', ',', ';', ':', ')', '`']);
-                        if note_paths(p) {
+                        if plausible_path(p) {
                             bump(&mut facts.paths, p);
                         }
                     }
@@ -1140,7 +1140,7 @@ fn scan_input_facts(_name: &str, input: &Value, f: &mut Facts) {
     }
     for k in ["file_path", "path", "notebook_path"] {
         if let Some(p) = input.get(k).and_then(Value::as_str) {
-            if note_paths(p) {
+            if plausible_path(p) {
                 bump(&mut f.paths, p);
             }
         }
@@ -1148,7 +1148,7 @@ fn scan_input_facts(_name: &str, input: &Value, f: &mut Facts) {
     for t in texts {
         for c in path_re().captures_iter(t) {
             let p = c[1].trim_end_matches(['.', ',', ';', ':', ')', '`', '\'']);
-            if note_paths(p) {
+            if plausible_path(p) {
                 bump(&mut f.paths, p);
             }
         }
