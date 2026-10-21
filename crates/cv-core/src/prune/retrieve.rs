@@ -2,8 +2,9 @@
 
 use super::*;
 
-/// Retrieve a stashed original from a prune sidecar by its `tool_use_id` (or `<id>#tur`). Returns the
-/// verbatim value (string, content-block array incl. images, or the raw toolUseResult object). Errors
+/// Retrieve a stashed original by its sidecar id: a tool_use_id, `<id>#tur`, `<id>#tr{index}`,
+/// `<id>#think{index}`, `<id>#declass{index}`, or `<id>#declass` (minted by prune). Returns the
+/// stored JSON value (string, content-block array incl. images, or raw toolUseResult object). Errors
 /// if the id matches more than one entry — a duplicated id means the sidecar can't say which payload
 /// is which, and silently returning one of them would misattribute data.
 pub fn retrieve(sidecar_path: &Path, id: &str) -> Result<Value> {
