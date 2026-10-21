@@ -589,6 +589,8 @@ fn message(top: &Fields<'_>, common: &Common, spans: bool) -> Result<Vec<Message
         }
     }
 
+    // An empty old-form compactionSummary also drops its boundary: it carries neither
+    // summary content nor metadata from which to construct a meaningful boundary.
     if m.content.is_empty() && m.extra.is_empty() {
         return Ok(Vec::new());
     }

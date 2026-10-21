@@ -15,7 +15,7 @@ use std::path::Path;
 use uuid::Uuid;
 
 /// Emit into OpenClaw's `agents/<agentId>/sessions/<sid>.jsonl` transcript (v3 parent-linked) plus
-/// a `sessions.json` index entry. Mirrors `harness/openclaw.rs`'s reader: a `{type:session,…}`
+/// a `sessions.json` index entry. Mirrors `harness/openclaw/record.rs`: a `{type:session,…}`
 /// header line followed by `{type:message,id,parentId,timestamp,message:{role,content,…}}` lines.
 pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<EmitResult> {
     stream::emit(session, out_dir, opts)

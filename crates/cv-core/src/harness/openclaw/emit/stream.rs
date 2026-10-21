@@ -275,6 +275,8 @@ pub(super) fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Res
                 }
                 row.finish()
             })?;
+            // Id-less replayed records retain their own links and do not introduce an outer
+            // entry id to parent the next message; generated or identified records do.
             if !replayed || msg.id.is_some() {
                 parent = Some(entry_id);
             }
