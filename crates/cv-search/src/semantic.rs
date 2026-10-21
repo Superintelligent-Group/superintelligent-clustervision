@@ -28,7 +28,6 @@
 //! the vectors — is fixed-width. A pre-binary all-JSON store is rejected like any bad magic:
 //! `cv index --semantic` rebuilds it.
 
-
 #[cfg(test)]
 #[path = "semantic_actual_probe.rs"]
 mod actual_probe;

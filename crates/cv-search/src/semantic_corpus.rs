@@ -1,7 +1,39 @@
 //! Bounded semantic body and label projections; no embedding model is needed to test them.
+use anyhow::{Context, Result};
 #[cfg(test)]
 use cv_core::Text;
 use cv_core::{Block, Flow, Message, MessageSink, Resolver, Role};
+
+/// Read only the semantic projection demanded for one discovered session.
+pub(crate) fn read_corpus_doc(r: &cv_core::SessionRef) -> Result<(Doc, cv_core::source::ReadSet)> {
+    let adapter = cv_core::harness::for_harness(r.harness).with_context(|| format!("no adapter for {}", r.harness))?;
+    let mut sink = DocSink::for_ref(r, &*adapter);
+    let meta = cv_core::stream::stream_counted(
+        &*adapter,
+        r,
+        &cv_core::Demand::LEAN.with_spans(),
+        &mut sink,
+        cv_core::stream::Pass::RECORD,
+    )
+    .with_context(|| format!("reading semantic corpus session {} ({})", r.id, r.harness))?
+    .session;
+    let title = cv_core::label_from(meta.title.as_deref(), sink.first_prompt.as_deref());
+    Ok((
+        Doc {
+            title: Some(title),
+            body: sink.body.into_string(),
+        },
+        sink.reads,
+    ))
+}
+
+/// What the **semantic** path ([`semantic::embed_all`]) distills from one session beside the
+/// discovered [`cv_core::SessionRef`] it embeds: the label hits show and the body it embeds.
+#[derive(Debug, Clone)]
+pub(crate) struct Doc {
+    pub title: Option<String>,
+    pub body: String,
+}
 
 const EMBED_HEAD_BYTES: usize = 64 * 1024;
 
@@ -21,6 +53,12 @@ pub(super) struct DocSink {
     failed: bool,
 }
 impl DocSink {
+    fn for_ref(r: &cv_core::SessionRef, adapter: &dyn cv_core::Adapter) -> Self {
+        let mut sink = Self::new(Resolver::new(Some(r.path.clone())));
+        sink.copied_before = adapter.copied_before(r, &mut sink);
+        sink
+    }
+
     pub(super) fn new(resolver: Resolver) -> Self {
         Self {
             body: Head::new(EMBED_HEAD_BYTES),
