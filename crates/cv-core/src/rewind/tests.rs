@@ -1082,3 +1082,71 @@ fn a_cut_that_would_leave_an_answered_call_open_is_refused_and_leaves_nothing() 
     let res = rewind_session(&sref(&src, SID), &opts(CutAt::End, &live.join("out"))).unwrap();
     assert_eq!(uuids(&read_lines(&res.new_path)), ["u0", "a0"]);
 }
+
+/// Claude Code writes each parallel `tool_use` of one response as its own record: a cut at the
+/// first keeps its siblings and runs on to both results, so no answered call is left open.
+#[test]
+fn a_cut_at_one_of_a_responses_parallel_calls_keeps_its_siblings() {
+    let world = crate::test_world("rewind");
+    let dir = world.proj.clone();
+    let src = dir.join(format!("{SID}.jsonl"));
+    let call = |id: &str| {
+        let mut m = bash(id, "cat notes");
+        m["id"] = json!("msg_1");
+        m
+    };
+    write_jsonl(
+        &src,
+        &[
+            rec("user", "u0", None, text("user", "read both")),
+            rec("assistant", "a0", Some("u0"), call("t1")),
+            rec("assistant", "a1", Some("a0"), call("t2")),
+            rec("user", "t1r", Some("a0"), result("t1", "one")),
+            rec("user", "t2r", Some("a1"), result("t2", "two")),
+            rec("assistant", "a2", Some("t2r"), text("assistant", "both read")),
+        ],
+    );
+    let res = rewind_session(
+        &sref(&src, SID),
+        &opts(CutAt::Message(idx_of(&src, "a0")), &dir.join("out")),
+    )
+    .unwrap();
+    assert_eq!(uuids(&read_lines(&res.new_path)), ["u0", "a0", "a1", "t1r", "t2r"]);
+    assert_eq!((res.closed_tool_calls, res.open_tool_calls), (2, 0));
+    assert!(res.warnings.is_empty(), "{:?}", res.warnings);
+}
+
+/// Past the cut only a result for an open call is copied: a result written before its own call
+/// (Claude Code records them out of order) would leave the copy's leaf pointing at a call the
+/// copy does not hold.
+#[test]
+fn a_result_for_no_open_call_ends_the_copy() {
+    let world = crate::test_world("rewind");
+    let dir = world.proj.clone();
+    let src = dir.join(format!("{SID}.jsonl"));
+    write_jsonl(
+        &src,
+        &[
+            rec("user", "u0", None, text("user", "read it")),
+            rec(
+                "assistant",
+                "a0",
+                Some("u0"),
+                json!({"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "t1", "name": "Bash", "input": {}},
+                    {"type": "tool_use", "id": "t3", "name": "Bash", "input": {}}]}),
+            ),
+            rec("user", "t1r", Some("a0"), result("t1", "notes")),
+            rec("user", "t2r", Some("a1"), result("t2", "early")),
+            rec("assistant", "a1", Some("t1r"), bash("t2", "cat more")),
+        ],
+    );
+    let res = rewind_session(
+        &sref(&src, SID),
+        &opts(CutAt::Message(idx_of(&src, "a0")), &dir.join("out")),
+    )
+    .unwrap();
+    assert_eq!(uuids(&read_lines(&res.new_path)), ["u0", "a0", "t1r"]);
+    // `t3` is never answered, in the source either.
+    assert_eq!((res.closed_tool_calls, res.open_tool_calls), (1, 1));
+}

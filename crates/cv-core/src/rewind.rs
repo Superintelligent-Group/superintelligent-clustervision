@@ -19,7 +19,8 @@
 //!   tool result that *shows the commit being made* (see [Commit evidence](#commit-evidence)). If
 //!   the cut leaves tool calls open (parallel calls whose results land on later records), the copy
 //!   runs on until they close, stopping at the next assistant turn or prompt — the API rejects a
-//!   `tool_use` with no result, and those results happened at the same moment.
+//!   `tool_use` with no result, and those results happened at the same moment. A later record of
+//!   the cut's own API response (each parallel `tool_use` is its own record) is no new turn.
 //! * **start** — by default the last compaction boundary at or before the cut. Claude Code resumes
 //!   from the last boundary anyway, so this is exactly the context the agent had when it made the
 //!   cut, and it keeps a month-long, 900 MB session down to one window. A boundary written by
@@ -70,7 +71,7 @@ use crate::prune::new_uuid;
 use crate::stream::{Demand, Flow, MessageSink};
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -727,7 +728,8 @@ fn rewind_session_after_scan(
     let (mut start_line, mut cut_line, mut end_line) = (0usize, 0usize, 0usize);
     let (mut lines_written, mut bytes_written) = (0usize, 0u64);
     let (mut omitted_lines, mut omitted_bytes) = (0usize, 0u64);
-    let mut open: HashSet<String> = HashSet::new();
+    // Each open call and the API response (`message.id`) that issued it.
+    let mut open: HashMap<String, Option<String>> = HashMap::new();
     let mut closed = 0usize;
     let mut replay_stage = crate::harness::store::bytes::ByteStage::new();
     let mut source_session_id: Option<String> = None;
@@ -811,7 +813,7 @@ fn rewind_session_after_scan(
                     );
                 }
             }
-            if phase == Phase::Closing && !closes_open_call(&facts) {
+            if phase == Phase::Closing && !closes_open_call(&facts, &open) {
                 phase = Phase::Done;
                 omitted_lines += 1;
                 omitted_bytes += n;
@@ -1085,15 +1087,15 @@ fn read_line_at(source: &crate::json::JsonSource, file: &std::fs::File, off: u64
 
 /// Update the open tool-call set from one record: an assistant's `tool_use` blocks open calls, a
 /// user record's `tool_result` blocks close them (counted into `closed` past the cut).
-fn track_tool_calls(facts: &Facts, open: &mut HashSet<String>, mut closed: Option<&mut usize>) {
+fn track_tool_calls(facts: &Facts, open: &mut HashMap<String, Option<String>>, mut closed: Option<&mut usize>) {
     for b in &facts.blocks {
         match b.ty.as_deref() {
             Some("tool_use") => {
                 if let Some(id) = &b.id {
-                    open.insert(id.clone());
+                    open.insert(id.clone(), facts.message_id.clone());
                 }
             }
-            Some("tool_result") if open.remove(b.tool_use_id.as_deref().unwrap_or("")) => {
+            Some("tool_result") if open.remove(b.tool_use_id.as_deref().unwrap_or("")).is_some() => {
                 if let Some(c) = closed.as_deref_mut() {
                     *c += 1;
                 }
@@ -1104,13 +1106,19 @@ fn track_tool_calls(facts: &Facts, open: &mut HashSet<String>, mut closed: Optio
 }
 
 /// Past the cut, a record still belongs to the cut's moment when it isn't a new turn: bookkeeping
-/// (attachments, hooks, system notes) or a user record carrying tool results. The next assistant
-/// turn or a real prompt ends the copy.
-fn closes_open_call(facts: &Facts) -> bool {
+/// (attachments, hooks, system notes), a user record answering an `open` call, or another record of
+/// a response with an open call (Claude Code writes each parallel `tool_use` of one response as
+/// its own record). The next assistant turn or a real prompt ends the copy.
+fn closes_open_call(facts: &Facts, open: &HashMap<String, Option<String>>) -> bool {
     match facts.turn_kind() {
         None => true,
-        Some(false) => false,
-        Some(true) => facts.blocks.iter().any(|b| b.ty.as_deref() == Some("tool_result")),
+        Some(false) => facts
+            .message_id
+            .as_ref()
+            .is_some_and(|id| open.values().any(|r| r.as_ref() == Some(id))),
+        Some(true) => facts.blocks.iter().any(|b| {
+            b.ty.as_deref() == Some("tool_result") && b.tool_use_id.as_ref().is_some_and(|id| open.contains_key(id))
+        }),
     }
 }
 

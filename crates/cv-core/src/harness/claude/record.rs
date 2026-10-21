@@ -273,6 +273,8 @@ pub(crate) struct Facts {
     pub logical_parent: Option<String>,
     /// `message` is an object (a turn with a body).
     pub message: bool,
+    /// `message.id`: one API response split over several records shares it.
+    pub message_id: Option<String>,
     pub model: Option<String>,
     /// The context size `message.usage` records, read the way Claude Code reads it
     /// ([`usage_context`]); `None` without a usage object.
@@ -360,11 +362,12 @@ impl Facts {
         };
         if let Some(message) = top
             .get("message")
-            .map(|m| Fields::parse(m, &["model", "usage", "content"]))
+            .map(|m| Fields::parse(m, &["id", "model", "usage", "content"]))
             .transpose()?
             .flatten()
         {
             facts.message = true;
+            facts.message_id = message.string("id")?;
             facts.model = message.string("model")?;
             facts.usage_in = message.get("usage").map(usage_context).transpose()?.flatten();
             body.content = message.get("content");
