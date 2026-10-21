@@ -647,27 +647,7 @@ pub fn semantic_search_filtered(
     k: usize,
     filter: crate::SearchFilter<'_>,
 ) -> Result<Vec<Hit>> {
-    let store = load_store(path)?;
-    if store.meta.is_empty() {
-        return Ok(Vec::new());
-    }
-    anyhow::ensure!(
-        store.projection == PROJECTION_VERSION,
-        "semantic projection version changed — run cv index --semantic to rebuild vectors"
-    );
-    let spec = resolve_model(false)?.context("embedding model is not cached — run cv index --semantic")?;
-    validate_store_model(&store, &spec, path)?;
-    let model = load_model(&spec)?;
-    let q = model.encode_single(query);
-    if q.len() != store.dim {
-        bail!(
-            "query embedding has dim {}, but store {} has dim {} — run `cv index --semantic` to re-embed",
-            q.len(),
-            path.display(),
-            store.dim
-        );
-    }
-    Ok(rank_filtered(&store, &q, k, filter))
+    SemanticSearch::new(Some(path.to_path_buf())).search(query, k, filter)
 }
 
 /// Service-owned semantic state. Construction reads no store/model; the first semantic request
