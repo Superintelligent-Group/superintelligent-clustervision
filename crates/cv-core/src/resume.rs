@@ -66,16 +66,12 @@ impl MarkHead {
 }
 
 /// The version a mark records and must match: the one stored-format version
-/// ([`crate::source::VERSION`], which the affordance view shares), the adapter's checkpoint
-/// format and `consumer` (the caller's own state format). Not the cv release: a release that
-/// changes what a mark means bumps one of those. `None`: the adapter takes no checkpoints.
-pub fn version(adapter: &dyn Adapter, consumer: &str) -> Option<String> {
-    Some(format!(
-        "v{}/{}{}/{consumer}",
-        crate::source::VERSION,
-        adapter.harness().as_str(),
-        adapter.resume_format()?
-    ))
+/// ([`crate::source::VERSION`], which the affordance view shares), the harness and `consumer`
+/// (the caller's own state format). Not the cv release: a release that changes what a mark means
+/// bumps one of those. The adapter's codec version rides in the checkpoint itself
+/// ([`crate::harness::store::jsonl::Codec::VERSION`]), so a mark of another codec is declined.
+pub fn version(adapter: &dyn Adapter, consumer: &str) -> String {
+    format!("v{}/{}/{consumer}", crate::source::VERSION, adapter.harness().as_str())
 }
 
 /// A session and its new mark (`None`: it has none any more), for [`update`].

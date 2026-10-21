@@ -97,7 +97,7 @@ use crate::ir::*;
 use crate::json::{JsonSource, JsonView};
 use crate::lazy::Text;
 use crate::source::{Dependencies, Probe};
-use crate::stream::{Checkpoint, Demand, Flow, MessageSink, Start, Tier};
+use crate::stream::{Demand, Flow, MessageSink, Start, Tier};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
@@ -290,23 +290,9 @@ impl Adapter for KimiCode {
             .context("a whole read never declines")
     }
 
-    fn resume_format(&self) -> Option<u32> {
-        Some(2)
-    }
-
     fn resume_source(&self, r: &SessionRef) -> PathBuf {
         let (session, agent) = split_agent_path(&r.path);
         agent_wire(session, agent)
-    }
-
-    fn resume(
-        &self,
-        r: &SessionRef,
-        opts: &Demand,
-        sink: &mut dyn MessageSink,
-        from: &Checkpoint,
-    ) -> Result<Option<Session>> {
-        self.transcript(r, opts, Start::Checkpoint(from), sink)
     }
 
     /// An agent's wire log through the driver, after the header its state file gives. Catalog
@@ -1822,6 +1808,7 @@ fn usage_from(u: &Value) -> Usage {
 mod tests {
     use super::*;
     use crate::harness::Parse;
+    use crate::stream::Checkpoint;
     use serde_json::json;
 
     #[test]
@@ -1975,7 +1962,9 @@ mod tests {
             );
             for (count, checkpoint) in &full.checkpoints {
                 let mut rest = Kept::default();
-                let suffix = adapter.resume(&r, &opts, &mut rest, checkpoint)?.unwrap();
+                let suffix = adapter
+                    .transcript(&r, &opts, crate::stream::Start::Checkpoint(checkpoint), &mut rest)?
+                    .unwrap();
                 assert_eq!(serde_json::to_value(&suffix)?, serde_json::to_value(&shell)?);
                 assert_eq!(
                     serde_json::to_value(&rest.messages)?,
@@ -1987,7 +1976,9 @@ mod tests {
                 .as_object_mut()
                 .unwrap()
                 .remove("model_bindings");
-            assert!(adapter.resume(&r, &opts, &mut Kept::default(), &old)?.is_none());
+            assert!(adapter
+                .transcript(&r, &opts, crate::stream::Start::Checkpoint(&old), &mut Kept::default())?
+                .is_none());
         }
         Ok(())
     }
@@ -2423,7 +2414,12 @@ mod tests {
                 let (count, checkpoint) = &full.checkpoints[index];
                 let mut suffix = Kept::default();
                 assert!(adapter
-                    .try_resume(&reference, &options, &mut suffix, checkpoint)?
+                    .transcript(
+                        &reference,
+                        &options,
+                        crate::stream::Start::Checkpoint(checkpoint),
+                        &mut suffix
+                    )?
                     .is_some());
                 assert_eq!(
                     serde_json::to_value(suffix.messages)?,
@@ -2523,7 +2519,10 @@ mod tests {
                 let stride = (full.checkpoints.len() / 12).max(1);
                 for (i, (count, cp)) in full.checkpoints.iter().enumerate().step_by(stride) {
                     let mut rest = Kept::default();
-                    let suffix = adapter.try_resume(&r, &opts, &mut rest, cp).unwrap().unwrap();
+                    let suffix = adapter
+                        .transcript(&r, &opts, crate::stream::Start::Checkpoint(cp), &mut rest)
+                        .unwrap()
+                        .unwrap();
                     shell.messages.clear();
                     assert_eq!(
                         serde_json::to_value(suffix).unwrap(),
@@ -2670,7 +2669,10 @@ mod tests {
         )
         .unwrap();
         let mut suffix = Kept::default();
-        let mut shell = adapter.try_resume(&r, &opts, &mut suffix, cp).unwrap().unwrap();
+        let mut shell = adapter
+            .transcript(&r, &opts, crate::stream::Start::Checkpoint(cp), &mut suffix)
+            .unwrap()
+            .unwrap();
         shell.messages = first.messages[..*count]
             .iter()
             .cloned()
@@ -2683,12 +2685,15 @@ mod tests {
         // Wrong option flavor and a different agent's path decline before metadata/callbacks.
         let mut none = Kept::default();
         assert!(adapter
-            .try_resume(&r, &Demand::COMPLETE, &mut none, cp)
+            .transcript(&r, &Demand::COMPLETE, crate::stream::Start::Checkpoint(cp), &mut none)
             .unwrap()
             .is_none());
         let mut other = r.clone();
         other.path = other.path.join("agents/agent-0");
-        assert!(adapter.try_resume(&other, &opts, &mut none, cp).unwrap().is_none());
+        assert!(adapter
+            .transcript(&other, &opts, crate::stream::Start::Checkpoint(cp), &mut none)
+            .unwrap()
+            .is_none());
         assert!(none.messages.is_empty() && none.checkpoints.is_empty());
         // Invalid UTF-8 is counted per record, as the old tolerant .lines scanner did.
         let mut bytes = fs::read(adapter.resume_source(&r)).unwrap();
@@ -2725,7 +2730,10 @@ mod tests {
             .unwrap();
         r.title = Some("new catalog title".into());
         let mut suffix = Kept::default();
-        let shell = adapter.try_resume(&r, &opts, &mut suffix, cp).unwrap().unwrap();
+        let shell = adapter
+            .transcript(&r, &opts, crate::stream::Start::Checkpoint(cp), &mut suffix)
+            .unwrap()
+            .unwrap();
         assert_eq!(suffix.messages.len(), 200);
         assert_eq!(shell.title, r.title);
         assert_eq!(suffix.messages.len() + count, old_wire_oracle(&r, &opts).messages.len());

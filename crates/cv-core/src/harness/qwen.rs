@@ -20,7 +20,7 @@ use super::store::jsonl;
 use super::{parse_ts, Adapter};
 use crate::ir::*;
 use crate::source::{Dependencies, Probe};
-use crate::stream::{self, Checkpoint, Flow, MessageSink};
+use crate::stream::{self, Flow, MessageSink};
 use anyhow::{Context, Result};
 use record::Demand;
 use serde::{Deserialize, Serialize};
@@ -82,8 +82,8 @@ impl Adapter for Qwen {
 
     /// The chronological `projects/.../chats/*.jsonl` ChatRecords grow by appended lines; the
     /// legacy gemini-shaped recording is rewritten whole.
-    fn append_only(&self, r: &SessionRef) -> Option<super::CountPrefix> {
-        is_session_jsonl(&r.path).then_some(super::count_prefix as super::CountPrefix)
+    fn append_only(&self, r: &SessionRef) -> bool {
+        is_session_jsonl(&r.path)
     }
 
     fn dependencies(&self, r: &SessionRef, _probe: &mut Probe, deps: &mut Dependencies) -> Option<()> {
@@ -157,20 +157,6 @@ impl Adapter for Qwen {
     fn stream(&self, r: &SessionRef, opts: &stream::Demand, sink: &mut dyn MessageSink) -> Result<Session> {
         self.transcript(r, opts, stream::Start::Whole, sink)?
             .context("a whole read never declines")
-    }
-
-    fn resume_format(&self) -> Option<u32> {
-        Some(1)
-    }
-
-    fn resume(
-        &self,
-        r: &SessionRef,
-        opts: &stream::Demand,
-        sink: &mut dyn MessageSink,
-        from: &Checkpoint,
-    ) -> Result<Option<Session>> {
-        self.transcript(r, opts, stream::Start::Checkpoint(from), sink)
     }
 
     /// A project ChatRecord transcript through the driver. The gemini-cli shape (mmap + RawValue
@@ -629,6 +615,7 @@ impl jsonl::Codec for Replay<'_> {
 mod tests {
     use super::*;
     use crate::harness::Parse;
+    use crate::stream::Checkpoint;
     use std::fs;
 
     #[derive(Default)]
@@ -773,7 +760,12 @@ mod tests {
         let (count, checkpoint) = full.checkpoints.iter().find(|(count, _)| *count == 1).unwrap();
         let mut resumed = Kept::default();
         let suffix = adapter
-            .resume(&r, &stream::Demand::LEAN.with_spans(), &mut resumed, checkpoint)
+            .transcript(
+                &r,
+                &stream::Demand::LEAN.with_spans(),
+                crate::stream::Start::Checkpoint(checkpoint),
+                &mut resumed,
+            )
             .unwrap()
             .unwrap();
         assert_eq!(

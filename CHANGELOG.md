@@ -39,7 +39,7 @@
 - `cv distill` and `cv adopt --model` share the `general-purpose` agent type default, applied only when the source names none.
 - **Breaking (library):** `ParseOptions` and `ExtraProjection` become `Demand { tier, spans, offsets }`; the five `Watcher` poll methods become `poll`/`try_poll(Poll { .. })`.
 - Gemini, Qwen, Goose, Grok, LM Studio, OpenClaw and OpenCode report the model on every turn the harness wrote it; windowed reads no longer lose it.
-- Claude, Codex, Grok, Kimi and Kimi Code read through one captured source (`store::jsonl::Read`); each keeps its own resume protocol.
+- **Breaking (library):** `Adapter::resume`, `try_resume` and `resume_format` become `Adapter::transcript(r, demand, Start, sink)`; `append_only` returns `bool`; JSONL transcripts share one driver.
 - A reader checks its source after a slow callback, per mapped window, at a checkpoint and at EOF; a replacement detected there is an error.
 - Native Codex file-change records feed `cv touched`, tool histograms and query facts, including code-mode edits, without duplicating visible patch calls.
 - `cv index --subagents` folds the sub-agent forest from stat-keyed metadata instead of re-parsing every transcript each pass.

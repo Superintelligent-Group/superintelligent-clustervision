@@ -420,18 +420,6 @@ pub trait Adapter: Send + Sync {
         crate::stream::checked(sink, |sink| self.stream(r, opts, sink))
     }
 
-    /// [`Self::resume`] with the same consumer error guard as [`Self::try_stream`]. A failed
-    /// consumer must not publish a mark even if the adapter offered checkpoints before failing.
-    fn try_resume(
-        &self,
-        r: &SessionRef,
-        opts: &Demand,
-        sink: &mut dyn MessageSink,
-        from: &crate::stream::Checkpoint,
-    ) -> Result<Option<Session>> {
-        crate::stream::checked(sink, |sink| self.resume(r, opts, sink, from))
-    }
-
     /// Read `r` from `from`: whole, from a checkpoint an earlier read of the same file took (then
     /// shorter), or as the first bytes of an append-only transcript ([`Start`](crate::stream::Start)).
     /// A continued read delivers to `sink` exactly what the whole read would after that point and
@@ -450,8 +438,7 @@ pub trait Adapter: Send + Sync {
     ) -> Result<Option<Session>> {
         match from {
             crate::stream::Start::Whole => self.try_stream(r, opts, sink).map(Some),
-            crate::stream::Start::Checkpoint(cp) => self.try_resume(r, opts, sink, cp),
-            crate::stream::Start::Prefix(_) => Ok(None),
+            _ => Ok(None),
         }
     }
 
@@ -508,16 +495,6 @@ pub trait Adapter: Send + Sync {
         None
     }
 
-    /// The version of the state this adapter puts in a [`Checkpoint`], when its
-    /// [`stream`](Adapter::stream) offers checkpoints at all (only on an append-only transcript
-    /// file). It is part of every stored mark's version, so changing what the state holds, or what
-    /// a record parses to, means bumping it. `None`: the adapter never offers one.
-    ///
-    /// [`Checkpoint`]: crate::stream::Checkpoint
-    fn resume_format(&self) -> Option<u32> {
-        None
-    }
-
     /// File whose immutable-prefix byte positions this adapter checkpoints. Directory-backed
     /// stores override this with their transcript file; side stores remain freshness dependencies.
     /// Consumers must use this same file for size, identity, sampled guards, and primary read state.
@@ -538,22 +515,6 @@ pub trait Adapter: Send + Sync {
         _deps: &mut crate::source::Dependencies,
     ) -> Option<()> {
         Some(())
-    }
-
-    /// Continue a [`stream`](Adapter::stream) of `r` from `from`, a checkpoint an earlier stream of
-    /// the same file (then shorter) took: read from `from.offset` on with the adapter state it
-    /// kept, so `sink` sees exactly the messages the whole stream would deliver after that point,
-    /// and the returned session is the one the whole stream returns. `Ok(None)`: this adapter, or
-    /// this file, cannot resume from it (no state, a different layout); nothing reached `sink`.
-    /// The caller has checked that the bytes before `from.offset` are the ones it was taken on.
-    fn resume(
-        &self,
-        _r: &SessionRef,
-        _opts: &Demand,
-        _sink: &mut dyn MessageSink,
-        _from: &crate::stream::Checkpoint,
-    ) -> Result<Option<Session>> {
-        Ok(None)
     }
 
     // The facts below are what a shared module asks instead of naming a harness
@@ -632,11 +593,12 @@ pub trait Adapter: Send + Sync {
         WatchPolicy::Tree
     }
 
-    /// When `r`'s transcript only ever grows by appending lines, so its first `n` bytes pin a past
-    /// state: the function that counts the messages a parse of those bytes returns. A follower
-    /// records a byte mark for such a session and resolves it later. Default: not append-only.
-    fn append_only(&self, _r: &SessionRef) -> Option<CountPrefix> {
-        None
+    /// Whether `r`'s transcript only ever grows by appending lines, so its first `n` bytes pin a
+    /// past state, read back by [`Self::transcript`] from
+    /// [`Start::Prefix`](crate::stream::Start::Prefix). A follower records a byte mark for such a
+    /// session and resolves it later. Default: not append-only.
+    fn append_only(&self, _r: &SessionRef) -> bool {
+        false
     }
 
     /// The file edit `m`'s harness record states outside its tool blocks (Codex's `FileChange`
@@ -726,44 +688,6 @@ pub enum WatchPolicy {
     /// The file is a database written in place, which changes no directory: watch the file and
     /// its write-ahead log.
     Database,
-}
-
-/// Counts the messages a parse of `r`'s first `len` bytes returns ([`Adapter::append_only`]),
-/// calling `check` at its cooperative boundaries.
-pub type CountPrefix = fn(r: &SessionRef, len: u64, check: &mut dyn FnMut() -> Result<()>) -> Result<usize>;
-
-/// [`CountPrefix`] through [`Adapter::transcript`] from [`Start::Prefix`](crate::stream::Start::Prefix).
-pub(crate) fn count_prefix(r: &SessionRef, len: u64, check: &mut dyn FnMut() -> Result<()>) -> Result<usize> {
-    struct Count<'c> {
-        messages: usize,
-        check: &'c mut dyn FnMut() -> Result<()>,
-        error: Option<anyhow::Error>,
-    }
-    impl MessageSink for Count<'_> {
-        fn message(&mut self, _: Message) -> crate::stream::Flow {
-            self.messages += 1;
-            crate::stream::Flow::Continue
-        }
-        fn wants_checkpoint(&mut self, _: u64) -> bool {
-            if let Err(error) = (self.check)() {
-                self.error = Some(error);
-            }
-            false
-        }
-        fn take_error(&mut self) -> Option<anyhow::Error> {
-            self.error.take()
-        }
-    }
-    let adapter = rootless(r.harness).ok_or_else(|| anyhow::anyhow!("no adapter for {}", r.harness))?;
-    let mut count = Count {
-        messages: 0,
-        check,
-        error: None,
-    };
-    adapter
-        .transcript(r, &Demand::RICH, crate::stream::Start::Prefix(len), &mut count)?
-        .ok_or_else(|| anyhow::anyhow!("{} declined a byte prefix of {}", r.harness, r.path.display()))?;
-    Ok(count.messages)
 }
 
 /// The `Workflow`-tool runs a store records beside its sessions ([`Adapter::workflows`]).

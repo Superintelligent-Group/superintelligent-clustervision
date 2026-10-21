@@ -9,11 +9,9 @@ const CHECKPOINT_EVERY: u64 = 256 * 1024;
 const ANCHOR_BYTES: usize = 64 * 1024;
 const METADATA_BYTES: usize = 16 * 1024;
 
-/// The state's version: the mark version of an adapter that takes checkpoints, else the one
-/// stored-format version and the harness. Never the cv release.
+/// The state's version: the mark version ([`crate::resume::version`]). Never the cv release.
 fn state_version(adapter: &dyn Adapter) -> String {
     crate::resume::version(adapter, CONSUMER)
-        .unwrap_or_else(|| format!("v{}/{CONSUMER}/{}", source::VERSION, adapter.harness().as_str()))
 }
 
 fn fits(value: &impl Serialize, limit: usize) -> bool {
@@ -182,7 +180,7 @@ impl ReadState {
         (anchor.checkpoint.messages()? <= skip).then_some(())?;
         anchor.head.admit(
             &adapter.resume_source(r),
-            &crate::resume::version(adapter, CONSUMER)?,
+            &crate::resume::version(adapter, CONSUMER),
             &anchor.checkpoint,
         )
     }
@@ -536,7 +534,7 @@ pub(super) fn pass(
             return None;
         }
         Some(Anchor {
-            head: crate::resume::MarkHead::of(&primary, cp, version.as_deref()?)?,
+            head: crate::resume::MarkHead::of(&primary, cp, &version)?,
             checkpoint: cp.clone(),
         })
     };

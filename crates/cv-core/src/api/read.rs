@@ -1,7 +1,7 @@
 //! Small verified continuations for repeated API reads. No messages are cached.
 use super::{session_meta_json, WindowSink};
 use crate::source::{Baseline, Probe, ReadSet};
-use crate::stream::{Checkpoint, Demand, Flow};
+use crate::stream::{Checkpoint, Demand, Flow, Start};
 use crate::{Adapter, Session, SessionRef};
 use anyhow::Result;
 use serde::Serialize;
@@ -159,14 +159,7 @@ pub(super) fn window(
     let opts = if extra { Demand::RICH } else { Demand::LEAN }.with_spans();
     let version = crate::resume::version(adapter, "api-window1");
     let primary = adapter.resume_source(r);
-    if version.is_none() {
-        let (before, reads) = captured(r, &primary);
-        let mut sink = WindowSink::page(&primary, start, end, false, reads);
-        let shell = adapter.try_stream(r, &opts, &mut sink)?;
-        verify(r, &primary, &before, &sink)?;
-        return Ok((shell, sink));
-    }
-    let key = version.and_then(|version| Key::admitted(r, &primary, version, extra));
+    let key = Key::admitted(r, &primary, version, extra);
     let (before, reads) = captured(r, &primary);
     let mut sink = WindowSink::page(&primary, start, end, key.is_some(), reads.clone());
     let mut resumed = false;
@@ -186,7 +179,7 @@ pub(super) fn window(
                         if let Some(old_reads) = entry.source.reads() {
                             sink.reads.merge(&old_reads);
                         }
-                        shell = adapter.try_resume(r, &opts, &mut sink, &checkpoint)?;
+                        shell = adapter.transcript(r, &opts, Start::Checkpoint(&checkpoint), &mut sink)?;
                         resumed = shell.is_some();
                     }
                 }
@@ -368,19 +361,19 @@ mod tests {
                 },
             )
         }
-        fn resume_format(&self) -> Option<u32> {
-            self.inner.resume_format()
-        }
         fn resume_source(&self, r: &SessionRef) -> std::path::PathBuf {
             self.inner.resume_source(r)
         }
-        fn resume(
+        fn transcript(
             &self,
             r: &SessionRef,
             opts: &Demand,
+            from: Start<'_>,
             sink: &mut dyn MessageSink,
-            cp: &Checkpoint,
         ) -> Result<Option<Session>> {
+            if matches!(from, Start::Whole) {
+                return self.try_stream(r, opts, sink).map(Some);
+            }
             if self.decline {
                 return Ok(None);
             }
@@ -390,14 +383,14 @@ mod tests {
             if let Some(path) = &self.dependency {
                 sink.dependency(path);
             }
-            self.inner.try_resume(
+            self.inner.transcript(
                 r,
                 opts,
+                from,
                 &mut Observer {
                     sink,
                     messages: &self.messages,
                 },
-                cp,
             )
         }
     }
@@ -433,7 +426,7 @@ mod tests {
 
     #[test]
     fn heads_and_windows_reject_mutation_before_publication() {
-        struct Mutating(bool);
+        struct Mutating;
         impl Adapter for Mutating {
             fn harness(&self) -> Harness {
                 Harness::Claude
@@ -443,9 +436,6 @@ mod tests {
             }
             fn discover(&self) -> Result<crate::Discovered> {
                 Ok(Default::default())
-            }
-            fn resume_format(&self) -> Option<u32> {
-                self.0.then_some(1)
             }
             fn stream(&self, r: &SessionRef, _: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
                 let mut message = Message::new(crate::Role::Assistant);
@@ -461,15 +451,12 @@ mod tests {
         let path = world.home.join("source");
         std::fs::write(&path, b"original").unwrap();
         let r = SessionRef::new("mutating", Harness::Claude, path);
-        for resumable in [false, true] {
-            std::fs::write(&r.path, b"original").unwrap();
-            let cache = Cache::default();
-            assert!(window(&cache, &Mutating(resumable), &r, 0, Some(1), false).is_err());
-            assert!(cache.entries.lock().unwrap().is_empty());
-        }
+        let cache = Cache::default();
+        assert!(window(&cache, &Mutating, &r, 0, Some(1), false).is_err());
+        assert!(cache.entries.lock().unwrap().is_empty());
         std::fs::write(&r.path, b"original").unwrap();
         let cache = Cache::default();
-        assert!(head(&cache, &Mutating(false), &r).is_err());
+        assert!(head(&cache, &Mutating, &r).is_err());
         assert!(cache.entries.lock().unwrap().is_empty());
     }
 

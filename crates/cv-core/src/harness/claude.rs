@@ -324,11 +324,8 @@ impl Adapter for Claude {
     }
 
     /// A `.jsonl` transcript only ever grows by appended lines.
-    fn append_only(&self, r: &SessionRef) -> Option<super::CountPrefix> {
-        r.path
-            .extension()
-            .is_some_and(|e| e == "jsonl")
-            .then_some(super::count_prefix as super::CountPrefix)
+    fn append_only(&self, r: &SessionRef) -> bool {
+        r.path.extension().is_some_and(|e| e == "jsonl")
     }
 
     /// The `subagents/` sidecar: directly spawned agents and, a tier deeper, workflow agents.
@@ -427,20 +424,6 @@ impl Adapter for Claude {
     fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
         self.transcript(r, opts, Start::Whole, sink)?
             .context("a whole read never declines")
-    }
-
-    fn resume_format(&self) -> Option<u32> {
-        Some(1)
-    }
-
-    fn resume(
-        &self,
-        r: &SessionRef,
-        opts: &Demand,
-        sink: &mut dyn MessageSink,
-        from: &Checkpoint,
-    ) -> Result<Option<Session>> {
-        self.transcript(r, opts, Start::Checkpoint(from), sink)
     }
 
     /// A checkpoint keeps the session accumulated so far (the spawn tracker holds nothing at a
@@ -2548,7 +2531,12 @@ mod tests {
         );
         let mut sink = CollectSink::default();
         adapter
-            .resume(&reference, &Demand::LEAN.with_spans(), &mut sink, &cp)
+            .transcript(
+                &reference,
+                &Demand::LEAN.with_spans(),
+                crate::stream::Start::Checkpoint(&cp),
+                &mut sink,
+            )
             .unwrap()
             .unwrap();
         assert_eq!(sink.messages.len(), 1);
@@ -2915,7 +2903,7 @@ mod tests {
                 for (cp, seen) in &whole.checkpoints {
                     let mut rest = Capture::default();
                     let resumed = Claude::with_config_dir(&dir)
-                        .resume(&r, &opts, &mut rest, cp)
+                        .transcript(&r, &opts, crate::stream::Start::Checkpoint(cp), &mut rest)
                         .unwrap()
                         .unwrap();
                     assert_eq!(

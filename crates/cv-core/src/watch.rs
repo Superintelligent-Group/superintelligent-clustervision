@@ -66,13 +66,52 @@ fn resolve_checked(r: &SessionRef, mark: Mark, check: &mut dyn FnMut() -> anyhow
     check()?;
     let count = match mark {
         Mark::Messages(n) => n,
-        Mark::Bytes(len) => match append_only(r) {
-            Some(count_prefix) => count_prefix(r, len, check)?,
-            None => anyhow::bail!("watch byte mark unsupported for {}", r.harness),
-        },
+        Mark::Bytes(len) if append_only(r) => count_prefix(r, len, check)?,
+        Mark::Bytes(_) => anyhow::bail!("watch byte mark unsupported for {}", r.harness),
     };
     check()?;
     Ok(count)
+}
+
+/// How many messages a whole read of `r`'s first `len` bytes yields: the count a read would have
+/// returned when the append-only transcript was `len` bytes long ([`crate::stream::Start::Prefix`]).
+/// `check` runs at every finished line the reader could resume after (its checkpoint offers),
+/// blank ones included.
+pub(crate) fn count_prefix(
+    r: &SessionRef,
+    len: u64,
+    check: &mut dyn FnMut() -> anyhow::Result<()>,
+) -> anyhow::Result<usize> {
+    struct Count<'c> {
+        messages: usize,
+        check: &'c mut dyn FnMut() -> anyhow::Result<()>,
+        error: Option<anyhow::Error>,
+    }
+    impl crate::MessageSink for Count<'_> {
+        fn message(&mut self, _: Message) -> crate::Flow {
+            self.messages += 1;
+            crate::Flow::Continue
+        }
+        fn wants_checkpoint(&mut self, _: u64) -> bool {
+            if let Err(error) = (self.check)() {
+                self.error = Some(error);
+            }
+            false
+        }
+        fn take_error(&mut self) -> Option<anyhow::Error> {
+            self.error.take()
+        }
+    }
+    let adapter = harness::rootless(r.harness).ok_or_else(|| anyhow::anyhow!("no adapter for {}", r.harness))?;
+    let mut count = Count {
+        messages: 0,
+        check,
+        error: None,
+    };
+    adapter
+        .transcript(r, &crate::Demand::RICH, crate::stream::Start::Prefix(len), &mut count)?
+        .ok_or_else(|| anyhow::anyhow!("{} declined a byte prefix of {}", r.harness, r.path.display()))?;
+    Ok(count.messages)
 }
 
 /// Where a follower stands in one session.
@@ -87,11 +126,11 @@ pub enum Mark {
     Bytes(u64),
 }
 
-/// A transcript that only ever grows by appending lines, so a byte length pins a past state, and
-/// how to count a prefix's messages: the adapter's [`harness::Adapter::append_only`]. A byte mark
-/// on any other session (a compressed rollout, a rewritten recording) resolves to nothing.
-fn append_only(r: &SessionRef) -> Option<harness::CountPrefix> {
-    harness::rootless(r.harness)?.append_only(r)
+/// A transcript that only ever grows by appending lines, so a byte length pins a past state
+/// ([`harness::Adapter::append_only`]). A byte mark on any other session (a compressed rollout, a
+/// rewritten recording) resolves to nothing.
+fn append_only(r: &SessionRef) -> bool {
+    harness::rootless(r.harness).is_some_and(|adapter| adapter.append_only(r))
 }
 
 /// Record where `r` stands now, as cheaply as possible: one `stat` for an append-only transcript,
@@ -101,7 +140,7 @@ fn append_only(r: &SessionRef) -> Option<harness::CountPrefix> {
 /// message count — tens of seconds and ~1 GB transient on a large corpus, almost all of it for
 /// sessions that never change while followed. A byte mark defers that parse to [`resolve`].
 pub fn baseline(r: &SessionRef) -> Option<Mark> {
-    if append_only(r).is_some() {
+    if append_only(r) {
         if let Ok(md) = std::fs::metadata(&r.path) {
             return Some(Mark::Bytes(md.len()));
         }
@@ -155,7 +194,7 @@ pub fn tail(r: &SessionRef, skip: usize, keep: usize) -> Option<(usize, Vec<Mess
 pub fn resolve(r: &SessionRef, mark: Mark) -> Option<usize> {
     match mark {
         Mark::Messages(n) => Some(n),
-        Mark::Bytes(len) => append_only(r)?(r, len, &mut || Ok(())).ok(),
+        Mark::Bytes(len) => append_only(r).then(|| count_prefix(r, len, &mut || Ok(())).ok())?,
     }
 }
 
@@ -353,7 +392,7 @@ impl Watcher {
         check()?;
         for r in refs {
             check()?;
-            let (mark, read) = if append_only(&r).is_some() {
+            let (mark, read) = if append_only(&r) {
                 let (mark, read) = capture_baseline(&r, || {
                     std::fs::metadata(&r.path).map(|metadata| Mark::Bytes(metadata.len()))
                 });
@@ -1390,7 +1429,7 @@ mod tests {
             let Ok(parsed) = harness::for_harness(h).unwrap().parse(&r) else {
                 continue;
             };
-            if append_only(&r).is_none() {
+            if !append_only(&r) {
                 assert_eq!(baseline(&r), Some(Mark::Messages(parsed.messages.len())), "{h} {rel}");
             }
             // The streamed tail is the parse's tail, message for message, at every split.
@@ -1480,7 +1519,7 @@ mod tests {
         assert_eq!(baseline(&sref(Harness::Claude, jsonl.clone())), Some(Mark::Bytes(len)));
         assert_eq!(baseline(&sref(Harness::Codex, jsonl.clone())), Some(Mark::Bytes(len)));
         // A compressed rollout's byte prefix is not a transcript prefix: parse it instead.
-        assert!(append_only(&sref(Harness::Codex, dir.join("r.jsonl.zst"))).is_none());
+        assert!(!append_only(&sref(Harness::Codex, dir.join("r.jsonl.zst"))));
         // Missing file: no mark, as before.
         assert_eq!(baseline(&sref(Harness::Gemini, dir.join("absent.json"))), None);
         assert_eq!(resolve(&sref(Harness::Claude, jsonl), Mark::Messages(3)), Some(3));
@@ -1502,7 +1541,7 @@ mod tests {
         let full = harness::for_harness(Harness::Codex).unwrap().parse(&r).unwrap();
         assert!(!full.messages.is_empty(), "the compressed fixture parses");
         // Its reader declines a byte prefix outright: decoded offsets are not file positions.
-        assert!(crate::harness::count_prefix(&r, CODEX.len() as u64, &mut || Ok(())).is_err());
+        assert!(count_prefix(&r, CODEX.len() as u64, &mut || Ok(())).is_err());
         assert_ne!(baseline(&r), Some(Mark::Bytes(CODEX.len() as u64)));
         for len in [1, CODEX.len() as u64 / 2, CODEX.len() as u64] {
             assert_eq!(resolve(&r, Mark::Bytes(len)), None, "byte mark {len}");

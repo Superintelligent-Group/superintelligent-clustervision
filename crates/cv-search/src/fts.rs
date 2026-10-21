@@ -1142,7 +1142,7 @@ fn job_out(
     adapter: &dyn cv_core::Adapter,
 ) -> Out {
     let version = cv_core::resume::version(adapter, RESUME_TAG);
-    let from = version.as_deref().and_then(|v| resumable_from(&job, v));
+    let from = resumable_from(&job, &version);
     // A resume the adapter declines touched nothing: read the session whole instead.
     let resumed = match &from {
         Some(cp) => job_pass(&job, f, tx, admission, adapter, Some(cp)).transpose(),
@@ -1167,9 +1167,11 @@ fn job_out(
                     hook(source);
                 }
             }
-            let mark = version.as_deref().and_then(|v| {
-                let cp = p.last?;
-                Some((cv_core::resume::MarkHead::of_file(p.source.as_ref()?, &cp, v)?, cp))
+            let mark = p.last.and_then(|cp| {
+                Some((
+                    cv_core::resume::MarkHead::of_file(p.source.as_ref()?, &cp, &version)?,
+                    cp,
+                ))
             });
             Out::Done {
                 job: Box::new(job),

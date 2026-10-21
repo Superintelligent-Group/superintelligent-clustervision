@@ -49,7 +49,7 @@ use super::{parse_ts, Adapter};
 use crate::ir::*;
 use crate::json::{JsonSource, JsonView};
 use crate::lazy::Text;
-use crate::stream::{self, Checkpoint, Flow, MessageSink, Start, Tier};
+use crate::stream::{self, Flow, MessageSink, Start, Tier};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use record::{Demand, Reader};
@@ -201,11 +201,8 @@ impl Adapter for Codex {
 
     /// A plain `.jsonl` rollout only grows by appended lines; a compressed `.jsonl.zst` one's
     /// byte prefix is not a logical prefix.
-    fn append_only(&self, r: &SessionRef) -> Option<super::CountPrefix> {
-        r.path
-            .extension()
-            .is_some_and(|e| e == "jsonl")
-            .then_some(super::count_prefix as super::CountPrefix)
+    fn append_only(&self, r: &SessionRef) -> bool {
+        r.path.extension().is_some_and(|e| e == "jsonl")
     }
 
     /// Membership comes from installed hooks, each child verified against its own header.
@@ -272,20 +269,6 @@ impl Adapter for Codex {
         use anyhow::Context;
         self.transcript(r, opts, Start::Whole, sink)?
             .context("a whole read never declines")
-    }
-
-    fn resume_format(&self) -> Option<u32> {
-        Some(crate::source::VERSION)
-    }
-
-    fn resume(
-        &self,
-        r: &SessionRef,
-        opts: &stream::Demand,
-        sink: &mut dyn MessageSink,
-        from: &Checkpoint,
-    ) -> Result<Option<Session>> {
-        self.transcript(r, opts, Start::Checkpoint(from), sink)
     }
 
     /// A modern `.jsonl` rollout through the driver. `has_events` is a whole-file property (do NL
@@ -1024,6 +1007,7 @@ fn scan_rollout(path: &Path, full_scan_cap: u64) -> Result<(SessionRef, Option<R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stream::Checkpoint;
 
     #[test]
     fn hook_forest_verifies_native_parents_and_follows_descendants() {
@@ -1095,7 +1079,7 @@ mod tests {
             r#"{"type":"response_item","payload":{"type":"message","role":"user","content":"snapshot question"}}"#;
         fs::write(&path, format!("{first}\n{{\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":\"later question\"}}}}\n"))?;
         let r = SessionRef::new("prefix", Harness::Codex, &path);
-        assert_eq!(super::super::count_prefix(&r, first.len() as u64, &mut || Ok(()))?, 1);
+        assert_eq!(crate::watch::count_prefix(&r, first.len() as u64, &mut || Ok(()))?, 1);
         assert_eq!(adapter().parse(&r)?.messages.iter().filter(|m| m.is_turn()).count(), 2);
         Ok(())
     }
@@ -1445,7 +1429,10 @@ mod tests {
                 shell.messages = full.messages.clone();
                 for (index, (count, cp)) in full.checkpoints.iter().enumerate() {
                     let mut suffix = BufferedKept::default();
-                    let mut resumed = adapter.try_resume(&r, &opts, &mut suffix, cp).unwrap().unwrap();
+                    let mut resumed = adapter
+                        .transcript(&r, &opts, crate::stream::Start::Checkpoint(cp), &mut suffix)
+                        .unwrap()
+                        .unwrap();
                     assert_eq!(
                         serde_json::to_value(&suffix.messages).unwrap(),
                         serde_json::to_value(&full.messages[*count..]).unwrap()
@@ -1504,11 +1491,17 @@ mod tests {
                 layer["state"]["ctx"]["complete"] = Value::Bool(false);
             }
             let mut sink = BufferedKept::default();
-            assert!(adapter.try_resume(&r, &opts, &mut sink, &old).unwrap().is_none());
+            assert!(adapter
+                .transcript(&r, &opts, crate::stream::Start::Checkpoint(&old), &mut sink)
+                .unwrap()
+                .is_none());
             assert!(sink.messages.is_empty());
         }
         let mut suffix = BufferedKept::default();
-        let mut resumed = adapter.try_resume(&r, &opts, &mut suffix, checkpoint).unwrap().unwrap();
+        let mut resumed = adapter
+            .transcript(&r, &opts, crate::stream::Start::Checkpoint(checkpoint), &mut suffix)
+            .unwrap()
+            .unwrap();
         resumed.messages = prefix.messages[..*count]
             .iter()
             .cloned()
@@ -1561,7 +1554,10 @@ mod tests {
         bytes.extend_from_slice("\u{2003}{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"escaped \\\" \\u263a\"}}\u{2003}\r\n".as_bytes());
         fs::write(&r.path, bytes).unwrap();
         let mut suffix = BufferedKept::default();
-        let mut resumed = adapter.try_resume(&r, &opts, &mut suffix, cp).unwrap().unwrap();
+        let mut resumed = adapter
+            .transcript(&r, &opts, crate::stream::Start::Checkpoint(cp), &mut suffix)
+            .unwrap()
+            .unwrap();
         resumed.messages = first.messages[..*count]
             .iter()
             .cloned()
@@ -1575,27 +1571,35 @@ mod tests {
 
         let mut untouched = BufferedKept::default();
         assert!(adapter
-            .try_resume(&r, &stream::Demand::COMPLETE, &mut untouched, cp)
+            .transcript(
+                &r,
+                &stream::Demand::COMPLETE,
+                crate::stream::Start::Checkpoint(cp),
+                &mut untouched
+            )
             .unwrap()
             .is_none());
         let mut elsewhere = r.clone();
         elsewhere.path = world.base.join("rollout-other.jsonl");
         assert!(adapter
-            .try_resume(&elsewhere, &opts, &mut untouched, cp)
+            .transcript(&elsewhere, &opts, crate::stream::Start::Checkpoint(cp), &mut untouched)
             .unwrap()
             .is_none());
         elsewhere.path = world.base.join("rollout.json");
         assert!(adapter
-            .try_resume(&elsewhere, &opts, &mut untouched, cp)
+            .transcript(&elsewhere, &opts, crate::stream::Start::Checkpoint(cp), &mut untouched)
             .unwrap()
             .is_none());
         elsewhere.path = world.base.join("rollout.jsonl.zst");
         assert!(adapter
-            .try_resume(&elsewhere, &opts, &mut untouched, cp)
+            .transcript(&elsewhere, &opts, crate::stream::Start::Checkpoint(cp), &mut untouched)
             .unwrap()
             .is_none());
         fs::write(&r.path, b"").unwrap();
-        assert!(adapter.try_resume(&r, &opts, &mut untouched, cp).unwrap().is_none());
+        assert!(adapter
+            .transcript(&r, &opts, crate::stream::Start::Checkpoint(cp), &mut untouched)
+            .unwrap()
+            .is_none());
         assert!(untouched.messages.is_empty() && untouched.checkpoints.is_empty());
         assert_eq!((untouched.metadata, untouched.dependencies), (0, 0));
     }
@@ -1621,7 +1625,10 @@ mod tests {
             .write_all(line.repeat(200).as_bytes())
             .unwrap();
         let mut suffix = BufferedKept::default();
-        let resumed = adapter.try_resume(&r, &opts, &mut suffix, cp).unwrap().unwrap();
+        let resumed = adapter
+            .transcript(&r, &opts, crate::stream::Start::Checkpoint(cp), &mut suffix)
+            .unwrap()
+            .unwrap();
         let mut all = whole(&r, &opts);
         assert_eq!(
             serde_json::to_value(&suffix.messages).unwrap(),
@@ -1649,7 +1656,10 @@ mod tests {
             .write_all(line.as_bytes())
             .unwrap();
         let mut untouched = BufferedKept::default();
-        assert!(adapter.try_resume(&r, &opts, &mut untouched, cp).unwrap().is_none());
+        assert!(adapter
+            .transcript(&r, &opts, crate::stream::Start::Checkpoint(cp), &mut untouched)
+            .unwrap()
+            .is_none());
         assert!(untouched.messages.is_empty() && untouched.checkpoints.is_empty());
         assert_eq!((untouched.metadata, untouched.dependencies), (0, 0));
     }

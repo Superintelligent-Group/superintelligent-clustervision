@@ -42,7 +42,7 @@ use crate::ir::*;
 use crate::json::{JsonSource, JsonView};
 use crate::lazy::Text;
 use crate::source::{Dependencies, Probe};
-use crate::stream::{Checkpoint, Demand, Flow, MessageSink, Start};
+use crate::stream::{Demand, Flow, MessageSink, Start};
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -160,22 +160,8 @@ impl Adapter for Grok {
             .context("a whole read never declines")
     }
 
-    fn resume_format(&self) -> Option<u32> {
-        Some(1)
-    }
-
     fn resume_source(&self, r: &SessionRef) -> PathBuf {
         r.path.join("chat_history.jsonl")
-    }
-
-    fn resume(
-        &self,
-        r: &SessionRef,
-        opts: &Demand,
-        sink: &mut dyn MessageSink,
-        from: &Checkpoint,
-    ) -> Result<Option<Session>> {
-        self.transcript(r, opts, Start::Checkpoint(from), sink)
     }
 
     /// `chat_history.jsonl` through the driver, after the header `summary.json` gives. A
@@ -769,7 +755,12 @@ mod tests {
         let (count, checkpoint) = &full.checkpoints[0];
         let mut resumed = ResumeKeep::default();
         let suffix = adapter
-            .resume(&r, &Demand::LEAN.with_spans(), &mut resumed, checkpoint)
+            .transcript(
+                &r,
+                &Demand::LEAN.with_spans(),
+                crate::stream::Start::Checkpoint(checkpoint),
+                &mut resumed,
+            )
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -828,7 +819,10 @@ mod tests {
                 let stride = (full.checkpoints.len() / 12).max(1);
                 for (i, (count, cp)) in full.checkpoints.iter().enumerate().step_by(stride) {
                     let mut rest = ResumeKeep::default();
-                    let s = adapter.try_resume(&r, &opts, &mut rest, cp).unwrap().unwrap();
+                    let s = adapter
+                        .transcript(&r, &opts, crate::stream::Start::Checkpoint(cp), &mut rest)
+                        .unwrap()
+                        .unwrap();
                     assert_eq!(serde_json::to_value(s).unwrap(), serde_json::to_value(&shell).unwrap());
                     assert_eq!(
                         serde_json::to_value(&rest.messages).unwrap(),
@@ -883,7 +877,10 @@ mod tests {
         r.title = Some("current catalog title".into());
         let expected = whole(&adapter, &r, &opts);
         let mut suffix = ResumeKeep::default();
-        let mut shell = adapter.try_resume(&r, &opts, &mut suffix, cp).unwrap().unwrap();
+        let mut shell = adapter
+            .transcript(&r, &opts, crate::stream::Start::Checkpoint(cp), &mut suffix)
+            .unwrap()
+            .unwrap();
         assert_eq!(suffix.messages.len(), 201);
         assert_eq!(shell.title, r.title);
         shell.messages = first.messages[..*count]
@@ -898,7 +895,10 @@ mod tests {
         let mut other = r.clone();
         other.path = dir.join("other");
         let mut none = ResumeKeep::default();
-        assert!(adapter.try_resume(&other, &opts, &mut none, cp).unwrap().is_none());
+        assert!(adapter
+            .transcript(&other, &opts, crate::stream::Start::Checkpoint(cp), &mut none)
+            .unwrap()
+            .is_none());
         assert!(none.messages.is_empty());
         // A UTF-8 failure remains a tolerant skipped line rather than poisoning subsequent records.
         let mut bytes = fs::read(adapter.resume_source(&r)).unwrap();
@@ -916,6 +916,7 @@ mod tests {
 
     use super::*;
     use crate::harness::Parse;
+    use crate::stream::Checkpoint;
 
     #[cfg(unix)]
     #[test]

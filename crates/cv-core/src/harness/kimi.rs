@@ -313,20 +313,6 @@ impl Adapter for Kimi {
             .collect()
     }
 
-    fn resume_format(&self) -> Option<u32> {
-        Some(CONTEXT_VERSION)
-    }
-
-    fn resume(
-        &self,
-        r: &SessionRef,
-        opts: &Demand,
-        sink: &mut dyn MessageSink,
-        from: &Checkpoint,
-    ) -> Result<Option<Session>> {
-        self.transcript(r, opts, Start::Checkpoint(from), sink)
-    }
-
     fn resume_source(&self, r: &SessionRef) -> PathBuf {
         // Native layout is fixed: sessions/<hash>/<id> (or its subagent dir) is modern;
         // sessions/<hash> is the legacy flat store. No mutable exists() decision selects a mark.
@@ -1849,7 +1835,12 @@ mod tests {
                 let (count, checkpoint) = &full.checkpoints[index];
                 let mut suffix = ResumeKeep::default();
                 assert!(adapter
-                    .try_resume(&reference, &options, &mut suffix, checkpoint)?
+                    .transcript(
+                        &reference,
+                        &options,
+                        crate::stream::Start::Checkpoint(checkpoint),
+                        &mut suffix
+                    )?
                     .is_some());
                 assert_eq!(
                     materialized(&suffix.messages, &reference),
@@ -1937,7 +1928,10 @@ mod tests {
                 let stride = (full.checkpoints.len() / 12).max(1);
                 for (i, (count, cp)) in full.checkpoints.iter().enumerate().step_by(stride) {
                     let mut rest = ResumeKeep::default();
-                    let suffix = adapter.try_resume(&r, &opts, &mut rest, cp).unwrap().unwrap();
+                    let suffix = adapter
+                        .transcript(&r, &opts, crate::stream::Start::Checkpoint(cp), &mut rest)
+                        .unwrap()
+                        .unwrap();
                     assert_eq!(
                         serde_json::to_value(suffix).unwrap(),
                         serde_json::to_value(&shell).unwrap(),
@@ -2009,7 +2003,10 @@ mod tests {
         r.title = Some("new catalog title".into());
         let expected = whole(&adapter, &r, &opts);
         let mut suffix = ResumeKeep::default();
-        let mut shell = adapter.try_resume(&r, &opts, &mut suffix, cp).unwrap().unwrap();
+        let mut shell = adapter
+            .transcript(&r, &opts, crate::stream::Start::Checkpoint(cp), &mut suffix)
+            .unwrap()
+            .unwrap();
         assert_eq!(suffix.messages.len(), 201);
         assert_eq!(shell.title, r.title);
         assert_eq!(shell.model.as_deref(), Some("kimi-test"));
@@ -2026,7 +2023,10 @@ mod tests {
         // Adding a rotation changes the dedup/branch context and declines before callbacks.
         fs::write(dir.join("context_1.jsonl"), line).unwrap();
         let mut none = ResumeKeep::default();
-        assert!(adapter.try_resume(&r, &opts, &mut none, cp).unwrap().is_none());
+        assert!(adapter
+            .transcript(&r, &opts, crate::stream::Start::Checkpoint(cp), &mut none)
+            .unwrap()
+            .is_none());
         assert!(none.messages.is_empty());
         eprintln!(
             "kimi stable_prefix=20000 appended_callbacks=201 whole_callbacks=20201 checkpoint_bytes={}",
@@ -2059,7 +2059,10 @@ mod tests {
             assert_eq!(first.messages.len(), if opts.tier == Tier::Complete { 6 } else { 5 });
             for (count, cp) in &first.checkpoints {
                 let mut suffix = ResumeKeep::default();
-                let shell = adapter.try_resume(&r, &opts, &mut suffix, cp).unwrap().unwrap();
+                let shell = adapter
+                    .transcript(&r, &opts, crate::stream::Start::Checkpoint(cp), &mut suffix)
+                    .unwrap()
+                    .unwrap();
                 full.messages.clear();
                 assert_eq!(
                     serde_json::to_value(shell).unwrap(),
