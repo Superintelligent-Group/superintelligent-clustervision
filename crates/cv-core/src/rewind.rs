@@ -593,115 +593,8 @@ fn rewind_session_after_scan(
     let size = source_guard.source.len();
     let subagent = is_subagent(r);
 
-    // Pass 1 — stream the prefix through the adapter: offsets, boundaries, evidence.
-    let want_sha = match &opts.at {
-        CutAt::Commit(s) => {
-            Some(normalize_sha(s).with_context(|| format!("{s:?} is not a commit sha (7–64 hex digits)"))?)
-        }
-        _ => None,
-    };
-    let mut scan = ScanSink {
-        offsets: Vec::new(),
-        unstamped: false,
-        boundaries: Vec::new(),
-        uuid_off: HashMap::new(),
-        stop_after: match opts.at {
-            CutAt::Message(n) => Some(n),
-            _ => None,
-        },
-        evidence: want_sha.clone().map(|s| {
-            let mut e = CommitEvidenceSink::new(vec![s], Some(r.path.clone()));
-            e.stop_on_created = true;
-            e
-        }),
-        foreign: Vec::new(),
-    };
-    crate::harness::Adapter::transcript(
-        &crate::harness::claude::ROOTLESS,
-        r,
-        &Demand::LEAN.with_spans().with_offsets(),
-        crate::stream::Start::Prefix(size),
-        &mut scan,
-    )?;
-    if let Some(error) = scan.take_error() {
-        return Err(error);
-    }
-    after_scan()?;
-    source_guard.verify(&file)?;
-    if scan.unstamped {
-        bail!("cannot map {}'s messages to source records (no byte offsets)", r.id);
-    }
-    let total = scan.offsets.len();
-    if total == 0 {
-        bail!("{} has no messages to rewind", r.id);
-    }
-
-    let evidence = match &want_sha {
-        None => None,
-        Some(sha) => {
-            let found = scan.evidence.as_ref().map(|e| e.found.as_slice()).unwrap_or_default();
-            Some(CommitEvidenceSink::best(found, sha).with_context(|| {
-                format!(
-                    "no tool result in {} shows commit {sha} being made: no `git commit`/`git push` \
-                     output names it (rebased/cherry-picked shas and silenced commits leave none) — \
-                     cut by message index instead (`--at <MSG_IDX>`)",
-                    r.id
-                )
-            })?)
-        }
-    };
-    let cut_idx = match (&opts.at, &evidence) {
-        (CutAt::Message(n), _) => {
-            if *n >= total {
-                bail!(
-                    "--at {n}: {} has {total} message(s) (0-based; the last is {})",
-                    r.id,
-                    total - 1
-                );
-            }
-            *n
-        }
-        (CutAt::Commit(_), Some(e)) => e.msg_idx,
-        _ => total - 1,
-    };
-    let cut_off = scan.offsets[cut_idx];
-    // `End` cuts at the end of the FILE, not at the last message's record: the records after the
-    // last message are part of the session and ride along. An explicit `--at`/`--commit` is a
-    // deliberate truncation and still stops at that message's record.
-    let to_eof = matches!(opts.at, CutAt::End);
-
-    // Start: the last compaction boundary at or before the cut, moved back to its preserved
-    // segment's head when that sits earlier; `--full` (or no boundary) starts at the top.
-    let boundary_idx = (!opts.full)
-        .then(|| scan.boundaries.iter().rev().find(|b| **b <= cut_idx).copied())
-        .flatten();
-    let (start_off, preserved_head) = match boundary_idx {
-        None => (0, false),
-        Some(b) => {
-            let b_off = scan.offsets[b];
-            let head = read_line_at(&source_guard.source, &file, b_off)?
-                .and_then(|facts| facts.compact_head)
-                .and_then(|h| scan.uuid_off.get(&h).copied())
-                .filter(|h| *h < b_off);
-            match head {
-                Some(h) => (h, true),
-                None => (b_off, false),
-            }
-        }
-    };
-    let start_msg_idx = scan.offsets.partition_point(|o| *o < start_off);
-    let thinking = opts
-        .thinking
-        .unwrap_or(if scan.foreign.iter().any(|i| (start_msg_idx..=cut_idx).contains(i)) {
-            crate::emit::ThinkingMode::Portable
-        } else {
-            crate::emit::ThinkingMode::Native
-        });
-    // Only a portable replay walks every record back through the reader; a native copy is bytes.
-    let reemits = thinking == crate::emit::ThinkingMode::Portable;
-
-    // Pass 2 — one sequential read of the prefix frames, hashes and counts every line; the
-    // window's records are then read by range to be rewritten.
+    let window = window(r, opts, &source_guard, &file, size, after_scan)?;
+    // The destination, refused up front when taken, and the staged file pass 2 writes.
     let new_id = opts.new_id.clone().unwrap_or_else(new_uuid);
     let out_dir = opts.out_dir.clone().unwrap_or_else(|| project_dir(&r.path));
     let new_path = out_dir.join(format!("{new_id}.jsonl"));
@@ -724,156 +617,37 @@ fn rewind_session_after_scan(
         )?))
     };
 
-    let mut line_no = 0usize;
-    let (mut start_line, mut cut_line, mut end_line) = (0usize, 0usize, 0usize);
-    let (mut lines_written, mut bytes_written) = (0usize, 0u64);
-    let (mut omitted_lines, mut omitted_bytes) = (0usize, 0u64);
-    // Each open call and the API response (`message.id`) that issued it.
-    let mut open: HashMap<String, Option<String>> = HashMap::new();
-    let mut closed = 0usize;
-    let mut replay_stage = crate::harness::store::bytes::ByteStage::new();
-    let mut source_session_id: Option<String> = None;
-    let mut cwds: Vec<String> = Vec::new();
-    #[derive(PartialEq)]
-    enum Phase {
-        Before,
-        Copy,
-        Closing,
-        Done,
-    }
-    let mut phase = Phase::Before;
-    use crate::harness::store::jsonl::ranges::{self, Range};
-    let mut rows = ranges::records(&file, Range { offset: 0, len: size })?.hashing();
-    for row in rows.by_ref() {
-        let (range, newline) = row?;
-        let at = range.offset;
-        let n = range.len + u64::from(newline);
-        line_no += 1;
-        if phase == Phase::Before && at >= start_off {
-            phase = Phase::Copy;
-            start_line = line_no;
-        }
-        if phase == Phase::Before {
-            continue;
-        }
-        if phase == Phase::Done {
-            omitted_lines += 1;
-            omitted_bytes += n;
-            continue;
-        }
-        // Only JSON whitespace is an empty physical record, copied verbatim; the selector refuses
-        // any other range that is not one JSON value, a line the new session could not read back,
-        // before anything is published (akapug, #27).
-        let mut selected =
-            match crate::derive::Select::read(&source_guard.source, &file, range, newline, false, &identity) {
-                Ok(selected) => selected,
-                Err(error) if error.is::<crate::json::InvalidJson>() => {
-                    // Past an explicit cut only a record that closes an open call is copied, and a
-                    // line that does not parse closes nothing: it is omitted like any other.
-                    if phase == Phase::Closing {
-                        omitted_lines += 1;
-                        omitted_bytes += n;
-                        continue;
-                    }
-                    // The captured prefix can end inside a record the session is still appending.
-                    let why = if range.offset + range.len == size && !newline {
-                        format!(
-                            "is unterminated at the end of the {size} bytes captured; if the session is still \
-                         being written, rerun the rewind; if it was cut short, repair it"
-                        )
-                    } else {
-                        "is not a complete JSON record; repair it".into()
-                    };
-                    drop(writer.take());
-                    bail!(
-                        "{}: line {line_no} {why} or cut before it with `--at <MSG_IDX>`",
-                        r.path.display()
-                    );
-                }
-                Err(error) => return Err(error),
-            };
-        if let Some(record) = &selected.record {
-            let facts = record.with_view(|view| Ok(Facts::parse(view)?.0))?;
-            if source_session_id.is_none() {
-                source_session_id = facts.session_id.clone();
-            }
-            // A `user`/`assistant` record with no `message` body: the Claude codec carries it
-            // verbatim on a byte copy, but a re-emitted copy walks it through the reader, which
-            // takes nothing out of it and would drop it silently. Refuse only where the copy
-            // would lose it; nothing is published either way.
-            if reemits {
-                if let Some(ty) = unreadable_record(&facts) {
-                    drop(writer.take());
-                    bail!(
-                        "{}: line {line_no} is a `{ty}` record with no `message` body (uuid {}); a \
-                         re-emitted copy would drop it: repair or remove that record, rewind without \
-                         re-emitting, or cut before it with `--at <MSG_IDX>`",
-                        r.path.display(),
-                        facts.uuid.as_deref().unwrap_or("(none)"),
-                    );
-                }
-            }
-            if phase == Phase::Closing && !closes_open_call(&facts, &open) {
-                phase = Phase::Done;
-                omitted_lines += 1;
-                omitted_bytes += n;
-                continue;
-            }
-            track_tool_calls(
-                &facts,
-                &mut open,
-                if phase == Phase::Closing {
-                    Some(&mut closed)
-                } else {
-                    None
-                },
-            );
-            if let Some(c) = facts.cwd.as_deref() {
-                if cwds.last().map(String::as_str) != Some(c) {
-                    cwds.retain(|x| x != c);
-                    cwds.push(c.to_string());
-                }
-            }
-            // Native valid records have always ended in a newline in rewind output.
-            selected.newline = true;
-        }
-        let rewrite = crate::derive::Rewrite {
-            session_id: &new_id,
-            standalone: subagent,
-            identity,
-        };
-        let selected = std::iter::once(Ok(selected));
-        let counts = if thinking == crate::emit::ThinkingMode::Portable {
-            crate::derive::derive(&source_guard.source, &file, selected, &rewrite, &mut replay_stage)?
-        } else if let Some(w) = writer.as_mut() {
-            crate::derive::derive(&source_guard.source, &file, selected, &rewrite, w)?
-        } else {
-            crate::derive::derive(&source_guard.source, &file, selected, &rewrite, &mut std::io::sink())?
-        };
-        lines_written += 1;
-        bytes_written += counts.bytes as u64;
-        end_line = line_no;
-        if at == cut_off {
-            cut_line = line_no;
-            // Past an explicit cut the copy keeps only what closes the cut's open calls; an `End`
-            // rewind copies to EOF, so its cut never closes the phase.
-            if !to_eof {
-                phase = Phase::Closing;
-            }
-        }
-        if phase == Phase::Closing && open.is_empty() {
-            phase = Phase::Done;
-        }
-    }
-    if cut_line == 0 {
-        drop(writer.take());
-        bail!(
-            "message {cut_idx}'s record (byte {cut_off}) is not a line start in {}",
-            r.path.display()
-        );
-    }
-    source_guard.verify(&file)?;
-    let source_sha256 = rows.finish_digest().expect("the framer was hashing");
+    let rewrite = crate::derive::Rewrite {
+        session_id: &new_id,
+        standalone: subagent,
+        identity,
+    };
+    let Copied {
+        start_line,
+        cut_line,
+        end_line,
+        mut lines_written,
+        mut bytes_written,
+        omitted_lines,
+        omitted_bytes,
+        open,
+        closed,
+        source_session_id,
+        cwds,
+        source_sha256,
+        replay_stage,
+    } = copy(r, &source_guard, &file, size, &window, &rewrite, &mut writer)?;
+    let Window {
+        cut_idx,
+        cut_off,
+        boundary_idx,
+        start_off,
+        start_msg_idx,
+        preserved_head,
+        thinking,
+        evidence,
+        ..
+    } = window;
 
     // The launch dir: among the cwds the window recorded (plus the owning session's first one — a
     // sub-agent's records may all sit in a worktree), the one Claude would file this session under.
@@ -979,6 +753,349 @@ fn rewind_session_after_scan(
         set.publish()?;
     }
     Ok(res)
+}
+
+/// Pass 1's verdict: the records the copy spans and how it is written.
+struct Window {
+    cut_idx: usize,
+    cut_off: u64,
+    /// `End` cuts at the end of the file; an explicit cut stops at its message's record.
+    to_eof: bool,
+    boundary_idx: Option<usize>,
+    start_off: u64,
+    start_msg_idx: usize,
+    preserved_head: bool,
+    thinking: crate::emit::ThinkingMode,
+    evidence: Option<CommitEvidence>,
+}
+
+/// Pass 1 — stream the captured prefix through the adapter for message offsets, compaction
+/// boundaries and commit evidence, then resolve the cut, the start and the thinking mode.
+fn window(
+    r: &SessionRef,
+    opts: &RewindOptions,
+    source_guard: &PrefixReadGuard,
+    file: &std::fs::File,
+    size: u64,
+    after_scan: impl FnOnce() -> Result<()>,
+) -> Result<Window> {
+    let want_sha = match &opts.at {
+        CutAt::Commit(s) => {
+            Some(normalize_sha(s).with_context(|| format!("{s:?} is not a commit sha (7–64 hex digits)"))?)
+        }
+        _ => None,
+    };
+    let mut scan = ScanSink {
+        offsets: Vec::new(),
+        unstamped: false,
+        boundaries: Vec::new(),
+        uuid_off: HashMap::new(),
+        stop_after: match opts.at {
+            CutAt::Message(n) => Some(n),
+            _ => None,
+        },
+        evidence: want_sha.clone().map(|s| {
+            let mut e = CommitEvidenceSink::new(vec![s], Some(r.path.clone()));
+            e.stop_on_created = true;
+            e
+        }),
+        foreign: Vec::new(),
+    };
+    crate::harness::Adapter::transcript(
+        &crate::harness::claude::ROOTLESS,
+        r,
+        &Demand::LEAN.with_spans().with_offsets(),
+        crate::stream::Start::Prefix(size),
+        &mut scan,
+    )?;
+    if let Some(error) = scan.take_error() {
+        return Err(error);
+    }
+    after_scan()?;
+    source_guard.verify(file)?;
+    if scan.unstamped {
+        bail!("cannot map {}'s messages to source records (no byte offsets)", r.id);
+    }
+    let total = scan.offsets.len();
+    if total == 0 {
+        bail!("{} has no messages to rewind", r.id);
+    }
+
+    let evidence = match &want_sha {
+        None => None,
+        Some(sha) => {
+            let found = scan.evidence.as_ref().map(|e| e.found.as_slice()).unwrap_or_default();
+            Some(CommitEvidenceSink::best(found, sha).with_context(|| {
+                format!(
+                    "no tool result in {} shows commit {sha} being made: no `git commit`/`git push` \
+                     output names it (rebased/cherry-picked shas and silenced commits leave none) — \
+                     cut by message index instead (`--at <MSG_IDX>`)",
+                    r.id
+                )
+            })?)
+        }
+    };
+    let cut_idx = match (&opts.at, &evidence) {
+        (CutAt::Message(n), _) => {
+            if *n >= total {
+                bail!(
+                    "--at {n}: {} has {total} message(s) (0-based; the last is {})",
+                    r.id,
+                    total - 1
+                );
+            }
+            *n
+        }
+        (CutAt::Commit(_), Some(e)) => e.msg_idx,
+        _ => total - 1,
+    };
+    let cut_off = scan.offsets[cut_idx];
+    // `End` cuts at the end of the FILE, not at the last message's record: the records after the
+    // last message are part of the session and ride along. An explicit `--at`/`--commit` is a
+    // deliberate truncation and still stops at that message's record.
+    let to_eof = matches!(opts.at, CutAt::End);
+
+    // Start: the last compaction boundary at or before the cut, moved back to its preserved
+    // segment's head when that sits earlier; `--full` (or no boundary) starts at the top.
+    let boundary_idx = (!opts.full)
+        .then(|| scan.boundaries.iter().rev().find(|b| **b <= cut_idx).copied())
+        .flatten();
+    let (start_off, preserved_head) = match boundary_idx {
+        None => (0, false),
+        Some(b) => {
+            let b_off = scan.offsets[b];
+            let head = read_line_at(&source_guard.source, file, b_off)?
+                .and_then(|facts| facts.compact_head)
+                .and_then(|h| scan.uuid_off.get(&h).copied())
+                .filter(|h| *h < b_off);
+            match head {
+                Some(h) => (h, true),
+                None => (b_off, false),
+            }
+        }
+    };
+    let start_msg_idx = scan.offsets.partition_point(|o| *o < start_off);
+    let thinking = opts
+        .thinking
+        .unwrap_or(if scan.foreign.iter().any(|i| (start_msg_idx..=cut_idx).contains(i)) {
+            crate::emit::ThinkingMode::Portable
+        } else {
+            crate::emit::ThinkingMode::Native
+        });
+    Ok(Window {
+        cut_idx,
+        cut_off,
+        to_eof,
+        boundary_idx,
+        start_off,
+        start_msg_idx,
+        preserved_head,
+        thinking,
+        evidence,
+    })
+}
+
+/// What pass 2 copied.
+struct Copied {
+    start_line: usize,
+    cut_line: usize,
+    end_line: usize,
+    lines_written: usize,
+    bytes_written: u64,
+    omitted_lines: usize,
+    omitted_bytes: u64,
+    /// Each call still open and the API response (`message.id`) that issued it.
+    open: HashMap<String, Option<String>>,
+    closed: usize,
+    source_session_id: Option<String>,
+    cwds: Vec<String>,
+    source_sha256: String,
+    /// The window's records for a portable replay to re-emit.
+    replay_stage: crate::harness::store::bytes::ByteStage,
+}
+
+/// Pass 2 — one sequential read of the prefix frames, hashes and counts every line, and copies
+/// the window's records (rewritten to `new_id`) into `writer`, or into the replay stage when the
+/// copy re-emits. Past an explicit cut it copies only what closes the cut's open calls.
+fn copy(
+    r: &SessionRef,
+    source_guard: &PrefixReadGuard,
+    file: &std::fs::File,
+    size: u64,
+    w: &Window,
+    rewrite: &crate::derive::Rewrite<'_>,
+    writer: &mut Option<std::io::BufWriter<crate::publish::Staged>>,
+) -> Result<Copied> {
+    let Window {
+        cut_idx,
+        cut_off,
+        to_eof,
+        start_off,
+        thinking,
+        ..
+    } = *w;
+    // Only a portable replay walks every record back through the reader; a native copy is bytes.
+    let reemits = thinking == crate::emit::ThinkingMode::Portable;
+    let mut line_no = 0usize;
+    let (mut start_line, mut cut_line, mut end_line) = (0usize, 0usize, 0usize);
+    let (mut lines_written, mut bytes_written) = (0usize, 0u64);
+    let (mut omitted_lines, mut omitted_bytes) = (0usize, 0u64);
+    // Each open call and the API response (`message.id`) that issued it.
+    let mut open: HashMap<String, Option<String>> = HashMap::new();
+    let mut closed = 0usize;
+    let mut replay_stage = crate::harness::store::bytes::ByteStage::new();
+    let mut source_session_id: Option<String> = None;
+    let mut cwds: Vec<String> = Vec::new();
+    #[derive(PartialEq)]
+    enum Phase {
+        Before,
+        Copy,
+        Closing,
+        Done,
+    }
+    let mut phase = Phase::Before;
+    use crate::harness::store::jsonl::ranges::{self, Range};
+    let mut rows = ranges::records(file, Range { offset: 0, len: size })?.hashing();
+    for row in rows.by_ref() {
+        let (range, newline) = row?;
+        let at = range.offset;
+        let n = range.len + u64::from(newline);
+        line_no += 1;
+        if phase == Phase::Before && at >= start_off {
+            phase = Phase::Copy;
+            start_line = line_no;
+        }
+        if phase == Phase::Before {
+            continue;
+        }
+        if phase == Phase::Done {
+            omitted_lines += 1;
+            omitted_bytes += n;
+            continue;
+        }
+        // Only JSON whitespace is an empty physical record, copied verbatim; the selector refuses
+        // any other range that is not one JSON value, a line the new session could not read back,
+        // before anything is published (akapug, #27).
+        let mut selected =
+            match crate::derive::Select::read(&source_guard.source, file, range, newline, false, &rewrite.identity) {
+                Ok(selected) => selected,
+                Err(error) if error.is::<crate::json::InvalidJson>() => {
+                    // Past an explicit cut only a record that closes an open call is copied, and a
+                    // line that does not parse closes nothing: it is omitted like any other.
+                    if phase == Phase::Closing {
+                        omitted_lines += 1;
+                        omitted_bytes += n;
+                        continue;
+                    }
+                    // The captured prefix can end inside a record the session is still appending.
+                    let why = if range.offset + range.len == size && !newline {
+                        format!(
+                            "is unterminated at the end of the {size} bytes captured; if the session is still \
+                         being written, rerun the rewind; if it was cut short, repair it"
+                        )
+                    } else {
+                        "is not a complete JSON record; repair it".into()
+                    };
+                    drop(writer.take());
+                    bail!(
+                        "{}: line {line_no} {why} or cut before it with `--at <MSG_IDX>`",
+                        r.path.display()
+                    );
+                }
+                Err(error) => return Err(error),
+            };
+        if let Some(record) = &selected.record {
+            let facts = record.with_view(|view| Ok(Facts::parse(view)?.0))?;
+            if source_session_id.is_none() {
+                source_session_id = facts.session_id.clone();
+            }
+            // A `user`/`assistant` record with no `message` body: the Claude codec carries it
+            // verbatim on a byte copy, but a re-emitted copy walks it through the reader, which
+            // takes nothing out of it and would drop it silently. Refuse only where the copy
+            // would lose it; nothing is published either way.
+            if reemits {
+                if let Some(ty) = unreadable_record(&facts) {
+                    drop(writer.take());
+                    bail!(
+                        "{}: line {line_no} is a `{ty}` record with no `message` body (uuid {}); a \
+                         re-emitted copy would drop it: repair or remove that record, rewind without \
+                         re-emitting, or cut before it with `--at <MSG_IDX>`",
+                        r.path.display(),
+                        facts.uuid.as_deref().unwrap_or("(none)"),
+                    );
+                }
+            }
+            if phase == Phase::Closing && !closes_open_call(&facts, &open) {
+                phase = Phase::Done;
+                omitted_lines += 1;
+                omitted_bytes += n;
+                continue;
+            }
+            track_tool_calls(
+                &facts,
+                &mut open,
+                if phase == Phase::Closing {
+                    Some(&mut closed)
+                } else {
+                    None
+                },
+            );
+            if let Some(c) = facts.cwd.as_deref() {
+                if cwds.last().map(String::as_str) != Some(c) {
+                    cwds.retain(|x| x != c);
+                    cwds.push(c.to_string());
+                }
+            }
+            // Native valid records have always ended in a newline in rewind output.
+            selected.newline = true;
+        }
+        let selected = std::iter::once(Ok(selected));
+        let counts = if thinking == crate::emit::ThinkingMode::Portable {
+            crate::derive::derive(&source_guard.source, file, selected, rewrite, &mut replay_stage)?
+        } else if let Some(w) = writer.as_mut() {
+            crate::derive::derive(&source_guard.source, file, selected, rewrite, w)?
+        } else {
+            crate::derive::derive(&source_guard.source, file, selected, rewrite, &mut std::io::sink())?
+        };
+        lines_written += 1;
+        bytes_written += counts.bytes as u64;
+        end_line = line_no;
+        if at == cut_off {
+            cut_line = line_no;
+            // Past an explicit cut the copy keeps only what closes the cut's open calls; an `End`
+            // rewind copies to EOF, so its cut never closes the phase.
+            if !to_eof {
+                phase = Phase::Closing;
+            }
+        }
+        if phase == Phase::Closing && open.is_empty() {
+            phase = Phase::Done;
+        }
+    }
+    if cut_line == 0 {
+        drop(writer.take());
+        bail!(
+            "message {cut_idx}'s record (byte {cut_off}) is not a line start in {}",
+            r.path.display()
+        );
+    }
+    source_guard.verify(file)?;
+    let source_sha256 = rows.finish_digest().expect("the framer was hashing");
+    Ok(Copied {
+        start_line,
+        cut_line,
+        end_line,
+        lines_written,
+        bytes_written,
+        omitted_lines,
+        omitted_bytes,
+        open,
+        closed,
+        source_session_id,
+        cwds,
+        source_sha256,
+        replay_stage,
+    })
 }
 
 /// The provenance sidecar body (`<new-id>.rewind.json`).
