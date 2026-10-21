@@ -746,18 +746,7 @@ fn source_consumer(dir: &Path) -> Result<String> {
     let linked = std::fs::hard_link(&staged, &file);
     let _ = std::fs::remove_file(&staged);
     match linked {
-        Ok(()) => {
-            let consumer = format!("fts:{id}");
-            let legacy = format!(
-                "fts:{}",
-                std::fs::canonicalize(dir)
-                    .context("identifying search index dependencies")?
-                    .display()
-            );
-            // Unmoved rows only cost one rewrite: no baseline exists under the new identity.
-            let _ = cv_core::source::rename_consumer(&legacy, &consumer);
-            Ok(consumer)
-        }
+        Ok(()) => Ok(format!("fts:{id}")),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             read(&file)?.with_context(|| format!("reading {}", file.display()))
         }
@@ -6389,8 +6378,8 @@ mod tests {
     }
 
     #[test]
-    fn a_copied_index_keeps_its_baselines_and_legacy_path_rows_move_to_the_identity() {
-        let home = IsolatedHome::new();
+    fn a_copied_index_keeps_its_baselines() {
+        let _home = IsolatedHome::new();
         let (dir, sdir) = (tmpdir(), tmpdir());
         let fleet = resumable_fleet(&sdir, 2);
         let refs: Vec<_> = fleet.iter().map(|(r, _)| r.clone()).collect();
@@ -6408,24 +6397,6 @@ mod tests {
             .success());
         assert_eq!(source_consumer(&copy).unwrap(), source_consumer(&dir).unwrap());
         assert_eq!(sweep(&copy, refs.clone(), false, false).unwrap().changed, 0);
-        // An index from before identities: rows keyed by its canonical path move on first open.
-        let legacy = format!("fts:{}", std::fs::canonicalize(&dir).unwrap().display());
-        let conn = rusqlite::Connection::open(home.home.join("catalog.db")).unwrap();
-        conn.execute(
-            "UPDATE source_dependencies SET consumer=?1 WHERE consumer=?2",
-            [legacy.as_str(), source_consumer(&dir).unwrap().as_str()],
-        )
-        .unwrap();
-        std::fs::remove_file(dir.join("cv-index-id")).unwrap();
-        assert_eq!(sweep(&dir, refs.clone(), false, false).unwrap().changed, 0);
-        let left: i64 = conn
-            .query_row(
-                "SELECT count(*) FROM source_dependencies WHERE consumer=?1",
-                [&legacy],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(left, 0);
         for d in [dir, copy, sdir] {
             std::fs::remove_dir_all(d).ok();
         }
