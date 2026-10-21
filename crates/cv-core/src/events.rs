@@ -19,7 +19,7 @@
 //! materialized — under [`Demand::LEAN.with_spans()`](crate::stream::Demand::with_spans) a large result
 //! is an unresolved [`Span`](crate::lazy::Span) and the error `detail` is simply skipped for it.
 //! Like [`crate::catalog`], the persistence side is best-effort: SQLite errors degrade to empty
-//! results / no-ops, never failing the caller.
+//! results / no-ops with a named diagnostic, never silently failing the caller.
 
 use crate::ir::{truncate, Block, Message, Session, SessionRef};
 use crate::json::{Json, JsonView};
@@ -32,6 +32,13 @@ use std::path::{Path, PathBuf};
 mod arguments;
 mod spool;
 pub use spool::{EventSpool, SpoolingSink};
+
+/// Controls catalog ingestion over the discovered corpus.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct IngestOptions {
+    pub force: bool,
+    pub subagents: bool,
+}
 
 /// Cap (chars) on a command-string target. File-path targets are never truncated.
 const TARGET_MAX: usize = 300;
@@ -941,7 +948,8 @@ mod db {
     /// streamed through the same `EventSink` and stored with provenance (parent / workflow / agent),
     /// so `cv touched`/`cv events` see what the agents did — not just the orchestrator. Off by
     /// default (the forest can be hundreds of transcripts / ~900 MB).
-    pub fn ingest_all(force: bool, subagents: bool) -> Result<usize> {
+    pub fn ingest_all(options: IngestOptions) -> Result<usize> {
+        let IngestOptions { force, subagents } = options;
         let sources = collect_sources(crate::discover_all(), subagents)?;
         let sync = SyncTable::load();
         let mut probe = crate::source::Probe::default();
@@ -1351,7 +1359,7 @@ mod db_stub {
     pub fn ingest_subagent(_r: &SessionRef, _prov: &Provenance) -> Result<usize> {
         Ok(0)
     }
-    pub fn ingest_all(_force: bool, _subagents: bool) -> Result<usize> {
+    pub fn ingest_all(_options: IngestOptions) -> Result<usize> {
         Ok(0)
     }
     pub fn events_for(_harness: &str, _session_id: &str, _kind: Option<&str>) -> Result<Vec<EventRow>> {

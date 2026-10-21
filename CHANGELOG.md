@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Breaking (library):** `events::ingest_all` takes named `IngestOptions` instead of two positional booleans.
+
 - **Breaking (library):** agent end, return, task-notice and workflow-launch reads return `Result`; aborted reads no longer imply missing or running agents.
 - String-entry readers preserve named read failures; invalid legacy Codex documents count as unparsed instead of returning an unmarked empty session.
 
