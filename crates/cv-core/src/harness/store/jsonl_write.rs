@@ -54,7 +54,8 @@ impl JsonlStage {
     }
 }
 
-/// Publish fully produced bytes through [`crate::publish`]: never written into an existing file.
+/// Publish fully produced bytes through [`crate::publish`], never through an existing inode;
+/// `Claim::Replace` replaces the destination name with the staged file.
 /// Checked serialization must complete before calling.
 pub(crate) fn publish_stage(stage: ByteStage, path: &Path, claim: Claim) -> Result<()> {
     let source = stage.finish()?;

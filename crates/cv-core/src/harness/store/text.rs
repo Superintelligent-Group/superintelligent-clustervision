@@ -213,6 +213,8 @@ fn generate_string_with_len(
 
 fn write_quoted_json(view: crate::json::JsonView<'_>, writer: &mut dyn std::io::Write) -> Result<usize> {
     use std::io::Write;
+    // Input is write_canonical output: control bytes are already escaped. Only quotes and
+    // backslashes need another escape layer to embed that JSON in a JSON string.
     struct Escaped<'a> {
         writer: &'a mut dyn Write,
         scratch: Vec<u8>,

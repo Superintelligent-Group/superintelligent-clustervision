@@ -9,6 +9,8 @@ impl Positions {
         positions.sort_unstable_by(|&a, &b| compare(a, b).then(a.cmp(&b)));
         Self(positions)
     }
+    /// Select positions after the `before` prefix and through the inclusive `through` prefix.
+    /// Both predicates must be monotone true-then-false in sorted order, with before ⊆ through.
     pub(crate) fn range(&self, before: impl Fn(usize) -> bool, through: impl Fn(usize) -> bool) -> &[usize] {
         let start = self.0.partition_point(|&i| before(i));
         let end = self.0.partition_point(|&i| through(i));

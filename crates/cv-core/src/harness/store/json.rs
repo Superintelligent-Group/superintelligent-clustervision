@@ -322,6 +322,8 @@ fn json_body_windows(
                 break;
             }
             let n = (WINDOW + 1 - buf.len()).min(bytes.len());
+            // n fills at most WINDOW body bytes after the opening quote; the extra byte
+            // reserves its closing quote. Thus needed <= WINDOW + 2 and needed > buf.len().
             let needed = buf.len() + n + 1;
             if needed > buf.capacity() {
                 buf.reserve_exact(needed.max(2 * buf.capacity()).min(WINDOW + 2) - buf.len());

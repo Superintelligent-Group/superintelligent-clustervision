@@ -84,7 +84,8 @@ impl Read {
     /// where the next step depends on the file being intact (a checkpoint, EOF).
     /// A sink callback longer than this is one during which the file could plausibly have been
     /// replaced or truncated (a consumer that writes, talks to a network, or blocks); the backing
-    /// is checked right after it. A callback that returned at once is covered by the window.
+    /// is checked right after it. A faster callback can still mutate the source; detection then
+    /// waits for CHECK_EVERY consumed bytes, a checkpoint or EOF, against the pinned descriptor.
     pub(crate) const SLOW_CALLBACK: std::time::Duration = std::time::Duration::from_micros(200);
 
     /// After a sink callback that began at `started`: the full check when the callback was slow
