@@ -48,12 +48,18 @@ unsafe impl GlobalAlloc for Allocator {
     }
 }
 
-pub fn begin() -> usize {
+/// An allocation observation started by [`begin`], consumed exactly once by [`end`].
+#[must_use = "finish the observation with heap::end"]
+pub struct Measurement {
+    baseline: usize,
+}
+
+pub fn begin() -> Measurement {
     let baseline = LIVE.load(Relaxed);
     PEAK.store(baseline, Relaxed);
     CALLS.store(0, Relaxed);
     REQUESTED.store(0, Relaxed);
-    baseline
+    Measurement { baseline }
 }
 
 #[derive(serde::Serialize)]
@@ -66,7 +72,8 @@ pub struct Snapshot {
     pub requested_bytes: usize,
 }
 
-pub fn end(baseline: usize) -> Snapshot {
+pub fn end(measurement: Measurement) -> Snapshot {
+    let baseline = measurement.baseline;
     let peak = PEAK.load(Relaxed);
     // Capture on the stack; allocating report JSON must not count itself as stage work.
     Snapshot {
