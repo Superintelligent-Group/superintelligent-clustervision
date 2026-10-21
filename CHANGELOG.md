@@ -3,6 +3,10 @@
 ## Unreleased
 
 - Document `cv events` catalog writes and `--frozen`; update the manual for 0.18 counts, flags, diagnostics and migrations.
+- Qwen emission preserves absent cache counts and incomplete totals, and rejects overflowing usage aggregates.
+- OpenCode emission keeps unknown working directories empty instead of substituting the invoking process’s directory.
+- Port fidelity reports declare target-supplied timestamps and complete-to-rich verification; Grok tool updates prefer recorded session creation time.
+
 - Codex usage-only records are harness notices; emission rejects overflowing counts and omits totals when components are unknown.
 
 - Goose reports bare model names; providers stay in the Goose metadata bag and never substitute for missing models.

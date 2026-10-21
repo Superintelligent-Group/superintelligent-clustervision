@@ -439,8 +439,8 @@ pub(crate) fn materialized_session(session: &Session) -> Result<std::borrow::Cow
 
 /// Emit `session` into `target`, then re-parse the written output with `target`'s own adapter and
 /// diff it against the input IR. Returns the [`EmitResult`] plus a list of human-readable
-/// lossy-conversion warnings (empty when the round-trip is clean). The CLI prints these so a user
-/// porting a session knows what (if anything) didn't survive.
+/// conversion warnings (empty when the round-trip is clean). These report both losses and
+/// target-supplied timestamps, so defaults cannot masquerade as source timing.
 ///
 /// This never changes what `emit` writes — it's a read-back verification pass on top of it.
 ///
@@ -487,7 +487,7 @@ pub fn emit_report(
     // complete session plainly compared it against a lean one: impossible deltas such as
     // `per-message model: 2106 → 836` on an 836-message session, because the source's carriers (and
     // the complete-mode roles of synthetic notices) had no counterpart.
-    let report = match reparse_features(target, opts.thinking, &result, &opts.parsed_at.demand()) {
+    let mut report = match reparse_features(target, opts.thinking, &result, &opts.parsed_at.demand()) {
         Ok((reparsed, after)) => diff_features(target, opts.thinking, session, &reparsed, before, after),
         Err(e) => FidelityReport {
             deltas: vec![Divergence {
@@ -499,6 +499,15 @@ pub fn emit_report(
             }],
         },
     };
+    if opts.parsed_at == ParsedAt::Complete && !fidelity::target_holds(target, fidelity::Field::CompleteReparse) {
+        report.deltas.push(Divergence {
+            what: "verification demand".into(),
+            a: "complete".into(),
+            b: "rich (target reader policy)".into(),
+            expected: true,
+            at: target.as_str().into(),
+        });
+    }
     Ok((result, report))
 }
 
@@ -542,7 +551,8 @@ pub(crate) fn called_tool_ids(session: &Session) -> std::collections::HashSet<&s
         .collect()
 }
 
-/// Epoch-millis for an optional timestamp, falling back to `now`.
+/// Target-required epoch-millis. Callers prefer recorded session time before using the write
+/// clock; `emit_report` declares timestamps added by the target in its expected deltas.
 pub(crate) fn epoch_ms(t: Option<DateTime<Utc>>) -> i64 {
     t.unwrap_or_else(Utc::now).timestamp_millis()
 }
@@ -2066,15 +2076,18 @@ mod tests {
     }
 
     #[test]
-    fn emit_verified_clean_for_openclaw() {
-        // OpenClaw represents text, thinking, tool calls/results, system turns — a clean round-trip.
+    fn emit_verified_declares_openclaw_timestamp_defaults() {
+        // OpenClaw retains content but supplies timestamps the source did not record.
         let s = sample_session(Harness::OpenClaw);
         let out = temp_dir();
         let (_res, warnings) = emit_verified(&s, Harness::OpenClaw, &out, &EmitOptions::default()).unwrap();
         // No tool/image/reasoning loss; OpenClaw keeps system turns and the title.
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
         assert!(
-            warnings.is_empty(),
-            "expected a clean round-trip for OpenClaw, got: {warnings:?}"
+            warnings
+                .iter()
+                .all(|line| line.contains("timestamps supplied by target") && line.contains("expected")),
+            "{warnings:?}"
         );
     }
 
@@ -2324,14 +2337,17 @@ mod tests {
 
     #[cfg(feature = "sqlite")]
     #[test]
-    fn emit_verified_clean_for_hermes() {
-        // Hermes keeps tools, reasoning, system turns, and title — should round-trip cleanly.
+    fn emit_verified_declares_hermes_timestamp_defaults() {
+        // Hermes retains content but supplies timestamps the source did not record.
         let s = sample_session(Harness::Hermes);
         let out = temp_dir();
         let (_res, warnings) = emit_verified(&s, Harness::Hermes, &out, &EmitOptions::default()).unwrap();
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
         assert!(
-            warnings.is_empty(),
-            "expected a clean round-trip for Hermes, got: {warnings:?}"
+            warnings
+                .iter()
+                .all(|line| line.contains("timestamps supplied by target") && line.contains("expected")),
+            "{warnings:?}"
         );
     }
 

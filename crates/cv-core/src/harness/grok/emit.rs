@@ -189,7 +189,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
                             line.finish()
                         })?;
                         updates.push(json!({
-                            "timestamp": epoch_ms(msg.timestamp.or(session.updated_at)),
+                            "timestamp": epoch_ms(msg.timestamp.or(session.created_at).or(session.updated_at)),
                             "method": "session/update",
                             "params": {
                                 "sessionId": new_id,

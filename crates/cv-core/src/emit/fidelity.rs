@@ -202,7 +202,7 @@ pub(super) fn brief(s: &str) -> String {
     }
 }
 
-/// The structured result of the v2 fidelity check: every field that did not survive the round-trip,
+/// The structured result of the v2 fidelity check: losses and declared target defaults,
 /// each classified expected/unexpected. An empty `deltas` is a fully clean round-trip.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct FidelityReport {
@@ -223,7 +223,7 @@ impl FidelityReport {
             .iter()
             .map(|d| {
                 if d.expected {
-                    format!("{} (expected: this format cannot carry it)", d.describe())
+                    format!("{} (expected: target format policy)", d.describe())
                 } else {
                     d.describe()
                 }
@@ -685,9 +685,8 @@ pub(crate) fn holds(target: Harness, thinking: ThinkingMode, field: Field) -> bo
 }
 
 /// The v2 diff: compare the source IR against what the target's own adapter read back, field by
-/// field, classifying each surviving delta. Only *losses* (count decreases, dropped/altered session
-/// fields) are reported — the re-parse legitimately adds records (compaction notes, synthesized
-/// ids/timestamps), and an addition is never a fidelity loss.
+/// field, classifying each surviving delta. Losses and target-added timestamps are reported;
+/// added timestamps are declared target policy, not evidence of source timing.
 #[cfg(test)]
 pub(super) fn diff_fidelity(
     target: Harness,
@@ -890,6 +889,50 @@ pub(super) fn diff_features(
         before.timestamps_tool,
         after.timestamps_tool,
     );
+    // Some target stores require timestamps. Declare their defaulting instead of silently
+    // presenting a newly written timestamp as source evidence.
+    for (label, before, after) in [
+        ("timestamps supplied by target", before.timestamps, after.timestamps),
+        (
+            "tool timestamps supplied by target",
+            before.timestamps_tool,
+            after.timestamps_tool,
+        ),
+    ] {
+        if after > before {
+            deltas.push(Divergence {
+                what: label.into(),
+                a: before.to_string(),
+                b: after.to_string(),
+                expected: true,
+                at: at(),
+            });
+        }
+    }
+    for (label, before, after) in [
+        (
+            "session created_at supplied by target",
+            input.created_at,
+            reparsed.created_at,
+        ),
+        (
+            "session updated_at supplied by target",
+            input.updated_at,
+            reparsed.updated_at,
+        ),
+    ] {
+        if before.is_none() {
+            if let Some(after) = after {
+                deltas.push(Divergence {
+                    what: label.into(),
+                    a: "(unknown)".into(),
+                    b: after.to_rfc3339(),
+                    expected: true,
+                    at: at(),
+                });
+            }
+        }
+    }
     count_delta(&mut deltas, Field::Id, "message ids", before.ids, after.ids);
     count_delta(
         &mut deltas,
@@ -1066,6 +1109,24 @@ pub(crate) fn unrepresentable_checked(
 #[cfg(test)]
 mod principal_tests {
     use super::*;
+
+    #[test]
+    fn target_added_timestamps_are_declared() {
+        let mut input = Session::new("source", Harness::Claude);
+        let mut message = crate::Message::new(Role::Assistant);
+        message.content.push(Block::Text { text: "answer".into() });
+        input.messages.push(message);
+        let mut output = input.clone();
+        let timestamp = "2026-01-01T00:00:00Z".parse().unwrap();
+        output.created_at = Some(timestamp);
+        output.messages[0].timestamp = Some(timestamp);
+        let report = diff_fidelity(Harness::Codex, ThinkingMode::Native, &input, &output);
+        assert_eq!(report.deltas.len(), 2);
+        assert!(report
+            .deltas
+            .iter()
+            .all(|d| d.expected && d.what.contains("supplied by target")));
+    }
 
     #[test]
     fn native_principal_loss_is_reported_and_retained_value_is_not() {

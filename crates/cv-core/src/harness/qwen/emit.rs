@@ -139,10 +139,13 @@ fn projected_texts<'a>(message: &'a Message, mode: ThinkingMode, resolver: &Reso
         .collect()
 }
 
-fn usage_metadata(m: &Message) -> Option<Value> {
-    let u = m.usage.as_ref()?;
+fn usage_metadata(m: &Message) -> Result<Option<Value>> {
+    let Some(u) = m.usage.as_ref() else { return Ok(None) };
     let cached = u.cache_read_tokens.unwrap_or(0);
-    let input = u.input_tokens.map(|i| i.saturating_add(cached));
+    let input = u
+        .input_tokens
+        .map(|i| i.checked_add(cached).context("Qwen prompt token count overflows u64"))
+        .transpose()?;
     let mut out = Map::new();
     if let Some(i) = input {
         out.insert("promptTokenCount".into(), json!(i));
@@ -153,12 +156,16 @@ fn usage_metadata(m: &Message) -> Option<Value> {
     if let Some(r) = u.reasoning_tokens {
         out.insert("thoughtsTokenCount".into(), json!(r));
     }
-    out.insert("cachedContentTokenCount".into(), json!(cached));
-    out.insert(
-        "totalTokenCount".into(),
-        json!(input.unwrap_or(0).saturating_add(u.output_tokens.unwrap_or(0))),
-    );
-    Some(Value::Object(out))
+    if let Some(cached) = u.cache_read_tokens {
+        out.insert("cachedContentTokenCount".into(), json!(cached));
+    }
+    if let (Some(input), Some(output)) = (input, u.output_tokens) {
+        let total = input
+            .checked_add(output)
+            .context("Qwen total token count overflows u64")?;
+        out.insert("totalTokenCount".into(), json!(total));
+    }
+    Ok(Some(Value::Object(out)))
 }
 
 /// The subtype a model-facing, harness-written user record carries: the one it was read with
@@ -311,7 +318,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
                         row.field("model", model)?;
                     }
                     row.field_with("message", |w| message_parts(w, "model", &parts, &resolver))?;
-                    if let Some(usage) = usage_metadata(m) {
+                    if let Some(usage) = usage_metadata(m)? {
                         row.field("usageMetadata", usage)?;
                     }
                     Ok(())
@@ -485,18 +492,26 @@ mod tests {
     use crate::harness::{Adapter, Parse};
 
     #[test]
-    fn usage_wire_aggregates_saturate_large_component_counts() {
+    fn usage_wire_preserves_absence_and_rejects_overflow() {
         let mut message = Message::new(Role::Assistant);
         message.usage = Some(crate::ir::Usage {
-            input_tokens: Some(u64::MAX),
-            cache_read_tokens: Some(1),
             output_tokens: Some(2),
             ..Default::default()
         });
-        let value = usage_metadata(&message).unwrap();
-        assert_eq!(value["promptTokenCount"], u64::MAX);
-        assert_eq!(value["totalTokenCount"], u64::MAX);
-        assert_eq!(value["cachedContentTokenCount"], 1);
+        let value = usage_metadata(&message).unwrap().unwrap();
+        assert_eq!(value, json!({"candidatesTokenCount":2}));
+        message.usage.as_mut().unwrap().cache_read_tokens = Some(0);
+        assert_eq!(usage_metadata(&message).unwrap().unwrap()["cachedContentTokenCount"], 0);
+        message.usage.as_mut().unwrap().input_tokens = Some(u64::MAX);
+        assert!(usage_metadata(&message)
+            .unwrap_err()
+            .to_string()
+            .contains("overflows u64"));
+        message.usage.as_mut().unwrap().cache_read_tokens = Some(1);
+        assert!(usage_metadata(&message)
+            .unwrap_err()
+            .to_string()
+            .contains("overflows u64"));
     }
 
     fn corpus_home() -> PathBuf {

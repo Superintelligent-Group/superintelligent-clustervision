@@ -87,12 +87,8 @@ fn emit_opencode_db(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Re
         |row| row.get(0),
     )?;
     if v2 || empty {
-        let cwd = if cwd_str.is_empty() {
-            std::env::current_dir()?.to_string_lossy().into_owned()
-        } else {
-            cwd_str.clone()
-        };
-        v2::write_database(session, opts, &new_id, &cwd, &mut conn).context(
+        // Empty is the store's unknown-directory sentinel, as on the v1 path.
+        v2::write_database(session, opts, &new_id, &cwd_str, &mut conn).context(
             "exporting native OpenCode 2.x store (requires complete session_v2/session_message/project schema)",
         )?;
     } else {
@@ -407,6 +403,34 @@ fn tool_state(
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::*;
+    #[test]
+    fn unknown_cwd_stays_empty_and_complete_verification_is_declared() -> Result<()> {
+        let world = crate::test_world("opencode-unknown-cwd");
+        let mut session = Session::new("source", crate::Harness::Claude);
+        let mut message = crate::Message::new(Role::User);
+        message.content.push(Block::Text { text: "hello".into() });
+        session.messages.push(message);
+        let (result, report) = crate::emit::emit_report(
+            &session,
+            crate::Harness::OpenCode,
+            &world.base.join("out"),
+            &EmitOptions {
+                parsed_at: ParsedAt::Complete,
+                ..Default::default()
+            },
+        )?;
+        let conn = rusqlite::Connection::open(&result.path)?;
+        let cwd: String = conn.query_row("SELECT directory FROM session_v2 WHERE id=?1", [&result.new_id], |r| {
+            r.get(0)
+        })?;
+        assert!(cwd.is_empty());
+        assert!(report
+            .deltas
+            .iter()
+            .any(|d| d.what == "verification demand" && d.expected));
+        Ok(())
+    }
+
     #[test]
     fn exported_v1_store_uses_lookup_indexes_with_unrelated_rows() -> Result<()> {
         let mut connection = rusqlite::Connection::open_in_memory()?;
