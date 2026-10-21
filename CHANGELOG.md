@@ -104,7 +104,7 @@
 - `cv doctor` adds a Writer versions row: the newest Claude/Codex version seen in the stores versus the newest the corpus verified, plus unknown sessions.
 - `cv hooks install codex` (user scope or `--scope project`, `.codex/hooks.json`) installs Claude's five hooks: compaction recovery, start context, lanes, decisions, edit guard.
 - Codex's edit guard denies a conflicting edit outright (Codex hooks have no `ask`); Claude's still asks.
-- Installed hooks run `cv hook <name> --harness <h>`; 0.17's `CV_HOOK_HARNESS=codex` entries keep working through 0.18, with a stderr pointer to reinstall.
+- **Breaking:** installed hooks run `cv hook <name> --harness <h>`; `$CV_HOOK_HARNESS` exits 2 with a pointer to `cv hooks install codex`.
 
 **Waiting commands.**
 - **Breaking:** `cv scry` with stdout piped prints the sessions it would follow once and exits 0; `--follow` keeps following, `--for 30s|5m|2h` bounds it.

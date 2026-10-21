@@ -255,9 +255,9 @@ installed and which compaction policy is in force.
 Claude Code (checked against 2.1.296 and its [hooks reference](https://code.claude.com/docs/en/hooks))
 and Codex 0.163.0 have verified contracts. Other harness names error. Each command ends with
 `--harness <name>`, so the shared bodies read that harness's payload, transcripts and thread
-identities. 0.17 wrote Codex's entries as `CV_HOOK_HARNESS=codex cv hook <name>`; those keep
-working through 0.18 with a pointer on stderr, and `cv hooks install codex` rewrites them (Codex
-then sees them as modified until you trust them again).
+identities. 0.17's Codex entries (`CV_HOOK_HARNESS=codex cv hook <name>`) exit 2 with a pointer;
+`cv hooks install codex` rewrites them (Codex then sees them as modified until you trust them
+again).
 
 Codex runs a `hooks.json` handler only after you trust it: start `codex` and accept cv's entries
 in its startup hooks review (automation: `codex exec --dangerously-bypass-hook-trust`); project

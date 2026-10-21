@@ -903,35 +903,11 @@ fn codex_edit_guard_exempts_the_root_threads_lineage_and_denies_strangers() {
     assert_eq!(codex_hook(&w, "edit", &input(late, &late_path, "shared.txt"), &[]), "");
 }
 
-/// 0.17 wrote Codex's entries as `CV_HOOK_HARNESS=codex cv hook <name>`; a session still running
-/// under them gets the same answer through 0.18, with a pointer to the reinstall on stderr.
+/// `$CV_HOOK_HARNESS` (0.17's Codex entries) was removed: it exits 2 with the reinstall pointer.
 #[test]
-fn the_0_17_codex_entry_answers_the_same_with_a_pointer() {
-    let w = World::new("codex-legacy-entry");
-    let parent = "01a14d90-0000-7000-8000-000000000001";
-    let stranger = "01a14d90-0000-7000-8000-000000000003";
-    let parent_path = codex_rollout(&w, parent, None, "shared.txt");
-    codex_rollout(&w, stranger, None, "other.txt");
-    cv_ok(&w, &["index"]);
-    let input = json!({"session_id": parent, "transcript_path": parent_path, "cwd": "/work/proj",
-        "hook_event_name": "PreToolUse", "tool_name": "apply_patch",
-        "tool_input": {"command": "*** Begin Patch\n*** Update File: other.txt\n@@\n-b\n+c\n*** End Patch"}});
-    let (flagged, quiet) = hook_full(&w, &["hook", "edit", "--harness", "codex"], &input, &[]);
-    let (legacy, pointer) = hook_full(&w, &["hook", "edit"], &input, &[("CV_HOOK_HARNESS", "codex")]);
-    assert!(flagged.contains("\"deny\""), "{flagged}");
-    assert_eq!(legacy, flagged);
-    assert!(!quiet.contains("CV_HOOK_HARNESS"), "{quiet}");
-    assert!(
-        pointer.contains("CV_HOOK_HARNESS=codex is the 0.17 entry")
-            && pointer.contains("`cv hook edit --harness codex`"),
-        "{pointer}"
-    );
-    // The flag wins over a stale variable, silently.
-    let (_, quiet) = hook_full(
-        &w,
-        &["hook", "edit", "--harness", "codex"],
-        &input,
-        &[("CV_HOOK_HARNESS", "codex")],
-    );
-    assert!(!quiet.contains("CV_HOOK_HARNESS"), "{quiet}");
+fn removed_hook_harness_variable_exits_two_with_a_pointer() {
+    let w = World::new("codex-hook-harness-env");
+    let (ok, code, _, err) = w.cv_full(&["hook", "edit"], &[("CV_HOOK_HARNESS", "codex")], Some("{}"));
+    assert!(!ok && code == 2, "{err}");
+    assert!(err.contains("CV_HOOK_HARNESS") && err.contains("cv hooks install codex"), "{err}");
 }

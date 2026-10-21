@@ -438,9 +438,8 @@ fn command_for(harness: Harness, exe: &str, name: HookName) -> String {
 }
 
 /// Is this handler one of ours? Recognized by shape: `<something>/cv hook <name>`, optionally
-/// `--harness <h>` (quotes allowed around the program; 0.17's `CV_HOOK_HARNESS=codex` prefix
-/// too), so a reinstall from another binary path, or over 0.17's entries, replaces rather than
-/// duplicates.
+/// `--harness <h>` (quotes allowed around the program), so a reinstall from another binary path
+/// replaces rather than duplicates.
 fn ours(handler: &Value) -> Option<HookName> {
     let cmd = handler.get("command")?.as_str()?.trim();
     let (prog, rest) = cmd.rsplit_once(" hook ")?;
@@ -891,28 +890,12 @@ pub(crate) fn doctor_json() -> Value {
 
 // ───────────────────────────── the hook bodies ─────────────────────────────
 
-/// 0.17 installed Codex's entries as `CV_HOOK_HARNESS=codex cv hook <name>`. A session running
-/// under those entries keeps working through 0.18 (with a pointer on stderr); 0.19 drops the
-/// variable, pinned by `the_legacy_harness_variable_leaves_in_0_19`.
-const LEGACY_HARNESS_ENV: &str = "CV_HOOK_HARNESS";
-
-/// The harness a `cv hook` call speaks for: `--harness`, else 0.17's variable, else Claude.
-fn hook_call_harness(name: HookName, flag: Option<&str>) -> Result<Harness> {
-    if let Some(h) = flag {
-        return hook_harness(h);
+/// The harness a `cv hook` call speaks for: `--harness`, else Claude.
+fn hook_call_harness(flag: Option<&str>) -> Result<Harness> {
+    if cv_core::env::var_os("CV_HOOK_HARNESS").is_some() {
+        return crate::util::usage("`$CV_HOOK_HARNESS` was removed in 0.18.0 — `cv hooks install codex` writes `--harness codex`");
     }
-    match cv_core::env::var_os(LEGACY_HARNESS_ENV) {
-        Some(v) if v == "codex" => {
-            eprintln!(
-                "cv hook {}: {LEGACY_HARNESS_ENV}=codex is the 0.17 entry and stops working in 0.19; \
-                 `cv hooks install codex` rewrites it as `cv hook {} --harness codex` (then re-trust it in Codex)",
-                name.as_str(),
-                name.as_str()
-            );
-            Ok(Harness::Codex)
-        }
-        _ => Ok(Harness::Claude),
-    }
+    flag.map_or(Ok(Harness::Claude), hook_harness)
 }
 
 /// `cv hook <name>`: read stdin, run the body, print its one-line JSON (or nothing). A body that
@@ -926,7 +909,7 @@ pub(crate) fn cmd_hook(name: HookName, harness: Option<String>) -> Result<()> {
             name.as_str()
         ));
     }
-    let harness = hook_call_harness(name, harness.as_deref())?;
+    let harness = hook_call_harness(harness.as_deref())?;
     let mut raw = String::new();
     let _ = std::io::stdin().read_to_string(&mut raw);
     let payload: Value = match serde_json::from_str(&raw) {
@@ -1428,10 +1411,6 @@ mod tests {
             ours(&json!({"command": "/opt/cv hook edit --harness codex"})),
             Some(HookName::Edit)
         );
-        assert_eq!(
-            ours(&json!({"command": "CV_HOOK_HARNESS=codex /opt/cv hook start"})),
-            Some(HookName::Start)
-        );
         assert_eq!(ours(&json!({"command": "/opt/cv hook edit --other x"})), None);
         assert_eq!(
             command_for(Harness::Codex, "/opt/cv", HookName::Lane),
@@ -1443,15 +1422,6 @@ mod tests {
         assert_eq!(shell_quote("/opt/cv@1/cv"), "/opt/cv@1/cv");
         assert_eq!(shell_quote("it's"), "'it'\\''s'");
         assert_eq!(shell_quote(""), "''");
-    }
-
-    #[test]
-    fn the_legacy_harness_variable_leaves_in_0_19() {
-        let minor: u64 = env!("CARGO_PKG_VERSION").split('.').nth(1).unwrap().parse().unwrap();
-        assert!(
-            minor < 19,
-            "{LEGACY_HARNESS_ENV} was kept for one minor after 0.17: delete it from `hook_call_harness` and this test"
-        );
     }
 
     fn claude_tail(p: &Path) -> Result<Option<(Option<String>, Option<u64>)>> {
