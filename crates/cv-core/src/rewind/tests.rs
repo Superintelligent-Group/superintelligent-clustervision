@@ -4,19 +4,6 @@ use serde_json::json;
 const SID: &str = "11111111-1111-4111-8111-111111111111";
 const SHA: &str = "63cef473b771e07a2b5060e50373a41a27d54c0e";
 
-/// A temp `projects/`-style dir named the way Claude files sessions launched from `/work/proj`.
-fn tmpdir() -> PathBuf {
-    let d = std::env::temp_dir()
-        .join(format!("cv-rewind-test-{}", uuid::Uuid::new_v4()))
-        .join("-work-proj");
-    std::fs::create_dir_all(&d).unwrap();
-    d
-}
-
-fn cleanup(dir: &Path) {
-    std::fs::remove_dir_all(dir.parent().unwrap()).ok();
-}
-
 fn write_jsonl(path: &Path, lines: &[Value]) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let body: String = lines.iter().map(|l| l.to_string() + "\n").collect();
@@ -239,7 +226,8 @@ fn chain(lines: &[Value]) -> Vec<String> {
 
 #[test]
 fn cut_at_message_index_starts_at_the_last_boundary_before_it() {
-    let dir = tmpdir();
+    let world = crate::test_world("rewind");
+    let dir = world.proj.clone();
     let src = session(&dir);
     let out = dir.join("out");
     let cut = idx_of(&src, "a2");
@@ -276,12 +264,12 @@ fn cut_at_message_index_starts_at_the_last_boundary_before_it() {
     // Out of range is a clear error, not a silent clamp.
     let err = rewind_session(&sref(&src, SID), &opts(CutAt::Message(999), &dir.join("x"))).unwrap_err();
     assert!(err.to_string().contains("message(s)"), "{err}");
-    cleanup(&dir);
 }
 
 #[test]
 fn cut_at_commit_sha_lands_on_the_tool_result_that_made_it() {
-    let dir = tmpdir();
+    let world = crate::test_world("rewind");
+    let dir = world.proj.clone();
     let src = session(&dir);
     let out = dir.join("out");
     // The full sha resolves through the 7-digit `[main 63cef47]` the commit printed — and the
@@ -312,12 +300,12 @@ fn cut_at_commit_sha_lands_on_the_tool_result_that_made_it() {
     let msg = err.to_string();
     assert!(msg.contains("abcdef1234") && msg.contains("git commit"), "{msg}");
     assert!(!none.exists());
-    cleanup(&dir);
 }
 
 #[test]
 fn from_compaction_takes_the_preserved_segment_and_full_takes_everything() {
-    let dir = tmpdir();
+    let world = crate::test_world("rewind");
+    let dir = world.proj.clone();
     let src = session(&dir);
     let out = dir.join("out");
     let cut = idx_of(&src, "a5");
@@ -342,7 +330,6 @@ fn from_compaction_takes_the_preserved_segment_and_full_takes_everything() {
         (1, "full", None)
     );
     assert_eq!(full.lines_written, 16);
-    cleanup(&dir);
 }
 
 /// ARM 1 (real tail) — `CutAt::End` copies through the END OF THE FILE, not through the last
@@ -351,7 +338,8 @@ fn from_compaction_takes_the_preserved_segment_and_full_takes_everything() {
 /// the answer and the tail would be gone, which is the measured 238 → 235 exactly.
 #[test]
 fn end_copies_the_records_after_the_last_message() {
-    let dir = tmpdir();
+    let world = crate::test_world("rewind");
+    let dir = world.proj.clone();
     let src = session_tailed(&dir);
     let before = std::fs::read(&src).unwrap();
     let res = rewind_session(&sref(&src, SID), &opts(CutAt::End, &dir.join("out"))).unwrap();
@@ -378,7 +366,6 @@ fn end_copies_the_records_after_the_last_message() {
     assert_eq!((res.cut_line, res.end_line, res.lines_written), (2, 5, 5));
     assert_eq!((res.omitted_lines, res.omitted_bytes), (0, 0));
     assert_eq!(std::fs::read(&src).unwrap(), before, "the source must never change");
-    cleanup(&dir);
 }
 
 /// CONTROL for arm 1 — an explicit cut is still a truncation: `--at <last message>` ends at that
@@ -387,7 +374,8 @@ fn end_copies_the_records_after_the_last_message() {
 /// would be 0 instead of 3.
 #[test]
 fn an_explicit_cut_still_ends_at_its_message_record() {
-    let dir = tmpdir();
+    let world = crate::test_world("rewind");
+    let dir = world.proj.clone();
     let src = session_tailed(&dir);
     let cut = idx_of(&src, "a0"); // the last message
     let res = rewind_session(&sref(&src, SID), &opts(CutAt::Message(cut), &dir.join("out"))).unwrap();
@@ -396,7 +384,6 @@ fn an_explicit_cut_still_ends_at_its_message_record() {
     assert_eq!(got.iter().map(ty).collect::<Vec<_>>(), ["user", "assistant"]);
     assert_eq!((res.cut_line, res.end_line), (2, 2));
     assert_eq!(res.omitted_lines, 3);
-    cleanup(&dir);
 }
 
 /// ARM 2 (attachment + malformed tail) — a record the codec reads nothing out of (a `user` record
@@ -408,7 +395,8 @@ fn an_explicit_cut_still_ends_at_its_message_record() {
 fn a_native_copy_carries_a_bodyless_turn_record_verbatim() {
     // The Claude codec carries a `user` record with no `message` as bookkeeping, so a byte copy
     // keeps it and the attachment after it rides along to EOF.
-    let dir = tmpdir();
+    let world = crate::test_world("rewind");
+    let dir = world.proj.clone();
     let src = session_attachment_and_bad_tail(&dir, true);
     let out = dir.join("out");
     let res = rewind_session(&sref(&src, SID), &opts(CutAt::End, &out)).unwrap();
@@ -421,7 +409,8 @@ fn a_native_copy_carries_a_bodyless_turn_record_verbatim() {
 fn a_portable_copy_refuses_a_bodyless_turn_record_instead_of_dropping_it() {
     // Portable replay re-emits every record through the reader, which takes nothing out of a
     // bodyless turn: refuse before publishing rather than mint a session missing a record.
-    let dir = tmpdir();
+    let world = crate::test_world("rewind");
+    let dir = world.proj.clone();
     let src = session_attachment_and_bad_tail(&dir, true);
     let before = std::fs::read(&src).unwrap();
     let out = dir.join("out");
@@ -446,7 +435,8 @@ fn a_portable_copy_refuses_a_bodyless_turn_record_instead_of_dropping_it() {
 
 #[test]
 fn without_the_unreadable_record_the_attachment_rides_along() {
-    let dir = tmpdir();
+    let world = crate::test_world("rewind");
+    let dir = world.proj.clone();
     let src = session_attachment_and_bad_tail(&dir, false);
     let res = rewind_session(&sref(&src, SID), &opts(CutAt::End, &dir.join("out"))).unwrap();
 
@@ -459,14 +449,14 @@ fn without_the_unreadable_record_the_attachment_rides_along() {
     assert_eq!(got[2]["rendered"], "padding");
     assert_eq!(got[2]["sessionId"], "22222222-2222-4222-8222-222222222222");
     assert_eq!(res.omitted_lines, 0);
-    cleanup(&dir);
 }
 
 #[test]
 fn end_refuses_invalid_json_tail_in_native_and_staged_copies() {
     for thinking in [crate::emit::ThinkingMode::Native, crate::emit::ThinkingMode::Portable] {
         for tail in ["{\"type\":\"cost-state\"", "not-json\n", "{\"type\":}\n", "\u{000c}\n"] {
-            let dir = tmpdir();
+            let world = crate::test_world("rewind");
+            let dir = world.proj.clone();
             let src = session_tailed(&dir);
             std::fs::OpenOptions::new()
                 .append(true)
@@ -495,7 +485,6 @@ fn end_refuses_invalid_json_tail_in_native_and_staged_copies() {
             .unwrap();
             assert_eq!(cut.lines_written, 2);
             assert_eq!(cut.omitted_lines, 4);
-            cleanup(&dir);
         }
     }
 }
@@ -506,7 +495,8 @@ fn end_refuses_invalid_json_tail_in_native_and_staged_copies() {
 /// the copied window and refuse, so the omission is the cut's, not a relaxed parse.
 #[test]
 fn an_explicit_cut_omits_a_malformed_line_while_it_closes_an_open_call() {
-    let dir = tmpdir();
+    let world = crate::test_world("rewind");
+    let dir = world.proj.clone();
     let src = dir.join(format!("{SID}.jsonl"));
     write_jsonl(
         &src,
@@ -537,14 +527,14 @@ fn an_explicit_cut_omits_a_malformed_line_while_it_closes_an_open_call() {
         err.to_string().contains("line 3 is not a complete JSON record"),
         "{err}"
     );
-    cleanup(&dir);
 }
 
 /// The same, with the call never closed: the scan reaches EOF, the open call is reported, and a
 /// live session's half-written last line (no newline) is omitted rather than refused.
 #[test]
 fn an_explicit_cut_left_open_omits_a_half_written_last_line() {
-    let dir = tmpdir();
+    let world = crate::test_world("rewind");
+    let dir = world.proj.clone();
     let src = dir.join(format!("{SID}.jsonl"));
     write_jsonl(
         &src,
@@ -562,7 +552,6 @@ fn an_explicit_cut_left_open_omits_a_half_written_last_line() {
     assert_eq!((res.closed_tool_calls, res.open_tool_calls), (0, 1));
     assert_eq!(res.omitted_lines, 1);
     assert_eq!(std::fs::read(&src).unwrap(), before, "the source must never change");
-    cleanup(&dir);
 }
 
 /// Under `End` the last line of the captured prefix is copied, so a half-written one refuses; with
@@ -574,7 +563,8 @@ fn end_names_a_rerun_for_an_unterminated_last_line_only() {
         ("{\"type\":\"cost-state\"", true),
         ("{\"type\":\"cost-state\"\n", false),
     ] {
-        let dir = tmpdir();
+        let world = crate::test_world("rewind");
+        let dir = world.proj.clone();
         let src = session_tailed(&dir);
         append(&src, tail.as_bytes());
         let out = dir.join("out");
@@ -589,7 +579,6 @@ fn end_names_a_rerun_for_an_unterminated_last_line_only() {
         );
         assert_eq!(msg.contains("not a complete JSON record"), !rerun, "{msg}");
         assert!(std::fs::read_dir(&out).unwrap().next().is_none(), "nothing published");
-        cleanup(&dir);
     }
 }
 
@@ -607,7 +596,8 @@ fn present_message_body_variants_remain_parser_compatible() {
         json!({"content": {}}),
     ] {
         for ty in ["user", "assistant"] {
-            let dir = tmpdir();
+            let world = crate::test_world("rewind");
+            let dir = world.proj.clone();
             let src = session_tailed(&dir);
             let bad = rec(ty, "invalid-body", Some("a0"), body.clone());
             std::fs::OpenOptions::new()
@@ -624,7 +614,6 @@ fn present_message_body_variants_remain_parser_compatible() {
             assert_eq!(read_lines(&result.new_path)[5]["message"], body);
             assert_eq!((result.lines_written, result.omitted_lines), (6, 0));
             assert_eq!(std::fs::read(&src).unwrap(), before);
-            cleanup(&dir);
         }
     }
 }
@@ -632,7 +621,8 @@ fn present_message_body_variants_remain_parser_compatible() {
 #[test]
 fn valid_empty_content_and_unknown_tail_survive_all_copy_paths() {
     for thinking in [crate::emit::ThinkingMode::Native, crate::emit::ThinkingMode::Portable] {
-        let dir = tmpdir();
+        let world = crate::test_world("rewind");
+        let dir = world.proj.clone();
         let src = session_attachment_and_bad_tail(&dir, false);
         let extra = [
             rec("user", "empty", Some("a0"), json!({"role":"user", "content":[]})),
@@ -657,14 +647,14 @@ fn valid_empty_content_and_unknown_tail_survive_all_copy_paths() {
         assert_eq!(got[4]["sessionId"], res.new_id);
         assert_eq!((res.end_line, res.omitted_lines), (5, 0));
         assert_eq!(got[2]["attachment"]["skills"].as_array().unwrap().len(), 1);
-        cleanup(&dir);
     }
 }
 
 #[test]
 fn full_changes_start_but_end_still_includes_compacted_tail() {
     for full in [false, true] {
-        let dir = tmpdir();
+        let world = crate::test_world("rewind");
+        let dir = world.proj.clone();
         let src = session(&dir);
         for tail in tail_records() {
             std::fs::OpenOptions::new()
@@ -687,14 +677,14 @@ fn full_changes_start_but_end_still_includes_compacted_tail() {
             (if full { 1 } else { 8 }, 20, 0)
         );
         assert_eq!(read_lines(&res.new_path).last().unwrap()["type"], "cost-state");
-        cleanup(&dir);
     }
 }
 
 #[test]
 fn empty_and_metadata_only_sources_refuse_without_publication() {
     for body in ["", "\n", "{\"type\":\"cost-state\",\"sessionId\":\"synthetic\"}\n"] {
-        let dir = tmpdir();
+        let world = crate::test_world("rewind");
+        let dir = world.proj.clone();
         let src = dir.join(format!("{SID}.jsonl"));
         std::fs::write(&src, body).unwrap();
         let out = dir.join("out");
@@ -702,13 +692,13 @@ fn empty_and_metadata_only_sources_refuse_without_publication() {
         assert!(err.to_string().contains("no messages"), "{err}");
         assert!(!out.exists());
         assert_eq!(std::fs::read_to_string(src).unwrap(), body);
-        cleanup(&dir);
     }
 }
 
 #[test]
 fn a_cut_between_parallel_results_runs_on_until_the_calls_close() {
-    let dir = tmpdir();
+    let world = crate::test_world("rewind");
+    let dir = world.proj.clone();
     let src = session(&dir);
     let res = rewind_session(
         &sref(&src, SID),
@@ -722,12 +712,12 @@ fn a_cut_between_parallel_results_runs_on_until_the_calls_close() {
     let got = read_lines(&res.new_path);
     assert_eq!(uuids(&got).last(), Some(&"t2r"));
     assert!(res.warnings.is_empty(), "{:?}", res.warnings);
-    cleanup(&dir);
 }
 
 #[test]
 fn provenance_sidecar_records_source_cut_and_start_and_the_source_is_untouched() {
-    let dir = tmpdir();
+    let world = crate::test_world("rewind");
+    let dir = world.proj.clone();
     let src = session(&dir);
     let before = std::fs::read(&src).unwrap();
     let out = dir.join("out");
@@ -772,12 +762,12 @@ fn provenance_sidecar_records_source_cut_and_start_and_the_source_is_untouched()
     // An existing target is refused, never overwritten.
     let err = rewind_session(&sref(&src, SID), &opts(CutAt::End, &out)).unwrap_err();
     assert!(err.to_string().contains("already exists"), "{err}");
-    cleanup(&dir);
 }
 
 #[test]
 fn subagent_transcript_becomes_a_standalone_resumable_session() {
-    let dir = tmpdir();
+    let world = crate::test_world("rewind");
+    let dir = world.proj.clone();
     let parent = dir.join(format!("{SID}.jsonl"));
     write_jsonl(
         &parent,
@@ -849,12 +839,12 @@ fn subagent_transcript_becomes_a_standalone_resumable_session() {
     )
     .unwrap();
     assert_eq!(short.cut_line, 3);
-    cleanup(&dir);
 }
 
 #[test]
 fn commit_evidence_reports_only_git_proof_of_the_queried_shas() {
-    let dir = tmpdir();
+    let world = crate::test_world("rewind");
+    let dir = world.proj.clone();
     let src = session(&dir);
     let r = sref(&src, SID);
     let ev = commit_evidence(&r, &[SHA.to_string(), "0123456789abcdef".into()]).unwrap();
@@ -863,12 +853,12 @@ fn commit_evidence_reports_only_git_proof_of_the_queried_shas() {
     assert!(ev[0].byte_offset.is_none(), "plain lazy() streams carry no offsets");
     assert!(commit_evidence(&r, &["fedcba9876".into()]).unwrap().is_empty());
     assert!(commit_evidence(&r, &["not-a-sha".into()]).unwrap().is_empty());
-    cleanup(&dir);
 }
 
 #[test]
 fn file_mentions_finds_needles_across_chunk_boundaries() {
-    let dir = tmpdir();
+    let world = crate::test_world("rewind");
+    let dir = world.proj.clone();
     let p = dir.join("big.jsonl");
     // Straddle the 4 MiB read boundary with one needle; put the other at the very end.
     let mut body = vec![b'x'; (4 << 20) - 3];
@@ -880,7 +870,6 @@ fn file_mentions_finds_needles_across_chunk_boundaries() {
         file_mentions(&p, &["abcdef1", "9876543", "1111111"]).unwrap(),
         [true, true, false]
     );
-    cleanup(&dir);
 }
 
 #[test]
@@ -921,7 +910,8 @@ fn git_verbs_classify_created_and_pushed() {
 #[test]
 fn rewind_prefix_receipt_accepts_appends_and_rejects_source_mutations() {
     for mutation in ["append", "rewrite", "replace", "rewrite-grow", "truncate"] {
-        let dir = tmpdir();
+        let world = crate::test_world("rewind");
+        let dir = world.proj.clone();
         let path = dir.join(format!("{SID}.jsonl"));
         let initial = rec("user", "u", None, text("user", "original prefix"));
         write_jsonl(&path, &[initial]);
@@ -983,13 +973,13 @@ fn rewind_prefix_receipt_accepts_appends_and_rejects_source_mutations() {
             .unwrap()
             .flatten()
             .all(|entry| !entry.file_name().to_string_lossy().starts_with(".cv-rewind-")));
-        cleanup(&dir);
     }
 }
 
 #[test]
 fn rewind_rejects_output_ids_that_escape_the_output_directory() {
-    let dir = tmpdir();
+    let world = crate::test_world("rewind");
+    let dir = world.proj.clone();
     let source = dir.join(format!("{SID}.jsonl"));
     write_jsonl(&source, &[rec("user", "u", None, text("user", "original"))]);
     let reference = SessionRef::from_path(&source, Harness::Claude);
@@ -1016,12 +1006,12 @@ fn rewind_rejects_output_ids_that_escape_the_output_directory() {
         assert_eq!(std::fs::read(&source).unwrap(), original);
     }
     assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
-    cleanup(&dir);
 }
 
 #[test]
 fn checked_derivation_preserves_large_results_and_closes_parallel_calls() {
-    let dir = tmpdir();
+    let world = crate::test_world("rewind");
+    let dir = world.proj.clone();
     let path = dir.join(format!("{SID}.jsonl"));
     let payload = "λ payload\n".repeat(200000);
     write_jsonl(
@@ -1062,5 +1052,4 @@ fn checked_derivation_preserves_large_results_and_closes_parallel_calls() {
     assert_eq!(std::fs::read_to_string(&result.new_path).unwrap(), expected);
     crate::harness::claude::emit::verify_claude_resumable(&result.new_path, None).unwrap();
     assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
-    cleanup(&dir);
 }
