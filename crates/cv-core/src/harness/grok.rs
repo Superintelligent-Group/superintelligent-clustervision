@@ -42,7 +42,7 @@ use crate::ir::*;
 use crate::json::{JsonSource, JsonView};
 use crate::lazy::Text;
 use crate::source::{Dependencies, Probe};
-use crate::stream::{Checkpoint, Demand, Flow, MessageSink};
+use crate::stream::{Checkpoint, Demand, Flow, MessageSink, Start};
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -156,17 +156,10 @@ impl Adapter for Grok {
     }
 
     fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
-        crate::stream::checked(sink, |sink| {
-            // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
-            let mut spawns = crate::affordance::AffordanceSink::new(Harness::Grok, sink);
-            let sink: &mut dyn MessageSink = &mut spawns;
-            let (s, enrich) = session_header(r);
-            sink.meta(&s);
-            stream_history_at(&self.resume_source(r), 0, s, &enrich, 0, opts, sink).map(Option::unwrap)
-        })
+        self.transcript(r, opts, Start::Whole, sink)?
+            .context("a whole read never declines")
     }
 
-    // Version of HistoryCheckpoint consumed by resume and included in stored mark validation.
     fn resume_format(&self) -> Option<u32> {
         Some(1)
     }
@@ -182,18 +175,39 @@ impl Adapter for Grok {
         sink: &mut dyn MessageSink,
         from: &Checkpoint,
     ) -> Result<Option<Session>> {
+        self.transcript(r, opts, Start::Checkpoint(from), sink)
+    }
+
+    /// `chat_history.jsonl` through the driver, after the header `summary.json` gives. A
+    /// checkpoint names its transcript: one of another resumes nothing.
+    fn transcript(
+        &self,
+        r: &SessionRef,
+        opts: &Demand,
+        from: Start<'_>,
+        sink: &mut dyn MessageSink,
+    ) -> Result<Option<Session>> {
         crate::stream::checked(sink, |sink| {
-            let Some(state) = from.get::<HistoryCheckpoint>(crate::stream::ADAPTER_LAYER) else {
-                return Ok(None);
-            };
             let wire = self.resume_source(r);
-            if state.wire != wire {
-                return Ok(None);
+            if let Start::Checkpoint(cp) = from {
+                match jsonl::restore::<HistoryCheckpoint>(cp, <History as jsonl::Codec>::VERSION) {
+                    Some(state) if state.wire == wire => {}
+                    _ => return Ok(None),
+                }
             }
-            let (s, enrich) = session_header(r);
+            // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
             let mut spawns = crate::affordance::AffordanceSink::new(Harness::Grok, sink);
+            let (s, enrich) = session_header(r);
             spawns.meta(&s);
-            stream_history_at(&wire, from.offset, s, &enrich, state.skipped, opts, &mut spawns)
+            let read = jsonl::Read::open(&wire).with_context(|| format!("reading {}", wire.display()))?;
+            let codec = History {
+                s,
+                enrich: &enrich,
+                spans: opts.spans.then_some(read.source()),
+                wire: &wire,
+                pending: None,
+            };
+            jsonl::drive(&read, from, codec, &mut spawns)
         })
     }
 
@@ -389,94 +403,72 @@ fn session_header(r: &SessionRef) -> (Session, HashMap<String, ToolEnrich>) {
     (s, enrich)
 }
 
-#[derive(serde::Deserialize)]
-struct HistoryCheckpoint {
-    wire: PathBuf,
-    skipped: u64,
+#[derive(serde::Serialize, serde::Deserialize)]
+struct HistoryCheckpoint<P = PathBuf> {
+    wire: P,
 }
 
-/// The one Grok read: records `at..` of `chat_history.jsonl`, each through the record codec. A
-/// standalone `reasoning` record is held and joins the next assistant turn. After a finished
-/// line that delivered a message (and holds no reasoning) the sink may take a checkpoint with
-/// the rejected-line count so far. `Ok(None)`: `at` lies beyond the file (a resume that cannot be).
-fn stream_history_at(
-    wire: &Path,
-    at: u64,
-    mut s: Session,
-    enrich: &HashMap<String, ToolEnrich>,
-    prior_skipped: u64,
-    opts: &Demand,
-    sink: &mut dyn MessageSink,
-) -> Result<Option<Session>> {
-    let read = jsonl::Read::open(wire).with_context(|| format!("reading {}", wire.display()))?;
-    let source = read.source();
-    if at > source.len() {
-        return Ok(None);
-    }
-    let spans = opts.spans.then_some(source);
-    let mut pending: Option<Message> = None;
-    let mut stopped = false;
-    let mut skipped = prior_skipped;
-    read.lines(at, |line| {
-        let Some(view) = line.view else {
-            skipped += u64::from(!line.blank);
-            return Ok(Flow::Continue);
-        };
-        let (is_reasoning, message) = record::message(view, spans, enrich)?;
+/// The Grok record codec over `chat_history.jsonl`. A standalone `reasoning` record is held and
+/// joins the next assistant turn, so the codec is settled only when none is held; a checkpoint
+/// keeps the transcript it was taken on.
+struct History<'r> {
+    s: Session,
+    enrich: &'r HashMap<String, ToolEnrich>,
+    spans: Option<&'r JsonSource>,
+    wire: &'r Path,
+    pending: Option<Message>,
+}
+
+impl jsonl::Codec for History<'_> {
+    const VERSION: u32 = 1;
+
+    fn record(&mut self, view: JsonView<'_>, _: u64, sink: &mut dyn MessageSink) -> Result<Flow> {
+        let (is_reasoning, message) = record::message(view, self.spans, self.enrich)?;
         let Some(mut m) = message else {
             return Ok(Flow::Continue);
         };
         if is_reasoning {
-            match pending.as_mut() {
+            match self.pending.as_mut() {
                 Some(p) => p.content.append(&mut m.content),
-                None => pending = Some(m),
+                None => self.pending = Some(m),
             }
             return Ok(Flow::Continue);
         }
-        let started = std::time::Instant::now();
-        if let Some(mut p) = pending.take() {
+        if let Some(mut p) = self.pending.take() {
             if m.role == Role::Assistant {
                 p.content.append(&mut m.content);
                 m.content = p.content;
-            } else {
-                if sink.message(p) == Flow::Stop {
-                    stopped = true;
-                    return Ok(Flow::Stop);
-                }
-                // A slow flush is checked before the current record is delivered.
-                read.check_backing_if_slow(started)?;
+            } else if sink.message(p) == Flow::Stop {
+                return Ok(Flow::Stop);
             }
         }
-        let flow = sink.message(m);
-        stopped = flow == Flow::Stop;
-        // Reasoning at EOF is provisional: only a finished record with no held reasoning can
-        // finalize the emitted prefix. AffordanceSink also excludes unresolved synchronous spawns.
-        let checkpointed = !stopped && line.complete && sink.wants_checkpoint(line.end);
-        if checkpointed {
-            #[derive(serde::Serialize)]
-            struct State<'a> {
-                wire: &'a Path,
-                skipped: u64,
-            }
-            let mut checkpoint = Checkpoint::new(line.end);
-            checkpoint.put(crate::stream::ADAPTER_LAYER, &State { wire, skipped });
-            sink.checkpoint(&mut checkpoint);
-        }
-        if checkpointed {
-            read.check_backing()?;
-        } else if !stopped {
-            // Record decoding is finished; guard a slow callback group before mapped iteration.
-            read.check_backing_after(started, line.end)?;
-        }
-        Ok(flow)
-    })?;
-    if let (Some(p), false) = (pending, stopped) {
-        sink.message(p);
-        // Held reasoning is delivered after lines() already performed its completion check.
-        read.check()?;
+        Ok(sink.message(m))
     }
-    super::Unparsed(skipped).note(&mut s);
-    Ok(Some(s))
+
+    /// Reasoning at EOF is provisional (AffordanceSink also excludes unresolved synchronous spawns).
+    fn settled(&self) -> bool {
+        self.pending.is_none()
+    }
+
+    /// The state (which transcript) is the same at every demand: a mark resumes at any.
+    fn demand(&self) -> Demand {
+        Demand::default()
+    }
+
+    fn session(&mut self) -> &mut Session {
+        &mut self.s
+    }
+
+    fn state(&self) -> impl serde::Serialize + '_ {
+        HistoryCheckpoint { wire: self.wire }
+    }
+
+    fn finish(self, stopped: bool, sink: &mut dyn MessageSink) -> Result<Session> {
+        if let (Some(p), false) = (self.pending, stopped) {
+            sink.message(p);
+        }
+        Ok(self.s)
+    }
 }
 
 /// Subagent nickname + Grok-specific session facts from `summary.json`: a subagent's `agent_name`
