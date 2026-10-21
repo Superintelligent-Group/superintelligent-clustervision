@@ -35,11 +35,12 @@ impl Range {
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "source range overflows"))
     }
     /// A quoted string's interior.
-    fn body(self) -> Range {
-        Range {
-            offset: self.offset + 1,
+    fn body(self) -> Result<Range> {
+        anyhow::ensure!(self.len >= 2, "not a quoted JSON string range");
+        Ok(Range {
+            offset: self.offset.checked_add(1).context("JSON string offset overflows")?,
             len: self.len - 2,
-        }
+        })
     }
 }
 
@@ -752,7 +753,7 @@ impl<'a> RangeSource<'a> {
             let decoded: String = self.materialize(string)?;
             return visit(&decoded);
         }
-        let mut cursor = self.cursor(string.body())?;
+        let mut cursor = self.cursor(string.body()?)?;
         let mut callback_error = None;
         let decoded = super::super::json::decode_body(&mut cursor, &mut |part| {
             callback_error = visit(part).err();
@@ -869,7 +870,7 @@ impl<'a> RangeSource<'a> {
     }
     /// Whether a string's body holds a backslash: the span rule's `escaped`.
     pub fn escaped(&self, string: Range) -> Result<bool> {
-        self.scan(string.body(), 0, |bytes| memchr::memchr(b'\\', bytes).is_some())
+        self.scan(string.body()?, 0, |bytes| memchr::memchr(b'\\', bytes).is_some())
     }
     /// Conservative printable-ASCII presence without decoding a retained JSON string.
     /// False proves absence; escaped backslashes may create harmless false positives.
@@ -1304,7 +1305,10 @@ mod syntax_tests {
         std::fs::write(&path, format!("[null,\"{}\"]", "a".repeat(WINDOW * 3))).unwrap();
         let source = RangeSource::open(&path).unwrap();
         let mut windowed = Windowed::new(&source, source.range());
-        assert_eq!(super::super::super::json::ValidationBytes::get(&mut windowed, 0), Some(b'['));
+        assert_eq!(
+            super::super::super::json::ValidationBytes::get(&mut windowed, 0),
+            Some(b'[')
+        );
         std::fs::OpenOptions::new()
             .write(true)
             .open(&path)
