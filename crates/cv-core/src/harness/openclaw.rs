@@ -107,10 +107,11 @@
 //! `Carrier` turns. Every carried record is the top-level `_record`; every harness fact is in
 //! `extra["openclaw"]` (`record_type` = the entry type, `message_role` = a custom message role,
 //! `session_version` on the first turn, `inactive_branch: true` off the visible path, the
-//! assistant's `api`/`provider`/`response_model`/`response_id`/`stop_reason`/`diagnostics`/
-//! `usage_raw`, and each control entry's own fields snake_cased). The header's `parentSession` is
-//! `Lineage::forked_from`; `usage.cost.total` is `Usage::cost_usd`; `Message::model` is set only
-//! when it differs from `Session::model` (the first non-synthetic one seen).
+//! assistant's `api`/`provider`/`responseModel`/`responseId`/`stopReason`/`diagnostics`/
+//! `usage_raw`, and each control entry's own fields under their native camelCase keys). The
+//! header's `parentSession` is `Lineage::forked_from`; `usage.cost.total` is `Usage::cost_usd`;
+//! `Message::model` is each record's own recorded model and `Session::model` the first
+//! non-synthetic one seen.
 
 mod discovery;
 mod emit;
@@ -2251,8 +2252,8 @@ mod tests {
         let c1 = &s.messages[3];
         assert_eq!((c1.role, c1.origin), (Role::System, Origin::Harness));
         assert_eq!(c1.extra["openclaw"]["record_type"], "compaction");
-        assert_eq!(c1.extra["openclaw"]["tokens_before"], 1234);
-        assert_eq!(c1.extra["openclaw"]["first_kept_entry_id"], "u2");
+        assert_eq!(c1.extra["openclaw"]["tokensBefore"], 1234);
+        assert_eq!(c1.extra["openclaw"]["firstKeptEntryId"], "u2");
         let summary = &s.messages[4];
         assert_eq!(summary.text().as_deref(), Some("summary of earlier"));
         assert_eq!(
@@ -2436,8 +2437,8 @@ mod tests {
         assert_eq!(compaction.role, Role::System);
         assert_eq!(compaction.kind, MessageKind::CompactionBoundary);
         assert_eq!(ocbag(compaction)["record_type"], "compaction");
-        assert_eq!(ocbag(compaction)["tokens_before"], 4321);
-        assert_eq!(ocbag(compaction)["first_kept_entry_id"], "u1");
+        assert_eq!(ocbag(compaction)["tokensBefore"], 4321);
+        assert_eq!(ocbag(compaction)["firstKeptEntryId"], "u1");
         assert_eq!(compaction.text().as_deref(), Some("[conversation compacted]"));
         // The summary that seeds the next window is its own turn, hanging off the boundary; it is
         // the store's synthetic text, so it carries no entry id (hence the id list skips it).
@@ -2619,7 +2620,7 @@ mod tests {
         assert_eq!(reset.extra["openclaw"]["reason"], "idle");
         let cm = &s.messages[4];
         assert_eq!(cm.kind, MessageKind::Notice);
-        assert_eq!(cm.extra["openclaw"]["custom_type"], "ext.note");
+        assert_eq!(cm.extra["openclaw"]["customType"], "ext.note");
         assert_eq!(cm.extra["openclaw"]["display"], true);
         assert_eq!(cm.text().as_deref(), Some("an extension note"));
 
@@ -2736,7 +2737,11 @@ mod tests {
         let bag = &asst.extra["openclaw"];
         assert!(bag.get("usage_raw").is_some());
         assert_eq!(bag["provider"], "anthropic");
-        assert_eq!(bag["stop_reason"], "toolUse");
+        assert_eq!(bag["stopReason"], "toolUse");
+        assert!(
+            bag.get("stop_reason").is_none(),
+            "native keys keep their camelCase: {bag}"
+        );
         assert_eq!(asst.extra.len(), 1, "nothing flat: {:?}", asst.extra);
 
         let tr = &s.messages[2];
@@ -2799,11 +2804,11 @@ mod tests {
         let bash = &s.messages[0];
         assert_eq!(bash.extra["openclaw"]["message_role"], "bashExecution");
         assert!(bash.text().unwrap().contains("$ ls -la"));
-        assert_eq!(bash.extra["openclaw"]["exit_code"], 0);
+        assert_eq!(bash.extra["openclaw"]["exitCode"], 0);
 
         let branch = &s.messages[1];
         assert_eq!(branch.extra["openclaw"]["message_role"], "branchSummary");
-        assert_eq!(branch.extra["openclaw"]["branch_from_id"], "abc123");
+        assert_eq!(branch.extra["openclaw"]["fromId"], "abc123");
 
         // the single-record compaction: the boundary keeps the entry id and counts, the summary
         // its text, hanging off the boundary
@@ -2811,7 +2816,7 @@ mod tests {
         assert_eq!(boundary.id.as_deref(), Some("c3"));
         assert_eq!(boundary.parent_id.as_deref(), Some("c2"));
         assert_eq!(boundary.extra["openclaw"]["message_role"], "compactionSummary");
-        assert_eq!(boundary.extra["openclaw"]["tokens_before"], 5000);
+        assert_eq!(boundary.extra["openclaw"]["tokensBefore"], 5000);
         let summary = &s.messages[3];
         assert_eq!(summary.text().as_deref(), Some("earlier history compacted"));
         assert_eq!(summary.parent_id.as_deref(), Some("c3"));
@@ -2822,8 +2827,8 @@ mod tests {
 
         let custom = &s.messages[4];
         assert_eq!(custom.extra["openclaw"]["message_role"], "custom");
-        assert_eq!(custom.extra["openclaw"]["custom_type"], "openclaw.cache-ttl");
-        assert_eq!(custom.extra["openclaw"]["custom_details"]["ttlMs"], 3600000);
+        assert_eq!(custom.extra["openclaw"]["customType"], "openclaw.cache-ttl");
+        assert_eq!(custom.extra["openclaw"]["details"]["ttlMs"], 3600000);
     }
 
     #[test]
@@ -2835,11 +2840,11 @@ mod tests {
             (a1.role, a1.kind, a1.origin),
             (Role::Assistant, MessageKind::Error, Origin::Harness)
         );
-        assert_eq!(a1.extra["openclaw"]["error"]["error_message"], "overloaded");
-        assert_eq!(a1.extra["openclaw"]["error"]["error_code"], 529);
-        assert_eq!(a1.extra["openclaw"]["stop_reason"], "error");
+        assert_eq!(a1.extra["openclaw"]["error"]["errorMessage"], "overloaded");
+        assert_eq!(a1.extra["openclaw"]["error"]["errorCode"], 529);
+        assert_eq!(a1.extra["openclaw"]["stopReason"], "error");
         assert!(
-            a1.extra["openclaw"].get("error_message").is_none(),
+            a1.extra["openclaw"].get("errorMessage").is_none(),
             "the error is one object"
         );
         // a `system` record is the system prompt, session-level too

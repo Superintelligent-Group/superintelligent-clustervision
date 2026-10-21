@@ -372,12 +372,12 @@ fn notice(view: JsonView<'_>, ty: &str, common: &Common, opts: &Demand, text: St
 
 /// A non-`message` canonical entry that carries context or a boundary the reader should see, as
 /// the kinds vocabulary has it: `compaction` → a `CompactionBoundary` (the entry's own fields:
-/// `first_kept_entry_id`, `tokens_before`, `from_hook`, `details`) followed by the
+/// `firstKeptEntryId`, `tokensBefore`, `fromHook`, `details`) followed by the
 /// `CompactionSummary` that replaced the compacted span; `reset` → `Branch`; `model_change` /
 /// `thinking_level_change` → `ModelChange`; `branch_summary` / `custom_message` (extension text
 /// that IS in model context) → `Notice`. All origin Harness. In the harness bag: `record_type`
 /// plus every field the entry carries besides the structural ones and the `summary`/`content`
-/// that become the turn's text, snake_cased.
+/// that become the turn's text, under its native camelCase key.
 fn control(view: JsonView<'_>, top: &Fields<'_>, ty: &str, common: &Common, spans: bool) -> Result<Vec<Message>> {
     let kind = match ty {
         "compaction" => MessageKind::CompactionBoundary,
@@ -390,7 +390,7 @@ fn control(view: JsonView<'_>, top: &Fields<'_>, ty: &str, common: &Common, span
     bag.insert("record_type".into(), Value::from(ty));
     view.for_each_entry(|key, value| {
         if !matches!(key, "type" | "id" | "parentId" | "timestamp" | "summary" | "content") && !value.is_null()? {
-            bag.insert(snake(key), value.resolve()?.into_owned());
+            bag.insert(key.into(), value.resolve()?.into_owned());
         }
         Ok(())
     })?;
@@ -558,7 +558,7 @@ fn message(top: &Fields<'_>, common: &Common, spans: bool) -> Result<Vec<Message
             let from_id = body.string("fromId")?;
             let bag = custom_role_bag(&mut m, "branchSummary", &body, &[])?;
             if let Some(from_id) = from_id {
-                bag.insert("branch_from_id".into(), Value::from(from_id));
+                bag.insert("fromId".into(), Value::from(from_id));
             }
         }
         "compactionSummary" => {
@@ -581,10 +581,10 @@ fn message(top: &Fields<'_>, common: &Common, spans: bool) -> Result<Vec<Message
             let details = present(body.get("details"))?;
             let bag = custom_role_bag(&mut m, "custom", &body, &["display"])?;
             if let Some(ct) = custom_type {
-                bag.insert("custom_type".into(), Value::from(ct));
+                bag.insert("customType".into(), Value::from(ct));
             }
             if let Some(details) = details {
-                bag.insert("custom_details".into(), details);
+                bag.insert("details".into(), details);
             }
         }
     }
@@ -651,7 +651,7 @@ fn assistant_meta(m: &mut Message, body: &Fields<'_>) -> Result<()> {
         "diagnostics",
     ] {
         if let Some(val) = present(body.get(key))? {
-            bag.insert(snake(key), val);
+            bag.insert(key.into(), val);
         }
     }
     if let Some(usage) = usage {
@@ -662,7 +662,7 @@ fn assistant_meta(m: &mut Message, body: &Fields<'_>) -> Result<()> {
         let mut err = serde_json::Map::new();
         for key in ["errorMessage", "errorCode", "errorType"] {
             if let Some(val) = present(body.get(key))? {
-                err.insert(snake(key), val);
+                err.insert(key.into(), val);
             }
         }
         bag.insert("error".into(), Value::Object(err));
@@ -705,22 +705,8 @@ fn custom_role_bag<'m>(
     bag.insert("message_role".into(), Value::from(role));
     for key in keys {
         if let Some(val) = present(body.get(key))? {
-            bag.insert(snake(key), val);
+            bag.insert((*key).into(), val);
         }
     }
     Ok(bag)
-}
-
-/// camelCase → snake_case for `extra` keys (ASCII only; OpenClaw keys are all ASCII).
-fn snake(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 4);
-    for c in s.chars() {
-        if c.is_ascii_uppercase() {
-            out.push('_');
-            out.push(c.to_ascii_lowercase());
-        } else {
-            out.push(c);
-        }
-    }
-    out
 }

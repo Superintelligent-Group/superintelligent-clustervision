@@ -646,7 +646,8 @@ is *there*, not in the `.sql`), `src/config/sessions/*`,
   `origin: subagent`; a user turn's `provenance` (kept in `extra.openclaw.provenance`) maps `inter_session` from a
   sub-agent to `kind: subagent_return`, other `inter_session` to `origin: subagent`, `internal_system` cron to
   `origin: scheduler` and other `internal_system` to `injected_context`. A `nested-tool.v1` record is a `notice`
-  with its details in `extra.openclaw.custom_details`. `usage{input, output, cacheRead, cacheWrite, cost{total}}` fills
+  with its details in `extra.openclaw.details`. Bag keys copied from a record keep their native camelCase
+  (`stopReason`, `customType`, `error.errorCode`); only cv's own keys (`record_type`, `usage_raw`) are snake_case. `usage{input, output, cacheRead, cacheWrite, cost{total}}` fills
   `Usage` including **`cost_usd`**; OpenClaw reports no reasoning-token count.
   `formats/openclaw.toml` `[types]` is the checked entry/role/block vocabulary.
 
