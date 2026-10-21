@@ -560,6 +560,27 @@ mod tests {
         assert!(actual.body.as_str().contains("chosen"));
     }
 
+    #[test]
+    fn semantic_transcript_head_is_independent_of_json_escaping() {
+        let world = cv_testkit::World::new("semantic-decoded-head");
+        for scalar in ["x", "\\u0078"] {
+            let path = world.proj.join("session.jsonl");
+            let raw = scalar.repeat(100_000);
+            std::fs::write(
+                &path,
+                format!(
+                    "{{\"type\":\"user\",\"uuid\":\"u\",\"sessionId\":\"head\",\"message\":{{\"role\":\"user\",\"content\":\"{raw}\"}}}}\n"
+                ),
+            )
+            .unwrap();
+            let r = cv_core::SessionRef::new("head", cv_core::Harness::Claude, &path);
+            let (doc, reads) = read_corpus_doc(&r).unwrap();
+            assert_eq!(doc.body.len(), 64 * 1024);
+            assert!(doc.body.bytes().all(|byte| byte == b'x'));
+            assert!(reads.fresh(&mut cv_core::source::Probe::default()));
+        }
+    }
+
     /// The committed Claude corpus copies one CLAUDE.md into 18 transcripts; a vector embeds it
     /// only where the exchange says it (`dfa91e7c`'s reply quotes it), and the fork's copied
     /// turns (`b3a058ca`) are its source's alone, as the full-text `body` field holds them.

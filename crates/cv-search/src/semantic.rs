@@ -1303,10 +1303,10 @@ mod tests {
                         assert_eq!(bodies[0].len(), 64 * 1024);
                         assert!(bodies[0].starts_with(prefix));
                         assert!(bodies[0][prefix.len()..].bytes().all(|b| b == b'x'));
-                    } else if kind == "plain-text" {
-                        assert_eq!(bodies[0], "x".repeat(64 * 1024));
                     } else {
-                        assert_eq!(bodies[0], format!("{}\n", "x".repeat(64 * 1024 / 6)));
+                        // Checked source text caps decoded bytes, independently of JSON escaping.
+                        assert_eq!(bodies[0].len(), 64 * 1024);
+                        assert!(bodies[0].bytes().all(|b| b == b'x'));
                     }
                     fake_encode(bodies)
                 },

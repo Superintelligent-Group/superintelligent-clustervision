@@ -60,8 +60,7 @@ impl Head {
         self.text.push_str(&text[..end]);
         self.stopped |= end < text.len();
     }
-    /// Checked text demand: a span's raw prefix of the remaining budget, then the decoded-byte
-    /// bound (decoded malformed UTF-8 may expand beyond the raw budget).
+    /// Checked text demand within the remaining decoded-byte budget.
     pub fn try_push_text(&mut self, text: &Text, resolver: &Resolver) -> anyhow::Result<()> {
         if !self.full() {
             if let Text::Source(source) = text {

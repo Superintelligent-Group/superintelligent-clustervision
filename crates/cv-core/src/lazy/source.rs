@@ -92,7 +92,7 @@ impl SourceText {
         })?;
         Ok(output)
     }
-    /// A decoded UTF8 byte prefix; unlike raw Span caps, this carrier has strict JSON semantics.
+    /// A decoded UTF8 byte prefix with strict JSON semantics.
     pub fn try_prefix(&self, cap: usize) -> Result<String> {
         self.try_prefix_with_truncation(cap).map(|(text, _)| text)
     }

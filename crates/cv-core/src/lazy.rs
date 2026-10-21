@@ -144,13 +144,13 @@ impl Text {
         }
     }
 
-    /// Checked counterpart of `resolve_prefix`, with the same raw-byte selection policy.
-    pub fn try_resolve_prefix<'a>(&'a self, resolver: &'a Resolver, max_raw: u64) -> anyhow::Result<Cow<'a, str>> {
+    /// A decoded-byte prefix for checked lazy text; inline text is borrowed whole.
+    pub fn try_resolve_prefix<'a>(&'a self, resolver: &'a Resolver, max: u64) -> anyhow::Result<Cow<'a, str>> {
         match self {
             Text::Inline(s) => Ok(Cow::Borrowed(s)),
-            Text::Span(sp) => resolver.try_resolve_prefix(sp, max_raw),
+            Text::Span(sp) => resolver.try_resolve_prefix(sp, max),
             Text::Source(source) => Ok(Cow::Owned(
-                source.try_prefix(usize::try_from(max_raw).unwrap_or(usize::MAX))?,
+                source.try_prefix(usize::try_from(max).unwrap_or(usize::MAX))?,
             )),
         }
     }
