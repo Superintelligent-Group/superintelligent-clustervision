@@ -366,7 +366,7 @@ pub(crate) fn rank_commit<'a>(
 }
 
 /// The `cv show --range` window around an edit at `msg_idx`: `RANGE_CONTEXT` messages of leading
-/// context, end-exclusive (so `142` → `139-145`).
+/// context and two trailing messages, end-exclusive (so `142` → `139..145`).
 pub(crate) fn range_hint(msg_idx: i64) -> (usize, usize) {
     let start = (msg_idx - RANGE_CONTEXT).max(0) as usize;
     let end = (msg_idx + RANGE_CONTEXT).max(1) as usize;
@@ -488,7 +488,7 @@ fn print_match(e: &EditEvent, m: &SessionMatch) {
     println!(
         "  {:8} {}  {}  {}edit at msg {} {}{}",
         e.harness,
-        crate::short_id(&e.session_id),
+        crate::util::short_id(&e.session_id),
         date,
         title,
         e.msg_idx,
@@ -496,7 +496,7 @@ fn print_match(e: &EditEvent, m: &SessionMatch) {
         elsewhere,
     );
     let (s, end) = range_hint(e.msg_idx);
-    println!("    ↳ cv show {} --range {s}..{end}", crate::short_id(&e.session_id));
+    println!("    ↳ cv show {} --range {s}..{end}", crate::util::short_id(&e.session_id));
 }
 
 /// An exact-evidence line: the session, where the commit output landed, the label — and the
@@ -511,7 +511,7 @@ fn print_exact(x: &ExactMatch, c: &CommitInfo) {
     println!(
         "  {:8} {}  {}  {}commit at msg {} ({})",
         x.harness,
-        crate::short_id(&x.session_id),
+        crate::util::short_id(&x.session_id),
         date,
         title,
         x.evidence.msg_idx,
@@ -529,7 +529,7 @@ fn hint_id(id: &str) -> String {
     if id.starts_with("agent-") {
         id.to_string()
     } else {
-        crate::short_id(id)
+        crate::util::short_id(id)
     }
 }
 
@@ -614,16 +614,16 @@ fn show_best(harness: &str, session_id: &str, msg_idx: i64) -> Result<()> {
     let (start, end) = range_hint(msg_idx);
     println!(
         "\n── conversation around the edit · {harness} {} · msg {start}..{end} ──\n",
-        crate::short_id(session_id)
+        crate::util::short_id(session_id)
     );
     let mut out = std::io::BufWriter::new(std::io::stdout().lock());
-    crate::stream_session_render(
+    crate::cmd::view::stream_session_render(
         adapter.as_ref(),
         &r,
         &mut out,
-        crate::show_header,
-        crate::show_message,
-        crate::RenderOpts {
+        crate::cmd::view::show_header,
+        crate::cmd::view::show_message,
+        crate::cmd::view::RenderOpts {
             range: Some(crate::util::Window::Range(start, Some(end))),
             max_bytes: None,
         },
@@ -649,17 +649,14 @@ fn blame_event_only(file: &str, abs: &Path) -> Result<()> {
     }
     // Latest edit per session, newest session first.
     let mut latest: Vec<&EditEvent> = Vec::new();
+    let mut positions = std::collections::HashMap::new();
     for e in &edits {
-        match latest
-            .iter_mut()
-            .find(|l| l.harness == e.harness && l.session_id == e.session_id)
-        {
-            Some(slot) => {
-                if e.ts.unwrap_or(i64::MIN) >= slot.ts.unwrap_or(i64::MIN) {
-                    *slot = e;
-                }
-            }
-            None => latest.push(e),
+        let index = *positions.entry((&e.harness, &e.session_id)).or_insert_with(|| {
+            latest.push(e);
+            latest.len() - 1
+        });
+        if e.ts.unwrap_or(i64::MIN) >= latest[index].ts.unwrap_or(i64::MIN) {
+            latest[index] = e;
         }
     }
     latest.sort_by_key(|e| std::cmp::Reverse(e.ts.or(e.updated_at)));
@@ -669,13 +666,13 @@ fn blame_event_only(file: &str, abs: &Path) -> Result<()> {
         println!(
             "  {:8} {}  {}  {}  last edit at msg {}",
             e.harness,
-            crate::short_id(&e.session_id),
+            crate::util::short_id(&e.session_id),
             date,
             e.title.as_deref().map(|t| truncate(t, 48)).unwrap_or_default(),
             e.msg_idx,
         );
         let (s, end) = range_hint(e.msg_idx);
-        println!("    ↳ cv show {} --range {s}..{end}", crate::short_id(&e.session_id));
+        println!("    ↳ cv show {} --range {s}..{end}", crate::util::short_id(&e.session_id));
     }
     Ok(())
 }

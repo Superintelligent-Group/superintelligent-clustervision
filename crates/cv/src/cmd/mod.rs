@@ -2,6 +2,7 @@
 
 pub(crate) mod adopt;
 pub(crate) mod archive;
+pub(crate) mod blame;
 pub(crate) mod browse;
 pub(crate) mod cat;
 pub(crate) mod compaction;

@@ -1,7 +1,7 @@
 //! `cv` — the clustervision CLI.
 //!
 //! This file holds only the clap surface (`Cli`/`Cmd`), the command groups, and the dispatch into
-//! the per-command modules under `cmd/`; shared helpers live in `util.rs` and `cv blame` in `blame.rs`.
+//! the per-command modules under `cmd/`; shared helpers live in `util.rs`.
 //!
 //! Interface v2 (0.11.0, `docs/INTERFACE-V2.md`): one verb per act, the same flag means the same
 //! thing everywhere, snake_case JSON, no hidden commands. A name removed in the current release is
@@ -12,7 +12,6 @@
 #[global_allocator]
 static ALLOCATOR: cv_testkit::heap::Allocator = cv_testkit::heap::Allocator;
 
-mod blame;
 mod cmd;
 mod http;
 mod llm;
@@ -24,17 +23,12 @@ fn test_world(tag: &str) -> cv_testkit::InProcess<cv_core::env::Scope> {
     cv_testkit::World::in_process(tag, cv_core::env::Env::enter_isolated)
 }
 
-// Crate-root re-exports for `blame.rs`, which renders conversation windows via the same
-// streaming renderer `cv show` uses.
-pub(crate) use cmd::view::{show_header, show_message, stream_session_render, RenderOpts};
-pub(crate) use util::short_id;
-
 use anyhow::{Context, Result};
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use cmd::hooks::{HookName, HooksCmd};
 use cmd::task::TaskCmd;
 use cmd::{
-    archive, browse, cat, compose, config, doctor, events, formats, hooks, live, orchestrate, pack, port, recipes,
+    archive, blame, browse, cat, compose, config, doctor, events, formats, hooks, live, orchestrate, pack, port, recipes,
     schema, search, serve, share, task, tools, view, workflow,
 };
 use std::path::PathBuf;
