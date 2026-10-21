@@ -865,79 +865,8 @@ mod tests {
         }
     }
 
-    // Frozen pre-spill compute recipe: this oracle exercises the original parallel helpers and
-    // whole-transcript vectors, rather than comparing two runs of the new streaming fold.
-    fn legacy_compute(refs: &[SessionRef]) -> TokenStats {
-        let mut all = refs.to_vec();
-        let subs = crate::par_flat_map(refs.to_vec(), |r| {
-            crate::subagent_tree_of(&r).into_iter().map(|s| s.session).collect()
-        });
-        let subagents = subs.len();
-        all.extend(subs);
-        let total = all.len();
-        let parsed = crate::par_filter_map(all, |r| {
-            let adapter = crate::harness::for_harness(r.harness)?;
-            let mut hits = Vec::new();
-            let session = adapter
-                .try_stream(&r, &Demand::RICH.with_spans(), &mut |m: Message| {
-                    if let Some(usage) = m
-                        .usage
-                        .as_ref()
-                        .filter(|u| u.total_tokens() > 0 || u.cost_usd.is_some())
-                    {
-                        hits.push(UsageHit {
-                            key: usage_key(r.harness, &m),
-                            harness: r.harness,
-                            model: m.model.clone().unwrap_or_default(),
-                            usage: usage.clone(),
-                        });
-                    }
-                    Flow::Continue
-                })
-                .ok()?;
-            for hit in &mut hits {
-                if hit.model.is_empty() {
-                    hit.model = session.model.clone().unwrap_or_else(|| "(unknown)".into());
-                }
-            }
-            Some(hits)
-        });
-        let mut stats = TokenStats {
-            sessions: refs.len(),
-            subagents,
-            failed: total - parsed.len(),
-            ..TokenStats::default()
-        };
-        let mut seen = std::collections::HashSet::new();
-        let mut rows = HashMap::new();
-        for hit in parsed.into_iter().flatten() {
-            if let Some(key) = hit.key {
-                if !seen.insert(key) {
-                    stats.duplicates += 1;
-                    continue;
-                }
-            }
-            let harness = hit.harness.as_str();
-            rows.entry((harness, hit.model.clone()))
-                .or_insert_with(|| TokenRow {
-                    harness,
-                    model: hit.model,
-                    ..TokenRow::default()
-                })
-                .add(&hit.usage);
-        }
-        stats.rows = rows.into_values().collect();
-        stats.rows.sort_by(|a, b| {
-            b.total()
-                .cmp(&a.total())
-                .then(a.harness.cmp(b.harness))
-                .then(a.model.cmp(&b.model))
-        });
-        stats
-    }
-
     #[test]
-    fn old_parallel_compute_matches_multiple_transcript_precedence_and_cost_bits() {
+    fn parallel_compute_matches_recorded_precedence_and_cost_bits() -> anyhow::Result<()> {
         let world = crate::test_world("token-stats-parallel-oracle");
         let mut refs = Vec::new();
         for (i, model) in ["first", "ignored", "ignored-again"].into_iter().enumerate() {
@@ -973,30 +902,16 @@ mod tests {
             Harness::Claude,
             world.base.join("absent.jsonl"),
         ));
+        // Recorded from the retired pre-spill parallel recipe's answer (the opencode cost sum's
+        // bits included: JSON floats round-trip exactly).
+        let mut frozen = crate::emit::frozen::Frozen::new("stats-tokens");
+        let first = TokenStats::compute(&refs).unwrap().to_json();
+        frozen.insert("in order", first.clone());
         let check = || {
-            let old = legacy_compute(&refs);
             let new = TokenStats::compute(&refs).unwrap();
-            assert_eq!(
-                serde_json::to_vec(&new.to_json()).unwrap(),
-                serde_json::to_vec(&old.to_json()).unwrap()
-            );
+            assert_eq!(serde_json::to_vec(&new.to_json()).unwrap(), serde_json::to_vec(&first).unwrap());
             assert_eq!(new.duplicates, 2);
             assert_eq!(new.failed, 1);
-            let old_cost = old
-                .rows
-                .iter()
-                .find(|r| r.harness == "opencode")
-                .unwrap()
-                .cost_usd
-                .unwrap();
-            let new_cost = new
-                .rows
-                .iter()
-                .find(|r| r.harness == "opencode")
-                .unwrap()
-                .cost_usd
-                .unwrap();
-            assert_eq!(new_cost.to_bits(), old_cost.to_bits());
             assert_eq!(new.rows.iter().find(|r| r.harness == "claude").unwrap().model, "first");
         };
         #[cfg(feature = "parallel")]
@@ -1017,8 +932,8 @@ mod tests {
                 .is_some());
         }
         refs.reverse();
-        let reordered = TokenStats::compute(&refs).unwrap();
-        assert_eq!(reordered.to_json(), legacy_compute(&refs).to_json());
+        let reordered = TokenStats::compute(&refs).unwrap().to_json();
+        frozen.insert("reversed", reordered.clone());
         #[cfg(feature = "sqlite")]
         {
             // Damaged persistent bytes must restart the entire ordered fold, including IDs
@@ -1034,16 +949,14 @@ mod tests {
                     rusqlite::params![r.harness.as_str(), r.id, r.path.to_string_lossy()],
                 )
                 .unwrap();
-            assert_eq!(
-                TokenStats::compute(&refs).unwrap().to_json(),
-                legacy_compute(&refs).to_json()
-            );
+            assert_eq!(TokenStats::compute(&refs).unwrap().to_json(), reordered);
         }
+        frozen.check()
     }
 
     #[cfg(feature = "sqlite")]
     #[test]
-    fn tiny_native_sources_parse_without_publishing_usage_cache() {
+    fn tiny_native_sources_parse_without_publishing_usage_cache() -> anyhow::Result<()> {
         let world = crate::test_world("token-stats-tiny");
         let path = world.write_session(
             "tiny",
@@ -1052,17 +965,15 @@ mod tests {
             "usage":{"input_tokens":3,"output_tokens":7}}})],
         );
         let r = SessionRef::new("tiny", Harness::Claude, path);
-        let expected = legacy_compute(std::slice::from_ref(&r)).to_json();
-        for _ in 0..2 {
-            assert_eq!(
-                TokenStats::compute(std::slice::from_ref(&r)).unwrap().to_json(),
-                expected
-            );
-        }
+        let expected = TokenStats::compute(std::slice::from_ref(&r)).unwrap().to_json();
+        let mut frozen = crate::emit::frozen::Frozen::new("stats-tiny");
+        frozen.insert("tiny", expected.clone());
+        assert_eq!(TokenStats::compute(std::slice::from_ref(&r)).unwrap().to_json(), expected);
         assert!(usage_cache::Cache::new()
             .unwrap()
             .load(&r, &crate::source::Probe::default().snapshot(&r))
             .is_none());
+        frozen.check()
     }
 
     #[test]
