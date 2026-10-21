@@ -92,7 +92,9 @@ impl WindowSink {
         self
     }
 
-    /// Materialize and keep the selected messages as well.
+    /// Materialize and retain selected messages instead of staging their payload frames.
+    /// Budgeting still measures their serialized size; retrieve the messages with [`Self::take_kept`].
+    /// Configure this before streaming begins.
     pub fn keeping(mut self) -> Self {
         self.kept = Some(Vec::new());
         self
