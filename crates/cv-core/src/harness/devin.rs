@@ -210,8 +210,8 @@ impl Adapter for Devin {
         _demand: crate::SubagentDemand,
         workflow: Option<&str>,
         select: &(dyn Fn(&str, Option<&str>) -> bool + Sync),
-    ) -> Vec<crate::AgentRef> {
-        super::select_forest(subagent_tree(&r.path, &r.id), workflow, select)
+    ) -> Result<Vec<crate::AgentRef>> {
+        Ok(super::select_forest(subagent_tree(&r.path, &r.id)?, workflow, select))
     }
 
     fn roots(&self) -> Vec<PathBuf> {
@@ -498,29 +498,18 @@ fn spawning_call(agent: &str, forest: &Forest) -> Option<String> {
 /// turns into `<session_id>/<agent_id>` child refs — as the forest [`crate::subagent_tree_of`]
 /// surfaces. `agent_id` is the child's `agent_type`; a completion receipt provides its spawning
 /// tool call. Devin records no per-agent description.
-pub fn subagent_tree(db: &Path, session_id: &str) -> Vec<crate::AgentRef> {
-    let Ok(conn) = open_ro(db) else {
-        return Vec::new();
-    };
+pub fn subagent_tree(db: &Path, session_id: &str) -> Result<Vec<crate::AgentRef>> {
+    let conn = open_ro(db)?;
     conn.read(|conn, _| {
         let select = Select::of(conn, "sessions")
             .always(&["working_directory"])
             .probed(&["title"])
             .always(&["created_at", "last_activity_at"]);
-        let (wd, title, created, last): (Option<String>, Option<String>, Option<i64>, Option<i64>) = conn
-            .query_row(
-                &format!("SELECT {} FROM sessions WHERE id = ?1", select.list()),
-                [session_id],
-                |row| {
-                    Ok((
-                        row.get(0).ok().flatten(),
-                        row.get(1).ok().flatten(),
-                        row.get(2).ok().flatten(),
-                        row.get(3).ok().flatten(),
-                    ))
-                },
-            )
-            .unwrap_or_default();
+        let (wd, title, created, last): (Option<String>, Option<String>, Option<i64>, Option<i64>) = conn.query_row(
+            &format!("SELECT {} FROM sessions WHERE id = ?1", select.list()),
+            [session_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
         let parent = SessionRef {
             cwd: wd.filter(|s| !s.is_empty()).map(PathBuf::from),
             title,
@@ -546,7 +535,6 @@ pub fn subagent_tree(db: &Path, session_id: &str) -> Vec<crate::AgentRef> {
         }
         Ok(out)
     })
-    .unwrap_or_default()
 }
 
 /// Row shape of the session metadata SELECT (columns probed — absent ones come back NULL):
@@ -1149,7 +1137,7 @@ mod tests {
         let refs = discover_conn(&conn, &path)?;
         let child = refs.iter().find(|r| r.id == "fixture-alpha/sidekick").unwrap();
         assert_eq!(child.message_count, Some(5));
-        let tree = subagent_tree(&path, "fixture-alpha");
+        let tree = subagent_tree(&path, "fixture-alpha").unwrap();
         assert_eq!(tree.len(), 1);
         assert_eq!(tree[0].tool_use_id.as_deref(), Some("spawn-call"));
         let parsed = parse_db(&conn, child)?;
@@ -1195,7 +1183,7 @@ mod tests {
                 reference.id
             );
         }
-        let tree = subagent_tree(&path, "fixture-alpha");
+        let tree = subagent_tree(&path, "fixture-alpha").unwrap();
         assert_eq!(tree[0].session.message_count, Some(5));
         Ok(())
     }
@@ -1282,7 +1270,7 @@ mod tests {
 
     #[test]
     fn subagent_tree_lists_the_live_head_and_skips_the_dangling_one() {
-        let subs = subagent_tree(&fixture(), "fixture-alpha");
+        let subs = subagent_tree(&fixture(), "fixture-alpha").unwrap();
         assert_eq!(subs.len(), 1);
         assert_eq!(subs[0].session.id, "fixture-alpha/sidekick");
         assert_eq!(subs[0].agent_type.as_deref(), Some("sidekick"));

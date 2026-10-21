@@ -843,7 +843,7 @@ fn lane_of(
 /// orchestrator issued them, which is how a status table reads). Read failures are explicit so a
 /// changing or unreadable source cannot silently remove a lane from the forest.
 pub fn lanes_of(parent: &SessionRef) -> Result<Vec<Lane>> {
-    let subs = crate::subagent_tree_of(parent);
+    let subs = crate::subagent_tree_of(parent)?;
     let notices = crate::harness::rootless(parent.harness)
         .map(|adapter| adapter.task_notices(parent))
         .unwrap_or_default();

@@ -335,7 +335,7 @@ impl Adapter for Claude {
         demand: crate::SubagentDemand,
         workflow: Option<&str>,
         select: &(dyn Fn(&str, Option<&str>) -> bool + Sync),
-    ) -> Vec<crate::AgentRef> {
+    ) -> Result<Vec<crate::AgentRef>> {
         subagent_tree_filtered(&r.path, demand, workflow, &select)
     }
 
@@ -603,7 +603,10 @@ fn apply_subagent_lineage(s: &mut Session, path: &std::path::Path, rich: bool) {
     if !rich {
         return;
     }
-    let (agent_type, description, tool_use_id) = read_meta(&path.with_extension("meta.json"));
+    let (agent_type, description, tool_use_id) = read_meta(&path.with_extension("meta.json")).unwrap_or_else(|error| {
+        crate::env::warn_once("agent metadata", format!("{}: {error:#}", path.display()));
+        Default::default()
+    });
     s.lineage.spawned_by_tool_use = tool_use_id;
     let bag = s.harness_extra_mut(Harness::Claude);
     if let Some(t) = agent_type {
@@ -718,7 +721,7 @@ fn persisted_output(text: &str) -> Option<(String, Option<String>)> {
 ///
 /// The workflow tier is, on a heavy session, the *majority* of the agents, and the meta/journal
 /// sidecars carry each agent's purpose and outcome. Newest first.
-pub fn subagent_tree(parent_path: &std::path::Path) -> Vec<AgentRef> {
+pub fn subagent_tree(parent_path: &std::path::Path) -> Result<Vec<AgentRef>> {
     subagent_tree_inner(parent_path, crate::SubagentDemand::Rich, None, &|_, _| true)
 }
 
@@ -727,7 +730,7 @@ pub(crate) fn subagent_tree_filtered(
     demand: crate::SubagentDemand,
     workflow: Option<&str>,
     select: &(impl Fn(&str, Option<&str>) -> bool + Sync),
-) -> Vec<AgentRef> {
+) -> Result<Vec<AgentRef>> {
     subagent_tree_inner(parent_path, demand, workflow, select)
 }
 
@@ -736,36 +739,39 @@ fn subagent_tree_inner(
     demand: crate::SubagentDemand,
     workflow: Option<&str>,
     select: &(impl Fn(&str, Option<&str>) -> bool + Sync),
-) -> Vec<AgentRef> {
+) -> Result<Vec<AgentRef>> {
     let Some(base) = sidecar::subagents_dir(parent_path) else {
-        return vec![];
+        return Ok(vec![]);
     };
 
     let mut out: Vec<AgentRef> = Vec::new();
 
     // Tier 1: directly-spawned sub-agents at `subagents/agent-*.jsonl`.
     if workflow.is_none() {
-        out.extend(agents_in_dir(&base, None, demand, select));
+        out.extend(agents_in_dir(&base, None, demand, select)?);
     }
 
     // Tier 2: workflow sub-agents at `subagents/workflows/<wf>/agent-*.jsonl`, grouped by run id,
     // each annotated with the result the workflow `journal.jsonl` recorded for its agentId.
-    if let Some(rd) = sidecar::workflow_runs_dir(parent_path).and_then(|d| fs::read_dir(d).ok()) {
+    if let Some(dir) = sidecar::workflow_runs_dir(parent_path) {
+        let rd = super::side_entries(&dir)?;
         let wf_dirs: Vec<PathBuf> = rd
-            .flatten()
+            .into_iter()
             .map(|e| e.path())
             .filter(|p| workflow.is_none_or(|run| p.file_name().and_then(|name| name.to_str()) == Some(run)))
             .filter(|p| p.is_dir())
             .collect();
         let groups = crate::par_flat_map(wf_dirs, |wf_dir| {
             let run_id = wf_dir.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
-            agents_in_dir(&wf_dir, Some(&run_id), demand, select)
+            vec![agents_in_dir(&wf_dir, Some(&run_id), demand, select)]
         });
-        out.extend(groups);
+        for group in groups {
+            out.extend(group?);
+        }
     }
 
     out.sort_by_key(|s| std::cmp::Reverse(s.session.created_at));
-    out
+    Ok(out)
 }
 
 /// A run's journal as [`sidecar::journal_results`] reads it: `agentId → full result`.
@@ -792,10 +798,10 @@ fn agents_in_dir(
     wf: Option<&str>,
     demand: crate::SubagentDemand,
     select: &(impl Fn(&str, Option<&str>) -> bool + Sync),
-) -> Vec<AgentRef> {
+) -> Result<Vec<AgentRef>> {
     let mut paths: Vec<PathBuf> = Vec::new();
-    if let Ok(rd) = fs::read_dir(dir) {
-        for e in rd.flatten() {
+    {
+        for e in super::side_entries(dir)? {
             let p = e.path();
             // Only `agent-*.jsonl`; skip `journal.jsonl` and the `.meta.json` sidecars.
             let is_agent = p.extension().and_then(|x| x.to_str()) == Some("jsonl")
@@ -815,61 +821,69 @@ fn agents_in_dir(
     let journal = if rich && wf.is_some() && !paths.is_empty() {
         #[cfg(test)]
         record_forest_read("journal", &dir.join("journal.jsonl"));
-        sidecar::journal_results(dir)
+        sidecar::journal_results_checked(dir)?
     } else {
         JournalResults::new()
     };
     crate::par_discovery_filter_map(paths, |p| {
-        #[cfg(test)]
-        record_forest_read("transcript", &p);
-        let session = if rich {
-            scan(&p).ok()?
-        } else {
-            // Retain the old open-failure exclusion even on a metadata cache hit.
-            fs::File::open(&p).ok()?;
-            cached_metadata(&p).ok()??
-        };
-        let meta = match demand {
-            crate::SubagentDemand::Rich => read_meta(&p.with_extension("meta.json")),
-            crate::SubagentDemand::Tools => (read_agent_type(&p.with_extension("meta.json")), None, None),
-            crate::SubagentDemand::Sessions => (None, None, None),
-        };
-        let agent_id = session.id.strip_prefix("agent-").unwrap_or(&session.id).to_string();
-        let (status, summary) = wf
-            .and_then(|_| journal.get(&agent_id))
-            .map(sidecar::result_summary)
-            .unwrap_or((None, None));
-        Some(AgentRef {
-            session,
-            agent_type: meta.0,
-            description: meta.1,
-            tool_use_id: meta.2,
-            workflow: wf.map(str::to_owned),
-            result_status: status,
-            result_summary: summary,
-        })
+        Some((|| -> Result<Option<AgentRef>> {
+            #[cfg(test)]
+            record_forest_read("transcript", &p);
+            let session = if rich {
+                scan(&p)?
+            } else {
+                // Retain the old open-failure exclusion even on a metadata cache hit.
+                fs::File::open(&p)?;
+                match cached_metadata(&p)? {
+                    Some(session) => session,
+                    None => return Ok(None),
+                }
+            };
+            let meta = match demand {
+                crate::SubagentDemand::Rich => read_meta(&p.with_extension("meta.json"))?,
+                crate::SubagentDemand::Tools => (read_agent_type(&p.with_extension("meta.json"))?, None, None),
+                crate::SubagentDemand::Sessions => (None, None, None),
+            };
+            let agent_id = session.id.strip_prefix("agent-").unwrap_or(&session.id).to_string();
+            let (status, summary) = wf
+                .and_then(|_| journal.get(&agent_id))
+                .map(sidecar::result_summary)
+                .unwrap_or((None, None));
+            Ok(Some(AgentRef {
+                session,
+                agent_type: meta.0,
+                description: meta.1,
+                tool_use_id: meta.2,
+                workflow: wf.map(str::to_owned),
+                result_status: status,
+                result_summary: summary,
+            }))
+        })())
     })
+    .into_iter()
+    .collect::<Result<Vec<_>>>()
+    .map(|rows| rows.into_iter().flatten().collect())
 }
 
 /// Tool analytics demand the agent type, not the task description or spawning-call metadata.
-fn read_agent_type(path: &Path) -> Option<String> {
+fn read_agent_type(path: &Path) -> Result<Option<String>> {
     #[cfg(test)]
     record_forest_read("metadata", path);
-    let source = JsonSource::capture(path).ok()?;
-    source
-        .read_document(|view| crate::affordance::input::field_string(view, "agentType"))
-        .ok()
-        .flatten()
+    let source = match JsonSource::capture(path) {
+        Ok(source) => source,
+        Err(error) if super::is_not_found(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    source.read_document(|view| crate::affordance::input::field_string(view, "agentType"))
 }
 
-/// Read an `agent-*.meta.json` sidecar → `(agentType, description, toolUseId)`. Any read/parse
-/// failure (or an absent file) is a clean `(None, None, None)`.
-fn read_meta(path: &std::path::Path) -> (Option<String>, Option<String>, Option<String>) {
+/// Missing metadata is optional; corrupt or unreadable metadata is an error.
+fn read_meta(path: &Path) -> Result<(Option<String>, Option<String>, Option<String>)> {
     #[cfg(test)]
     record_forest_read("metadata", path);
-    let v = sidecar::read_or_default(path);
+    let v = sidecar::read(path)?;
     let s = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
-    (s("agentType"), s("description"), s("toolUseId"))
+    Ok((s("agentType"), s("description"), s("toolUseId")))
 }
 
 /// The sub-agent's final return value as text: the last assistant text turn in its transcript
@@ -2276,7 +2290,7 @@ mod tests {
         drop(jf);
 
         FOREST_READS.lock().unwrap().0 = Some(root.clone());
-        let tree = subagent_tree(&parent);
+        let tree = subagent_tree(&parent).unwrap();
         assert_eq!(tree.len(), 3, "two tiers: 1 direct + 2 workflow");
 
         let before = FOREST_READS.lock().unwrap().1.len();
@@ -2284,7 +2298,8 @@ mod tests {
         let tools = subagent_tree_filtered(&parent, crate::SubagentDemand::Tools, Some("wf_abc-123"), &|id, run| {
             candidates.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             id == "agent-a222" && run == Some("wf_abc-123")
-        });
+        })
+        .unwrap();
         assert_eq!(
             candidates.load(std::sync::atomic::Ordering::Relaxed),
             2,
@@ -2316,7 +2331,8 @@ mod tests {
         let before = FOREST_READS.lock().unwrap().1.len();
         let sessions = subagent_tree_filtered(&parent, crate::SubagentDemand::Sessions, None, &|id, _| {
             id == "agent-a111"
-        });
+        })
+        .unwrap();
         assert_eq!(sessions.len(), 1);
         let reads: Vec<_> = FOREST_READS.lock().unwrap().1[before..]
             .iter()
@@ -2325,7 +2341,7 @@ mod tests {
             .collect();
         assert_eq!(reads, [("transcript", a1.clone())]);
         let selected_rich =
-            subagent_tree_filtered(&parent, crate::SubagentDemand::Rich, None, &|id, _| id == "agent-a222");
+            subagent_tree_filtered(&parent, crate::SubagentDemand::Rich, None, &|id, _| id == "agent-a222").unwrap();
         assert_eq!(
             serde_json::to_value(&selected_rich[0]).unwrap(),
             serde_json::to_value(original).unwrap()
@@ -2337,6 +2353,7 @@ mod tests {
             assert_eq!(
                 serde_json::to_vec(
                     &subagent_tree_filtered(&parent, crate::SubagentDemand::Sessions, None, &|_, _| true)
+                        .unwrap()
                         .into_iter()
                         .map(|s| s.session)
                         .collect::<Vec<_>>()

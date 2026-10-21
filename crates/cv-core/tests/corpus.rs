@@ -70,6 +70,7 @@ fn claude_adapter(version_dir: &Path) -> Box<dyn Adapter> {
 /// the parent's `subagents/`, found the way `cv show --tree` finds them.
 fn claude_children(r: &SessionRef) -> Vec<SessionRef> {
     cv_core::harness::claude::subagent_tree(&r.path)
+        .unwrap()
         .into_iter()
         .map(|k| k.session)
         .collect()
@@ -180,12 +181,12 @@ const HARNESSES: &[CorpusHarness] = &[
     CorpusHarness {
         name: "kimi",
         adapter: kimi,
-        children: Some(cv_core::harness::kimi::subagent_refs),
+        children: Some(|r| cv_core::harness::kimi::subagent_refs(r).unwrap()),
     },
     CorpusHarness {
         name: "kimi-code",
         adapter: kimi_code,
-        children: Some(cv_core::harness::kimi_code::subagent_refs),
+        children: Some(|r| cv_core::harness::kimi_code::subagent_refs(r).unwrap()),
     },
     CorpusHarness {
         name: "qwen",
@@ -210,7 +211,7 @@ const HARNESSES: &[CorpusHarness] = &[
     CorpusHarness {
         name: "hermes",
         adapter: hermes,
-        children: Some(cv_core::harness::hermes::subagent_refs),
+        children: Some(|r| cv_core::harness::hermes::subagent_refs(r).unwrap()),
     },
 ];
 
@@ -557,7 +558,7 @@ fn claude_corpus_workflow_runs_read_as_recorded() {
                 let runs: Vec<Value> = claude_workflow::workflows(&r.path)
                     .iter()
                     .map(|w| {
-                        let mut agents: Vec<Value> = claude::subagent_tree(&r.path)
+                        let mut agents: Vec<Value> = claude::subagent_tree(&r.path).unwrap()
                             .iter()
                             .filter(|k| k.workflow.as_deref() == Some(w.run_id.as_str()))
                             .map(|k| json!({"agent_id": k.agent_id(), "result_status": k.result_status, "result_summary": k.result_summary}))

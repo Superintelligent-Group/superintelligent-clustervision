@@ -212,8 +212,8 @@ impl Adapter for Codex {
         _demand: crate::SubagentDemand,
         workflow: Option<&str>,
         select: &(dyn Fn(&str, Option<&str>) -> bool + Sync),
-    ) -> Vec<crate::AgentRef> {
-        super::select_forest(hook_forest(r), workflow, select)
+    ) -> Result<Vec<crate::AgentRef>> {
+        Ok(super::select_forest(hook_forest(r)?, workflow, select))
     }
 
     fn roots(&self) -> Vec<PathBuf> {
@@ -409,7 +409,7 @@ impl CodexCtx {
 
 /// Codex hook membership is a native UUID/parent relation, verified against each child's header.
 /// This also makes the registered forest available to tools and query consumers of the one API.
-fn hook_forest(parent: &SessionRef) -> Vec<crate::AgentRef> {
+fn hook_forest(parent: &SessionRef) -> Result<Vec<crate::AgentRef>> {
     let rows = crate::lanes::read_ledger();
     let mut known = std::collections::HashSet::from([parent.id.clone()]);
     let mut out = Vec::new();
@@ -423,7 +423,11 @@ fn hook_forest(parent: &SessionRef) -> Vec<crate::AgentRef> {
                 continue;
             };
             // A child whose transcript cannot be read yet is not listed (the ledger keeps it).
-            let Ok(Some(head)) = hook_header(path) else {
+            let Some(head) = (match hook_header(path) {
+                Ok(head) => head,
+                Err(error) if super::is_not_found(&error) => None,
+                Err(error) => return Err(error),
+            }) else {
                 continue;
             };
             if head.id != row.agent_id || head.lineage.parent.as_deref() != Some(row.session_id.as_str()) {
@@ -449,7 +453,7 @@ fn hook_forest(parent: &SessionRef) -> Vec<crate::AgentRef> {
         }
     }
     out.sort_by_key(|s| std::cmp::Reverse(s.session.created_at));
-    out
+    Ok(out)
 }
 
 /// Canonical header for a live hook's rollout: its first record, through the same captured
@@ -1041,7 +1045,7 @@ mod tests {
         child.event = crate::lanes::LaneEventKind::Stop;
         crate::lanes::append_lane_event(&child).unwrap();
         crate::lanes::append_lane_event(&row("foreign", "root", "another-parent")).unwrap();
-        let forest = crate::subagent_tree_of(&parent);
+        let forest = crate::subagent_tree_of(&parent).unwrap();
         let ids: std::collections::HashSet<_> = forest.iter().map(|s| s.session.id.as_str()).collect();
         assert_eq!(ids, std::collections::HashSet::from(["child", "grandchild"]));
         assert!(forest.iter().all(|s| s.session.harness == crate::Harness::Codex));

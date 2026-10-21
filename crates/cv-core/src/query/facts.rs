@@ -99,8 +99,11 @@ impl<'a> SessionFacts<'a> {
     }
 
     /// The sub-agent forest as lightweight infos (type + ref + journaled outcome).
-    fn tree(&self) -> &[crate::AgentRef] {
-        self.tree.get_or_init(|| crate::subagent_tree_of(self.r))
+    fn tree(&self) -> anyhow::Result<&[crate::AgentRef]> {
+        if self.tree.get().is_none() {
+            let _ = self.tree.set(crate::subagent_tree_of(self.r)?);
+        }
+        Ok(self.tree.get().expect("tree initialized"))
     }
 
     fn workflows(&self) -> &[crate::Workflow] {
@@ -155,7 +158,7 @@ impl ExtFacts for SessionFacts<'_> {
                 agent.agent != crate::tools::ORCHESTRATOR
                     && agent.histogram.tools.keys().any(|value| value.to_lowercase() == needle)
             }),
-            FieldId::Agent => self.tree().iter().any(|info| {
+            FieldId::Agent => self.tree()?.iter().any(|info| {
                 info.agent_type
                     .as_deref()
                     .is_some_and(|value| value.to_lowercase() == needle)
@@ -210,13 +213,11 @@ impl ExtFacts for SessionFacts<'_> {
                 |f| f.images,
             ),
             // The forest `agents` counts, asked for membership only unless already read.
-            "subagents" => self.tree.get().map_or_else(
-                || {
-                    !crate::subagent_tree_filtered_of(self.r, crate::SubagentDemand::Sessions, None, |_, _| true)
-                        .is_empty()
-                },
-                |tree| !tree.is_empty(),
-            ),
+            "subagents" => match self.tree.get() {
+                Some(tree) => !tree.is_empty(),
+                None => !crate::subagent_tree_filtered_of(self.r, crate::SubagentDemand::Sessions, None, |_, _| true)?
+                    .is_empty(),
+            },
             "compacted" => self.compaction_count()? > 0,
             "workflows" => !self.workflows().is_empty(),
             other => match crate::affordance::Kind::parse(other) {
@@ -234,7 +235,7 @@ impl ExtFacts for SessionFacts<'_> {
         })))
     }
     fn agent_type(&self, needle: &str) -> anyhow::Result<Tri> {
-        Ok(Tri::of(self.tree().iter().any(|info| {
+        Ok(Tri::of(self.tree()?.iter().any(|info| {
             info.agent_type
                 .as_deref()
                 .is_some_and(|t| t.to_lowercase().contains(needle))
@@ -248,7 +249,7 @@ impl ExtFacts for SessionFacts<'_> {
     }
     fn count(&self, field: FieldId) -> anyhow::Result<Option<u64>> {
         Ok(match field {
-            FieldId::Agents => Some(self.tree().len() as u64),
+            FieldId::Agents => Some(self.tree()?.len() as u64),
             FieldId::Workflows => Some(self.workflows().len() as u64),
             FieldId::Compactions => Some(self.compaction_count()? as u64),
             _ => None,

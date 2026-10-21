@@ -942,7 +942,7 @@ mod db {
     /// so `cv touched`/`cv events` see what the agents did — not just the orchestrator. Off by
     /// default (the forest can be hundreds of transcripts / ~900 MB).
     pub fn ingest_all(force: bool, subagents: bool) -> Result<usize> {
-        let sources = collect_sources(crate::discover_all(), subagents);
+        let sources = collect_sources(crate::discover_all(), subagents)?;
         let sync = SyncTable::load();
         let mut probe = crate::source::Probe::default();
         let mut n = 0;
@@ -959,25 +959,31 @@ mod db {
         Ok(n)
     }
 
-    pub(super) fn collect_sources(refs: Vec<SessionRef>, subagents: bool) -> Vec<(SessionRef, Provenance)> {
+    pub(super) fn collect_sources(refs: Vec<SessionRef>, subagents: bool) -> Result<Vec<(SessionRef, Provenance)>> {
         let mut sources: Vec<_> = refs.into_iter().map(|r| (r, Provenance::default())).collect();
         if subagents {
             let folded: Vec<_> = sources
                 .iter()
-                .flat_map(|(parent, _)| {
-                    crate::subagent_tree_of(parent).into_iter().map(|sub| {
-                        let provenance = Provenance {
-                            parent_id: Some(parent.id.clone()),
-                            agent_id: Some(sub.agent_id().to_owned()),
-                            workflow: sub.workflow.clone(),
-                        };
-                        (sub.session, provenance)
-                    })
+                .map(|(parent, _)| {
+                    Ok(crate::subagent_tree_of(parent)?
+                        .into_iter()
+                        .map(|sub| {
+                            let provenance = Provenance {
+                                parent_id: Some(parent.id.clone()),
+                                agent_id: Some(sub.agent_id().to_owned()),
+                                workflow: sub.workflow.clone(),
+                            };
+                            (sub.session, provenance)
+                        })
+                        .collect::<Vec<_>>())
                 })
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .flatten()
                 .collect();
             sources.extend(folded);
         }
-        preferred_sources(sources)
+        Ok(preferred_sources(sources))
     }
 
     /// Events have one output per harness/id, independent of how many source copies discovery
@@ -1942,7 +1948,7 @@ mod tests {
             std::fs::write(agents.join(format!("agent-{name}.jsonl")), format!("{line}\n")).unwrap();
             parents.push(parent);
         }
-        let selected = db::collect_sources(parents.clone(), true);
+        let selected = db::collect_sources(parents.clone(), true).unwrap();
         assert_eq!(selected.len(), 3, "one preferred parent plus both disjoint children");
         assert_eq!(
             selected.iter().find(|(r, _)| r.id == "parent").unwrap().0.path,
@@ -1956,7 +1962,10 @@ mod tests {
         }
         assert_eq!(
             format!("{selected:?}"),
-            format!("{:?}", db::collect_sources(parents.into_iter().rev().collect(), true))
+            format!(
+                "{:?}",
+                db::collect_sources(parents.into_iter().rev().collect(), true).unwrap()
+            )
         );
     }
 

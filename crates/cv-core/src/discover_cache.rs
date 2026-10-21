@@ -206,6 +206,7 @@ pub(crate) fn stat_key(path: &Path) -> Option<(u64, u64)> {
 ///
 /// The capture happens **before** the scan, so a write racing the scan leaves a too-old stamp in
 /// the cache, which misses next time and re-scans. The safe direction.
+#[cfg(test)]
 pub(crate) fn cached_scan_many<F>(path: &Path, scan: F) -> Vec<SessionRef>
 where
     F: FnOnce() -> Vec<SessionRef>,
@@ -230,7 +231,7 @@ where
         .map(|refs: Vec<SessionRef>| refs.into_iter().next())
 }
 
-/// [`cached_scan_many`] with auxiliary identities captured before the caller reads them, over a
+/// [`cached_scan_many_checked`] with auxiliary identities captured before the caller reads them, over a
 /// scan that can fail (its error is returned, nothing cached).
 #[cfg(feature = "sqlite")]
 pub(crate) fn cached_scan_many_with_reads<F>(
@@ -433,7 +434,8 @@ pub(crate) fn captured_reads(path: &Path) -> Option<crate::source::ReadSet> {
     Some(reads.clone())
 }
 
-/// Single-result convenience over [`cached_scan_many`].
+/// Single-result convenience over [`cached_scan_many_checked`].
+#[cfg(test)]
 pub(crate) fn cached_scan<F>(path: &Path, scan: F) -> Option<SessionRef>
 where
     F: FnOnce() -> Option<SessionRef>,
@@ -443,7 +445,7 @@ where
         .next()
 }
 
-/// [`cached_scan`] over a scan that can fail: its error comes back to the caller, nothing
+/// A single-result scan that can fail: its error comes back to the caller, nothing
 /// cached, for discovery to report the source as skipped.
 pub(crate) fn cached_scan_checked<F>(path: &Path, scan: F) -> anyhow::Result<Option<SessionRef>>
 where
@@ -452,7 +454,7 @@ where
     cached_scan_with_reads(path, Default::default(), scan)
 }
 
-/// [`cached_scan_many`] over a scan that can fail (see [`cached_scan_checked`]).
+/// [`cached_scan_many_checked`] over a scan that can fail (see [`cached_scan_checked`]).
 pub(crate) fn cached_scan_many_checked<F>(path: &Path, scan: F) -> anyhow::Result<Vec<SessionRef>>
 where
     F: FnOnce() -> anyhow::Result<Vec<SessionRef>>,

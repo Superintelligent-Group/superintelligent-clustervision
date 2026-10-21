@@ -263,8 +263,8 @@ impl Adapter for Hermes {
         _demand: crate::SubagentDemand,
         workflow: Option<&str>,
         select: &(dyn Fn(&str, Option<&str>) -> bool + Sync),
-    ) -> Vec<crate::AgentRef> {
-        super::ref_forest(subagent_refs(r), workflow, select)
+    ) -> Result<Vec<crate::AgentRef>> {
+        Ok(super::ref_forest(subagent_refs(r)?, workflow, select))
     }
 
     /// Every dir holding a `state.db` (home + each profile), the first `state.db`'s first:
@@ -393,21 +393,18 @@ fn discover_conn(conn: &Connection, path: &Path) -> Result<Vec<SessionRef>> {
 /// spawned), as [`SessionRef`]s of the same shape discovery gives a session in that db, sorted by
 /// id. Discovery leaves them out (Hermes's picker hides them too); this is how a caller reaches
 /// them from their parent. Empty when the db cannot be opened.
-pub fn subagent_refs(parent: &SessionRef) -> Vec<SessionRef> {
-    let Ok(conn) = open_ro(&parent.path) else {
-        return Vec::new();
-    };
+pub fn subagent_refs(parent: &SessionRef) -> Result<Vec<SessionRef>> {
+    let conn = open_ro(&parent.path)?;
     conn.read(|conn, _| {
         let chain: HashSet<String> = if Select::of(conn, "sessions").has("parent_session_id") {
             session_lineage_root_to_tip(conn, &parent.id).into_iter().collect()
         } else {
             HashSet::from([parent.id.clone()])
         };
-        let mut out = refs_conn(conn, &parent.path, Some(&chain)).unwrap_or_default();
+        let mut out = refs_conn(conn, &parent.path, Some(&chain))?;
         out.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(out)
     })
-    .unwrap_or_default()
 }
 
 /// Session refs in one db: with `delegates_of` unset, every listed conversation (see
@@ -2926,16 +2923,24 @@ mod tests {
             "discovery lists conversations, not delegates or ancestors"
         );
         let tip = refs.iter().find(|r| r.id == "t").unwrap();
-        let kids = subagent_refs(tip);
+        let kids = subagent_refs(tip).unwrap();
         assert_eq!(kids.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), vec!["d1", "d2"]);
         assert!(kids.iter().all(|k| k.path == db && k.harness == Harness::Hermes));
         // The forest is the same delegates, newest first.
-        let mut forest: Vec<String> = crate::subagent_tree_of(tip).into_iter().map(|a| a.session.id).collect();
+        let mut forest: Vec<String> = crate::subagent_tree_of(tip)
+            .unwrap()
+            .into_iter()
+            .map(|a| a.session.id)
+            .collect();
         forest.sort();
         assert_eq!(forest, ["d1", "d2"]);
         let x = refs.iter().find(|r| r.id == "x").unwrap();
         assert_eq!(
-            subagent_refs(x).iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            subagent_refs(x)
+                .unwrap()
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["dx"]
         );
         // a child parses as its own conversation that names its parent
@@ -3558,7 +3563,7 @@ mod tests {
             let mut refreshed = reference.clone();
             reader.refill_turns(std::iter::once(&mut refreshed));
             assert_eq!(refreshed.message_count, Some(turns), "{}", reference.id);
-            for child in subagent_refs(&reference) {
+            for child in subagent_refs(&reference).unwrap() {
                 assert_eq!(child.message_count, None);
                 let parsed = crate::stream::collect_with(&adapter, &child, &stream::Demand::RICH)?;
                 let done = crate::stream::stream_counted(

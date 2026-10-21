@@ -502,7 +502,7 @@ pub fn resolve_agent(r: &SessionRef, key: &str, workflow: Option<&str>) -> anyho
     ids.extend(
         crate::subagent_tree_filtered_of(r, crate::SubagentDemand::Sessions, workflow, |_, run| {
             workflow.is_none_or(|wanted| run == Some(wanted))
-        })
+        })?
         .iter()
         .map(|s| s.agent_id().to_string()),
     );
@@ -542,7 +542,7 @@ fn selected_tool_agents(
             workflow_member.store(true, std::sync::atomic::Ordering::Relaxed);
         }
         matches_workflow && matches_agent(agent, id.strip_prefix("agent-").unwrap_or(id))
-    });
+    })?;
     anyhow::ensure!(
         workflow.is_none()
             || if agent.is_some() {

@@ -945,7 +945,8 @@ impl SweepPlanner<'_> {
             for r in refs {
                 // The fold needs each agent's identity and workflow only; the `Sessions` demand
                 // answers from the stat-keyed scan cache instead of re-parsing every transcript.
-                for sub in cv_core::subagent_tree_filtered_of(r, cv_core::SubagentDemand::Sessions, None, |_, _| true) {
+                for sub in cv_core::subagent_tree_filtered_of(r, cv_core::SubagentDemand::Sessions, None, |_, _| true)?
+                {
                     let prov = cv_core::events::Provenance {
                         parent_id: Some(r.id.clone()),
                         agent_id: Some(sub.agent_id().to_string()),
@@ -5699,12 +5700,12 @@ mod tests {
         conn.execute_batch("DELETE FROM events; DELETE FROM source_dependencies WHERE consumer='events';")
             .unwrap();
         assert!(cv_core::events::needs_ingest(&parent));
-        let child = cv_core::subagent_tree_of(&parent).remove(0).session;
+        let child = cv_core::subagent_tree_of(&parent).unwrap().remove(0).session;
         assert!(cv_core::events::needs_ingest(&child));
 
         // The production `--subagents` sweep: parent and agent are both FTS-fresh, events-stale.
         assert_eq!(
-            cv_core::subagent_tree_of(&parent).len(),
+            cv_core::subagent_tree_of(&parent).unwrap().len(),
             1,
             "fixture must discover exactly one sub-agent"
         );
@@ -5878,7 +5879,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let direct = cv_core::subagent_tree_of(&parent).pop().unwrap().session;
+        let direct = cv_core::subagent_tree_of(&parent).unwrap().pop().unwrap().session;
         let attribution = || -> Option<String> {
             rusqlite::Connection::open(home.home.join("catalog.db"))
                 .unwrap()

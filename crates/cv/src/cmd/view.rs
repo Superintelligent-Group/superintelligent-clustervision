@@ -487,7 +487,7 @@ fn agent_parents_for_harness(parents: Vec<SessionRef>, want: Option<Harness>) ->
 fn show_agent_fleetwide(agent_id: &str, want: Option<Harness>, json: bool, window: &WindowArgs) -> Result<bool> {
     let parents = agent_parents_for_harness(cv_core::find_subagent_parents(agent_id), want);
     // Copies of one agent across sessions (`cv adopt`) read through the newest parent's copy.
-    let parents = if parents.len() > 1 && cv_core::one_agent_across(&parents, agent_id) {
+    let parents = if parents.len() > 1 && cv_core::one_agent_across(&parents, agent_id)? {
         eprintln!(
             "✦ {} sessions hold a copy of this agent (adopted); reading the newest — `cv show <session> --agent {agent_id}` for another",
             parents.len()
@@ -537,7 +537,7 @@ fn show_agent_fleetwide(agent_id: &str, want: Option<Harness>, json: bool, windo
 /// sub-agent with its type, journaled outcome, and final return value. `json` emits the structured
 /// [`AgentRef`] forest (each annotated with its return) for machine consumption.
 fn show_subagents(r: &SessionRef, json: bool) -> Result<()> {
-    let subs = cv_core::subagent_tree_of(r);
+    let subs = cv_core::subagent_tree_of(r)?;
 
     if json {
         // Enrich each with its final return value (direct agents report via the parent tool_result;
@@ -594,7 +594,7 @@ pub(crate) fn resolve_subagent(parent: &SessionRef, agent_id: &str) -> Result<cv
         [id, id.rsplit('/').next().unwrap_or(id)].into_iter().any(|id| {
             id.starts_with(agent_id) || id.strip_prefix("agent-").is_some_and(|bare| bare.starts_with(agent_id))
         })
-    });
+    })?;
     let matches: Vec<&cv_core::AgentRef> = subs.iter().collect();
     match matches.as_slice() {
         [one] => Ok((*one).clone()),
@@ -881,18 +881,18 @@ fn print_tree(r: &SessionRef, adapter: &dyn Adapter) -> Result<()> {
             println!("{:>4}. {}", i + 1, row.line);
         }
     }
-    render_subagent_forest(r);
+    render_subagent_forest(r)?;
     Ok(())
 }
 
 /// Print the sub-agent forest under a session: directly-spawned sub-agents, then each workflow's
 /// agents grouped together with the journaled `status: summary` outcome. Reads only the cheap
 /// metadata/journal sidecars (no transcript bodies).
-fn render_subagent_forest(r: &SessionRef) {
+fn render_subagent_forest(r: &SessionRef) -> Result<()> {
     use std::collections::BTreeMap;
-    let subs = cv_core::subagent_tree_of(r);
+    let subs = cv_core::subagent_tree_of(r)?;
     if subs.is_empty() {
-        return;
+        return Ok(());
     }
 
     let direct: Vec<&cv_core::AgentRef> = subs.iter().filter(|s| s.workflow.is_none()).collect();
@@ -922,6 +922,7 @@ fn render_subagent_forest(r: &SessionRef) {
             println!("    • {}", subagent_line(s));
         }
     }
+    Ok(())
 }
 
 /// One line describing a sub-agent — `cv show --tree`'s forest and `cv show --subagents` share it: short

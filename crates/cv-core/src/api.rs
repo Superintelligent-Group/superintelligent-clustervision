@@ -537,7 +537,11 @@ fn subagents(harness: &str, id: &str) -> (u16, Value) {
         Ok(x) => x,
         Err(e) => return e,
     };
-    let out: Vec<Value> = crate::subagent_tree_of(&r)
+    let forest = match crate::subagent_tree_of(&r) {
+        Ok(forest) => forest,
+        Err(error) => return err(500, &format!("forest read failed: {error:#}")),
+    };
+    let out: Vec<Value> = forest
         .iter()
         .map(|s| crate::rows::subagent_row(s, size_of(&s.session)))
         .collect();
@@ -554,12 +558,18 @@ fn subagent(harness: &str, parent: &str, agent: &str) -> (u16, Value) {
         Err(e) => return e,
     };
     // The full transcript id, Claude's bare `agentId`, or the agent part of a `<parent>/<agent>` id.
-    let Some(sr) = crate::subagent_tree_filtered_of(&r, crate::SubagentDemand::Sessions, None, |id, _| {
+    let forest = crate::subagent_tree_filtered_of(&r, crate::SubagentDemand::Sessions, None, |id, _| {
         id == agent || id.strip_prefix("agent-") == Some(agent) || id.rsplit_once('/').is_some_and(|(_, a)| a == agent)
-    })
-    .into_iter()
-    .find(|s| s.session.id == agent || s.agent_id() == agent)
-    .map(|s| s.session) else {
+    });
+    let forest = match forest {
+        Ok(forest) => forest,
+        Err(error) => return err(500, &format!("forest read failed: {error:#}")),
+    };
+    let Some(sr) = forest
+        .into_iter()
+        .find(|s| s.session.id == agent || s.agent_id() == agent)
+        .map(|s| s.session)
+    else {
         return err(404, "subagent not found");
     };
     match complete_session_json(adapter.as_ref(), &sr) {

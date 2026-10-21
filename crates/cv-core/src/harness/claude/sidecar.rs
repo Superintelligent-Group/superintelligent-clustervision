@@ -19,17 +19,23 @@ use std::path::{Path, PathBuf};
 /// The journal a `Workflow` run writes into its run dir.
 pub const JOURNAL: &str = "journal.jsonl";
 
-/// A JSON-object sidecar (a sub-agent's `agent-<id>.meta.json`) as its object: empty when the
-/// file is missing, unreadable, not JSON, or not an object. A sidecar is optional, so a bad one
-/// reads as none, the same way for every reader and writer that consults it.
+/// An optional JSON-object sidecar. Only a missing file has no metadata.
+pub fn read(path: &Path) -> anyhow::Result<serde_json::Map<String, Value>> {
+    use anyhow::Context;
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Default::default()),
+        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+    };
+    serde_json::from_slice(&bytes).with_context(|| format!("decoding {}", path.display()))
+}
+
+/// Optional enrichment reports a named diagnostic when its sidecar cannot be read.
 pub fn read_or_default(path: &Path) -> serde_json::Map<String, Value> {
-    match std::fs::read(path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-    {
-        Some(Value::Object(object)) => object,
-        _ => serde_json::Map::new(),
-    }
+    read(path).unwrap_or_else(|error| {
+        crate::env::warn_once("agent metadata", format!("{}: {error:#}", path.display()));
+        Default::default()
+    })
 }
 
 /// The type Claude Code gives a sub-agent spawned without one.
@@ -94,7 +100,7 @@ pub fn workflows_dir(transcript: &Path) -> Option<PathBuf> {
 /// per agent wins: a `result` supersedes the earlier `started`, and a re-issued agent journals more
 /// than once. Empty when the journal is absent or unreadable; a corrupt line is skipped the way
 /// every adapter skips one (the shared JSONL lifecycle).
-pub fn journal_results(run_dir: &Path) -> BTreeMap<String, Value> {
+pub fn journal_results_checked(run_dir: &Path) -> anyhow::Result<BTreeMap<String, Value>> {
     let mut map = BTreeMap::new();
     let read = crate::harness::store::jsonl::for_each_record(&run_dir.join(JOURNAL), |view| {
         let Some(fields) = crate::harness::store::document::Fields::parse(view, &["type", "agentId", "result"])? else {
@@ -107,10 +113,20 @@ pub fn journal_results(run_dir: &Path) -> BTreeMap<String, Value> {
         }
         Ok(())
     });
-    if read.is_err() {
-        map.clear();
+    if let Err(error) = read {
+        if !super::super::is_not_found(&error) {
+            return Err(error);
+        }
     }
-    map
+    Ok(map)
+}
+
+/// Optional workflow enrichment keeps its failure visible.
+pub fn journal_results(run_dir: &Path) -> BTreeMap<String, Value> {
+    journal_results_checked(run_dir).unwrap_or_else(|error| {
+        crate::env::warn_once("workflow journal", format!("{}: {error:#}", run_dir.display()));
+        Default::default()
+    })
 }
 
 /// The `(status, summary)` a journaled result carries. Workflows write two shapes: a structured

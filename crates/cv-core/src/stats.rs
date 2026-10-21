@@ -393,11 +393,13 @@ fn read_string(reader: &mut impl BufRead, limit: Option<usize>) -> Result<Option
 
 /// Token aggregation needs the full forest and its metadata order, without task descriptions or
 /// journaled return bodies ([`crate::SubagentDemand::Sessions`]).
-fn subagent_usage_refs(r: &SessionRef) -> Vec<SessionRef> {
-    crate::subagent_tree_filtered_of(r, crate::SubagentDemand::Sessions, None, |_, _| true)
-        .into_iter()
-        .map(|s| s.session)
-        .collect()
+fn subagent_usage_refs(r: &SessionRef) -> Result<Vec<SessionRef>> {
+    Ok(
+        crate::subagent_tree_filtered_of(r, crate::SubagentDemand::Sessions, None, |_, _| true)?
+            .into_iter()
+            .map(|s| s.session)
+            .collect(),
+    )
 }
 
 fn parse_workers() -> usize {
@@ -465,7 +467,12 @@ impl TokenStats {
             sessions: refs.len(),
             ..TokenStats::default()
         };
-        let subs: Vec<SessionRef> = crate::par_flat_map(refs.to_vec(), |r| subagent_usage_refs(&r));
+        let subs: Vec<SessionRef> = crate::par_flat_map(refs.to_vec(), |r| vec![subagent_usage_refs(&r)])
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect();
         stats.subagents = subs.len();
         let mut fold = TokenFold::default();
         // Bound completed spool retention to one spill::ordered::MEMORY_BYTES per configured worker.

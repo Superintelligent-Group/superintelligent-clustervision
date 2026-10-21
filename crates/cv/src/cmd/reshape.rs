@@ -733,7 +733,7 @@ pub(crate) fn cmd_dataset(args: DatasetArgs<'_>) -> Result<()> {
         // another, so a `model:` query that misses them misses most of the matching turns. Walk
         // the adapter's forest and emit each match too.
         if subagents {
-            for info in cv_core::subagent_tree_of(r) {
+            for info in cv_core::subagent_tree_of(r)? {
                 if out.is_some() {
                     extra_sources.push(info.session.path.clone());
                 }

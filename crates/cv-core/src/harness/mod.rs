@@ -630,8 +630,8 @@ pub trait Adapter: Send + Sync {
         _demand: crate::SubagentDemand,
         _workflow: Option<&str>,
         _select: &(dyn Fn(&str, Option<&str>) -> bool + Sync),
-    ) -> Vec<crate::AgentRef> {
-        Vec::new()
+    ) -> Result<Vec<crate::AgentRef>> {
+        Ok(Vec::new())
     }
 
     /// The `Workflow`-tool runs this store records beside a session, when it records any.
@@ -1124,5 +1124,17 @@ mod tests {
             "`cv` must never be parseable as a harness, or its bag would shadow one"
         );
         assert!(!Harness::ALL.iter().any(|h| h.as_str() == crate::ir::CV_NAMESPACE));
+    }
+}
+
+/// Entries of an optional side directory. Only a missing directory is empty.
+pub(crate) fn side_entries(path: &std::path::Path) -> Result<Vec<std::fs::DirEntry>> {
+    use anyhow::Context;
+    match std::fs::read_dir(path) {
+        Ok(entries) => entries
+            .collect::<std::io::Result<Vec<_>>>()
+            .with_context(|| format!("reading {}", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(error).with_context(|| format!("reading {}", path.display())),
     }
 }

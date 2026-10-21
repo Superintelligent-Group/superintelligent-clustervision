@@ -200,8 +200,8 @@ impl Adapter for KimiCode {
         _demand: crate::SubagentDemand,
         workflow: Option<&str>,
         select: &(dyn Fn(&str, Option<&str>) -> bool + Sync),
-    ) -> Vec<crate::AgentRef> {
-        super::ref_forest(subagent_refs(r), workflow, select)
+    ) -> Result<Vec<crate::AgentRef>> {
+        Ok(super::ref_forest(subagent_refs(r)?, workflow, select))
     }
 
     fn dependencies(&self, r: &SessionRef, _probe: &mut Probe, deps: &mut Dependencies) -> Option<()> {
@@ -594,38 +594,39 @@ fn session_uuid(session_dir: &Path) -> &str {
 /// [`Adapter::discover`]): `agents/agent-N/wire.jsonl`, in agent order. Ids are `<uuid>/agent-N`;
 /// parsing one gives a session whose `lineage.parent` is the uuid and `lineage.agent_path` the
 /// agent id. Sub-agents are not listed by `discover` (like the Claude adapter's `subagents/`).
-pub fn subagent_refs(main: &SessionRef) -> Vec<SessionRef> {
+pub fn subagent_refs(main: &SessionRef) -> Result<Vec<SessionRef>> {
     let _cache_scope = crate::discover_cache::read::Context::current().enter();
-    let Ok(rd) = fs::read_dir(main.path.join("agents")) else {
-        return Vec::new();
-    };
-    let mut out: Vec<(u64, SessionRef)> = rd
-        .flatten()
-        .filter_map(|e| {
-            let name = e.file_name().to_string_lossy().into_owned();
-            let n: u64 = name.strip_prefix("agent-")?.parse().ok()?;
-            let dir = e.path();
-            let wire = dir.join("wire.jsonl");
-            if !wire.exists() {
-                return None;
-            }
-            let mut reference = crate::discover_cache::cached_scan(&wire, || {
-                let w = scan_wire(&wire).ok()?;
-                Some(SessionRef {
-                    title: w.title,
-                    created_at: w.first_ts.or_else(|| file_mtime(&wire)),
-                    updated_at: w.last_ts.or_else(|| file_mtime(&wire)),
-                    message_count: None,
-                    ..SessionRef::new(&name, Harness::KimiCode, &dir)
-                })
-            })?;
-            reference.id = format!("{}/{name}", main.id);
-            reference.cwd.clone_from(&main.cwd);
-            Some((n, reference))
-        })
-        .collect();
+    let mut out = Vec::new();
+    for e in super::side_entries(&main.path.join("agents"))? {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Some(n) = name.strip_prefix("agent-").and_then(|n| n.parse::<u64>().ok()) else {
+            continue;
+        };
+        let dir = e.path();
+        let wire = dir.join("wire.jsonl");
+        let reference = crate::discover_cache::cached_scan_checked(&wire, || {
+            let w = scan_wire(&wire)?;
+            Ok(Some(SessionRef {
+                title: w.title,
+                created_at: w.first_ts.or_else(|| file_mtime(&wire)),
+                updated_at: w.last_ts.or_else(|| file_mtime(&wire)),
+                message_count: None,
+                ..SessionRef::new(&name, Harness::KimiCode, &dir)
+            }))
+        });
+        let Some(mut reference) = (match reference {
+            Ok(reference) => reference,
+            Err(error) if super::is_not_found(&error) => None,
+            Err(error) => return Err(error),
+        }) else {
+            continue;
+        };
+        reference.id = format!("{}/{name}", main.id);
+        reference.cwd.clone_from(&main.cwd);
+        out.push((n, reference));
+    }
     out.sort_by_key(|(n, _)| *n);
-    out.into_iter().map(|(_, r)| r).collect()
+    Ok(out.into_iter().map(|(_, r)| r).collect())
 }
 
 fn read_state(session_dir: &Path) -> Value {
@@ -2898,7 +2899,7 @@ mod tests {
             fs::create_dir_all(&child)?;
             fs::write(child.join("wire.jsonl"), &body)?;
         }
-        let first = subagent_refs(&main);
+        let first = subagent_refs(&main).unwrap();
         assert_eq!(first.len(), 12);
         for (index, reference) in first.iter().enumerate() {
             assert_eq!(reference.id, format!("parent/agent-{index}"));
@@ -2912,18 +2913,18 @@ mod tests {
         }
         main.id = "new-parent".into();
         main.cwd = Some(PathBuf::from("/second"));
-        let unchanged = subagent_refs(&main);
+        let unchanged = subagent_refs(&main).unwrap();
         assert!(unchanged
             .iter()
             .all(|reference| reference.id.starts_with("new-parent/") && reference.cwd == main.cwd));
         let wire = unchanged[2].path.join("wire.jsonl");
         fs::write(&wire, "{\"type\":\"context.append_message\",\"time\":1800000000000,\"message\":{\"role\":\"user\",\"content\":\"new prompt\"}}\n")?;
-        let refreshed = subagent_refs(&main);
+        let refreshed = subagent_refs(&main).unwrap();
         assert_eq!(refreshed[2].message_count, None);
         assert_eq!(refreshed[2].title.as_deref(), Some("new prompt"));
         assert_eq!(refreshed[2].created_at.unwrap().timestamp_millis(), 1800000000000);
         fs::remove_file(wire)?;
-        assert_eq!(subagent_refs(&main).len(), 11);
+        assert_eq!(subagent_refs(&main).unwrap().len(), 11);
         Ok(())
     }
 
@@ -2932,11 +2933,11 @@ mod tests {
         let root = fixture_root();
         let a = KimiCode::with_home(&root);
         let main = a.discover().unwrap().remove(0);
-        let subs = subagent_refs(&main);
+        let subs = subagent_refs(&main).unwrap();
         assert_eq!(subs.len(), 1, "{subs:?}");
         let sub = &subs[0];
         assert_eq!(sub.id, format!("{SID}/agent-0"));
-        let forest = crate::subagent_tree_of(&main);
+        let forest = crate::subagent_tree_of(&main).unwrap();
         assert_eq!(forest.iter().map(|a| &a.session.id).collect::<Vec<_>>(), [&sub.id]);
         assert_eq!(sub.path, main.path.join("agents").join("agent-0"));
         assert_eq!(sub.title.as_deref(), Some("Extract IPA verifier math"));

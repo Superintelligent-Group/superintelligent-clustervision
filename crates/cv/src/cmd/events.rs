@@ -25,7 +25,7 @@ pub(crate) fn cmd_events(
         let mut out: Vec<serde_json::Value> = rows.iter().map(cv_core::rows::event_row).collect();
         if subagents {
             out.extend(
-                subagent_events(cv_core::subagent_tree_of(&r), r.harness, kind.as_deref())?
+                subagent_events(cv_core::subagent_tree_of(&r)?, r.harness, kind.as_deref())?
                     .into_iter()
                     .flat_map(|(s, evs)| {
                         let agent_id = s.agent_id().to_string();
@@ -123,7 +123,7 @@ fn subagent_events(
 
 /// Print each sub-agent's events grouped under the agent (with the agent's type/task as a header).
 fn print_subagent_events(r: &cv_core::SessionRef, kind: Option<&str>) -> Result<()> {
-    let subs = cv_core::subagent_tree_of(r);
+    let subs = cv_core::subagent_tree_of(r)?;
     let n_agents = subs.len();
     let per_agent = subagent_events(subs, r.harness, kind)?;
     let mut total = 0usize;

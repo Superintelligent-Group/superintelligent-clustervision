@@ -143,8 +143,8 @@ impl Adapter for Kimi {
         _demand: crate::SubagentDemand,
         workflow: Option<&str>,
         select: &(dyn Fn(&str, Option<&str>) -> bool + Sync),
-    ) -> Vec<crate::AgentRef> {
-        super::ref_forest(subagent_refs(r), workflow, select)
+    ) -> Result<Vec<crate::AgentRef>> {
+        Ok(super::ref_forest(subagent_refs(r)?, workflow, select))
     }
 
     /// A `<notification>` turn: a background task finished.
@@ -967,47 +967,48 @@ fn subagent_meta(path: &Path) -> Option<Value> {
 /// One [`SessionRef`] per sub-agent of a discovered session (`<session>/subagents/<agent_id>/`
 /// with a `context.jsonl`). Discovery lists only top-level sessions; parsing one of these yields a
 /// [`Session`] whose `lineage.parent` is the session id and `lineage.agent_path` the agent id.
-pub fn subagent_refs(main: &SessionRef) -> Vec<SessionRef> {
+pub fn subagent_refs(main: &SessionRef) -> Result<Vec<SessionRef>> {
     let _cache_scope = crate::discover_cache::read::Context::current().enter();
-    let Ok(rd) = fs::read_dir(main.path.join("subagents")) else {
-        return Vec::new();
-    };
-    let mut out: Vec<SessionRef> = rd
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.join("context.jsonl").is_file())
-        .filter_map(|p| {
-            let agent = p.file_name()?.to_str()?.to_string();
-            let transcript = p.join("context.jsonl");
-            let mut reads = crate::source::ReadSet::default();
-            reads.record(&p);
-            for path in [p.join("state.json"), p.join("meta.json"), p.join("wire.jsonl")] {
-                reads.record(&path);
+    let mut out = Vec::new();
+    for e in super::side_entries(&main.path.join("subagents"))? {
+        let p = e.path();
+        let Some(agent) = p.file_name().and_then(|n| n.to_str()).map(str::to_owned) else {
+            continue;
+        };
+        let transcript = p.join("context.jsonl");
+        let mut reads = crate::source::ReadSet::default();
+        reads.record(&p);
+        for path in [p.join("state.json"), p.join("meta.json"), p.join("wire.jsonl")] {
+            reads.record(&path);
+        }
+        for segment in transcript_segments(&p, &transcript) {
+            reads.record(&segment);
+        }
+        let scanned = crate::discover_cache::cached_scan_with_reads(&transcript, reads, || {
+            let Some(mut r) = scan(&agent, &transcript, &p, None)? else {
+                return Ok(None);
+            };
+            if let Some(d) =
+                subagent_meta(&p).and_then(|m| m.get("description").and_then(Value::as_str).map(str::to_string))
+            {
+                r.title = Some(crate::ir::truncate(&d, crate::ir::Head::TITLE));
             }
-            for segment in transcript_segments(&p, &transcript) {
-                reads.record(&segment);
-            }
-            // A sub-agent ref view has no error channel: one that cannot be scanned is absent.
-            let mut r = crate::discover_cache::cached_scan_with_reads(&transcript, reads, || {
-                let Some(mut r) = scan(&agent, &transcript, &p, None)? else {
-                    return Ok(None);
-                };
-                if let Some(d) =
-                    subagent_meta(&p).and_then(|m| m.get("description").and_then(Value::as_str).map(str::to_string))
-                {
-                    r.title = Some(crate::ir::truncate(&d, crate::ir::Head::TITLE));
-                }
-                Ok(Some(r))
-            })
-            .ok()??;
-            // Parent display identity/cwd are supplied by the caller, not by these cached bytes.
-            r.id = format!("{}/{agent}", main.id);
-            r.cwd.clone_from(&main.cwd);
-            Some(r)
-        })
-        .collect();
+            Ok(Some(r))
+        });
+        let Some(mut r) = (match scanned {
+            Ok(r) => r,
+            Err(error) if super::is_not_found(&error) => None,
+            Err(error) => return Err(error),
+        }) else {
+            continue;
+        };
+        // Parent display identity/cwd are supplied by the caller, not by these cached bytes.
+        r.id = format!("{}/{agent}", main.id);
+        r.cwd.clone_from(&main.cwd);
+        out.push(r);
+    }
     out.sort_by(|a, b| a.id.cmp(&b.id));
-    out
+    Ok(out)
 }
 
 /// The synthesized marker for a segment that a `/clear` or a rewind rotated in (a compaction's
@@ -2788,7 +2789,7 @@ mod tests {
             fs::create_dir_all(&child)?;
             fs::write(child.join("context.jsonl"), &body)?;
         }
-        let first = subagent_refs(&main);
+        let first = subagent_refs(&main).unwrap();
         assert_eq!(first.len(), 12);
         for reference in &first {
             assert_eq!(reference.message_count, None);
@@ -2801,23 +2802,26 @@ mod tests {
         }
         main.id = "new-parent".into();
         main.cwd = Some(PathBuf::from("/second"));
-        let unchanged = subagent_refs(&main);
+        let unchanged = subagent_refs(&main).unwrap();
         assert!(unchanged
             .iter()
             .all(|reference| reference.id.starts_with("new-parent/") && reference.cwd == main.cwd));
         let child = &unchanged[0].path;
         fs::write(child.join("meta.json"), r#"{"description":"new task description"}"#)?;
-        assert_eq!(subagent_refs(&main)[0].title.as_deref(), Some("new task description"));
+        assert_eq!(
+            subagent_refs(&main).unwrap()[0].title.as_deref(),
+            Some("new task description")
+        );
         fs::write(
             child.join("context_1.jsonl"),
             "{\"role\":\"assistant\",\"content\":\"older\"}\n",
         )?;
-        assert_eq!(subagent_refs(&main)[0].message_count, None);
+        assert_eq!(subagent_refs(&main).unwrap()[0].message_count, None);
         fs::write(
             child.join("wire.jsonl"),
             "{\"timestamp\":1700000000}\n{\"timestamp\":1700000001}\n",
         )?;
-        let refreshed = subagent_refs(&main);
+        let refreshed = subagent_refs(&main).unwrap();
         assert_eq!(refreshed[0].created_at, Some(epoch_to_dt(1700000000.0)));
         assert_eq!(refreshed[0].updated_at, Some(epoch_to_dt(1700000001.0)));
         assert_eq!(fs::read_to_string(child.join("context.jsonl"))?, body);
@@ -2836,12 +2840,12 @@ mod tests {
         )
         .unwrap();
         let main = scan("p1", &dir.join("context.jsonl"), &dir, None).unwrap().unwrap();
-        let refs = subagent_refs(&main);
+        let refs = subagent_refs(&main).unwrap();
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].id, "p1/a1b2");
         assert_eq!(refs[0].title.as_deref(), Some("do it"));
         // The forest every consumer asks (`has:subagents`, `agents>=1`, `--agent`) holds them.
-        let forest = crate::subagent_tree_of(&main);
+        let forest = crate::subagent_tree_of(&main).unwrap();
         assert_eq!(
             forest.iter().map(|a| a.session.id.as_str()).collect::<Vec<_>>(),
             ["p1/a1b2"]

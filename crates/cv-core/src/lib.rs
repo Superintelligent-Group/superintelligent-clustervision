@@ -435,8 +435,8 @@ pub fn subagent_tree_filtered_of(
     demand: SubagentDemand,
     workflow: Option<&str>,
     select: impl Fn(&str, Option<&str>) -> bool + Sync,
-) -> Vec<AgentRef> {
-    harness::rootless(r.harness).map_or_else(Vec::new, |a| a.forest(r, demand, workflow, &select))
+) -> Result<Vec<AgentRef>> {
+    harness::rootless(r.harness).map_or_else(|| Ok(Vec::new()), |a| a.forest(r, demand, workflow, &select))
 }
 
 /// The full sub-agent **forest** a session spawned: directly-spawned (`Agent`/`Task`) sub-agents
@@ -444,7 +444,7 @@ pub fn subagent_tree_filtered_of(
 /// sidecar (agent type / task description / spawning tool_use) and, for workflow agents, the
 /// orchestrator's journaled result (`status` + `summary`). Newest first. The adapter's
 /// [`harness::Adapter::forest`]: empty for a store that records none.
-pub fn subagent_tree_of(r: &SessionRef) -> Vec<AgentRef> {
+pub fn subagent_tree_of(r: &SessionRef) -> Result<Vec<AgentRef>> {
     subagent_tree_filtered_of(r, SubagentDemand::Rich, None, |_, _| true)
 }
 
@@ -603,7 +603,7 @@ fn find_subagent_session(id: &str, harness: Option<Harness>) -> Result<Option<Fo
         [one] => one,
         // Copies of ONE agent under several sessions (`cv adopt` moved it into a live session):
         // the newest parent's copy is the one that continues, so it wins.
-        many if one_agent_across(many, id) => &many[0],
+        many if one_agent_across(many, id)? => &many[0],
         many => {
             let mut names: Vec<String> = many
                 .iter()
@@ -622,7 +622,7 @@ fn find_subagent_session(id: &str, harness: Option<Harness>) -> Result<Option<Fo
     let mut hits: Vec<SessionRef> = Vec::new();
     for s in subagent_tree_filtered_of(parent, SubagentDemand::Sessions, None, |candidate, _| {
         candidate.starts_with(id)
-    }) {
+    })? {
         if s.session.id == id {
             return Ok(harness::for_harness(s.session.harness).map(|a| (s.session, a)));
         }
@@ -642,19 +642,22 @@ fn find_subagent_session(id: &str, harness: Option<Harness>) -> Result<Option<Fo
 
 /// Whether every sub-agent matching `id` (`agent-` optional) under `parents` is the same agent:
 /// copies of one agent in several sessions, as `cv adopt` leaves them.
-pub fn one_agent_across(parents: &[SessionRef], id: &str) -> bool {
+pub fn one_agent_across(parents: &[SessionRef], id: &str) -> Result<bool> {
     let want = format!("agent-{}", id.strip_prefix("agent-").unwrap_or(id));
     let ids: std::collections::BTreeSet<String> = parents
         .iter()
-        .flat_map(|parent| {
+        .map(|parent| {
             subagent_tree_filtered_of(parent, SubagentDemand::Sessions, None, |candidate, _| {
                 candidate.starts_with(&want)
             })
         })
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
         .map(|s| s.session.id)
         .filter(|s| s.starts_with(&want))
         .collect();
-    ids.len() == 1
+    Ok(ids.len() == 1)
 }
 
 /// A resolved session: its catalog ref plus the harness adapter that reads it.

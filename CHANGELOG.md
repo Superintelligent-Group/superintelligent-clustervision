@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Breaking (library):** forest and subagent-reference APIs return `Result`; unreadable forests fail views, queries, indexing and stats instead of hiding agents.
+
 - Document `cv events` catalog writes and `--frozen`; update the manual for 0.18 counts, flags, diagnostics and migrations.
 - Qwen emission preserves absent cache counts and incomplete totals, and rejects overflowing usage aggregates.
 - OpenCode emission keeps unknown working directories empty instead of substituting the invoking process’s directory.
