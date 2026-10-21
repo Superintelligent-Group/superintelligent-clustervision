@@ -136,7 +136,7 @@ fn prunes_old_payloads_into_new_session_keeping_recent() {
         dry_run: false,
         ..Default::default()
     };
-    let r = prune_session(&src, &opts).unwrap();
+    let r = prune_session(crate::Harness::Claude, &src, &opts).unwrap();
 
     // new session, distinct id + file
     assert_ne!(r.new_id, r.source_id);
@@ -198,7 +198,7 @@ fn drop_mode_writes_no_sidecar_and_never_advertises_retrieve() {
         dry_run: false,
         ..Default::default()
     };
-    let r = prune_session(&src, &opts).unwrap();
+    let r = prune_session(crate::Harness::Claude, &src, &opts).unwrap();
     assert_eq!(r.new_id, "aaaa");
     assert!(r.sidecar_path.is_none());
     assert!(!dir.join("aaaa.flat.jsonl").exists());
@@ -249,7 +249,7 @@ fn drop_thinking_omits_old_reasoning_and_relinks_emptied_records() {
         thinking: true,
         ..Default::default()
     };
-    let r = prune_session(&path, &opts).unwrap();
+    let r = prune_session(crate::Harness::Claude, &path, &opts).unwrap();
     let out = std::fs::read_to_string(&r.new_path).unwrap();
     assert!(out.len() < input.len(), "dropping thinking never grows the transcript");
     assert!(
@@ -309,7 +309,7 @@ fn revive_rewrites_stale_usage_below_loaded_content() {
         keep_last: 100, // don't snip anything — isolate the revive behavior
         ..Default::default()
     };
-    let r = prune_session(&path, &opts).unwrap();
+    let r = prune_session(crate::Harness::Claude, &path, &opts).unwrap();
 
     assert_eq!(
         r.usage_rewritten, 1,
@@ -422,7 +422,7 @@ fn revive_pins_usage_iterations_too() {
         keep_last: 100,
         ..Default::default()
     };
-    let r = prune_session(&path, &opts).unwrap();
+    let r = prune_session(crate::Harness::Claude, &path, &opts).unwrap();
     assert_eq!(r.usage_rewritten, 1);
     assert_eq!(
         r.revive_old_tokens,
@@ -473,7 +473,9 @@ fn revive_pins_usage_iterations_too() {
             dry_run: true,
             ..Default::default()
         };
-        prune_session(source, &opts).unwrap().window_real_tokens
+        prune_session(crate::Harness::Claude, source, &opts)
+            .unwrap()
+            .window_real_tokens
     };
     assert_eq!(
         window(&r.new_path, "55555555-5555-4555-8555-555555555555"),
@@ -525,7 +527,7 @@ fn synthetic_notices_are_not_turns() {
         keep_range: Some((1, None)),
         ..Default::default()
     };
-    let r = prune_session(&path, &opts).unwrap();
+    let r = prune_session(crate::Harness::Claude, &path, &opts).unwrap();
     assert_eq!(r.dropped_turns, 1);
     let out = std::fs::read_to_string(&r.new_path).unwrap();
     assert!(!out.contains("\"uuid\":\"u0\""));
@@ -569,7 +571,7 @@ fn window_keeps_last_singleton_records_and_restamps_both_id_spellings() {
         keep_range: Some((2, None)),
         ..Default::default()
     };
-    let r = prune_session(&path, &opts).unwrap();
+    let r = prune_session(crate::Harness::Claude, &path, &opts).unwrap();
     assert_eq!(r.dropped_turns, 2);
     let out = std::fs::read_to_string(&r.new_path).unwrap();
     assert!(!out.contains("\"uuid\":\"u0\""));
@@ -616,7 +618,7 @@ fn thinking_flatten_snips_signature_only_blocks() {
         keep_last: 2,
         ..Default::default()
     };
-    let r = prune_session(&path, &opts).unwrap();
+    let r = prune_session(crate::Harness::Claude, &path, &opts).unwrap();
     assert_eq!(
         r.pruned_count, 1,
         "the OLD signature-only block is snipped; the recent one (keep-last) stays"
@@ -694,7 +696,7 @@ fn revive_honors_recorded_delta_evidence_over_low_byte_estimate() {
         min_size: 2048,
         ..Default::default()
     };
-    let r = prune_session(&path, &opts).unwrap();
+    let r = prune_session(crate::Harness::Claude, &path, &opts).unwrap();
     assert!(r.pruned_count >= 1, "the big tool_result was snipped");
     let honest = r.revive_tokens.expect("stale records rewritten");
     assert!(
@@ -740,7 +742,7 @@ fn window_prune_reroots_within_budget_and_keeps_bookend_records() {
         window: Some(120_000),
         ..Default::default()
     };
-    let r = prune_session(&src, &opts).unwrap();
+    let r = prune_session(crate::Harness::Claude, &src, &opts).unwrap();
 
     assert_eq!(r.dropped_turns, 2, "old prompt+reply dropped");
     let real = r.window_real_tokens.expect("sized by recorded usage");
@@ -782,7 +784,7 @@ fn window_overshoot_keeps_the_huge_turn_and_warns() {
         window: Some(10),
         ..Default::default()
     };
-    let r = prune_session(&path, &opts).unwrap();
+    let r = prune_session(crate::Harness::Claude, &path, &opts).unwrap();
     assert_eq!(r.dropped_turns, 2, "everything but the huge newest turn dropped");
     assert!(!r.warnings.is_empty(), "overshoot must be reported loudly");
     assert!(
@@ -826,7 +828,7 @@ fn window_and_revive_ignore_sidechain_turns() {
         revive: true,
         ..Default::default()
     };
-    let r = prune_session(&path, &opts).unwrap();
+    let r = prune_session(crate::Harness::Claude, &path, &opts).unwrap();
 
     // Sizing saw main-thread costs of 100k per pair — the sidechain's 950k didn't poison it.
     assert_eq!(r.window_real_tokens, Some(100_000));
@@ -890,7 +892,7 @@ fn sidecar_ids_are_unique_and_round_trip_arrays_and_objects() {
         min_size: 1024,
         ..Default::default()
     };
-    let r = prune_session(&path, &opts).unwrap();
+    let r = prune_session(crate::Harness::Claude, &path, &opts).unwrap();
     assert_eq!(r.pruned_count, 4, "two content payloads + two mirrors");
     let sc = r.sidecar_path.expect("sidecar written");
 
@@ -956,13 +958,13 @@ fn double_prune_is_idempotent() {
         keep_last: 0,
         ..Default::default()
     };
-    let r1 = prune_session(&src, &opts).unwrap();
+    let r1 = prune_session(crate::Harness::Claude, &src, &opts).unwrap();
     let out1 = std::fs::read_to_string(&r1.new_path).unwrap();
     let markers1 = out1.matches(MARKER_PREFIX).count();
     assert!(markers1 > 0);
 
     // Pruning the pruned session again must find nothing new: markers are never re-snipped.
-    let r2 = prune_session(&r1.new_path, &opts).unwrap();
+    let r2 = prune_session(crate::Harness::Claude, &r1.new_path, &opts).unwrap();
     assert_eq!(r2.pruned_count, 0, "second prune snips nothing");
     assert!(r2.sidecar_path.is_none(), "no new sidecar for a no-op prune");
     let out2 = std::fs::read_to_string(&r2.new_path).unwrap();
@@ -985,7 +987,7 @@ fn pruned_session_reparses_via_claude_adapter_with_intact_turns() {
         revive: true,
         ..Default::default()
     };
-    let r = prune_session(&src, &opts).unwrap();
+    let r = prune_session(crate::Harness::Claude, &src, &opts).unwrap();
 
     let orig = crate::harness::claude::parse_str("orig", &std::fs::read_to_string(&src).unwrap(), None);
     let pruned_text = std::fs::read_to_string(&r.new_path).unwrap();
@@ -1003,7 +1005,7 @@ fn pruned_session_reparses_via_claude_adapter_with_intact_turns() {
         ..Default::default()
     };
     let src2 = window_fixture(&dir);
-    let r2 = prune_session(&src2, &opts).unwrap();
+    let r2 = prune_session(crate::Harness::Claude, &src2, &opts).unwrap();
     let tail = crate::harness::claude::parse_str("tail", &std::fs::read_to_string(&r2.new_path).unwrap(), None);
     assert!(!tail.messages.is_empty(), "windowed tail still parses into turns");
 }
@@ -1019,7 +1021,7 @@ fn dry_run_writes_nothing() {
         keep_last: 2,
         ..Default::default()
     };
-    let r = prune_session(&src, &opts).unwrap();
+    let r = prune_session(crate::Harness::Claude, &src, &opts).unwrap();
     assert!(r.pruned_count >= 1);
     assert!(!r.new_path.exists(), "dry run must not write the new session");
 }
@@ -1034,7 +1036,7 @@ fn keep_last_large_spares_everything() {
         keep_last: 100,
         ..Default::default()
     };
-    let r = prune_session(&src, &opts).unwrap();
+    let r = prune_session(crate::Harness::Claude, &src, &opts).unwrap();
     assert_eq!(r.pruned_count, 0, "nothing is old enough to snip");
 }
 
@@ -1087,7 +1089,7 @@ fn declassify_snips_all_security_prose_keeps_benign() {
         .collect(),
         ..Default::default()
     };
-    let r = prune_session(&path, &opts).unwrap();
+    let r = prune_session(crate::Harness::Claude, &path, &opts).unwrap();
     let out = std::fs::read_to_string(&r.new_path).unwrap();
 
     // ALL security-dense prose is snipped: originals gone, markers present.
@@ -1130,7 +1132,7 @@ fn declassify_spares_benign_sessions_entirely() {
             .collect(),
         ..Default::default()
     };
-    let r = prune_session(&path, &opts).unwrap();
+    let r = prune_session(crate::Harness::Claude, &path, &opts).unwrap();
     let out = std::fs::read_to_string(&r.new_path).unwrap();
     assert_eq!(
         r.pruned_count, 0,
@@ -1194,7 +1196,7 @@ fn sidecar_preparation_failure_preserves_existing_transcript() {
         force: true,
         ..Default::default()
     };
-    assert!(prune_session(&src, &options).is_err());
+    assert!(prune_session(crate::Harness::Claude, &src, &options).is_err());
     assert_eq!(std::fs::read_to_string(transcript).unwrap(), "prior destination");
     assert!(!std::fs::read_dir(&dir).unwrap().any(|e| e
         .unwrap()
@@ -1221,7 +1223,10 @@ fn a_failed_transcript_claim_restores_the_replaced_sidecar() {
         force: true,
         ..Default::default()
     };
-    let error = format!("{:#}", prune_session(&src, &options).unwrap_err());
+    let error = format!(
+        "{:#}",
+        prune_session(crate::Harness::Claude, &src, &options).unwrap_err()
+    );
     assert!(error.contains("is a directory"), "{error}");
     assert_eq!(std::fs::read_to_string(&sidecar).unwrap(), "prior sidecar");
     assert!(!std::fs::read_dir(&dir)
@@ -1243,7 +1248,7 @@ fn renamed_source_cannot_be_its_own_prune_destination() {
         keep_last: 0,
         ..Default::default()
     };
-    assert!(prune_session(&renamed, &options).is_err());
+    assert!(prune_session(crate::Harness::Claude, &renamed, &options).is_err());
     assert_eq!(std::fs::read(renamed).unwrap(), original);
 }
 
@@ -1263,7 +1268,7 @@ fn giant_ignored_row_preserves_raw_bytes_and_recorded_usage() {
         keep_last: 0,
         ..Default::default()
     };
-    let result = prune_session(&src, &options).unwrap();
+    let result = prune_session(crate::Harness::Claude, &src, &options).unwrap();
     let output = std::fs::read_to_string(result.new_path).unwrap();
     assert_eq!(
         output.lines().next().unwrap(),
@@ -1314,11 +1319,11 @@ fn existing_output_is_refused_and_force_replaces_the_name_not_the_inode() {
             keep_last: 0,
             ..Default::default()
         };
-        let error = prune_session(&source, &options).unwrap_err();
+        let error = prune_session(crate::Harness::Claude, &source, &options).unwrap_err();
         assert!(error.downcast_ref::<crate::publish::Exists>().is_some(), "{error:#}");
         assert!(!dir.join(format!("{new_id}.flat.jsonl")).exists());
         options.force = true;
-        prune_session(&source, &options).unwrap();
+        prune_session(crate::Harness::Claude, &source, &options).unwrap();
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "before");
         assert_eq!(std::fs::metadata(&target).unwrap().ino(), inode);
         assert!(!std::fs::symlink_metadata(&destination)
@@ -1343,7 +1348,7 @@ fn hardlinked_source_is_rejected_before_truncation() {
         keep_last: 0,
         ..Default::default()
     };
-    assert!(prune_session(&source, &options).is_err());
+    assert!(prune_session(crate::Harness::Claude, &source, &options).is_err());
     assert_eq!(std::fs::read(source).unwrap(), original);
 }
 
@@ -1734,6 +1739,7 @@ fn large_noop_declassification_preserves_raw_duplicate_ids_and_spacing() -> Resu
         serde_json::to_string(&"BENIGN prose\n".repeat(131072))?);
     std::fs::write(&path, format!("{raw}\r\n"))?;
     let result = prune_session(
+        crate::Harness::Claude,
         &path,
         &PruneOptions {
             declassify: true,
@@ -2120,6 +2126,7 @@ fn malformed_large_rows_refuse_before_staging_and_invalid_utf8_is_named_first() 
     std::fs::write(&source, &readable)?;
     let expected = crate::restamp_line(readable.trim_end_matches([' ', '\t', '\r', '\n']), "new").unwrap() + "\n";
     let result = prune_session(
+        crate::Harness::Claude,
         &source,
         &PruneOptions {
             new_id: Some("new".into()),
@@ -2138,6 +2145,7 @@ fn malformed_large_rows_refuse_before_staging_and_invalid_utf8_is_named_first() 
         std::fs::write(&source, &text)?;
         for revive in [false, true] {
             let error = prune_session(
+                crate::Harness::Claude,
                 &source,
                 &PruneOptions {
                     new_id: Some("new".into()),
@@ -2163,6 +2171,7 @@ fn malformed_large_rows_refuse_before_staging_and_invalid_utf8_is_named_first() 
     invalid[1 << 20] = 0xff;
     std::fs::write(&source, invalid)?;
     let error = prune_session(
+        crate::Harness::Claude,
         &source,
         &PruneOptions {
             new_id: Some("new".into()),
@@ -2199,6 +2208,7 @@ fn rejected_large_json_keeps_strict_owned_value_acceptance() -> Result<()> {
         std::fs::write(&path, &row)?;
         let accepted = serde_json::from_str::<Value>(&row).is_ok();
         let result = prune_session(
+            crate::Harness::Claude,
             &path,
             &PruneOptions {
                 new_id: Some("new".into()),
@@ -2274,7 +2284,7 @@ fn subagent_prune_counts_own_turns_and_emits_standalone_without_touching_parent(
         let child_resources = child.with_extension("");
         std::fs::create_dir_all(&child_resources)?;
         std::fs::write(child_resources.join("child-resource"), "own")?;
-        let result = prune_session(&child, &opts)?;
+        let result = prune_session(crate::Harness::Claude, &child, &opts)?;
         assert_eq!(result.source_id, "agent-native-child");
         assert_eq!(
             result.parent_session_id.as_deref(),
@@ -2304,6 +2314,7 @@ fn subagent_prune_counts_own_turns_and_emits_standalone_without_touching_parent(
         assert_eq!(std::fs::read(&parent)?, parent_before);
         assert_eq!(std::fs::read(&child)?, child_before);
         let copied = prune_session(
+            crate::Harness::Claude,
             &child,
             &PruneOptions {
                 copy_resources: true,
@@ -2316,7 +2327,7 @@ fn subagent_prune_counts_own_turns_and_emits_standalone_without_touching_parent(
         assert!(!resources.join("unrelated-parent-resource").exists());
         let mut collision = opts.clone();
         collision.new_id = result.parent_session_id;
-        assert!(prune_session(&child, &collision).is_err());
+        assert!(prune_session(crate::Harness::Claude, &child, &collision).is_err());
         assert_eq!(std::fs::read(&parent)?, parent_before);
     }
     Ok(())
@@ -2334,13 +2345,14 @@ fn subagent_prune_keep_window_and_usage_match_standalone_turn_semantics() -> Res
             ..Default::default()
         };
         let expected = prune_session(
+            crate::Harness::Claude,
             &parent,
             &PruneOptions {
                 new_id: Some(format!("parent-{label}")),
                 ..opts.clone()
             },
         )?;
-        let actual = prune_session(&child, &opts)?;
+        let actual = prune_session(crate::Harness::Claude, &child, &opts)?;
         assert!(actual.dropped_turns > 0);
         assert_eq!(actual.dropped_turns, expected.dropped_turns);
         let normalized = |path: &Path| -> Result<Vec<Value>> {
@@ -2371,6 +2383,7 @@ fn subagent_prune_keep_window_and_usage_match_standalone_turn_semantics() -> Res
     }
     std::fs::write(&child, rows.iter().map(|v| format!("{v}\n")).collect::<String>())?;
     let actual = prune_session(
+        crate::Harness::Claude,
         &child,
         &PruneOptions {
             window: Some(250),
@@ -2393,6 +2406,7 @@ fn parent_prune_keeps_embedded_sidechains_out_of_own_turns() -> Result<()> {
     mixed.extend_from_slice(&embedded);
     std::fs::write(&parent, &mixed)?;
     let result = prune_session(
+        crate::Harness::Claude,
         &parent,
         &PruneOptions {
             keep_last: 2,
@@ -2429,6 +2443,7 @@ fn prune_rejects_output_ids_that_escape_or_alias_resource_directories() {
         "bad\0id",
     ] {
         let error = prune_session(
+            crate::Harness::Claude,
             &source,
             &PruneOptions {
                 new_id: Some(id.into()),
@@ -2463,7 +2478,7 @@ fn copied_resources_are_refused_or_replaced_whole_never_merged() {
         copy_resources: true,
         ..Default::default()
     };
-    let error = prune_session(&source, &options).unwrap_err();
+    let error = prune_session(crate::Harness::Claude, &source, &options).unwrap_err();
     assert!(error.downcast_ref::<crate::publish::Exists>().is_some(), "{error:#}");
     assert!(
         !dir.join(format!("{new_id}.jsonl")).exists(),
@@ -2474,7 +2489,7 @@ fn copied_resources_are_refused_or_replaced_whole_never_merged() {
         b"another session's resource"
     );
     options.force = true;
-    prune_session(&source, &options).unwrap();
+    prune_session(crate::Harness::Claude, &source, &options).unwrap();
     assert!(!destination.join("stale.txt").exists(), "replaced, not merged");
     assert_eq!(
         std::fs::read(destination.join("subagents/agent-a.jsonl")).unwrap(),
@@ -2491,7 +2506,7 @@ fn copied_resources_are_refused_or_replaced_whole_never_merged() {
         std::fs::write(elsewhere.join("keep.txt"), b"kept").unwrap();
         std::fs::remove_dir_all(&destination).unwrap();
         std::os::unix::fs::symlink(&elsewhere, &destination).unwrap();
-        prune_session(&source, &options).unwrap();
+        prune_session(crate::Harness::Claude, &source, &options).unwrap();
         assert!(!std::fs::symlink_metadata(&destination)
             .unwrap()
             .file_type()
@@ -2591,6 +2606,7 @@ fn standalone_prune_preserves_unmodified_metadata_bytes_at_every_size() {
         let user = r#"{"type":"user","sessionId":"old","isSidechain":true,"agentId":"child","uuid":"u","parentUuid":"parent","message":{"content":"prompt"}}"#;
         std::fs::write(&path, format!("{metadata}\n{user}\n")).unwrap();
         let result = prune_session(
+            crate::Harness::Claude,
             &path,
             &PruneOptions {
                 new_id: Some("derived".into()),
@@ -2637,7 +2653,7 @@ fn prune_refuses_a_malformed_line_inside_the_kept_window() {
             keep_range,
             ..Default::default()
         };
-        let error = prune_session(&path, &opts).unwrap_err();
+        let error = prune_session(crate::Harness::Claude, &path, &opts).unwrap_err();
         assert!(error.is::<crate::json::InvalidJson>(), "{error:#}");
         let message = error.to_string();
         assert!(message.contains("line 3 is not a complete JSON record"), "{message}");

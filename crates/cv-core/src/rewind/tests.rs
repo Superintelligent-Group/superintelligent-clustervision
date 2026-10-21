@@ -1,4 +1,5 @@
 use super::*;
+use crate::ir::Harness;
 use serde_json::json;
 
 const SID: &str = "11111111-1111-4111-8111-111111111111";

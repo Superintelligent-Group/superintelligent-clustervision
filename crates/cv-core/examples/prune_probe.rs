@@ -53,7 +53,7 @@ fn main() -> Result<()> {
     #[cfg(feature = "probe-heap")]
     let baseline = cv_testkit::heap::begin();
     let start = std::time::Instant::now();
-    let result = prune_session(std::path::Path::new(&args[1]), &options)?;
+    let result = prune_session(cv_core::Harness::Claude, std::path::Path::new(&args[1]), &options)?;
     let elapsed = start.elapsed().as_secs_f64();
     #[cfg(feature = "probe-heap")]
     let heap = Some(cv_testkit::heap::end(baseline));

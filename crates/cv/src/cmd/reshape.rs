@@ -116,7 +116,7 @@ pub(crate) fn cmd_prune(args: PruneArgs<'_>) -> Result<()> {
         force,
         ..Default::default()
     };
-    let res = cv_core::prune::prune_session(&r.path, &opts)?;
+    let res = cv_core::prune::prune_session(r.harness, &r.path, &opts)?;
 
     let mut v = serde_json::to_value(&res)?;
     v["harness"] = r.harness.as_str().into();

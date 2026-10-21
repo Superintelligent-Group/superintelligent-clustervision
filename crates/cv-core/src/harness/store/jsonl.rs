@@ -771,7 +771,7 @@ mod tests {
                 new_id: Some(format!("{name}-pruned")),
                 ..Default::default()
             };
-            match crate::prune::prune_session(&path, &opts) {
+            match crate::prune::prune_session(crate::Harness::Claude, &path, &opts) {
                 Ok(pruned) => {
                     let output = std::fs::read_to_string(&pruned.new_path).unwrap();
                     assert!(blank && output.lines().count() == 1, "prune, {name}: {output:?}");

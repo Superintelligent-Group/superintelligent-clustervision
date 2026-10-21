@@ -22,13 +22,7 @@ use regex::Regex;
 
 /// Product files outside the adapters that still name a harness outside an exhaustive match, with
 /// how many literals each holds. Lower a count (or delete the line) with the move that earns it.
-const ALLOWLIST: &[(&str, usize)] = &[
-    ("prune.rs", 1),
-    ("rewind.rs", 1),
-    ("source.rs", 2),
-    ("stats.rs", 5),
-    ("watch/read.rs", 2),
-];
+const ALLOWLIST: &[(&str, usize)] = &[("source.rs", 2), ("stats.rs", 5), ("watch/read.rs", 2)];
 
 fn source_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")

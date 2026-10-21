@@ -63,7 +63,7 @@
 //! mints a new sha the session never printed.
 
 use crate::harness::claude::record::Facts;
-use crate::ir::{Block, Harness, Message, MessageKind, SessionRef};
+use crate::ir::{Block, Message, MessageKind, SessionRef};
 use crate::lazy::Resolver;
 use crate::offsets::OFFSET_KEY;
 use crate::prune::new_uuid;
@@ -580,13 +580,13 @@ fn rewind_session_after_scan(
     if let Some(id) = &opts.new_id {
         crate::restamp::validate_output_id(id)?;
     }
-    if r.harness != Harness::Claude {
-        bail!(
+    // Only an adapter that declares derived copies (Claude's) says what a rewound copy rewrites.
+    let identity = crate::derive::identity(r.harness).map_err(|_| {
+        anyhow::anyhow!(
             "cv rewind currently supports Claude Code sessions only (got {})",
             r.harness
-        );
-    }
-    let identity = crate::derive::identity(r.harness)?;
+        )
+    })?;
     let (source_guard, file) =
         PrefixReadGuard::capture(&r.path).with_context(|| format!("reading {}", r.path.display()))?;
     let size = source_guard.source.len();
