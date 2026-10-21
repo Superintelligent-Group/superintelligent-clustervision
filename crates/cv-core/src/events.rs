@@ -167,11 +167,9 @@ const EVENTS_LAYER: &str = "events";
 /// What an [`EventSink`] holds at a checkpoint: the rows so far are in the catalog already.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct EventState {
-    #[serde(default)]
     extractor: ExtractorState,
     msg_idx: usize,
     cwd: Option<PathBuf>,
-    #[serde(default = "crate::source::ReadSet::unrecorded")]
     dependencies: crate::source::ReadSet,
 }
 

@@ -323,8 +323,8 @@ impl Default for ReadSet {
 }
 
 impl ReadSet {
-    /// A legacy checkpoint did not capture the dependencies of its reused prefix. It may be
-    /// replayed, but cannot establish cache freshness until a complete pass replaces it.
+    /// A read set that missed a dependency: it may be replayed, but cannot establish cache
+    /// freshness until a complete pass replaces it.
     pub fn unrecorded() -> Self {
         Self {
             entries: BTreeMap::new(),

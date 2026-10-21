@@ -1579,7 +1579,6 @@ const FTS_LAYER: &str = "fts";
 #[derive(serde::Serialize, serde::Deserialize)]
 struct FtsState {
     discovery_metadata: DiscoveryMetadata,
-    #[serde(default = "cv_core::source::ReadSet::unrecorded")]
     dependencies: cv_core::source::ReadSet,
     msgs: usize,
     cwd: Option<String>,

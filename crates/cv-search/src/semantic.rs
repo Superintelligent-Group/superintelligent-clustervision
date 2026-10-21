@@ -76,14 +76,7 @@ struct RecordMeta {
     label: Option<String>,
     /// A short preview of the body, for display in hits.
     preview: String,
-    /// A row stored by an older baseline shape is dateless provenance: it re-embeds once.
-    #[serde(default, deserialize_with = "lenient")]
     source: Option<Baseline>,
-}
-
-/// `None` for a value of another shape, instead of failing the whole store.
-fn lenient<'de, D: serde::Deserializer<'de>, T: serde::Deserialize<'de>>(d: D) -> Result<Option<T>, D::Error> {
-    Ok(T::deserialize(<serde_json::Value as serde::Deserialize>::deserialize(d)?).ok())
 }
 
 /// The JSON block inside the binary store (deserialize side; serialization uses a borrowed twin
@@ -91,9 +84,7 @@ fn lenient<'de, D: serde::Deserializer<'de>, T: serde::Deserialize<'de>>(d: D) -
 #[derive(serde::Deserialize)]
 struct MetaBlock {
     model: String,
-    #[serde(default)]
     projection: u32,
-    #[serde(default)]
     model_reads: Option<ReadSet>,
     records: Vec<RecordMeta>,
 }
@@ -1973,8 +1964,8 @@ mod tests {
     }
 
     #[test]
-    fn semantic_legacy_metadata_rebuilds_once_and_save_failure_cleans_temp() {
-        let dir = std::env::temp_dir().join(format!("cv-semantic-legacy-{}", uuid::Uuid::new_v4()));
+    fn semantic_projection_change_rebuilds_once_and_save_failure_cleans_temp() {
+        let dir = std::env::temp_dir().join(format!("cv-semantic-projection-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
         let input = dir.join("input.jsonl");
         let path = dir.join("store");

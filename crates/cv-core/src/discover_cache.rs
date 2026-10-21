@@ -66,7 +66,6 @@ impl Payload {
 pub(crate) struct ScanContinuation {
     pub head: crate::resume::MarkHead,
     pub checkpoint: crate::stream::Checkpoint,
-    #[serde(default = "crate::source::ReadSet::unrecorded")]
     /// Auxiliary identities only: the growing primary is guarded by head and before/after reads.
     pub dependencies: crate::source::ReadSet,
 }

@@ -48,12 +48,9 @@ struct Stored<R = cv_core::watch::ReadState> {
     total: usize,
     artifact: Artifact,
     read: R,
-    #[serde(default)]
     prefix: Option<Prefix>,
     /// The turns among the `prefix` messages, for the next pass that copies them.
-    #[serde(default)]
     prefix_turns: usize,
-    #[serde(default)]
     first_user: Option<FirstUser>,
 }
 

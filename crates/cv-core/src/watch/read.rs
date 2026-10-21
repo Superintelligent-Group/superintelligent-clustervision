@@ -49,10 +49,8 @@ struct Completed {
 /// state, not a second source index. Unsupported adapters transparently read whole.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadState {
-    #[serde(default)]
     version: String,
     path: PathBuf,
-    #[serde(default)]
     primary: Option<PathBuf>,
     pub source: source::Baseline,
     anchor: Option<Anchor>,
