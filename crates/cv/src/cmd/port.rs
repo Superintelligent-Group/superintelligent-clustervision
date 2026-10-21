@@ -13,19 +13,12 @@
 
 use crate::util::{home_rel, parse_harness, resolve, shell_quote, usage};
 use anyhow::{bail, Context, Result};
-use cv_core::ir::{Harness, Session, SessionRef};
-use cv_core::{Adapter, EmitOptions};
+use cv_core::ir::{Harness, Session};
+use cv_core::EmitOptions;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Parse a session at the fidelity the port needs. Same-harness (a pure rehome) parses
-/// **format-complete** so the carrier/replay machinery preserves every record (meta lines, compact
-/// boundaries, exhaustive `extra`) — the emitter replays them verbatim. Cross-harness sticks to the
-/// plain full-fidelity parse: carriers hold *source*-native records that no other emitter can
-/// replay (they'd just surface as empty turns).
-fn parse_for_emit(adapter: &dyn Adapter, r: &SessionRef, to_h: Harness) -> Result<Session> {
-    cv_core::emit::parse_for_emit(adapter, r, to_h)
-}
+use cv_core::emit::parse_for_emit;
 
 pub(crate) fn cmd_port(
     id: &str,

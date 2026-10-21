@@ -83,7 +83,7 @@ pub(crate) fn cmd_pack(
     // 2. DISTILL — one structured digest per recalled span.
     let mut sources: Vec<PackSource> = Vec::with_capacity(hits.len());
     for hit in hits {
-        match build_source(&hit, task, llm_model.as_ref()) {
+        match build_source(&hit, task, llm_model.as_ref().map(|model| model.as_deref())) {
             Ok(s) => sources.push(s),
             Err(e) => eprintln!("cv pack: skipping {} ({}): {e:#}", short_id(&hit.id), hit.harness),
         }
@@ -358,7 +358,7 @@ struct PackSource {
     llm_digest: Option<String>,
 }
 
-fn build_source(hit: &cv_search::Hit, task: &str, llm_model: Option<&Option<String>>) -> Result<PackSource> {
+fn build_source(hit: &cv_search::Hit, task: &str, llm_model: Option<Option<&str>>) -> Result<PackSource> {
     let want = Harness::parse(&hit.harness);
     let (r, adapter) =
         cv_core::find(&hit.id, want)?.with_context(|| format!("session {} no longer on disk", short_id(&hit.id)))?;
@@ -383,7 +383,7 @@ fn build_source(hit: &cv_search::Hit, task: &str, llm_model: Option<&Option<Stri
             mini.messages.push(m);
         }
         let opts = crate::llm::DigestOptions {
-            model: model.clone(),
+            model: model.map(str::to_owned),
             project: false,
         };
         match crate::llm::digest(&mini, &opts) {
