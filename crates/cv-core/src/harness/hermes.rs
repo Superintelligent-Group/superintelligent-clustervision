@@ -1,4 +1,4 @@
-//! Hermes (Nous Research) adapter — `~/.hermes/state.db` (SQLite, schema v30; back-compatible to the
+//! Hermes (Nous Research) adapter — `~/.hermes/state.db` (SQLite, including schema v31; back-compatible to the
 //! pre-v11 tables).
 //!
 //! See `docs/FORMATS.md`. One DB holds all sessions: a `sessions` table (metadata) and a `messages`
@@ -437,8 +437,7 @@ fn refs_conn(conn: &Connection, path: &Path, delegates_of: Option<&HashSet<Strin
             ..SessionRef::new(id, Harness::Hermes, path.to_path_buf())
         });
     }
-    // Discovery owns native session metadata and inclusion, not a transcript reduction.
-    // Complete reads/indexing publish canonical turns through the shared source certificate.
+    // Counts stay unknown here; complete reads/indexing count canonical turns and certify them.
     Ok(out)
 }
 
@@ -1812,6 +1811,7 @@ impl MsgRow {
 }
 
 #[derive(Default)]
+// FAILED_TURN_NOTICES must be ASCII: positions are byte offsets compared to decoded chars.
 struct FailedNotice {
     leading: bool,
     positions: [Option<usize>; FAILED_TURN_NOTICES.len()],

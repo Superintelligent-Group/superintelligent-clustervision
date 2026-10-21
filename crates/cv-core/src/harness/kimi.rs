@@ -256,6 +256,8 @@ impl Adapter for Kimi {
             let (s, enrich) = session_header(self, r, opts, &segments, wire.as_deref());
             sink.meta(&s);
             let primary = self.resume_source(r);
+            // Offer checkpoints only when layout discovery and resume_source agree on the
+            // final segment; a byte offset in another segment cannot resume this stream.
             let capture = segments.last() == Some(&primary);
             stream_context(
                 s,

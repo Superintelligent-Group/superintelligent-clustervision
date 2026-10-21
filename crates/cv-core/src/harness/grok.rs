@@ -166,6 +166,7 @@ impl Adapter for Grok {
         })
     }
 
+    // Version of HistoryCheckpoint consumed by resume and included in stored mark validation.
     fn resume_format(&self) -> Option<u32> {
         Some(1)
     }
