@@ -345,6 +345,8 @@ fn write_database(
 
 /// The `state` object of an OpenCode `tool` part: the call's `input`, plus — when the session
 /// paired one with it — the result's status, output-or-error and structured `details`.
+/// This v1 layout hoists title/time into state and folds other details into metadata;
+/// `emit/v2.rs::tool_state` uses the v2 details envelope instead.
 ///
 /// `input` is `None` for an **orphan** result (see [`emit_opencode_db`]): the call itself is not in
 /// this session, so there are no arguments to record, only what came back.

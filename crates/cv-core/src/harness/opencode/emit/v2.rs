@@ -669,6 +669,8 @@ fn tool_metadata(item: &mut ObjectWriter<'_>, result: Option<&Block>, ts: i64) -
     }
     Ok(())
 }
+// V2 keeps details in its clustervision envelope rather than the v1 state title/time fields;
+// the v2 reader unwraps that envelope when reconstructing the tool result.
 fn tool_state(
     w: &mut dyn Write,
     input: Option<&crate::Json>,

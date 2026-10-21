@@ -210,6 +210,8 @@ pub(super) fn build(
             out.push(b);
             if completed {
                 let mut s = new(Role::Assistant, MessageKind::CompactionSummary, Origin::Harness);
+                // One native compaction produces two IR turns; suffix the summary id so it
+                // differs from its boundary. Native prefixed IDs do not contain `#`.
                 s.id = Some(format!("{id}#summary"));
                 if let Some(text) = text_of("summary")? {
                     s.content.push(Block::Text { text });

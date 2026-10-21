@@ -298,6 +298,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
         let ts = stamp(m.timestamp);
         i += 1;
         match (m.role, m.kind) {
+            // Qwen rebuilds its system prompt at launch; session messages cannot represent it.
             (_, MessageKind::SystemPrompt) => {}
             (Role::Assistant, _) => {
                 let parts = parts(&m.content, opts.thinking, &resolver)?;
