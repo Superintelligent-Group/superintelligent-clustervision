@@ -475,7 +475,7 @@ fn claude_message(view: JsonView<'_>, spans: bool) -> Result<Option<Message>> {
                 &anthropic::CLAUDE_AI,
                 spans,
                 &mut |v| v.lazy_text(spans),
-                if spans { 0 } else { u64::MAX },
+                crate::harness::wire::joined_over(spans),
             )?
             else {
                 continue;

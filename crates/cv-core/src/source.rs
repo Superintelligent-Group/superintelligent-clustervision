@@ -1727,6 +1727,16 @@ mod tests {
             Probe::default().snapshot(&r).with_reads(&ReadSet::default()).stamp,
             "part membership"
         );
+        // The stream uses the part root for an absent message ID too. Dependency caching must
+        // retain that default, even when the message filename could suggest a different ID.
+        std::fs::write(storage.join("message/sid/noncanonical.json"), r#"{"role":"user"}"#).unwrap();
+        let before = Probe::default().snapshot(&r).with_reads(&ReadSet::default());
+        std::fs::write(storage.join("part/default.json"), "new").unwrap();
+        assert_ne!(
+            before.stamp,
+            Probe::default().snapshot(&r).with_reads(&ReadSet::default()).stamp,
+            "missing IDs still track their default part directory"
+        );
     }
 
     #[test]

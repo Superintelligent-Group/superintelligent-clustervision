@@ -456,10 +456,10 @@ fn discover_conn(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
             row.get::<_, Option<i64>>(5).ok().flatten(),
         ))
     })?;
-    let cells = Cells::new(conn, db, &crate::source::ReadSet::default(), "message_nodes")?;
     let mut out = Vec::new();
     for row in rows {
         let (id, wd, title, created, last, main_chain_id) = row?;
+        let cells = Cells::new(conn, db, &crate::source::ReadSet::default(), "message_nodes")?;
         // One forest load serves the parent's count AND its sub-agent children's.
         let forest = load_forest(conn, &id, &cells)?;
         let (head, _) = chain_head(&forest, main_chain_id);

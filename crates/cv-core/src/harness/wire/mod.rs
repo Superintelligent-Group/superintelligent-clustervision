@@ -42,6 +42,15 @@ pub(crate) const RESULT: Parts = Parts {
     image: Some("[image]"),
 };
 
+/// Joined structured text stays in its source when spans are requested, otherwise inline.
+pub(crate) const fn joined_over(spans: bool) -> u64 {
+    if spans {
+        0
+    } else {
+        u64::MAX
+    }
+}
+
 /// Where several joined parts live.
 #[derive(Clone, Copy)]
 pub(crate) enum Backing<'a> {

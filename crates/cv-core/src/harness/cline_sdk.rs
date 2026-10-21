@@ -418,7 +418,7 @@ fn view_message(view: JsonView<'_>, spans: bool, lead: bool, prompted: &mut bool
                     &anthropic::ANTHROPIC,
                     spans,
                     &mut |v| v.lazy_text(spans),
-                    if spans { 0 } else { u64::MAX },
+                    crate::harness::wire::joined_over(spans),
                 )? {
                     blocks.push(block);
                 }

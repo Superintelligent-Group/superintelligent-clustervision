@@ -720,7 +720,7 @@ fn record(view: JsonView<'_>, session: &mut Session, spans: bool) -> Result<(Opt
                         &anthropic::ANTHROPIC,
                         spans,
                         &mut |v| v.lazy_text(spans),
-                        if spans { 0 } else { u64::MAX },
+                        crate::harness::wire::joined_over(spans),
                     )?
                 };
                 if let Some(block) = block {

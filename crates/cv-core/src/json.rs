@@ -870,6 +870,13 @@ impl<'a> JsonView<'a> {
         let View::Source(source) = self.0 else { unreachable!() };
         source.source.kind(source.value)
     }
+    /// Own a selected JSON string; a missing string type remains distinct from a read failure.
+    pub(crate) fn string(self) -> Result<Option<String>> {
+        Ok(self.text(false)?.and_then(|text| match text {
+            crate::Text::Inline(text) => Some(text),
+            _ => None,
+        }))
+    }
     pub fn is_string(self) -> Result<bool> {
         match self.0 {
             View::Owned(value) => Ok(value.is_string()),

@@ -173,15 +173,18 @@ impl Adapter for Cursor {
 
         // Each database that cannot open or read is skipped and reported.
         if let Some(db) = self.global_db() {
-            let rows = open_ro(&db).and_then(|conn| {
-                conn.read(|conn, _| {
+            let rows = super::store::sqlite::cached_discover(&db, || {
+                open_ro(&db)?.read(|conn, _| {
                     let mut rows = Vec::new();
-                    discover_global(conn, &db, &cwd_map, &mut rows);
+                    discover_global(conn, &db, &HashMap::new(), &mut rows);
                     Ok(rows)
                 })
             });
             if let Some(rows) = out.keep(&db, rows) {
-                out.refs.extend(rows);
+                out.refs.extend(rows.into_iter().map(|mut row| {
+                    row.cwd = cwd_map.get(&row.id).cloned();
+                    row
+                }));
             }
         }
 
@@ -192,15 +195,18 @@ impl Adapter for Cursor {
                 continue;
             }
             let cwd = workspace_cwd(&ws);
-            let rows = open_ro(&db).and_then(|conn| {
-                conn.read(|conn, _| {
+            let rows = super::store::sqlite::cached_discover(&db, || {
+                open_ro(&db)?.read(|conn, _| {
                     let mut rows = Vec::new();
-                    legacy::discover(conn, &db, cwd.as_deref(), &mut rows)?;
+                    legacy::discover(conn, &db, None, &mut rows)?;
                     Ok(rows)
                 })
             });
             if let Some(rows) = out.keep(&db, rows) {
-                out.refs.extend(rows);
+                out.refs.extend(rows.into_iter().map(|mut row| {
+                    row.cwd = cwd.clone();
+                    row
+                }));
             }
         }
         if let Some(home) = &self.cli_home {
@@ -372,18 +378,15 @@ fn discover_global(conn: &Connection, db: &Path, cwd_map: &HashMap<String, PathB
         if count == 0 {
             continue;
         }
-        let created = d.get("createdAt").and_then(Value::as_i64);
-        let updated = d.get("lastUpdatedAt").and_then(Value::as_i64).or(created);
-        let title = d
-            .get("name")
-            .and_then(Value::as_str)
-            .filter(|s| !s.trim().is_empty())
-            .map(|s| crate::ir::truncate(s, crate::projection::Head::TITLE));
+        let shell = SessionRef::new(composer_id, Harness::Cursor, db);
+        let head = global_session(&d, &shell);
         out.push(SessionRef {
             cwd: cwd_map.get(composer_id).cloned(),
-            title,
-            created_at: created.and_then(ts_from_epoch),
-            updated_at: updated.and_then(ts_from_epoch),
+            title: head
+                .title
+                .map(|title| crate::ir::truncate(&title, crate::projection::Head::TITLE)),
+            created_at: head.created_at,
+            updated_at: head.updated_at,
             message_count: Some(count),
             ..SessionRef::new(composer_id.to_string(), Harness::Cursor, db.to_path_buf())
         });
@@ -416,7 +419,7 @@ fn stream_global(
             for (ordinal, row) in composer.rows.into_iter().flatten().enumerate() {
                 let row = row?;
                 let message = if composer.external {
-                    let Some(id) = row.get("bubbleId")?.map(record::string).transpose()?.flatten() else {
+                    let Some(id) = row.get("bubbleId")?.map(|view| view.string()).transpose()?.flatten() else {
                         unparsed.count();
                         continue;
                     };

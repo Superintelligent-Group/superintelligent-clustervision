@@ -140,7 +140,7 @@ pub(super) fn content(
                 }
             }
             Some(_) => {
-                let joined_over = if spans { 0 } else { u64::MAX };
+                let joined_over = crate::harness::wire::joined_over(spans);
                 let block = anthropic::block_from_view_with(
                     item,
                     &anthropic::GOOSE,

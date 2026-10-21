@@ -343,25 +343,29 @@ impl Adapter for OpenCode {
             .find(|p| p.file_name().is_some_and(|n| n == "session"))
             .and_then(Path::parent)?;
         let messages = storage.join("message").join(&r.id);
-        // Parts are keyed by the parsed message ID. Read only the ID (other fields are ignored),
-        // and enumerate only this session's own message/part directories.
+        // IDs are data, not filenames: old/imported stores can disagree. Cache that small
+        // projection under its captured identity for every probe in this operation; no body
+        // is materialized and unchanged messages are not decoded again on publication.
         for message in probe.list(&messages)?.iter() {
-            #[derive(serde::Deserialize)]
-            struct MessageId {
-                #[serde(default)]
-                id: String,
+            let mut reads = crate::source::ReadSet::default();
+            reads.record(message);
+            let (id, _) = crate::source::inventory("opencode-message-id", message, &reads, || {
+                let id = document(message, |view, _| {
+                    super::store::document::Fields::parse(view, &["id"])?
+                        .map(|fields| fields.string("id").map(Option::unwrap_or_default))
+                        .transpose()
+                })?
+                .flatten();
+                let bytes = id.as_ref().map_or(0, String::capacity) + std::mem::size_of_val(&id);
+                Ok((id, reads.clone(), bytes))
+            })
+            .inspect_err(|error| {
+                crate::env::warn_once("OpenCode dependencies", format_args!("{}: {error:#}", message.display()));
+            })
+            .ok()?;
+            if let Some(id) = id.as_ref() {
+                deps.directories.push(storage.join("part").join(id));
             }
-            // A file that cannot be opened is undetermined; one that does not decode names no part
-            // dir (the stream skips it too), and the message dir's own entry covers its repair.
-            let file = fs::File::open(message)
-                .inspect_err(|error| {
-                    crate::env::warn_once("OpenCode dependencies", format_args!("{}: {error}", message.display()));
-                })
-                .ok()?;
-            let Ok(id) = serde_json::from_reader::<_, MessageId>(std::io::BufReader::new(file)) else {
-                continue;
-            };
-            deps.directories.push(storage.join("part").join(id.id));
         }
         deps.directories.push(messages);
         Some(())
@@ -504,10 +508,12 @@ impl Adapter for OpenCode {
                     continue;
                 };
                 if let Some(dir) = self.part_dir(record.id().unwrap_or("")) {
+                    sink.dependency(&dir);
                     // Parts in file-name order, one file at a time.
                     let mut paths = listing(&dir)?;
                     paths.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
                     for path in paths {
+                        sink.dependency(&path);
                         let part = document(&path, |view, source| {
                             record.part(view, None, record::Ctx::new(opts.spans, source, &arena))
                         })?;
