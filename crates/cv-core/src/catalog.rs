@@ -209,7 +209,6 @@ mod imp {
     fn open_writable(path: &Path) -> rusqlite::Result<Connection> {
         let mut conn = Connection::open(path)?;
         conn.busy_timeout(Duration::from_secs(5))?;
-        conn.execute_batch("PRAGMA journal_mode=WAL;")?;
         let schema: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         let version = crate::discover_cache::INTERPRETATION_VERSION.to_string();
         // A stamp certifies the complete CREATE phase. Drop, create and stamp commit together.
@@ -223,6 +222,7 @@ mod imp {
                 )
                 .optional()?;
             if old.as_deref() == Some(&version) {
+                configure_journal(&conn)?;
                 return Ok(conn);
             }
         }
@@ -265,6 +265,7 @@ mod imp {
         }
         tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA};"))?;
         tx.commit()?;
+        configure_journal(&conn)?;
         if changed {
             crate::discover_cache::invalidate_interpretation(path);
         }
@@ -274,6 +275,23 @@ mod imp {
             }
         }
         Ok(conn)
+    }
+
+    // WAL is an accelerator too. A simultaneous first opener can hold the default-journal
+    // schema lock while another switches modes; keep its usable connection and retry next open.
+    fn configure_journal(conn: &Connection) -> rusqlite::Result<()> {
+        match conn.execute_batch("PRAGMA journal_mode=WAL;") {
+            Err(error)
+                if matches!(
+                    error.sqlite_error_code(),
+                    Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+                ) =>
+            {
+                crate::env::warn_once("catalog WAL mode", &error);
+                Ok(())
+            }
+            result => result,
+        }
     }
 
     const SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS sessions(
@@ -1308,6 +1326,31 @@ mod imp {
                 updated_at: None,
                 message_count: None,
             }
+        }
+
+        #[test]
+        fn locked_wal_switch_keeps_a_usable_catalog_and_retries() {
+            let world = crate::test_world("catalog-journal-lock");
+            let path = world.cv_home.join("journal.db");
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("CREATE TABLE fixture(value); INSERT INTO fixture VALUES(1);")
+                .unwrap();
+            let reader = Connection::open(&path).unwrap();
+            reader.execute_batch("BEGIN; SELECT * FROM fixture;").unwrap();
+            configure_journal(&conn).unwrap();
+            assert!(!crate::env::warn_once("catalog WAL mode", "already reported"));
+            assert_eq!(
+                conn.query_row("SELECT value FROM fixture", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+            drop(reader);
+            configure_journal(&conn).unwrap();
+            assert_eq!(
+                conn.query_row("PRAGMA journal_mode", [], |r| r.get::<_, String>(0))
+                    .unwrap(),
+                "wal"
+            );
         }
 
         #[test]
