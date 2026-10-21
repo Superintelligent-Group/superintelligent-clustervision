@@ -3275,15 +3275,6 @@ mod tests {
         );
     }
 
-    /// `--strict` fails on an *unexpected* loss — one the target format could have carried. The
-    /// subject has had to move twice, because each previous one got fixed: tool-result `details`
-    /// (now round-trips) and then per-message `usage` (now written for every source harness, see
-    /// [`claude_carries_usage_from_a_foreign_source`]). It is now the **text of a foreign System
-    /// turn**: Claude's transcript has no standalone system record, so `emit_claude` drops the turn
-    /// — but its text is not inherently unportable there (a foreign `InjectedContext` turn is
-    /// carried into an `attachment` record a few lines away), so `target_holds(Claude, Field::Text)` is
-    /// rightly true and the loss is rightly unexpected. If that gap is ever closed, point this test
-    /// at another real one rather than weakening the check.
     /// Every emitter claims its session files: a pinned id emitted twice is refused with nothing
     /// written over the first (a symlink or hard link there included); `force` replaces by rename.
     #[test]
@@ -3333,6 +3324,15 @@ mod tests {
         }
     }
 
+    /// `--strict` fails on an *unexpected* loss — one the target format could have carried. The
+    /// subject has had to move twice, because each previous one got fixed: tool-result `details`
+    /// (now round-trips) and then per-message `usage` (now written for every source harness, see
+    /// [`claude_carries_usage_from_a_foreign_source`]). It is now the **text of a foreign System
+    /// turn**: Claude's transcript has no standalone system record, so `emit_claude` drops the turn
+    /// — but its text is not inherently unportable there (a foreign `InjectedContext` turn is
+    /// carried into an `attachment` record a few lines away), so `target_holds(Claude, Field::Text)` is
+    /// rightly true and the loss is rightly unexpected. If that gap is ever closed, point this test
+    /// at another real one rather than weakening the check.
     #[test]
     fn strict_fails_on_unexpected_loss() {
         let s = sample_session(Harness::OpenCode); // foreign source → Claude cross-harness path

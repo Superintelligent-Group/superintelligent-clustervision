@@ -332,10 +332,7 @@ fn from_compaction_takes_the_preserved_segment_and_full_takes_everything() {
     assert_eq!(full.lines_written, 16);
 }
 
-/// ARM 1 (real tail) — `CutAt::End` copies through the END OF THE FILE, not through the last
-/// message's record: the records after it ride along, with the same `sessionId` rewrite as the rest
-/// of the copy. If the cure were wrong — still cutting at the last message — the output would end at
-/// the answer and the tail would be gone, which is the measured 238 → 235 exactly.
+/// `CutAt::End` copies bookkeeping after the last message, rewriting its session identity too.
 #[test]
 fn end_copies_the_records_after_the_last_message() {
     let world = crate::test_world("rewind");
@@ -368,10 +365,7 @@ fn end_copies_the_records_after_the_last_message() {
     assert_eq!(std::fs::read(&src).unwrap(), before, "the source must never change");
 }
 
-/// CONTROL for arm 1 — an explicit cut is still a truncation: `--at <last message>` ends at that
-/// message's record and copies none of the tail. If the cure were wrong in the other direction —
-/// `End`'s full copy leaking into every cut — this would carry the tail too, and `omitted_lines`
-/// would be 0 instead of 3.
+/// An explicit cut ends at its message record, omitting later bookkeeping.
 #[test]
 fn an_explicit_cut_still_ends_at_its_message_record() {
     let world = crate::test_world("rewind");
@@ -386,11 +380,7 @@ fn an_explicit_cut_still_ends_at_its_message_record() {
     assert_eq!(res.omitted_lines, 3);
 }
 
-/// ARM 2 (attachment + malformed tail) — a record the codec reads nothing out of (a `user` record
-/// with no `message` body, the synthetic `critical-tail` shape) makes the rewind REFUSE, naming the
-/// record, instead of truncating at the last message. If the cure were wrong — walking past it
-/// silently — this would exit 0 having dropped the record and everything after it, which is the
-/// measured 10 records in → 8 out.
+/// A bodyless native user record is bookkeeping and survives a full byte copy.
 #[test]
 fn a_native_copy_carries_a_bodyless_turn_record_verbatim() {
     // The Claude codec carries a `user` record with no `message` as bookkeeping, so a byte copy

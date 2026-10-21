@@ -1289,6 +1289,9 @@ fn write_source(view: SourceView<'_>, writer: &mut impl Write) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use serde_json::json;
+
     #[test]
     fn canonical_replacements_require_same_capture_and_exact_range() {
         let world = cv_testkit::World::new("json-canonical-replacements");
@@ -1316,8 +1319,6 @@ mod tests {
             serde_json::to_vec(&serde_json::from_str::<Value>(raw).unwrap()).unwrap()
         );
     }
-    use super::*;
-    use serde_json::json;
 
     #[cfg(not(feature = "mmap"))]
     #[test]
