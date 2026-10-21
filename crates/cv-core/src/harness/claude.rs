@@ -255,6 +255,11 @@ impl Adapter for Claude {
             .map(|id| format!("claude:{id}"))
     }
 
+    /// Native spans retain the same full-extra metadata.
+    fn rich_spans(&self) -> bool {
+        true
+    }
+
     /// Tiny native transcripts cost less to parse than to validate and replay a ledger.
     fn usage_cache_floor(&self) -> u64 {
         64 * 1024

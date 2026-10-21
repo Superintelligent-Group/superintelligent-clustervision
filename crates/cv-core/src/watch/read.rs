@@ -1,5 +1,5 @@
 //! Full-fidelity tail reads continued only from the adapters' existing verified checkpoints.
-use crate::{harness::Adapter, source, stream, Harness, Message, Session, SessionRef};
+use crate::{harness::Adapter, source, stream, Message, Session, SessionRef};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -443,9 +443,9 @@ pub(super) fn pass(
     if session_output {
         skip = from.and_then(stream::Checkpoint::messages).unwrap_or(0);
     }
-    // Native Claude/Codex spans retain the same full-extra metadata. Exact materialized parity
-    // is checked against the independent full collector; discarded payloads remain unowned.
-    let opts = if matches!(r.harness, Harness::Claude | Harness::Codex) {
+    // Exact materialized parity is checked against the independent full collector; discarded
+    // payloads remain unowned.
+    let opts = if adapter.rich_spans() {
         stream::Demand::RICH.with_spans()
     } else {
         stream::Demand::RICH
@@ -604,6 +604,7 @@ pub(super) fn pass(
 mod tests {
     use super::*;
     use crate::harness;
+    use crate::Harness;
 
     #[test]
     fn materialized_read_sets_keep_original_text_and_argument_guards() {

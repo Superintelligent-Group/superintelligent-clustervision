@@ -558,6 +558,12 @@ pub trait Adapter: Send + Sync {
         None
     }
 
+    /// Whether a [`Demand::RICH`] stream with spans keeps the same full-extra metadata as an
+    /// inline one, so a tail can leave large payloads in the source. Default: no, read inline.
+    fn rich_spans(&self) -> bool {
+        false
+    }
+
     /// The identity that makes two of this harness's messages *the same API call*, when its
     /// store repeats one (so usage is counted once). Default: every message is its own call.
     fn usage_key(&self, _m: &Message) -> Option<String> {
