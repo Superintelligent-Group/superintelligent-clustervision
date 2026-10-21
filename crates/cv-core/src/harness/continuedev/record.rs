@@ -51,6 +51,8 @@ pub(super) fn messages(
         "system" => Role::System,
         "assistant" => Role::Assistant,
         "tool" => Role::Tool,
+        // Missing and unknown native roles use the user fallback; this is a lossy
+        // classification, since the unrecognized role string is not retained here.
         _ => Role::User,
     };
     let mut m = Message::new(role);

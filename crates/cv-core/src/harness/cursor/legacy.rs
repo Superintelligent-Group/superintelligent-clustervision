@@ -67,6 +67,8 @@ pub(super) fn stream(
     spans: bool,
     sink: &mut dyn MessageSink,
 ) -> Result<Session> {
+    // Keep cell lookup and subsequent body reads on one SQLite snapshot; reuse an existing
+    // transaction when the caller already opened one.
     let _snapshot = conn.is_autocommit().then(|| conn.unchecked_transaction()).transpose()?;
     let cells = Cells::new(conn, &r.path, reads, "ItemTable")?;
     let cell = source::cell(conn, &cells, "ItemTable", CHAT_KEY)?.context("legacy chatdata missing")?;

@@ -61,6 +61,8 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
     summary.insert("num_messages".into(), json!(num_turns));
     summary.insert("next_trace_turn".into(), json!(0));
     summary.insert("chat_format_version".into(), json!(1));
+    // Agent persona, independent of current_model_id; its spelling happens to match the
+    // fallback model but the two fields can vary independently.
     summary.insert("agent_name".into(), json!("grok-build"));
     if let Some(home) = crate::env::var_os("HOME") {
         summary.insert(

@@ -166,7 +166,8 @@ pub(super) fn message(
             let Block::ToolUse { id, .. } = &block else {
                 anyhow::bail!("Grok tool call did not decode as a tool use");
             };
-            // Stash sidecar enrichment so nothing is lost (ir.rs has no field for it yet).
+            // Grok-specific sidecar title/kind/locations belong in the harness bag;
+            // preserve them there without inventing shared IR fields.
             if let Some(e) = enrich.get(id) {
                 let mut info = serde_json::Map::new();
                 if let Some(t) = &e.title {
