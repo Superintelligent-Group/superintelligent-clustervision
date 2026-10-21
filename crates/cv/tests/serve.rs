@@ -820,10 +820,9 @@ fn serve_compactions() {
     let (status, v) = get_json(port, "/api/session/claude/compactsess/messages");
     assert_eq!(status, 200);
     let m = &v["messages"].as_array().unwrap()[2];
-    // Lean read: no `extra` populated (the map is absent or empty for the boundary) — but `kind`
-    // is first-class, so the boundary is still identifiable without opting into the harness bag.
-    let extra_empty = m["extra"].is_null() || m["extra"].as_object().map(|o| o.is_empty()).unwrap_or(true);
-    assert!(extra_empty, "lean read should omit extra: {m}");
+    // Lean read: no `extra` on the wire at all (an empty bag is skipped) — but `kind` is
+    // first-class, so the boundary is still identifiable without opting into the harness bag.
+    assert_eq!(m.get("extra"), None, "lean read should omit extra: {m}");
     assert_eq!(m["kind"], "compaction_boundary", "{m}");
 }
 
