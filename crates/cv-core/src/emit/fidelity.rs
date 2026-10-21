@@ -590,11 +590,11 @@ pub(super) fn target_holds(t: Harness, field: Field) -> bool {
 /// synthesize the IR's Tool turn as they parse the call, so it never had a row/object of its own.
 /// Every other target writes a standalone record for the result (Claude a `user` line with a
 /// `tool_result` block, Codex a `function_call_output` item, OpenClaw a `toolResult` message,
-/// Hermes a `tool` row, Grok a `tool_result` line) and therefore keeps its id and timestamp.
+/// Hermes a `tool` row, Grok a `tool_result` line). Standalone framing permits a result-specific
+/// id and timestamp; which fields survive depends on the target.
 ///
-/// Derived by reading the emitters: these are exactly the two that `continue`/skip on
-/// [`Role::Tool`] instead of writing a record, and the two whose [`holds_fields`] rows omit
-/// [`Field::IdToolTurn`] and [`Field::TimestampToolTurn`] while holding the plain fields.
+/// These emitters skip standalone [`Role::Tool`] records. The field table separately states
+/// which ids and timestamps their readers recover from the enclosing call record.
 #[cfg(test)]
 pub(super) fn folds_tool_result(t: Harness) -> bool {
     matches!(t, Harness::OpenCode | Harness::Gemini)

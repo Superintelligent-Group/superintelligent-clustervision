@@ -1,6 +1,8 @@
 //! Embed the git commit into the binary (audit G11): `cv --version` prints `x.y.z (abc123)`,
 //! so a running binary is checkable against source. `CV_BUILD_SHA` overrides (release pipelines);
 //! outside a git checkout (crates.io builds) it degrades to "unknown".
+//! The `-dirty` stamp requires watching every tracked source, including documentation: narrowing
+//! the watch set would let an uncommitted edit retain a clean stamp. Output/cache dirs are excluded.
 
 use std::process::Command;
 

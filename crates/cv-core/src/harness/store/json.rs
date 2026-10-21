@@ -78,7 +78,8 @@ pub(crate) fn number_accepted(token: &[u8], strict: bool) -> bool {
 /// `serde_json::from_str::<Value>` accepts when `strict` (JSON grammar, strings without control
 /// characters or invalid escapes including lone surrogates, finite numbers, Value's nesting
 /// limit, nothing after the value), and what `RawValue` accepts otherwise (lone UTF-16 escapes
-/// and infinite numbers pass; grammar, control characters, nesting and UTF-8 still apply).
+/// and out-of-range number tokens pass; grammar, control characters and UTF-8 still apply,
+/// without Value's nesting limit).
 /// `depth` levels are already open around the value. `span` sees the bounds of every string
 /// and container, so a caller can index them for later structural selection.
 /// Returns the value's bounds, or None when it is not accepted.
