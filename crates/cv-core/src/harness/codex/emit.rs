@@ -30,14 +30,14 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
         .unwrap_or_else(|| PathBuf::from("/"));
     let cwd_str = cwd.to_string_lossy().into_owned();
 
-    let now = session.created_at.unwrap_or_else(Utc::now);
+    let created = session.created_at.unwrap_or_else(Utc::now);
     // Path: out_dir/YYYY/MM/DD/rollout-<YYYY-MM-DDTHH-MM-SS>-<uuid>.jsonl — in LOCAL time and with no
     // zone suffix, exactly as `RolloutFileName::render` writes it (`OffsetDateTime::now_local()`):
     // Codex's `RolloutFileName::parse` requires a 19-char timestamp with byte 19 == `-` before the
     // uuid, so a `…T11-04-49Z-<uuid>` name (what we used to write) is invisible to every
     // filename-based lookup (thread-id resolution, migration, `builder_from_items`) and the thread
     // only resumed while its sqlite row happened to exist.
-    let local = now.with_timezone(&chrono::Local);
+    let local = created.with_timezone(&chrono::Local);
     let date_dir = out_dir
         .join(local.format("%Y").to_string())
         .join(local.format("%m").to_string())
@@ -46,7 +46,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
     let stamp = local.format("%Y-%m-%dT%H-%M-%S").to_string();
     let file_path = date_dir.join(format!("rollout-{stamp}-{new_id}.jsonl"));
 
-    let ts_str = now.to_rfc3339_opts(SecondsFormat::Millis, true);
+    let ts_str = created.to_rfc3339_opts(SecondsFormat::Millis, true);
 
     let mut lines = JsonlStage::new();
 
