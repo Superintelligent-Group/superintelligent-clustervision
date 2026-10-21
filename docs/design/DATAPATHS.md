@@ -226,10 +226,9 @@ Audited against `git log v0.17.0..HEAD` on 2026-10-21; a closure below names its
   Cursor CLI counts to exclude empty stores. Removing these reads needs to preserve inclusion and exact metadata.
   Shared selections landed for OpenClaw/Hermes/Qwen tasks/Goose/exports (`62f0ccda`, `0a6a3b22`,
   `7475e978`, `20980e64`, `646b8fb6`); native allocations and validation still cost work.
-- **Three message windowings, open.** `api::WindowSink`, the text renderer's window pass in
-  `cv/src/cmd/view.rs` and `cv/src/cmd/pack.rs`'s relevance sink still select separately.
-  `5770a811` types forward/tail windows but does not unify the selectors. Search already shares
-  `cv_search::Searcher::search` across CLI and HTTP; that is not a windowing closure.
+- **Three message windowings, closed.** JSON, text rendering and pack relevance excerpts share
+  `api::MessageWindow`; renderers retain their own byte accounting and metadata timing.
+  CLI and HTTP search share `cv_search::Searcher::search`, including notes and snippets.
 - **Format-dependent costs, open.** Grok sibling lineage retains per-query metadata guards;
   Kimi wire enrichment and Kimi Code's auxiliary index reread changed prefixes; Claude fork
   inference can inspect sibling bodies. These dependencies can change independently of the main

@@ -13,7 +13,9 @@ use crate::Session;
 use serde_json::{json, Value};
 
 mod read;
+mod selection;
 mod window;
+pub use selection::MessageWindow;
 pub use window::WindowSink;
 
 /// A router's arms spelled once: the `match` that answers and the method/path patterns

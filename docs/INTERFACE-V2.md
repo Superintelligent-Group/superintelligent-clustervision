@@ -71,9 +71,9 @@ store wrappers and output selection remain beside each adapter. `derive` now own
 selection/writing for prune, rewind and adoption. Prune uses
 checked views at every size; untouched records keep their bytes except for selected identity
 changes. Rewind retains evidence/window selection and adoption retains destination/meta policy.
-`splice::Composition` (74 lines) still composes splice outside the emitter. Message windowing is written in
-`api::WindowSink`, `cv/src/cmd/view.rs` (the text renderer resolves `--first/--last/--range` in
-its own pass) and `cv/src/cmd/pack.rs`. CLI and HTTP search now share
+`splice::Composition` (74 lines) still composes splice outside the emitter. Message window selection lives in
+`api::MessageWindow`, shared by JSON, text rendering and pack relevance excerpts.
+CLI and HTTP search now share
 `cv_search::Searcher::search`; each door renders its own response. The clap tree in
 `cv/src/main.rs` is 1,605 lines. The task reducer is 664 lines
 plus 224 of model inside a 2,182-line `task` module; `lanes.jsonl` is stored state (hook stops

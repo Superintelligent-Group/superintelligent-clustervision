@@ -9,6 +9,7 @@
 //! warning. The document pieces live in [`cv_core::html`] (`share_begin` / `share_message` /
 //! `share_end`); this module owns the streaming sink and the CLI surface.
 
+use super::frames::Frames;
 use crate::util::{home_rel, parse_harness, resolve};
 use anyhow::{Context, Result};
 use cv_core::html::{self, ShareMeta};
@@ -61,7 +62,7 @@ fn share_session(
     let mut w = std::io::BufWriter::new(temporary.file());
 
     let mut sink = ShareSink {
-        out: &mut w,
+        frames: Frames::new(&mut w),
         redact: !no_redact,
         opts: RedactOptions::default(),
         stats: RedactStats::default(),
@@ -73,11 +74,8 @@ fn share_session(
         title: r.title.clone(),
         model: None,
         first_prompt: None,
-        buf: Vec::new(),
-        printed: false,
         meta_for_end: None,
         count: 0,
-        result: Ok(()),
     };
     let pass = cv_core::stream::Pass {
         guard: true,
@@ -90,7 +88,7 @@ fn share_session(
 
     let count = sink.count;
     let stats = std::mem::take(&mut sink.stats);
-    let io_result = std::mem::replace(&mut sink.result, Ok(()));
+    let io_result = std::mem::replace(&mut sink.frames.result, Ok(()));
     drop(sink);
     io_result.with_context(|| format!("writing {}", out_path.display()))?;
     w.flush().with_context(|| format!("writing {}", out_path.display()))?;
@@ -103,11 +101,10 @@ fn share_session(
 
 /// Streaming sink: scrub + render each message as it arrives and write it through, holding back
 /// only a small buffer until the header's label/model are known (they come from the first turns).
-/// Mirrors the shape of `view.rs`'s `stream_session_render`, reimplemented here because the share
-/// header needs different facts (created date, redaction flag) and each message must be *mutated*
-/// (redacted) before rendering, which a `Fn(&Message) -> String` renderer can't do.
+/// Header holdback uses the same frame writer as text rendering; this sink supplies HTML
+/// metadata and redacts messages before they become frames.
 struct ShareSink<'w, W: Write> {
-    out: &'w mut W,
+    frames: Frames<'w, W>,
     redact: bool,
     opts: RedactOptions,
     stats: RedactStats,
@@ -120,28 +117,14 @@ struct ShareSink<'w, W: Write> {
     title: Option<String>,
     model: Option<String>,
     first_prompt: Option<String>,
-    /// Rendered messages held back until the header is written.
-    buf: Vec<String>,
-    printed: bool,
     /// The meta the header was written with, kept so the footer badges agree with it.
     meta_for_end: Option<ShareMeta>,
     count: usize,
-    result: std::io::Result<()>,
 }
 
-/// Stop buffering and write the header once we've seen this many messages, even if the model is
-/// still unknown (matches `view.rs`'s holdback — header facts live in the first few turns).
-const HOLDBACK: usize = 24;
-
 impl<W: Write> ShareSink<'_, W> {
-    fn write(&mut self, s: &str) {
-        if self.result.is_ok() {
-            self.result = self.out.write_all(s.as_bytes());
-        }
-    }
-
     fn flush_header(&mut self) {
-        if self.printed {
+        if self.frames.printed {
             return;
         }
         // The title can itself contain a secret; scrub it *before* label truncation so the
@@ -160,13 +143,8 @@ impl<W: Write> ShareSink<'_, W> {
             created_at: self.created_at,
             redacted: self.redact,
         };
-        self.write(&html::share_begin(&meta));
+        self.frames.start(&html::share_begin(&meta));
         self.meta_for_end = Some(meta);
-        let buffered = std::mem::take(&mut self.buf);
-        for s in buffered {
-            self.write(&s);
-        }
-        self.printed = true;
     }
 
     /// Flush any held-back header (short sessions) and write the footer/epilogue.
@@ -174,22 +152,13 @@ impl<W: Write> ShareSink<'_, W> {
         self.flush_header();
         let meta = self.meta_for_end.take().expect("flush_header sets meta");
         let total = self.stats.total();
-        self.write(&html::share_end(&meta, total, version));
+        self.frames.write(&html::share_end(&meta, total, version));
     }
 }
 
 impl<W: Write> MessageSink for ShareSink<'_, W> {
     fn take_error(&mut self) -> Option<anyhow::Error> {
-        if self.result.is_err() {
-            std::mem::replace(
-                &mut self.result,
-                Err(std::io::Error::other("share output has already failed")),
-            )
-            .err()
-            .map(Into::into)
-        } else {
-            None
-        }
+        self.frames.take_error()
     }
     fn meta(&mut self, s: &Session) {
         // Parsed metadata beats discovery-time guesses (same contract as `cv show`'s sink).
@@ -206,7 +175,7 @@ impl<W: Write> MessageSink for ShareSink<'_, W> {
     }
 
     fn message(&mut self, mut m: Message) -> Flow {
-        if self.result.is_err() {
+        if self.frames.result.is_err() {
             return Flow::Stop;
         }
         if let Err(error) = m.materialize(&self.resolver).and_then(|()| {
@@ -215,7 +184,7 @@ impl<W: Write> MessageSink for ShareSink<'_, W> {
             }
             Ok(())
         }) {
-            self.result = Err(std::io::Error::other(error));
+            self.frames.result = Err(std::io::Error::other(error));
             return Flow::Stop;
         }
         if self.model.is_none() {
@@ -228,29 +197,30 @@ impl<W: Write> MessageSink for ShareSink<'_, W> {
             match m.prompt_title(&self.resolver) {
                 Ok(title) => self.first_prompt = title,
                 Err(error) => {
-                    self.result = Err(std::io::Error::other(error));
+                    self.frames.result = Err(std::io::Error::other(error));
                     return Flow::Stop;
                 }
             }
         }
         let mut rendered = String::new();
         if let Err(error) = html::share_message(&m, self.count, &mut rendered) {
-            self.result = Err(std::io::Error::other(error));
+            self.frames.result = Err(std::io::Error::other(error));
             return Flow::Stop;
         }
         drop(m);
         self.count += 1;
 
-        if self.printed {
-            self.write(&rendered);
-        } else {
-            self.buf.push(rendered);
-            let title_known = self.title.is_some() || self.first_prompt.is_some();
-            if (self.model.is_some() && title_known) || self.buf.len() >= HOLDBACK {
-                self.flush_header();
-            }
+        self.frames.push(rendered);
+        if !self.frames.printed
+            && Frames::<W>::ready(
+                self.model.is_some(),
+                self.title.is_some() || self.first_prompt.is_some(),
+                self.count,
+            )
+        {
+            self.flush_header();
         }
-        if self.result.is_err() {
+        if self.frames.result.is_err() {
             Flow::Stop
         } else {
             Flow::Continue
@@ -325,7 +295,7 @@ mod tests {
     fn render(input: Json) -> Result<String> {
         let mut output = Vec::new();
         let mut sink = ShareSink {
-            out: &mut output,
+            frames: Frames::new(&mut output),
             redact: true,
             opts: RedactOptions::default(),
             stats: RedactStats::default(),
@@ -337,11 +307,8 @@ mod tests {
             title: Some("source parity".into()),
             model: None,
             first_prompt: None,
-            buf: Vec::new(),
-            printed: false,
             meta_for_end: None,
             count: 0,
-            result: Ok(()),
         };
         let mut message = Message::new(Role::Assistant);
         message.content.push(Block::ToolUse {

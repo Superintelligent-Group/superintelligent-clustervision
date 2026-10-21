@@ -537,14 +537,7 @@ fn best_window_observing(
         words: Vec<String>,
         needle: String,
         resolver: Resolver,
-        idx: usize,
-        /// Last non-empty conversational message seen: `(idx, role, trimmed text)`.
-        prev: Option<(usize, Role, String)>,
-        best_score: i64,
-        window: Vec<(Role, String)>,
-        range: Option<(usize, usize)>,
-        /// How many more following messages the current best window still wants.
-        pending: usize,
+        window: cv_core::api::MessageWindow<(Role, String)>,
         error: Option<anyhow::Error>,
     }
     impl MessageSink for WindowSink<'_> {
@@ -571,9 +564,8 @@ fn best_window_observing(
                     self.events_failed = events.observe_message(&m) == Flow::Stop;
                 }
             }
-            let i = self.idx;
-            self.idx += 1;
             if m.role == Role::Tool {
+                self.window.skip();
                 return Flow::Continue;
             }
             let text = match capped_text(&m, &self.resolver) {
@@ -584,29 +576,12 @@ fn best_window_observing(
                 }
             };
             if text.trim().is_empty() {
+                self.window.skip();
                 return Flow::Continue;
             }
             let low = text.to_lowercase();
             let score = lexical_score(&low, &self.needle, self.words.iter().map(String::as_str));
-            if score > self.best_score {
-                self.best_score = score;
-                self.window.clear();
-                let mut lo = i;
-                if let Some((pi, pr, pt)) = self.prev.take() {
-                    self.window.push((pr, pt));
-                    lo = pi;
-                }
-                self.window.push((m.role, text.clone()));
-                self.range = Some((lo, i + 1));
-                self.pending = 1;
-            } else if self.pending > 0 {
-                self.window.push((m.role, text.clone()));
-                if let Some((_, hi)) = &mut self.range {
-                    *hi = i + 1;
-                }
-                self.pending -= 1;
-            }
-            self.prev = Some((i, m.role, text));
+            self.window.scored((m.role, text), score);
             Flow::Continue
         }
     }
@@ -617,16 +592,16 @@ fn best_window_observing(
         words,
         needle,
         resolver: Resolver::new(Some(r.path.clone())),
-        idx: 0,
-        prev: None,
-        best_score: -1, // any non-empty message seeds a window, even with zero lexical overlap
-        window: Vec::new(),
-        range: None,
-        pending: 0,
+        window: cv_core::api::MessageWindow::best(),
         error: None,
     };
     adapter.try_stream(r, &Demand::LEAN.with_spans(), &mut sink)?;
-    Ok((sink.window, sink.range))
+    let selected = sink.window.finish();
+    let range = selected
+        .first()
+        .zip(selected.last())
+        .map(|((lo, _), (hi, _))| (*lo, hi + 1));
+    Ok((selected.into_iter().map(|(_, value)| value).collect(), range))
 }
 
 /// A message's text blocks, span-aware (head-resolved) and trimmed to excerpt size with code

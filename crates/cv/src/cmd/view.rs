@@ -1,6 +1,7 @@
 //! `cv show` (and its `--tree` / `--kind` views) / `cv export` — reading sessions,
 //! plus the streaming renderer (`stream_session_render`) and its header/message helpers.
 
+use super::frames::Frames;
 use crate::util::{
     continue_hint, count_messages, home_rel, parse_harness, resolve, resolve_found, short_id, split_harness_id, usage,
     StreamWindow, Window, WindowArgs,
@@ -1140,7 +1141,6 @@ fn stream_session_render_inner<W: std::io::Write>(
     mode: Mode<'_>,
 ) -> Result<RenderOutcome> {
     use cv_core::{Demand, Flow, MessageSink};
-    const HOLDBACK: usize = 24;
     let checked = matches!(mode, Mode::CheckedMarkdown);
     let views = match mode {
         Mode::PipeGuard(views) => Some(views),
@@ -1164,15 +1164,12 @@ fn stream_session_render_inner<W: std::io::Write>(
     /// message model — so [`Sink::finish_tail`] replays the window exactly as a second pass that
     /// started at `total - n` would have.
     struct Tail {
-        n: usize,
-        ring: std::collections::VecDeque<Message>,
-        seen: usize,
         metas: Vec<(usize, Meta)>,
         first_model: Option<(usize, String)>,
     }
 
     struct Sink<'w, W, H, R> {
-        out: &'w mut W,
+        frames: Frames<'w, W>,
         harness: Harness,
         id: String,
         cwd: Option<PathBuf>,
@@ -1182,18 +1179,13 @@ fn stream_session_render_inner<W: std::io::Write>(
         first_prompt: Option<String>,
         header: H,
         render_msg: R,
-        buf: Vec<String>,
         // Complete Markdown downloads hold the same header window in bounded private staging.
         checked_markdown: bool,
         checked_buf: Option<std::io::BufWriter<cv_core::bytes::ByteStage>>,
-        printed: bool,
-        result: std::io::Result<()>,
         resolver: cv_core::Resolver,
         // Windowed view: 0-based message index we're at, plus the [start, end) bounds. Messages
         // outside the window are never materialized — their on-disk content is never touched.
-        idx: usize,
-        start: usize,
-        end: Option<usize>,
+        window: cv_core::api::MessageWindow<Message>,
         // Byte budget: rendered bytes so far (header + messages) and where the cut landed.
         max_bytes: Option<usize>,
         bytes: usize,
@@ -1220,9 +1212,9 @@ fn stream_session_render_inner<W: std::io::Write>(
         /// with each meta delivered before the message it preceded.
         fn finish_tail(&mut self) {
             let Some(t) = self.tail.take() else { return };
-            let start = t.seen - t.ring.len();
-            self.start = start;
-            self.idx = start;
+            let messages = self.window.finish();
+            let start = self.window.start;
+            self.window.idx = start;
             let mut metas = t.metas.into_iter().peekable();
             let mut pre_model = t.first_model.filter(|(i, _)| *i < start);
             while let Some((at, m)) = metas.next_if(|(at, _)| *at <= start) {
@@ -1234,7 +1226,7 @@ fn stream_session_render_inner<W: std::io::Write>(
             if let Some((_, md)) = pre_model {
                 self.model.get_or_insert(md);
             }
-            for (k, m) in t.ring.into_iter().enumerate() {
+            for (k, (_, m)) in messages.into_iter().enumerate() {
                 while let Some((_, s)) = metas.next_if(|(at, _)| *at <= start + k) {
                     self.apply_meta(s);
                 }
@@ -1244,11 +1236,6 @@ fn stream_session_render_inner<W: std::io::Write>(
             }
             for (_, s) in metas {
                 self.apply_meta(s);
-            }
-        }
-        fn write(&mut self, s: &str) {
-            if self.result.is_ok() {
-                self.result = self.out.write_all(s.as_bytes());
             }
         }
         fn header_now(&self) -> String {
@@ -1262,50 +1249,37 @@ fn stream_session_render_inner<W: std::io::Write>(
             })
         }
         fn flush_header(&mut self) {
-            if self.printed {
+            if self.frames.printed {
                 return;
             }
             let head = self.header_now();
             self.bytes += head.len();
             if let Some(views) = self.views.as_mut() {
                 views.header = head;
-                self.printed = true;
+                self.frames.printed = true;
                 return;
             }
-            self.write(&head);
-            let buffered = std::mem::take(&mut self.buf);
-            for s in buffered {
-                self.write(&s);
-            }
+            self.frames.start(&head);
             if let Some(mut buffered) = self.checked_buf.take() {
-                if self.result.is_ok() {
-                    self.result = buffered.flush().and_then(|()| {
+                if self.frames.result.is_ok() {
+                    self.frames.result = buffered.flush().and_then(|()| {
                         buffered
                             .into_inner()
                             .map_err(|e| e.into_error())?
                             .finish()?
-                            .copy_to(self.out)
+                            .copy_to(self.frames.out)
                             .map(|_| ())
                     });
                 }
             }
-            self.printed = true;
+            self.frames.printed = true;
         }
     }
     impl<W: std::io::Write, H: Fn(&HeaderInfo) -> String, R: Fn(&Message) -> Result<String>> MessageSink
         for Sink<'_, W, H, R>
     {
         fn take_error(&mut self) -> Option<anyhow::Error> {
-            if self.result.is_err() {
-                std::mem::replace(
-                    &mut self.result,
-                    Err(std::io::Error::other("view output has already failed")),
-                )
-                .err()
-                .map(Into::into)
-            } else {
-                None
-            }
+            self.frames.take_error()
         }
         fn meta(&mut self, s: &Session) {
             // Authoritative *parsed* session metadata, delivered before the body by the bridge
@@ -1320,7 +1294,7 @@ fn stream_session_render_inner<W: std::io::Write>(
                 created_at: s.created_at,
             };
             match self.tail.as_mut() {
-                Some(t) => t.metas.push((t.seen, meta)),
+                Some(t) => t.metas.push((self.window.idx, meta)),
                 None => self.apply_meta(meta),
             }
         }
@@ -1328,26 +1302,19 @@ fn stream_session_render_inner<W: std::io::Write>(
             if let Some(t) = self.tail.as_mut() {
                 if t.first_model.is_none() {
                     if let Some(md) = &m.model {
-                        t.first_model = Some((t.seen, md.clone()));
+                        t.first_model = Some((self.window.idx, md.clone()));
                     }
                 }
-                t.seen += 1;
-                if t.n > 0 {
-                    t.ring.push_back(m);
-                    if t.ring.len() > t.n {
-                        t.ring.pop_front();
-                    }
-                }
+                self.window.push(m);
                 return Flow::Continue;
             }
-            if self.result.is_err() || self.next.is_some() {
+            if self.frames.result.is_err() || self.next.is_some() {
                 return Flow::Stop;
             }
-            let idx = self.idx;
-            self.idx += 1;
+            let idx = self.window.idx;
             if idx == PIPE_GUARD_EDGE {
                 // A render that stops here (a `--first` window) prints the header it knows now.
-                let head = (!self.printed && self.views.is_some()).then(|| self.header_now());
+                let head = (!self.frames.printed && self.views.is_some()).then(|| self.header_now());
                 if let Some(views) = self.views.as_mut() {
                     views.head_header = head.unwrap_or_else(|| views.header.clone());
                 }
@@ -1355,7 +1322,7 @@ fn stream_session_render_inner<W: std::io::Write>(
 
             // Past the window's end: nothing left to render — stop early so we never read the
             // rest of the file (the whole point of a windowed show on a huge session).
-            if let Some(end) = self.end {
+            if let Some(end) = self.window.end {
                 if idx >= end {
                     return Flow::Stop;
                 }
@@ -1370,17 +1337,17 @@ fn stream_session_render_inner<W: std::io::Write>(
             }
 
             // Before the window: skip entirely. We do NOT materialize, so no span content is read.
-            if idx < self.start {
+            let Some((_, m)) = self.window.push(m) else {
                 return Flow::Continue;
-            }
+            };
 
             if self.checked_markdown {
                 let result = (|| -> Result<()> {
                     if self.first_prompt.is_none() {
                         self.first_prompt = m.prompt_title(&self.resolver)?;
                     }
-                    if self.printed {
-                        cv_core::render::write_md_message(&m, self.out, &self.resolver)?;
+                    if self.frames.printed {
+                        cv_core::render::write_md_message(&m, self.frames.out, &self.resolver)?;
                     } else {
                         cv_core::render::write_md_message(
                             &m,
@@ -1391,15 +1358,15 @@ fn stream_session_render_inner<W: std::io::Write>(
                     Ok(())
                 })();
                 if let Err(error) = result {
-                    self.result = Err(std::io::Error::other(error));
+                    self.frames.result = Err(std::io::Error::other(error));
                     return Flow::Stop;
                 }
                 self.rendered += 1;
                 let title_known = self.title.is_some() || self.first_prompt.is_some();
-                if !self.printed && ((self.model.is_some() && title_known) || self.rendered >= HOLDBACK) {
+                if !self.frames.printed && Frames::<W>::ready(self.model.is_some(), title_known, self.rendered) {
                     self.flush_header();
                 }
-                return if self.result.is_err() {
+                return if self.frames.result.is_err() {
                     Flow::Stop
                 } else {
                     Flow::Continue
@@ -1409,14 +1376,14 @@ fn stream_session_render_inner<W: std::io::Write>(
             // In-window: resolve this message's lazy content spans (peak = one message) and render.
             let mut m = m;
             if let Err(error) = m.try_materialize_text(&self.resolver) {
-                self.result = Err(std::io::Error::other(error));
+                self.frames.result = Err(std::io::Error::other(error));
                 return Flow::Stop;
             }
             if self.first_prompt.is_none() {
                 match m.prompt_title(&self.resolver) {
                     Ok(title) => self.first_prompt = title,
                     Err(error) => {
-                        self.result = Err(std::io::Error::other(error));
+                        self.frames.result = Err(std::io::Error::other(error));
                         return Flow::Stop;
                     }
                 }
@@ -1424,7 +1391,7 @@ fn stream_session_render_inner<W: std::io::Write>(
             let rendered = match (self.render_msg)(&m) {
                 Ok(rendered) => rendered,
                 Err(error) => {
-                    self.result = Err(std::io::Error::other(error));
+                    self.frames.result = Err(std::io::Error::other(error));
                     return Flow::Stop;
                 }
             };
@@ -1436,7 +1403,7 @@ fn stream_session_render_inner<W: std::io::Write>(
                 self.rendered += 1;
                 views.push(rendered);
                 let title_known = self.title.is_some() || self.first_prompt.is_some();
-                if !self.printed && ((self.model.is_some() && title_known) || self.rendered >= HOLDBACK) {
+                if !self.frames.printed && Frames::<W>::ready(self.model.is_some(), title_known, self.rendered) {
                     self.flush_header();
                 }
                 return Flow::Continue;
@@ -1451,16 +1418,12 @@ fn stream_session_render_inner<W: std::io::Write>(
             }
             self.bytes += rendered.len();
             self.rendered += 1;
-            if self.printed {
-                self.write(&rendered);
-            } else {
-                self.buf.push(rendered);
-                let title_known = self.title.is_some() || self.first_prompt.is_some();
-                if (self.model.is_some() && title_known) || self.buf.len() >= HOLDBACK {
-                    self.flush_header();
-                }
+            self.frames.push(rendered);
+            let title_known = self.title.is_some() || self.first_prompt.is_some();
+            if !self.frames.printed && Frames::<W>::ready(self.model.is_some(), title_known, self.rendered) {
+                self.flush_header();
             }
-            if self.result.is_err() {
+            if self.frames.result.is_err() {
                 Flow::Stop
             } else {
                 Flow::Continue
@@ -1473,7 +1436,7 @@ fn stream_session_render_inner<W: std::io::Write>(
         StreamWindow::Range(start, end) => (start, end, None),
     };
     let mut sink = Sink {
-        out,
+        frames: Frames::new(out),
         harness: r.harness,
         id: r.id.clone(),
         cwd: r.cwd.clone(),
@@ -1483,23 +1446,18 @@ fn stream_session_render_inner<W: std::io::Write>(
         first_prompt: None,
         header,
         render_msg,
-        buf: Vec::new(),
         checked_markdown: checked,
         checked_buf: checked.then(|| std::io::BufWriter::with_capacity(64 * 1024, cv_core::bytes::ByteStage::new())),
-        printed: false,
-        result: Ok(()),
         resolver: cv_core::Resolver::new(Some(r.path.clone())),
-        idx: 0,
-        start,
-        end,
+        window: match tail {
+            Some(n) => cv_core::api::MessageWindow::new(start, end).tail(n),
+            None => cv_core::api::MessageWindow::new(start, end),
+        },
         max_bytes: opts.max_bytes,
         bytes: 0,
         rendered: 0,
         next: None,
-        tail: tail.map(|n| Tail {
-            n,
-            ring: Default::default(),
-            seen: 0,
+        tail: tail.map(|_| Tail {
             metas: Vec::new(),
             first_model: None,
         }),
@@ -1520,7 +1478,7 @@ fn stream_session_render_inner<W: std::io::Write>(
     let guard = cv_core::stream::stream_counted(adapter, r, &parse_opts, &mut sink, pass)?.guard;
     sink.finish_tail();
     sink.flush_header(); // short sessions (no assistant turn / < HOLDBACK msgs) flush here
-    sink.result?;
+    sink.frames.result?;
     if let Some(guard) = guard {
         guard.verify(r)?;
     }

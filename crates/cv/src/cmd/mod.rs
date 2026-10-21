@@ -32,3 +32,5 @@ pub(crate) mod task_ops;
 pub(crate) mod tools;
 pub(crate) mod view;
 pub(crate) mod workflow;
+
+mod frames;
