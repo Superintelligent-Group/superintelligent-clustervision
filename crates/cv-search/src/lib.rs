@@ -153,7 +153,14 @@ pub struct Found {
 #[derive(Default)]
 pub struct Searcher {
     #[cfg(feature = "semantic")]
-    pub semantic: SemanticSearch,
+    semantic: SemanticSearch,
+}
+
+#[cfg(feature = "semantic")]
+impl From<SemanticSearch> for Searcher {
+    fn from(semantic: SemanticSearch) -> Self {
+        Self { semantic }
+    }
 }
 
 impl Searcher {

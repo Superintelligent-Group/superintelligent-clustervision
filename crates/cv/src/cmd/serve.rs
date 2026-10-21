@@ -941,9 +941,7 @@ mod semantic_service_tests {
         empty.extend_from_slice(&(metadata.len() as u64).to_le_bytes());
         empty.extend_from_slice(metadata);
         std::fs::write(&path, &empty).unwrap();
-        let semantic = cv_search::Searcher {
-            semantic: cv_search::SemanticSearch::new(Some(path.clone())),
-        };
+        let semantic = cv_search::Searcher::from(cv_search::SemanticSearch::new(Some(path.clone())));
         for _ in 0..2 {
             let (status, body, headers) = route(
                 false,
