@@ -74,7 +74,7 @@ impl<'a> Fields<'a> {
         }
         match view.resolve()?.into_owned() {
             Value::String(s) => Ok(Some(s)),
-            _ => unreachable!(),
+            _ => anyhow::bail!("selected JSON string changed type"),
         }
     }
     pub fn project(&self, keys: &[&str]) -> Result<serde_json::Map<String, Value>> {
