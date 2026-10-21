@@ -170,6 +170,7 @@ impl MessageSink for DocSink {
         if self.failed || self.error.is_some() {
             return Flow::Stop;
         }
+        // Role is only a coarse gate; prompt_title below rejects non-prompt message kinds.
         if self.first_prompt.is_none() && message.role == Role::User {
             for block in &message.content {
                 if let Block::Text { text } = block {

@@ -447,6 +447,8 @@ fn model_reads(root: &Path) -> Result<ReadSet> {
             reads.record(&base.join(name));
         }
     }
+    // A local model root can be 0_StaticEmbedding with its configuration one directory up.
+    // In hub snapshots this parent file is normally absent; its absence is stamped too.
     if let Some(parent) = root.parent() {
         reads.record(&parent.join("config_sentence_transformers.json"));
     }

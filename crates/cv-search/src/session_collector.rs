@@ -297,6 +297,8 @@ impl SegmentCollector for SessionSegment {
                             FilterDecision::Document(accepted) => accepted,
                             FilterDecision::Session(accepted) => {
                                 // Only authoritative session decisions can be reused by id.
+                                // Bound per-segment decision memory. Clear-all avoids recency
+                                // bookkeeping for this opportunistic cache; misses recompute.
                                 if self.filter_cache.len() == 64 {
                                     self.filter_cache.clear();
                                 }

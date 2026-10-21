@@ -77,7 +77,8 @@ impl Admission {
 
 /// The compact document owns one public byte vector and a private field-address vector. Charge
 /// the exact byte capacity plus twice the field count at a conservative address size (the private
-/// packed address is smaller). Include both vector headers, wrapper and allocation overhead.
+/// packed address is smaller). A minimum four slots covers small-vector allocation slack; the
+/// extra 128 bytes conservatively covers vector headers and allocator overhead beyond the wrapper.
 fn document_bytes(document: &TantivyDocument) -> usize {
     document
         .node_data
