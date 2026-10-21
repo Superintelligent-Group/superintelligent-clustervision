@@ -1182,9 +1182,16 @@ impl Drop for Shutdown<'_> {
 fn job_cost(group: &[Job]) -> u64 {
     group
         .iter()
-        .map(|j| j.size.max(0) as u64)
-        .max()
-        .unwrap_or(0)
+        // Compressed extents do not bound decoded working sets. Until the adapter
+        // exposes that length, admit a compressed source alone.
+        .map(|j| {
+            if j.r.path.extension().is_some_and(|ext| ext == "zst") {
+                IN_FLIGHT_BYTES
+            } else {
+                j.size.max(0) as u64
+            }
+        })
+        .fold(0u64, u64::saturating_add)
         .min(IN_FLIGHT_BYTES)
 }
 
