@@ -99,6 +99,16 @@ impl Read {
         Ok(())
     }
 
+    /// The full check after a callback that began at `started` and was slow, for a callback
+    /// inside one record's interpretation (the record goes on reading mapped bytes); the caller's
+    /// per-record [`Self::check_backing_after`] owns the windowed one.
+    pub(crate) fn check_backing_if_slow(&self, started: std::time::Instant) -> anyhow::Result<()> {
+        if started.elapsed() < Self::SLOW_CALLBACK {
+            return Ok(());
+        }
+        self.check_backing()
+    }
+
     pub(crate) fn check_backing_at(&self, offset: u64) -> anyhow::Result<()> {
         use std::sync::atomic::Ordering;
         let through = self.checked_through.load(Ordering::Relaxed);

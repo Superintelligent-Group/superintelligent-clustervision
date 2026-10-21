@@ -486,15 +486,13 @@ fn stream_wire(
             skipped += u64::from(!line.blank);
             return Ok(Flow::Continue);
         };
+        let started = std::time::Instant::now();
         let flow = ctx.record(view, Some(&input), sink)?;
-        input.check_backing()?;
-        if flow != Flow::Stop && line.complete && ctx.step.is_none() {
-            let wanted = sink.wants_checkpoint(line.end);
+        input.check_backing_after(started, line.end)?;
+        if flow != Flow::Stop && line.complete && ctx.step.is_none() && sink.wants_checkpoint(line.end) {
             input.check_backing()?;
-            if wanted {
-                checkpoint_wire(&ctx, wire, line.end, skipped, sink);
-                input.check_backing()?;
-            }
+            checkpoint_wire(&ctx, wire, line.end, skipped, sink);
+            input.check_backing()?;
         }
         Ok(flow)
     })?;
@@ -1031,10 +1029,12 @@ impl<'a> Ctx<'a> {
                 let uuid = fields.string("stepUuid")?.unwrap_or_default();
                 let metadata = Value::Object(fields.project(&["stepUuid", "turnId", "step"])?);
                 let may_flush = self.step.as_ref().is_some_and(|step| step.uuid != uuid);
+                let started = std::time::Instant::now();
                 let flow = self.ensure_step(&uuid, &metadata, ts, sink);
+                // The record's `part` is still read from the mapping after a flushing callback.
                 if may_flush {
                     if let Some(input) = input {
-                        input.check_backing()?;
+                        input.check_backing_if_slow(started)?;
                     }
                 }
                 if flow == Flow::Stop {
@@ -2120,6 +2120,9 @@ mod tests {
                     .unwrap()
                     .set_len(0)
                     .unwrap();
+                // A callback that changed the file is a slow one by construction (the stream
+                // module's source-guarantee policy): the reader checks right after it.
+                std::thread::sleep(jsonl::Read::SLOW_CALLBACK * 10);
                 Flow::Continue
             });
             assert!(

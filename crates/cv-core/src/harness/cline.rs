@@ -462,7 +462,6 @@ pub fn stream_task_dir(
     // An item that is not one JSON value, and a history that does not decode, are counted.
     let mut unparsed = super::Unparsed::default();
     let result = source.read_archive(|items| {
-        let mut has_sources = false;
         for view in items.into_iter().flatten() {
             let Some(view) = view? else {
                 unparsed.count();
@@ -481,31 +480,17 @@ pub fn stream_task_dir(
                         message.timestamp.get_or_insert(ts);
                     }
                 }
-                let sourced = message.content.iter().any(|block| {
-                    matches!(
-                        block,
-                        Block::ToolUse {
-                            input: crate::Json::Source(_),
-                            ..
-                        }
-                    )
-                });
-                has_sources |= sourced;
-                if sourced {
-                    source.check()?;
-                }
+                // A span demand checks its own source; the stream rechecks after a slow callback and
+                // at the end (`stream` module: who owns the source guarantee).
+                let started = std::time::Instant::now();
                 let flow = sink.try_message(message)?;
-                if sourced {
-                    source.check()?;
-                }
+                source.check_after(started)?;
                 if flow == Flow::Stop {
                     break;
                 }
             }
         }
-        if has_sources {
-            source.check()?;
-        }
+        source.check()?;
         Ok(())
     });
     if let Err(error) = result {

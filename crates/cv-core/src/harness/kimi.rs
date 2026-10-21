@@ -489,9 +489,11 @@ fn stream_context(
             return Ok(Flow::Continue);
         };
         if let Some((prev, source)) = pending.take() {
+            // The pending message may come from an older rotated segment: its own source is
+            // rechecked after a slow callback; `visit_segments` owns the current descriptor.
+            let started = std::time::Instant::now();
             let flow = sink.message(prev);
-            input.check_backing()?;
-            source.check()?;
+            source.check_after(started)?;
             if flow == Flow::Stop {
                 stopped = true;
                 return Ok(Flow::Stop);
@@ -549,7 +551,6 @@ fn stream_context(
         }
         if m.kind == MessageKind::CompactionSummary {
             let flow = sink.message(compaction_boundary(m.timestamp));
-            input.check_backing()?;
             if flow == Flow::Stop {
                 stopped = true;
                 return Ok(flow);
@@ -558,7 +559,6 @@ fn stream_context(
         if let Some(segment) = ctx.rotated.take() {
             if m.kind != MessageKind::CompactionSummary {
                 let flow = sink.message(rotation_branch(m.timestamp, segment));
-                input.check_backing()?;
                 if flow == Flow::Stop {
                     stopped = true;
                     return Ok(flow);
@@ -832,8 +832,9 @@ fn visit_segments(segments: &[PathBuf], at: Option<u64>, accept: &mut SegmentRec
             let starts = announce.then_some(name);
             announce = false;
             let position = (live && line.complete).then_some(line_start);
+            let started = std::time::Instant::now();
             let flow = accept(view, &input, starts, position, skipped)?;
-            input.check_backing()?;
+            input.check_backing_after(started, line.end)?;
             stopped = flow == Flow::Stop;
             Ok(flow)
         })?;

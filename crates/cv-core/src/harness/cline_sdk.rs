@@ -319,7 +319,6 @@ pub(crate) fn stream_with_options(path: &Path, id: &str, opts: &Demand, sink: &m
 
         let mut prompted = false;
         let resolver = crate::lazy::Resolver::new(Some(path.to_path_buf()));
-        let mut has_sources = false;
         for view in messages
             .map(JsonView::array)
             .transpose()?
@@ -345,23 +344,11 @@ pub(crate) fn stream_with_options(path: &Path, id: &str, opts: &Demand, sink: &m
                     false,
                 );
             }
-            let sourced = m.content.iter().any(|block| {
-                matches!(
-                    block,
-                    Block::ToolUse {
-                        input: crate::Json::Source(_),
-                        ..
-                    }
-                )
-            });
-            has_sources |= sourced;
-            if sourced {
-                source.check()?;
-            }
+            // A span demand checks its own source; the stream rechecks after a slow callback and
+            // at the end (`stream` module: who owns the source guarantee).
+            let started = std::time::Instant::now();
             let flow = sink.try_message(m)?;
-            if sourced {
-                source.check()?;
-            }
+            source.check_after(started)?;
             if flow == Flow::Stop {
                 break;
             }
@@ -369,9 +356,7 @@ pub(crate) fn stream_with_options(path: &Path, id: &str, opts: &Demand, sink: &m
         if s.updated_at.is_none() {
             s.updated_at = mtime(path).or(s.created_at);
         }
-        if has_sources {
-            source.check()?;
-        }
+        source.check()?;
         Ok(s)
     })
 }

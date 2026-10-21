@@ -183,7 +183,6 @@ impl Adapter for Continue {
                 }
                 sink.meta(&s);
                 let mut answered = std::collections::HashSet::<String>::new();
-                let mut has_sources = false;
                 for item in history.into_iter().flatten().flatten() {
                     let Some(item) = item? else { continue };
                     let reply_id = record::reply_id(item)?;
@@ -200,15 +199,11 @@ impl Adapter for Continue {
                                 s.system_prompt = Some(text);
                             }
                         }
-                        let sourced = record::has_sources(&message);
-                        has_sources |= sourced;
-                        if sourced {
-                            source.check()?;
-                        }
+                        // A span demand checks its own source; the stream rechecks after a slow callback and
+                        // at the end (`stream` module: who owns the source guarantee).
+                        let started = std::time::Instant::now();
                         let flow = sink.try_message(message)?;
-                        if sourced {
-                            source.check()?;
-                        }
+                        source.check_after(started)?;
                         if flow == Flow::Stop {
                             break;
                         }
@@ -219,14 +214,15 @@ impl Adapter for Continue {
                                 answered.insert(tool_use_id.clone());
                             }
                         }
-                        if sink.try_message(results)? == Flow::Stop {
+                        let started = std::time::Instant::now();
+                        let flow = sink.try_message(results)?;
+                        source.check_after(started)?;
+                        if flow == Flow::Stop {
                             break;
                         }
                     }
                 }
-                if has_sources {
-                    source.check()?;
-                }
+                source.check()?;
                 Ok(())
             });
             if let Err(error) = result {

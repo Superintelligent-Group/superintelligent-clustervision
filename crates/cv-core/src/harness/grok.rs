@@ -433,6 +433,7 @@ fn stream_history_at(
             }
             return Ok(Flow::Continue);
         }
+        let started = std::time::Instant::now();
         if let Some(mut p) = pending.take() {
             if m.role == Role::Assistant {
                 p.content.append(&mut m.content);
@@ -442,14 +443,16 @@ fn stream_history_at(
                     stopped = true;
                     return Ok(Flow::Stop);
                 }
-                read.check_backing()?;
+                // A slow flush is checked before the current record is delivered.
+                read.check_backing_if_slow(started)?;
             }
         }
         let flow = sink.message(m);
         stopped = flow == Flow::Stop;
         // Reasoning at EOF is provisional: only a finished record with no held reasoning can
         // finalize the emitted prefix. AffordanceSink also excludes unresolved synchronous spawns.
-        if !stopped && line.complete && sink.wants_checkpoint(line.end) {
+        let checkpointed = !stopped && line.complete && sink.wants_checkpoint(line.end);
+        if checkpointed {
             #[derive(serde::Serialize)]
             struct State<'a> {
                 wire: &'a Path,
@@ -459,9 +462,11 @@ fn stream_history_at(
             checkpoint.put(crate::stream::ADAPTER_LAYER, &State { wire, skipped });
             sink.checkpoint(&mut checkpoint);
         }
-        if !stopped {
-            // Record decoding is finished; guard the callback group before mapped iteration.
+        if checkpointed {
             read.check_backing()?;
+        } else if !stopped {
+            // Record decoding is finished; guard a slow callback group before mapped iteration.
+            read.check_backing_after(started, line.end)?;
         }
         Ok(flow)
     })?;
@@ -986,6 +991,9 @@ mod tests {
                         _ => return,
                     }
                     self.changed = true;
+                    // A callback that changed the file is a slow one by construction (the stream
+                    // module's source-guarantee policy): the reader checks right after it.
+                    std::thread::sleep(super::jsonl::Read::SLOW_CALLBACK * 10);
                 }
             }
         }

@@ -34,14 +34,13 @@ record that published a source descriptor and at completion; the identity is
 (`FileId::admits`: same inode, at least as long, sampled prefix unchanged), with the trailing
 partial line held back. Every span a reader hands out resolves through one checked resolver in
 `lazy`, so a replaced or shrunk file fails the first content read instead of returning the
-replacement's bytes. Claude checks the opened descriptor after each record's message/checkpoint
-callback group before mapped iteration resumes. Codex checks its message, metadata and checkpoint
-callbacks, including held EOF output. Grok guards pending/current output and checkpoint groups
-before advancing the framer, and rechecks held reasoning after EOF delivery. Kimi guards each
-message/checkpoint boundary and validates final pending output against its own segment, plus
-admitted wire enrichment. Completion rechecks the pathname. These guards reject
-synchronous callback truncation; they do not make mappings immutable snapshots against arbitrary
-concurrent external writes or truncation.
+replacement's bytes. Every reader follows the `stream` module's ownership rule: the descriptor
+is checked after a slow callback (`SLOW_CALLBACK`), once per window of mapped input, at a
+checkpoint and at EOF; a source other than the current file (Kimi's older segment, its wire
+enrichment) is checked against its own capture the same way. Completion rechecks the pathname.
+A slow callback that truncates the file is rejected before the mapping is touched again; a fast
+one, and any concurrent external write or truncation, can still fault a mapped read: mappings
+are not immutable snapshots.
 
 **Heap budgets by construction.** Materialization follows demand, while validation can still
 traverse unselected bytes. A reducer retains the fields it reads; a giant line is never copied on positioned builds; spans and source arguments

@@ -17,6 +17,7 @@ pub(super) fn reply_id(item: JsonView<'_>) -> Result<Option<String>> {
     message.string("toolCallId")
 }
 
+#[cfg(test)]
 pub(super) fn has_sources(message: &Message) -> bool {
     message.content.iter().any(|block| {
         matches!(
