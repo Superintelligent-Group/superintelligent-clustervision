@@ -398,7 +398,8 @@ fn lanes_tasks_join_by_exported_endpoint_then_description() {
         let tasks: Vec<serde_json::Value> = serde_json::from_str(&out).unwrap();
         let matches: Vec<_> = tasks.iter().filter(|task| task["title"] == title).collect();
         assert_eq!(matches.len(), 1, "one newly opened task with title {title:?}");
-        matches[0]["id"].as_str().expect("task id").to_owned()
+        // Task projections use `task_id`; the lane's joined task row uses `id`.
+        matches[0]["task_id"].as_str().expect("task id").to_owned()
     };
     let a = open("A: the first lane's task", "lane:lane-a");
     w.cv_ok(&[
