@@ -438,6 +438,8 @@ fn sweep_all(dir: &Path, rebuild: bool, subagents: bool) -> Result<(Swept, Vec<c
         (early, refs)
     });
     let early = early?;
+    // An early rebuild already cleared the index; clearing again would discard its commits.
+    // With no early decodes, the full sweep still owns the rebuild clear.
     let mut swept = sweep_refs(dir, &refs, rebuild && early.is_none(), subagents)?;
     if let Some(early) = early {
         // Early sessions are fresh to the full plan; count them where they were read. Their
@@ -457,6 +459,8 @@ fn sweep_all(dir: &Path, rebuild: bool, subagents: bool) -> Result<(Swept, Vec<c
 /// the full plan finds them fresh. A second copy of an id is left to the full plan, which picks
 /// the preferred copy (rewriting the early one's docs and events if it was not). `None` when
 /// discovery decoded nothing, which opens no writer.
+/// This early plan is provisional: the full sweep always follows and rechecks index metadata.
+/// Unlike its terminal cheap-skip path, this phase needs no separate meta.json recheck.
 fn sweep_decoded(dir: &Path, rebuild: bool, decoded: cv_core::codex_handoff::Receiver) -> Result<Option<Ran>> {
     let Some(first) = decoded.recv() else {
         return Ok(None);
@@ -1069,6 +1073,8 @@ impl PlanState {
             && metadata.get(&r.id) == Some(&DiscoveryMetadata::new(r, prov));
         let events = event_sync.needs_ingest(r, &source, prov, probe);
         // Unchanged on every axis → skip entirely (no re-parse beyond the metadata scan).
+        // Folded subagents have no independent catalog affordance row; their FTS/event
+        // freshness suffices, while top-level sessions also need certified counts.
         if fts_fresh
             && !events
             && (prov.parent_id.is_some() || affordances.counts_with_probe(r, &source, probe).is_some())
@@ -2011,6 +2017,8 @@ impl cv_core::MessageSink for ChunkSink<'_> {
     fn meta(&mut self, s: &cv_core::Session) {
         self.meta_title = s.title.clone();
         self.meta_received = true;
+        // Keep discovery cwd (the indexed filter identity) when present; parsed title above
+        // is authoritative for display, with title() supplying its first-prompt fallback.
         if self.cwd.is_none() {
             self.cwd = s.cwd.as_ref().map(|p| p.display().to_string());
         }
