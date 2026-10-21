@@ -1150,3 +1150,22 @@ fn a_result_for_no_open_call_ends_the_copy() {
     // `t3` is never answered, in the source either.
     assert_eq!((res.closed_tool_calls, res.open_tool_calls), (1, 1));
 }
+
+/// An empty line is blank: copied verbatim, never an error.
+#[test]
+fn an_empty_line_is_copied_like_any_blank_one() {
+    let world = crate::test_world("rewind");
+    let dir = world.proj.clone();
+    let src = dir.join(format!("{SID}.jsonl"));
+    write_jsonl(
+        &src,
+        &[
+            rec("user", "u0", None, text("user", "go")),
+            rec("assistant", "a0", Some("u0"), text("assistant", "done")),
+        ],
+    );
+    let body = std::fs::read_to_string(&src).unwrap().replacen('\n', "\n\n", 1);
+    std::fs::write(&src, body).unwrap();
+    let res = rewind_session(&sref(&src, SID), &opts(CutAt::End, &dir.join("out"))).unwrap();
+    assert_eq!(std::fs::read_to_string(res.new_path).unwrap().lines().nth(1), Some(""));
+}

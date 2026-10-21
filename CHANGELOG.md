@@ -100,6 +100,8 @@
 **Reshaping.**
 - Hermes and OpenCode exports reject unreadable sources before creating output directories or databases, while retaining transaction publication guards.
 - `cv prune`, `cv rewind` and agent adoption refuse a source line that is not one JSON record instead of copying it; blank lines pass.
+- `cv prune`, `cv rewind` and agent adoption copy an empty line as blank instead of failing with "JSON range is empty".
+- `cv prune` refuses an empty or blank-only transcript; it published a one-newline session. Minted prune and rewind ids are UUID v7.
 - `cv prune`, `cv rewind`, `cv adopt` and Claude ports verify the staged session resumes before publishing; a break its source lacks refuses and leaves nothing.
 - `cv rewind` copies to the end of the file (`cost-state` and other tail records were dropped).
 - `cv rewind` at a cut keeps the cut response's other parallel calls and stops at a result for no open call, so no answered call is left open.

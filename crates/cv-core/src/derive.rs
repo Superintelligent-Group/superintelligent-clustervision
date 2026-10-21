@@ -60,13 +60,17 @@ impl Select {
                 crate::restamp::source_id_spans(view, identity.session_keys)?,
             ))
         };
-        let projected = if syntax {
-            source.read_range_syntax(range.offset, range.len, read)
-        } else {
-            source.read_range_value(range.offset, range.len, read)
-        };
-        let (record, ids) = match projected {
-            Ok((record, ids)) => (Some(record), ids),
+        // An empty line is blank like any JSON-whitespace range (a JSON range cannot be empty).
+        let projected = (range.len != 0).then(|| {
+            if syntax {
+                source.read_range_syntax(range.offset, range.len, read)
+            } else {
+                source.read_range_value(range.offset, range.len, read)
+            }
+        });
+        let (record, ids) = match projected.transpose() {
+            Ok(Some((record, ids))) => (Some(record), ids),
+            Ok(None) => (None, Vec::new()),
             Err(error) if error.is::<crate::json::InvalidJson>() => {
                 if ranges::trim(file, range)?.len != 0 {
                     return Err(error.context(Malformed::at(range)));

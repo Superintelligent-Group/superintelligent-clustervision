@@ -457,10 +457,14 @@ fn prune_session_after_stage(
     )? {
         let (range, _) = record?;
         line_no += 1;
-        let facts = match source.read_range_value(range.offset, range.len, |view| {
-            decide(view, range, opts, &mut tool_names)
-        }) {
-            Ok(facts) => Some(facts),
+        // An empty line is blank like any JSON-whitespace row (a JSON range cannot be empty).
+        let read = (range.len != 0).then(|| {
+            source.read_range_value(range.offset, range.len, |view| {
+                decide(view, range, opts, &mut tool_names)
+            })
+        });
+        let facts = match read.transpose() {
+            Ok(facts) => facts,
             Err(e) if e.is::<crate::json::InvalidJson>() => {
                 // Value-compatible validation rejected this row. Invalid UTF-8 is fatal first,
                 // under its own name; then only a blank row (JSON whitespace) passes, copied
@@ -503,10 +507,10 @@ fn prune_session_after_stage(
             break;
         }
     }
-    // split on an empty trimmed file historically produces one empty line.
+    // An empty or blank-only source has nothing to keep: it once published a one-newline session
+    // (an empty file) or failed on an empty JSON range (blank lines).
     if lines.is_empty() {
-        lines.push(Range { offset: 0, len: 0 });
-        parsed.push(None);
+        bail!("{} holds no records; nothing to prune", src_path.display());
     }
     source.check()?;
 
@@ -2223,8 +2227,9 @@ use retrieve::retrieve_captured;
 
 // ── helpers ───────────────────────────────────────────────────────────────
 
+/// A new session id: v7 (time-ordered), as cv mints every other id.
 pub(crate) fn new_uuid() -> String {
-    uuid::Uuid::new_v4().to_string()
+    uuid::Uuid::now_v7().to_string()
 }
 
 fn str_tokens(s: &str) -> u64 {

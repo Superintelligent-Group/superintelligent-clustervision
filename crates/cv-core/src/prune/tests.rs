@@ -2720,3 +2720,40 @@ fn a_staged_prune_that_breaks_resume_is_refused_and_leaves_nothing() {
     // Untampered, the same prune publishes.
     prune_session(crate::Harness::Claude, &src, &opts).unwrap();
 }
+
+/// An empty or blank-only source holds nothing to prune: refused, nothing published.
+#[test]
+fn an_empty_source_is_refused_without_publication() {
+    for body in ["", "\n \n\t\n"] {
+        let world = crate::test_world("prune");
+        let dir = world.proj.clone();
+        let src = dir.join("11111111-1111-4111-8111-111111111111.jsonl");
+        std::fs::write(&src, body).unwrap();
+        let opts = PruneOptions {
+            new_id: Some("aaaa".into()),
+            ..Default::default()
+        };
+        let err = prune_session(crate::Harness::Claude, &src, &opts).unwrap_err();
+        assert!(err.to_string().contains("holds no records; nothing to prune"), "{err}");
+        assert!(!dir.join("aaaa.jsonl").exists());
+    }
+    // An empty line between records is copied like any blank one.
+    let world = crate::test_world("prune");
+    let dir = world.proj.clone();
+    let src = fixture(&dir, "small");
+    let body = std::fs::read_to_string(&src).unwrap().replacen('\n', "\n\n", 1);
+    std::fs::write(&src, &body).unwrap();
+    let opts = PruneOptions {
+        new_id: Some("aaaa".into()),
+        ..Default::default()
+    };
+    let r = prune_session(crate::Harness::Claude, &src, &opts).unwrap();
+    assert_eq!(std::fs::read_to_string(r.new_path).unwrap().lines().nth(1), Some(""));
+}
+
+/// A minted session id is time-ordered (v7), like every other id cv mints.
+#[test]
+fn a_minted_session_id_is_v7() {
+    let id = uuid::Uuid::parse_str(&new_uuid()).unwrap();
+    assert_eq!(id.get_version_num(), 7);
+}
