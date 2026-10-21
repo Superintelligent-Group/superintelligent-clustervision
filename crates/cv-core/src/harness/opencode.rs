@@ -63,7 +63,7 @@ pub use emit::emit;
 
 use super::Adapter;
 use crate::ir::*;
-use crate::source::{is_sqlite_source, Dependencies, Probe};
+use crate::source::{Dependencies, Probe};
 use crate::stream::{Demand, Flow, MessageSink};
 use anyhow::{Context, Result};
 use serde_json::{json, Map, Value};
@@ -272,8 +272,17 @@ impl Adapter for OpenCode {
         out
     }
 
+    /// OpenCode accepts a database under any filename (`OPENCODE_DB`), so a name that is not a
+    /// SQLite one is sniffed; an unreadable one is unknown.
+    fn sqlite_source(&self, r: &SessionRef) -> Option<bool> {
+        if crate::source::has_sqlite_extension(&r.path) {
+            return Some(true);
+        }
+        crate::source::has_sqlite_header(&r.path)
+    }
+
     fn dependencies(&self, r: &SessionRef, probe: &mut Probe, deps: &mut Dependencies) -> Option<()> {
-        if is_sqlite_source(r)? {
+        if self.sqlite_source(r)? {
             return Some(());
         }
         let storage = r

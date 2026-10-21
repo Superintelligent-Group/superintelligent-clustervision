@@ -19,29 +19,18 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-/// Cursor Agent CLI/ACP metadata participates in both catalog discovery and consumer freshness.
-/// Include the absent path: creating it can supply a previously missing cwd or title.
-pub(crate) fn cursor_cli_metadata(r: &SessionRef) -> Option<PathBuf> {
-    (r.harness == Harness::Cursor && r.id.starts_with("cli:"))
-        .then(|| r.path.parent().map(|parent| parent.join("meta.json")))
-        .flatten()
-}
-
-/// Native SQLite identities retain sidecars even when a harness permits an arbitrary filename.
-/// Unreadable arbitrary OpenCode sources are unknown, so consumers cannot certify freshness.
-pub(crate) fn is_sqlite_source(r: &SessionRef) -> Option<bool> {
-    if r.path
-        .extension()
+/// A native SQLite file by its name: what [`crate::harness::Adapter::sqlite_source`] answers
+/// unless the harness permits a database under an arbitrary filename.
+pub(crate) fn has_sqlite_extension(path: &Path) -> bool {
+    path.extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| matches!(e, "db" | "sqlite" | "sqlite3" | "vscdb"))
-    {
-        return Some(true);
-    }
-    if r.harness != Harness::OpenCode {
-        return Some(false);
-    }
+}
+
+/// Whether `path` starts with the SQLite header: `None` when it cannot be read.
+pub(crate) fn has_sqlite_header(path: &Path) -> Option<bool> {
     use std::io::Read;
-    let mut file = std::fs::File::open(&r.path).ok()?;
+    let mut file = std::fs::File::open(path).ok()?;
     let mut header = [0; 16];
     match file.read_exact(&mut header) {
         Ok(()) => Some(&header == b"SQLite format 3\0"),
@@ -731,11 +720,24 @@ impl Probe {
     // Publication already has typed captured records; collect fresh entries without a second
     // serialized stamp and parser allocation. The same inventory serves serialized checkpoints.
     fn dependency_entries(&mut self, r: &SessionRef, primary: &Path) -> Option<Vec<Entry>> {
+        // Native SQLite identities retain sidecars; an absent metadata file is still recorded,
+        // because creating it can supply a previously missing cwd or title.
+        let (sqlite, metadata) = {
+            let adapter = self
+                .adapters
+                .entry(r.harness)
+                .or_insert_with(|| crate::harness::for_harness(r.harness));
+            let adapter = adapter.as_ref();
+            (
+                adapter.map_or_else(|| Some(has_sqlite_extension(&r.path)), |a| a.sqlite_source(r)),
+                adapter.and_then(|a| a.metadata_file(r)),
+            )
+        };
         let mut deps = Dependencies::default();
-        if is_sqlite_source(r)? {
+        if sqlite? {
             deps.files.extend(sqlite_sidecars(&r.path));
         }
-        deps.files.extend(cursor_cli_metadata(r));
+        deps.files.extend(metadata);
         // The adapter is taken out of the registry while it probes through `self`.
         let adapter = self
             .adapters
@@ -1096,7 +1098,8 @@ mod tests {
         let path = w.base.join("custom-store");
         std::fs::write(&path, b"SQLite format 3\0remaining database bytes").unwrap();
         let r = SessionRef::new("session", Harness::OpenCode, &path);
-        assert_eq!(is_sqlite_source(&r), Some(true));
+        let opencode = crate::harness::rootless(Harness::OpenCode).unwrap();
+        assert_eq!(opencode.sqlite_source(&r), Some(true));
         let before = Probe::default().snapshot(&r);
         assert!(unchanged(&r, &before));
         for sidecar in sqlite_sidecars(&path) {
@@ -1106,12 +1109,12 @@ mod tests {
             assert!(unchanged(&r, &before));
         }
         let missing = SessionRef::new("missing", Harness::OpenCode, w.base.join("missing"));
-        assert_eq!(is_sqlite_source(&missing), None);
+        assert_eq!(opencode.sqlite_source(&missing), None);
         assert!(Probe::default().snapshot(&missing).stamp.is_none());
         let legacy = w.base.join("ses_old.json");
         std::fs::write(&legacy, "{}").unwrap();
         assert_eq!(
-            is_sqlite_source(&SessionRef::new("old", Harness::OpenCode, legacy)),
+            opencode.sqlite_source(&SessionRef::new("old", Harness::OpenCode, legacy)),
             Some(false)
         );
     }
@@ -1399,7 +1402,8 @@ mod tests {
         std::fs::write(&metadata, r#"{"title":"rewritten title"}"#).unwrap();
         assert!(!super::unchanged(&r, &present));
         let ide = crate::SessionRef::new("composer", crate::Harness::Cursor, &path);
-        assert!(super::cursor_cli_metadata(&ide).is_none());
+        let cursor = crate::harness::rootless(crate::Harness::Cursor).unwrap();
+        assert!(cursor.metadata_file(&ide).is_none());
     }
 
     #[test]

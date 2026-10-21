@@ -545,6 +545,19 @@ pub trait Adapter: Send + Sync {
         None
     }
 
+    /// Whether `r`'s source is a SQLite database, whose `-wal`/`-journal` sidecars then guard it;
+    /// `None` when that cannot be determined (no consumer certifies it). Default: by its extension.
+    fn sqlite_source(&self, r: &SessionRef) -> Option<bool> {
+        Some(crate::source::has_sqlite_extension(&r.path))
+    }
+
+    /// A metadata file beside `r`'s store that, once written, can supply a cwd or title the store
+    /// lacks: watched by the catalog and recorded as a read dependency even while absent.
+    /// Default: none.
+    fn metadata_file(&self, _r: &SessionRef) -> Option<PathBuf> {
+        None
+    }
+
     /// How a change to `r` shows on disk, so the catalog's freshness probe knows what to watch.
     /// Default: as a directory change ([`WatchPolicy::Tree`]).
     fn watch_policy(&self, _r: &SessionRef) -> WatchPolicy {

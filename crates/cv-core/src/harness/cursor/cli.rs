@@ -9,6 +9,15 @@ use crate::lazy::Text;
 use crate::stream::Tier;
 use std::io::Read;
 
+/// Cursor Agent CLI/ACP metadata (`meta.json` beside a `cli:` session's store) participates in
+/// both catalog discovery and consumer freshness. The path is returned even while absent:
+/// creating it can supply a previously missing cwd or title.
+pub(super) fn metadata(r: &SessionRef) -> Option<PathBuf> {
+    (r.harness == Harness::Cursor && r.id.starts_with("cli:"))
+        .then(|| r.path.parent().map(|parent| parent.join("meta.json")))
+        .flatten()
+}
+
 pub(super) fn roots(home: &Path) -> Vec<PathBuf> {
     ["chats", "acp-sessions"]
         .into_iter()
@@ -123,7 +132,7 @@ fn read_with_reads(
     let mut wal = r.path.as_os_str().to_os_string();
     wal.push("-wal");
     reads.record(&PathBuf::from(wal));
-    if let Some(meta) = crate::source::cursor_cli_metadata(r) {
+    if let Some(meta) = metadata(r) {
         reads.record(&meta);
     }
     let cells = Cells::new(conn, &r.path, &reads, "blobs")?;

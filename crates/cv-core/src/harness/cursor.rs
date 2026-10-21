@@ -141,6 +141,10 @@ impl Adapter for Cursor {
         Harness::Cursor
     }
 
+    fn metadata_file(&self, r: &SessionRef) -> Option<PathBuf> {
+        cli::metadata(r)
+    }
+
     /// `Cursor/User`: the dir under which both the global `state.vscdb` and every
     /// `workspaceStorage/<hash>/state.vscdb` live. The db files are catalog file-watches.
     fn roots(&self) -> Vec<PathBuf> {

@@ -689,7 +689,7 @@ mod imp {
         let mut paths: BTreeSet<PathBuf> = roots.iter().cloned().collect();
         let mut optional_files = BTreeSet::new();
         for r in refs {
-            if let Some(metadata) = crate::source::cursor_cli_metadata(r) {
+            if let Some(metadata) = adapter.metadata_file(r) {
                 optional_files.insert(metadata.clone());
                 paths.insert(metadata);
             }
@@ -697,7 +697,7 @@ mod imp {
             if sqlite_watch {
                 paths.insert(r.path.clone());
             }
-            if sqlite_watch && crate::source::is_sqlite_source(r).unwrap_or(true) {
+            if sqlite_watch && adapter.sqlite_source(r).unwrap_or(true) {
                 let mut wal = r.path.as_os_str().to_os_string();
                 wal.push("-wal");
                 let wal = PathBuf::from(wal);
