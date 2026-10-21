@@ -1875,7 +1875,7 @@ mod tests {
         let path = world.base.join("gone.txt");
         let span = crate::Text::Span(crate::Span {
             source: None,
-            offset: 0,
+            offset: 1,
             len: 4,
             escaped: false,
         });
@@ -1887,7 +1887,7 @@ mod tests {
         assert!(session.materialize().is_err());
         assert!(matches!(&session.messages[0].content[0], Block::Text { text } if text == &span));
 
-        std::fs::write(&path, "text").unwrap();
+        std::fs::write(&path, "\"text\"").unwrap();
         let reads = session.source_reads();
         session.materialize().unwrap();
         assert!(reads.fresh(&mut crate::source::Probe::default()));
@@ -1954,18 +1954,19 @@ mod tests {
 
         let dir = cv_testkit::temp_dir("resolved-token-estimate");
         let source = dir.join("body");
+        // Spans cover valid JSON string bodies; malformed ones are refused, never estimated.
         for raw in [
             "hello π".as_bytes().to_vec(),
             br"\n\t\u03c0\ud83d\ude42".repeat(20_000),
-            [br"\u03c0".repeat(20_000), br"\q".to_vec()].concat(),
-            [b"abc".repeat(30_000), vec![0xff, 0xe2]].concat(),
+            br"\u03c0".repeat(20_000),
+            b"abc".repeat(30_000),
         ] {
-            std::fs::write(&source, &raw).unwrap();
+            std::fs::write(&source, [&b"\""[..], &raw, b"\""].concat()).unwrap();
             for escaped in [false, true] {
                 let resolver = Resolver::new(None);
                 let text = Text::Span(Span {
                     source: Some(source.clone()),
-                    offset: 0,
+                    offset: 1,
                     len: raw.len() as u64,
                     escaped,
                 });
@@ -1999,7 +2000,7 @@ mod tests {
             }
         }
         let resolver = Resolver::new(Some(source));
-        for (offset, len) in [(u64::MAX, 1), (0, u64::MAX)] {
+        for (offset, len) in [(u64::MAX, 1), (1, u64::MAX - 2)] {
             let block = Block::Text {
                 text: Text::Span(Span {
                     source: None,

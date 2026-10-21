@@ -117,10 +117,7 @@ fn non_blank(view: Option<JsonView<'_>>) -> Result<bool> {
 /// depends on `sessions.json` and sibling transcripts (prompt origin, lineage), and only a source
 /// descriptor carries those dependencies to the reader that resolves it. None for a nonstring.
 fn text_of(view: JsonView<'_>, spans: bool) -> Result<Option<Text>> {
-    match view.lazy_text(spans)? {
-        Some(Text::Span(_)) => view.source_text(),
-        text => Ok(text),
-    }
+    view.lazy_text(spans)
 }
 /// [`text_of`] a string field; "" for a missing or nonstring one.
 fn lazy(view: Option<JsonView<'_>>, spans: bool) -> Result<Text> {

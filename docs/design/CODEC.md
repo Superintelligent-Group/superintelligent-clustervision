@@ -24,8 +24,9 @@ offsets }`, tiers ordered Discovery < Lean < Usage < Facts < Rich < Complete, th
 narrowing Rich to Facts per message (`Demand::for_sink`); an adapter's own codec demand is built
 from it once per read. Content goes through the family's block codec (`wire::anthropic::
 block_from_view_with`) with the shared text rule `JsonView::lazy_text(spans)`: decoded length
-over `INLINE_MAX` stays in the source: primary transcript text uses `Span` in both builds;
-independent files, cells and decoded backing use checked `Text::Source`. Large tool arguments
+over `INLINE_MAX` stays in the source as checked `Text::Source` (a `JsonRange` of the read's own
+capture), in the primary transcript as in independent files, cells and decoded backing; `Span`
+is only a serialized wire form, resolved through the same checked range. Large tool arguments
 become `Json::Source`. Lean, facts, usage, rich and
 complete are which fields get resolved, never which code runs. Discovery, fork heads and
 prefix counts are demands on the same reader.
@@ -44,9 +45,9 @@ The reader rechecks source identity after a record that published a source descr
 completion; the identity is
 `source::FileId`, and a `.jsonl` that grew under the read is admitted by content
 (`FileId::admits`: same inode, at least as long, sampled prefix unchanged), with the trailing
-partial line held back. Every span a reader hands out resolves through one checked resolver in
-`lazy`, so a replaced or shrunk file fails the first content read instead of returning the
-replacement's bytes. Every reader follows the `stream` module's ownership rule: the descriptor
+partial line held back. Every lazy text a reader hands out resolves through its checked capture,
+so a replaced or shrunk file fails the first content read instead of returning the replacement's
+bytes. Every reader follows the `stream` module's ownership rule: the descriptor
 is checked after a slow callback (`SLOW_CALLBACK`), once per window of mapped input, at a
 checkpoint and at EOF; a source other than the current file (Kimi's older segment, its wire
 enrichment) is checked against its own capture the same way. Completion rechecks the pathname.

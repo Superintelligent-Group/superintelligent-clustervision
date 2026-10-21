@@ -155,29 +155,6 @@ pub(super) fn content(
             None => {}
         }
     }
-    // A mapped legacy record's spans name the `.jsonl`; retain them as checked source values so
-    // collected windows remain usable without a primary-path resolver.
-    if let Some((source, _)) = out {
-        for block in &mut d.blocks {
-            let text = match block {
-                Block::Text { text } | Block::Thinking { text, .. } | Block::ToolResult { content: text, .. } => text,
-                _ => continue,
-            };
-            if let Text::Span(span) = text {
-                // Text spans exclude JSON quotes; a source JSON value must include both.
-                // Reattach the opening byte and two quote bytes before validating the range.
-                let offset = span
-                    .offset
-                    .checked_sub(1)
-                    .context("Goose string span has no opening quote")?;
-                let len = span.len.checked_add(2).context("Goose quoted string span overflows")?;
-                let crate::json::Json::Source(range) = source.validated_range(offset, len)? else {
-                    anyhow::bail!("validated Goose string range is not source-backed");
-                };
-                *text = Text::Source(crate::lazy::SourceText::new(range));
-            }
-        }
-    }
     Ok(d)
 }
 

@@ -873,10 +873,6 @@ impl<'a> RangeSource<'a> {
         }
         Ok(Some(entries))
     }
-    /// Whether a string's body holds a backslash: the span rule's `escaped`.
-    pub fn escaped(&self, string: Range) -> Result<bool> {
-        self.scan(string.body()?, 0, |bytes| memchr::memchr(b'\\', bytes).is_some())
-    }
     /// Conservative printable-ASCII presence without decoding a retained JSON string.
     /// False proves absence; escaped backslashes may create harmless false positives.
     pub fn string_may_contain_ascii(&self, string: Range, byte: u8) -> Result<bool> {
@@ -1172,7 +1168,6 @@ mod tests {
             assert_eq!(fields[0], fields[1]);
             assert!(fields[2].is_none());
             assert_eq!(source.materialize::<u64>(fields[0].unwrap()).unwrap(), 2);
-            assert!(source.escaped(fields[3].unwrap()).unwrap());
             let mut decoded = String::new();
             source
                 .string_chunks(fields[3].unwrap(), &mut |part| {

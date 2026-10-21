@@ -1158,10 +1158,6 @@ impl Reader<'_> {
                         let mut text = d.text(o)?.unwrap_or_default();
                         let is_error = prefix == ERROR_PREFIX;
                         if is_error {
-                            // An escaped span cannot skip a decoded prefix; checked source text can.
-                            if matches!(&text, Text::Span(span) if span.escaped) {
-                                text = o.source_text()?.unwrap_or_default();
-                            }
                             text = text.with_skipped_prefix(ERROR_PREFIX.len())?;
                         }
                         (text, Vec::new(), is_error)

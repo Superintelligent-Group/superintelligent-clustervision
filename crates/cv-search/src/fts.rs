@@ -3474,8 +3474,11 @@ mod tests {
         let dir = tmpdir();
         let path = dir.join("text");
         let text = "zqtextmutation ".repeat(2 * CHUNK_BYTES);
-        let mut source = " ".repeat(8192);
+        // A span covers a JSON string's body.
+        let mut source = " ".repeat(8191);
+        source.push('"');
         source.push_str(&text);
+        source.push('"');
         std::fs::write(&path, &source).unwrap();
         let f = fields_of(&build_schema()).unwrap();
         let r = cv_core::SessionRef::new("text", cv_core::Harness::Claude, dir.join("primary.jsonl"));
@@ -3507,39 +3510,6 @@ mod tests {
         assert!(sink.finish().is_err());
         drop(sink);
         assert!(emitted > 0);
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn demanded_text_malformed_escape_fallback_matches_existing_body_and_bounds() {
-        let dir = tmpdir();
-        let path = dir.join("text");
-        let raw = "before\\q\\uD800after ".repeat(CHUNK_BYTES);
-        std::fs::write(&path, &raw).unwrap();
-        let span = cv_core::Span {
-            source: Some(path),
-            offset: 0,
-            len: raw.len() as u64,
-            escaped: true,
-        };
-        let resolver = cv_core::Resolver::new(None);
-        let expected = resolver.try_resolve(&span).unwrap().into_owned();
-        let f = fields_of(&build_schema()).unwrap();
-        let r = cv_core::SessionRef::new("fallback", cv_core::Harness::Claude, dir.join("primary.jsonl"));
-        let mut bodies = Vec::new();
-        let mut out = |doc: TantivyDocument| -> Result<()> {
-            if let Some(body) = doc.get_first(f.body).and_then(|v| v.as_str()) {
-                assert!(body.len() <= 2 * CHUNK_BYTES);
-                bodies.push(body.to_owned());
-            }
-            Ok(())
-        };
-        let mut sink = ChunkSink::new(&mut out, &f, &r, 1, 1, Default::default());
-        sink.append_text(&resolver, &cv_core::Text::Span(span));
-        assert!(sink.buf.capacity() <= 2 * CHUNK_BYTES);
-        sink.finish().unwrap();
-        drop(sink);
-        assert_eq!(bodies.concat(), expected);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

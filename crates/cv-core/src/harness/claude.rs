@@ -2744,7 +2744,7 @@ mod tests {
                         let Block::Text { text } = &sink.held.as_ref().unwrap().content[0] else {
                             panic!("first text")
                         };
-                        assert_eq!(matches!(text, Text::Span(_)), spans);
+                        assert_eq!(matches!(text, Text::Source(_)), spans);
                         if let Text::Inline(text) = text {
                             assert_eq!(text, &"owned ".repeat(1000));
                         }

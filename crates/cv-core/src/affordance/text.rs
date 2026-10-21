@@ -180,25 +180,6 @@ pub(super) fn starts_with(text: &Text, resolver: &Resolver, wanted: &str) -> Res
     if let Text::Inline(text) = text {
         return Ok(text.trim_start().starts_with(wanted));
     }
-    if let Text::Span(span) = text {
-        let prefix = text.try_resolve_prefix(resolver, 256)?;
-        if span.len <= 256 {
-            return Ok(prefix.trim_start().starts_with(wanted));
-        }
-        let decoded = prefix_decision(&prefix, wanted, span.escaped);
-        // Malformed escaped bodies fall back to their entire raw text. An early answer must
-        // agree with both interpretations, even if malformed data occurs beyond this prefix.
-        let raw = crate::lazy::Span {
-            escaped: false,
-            ..span.clone()
-        };
-        let raw_prefix = resolver.try_resolve_prefix(&raw, 256)?;
-        if let Some(answer) = decoded {
-            if prefix_decision(&raw_prefix, wanted, false) == Some(answer) {
-                return Ok(answer);
-            }
-        }
-    }
     let mut head = String::with_capacity(wanted.len());
     let mut remaining = wanted.chars().count();
     let mut started = false;
@@ -217,24 +198,6 @@ pub(super) fn starts_with(text: &Text, resolver: &Resolver, wanted: &str) -> Res
         remaining == 0
     })?;
     Ok(head.starts_with(wanted))
-}
-
-fn prefix_decision(prefix: &str, wanted: &str, escaped: bool) -> Option<bool> {
-    // A UTF-8 cut can produce a replacement character; a failed prefix unescape can expose
-    // backslashes. The text before that uncertainty can still prove an answer.
-    let uncertain = prefix
-        .find('\u{fffd}')
-        .into_iter()
-        .chain(escaped.then(|| prefix.find('\\')).flatten())
-        .min();
-    let known = prefix[..uncertain.unwrap_or(prefix.len())].trim_start();
-    if known.starts_with(wanted) {
-        Some(true)
-    } else if !wanted.starts_with(known) {
-        Some(false)
-    } else {
-        None
-    }
 }
 
 pub(super) fn contains(text: &Text, resolver: &Resolver, needle: &'static str) -> Result<bool> {
@@ -430,17 +393,14 @@ mod tests {
         for (i, body) in examples.iter().enumerate() {
             for escaped in [false, true] {
                 let path = dir.join(format!("{i}-{escaped}"));
-                let raw = if escaped {
-                    serde_json::to_string(body).unwrap()
-                } else {
-                    body.clone()
-                };
+                // A span covers a JSON string's body; `escaped` is only the body's own flag.
+                let raw = serde_json::to_string(body).unwrap();
                 std::fs::write(&path, &raw).unwrap();
                 let resolver = Resolver::new(Some(path));
                 let span = Text::Span(crate::lazy::Span {
                     source: None,
-                    offset: u64::from(escaped),
-                    len: raw.len() as u64 - 2 * u64::from(escaped),
+                    offset: 1,
+                    len: raw.len() as u64 - 2,
                     escaped,
                 });
                 let reduced = facts(&span, &resolver).unwrap();
@@ -464,46 +424,6 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
-    fn malformed_escaped_tail_uses_the_full_resolution_fallback_for_heads() {
-        let dir = std::env::temp_dir().join(format!("cv-affordance-malformed-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let examples = [
-            format!("\\n<task-notification>{}\\q", "x".repeat(70000)),
-            format!("\\n<task-notification>{}\\uD800", "x".repeat(70000)),
-            format!("\\nPermission to use Bash {} denied\\q", "x".repeat(70000)),
-            format!(
-                "\\nThe user rejected permission to use this specific tool call{}\\q",
-                "x".repeat(70000)
-            ),
-            format!("\\n<task-notification>{}", "x".repeat(70000)),
-        ];
-        for (i, raw) in examples.iter().enumerate() {
-            let path = dir.join(i.to_string());
-            std::fs::write(&path, raw).unwrap();
-            let resolver = Resolver::new(Some(path));
-            let span = Text::Span(crate::lazy::Span {
-                source: None,
-                offset: 0,
-                len: raw.len() as u64,
-                escaped: true,
-            });
-            let full = span.try_resolve(&resolver).unwrap();
-            let inline = Text::Inline(full.to_string());
-            assert_eq!(
-                starts_with(&span, &resolver, "<task-notification>").unwrap(),
-                full.trim_start().starts_with("<task-notification>")
-            );
-            for harness in [Harness::Claude, Harness::OpenCode] {
-                assert_eq!(
-                    denied(&span, &resolver, harness).unwrap(),
-                    denied(&inline, &resolver, harness).unwrap()
-                );
-            }
-        }
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
     fn unicode_whitespace_across_prefix_cap_keeps_the_late_ascii_head() {
         let dir = std::env::temp_dir().join(format!("cv-affordance-unicode-head-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -512,12 +432,12 @@ mod tests {
             "\u{2003}".repeat(10000)
         );
         let path = dir.join("body");
-        std::fs::write(&path, &full).unwrap();
+        std::fs::write(&path, format!("\"{full}\"")).unwrap();
         let resolver = Resolver::new(Some(path));
         for escaped in [false, true] {
             let span = Text::Span(crate::lazy::Span {
                 source: None,
-                offset: 0,
+                offset: 1,
                 len: full.len() as u64,
                 escaped,
             });

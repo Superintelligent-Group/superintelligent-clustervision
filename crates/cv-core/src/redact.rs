@@ -1405,14 +1405,14 @@ mod tests {
         let world = crate::test_world("redact-implicit-span");
         let path = world.base.join("body.txt");
         let secret = fixture("sk-", "testabcdefghijklmnopqrstuvwxyz");
-        std::fs::write(&path, &secret)?;
+        std::fs::write(&path, serde_json::to_string(&secret)?)?;
         let mut session = Session::new("implicit", crate::Harness::Claude);
         session.source_path = Some(path);
         let mut message = Message::new(crate::Role::User);
         message.content.push(Block::Text {
             text: crate::Text::Span(crate::lazy::Span {
                 source: None,
-                offset: 0,
+                offset: 1,
                 len: secret.len() as u64,
                 escaped: false,
             }),

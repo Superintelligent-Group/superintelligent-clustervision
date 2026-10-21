@@ -569,34 +569,34 @@ def token_stats(binary, root, env, mmap, baseline=None):
         bound(peaks, 2 * MIB, MIB // 4, f"token stats {harness} mmap={mmap}")
 
 
-def raw_body(path, repeats, malformed):
+def raw_body(path, repeats):
+    """A JSON string of `repeats` escaped newlines: a span covers its body, quotes excluded."""
     block_repeats = 16 << 10
     block = b"x\\n" * block_repeats
     with path.open("wb") as out:
+        out.write(b'"')
         blocks, tail = divmod(repeats, block_repeats)
         for _ in range(blocks):
             out.write(block)
         out.write(b"x\\n" * tail)
-        if malformed:
-            out.write(b"\\q")
+        out.write(b'"')
 
 
 def chunks(binary, root, env, mmap):
-    for malformed in (False, True):
-        peaks = []
-        for size in SIZES:
-            repeats = (size + 2) // 3
-            path = root / f"raw-{size}-{malformed}.txt"
-            raw_body(path, repeats, malformed)
-            raw_bytes = path.stat().st_size
-            row, peak = probe(binary, ["chunks", "gemini", "unused", path, "--span", f"0:{raw_bytes}", "--escaped", "--chunk-bytes", CHUNK_BYTES], env, mmap)
-            expected = raw_bytes if malformed else repeats * 2
-            assert row["detail"]["decoded_bytes"] == expected, "decoder dropped or duplicated bytes"
-            assert row["detail"]["largest_chunk_bytes"] <= CHUNK_BYTES + 3, "decoder output chunk is unbounded"
-            peaks.append(peak)
-            print(json.dumps({"case": f"chunks-{'mmap' if mmap else 'ranged-read'}-{'malformed-tail' if malformed else 'valid'}",
-                              "raw_bytes": raw_bytes, "decoded_bytes": expected, "peak_live_rust_bytes": peak}), flush=True)
-        bound(peaks, CHUNK_CEILING, CHUNK_GROWTH, f"chunks mmap={mmap} malformed={malformed}")
+    peaks = []
+    for size in SIZES:
+        repeats = (size + 2) // 3
+        path = root / f"raw-{size}.txt"
+        raw_body(path, repeats)
+        body_bytes = path.stat().st_size - 2
+        row, peak = probe(binary, ["chunks", "gemini", "unused", path, "--span", f"1:{body_bytes}", "--escaped", "--chunk-bytes", CHUNK_BYTES], env, mmap)
+        expected = repeats * 2
+        assert row["detail"]["decoded_bytes"] == expected, "decoder dropped or duplicated bytes"
+        assert row["detail"]["largest_chunk_bytes"] <= CHUNK_BYTES + 3, "decoder output chunk is unbounded"
+        peaks.append(peak)
+        print(json.dumps({"case": f"chunks-{'mmap' if mmap else 'ranged-read'}-valid",
+                          "raw_bytes": body_bytes, "decoded_bytes": expected, "peak_live_rust_bytes": peak}), flush=True)
+    bound(peaks, CHUNK_CEILING, CHUNK_GROWTH, f"chunks mmap={mmap}")
 
 
 def main():

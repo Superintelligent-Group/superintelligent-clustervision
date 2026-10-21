@@ -3,6 +3,7 @@ use super::*;
 use crate::json::JsonSource;
 use crate::source::{Probe, ReadSet};
 use crate::stream::{Flow, MessageSink};
+use anyhow::Context;
 use std::collections::HashMap;
 
 struct Collect {
@@ -128,7 +129,6 @@ pub(super) fn selected(
         sink.reads.fresh(&mut Probe::default()) && crate::source::unchanged_from(reference, &primary, &guard),
         "source changed during port preparation"
     );
-    let resolver = session.resolver();
     for message in &mut sink.messages {
         for block in &mut message.content {
             let Some(value) = text_mut(block) else { continue };
@@ -145,38 +145,17 @@ pub(super) fn selected(
                 .get(&path)
                 .ok_or_else(|| anyhow::anyhow!("uncaptured retained span source: {}", path.display()))?;
             source.check()?;
-            let mut literal_backslash = false;
-            if !span.escaped {
-                value.try_for_each_chunk(&resolver, 64 * 1024, |chunk| {
-                    literal_backslash |= chunk.contains('\\');
-                    Ok(())
-                })?;
-            }
-            let quoted = if !literal_backslash {
-                span.offset
-                    .checked_sub(1)
-                    .zip(span.len.checked_add(2))
-                    // Bounded by the capture just checked, not by a fresh stat of the live path.
-                    .filter(|(offset, len)| offset.checked_add(*len).is_some_and(|end| end <= source.len()))
-                    .map(|(offset, len)| {
-                        source.read_range_value(offset, len, |view| {
-                            if view.source_range()? == Some((offset, len)) {
-                                view.source_text()
-                            } else {
-                                Ok(None)
-                            }
-                        })
-                    })
-            } else {
-                None
-            };
-            let bound = match quoted {
-                Some(Ok(Some(text))) => text,
-                Some(Err(error)) if error.downcast_ref::<crate::json::InvalidJson>().is_none() => return Err(error),
-                _ => crate::harness::store::text::append(source, &source.decoded_backing()?, |builder| {
-                    value.try_for_each_chunk(&resolver, 64 * 1024, |chunk| builder.push(chunk))
-                })?,
-            };
+            // A wire-form span covers a JSON string's body: bind that string, quotes included,
+            // in the capture just checked rather than a fresh stat of the live path.
+            let (offset, len) = span
+                .offset
+                .checked_sub(1)
+                .zip(span.len.checked_add(2))
+                .filter(|(offset, len)| offset.checked_add(*len).is_some_and(|end| end <= source.len()))
+                .with_context(|| format!("retained span is outside its source {}", path.display()))?;
+            let bound = source
+                .read_range_value(offset, len, |view| view.source_text())?
+                .with_context(|| format!("retained span is not a JSON string in {}", path.display()))?;
             source.check()?;
             *value = bound;
         }
@@ -590,48 +569,6 @@ mod tests {
         }
     }
     #[test]
-    fn literal_sidecar_spans_are_bounded_snapshots_with_original_identity() -> Result<()> {
-        let world = cv_testkit::World::new("port-prepare-sidecar");
-        let primary = world.base.join("session.jsonl");
-        let sidecar = world.base.join("body.txt");
-        fs::write(&primary, b"{}")?;
-        let body = "literal \\n body λ".repeat(1024);
-        fs::write(&sidecar, format!("!{body}"))?;
-        let reference = SessionRef::new("session", Harness::Claude, &primary);
-        let adapter = Sidecar {
-            path: sidecar.clone(),
-            mutate: false,
-            range: None,
-        };
-        let session = super::super::parse_for_emit(&adapter, &reference, Harness::Codex)?;
-        assert!(matches!(
-            &session.messages[0].content[0],
-            Block::Text { text: Text::Source(_) }
-        ));
-        let materialized = super::super::materialized_session(&session)?;
-        assert_eq!(materialized.messages[0].text().as_deref(), Some(body.as_str()));
-        fs::write(&sidecar, b"!changed")?;
-        assert!(emit(
-            &session,
-            Harness::Codex,
-            &world.base.join("output"),
-            &EmitOptions::default()
-        )
-        .is_err());
-        fs::write(&sidecar, format!("!{body}"))?;
-        assert!(super::super::parse_for_emit(
-            &Sidecar {
-                path: sidecar,
-                mutate: true,
-                range: None,
-            },
-            &reference,
-            Harness::Codex
-        )
-        .is_err());
-        Ok(())
-    }
-    #[test]
     fn selected_opensession_defaults_to_underlying_harness_and_provenance() -> Result<()> {
         let world = cv_testkit::World::new("selected-prepare-opensession");
         let path = world.base.join("source.opensession.json");
@@ -716,25 +653,6 @@ mod tests {
         };
         // Even an empty selection must reject metadata/dependency mutation during the EOF pass.
         assert!(super::super::prepare_selected(&adapter, &reference, 5, None).is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn literal_quoted_text_does_not_become_the_enclosing_json_value() -> Result<()> {
-        let world = cv_testkit::World::new("port-prepare-literal-quotes");
-        let primary = world.base.join("session.jsonl");
-        let sidecar = world.base.join("body.txt");
-        fs::write(&primary, b"{}")?;
-        fs::write(&sidecar, br#"[ "x" ]"#)?;
-        let reference = SessionRef::new("session", Harness::Claude, &primary);
-        let adapter = Sidecar {
-            path: sidecar,
-            mutate: false,
-            range: Some((2, 3)),
-        };
-        let session = super::super::parse_for_emit(&adapter, &reference, Harness::Codex)?;
-        let owned = super::super::materialized_session(&session)?;
-        assert_eq!(owned.messages[0].text().as_deref(), Some("\"x\""));
         Ok(())
     }
 }

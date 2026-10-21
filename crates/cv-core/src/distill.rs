@@ -1975,7 +1975,7 @@ facts text",
     }
 
     #[test]
-    fn full_analysis_preserves_malformed_span_text_but_rejects_failed_sources() -> anyhow::Result<()> {
+    fn full_analysis_reads_span_text_but_rejects_malformed_and_failed_sources() -> anyhow::Result<()> {
         let world = cv_testkit::World::new("distill-legacy-spans");
         let path = world.base.join("span.txt");
         let opts = DistillOptions {
@@ -1984,8 +1984,9 @@ facts text",
         };
         let mut frozen = Frozen::new("distill-span-text");
         for body in [Some(r#"escaped\n\u03bb"#), Some(r#"malformed\q"#), None] {
+            // A span covers a JSON string's body.
             if let Some(body) = body {
-                std::fs::write(&path, body)?;
+                std::fs::write(&path, format!("\"{body}\""))?;
             } else {
                 std::fs::remove_file(&path)?;
             }
@@ -1996,13 +1997,13 @@ facts text",
                 vec![Block::Text {
                     text: crate::Text::Span(crate::Span {
                         source: Some(path.clone()),
-                        offset: 0,
+                        offset: 1,
                         len: body.map_or(20, str::len) as u64,
                         escaped: true,
                     }),
                 }],
             ));
-            if body.is_none() {
+            if body.is_none_or(|body| body.starts_with("malformed")) {
                 assert!(prepare_distill(&source, &opts).is_err());
                 assert!(prepare_distill(&source, &opts).is_err());
                 assert!(distill_pack(&source, &opts).is_err());
@@ -2162,14 +2163,14 @@ facts text",
         };
         *input = crate::Json::source(&argument_path, 0, original_arguments.len() as u64)?;
         let span_path = world.base.join("legacy-span.txt");
-        std::fs::write(&span_path, b"legacy span reply")?;
+        std::fs::write(&span_path, b"\"legacy span reply\"")?;
         source.messages.push(msg(
             Role::Assistant,
             MessageKind::Reply,
             vec![Block::Text {
                 text: crate::Text::Span(crate::Span {
                     source: Some(span_path),
-                    offset: 0,
+                    offset: 1,
                     len: 17,
                     escaped: false,
                 }),

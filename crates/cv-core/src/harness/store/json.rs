@@ -286,26 +286,6 @@ pub(crate) fn decode_body(reader: &mut impl std::io::BufRead, f: &mut impl FnMut
     })
 }
 
-/// Validate a body in bounded windows without decoding it; returns whether it contained an
-/// escape. `value`: serde `Value` acceptance (Unicode escapes go through the strict decoder,
-/// surrogate pairing included). Otherwise string syntax only, which like `RawValue` accepts lone
-/// UTF-16 escapes. Strings without Unicode escapes have the same acceptance either way.
-pub(crate) fn validate_body(reader: &mut impl std::io::BufRead, value: bool) -> Result<bool, ()> {
-    use serde::Deserializer;
-    json_body_windows(reader, &mut |quoted| {
-        if value && memchr::memmem::find(quoted, b"\\u").is_some() {
-            let mut decoder = serde_json::Deserializer::from_slice(quoted);
-            decoder
-                .deserialize_str(JsonWindow(&mut |_: &str| true))
-                .map_err(|_| ())?;
-            decoder.end().map_err(|_| ())?;
-        } else {
-            serde_json::from_slice::<&serde_json::value::RawValue>(quoted).map_err(|_| ())?;
-        }
-        Ok(true)
-    })
-}
-
 fn json_body_windows(
     reader: &mut impl std::io::BufRead,
     visit: &mut impl FnMut(&[u8]) -> Result<bool, ()>,
@@ -405,7 +385,7 @@ fn complete_json_window_prefix(raw: &[u8]) -> usize {
 
 /// The longest prefix of `raw` (a JSON string body) that ends on a *complete* escape sequence —
 /// i.e. doesn't cut a `\x` or `\uXXXX` in half. Truncating to this length keeps the prefix
-/// parseable by [`unescape_body`] instead of tripping its lossy raw fallback.
+/// parseable: the window decoder cuts there so an escape never spans two windows.
 pub(crate) fn complete_escape_prefix(raw: &[u8]) -> usize {
     let mut i = 0usize;
     while i < raw.len() {
@@ -440,54 +420,9 @@ pub(crate) fn complete_escape_prefix(raw: &[u8]) -> usize {
     raw.len()
 }
 
-/// Unescape a JSON string *body* (the bytes between the quotes) into its text, by re-quoting and
-/// letting `serde_json` parse it — correct for all JSON escapes. Falls back to a lossy decode.
-pub(crate) fn unescape_body(raw: &[u8]) -> String {
-    if !raw.contains(&b'\\') {
-        return String::from_utf8_lossy(raw).into_owned();
-    }
-    let mut quoted = Vec::with_capacity(raw.len() + 2);
-    quoted.push(b'"');
-    quoted.extend_from_slice(raw);
-    quoted.push(b'"');
-    serde_json::from_slice::<String>(&quoted).unwrap_or_else(|_| String::from_utf8_lossy(raw).into_owned())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn validation_preflight_matches_string_decoder_acceptance() {
-        use std::io::{BufReader, Cursor};
-        let codes = [0, 0x41, 0xd7ff, 0xd800, 0xdbff, 0xdc00, 0xdfff, 0xe000, 0xffff];
-        let mut cases = vec![
-            b"a\xff".to_vec(),
-            b"a\\q".to_vec(),
-            b"\\u123".to_vec(),
-            b"\\n\\t".to_vec(),
-        ];
-        for high in codes {
-            cases.push(format!("a\\u{high:04x}z").into_bytes());
-            for low in codes {
-                cases.push(format!("a\\u{high:04x}\\u{low:04x}z").into_bytes());
-            }
-            for slashes in 0..8 {
-                cases.push(format!("{}u{high:04x}", "\\".repeat(slashes)).into_bytes());
-            }
-        }
-        for raw in cases {
-            for window in 1..20 {
-                let mut validate = BufReader::with_capacity(window, Cursor::new(&raw));
-                let mut decode = BufReader::with_capacity(window, Cursor::new(&raw));
-                assert_eq!(
-                    validate_body(&mut validate, true).is_ok(),
-                    decode_body(&mut decode, &mut |_| true).is_ok(),
-                    "raw={raw:?}, window={window}"
-                );
-            }
-        }
-    }
 
     #[test]
     fn validated_decoder_stops_after_one_bounded_window() {
@@ -533,13 +468,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn unescape_handles_escapes() {
-        assert_eq!(unescape_body(b"a\\nb"), "a\nb");
-        assert_eq!(unescape_body(b"plain"), "plain");
-        assert_eq!(unescape_body(b"quote \\\" mark"), "quote \" mark");
     }
 
     #[test]

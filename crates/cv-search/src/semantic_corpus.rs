@@ -382,14 +382,14 @@ mod tests {
         let text_path = dir.join("text");
         let sidecar = dir.join("missing");
         std::fs::write(&json_path, "{\"arg\":true}").unwrap();
-        std::fs::write(&text_path, "label").unwrap();
+        std::fs::write(&text_path, "\"label\"").unwrap();
         let mut m = message(
             Role::User,
             vec![
                 Block::Text {
                     text: Text::Span(cv_core::Span {
                         source: Some(text_path.clone()),
-                        offset: 0,
+                        offset: 1,
                         len: 5,
                         escaped: false,
                     }),
@@ -624,16 +624,17 @@ mod tests {
     }
 
     #[test]
-    fn semantic_head_lazy_spans_keep_raw_prefix_and_bound_lossy_expansion() {
+    fn semantic_head_lazy_spans_keep_a_bounded_prefix() {
         let dir = std::env::temp_dir().join(format!("cv-semantic-head-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
-        for (escaped, bytes) in [(true, b"\\u0061".repeat(20000)), (false, vec![0xff; 100000])] {
+        // A span covers a JSON string's body.
+        for (escaped, bytes) in [(true, b"\\u0061".repeat(20000)), (false, vec![b'a'; 100000])] {
             let path = dir.join("source");
-            std::fs::write(&path, &bytes).unwrap();
+            std::fs::write(&path, [&b"\""[..], &bytes, b"\""].concat()).unwrap();
             let resolver = Resolver::new(Some(path));
             let span = cv_core::Span {
                 source: None,
-                offset: 0,
+                offset: 1,
                 len: bytes.len() as u64,
                 escaped,
             };

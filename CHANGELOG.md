@@ -200,6 +200,7 @@
 - Shared modules in cv-core, `cv` and cv-search name a harness, even through an alias, only inside exhaustive matches; new `Adapter` methods have defaults.
 
 **Breaking (library): cv-core, cv-search and cv-testkit APIs.** Rust callers migrate as follows; the CLI, HTTP and MCP are unaffected.
+- Transcript text over 4 KiB is `Text::Source` (checked); `Span` is wire form only, a JSON string body; malformed escapes error instead of decoding lossily.
 - `emit::Delta {field, before, after}` and `formats::Finding` become one `emit::Divergence {what, a, b, expected, at}`; serialized, `at` is `where` and `FidelityReport.deltas` elements change keys.
 - `SubagentInfo` and `claude::subagent_refs` become `ir::AgentRef` and `subagent_tree_of`; `claude::CARRIER_KEY` is `ir::CARRIER_KEY`.
 - Modules move: `handoff` is `codex_handoff`, `loom` is `splice`, `harness::harmony` is `harness::wire::harmony`.

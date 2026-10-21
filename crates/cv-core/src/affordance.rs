@@ -1638,12 +1638,12 @@ mod tests {
                 let text = if opts.spans {
                     crate::Text::Span(crate::Span {
                         source: Some(self.text_path.clone()),
-                        offset: 0,
-                        len: std::fs::metadata(&self.text_path)?.len(),
+                        offset: 1,
+                        len: std::fs::metadata(&self.text_path)?.len() - 2,
                         escaped: false,
                     })
                 } else {
-                    std::fs::read_to_string(&self.text_path)?.into()
+                    serde_json::from_str::<String>(&std::fs::read_to_string(&self.text_path)?)?.into()
                 };
                 hook.content.push(Block::Text { text });
                 sink.message(hook);
@@ -1676,7 +1676,8 @@ mod tests {
         let text_path = std::env::temp_dir().join(format!("cv-affordance-stream-{}", uuid::Uuid::new_v4()));
         std::fs::write(
             &text_path,
-            format!("<summary>{}late closing tag</summary>", " ".repeat(8192)),
+            // A JSON string: the span covers its body.
+            format!("\"<summary>{}late closing tag</summary>\"", " ".repeat(8192)),
         )
         .unwrap();
         let fixture = Fixture {

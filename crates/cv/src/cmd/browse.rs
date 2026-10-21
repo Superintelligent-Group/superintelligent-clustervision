@@ -966,7 +966,7 @@ mod enrich_tests {
         let primary = world.base.join("primary.jsonl");
         std::fs::write(&primary, "wrong source").unwrap();
         let body = world.base.join("resolved.txt");
-        std::fs::write(&body, "right EOF source").unwrap();
+        std::fs::write(&body, "\"right EOF source\"").unwrap();
         drop(cv_core::catalog::Writer::open().expect("scratch catalog"));
         let reference = SessionRef::new("span", Harness::Claude, primary);
         let mut metadata = Session::new("span", Harness::Claude);
@@ -980,7 +980,7 @@ mod enrich_tests {
                 user(["<system-reminder>noise</system-reminder>".into()]),
                 user([Text::Span(cv_core::Span {
                     source: None,
-                    offset: 0,
+                    offset: 1,
                     len: 16,
                     escaped: false,
                 })]),

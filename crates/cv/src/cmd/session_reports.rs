@@ -1067,24 +1067,26 @@ mod tests {
         let answer_path = world.base.join("answer.txt");
         let prompt = "typed🌙\n".repeat(1000);
         let answer = format!("{}The user answered with a complete answer", "\u{2003}".repeat(3000));
-        std::fs::write(&prompt_path, &prompt)?;
-        std::fs::write(&answer_path, &answer)?;
+        // A span covers a JSON string's body.
+        let (prompt_json, answer_json) = (serde_json::to_string(&prompt)?, serde_json::to_string(&answer)?);
+        std::fs::write(&prompt_path, &prompt_json)?;
+        std::fs::write(&answer_path, &answer_json)?;
         let span = |path: &std::path::Path, len: usize| {
             cv_core::Text::Span(cv_core::Span {
                 source: Some(path.into()),
-                offset: 0,
+                offset: 1,
                 len: len as u64,
-                escaped: false,
+                escaped: true,
             })
         };
         let mut user = Message::new(Role::User);
         user.content.push(Block::Text {
-            text: span(&prompt_path, prompt.len()),
+            text: span(&prompt_path, prompt_json.len() - 2),
         });
         let mut tool = Message::new(Role::Tool);
         tool.content.push(Block::ToolResult {
             tool_use_id: "question".into(),
-            content: span(&answer_path, answer.len()),
+            content: span(&answer_path, answer_json.len() - 2),
             is_error: false,
             tool_name: None,
             status: None,

@@ -772,8 +772,8 @@ impl<'a> JsonView<'a> {
     }
     /// Transcript text by the codec's span rule: a string whose *decoded* length exceeds
     /// INLINE_MAX stays in the source when `spans` is demanded, and anything else is inline.
-    /// Both builds describe it as a [`Span`](crate::lazy::Span) of the session's primary file,
-    /// held to the session's parse-time stamp (same file, only grown). None for a nonstring.
+    /// Both builds keep it as checked [`SourceText`](crate::lazy::SourceText) in its file, held
+    /// to the read's capture (same file, only grown). None for a nonstring.
     pub(crate) fn lazy_text(self, spans: bool) -> Result<Option<crate::lazy::Text>> {
         if !self.is_string()? {
             return Ok(None);
@@ -824,7 +824,9 @@ impl<'a> JsonView<'a> {
         }))?
         .unwrap_or(true))
     }
-    /// Native transcript text uses the session's primary source, just like existing Text spans.
+    /// A string, inline or, with `spans` and a body over [`INLINE_MAX`](crate::lazy::INLINE_MAX),
+    /// left in its source as checked [`SourceText`](crate::lazy::SourceText): the session's
+    /// primary transcript like any other file, cell or decoded backing.
     pub(crate) fn text(self, spans: bool) -> Result<Option<crate::lazy::Text>> {
         let View::Source(source) = self.0 else {
             let View::Owned(value) = self.0 else { unreachable!() };
@@ -838,12 +840,9 @@ impl<'a> JsonView<'a> {
             return self.source_text();
         }
         if spans && source.value.len - 2 > crate::lazy::INLINE_MAX as u64 {
-            return Ok(Some(crate::lazy::Text::Span(crate::lazy::Span {
-                source: None,
-                offset: source.value.offset + 1,
-                len: source.value.len - 2,
-                escaped: source.source.escaped(source.value)?,
-            })));
+            if let Json::Source(range) = self.to_json()? {
+                return Ok(Some(crate::lazy::Text::Source(crate::lazy::SourceText::new(range))));
+            }
         }
         Ok(Some(crate::lazy::Text::Inline(
             source.source.materialize(source.value)?,
@@ -1602,16 +1601,11 @@ mod tests {
                     crate::harness::store::document::Fields::parse(view, &["id", "id", "body", "input"])?.unwrap();
                 assert_eq!(fields.string("id")?.as_deref(), Some("last"));
                 let text = fields.get("body").unwrap().text(true)?.unwrap();
-                let crate::lazy::Text::Span(span) = text else {
-                    panic!("large text must remain a span")
-                };
-                assert!(span.escaped);
-                assert_eq!(
-                    crate::lazy::Resolver::new(Some(fixture.path.clone()))
-                        .try_resolve(&span)
-                        .unwrap(),
-                    body
+                assert!(
+                    matches!(text, crate::lazy::Text::Source(_)),
+                    "large text must remain in its source"
                 );
+                assert_eq!(text.try_resolve(&crate::lazy::Resolver::new(None)).unwrap(), body);
                 let argument = fields.get("input").unwrap().argument(true)?;
                 assert!(matches!(argument, Json::Source(_)));
                 assert_eq!(

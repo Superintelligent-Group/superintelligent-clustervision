@@ -449,11 +449,6 @@ pub fn stream_task_dir(
         }
         Err(error) => return Err(error),
     };
-    let span_path = if history.is_absolute() {
-        history.clone()
-    } else {
-        std::env::current_dir()?.join(&history)
-    };
     sink.dependency(&history);
     if let Some(error) = sink.take_error() {
         return Err(error);
@@ -467,7 +462,7 @@ pub fn stream_task_dir(
                 unparsed.count();
                 continue;
             };
-            let (boundary, message) = record(view, &mut session, opts.spans, Some(&span_path))?;
+            let (boundary, message) = record(view, &mut session, opts.spans)?;
             if let Some(boundary) = boundary {
                 if sink.try_message(boundary)? == Flow::Stop {
                     break;
@@ -522,7 +517,7 @@ pub(crate) fn parse_history_str(id: &str, text: &str, harness: Harness, source_p
         return session;
     };
     for item in &items {
-        if let Ok((boundary, message)) = record(item.into(), &mut session, false, None) {
+        if let Ok((boundary, message)) = record(item.into(), &mut session, false) {
             session.messages.extend(boundary.into_iter().chain(message));
         }
     }
@@ -652,14 +647,9 @@ fn visit_text(content: Option<JsonView<'_>>, discovery: bool, feed: &mut dyn FnM
     })
 }
 /// The record codec, the only decoder of this format: one history item in, the condense boundary
-/// it implies and its message out. Text follows [`JsonView::lazy_text`]; `history` names the file
-/// a mapped span points into (the session's own path is the task dir).
-fn record(
-    view: JsonView<'_>,
-    session: &mut Session,
-    spans: bool,
-    history: Option<&Path>,
-) -> Result<(Option<Message>, Option<Message>)> {
+/// it implies and its message out. Text follows [`JsonView::lazy_text`]: source text names the
+/// history file it lives in (the session's own path is the task dir).
+fn record(view: JsonView<'_>, session: &mut Session, spans: bool) -> Result<(Option<Message>, Option<Message>)> {
     let Some(record) = Fields::parse(view, MESSAGE_FIELDS)? else {
         return Ok((None, None));
     };
@@ -735,16 +725,6 @@ fn record(
                     blocks.push(block);
                 }
             }
-        }
-    }
-    for block in &mut blocks {
-        let text = match block {
-            Block::Text { text } | Block::Thinking { text, .. } => Some(text),
-            Block::ToolResult { content, .. } => Some(content),
-            _ => None,
-        };
-        if let (Some(crate::Text::Span(span)), Some(history)) = (text, history) {
-            span.source = Some(history.to_path_buf());
         }
     }
     Ok((
@@ -1203,7 +1183,7 @@ mod tests {
                 if opts.spans {
                     assert!(actual.messages.iter().flat_map(|m| &m.content).any(|block| matches!(
                         block,
-                        Block::Text { text: crate::Text::Span(span) } if span.source.as_deref() == Some(history.as_path())
+                        Block::Text { text: crate::Text::Source(text) } if text.path() == history.as_path()
                     )));
                 }
                 actual.materialize().unwrap();

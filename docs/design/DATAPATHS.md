@@ -173,8 +173,8 @@ refreshes that leave the source unchanged and drops it when the source changes. 
    rejecting same-size restored-mtime rewrites; platforms without that identity retain length/mtime guards.
    Unconditional detection of arbitrary prefix edits requires reading that prefix or a trusted
    writer/filesystem change signal; do not promise both zero prefix reads and such detection.
-4. Lazy/full equivalence must compare **resolved content** and metadata. The existing stream dump
-   serializes span descriptors, not their resolved text. Span layout changes are not output changes.
+4. Lazy/full equivalence must compare **resolved content** and metadata. The stream dump
+   serializes lazy text resolved (checked source text), so only a wire-form `Span` is a descriptor.
 5. Existing format bugs must be isolated and tested as correctness changes. Fixed separately:
    Codex's giant-output shortcut dropped metadata preserved by its ordinary branch; Gemini's native
    wrapper omitted metadata fields and rejected escaped borrowed strings.

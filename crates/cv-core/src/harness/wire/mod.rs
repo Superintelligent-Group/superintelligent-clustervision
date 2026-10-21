@@ -230,7 +230,7 @@ mod tests {
                 let resolver = crate::lazy::Resolver::new(Some(path.clone()));
                 assert_eq!(text.try_resolve(&resolver)?.as_ref(), expected);
                 if value.as_array().is_some_and(|parts| parts.len() == 1) && primary_span {
-                    assert!(matches!(text, crate::Text::Span(_)));
+                    assert!(matches!(text, crate::Text::Source(_)));
                 }
                 if let crate::Text::Source(_) = &text {
                     std::fs::write(&path, b"null")?;
