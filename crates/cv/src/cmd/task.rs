@@ -560,13 +560,13 @@ fn replay_loud() -> Result<cv_core::task::ReplayOutcome> {
     Ok(outcome)
 }
 
-/// Append an agent event through the shared core path, print a one-line confirmation.
-fn append_and_report(task_id: Option<&str>, from: &str, kind: TaskEventKind) -> Result<()> {
-    append_event(task_id, from, kind).map(|_| ())
+/// Resolve one mutation target after reporting replay warnings.
+fn resolve_target(id: &str) -> Result<String> {
+    let outcome = replay_loud()?;
+    Ok(resolve(&outcome.model, id)?.to_string())
 }
 
-/// [`append_and_report`], returning the event's task id (what `open` needs to attach its tags
-/// and relations to the task it just created).
+/// Append an agent event, print confirmation and return its task id for follow-up events.
 fn append_event(task_id: Option<&str>, from: &str, kind: TaskEventKind) -> Result<String> {
     let store = TaskStore::default_store();
     let report = task::append(&store, task_id, from, kind, Vec::new())?;
@@ -624,7 +624,7 @@ fn append_batch(events: Vec<TaskEvent>) -> Result<()> {
 /// refused close leaves the log unchanged and evidence precedes completion when appended.
 fn close_with_note(id: &str, from: &str, note: Option<String>, close: TaskEventKind) -> Result<()> {
     let Some(text) = note else {
-        return append_and_report(Some(id), from, close);
+        return append_event(Some(id), from, close).map(|_| ());
     };
     let note = task::new_event(
         Some(id),
@@ -883,16 +883,14 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
         TaskCmd::Claim { id, from, token } => {
             refuse_token(token)?;
             let from = require_from(from)?;
-            let outcome = replay_loud()?;
-            let id = resolve(&outcome.model, &id)?.to_string();
-            append_and_report(Some(&id), &from, TaskEventKind::Claimed { assignee: from.clone() })
+            let id = resolve_target(&id)?;
+            append_event(Some(&id), &from, TaskEventKind::Claimed { assignee: from.clone() }).map(|_| ())
         }
         TaskCmd::Release { id, from, token } => {
             refuse_token(token)?;
             let from = require_from(from)?;
-            let outcome = replay_loud()?;
-            let id = resolve(&outcome.model, &id)?.to_string();
-            append_and_report(Some(&id), &from, TaskEventKind::Released {})
+            let id = resolve_target(&id)?;
+            append_event(Some(&id), &from, TaskEventKind::Released {}).map(|_| ())
         }
         TaskCmd::Note {
             id,
@@ -901,14 +899,13 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
             session_ref,
             from,
         } => {
-            let outcome = replay_loud()?;
-            let id = resolve(&outcome.model, &id)?.to_string();
+            let id = resolve_target(&id)?;
             let text = match (text, file) {
                 (Some(t), _) => text_or_stdin(t)?,
                 (None, Some(f)) => read_text_arg(&f)?,
                 (None, None) => unreachable!("clap requires text or --file"),
             };
-            append_and_report(Some(&id), &from_or_cv(from), TaskEventKind::Noted { text, session_ref })
+            append_event(Some(&id), &from_or_cv(from), TaskEventKind::Noted { text, session_ref }).map(|_| ())
         }
         TaskCmd::Done {
             id,
@@ -927,8 +924,7 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
                 );
             }
             let note = note_arg(note, note_file)?;
-            let outcome = replay_loud()?;
-            let id = resolve(&outcome.model, &id)?.to_string();
+            let id = resolve_target(&id)?;
             close_with_note(
                 &id,
                 &from_or_cv(from),
@@ -945,15 +941,14 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
         } => {
             refuse_token(token)?;
             let from = require_from(from)?;
-            let outcome = replay_loud()?;
-            let id = resolve(&outcome.model, &id)?.to_string();
+            let id = resolve_target(&id)?;
             let text = match (text, file) {
                 (Some(t), _) => text_or_stdin(t)?,
                 (None, Some(f)) => read_text_arg(&f)?,
                 (None, None) => unreachable!("clap requires text or --file"),
             };
             let text = text.trim_end().to_string();
-            append_and_report(Some(&id), &from, TaskEventKind::StatusSet { text })
+            append_event(Some(&id), &from, TaskEventKind::StatusSet { text }).map(|_| ())
         }
         TaskCmd::Abandon {
             id,
@@ -963,30 +958,28 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
             from,
         } => {
             let note = note_arg(note, note_file)?;
-            let outcome = replay_loud()?;
-            let id = resolve(&outcome.model, &id)?.to_string();
+            let id = resolve_target(&id)?;
             close_with_note(&id, &from_or_cv(from), note, TaskEventKind::Abandoned { reason })
         }
         TaskCmd::Supersede { id, by_task, from } => {
             let outcome = replay_loud()?;
             let id = resolve(&outcome.model, &id)?.to_string();
             let by_task = resolve(&outcome.model, &by_task)?.to_string();
-            append_and_report(Some(&id), &from_or_cv(from), TaskEventKind::Superseded { by_task })
+            append_event(Some(&id), &from_or_cv(from), TaskEventKind::Superseded { by_task }).map(|_| ())
         }
         TaskCmd::Tag { id, tags, from } => {
-            let outcome = replay_loud()?;
-            let id = resolve(&outcome.model, &id)?.to_string();
+            let id = resolve_target(&id)?;
             let tags = parse_tags(&tags);
             if tags.is_empty() {
                 bail!("no tags given (comma-separated, e.g. `deploy,lean`)");
             }
-            append_and_report(Some(&id), &from_or_cv(from), TaskEventKind::Tagged { tags })
+            append_event(Some(&id), &from_or_cv(from), TaskEventKind::Tagged { tags }).map(|_| ())
         }
         TaskCmd::Block { id, by_task, from } => {
             let outcome = replay_loud()?;
             let id = resolve(&outcome.model, &id)?.to_string();
             let by_task = resolve(&outcome.model, &by_task)?.to_string();
-            append_and_report(Some(&id), &from_or_cv(from), TaskEventKind::BlockedBy { task: by_task })
+            append_event(Some(&id), &from_or_cv(from), TaskEventKind::BlockedBy { task: by_task }).map(|_| ())
         }
         TaskCmd::Sweep { repo, main, json } => cmd_sweep(&repo, main, json),
         TaskCmd::Inbox {
