@@ -6,6 +6,17 @@ use crate::{
 };
 use anyhow::Result;
 use std::io::Write;
+/// Native file references share the same tagged source shape for images and documents.
+fn source_reference(source: &mut ObjectWriter<'_>, reference: &str) -> Result<()> {
+    if let Some(id) = reference.strip_prefix("file:") {
+        source.field("type", "file")?;
+        source.field("file_id", id)
+    } else {
+        source.field("type", "url")?;
+        source.field("url", reference)
+    }
+}
+
 /// Public owned codecs retain Span descriptors; checked emitters resolve text directly.
 enum LeafPublication<'a> {
     Owned,
@@ -109,17 +120,10 @@ fn publish(writer: &mut dyn Write, b: &Block, q: &Quirks, user: bool, leaf: Leaf
                         s.field("media_type", mt)?;
                     }
                     match data_ref.as_deref() {
-                        Some(r) if r.starts_with("file:") => {
-                            s.field("type", "file")?;
-                            s.field("file_id", &r[5..])?;
-                        }
                         Some("base64:inline") => {
                             s.field("type", "base64")?;
                         }
-                        Some(r) => {
-                            s.field("type", "url")?;
-                            s.field("url", r)?;
-                        }
+                        Some(r) => source_reference(&mut s, r)?,
                         None => {}
                     }
                     s.finish()
@@ -137,14 +141,7 @@ fn publish(writer: &mut dyn Write, b: &Block, q: &Quirks, user: bool, leaf: Leaf
                     s.field("media_type", mt)?;
                 }
                 match source.as_deref() {
-                    Some(r) if r.starts_with("file:") => {
-                        s.field("type", "file")?;
-                        s.field("file_id", &r[5..])?;
-                    }
-                    Some(r) => {
-                        s.field("type", "url")?;
-                        s.field("url", r)?;
-                    }
+                    Some(r) => source_reference(&mut s, r)?,
                     None => {}
                 }
                 s.finish()
