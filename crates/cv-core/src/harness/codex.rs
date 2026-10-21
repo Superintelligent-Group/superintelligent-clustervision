@@ -503,12 +503,14 @@ pub fn parse_str(id: &str, text: &str, is_jsonl: bool, source_path: Option<PathB
     let demand = Demand::from(&stream::Demand::LEAN);
     if is_jsonl {
         let mut det = EventDetector::default();
-        let _ = super::store::jsonl::slice(text.as_bytes(), |line| {
-            Ok(match line.view.map(nl_flags).transpose() {
-                Ok(Some(flags)) => det.feed(flags),
-                _ => Flow::Continue,
-            })
+        let detected = super::store::jsonl::slice(text.as_bytes(), |line| {
+            Ok(line
+                .view
+                .map(nl_flags)
+                .transpose()?
+                .map_or(Flow::Continue, |flags| det.feed(flags)))
         });
+        super::note_read_error(&mut s, detected);
         let mut reader = Reader {
             session: &mut s,
             ctx: &mut ctx,
@@ -518,14 +520,15 @@ pub fn parse_str(id: &str, text: &str, is_jsonl: bool, source_path: Option<PathB
             source: None,
         };
         let mut skipped = 0;
-        let _ = super::store::jsonl::slice(text.as_bytes(), |line| {
+        let read = super::store::jsonl::slice(text.as_bytes(), |line| {
             if let Some(view) = line.view {
-                let _ = reader.record(view);
+                reader.record(view)?;
             } else {
                 skipped += u64::from(!line.blank);
             }
             Ok(Flow::Continue)
         });
+        super::note_read_error(&mut s, read);
         super::Unparsed(skipped).note(&mut s);
     } else if let Ok(root) = serde_json::from_str::<Value>(text) {
         let root = JsonView::from(&root);
@@ -537,7 +540,10 @@ pub fn parse_str(id: &str, text: &str, is_jsonl: bool, source_path: Option<PathB
             demand,
             source: None,
         };
-        let _ = legacy::items(&mut reader, root);
+        let read = legacy::items(&mut reader, root);
+        super::note_read_error(&mut s, read);
+    } else {
+        super::Unparsed(u64::from(!text.trim().is_empty())).note(&mut s);
     }
     s.messages = out;
     if s.id.is_empty() {

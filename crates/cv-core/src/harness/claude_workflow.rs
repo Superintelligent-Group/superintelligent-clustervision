@@ -239,7 +239,12 @@ impl Workflow {
             }
             if let Some(id) = &a.agent_id {
                 let bare = id.strip_prefix("agent-").unwrap_or(id);
-                if let Some(ret) = super::claude::subagent_return(&dir.join(format!("agent-{bare}.jsonl"))) {
+                if let Some(ret) = super::claude::subagent_return(&dir.join(format!("agent-{bare}.jsonl")))
+                    .unwrap_or_else(|error| {
+                        crate::env::warn_once("workflow agent return", format!("{bare}: {error:#}"));
+                        None
+                    })
+                {
                     a.journal_result = Some(Value::String(ret));
                 }
             }
@@ -730,15 +735,14 @@ pub struct WorkflowLaunch {
 
 /// Every `Workflow` tool invocation in a session's transcript, in order, with whether its
 /// paired tool result was an error. Read through the one line reader and the record codec's
-/// tool demand; a read failure ends the scan with the launches before it (a ghost listing is a
-/// best-effort recovery).
-pub fn launches(session_path: &Path) -> Vec<WorkflowLaunch> {
+/// tool demand; an aborted scan is an error so it cannot certify missing workflow runs.
+pub fn launches(session_path: &Path) -> anyhow::Result<Vec<WorkflowLaunch>> {
     use super::claude::record::{Demand, Head};
     use super::store::document::Fields;
     // tool_use_id -> index into `out`, so the (later) tool_result line can set `errored`.
     let mut by_use_id: BTreeMap<String, usize> = BTreeMap::new();
     let mut out: Vec<WorkflowLaunch> = Vec::new();
-    let _ = super::store::jsonl::for_each_record(session_path, |view| {
+    let read = super::store::jsonl::for_each_record(session_path, |view| {
         let Some(head) = Head::parse(view, Demand::Tools)? else {
             return Ok(());
         };
@@ -806,7 +810,8 @@ pub fn launches(session_path: &Path) -> Vec<WorkflowLaunch> {
         }
         Ok(())
     });
-    out
+    read?;
+    Ok(out)
 }
 
 /// What a workflow lane's transcript shows it did, for `cv workflow --revive`: the FULL first
@@ -966,7 +971,13 @@ impl Miner {
 /// recovers the run id, which keys the `subagents/workflows/<runId>/` debris dir — agent
 /// transcripts and journaled results produced before the crash, i.e. the harvestable work.
 pub fn ghost_launches(session_path: &Path) -> Vec<WorkflowLaunch> {
-    let mut ghosts = compute_ghosts(launches(session_path), &workflows(session_path));
+    let mut ghosts = compute_ghosts(
+        launches(session_path).unwrap_or_else(|error| {
+            crate::env::warn_once("workflow launches", format!("{}: {error:#}", session_path.display()));
+            Vec::new()
+        }),
+        &workflows(session_path),
+    );
     let mut orphans = OrphanScripts::new(orphan_scripts(session_path));
     for g in &mut ghosts {
         let Some(name) = g.name.as_deref() else { continue };
@@ -1549,7 +1560,7 @@ mod tests {
             rows.push_str(&format!("{}\n", json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":format!("pending-{n}"),"is_error":n % 3 == 0,"content":"receipt"}]}})));
         }
         fs::write(&path, rows).unwrap();
-        let launches = launches(&path);
+        let launches = launches(&path).unwrap();
         assert_eq!(launches.len(), count);
         for (n, launch) in launches.iter().enumerate() {
             assert_eq!(launch.name, Some(format!("workflow-{n}")));
@@ -1707,7 +1718,7 @@ mod tests {
             .to_string(),
         ];
         std::fs::write(&p, lines.join("\n")).unwrap();
-        let ls = launches(&p);
+        let ls = launches(&p).unwrap();
         std::fs::remove_dir_all(&dir).ok();
         assert_eq!(ls.len(), 2);
         assert_eq!(ls[0].name.as_deref(), Some("doomed-swarm"));

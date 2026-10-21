@@ -784,7 +784,9 @@ fn lane_of(
     // Only a store that records the end beside the transcript answers; other harnesses' child
     // sessions live inside their own stores (a `.db` path here), where there is nothing to scan.
     let end = crate::harness::rootless(sub.session.harness)
-        .and_then(|adapter| adapter.subagent_end(&sub.session.path))
+        .map(|adapter| adapter.subagent_end(&sub.session.path))
+        .transpose()?
+        .flatten()
         .unwrap_or_default();
     let agent_id = sub.agent_id().to_string();
     let (status, status_source) = status_of(
@@ -846,6 +848,7 @@ pub fn lanes_of(parent: &SessionRef) -> Result<Vec<Lane>> {
     let subs = crate::subagent_tree_of(parent)?;
     let notices = crate::harness::rootless(parent.harness)
         .map(|adapter| adapter.task_notices(parent))
+        .transpose()?
         .unwrap_or_default();
     let rows = read_ledger();
     let ledger = match crate::harness::rootless(parent.harness).and_then(|adapter| adapter.capabilities().lane_stops) {

@@ -137,7 +137,7 @@ impl Native {
                 let group = if record.unchanged(Harness::OpenClaw, messages) {
                     Some(record.projection.len())
                 } else if let Json::Owned(value) = &record.value {
-                    self.owned_group(value, &record.projection, messages)
+                    self.owned_group(value, &record.projection, messages)?
                 } else {
                     None
                 };
@@ -172,26 +172,24 @@ impl Native {
     }
     // A full owned read has no retained payload witness: rebuild just this record using
     // the native codec, then apply the session-level normalization used by the reader.
-    fn owned_group(&self, value: &Value, envelopes: &[Message], messages: &[Message]) -> Option<usize> {
-        let mut original = super::super::record::record(JsonView::from(value), &Demand::COMPLETE)
-            .ok()?
-            .messages;
+    fn owned_group(&self, value: &Value, envelopes: &[Message], messages: &[Message]) -> Result<Option<usize>> {
+        let mut original = super::super::record::record(JsonView::from(value), &Demand::COMPLETE)?.messages;
         if original.len() != envelopes.len() || messages.len() < original.len() {
-            return None;
+            return Ok(None);
         }
         for ((original, envelope), current) in original.iter_mut().zip(envelopes).zip(messages) {
             if !crate::ir::record::same_envelope(envelope, current) {
-                return None;
+                return Ok(None);
             }
             let original = Message {
                 content: std::mem::take(&mut original.content),
                 ..envelope.clone()
             };
             if !crate::ir::record::same_message(&original, current) {
-                return None;
+                return Ok(None);
             }
         }
-        Some(original.len())
+        Ok(Some(original.len()))
     }
     fn write(
         &self,

@@ -820,7 +820,10 @@ pub fn parse_all_str_for(harness: Harness, text: &str, source_path: Option<PathB
 
 fn parse_all_str_inner(harness: Harness, text: &str, source_path: Option<PathBuf>) -> Vec<Session> {
     // Chat recording? (object with sessionId+messages, or jsonl with a metadata line)
-    if let Some(s) = parse_chat_recording(text, harness, source_path.clone()) {
+    if let Some(s) = parse_chat_recording(text, harness, source_path.clone()).unwrap_or_else(|error| {
+        crate::env::warn_once("Gemini string recording", format!("{error:#}"));
+        None
+    }) {
         return vec![s];
     }
 
@@ -933,7 +936,7 @@ fn parse_logs_str(text: &str, source_path: Option<PathBuf>) -> Vec<Session> {
 /// JSON object (`{sessionId, messages:[…]}`) or the modern append-only JSONL log (metadata line +
 /// message records + `$set` / `$rewindTo` control records), through the same readers as a file.
 /// `None` if the text is not a recording.
-fn parse_chat_recording(text: &str, harness: Harness, source_path: Option<PathBuf>) -> Option<Session> {
+fn parse_chat_recording(text: &str, harness: Harness, source_path: Option<PathBuf>) -> Result<Option<Session>> {
     let resolver = crate::lazy::Resolver::new(None);
     let d = record::Demand {
         harness,
@@ -944,29 +947,27 @@ fn parse_chat_recording(text: &str, harness: Harness, source_path: Option<PathBu
     // A modern recording's metadata line also starts with `{`, but a whole-file parse of
     // multi-line JSONL fails, so it falls through to the line replay.
     let document = match serde_json::from_str::<Value>(text) {
-        Ok(value @ Value::Object(_)) => document((&value).into(), source_path.as_deref(), d, &mut sink, true)
-            .ok()
-            .flatten(),
+        Ok(value @ Value::Object(_)) => document((&value).into(), source_path.as_deref(), d, &mut sink, true)?,
         _ => None,
     };
     let mut session = match document {
         Some(session) => session,
         None => {
             let mut replay = RecordingReplay::default();
-            let _ = super::store::jsonl::slice(text.as_bytes(), |line| {
+            super::store::jsonl::slice(text.as_bytes(), |line| {
                 if let Some(view) = line.view {
-                    let _ = replay.ingest(view);
+                    replay.ingest(view)?;
                 }
                 Ok(Flow::Continue)
-            });
-            replay
-                .emit(d, source_path.as_deref(), None, &mut sink, &mut false)
-                .ok()
-                .flatten()?
+            })?;
+            let Some(session) = replay.emit(d, source_path.as_deref(), None, &mut sink, &mut false)? else {
+                return Ok(None);
+            };
+            session
         }
     };
     session.messages = sink.messages;
-    Some(session)
+    Ok(Some(session))
 }
 
 /// Build the IR [`Session`] *metadata* (everything but `messages`) from a `ConversationRecord`'s
@@ -1073,7 +1074,10 @@ fn parse_checkpoint(text: &str, file_name: &str, source_path: Option<PathBuf>) -
             m.kind = MessageKind::SystemPrompt;
         }
         if let Some(parts) = obj.get("parts") {
-            let _ = record::content_blocks(parts.into(), parts_demand, &mut m.content);
+            if let Err(error) = record::content_blocks(parts.into(), parts_demand, &mut m.content) {
+                crate::env::warn_once("Gemini checkpoint parts", format!("{error:#}"));
+                return None;
+            }
         }
         // If this "user" turn is purely tool results, retag it as a Tool turn.
         if role == Role::User

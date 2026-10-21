@@ -152,6 +152,15 @@ pub(crate) fn note_skipped_lines(s: &mut Session, skipped: u64) {
     }
 }
 
+/// An aborted in-memory read keeps its diagnostic on the partial session, never an unmarked empty.
+pub(crate) fn note_read_error(session: &mut Session, result: anyhow::Result<()>) {
+    if let Err(error) = result {
+        session
+            .cv_extra_mut()
+            .insert("read_error".into(), Value::String(format!("{error:#}")));
+    }
+}
+
 /// The first channel of the skip policy: the records one read could not parse, COUNTED, never
 /// dropped silently. An adapter keeps one per read and writes it once with [`Unparsed::note`]
 /// (`extra["cv"]["skipped_lines"]`, nothing when zero, so a clean read is unchanged).
@@ -542,14 +551,17 @@ pub trait Adapter: Send + Sync {
 
     /// Where the sub-agent transcript at `transcript` ended (last turn, last stop, a fatal API
     /// notice), when the store records it there. Default: it records none.
-    fn subagent_end(&self, _transcript: &std::path::Path) -> Option<crate::lanes::SubagentEnd> {
-        None
+    fn subagent_end(&self, _transcript: &std::path::Path) -> Result<Option<crate::lanes::SubagentEnd>> {
+        Ok(None)
     }
 
     /// The last status notice `parent`'s own records give each sub-agent, by agent id. Default:
     /// the parent records none.
-    fn task_notices(&self, _parent: &SessionRef) -> std::collections::HashMap<String, crate::lanes::TaskNotice> {
-        std::collections::HashMap::new()
+    fn task_notices(
+        &self,
+        _parent: &SessionRef,
+    ) -> Result<std::collections::HashMap<String, crate::lanes::TaskNotice>> {
+        Ok(std::collections::HashMap::new())
     }
 
     /// The newest compaction boundary in the last `tail` bytes of `transcript`:
@@ -1006,6 +1018,18 @@ pub(crate) fn assert_windowed_models(adapter: &dyn Adapter) {
     );
 }
 
+/// Entries of an optional side directory. Only a missing directory is empty.
+pub(crate) fn side_entries(path: &std::path::Path) -> Result<Vec<std::fs::DirEntry>> {
+    use anyhow::Context;
+    match std::fs::read_dir(path) {
+        Ok(entries) => entries
+            .collect::<std::io::Result<Vec<_>>>()
+            .with_context(|| format!("reading {}", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(error).with_context(|| format!("reading {}", path.display())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1124,17 +1148,5 @@ mod tests {
             "`cv` must never be parseable as a harness, or its bag would shadow one"
         );
         assert!(!Harness::ALL.iter().any(|h| h.as_str() == crate::ir::CV_NAMESPACE));
-    }
-}
-
-/// Entries of an optional side directory. Only a missing directory is empty.
-pub(crate) fn side_entries(path: &std::path::Path) -> Result<Vec<std::fs::DirEntry>> {
-    use anyhow::Context;
-    match std::fs::read_dir(path) {
-        Ok(entries) => entries
-            .collect::<std::io::Result<Vec<_>>>()
-            .with_context(|| format!("reading {}", path.display())),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(error) => Err(error).with_context(|| format!("reading {}", path.display())),
     }
 }

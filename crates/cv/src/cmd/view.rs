@@ -552,14 +552,14 @@ fn show_subagents(r: &SessionRef, json: bool) -> Result<()> {
                     obj.insert("agent_id".into(), serde_json::Value::String(s.agent_id().to_string()));
                     // Direct agents have no journaled summary — attach their final return value.
                     if s.result_summary.is_none() {
-                        if let Some(ret) = cv_core::harness::claude::subagent_return(&s.session.path) {
+                        if let Some(ret) = cv_core::harness::claude::subagent_return(&s.session.path)? {
                             obj.insert("return".into(), serde_json::Value::String(ret));
                         }
                     }
                 }
-                v
+                Ok(v)
             })
-            .collect();
+            .collect::<Result<_>>()?;
         println!("{}", serde_json::to_string_pretty(&enriched)?);
         return Ok(());
     }
@@ -577,7 +577,7 @@ fn show_subagents(r: &SessionRef, json: bool) -> Result<()> {
         // the last text turn of its transcript. Transcript-derived, so sanitized at the seam (G5);
         // the `--json` path stays raw.
         if s.result_summary.is_none() {
-            if let Some(ret) = cv_core::harness::claude::subagent_return(&s.session.path) {
+            if let Some(ret) = cv_core::harness::claude::subagent_return(&s.session.path)? {
                 println!("  ↩ {}", truncate(&cv_core::sanitize::sanitize_line(&ret), 400));
             }
         }

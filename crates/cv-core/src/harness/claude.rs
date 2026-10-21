@@ -265,11 +265,11 @@ impl Adapter for Claude {
             .and_then(Value::as_str)
     }
 
-    fn subagent_end(&self, transcript: &std::path::Path) -> Option<SubagentEnd> {
-        Some(subagent_end(transcript))
+    fn subagent_end(&self, transcript: &std::path::Path) -> Result<Option<SubagentEnd>> {
+        Ok(Some(subagent_end(transcript)?))
     }
 
-    fn task_notices(&self, parent: &SessionRef) -> std::collections::HashMap<String, TaskNotice> {
+    fn task_notices(&self, parent: &SessionRef) -> Result<std::collections::HashMap<String, TaskNotice>> {
         task_notices(&parent.path)
     }
 
@@ -506,10 +506,14 @@ pub fn stream_str(
     let mut session = new_session_for(id, source_path, opts);
     let mut spawns = crate::affordance::AffordanceSink::new(Harness::Claude, sink);
     // Pure-string path (parse_str, tests): no file offsets, so all content stays inline.
-    let _ = jsonl::slice(text.as_bytes(), |line| match line.view {
+    let result = jsonl::slice(text.as_bytes(), |line| match line.view {
         Some(view) => record::ingest(&mut session, view, None, opts, &mut spawns, &mut false),
         None => Ok(Flow::Continue),
     });
+    super::note_read_error(&mut session, result);
+    if let Some(error) = spawns.take_error() {
+        super::note_read_error(&mut session, Err(error));
+    }
     session
 }
 
@@ -889,9 +893,9 @@ fn read_meta(path: &Path) -> Result<(Option<String>, Option<String>, Option<Stri
 /// The sub-agent's final return value as text: the last assistant text turn in its transcript
 /// (what a `general-purpose`/`Explore` agent hands back to its parent, surfaced in the parent's
 /// `Agent` tool_result). Reads one record at a time and retains the last substantive assistant text.
-/// `None` for an empty/unreadable transcript or one with no substantive assistant text.
-pub fn subagent_return(path: &std::path::Path) -> Option<String> {
-    let read = jsonl::Read::open(path).ok()?;
+/// `None` for an empty transcript or one with no substantive assistant text; failed reads return an error.
+pub fn subagent_return(path: &std::path::Path) -> Result<Option<String>> {
+    let read = jsonl::Read::open(path)?;
     let mut last = None;
     read.lines(0, |line| {
         let Some(head) = line
@@ -925,14 +929,13 @@ pub fn subagent_return(path: &std::path::Path) -> Option<String> {
             }
         }
         Ok(Flow::Continue)
-    })
-    .ok()?;
-    last
+    })?;
+    Ok(last)
 }
 
-pub fn subagent_end(path: &std::path::Path) -> SubagentEnd {
+pub fn subagent_end(path: &std::path::Path) -> Result<SubagentEnd> {
     let mut end = SubagentEnd::default();
-    let Ok(read) = jsonl::Read::open(path) else { return end };
+    let read = jsonl::Read::open(path)?;
     let result = read.lines(0, |line| {
         let Some(head) = line
             .view
@@ -1043,10 +1046,8 @@ pub fn subagent_end(path: &std::path::Path) -> SubagentEnd {
         }
         Ok(Flow::Continue)
     });
-    if result.is_err() {
-        return SubagentEnd::default();
-    }
-    end
+    result?;
+    Ok(end)
 }
 
 /// Scan a parent transcript for `<task-notification>` records and reduce them to the last notice
@@ -1057,11 +1058,9 @@ pub fn subagent_end(path: &std::path::Path) -> SubagentEnd {
 /// (`message.content`). Most notifications exist only as the former — on one real session 1,229
 /// against 105 — so reading only user turns misses the status of most lanes. Content is read only
 /// for records that start with the tag.
-pub fn task_notices(parent_path: &std::path::Path) -> std::collections::HashMap<String, TaskNotice> {
+pub fn task_notices(parent_path: &std::path::Path) -> Result<std::collections::HashMap<String, TaskNotice>> {
     let mut map = std::collections::HashMap::new();
-    let Ok(read) = jsonl::Read::open(parent_path) else {
-        return map;
-    };
+    let read = jsonl::Read::open(parent_path)?;
     let result = read.lines(0, |line| {
         let Some(head) = line
             .view
@@ -1097,10 +1096,8 @@ pub fn task_notices(parent_path: &std::path::Path) -> std::collections::HashMap<
         }
         Ok(Flow::Continue)
     });
-    if result.is_err() {
-        map.clear();
-    }
-    map
+    result?;
+    Ok(map)
 }
 
 /// Cheap metadata-only scan for `discover`.
@@ -2200,14 +2197,14 @@ mod tests {
             .join("\n"),
         )
         .unwrap();
-        let end = subagent_end(&agent);
+        let end = subagent_end(&agent).unwrap();
         assert_eq!(end.stopped(), Some(true), "{end:?}");
         // A resume appends turns after the stop: no longer stopped.
         let mut resumed = std::fs::read_to_string(&agent).unwrap();
         resumed.push('\n');
         resumed.push_str(r#"{"type":"user","uuid":"u2","timestamp":"2026-10-01T00:05:00Z","message":{"role":"user","content":"poll it in the foreground"}}"#);
         std::fs::write(&agent, resumed).unwrap();
-        assert_eq!(subagent_end(&agent).stopped(), Some(false));
+        assert_eq!(subagent_end(&agent).unwrap().stopped(), Some(false));
         // No stop record at all: unknown (a killed harness looks like this too).
         let fresh = dir.join("agent-a2.jsonl");
         std::fs::write(
@@ -2215,7 +2212,7 @@ mod tests {
             r#"{"type":"user","uuid":"u","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"go"}}"#,
         )
         .unwrap();
-        assert_eq!(subagent_end(&fresh).stopped(), None);
+        assert_eq!(subagent_end(&fresh).unwrap().stopped(), None);
 
         let parent = dir.join("parent.jsonl");
         std::fs::write(
@@ -2230,7 +2227,7 @@ mod tests {
             .join("\n"),
         )
         .unwrap();
-        let notices = task_notices(&parent);
+        let notices = task_notices(&parent).unwrap();
         assert_eq!(notices.len(), 3, "{notices:?}");
         assert_eq!(notices["a1"].status, "killed");
         assert_eq!(notices["a2"].status, "completed", "queue-operation records count");
@@ -2391,7 +2388,10 @@ mod tests {
         assert!(direct.workflow.is_none());
         assert_eq!(direct.result_status, None); // direct agents report via parent tool_result
                                                 // its return value = the last assistant text turn.
-        assert_eq!(subagent_return(&direct.session.path).as_deref(), Some("done one"));
+        assert_eq!(
+            subagent_return(&direct.session.path).unwrap().as_deref(),
+            Some("done one")
+        );
 
         let w1 = tree.iter().find(|s| s.agent_id() == "a222").expect("wf agent 1");
         assert_eq!(w1.workflow.as_deref(), Some("wf_abc-123"));

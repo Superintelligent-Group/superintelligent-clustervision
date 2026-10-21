@@ -70,3 +70,58 @@ fn json_files_and_store_affordances_report_corrupt_side_files() {
     fs::write(dir.join("1.json"), r#"{"subject":"repair","status":"pending"}"#).unwrap();
     assert_eq!(adapter.store_affordances(&r).unwrap().len(), 1);
 }
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn opencode_discovery_reports_a_row_decode_failure() {
+    use cv_core::Adapter;
+    let world = cv_testkit::World::in_process("opencode-row-error", cv_core::env::Env::enter_isolated);
+    let db = world.home.join("opencode.db");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute_batch("CREATE TABLE session_v2(id, directory, title, time_created, time_updated); CREATE TABLE session_message(session_id, type); INSERT INTO session_v2 VALUES (x'ff', '', '', 0, 0);").unwrap();
+    let adapter = cv_core::harness::opencode::OpenCode::with_db(db.clone());
+    let discovered = adapter.discover().unwrap();
+    assert!(discovered.refs.is_empty());
+    assert_eq!(discovered.skipped.len(), 1);
+    assert_eq!(discovered.skipped[0].path, db);
+    assert!(discovered.skipped[0].why.contains("column"));
+}
+
+#[test]
+fn claude_end_and_notices_do_not_turn_failed_reads_into_running_or_empty() {
+    let world = cv_testkit::World::in_process("claude-status-errors", cv_core::env::Env::enter_isolated);
+    let path = &world.home; // A directory is a deterministic read failure, including as root.
+    assert!(cv_core::harness::claude::subagent_end(path).is_err());
+    assert!(cv_core::harness::claude::task_notices(path).is_err());
+    assert!(cv_core::harness::claude::subagent_return(path).is_err());
+}
+
+#[test]
+fn string_stream_carries_a_named_consumer_failure() {
+    struct Failed;
+    impl cv_core::MessageSink for Failed {
+        fn message(&mut self, _: cv_core::Message) -> cv_core::Flow {
+            cv_core::Flow::Stop
+        }
+        fn take_error(&mut self) -> Option<anyhow::Error> {
+            Some(anyhow::anyhow!("injected consumer failure"))
+        }
+    }
+    let session = cv_core::harness::claude::stream_str("fixture", "{}\n", None, &cv_core::Demand::RICH, &mut Failed);
+    assert!(session.extra["cv"]["read_error"]
+        .as_str()
+        .unwrap()
+        .contains("injected consumer failure"));
+}
+
+#[test]
+fn workflow_launches_report_an_aborted_scan() {
+    let world = cv_testkit::World::in_process("workflow-launch-error", cv_core::env::Env::enter_isolated);
+    assert!(cv_core::harness::claude_workflow::launches(&world.home).is_err());
+}
+
+#[test]
+fn codex_string_input_counts_an_invalid_legacy_document() {
+    let session = cv_core::harness::codex::parse_str("fixture", "{broken", false, None);
+    assert_eq!(session.extra["cv"]["skipped_lines"], 1);
+}
