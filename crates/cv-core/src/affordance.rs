@@ -260,40 +260,33 @@ fn flag(input: JsonView<'_>, key: &str) -> Result<bool> {
 /// The cron-style tools that take an action argument. Compare the complete string without
 /// materializing a potentially giant ignored action value.
 fn action_verb(input: JsonView<'_>) -> Result<&'static str> {
-    const WORDS: &[&str] = &[
-        "create",
-        "add",
-        "new",
-        "schedule",
-        "remove",
-        "delete",
-        "cancel",
-        "rm",
-        "list",
-        "ls",
-        "status",
-        "get",
-        "show",
-        "run",
-        "run_now",
-        "trigger",
-        "kill",
-        "stop",
-        "terminate",
+    const ACTIONS: [(&str, &str); 19] = [
+        ("create", "create"),
+        ("add", "create"),
+        ("new", "create"),
+        ("schedule", "create"),
+        ("remove", "delete"),
+        ("delete", "delete"),
+        ("cancel", "delete"),
+        ("rm", "delete"),
+        ("list", "list"),
+        ("ls", "list"),
+        ("status", "list"),
+        ("get", "list"),
+        ("show", "list"),
+        ("run", "fire"),
+        ("run_now", "fire"),
+        ("trigger", "fire"),
+        ("kill", "stop"),
+        ("stop", "stop"),
+        ("terminate", "stop"),
     ];
     let action = input
         .get("action")?
-        .map(|v| input::word(v, WORDS))
+        .map(|v| input::word(v, &ACTIONS.map(|(word, _)| word)))
         .transpose()?
         .flatten();
-    Ok(match action {
-        Some(0..=3) => "create",
-        Some(4..=7) => "delete",
-        Some(8..=12) => "list",
-        Some(13..=15) => "fire",
-        Some(16..=18) => "stop",
-        _ => "update",
-    })
+    Ok(action.map_or("update", |index| ACTIONS[index].1))
 }
 
 /// The one table: `(harness, tool name, input)` → `(kind, action)`, or `None` for a tool that is not
