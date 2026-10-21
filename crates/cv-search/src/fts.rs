@@ -302,7 +302,18 @@ fn compaction_candidates_at_floor(
     let bytes = |m: &tantivy::index::SegmentMeta| -> u64 {
         m.list_files()
             .iter()
-            .filter_map(|f| std::fs::metadata(dir.join(f)).ok())
+            .filter_map(|f| {
+                std::fs::metadata(dir.join(f))
+                    .inspect_err(|error| {
+                        if error.kind() != std::io::ErrorKind::NotFound {
+                            cv_core::env::warn_once(
+                                "search metadata",
+                                format_args!("{}: {error}", dir.join(f).display()),
+                            );
+                        }
+                    })
+                    .ok()
+            })
             .map(|md| md.len())
             .sum()
     };
@@ -1303,7 +1314,11 @@ fn job_pass(
             hook(source)?;
         }
     }
-    let source = std::fs::File::open(adapter.resume_source(&job.r)).ok();
+    let source = std::fs::File::open(adapter.resume_source(&job.r))
+        .inspect_err(|error| {
+            cv_core::env::warn_once("index source handle", format_args!("{}: {error}", job.r.path.display()));
+        })
+        .ok();
     let mut events = match from {
         None => cv_core::events::SpoolingSink::new(job.r.cwd.clone()),
         Some(cp) => cv_core::events::SpoolingSink::resume(cp).context("checkpoint without events")?,
@@ -1897,7 +1912,10 @@ impl<'w> ChunkSink<'w> {
                     match cv_core::lazy::read_head_checked(std::path::Path::new(p), PERSISTED_INDEX_CAP) {
                         Ok(head) => {
                             if let cv_core::lazy::PersistedHead::Unreadable(reason) = &head {
-                                eprintln!("cv: {} indexed without {p}: {reason}", self.id);
+                                if !self.failed && self.err.is_none() {
+                                    self.err = Some(anyhow::anyhow!("reading persisted search output {p}: {reason}"));
+                                }
+                                return;
                             }
                             if let Some(t) = head.indexed_text(p) {
                                 for piece in t.as_bytes().chunks(CHUNK_BYTES) {
@@ -2136,7 +2154,13 @@ fn read_indexed_metadata(index: &Index, f: &Fields, read_metadata: bool) -> Resu
                 if let Some(stamp) = doc
                     .get_first(f.discovery_metadata)
                     .and_then(|v| v.as_str())
-                    .and_then(|s| serde_json::from_str(s).ok())
+                    .and_then(|s| {
+                        serde_json::from_str(s)
+                            .inspect_err(|error| {
+                                cv_core::env::warn_once("search metadata", format_args!("{id}: {error}"));
+                            })
+                            .ok()
+                    })
                 {
                     metadata.insert(id.clone(), stamp);
                 }
@@ -2160,9 +2184,12 @@ fn kind_query(f: &Fields, kind: &str) -> tantivy::query::TermQuery {
     )
 }
 
-/// Session `id`'s meta doc. Preserve best-effort metadata fallback on lookup/read failure.
-fn meta_doc(searcher: &tantivy::Searcher, f: &Fields, id: &str) -> Option<TantivyDocument> {
-    searcher.doc(meta_addr(searcher, f, id).ok()??).ok()
+/// Session `id`'s metadata: absence allows a body fallback; failed lookup or decoding does not.
+fn meta_doc(searcher: &tantivy::Searcher, f: &Fields, id: &str) -> Result<Option<TantivyDocument>> {
+    meta_addr(searcher, f, id)?
+        .map(|address| searcher.doc(address))
+        .transpose()
+        .context("reading search metadata")
 }
 
 fn meta_addr(searcher: &tantivy::Searcher, f: &Fields, id: &str) -> Result<Option<tantivy::DocAddress>> {
@@ -2267,12 +2294,28 @@ fn metadata_matches(doc: &TantivyDocument, fields: &Fields, harness: Option<&str
         })
 }
 
+/// Optional index metadata is an accelerator: absence is normal, failed reads are named and retried.
+fn probe_indexed_sigs(dir: &Path) -> Option<IndexedSigs> {
+    let read = || -> Result<Option<IndexedSigs>> {
+        if !dir.join("meta.json").try_exists()? {
+            return Ok(None);
+        }
+        let (index, fields) = open_existing(dir)?;
+        read_indexed_sigs(&index, &fields).map(Some)
+    };
+    read()
+        .inspect_err(|error| {
+            cv_core::env::warn_once("search metadata", format_args!("{}: {error:#}", dir.display()));
+        })
+        .ok()
+        .flatten()
+}
+
 /// The newest file mtime (ns) stamped on any indexed doc — how far the index has caught up. `None`
 /// when the index can't be opened or is empty. One stored-field scan, the same cost incremental
 /// indexing pays for its skip-set.
 pub fn newest_indexed_mtime(dir: &Path) -> Option<i64> {
-    let (index, f) = open_existing(dir).ok()?;
-    let (sigs, _) = read_indexed_sigs(&index, &f).ok()?;
+    let (sigs, _) = probe_indexed_sigs(dir)?;
     sigs.values().filter(|(_, size)| *size >= 0).map(|&(mt, _)| mt).max()
 }
 
@@ -2297,8 +2340,7 @@ pub fn staleness(dir: &Path) -> Option<Staleness> {
 /// [`staleness`] over a caller-supplied inventory — the split that lets a unit test feed the
 /// fixture's refs rather than a real corpus discovery.
 fn staleness_over(dir: &Path, refs: &[cv_core::SessionRef]) -> Option<Staleness> {
-    let (index, f) = open_existing(dir).ok()?;
-    let (sigs, _) = read_indexed_sigs(&index, &f).ok()?;
+    let (sigs, _) = probe_indexed_sigs(dir)?;
     let indexed = sigs.values().filter(|(_, size)| *size >= 0).map(|&(mt, _)| mt).max()?;
     let mut stale_sessions = 0usize;
     let mut newest_on_disk = 0i64;
@@ -2353,13 +2395,7 @@ fn fmt_age_ns(ns: i64) -> String {
 /// a transient failure never spams the hint. One stored-field scan — the same cheap pass
 /// [`newest_indexed_mtime`] makes (no body is stored).
 pub fn has_subagent_docs(dir: &Path) -> bool {
-    let Ok((index, f)) = open_existing(dir) else {
-        return true;
-    };
-    match read_indexed_sigs(&index, &f) {
-        Ok((_, folded)) => !folded.is_empty(),
-        Err(_) => true,
-    }
+    probe_indexed_sigs(dir).is_none_or(|(_, folded)| !folded.is_empty())
 }
 
 /// Index an explicit set of sessions through the real production [`index_session`] path — the same
@@ -2502,7 +2538,7 @@ fn enrich_snippets(
 ) -> Result<Option<String>> {
     let (mut unreadable, mut first) = (0usize, None);
     for hit in hits {
-        let doc = meta_doc(searcher, f, &hit.id);
+        let doc = meta_doc(searcher, f, &hit.id)?;
         let path = doc.as_ref().and_then(|d| d.get_first(f.path)).and_then(|v| v.as_str());
         // The stored preview stands in when the live read cannot: marked when the source is
         // gone, returned as the search's note when it is there but cannot be read. A hit whose
@@ -2669,10 +2705,10 @@ fn ranked_search(
                         .observed
                         .winner_metadata_reads
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    searcher.doc(address).ok()
+                    Some(searcher.doc(address).context("reading search metadata")?)
                 }
                 Some(MetadataDecision::Missing) => None,
-                _ => meta_doc(searcher, f, &id),
+                _ => meta_doc(searcher, f, &id)?,
             };
             match metadata {
                 Some(doc) => doc,
@@ -2901,6 +2937,21 @@ mod tests {
             mark: None,
             decoded: None,
         }
+    }
+
+    #[test]
+    fn optional_metadata_failure_is_named_and_retried_after_repair() {
+        let world = cv_testkit::World::in_process("metadata-failure", cv_core::env::Env::enter_isolated);
+        let dir = world.base.join("index");
+        assert!(probe_indexed_sigs(&dir).is_none());
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("meta.json"), "{broken").unwrap();
+        assert!(probe_indexed_sigs(&dir).is_none());
+        assert!(!cv_core::env::warn_once("search metadata", "already reported"));
+        std::fs::remove_file(dir.join("meta.json")).unwrap();
+        let (index, _) = open_or_create(&dir).unwrap();
+        drop(index);
+        assert!(probe_indexed_sigs(&dir).is_some());
     }
 
     #[test]
@@ -3257,7 +3308,10 @@ mod tests {
             job.size = IN_FLIGHT_BYTES as i64;
         }
         let error = run_jobs(&mut writer, &fields, jobs, &consumer).err().unwrap();
-        assert!(format!("{error:#}").contains("injected index consumer failure"));
+        assert!(
+            format!("{error:#}").contains("injected index consumer failure"),
+            "{error:#}"
+        );
         drop(writer);
         assert_eq!(
             admission.stats().0,
@@ -3713,6 +3767,24 @@ mod tests {
         }
         std::fs::write(&p, out).unwrap();
         p.display().to_string()
+    }
+
+    #[test]
+    fn metadata_query_failure_is_not_a_missing_document() {
+        let _home = IsolatedHome::new();
+        let dir = tmpdir();
+        let source = tmpdir();
+        let path = write_claude(&source, "metadata-error", "fixture text");
+        index_refs(&dir, &[sref("metadata-error", "fixture", path)], false).unwrap();
+        let (index, fields) = open_existing(&dir).unwrap();
+        let searcher = index.reader().unwrap().searcher();
+        assert!(meta_doc(&searcher, &fields, "metadata-error").unwrap().is_some());
+        assert!(meta_doc(&searcher, &fields, "absent").unwrap().is_none());
+        let mut broken = fields.clone();
+        broken.id = fields.preview; // Stored-only field: a term lookup must fail.
+        assert!(meta_doc(&searcher, &broken, "metadata-error").is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+        std::fs::remove_dir_all(source).unwrap();
     }
 
     #[test]
@@ -5817,7 +5889,9 @@ mod tests {
         let first = sweep(&dir, vec![b.clone(), a.clone()], true, true).unwrap();
         assert_eq!(first.changed, 3);
         let (index, fields) = open_existing(&dir).unwrap();
-        let meta = meta_doc(&index.reader().unwrap().searcher(), &fields, "agent-shared").unwrap();
+        let meta = meta_doc(&index.reader().unwrap().searcher(), &fields, "agent-shared")
+            .unwrap()
+            .unwrap();
         assert_eq!(
             meta.get_first(fields.parent_id).and_then(|v| v.as_str()),
             Some("parent-a")
@@ -5837,7 +5911,9 @@ mod tests {
             1
         );
         let (index, fields) = open_existing(&dir).unwrap();
-        let meta = meta_doc(&index.reader().unwrap().searcher(), &fields, "agent-shared").unwrap();
+        let meta = meta_doc(&index.reader().unwrap().searcher(), &fields, "agent-shared")
+            .unwrap()
+            .unwrap();
         assert!(meta.get_first(fields.parent_id).is_none());
         assert_eq!(
             text_search_ids(&dir, "topaz").unwrap(),
@@ -6893,21 +6969,14 @@ mod tests {
         assert_eq!(report(Swept::default(), true, true).unwrap().total, 0);
     }
 
-    /// A persisted tool output the indexer cannot open (another user's file) leaves its session
-    /// indexed: the transcript's text, and a note naming the output and why it is missing.
-    #[cfg(unix)]
+    /// Unreadable persisted output fails publication, just like a source-change error.
     #[test]
-    fn an_unreadable_persisted_output_degrades_its_session_instead_of_failing_it() {
-        use std::os::unix::fs::PermissionsExt;
+    fn an_unreadable_persisted_output_fails_publication_and_retries_after_repair() {
         let _home = IsolatedHome::new();
         let (dir, sdir) = (tmpdir(), tmpdir());
         let output = sdir.join("tool-results").join("big.txt");
         std::fs::create_dir_all(output.parent().unwrap()).unwrap();
-        std::fs::write(&output, "zqhiddenoutput").unwrap();
-        std::fs::set_permissions(&output, std::fs::Permissions::from_mode(0o000)).unwrap();
-        if std::fs::File::open(&output).is_ok() {
-            return; // root reads anything
-        }
+        std::fs::create_dir(&output).unwrap();
         let stub = format!(
             "<persisted-output>\nOutput too large (66KB). Full output saved to: {}\n\nPreview (first 2KB):\nzqpreview\n</persisted-output>",
             output.display()
@@ -6927,11 +6996,19 @@ mod tests {
             false,
         )
         .unwrap();
-        assert_eq!((swept.changed, swept.errors), (1, 0));
-        assert_eq!(text_search(&dir, "zqpreview", 10).unwrap().len(), 1);
-        assert_eq!(text_search(&dir, "unreadable", 10).unwrap().len(), 1);
-        assert!(text_search(&dir, "zqhiddenoutput", 10).unwrap().is_empty());
-        std::fs::set_permissions(&output, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!((swept.changed, swept.errors), (0, 1));
+        assert!(text_search(&dir, "zqpreview", 10).unwrap().is_empty());
+        std::fs::remove_dir(&output).unwrap();
+        std::fs::write(&output, "zqhiddenoutput").unwrap();
+        let repaired = sweep(
+            &dir,
+            vec![sref("s", "s", path.to_string_lossy().into_owned())],
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!((repaired.changed, repaired.errors), (1, 0));
+        assert_eq!(text_search(&dir, "zqhiddenoutput", 10).unwrap().len(), 1);
         for d in [dir, sdir] {
             std::fs::remove_dir_all(d).ok();
         }
