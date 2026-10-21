@@ -522,7 +522,7 @@ fn checked_grok_qwen_complete_selected_producer_matches_owned() -> Result<()> {
             )?;
         }
         let wire = adapter.resume_source(&reference);
-        // Truncation, not growth: an append-only log may grow under a selected source.
+        // Truncate to invalidate the selected source; append-only growth is permitted.
         std::fs::write(&wire, b"")?;
         let absent = world.base.join(format!("changed-{target}"));
         assert!(emit(&selected, target, &absent, &EmitOptions::default()).is_err());

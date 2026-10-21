@@ -86,6 +86,8 @@ pub(in crate::emit) fn source_features(target: Harness, thinking: ThinkingMode, 
     Ok(accumulator.finish(session))
 }
 
+/// Preserve the first nonblank character classification consumed by `is_client_command`:
+/// `/` and `?` are commands, `x` is other nonblank text, and empty is blank.
 pub(super) fn marker(text: &crate::lazy::Text, resolver: &crate::lazy::Resolver) -> Result<String> {
     Ok(match crate::emit::thinking::first_character(text, resolver, true)? {
         Some(ch @ ('/' | '?')) => ch.to_string(),

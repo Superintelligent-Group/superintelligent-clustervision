@@ -20,6 +20,7 @@ pub(crate) fn first_character(text: &Text, resolver: &Resolver, skip_whitespace:
         Ok(())
     }) {
         Ok(()) => Ok(None),
+        // Only our early-stop sentinel means success; source validation errors still escape.
         Err(error) if error.is::<crate::stream::Stop>() => Ok(first),
         Err(error) => Err(error),
     }
@@ -51,6 +52,8 @@ pub(crate) fn fate(block: &Block, target: Harness, mode: ThinkingMode, resolver:
             *redacted,
         )
     };
+    // If absent plaintext already means Keep, presence cannot change the decision; avoid
+    // resolving a retained source field just to rediscover that it will be kept.
     if decide(false) == ThinkingFate::Keep {
         return Ok(ThinkingFate::Keep);
     }
