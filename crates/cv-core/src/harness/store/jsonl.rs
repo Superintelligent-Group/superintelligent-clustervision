@@ -209,10 +209,6 @@ pub(crate) trait Codec {
     /// bump it when either changes. A checkpoint of another version is declined ([`restore`]).
     const VERSION: u32;
 
-    /// Whether the session records its rejected lines (`cv.skipped_lines`). Claude's reader never
-    /// has, and starting would change its output.
-    const NOTES_SKIPPED: bool = true;
-
     /// One accepted record, starting at byte `at`.
     fn record(
         &mut self,
@@ -354,12 +350,8 @@ pub(crate) fn drive<C: Codec>(
             stopped = guard.failed();
             Ok(if stopped { Flow::Stop } else { Flow::Continue })
         })?;
-        if C::NOTES_SKIPPED {
-            super::super::note_skipped_lines(codec.session(), skipped);
-        }
-        let session = codec.finish(stopped, guard)?;
-        read.check()?;
-        Ok(Some(session))
+        super::super::note_skipped_lines(codec.session(), skipped);
+        codec.finish(stopped, guard).map(Some)
     })
 }
 

@@ -235,6 +235,11 @@ fn guard<'a, T>(
         return Err(error);
     }
     let result = read(&mut guard);
+    // Held output and a fast failing callback may follow the last line-pass check. Completion
+    // belongs here, including errors: a changed backing outranks the consumer error it caused.
+    if let Some(backing) = backing {
+        backing.check()?;
+    }
     let error = guard.take_error();
     // An inner checked boundary may already have returned the original diagnostic while its
     // failed outer sink now reports only a persistent failure marker. Preserve that Result.

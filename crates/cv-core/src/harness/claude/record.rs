@@ -500,16 +500,14 @@ pub(crate) fn usage_context(usage: JsonView<'_>) -> Result<Option<u64>> {
 }
 
 /// One record: update `session` and hand its message (if any) to `sink`. `at` is the record's
-/// byte offset when the source has one. `sourced` is set when the delivered message holds a
-/// source descriptor, which obliges the reader to recheck the source before going on. Errors
+/// byte offset when the source has one. The shared driver owns source checks; errors here
 /// are source failures, never malformed records.
-pub(super) fn ingest(
+pub(super) fn record(
     session: &mut Session,
     view: JsonView<'_>,
     at: Option<u64>,
     opts: &crate::stream::Demand,
     sink: &mut dyn MessageSink,
-    sourced: &mut bool,
 ) -> Result<Flow> {
     // A record that is not an object carries nothing (Value's lookups all miss).
     let Some(Head { top, ty }) = Head::parse(view, opts.into())? else {
@@ -659,7 +657,7 @@ pub(super) fn ingest(
             return match r.attachment()? {
                 Some(mut m) => {
                     r.stamp(&mut m);
-                    Ok(deliver(m, sink, sourced))
+                    Ok(sink.message(m))
                 }
                 None => r.carry_or_skip(sink),
             };
@@ -695,18 +693,7 @@ pub(super) fn ingest(
     if session.model.is_none() && msg.model.as_deref() != Some(SYNTHETIC_MODEL) {
         session.model = msg.model.clone();
     }
-    Ok(deliver(msg, sink, sourced))
-}
-
-fn deliver(msg: Message, sink: &mut dyn MessageSink, sourced: &mut bool) -> Flow {
-    *sourced |= msg.content.iter().any(|block| match block {
-        Block::Text { text } | Block::Thinking { text, .. } | Block::ToolResult { content: text, .. } => {
-            matches!(text, Text::Source(_))
-        }
-        Block::ToolUse { input, .. } => matches!(input, Json::Source(_)),
-        _ => false,
-    });
-    sink.message(msg)
+    Ok(sink.message(msg))
 }
 
 /// One record under the read's [`stream::Demand`]. At [`Tier::Facts`] Claude builds only the

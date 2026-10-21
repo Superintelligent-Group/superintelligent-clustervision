@@ -343,6 +343,20 @@ impl Default for Poll<'_> {
     }
 }
 
+struct SessionPoll<'a> {
+    kind: EventKind,
+    reference: &'a SessionRef,
+    adapter: &'a dyn harness::Adapter,
+    previous: Option<&'a ReadState>,
+    from: usize,
+    max: usize,
+}
+struct Delivery {
+    pass: ReadPass,
+    taken: usize,
+    stopped: bool,
+}
+
 impl Watcher {
     /// Create a watcher. If `emit_existing` is false, the current sessions are recorded silently so
     /// only activity *after* construction is reported (the usual `tail -f` feel).
@@ -565,94 +579,112 @@ impl Watcher {
         mut check: impl FnMut() -> anyhow::Result<()>,
         mut take: impl FnMut(EventKind, &SessionRef, Message) -> anyhow::Result<crate::Flow>,
     ) -> anyhow::Result<bool> {
-        struct Consumer<'a, F> {
-            kind: EventKind,
-            reference: &'a SessionRef,
-            take: &'a mut F,
-            taken: usize,
-            stopped: bool,
-            error: Option<anyhow::Error>,
-        }
-        impl<F: FnMut(EventKind, &SessionRef, Message) -> anyhow::Result<crate::Flow>> crate::MessageSink for Consumer<'_, F> {
-            fn take_error(&mut self) -> Option<anyhow::Error> {
-                self.error.take()
-            }
-            fn message(&mut self, message: Message) -> crate::Flow {
-                match (self.take)(self.kind, self.reference, message) {
-                    Ok(flow) => {
-                        self.taken += 1;
-                        self.stopped = flow == crate::Flow::Stop;
-                        flow
-                    }
-                    Err(error) => {
-                        self.error = Some(error);
-                        crate::Flow::Stop
-                    }
-                }
-            }
-        }
-        let _reads = crate::source::read_scope();
-        check()?;
-        let refs = self.discover_live();
-        check()?;
-        for (key, r) in refs {
-            check()?;
-            let trigger = Self::trigger_of(&r);
-            let (kind, previous_count) = match self.seen.get(&key) {
-                None => (EventKind::New, 0),
-                Some(state) if state.stale(trigger, &r) => {
-                    let previous = resolve_checked(&r, state.mark, &mut check)?;
-                    (EventKind::Updated, previous)
-                }
-                Some(_) => continue,
-            };
-            check()?;
-            let adapter = harness::for_harness(r.harness)
-                .ok_or_else(|| anyhow::anyhow!("no adapter for watched {} session {}", r.harness, r.path.display()))?;
-            let mut consumer = Consumer {
-                kind,
-                reference: &r,
-                take: &mut take,
-                taken: 0,
-                stopped: false,
-                error: None,
-            };
-            let previous = self.seen.get(&key).and_then(|state| state.read.as_ref());
-            let demand = read::Demand {
-                output: Some(&mut consumer),
-                check: Some(&mut check),
-                ..Default::default()
-            };
-            let pass = read::pass(adapter.as_ref(), &r, previous, previous_count, usize::MAX, demand)?;
-            check()?;
-            let seen_to = previous_count.min(pass.total) + consumer.taken;
-            let pending = !pass.reached_eof || pass.total > seen_to;
-            self.seen.insert(
-                key,
-                State {
-                    trigger,
-                    mark: Mark::Messages(seen_to),
-                    pending,
-                    read: Some(pass.accepted(seen_to)),
-                },
-            );
-            if consumer.stopped {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        self.poll_sessions(
+            Poll {
+                strict: true,
+                checked: Some(&mut check),
+                ..Poll::default()
+            },
+            |session, check| {
+                let mut taken = 0;
+                let mut stopped = false;
+                let mut consumer = crate::TryFnSink::new(|message| {
+                    let flow = take(session.kind, session.reference, message)?;
+                    taken += 1;
+                    stopped = flow == crate::Flow::Stop;
+                    Ok(flow)
+                });
+                let pass = read::pass(
+                    session.adapter,
+                    session.reference,
+                    session.previous,
+                    session.from,
+                    session.max,
+                    read::Demand {
+                        output: Some(&mut consumer),
+                        check: Some(check),
+                        ..Default::default()
+                    },
+                )?;
+                Ok(Delivery { pass, taken, stopped })
+            },
+        )
     }
 
     /// [`poll`](Self::poll), with failures returned: under [`Poll::strict`] an unreadable session
-    /// or an unresolvable prior position is an error, so a caller never returns a successful
-    /// cursor for output that could not be read; otherwise such a session is skipped and stays
-    /// retryable. [`Poll::checked`] failures are always errors.
+    /// or an unresolvable prior position is an error; otherwise it stays retryable.
+    /// [`Poll::checked`] failures are always errors.
     pub fn try_poll(&mut self, poll: Poll<'_>, mut take: impl FnMut(SessionEvent) -> usize) -> anyhow::Result<bool> {
+        let retained = poll.retained;
+        let controlled = poll.checked.is_some();
+        self.poll_sessions(poll, |session, check| {
+            let mut pass = read::pass(
+                session.adapter,
+                session.reference,
+                session.previous,
+                session.from,
+                session.max,
+                read::Demand {
+                    retained,
+                    check: (retained && controlled).then_some(check),
+                    ..Default::default()
+                },
+            )?;
+            let messages = std::mem::take(&mut pass.messages);
+            let offered = messages.len();
+            let taken = if offered == 0 {
+                0
+            } else {
+                take(SessionEvent {
+                    kind: session.kind,
+                    reference: session.reference.clone(),
+                    new_messages: messages,
+                })
+                .min(offered)
+            };
+            if retained {
+                anyhow::ensure!(
+                    pass.accepted(session.from.min(pass.total))
+                        .fresh_with(session.adapter, session.reference),
+                    "watched source changed during retained projection"
+                );
+            }
+            Ok(Delivery {
+                pass,
+                taken,
+                stopped: false,
+            })
+        })
+    }
+
+    /// One trigger and position rule for every message delivery shape.
+    fn next_change(
+        &self,
+        key: &str,
+        r: &SessionRef,
+        check: &mut dyn FnMut() -> anyhow::Result<()>,
+    ) -> anyhow::Result<Option<(EventKind, usize)>> {
+        match self.seen.get(key) {
+            None => Ok(Some((EventKind::New, 0))),
+            Some(state) if state.stale(Self::trigger_of(r), r) => {
+                resolve_checked(r, state.mark, check).map(|from| Some((EventKind::Updated, from)))
+            }
+            Some(_) => Ok(None),
+        }
+    }
+
+    /// The per-session callback owns delivery; this loop alone owns discovery, change detection,
+    /// budgets and cursor acceptance. An error leaves the session's previous position intact.
+    fn poll_sessions(
+        &mut self,
+        poll: Poll<'_>,
+        mut deliver: impl FnMut(SessionPoll<'_>, &mut dyn FnMut() -> anyhow::Result<()>) -> anyhow::Result<Delivery>,
+    ) -> anyhow::Result<bool> {
         let Poll {
-            max: max_messages,
+            max,
             strict,
-            retained,
             checked: mut check,
+            ..
         } = poll;
         let controlled = check.is_some();
         let mut check = || match check.as_mut() {
@@ -667,30 +699,14 @@ impl Watcher {
         let mut pending = false;
         for (key, r) in refs {
             check()?;
-            let trigger = Self::trigger_of(&r);
-            let (kind, prev_len) = match self.seen.get(&key) {
-                None => (EventKind::New, 0),
-                Some(state) if state.stale(trigger, &r) => {
-                    let previous = if controlled {
-                        Some(resolve_checked(&r, state.mark, &mut check)?)
-                    } else {
-                        resolve(&r, state.mark)
-                    };
-                    let Some(prev_len) = previous else {
-                        if strict {
-                            anyhow::bail!(
-                                "could not resolve prior watch position: {} {}",
-                                r.harness,
-                                r.path.display()
-                            );
-                        }
-                        continue; // unreadable right now: keep the position, a transient failure is not a skip
-                    };
-                    (EventKind::Updated, prev_len)
-                }
-                Some(_) => continue,
+            let change = self.next_change(&key, &r, &mut check);
+            let (kind, from) = match change {
+                Ok(Some(change)) => change,
+                Ok(None) => continue,
+                Err(error) if strict || controlled => return Err(error),
+                Err(_) => continue,
             };
-            let room = max_messages.saturating_sub(consumed);
+            check()?;
             let Some(adapter) = harness::for_harness(r.harness) else {
                 anyhow::ensure!(
                     !strict,
@@ -700,55 +716,41 @@ impl Watcher {
                 );
                 continue;
             };
-            let previous = self.seen.get(&key).and_then(|state| state.read.as_ref());
-            let demand = read::Demand {
-                retained,
-                check: (retained && controlled).then_some(&mut check as &mut dyn FnMut() -> anyhow::Result<()>),
-                ..Default::default()
-            };
-            let result = read::pass(adapter.as_ref(), &r, previous, prev_len, room, demand);
-            let mut pass = match result {
-                Ok(pass) => pass,
+            let result = deliver(
+                SessionPoll {
+                    kind,
+                    reference: &r,
+                    adapter: adapter.as_ref(),
+                    previous: self.seen.get(&key).and_then(|state| state.read.as_ref()),
+                    from,
+                    max: max.saturating_sub(consumed),
+                },
+                &mut check,
+            );
+            let Delivery { pass, taken, stopped } = match result {
+                Ok(delivery) => delivery,
                 Err(error) if strict => {
                     return Err(error.context(format!("reading watched {} session {}", r.harness, r.path.display())))
                 }
                 Err(_) => continue,
             };
-            let total = pass.total;
-            let new_messages = std::mem::take(&mut pass.messages);
-            // A mark past the end of a rewritten transcript: nothing to re-emit (see the tests).
-            let prev_len = prev_len.min(total);
-            let offered = new_messages.len();
-            let taken = if offered == 0 {
-                0
-            } else {
-                take(SessionEvent {
-                    kind,
-                    reference: r.clone(),
-                    new_messages,
-                })
-                .min(offered)
-            };
-            if retained {
-                anyhow::ensure!(
-                    pass.accepted(prev_len).fresh_with(adapter.as_ref(), &r),
-                    "watched source changed during retained projection"
-                );
-            }
             check()?;
-            consumed += taken;
-            let seen_to = prev_len + taken;
-            let left = total > seen_to;
+            consumed = consumed.saturating_add(taken);
+            let seen_to = from.min(pass.total) + taken;
+            let left = !pass.reached_eof || pass.total > seen_to;
             pending |= left;
             self.seen.insert(
                 key,
                 State {
-                    trigger,
+                    trigger: Self::trigger_of(&r),
                     mark: Mark::Messages(seen_to),
                     pending: left,
                     read: Some(pass.accepted(seen_to)),
                 },
             );
+            if stopped {
+                return Ok(true);
+            }
         }
         Ok(pending)
     }

@@ -27,7 +27,7 @@ use super::store::jsonl;
 use super::wire::anthropic;
 use crate::ir::*;
 use crate::ir::{MessageKind, Origin};
-use crate::json::{Json, JsonSource};
+use crate::json::JsonSource;
 use crate::lanes::{ApiErrorNotice, SubagentEnd, TaskNotice};
 use crate::lazy::Text;
 use crate::stream::{Checkpoint, CollectSink, Demand, Flow, MessageSink, Start, Tier};
@@ -451,11 +451,7 @@ impl Adapter for Claude {
                 _ => new_session_for(&r.id, Some(r.path.clone()), opts),
             };
             let read = jsonl::Read::open(&r.path)?;
-            let codec = Transcript {
-                session,
-                opts,
-                source: read.source(),
-            };
+            let codec = Transcript { session, opts };
             let mut spawns = crate::affordance::AffordanceSink::new(Harness::Claude, sink);
             let Some(s) = jsonl::drive(&read, from, codec, &mut spawns)? else {
                 return Ok(None);
@@ -512,10 +508,15 @@ pub fn stream_str(
     let mut session = new_session_for(id, source_path, opts);
     let mut spawns = crate::affordance::AffordanceSink::new(Harness::Claude, sink);
     // Pure-string path (parse_str, tests): no file offsets, so all content stays inline.
+    let mut skipped = super::Unparsed::default();
     let result = jsonl::slice(text.as_bytes(), |line| match line.view {
-        Some(view) => record::ingest(&mut session, view, None, opts, &mut spawns, &mut false),
-        None => Ok(Flow::Continue),
+        Some(view) => record::record(&mut session, view, None, opts, &mut spawns),
+        None => {
+            skipped.0 += u64::from(!line.blank);
+            Ok(Flow::Continue)
+        }
     });
+    skipped.note(&mut session);
     super::note_read_error(&mut session, result);
     if let Some(error) = spawns.take_error() {
         super::note_read_error(&mut session, Err(error));
@@ -524,24 +525,17 @@ pub fn stream_str(
 }
 
 /// The Claude record codec over one captured transcript: each record accumulates into the session
-/// (a checkpoint's, or a fresh shell at 0). A message holding a source descriptor makes the
-/// reader recheck the source's identity before going on.
+/// (a checkpoint's, or a fresh shell at 0). The shared driver owns source identity checks.
 struct Transcript<'r> {
     session: Session,
     opts: &'r Demand,
-    source: &'r JsonSource,
 }
 
 impl jsonl::Codec for Transcript<'_> {
     const VERSION: u32 = 1;
 
     fn record(&mut self, view: crate::json::JsonView<'_>, at: u64, sink: &mut dyn MessageSink) -> Result<Flow> {
-        let mut sourced = false;
-        let flow = record::ingest(&mut self.session, view, Some(at), self.opts, sink, &mut sourced)?;
-        if sourced {
-            self.source.check()?;
-        }
-        Ok(flow)
+        record::record(&mut self.session, view, Some(at), self.opts, sink)
     }
 
     fn demand(&self) -> Demand {
@@ -1354,6 +1348,7 @@ fn task_list(transcript: &Path, id: &str) -> Result<Option<crate::affordance::Af
 mod tests {
     use super::*;
     use crate::lazy::INLINE_MAX;
+    use crate::Json;
     use std::sync::LazyLock;
 
     static NO_BAG: LazyLock<Map<String, Value>> = LazyLock::new(Map::new);
@@ -2610,7 +2605,7 @@ mod tests {
         assert!(range.offset() >= first.len() as u64);
         assert_eq!(Json::Source(range.clone()).resolve().unwrap()["id"], "second");
         // Deleting the path keeps an existing Unix mmap readable but invalidates its captured
-        // identity. The operation must stop before another callback and return the source error.
+        // identity. A slow callback must stop the operation before another callback.
         struct Deleting {
             path: PathBuf,
             calls: usize,
@@ -2624,6 +2619,7 @@ mod tests {
                     self.captured = Some(input.clone());
                 }
                 fs::remove_file(&self.path).unwrap();
+                std::thread::sleep(jsonl::Read::SLOW_CALLBACK * 10);
                 Flow::Continue
             }
             fn wants_checkpoint(&mut self, _offset: u64) -> bool {

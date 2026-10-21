@@ -53,6 +53,8 @@
 - Restore standalone wasm and no-default-features builds by gating the SQLite-only compaction resolver constructor.
 
 - Read-only checkpointed catalogs retain writer-version observations and warm listings without accepting publications or bypassing live WAL contents.
+- Claude reports malformed nonblank JSONL records in `cv.skipped_lines`, including incomplete trailing records.
+
 - Codex and Gemini string parsing and uploaded-file ingestion return codec failures instead of successful partial sessions.
 
 - Compressed Codex rollouts use the independent `zstd` feature; builds without it report unreadable sources instead of parsing compressed bytes as JSONL.
