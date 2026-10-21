@@ -239,14 +239,12 @@ fn message_with_thinking(
             let mut first = true;
             for part in value.array()?.unwrap() {
                 let part = part?;
-                let fields = crate::harness::store::document::Fields::parse(part, &["type"])?;
-                let thinking = fields
-                    .as_ref()
-                    .map(|v| v.string("type"))
+                let thinking = part
+                    .get("type")?
+                    .map(|value| crate::affordance::input::word(value, &["thinking"]))
                     .transpose()?
                     .flatten()
-                    .as_deref()
-                    == Some("thinking");
+                    == Some(0);
                 let block = if thinking {
                     super::super::record::block_with(part, true, &mut |v| v.source_text())?
                 } else {
