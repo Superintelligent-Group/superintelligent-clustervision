@@ -211,8 +211,10 @@ impl std::hash::Hash for Entry {
 }
 
 /// The one version of everything cv stores about a session: the [`Record`] envelope, the
-/// catalog's discovery interpretation, the affordance view. A change to what any of them means
-/// bumps it, and every consumer rereads each session once (0.18 is 6; 0.17 wrote 4).
+/// catalog's discovery interpretation, the affordance view, the usage projection rows and the
+/// semantic store's header. A change to what any of them means bumps it, and every consumer
+/// rereads each session once (0.18 is 6; 0.17 wrote 4). Layout versions of cv's own logs and
+/// cursors (`events` schema, task log, watch cursor) version a byte layout, not an interpretation.
 pub const VERSION: u32 = 6;
 
 /// Exact auxiliary records, not a content digest: the inventory a pass captured before reading

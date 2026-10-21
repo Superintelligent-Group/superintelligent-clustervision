@@ -39,15 +39,12 @@ use model2vec_rs::model::StaticModel;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// What a stored vector embeds ([`crate::semantic_corpus::DocSink`]); a store of another
-/// projection re-embeds whole. 2: the exchange only, not the context around it.
-const PROJECTION_VERSION: u32 = 2;
-
 /// A small, strong static-embedding model (~30MB, 256-dim). Distilled from a sentence encoder.
 const MODEL_REPO: &str = "minishlab/potion-base-8M";
 
 /// Store header magic: `CVEMBED` + the one stored-format version ([`cv_core::source::VERSION`]):
-/// a cv that changes what any store means re-embeds too. 5: rows hold the discovered
+/// a cv that changes what any store means, or what a stored vector embeds
+/// ([`crate::semantic_corpus::DocSink`]), bumps it and re-embeds. 5: rows hold the discovered
 /// `SessionRef`; 2 re-spelled its fields; 1 was the implicit all-JSON store.
 const MAGIC: &[u8; 8] = &{
     let mut magic = *b"CVEMBED\0";
@@ -84,7 +81,6 @@ struct RecordMeta {
 #[derive(serde::Deserialize)]
 struct MetaBlock {
     model: String,
-    projection: u32,
     model_reads: Option<ReadSet>,
     records: Vec<RecordMeta>,
 }
@@ -93,7 +89,6 @@ struct MetaBlock {
 /// `vectors[i*dim..(i+1)*dim]`).
 struct Store {
     model: String,
-    projection: u32,
     model_reads: Option<ReadSet>,
     dim: usize,
     meta: Vec<RecordMeta>,
@@ -118,13 +113,11 @@ fn save_store(path: &Path, store: &Store) -> Result<()> {
         #[derive(serde::Serialize)]
         struct MetaBlockRef<'a> {
             model: &'a str,
-            projection: u32,
             model_reads: &'a Option<ReadSet>,
             records: &'a [RecordMeta],
         }
         serde_json::to_vec(&MetaBlockRef {
             model: &store.model,
-            projection: store.projection,
             model_reads: &store.model_reads,
             records: &store.meta,
         })
@@ -264,7 +257,6 @@ fn load_store_metadata(path: &Path) -> Result<(Store, Option<VectorBacking>)> {
     Ok((
         Store {
             model: meta.model,
-            projection: meta.projection,
             model_reads: meta.model_reads,
             dim,
             meta: meta.records,
@@ -380,7 +372,6 @@ fn embed_with(
             path,
             refs,
             &model_id(),
-            PROJECTION_VERSION,
             ReadSet::default(),
             read,
             |_| anyhow::bail!("empty semantic inventory unexpectedly demanded a model"),
@@ -396,7 +387,6 @@ fn embed_with(
         path,
         refs,
         &key,
-        PROJECTION_VERSION,
         reads,
         read,
         |bodies| {
@@ -469,12 +459,10 @@ fn canonical_refs(refs: &[cv_core::SessionRef]) -> Vec<&cv_core::SessionRef> {
 }
 
 // The three injected operations keep refresh/publication tests independent of model downloads.
-#[allow(clippy::too_many_arguments)]
 fn refresh(
     path: &Path,
     refs: &[cv_core::SessionRef],
     model: &str,
-    projection: u32,
     model_reads: ReadSet,
     mut read: impl FnMut(&cv_core::SessionRef) -> Result<(crate::Doc, ReadSet)>,
     mut encode: impl FnMut(&[String]) -> Result<Vec<Vec<f32>>>,
@@ -487,7 +475,6 @@ fn refresh(
         (
             Store {
                 model: model.into(),
-                projection,
                 model_reads: None,
                 dim: 0,
                 meta: vec![],
@@ -496,9 +483,7 @@ fn refresh(
             None,
         )
     };
-    let compatible = old.model == model
-        && old.projection == projection
-        && old.model_reads.as_ref().is_some_and(|r| r.fresh(&mut Probe::default()));
+    let compatible = old.model == model && old.model_reads.as_ref().is_some_and(|r| r.fresh(&mut Probe::default()));
     // Old stores may contain duplicate identities from earlier refreshes. Ambiguous rows must
     // all be replaced, even if one path's provenance looks fresh: do not silently choose a vector.
     let mut lookup = std::collections::HashMap::new();
@@ -557,7 +542,6 @@ fn refresh(
         old.dim = 0;
     }
     old.model = model.into();
-    old.projection = projection;
     old.model_reads = Some(model_reads);
     let mut pending = Vec::new();
     let mut bodies = Vec::new();
@@ -757,10 +741,6 @@ impl<M> ResidentState<M> {
             );
             return Ok(Vec::new());
         }
-        anyhow::ensure!(
-            cached.store.projection == PROJECTION_VERSION,
-            "semantic projection version changed — run cv index --semantic to rebuild vectors"
-        );
         // Resolution checks paths/revisions and artifact metadata, never model bodies.
         let spec = resolve()?.context("embedding model is not cached — run cv index --semantic")?;
         validate_store_model(&cached.store, &spec, path)?;
@@ -1099,7 +1079,6 @@ mod tests {
                 &store_path,
                 &refs,
                 "fake",
-                PROJECTION_VERSION,
                 ReadSet::default(),
                 |r| {
                     let text = text.expect("fresh carrier guard must avoid reading").clone();
@@ -1177,7 +1156,6 @@ mod tests {
             &store_path,
             &refs,
             "same-revision",
-            1,
             reads.clone(),
             |r| fake_doc(r, None),
             fake_encode,
@@ -1188,7 +1166,6 @@ mod tests {
             &store_path,
             &refs,
             "same-revision",
-            1,
             reads.clone(),
             |_| panic!("unchanged model must reuse"),
             |_| panic!(),
@@ -1202,7 +1179,6 @@ mod tests {
             &store_path,
             &refs,
             "same-revision",
-            1,
             model_reads(&first).unwrap(),
             |r| {
                 count.set(count.get() + 1);
@@ -1247,7 +1223,6 @@ mod tests {
             &path,
             &refs,
             "fake",
-            1,
             ReadSet::default(),
             crate::read_corpus_doc,
             |bodies| {
@@ -1266,7 +1241,6 @@ mod tests {
             &path,
             &refs,
             "fake",
-            1,
             ReadSet::default(),
             |_| panic!("fresh native source should not parse"),
             |_| panic!("fresh native source should not load model"),
@@ -1319,7 +1293,6 @@ mod tests {
                 &path,
                 &refs,
                 "fake",
-                PROJECTION_VERSION,
                 ReadSet::default(),
                 crate::read_corpus_doc,
                 |bodies| {
@@ -1351,7 +1324,6 @@ mod tests {
                 &path,
                 &refs,
                 "fake",
-                PROJECTION_VERSION,
                 ReadSet::default(),
                 |_| panic!("unchanged producer must not parse"),
                 |_| panic!("unchanged producer must not embed"),
@@ -1384,7 +1356,6 @@ mod tests {
                 &path,
                 std::slice::from_ref(r),
                 "fake",
-                1,
                 ReadSet::default(),
                 |r| {
                     count.set(count.get() + 1);
@@ -1418,13 +1389,6 @@ mod tests {
         assert_eq!(count.get(), 6);
         run(&r);
         assert_eq!(count.get(), 6);
-        let mut old = load_store(&path).unwrap();
-        old.projection = 0;
-        save_store(&path, &old).unwrap();
-        assert!(semantic_search(&path, "query", 1)
-            .unwrap_err()
-            .to_string()
-            .contains("projection version changed"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1446,7 +1410,6 @@ mod tests {
             &path,
             std::slice::from_ref(&r),
             "fake",
-            1,
             ReadSet::default(),
             |r| fake_doc(r, None),
             fake_encode,
@@ -1476,7 +1439,6 @@ mod tests {
                 &store,
                 &refs,
                 "fake",
-                1,
                 ReadSet::default(),
                 |r| {
                     read.set(read.get() + 1);
@@ -1500,7 +1462,6 @@ mod tests {
             &store,
             &refs,
             "fake",
-            1,
             ReadSet::default(),
             |_| panic!("warm copies must not read"),
             |_| panic!("warm copies must not encode"),
@@ -1512,7 +1473,6 @@ mod tests {
             &store,
             &reversed,
             "fake",
-            1,
             ReadSet::default(),
             |_| panic!("reordered copies must not read"),
             |_| panic!("reordered copies must not encode"),
@@ -1524,7 +1484,6 @@ mod tests {
             &rebuilt,
             &reversed,
             "fake",
-            1,
             ReadSet::default(),
             |r| fake_doc(r, None),
             fake_encode,
@@ -1547,7 +1506,6 @@ mod tests {
             &store,
             &refs,
             "fake",
-            1,
             ReadSet::default(),
             |r| {
                 read.set(read.get() + 1);
@@ -1597,7 +1555,6 @@ mod tests {
                 &store,
                 &refs,
                 "fake",
-                1,
                 ReadSet::default(),
                 |r| fake_doc(r, None),
                 fake_encode,
@@ -1629,7 +1586,6 @@ mod tests {
             &rebuild,
             &reversed,
             "fake",
-            1,
             ReadSet::default(),
             |r| fake_doc(r, None),
             fake_encode,
@@ -1652,7 +1608,6 @@ mod tests {
             &store,
             &refs,
             "fake",
-            1,
             ReadSet::default(),
             |_| panic!("warm fallback must not read"),
             |_| panic!("warm fallback must not encode"),
@@ -1665,7 +1620,6 @@ mod tests {
             &store,
             &refs,
             "fake",
-            1,
             ReadSet::default(),
             |r| fake_doc(r, None),
             |_| panic!("all-missing copy must not encode"),
@@ -1687,12 +1641,11 @@ mod tests {
         std::fs::write(&a, "a").unwrap();
         std::fs::write(&b, "bb").unwrap();
         let refs = [fixture_ref(&a, "a"), fixture_ref(&b, "b")];
-        let run = |model: &str, version, count: &std::cell::Cell<usize>| {
+        let run = |model: &str, count: &std::cell::Cell<usize>| {
             refresh(
                 &path,
                 &refs,
                 model,
-                version,
                 ReadSet::default(),
                 |r| {
                     count.set(count.get() + 1);
@@ -1704,14 +1657,13 @@ mod tests {
             .unwrap()
         };
         let count = std::cell::Cell::new(0);
-        assert_eq!(run("fake", 1, &count), 2);
+        assert_eq!(run("fake", &count), 2);
         assert_eq!(count.get(), 2);
         let initial = std::fs::read(&path).unwrap();
         refresh(
             &path,
             &refs,
             "fake",
-            1,
             ReadSet::default(),
             |_| panic!("unchanged rows must not parse"),
             |_| panic!("must not load model"),
@@ -1730,29 +1682,25 @@ mod tests {
                 .set_times(std::fs::FileTimes::new().set_modified(modified))
                 .unwrap();
             count.set(0);
-            run("fake", 1, &count);
+            run("fake", &count);
             assert_eq!(count.get(), 1, "same-size restored-mtime primary cannot reuse vector");
         }
         std::fs::write(&a, "changed primary").unwrap();
         count.set(0);
-        run("fake", 1, &count);
+        run("fake", &count);
         assert_eq!(count.get(), 1);
         // Absence was recorded before the initial projection, so an adopted sidecar invalidates.
         std::fs::write(&dep, "output").unwrap();
         count.set(0);
-        run("fake", 1, &count);
+        run("fake", &count);
         assert_eq!(count.get(), 2);
         count.set(0);
-        run("other", 1, &count);
-        assert_eq!(count.get(), 2);
-        count.set(0);
-        run("other", 2, &count);
+        run("other", &count);
         assert_eq!(count.get(), 2);
         refresh(
             &path,
             &refs[..1],
             "other",
-            2,
             ReadSet::default(),
             |_| panic!("removal needs no parsing"),
             |_| panic!("removal needs no model"),
@@ -1783,7 +1731,6 @@ mod tests {
             &path,
             &refs,
             "fake",
-            1,
             ReadSet::default(),
             |r| fake_doc(r, None),
             encode,
@@ -1796,7 +1743,6 @@ mod tests {
             &path,
             &refs,
             "fake",
-            1,
             ReadSet::default(),
             |_| panic!("unchanged source must not parse"),
             |_| panic!("unchanged must not encode"),
@@ -1811,7 +1757,6 @@ mod tests {
             &path,
             &refs,
             "fake",
-            1,
             ReadSet::default(),
             |_| panic!("corrupt store must fail before parsing"),
             |_| panic!("corrupt store must not encode"),
@@ -1826,7 +1771,6 @@ mod tests {
             &path,
             &refs,
             "fake",
-            1,
             ReadSet::default(),
             |r| fake_doc(r, None),
             encode,
@@ -1843,7 +1787,6 @@ mod tests {
             &path,
             &refs,
             "new-model",
-            1,
             ReadSet::default(),
             |r| fake_doc(r, None),
             encode,
@@ -1855,7 +1798,6 @@ mod tests {
             &path,
             &[],
             "new-model",
-            1,
             ReadSet::default(),
             |_| panic!("empty refresh must not parse"),
             |_| panic!("empty must not encode"),
@@ -1880,7 +1822,6 @@ mod tests {
             &path,
             &refs,
             "fake",
-            1,
             ReadSet::default(),
             |r| fake_doc(r, None),
             fake_encode,
@@ -1894,7 +1835,6 @@ mod tests {
             &path,
             &refs,
             "fake",
-            1,
             ReadSet::default(),
             |r| fake_doc(r, None),
             |_| panic!("missing selected source must not encode"),
@@ -1908,7 +1848,6 @@ mod tests {
             &path,
             &refs,
             "fake",
-            1,
             ReadSet::default(),
             |r| fake_doc(r, None),
             fake_encode,
@@ -1920,7 +1859,6 @@ mod tests {
             &path,
             &refs,
             "fake",
-            1,
             ReadSet::default(),
             |r| fake_doc(r, None),
             |_| anyhow::bail!("injected model failure"),
@@ -1932,7 +1870,6 @@ mod tests {
             &path,
             &refs,
             "fake",
-            1,
             ReadSet::default(),
             |r| {
                 let doc = fake_doc(r, None)?;
@@ -1949,7 +1886,6 @@ mod tests {
             &path,
             &refs,
             "fake",
-            1,
             ReadSet::default(),
             |r| {
                 count.set(count.get() + 1);
@@ -1964,22 +1900,20 @@ mod tests {
     }
 
     #[test]
-    fn semantic_projection_change_rebuilds_once_and_save_failure_cleans_temp() {
-        let dir = std::env::temp_dir().join(format!("cv-semantic-projection-{}", uuid::Uuid::new_v4()));
+    fn semantic_refresh_reads_once_and_save_failure_cleans_temp() {
+        let dir = std::env::temp_dir().join(format!("cv-semantic-once-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
         let input = dir.join("input.jsonl");
         let path = dir.join("store");
         std::fs::write(&input, "new").unwrap();
         let refs = [fixture_ref(&input, "a")];
-        let mut old = store(vec![(meta("a", None), vec![1., 2.])]);
-        old.projection = 0;
+        let old = store(vec![(meta("a", None), vec![1., 2.])]);
         save_store(&path, &old).unwrap();
         let count = std::cell::Cell::new(0);
         refresh(
             &path,
             &refs,
             "test",
-            1,
             ReadSet::default(),
             |r| {
                 count.set(count.get() + 1);
@@ -1994,7 +1928,6 @@ mod tests {
             &path,
             &refs,
             "test",
-            1,
             ReadSet::default(),
             |_| panic!(),
             |_| panic!(),
@@ -2029,7 +1962,6 @@ mod tests {
         let dim = records.first().map(|(_, v)| v.len()).unwrap_or(0);
         let mut s = Store {
             model: "test".into(),
-            projection: PROJECTION_VERSION,
             model_reads: Some(ReadSet::default()),
             dim,
             meta: Vec::new(),

@@ -8,8 +8,9 @@ use std::{
     io::{BufRead, Read, Write},
     sync::{Arc, Mutex},
 };
-// Bump when usage projection, response identity, model resolution or adapter interpretation changes.
-const VERSION: i64 = 1;
+/// The rows' version column is the one stored-format version: a change to the usage projection,
+/// response identity or model resolution bumps [`crate::source::VERSION`] like any other.
+const VERSION: i64 = crate::source::VERSION as i64;
 /// The `usage` consumer's record payload: the digest of the cached projection's header row.
 #[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct Projected {

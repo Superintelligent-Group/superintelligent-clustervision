@@ -276,13 +276,14 @@ fn actual_model_refresh_probe() {
     assert_eq!(calls(), [0, 0, 0]);
     refresh_stage("model-artifact-changed", &store, &refs, [refs.len(), 1, 1]);
     assert_eq!(vectors(&load_store(&store).unwrap()), changed_vectors);
-    let mut obsolete = load_store(&store).unwrap();
-    obsolete.projection = PROJECTION_VERSION.saturating_sub(1);
-    save_store(&store, &obsolete).unwrap();
+    // A store of the previous stored-format version (its magic byte) re-embeds whole.
+    let mut obsolete = std::fs::read(&store).unwrap();
+    obsolete[7] = obsolete[7].wrapping_sub(1);
+    std::fs::write(&store, obsolete).unwrap();
     reset();
     assert!(semantic_search(&store, "astronomy", 1).is_err());
     assert_eq!(calls(), [0, 0, 0]);
-    refresh_stage("projection-changed", &store, &refs, [refs.len(), 1, 1]);
+    refresh_stage("format-version-changed", &store, &refs, [refs.len(), 1, 1]);
     refresh_stage("final-unchanged", &store, &refs, [0, 0, 0]);
     reset();
     let mut elapsed = Vec::new();
