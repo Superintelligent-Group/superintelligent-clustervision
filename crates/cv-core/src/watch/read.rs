@@ -242,6 +242,9 @@ struct Tail<'a> {
     check: Option<&'a mut dyn FnMut() -> Result<()>>,
     output: Option<&'a mut dyn stream::MessageSink>,
     resolver_source: Option<PathBuf>,
+    // Streaming output can resolve implicit-path spans during callbacks. Retained/owned tails
+    // instead materialize under the final source and dependency checks before returning.
+    // Tool input Json carries its own source identity and is recorded via record_message_reads.
     used_implicit_source: bool,
     primary: PathBuf,
     materialized_reads: source::ReadSet,
@@ -976,6 +979,8 @@ mod tests {
         let modified = std::fs::metadata(&r.path).unwrap().modified().unwrap();
         let middle = body.len() / 2;
         let changed = middle + body[middle..].find("xxx").unwrap();
+        // Edit the unsampled middle: outside the first and checkpoint-adjacent 4096-byte
+        // guards. The timestamp-preserving rewrite exercises the additional identity check.
         assert!(changed > 4096 && changed + 4096 < complete.anchor.as_ref().unwrap().checkpoint.offset as usize);
         body.replace_range(changed..changed + 1, "y");
         std::fs::write(&r.path, &body).unwrap();

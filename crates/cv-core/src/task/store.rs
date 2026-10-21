@@ -370,7 +370,6 @@ impl TaskStore {
     }
 }
 
-/// The agent-facing seam: a kind cv retired is never written again, whatever constructed it.
 /// If `line` is a log-format header record, its declared version (`v` missing reads as 0, which
 /// is ≤ current and therefore skipped — keep it dumb).
 fn header_version(line: &str) -> Option<u64> {

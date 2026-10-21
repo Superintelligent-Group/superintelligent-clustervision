@@ -72,7 +72,8 @@ fn estimate(row: &Row) -> u64 {
     content + images * IMAGE_TOKENS + blocks * BLOCK_TOKENS
 }
 
-/// The estimate errs high: never more than 8% under the count, and the middle row within 10%.
+/// The estimate errs high: never more than 8% under the count, and median error within 10%.
+/// The +60% upper bound is a loose sanity ceiling; underestimation has the tighter gate.
 /// (The claude-opus-4-6 tokenizer is sparser, so its rows read high; the rows that read highest
 /// are sessions whose thinking signatures the API did not count.)
 #[test]
