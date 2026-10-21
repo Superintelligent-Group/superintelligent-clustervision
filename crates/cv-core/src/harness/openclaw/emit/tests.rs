@@ -733,3 +733,29 @@ fn native_complete_export_preserves_records_branch_links_and_one_compaction_pair
     );
     Ok(())
 }
+
+#[test]
+fn fixed_target_identity_reproduces_openclaw_corpus_bytes() -> Result<()> {
+    let world = crate::test_world("openclaw-repeatable-emit");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/openclaw/2026.1.29");
+    let id = "28aa9586-8613-4ec8-bf4d-02549281e1f2";
+    let reference = crate::SessionRef::new(
+        id,
+        Harness::OpenClaw,
+        root.join(format!("agents/main/sessions/{id}.jsonl")),
+    );
+    let adapter = crate::harness::openclaw::OpenClaw::with_state_dir(&root);
+    let source = crate::emit::parse_for_emit(&adapter, &reference, Harness::OpenClaw)?;
+    let options = EmitOptions {
+        new_id: Some("repeatable-target".into()),
+        ..Default::default()
+    };
+    let first = emit(&source, &world.base.join("first"), &options)?;
+    let second = emit(&source, &world.base.join("second"), &options)?;
+    assert_eq!(
+        crate::digest::sha256_hex(&fs::read(first.path)?),
+        crate::digest::sha256_hex(&fs::read(second.path)?),
+        "a fixed destination identity must produce the same transcript"
+    );
+    Ok(())
+}

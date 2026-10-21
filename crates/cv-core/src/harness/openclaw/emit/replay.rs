@@ -14,10 +14,12 @@ pub(super) struct Native {
     enabled: bool,
     linked: bool,
     ids: HashMap<String, String>,
+    namespace: Uuid,
     model: Option<String>,
 }
 impl Native {
-    pub(super) fn new(session: &Session) -> Self {
+    pub(super) fn new(session: &Session, new_id: &str) -> Self {
+        let namespace = Uuid::new_v5(&Uuid::NAMESPACE_OID, new_id.as_bytes());
         let enabled = session.harness == Harness::OpenClaw;
         let header_version = session
             .extra
@@ -36,23 +38,28 @@ impl Native {
         let mut ids = HashMap::new();
         if enabled {
             for id in session.messages.iter().filter_map(|m| m.id.as_ref()) {
-                ids.entry(id.clone()).or_insert_with(openclaw_short_id);
+                ids.entry(id.clone())
+                    .or_insert_with(|| openclaw_short_id(&namespace, &format!("native:{id}")));
             }
         }
         Self {
             enabled,
             linked: enabled && header_version.is_some_and(|v| v >= 3),
             ids,
+            namespace,
             model: session.model.clone(),
         }
     }
-    pub(super) fn entry_id(&self, message: &Message) -> String {
+    pub(super) fn generated_id(&self, key: &str) -> String {
+        openclaw_short_id(&self.namespace, key)
+    }
+    pub(super) fn entry_id(&self, message: &Message, index: usize) -> String {
         message
             .id
             .as_ref()
             .and_then(|id| self.ids.get(id))
             .cloned()
-            .unwrap_or_else(openclaw_short_id)
+            .unwrap_or_else(|| self.generated_id(&format!("message:{index}")))
     }
     pub(super) fn parent(&self, message: &Message, linear: &Option<String>) -> Option<String> {
         if self.linked && message.id.is_some() {

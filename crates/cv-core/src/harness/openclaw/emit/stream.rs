@@ -140,7 +140,7 @@ pub(super) fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Res
     let created = session.created_at.or(session.updated_at).unwrap_or_else(Utc::now);
     let created_iso = created.to_rfc3339_opts(SecondsFormat::Millis, true);
     let mut lines = JsonlStage::new();
-    let native = super::replay::Native::new(session);
+    let native = super::replay::Native::new(session, &new_id);
     lines.push_with(|w| {
         if native.header(session, w, &new_id, &cwd_str)? {
             return Ok(());
@@ -166,7 +166,7 @@ pub(super) fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Res
         lines.push_with(|w| {
             let mut row = ObjectWriter::new(w)?;
             row.field("type", "session_info")?;
-            row.field("id", openclaw_short_id())?;
+            row.field("id", native.generated_id("title"))?;
             row.field("parentId", Value::Null)?;
             row.field("timestamp", &created_iso)?;
             row.field("name", title)?;
@@ -194,6 +194,7 @@ pub(super) fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Res
         };
         let mut remaining = msg.content.as_slice();
         let mut first_part = true;
+        let mut part_index = 0;
         loop {
             let split = if msg.role == Role::Tool && control.is_none() {
                 remaining
@@ -212,9 +213,9 @@ pub(super) fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Res
                 (remaining, None)
             };
             let entry_id = if first_part {
-                native.entry_id(msg)
+                native.entry_id(msg, index)
             } else {
-                openclaw_short_id()
+                native.generated_id(&format!("part:{index}:{part_index}"))
             };
             let row_parent = if first_part {
                 native.parent(msg, &parent)
@@ -283,6 +284,7 @@ pub(super) fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Res
             let Some(rest) = rest else { break };
             remaining = rest;
             first_part = false;
+            part_index += 1;
         }
         index += consumed;
     }

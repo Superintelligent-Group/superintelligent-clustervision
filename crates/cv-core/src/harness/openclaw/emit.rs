@@ -51,6 +51,7 @@ fn openclaw_usage(usage: Option<&crate::ir::Usage>) -> Option<Value> {
     (!m.is_empty()).then_some(Value::Object(m))
 }
 
-fn openclaw_short_id() -> String {
-    Uuid::new_v4().simple().to_string()[..8].to_string()
+/// OpenClaw's eight-hex entry IDs, stable for a target session and a record identity.
+fn openclaw_short_id(namespace: &Uuid, key: &str) -> String {
+    Uuid::new_v5(namespace, key.as_bytes()).simple().to_string()[..8].to_string()
 }
