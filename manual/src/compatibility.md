@@ -35,8 +35,8 @@ synthetic homes, and the comparator permits additions and prose changes while
 rejecting removals and changed existing shapes or defaults.
 
 It compares the command tree (`schema --commands --json`), the data schema's field and
-vocabulary lists (`schema --json`), the actual `ls`/`show` JSON shapes of a fixture
-session, the real MCP `tools/list`, and the HTTP routes. The route inventory is the
+vocabulary lists (`schema --json`), the actual `ls`/`show` JSON shapes of fixture
+sessions, the real MCP `tools/list`, and the HTTP routes. The route inventory is the
 candidate's `schema --json` `routes` list, which the routers' own tables produce (the
 `routes!` macro spells each arm once), so it cannot drift from the code; both servers
 are probed on every pattern and a status the baseline answered must hold. A baseline
@@ -47,10 +47,13 @@ lists are also checked against the serialized output. These are fixtures and
 inventories, not a proof of semantic equivalence for every transcript.
 
 A reviewed removal is named on the CI step with `--accept <contract path>`, beside the
-pinned baseline that still has it; the exception leaves with that baseline. The one
-0.18 entry is MCP `workflow`'s unbounded `follow`, replaced by bounded `for`
-(`tools.workflow.inputSchema.properties.follow`). CLI pipe/terminal behavior is covered
-separately by `crates/cv/tests/announce.rs`.
+pinned baseline that still has it; the exception leaves with that baseline. The 0.18
+entries are MCP `workflow`'s unbounded `follow`, replaced by bounded `for`; the renamed
+`rewind --from-compaction`, `deferrals --since` and `dataset --out`, on the CLI and in MCP;
+`watch --interval`'s widened value type; and `rows.codex.message_count`, an uncounted
+session's `null`. The fixture holds a Claude session (counted at discovery) and a Codex one
+(counted on a complete read), so the session-row shape is checked both ways. CLI
+pipe/terminal behavior is covered separately by `crates/cv/tests/announce.rs`.
 
 Run the comparator's mutation tests with `python3 -I tools/test-compatibility.py`. Before
 accepting a contract change, inspect the actual failure and add only its narrow

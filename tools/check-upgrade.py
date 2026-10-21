@@ -152,8 +152,18 @@ def check_version(baseline, candidate, version, case):
     old_count = re.search(r"indexed (\d+) top-level session", old_output)
     require(old_count is not None and (int(old_count[1]) > 0 or not old_rows),
             "baseline did not populate its index")
+    # The baseline counted every session; the candidate certifies counts itself. Its first listing
+    # over the old catalog must leave exactly the counts a fresh listing leaves uncounted (null),
+    # never carry the baseline's numbers forward.
+    counts = lambda listed: {(row["harness"], row["id"]): row["message_count"] for row in listed}
+    first = counts(rows(candidate, upgraded, expected))
+    fresh = counts(rows(candidate, environment(case, home, case / "fresh"), expected))
+    require(first == fresh, f"upgraded first listing counts differ from a fresh one: {first} != {fresh}")
+    deferred = sum(count is None for count in first.values())
     migrated = index(candidate, upgraded)
     upgraded_rows = rows(candidate, upgraded, expected)
+    uncounted = [(row["harness"], row["id"]) for row in upgraded_rows if type(row["message_count"]) is not int]
+    require(not uncounted, f"index left counts uncertified: {uncounted}")
     hashes = {selector: show_hash(candidate, upgraded, selector)
               for selector in sorted(f"{h}:{sid}" for h, sid in expected)}
     upgraded_events = event_digest(case / "upgraded")
@@ -169,7 +179,7 @@ def check_version(baseline, candidate, version, case):
     index(candidate, clean, unchanged=True)
     return {"corpus": str(version.parent.name + "/" + version.name), "sessions": len(expected),
             "baseline_sessions": len(old_rows), "newly_discovered": len(expected) - len(old_rows),
-            "migrated": migrated, "events": upgraded_events[0], "unchanged_passes": 2,
+            "deferred_counts": deferred, "migrated": migrated, "events": upgraded_events[0], "unchanged_passes": 2,
             "show_bytes_hashed": sum(size for size, _ in hashes.values())}
 
 

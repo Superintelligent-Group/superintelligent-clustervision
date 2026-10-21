@@ -93,6 +93,20 @@ def world(root):
          "message": {"role": "assistant", "model": "fixture", "content": [{"type": "text", "text": "hello"}]}},
     ]
     (projects / "compat-session.jsonl").write_text("".join(json.dumps(r) + "\n" for r in records))
+    # Codex defers its count to a complete read, so its first `ls` row carries the uncounted shape.
+    rollouts = home / ".codex/sessions/2026/01/01"
+    rollouts.mkdir(parents=True)
+    sid = "0198a000-0000-7000-8000-00000000c0de"
+    rollout = [
+        {"timestamp": "2026-01-01T00:00:00.000Z", "type": "session_meta",
+         "payload": {"id": sid, "timestamp": "2026-01-01T00:00:00.000Z", "cwd": "/compat",
+                     "originator": "codex_cli_rs", "cli_version": "0.1.0"}},
+        {"timestamp": "2026-01-01T00:00:01.000Z", "type": "response_item",
+         "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello"}]}},
+        {"timestamp": "2026-01-01T00:00:02.000Z", "type": "response_item",
+         "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "hello"}]}},
+    ]
+    (rollouts / f"rollout-2026-01-01T00-00-00-{sid}.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rollout))
     return {"PATH": os.environ["PATH"], "HOME": str(home), "CLUSTERVISION_HOME": str(root / "catalog"),
             "CLAUDE_CONFIG_DIR": str(home / ".claude"), "CODEX_HOME": str(home / ".codex"),
             "XDG_CACHE_HOME": str(root / "cache"), "XDG_CONFIG_HOME": str(home / ".config"),
@@ -152,14 +166,16 @@ def collect(binary, root, routes=None):
     commands = json.loads(invoke(binary, env, ["schema", "--commands", "--json"]))
     schema = json.loads(invoke(binary, env, ["schema", "--json"]))
     rows = json.loads(invoke(binary, env, ["ls", "--json"]))
-    require(isinstance(rows, list) and len(rows) == 1, "fixture must discover exactly one session")
+    require(isinstance(rows, list) and sorted(r["harness"] for r in rows) == ["claude", "codex"],
+            "fixture must discover exactly its Claude and Codex sessions")
     session = json.loads(invoke(binary, env, ["show", "compat-session", "--json"]))
     requests = "\n".join(json.dumps({"jsonrpc": "2.0", "id": i, "method": method, "params": params})
                          for i, method, params in [(1, "initialize", {"protocolVersion": "2025-06-18"}), (2, "tools/list", {})]) + "\n"
     responses = [json.loads(line) for line in invoke(binary, env, ["mcp"], stdin=requests).splitlines()]
     tools = next(r["result"]["tools"] for r in responses if r.get("id") == 2)
     # The schema's field inventories must agree with what the binary actually serializes.
-    require(set(schema["session_row"]["keys"]) <= rows[0].keys(), "session-row schema drifted from ls JSON")
+    for row in rows:
+        require(set(schema["session_row"]["keys"]) <= row.keys(), "session-row schema drifted from ls JSON")
     require(session.keys() <= set(schema["session"]["fields"]), "session schema omits real serde fields")
     for message in session["messages"]:
         require(message.keys() <= set(schema["message"]["fields"]), "message schema omits real serde fields")
@@ -174,7 +190,7 @@ def collect(binary, root, routes=None):
     invoke(binary, dict(env, CLUSTERVISION_HOME=str(denied / "catalog")), ["task", "open", "compat operational failure"], code=1)
     inventory = schema.get("routes", routes)
     require(bool(inventory), "no HTTP route inventory: the candidate's `schema --json` must list routes")
-    return {"commands": commands, "schema": data_contract(schema), "rows": shape(rows), "session": shape(session),
+    return {"commands": commands, "schema": data_contract(schema), "rows": {r["harness"]: shape(r) for r in rows}, "session": shape(session),
             "tools": tools, "routes": http_routes(binary, env, inventory), "inventory": inventory,
             "version": invoke(binary, env, ["--version"]).strip()}
 

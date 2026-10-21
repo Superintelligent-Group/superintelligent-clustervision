@@ -168,8 +168,24 @@
 - The size gate reports each crate's and module's drift since the last release tag; `tools/size-budget.txt` and `check-size.py --write` are gone.
 - A compatibility gate downloads the released 0.17.0 binary (digest-pinned) and compares CLI schemas, session rows, messages, MCP tools, HTTP routes and exit codes.
 - The upgrade gate runs the released 0.16.1 binary over every corpus version, then compares the migrated rows, events and `show` output with a clean index.
+- The upgrade gate requires the first listing over a 0.16.1 catalog to leave uncounted exactly what a fresh one does, and `cv index` to count all.
 - macOS runs nightly and on rc tags: APFS identity, publish, SQLite and mmap gates; a separate workflow smokes the published Darwin artifact natively.
 - `tools/dump-hash.sh` streams one sha256 per command, session and demand over `tools/dump-hash.manifest`: the byte-identity gate for output-preserving changes.
+
+**Breaking (library): cv-core, cv-search and cv-testkit APIs.** Rust callers migrate as follows; the CLI, HTTP and MCP are unaffected.
+- `emit::Delta {field, before, after}` and `formats::Finding` become one `emit::Divergence {what, a, b, expected, at}`; serialized, `at` is `where` and `FidelityReport.deltas` elements change keys.
+- `SubagentInfo` and `claude::subagent_refs` become `ir::AgentRef` and `subagent_tree_of`; `claude::CARRIER_KEY` is `ir::CARRIER_KEY`.
+- Modules move: `handoff` is `codex_handoff`, `loom` is `splice`, `harness::harmony` is `harness::wire::harmony`.
+- `Watcher::run` is gone (callers own scheduling around `poll`); `cline::discover_in` and `cline_sdk::discover` return `Discovered`.
+- `distill::distill` splits into `prepare_distill` and `distill_pack`; `Session::first_user_text` and `searchable_text` are gone.
+- `SearchRow::to_json` is `to_json_with(&SearchRowContext)`; `scan::live_search` is `live_search_filtered`; `lazy::read_head` is `read_head_checked`, returning `Result`.
+- `RedactOptions.keep_emails` is `classes.emails`, inverted: `false` keeps emails. `task::AppendOutcome.replay_warnings` (always empty) is gone.
+- `source::Published` becomes `Record<T>`; `Table<T: Payload>`, `get` returns a `Record`, `admit` replaces `published`/`fresh`; `update` is generic.
+- `affordance::{unwrap,rewrap}_deferred` take a `DeferredWrapper`, not a `Harness`; `wire::anthropic`'s owned `Texter`/`block_from*`/`blocks_from` helpers are gone.
+- `publish::retract` is gone: a `publish::Set` owns grouped rollback. `EmitOptions` gains `parsed_at`, so exhaustive struct literals break.
+- cv-search's root `text_search*`, `enrich_text_snippets`, `embed_all` and `semantic_search_filtered` become `Searcher::{search, search_in}` and `embed_sessions`.
+- `fts::enrich_text_snippets` returns `Result<Option<String>>` (a degradation note). New fields (`Stats.uncounted`, `HarnessCensus.first_error`, `LaneWork.unread`) break exhaustive literals.
+- cv-testkit: `heap::begin`/`end` return a `Measurement` instead of a `usize`.
 
 **After upgrading, once.**
 - The first listing rediscovers the fleet (announced on stderr; `cv index` does it ahead of time): catalog schema 4 drops an older catalog whole and rebuilds it.

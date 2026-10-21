@@ -65,9 +65,9 @@ jobs:
         run: python3 -I tools/test-compatibility.py
 
       # The released binary, not a rebuild of its tag: the comparator reads both binaries' own
-      # contracts (`schema --json` lists the HTTP routes from the routers' tables). `--accept`
-      # names the one reviewed 0.18 removal (MCP `workflow` `follow` -> bounded `for`); it leaves
-      # with this baseline.
+      # contracts (`schema --json` lists the HTTP routes from the routers' tables). Each `--accept`
+      # is one reviewed 0.18 change (manual/src/compatibility.md lists them); they leave with this
+      # baseline.
       - name: Compatibility against the released 0.17.0 binary
         shell: bash
         run: |
@@ -84,6 +84,7 @@ jobs:
             --accept commands.dataset.args.out \
             --accept tools.dataset.inputSchema.properties.out \
             --accept commands.watch.args.interval.value_type
+            --accept rows.codex.message_count
 
       - name: Upgrade from the released 0.16.1 binary
         shell: bash

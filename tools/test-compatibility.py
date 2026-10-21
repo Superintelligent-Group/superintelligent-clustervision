@@ -15,7 +15,7 @@ class Compatibility(unittest.TestCase):
         self.old = {"commands": [{"name": "show", "args": [{"name": "id", "required": True, "kind": "positional", "value_type": "string"},
             {"name": "last", "required": False, "kind": "option", "value_type": "integer", "default": "50"}]}],
             "tools": [{"name": "show", "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}, "follow": {"type": "boolean"}}, "required": ["id"]}}],
-            "schema": {"message": {"fields": ["role", "content"]}}, "rows": [{"id": "str"}],
+            "schema": {"message": {"fields": ["role", "content"]}}, "rows": {"claude": {"id": "str", "message_count": "int"}, "codex": {"id": "str", "message_count": "int"}},
             "session": {"messages": [{"role": "=user", "content": []}]},
             "routes": {"GET /api/sessions": {"status": 200, "pointer": ""}, "GET /api/task/{}": {"status": 404, "pointer": ""}}}
 
@@ -43,7 +43,8 @@ class Compatibility(unittest.TestCase):
             lambda n: n["tools"].clear(), lambda n: n["session"]["messages"][0].pop("role"),
             lambda n: n["session"]["messages"][0].update(role="=assistant"),
             lambda n: n["schema"]["message"]["fields"].remove("content"),
-            lambda n: n["rows"][0].pop("id"), lambda n: n["rows"][0].update(id="int"),
+            lambda n: n["rows"]["claude"].pop("id"), lambda n: n["rows"]["claude"].update(id="int"),
+            lambda n: n["rows"].pop("codex"), lambda n: n["rows"]["codex"].update(message_count="null"),
             lambda n: n["routes"].clear(),
             lambda n: n["routes"]["GET /api/sessions"].update(status=404)]
         for mutation in mutations:
@@ -69,6 +70,15 @@ class Compatibility(unittest.TestCase):
         compat.compare(self.old, new, {path})
         with self.assertRaises(compat.Incompatible):
             compat.compare(self.old, new, {"tools.show.inputSchema.properties.follow.type"})
+
+    def test_an_accepted_uncounted_row_is_exact(self):
+        # The reviewed 0.18 change: a deferred-count harness's row count becomes null.
+        new = copy.deepcopy(self.old)
+        new["rows"]["codex"]["message_count"] = "null"
+        compat.compare(self.old, new, {"rows.codex.message_count"})
+        new["rows"]["claude"]["message_count"] = "null"
+        with self.assertRaises(compat.Incompatible):
+            compat.compare(self.old, new, {"rows.codex.message_count"})
 
 
 if __name__ == "__main__": unittest.main()
