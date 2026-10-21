@@ -9,12 +9,12 @@
 - `message_count` is `null` (a dash in the table) until a full read or `cv index` certifies it; `0` means a session with no turns.
 - Claude counts at discovery (its record heads are read anyway); Codex, Grok, Kimi, Kimi Code, Hermes, Goose and Zed are not counted until then.
 - **Breaking:** an uncounted session's `message_count` was `0`; `ls --json`, `/api/sessions` and search rows now emit `null`.
-- `cv stats` reports "N not counted yet" beside the total (`uncounted` in `--json` and `/api/stats`); `--sort-by messages` ranks uncounted sessions last.
+- `cv stats` reports "N not counted yet" beside the total (`uncounted` in `--json` and `/api/stats`); `--sort-by messages` (descending) ranks uncounted last.
 - A certified count survives metadata refreshes that leave the source unchanged and is dropped when the source changes.
 - Kimi, Kimi Code and Grok listings take the recorded native title and stop reading at the first fallback prompt.
 - Continue and OpenCode's JSON tree no longer read every history or message file to count at discovery; their `message_count` is `null` until certified.
 - Hermes and Goose listings read session metadata only; Zed projects its snapshot metadata without decoding messages.
-- A listing racing `cv index` no longer loses a discovery update: catalog publication waits for the other writer instead of discarding.
+- A listing racing `cv index` waits up to the catalog's 5 s busy timeout for the other writer instead of discarding its discovery update.
 - **Breaking:** `cv archive ls` counts turns like `cv ls`; `catalog.jsonl` rows keep the raw count as `messages_written`; 0.17's rows show a dash until resynced.
 
 **Reading.**
@@ -28,8 +28,8 @@
 - `cv distill` and `cv adopt --model` share the `general-purpose` agent type default, applied only when the source names none.
 - **Breaking (library):** `ParseOptions` and `ExtraProjection` become `Demand { tier, spans, offsets }`; the five `Watcher` poll methods become `poll`/`try_poll(Poll { .. })`.
 - Gemini, Qwen, Goose, Grok, LM Studio, OpenClaw and OpenCode report the model on every turn the harness wrote it; windowed reads no longer lose it.
-- Every JSONL adapter reads its transcript through one captured source (`store::jsonl::Read`); each adapter keeps its own resume protocol.
-- A reader checks its source after a slow callback, a checkpoint and at EOF; a replaced or truncated file is an error, never a crash.
+- Claude, Codex, Grok, Kimi and Kimi Code read through one captured source (`store::jsonl::Read`); each keeps its own resume protocol.
+- A reader checks its source after a slow callback, per mapped window, at a checkpoint and at EOF; a replacement detected there is an error.
 - Native Codex file-change records feed `cv touched`, tool histograms and query facts, including code-mode edits, without duplicating visible patch calls.
 - `cv index --subagents` folds the sub-agent forest from stat-keyed metadata instead of re-parsing every transcript each pass.
 - `message_count` is `null` (a dash in `cv ls`) until a session is counted; `cv stats` reports the uncounted sessions beside the total.
@@ -65,7 +65,7 @@
 
 - Grok listings use native summaries and stop after finding fallback titles; exact message counts appear after indexing or a complete read.
 - `cv doctor` compares observed Claude/Codex writer versions with corpus coverage, including unknown sessions; observations come from normal discovery.
-- Cataloged writer versions and interpretation 6 trigger an announced rediscovery and consumer reread after upgrading; JSON stays unchanged.
+- Cataloged writer versions and interpretation 6 trigger an announced rediscovery and consumer reread after upgrading; writer observations add no JSON field.
 - A compatibility gate checks the latest release against CLI schemas, serialized messages, session rows, MCP tools, HTTP routes, and exit codes.
 - Native Codex file-change records now feed `cv touched`, tool histograms and query facts, including code-mode edits, without duplicating visible patch calls.
 
@@ -95,11 +95,12 @@
 - `cv port` to LM Studio no longer writes `tokenCount: 0`; cv does not know the chat's last prompt token count.
 - `cv port` to Continue refuses a tool turn with no tool result instead of writing an empty `toolCallId`.
 - `cv port` to Gemini derives message ids from the session id and turn index (UUID v5), so a re-emit writes the same ids.
-- Gemini emit publishes the transcript, its project marker and `projects.json` together or not at all; an unwritable registry now fails the emit.
-- Grok emit publishes `chat_history.jsonl`, `updates.jsonl` and `summary.json` together or not at all, the summary last.
-- OpenClaw emit refuses a `sessions.json` it cannot read instead of replacing it with a one-entry index; transcript and index publish together.
-- Cline, Roo and Continue emits publish their task or session files together or not at all, the transcript or index last.
+- Gemini emit stages the transcript, project marker and `projects.json`, rolling back on failure; an unwritable registry now fails the emit.
+- Grok emit stages `chat_history.jsonl`, `updates.jsonl` and `summary.json`, publishes the summary last, and rolls back on failure.
+- OpenClaw emit refuses a `sessions.json` it cannot read instead of replacing it with a one-entry index; transcript and index roll back together.
+- Cline, Roo and Continue emits stage their task or session files, publish the transcript or index last, and roll back on failure.
 - `cv prune --force` and adoption with `--force` put a replaced sidecar or metadata file back when the transcript then fails to publish.
+- Staged emits are not atomic: a crash can leave a published prefix, and a rollback that itself fails is reported.
 
 **Doctor and hooks.**
 - `cv doctor` adds a Writer versions row: the newest Claude/Codex version seen in the stores versus the newest the corpus verified, plus unknown sessions.
@@ -113,7 +114,7 @@
 - `cv workflow --follow` gains `--for <duration>`: stop after that long and render the run as it stands.
 - `cv hook` with a terminal on stdin exits 2 with usage; `cv mcp` and `cv task … -` say what they are reading.
 - MCP tools generated from the CLI omit `--follow` (no Ctrl-C in a tool call); `for` stays.
-- `tests/announce.rs` pins it: every command on a pipe exits within 5 s or is a daemon that announced within 1 s.
+- `tests/announce.rs` pins it: every command on a pipe exits within 5 s or is a daemon that announced within the 3 s test allowance.
 - **Breaking:** watch and `observe_stream` cursors are version 2 (one mark per position); a 0.17 cursor starts a fresh baseline.
 - `ls --json --asc` with a query selects the same sessions as descending, reversed; an absent session no longer takes a window slot.
 - **Breaking:** a tag-only `decision` (nothing posed, written before 0.15) reads as an assigned action, not a decision owed; the page's tagged-decision card is gone.
@@ -158,7 +159,7 @@
 - `cv ls --json --enrich`: a row whose transcript cannot be read carries `enrich_error` instead of looking unenriched.
 - `cv search --scan` skips a session it cannot read and names the unscanned sources in its note, instead of failing the whole scan.
 - **Breaking (library):** `harness::wire::openai::tool_calls` returns `Result`; an entry that fails to decode is an error, not a shorter list.
-- `cv formats census` reports each harness's first parse error (`first_error` in `--json`) beside the count.
+- `cv formats` reports each harness's first parse error (`first_error` in `--json`) beside the count.
 - **Breaking:** `cv events`, `cv touched`, `cv blame` and their HTTP routes fail on an event-catalog error instead of answering empty.
 - **Breaking (library):** `events::events_for`, `sessions_touching`, `sessions_editing` and `edits_touching_file` return `Result`.
 
@@ -190,7 +191,7 @@
 
 **After upgrading, once.**
 - The first listing rediscovers the fleet (announced on stderr; `cv index` does it ahead of time): catalog schema 4 drops an older catalog whole and rebuilds it.
-- Every store, mark and watch state rereads each session once: `source::VERSION` 6 is the one version all check; nothing expires per release any more.
+- Every store, mark and watch state invalidates once: `source::VERSION` 6 is the one interpretation version all check; nothing expires per release.
 
 ## 0.17.0 — 2026-10-17 — stream, never materialize
 
