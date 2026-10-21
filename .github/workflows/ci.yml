@@ -109,6 +109,19 @@ jobs:
           cargo nextest run --workspace --profile ci
           cargo test --workspace --doc
 
+      # The real Codex, not recorded payloads: the trust verdict from `app-server hooks/list` and
+      # the SessionStart/UserPromptSubmit effect of `codex exec`. Neither needs an API key or a model call.
+      - name: Codex hooks against the released 0.162.1 binary
+        shell: bash
+        run: |
+          codex=$(mktemp -d "$RUNNER_TEMP/codex-XXXXXX")
+          curl -fsSL --retry 3 https://github.com/openai/codex/releases/download/rust-v0.162.1/codex-x86_64-unknown-linux-musl.tar.gz -o "$codex/codex.tar.gz"
+          echo "86f268d81b898f3e144c5ecff2ad2fda2c5802e042d6195b72538fe0fa125057  $codex/codex.tar.gz" | sha256sum -c -
+          tar -xzf "$codex/codex.tar.gz" -C "$codex"
+          mv "$codex/codex-x86_64-unknown-linux-musl" "$codex/codex"
+          "$codex/codex" --version
+          CV_CODEX_BIN="$codex/codex" cargo nextest run --profile ci -p clustervision --test hooks -E 'test(real_binary) | test(codex_hooks_run_in_the_real)'
+
       # The parse budget (docs/design/PERF.md): the counting pass over the committed corpus as a
       # ratio to a plain read of the same bytes in the same run, so a slow runner moves both sides.
       - name: Parse budget

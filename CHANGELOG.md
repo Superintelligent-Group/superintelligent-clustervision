@@ -142,6 +142,7 @@
 - A compatibility gate downloads the released 0.17.0 binary (digest-pinned) and compares CLI schemas, session rows, messages, MCP tools, HTTP routes and exit codes.
 - The upgrade gate runs the released 0.16.1 binary over every corpus version, then compares the migrated rows, events and `show` output with a clean index.
 - The upgrade gate requires a first listing over a 0.16.1 catalog to leave uncounted what a fresh one does; `cv index` counts all.
+- CI runs the Codex hooks against a digest-pinned real `codex` 0.162.1: trust from `hooks/list`, and SessionStart/UserPromptSubmit running under `codex exec`.
 - macOS runs nightly and on rc tags: APFS identity, publish, SQLite and mmap gates; a separate workflow smokes the published Darwin artifact natively.
 - `tools/dump-hash.sh` streams one sha256 per command, session and demand over `tools/dump-hash.manifest`: the byte-identity gate for output-preserving changes.
 - Shared cv-core modules name a harness variant, directly or through an alias, only inside an exhaustive match; out-of-tree adapters inherit defaults for new `Adapter` methods.

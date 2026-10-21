@@ -741,7 +741,7 @@ fn codex_trust_is_read_from_the_store_codex_writes() {
 
 /// The real-binary gate for trust: with `CV_CODEX_BIN=/path/to/codex`, ask that Codex's
 /// `app-server` for `hooks/list` over the file cv wrote and compare keys, hashes and states.
-/// Without the variable the test passes without running (CI has no Codex).
+/// Without the variable the test passes without running; CI sets it to a pinned release.
 #[test]
 fn codex_trust_matches_the_real_binary() {
     let Some(codex) = std::env::var_os("CV_CODEX_BIN") else {
@@ -822,6 +822,73 @@ fn codex_trust_matches_the_real_binary() {
         assert_eq!(their_trust, trust, "{key}");
     }
     assert_eq!(rows.iter().filter(|(_, _, t)| t == "modified").count(), 1);
+}
+
+/// The live effect, with no model call: `codex exec` runs SessionStart and UserPromptSubmit hooks
+/// before it asks the model anything, and reports each as `hook: <Event> Completed`. Untrusted
+/// (a fresh install) Codex skips every one; `--dangerously-bypass-hook-trust` runs them. The model
+/// request itself fails unauthenticated, which is why the run is read until both lines appear (or
+/// a deadline) and then killed. Opt-in on `CV_CODEX_BIN`, like the trust check.
+#[test]
+fn codex_hooks_run_in_the_real_binary_only_with_trust() {
+    let Some(codex) = std::env::var_os("CV_CODEX_BIN") else {
+        eprintln!("CV_CODEX_BIN unset: skipping the real-binary hook run");
+        return;
+    };
+    use std::process::{Command, Stdio};
+    let w = World::new("codex-hooks-real");
+    cv_ok(&w, &["hooks", "install", "codex"]);
+    let run = |bypass: bool| -> String {
+        let log = w.base.join(if bypass {
+            "exec-bypass.log"
+        } else {
+            "exec-untrusted.log"
+        });
+        let out = fs::File::create(&log).unwrap();
+        let mut cmd = Command::new(&codex);
+        cmd.args(["exec", "--skip-git-repo-check"]);
+        if bypass {
+            cmd.arg("--dangerously-bypass-hook-trust");
+        }
+        let mut child = cmd
+            .arg("hello")
+            .env("CODEX_HOME", w.home.join(".codex"))
+            .env("HOME", &w.home)
+            .env_remove("OPENAI_API_KEY")
+            .env_remove("CODEX_API_KEY")
+            .current_dir(&w.base)
+            .stdin(Stdio::null())
+            .stdout(out.try_clone().unwrap())
+            .stderr(out)
+            .spawn()
+            .expect("codex exec");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+        loop {
+            let text = fs::read_to_string(&log).unwrap_or_default();
+            let hooked =
+                text.contains("hook: SessionStart Completed") && text.contains("hook: UserPromptSubmit Completed");
+            // Untrusted: Codex reaches the model request (and its retries) without a hook line.
+            let reached_model = text.contains("Reconnecting... 2/");
+            let exited = child.try_wait().unwrap().is_some();
+            if (bypass && hooked) || (!bypass && reached_model) || exited || std::time::Instant::now() > deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return fs::read_to_string(&log).unwrap_or_default();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    };
+    let untrusted = run(false);
+    assert!(!untrusted.contains("hook: "), "untrusted hooks ran:\n{untrusted}");
+    let bypassed = run(true);
+    assert!(
+        bypassed.contains("hook: SessionStart Completed") && bypassed.contains("hook: UserPromptSubmit Completed"),
+        "hooks did not complete under --dangerously-bypass-hook-trust:\n{bypassed}"
+    );
+    assert!(
+        !bypassed.contains("Failed") && !bypassed.contains("Blocked"),
+        "{bypassed}"
+    );
 }
 
 /// A Codex rollout under the world's `~/.codex/sessions`: a `session_meta` header (with
