@@ -92,36 +92,11 @@ pub(super) fn job_cost(group: &[Job]) -> u64 {
         .min(IN_FLIGHT_BYTES)
 }
 
-#[cfg(all(test, feature = "probe-heap"))]
-#[derive(serde::Serialize)]
-pub(super) struct BodySummary {
-    pub(super) bytes: usize,
-    pub(super) docs: usize,
-    pub(super) hash: u64,
-}
-#[cfg(all(test, feature = "probe-heap"))]
-impl Default for BodySummary {
-    fn default() -> Self {
-        Self {
-            bytes: 0,
-            docs: 0,
-            hash: 0xcbf29ce484222325,
-        }
-    }
-}
-#[cfg(test)]
-pub(super) fn body_hash(mut hash: u64, bytes: &[u8]) -> u64 {
-    for &byte in bytes {
-        hash = (hash ^ byte as u64).wrapping_mul(0x100000001b3);
-    }
-    hash
-}
-
 /// What [`run_jobs`] did.
 #[derive(Default)]
 pub(super) struct Ran {
     #[cfg(test)]
-    pub(super) work: SweepWork,
+    pub(super) observed: observe::Sweep,
     /// Event and search baseline publications that failed: the catalog could not be written.
     pub(super) errors: usize,
     pub(super) first_error: Option<String>,
@@ -134,8 +109,6 @@ pub(super) struct Ran {
     /// Mark updates still waiting for the commit that holds their docs.
     pub(super) marks: Vec<cv_core::resume::MarkUpdate>,
     pub(super) dependencies: Vec<cv_core::source::Update>,
-    #[cfg(all(test, feature = "probe-heap"))]
-    pub(super) bodies: HashMap<String, BodySummary>,
 }
 
 /// Publish the committed docs' baselines; a row that fails is an error of the pass (its session
@@ -297,22 +270,7 @@ pub(super) fn run_fed(
                 }
                 Out::Doc(doc) => {
                     #[cfg(test)]
-                    {
-                        ran.work.documents += 1;
-                        let inner = doc.inner();
-                        if let Some(body) = inner.get_first(f.body).and_then(|value| value.as_str()) {
-                            ran.work.body_bytes += body.len();
-                            #[cfg(feature = "probe-heap")]
-                            if std::env::var_os("CV_SWEEP_HASH_BODY").is_some() {
-                                if let Some(id) = inner.get_first(f.id).and_then(|value| value.as_str()) {
-                                    let summary = ran.bodies.entry(id.to_owned()).or_default();
-                                    summary.bytes += body.len();
-                                    summary.docs += 1;
-                                    summary.hash = body_hash(summary.hash, body.as_bytes());
-                                }
-                            }
-                        }
-                    }
+                    ran.observed.document(&doc, f);
                     if failure.is_none() {
                         if let Err(e) = writer.add_admitted(doc) {
                             failure = Some(e);
@@ -333,7 +291,7 @@ pub(super) fn run_fed(
                 } => {
                     #[cfg(test)]
                     {
-                        ran.work.callbacks += callbacks;
+                        ran.observed.work.callbacks += callbacks;
                     }
                     // Only stamp events after a complete pass: a parse error leaves the sync rows
                     // untouched so the session is retried next run.
@@ -435,5 +393,3 @@ pub(super) fn run_fed(
         }
     })
 }
-
-/// The docs a pass resumed at message `n` of session `id` replaces: its meta doc and its body

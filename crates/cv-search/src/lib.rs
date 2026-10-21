@@ -165,7 +165,14 @@ impl Searcher {
 
     /// Search with an explicit full-text index location; live and semantic sources use their
     /// configured stores. This avoids changing the process environment to select an index.
-    pub fn search_in(&self, dir: &std::path::Path, query: &str, filter: SearchFilter<'_>, limit: usize, source: Source) -> Result<Found> {
+    pub fn search_in(
+        &self,
+        dir: &std::path::Path,
+        query: &str,
+        filter: SearchFilter<'_>,
+        limit: usize,
+        source: Source,
+    ) -> Result<Found> {
         let mut found = Found {
             hits: Vec::new(),
             source,
@@ -176,7 +183,10 @@ impl Searcher {
         if filter.harness.is_some() && harness.is_none() {
             return Ok(found);
         }
-        let filter = SearchFilter { harness: harness.map(cv_core::Harness::as_str), ..filter };
+        let filter = SearchFilter {
+            harness: harness.map(cv_core::Harness::as_str),
+            ..filter
+        };
         match source {
             Source::Live => {
                 let live = cv_core::scan::live_search_filtered(query, harness, limit, |r| {

@@ -157,7 +157,7 @@ fn document_limit() -> usize {
 }
 #[cfg(not(test))]
 #[derive(Default)]
-struct Fault;
+struct Fault {}
 #[cfg(not(test))]
 impl Fault {
     fn check(&self) -> Result<()> {

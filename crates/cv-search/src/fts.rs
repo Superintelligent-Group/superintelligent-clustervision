@@ -38,6 +38,10 @@
 //! Snippets are generated **live** from the top hits (re-reading the session, capped) rather than
 //! from a stored copy of every body — which is what keeps the on-disk index small.
 
+#[cfg(test)]
+mod observe;
+#[cfg(test)]
+use observe::{body_hash, SweepWork};
 mod sweep;
 use sweep::*;
 
@@ -442,7 +446,7 @@ fn sweep_all(dir: &Path, rebuild: bool, subagents: bool) -> Result<(Swept, Vec<c
         swept.unchanged = swept.unchanged.saturating_sub(early.changed);
         #[cfg(test)]
         {
-            swept.early = early.changed;
+            swept.observed.early = early.changed;
         }
     }
     Ok((swept, refs))
@@ -568,16 +572,6 @@ fn report(swept: Swept, rebuild: bool, strict: bool) -> Result<Indexed> {
     })
 }
 
-/// Successful-sweep delivered callbacks and document submissions, not input scans or timings.
-#[cfg(test)]
-#[derive(Debug, Default, PartialEq, Eq)]
-struct SweepWork {
-    callbacks: usize,
-    documents: usize,
-    body_bytes: usize,
-    writer_opened: bool,
-}
-
 /// What one [`sweep`] did.
 #[derive(Default)]
 pub(crate) struct Swept {
@@ -601,14 +595,7 @@ pub(crate) struct Swept {
     /// Sessions read only from their mark on.
     pub resumed: usize,
     #[cfg(test)]
-    admission: (usize, usize, usize, usize),
-    #[cfg(test)]
-    work: SweepWork,
-    /// Sessions read early, from bytes discovery decoded.
-    #[cfg(test)]
-    early: usize,
-    #[cfg(all(test, feature = "probe-heap"))]
-    bodies: HashMap<String, BodySummary>,
+    observed: observe::Sweep,
 }
 
 /// Inputs copied into retained body documents: the discovered ref, as discovery spelled it, and
@@ -729,15 +716,18 @@ fn source_consumer(dir: &Path) -> Result<String> {
         return Ok(consumer);
     }
     // Serialize missing/empty identity repair; never unlink this lock inode.
-    let lock = std::fs::OpenOptions::new().write(true).create(true).truncate(false)
+    let lock = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
         .open(dir.join(".cv-index-id.lock"))?;
     lock.lock().context("locking search index identity repair")?;
     if let Some(consumer) = read(&file)? {
         return Ok(consumer);
     }
     match std::fs::remove_file(&file) {
-        Ok(()) => {},
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e).context("removing empty search index identity"),
     }
     // Write the whole identity aside, then link it into place: a concurrent first open either
@@ -912,16 +902,7 @@ fn sweep_refs(dir: &Path, refs: &[cv_core::SessionRef], rebuild: bool, subagents
         first_error: ran.first_error,
         unreadable: ran.unreadable,
         #[cfg(test)]
-        admission: writer.admission.stats(),
-        #[cfg(test)]
-        work: SweepWork {
-            writer_opened: true,
-            ..ran.work
-        },
-        #[cfg(test)]
-        early: 0,
-        #[cfg(all(test, feature = "probe-heap"))]
-        bodies: ran.bodies,
+        observed: ran.observed.finished(&writer.admission),
     })
 }
 
@@ -1119,7 +1100,7 @@ impl PlanState {
     }
 }
 
-/// docs from message `n` on.
+/// The docs replaced by a resumed pass: its meta doc and body docs from message `n` on.
 fn resumed_docs(f: &Fields, id: &str, n: usize) -> tantivy::query::BooleanQuery {
     use std::ops::Bound;
     use tantivy::query::{BooleanQuery, Occur, Query, RangeQuery, TermQuery};
@@ -2523,7 +2504,13 @@ pub fn enrich_text_snippets(dir: &Path, query: &str, scope: crate::Scope, hits: 
     enrich_snippets(&searcher, &f, query, scope, hits)
 }
 
-fn enrich_snippets(searcher: &tantivy::Searcher, f: &Fields, query: &str, scope: crate::Scope, hits: &mut [Hit]) -> Result<Option<String>> {
+fn enrich_snippets(
+    searcher: &tantivy::Searcher,
+    f: &Fields,
+    query: &str,
+    scope: crate::Scope,
+    hits: &mut [Hit],
+) -> Result<Option<String>> {
     let (mut unreadable, mut first) = (0usize, None);
     for hit in hits {
         let doc = meta_doc(searcher, f, &hit.id);
@@ -2602,7 +2589,12 @@ fn query_index(dir: &Path) -> Result<(Index, Fields, tantivy::Searcher)> {
     Ok((index, f, searcher))
 }
 
-pub(crate) fn search_with_snippets(dir: &Path, query: &str, limit: usize, filter: crate::SearchFilter<'_>) -> Result<(Vec<Hit>, Option<String>)> {
+pub(crate) fn search_with_snippets(
+    dir: &Path,
+    query: &str,
+    limit: usize,
+    filter: crate::SearchFilter<'_>,
+) -> Result<(Vec<Hit>, Option<String>)> {
     let (index, f, searcher) = query_index(dir)?;
     let decisions = std::sync::Arc::new(MetadataDecisions::new(&searcher, &f, filter));
     let mut hits = ranked_search(&index, &f, &searcher, query, limit, filter, decisions)?;
@@ -2925,10 +2917,23 @@ mod tests {
         let (index, f) = open_or_create(&dir).unwrap();
         let mut writer = open_writer(&index, 15_000_000).unwrap();
         for (id, harness) in [("a", "codex"), ("b", "claude"), ("c", "claude")] {
-            writer.add_document(tantivy::doc!(f.id => id, f.kind => KIND_BODY, f.harness => harness, f.body => "needle")).unwrap();
+            writer
+                .add_document(tantivy::doc!(f.id => id, f.kind => KIND_BODY, f.harness => harness, f.body => "needle"))
+                .unwrap();
         }
         writer.commit().unwrap();
-        let found = crate::Searcher::default().search_in(&dir, "needle", crate::SearchFilter { harness: Some("CC"), ..Default::default() }, 2, crate::Source::Index).unwrap();
+        let found = crate::Searcher::default()
+            .search_in(
+                &dir,
+                "needle",
+                crate::SearchFilter {
+                    harness: Some("CC"),
+                    ..Default::default()
+                },
+                2,
+                crate::Source::Index,
+            )
+            .unwrap();
         assert_eq!(found.hits.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(), ["b", "c"]);
     }
 
@@ -2988,10 +2993,10 @@ mod tests {
         let wall = started.elapsed().as_secs_f64();
         let heap = cv_testkit::heap::end(baseline);
         assert_eq!((result.changed, result.errors), (refs.len(), 0));
-        assert_eq!(result.admission.0, 0);
+        assert_eq!(result.observed.admission.0, 0);
         let bounded = std::env::var_os("CV_SWEEP_COMPARE_UNBOUNDED").is_none();
         if bounded {
-            assert!(result.admission.1 <= crate::ingest::DOCUMENT_BYTES.max(result.admission.2));
+            assert!(result.observed.admission.1 <= crate::ingest::DOCUMENT_BYTES.max(result.observed.admission.2));
         }
         // This is a scoped composed-path ceiling, not a universal RSS promise. Four concurrent
         // synthetic giant Source inputs include raw queues, working buffers, tokenizers and arenas.
@@ -3024,21 +3029,24 @@ mod tests {
             expected = body_hash(expected, &x[..input_bytes % x.len()]);
             expected = body_hash(expected, suffix);
             for n in 0..copies {
-                let body = &result.bodies[&format!("large{n}")];
+                let body = &result.observed.bodies[&format!("large{n}")];
                 assert_eq!(body.bytes, prefix.len() + input_bytes + suffix.len());
                 assert_eq!(body.hash, expected);
             }
         }
         let repeat_started = std::time::Instant::now();
         let unchanged = sweep(&dir, refs, false, false).unwrap();
-        assert_eq!((unchanged.changed, unchanged.errors, unchanged.admission.1), (0, 0, 0));
+        assert_eq!(
+            (unchanged.changed, unchanged.errors, unchanged.observed.admission.1),
+            (0, 0, 0)
+        );
         eprintln!(
             "{}",
             serde_json::json!({"input_bytes":input_bytes,"physical_bytes":std::fs::metadata(&fixture).unwrap().len(),
             "large_sessions":copies,"small_sessions":small,"chunk_bytes":CHUNK_BYTES,
-            "document_limit_bytes":if bounded { Some(crate::ingest::DOCUMENT_BYTES) } else { None },"queue_peak_charged_bytes":result.admission.1,
-            "largest_document_charged_bytes":result.admission.2,"queue_waits":result.admission.3,
-            "body_hashing":std::env::var_os("CV_SWEEP_HASH_BODY").is_some(),"bodies":result.bodies,
+            "document_limit_bytes":if bounded { Some(crate::ingest::DOCUMENT_BYTES) } else { None },"queue_peak_charged_bytes":result.observed.admission.1,
+            "largest_document_charged_bytes":result.observed.admission.2,"queue_waits":result.observed.admission.3,
+            "body_hashing":std::env::var_os("CV_SWEEP_HASH_BODY").is_some(),"bodies":result.observed.bodies,
             "heap":heap,"wall_seconds":wall,"unchanged_wall_seconds":repeat_started.elapsed().as_secs_f64(),
             "tantivy_tokenization":true,"commits_and_compaction":true})
         );
@@ -3099,7 +3107,7 @@ mod tests {
         let dir = tmpdir();
         let result = sweep(&dir, refs.clone(), false, false).unwrap();
         assert_eq!((result.changed, result.errors), (refs.len(), 0));
-        let (live, peak, largest, _) = result.admission;
+        let (live, peak, largest, _) = result.observed.admission;
         assert_eq!(live, 0, "commit consumed every accepted document");
         assert!(peak <= crate::ingest::DOCUMENT_BYTES.max(largest));
         assert!(peak > 0);
@@ -3168,7 +3176,7 @@ mod tests {
 
         let check = |dir: &Path, rebuild: bool, early: usize| {
             let (swept, refs) = sweep_all(dir, rebuild, false).unwrap();
-            assert_eq!((swept.errors, swept.early, swept.copies), (0, early, 1));
+            assert_eq!((swept.errors, swept.observed.early, swept.copies), (0, early, 1));
             let reference = tmpdir();
             sweep(&reference, refs, false, false).unwrap();
             assert_eq!(all_docs(dir), all_docs(&reference));
@@ -3186,7 +3194,7 @@ mod tests {
             assert_eq!(Path::new(&source), preferred);
             let again = sweep_all(dir, false, false).unwrap().0;
             assert_eq!(
-                (again.changed, again.work.callbacks),
+                (again.changed, again.observed.work.callbacks),
                 (0, 0),
                 "then nothing is stale and nothing is read"
             );
@@ -4415,7 +4423,10 @@ mod tests {
         assert_eq!((cold.changed, cold.errors), (1, 0));
         let before = observe(&dir, std::slice::from_ref(&r), &[]);
         let warm = sweep(&dir, vec![r.clone()], false, false).unwrap();
-        assert_eq!((warm.changed, warm.errors, warm.work), (0, 0, SweepWork::default()));
+        assert_eq!(
+            (warm.changed, warm.errors, warm.observed.work),
+            (0, 0, SweepWork::default())
+        );
         assert_eq!(before, observe(&dir, std::slice::from_ref(&r), &[]));
         std::fs::write(&path, "\n").unwrap();
         assert_eq!(sweep(&dir, vec![r.clone()], false, false).unwrap().changed, 1);
@@ -4438,7 +4449,7 @@ mod tests {
             );
         }
         let warm = sweep(&dir, vec![r.clone()], false, false).unwrap();
-        assert_eq!((warm.changed, warm.work), (0, SweepWork::default()));
+        assert_eq!((warm.changed, warm.observed.work), (0, SweepWork::default()));
         assert_eq!(
             observe(&dir, std::slice::from_ref(&r), &[]),
             whole_sweep(std::slice::from_ref(&r), &[])
@@ -5905,10 +5916,10 @@ mod tests {
         assert_eq!(attribution(), None);
         let restored = sweep(&dir, vec![parent.clone()], false, true).unwrap();
         assert_eq!(restored.changed, 0, "event-only authority repair preserves FTS");
-        assert!(restored.work.callbacks > 0);
+        assert!(restored.observed.work.callbacks > 0);
         assert_eq!(attribution().as_deref(), Some("parent"));
         assert_eq!(
-            sweep(&dir, vec![parent], false, true).unwrap().work,
+            sweep(&dir, vec![parent], false, true).unwrap().observed.work,
             SweepWork::default()
         );
         std::fs::remove_dir_all(dir).unwrap();
@@ -6149,7 +6160,7 @@ mod tests {
         for d in [dir, home] {
             std::fs::remove_dir_all(d).ok();
         }
-        (seen, swept.work)
+        (seen, swept.observed.work)
     }
 
     /// Write the first `num/den` of each transcript, cut inside a line as a live writer leaves it.
@@ -6172,12 +6183,16 @@ mod tests {
         write_heads(&fleet, 1, 3);
         let fresh = sweep(&dir, refs.clone(), false, false).unwrap();
         assert_eq!((fresh.resumed, fresh.errors), (0, 0));
-        assert!(fresh.work.callbacks > 0 && fresh.work.body_bytes > 0 && fresh.work.documents > 0);
-        assert!(fresh.work.writer_opened);
+        assert!(
+            fresh.observed.work.callbacks > 0
+                && fresh.observed.work.body_bytes > 0
+                && fresh.observed.work.documents > 0
+        );
+        assert!(fresh.observed.work.writer_opened);
         let warm = sweep(&dir, refs.clone(), false, false).unwrap();
         assert_eq!(warm.errors, 0);
         assert_eq!(
-            warm.work,
+            warm.observed.work,
             SweepWork::default(),
             "unchanged refresh performs no parse or writer work"
         );
@@ -6198,21 +6213,21 @@ mod tests {
             let (whole, work) = whole_sweep_with_work(&refs, &words);
             assert_eq!(resumed, whole, "at {num}/{den}");
             assert!(
-                swept.work.callbacks < work.callbacks,
+                swept.observed.work.callbacks < work.callbacks,
                 "suffix callbacks {:?} versus whole {:?}",
-                swept.work,
+                swept.observed.work,
                 work
             );
             assert!(
-                swept.work.body_bytes < work.body_bytes,
+                swept.observed.work.body_bytes < work.body_bytes,
                 "suffix searchable bytes {:?} versus whole {:?}",
-                swept.work,
+                swept.observed.work,
                 work
             );
             assert!(
-                swept.work.documents <= work.documents,
+                swept.observed.work.documents <= work.documents,
                 "suffix document submissions {:?} versus whole {:?}",
-                swept.work,
+                swept.observed.work,
                 work
             );
         }
@@ -6539,7 +6554,7 @@ mod tests {
             "only the unpublished session is read again"
         );
         let again = sweep(&dir, refs.clone(), false, false).unwrap();
-        assert_eq!((again.changed, again.work.callbacks), (0, 0));
+        assert_eq!((again.changed, again.observed.work.callbacks), (0, 0));
         let words = some_words(&refs);
         assert_eq!(observe(&dir, &refs, &words), whole_sweep(&refs, &words));
         for d in [dir, sdir] {
@@ -6770,7 +6785,7 @@ mod tests {
             whole_sweep(std::slice::from_ref(&r), &words)
         );
         let unchanged = sweep(&dir, vec![r], false, false).unwrap();
-        assert_eq!((unchanged.changed, unchanged.work.callbacks), (0, 0));
+        assert_eq!((unchanged.changed, unchanged.observed.work.callbacks), (0, 0));
         for d in [dir, sdir] {
             std::fs::remove_dir_all(d).ok();
         }
@@ -7084,10 +7099,10 @@ mod tests {
         let _writer_lock = open_writer(&index, 15_000_000).unwrap();
         let swept = sweep(&dir, refs.clone(), false, false).unwrap();
         assert_eq!(
-            (swept.changed, swept.removed, swept.errors, swept.admission.1),
+            (swept.changed, swept.removed, swept.errors, swept.observed.admission.1),
             (0, 0, 0, 0)
         );
-        assert_eq!(swept.work, SweepWork::default());
+        assert_eq!(swept.observed.work, SweepWork::default());
         assert_eq!(observe(&dir, &refs, &["zqwarm".into()]), before);
     }
 
@@ -7189,7 +7204,12 @@ mod tests {
         for _ in 0..runs {
             let result = sweep(&dir, refs.clone(), false, false).unwrap();
             assert_eq!(
-                (result.changed, result.removed, result.errors, result.admission.1),
+                (
+                    result.changed,
+                    result.removed,
+                    result.errors,
+                    result.observed.admission.1
+                ),
                 (0, 0, 0, 0)
             );
         }
