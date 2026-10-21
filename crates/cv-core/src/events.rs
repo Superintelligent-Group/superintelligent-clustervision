@@ -529,17 +529,8 @@ pub fn read_ref(r: &crate::SessionRef, kind: Option<&str>) -> Result<Vec<EventRo
             let mut sink = EventSink::new(r.cwd.clone());
             adapter.try_stream(r, &crate::Demand::LEAN.with_spans(), &mut sink)?;
             let mut events = sink.into_events()?;
-            // Match catalog order and its first-row-wins key, including NULL/empty targets.
+            // Match catalog order.
             events.sort_by_key(|e| (e.msg_idx, e.kind));
-            let mut seen = std::collections::HashSet::new();
-            let mut previous = None;
-            events.retain(|e| {
-                if previous != Some(e.msg_idx) {
-                    seen.clear();
-                }
-                previous = Some(e.msg_idx);
-                seen.insert((e.kind, e.target.clone().unwrap_or_default()))
-            });
             return Ok(events
                 .into_iter()
                 .filter(|e| kind.is_none_or(|k| e.kind == k))
@@ -639,9 +630,8 @@ mod db {
     ///   carry a nullable integer. Re-ingest deletes a session's event rows but leaves its
     ///   interned targets — orphans are unreferenced cache rows, reclaimed only when a
     ///   catalog of another schema is rebuilt. Suffix matching scans `event_targets` instead of every event row.
-    /// * No dedup index: [`record`] is DELETE-by-session + batch INSERT in one transaction, so
-    ///   cross-session duplicates are impossible by construction, and intra-batch duplicates are
-    ///   deduped in memory there.
+    /// * No dedup: [`record`] is DELETE-by-session + batch INSERT in one transaction, and every
+    ///   extracted event is a row.
     /// * `idx_events_session` serves [`events_for`] and `record`'s delete; `idx_events_target`
     ///   joins event rows back from a matched target.
     pub(crate) fn open() -> Option<Connection> {
@@ -855,7 +845,6 @@ mod db {
                 "INSERT INTO events(session,msg_idx,ts,kind,tool,target_id,detail)
                  VALUES(?1,?2,?3,?4,?5,?6,?7)",
             )?;
-            let mut seen: std::collections::HashSet<(usize, &'static str, String)> = std::collections::HashSet::new();
             let mut targets: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
             let mut previous = None;
             for e in events {
@@ -863,15 +852,7 @@ mod db {
                 if e.msg_idx < from || previous.is_some_and(|idx| e.msg_idx < idx) {
                     anyhow::bail!("event batch is not ordered from the resume index");
                 }
-                if previous != Some(e.msg_idx) {
-                    // Stream extraction emits consecutive rows for each message. Dedup keys
-                    // cannot recur in later messages, so retain only this message's keys.
-                    seen.clear();
-                }
                 previous = Some(e.msg_idx);
-                if !seen.insert((e.msg_idx, e.kind, e.target.clone().unwrap_or_default())) {
-                    continue;
-                }
                 let target_id: Option<i64> = match e.target.as_deref() {
                     None => None,
                     Some(t) => match targets.get(t) {

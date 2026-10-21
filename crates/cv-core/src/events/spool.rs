@@ -354,7 +354,7 @@ mod tests {
 
     #[cfg(feature = "sqlite")]
     #[test]
-    fn ordered_publication_preserves_suffix_dedup_and_rolls_back_failures() {
+    fn ordered_publication_replaces_the_suffix_and_rolls_back_failures() {
         use crate::events::{events_for, needs_ingest, record_spooled_with_source, Provenance};
         use crate::{Harness, SessionRef};
         let world = crate::test_world("event-spool-transaction");
@@ -373,18 +373,16 @@ mod tests {
             original.push(row).unwrap();
         }
         record_spooled_with_source(&r, 0, original, &source, &Provenance::default()).unwrap();
-        assert_eq!(events_for("claude", "events", None).unwrap().len(), 2);
+        assert_eq!(events_for("claude", "events", None).unwrap().len(), 3);
         let mut spool = EventSpool::default();
         spool.push(event(2, None)).unwrap();
-        let mut duplicate = event(2, Some(String::new()));
-        duplicate.detail = Some("later duplicate must lose".into());
-        spool.push(duplicate).unwrap();
         spool.push(event(2, Some("new".into()))).unwrap();
         spool.push(event(3, Some("new".into()))).unwrap();
         record_spooled_with_source(&r, 2, spool, &source, &Provenance::default()).unwrap();
         let rows = events_for("claude", "events", None).unwrap();
         assert_eq!(rows.len(), 4);
         assert_eq!(rows[0].msg_idx, 0);
+        assert_eq!(rows[3].msg_idx, 3);
         assert_eq!(rows[1].target, None);
         let before = format!("{rows:?}");
         assert!(!needs_ingest(&r));
