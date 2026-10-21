@@ -127,7 +127,9 @@ verbatim carrier record under `ParseOptions::complete`) and `cv_byte_offset`.
   non-advisor/compaction iteration** (falling back to the top-level counters), and its turn gate refuses
   client-side with a synthesized "Prompt is too long" when that + a byte estimate of everything after the
   record ≥ context window − min(max_output, 20k) − 3k. `cv prune` pins both — revive is **on by
-  default** since 0.11.0; `--no-revive` preserves the original `usage` records byte-for-byte.
+  default** since 0.11.0; `--no-revive` preserves the original `usage` records byte-for-byte. A pinned
+  record carries the count it replaced as a top-level `_cv_orig_ctx` (cv's own key; a later prune
+  prices that record from it, `record::Facts::orig_ctx`).
 - **Persisted tool outputs:** a too-large `tool_result` is replaced by the stub
   `<persisted-output>\nOutput too large (NNKB). Full output saved to: <session>/tool-results/<id>.txt\n\n
   Preview (first 2KB):\n…</persisted-output>` — the model saw only the stub; cv keeps it as content and
