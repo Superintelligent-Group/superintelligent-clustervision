@@ -370,7 +370,7 @@ pub(crate) fn thinking_fate_with_presence(
         || (signature.is_some() && target_holds(target, Field::ThinkingSignature))
         || (encrypted.is_some() && target_holds(target, Field::ThinkingEncrypted));
     let mode = if mode == ThinkingMode::Portable {
-        if target == Harness::Claude {
+        if fidelity::write_rules(target).portable_replay {
             return if has_text {
                 ThinkingFate::AsText
             } else {

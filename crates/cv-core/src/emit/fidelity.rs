@@ -241,8 +241,9 @@ pub(super) struct Features {
     results_is_error: usize,
     usage: usize,
     cost: usize,
-    // Continue carries usage/cost but has no native cache-write field.
-    continue_cache_creation: usize,
+    // Cache-write tokens on a target with no native field for them (Continue carries usage/cost
+    // without one); a target that holds the field reports them through its usage count.
+    unheld_cache_creation: usize,
     // Timestamps and ids are counted separately for TOOL turns, because a store that keeps a tool
     // result inside its originating call's record gives that turn no record of its own to carry
     // them on — see [`Field::IdToolTurn`].
@@ -289,7 +290,8 @@ pub(super) fn features(target: Harness, thinking: ThinkingMode, session: &Sessio
     // 1), and an assistant turn that held nothing else goes with it. That is the format's
     // resumability rule, not a loss the target could have avoided, so the verifier compares both
     // sides without them. For every other target the set is unused.
-    let answered: std::collections::HashSet<&str> = if target == Harness::Claude {
+    let answered_only = write_rules(target).answered_calls_only;
+    let answered: std::collections::HashSet<&str> = if answered_only {
         session
             .messages
             .iter()
@@ -303,7 +305,7 @@ pub(super) fn features(target: Harness, thinking: ThinkingMode, session: &Sessio
         Default::default()
     };
     let orphan_call = |b: &Block| {
-        target == Harness::Claude && matches!(b, Block::ToolUse { id, .. } if !answered.contains(id.as_str()))
+        answered_only && matches!(b, Block::ToolUse { id, .. } if !answered.contains(id.as_str()))
     };
     for message in &session.messages {
         f.note(target, thinking, message, session.model.is_some(), &orphan_call);
@@ -340,7 +342,7 @@ impl Features {
         // A store whose own reader re-tags a turn on the way back in is not LOSING it, and the
         // verifier must not cry loss over a transformation the format defines. Model the known one
         // here so both sides agree; anything else still shows up.
-        let (role, kind) = if reroles_client_commands(target) && is_client_command(m) {
+        let (role, kind) = if write_rules(target).reroles_client_commands && is_client_command(m) {
             ("system", MessageKind::InjectedContext.as_str())
         } else {
             (role_str(m.role), m.kind.as_str())
@@ -372,8 +374,8 @@ impl Features {
         // that no target has a slot for.
         if let (Role::Assistant, Some(usage)) = (m.role, &m.usage) {
             f.usage += 1;
-            if target == Harness::Continue && usage.cache_creation_tokens.is_some() {
-                f.continue_cache_creation += 1;
+            if !target_holds(target, Field::UsageCacheCreation) && usage.cache_creation_tokens.is_some() {
+                f.unheld_cache_creation += 1;
             }
         }
         if m.usage.as_ref().and_then(|u| u.cost_usd).is_some() && m.role == Role::Assistant {
@@ -589,15 +591,66 @@ pub(super) fn folds_tool_result(t: Harness) -> bool {
     matches!(t, Harness::OpenCode | Harness::Gemini)
 }
 
-/// Targets whose reader applies gemini-cli's `isIgnoredUserContent` rule
-/// (`utils/sessionUtils.ts`): a user turn beginning `/` or `?` is a command typed AT the client,
-/// never a prompt sent to the model, so reading one back yields a System / `injected_context` turn
-/// rather than the `prompt` that went in. The turn and its text survive intact — only the tagging
-/// changes — so this is a known transformation to model, not a loss to report. Qwen shares Gemini's
-/// parser and therefore its rule.
-pub(super) fn reroles_client_commands(t: Harness) -> bool {
-    matches!(t, Harness::Gemini | Harness::Qwen)
+/// What a target's writer (and its reader, on the way back) does beyond the fields it holds
+/// ([`holds_fields`]): the rules the thinking projection and the verifier model. One row per
+/// harness, exhaustive like [`holds_fields`], so a new harness states its rules or has none.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct WriteRules {
+    /// [`ThinkingMode::Portable`] is this target's replay policy (Claude's): plaintext thinking
+    /// becomes text and reasoning without plaintext goes, so no thinking field is held under it.
+    /// Elsewhere Portable is the text policy.
+    pub portable_replay: bool,
+    /// The writer drops a tool call the transcript never answered, and a turn that held nothing
+    /// else (`claude::emit`, rule 1): the format's resumability rule, not an avoidable loss, so
+    /// the verifier keeps call ids to tell which calls were answered.
+    pub answered_calls_only: bool,
+    /// The reader applies gemini-cli's `isIgnoredUserContent` rule (`utils/sessionUtils.ts`): a
+    /// user turn beginning `/` or `?` is a command typed AT the client, never a prompt sent to the
+    /// model, so reading one back yields a System / `injected_context` turn rather than the
+    /// `prompt` that went in. The turn and its text survive intact; only the tagging changes, so
+    /// this is a known transformation to model, not a loss to report. Qwen shares Gemini's parser.
+    pub reroles_client_commands: bool,
+    /// The writer pins a foreign session model to its own id ([`Field::SessionModelForeign`] in
+    /// [`policy`]), as this function computes it.
+    pub pinned_model: Option<fn(&Session) -> &str>,
 }
+
+pub(crate) fn write_rules(h: Harness) -> WriteRules {
+    let none = WriteRules::default();
+    match h {
+        Harness::Claude => WriteRules {
+            portable_replay: true,
+            answered_calls_only: true,
+            ..none
+        },
+        Harness::Gemini | Harness::Qwen => WriteRules {
+            reroles_client_commands: true,
+            ..none
+        },
+        Harness::Grok => WriteRules {
+            pinned_model: Some(grok_model_id),
+            ..none
+        },
+        Harness::Codex
+        | Harness::OpenCode
+        | Harness::OpenClaw
+        | Harness::Hermes
+        | Harness::LmStudio
+        | Harness::Cline
+        | Harness::Roo
+        | Harness::Continue
+        | Harness::Cursor
+        | Harness::Goose
+        | Harness::Zed
+        | Harness::Devin
+        | Harness::Kimi
+        | Harness::KimiCode
+        | Harness::ChatGptExport
+        | Harness::ClaudeExport
+        | Harness::OpenSession => none,
+    }
+}
+
 
 /// A human-typed client command (`/compact`, `?help`) rather than a prompt for the model.
 pub(super) fn is_client_command(m: &Message) -> bool {
@@ -615,7 +668,7 @@ pub(super) fn is_client_command(m: &Message) -> bool {
 /// (`text` needs no override — the text lands in a [`Block::Text`] and the structured payloads are
 /// still classified by the target's own capability, which is what makes the report stay honest.)
 pub(crate) fn holds(target: Harness, thinking: ThinkingMode, field: Field) -> bool {
-    if (thinking == ThinkingMode::Drop || (thinking == ThinkingMode::Portable && target == Harness::Claude))
+    if (thinking == ThinkingMode::Drop || (thinking == ThinkingMode::Portable && write_rules(target).portable_replay))
         && field.is_thinking()
     {
         return false;
@@ -812,8 +865,8 @@ pub(super) fn diff_features(
         &mut deltas,
         Field::UsageCacheCreation,
         "usage cache creation tokens",
-        before.continue_cache_creation,
-        after.continue_cache_creation,
+        before.unheld_cache_creation,
+        after.unheld_cache_creation,
     );
     count_delta(
         &mut deltas,
@@ -865,7 +918,9 @@ pub(super) fn diff_features(
     // The session model. A target that deliberately *pins* its own model rather than carrying a
     // foreign one (Grok — see [`Field::SessionModelForeign`] in [`policy`]) is classified under that
     // key, so the substitution is reported but not counted against the emitter.
-    let model_pinned = target == Harness::Grok && input.model.as_deref().is_some_and(|m| grok_model_id(input) != m);
+    let model_pinned = write_rules(target)
+        .pinned_model
+        .is_some_and(|pinned| input.model.as_deref().is_some_and(|m| pinned(input) != m));
     opt_delta(
         &mut deltas,
         target,

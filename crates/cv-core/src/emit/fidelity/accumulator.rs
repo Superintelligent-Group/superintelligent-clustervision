@@ -6,8 +6,10 @@ pub(super) struct Accumulator {
     target: Harness,
     thinking: ThinkingMode,
     features: Features,
-    // Claude's answered-call policy needs future IDs, but not argument/output bodies.
-    claude: Vec<Message>,
+    // The answered-call rule ([`WriteRules::answered_calls_only`]) needs future IDs, but not
+    // argument/output bodies.
+    answered_only: bool,
+    pending: Vec<Message>,
     answered: std::collections::HashSet<String>,
     resolver: crate::lazy::Resolver,
     error: Option<anyhow::Error>,
@@ -18,7 +20,8 @@ impl Accumulator {
             target,
             thinking,
             features: Features::default(),
-            claude: Vec::new(),
+            answered_only: write_rules(target).answered_calls_only,
+            pending: Vec::new(),
             answered: Default::default(),
             resolver,
             error: None,
@@ -26,15 +29,15 @@ impl Accumulator {
     }
     pub(super) fn note(&mut self, message: &Message) -> Result<()> {
         let facts = project(message, &self.resolver, self.target)?;
-        if self.target == Harness::Claude {
+        if self.answered_only {
             for block in &facts.content {
                 if let Block::ToolResult { tool_use_id, .. } = block {
                     self.answered.insert(tool_use_id.clone());
                 }
             }
         }
-        if self.target == Harness::Claude && facts.content.iter().any(|b| matches!(b, Block::ToolUse { .. })) {
-            self.claude.push(facts);
+        if self.answered_only && facts.content.iter().any(|b| matches!(b, Block::ToolUse { .. })) {
+            self.pending.push(facts);
         } else {
             self.features
                 .note(self.target, self.thinking, &facts, false, &|_| false);
@@ -42,8 +45,8 @@ impl Accumulator {
         Ok(())
     }
     pub(super) fn finish(mut self, metadata: &Session) -> Features {
-        if self.target == Harness::Claude {
-            for message in &self.claude {
+        if self.answered_only {
+            for message in &self.pending {
                 self.features.note(
                     self.target,
                     self.thinking,
@@ -97,6 +100,8 @@ pub(super) fn marker(text: &crate::lazy::Text, resolver: &crate::lazy::Resolver)
 }
 
 fn project(message: &Message, resolver: &crate::lazy::Resolver, target: Harness) -> Result<Message> {
+    let rules = write_rules(target);
+    let keep_ids = rules.answered_calls_only;
     let mut facts = Message::new(message.role);
     facts.id = message.id.as_ref().map(|_| String::new());
     facts.kind = message.kind;
@@ -111,7 +116,7 @@ fn project(message: &Message, resolver: &crate::lazy::Resolver, target: Harness)
     for block in &message.content {
         facts.content.push(match block {
             Block::Text { text } => {
-                let mut value = if reroles_client_commands(target) && message.kind == MessageKind::Prompt {
+                let mut value = if rules.reroles_client_commands && message.kind == MessageKind::Prompt {
                     marker(text, resolver)?
                 } else {
                     validate_text(text, resolver)?;
@@ -140,7 +145,7 @@ fn project(message: &Message, resolver: &crate::lazy::Resolver, target: Harness)
                 // Preserve the old source-error boundary even though feature counts ignore args.
                 input.with_view(|_| Ok(()))?;
                 Block::ToolUse {
-                    id: if target == Harness::Claude {
+                    id: if keep_ids {
                         id.clone()
                     } else {
                         String::new()
@@ -160,7 +165,7 @@ fn project(message: &Message, resolver: &crate::lazy::Resolver, target: Harness)
             } => {
                 validate_text(content, resolver)?;
                 Block::ToolResult {
-                    tool_use_id: if target == Harness::Claude {
+                    tool_use_id: if keep_ids {
                         tool_use_id.clone()
                     } else {
                         String::new()
