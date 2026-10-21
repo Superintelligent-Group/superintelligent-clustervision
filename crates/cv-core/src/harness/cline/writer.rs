@@ -47,8 +47,8 @@ fn blocks(
         separate(writer)?;
         text_block(writer, &["<task>", title, "</task>"])?;
     }
+    let user = message.role == Role::User || message.role == Role::Tool;
     for block in &message.content {
-        let user = message.role == Role::User || message.role == Role::Tool;
         if message.role == Role::Tool && !matches!(block, Block::ToolResult { .. }) {
             continue;
         }
