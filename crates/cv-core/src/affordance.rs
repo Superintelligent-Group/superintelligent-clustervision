@@ -1043,13 +1043,23 @@ enum Hit<'a> {
     },
 }
 
+/// One affordance a message's harness bag records outside its blocks
+/// ([`crate::harness::Adapter::message_affordances`]): a row with no call of its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BagHit {
+    pub kind: Kind,
+    pub action: &'static str,
+    pub tool: &'static str,
+    pub summary: String,
+}
+
 /// The first eight characters of a snapshot hash, for a summary.
-fn short(hash: &str) -> &str {
+pub(crate) fn short(hash: &str) -> &str {
     hash.get(..8).unwrap_or(hash)
 }
 
 /// The paths of a JSON list of strings, joined for a summary.
-fn joined(v: Option<&Value>) -> String {
+pub(crate) fn joined(v: Option<&Value>) -> String {
     v.and_then(Value::as_array)
         .map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", "))
         .unwrap_or_default()
@@ -1121,30 +1131,13 @@ fn detail_hits<'a>(
             });
         }
     }
-    if h != Harness::OpenCode {
-        return Ok(());
-    }
-    let Some(bag) = m.harness_extra(h) else {
-        return Ok(());
-    };
-    for p in bag.get("patches").and_then(Value::as_array).into_iter().flatten() {
-        let hash = p.get("hash").and_then(Value::as_str).unwrap_or("");
+    for hit in crate::harness::rootless(h).map(|a| a.message_affordances(m)).unwrap_or_default() {
         out.push(Hit::Detail {
-            kind: Kind::Checkpoint,
-            action: "create",
-            tool: Some("patch"),
+            kind: hit.kind,
+            action: hit.action,
+            tool: Some(hit.tool),
             tool_use_id: None,
-            summary: crate::ir::truncate(&format!("{} · {}", short(hash), joined(p.get("files"))), 120),
-        });
-    }
-    if let Some(snap) = bag.get("snapshot").filter(|v| !joined(v.get("files")).is_empty()) {
-        let hash = snap.get("start").and_then(Value::as_str).unwrap_or("");
-        out.push(Hit::Detail {
-            kind: Kind::Checkpoint,
-            action: "create",
-            tool: Some("snapshot"),
-            tool_use_id: None,
-            summary: crate::ir::truncate(&format!("{} · {}", short(hash), joined(snap.get("files"))), 120),
+            summary: hit.summary,
         });
     }
     Ok(())
@@ -1201,7 +1194,13 @@ fn hits<'a>(h: Harness, m: &'a Message, resolver: &crate::lazy::Resolver, summar
 }
 
 /// A row the session carries once rather than at a message.
-fn session_row(kind: Kind, action: &'static str, tool: &str, summary: String, items: Vec<Item>) -> Affordance {
+/// The approval-mode row: the modes a session passed through, in order, under `tool`.
+pub(crate) fn mode_row(tool: &str, modes: &[&str]) -> Affordance {
+    let summary = format!("mode: {}", modes.join(" → "));
+    session_row(Kind::Approval, "state", tool, summary, Vec::new())
+}
+
+pub(crate) fn session_row(kind: Kind, action: &'static str, tool: &str, summary: String, items: Vec<Item>) -> Affordance {
     Affordance {
         kind,
         action,
@@ -1215,10 +1214,11 @@ fn session_row(kind: Kind, action: &'static str, tool: &str, summary: String, it
     }
 }
 
-/// The facts a harness keeps once per session, as rows: the fork, the approval mode (or OpenCode's
-/// permission ruleset), the restorable points an adapter tallied ([`CHECKPOINTS_KEY`]), and
-/// OpenCode's staged revert. Read off the session's metadata, so a streamed pass that saw no
-/// message of it still counts it ([`Counter::finish`]).
+/// The facts a harness keeps once per session, as rows: the fork, the approval modes an adapter
+/// noted ([`MODES_KEY`]), what the adapter reads off its own bag
+/// ([`crate::harness::Adapter::session_affordances`]), and the restorable points an adapter tallied
+/// ([`CHECKPOINTS_KEY`]). Read off the session's metadata, so a streamed pass that saw no message
+/// of it still counts it ([`Counter::finish`]).
 pub fn session_rows(s: &Session) -> Vec<Affordance> {
     let mut out = Vec::new();
     if let Some(from) = &s.lineage.forked_from {
@@ -1231,68 +1231,15 @@ pub fn session_rows(s: &Session) -> Vec<Affordance> {
     let Some(bag) = s.harness_extra(s.harness) else {
         return out;
     };
-    let modes: Vec<&str> = match (s.harness, bag.get("agent_mode")) {
-        // Devin's `agent_mode` is its permission mode (`bypass`, `normal`, `accept-edits`, `plan`).
-        (Harness::Devin, Some(Value::String(m))) => vec![m.as_str()],
-        _ => bag
-            .get(MODES_KEY)
-            .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(Value::as_str).collect())
-            .unwrap_or_default(),
-    };
+    let modes: Vec<&str> = bag
+        .get(MODES_KEY)
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
     if !modes.is_empty() {
-        let tool = if s.harness == Harness::Devin {
-            "agent_mode"
-        } else {
-            MODES_KEY
-        };
-        let summary = format!("mode: {}", modes.join(" → "));
-        out.push(session_row(Kind::Approval, "state", tool, summary, Vec::new()));
+        out.push(mode_row(MODES_KEY, &modes));
     }
-    if s.harness == Harness::KimiCode {
-        let items: Vec<Item> = bag
-            .get("todo")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(item_of)
-            .collect();
-        if !items.is_empty() || bag.get("todo_present").and_then(Value::as_bool) == Some(true) {
-            let summary = if items.is_empty() {
-                "todo state".into()
-            } else {
-                items_summary(&items)
-            };
-            out.push(session_row(Kind::Plan, "state", "tools.update_store", summary, items));
-        }
-    }
-    if s.harness == Harness::OpenCode {
-        // The session's permission ruleset: `[{permission, pattern, action}]`.
-        let rules: Vec<Item> = bag
-            .get("permission")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|r| {
-                let what = r.get("permission").and_then(Value::as_str)?;
-                let pattern = r.get("pattern").and_then(Value::as_str).unwrap_or("*");
-                Some(Item {
-                    content: format!("{what} {pattern}"),
-                    status: r.get("action").and_then(Value::as_str).map(str::to_string),
-                })
-            })
-            .collect();
-        if !rules.is_empty() {
-            let summary = items_summary(&rules).replacen(" item", " rule", 1);
-            out.push(session_row(Kind::Approval, "state", "permission", summary, rules));
-        }
-        if let Some(rev) = bag.get("revert").and_then(Value::as_object) {
-            let to = rev.get("messageID").and_then(Value::as_str).unwrap_or("?");
-            let snap = rev.get("snapshot").and_then(Value::as_str).map(short).unwrap_or("");
-            let summary = format!("to {to} · snapshot {snap}");
-            out.push(session_row(Kind::Checkpoint, "restore", "revert", summary, Vec::new()));
-        }
-    }
+    out.extend(crate::harness::rootless(s.harness).map(|a| a.session_affordances(s)).unwrap_or_default());
     if let Some(cp) = bag.get(CHECKPOINTS_KEY).and_then(Value::as_object) {
         let n = cp.get("count").and_then(Value::as_u64).unwrap_or(0);
         let files: Vec<Item> = cp

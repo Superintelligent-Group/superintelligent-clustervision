@@ -400,6 +400,19 @@ pub trait Adapter: Send + Sync {
         Vec::new()
     }
 
+    /// The affordances the session's own harness bag records once per session (a permission
+    /// mode, a todo state, a ruleset), in the order [`crate::affordance::session_rows`] lists them
+    /// after the shared mode row. Default: the bag records none.
+    fn session_affordances(&self, _s: &Session) -> Vec<crate::affordance::Affordance> {
+        Vec::new()
+    }
+
+    /// The affordances `m`'s harness bag records outside its blocks (a patch or snapshot part
+    /// riding the turn), in order. Default: the bag records none.
+    fn message_affordances(&self, _m: &Message) -> Vec<crate::affordance::BagHit> {
+        Vec::new()
+    }
+
     /// The instant before which `r`'s turns were copied from another session rather than taken in
     /// this one: a Claude `--fork-session` copy keeps its source's records and their timestamps.
     /// A consumer that attributes each turn once (the search index) skips those; views keep them.

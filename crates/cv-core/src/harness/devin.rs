@@ -191,6 +191,14 @@ impl Devin {
 }
 
 impl Adapter for Devin {
+    /// `agent_mode` is Devin's permission mode (`bypass`, `normal`, `accept-edits`, `plan`).
+    fn session_affordances(&self, s: &Session) -> Vec<crate::affordance::Affordance> {
+        match s.harness_extra(Harness::Devin).and_then(|bag| bag.get("agent_mode")) {
+            Some(Value::String(mode)) => vec![crate::affordance::mode_row("agent_mode", &[mode.as_str()])],
+            _ => Vec::new(),
+        }
+    }
+
     fn harness(&self) -> Harness {
         Harness::Devin
     }

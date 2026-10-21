@@ -196,6 +196,68 @@ impl Adapter for OpenCode {
         Harness::OpenCode
     }
 
+    /// The session's permission ruleset (`[{permission, pattern, action}]`) and its staged revert.
+    fn session_affordances(&self, s: &Session) -> Vec<crate::affordance::Affordance> {
+        use crate::affordance::{items_summary, session_row, short, Item, Kind};
+        let mut out = Vec::new();
+        let Some(bag) = s.harness_extra(Harness::OpenCode) else {
+            return out;
+        };
+        let rules: Vec<Item> = bag
+            .get("permission")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|r| {
+                let what = r.get("permission").and_then(Value::as_str)?;
+                let pattern = r.get("pattern").and_then(Value::as_str).unwrap_or("*");
+                Some(Item {
+                    content: format!("{what} {pattern}"),
+                    status: r.get("action").and_then(Value::as_str).map(str::to_string),
+                })
+            })
+            .collect();
+        if !rules.is_empty() {
+            let summary = items_summary(&rules).replacen(" item", " rule", 1);
+            out.push(session_row(Kind::Approval, "state", "permission", summary, rules));
+        }
+        if let Some(rev) = bag.get("revert").and_then(Value::as_object) {
+            let to = rev.get("messageID").and_then(Value::as_str).unwrap_or("?");
+            let snap = rev.get("snapshot").and_then(Value::as_str).map(short).unwrap_or("");
+            let summary = format!("to {to} · snapshot {snap}");
+            out.push(session_row(Kind::Checkpoint, "restore", "revert", summary, Vec::new()));
+        }
+        out
+    }
+
+    /// A turn's `patch` parts and its step `snapshot`, each a restorable point.
+    fn message_affordances(&self, m: &Message) -> Vec<crate::affordance::BagHit> {
+        use crate::affordance::{joined, short, BagHit, Kind};
+        let mut out = Vec::new();
+        let Some(bag) = m.harness_extra(Harness::OpenCode) else {
+            return out;
+        };
+        for p in bag.get("patches").and_then(Value::as_array).into_iter().flatten() {
+            let hash = p.get("hash").and_then(Value::as_str).unwrap_or("");
+            out.push(BagHit {
+                kind: Kind::Checkpoint,
+                action: "create",
+                tool: "patch",
+                summary: crate::ir::truncate(&format!("{} · {}", short(hash), joined(p.get("files"))), 120),
+            });
+        }
+        if let Some(snap) = bag.get("snapshot").filter(|v| !joined(v.get("files")).is_empty()) {
+            let hash = snap.get("start").and_then(Value::as_str).unwrap_or("");
+            out.push(BagHit {
+                kind: Kind::Checkpoint,
+                action: "create",
+                tool: "snapshot",
+                summary: crate::ir::truncate(&format!("{} · {}", short(hash), joined(snap.get("files"))), 120),
+            });
+        }
+        out
+    }
+
     fn dependencies(&self, r: &SessionRef, probe: &mut Probe, deps: &mut Dependencies) -> Option<()> {
         if is_sqlite_source(r)? {
             return Some(());

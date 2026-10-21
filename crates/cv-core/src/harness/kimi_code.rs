@@ -134,6 +134,30 @@ impl KimiCode {
 }
 
 impl Adapter for KimiCode {
+    /// The session's todo state (`tools.update_store`), even when it is empty but present.
+    fn session_affordances(&self, s: &Session) -> Vec<crate::affordance::Affordance> {
+        use crate::affordance::{item_of, items_summary, session_row, Item, Kind};
+        let Some(bag) = s.harness_extra(Harness::KimiCode) else {
+            return Vec::new();
+        };
+        let items: Vec<Item> = bag
+            .get("todo")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(item_of)
+            .collect();
+        if items.is_empty() && bag.get("todo_present").and_then(Value::as_bool) != Some(true) {
+            return Vec::new();
+        }
+        let summary = if items.is_empty() {
+            "todo state".into()
+        } else {
+            items_summary(&items)
+        };
+        vec![session_row(Kind::Plan, "state", "tools.update_store", summary, items)]
+    }
+
     fn harness(&self) -> Harness {
         Harness::KimiCode
     }
