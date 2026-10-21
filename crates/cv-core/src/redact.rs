@@ -306,7 +306,7 @@ pub fn scrub_cow<'a>(s: &'a str, opts: &RedactOptions, stats: &mut RedactStats) 
         let Hit { start, keep, end, kind } = *hit;
         cur = end.max(start + 1);
         let Some(label) = kind.label() else { continue }; // a placeholder: leave it in place
-        let o = out.get_or_insert_with(|| String::with_capacity(s.len()));
+        let o = out.get_or_insert_with(String::new);
         // The clean stretch plus any prefix the rule preserves (e.g. `Authorization: `).
         o.push_str(&s[copied..keep]);
         o.push_str(PLACEHOLDER_OPEN);
