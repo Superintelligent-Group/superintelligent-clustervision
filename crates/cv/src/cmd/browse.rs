@@ -8,6 +8,9 @@ use anyhow::{Context, Result};
 use cv_core::ir::{truncate, SessionRef};
 use cv_core::sanitize::sanitize_line;
 
+const METADATA_BATCH_SIZE: usize = 256;
+const HEAP_WINDOW_RATIO: usize = 8;
+
 /// Apply a parsed query to a ref list in place. The two-phase filter itself is
 /// [`cv_core::query::filter_refs`] — shared with `cv serve`'s `/api/stats?q=`, so `ls`/`stats` and
 /// the daemon all speak exactly the same `-q`; the CLI only supplies the `text:`
@@ -25,7 +28,7 @@ fn json_rows<'a>(refs: impl Iterator<Item = &'a SessionRef>, limit: usize) -> Ve
     let mut probe = cv_core::source::Probe::default();
     refs.enumerate()
         .filter_map(|(index, r)| {
-            if index % 256 == 0 {
+            if index % METADATA_BATCH_SIZE == 0 {
                 probe = cv_core::source::Probe::default();
             }
             probe.size(&r.path).map(|size| (r, size))
@@ -247,7 +250,7 @@ pub(crate) fn cmd_ls(
         .collect();
     // Queried windows still require ordered predicate/error evaluation; text needs exact totals.
     // Heapify only a small unqueried machine window, preserving the existing row stat seam.
-    let heap_window = json && query.is_none() && limit.saturating_mul(8) < refs.len();
+    let heap_window = json && query.is_none() && limit.saturating_mul(HEAP_WINDOW_RATIO) < refs.len();
     let total = if heap_window {
         refs.len()
     } else {

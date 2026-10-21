@@ -13,6 +13,9 @@
 //! Every body reads the catalog or the index (never a fleet scan) and must finish well under 100 ms
 //! on a cold cache — the latencies are measured in the lane report, not assumed.
 
+// Hook commands do local bookkeeping; bound how long they can hold up the harness.
+const HOOK_TIMEOUT_SECS: u64 = 10;
+
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -459,7 +462,7 @@ fn handler_for(harness: Harness, exe: &str, spec: &Spec) -> Value {
     if spec.asynchronous {
         h.insert("async".into(), json!(true));
     } else {
-        h.insert("timeout".into(), json!(10));
+        h.insert("timeout".into(), json!(HOOK_TIMEOUT_SECS));
     }
     Value::Object(h)
 }

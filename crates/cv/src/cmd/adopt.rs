@@ -167,8 +167,10 @@ fn run(roots: &[PathBuf], a: &AdoptArgs) -> Result<()> {
             .dest_meta
             .clone()
             .unwrap_or_else(|| p.dest.with_extension("meta.json"));
-        if let (Some(m), false) = (&a.model, a.dry_run) {
-            set_meta_model(&meta_dest, m)?;
+        if !a.dry_run {
+            if let Some(m) = &a.model {
+                set_meta_model(&meta_dest, m)?;
+            }
         }
         let verb = if a.dry_run { "would adopt" } else { "adopted" };
         let _ = writeln!(
@@ -239,13 +241,13 @@ fn run(roots: &[PathBuf], a: &AdoptArgs) -> Result<()> {
         );
         done.push(json!({"plan": p, "result": r, "written": !a.dry_run}));
     }
-    let deads: std::collections::BTreeSet<&str> = plans.iter().map(|p| p.agent.session_id.as_str()).collect();
-    for dead in &deads {
+    let source_sessions: std::collections::BTreeSet<&str> = plans.iter().map(|p| p.agent.session_id.as_str()).collect();
+    for source in &source_sessions {
         let _ = writeln!(
             h,
-            "  ⚑ keep {dead}'s directory: these agents' persisted outputs stay in its tool-results/ \
+            "  ⚑ keep {source}'s directory: these agents' persisted outputs stay in its tool-results/ \
              (named by absolute path), and what `cv prune` snipped from it stays in its sidecar — \
-             `cv cat {dead} <tool_use_id>`; an agent's own calls: `cv cat agent-<id> <tool_use_id>`"
+             `cv cat {source} <tool_use_id>`; an agent's own calls: `cv cat agent-<id> <tool_use_id>`"
         );
     }
     if a.dry_run {

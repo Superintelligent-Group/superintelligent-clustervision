@@ -496,7 +496,10 @@ fn print_match(e: &EditEvent, m: &SessionMatch) {
         elsewhere,
     );
     let (s, end) = range_hint(e.msg_idx);
-    println!("    ↳ cv show {} --range {s}..{end}", crate::util::short_id(&e.session_id));
+    println!(
+        "    ↳ cv show {} --range {s}..{end}",
+        crate::util::short_id(&e.session_id)
+    );
 }
 
 /// An exact-evidence line: the session, where the commit output landed, the label — and the
@@ -672,7 +675,10 @@ fn blame_event_only(file: &str, abs: &Path) -> Result<()> {
             e.msg_idx,
         );
         let (s, end) = range_hint(e.msg_idx);
-        println!("    ↳ cv show {} --range {s}..{end}", crate::util::short_id(&e.session_id));
+        println!(
+            "    ↳ cv show {} --range {s}..{end}",
+            crate::util::short_id(&e.session_id)
+        );
     }
     Ok(())
 }

@@ -28,8 +28,8 @@ use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use cmd::hooks::{HookName, HooksCmd};
 use cmd::task::TaskCmd;
 use cmd::{
-    archive, blame, browse, cat, compose, config, doctor, events, formats, hooks, live, orchestrate, pack, port, recipes,
-    schema, search, serve, share, task, tools, view, workflow,
+    archive, blame, browse, cat, compose, config, doctor, events, formats, hooks, live, orchestrate, pack, port,
+    recipes, schema, search, serve, share, task, tools, view, workflow,
 };
 use std::path::PathBuf;
 use util::{usage, UsageError, WindowArgs};
