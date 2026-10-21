@@ -1497,8 +1497,14 @@ mod tests {
                 let error = adapter
                     .stream(&reference, &stream::Demand::LEAN.with_spans(), &mut sink)
                     .unwrap_err();
-                assert!(format!("{error:#}").contains("changed"), "{error:#}");
-                assert!(!format!("{error:#}").contains("consumer cap"));
+                // The shared guard preserves the first failure: a fast callback can report
+                // its own error before a backing check. Neither case may deliver another turn.
+                let diagnostic = format!("{error:#}");
+                assert!(
+                    diagnostic.contains("changed") || diagnostic.contains("consumer cap"),
+                    "{diagnostic}"
+                );
+                assert_eq!(calls, at);
             }
         }
     }
