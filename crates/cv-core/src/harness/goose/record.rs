@@ -164,7 +164,10 @@ pub(super) fn content(
                 _ => continue,
             };
             if let Text::Span(span) = text {
-                let offset = span.offset.checked_sub(1).context("Goose string span has no opening quote")?;
+                let offset = span
+                    .offset
+                    .checked_sub(1)
+                    .context("Goose string span has no opening quote")?;
                 let len = span.len.checked_add(2).context("Goose quoted string span overflows")?;
                 let crate::json::Json::Source(range) = source.validated_range(offset, len)? else {
                     anyhow::bail!("validated Goose string range is not source-backed");

@@ -90,6 +90,14 @@ impl StringCount {
     }
 }
 impl Builder<'_> {
+    fn add_len(&mut self, len: usize) -> Result<()> {
+        self.1 = self
+            .1
+            .checked_add(len)
+            .ok_or_else(|| anyhow::anyhow!("text length overflow"))?;
+        Ok(())
+    }
+
     pub(crate) fn decoded_len(&self) -> usize {
         self.1
     }
@@ -107,10 +115,7 @@ impl Builder<'_> {
         }
         let len = text.len();
         text.serialize(&mut serde_json::Serializer::with_formatter(&mut *self.0, Interior))?;
-        self.1 = self
-            .1
-            .checked_add(len)
-            .ok_or_else(|| anyhow::anyhow!("text length overflow"))?;
+        self.add_len(len)?;
         Ok(())
     }
     /// Append a string view without decoding and re-encoding its already valid interior.
@@ -161,19 +166,13 @@ impl Builder<'_> {
         view.write_canonical(&mut interior)?;
         anyhow::ensure!(interior.last == Some(b'"'), "missing closing string quote");
         let len = interior.count.finish()?;
-        self.1 = self
-            .1
-            .checked_add(len)
-            .ok_or_else(|| anyhow::anyhow!("text length overflow"))?;
+        self.add_len(len)?;
         Ok(true)
     }
     /// Append a value's canonical JSON document as decoded text.
     pub(crate) fn push_json(&mut self, view: JsonView<'_>) -> Result<()> {
         let len = write_quoted_json(view, self.0)?;
-        self.1 = self
-            .1
-            .checked_add(len)
-            .ok_or_else(|| anyhow::anyhow!("text length overflow"))?;
+        self.add_len(len)?;
         Ok(())
     }
 }
