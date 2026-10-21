@@ -553,8 +553,9 @@ fn subagent(harness: &str, parent: &str, agent: &str) -> (u16, Value) {
         Err((404, _)) => return err(404, "parent session not found"),
         Err(e) => return e,
     };
+    // The full transcript id, Claude's bare `agentId`, or the agent part of a `<parent>/<agent>` id.
     let Some(sr) = crate::subagent_tree_filtered_of(&r, crate::SubagentDemand::Sessions, None, |id, _| {
-        id == agent || id.strip_prefix("agent-") == Some(agent)
+        id == agent || id.strip_prefix("agent-") == Some(agent) || id.rsplit_once('/').is_some_and(|(_, a)| a == agent)
     })
     .into_iter()
     .find(|s| s.session.id == agent || s.agent_id() == agent)
