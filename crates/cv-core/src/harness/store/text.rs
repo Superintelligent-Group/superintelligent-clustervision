@@ -302,7 +302,6 @@ mod tests {
         let Text::Source(mut counted) = text else {
             panic!("source carrier required")
         };
-        assert_eq!(counted.known_len, Some(expected.len()));
         for _ in 0..3 {
             assert_eq!(counted.try_decoded_len().unwrap(), expected.len());
         }

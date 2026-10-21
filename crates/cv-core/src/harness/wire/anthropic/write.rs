@@ -140,9 +140,8 @@ fn publish(writer: &mut dyn Write, b: &Block, q: &Quirks, user: bool, leaf: Leaf
                 if let Some(mt) = mime {
                     s.field("media_type", mt)?;
                 }
-                match source.as_deref() {
-                    Some(r) => source_reference(&mut s, r)?,
-                    None => {}
+                if let Some(reference) = source.as_deref() {
+                    source_reference(&mut s, reference)?;
                 }
                 s.finish()
             })?;
