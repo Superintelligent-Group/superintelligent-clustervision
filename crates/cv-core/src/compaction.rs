@@ -95,6 +95,7 @@ impl CompactionSink {
         }
     }
 
+    #[cfg(feature = "sqlite")]
     pub(crate) fn with_source(mut self, path: &std::path::Path) -> Self {
         self.resolver = Some(crate::Resolver::new(Some(path.to_owned())));
         self
