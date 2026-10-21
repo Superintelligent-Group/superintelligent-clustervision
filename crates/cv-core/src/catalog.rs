@@ -304,7 +304,10 @@ mod imp {
     /// the writer lock (a concurrent open may have rebuilt it already). `Some(true)` when tables
     /// were dropped: the next full discovery says why it is slow.
     fn rebuild_other_schema(conn: &mut Connection) -> Option<bool> {
-        let stamped = |conn: &Connection| conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).ok();
+        let stamped = |conn: &Connection| {
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .ok()
+        };
         if stamped(conn)? == SCHEMA {
             return Some(false);
         }
@@ -322,7 +325,8 @@ mod imp {
             .collect::<rusqlite::Result<_>>()
             .ok()?;
         for table in &tables {
-            tx.execute_batch(&format!("DROP TABLE \"{}\";", table.replace('"', "\"\""))).ok()?;
+            tx.execute_batch(&format!("DROP TABLE \"{}\";", table.replace('"', "\"\"")))
+                .ok()?;
         }
         tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA};")).ok()?;
         tx.commit().ok()?;
@@ -1459,10 +1463,22 @@ mod imp {
             let count = |conn: &Connection, sql: &str| conn.query_row(sql, [], |row| row.get::<_, i64>(0)).unwrap();
             assert_eq!(count(&conn, "PRAGMA user_version"), SCHEMA);
             assert_eq!(count(&conn, "SELECT count(*) FROM sessions"), 0);
-            assert_eq!(count(&conn, "SELECT count(*) FROM sqlite_master WHERE name='event_sync'"), 0);
-            assert_eq!(count(&conn, "SELECT count(*) FROM catalog_meta WHERE key='rediscovery_notice'"), 1);
-            conn.execute("INSERT INTO sessions(harness, id, path, created_ns) VALUES('claude', 'new', '/new.jsonl', 1)", [])
-                .unwrap();
+            assert_eq!(
+                count(&conn, "SELECT count(*) FROM sqlite_master WHERE name='event_sync'"),
+                0
+            );
+            assert_eq!(
+                count(
+                    &conn,
+                    "SELECT count(*) FROM catalog_meta WHERE key='rediscovery_notice'"
+                ),
+                1
+            );
+            conn.execute(
+                "INSERT INTO sessions(harness, id, path, created_ns) VALUES('claude', 'new', '/new.jsonl', 1)",
+                [],
+            )
+            .unwrap();
             drop(conn);
             let conn = open_writable(&path).unwrap();
             assert_eq!(count(&conn, "SELECT count(*) FROM sessions"), 1);

@@ -893,7 +893,9 @@ pub(crate) fn doctor_json() -> Value {
 /// The harness a `cv hook` call speaks for: `--harness`, else Claude.
 fn hook_call_harness(flag: Option<&str>) -> Result<Harness> {
     if cv_core::env::var_os("CV_HOOK_HARNESS").is_some() {
-        return crate::util::usage("`$CV_HOOK_HARNESS` was removed in 0.18.0 — `cv hooks install codex` writes `--harness codex`");
+        return crate::util::usage(
+            "`$CV_HOOK_HARNESS` was removed in 0.18.0 — `cv hooks install codex` writes `--harness codex`",
+        );
     }
     flag.map_or(Ok(Harness::Claude), hook_harness)
 }

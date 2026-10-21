@@ -1644,7 +1644,10 @@ mod tests {
         assert!(sparse.o["s"].more);
         assert!(sparse.o["s"].r.is_none());
         for unmarked in [r#"{"t":[null,null],"n":0,"b":5}"#, r#"{"t":[null,null]}"#] {
-            assert!(Cursor::decode(&format!(r#"{{"v":2,"o":{{"x":{unmarked}}}}}"#)).is_none(), "{unmarked}");
+            assert!(
+                Cursor::decode(&format!(r#"{{"v":2,"o":{{"x":{unmarked}}}}}"#)).is_none(),
+                "{unmarked}"
+            );
         }
         let v1 = r#"{"v":1,"o":{"x":{"t":[8,null],"n":3}}}"#;
         assert!(Cursor::decode(v1).is_none(), "a 0.17 cursor starts a fresh baseline");

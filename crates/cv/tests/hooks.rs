@@ -909,5 +909,8 @@ fn removed_hook_harness_variable_exits_two_with_a_pointer() {
     let w = World::new("codex-hook-harness-env");
     let (ok, code, _, err) = w.cv_full(&["hook", "edit"], &[("CV_HOOK_HARNESS", "codex")], Some("{}"));
     assert!(!ok && code == 2, "{err}");
-    assert!(err.contains("CV_HOOK_HARNESS") && err.contains("cv hooks install codex"), "{err}");
+    assert!(
+        err.contains("CV_HOOK_HARNESS") && err.contains("cv hooks install codex"),
+        "{err}"
+    );
 }
