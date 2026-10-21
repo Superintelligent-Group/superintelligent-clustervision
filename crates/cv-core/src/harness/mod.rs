@@ -340,6 +340,46 @@ pub struct Identity {
     pub parent_key: &'static str,
 }
 
+/// The static facts an adapter declares about its harness, in one value: what a shared module asks
+/// instead of naming a harness (`docs/INTERFACE-V2.md` §4), each "no opinion" in
+/// [`Capabilities::NONE`]. An adapter that declares any writes the whole literal (no `..NONE`), so
+/// a new fact is a compile error at every adapter that has an opinion, not a silent default.
+/// `#[non_exhaustive]`: a crate outside cv-core starts from `NONE` and sets fields.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct Capabilities {
+    /// The wordings of an error tool result that mean the call was denied (an approval refused, a
+    /// rule matched).
+    pub denials: &'static [crate::affordance::Denial],
+    /// What its edit hook answers when another live writer edited the file; `None`: no edit guard.
+    pub edit_guard: Option<crate::hooks::EditGuard>,
+    /// How its hook rows in cv's lane ledger name the sub-agents whose `stop` counts for a parent;
+    /// `None`: its hooks write no lane rows.
+    pub lane_stops: Option<crate::lanes::StopScope>,
+    /// The deferred-tool wrapper its reader leaves in calls, for
+    /// [`crate::affordance::AffordanceSink`] to unwrap; `None`: it leaves none.
+    pub deferred_wrapper: Option<crate::affordance::DeferredWrapper>,
+    /// Whether a [`Demand::RICH`] stream with spans keeps the same full-extra metadata as an
+    /// inline one, so a tail can leave large payloads in the source; `false`: read inline.
+    pub rich_spans: bool,
+    /// cv's own tuning, not a harness fact: the primary size below which parsing a transcript costs
+    /// less than validating and replaying its usage-cache ledger, so the cache is skipped; 0: always
+    /// use it.
+    pub usage_cache_floor: u64,
+}
+
+impl Capabilities {
+    /// No opinion on any fact.
+    pub const NONE: Capabilities = Capabilities {
+        denials: &[],
+        edit_guard: None,
+        lane_stops: None,
+        deferred_wrapper: None,
+        rich_spans: false,
+        usage_cache_floor: 0,
+    };
+}
+
 /// A harness adapter: where a harness keeps its sessions ([`roots`](Adapter::roots)), how to list
 /// them cheaply ([`discover`](Adapter::discover)), and how to read one as a message stream
 /// ([`stream`](Adapter::stream)). Implementors live in submodules and are registered in [`all`].
@@ -413,10 +453,10 @@ pub trait Adapter: Send + Sync {
         None
     }
 
-    /// The wordings of an error tool result that mean the call was denied (an approval refused, a
-    /// rule matched). Default: the harness words none.
-    fn denials(&self) -> &'static [crate::affordance::Denial] {
-        &[]
+    /// The static facts this adapter declares about its harness ([`Capabilities`]). Default:
+    /// [`Capabilities::NONE`], no opinion on any.
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::NONE
     }
 
     /// The affordance `m` is as one of this harness's own records that no `MessageKind` names (a
@@ -504,12 +544,6 @@ pub trait Adapter: Send + Sync {
         Ok(None)
     }
 
-    /// What this harness's edit hook answers when another live writer edited the file. Default:
-    /// `None`, the harness has no edit guard.
-    fn edit_guard_decision(&self) -> Option<crate::hooks::EditGuard> {
-        None
-    }
-
     /// The lineage a live transcript records in its header, read without parsing its history
     /// (a hook's budget). Default: the header records none.
     fn hook_lineage(&self, _transcript: &std::path::Path) -> Result<Option<crate::ir::Lineage>> {
@@ -519,12 +553,6 @@ pub trait Adapter: Send + Sync {
     /// The transcript of `agent_session`, a sub-agent of `parent` (inside `workflow`'s run when
     /// given), as this store lays it out beside its parent. Default: the store keeps none there.
     fn agent_transcript(&self, _parent: &SessionRef, _agent_session: &str, _workflow: Option<&str>) -> Option<PathBuf> {
-        None
-    }
-
-    /// How this harness's hook rows in cv's lane ledger name the sub-agents whose `stop` counts
-    /// for a parent. Default: its hooks write no lane rows.
-    fn lane_stops(&self) -> Option<crate::lanes::StopScope> {
         None
     }
 
@@ -556,12 +584,6 @@ pub trait Adapter: Send + Sync {
         None
     }
 
-    /// The deferred-tool wrapper this store's reader leaves in its calls, for
-    /// [`crate::affordance::AffordanceSink`] to unwrap. Default: the reader leaves none.
-    fn deferred_wrapper(&self) -> Option<crate::affordance::DeferredWrapper> {
-        None
-    }
-
     /// Whether `r`'s source is a SQLite database, whose `-wal`/`-journal` sidecars then guard it;
     /// `None` when that cannot be determined (no consumer certifies it). Default: by its extension.
     fn sqlite_source(&self, r: &SessionRef) -> Option<bool> {
@@ -575,22 +597,10 @@ pub trait Adapter: Send + Sync {
         None
     }
 
-    /// Whether a [`Demand::RICH`] stream with spans keeps the same full-extra metadata as an
-    /// inline one, so a tail can leave large payloads in the source. Default: no, read inline.
-    fn rich_spans(&self) -> bool {
-        false
-    }
-
     /// The identity that makes two of this harness's messages *the same API call*, when its
     /// store repeats one (so usage is counted once). Default: every message is its own call.
     fn usage_key(&self, _m: &Message) -> Option<String> {
         None
-    }
-
-    /// The primary size below which parsing a transcript costs less than validating and
-    /// replaying its usage-cache ledger, so the cache is skipped. Default: 0, always use it.
-    fn usage_cache_floor(&self) -> u64 {
-        0
     }
 
     /// How a change to `r` shows on disk, so the catalog's freshness probe knows what to watch.
@@ -1039,10 +1049,16 @@ mod tests {
         let root = outer.join("store");
         std::fs::create_dir_all(&root).unwrap();
         for h in Harness::ALL {
-            let Some(adapter) = for_harness_with_root(h, &root) else { continue };
+            let Some(adapter) = for_harness_with_root(h, &root) else {
+                continue;
+            };
             assert_eq!(adapter.harness(), h);
             for found in adapter.roots() {
-                assert!(found.starts_with(&outer), "{h}: {} is outside the explicit root", found.display());
+                assert!(
+                    found.starts_with(&outer),
+                    "{h}: {} is outside the explicit root",
+                    found.display()
+                );
             }
         }
     }

@@ -215,18 +215,25 @@ impl Adapter for OpenCode {
         Harness::OpenCode
     }
 
-    fn denials(&self) -> &'static [crate::affordance::Denial] {
+    fn capabilities(&self) -> super::Capabilities {
         use crate::affordance::Denial;
-        &[
-            Denial {
-                prefix: "The user has specified a rule which prevents you from using this specific tool call",
-                also: None,
-            },
-            Denial {
-                prefix: "The user rejected permission to use this specific tool call",
-                also: None,
-            },
-        ]
+        super::Capabilities {
+            denials: &[
+                Denial {
+                    prefix: "The user has specified a rule which prevents you from using this specific tool call",
+                    also: None,
+                },
+                Denial {
+                    prefix: "The user rejected permission to use this specific tool call",
+                    also: None,
+                },
+            ],
+            edit_guard: None,
+            lane_stops: None,
+            deferred_wrapper: None,
+            rich_spans: false,
+            usage_cache_floor: 0,
+        }
     }
 
     /// The session's permission ruleset (`[{permission, pattern, action}]`) and its staged revert.

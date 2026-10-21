@@ -265,17 +265,24 @@ impl Adapter for OpenClaw {
         }
     }
 
-    /// OpenClaw 10.1 routes lazily loaded tools through `tool_call{id, args}` and its reader
-    /// leaves the wrapper in place.
-    fn deferred_wrapper(&self) -> Option<crate::affordance::DeferredWrapper> {
-        Some(DEFERRED_WRAPPER)
+    fn capabilities(&self) -> super::Capabilities {
+        super::Capabilities {
+            denials: &[],
+            edit_guard: None,
+            lane_stops: None,
+            // OpenClaw 10.1 routes lazily loaded tools through `tool_call{id, args}` and its reader
+            // leaves the wrapper in place.
+            deferred_wrapper: Some(DEFERRED_WRAPPER),
+            rich_spans: false,
+            usage_cache_floor: 0,
+        }
     }
 
     fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| {
             // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
-            let mut spawns =
-                crate::affordance::AffordanceSink::new(Harness::OpenClaw, sink).unwrapping(self.deferred_wrapper());
+            let mut spawns = crate::affordance::AffordanceSink::new(Harness::OpenClaw, sink)
+                .unwrapping(self.capabilities().deferred_wrapper);
             let sink: &mut dyn MessageSink = &mut spawns;
             if is_sqlite_store_path(&r.path) {
                 return stream_sqlite(r, opts, sink);

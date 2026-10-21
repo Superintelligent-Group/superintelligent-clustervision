@@ -468,7 +468,7 @@ pub fn spawn_returns(h: Harness, name: &str) -> Option<Returns> {
 pub const DEFERRED: &str = "tool_call";
 
 /// The keys of a store's deferred-tool wrapper ([`DEFERRED`]): the inner tool's name and its
-/// arguments ([`crate::harness::Adapter::deferred_wrapper`]).
+/// arguments ([`crate::harness::Capabilities::deferred_wrapper`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeferredWrapper {
     pub name_key: &'static str,
@@ -558,7 +558,7 @@ impl<'a> AffordanceSink<'a> {
     }
 
     /// Unwrap `wrapper`'s deferred calls too: an adapter whose reader leaves them passes its
-    /// [`crate::harness::Adapter::deferred_wrapper`].
+    /// [`crate::harness::Capabilities::deferred_wrapper`].
     pub fn unwrapping(mut self, wrapper: Option<DeferredWrapper>) -> Self {
         self.deferred = wrapper;
         self
@@ -1050,7 +1050,7 @@ enum Hit<'a> {
 
 /// How a harness words an error result that is the user (or a rule) refusing the call: the text
 /// starts with `prefix` and, when given, also contains `also`
-/// ([`crate::harness::Adapter::denials`]).
+/// ([`crate::harness::Capabilities::denials`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Denial {
     pub prefix: &'static str,
@@ -2001,7 +2001,7 @@ mod tests {
             ),
         ] {
             // Each adapter states its own spelling; Hermes is absent from a build without SQLite.
-            let wrapper = crate::harness::rootless(h).and_then(|a| a.deferred_wrapper());
+            let wrapper = crate::harness::rootless(h).and_then(|a| a.capabilities().deferred_wrapper);
             #[cfg(not(feature = "sqlite"))]
             if h == Harness::Hermes {
                 assert_eq!(wrapper, None);

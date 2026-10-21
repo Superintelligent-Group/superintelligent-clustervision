@@ -230,7 +230,7 @@ fn usage_hits(
     #[cfg(feature = "sqlite")]
     // Below its adapter's floor a transcript costs less to parse than to validate and replay a ledger.
     let cache = cache.filter(|_| {
-        let floor = adapter.usage_cache_floor();
+        let floor = adapter.capabilities().usage_cache_floor;
         floor == 0 || std::fs::metadata(adapter.resume_source(r)).is_ok_and(|metadata| metadata.len() >= floor)
     });
     #[cfg(feature = "sqlite")]

@@ -147,7 +147,7 @@ fn ledger_stops(rows: &[LaneEvent], session_id: &str) -> HashMap<String, DateTim
 }
 
 /// How a harness's hook rows in the lane ledger name the lanes whose `stop` counts for a parent
-/// ([`crate::harness::Adapter::lane_stops`]).
+/// ([`crate::harness::Capabilities::lane_stops`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopScope {
     /// Rows whose `session_id` is the parent: its direct sub-agents.
@@ -798,7 +798,7 @@ pub fn lanes_of(parent: &SessionRef) -> Result<Vec<Lane>> {
         .map(|adapter| adapter.task_notices(parent))
         .unwrap_or_default();
     let rows = read_ledger();
-    let ledger = match crate::harness::rootless(parent.harness).and_then(|adapter| adapter.lane_stops()) {
+    let ledger = match crate::harness::rootless(parent.harness).and_then(|adapter| adapter.capabilities().lane_stops) {
         Some(StopScope::Parent) => ledger_stops(&rows, &parent.id),
         Some(StopScope::Forest) => {
             let agents: std::collections::HashSet<_> = subs.iter().map(|sub| sub.agent_id()).collect();

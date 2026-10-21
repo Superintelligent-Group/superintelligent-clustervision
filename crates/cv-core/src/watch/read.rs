@@ -445,7 +445,7 @@ pub(super) fn pass(
     }
     // Exact materialized parity is checked against the independent full collector; discarded
     // payloads remain unowned.
-    let opts = if adapter.rich_spans() {
+    let opts = if adapter.capabilities().rich_spans {
         stream::Demand::RICH.with_spans()
     } else {
         stream::Demand::RICH

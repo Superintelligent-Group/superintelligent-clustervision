@@ -265,11 +265,6 @@ impl Adapter for Claude {
             .and_then(Value::as_str)
     }
 
-    /// `SubagentStart`/`SubagentStop` rows name the parent session.
-    fn lane_stops(&self) -> Option<crate::lanes::StopScope> {
-        Some(crate::lanes::StopScope::Parent)
-    }
-
     fn subagent_end(&self, transcript: &std::path::Path) -> Option<SubagentEnd> {
         Some(subagent_end(transcript))
     }
@@ -288,36 +283,32 @@ impl Adapter for Claude {
             .map(|id| format!("claude:{id}"))
     }
 
-    /// Native spans retain the same full-extra metadata.
-    fn rich_spans(&self) -> bool {
-        true
-    }
-
-    /// Tiny native transcripts cost less to parse than to validate and replay a ledger.
-    fn usage_cache_floor(&self) -> u64 {
-        64 * 1024
-    }
-
-    fn denials(&self) -> &'static [crate::affordance::Denial] {
+    fn capabilities(&self) -> super::Capabilities {
         use crate::affordance::Denial;
-        &[
-            Denial {
-                prefix: "Permission to use ",
-                also: Some(" denied"),
-            },
-            Denial {
-                prefix: "The user doesn't want to proceed with this tool use",
-                also: None,
-            },
-        ]
+        super::Capabilities {
+            denials: &[
+                Denial {
+                    prefix: "Permission to use ",
+                    also: Some(" denied"),
+                },
+                Denial {
+                    prefix: "The user doesn't want to proceed with this tool use",
+                    also: None,
+                },
+            ],
+            edit_guard: Some(crate::hooks::EditGuard::Ask),
+            // `SubagentStart`/`SubagentStop` rows name the parent session.
+            lane_stops: Some(crate::lanes::StopScope::Parent),
+            deferred_wrapper: None,
+            // Native spans retain the same full-extra metadata.
+            rich_spans: true,
+            // Tiny native transcripts cost less to parse than to validate and replay a ledger.
+            usage_cache_floor: 64 * 1024,
+        }
     }
 
     fn hook_event(&self, payload: &serde_json::Value) -> Result<Option<crate::hooks::Event>> {
         hook::hook_event(payload)
-    }
-
-    fn edit_guard_decision(&self) -> Option<crate::hooks::EditGuard> {
-        Some(crate::hooks::EditGuard::Ask)
     }
 
     fn agent_transcript(&self, parent: &SessionRef, agent_session: &str, workflow: Option<&str>) -> Option<PathBuf> {

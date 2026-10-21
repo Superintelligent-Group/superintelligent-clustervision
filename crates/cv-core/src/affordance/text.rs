@@ -250,9 +250,9 @@ pub(super) fn contains(text: &Text, resolver: &Resolver, needle: &'static str) -
 }
 
 /// Whether an error result reads as one of `harness`'s denials
-/// ([`crate::harness::Adapter::denials`]), tried in order.
+/// ([`crate::harness::Capabilities::denials`]), tried in order.
 pub(super) fn denied(text: &Text, resolver: &Resolver, harness: Harness) -> Result<bool> {
-    let denials = crate::harness::rootless(harness).map_or(&[][..], |adapter| adapter.denials());
+    let denials = crate::harness::rootless(harness).map_or(&[][..], |adapter| adapter.capabilities().denials);
     for denial in denials {
         if starts_with(text, resolver, denial.prefix)?
             && denial

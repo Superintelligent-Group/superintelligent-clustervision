@@ -162,8 +162,18 @@ impl Adapter for Codex {
         hook::hook_event(payload)
     }
 
-    fn edit_guard_decision(&self) -> Option<crate::hooks::EditGuard> {
-        Some(crate::hooks::EditGuard::Deny)
+    fn capabilities(&self) -> super::Capabilities {
+        super::Capabilities {
+            denials: &[],
+            edit_guard: Some(crate::hooks::EditGuard::Deny),
+            // A descendant's hook row names its own parent, so a stop counts by forest membership.
+            lane_stops: Some(crate::lanes::StopScope::Forest),
+            deferred_wrapper: None,
+            // Native spans retain the same full-extra metadata.
+            rich_spans: true,
+            // Tiny native transcripts cost less to parse than to validate and replay a ledger.
+            usage_cache_floor: 64 * 1024,
+        }
     }
 
     fn hook_lineage(&self, transcript: &Path) -> Result<Option<Lineage>> {
@@ -196,21 +206,6 @@ impl Adapter for Codex {
             .extension()
             .is_some_and(|e| e == "jsonl")
             .then_some(count_prefix_checked as super::CountPrefix)
-    }
-
-    /// Native spans retain the same full-extra metadata.
-    fn rich_spans(&self) -> bool {
-        true
-    }
-
-    /// Tiny native transcripts cost less to parse than to validate and replay a ledger.
-    fn usage_cache_floor(&self) -> u64 {
-        64 * 1024
-    }
-
-    /// A descendant's hook row names its own parent, so a stop counts by forest membership.
-    fn lane_stops(&self) -> Option<crate::lanes::StopScope> {
-        Some(crate::lanes::StopScope::Forest)
     }
 
     /// Membership comes from installed hooks, each child verified against its own header.

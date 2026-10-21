@@ -195,9 +195,9 @@ Rules:
   only when round-tripping into the same harness (format-complete replay), where the non-first-class
   fields are mirrored into the harness bag and the carrier stays at `_record`.
 - **A shared module names a harness only inside an exhaustive match.** A harness fact is an
-  `Adapter` method with a "no opinion" default, asked of `harness::rootless(h)` when no store is
-  needed; per-harness data is a `match` naming every variant (`tests/harness_fence.rs`, over
-  cv-core, the binary and cv-search).
+  `Adapter` method with a "no opinion" default (a static one is a field of `Adapter::capabilities`),
+  asked of `harness::rootless(h)` when no store is needed; per-harness data is a `match` naming
+  every variant (`tests/harness_fence.rs`, over cv-core, the binary and cv-search).
 - **Shared core modules key off `kind`.** `compaction.rs` detects the two compaction kinds;
   `doctor.rs` buckets `InjectedContext` as system reminders (kind name from the harness bag when
   present); `render.rs`/`html.rs` label a System turn by its `kind`.

@@ -297,10 +297,17 @@ impl Adapter for Hermes {
         Ok(out)
     }
 
-    /// Hermes routes lazily loaded tools through `tool_call{name, arguments}` and its reader
-    /// leaves the wrapper in place.
-    fn deferred_wrapper(&self) -> Option<crate::affordance::DeferredWrapper> {
-        Some(DEFERRED_WRAPPER)
+    fn capabilities(&self) -> super::Capabilities {
+        super::Capabilities {
+            denials: &[],
+            edit_guard: None,
+            lane_stops: None,
+            // Hermes routes lazily loaded tools through `tool_call{name, arguments}` and its reader
+            // leaves the wrapper in place.
+            deferred_wrapper: Some(DEFERRED_WRAPPER),
+            rich_spans: false,
+            usage_cache_floor: 0,
+        }
     }
 
     /// Hermes writes each profile's `state.db` in place.
@@ -311,8 +318,8 @@ impl Adapter for Hermes {
     fn stream(&self, r: &SessionRef, opts: &stream::Demand, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| {
             // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
-            let mut spawns =
-                crate::affordance::AffordanceSink::new(Harness::Hermes, sink).unwrapping(self.deferred_wrapper());
+            let mut spawns = crate::affordance::AffordanceSink::new(Harness::Hermes, sink)
+                .unwrapping(self.capabilities().deferred_wrapper);
             let sink: &mut dyn MessageSink = &mut spawns;
             // Route by the ref's own DB path (set at discovery time), NOT a single self.db — this is
             // what lets one Hermes adapter span many profile DBs without id collisions.

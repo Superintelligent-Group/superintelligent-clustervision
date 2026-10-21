@@ -330,7 +330,9 @@ pub(crate) fn cmd_lanes(
         LaneScope::Recent { n, dir } => {
             let mut refs: Vec<SessionRef> = cv_core::sessions()
                 .into_iter()
-                .filter(|r| cv_core::harness::rootless(r.harness).is_some_and(|a| a.lane_stops().is_some()))
+                .filter(|r| {
+                    cv_core::harness::rootless(r.harness).is_some_and(|a| a.capabilities().lane_stops.is_some())
+                })
                 .filter(|r| r.cwd.as_deref().is_some_and(|c| same_dir(c, &dir)))
                 .collect();
             refs.sort_by_key(|r| std::cmp::Reverse(r.updated_at.or(r.created_at)));

@@ -87,7 +87,7 @@ fn expand(p: &Path) -> PathBuf {
 }
 
 /// What a harness's edit hook can answer for a conflicting edit
-/// ([`Adapter::edit_guard_decision`](crate::harness::Adapter::edit_guard_decision)).
+/// ([`Capabilities::edit_guard`](crate::harness::Capabilities::edit_guard)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditGuard {
     /// The harness asks its user (Claude Code's `ask`).
@@ -123,7 +123,7 @@ impl Guard {
     /// `None` when the harness has no edit guard.
     pub fn of(ev: &Event) -> Option<Guard> {
         let adapter = crate::harness::rootless(ev.harness)?;
-        let decision = adapter.edit_guard_decision()?;
+        let decision = adapter.capabilities().edit_guard?;
         let (root, ledger) = match decision {
             EditGuard::Ask => (ev.session.id.clone(), Vec::new()),
             EditGuard::Deny => {
