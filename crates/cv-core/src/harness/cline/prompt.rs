@@ -87,56 +87,65 @@ impl FirstLine {
 }
 
 const CWD_PREFIX: &str = "# Current Working Directory";
+#[derive(Default, PartialEq, Eq)]
+enum CwdState {
+    #[default]
+    Prefix,
+    BeforePath,
+    Path,
+    IgnoreLine,
+    Done,
+}
+
 #[derive(Default)]
 struct Cwd {
     matched: usize,
-    // 0: prefix; 1: whitespace before '('; 2: path; 3: ignore line; 4: terminal.
-    state: u8,
+    state: CwdState,
     first: Option<u64>,
     last: u64,
     result: Option<(u64, u64)>,
 }
 impl Cwd {
     fn feed(&mut self, c: char, at: u64) {
-        if self.state == 4 {
+        if self.state == CwdState::Done {
             return;
         }
         if c == '\n' {
-            if self.state == 1 || self.state == 2 {
+            if self.state == CwdState::BeforePath || self.state == CwdState::Path {
                 // The owned extractor returns at the first prefix with malformed parentheses.
-                self.state = 4;
+                self.state = CwdState::Done;
             } else {
-                self.state = 0;
+                self.state = CwdState::Prefix;
                 self.matched = 0;
             }
             return;
         }
         match self.state {
-            0 => {
+            CwdState::Prefix => {
                 if self.matched == 0 && c.is_whitespace() {
                     return;
                 }
                 if CWD_PREFIX.as_bytes().get(self.matched).copied() == Some(c as u8) && c.is_ascii() {
                     self.matched += 1;
                     if self.matched == CWD_PREFIX.len() {
-                        self.state = 1;
+                        self.state = CwdState::BeforePath;
                     }
                 } else {
-                    self.state = 3;
+                    self.state = CwdState::IgnoreLine;
                 }
             }
-            1 if c.is_whitespace() => {}
-            1 if c == '(' => self.state = 2,
-            1 => self.state = 4,
-            2 if c == ')' => {
+            CwdState::BeforePath if c.is_whitespace() => {}
+            CwdState::BeforePath if c == '(' => self.state = CwdState::Path,
+            CwdState::BeforePath => self.state = CwdState::Done,
+            CwdState::Path if c == ')' => {
                 if let Some(first) = self.first {
                     self.result = Some((first, self.last));
-                    self.state = 4;
+                    self.state = CwdState::Done;
                 } else {
-                    self.state = 3;
+                    self.state = CwdState::IgnoreLine;
                 }
             }
-            2 if !c.is_whitespace() => {
+            CwdState::Path if !c.is_whitespace() => {
                 self.first.get_or_insert(at);
                 self.last = at + c.len_utf8() as u64;
             }
