@@ -39,7 +39,12 @@ impl DeferredMessage {
                 if let crate::lazy::Text::Source(source) = text {
                     let skip = source.skip;
                     let mut json = source.json();
-                    sources.push((SourceSlot::Text { index, skip }, registry.detach(&mut json).unwrap()));
+                    sources.push((
+                        SourceSlot::Text { index, skip },
+                        registry
+                            .detach(&mut json)
+                            .expect("source text yields a source JSON descriptor"),
+                    ));
                     *text = crate::lazy::Text::Inline(String::new());
                 }
             }
