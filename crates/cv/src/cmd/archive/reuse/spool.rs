@@ -85,6 +85,8 @@ impl cv_core::MessageSink for Spool {
         }
         let result = (|| -> Result<()> {
             if self.first_user.is_none() {
+                // A durable archive must fail on unreadable title text; unlike the display
+                // fallback Session::synth_title, it cannot skip a failed prompt and publish.
                 if let Some(head) = message.prompt_title(&self.resolver)? {
                     self.first_user = Some(FirstUser {
                         ordinal: self.messages + 1,

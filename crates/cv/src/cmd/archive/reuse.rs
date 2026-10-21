@@ -273,6 +273,8 @@ impl Archive {
             "archive resumed without the prefix it copies"
         );
         let old_turns = old.map_or(0, |stored| stored.prefix_turns);
+        // The spool sees only the suffix: translate its one-based prompt ordinal to the
+        // full artifact. A saved prompt inside the stable prefix precedes any suffix prompt.
         if let Some(first) = first_user.as_mut() {
             first.ordinal += pass.prefix;
         }

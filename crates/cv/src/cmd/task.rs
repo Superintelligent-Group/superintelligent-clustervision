@@ -624,8 +624,8 @@ fn append_batch(events: Vec<TaskEvent>) -> Result<()> {
     Ok(())
 }
 
-/// Close with an optional note first. Validate both candidates before writing either, so a
-/// refused close leaves the log unchanged and evidence precedes completion when appended.
+/// Close with an optional note first. task::append_events validates the complete batch before
+/// writing it, so a refused close leaves the log unchanged and evidence precedes completion.
 fn close_with_note(id: &str, from: &str, note: Option<String>, close: TaskEventKind) -> Result<()> {
     let Some(text) = note else {
         return append_event(Some(id), from, close).map(|_| ());
