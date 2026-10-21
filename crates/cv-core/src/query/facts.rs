@@ -1368,7 +1368,7 @@ mod tests {
             sink.note_target(format!("relative-{i}.rs")).unwrap();
         }
         sink.note_target("missing.rs".into()).unwrap();
-        assert!(sink.pending_targets.temporary_bytes().unwrap() > 0);
+        assert!(sink.pending_targets.spilled_bytes().unwrap() > 0);
         let mut shell = Session::new("facts", crate::Harness::Claude);
         shell.cwd = Some("/late/work".into());
         let facts = sink.finish(&shell).unwrap();

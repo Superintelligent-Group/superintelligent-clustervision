@@ -75,7 +75,7 @@ impl EventSpool {
         self.len() == 0
     }
     pub fn temporary_bytes(&self) -> Result<u64> {
-        self.ordered.temporary_bytes()
+        self.ordered.spilled_bytes()
     }
     pub fn push(&mut self, event: Event) -> Result<()> {
         self.ordered.push(event)

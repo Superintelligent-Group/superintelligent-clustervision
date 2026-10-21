@@ -825,7 +825,7 @@ mod tests {
                 .unwrap();
             expected.push(hit(Some(&format!("id-{i}")), Harness::Claude, "late-model", usage));
         }
-        assert!(spool.temporary_bytes().unwrap() > 0);
+        assert!(spool.spilled_bytes().unwrap() > 0);
         oracle.fold(expected.into_iter()).unwrap();
         let mut fold = TokenFold::default();
         for row in spool.rows().unwrap() {

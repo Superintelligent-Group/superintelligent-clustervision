@@ -41,7 +41,7 @@ impl<T: Record> Ordered<T> {
     pub(crate) fn len(&self) -> usize {
         self.len
     }
-    pub(crate) fn temporary_bytes(&self) -> Result<u64> {
+    pub(crate) fn spilled_bytes(&self) -> Result<u64> {
         match &self.spill {
             None => Ok(0),
             Some(spill) => {

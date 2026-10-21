@@ -257,7 +257,7 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(registry.owner_counts(), (1, 1));
-        assert!(ordered.temporary_bytes().unwrap() < body.len() as u64 * 10);
+        assert!(ordered.spilled_bytes().unwrap() < body.len() as u64 * 10);
         drop(original);
         drop(source);
         drop(backing);
@@ -322,7 +322,7 @@ mod tests {
                 .push(DeferredMessage::new(original.clone(), &mut registry))
                 .unwrap();
         }
-        let temporary_bytes = ordered.temporary_bytes().unwrap();
+        let temporary_bytes = ordered.spilled_bytes().unwrap();
         assert!(temporary_bytes > 0);
         assert!(
             temporary_bytes < body.len() as u64 * 10,
