@@ -114,6 +114,7 @@ impl Adapter for Qwen {
         let mut paths: Vec<PathBuf> = Vec::new();
         if let Some(projects) = &self.projects {
             paths.extend(
+                // projects/<cwd>/subagents/<session>/agent-<id>.jsonl is the deepest supported layout.
                 WalkDir::new(projects)
                     .max_depth(4)
                     .into_iter()
@@ -169,7 +170,7 @@ impl Adapter for Qwen {
                     sink,
                     &mut || Ok(()),
                 )
-                .map(Option::unwrap);
+                .map(|session| session.expect("replay from offset zero is within the captured source"));
             }
             // The gemini-cli shape: the streaming machinery (mmap + RawValue for legacy whole-file
             // JSON, line streaming for JSONL recordings) is shared and re-tags the session as Qwen.
