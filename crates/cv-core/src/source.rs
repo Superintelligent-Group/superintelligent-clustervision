@@ -980,17 +980,6 @@ pub(crate) fn publish_in<T: Payload>(
     Ok(())
 }
 
-/// Forget every baseline of `consumer` on the caller's connection: its output is gone.
-#[cfg(feature = "sqlite")]
-pub(crate) fn forget_in(conn: &rusqlite::Connection, consumer: &str) -> Option<()> {
-    if crate::env::frozen() {
-        return None;
-    }
-    conn.execute("DELETE FROM source_dependencies WHERE consumer=?1", [consumer])
-        .ok()?;
-    Some(())
-}
-
 /// Invalidate old baselines before changing consumer output. Failure must prevent that output
 /// write: otherwise an older stamp could certify newer output after dependencies revert.
 #[cfg(feature = "sqlite")]

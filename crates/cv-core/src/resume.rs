@@ -148,7 +148,7 @@ mod imp {
         (row_head(offset, hash, version, identity).as_ref() == Some(head) && cp.offset == head.offset()).then_some(cp)
     }
 
-    /// A row's head; a legacy row without a device/inode identity has none and is read whole.
+    /// A row's head; a row without a device/inode identity has none and is read whole.
     fn row_head(offset: i64, hash: i64, version: String, identity: Option<String>) -> Option<MarkHead> {
         let (dev, ino) = serde_json::from_str(&identity?).ok()?;
         Some(MarkHead {

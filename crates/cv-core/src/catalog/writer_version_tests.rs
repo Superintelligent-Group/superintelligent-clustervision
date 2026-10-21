@@ -1,6 +1,6 @@
 use super::*;
 use crate::discover_cache::read::Context;
-use rusqlite::{params, Connection};
+use rusqlite::params;
 
 fn session(w: &std::path::Path, id: &str) -> SessionRef {
     SessionRef::new(id, Harness::Claude, w.join(format!("{id}.jsonl")))
@@ -61,37 +61,6 @@ fn null_rows_remain_unknown_until_normal_observation() {
     sync(std::slice::from_ref(&r));
     assert_eq!(column(&r).as_deref(), Some(""));
     assert!(!r.path.exists(), "catalog publication does not read sources");
-}
-
-#[test]
-fn old_catalog_migrates_once_and_normal_publication_observes() {
-    let w = crate::test_world("writer-migration");
-    let r = session(&w.base, "old");
-    let conn = Connection::open(db_path().unwrap()).unwrap();
-    conn.execute_batch(
-        "CREATE TABLE sessions(harness TEXT NOT NULL,id TEXT NOT NULL,path TEXT NOT NULL,cwd TEXT,
-        title TEXT,created_at INTEGER,updated_at INTEGER,message_count INTEGER,PRIMARY KEY(harness,id,path));
-        CREATE TABLE catalog_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
-        INSERT INTO catalog_meta VALUES('discovery_version','4');",
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO sessions(harness,id,path) VALUES('claude','old',?1)",
-        [r.path.to_string_lossy()],
-    )
-    .unwrap();
-    drop(conn);
-    observe(&Context::current(), &r, Some("2.1.296"));
-    assert_eq!(column(&r).as_deref(), Some("2.1.296"));
-    let stored: String = open_db()
-        .unwrap()
-        .query_row(
-            "SELECT value FROM catalog_meta WHERE key='discovery_version'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(stored, crate::source::VERSION.to_string());
 }
 
 #[test]

@@ -627,59 +627,7 @@ mod db {
     use anyhow::{Context as _, Result};
     use rusqlite::{params, Connection};
 
-    /// Event-tables schema generation, stamped into the catalog's `PRAGMA user_version`.
-    ///
-    /// v1 (0.9.10) stored `(harness TEXT, session_id TEXT, …, target TEXT)` per event row plus a
-    /// dedup expression index — measured at ~3× the data size in indexes alone. v2 interns session
-    /// identity and targets into side tables and carries integers per row. The catalog is a pure
-    /// cache, so "migration" is version-stamp + drop + lazy reingest (dropping the baselines makes
-    /// every session look stale; the next `cv index` — or any on-the-spot `cv events <id>` —
-    /// rebuilds), exactly like the tantivy schema self-heal.
-    /// v3 (0.9.13) adds sub-agent provenance columns (`parent_id`, `agent_id`, `workflow`) to
-    /// `event_sessions`, so a folded-in sub-agent transcript's events can be attributed to the
-    /// orchestrator that spawned it. Same self-heal as before: bumping the version drops the event
-    /// tables, so everything reads stale and the next `cv index` reingests on the new schema.
-    const EVENTS_SCHEMA_VERSION: i64 = 3;
-
-    /// Drop pre-v2 event tables (their indexes go with them) and stamp the version.
-    ///
-    /// Two triggers, both checked on every open so the schema self-heals:
-    /// * `user_version < 2` — a v1/unversioned catalog (the `sessions` table never changed shape
-    ///   and is versionless `CREATE IF NOT EXISTS`; the event tables own the version stamp);
-    /// * a v1-*shaped* `events` table (it has a `harness` column) even under a v2 stamp — an old
-    ///   0.9.10 binary re-created v1 tables in a v2 catalog. (The common old-binary case is
-    ///   harmless without this: v2 drops `idx_events_dedup`, so the old binary's
-    ///   `CREATE UNIQUE INDEX … ON events(harness,…)` DDL fails against the v2 table and it
-    ///   degrades to events-disabled — its designed no-catalog path, no corruption possible. The
-    ///   shape check covers the race where an old binary lands v1 tables *first*.)
-    fn migrate(conn: &Connection) -> Option<()> {
-        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).ok()?;
-        let v1_shaped: bool = conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('events') WHERE name='harness')",
-                [],
-                |r| r.get(0),
-            )
-            .ok()?;
-        if version >= EVENTS_SCHEMA_VERSION && !v1_shaped {
-            return Some(());
-        }
-        conn.execute_batch(&format!(
-            "DROP TABLE IF EXISTS events;
-             DROP TABLE IF EXISTS event_sync;
-             DROP TABLE IF EXISTS event_sessions;
-             DROP TABLE IF EXISTS event_targets;
-             PRAGMA user_version = {EVENTS_SCHEMA_VERSION};"
-        ))
-        .ok()?;
-        crate::source::forget_in(conn, "events")?;
-        // The drop frees most of the file's pages but SQLite never returns them to the OS on its
-        // own — reclaim once, opportunistically (a busy db just keeps its free pages for reuse).
-        let _ = conn.execute_batch("VACUUM;");
-        Some(())
-    }
-
-    /// Open the shared catalog db and ensure the (v2) event tables exist. `None` on any error.
+    /// Open the shared catalog db and ensure the event tables exist. `None` on any error.
     ///
     /// Schema notes:
     /// * `event_sessions` is a dedicated intern table rather than a reuse of the `sessions`
@@ -689,20 +637,18 @@ mod db {
     ///   `UNIQUE(harness, session_id)` here is stable across syncs and tiny (~2.4k rows).
     /// * `event_targets` interns the distinct target strings (~54k of ~145k events); event rows
     ///   carry a nullable integer. Re-ingest deletes a session's event rows but leaves its
-    ///   interned targets — orphans are unreferenced cache rows, reclaimed only by the next
-    ///   schema migration. Suffix matching scans `event_targets` instead of every event row.
+    ///   interned targets — orphans are unreferenced cache rows, reclaimed only when a
+    ///   catalog of another schema is rebuilt. Suffix matching scans `event_targets` instead of every event row.
     /// * No dedup index: [`record`] is DELETE-by-session + batch INSERT in one transaction, so
     ///   cross-session duplicates are impossible by construction, and intra-batch duplicates are
     ///   deduped in memory there.
     /// * `idx_events_session` serves [`events_for`] and `record`'s delete; `idx_events_target`
-    ///   joins event rows back from a matched target. v1's `idx_events_kind_ts` indexed
-    ///   `(kind, ts)` which no query ever drove with a kind-prefix lookup — dropped.
+    ///   joins event rows back from a matched target.
     pub(crate) fn open() -> Option<Connection> {
         let conn = crate::catalog::open_db()?;
         if crate::env::frozen() {
             return Some(conn);
         }
-        migrate(&conn)?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS event_sessions(
                  id         INTEGER PRIMARY KEY,
@@ -727,9 +673,7 @@ mod db {
                  detail    TEXT
              );
              CREATE INDEX IF NOT EXISTS idx_events_session ON events(session);
-             CREATE INDEX IF NOT EXISTS idx_events_target ON events(target_id);
-             -- The per-session skip-table (0.16 and earlier): the baseline record is the stamp.
-             DROP TABLE IF EXISTS event_sync;",
+             CREATE INDEX IF NOT EXISTS idx_events_target ON events(target_id);",
         )
         .ok()?;
         Some(conn)
@@ -1135,7 +1079,7 @@ mod db {
     /// `edits_only` keeps only sessions with at least one `file_edit`. Titles come from a join
     /// against the `sessions` catalog. Empty on a cold catalog; a catalog error is an error.
     ///
-    /// The leading-`%` LIKE can never use an index; since v2 it scans `event_targets` (the
+    /// The leading-`%` LIKE can never use an index; it scans `event_targets` (the
     /// distinct targets, ~⅓ of the event rows) and joins matches back through `idx_events_target`
     /// instead of scanning every event row.
     pub fn sessions_touching(path: &str, edits_only: bool) -> Result<Vec<TouchedSession>> {
@@ -2208,104 +2152,5 @@ mod tests {
         assert!(edits_touching_file("/x/src/parser.rs.bak", "src/parser.rs.bak")
             .unwrap()
             .is_empty());
-    }
-
-    /// Migration e2e: a v1-shaped (0.9.10) catalog opened by v2 code is dropped wholesale —
-    /// old rows AND its stamps (so everything reads as stale) — then lazily reingested; the
-    /// version stamp prevents re-drops; and a v1 table snuck back in by an old binary under a
-    /// v2 stamp self-heals on the next open.
-    #[cfg(feature = "sqlite")]
-    #[test]
-    fn v1_catalog_migrates_by_drop_and_lazy_reingest() {
-        let world = crate::test_world("events-migration");
-        let home = &world.cv_home;
-
-        const V1_DDL: &str = "CREATE TABLE events(
-                 harness    TEXT NOT NULL,
-                 session_id TEXT NOT NULL,
-                 msg_idx    INTEGER NOT NULL,
-                 ts         INTEGER,
-                 kind       TEXT NOT NULL,
-                 tool       TEXT,
-                 target     TEXT,
-                 detail     TEXT
-             );
-             CREATE UNIQUE INDEX idx_events_dedup
-                 ON events(harness, session_id, msg_idx, kind, COALESCE(target,''));
-             INSERT INTO events VALUES('claude','mig-e2e',1,NULL,'file_edit','Edit','/old/v1.rs',NULL);";
-
-        // A v1-shaped catalog as 0.9.10 left it: v1 events + a fresh event_sync stamp.
-        let sdir = home.join("sessions");
-        std::fs::create_dir_all(&sdir).unwrap();
-        let path = sdir.join("mig-e2e.jsonl");
-        std::fs::write(
-            &path,
-            format!(
-                "{}\n",
-                serde_json::json!({
-                    "type": "assistant", "uuid": "a0", "sessionId": "mig-e2e",
-                    "message": {"role": "assistant", "content": [
-                        {"type": "tool_use", "id": "t1", "name": "Edit",
-                         "input": {"file_path": "src/lib.rs", "old_string": "a", "new_string": "b"}}
-                    ]}
-                })
-            ),
-        )
-        .unwrap();
-        let mtime = crate::source::FileId::at(&path).unwrap().mtime_ns;
-        {
-            let conn = rusqlite::Connection::open(home.join("catalog.db")).unwrap();
-            conn.execute_batch(&format!(
-                "{V1_DDL}
-                 CREATE TABLE event_sync(
-                     harness TEXT NOT NULL, id TEXT NOT NULL, path TEXT NOT NULL,
-                     mtime_ns INTEGER NOT NULL, PRIMARY KEY(harness, id, path));
-                 INSERT INTO event_sync VALUES('claude','mig-e2e','{}',{mtime});",
-                path.display()
-            ))
-            .unwrap();
-        }
-
-        let r = SessionRef {
-            id: "mig-e2e".into(),
-            harness: crate::ir::Harness::Claude,
-            path: path.clone(),
-            cwd: Some("/repo".into()),
-            title: None,
-            created_at: None,
-            updated_at: None,
-            message_count: Some(1),
-        };
-
-        // First v2 open (inside needs_ingest) migrates: v1 rows gone, sync stamp gone → stale.
-        assert!(needs_ingest(&r), "v1 event_sync stamps must not survive migration");
-        assert!(!catalog_has_events(), "v1 event rows must not survive migration");
-
-        // The normal lazy path then rebuilds cleanly on the v2 schema.
-        let n = ingest_ref(&r).unwrap();
-        assert_eq!(n, 1);
-        assert!(!needs_ingest(&r));
-        let rows = events_for("claude", "mig-e2e", None).unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].target.as_deref(), Some("/repo/src/lib.rs"));
-        assert_eq!(sessions_touching("src/lib.rs", true).unwrap().len(), 1);
-
-        // The stamp stuck, so the next open did NOT re-drop (the ingested rows are still there).
-        {
-            let conn = rusqlite::Connection::open(home.join("catalog.db")).unwrap();
-            let v: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
-            assert_eq!(v, 3);
-
-            // Now simulate an old 0.9.10 binary recreating v1 tables under the v2 stamp.
-            conn.execute_batch(&format!("DROP TABLE events; {V1_DDL}")).unwrap();
-        }
-        // Shape detection self-heals on open: full reset, stale again, reingest works.
-        assert!(
-            !catalog_has_events(),
-            "a v1-shaped table under a v2 stamp must be dropped"
-        );
-        assert!(needs_ingest(&r));
-        ingest_ref(&r).unwrap();
-        assert_eq!(events_for("claude", "mig-e2e", None).unwrap().len(), 1);
     }
 }

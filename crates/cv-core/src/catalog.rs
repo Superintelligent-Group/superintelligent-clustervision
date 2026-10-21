@@ -152,7 +152,7 @@ mod imp {
     /// reason: the absent `-shm` attests that no writer is connected as it opens; an immutable
     /// read ignores locks and the WAL, so a writer that starts later makes its reads stale or
     /// fail, and a failed read degrades like any other. Only a catalog of the current
-    /// interpretation serves, since migrating one is a write.
+    /// schema and interpretation serves, since rebuilding one is a write.
     fn open_read_only(path: &Path) -> Option<Connection> {
         use rusqlite::OpenFlags;
         let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_NO_MUTEX;
@@ -175,66 +175,22 @@ mod imp {
                         |row| row.get(0),
                     )
                     .ok()?;
-                (stored == version).then_some(conn)
+                let schema: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0)).ok()?;
+                (stored == version && schema == SCHEMA).then_some(conn)
             })
     }
 
-    /// Columns later releases added to tables an older catalog already has, in the order they
-    /// came: `sessions` gained sub-second timestamps for the catalog read path (the second-
-    /// precision columns stay; the event catalog joins them) and the discovered writer version
-    /// (NULL: not observed); `scan_cache` gained its interpretation (nullable: an older binary's
-    /// INSERT OR REPLACE omits it and leaves a stale row), its auxiliary reads and its metadata
-    /// continuation; `resume_marks` gained the device/inode identity (a row without one is read
-    /// whole).
-    const ADDED_COLUMNS: [(&str, &str); 7] = [
-        ("sessions", "created_ns INTEGER"),
-        ("sessions", "updated_ns INTEGER"),
-        ("sessions", "writer_version TEXT"),
-        ("scan_cache", "interpretation_version INTEGER"),
-        ("scan_cache", "source_reads TEXT"),
-        ("scan_cache", "continuation TEXT"),
-        ("resume_marks", "identity TEXT"),
-    ];
-
-    /// Add `column` to `table` unless an earlier (or a concurrent) open already did: "duplicate
-    /// column" is the one failure a migration that already ran leaves, and any other fails the
-    /// open, which then serves read-only.
-    fn add_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<()> {
-        match conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column};")) {
-            Err(rusqlite::Error::SqliteFailure(_, Some(message))) if message.starts_with("duplicate column name") => {
-                Ok(())
-            }
-            result => result,
-        }
-    }
+    /// The catalog's schema, stamped in `PRAGMA user_version`. Every table here is derived from
+    /// the transcripts, so a catalog of any other schema is dropped whole and rebuilt: there are
+    /// no migrations. Change any table's shape and bump this. 4: above every stamp an older cv
+    /// wrote (its event tables used 0-3).
+    const SCHEMA: i64 = 4;
 
     fn open_writable(path: &Path) -> Option<Connection> {
         let mut conn = Connection::open(path).ok()?;
         // WAL + a busy timeout so concurrent cv processes don't error each other out.
         conn.busy_timeout(Duration::from_secs(5)).ok()?;
-        // Tables of an older shape are dropped: watches recorded as an mtime (one full discovery
-        // records identities), the counts text table (counts live in their record) and 0.16's
-        // freshness table with a `stamp` column. Every consumer rereads once.
-        let legacy: bool = conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('watched') WHERE name='mtime_ns')",
-                [],
-                |row| row.get(0),
-            )
-            .ok()?;
-        if legacy {
-            conn.execute_batch("DROP TABLE IF EXISTS watched;").ok()?;
-        }
-        let legacy_sources: bool = conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('source_dependencies') WHERE name='stamp')",
-                [],
-                |row| row.get(0),
-            )
-            .ok()?;
-        if legacy_sources {
-            conn.execute_batch("DROP TABLE source_dependencies;").ok()?;
-        }
+        let rebuilt = rebuild_other_schema(&mut conn)?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
              CREATE TABLE IF NOT EXISTS sessions(
@@ -246,6 +202,9 @@ mod imp {
                  created_at    INTEGER,
                  updated_at    INTEGER,
                  message_count INTEGER,
+                 created_ns    INTEGER,
+                 updated_ns    INTEGER,
+                 writer_version TEXT,
                  PRIMARY KEY(harness, id, path)
              );
              CREATE INDEX IF NOT EXISTS idx_sessions_id ON sessions(id);
@@ -264,10 +223,11 @@ mod imp {
                  path     TEXT PRIMARY KEY,
                  mtime_ns INTEGER NOT NULL,
                  size     INTEGER NOT NULL,
-                 refs     TEXT NOT NULL
+                 refs     TEXT NOT NULL,
+                 interpretation_version INTEGER,
+                 source_reads TEXT,
+                 continuation TEXT
              );
-             -- Counts live in their `source_dependencies` record (0.17 kept them as text here).
-             DROP TABLE IF EXISTS affordance_counts;
              CREATE TABLE IF NOT EXISTS catalog_meta(
                  key   TEXT PRIMARY KEY,
                  value TEXT NOT NULL
@@ -280,6 +240,7 @@ mod imp {
                  hash    INTEGER NOT NULL,
                  version TEXT NOT NULL,
                  state   TEXT NOT NULL,
+                 identity TEXT,
                  PRIMARY KEY(harness, id, path)
              );
              CREATE TABLE IF NOT EXISTS source_dependencies(
@@ -291,15 +252,9 @@ mod imp {
                  path    TEXT NOT NULL,
                  why     TEXT NOT NULL,
                  PRIMARY KEY(harness, path)
-             );
-             -- The seek store (0.14 and earlier) is gone; see `crate::offsets`.
-             DROP TABLE IF EXISTS msg_offsets;
-             DROP TABLE IF EXISTS msg_offsets_schema;",
+             );",
         )
         .ok()?;
-        for (table, column) in ADDED_COLUMNS {
-            add_column(&conn, table, column).ok()?;
-        }
         let version = crate::discover_cache::INTERPRETATION_VERSION.to_string();
         let old: Option<String> = conn
             .query_row(
@@ -330,7 +285,7 @@ mod imp {
                     [&version],
                 )
                 .ok()?;
-                if old.is_some() {
+                if old.is_some() || rebuilt {
                     // An earlier cv built this catalog: the next full discovery says why it is slow.
                     tx.execute(
                         "INSERT OR REPLACE INTO catalog_meta(key,value) VALUES('rediscovery_notice',?1)",
@@ -343,6 +298,39 @@ mod imp {
             }
         }
         Some(conn)
+    }
+
+    /// Drop every table of a catalog stamped with another [`SCHEMA`] and stamp this one, under
+    /// the writer lock (a concurrent open may have rebuilt it already). `Some(true)` when tables
+    /// were dropped: the next full discovery says why it is slow.
+    fn rebuild_other_schema(conn: &mut Connection) -> Option<bool> {
+        let stamped = |conn: &Connection| conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).ok();
+        if stamped(conn)? == SCHEMA {
+            return Some(false);
+        }
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .ok()?;
+        if stamped(&tx)? == SCHEMA {
+            return Some(false);
+        }
+        let tables: Vec<String> = tx
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+            .ok()?
+            .query_map([], |row| row.get(0))
+            .ok()?
+            .collect::<rusqlite::Result<_>>()
+            .ok()?;
+        for table in &tables {
+            tx.execute_batch(&format!("DROP TABLE \"{}\";", table.replace('"', "\"\""))).ok()?;
+        }
+        tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA};")).ok()?;
+        tx.commit().ok()?;
+        if !tables.is_empty() {
+            // SQLite keeps the freed pages; reclaim them once (a busy db keeps them for reuse).
+            let _ = conn.execute_batch("VACUUM;");
+        }
+        Some(!tables.is_empty())
     }
 
     fn watch_is_fresh(path: &Path, recorded: Watched) -> bool {
@@ -1449,42 +1437,35 @@ mod imp {
             assert!(primary_refs_in(&conn, Some(Harness::Claude)).is_empty());
         }
 
-        /// A catalog of the shapes before every added column migrates at open, a second open
-        /// finds each column already there, and any other ALTER failure fails the open.
+        /// A catalog of another schema (an older cv's, stamped below [`SCHEMA`]) is dropped whole
+        /// and rebuilt at open, with the rediscovery notice; a second open keeps what it holds.
         #[test]
-        fn added_columns_migrate_once_and_other_failures_fail_the_open() {
-            let w = crate::test_world("catalog-added-columns");
+        fn another_schema_is_rebuilt_once() {
+            let w = crate::test_world("catalog-other-schema");
             let path = w.cv_home.join("old-catalog.db");
             Connection::open(&path)
                 .unwrap()
                 .execute_batch(
-                    "CREATE TABLE sessions(harness TEXT NOT NULL, id TEXT NOT NULL, path TEXT NOT NULL, cwd TEXT,
-                         title TEXT, created_at INTEGER, updated_at INTEGER, message_count INTEGER,
+                    "PRAGMA user_version = 3;
+                     CREATE TABLE sessions(harness TEXT NOT NULL, id TEXT NOT NULL, path TEXT NOT NULL,
                          PRIMARY KEY(harness, id, path));
-                     CREATE TABLE scan_cache(path TEXT PRIMARY KEY, mtime_ns INTEGER NOT NULL, size INTEGER NOT NULL,
-                         refs TEXT NOT NULL);
-                     CREATE TABLE resume_marks(harness TEXT NOT NULL, id TEXT NOT NULL, path TEXT NOT NULL,
-                         offset INTEGER NOT NULL, hash INTEGER NOT NULL, version TEXT NOT NULL, state TEXT NOT NULL,
-                         PRIMARY KEY(harness, id, path));",
+                     INSERT INTO sessions VALUES('claude', 'old', '/old.jsonl');
+                     CREATE TABLE event_sync(harness TEXT);
+                     CREATE TABLE catalog_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                     INSERT INTO catalog_meta VALUES('discovery_version', '1');",
                 )
                 .unwrap();
-            for _ in 0..2 {
-                let conn = open_writable(&path).expect("the migration opens");
-                for (table, column) in ADDED_COLUMNS {
-                    let name = column.split(' ').next().unwrap();
-                    let present: bool = conn
-                        .query_row(
-                            &format!("SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name=?1)"),
-                            [name],
-                            |row| row.get(0),
-                        )
-                        .unwrap();
-                    assert!(present, "{table}.{name}");
-                }
-            }
-            let conn = Connection::open(&path).unwrap();
-            assert!(add_column(&conn, "sessions", "writer_version TEXT").is_ok());
-            assert!(add_column(&conn, "no_such_table", "x TEXT").is_err());
+            let conn = open_writable(&path).expect("the rebuild opens");
+            let count = |conn: &Connection, sql: &str| conn.query_row(sql, [], |row| row.get::<_, i64>(0)).unwrap();
+            assert_eq!(count(&conn, "PRAGMA user_version"), SCHEMA);
+            assert_eq!(count(&conn, "SELECT count(*) FROM sessions"), 0);
+            assert_eq!(count(&conn, "SELECT count(*) FROM sqlite_master WHERE name='event_sync'"), 0);
+            assert_eq!(count(&conn, "SELECT count(*) FROM catalog_meta WHERE key='rediscovery_notice'"), 1);
+            conn.execute("INSERT INTO sessions(harness, id, path, created_ns) VALUES('claude', 'new', '/new.jsonl', 1)", [])
+                .unwrap();
+            drop(conn);
+            let conn = open_writable(&path).unwrap();
+            assert_eq!(count(&conn, "SELECT count(*) FROM sessions"), 1);
         }
 
         #[test]

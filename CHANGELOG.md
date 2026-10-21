@@ -168,7 +168,7 @@
 - `tools/dump-hash.sh` streams one sha256 per command, session and demand over `tools/dump-hash.manifest`: the byte-identity gate for output-preserving changes.
 
 **After upgrading, once.**
-- The first listing rediscovers the fleet (announced on stderr; `cv index` does it ahead of time): catalog interpretation 6 adds a nullable `writer_version`.
+- The first listing rediscovers the fleet (announced on stderr; `cv index` does it ahead of time): catalog schema 4 drops an older catalog whole and rebuilds it.
 - Every store, mark and watch state rereads each session once: `source::VERSION` 6 is the one version all check; nothing expires per release any more.
 
 ## 0.17.0 — 2026-10-17 — stream, never materialize
