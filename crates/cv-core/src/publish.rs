@@ -370,7 +370,11 @@ fn claim_member(
 ) -> Result<Claimed> {
     let context = || format!("publishing {}", destination.display());
     let existing = match claim {
-        Claim::Replace => std::fs::symlink_metadata(destination).ok(),
+        Claim::Replace => match std::fs::symlink_metadata(destination) {
+            Ok(metadata) => Some(metadata),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error).with_context(context),
+        },
         Claim::New => None,
     };
     let Some(existing) = existing else {
@@ -749,6 +753,28 @@ pub(crate) mod tests {
             .publish_linking(&dir.join("kind"), Claim::New, unsupported)
             .unwrap();
         assert_eq!(temporaries(dir), 0);
+    }
+
+    #[test]
+    fn replacement_metadata_failure_is_not_absence() {
+        let world = cv_testkit::World::new("publish-metadata-error");
+        let parent = world.base.join("file");
+        std::fs::write(&parent, "original").unwrap();
+        let error = claim_member(
+            staged(&world.base, b"new"),
+            &parent.join("child"),
+            Claim::Replace,
+            |_, _| panic!("metadata must be checked before claiming"),
+        )
+        .err()
+        .expect("a non-directory parent is an error");
+        assert!(format!("{error:#}").contains("publishing"));
+        assert_ne!(
+            error.downcast_ref::<io::Error>().unwrap().kind(),
+            io::ErrorKind::NotFound
+        );
+        assert_eq!(std::fs::read(&parent).unwrap(), b"original");
+        assert_eq!(temporaries(&world.base), 0);
     }
 
     #[cfg(unix)]

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Multi-file publication reports destination metadata failures before replacing files.
+
 - **Breaking (library):** `store_affordances` and `json_files` return `Result`; failed side-store reads now fail affordance views and count publication.
 
 - **Breaking (library):** forest and subagent-reference APIs return `Result`; unreadable forests fail views, queries, indexing and stats instead of hiding agents.
