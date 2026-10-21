@@ -82,6 +82,16 @@ impl Cursor {
         }
     }
 
+    /// Use one explicit root, whichever of the two stores it is: a `Cursor/User` directory (it
+    /// holds `globalStorage/`) or else a CLI home ([`Self::with_cli_home`]).
+    pub fn with_root(root: &Path) -> Self {
+        if root.join("globalStorage").is_dir() {
+            Self::with_user_dir(root)
+        } else {
+            Self::with_cli_home(root)
+        }
+    }
+
     /// Use only an explicit Cursor Agent CLI configuration home (`.cursor`), including chats
     /// and ACP sessions. Never consult the installed IDE or other harness homes.
     pub fn with_cli_home(home: &Path) -> Self {

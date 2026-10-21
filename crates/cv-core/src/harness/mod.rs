@@ -8,7 +8,7 @@ use crate::stream::{Demand, MessageSink};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub mod claude;
 /// Claude Code `Workflow`-tool runs (phase tree + script), a first-class layer over the
@@ -885,6 +885,46 @@ pub fn for_harness(h: Harness) -> Option<Box<dyn Adapter>> {
     })
 }
 
+/// The adapter for `h` reading one explicit root and nothing it would detect (no `$HOME`, no
+/// configured extra roots): what a probe or a fixture reads. `root` is the directory the
+/// adapter's own explicit constructor takes: Claude's config dir, the native home of Codex, Gemini,
+/// Grok, Kimi, Kimi Code, Qwen and Hermes, Cline's and Roo's user home, OpenClaw's state dir,
+/// OpenCode's data dir, Continue's global dir, LM Studio's conversations dir, Goose's sessions dir,
+/// the dir holding Devin's or Zed's database, a Cursor `User` dir or CLI home, or the dir an
+/// export or OpenSession document sits in. `None` when `h` is not built in.
+pub fn for_harness_with_root(h: Harness, root: &Path) -> Option<Box<dyn Adapter>> {
+    Some(match h {
+        Harness::Claude => Box::new(claude::Claude::with_config_dir(root)),
+        Harness::Codex => Box::new(codex::Codex::with_home(root)),
+        Harness::Grok => Box::new(grok::Grok::with_home(root)),
+        Harness::Gemini => Box::new(gemini::Gemini::with_home(root)),
+        Harness::OpenClaw => Box::new(openclaw::OpenClaw::with_state_dir(root)),
+        Harness::Kimi => Box::new(kimi::Kimi::with_home(root)),
+        Harness::KimiCode => Box::new(kimi_code::KimiCode::with_home(root)),
+        Harness::Qwen => Box::new(qwen::Qwen::with_home(root)),
+        Harness::LmStudio => Box::new(lmstudio::LmStudio::with_root(root)),
+        Harness::Cline => Box::new(cline::Cline::with_home(root)),
+        Harness::Roo => Box::new(roo::Roo::with_home(root)),
+        Harness::Continue => Box::new(continuedev::Continue::with_root(root)),
+        Harness::OpenCode => Box::new(opencode::OpenCode::with_data_dir(root)),
+        Harness::ChatGptExport => Box::new(export::ChatGptExport::with_roots(vec![root.to_path_buf()])),
+        Harness::ClaudeExport => Box::new(export::ClaudeExport::with_roots(vec![root.to_path_buf()])),
+        Harness::OpenSession => Box::new(opensession::OpenSession::with_roots(vec![root.to_path_buf()])),
+        #[cfg(feature = "sqlite")]
+        Harness::Hermes => Box::new(hermes::Hermes::with_home(root)),
+        #[cfg(feature = "sqlite")]
+        Harness::Cursor => Box::new(cursor::Cursor::with_root(root)),
+        #[cfg(feature = "sqlite")]
+        Harness::Goose => Box::new(goose::Goose::with_sessions_dir(root)),
+        #[cfg(feature = "sqlite")]
+        Harness::Zed => Box::new(zed::Zed::with_root(root)),
+        #[cfg(feature = "sqlite")]
+        Harness::Devin => Box::new(devin::Devin::with_root(root)),
+        #[cfg(not(feature = "sqlite"))]
+        Harness::Hermes | Harness::Cursor | Harness::Goose | Harness::Zed | Harness::Devin => return None,
+    })
+}
+
 /// Assert the IR-v2 nesting invariant on a parsed session (`docs/INTERFACE-V2.md` §4), so every
 /// adapter's tests state the rule the same way instead of each spelling out its own key list.
 ///
@@ -986,6 +1026,23 @@ mod tests {
         for h in ORDER {
             if let Some(adapter) = for_harness(h) {
                 assert_eq!(adapter.harness(), h);
+            }
+        }
+    }
+
+    #[test]
+    fn an_explicit_root_reads_nothing_else() {
+        // A store's reported root may be the install dir above the one given (LM Studio's), never
+        // anywhere detection would look.
+        let world = crate::test_world("explicit-root-registry");
+        let outer = world.base.join("explicit");
+        let root = outer.join("store");
+        std::fs::create_dir_all(&root).unwrap();
+        for h in Harness::ALL {
+            let Some(adapter) = for_harness_with_root(h, &root) else { continue };
+            assert_eq!(adapter.harness(), h);
+            for found in adapter.roots() {
+                assert!(found.starts_with(&outer), "{h}: {} is outside the explicit root", found.display());
             }
         }
     }

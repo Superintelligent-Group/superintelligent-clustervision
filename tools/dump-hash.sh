@@ -115,20 +115,22 @@ stage_corpus() { # <harness> <version> <home>
   esac
 }
 
-# The probe reads a store through its explicit-root constructor: the root per harness.
-probe_root() { # <home> <harness> <id>
+# The probe reads a store through `harness::for_harness_with_root`: where each harness's root sits
+# in a staged home (the layout its detection finds).
+probe_root() { # <home> <harness> <id> <path>
   case "$2" in
     claude) echo "$1/.claude" ;;            codex) echo "$1/.codex" ;;
     gemini) echo "$1/.gemini" ;;            qwen) echo "$1/.qwen" ;;
     grok) echo "$1/.grok" ;;                kimi) echo "$1/.kimi" ;;
     kimi-code) echo "$1/.kimi-code" ;;      hermes) echo "$1/.hermes" ;;
-    continue) echo "$1/.continue" ;;        cline) echo "$1" ;;
+    continue) echo "$1/.continue" ;;        cline|roo) echo "$1" ;;
     openclaw) echo "$1/.openclaw" ;;        opencode) echo "$1/.local/share/opencode" ;;
     goose) echo "$1/.local/share/goose/sessions" ;;
     devin) echo "$1/.local/share/devin/cli" ;;
     lmstudio) echo "$1/.lmstudio/conversations" ;;
     cursor) case "$3" in cli:*) echo "$1/.cursor" ;; *) echo "$1/Library/Application Support/Cursor/User" ;; esac ;;
-    *) return 1 ;;   # roo and the exports have no probe constructor
+    chatgpt-export|claude-export|opensession) dirname "$4" ;;
+    *) return 1 ;;
   esac
 }
 
@@ -232,7 +234,7 @@ for r in sorted(json.load(sys.stdin), key=lambda r: (r["harness"], r["id"])):
     local b; for b in mmap positioned; do
       local probe=$PROBE; [ "$b" = positioned ] && probe=$PROBE_POS
       [ -n "$probe" ] || continue
-      local proot; proot=$(probe_root "$home" "$harness" "$id") || continue
+      local proot; proot=$(probe_root "$home" "$harness" "$id" "$path") || continue
       local m; for m in $MODES; do
         local j; j=$("$probe" hash "$harness" "$id" "$path" --root "$proot" --mode "$m" 2>/dev/null) || { printf '%064d  probe!1  %s  %s/%s\n' 0 "$s" "$m" "$b" >>"$OUT"; continue; }
         printf '%s\n' "$j" | python3 -I -c '

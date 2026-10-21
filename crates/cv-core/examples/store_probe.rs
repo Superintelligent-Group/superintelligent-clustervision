@@ -83,7 +83,7 @@ fn args() -> Result<Args> {
                 "store_probe OP HARNESS ID PATH [--root DIR] [--mode lazy|lazy-extra|facts|bulk|full|complete] \
                  [--materialize] [--sqlite-heap] [--hash-output] [--hash-detail] [--raw-order] [--warm-discover] [--query EXPR] [--resume-from CHECKPOINT] [--span OFFSET:LENGTH --escaped --chunk-bytes N --prefix-bytes N]\n\
                  OP: baseline|discard|count|checkpoint|resume|collect|window|affordances|affordance-read|doctor|token-stats|dataset|dataset-collect|tools|tools-collect|query|query-collect|hash|discover|sessions|events|events-collected|chunks|prefix|resolve|resolved-len|json-len|json-write|json-prefix\n\
-                 HARNESS: claude|codex|gemini|openclaw|continue|lmstudio|cline|kimi|kimi-code|grok|qwen|devin|zed|opensession|chatgpt-export|claude-export; use scratch CLUSTERVISION_HOME"
+                 HARNESS: any (`harness::for_harness_with_root` names each one's ROOT); use scratch CLUSTERVISION_HOME"
             ),
             s if s.starts_with('-') => bail!("unknown option {s}"),
             _ => positional.push(arg),
@@ -145,45 +145,8 @@ fn options(mode: &str) -> Demand {
 }
 
 fn adapter(a: &Args) -> Result<Box<dyn Adapter>> {
-    Ok(match a.harness {
-        Harness::Claude => Box::new(cv_core::harness::claude::Claude::with_config_dir(&a.root)),
-        Harness::Codex => Box::new(cv_core::harness::codex::Codex::with_home(&a.root)),
-        Harness::Gemini => Box::new(cv_core::harness::gemini::Gemini::with_home(&a.root)),
-        Harness::OpenClaw => Box::new(cv_core::harness::openclaw::OpenClaw::with_state_dir(&a.root)),
-        Harness::Continue => Box::new(cv_core::harness::continuedev::Continue::with_root(&a.root)),
-        Harness::LmStudio => Box::new(cv_core::harness::lmstudio::LmStudio::with_root(&a.root)),
-        Harness::Cline => Box::new(cv_core::harness::cline::Cline::with_home(&a.root)),
-        Harness::Kimi => Box::new(cv_core::harness::kimi::Kimi::with_home(&a.root)),
-        Harness::KimiCode => Box::new(cv_core::harness::kimi_code::KimiCode::with_home(&a.root)),
-        Harness::Grok => Box::new(cv_core::harness::grok::Grok::with_home(&a.root)),
-        Harness::OpenSession => Box::new(cv_core::harness::opensession::OpenSession::with_roots(vec![a
-            .root
-            .clone()])),
-        Harness::ChatGptExport => Box::new(cv_core::harness::export::ChatGptExport::with_roots(vec![a
-            .root
-            .clone()])),
-        Harness::ClaudeExport => Box::new(cv_core::harness::export::ClaudeExport::with_roots(vec![a.root.clone()])),
-        Harness::Qwen => Box::new(cv_core::harness::qwen::Qwen::with_home(&a.root)),
-        #[cfg(feature = "sqlite")]
-        Harness::Cursor => Box::new(if a.id.starts_with("cli:") {
-            cv_core::harness::cursor::Cursor::with_cli_home(&a.root)
-        } else {
-            cv_core::harness::cursor::Cursor::with_user_dir(&a.root)
-        }),
-        #[cfg(feature = "sqlite")]
-        Harness::OpenCode => Box::new(cv_core::harness::opencode::OpenCode::with_data_dir(&a.root)),
-        #[cfg(feature = "sqlite")]
-        Harness::Hermes => Box::new(cv_core::harness::hermes::Hermes::with_home(&a.root)),
-        #[cfg(feature = "sqlite")]
-        Harness::Goose => Box::new(cv_core::harness::goose::Goose::with_sessions_dir(&a.root)),
-        #[cfg(feature = "sqlite")]
-        Harness::Devin => Box::new(cv_core::harness::devin::Devin::with_root(&a.root)),
-        #[cfg(feature = "sqlite")]
-        Harness::Zed => Box::new(cv_core::harness::zed::Zed::with_root(&a.root)),
-        _ => {
-            bail!("unsupported probe harness or disabled feature; use explicit-root constructors when extending it")
-        }
-    })
+    cv_core::harness::for_harness_with_root(a.harness, &a.root)
+        .context("this harness is not built in (enable the sqlite feature)")
 }
 
 // Sort owned maps in place: deterministic JSON without cloning giant payloads into Value trees.

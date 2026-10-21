@@ -1,9 +1,8 @@
 # Store probe
 
 This diagnostic example performs one operation per process without modifying harness stores.
-It supports Claude, Codex, Gemini, OpenClaw, Continue, LM Studio, Cline, Kimi, Kimi Code, Grok, Qwen,
-OpenSession, ChatGPT/Claude account exports and (with SQLite enabled) Cursor, OpenCode, Devin,
-Hermes, Goose and Zed through explicit-root constructors. Direct stream operations never update
+It supports every harness (the SQLite ones with SQLite enabled) through the registry's
+explicit-root constructor, `harness::for_harness_with_root`. Direct stream operations never update
 the catalog or detect installed homes to resolve IDs. The `sessions` operation follows production
 fleet detection from `HOME`/XDG and may perform a scoped or full discovery.
 
@@ -29,11 +28,10 @@ Run `OP HARNESS ID PATH`, optionally `--root DIR`, `--mode lazy|lazy-extra|facts
 `--mode facts` requests the shared reducer metadata projection; adapters without a projection
 implementation retain full extras. Compare reducer outputs rather than Message JSON across these
 two modes. The default mode is lazy. The root defaults to the input's parent; for discovery
-pass the config/runtime root explicitly (`projects/`, `sessions/`, or `tmp/` lives beneath it).
-Continue expects its global directory containing `sessions/`; LM Studio expects the conversations
-directory containing `*.conversation.json` itself. OpenClaw expects its state directory.
-Cline expects a home containing `.cline/`; Kimi, Kimi Code and Grok expect their native homes
-containing `sessions/`. Devin/Zed expect the directory containing `sessions.db`/`threads.db`. Directory session
+pass the root explicitly: what `for_harness_with_root` documents for the harness (Claude's config
+dir, Codex's home, Continue's global dir, LM Studio's conversations dir, OpenClaw's state dir, a
+user home for Cline and Roo, the dir holding `sessions.db`/`threads.db` for Devin/Zed, a Cursor
+`User` dir or CLI home, …). Directory session
 paths (Kimi, Kimi Code and Grok) report directory metadata size, not total transcript/sidecar bytes;
 use the generator manifest for total generated physical source sizes.
 OpenSession and account exports scan only the explicit root, excluding configured exports and
