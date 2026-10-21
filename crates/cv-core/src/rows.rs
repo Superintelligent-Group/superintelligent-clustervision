@@ -101,8 +101,8 @@ impl SearchRow<'_> {
                 )
             });
         let reference = cataloged.as_ref();
-        // Choose each final value before serialization. Valid index dates overlay the catalog;
-        // out-of-range seconds retain the catalog fallback, as in the old overlay policy.
+        // Index cwd/title and valid dates win when present; the catalog supplies their fallbacks
+        // plus canonical identity, path and count. Out-of-range index dates use the catalog too.
         let created = rfc3339(self.created_at).or_else(|| reference.and_then(|r| r.created_at).map(|t| t.to_rfc3339()));
         let updated = rfc3339(self.updated_at).or_else(|| reference.and_then(|r| r.updated_at).map(|t| t.to_rfc3339()));
         json!({
