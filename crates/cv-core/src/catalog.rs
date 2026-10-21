@@ -157,16 +157,9 @@ mod imp {
         }
     }
 
-    /// A catalog this process may not write (a sandbox denying writes to the home, a read-only
-    /// copy) still answers reads: its rows serve, and every write fails and is dropped like any
-    /// other catalog error. `mode=ro` reads a WAL catalog through an existing `-shm`. The last
-    /// connection to close removes the `-shm`, and SQLite opens a WAL database read-only only
-    /// where it can create one, or `immutable=1` (wal.html, "Read-Only Databases"): the sandboxed
-    /// read 9a297dd3 (2026-10-15) measured at 1m24s of rediscovery without it. Kept for that
-    /// reason: the absent `-shm` attests that no writer is connected as it opens; an immutable
-    /// read ignores locks and the WAL, so a writer that starts later makes its reads stale or
-    /// fail, and a failed read degrades like any other. Only a catalog of the current
-    /// schema and interpretation serves, since rebuilding one is a write.
+    /// Read-only catalogs use SQLite's WAL-aware reader. Never fall back to immutable on a
+    /// live WAL: it ignores committed frames. Frozen reads reach this only after `open_at`
+    /// rejects every nonempty WAL/journal, and cannot create coordination files.
     fn open_read_only(path: &Path) -> Option<Connection> {
         use rusqlite::OpenFlags;
         let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_NO_MUTEX;
@@ -176,28 +169,18 @@ mod imp {
             .replace('?', "%3f")
             .replace('#', "%23");
         let version = crate::discover_cache::INTERPRETATION_VERSION.to_string();
-        ["mode=ro", "immutable=1"]
-            .into_iter()
-            .filter(|query| !crate::env::frozen() || *query == "immutable=1")
-            .find_map(|query| {
-                let conn = Connection::open_with_flags(format!("file:{file}?{query}"), flags)
-                    .inspect_err(note_sql)
-                    .ok()?;
-                conn.busy_timeout(Duration::from_secs(5)).inspect_err(note_sql).ok()?;
-                let stored: String = conn
-                    .query_row(
-                        "SELECT value FROM catalog_meta WHERE key='discovery_version'",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .inspect_err(note_sql)
-                    .ok()?;
-                let schema: i64 = conn
-                    .query_row("PRAGMA user_version", [], |row| row.get(0))
-                    .inspect_err(note_sql)
-                    .ok()?;
-                (stored == version && schema == SCHEMA).then_some(conn)
-            })
+        let query = if crate::env::frozen() { "immutable=1" } else { "mode=ro" };
+        let conn = Connection::open_with_flags(format!("file:{file}?{query}"), flags).inspect_err(note_sql).ok()?;
+        conn.busy_timeout(Duration::from_secs(5)).inspect_err(note_sql).ok()?;
+        let stored: String = conn
+            .query_row(
+                "SELECT value FROM catalog_meta WHERE key='discovery_version'",
+                [],
+                |row| row.get(0),
+            )
+            .inspect_err(note_sql).ok()?;
+        let schema: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0)).inspect_err(note_sql).ok()?;
+        (stored == version && schema == SCHEMA).then_some(conn)
     }
 
     /// The catalog's schema, stamped in `PRAGMA user_version`. Every table here is derived from
@@ -1824,6 +1807,9 @@ mod imp {
                     .unwrap();
             }
             let discovered = crate::discover_all();
+            // A live connection retains WAL coordination. A mode=ro reader must observe it,
+            // including commits that an immutable connection would silently ignore.
+            let writer = open_db().unwrap();
             let set_mode = |mode: u32| {
                 for entry in std::fs::read_dir(&w.cv_home).unwrap() {
                     let path = entry.unwrap().path();
@@ -1835,10 +1821,23 @@ mod imp {
             let read = std::panic::catch_unwind(crate::sessions_impl);
             set_mode(0o755);
             let (listed, full) = read.unwrap();
-            assert!(!full, "a read-only catalog must serve the warm route");
+            assert!(!full, "a read-only catalog with WAL coordination serves the warm route");
             assert_eq!(
                 serde_json::to_value(listed).unwrap(),
-                serde_json::to_value(discovered).unwrap()
+                serde_json::to_value(&discovered).unwrap()
+            );
+            drop(writer);
+            set_mode(0o555);
+            let read = std::panic::catch_unwind(crate::sessions_impl);
+            set_mode(0o755);
+            let (listed, full) = read.unwrap();
+            assert!(
+                full,
+                "without writable WAL coordination, scan rather than ignore live WAL frames"
+            );
+            assert_eq!(
+                serde_json::to_value(listed).unwrap(),
+                serde_json::to_value(&discovered).unwrap()
             );
         }
 
