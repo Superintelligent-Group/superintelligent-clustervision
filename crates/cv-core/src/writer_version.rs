@@ -81,7 +81,7 @@ fn parts(version: &str) -> Option<(Vec<&str>, Option<Vec<&str>>)> {
     let mut build = version.split('+');
     let version = build.next()?;
     if let Some(build) = build.next() {
-        if !identifiers(build) || build.is_empty() {
+        if !identifiers(build) {
             return None;
         }
     }
@@ -152,7 +152,7 @@ pub fn compare(a: &str, b: &str) -> Option<Ordering> {
 
 /// Fold an actual declaration into historical knowledge. Returns whether it is understood.
 pub(crate) fn observe(newest: &mut Option<String>, declaration: Option<&str>) -> bool {
-    let Some(version) = declaration.filter(|v| compare(v, v).is_some()) else {
+    let Some(version) = declaration.filter(|v| parts(v).is_some()) else {
         return false;
     };
     if newest
