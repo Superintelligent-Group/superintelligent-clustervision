@@ -460,6 +460,26 @@ pub(crate) fn build_argv(cmd: &CommandSpec, args: &Value) -> Result<Vec<String>>
     };
 
     for key in obj.keys() {
+        let replacement = match (cmd.name.as_str(), key.as_str()) {
+            ("dataset", "out" | "out_removed") => Some("file"),
+            ("deferrals", "since" | "since_removed") => Some("at"),
+            ("port" | "pack" | "splice", "to") => Some("harness"),
+            ("show" | "export", "head") => Some("first"),
+            ("show" | "export", "tail") => Some("last"),
+            ("port", "to_dir") => Some("cwd"),
+            ("prune", "range") => Some("keep"),
+            ("prune", "retrieve") => Some("cat tool with session and tool_use_id"),
+            ("rewind", "from_compaction") => Some("full (omit it to start at the last compaction)"),
+            _ => None,
+        };
+        if let Some(replacement) = replacement {
+            return Err(invalid(format!(
+                "argument `{key}` was removed from `{}` — use `{replacement}`",
+                cmd.tool_name()
+            )));
+        }
+    }
+    for key in obj.keys() {
         if key == "json" {
             continue; // forced on; tolerated from a caller that echoes the CLI
         }
@@ -894,6 +914,27 @@ mod tests {
         let e = build_argv(&cat(), &json!({"session": "abc"})).unwrap_err();
         assert!(e.downcast_ref::<InvalidParams>().is_some(), "{e}");
         assert!(format!("{e}").contains("tool_use_id"), "{e}");
+    }
+
+    #[test]
+    fn removed_properties_name_the_replacement() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                for (name, old, replacement) in [
+                    ("pack", "to", "harness"),
+                    ("dataset", "out", "file"),
+                    ("deferrals", "since", "at"),
+                ] {
+                    let commands = CliTools::from_tree(&crate::build_cli()).unwrap();
+                    let command = commands.commands().iter().find(|cmd| cmd.name == name).unwrap();
+                    let error = build_argv(command, &json!({old: "value"})).unwrap_err().to_string();
+                    assert!(error.contains(&format!("use `{replacement}`")), "{error}");
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
