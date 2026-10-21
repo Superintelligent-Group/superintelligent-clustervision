@@ -55,6 +55,7 @@
 //! (`Usage::cost_usd`, `Usage::reasoning_tokens`); `session.parent_id` is `Lineage::parent`; the
 //! remaining `session` columns land in `Session::extra["opencode"]`.
 
+use crate::json::{ReadInput, Validation};
 mod emit;
 mod record;
 #[cfg(any(feature = "sqlite", test))]
@@ -575,7 +576,7 @@ fn document<T>(
     f: impl for<'a> FnOnce(crate::json::JsonView<'a>, &crate::json::JsonSource) -> Result<T>,
 ) -> Result<Option<T>> {
     let source = crate::json::JsonSource::capture(path)?;
-    match source.read_syntax(|view| {
+    match source.read(ReadInput::Document, Validation::Syntax, |view| {
         if view.accepts_value()? {
             f(view, &source).map(Some)
         } else {
@@ -1131,9 +1132,15 @@ mod tests {
     ) -> (Vec<Message>, Vec<Message>) {
         let source = crate::json::JsonSource::capture(path).unwrap();
         let arena = std::sync::Arc::new(crate::harness::store::bytes::ByteSource::arena().unwrap());
-        let owned = source.read_document(|view| decode(view, record::Ctx::Owned)).unwrap();
+        let owned = source
+            .read(ReadInput::Document, Validation::Value, |view| {
+                decode(view, record::Ctx::Owned)
+            })
+            .unwrap();
         let mut spans = source
-            .read_document(|view| decode(view, record::Ctx::new(true, &source, &arena)))
+            .read(ReadInput::Document, Validation::Value, |view| {
+                decode(view, record::Ctx::new(true, &source, &arena))
+            })
             .unwrap();
         for message in &mut spans {
             message.materialize(&crate::lazy::Resolver::new(None)).unwrap();
@@ -1405,7 +1412,7 @@ mod tests {
         let source = crate::json::JsonSource::capture(&path).unwrap();
         let arena = std::sync::Arc::new(crate::harness::store::bytes::ByteSource::arena().unwrap());
         let mut messages = source
-            .read_document(|view| {
+            .read(ReadInput::Document, Validation::Value, |view| {
                 Ok(
                     record::Record::header(view, None, record::Ctx::new(true, &source, &arena))?
                         .unwrap()
@@ -1528,7 +1535,7 @@ mod tests {
         let source = crate::json::JsonSource::capture(&path).unwrap();
         let arena = std::sync::Arc::new(crate::harness::store::bytes::ByteSource::arena().unwrap());
         let messages = source
-            .read_document(|view| {
+            .read(ReadInput::Document, Validation::Value, |view| {
                 Ok(v2::build(
                     "message",
                     "shell",
@@ -1700,7 +1707,7 @@ mod tests {
         let source = crate::json::JsonSource::capture(&path).unwrap();
         let arena = std::sync::Arc::new(crate::harness::store::bytes::ByteSource::arena().unwrap());
         let messages = source
-            .read_document(|view| {
+            .read(ReadInput::Document, Validation::Value, |view| {
                 Ok(v2::build(
                     "message",
                     "assistant",

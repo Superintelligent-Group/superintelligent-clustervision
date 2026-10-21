@@ -7,6 +7,7 @@
 //! threaded via `uuid`/`parentUuid`.
 
 use super::{parse_ts, Adapter};
+use crate::json::{ReadInput, Validation};
 use crate::source::{Dependencies, Probe};
 
 /// `cv adopt`: move a sub-agent stranded by a dead session into a live one — Claude-only byte
@@ -533,7 +534,6 @@ struct Transcript<'r> {
 
 impl jsonl::Codec for Transcript<'_> {
     const VERSION: u32 = 1;
-    const NOTES_SKIPPED: bool = false;
 
     fn record(&mut self, view: crate::json::JsonView<'_>, at: u64, sink: &mut dyn MessageSink) -> Result<Flow> {
         let mut sourced = false;
@@ -883,7 +883,9 @@ fn read_agent_type(path: &Path) -> Result<Option<String>> {
         Err(error) if super::is_not_found(&error) => return Ok(None),
         Err(error) => return Err(error),
     };
-    source.read_document(|view| crate::affordance::input::field_string(view, "agentType"))
+    source.read(ReadInput::Document, Validation::Value, |view| {
+        crate::affordance::input::field_string(view, "agentType")
+    })
 }
 
 /// Missing metadata is optional; corrupt or unreadable metadata is an error.

@@ -38,6 +38,8 @@
 //! OWNED BY the redact work.
 
 use crate::ir::{Block, Message, Session};
+#[cfg(test)]
+use crate::json::{ReadInput, Validation};
 use regex::{Captures, Regex};
 use serde_json::Value;
 use std::borrow::Cow;
@@ -1356,7 +1358,9 @@ mod tests {
         std::fs::write(&path, serde_json::to_vec(&value)?)?;
         let source = crate::json::JsonSource::capture(&path)?;
         let text = source
-            .read_range_value(0, source.len(), |view| view.get("text")?.unwrap().source_text())?
+            .read(ReadInput::Range(0, source.len()), Validation::Value, |view| {
+                view.get("text")?.unwrap().source_text()
+            })?
             .unwrap();
         let raw = crate::Json::source(&path, 0, source.len())?;
         let mut session = Session::new("redaction", crate::Harness::OpenCode);

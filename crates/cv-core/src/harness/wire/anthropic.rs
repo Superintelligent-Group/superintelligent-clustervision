@@ -3,6 +3,8 @@
 //! persist it verbatim; the claude.ai export, OpenClaw, Goose and Zed's legacy threads renamed a
 //! key or two, which a [`Quirks`] constant names so the adapter does not re-type the shape.
 
+#[cfg(test)]
+use crate::json::{ReadInput, Validation};
 pub(crate) mod write;
 use crate::ir::Block;
 use crate::lazy::Text;
@@ -444,7 +446,9 @@ mod selected_media_tests {
         let raw = serde_json::to_vec(&"large text ".repeat(10000))?;
         std::fs::write(&path, &raw)?;
         let text = crate::json::JsonSource::capture(&path)?
-            .read_range_value(0, raw.len() as u64, |view| view.source_text())?
+            .read(ReadInput::Range(0, raw.len() as u64), Validation::Value, |view| {
+                view.source_text()
+            })?
             .unwrap();
         std::fs::write(&path, b"changed source")?;
         for block in [
@@ -485,7 +489,7 @@ mod selected_media_tests {
         std::fs::write(&path, serde_json::to_vec(&value)?)?;
         let source = crate::json::JsonSource::capture(&path)?;
         let block = source
-            .read_range_value(0, source.len(), |view| {
+            .read(ReadInput::Range(0, source.len()), Validation::Value, |view| {
                 block_from_view_with(view, &ANTHROPIC, true, &mut |v| v.text(true), 0)
             })?
             .unwrap();
@@ -511,7 +515,7 @@ mod selected_media_tests {
         std::fs::write(&path, serde_json::to_vec(&value)?)?;
         let source = crate::json::JsonSource::capture(&path)?;
         let block = source
-            .read_range_value(0, source.len(), |view| {
+            .read(ReadInput::Range(0, source.len()), Validation::Value, |view| {
                 block_from_view_with(view, &ANTHROPIC, true, &mut |v| v.text(true), 0)
             })?
             .unwrap();
@@ -532,7 +536,7 @@ mod selected_media_tests {
             serde_json::to_value(block_from(&value, &ANTHROPIC))?
         );
         let block = source
-            .read_range_value(0, source.len(), |view| {
+            .read(ReadInput::Range(0, source.len()), Validation::Value, |view| {
                 block_from_view_with(view, &ANTHROPIC, true, &mut |v| v.text(true), 0)
             })?
             .unwrap();
@@ -552,7 +556,7 @@ mod selected_media_tests {
                     let value = json!({"type":ty,"mimeType":"image/png","data":data,"name":"attachment","unknown":"x".repeat(200000)});
                     std::fs::write(&path, serde_json::to_vec(&value)?)?;
                     let source = crate::json::JsonSource::capture(&path)?;
-                    let selected = source.read_range_value(0, source.len(), |view| {
+                    let selected = source.read(ReadInput::Range(0, source.len()), Validation::Value, |view| {
                         block_from_view_with(view, &quirks, true, &mut |v| v.text(true), 0)
                     })?;
                     assert_eq!(

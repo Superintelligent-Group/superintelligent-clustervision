@@ -1,5 +1,6 @@
 //! Strict read-only JSONL projection, sharing document source slices and navigation indexes.
 
+use crate::json::{ReadInput, Validation};
 pub(crate) mod ranges;
 
 use super::document;
@@ -485,12 +486,16 @@ fn lines(
                 })
             };
             let read = (!blank).then(|| match decoded {
-                Some((backing, len)) => {
-                    source.read_positioned_decoded_value(&context, backing, len, at, range.len, &mut view)
-                }
-                None => {
-                    source.read_positioned_range(&context, at, range.len, crate::json::Validation::Value, &mut view)
-                }
+                Some((backing, len)) => source.read(
+                    ReadInput::Positioned(&context, at, range.len, Some((backing, len))),
+                    Validation::Value,
+                    &mut view,
+                ),
+                None => source.read(
+                    ReadInput::Positioned(&context, at, range.len, None),
+                    Validation::Value,
+                    &mut view,
+                ),
             });
             match read {
                 Some(Err(error)) if !visited && error.downcast_ref::<crate::json::InvalidJson>().is_some() => None,
@@ -638,7 +643,7 @@ impl<'s> Records<'s> {
         len: u64,
         f: impl FnOnce(crate::json::JsonView<'_>) -> anyhow::Result<T>,
     ) -> anyhow::Result<T> {
-        self.read_with(at, len, crate::json::Validation::Value, f)
+        self.read_with(at, len, Validation::Value, f)
     }
     /// [`Self::read`] under a chosen acceptance.
     pub(crate) fn read_with<T>(
@@ -664,19 +669,20 @@ impl<'s> Records<'s> {
             #[cfg(test)]
             note_mapped(map.len());
             let text = std::str::from_utf8(&map).map_err(|_| crate::json::InvalidJson)?;
-            return self.source.read_record_with(at, text, validation, f);
+            return self.source.read(ReadInput::Record(at, text, None), validation, f);
         }
         if len <= 64 * 1024 {
             self.buffer.resize(len as usize, 0);
             ranges::read_exact_at(self.file, &mut self.buffer, at)?;
             let text = std::str::from_utf8(&self.buffer).map_err(|_| crate::json::InvalidJson)?;
-            return self.source.read_record_with(at, text, validation, f);
+            return self.source.read(ReadInput::Record(at, text, None), validation, f);
         }
         if self.context.is_none() {
             self.context = Some(document::range::RangeSource::from_captured(self.source.clone())?);
         }
         let context = self.context.as_ref().expect("context was just made");
-        self.source.read_positioned_range(context, at, len, validation, f)
+        self.source
+            .read(ReadInput::Positioned(context, at, len, None), validation, f)
     }
 }
 
@@ -707,15 +713,19 @@ fn in_memory(
             })
         };
         let read = match (source, decoded) {
-            (Some(source), Some((backing, len))) => source.read_decoded_record(backing, len, at, text, view),
-            (Some(source), None) => source.read_record(at, text, view),
+            (Some(source), Some((backing, len))) => source.read(
+                ReadInput::Record(at, text, Some((backing, len))),
+                Validation::Value,
+                view,
+            ),
+            (Some(source), None) => source.read(ReadInput::Record(at, text, None), Validation::Value, view),
             (None, _) => (|| {
                 let context = document::range::RangeSource::text(None, text, at, false);
                 let range = document::range::Range {
                     offset: at,
                     len: text.len() as u64,
                 };
-                match context.accept(range, crate::json::Validation::Value)? {
+                match context.accept(range, Validation::Value)? {
                     Some(value) => view(crate::json::JsonView::of(&context, value)),
                     None => Err(crate::json::InvalidJson.into()),
                 }
@@ -737,6 +747,7 @@ fn in_memory(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use crate::json::{ReadInput, Validation};
     use crate::stream::Flow;
 
     /// Run the test `name` (its full path) again in a child process with core dumps off, and
@@ -905,10 +916,16 @@ pub(crate) mod tests {
             assert_eq!(lines, [(false, true), (false, false), (false, true)], "framer, {name}");
             let (at, len) = (valid.len() as u64 + 1, bad.len() as u64);
             let invalid = |result: anyhow::Result<()>| result.is_err_and(|e| e.is::<crate::json::InvalidJson>());
-            assert!(invalid(source.read_range_value(at, len, |_| Ok(()))), "value, {name}");
-            assert!(invalid(source.read_range_syntax(at, len, |_| Ok(()))), "syntax, {name}");
+            assert!(
+                invalid(source.read(ReadInput::Range(at, len), Validation::Value, |_| Ok(()))),
+                "value, {name}"
+            );
+            assert!(
+                invalid(source.read(ReadInput::Range(at, len), Validation::Syntax, |_| Ok(()))),
+                "syntax, {name}"
+            );
             let mut records = super::Records::new(&source, &file);
-            let read = records.read_with(at, len, crate::json::Validation::Syntax, |_| Ok(()));
+            let read = records.read_with(at, len, Validation::Syntax, |_| Ok(()));
             assert!(invalid(read), "records, {name}");
             let derived = crate::derive::transcript(
                 &source,

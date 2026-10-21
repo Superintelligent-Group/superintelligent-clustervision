@@ -78,7 +78,7 @@ pastes the lines it moved into its message. Results are never committed.
 
 **Byte sources by family.** JSONL (Claude, the OpenAI family, Gemini's jsonl era): `jsonl::Read`.
 JSON documents (Gemini's document era, cline, roo, cline_sdk, lmstudio, opensession, the exports):
-`JsonSource::read_document`/`read_archive`, with an owned view (`(&Value).into()`) for string entry
+`JsonSource::read(ReadInput, Validation, callback)`, with an owned view (`(&Value).into()`) for string entry
 points. SQLite stores (opencode, cursor, devin, goose, zed, openclaw, hermes): `store::sqlite::Cells`,
 each cell copied once into the source's arena, validated once, then viewed. `codex`, `cursor` and
 `goose` `legacy` modules are readers of older formats, not oracles. Test-only legacy emitters are

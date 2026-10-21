@@ -6,6 +6,7 @@ use crate::harness::store::{
 };
 use crate::harness::wire::text_title;
 use crate::json::{JsonSource, JsonView};
+use crate::json::{ReadInput, Validation};
 
 /// A `sessions.json` entry / `session_nodes.entry_json` (same shape).
 #[derive(Default, Debug, PartialEq)]
@@ -31,7 +32,7 @@ impl Indexes {
             // Missing, unreadable and malformed indexes historically fall back to transcript
             // metadata. Capture before the attempt; final dependency checks reject a race.
             JsonSource::capture(&path)
-                .and_then(|source| source.read_document(index))
+                .and_then(|source| source.read(ReadInput::Document, Validation::Value, index))
                 .unwrap_or_default()
         })
     }

@@ -11,6 +11,8 @@
 //! tool a [`MessageKind::SubagentSpawn`] and a synchronous spawn's result a
 //! [`MessageKind::SubagentReturn`].
 
+#[cfg(test)]
+use crate::json::{ReadInput, Validation};
 pub(crate) mod input;
 mod text;
 
@@ -1748,7 +1750,9 @@ mod tests {
                 })
                 .unwrap();
             let text = capture
-                .read_backing_value(backing, offset, len, |view| view.source_text())
+                .read(ReadInput::Backing(backing, offset, len), Validation::Value, |view| {
+                    view.source_text()
+                })
                 .unwrap()
                 .unwrap();
             let make = |text| {
@@ -2205,7 +2209,10 @@ mod tests {
             payload.push_str(&"é\n".repeat(50000));
             std::fs::write(&path, serde_json::to_vec(&payload).unwrap()).unwrap();
             let source = crate::json::JsonSource::capture(&path).unwrap();
-            let backed = source.read_syntax(|view| view.source_text()).unwrap().unwrap();
+            let backed = source
+                .read(ReadInput::Document, Validation::Syntax, |view| view.source_text())
+                .unwrap()
+                .unwrap();
             let run = |text: crate::lazy::Text| {
                 let mut messages = Vec::new();
                 let mut target = |m| {
@@ -2238,7 +2245,10 @@ mod tests {
         }
         // Stale retained backing is an error, rather than silently classifying the result.
         let source = crate::json::JsonSource::capture(&path).unwrap();
-        let backed = source.read_syntax(|view| view.source_text()).unwrap().unwrap();
+        let backed = source
+            .read(ReadInput::Document, Validation::Syntax, |view| view.source_text())
+            .unwrap()
+            .unwrap();
         std::fs::write(&path, b"\"changed\"").unwrap();
         let crate::lazy::Text::Source(backed) = backed else {
             panic!("large receipt backing")

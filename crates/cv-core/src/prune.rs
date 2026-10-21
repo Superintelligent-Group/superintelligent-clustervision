@@ -37,6 +37,7 @@ use crate::harness::store::{
     bytes::{ByteSource, ByteStage},
     jsonl::ranges::{self, Range},
 };
+use crate::json::{ReadInput, Validation};
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -461,7 +462,7 @@ fn prune_session_after_stage(
         line_no += 1;
         // An empty line is blank like any JSON-whitespace row (a JSON range cannot be empty).
         let read = (range.len != 0).then(|| {
-            source.read_range_value(range.offset, range.len, |view| {
+            source.read(ReadInput::Range(range.offset, range.len), Validation::Value, |view| {
                 decide(view, range, opts, &mut tool_names)
             })
         });
@@ -1678,9 +1679,11 @@ fn revive_staged(
         }
         if rewrite {
             let start = start.context("usage row has no JSON value")?;
-            source.read_backing_value(output.clone(), start, end - start, |view| {
-                write_source_usage(view, total, honest, &mut stage)
-            })?;
+            source.read(
+                ReadInput::Backing(output.clone(), start, end - start),
+                Validation::Value,
+                |view| write_source_usage(view, total, honest, &mut stage),
+            )?;
             stage.write_all(b"\n")?;
             rewritten += 1;
             stale_max = stale_max.max(total);

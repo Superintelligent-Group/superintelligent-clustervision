@@ -4,6 +4,7 @@
 use super::*;
 use crate::harness::store::{document::Fields, jsonl::ranges};
 use crate::json::InvalidJson;
+use crate::json::{ReadInput, Validation};
 
 /// Value acceptance is whole-document, including ignored descendants. Invalid JSON remains an
 /// empty session; read errors (including invalid UTF-8) remain fatal, as with read_to_string.
@@ -18,7 +19,7 @@ fn read<T>(path: &Path, f: impl for<'a> FnOnce(&JsonSource, JsonView<'a>) -> Res
         return Ok(None);
     }
     let mut entered = false;
-    match source.read_document(|view| {
+    match source.read(ReadInput::Document, Validation::Value, |view| {
         entered = true;
         f(&source, view)
     }) {

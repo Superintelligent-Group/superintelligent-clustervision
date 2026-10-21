@@ -1,4 +1,5 @@
 //! Connection-scoped export oracles; callbacks own no production instrumentation.
+use crate::json::{ReadInput, Validation};
 use crate::{Block, Harness, Message, Role, Session};
 use anyhow::Result;
 use rusqlite::{ffi, Connection};
@@ -113,7 +114,11 @@ pub(crate) fn fixture(world: &cv_testkit::World) -> Result<(Session, PathBuf)> {
     let path = world.base.join("body.json");
     std::fs::write(&path, serde_json::to_vec(&"λ\nquoted \"body\"".repeat(2000))?)?;
     let source = crate::json::JsonSource::capture(&path)?;
-    let text = source.read_range_value(0, source.len(), |v| v.source_text())?.unwrap();
+    let text = source
+        .read(ReadInput::Range(0, source.len()), Validation::Value, |v| {
+            v.source_text()
+        })?
+        .unwrap();
     let arguments = world.base.join("arguments.json");
     std::fs::write(&arguments, br#"{"z":1,"a":"escaped\n","dup":1,"dup":2,"n":1.25}"#)?;
     let input = crate::Json::source(&arguments, 0, std::fs::metadata(&arguments)?.len())?;

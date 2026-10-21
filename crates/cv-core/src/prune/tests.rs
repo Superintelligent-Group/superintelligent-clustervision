@@ -1,4 +1,5 @@
 use super::*;
+use crate::json::{ReadInput, Validation};
 
 /// A tiny but realistic Claude JSONL: an assistant tool_use, a user tool_result with a big payload
 /// (both the content block and the toolUseResult mirror), then a recent turn that must be spared.
@@ -52,7 +53,9 @@ fn fixture_decisions(lines: &[Value]) -> Vec<Option<Decision>> {
     .unwrap()
     .map(|row| {
         let (range, _) = row.unwrap();
-        let read = source.read_range_value(range.offset, range.len, |v| decide(v, range, &options, &mut tools));
+        let read = source.read(ReadInput::Range(range.offset, range.len), Validation::Value, |v| {
+            decide(v, range, &options, &mut tools)
+        });
         Some(read.unwrap())
     })
     .collect();
@@ -1373,7 +1376,9 @@ fn source_string_mutation_matches_frozen_output_sidecars_and_estimate() {
             offset: 0,
             len: raw.len() as u64,
         };
-        source.read_range_value(0, range.len, |_| Ok(())).unwrap();
+        source
+            .read(ReadInput::Range(0, range.len), Validation::Value, |_| Ok(()))
+            .unwrap();
         let opts = PruneOptions {
             min_size: 4,
             drop,
@@ -1417,7 +1422,9 @@ fn source_user_mutation_matches_frozen_rich_payload_and_mirror() {
                 offset: 0,
                 len: raw.len() as u64,
             };
-            source.read_range_value(0, range.len, |_| Ok(())).unwrap();
+            source
+                .read(ReadInput::Range(0, range.len), Validation::Value, |_| Ok(()))
+                .unwrap();
             let opts = PruneOptions {
                 min_size: 4,
                 drop,
@@ -1832,7 +1839,7 @@ fn linked_tool_input_projection_matches_frozen_owned_lookup() -> Result<()> {
         len: raw.len() as u64,
     };
     let mut tools = HashMap::new();
-    source.read_range_value(0, range.len, |view| {
+    source.read(ReadInput::Range(0, range.len), Validation::Value, |view| {
         decide(view, range, &PruneOptions::default(), &mut tools).map(|_| ())
     })?;
     assert_eq!(

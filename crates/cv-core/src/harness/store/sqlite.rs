@@ -15,6 +15,7 @@
 //! Every path's identity is captured before and checked after each read ([`ReadConnection::read`]),
 //! so a harness write during a read is an error, not a torn result.
 
+use crate::json::{ReadInput, Validation};
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags};
 use std::collections::HashSet;
@@ -586,7 +587,11 @@ impl Cells {
         cell: Cell,
         f: impl for<'a> FnOnce(crate::json::JsonView<'a>) -> Result<T>,
     ) -> Result<Option<T>> {
-        match self.source.read_backing_value(self.arena.clone(), cell.0, cell.1, f) {
+        match self.source.read(
+            ReadInput::Backing(self.arena.clone(), cell.0, cell.1),
+            Validation::Value,
+            f,
+        ) {
             Err(error) if error.downcast_ref::<crate::json::InvalidJson>().is_some() => Ok(None),
             result => result.map(Some),
         }

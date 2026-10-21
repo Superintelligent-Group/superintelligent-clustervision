@@ -113,6 +113,7 @@
 //! `Message::model` is each record's own recorded model and `Session::model` the first
 //! non-synthetic one seen.
 
+use crate::json::{ReadInput, Validation};
 mod discovery;
 mod emit;
 mod record;
@@ -380,7 +381,9 @@ fn stream_lines(
         drop(descriptors);
         for row in navigation {
             let (offset, len) = records[row.index];
-            let record = source.read_range_value(offset, len, |view| record::record(view, opts))?;
+            let record = source.read(ReadInput::Range(offset, len), Validation::Value, |view| {
+                record::record(view, opts)
+            })?;
             if fold.push(record, row.active, row.parent, sink)? == Flow::Stop {
                 break;
             }
@@ -681,7 +684,7 @@ impl JsonKeys {
         JSON_KEY_READS.with(|count| count.set(count.get() + 1));
         crate::json::JsonSource::capture(path)
             .and_then(|source| {
-                source.read_document(|view| {
+                source.read(ReadInput::Document, Validation::Value, |view| {
                     let mut index = Self::default();
                     view.for_each_entry(|key, entry| {
                         let Some(fields) = Fields::parse(entry, &["sessionId", "spawnedBy"])? else {

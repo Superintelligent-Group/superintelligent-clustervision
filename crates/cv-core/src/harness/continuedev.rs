@@ -38,6 +38,7 @@
 
 use super::store::document::{Fields, InvalidStruct};
 use crate::json::{InvalidJson, JsonSource, JsonView};
+use crate::json::{ReadInput, Validation};
 mod record;
 use super::wire::openai;
 use super::{ts_from_epoch, Adapter};
@@ -165,7 +166,7 @@ impl Adapter for Continue {
                 return Err(error);
             }
             let source = JsonSource::capture(&r.path)?;
-            let result = source.read_syntax(|root| {
+            let result = source.read(ReadInput::Document, Validation::Syntax, |root| {
                 let Some(doc) = Fields::parse_struct(root, &["title", "workspaceDirectory", "history"])? else {
                     return Err(InvalidStruct("expected Continue session struct").into());
                 };
@@ -386,7 +387,7 @@ fn is_undecodable(error: &anyhow::Error) -> bool {
 /// Read `sessions.json` (array of `{sessionId, title, dateCreated, workspaceDirectory}`); a
 /// non-array document is an empty index, a read or decode failure an error.
 fn read_index(path: &Path) -> Result<Vec<IndexMeta>> {
-    JsonSource::capture(path)?.read_document(|root| {
+    JsonSource::capture(path)?.read(ReadInput::Document, Validation::Value, |root| {
         let mut out = Vec::new();
         if let Some(entries) = root.array()? {
             for entry in entries {
@@ -437,7 +438,7 @@ struct Scan {
 
 /// `None` for a document that does not decode; an error for one that cannot be read.
 fn scan_session(path: &Path) -> Result<Option<Scan>> {
-    let scanned = JsonSource::capture(path)?.read_document(|root| {
+    let scanned = JsonSource::capture(path)?.read(ReadInput::Document, Validation::Value, |root| {
         let mut scan = Scan::default();
         if let Some(fields) = Fields::parse(root, &["title", "workspaceDirectory"])? {
             scan.title = record::title(fields.get("title"), false)?;
@@ -577,7 +578,7 @@ mod tests {
         fs::write(&path, serde_json::to_vec(&items).unwrap()).unwrap();
         let source = JsonSource::capture(&path).unwrap();
         source
-            .read_document(|root| {
+            .read(ReadInput::Document, Validation::Value, |root| {
                 let mut expected_model = None;
                 let mut actual_model = None;
                 for (view, owned) in root.array()?.unwrap().zip(items.as_array().unwrap()) {

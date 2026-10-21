@@ -1,5 +1,6 @@
 use super::*;
 use crate::emit::frozen::Frozen;
+use crate::json::{ReadInput, Validation};
 use crate::stream::{CollectSink, Demand, Tier};
 use serde_json::{json, Value};
 
@@ -649,7 +650,7 @@ fn wide_chatgpt_parts_preserve_filtered_join_and_source_guard() -> Result<()> {
     std::fs::write(&path, serde_json::to_vec(&json!({"parts":parts}))?)?;
     let source = crate::json::JsonSource::capture(&path)?;
     let resolver = crate::lazy::Resolver::new(None);
-    let text = source.read_range_value(0, source.len(), |view| {
+    let text = source.read(ReadInput::Range(0, source.len()), Validation::Value, |view| {
         let fields = crate::harness::store::document::Fields::parse(view, &["parts"])?;
         native::chatgpt_text(fields.as_ref(), true, &source, &resolver)
     })?;

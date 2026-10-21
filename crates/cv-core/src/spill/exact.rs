@@ -1,5 +1,7 @@
 //! Exact equality with a bounded in-memory fast path and a portable disk hash table.
 use crate::harness::store::bytes::Spill as Owner;
+#[cfg(test)]
+use crate::json::{ReadInput, Validation};
 use anyhow::{bail, Context, Result};
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -774,7 +776,7 @@ mod tests {
             std::fs::write(&path, serde_json::to_vec(&serde_json::json!({"key":body})).unwrap()).unwrap();
             let source = crate::json::JsonSource::capture(&path).unwrap();
             let text = source
-                .read_document(|view| {
+                .read(ReadInput::Document, Validation::Value, |view| {
                     let crate::Json::Source(range) = view.get("key")?.unwrap().to_json()? else {
                         anyhow::bail!("fixture must retain checked source range");
                     };
@@ -821,7 +823,9 @@ mod tests {
         std::fs::write(&path, serde_json::to_vec(&serde_json::json!({"key":body})).unwrap()).unwrap();
         let source = crate::json::JsonSource::capture(&path).unwrap();
         let text = source
-            .read_document(|view| view.get("key")?.unwrap().source_text()?.context("key string"))
+            .read(ReadInput::Document, Validation::Value, |view| {
+                view.get("key")?.unwrap().source_text()?.context("key string")
+            })
             .unwrap();
         assert!(matches!(text, crate::Text::Source(_)));
         let resolver = crate::lazy::Resolver::new(Some(path.clone()));

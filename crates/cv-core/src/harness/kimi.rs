@@ -79,6 +79,7 @@ use super::wire::openai;
 use super::Adapter;
 use crate::ir::*;
 use crate::json::{JsonSource, JsonView};
+use crate::json::{ReadInput, Validation};
 use crate::lazy::{Text, INLINE_MAX};
 use crate::source::{Dependencies, Probe};
 use crate::stream::{Checkpoint, Demand, Flow, MessageSink, Start, Tier};
@@ -744,7 +745,7 @@ fn read_custom_title(dir: &Path) -> Option<String> {
     let path = dir.join("state.json");
     let source = crate::json::JsonSource::capture(&path).ok()?;
     source
-        .read_range_value(0, source.len(), |view| {
+        .read(ReadInput::Range(0, source.len()), Validation::Value, |view| {
             super::wire::text_title(
                 view.get("custom_title")?
                     .filter(|value| value.is_string().unwrap_or(false)),

@@ -8,6 +8,8 @@ use super::*;
 use crate::harness::store::{document::Fields, text};
 use crate::harness::wire::genai::{self, Dialect, Part};
 use crate::json::{JsonSource, JsonView};
+#[cfg(test)]
+use crate::json::{ReadInput, Validation};
 use crate::lazy::{Resolver, Text};
 
 /// Every top-level key any message kind reads, selected in one pass.
@@ -815,7 +817,7 @@ mod genai_contracts {
             std::fs::write(&path, &bytes)?;
             let source = JsonSource::capture(&path)?;
             for demand in 0..2 {
-                let (blocks, flag) = source.read_range_value(0, source.len(), |view| {
+                let (blocks, flag) = source.read(ReadInput::Range(0, source.len()), Validation::Value, |view| {
                     let d = Demand {
                         harness: Harness::Gemini,
                         source: if demand == 0 { None } else { Some(&source) },

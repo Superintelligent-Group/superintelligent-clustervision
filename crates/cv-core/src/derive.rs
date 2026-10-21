@@ -4,6 +4,7 @@ use crate::harness::store::jsonl::ranges::{self, Range};
 use crate::harness::Identity;
 use crate::ir::Harness;
 use crate::json::{Json, JsonSource};
+use crate::json::{ReadInput, Validation};
 use anyhow::Result;
 use serde_json::Value;
 use std::io::Write;
@@ -63,9 +64,9 @@ impl Select {
         // An empty line is blank like any JSON-whitespace range (a JSON range cannot be empty).
         let projected = (range.len != 0).then(|| {
             if syntax {
-                source.read_range_syntax(range.offset, range.len, read)
+                source.read(ReadInput::Range(range.offset, range.len), Validation::Syntax, read)
             } else {
-                source.read_range_value(range.offset, range.len, read)
+                source.read(ReadInput::Range(range.offset, range.len), Validation::Value, read)
             }
         });
         let (record, ids) = match projected.transpose() {

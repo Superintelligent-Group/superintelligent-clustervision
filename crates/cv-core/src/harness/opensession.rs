@@ -30,6 +30,7 @@ use super::store::document::Fields;
 use super::{ts_from_value, Adapter};
 use crate::ir::*;
 use crate::json::{JsonSource, JsonView};
+use crate::json::{ReadInput, Validation};
 use crate::stream::{Demand, Flow, MessageSink};
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
@@ -224,7 +225,7 @@ fn is_document_file(p: &Path) -> bool {
 /// (user + assistant, the cross-harness contract) straight off the raw records. A document with
 /// no `id` is not a session cv can name: an error, as is one that cannot be read or decoded.
 fn doc_ref(path: &Path) -> Result<SessionRef> {
-    JsonSource::capture(path)?.read_document(|view| {
+    JsonSource::capture(path)?.read(ReadInput::Document, Validation::Value, |view| {
         let record = Fields::parse(view, &["id", "cwd", "title", "created_at", "updated_at", "messages"])?
             .context("document object")?;
         let o = record.project(&["id", "cwd", "title", "created_at", "updated_at"])?;
@@ -270,7 +271,9 @@ pub fn read_document(path: &Path) -> Result<Session> {
 /// Traverse the document's IR messages without retaining a complete Session.
 fn stream_document(path: &Path, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
     let source = JsonSource::capture(path)?;
-    source.read_document(|view| read(view, Some((path, &source)), opts, sink))
+    source.read(ReadInput::Document, Validation::Value, |view| {
+        read(view, Some((path, &source)), opts, sink)
+    })
 }
 
 /// The document codec, the only decoder of this format: the session envelope through the IR's own
@@ -284,7 +287,6 @@ fn read(
     opts: &Demand,
     sink: &mut dyn MessageSink,
 ) -> Result<Session> {
-    let check = || file.map_or(Ok(()), |(_, source)| source.check());
     {
         let keys = SESSION_FIELDS
             .iter()
@@ -311,30 +313,16 @@ fn read(
             ir_message(view?, true)?;
         }
         sink.meta(&session);
-        let mut has_sources = false;
         for view in messages.array()?.unwrap() {
             let message = ir_message(view?, opts.spans)?;
-            let sourced = message.content.iter().any(|block| {
-                matches!(
-                    block,
-                    Block::ToolUse {
-                        input: crate::Json::Source(_),
-                        ..
-                    }
-                )
-            });
-            has_sources |= sourced;
             let started = std::time::Instant::now();
             let flow = sink.try_message(message)?;
-            if let Some((_, source)) = file.filter(|_| sourced) {
+            if let Some((_, source)) = file {
                 source.check_after(started)?;
             }
             if flow == Flow::Stop {
                 break;
             }
-        }
-        if has_sources {
-            check()?;
         }
         Ok(session)
     }

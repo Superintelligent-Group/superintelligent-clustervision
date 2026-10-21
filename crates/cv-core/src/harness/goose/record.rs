@@ -6,6 +6,7 @@
 use super::*;
 use crate::harness::store::{bytes::ByteSource, document::Fields, text};
 use crate::json::{JsonSource, JsonView};
+use crate::json::{ReadInput, Validation};
 use crate::lazy::Text;
 use crate::stream::Tier;
 use std::sync::Arc;
@@ -248,7 +249,9 @@ fn tool(view: JsonView<'_>, tools: &mut HashMap<String, String>, opts: &Demand, 
                         writer.write_all(b"}")?;
                         Ok(())
                     })?;
-                    source.read_backing_value(arena.clone(), offset, len, |v| v.argument(opts.spans))?
+                    source.read(ReadInput::Backing(arena.clone(), offset, len), Validation::Value, |v| {
+                        v.argument(opts.spans)
+                    })?
                 }
                 None => crate::json::Json::default(),
             };

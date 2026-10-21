@@ -1,5 +1,7 @@
 //! Bounded text construction in a checked shared source arena.
 use super::bytes::ByteSource;
+#[cfg(test)]
+use crate::json::{ReadInput, Validation};
 use crate::{
     json::{JsonSource, JsonView},
     lazy::Text,
@@ -327,15 +329,19 @@ mod tests {
             })
             .unwrap();
         let text = source
-            .read_backing_value(arena.clone(), offset, len, |view| {
-                append(&source, &arena, |builder| {
-                    builder.push("prefix\n")?;
-                    assert!(builder.push_string(view.get("body")?.unwrap())?);
-                    assert!(!builder.push_string(view.get("scalar")?.unwrap())?);
-                    builder.push("\n")?;
-                    builder.push_json(view)
-                })
-            })
+            .read(
+                ReadInput::Backing(arena.clone(), offset, len),
+                Validation::Value,
+                |view| {
+                    append(&source, &arena, |builder| {
+                        builder.push("prefix\n")?;
+                        assert!(builder.push_string(view.get("body")?.unwrap())?);
+                        assert!(!builder.push_string(view.get("scalar")?.unwrap())?);
+                        builder.push("\n")?;
+                        builder.push_json(view)
+                    })
+                },
+            )
             .unwrap();
         assert!(matches!(text, Text::Source(_)));
         let expected = format!("prefix\n{body}\n{}", serde_json::to_string(&input).unwrap());
@@ -367,17 +373,21 @@ mod tests {
                 .unwrap();
             for string_only in [true, false] {
                 let mut visited = false;
-                let result = source.read_backing_syntax(arena.clone(), offset, len, |view| {
-                    visited = true;
-                    append(&source, &arena, |builder| {
-                        if string_only {
-                            builder.push_string(view)?;
-                            Ok(())
-                        } else {
-                            builder.push_json(view)
-                        }
-                    })
-                });
+                let result = source.read(
+                    ReadInput::Backing(arena.clone(), offset, len),
+                    Validation::Syntax,
+                    |view| {
+                        visited = true;
+                        append(&source, &arena, |builder| {
+                            if string_only {
+                                builder.push_string(view)?;
+                                Ok(())
+                            } else {
+                                builder.push_json(view)
+                            }
+                        })
+                    },
+                );
                 assert!(
                     visited,
                     "syntax-only view must exercise canonical strict string checking"

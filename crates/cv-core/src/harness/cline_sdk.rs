@@ -58,6 +58,7 @@ use super::wire::{self, anthropic};
 use super::{parse_ts, ts_from_epoch};
 use crate::ir::*;
 use crate::json::{JsonSource, JsonView};
+use crate::json::{ReadInput, Validation};
 use crate::stream::{Demand, Flow, MessageSink};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -150,7 +151,7 @@ fn mtime(path: &Path) -> Option<DateTime<Utc>> {
 }
 
 fn scan(path: &Path, sid: &str) -> Result<SessionRef> {
-    JsonSource::capture(path)?.read_document(|view| {
+    JsonSource::capture(path)?.read(ReadInput::Document, Validation::Value, |view| {
         let record = Fields::parse(view, &["messages", "updated_at"])?.context("SDK document object")?;
         let messages = record.get("messages").context("SDK messages")?;
         let id = ref_id(path, sid).context("SDK id")?;
@@ -213,7 +214,7 @@ pub fn stream(path: &Path, id: &str, sink: &mut dyn MessageSink) -> Result<Sessi
 
 pub(crate) fn stream_with_options(path: &Path, id: &str, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
     let source = JsonSource::capture(path)?;
-    source.read_document(|view| {
+    source.read(ReadInput::Document, Validation::Value, |view| {
         let keys = [
             "agent",
             "taskType",

@@ -95,6 +95,7 @@ use super::Adapter;
 use crate::ir::CARRIER_KEY;
 use crate::ir::*;
 use crate::json::{JsonSource, JsonView};
+use crate::json::{ReadInput, Validation};
 use crate::lazy::Text;
 use crate::source::{Dependencies, Probe};
 use crate::stream::{Demand, Flow, MessageSink, Start, Tier};
@@ -647,7 +648,7 @@ fn read_state(session_dir: &Path) -> Value {
 fn read_discovery_state(session_dir: &Path) -> Value {
     let read = || -> Result<Value> {
         let source = crate::json::JsonSource::capture(&session_dir.join("state.json"))?;
-        source.read_range_value(0, source.len(), |view| {
+        source.read(ReadInput::Range(0, source.len()), Validation::Value, |view| {
             let fields = super::store::document::Fields::parse(view, &["cwd", "title", "createdAt", "updatedAt"])?;
             let Some(fields) = fields else { return Ok(Value::Null) };
             let mut state = serde_json::Map::new();
@@ -1298,7 +1299,9 @@ impl<'a> Ctx<'a> {
                         out.field("time", time)?;
                         out.finish()
                     })?;
-                    let raw = source.read_backing_syntax(arena, offset, len, |view| view.to_json())?;
+                    let raw = source.read(ReadInput::Backing(arena, offset, len), Validation::Syntax, |view| {
+                        view.to_json()
+                    })?;
                     CompleteRecord::attach(std::slice::from_mut(&mut message), Harness::KimiCode, raw, Map::new());
                 }
                 None => {

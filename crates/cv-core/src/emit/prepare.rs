@@ -1,6 +1,7 @@
 //! Accept one source snapshot before retaining its lazy file bodies for native emission.
 use super::*;
 use crate::json::JsonSource;
+use crate::json::{ReadInput, Validation};
 use crate::source::{Probe, ReadSet};
 use crate::stream::{Flow, MessageSink};
 use anyhow::Context;
@@ -154,7 +155,7 @@ pub(super) fn selected(
                 .filter(|(offset, len)| offset.checked_add(*len).is_some_and(|end| end <= source.len()))
                 .with_context(|| format!("retained span is outside its source {}", path.display()))?;
             let bound = source
-                .read_range_value(offset, len, |view| view.source_text())?
+                .read(ReadInput::Range(offset, len), Validation::Value, |view| view.source_text())?
                 .with_context(|| format!("retained span is not a JSON string in {}", path.display()))?;
             source.check()?;
             *value = bound;

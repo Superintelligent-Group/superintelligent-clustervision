@@ -2,6 +2,7 @@
 use super::*;
 use crate::harness::store::document::{text_summary, Fields};
 use crate::json::{InvalidJson, JsonSource, JsonView};
+use crate::json::{ReadInput, Validation};
 use crate::lazy::{Resolver, Text};
 use crate::stream::Flow;
 use std::collections::{HashMap, VecDeque};
@@ -95,7 +96,8 @@ fn load_bounded(path: &Path, selected: Option<&str>, admission_bytes: usize) -> 
         let mut payload_charge = key.capacity().saturating_add(source.metadata_bytes());
         let mut charge = payload_charge;
         let mut cacheable = true;
-        let scanned = source.read_archive(|values| {
+        let scanned = source.read(ReadInput::Document, Validation::Syntax, |values| {
+            let values = values.accepted_array()?;
             for (position, view) in values.into_iter().flatten().enumerate() {
                 let Some(view) = view? else { continue };
                 let Some(record) = Fields::parse(view, CONVERSATION_FIELDS)? else {
@@ -425,32 +427,17 @@ pub(super) fn stream(kind: Kind, r: &SessionRef, opts: &Demand, sink: &mut dyn M
         }
         sink.meta(&session);
         let mut calls = HashMap::new();
-        let mut has_sources = false;
         for view in nodes.iter()? {
             if let Some(message) = build_message(kind, view?, opts.spans, &source, &resolver, &mut calls)? {
-                let sourced = message.content.iter().any(|block| {
-                    matches!(
-                        block,
-                        Block::ToolUse {
-                            input: crate::Json::Source(_),
-                            ..
-                        }
-                    )
-                });
-                has_sources |= sourced;
                 let started = std::time::Instant::now();
                 let flow = sink.try_message(message)?;
-                if sourced {
-                    archive.source.check_after(started)?;
-                }
+                archive.source.check_after(started)?;
                 if flow == Flow::Stop {
                     break;
                 }
             }
         }
-        if has_sources {
-            archive.source.check()?;
-        }
+
         Ok(session)
     })
 }

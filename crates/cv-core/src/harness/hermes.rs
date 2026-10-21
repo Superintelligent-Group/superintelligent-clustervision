@@ -61,6 +61,7 @@
 //! compaction flags, the raw reasoning columns, and the session row under
 //! `extra["hermes"]["session"]`.
 
+use crate::json::{ReadInput, Validation};
 mod emit;
 pub use emit::emit;
 
@@ -1594,7 +1595,9 @@ fn content(
             })?;
             Ok(())
         })?;
-        match source.read_backing_value(arena.clone(), offset, len, |v| multimodal_blocks(v, spans)) {
+        match source.read(ReadInput::Backing(arena.clone(), offset, len), Validation::Value, |v| {
+            multimodal_blocks(v, spans)
+        }) {
             Ok(Some(blocks)) => return Ok((Some(Body::Blocks(blocks)), false)),
             Ok(None) => {}
             Err(error) if error.is::<crate::json::InvalidJson>() => {}

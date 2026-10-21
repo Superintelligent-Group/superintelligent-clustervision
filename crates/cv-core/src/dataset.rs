@@ -13,6 +13,8 @@
 //! Reasoning is kept in a `<thinking>` wrapper — it's high-signal for distilling into smaller
 //! models, and a downstream filter can strip it if a given run wants answer-only SFT.
 
+#[cfg(test)]
+use crate::json::{ReadInput, Validation};
 mod deferred;
 
 use crate::ir::{Block, Message, MessageKind, Role, Session};
@@ -1043,7 +1045,11 @@ mod tests {
             })
             .unwrap();
         let text = source
-            .read_backing_value(backing.clone(), offset, len, |view| view.source_text())
+            .read(
+                ReadInput::Backing(backing.clone(), offset, len),
+                Validation::Value,
+                |view| view.source_text(),
+            )
             .unwrap()
             .unwrap();
         let mut first = Message::new(Role::User);

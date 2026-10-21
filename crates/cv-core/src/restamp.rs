@@ -8,6 +8,8 @@
 //! output quoting a transcript) is content and is not touched. The property, pinned below:
 //! `restamp(restamp(x, a), b) == x` when `b` is the id `x` carried.
 
+#[cfg(test)]
+use crate::json::{ReadInput, Validation};
 use serde::Deserialize;
 use serde_json::value::RawValue;
 
@@ -191,7 +193,9 @@ mod tests {
             Vec::new()
         } else {
             let keys = crate::harness::claude::IDENTITY.session_keys;
-            match source.read_range_syntax(offset, len, |view| source_id_spans(view, keys)) {
+            match source.read(ReadInput::Range(offset, len), Validation::Syntax, |view| {
+                source_id_spans(view, keys)
+            }) {
                 Ok(spans) => spans,
                 Err(e) if e.is::<crate::json::InvalidJson>() || e.is::<InvalidStruct>() => Vec::new(),
                 Err(e) => return Err(e),

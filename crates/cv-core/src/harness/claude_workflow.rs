@@ -20,6 +20,7 @@
 //! phases → agents → outcomes + the script — making workflows queryable on their own terms.
 
 use super::claude::sidecar;
+use crate::json::{ReadInput, Validation};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
@@ -359,7 +360,9 @@ pub fn workflow(parent_path: &Path, key: &str) -> Option<Workflow> {
     #[cfg(test)]
     record_state_materialization(source.path());
     source
-        .read_document(|view| Ok(parse_state(view.resolve()?.as_ref())))
+        .read(ReadInput::Document, Validation::Value, |view| {
+            Ok(parse_state(view.resolve()?.as_ref()))
+        })
         .ok()
 }
 
@@ -374,7 +377,7 @@ fn workflow_index(parent_path: &Path) -> Vec<(crate::json::JsonSource, String, O
     let mut index = crate::par_filter_map(state_paths(parent_path), |path| {
         let source = crate::json::JsonSource::capture(&path).ok()?;
         let (id, name) = source
-            .read_document(|view| {
+            .read(ReadInput::Document, Validation::Value, |view| {
                 Ok((
                     crate::affordance::input::field_string(view, "runId")?.unwrap_or_default(),
                     crate::affordance::input::field_string(view, "workflowName")?,
@@ -482,7 +485,9 @@ pub fn run_names(parent_path: &Path) -> Vec<(String, String)> {
             let name = by_script.get(&rid).cloned().or_else(|| {
                 crate::json::JsonSource::capture(&p)
                     .ok()?
-                    .read_document(|view| crate::affordance::input::field_string(view, "workflowName"))
+                    .read(ReadInput::Document, Validation::Value, |view| {
+                        crate::affordance::input::field_string(view, "workflowName")
+                    })
                     .ok()
                     .flatten()
             });

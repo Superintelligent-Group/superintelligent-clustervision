@@ -3,6 +3,8 @@
 //! The serde derives visit message and block fields. This visitor replaces only their lazy
 //! leaves; ordinary fields still use serde_json. Output may be partial on any error, so callers
 //! publishing files must stage them first.
+#[cfg(test)]
+use crate::json::{ReadInput, Validation};
 use crate::{
     ir::{Block, Message, Session},
     json::Json,
@@ -744,7 +746,9 @@ mod output_freshness_tests {
         let raw = serde_json::to_vec(&"source body ".repeat(10000))?;
         std::fs::write(&path, &raw)?;
         let text = crate::json::JsonSource::capture(&path)?
-            .read_range_value(0, raw.len() as u64, |view| view.source_text())?
+            .read(ReadInput::Range(0, raw.len() as u64), Validation::Value, |view| {
+                view.source_text()
+            })?
             .unwrap();
         let mut message = Message::new(crate::Role::User);
         message.content.push(Block::Text { text });
@@ -778,7 +782,9 @@ mod output_freshness_tests {
                 // Refresh capture after each deliberate source replacement.
                 message.content[0] = Block::Text {
                     text: crate::json::JsonSource::capture(&path)?
-                        .read_range_value(0, raw.len() as u64, |v| v.source_text())?
+                        .read(ReadInput::Range(0, raw.len() as u64), Validation::Value, |v| {
+                            v.source_text()
+                        })?
                         .unwrap(),
                 };
                 let mut writer = Mutate {

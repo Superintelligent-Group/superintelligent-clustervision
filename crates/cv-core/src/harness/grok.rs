@@ -30,6 +30,7 @@
 //!   `summary.json` has `parent_session_id` (→ `lineage.forked_from`), and a parent lists each child
 //!   under `subagents/<child id>/meta.json` (→ the child's `lineage.parent`).
 
+use crate::json::{ReadInput, Validation};
 pub(crate) mod emit;
 mod record;
 pub use emit::emit;
@@ -108,7 +109,7 @@ impl Adapter for Grok {
         let subagent = JsonSource::capture(&summary_path)
             .inspect_err(note)
             .ok()?
-            .read_document(|view| {
+            .read(ReadInput::Document, Validation::Value, |view| {
                 let kind = view
                     .get("session_kind")?
                     .map(|kind| crate::projection::string_prefix(kind, SUBAGENT_KIND.len() + 1))

@@ -14,6 +14,8 @@
 //! An adapter names its store's spelling with a `Quirks` constant and keeps only what is genuinely
 //! its own: where its files are and which records mean prompt, reply, tool, compaction.
 
+#[cfg(test)]
+use crate::json::{ReadInput, Validation};
 use serde_json::Value;
 
 pub mod anthropic;
@@ -218,7 +220,7 @@ mod tests {
             std::fs::write(&path, serde_json::to_vec(&value)?)?;
             for primary_span in [false, true] {
                 let source = crate::json::JsonSource::capture(&path)?;
-                let text = source.read_range_value(0, source.len(), |view| {
+                let text = source.read(ReadInput::Range(0, source.len()), Validation::Value, |view| {
                     joined(Some(view), TEXT, Backing::Source(&source), &mut |v| {
                         if primary_span {
                             v.lazy_text(true)
@@ -257,7 +259,9 @@ mod tests {
         ] {
             std::fs::write(&path, serde_json::to_vec(&value)?)?;
             let source = crate::json::JsonSource::capture(&path)?;
-            let title = source.read_range_value(0, source.len(), |view| text_title(Some(view)))?;
+            let title = source.read(ReadInput::Range(0, source.len()), Validation::Value, |view| {
+                text_title(Some(view))
+            })?;
             let full = joined_owned(Some(&value), TEXT);
             let expected =
                 (!full.trim().is_empty()).then(|| crate::ir::truncate(&full, crate::projection::Head::TITLE));

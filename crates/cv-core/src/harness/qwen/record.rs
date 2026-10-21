@@ -6,6 +6,8 @@ use super::*;
 use crate::harness::store::document::{text_head, text_summary, Fields};
 use crate::harness::wire::genai::{self, Dialect, Part};
 use crate::json::{JsonSource, JsonView};
+#[cfg(test)]
+use crate::json::{ReadInput, Validation};
 use crate::lazy::{Resolver, Text};
 use crate::stream::Tier;
 
@@ -716,7 +718,9 @@ mod tests {
         ]}});
         std::fs::write(&path, serde_json::to_vec(&record)?)?;
         let source = JsonSource::capture(&path)?;
-        let blocks = source.read_document(|view| content_blocks(view.get("message")?, Demand::Discovery))?;
+        let blocks = source.read(ReadInput::Document, Validation::Value, |view| {
+            content_blocks(view.get("message")?, Demand::Discovery)
+        })?;
         assert!(serde_json::to_vec(&blocks)?.len() < 2000);
         assert!(
             matches!(&blocks[3], Block::ToolUse { id, name, namespace: Some(namespace), input }
@@ -750,7 +754,7 @@ mod genai_contracts {
             std::fs::write(&path, &bytes)?;
             let source = JsonSource::capture(&path)?;
             for demand in 0..3 {
-                let (blocks, flag) = source.read_range_value(0, source.len(), |view| {
+                let (blocks, flag) = source.read(ReadInput::Range(0, source.len()), Validation::Value, |view| {
                     let d = match demand {
                         0 => Demand::Owned,
                         1 => Demand::Spans(&source),

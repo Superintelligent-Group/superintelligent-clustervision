@@ -39,6 +39,7 @@
 //! `parse_all_str` (used by the wasm ingest path) handles all three readable JSON/JSONL shapes purely,
 //! with no filesystem access.
 
+use crate::json::{ReadInput, Validation};
 mod emit;
 mod record;
 pub use emit::emit;
@@ -455,13 +456,15 @@ fn read_document(
     // serde's typed envelope: syntax only, each message accepted on its own. Either way the
     // source view checks the descriptor's identity after the visit.
     let mut visited = false;
-    let read = source.read_document(|view| {
+    let read = source.read(ReadInput::Document, Validation::Value, |view| {
         visited = true;
         document(view, Some(path), d, sink, true)
     });
     let read = match read {
         Err(error) if !visited && error.is::<crate::json::InvalidJson>() => {
-            source.read_syntax(|view| document(view, Some(path), d, sink, false))
+            source.read(ReadInput::Document, Validation::Syntax, |view| {
+                document(view, Some(path), d, sink, false)
+            })
         }
         read => read,
     };

@@ -43,6 +43,7 @@
 //! namespace (`rooveterinaryinc.roo-cline` / `rooveterinaryinc.roo-code`) and `~/.roo/`. The real
 //! parsing lives here as `pub` helpers; `roo.rs` reuses them with Roo's paths + `Harness::Roo`.
 
+use crate::json::{ReadInput, Validation};
 mod prompt;
 mod writer;
 
@@ -268,7 +269,7 @@ pub fn discover_in(roots: &[PathBuf], harness: Harness) -> crate::Discovered {
 fn scan(dir: &Path, id: &str, harness: Harness) -> Result<SessionRef> {
     let history = dir.join("api_conversation_history.json");
     let source = JsonSource::capture(&history)?;
-    let (mut cwd, title, message_count) = source.read_document(|view| {
+    let (mut cwd, title, message_count) = source.read(ReadInput::Document, Validation::Value, |view| {
         let messages = view.array()?.context("history array")?;
         let mut cwd = None;
         let mut title = None;
@@ -456,7 +457,8 @@ pub fn stream_task_dir(
     let mut stamped_first_user = false;
     // An item that is not one JSON value, and a history that does not decode, are counted.
     let mut unparsed = super::Unparsed::default();
-    let result = source.read_archive(|items| {
+    let result = source.read(ReadInput::Document, Validation::Syntax, |items| {
+        let items = items.accepted_array()?;
         for view in items.into_iter().flatten() {
             let Some(view) = view? else {
                 unparsed.count();
@@ -955,7 +957,7 @@ fn optional_document<T>(path: &Path, visit: impl for<'a> FnOnce(JsonView<'a>) ->
     let Ok(source) = JsonSource::capture(path) else {
         return Ok(None);
     };
-    match source.read_document(visit) {
+    match source.read(ReadInput::Document, Validation::Value, visit) {
         Ok(value) => Ok(Some(value)),
         Err(error) if error.is::<InvalidJson>() => Ok(None),
         Err(error) => Err(error),

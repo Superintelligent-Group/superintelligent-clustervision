@@ -19,6 +19,8 @@
 //! the transcript. Requested full summaries are retained as output and may be arbitrarily large.
 
 use crate::ir::{Block, Message, MessageKind, SessionRef};
+#[cfg(test)]
+use crate::json::{ReadInput, Validation};
 use crate::stream::{Flow, MessageSink};
 use serde_json::Value;
 
@@ -447,7 +449,9 @@ mod tests {
             })
             .unwrap();
         let text = capture
-            .read_backing_value(backing, offset, len, |view| view.source_text())
+            .read(ReadInput::Backing(backing, offset, len), Validation::Value, |view| {
+                view.source_text()
+            })
             .unwrap()
             .unwrap();
         let mut message = summary("b", "");

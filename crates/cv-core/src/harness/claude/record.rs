@@ -7,6 +7,8 @@
 use super::*;
 use crate::harness::store::document::Fields;
 use crate::json::JsonView;
+#[cfg(test)]
+use crate::json::{ReadInput, Validation};
 use crate::stream::Tier;
 
 /// Every top-level key any record kind reads. One selection pass per record; a field is
@@ -1462,7 +1464,9 @@ mod tests {
                     fs::write(&path, &encoded).unwrap();
                     let source = JsonSource::capture(&path).unwrap();
                     let actual = source
-                        .read_record(0, &encoded, |view| classify_head(view, origin))
+                        .read(ReadInput::Record(0, &encoded, None), Validation::Value, |view| {
+                            classify_head(view, origin)
+                        })
                         .unwrap();
                     assert_eq!(actual.1, expected, "{origin:?}");
                 }

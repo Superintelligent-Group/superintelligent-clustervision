@@ -2,6 +2,7 @@
 use super::*;
 use crate::harness::store::{document::Fields, jsonl::ranges};
 use crate::json::{InvalidJson, JsonSource, JsonView};
+use crate::json::{ReadInput, Validation};
 use crate::stream::Tier;
 
 /// The first physical record is always the header, including when it is malformed or empty.
@@ -151,7 +152,9 @@ pub(super) fn discover(name: &str, path: &Path) -> Result<SessionRef> {
                 Ok(())
             }
         } else if header {
-            source.read_range_value(range.offset, range.len, |view| note_header(view, &mut session))
+            source.read(ReadInput::Range(range.offset, range.len), Validation::Value, |view| {
+                note_header(view, &mut session)
+            })
         } else {
             // Legacy discovery has always rejected invalid UTF-8 anywhere in the file. Keep
             // that inclusion contract without decoding undemanded message JSON or bodies.
