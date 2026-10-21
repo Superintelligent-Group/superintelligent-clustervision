@@ -16,7 +16,6 @@ use uuid::Uuid;
 /// reader (`harness/hermes.rs`) expects: a `sessions` row + OpenAI-shaped `messages` rows
 /// (role/content/tool_calls JSON/reasoning/timestamps as REAL unix secs). Multimodal content uses
 /// the `\x00json:` sentinel prefix.
-#[cfg(feature = "sqlite")]
 pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<EmitResult> {
     use rusqlite::Connection;
 

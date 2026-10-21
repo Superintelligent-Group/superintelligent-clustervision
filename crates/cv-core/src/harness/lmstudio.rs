@@ -650,7 +650,7 @@ fn is_conversation_file(path: &Path) -> bool {
         return false;
     }
     match path.file_name().and_then(|n| n.to_str()) {
-        Some(name) => name.ends_with(".conversation.json") || name.ends_with(".json"),
+        Some(name) => name.ends_with(".json"),
         None => false,
     }
 }
