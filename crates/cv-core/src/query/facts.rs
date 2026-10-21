@@ -637,7 +637,7 @@ impl<'a> RefQuery<'a> {
             query,
             text_sets,
             heavy: query.needs_parse() || query.needs_index() || query.needs_events() || query.needs_forest(),
-            table: (query.needs_counted() && !demand_counts).then(crate::catalog::AffordanceTable::load),
+            table: None,
             demand_counts,
             reader: None,
             probe: crate::source::Probe::default(),
@@ -651,49 +651,39 @@ impl<'a> RefQuery<'a> {
         if !self.heavy && !self.query.needs_counted() {
             return Ok(Tri::True);
         }
-        if self.demand_counts {
-            // The existing evaluator may settle metadata/index Boolean branches without counts.
-            let without_counts = self.query.eval(&Facts {
-                r,
-                session: None,
-                ext: &RefFacts {
-                    id: &r.id,
-                    text_sets: self.text_sets,
-                    counts: None,
-                },
-            })?;
-            if !matches!(without_counts, Tri::Unknown) || !self.query.needs_counted() {
-                return Ok(without_counts);
-            }
+        // Metadata and indexed text can settle a Boolean branch without opening the catalog.
+        let without_counts = self.query.eval(&Facts {
+            r,
+            session: None,
+            ext: &RefFacts {
+                id: &r.id,
+                text_sets: self.text_sets,
+                counts: None,
+            },
+        })?;
+        if !matches!(without_counts, Tri::Unknown) || !self.query.needs_counted() {
+            return Ok(without_counts);
+        }
+        let counts = if self.demand_counts {
             if self.reader.is_none() {
                 self.reader = crate::catalog::Reader::open();
             }
-            let counts = self
-                .reader
+            self.reader
                 .as_ref()
-                .and_then(|reader| reader.counts_with_probe(r, &self.probe.snapshot(r), &mut self.probe));
-            return self.query.eval(&Facts {
-                r,
-                session: None,
-                ext: &RefFacts {
-                    id: &r.id,
-                    text_sets: self.text_sets,
-                    counts,
-                },
-            });
-        }
-        let facts = RefFacts {
-            id: &r.id,
-            text_sets: self.text_sets,
-            counts: self
-                .table
-                .as_ref()
-                .and_then(|t| t.counts_with_probe(r, &self.probe.snapshot(r), &mut self.probe)),
+                .and_then(|reader| reader.counts_with_probe(r, &self.probe.snapshot(r), &mut self.probe))
+        } else {
+            self.table
+                .get_or_insert_with(crate::catalog::AffordanceTable::load)
+                .counts_with_probe(r, &self.probe.snapshot(r), &mut self.probe)
         };
         self.query.eval(&Facts {
             r,
             session: None,
-            ext: &facts,
+            ext: &RefFacts {
+                id: &r.id,
+                text_sets: self.text_sets,
+                counts,
+            },
         })
     }
 
@@ -862,20 +852,26 @@ mod tests {
     }
 
     #[test]
-    fn demand_counts_follow_existing_boolean_shortcircuits_without_opening_reader() {
+    fn counts_follow_boolean_shortcircuits_without_loading_reader_or_table() {
         let r = missing_source();
         for expression in [
             "id:absent AND has:plan",
             "id:indexed-session OR has:plan",
             "text:hit OR has:plan",
+            "has:plan OR text:hit",
+            "text:miss AND has:plan",
+            "has:plan AND text:miss",
+            "NOT (text:miss AND has:plan)",
         ] {
             let query = SessionQuery::parse(expression).unwrap();
             let texts = text_sets(&query, &r);
-            let mut plan = RefQuery::with_counts_mode(&query, &texts, true);
-            let result = plan.cheap(&r).unwrap();
-            assert!(!matches!(result, Tri::Unknown), "{expression}");
-            assert!(plan.reader.is_none(), "{expression} should not demand counts");
-            assert!(plan.table.is_none());
+            for demand_counts in [false, true] {
+                let mut plan = RefQuery::with_counts_mode(&query, &texts, demand_counts);
+                let result = plan.cheap(&r).unwrap();
+                assert!(!matches!(result, Tri::Unknown), "{expression}");
+                assert!(plan.reader.is_none(), "{expression} should not demand counts");
+                assert!(plan.table.is_none(), "{expression} should not load counts");
+            }
         }
     }
 

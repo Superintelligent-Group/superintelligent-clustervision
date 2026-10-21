@@ -25,6 +25,7 @@
 
 - **Breaking (library):** forest and subagent-reference APIs return `Result`; unreadable forests fail views, queries, indexing and stats instead of hiding agents.
 - Initialize the sweep catalog before feeding jobs, preventing concurrent cold opens from failing search baseline invalidation.
+- Boolean search filters load affordance counts only when metadata and indexed text cannot decide a row.
 
 - Failed partial spill-index reads preserve cached membership data for safe retry and eviction.
 
