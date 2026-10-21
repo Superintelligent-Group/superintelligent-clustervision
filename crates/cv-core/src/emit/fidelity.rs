@@ -314,9 +314,8 @@ pub(super) fn features(target: Harness, thinking: ThinkingMode, session: &Sessio
     } else {
         Default::default()
     };
-    let orphan_call = |b: &Block| {
-        answered_only && matches!(b, Block::ToolUse { id, .. } if !answered.contains(id.as_str()))
-    };
+    let orphan_call =
+        |b: &Block| answered_only && matches!(b, Block::ToolUse { id, .. } if !answered.contains(id.as_str()));
     for message in &session.messages {
         f.note(target, thinking, message, session.model.is_some(), &orphan_call);
     }
@@ -660,7 +659,6 @@ pub(crate) fn write_rules(h: Harness) -> WriteRules {
         | Harness::OpenSession => none,
     }
 }
-
 
 /// A human-typed client command (`/compact`, `?help`) rather than a prompt for the model.
 pub(super) fn is_client_command(m: &Message) -> bool {

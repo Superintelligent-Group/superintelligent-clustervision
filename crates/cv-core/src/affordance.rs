@@ -1140,7 +1140,10 @@ fn detail_hits<'a>(
             });
         }
     }
-    for hit in crate::harness::rootless(h).map(|a| a.message_affordances(m)).unwrap_or_default() {
+    for hit in crate::harness::rootless(h)
+        .map(|a| a.message_affordances(m))
+        .unwrap_or_default()
+    {
         out.push(Hit::Detail {
             kind: hit.kind,
             action: hit.action,
@@ -1209,7 +1212,13 @@ pub(crate) fn mode_row(tool: &str, modes: &[&str]) -> Affordance {
     session_row(Kind::Approval, "state", tool, summary, Vec::new())
 }
 
-pub(crate) fn session_row(kind: Kind, action: &'static str, tool: &str, summary: String, items: Vec<Item>) -> Affordance {
+pub(crate) fn session_row(
+    kind: Kind,
+    action: &'static str,
+    tool: &str,
+    summary: String,
+    items: Vec<Item>,
+) -> Affordance {
     Affordance {
         kind,
         action,
@@ -1248,7 +1257,11 @@ pub fn session_rows(s: &Session) -> Vec<Affordance> {
     if !modes.is_empty() {
         out.push(mode_row(MODES_KEY, &modes));
     }
-    out.extend(crate::harness::rootless(s.harness).map(|a| a.session_affordances(s)).unwrap_or_default());
+    out.extend(
+        crate::harness::rootless(s.harness)
+            .map(|a| a.session_affordances(s))
+            .unwrap_or_default(),
+    );
     if let Some(cp) = bag.get(CHECKPOINTS_KEY).and_then(Value::as_object) {
         let n = cp.get("count").and_then(Value::as_u64).unwrap_or(0);
         let files: Vec<Item> = cp

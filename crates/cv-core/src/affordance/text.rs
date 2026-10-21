@@ -255,7 +255,9 @@ pub(super) fn denied(text: &Text, resolver: &Resolver, harness: Harness) -> Resu
     let denials = crate::harness::rootless(harness).map_or(&[][..], |adapter| adapter.denials());
     for denial in denials {
         if starts_with(text, resolver, denial.prefix)?
-            && denial.also.map_or(Ok(true), |needle| contains(text, resolver, needle))?
+            && denial
+                .also
+                .map_or(Ok(true), |needle| contains(text, resolver, needle))?
         {
             return Ok(true);
         }

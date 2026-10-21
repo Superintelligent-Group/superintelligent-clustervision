@@ -145,11 +145,7 @@ fn project(message: &Message, resolver: &crate::lazy::Resolver, target: Harness)
                 // Preserve the old source-error boundary even though feature counts ignore args.
                 input.with_view(|_| Ok(()))?;
                 Block::ToolUse {
-                    id: if keep_ids {
-                        id.clone()
-                    } else {
-                        String::new()
-                    },
+                    id: if keep_ids { id.clone() } else { String::new() },
                     name: String::new(),
                     input: Value::Null.into(),
                     namespace: None,
@@ -165,11 +161,7 @@ fn project(message: &Message, resolver: &crate::lazy::Resolver, target: Harness)
             } => {
                 validate_text(content, resolver)?;
                 Block::ToolResult {
-                    tool_use_id: if keep_ids {
-                        tool_use_id.clone()
-                    } else {
-                        String::new()
-                    },
+                    tool_use_id: if keep_ids { tool_use_id.clone() } else { String::new() },
                     content: "".into(),
                     tool_name: tool_name
                         .as_ref()
