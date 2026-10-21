@@ -3761,6 +3761,7 @@ mod tests {
                 _ => panic!("batch/single query mismatch: {query}"),
             }
         }
+        // Zero needles need no index; any real query must open one, even if it finds no hits.
         let absent = dir.join("no-index");
         assert!(text_search_ids_batch(&absent, &[]).unwrap().is_empty());
         assert!(text_search_ids_batch(&absent, &["alpha"]).is_err());
@@ -5347,7 +5348,7 @@ mod tests {
         std::fs::remove_dir_all(&sdir).ok();
     }
 
-    /// Regression for the truncated-fresh hole (B1): a parse error *after* chunk docs were already
+    /// Regression for the truncated-fresh hole: a parse error *after* chunk docs were already
     /// flushed into the writer must not leave those docs behind — they carry the full current
     /// `(mtime, size)` stamp, so a later `sig_is_fresh_with_source` would skip the session forever and freeze
     /// the truncated head into the index. [`index_session_clean`] (the path both `index_all` and
@@ -5684,7 +5685,7 @@ mod tests {
         std::fs::remove_dir_all(&sdir).ok();
     }
 
-    /// Regression (B2): an FTS-fresh sub-agent whose *catalog* is stale (e.g. first run after an
+    /// Regression: an FTS-fresh sub-agent whose *catalog* is stale (e.g. first run after an
     /// event-schema upgrade) takes the catalog-only pass — which must never
     /// delete its tantivy docs. The pre-fix path issued the delete-by-id BEFORE the fresh check,
     /// so the agent's docs were dropped and never re-added: a window of silently missing results.
@@ -5776,7 +5777,7 @@ mod tests {
         std::fs::remove_dir_all(sdir).ok();
     }
 
-    /// Regression (B3): a plain (no `--subagents`) refresh after `cv index --subagents` must NOT
+    /// Regression: a plain (no `--subagents`) refresh after `cv index --subagents` must NOT
     /// reap the folded forest. Only a --subagents sweep walks the forest, so only it can tell a
     /// vanished agent transcript from a merely-unvisited one.
     #[test]
