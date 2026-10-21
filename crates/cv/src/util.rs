@@ -249,21 +249,31 @@ impl WindowArgs {
     }
 }
 
+/// A streaming window either has forward bounds or retains a tail until EOF.
+pub(crate) enum StreamWindow {
+    Range(usize, Option<usize>),
+    Tail(usize),
+}
+
 impl Window {
-    /// Resolve to `[start, end)`; `end == None` means "through the last message".
-    pub(crate) fn bounds(self, total: impl FnOnce() -> Result<usize>) -> Result<(usize, Option<usize>)> {
-        Ok(match self {
-            Window::First(n) => (0, Some(n)),
-            Window::Last(n) => {
-                let total = total()?;
-                (total.saturating_sub(n), None)
-            }
-            Window::Range(a, b) => (a, b),
-            Window::Around { center, context } => (
+    pub(crate) fn streaming(self) -> StreamWindow {
+        match self {
+            Window::First(n) => StreamWindow::Range(0, Some(n)),
+            Window::Last(n) => StreamWindow::Tail(n),
+            Window::Range(a, b) => StreamWindow::Range(a, b),
+            Window::Around { center, context } => StreamWindow::Range(
                 center.saturating_sub(context),
                 Some(center.saturating_add(context).saturating_add(1)),
             ),
-        })
+        }
+    }
+
+    /// Resolve to `[start, end)`; `end == None` means "through the last message".
+    pub(crate) fn bounds(self, total: impl FnOnce() -> Result<usize>) -> Result<(usize, Option<usize>)> {
+        match self.streaming() {
+            StreamWindow::Range(start, end) => Ok((start, end)),
+            StreamWindow::Tail(n) => Ok((total()?.saturating_sub(n), None)),
+        }
     }
 }
 

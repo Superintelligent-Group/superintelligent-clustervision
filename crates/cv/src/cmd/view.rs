@@ -3,7 +3,7 @@
 
 use crate::util::{
     continue_hint, count_messages, home_rel, parse_harness, resolve, resolve_found, short_id, split_harness_id, usage,
-    Window, WindowArgs,
+    StreamWindow, Window, WindowArgs,
 };
 use anyhow::{bail, Context, Result};
 use cv_core::ir::{truncate, Block, Harness, Message, MessageKind, Session, SessionRef};
@@ -283,13 +283,9 @@ fn show_range(r: &SessionRef, window: &WindowArgs, pre_compaction: Option<usize>
 /// The CLI's window over `r`: the selector's bounds or the last `n`, cut at the byte budget.
 fn window_sink(r: &SessionRef, window: Option<Window>, max_bytes: Option<usize>) -> Result<cv_core::api::WindowSink> {
     use cv_core::api::WindowSink;
-    let sink = match window {
-        Some(Window::Last(n)) => WindowSink::new(&r.path, 0, None).tail(n),
-        Some(w) => {
-            let (start, end) = w.bounds(|| unreachable!("Last is handled by the tail"))?;
-            WindowSink::new(&r.path, start, end)
-        }
-        None => WindowSink::new(&r.path, 0, None),
+    let sink = match window.map_or(StreamWindow::Range(0, None), Window::streaming) {
+        StreamWindow::Tail(n) => WindowSink::new(&r.path, 0, None).tail(n),
+        StreamWindow::Range(start, end) => WindowSink::new(&r.path, start, end),
     };
     Ok(sink.budget(max_bytes))
 }
@@ -1467,13 +1463,9 @@ fn stream_session_render_inner<W: std::io::Write>(
         }
     }
 
-    let (start, end, tail) = match opts.range {
-        None => (0, None, None),
-        Some(Window::Last(n)) => (0, None, Some(n)),
-        Some(w) => {
-            let (s, e) = w.bounds(|| unreachable!("only `Last` needs the total, and it streams instead"))?;
-            (s, e, None)
-        }
+    let (start, end, tail) = match opts.range.map_or(StreamWindow::Range(0, None), Window::streaming) {
+        StreamWindow::Tail(n) => (0, None, Some(n)),
+        StreamWindow::Range(start, end) => (start, end, None),
     };
     let mut sink = Sink {
         out,
