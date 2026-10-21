@@ -501,14 +501,14 @@ impl Adapter for OpenCode {
     }
 
     /// The todo list `todowrite` keeps in `opencode.db`'s `todo` table (1.x; 2.x has none).
-    fn store_affordances(&self, r: &SessionRef) -> Vec<crate::affordance::Affordance> {
+    fn store_affordances(&self, r: &SessionRef) -> anyhow::Result<Vec<crate::affordance::Affordance>> {
         #[cfg(feature = "sqlite")]
         if self.db.as_ref() == Some(&r.path) || db::is_db_ref(r) {
-            return db::todos(r).into_iter().collect();
+            return Ok(db::todos(r)?.into_iter().collect());
         }
         #[cfg(not(feature = "sqlite"))]
         let _ = r;
-        Vec::new()
+        Ok(Vec::new())
     }
 }
 
@@ -602,8 +602,8 @@ mod db {
 
     /// The session's `todo` rows in position order, as its plan. `None` when the table is absent
     /// (2.x) or holds nothing for the session.
-    pub(super) fn todos(r: &SessionRef) -> Option<crate::affordance::Affordance> {
-        let conn = open_ro(&r.path).ok()?;
+    pub(super) fn todos(r: &SessionRef) -> Result<Option<crate::affordance::Affordance>> {
+        let conn = open_ro(&r.path)?;
         conn.read(|conn, _| {
             if !has_table(conn, "todo") {
                 return Ok(None);
@@ -616,16 +616,13 @@ mod db {
                         status: row.get(1)?,
                     })
                 })?
-                .filter_map(|x| x.ok())
-                .collect();
+                .collect::<rusqlite::Result<_>>()?;
             Ok(crate::affordance::plan_state(
                 crate::affordance::Kind::Plan,
                 "todo",
                 items,
             ))
         })
-        .ok()
-        .flatten()
     }
 
     pub(super) fn is_db_ref(r: &SessionRef) -> bool {

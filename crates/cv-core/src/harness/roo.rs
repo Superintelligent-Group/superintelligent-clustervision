@@ -87,19 +87,16 @@ impl Adapter for Roo {
     /// The checkpoints and permission asks `ui_messages.json` logs (the conversation file has
     /// neither): `say: checkpoint_saved` (a shadow-git commit under `checkpoints/`) and the `ask`s
     /// that gate a tool, a command, an MCP call or a browser launch.
-    fn store_affordances(&self, r: &SessionRef) -> Vec<crate::affordance::Affordance> {
+    fn store_affordances(&self, r: &SessionRef) -> anyhow::Result<Vec<crate::affordance::Affordance>> {
         ui_affordances(&r.path.join("ui_messages.json"))
     }
 }
 
-fn ui_affordances(path: &Path) -> Vec<crate::affordance::Affordance> {
+fn ui_affordances(path: &Path) -> Result<Vec<crate::affordance::Affordance>> {
     use crate::affordance::{Affordance, Kind};
     use serde_json::Value;
-    let Some(Value::Array(events)) = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-    else {
-        return Vec::new();
+    let Some(Value::Array(events)) = crate::affordance::side_json(path)? else {
+        return Ok(Vec::new());
     };
     let mut out = Vec::new();
     for e in &events {
@@ -139,7 +136,7 @@ fn ui_affordances(path: &Path) -> Vec<crate::affordance::Affordance> {
             _ => {}
         }
     }
-    out
+    Ok(out)
 }
 
 /// Emit `session` into Roo's per-task layout under `out_dir`: the Cline writer, tagged for Roo.

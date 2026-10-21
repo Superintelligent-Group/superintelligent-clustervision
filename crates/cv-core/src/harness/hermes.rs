@@ -331,17 +331,14 @@ impl Adapter for Hermes {
     }
 
     /// What `/goal`, `/loop` and `/heartbeat` keep in `state_meta` under `<kind>:<session id>`.
-    fn store_affordances(&self, r: &SessionRef) -> Vec<crate::affordance::Affordance> {
-        let Ok(conn) = open_ro(&r.path) else {
-            return Vec::new();
-        };
+    fn store_affordances(&self, r: &SessionRef) -> anyhow::Result<Vec<crate::affordance::Affordance>> {
+        let conn = open_ro(&r.path)?;
         conn.read(|conn, _| {
             if !table_exists(conn, "state_meta") {
                 return Ok(Vec::new());
             }
-            Ok(state_meta_affordances(conn, &r.id))
+            state_meta_affordances(conn, &r.id)
         })
-        .unwrap_or_default()
     }
 }
 
@@ -1901,8 +1898,9 @@ fn parse_conn_with(conn: &Connection, r: &SessionRef, opts: &stream::Demand) -> 
 /// `state_meta` rows `goal:<sid>` (`{goal, status, turns_used, max_turns, …}`), `loop:<sid>`
 /// (`{prompt, status, mode, interval_seconds, ticks_fired, …}`) and `heartbeat:<sid>` (`{prompt,
 /// interval_seconds, status, fire_count}`) as the session's goal and schedules.
-fn state_meta_affordances(conn: &Connection, id: &str) -> Vec<crate::affordance::Affordance> {
+fn state_meta_affordances(conn: &Connection, id: &str) -> Result<Vec<crate::affordance::Affordance>> {
     use crate::affordance::{Affordance, Item, Kind};
+    use rusqlite::OptionalExtension as _;
     let mut out = Vec::new();
     for key in ["goal", "loop", "heartbeat"] {
         let value: Option<String> = conn
@@ -1911,8 +1909,8 @@ fn state_meta_affordances(conn: &Connection, id: &str) -> Vec<crate::affordance:
                 [format!("{key}:{id}")],
                 |row| row.get(0),
             )
-            .ok();
-        let Some(v) = value.and_then(|t| serde_json::from_str::<Value>(&t).ok()) else {
+            .optional()?;
+        let Some(v) = value.map(|t| serde_json::from_str::<Value>(&t)).transpose()? else {
             continue;
         };
         let s = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("");
@@ -1941,7 +1939,7 @@ fn state_meta_affordances(conn: &Connection, id: &str) -> Vec<crate::affordance:
             ),
         });
     }
-    out
+    Ok(out)
 }
 
 // Thread-local observation of existing arena length keeps the consumer connection control

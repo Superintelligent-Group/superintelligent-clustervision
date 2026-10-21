@@ -52,3 +52,21 @@ fn subagent_refs_propagate_directory_and_database_failures() {
         assert!(cv_core::harness::devin::subagent_tree(&db, "parent").is_err());
     }
 }
+
+#[test]
+fn json_files_and_store_affordances_report_corrupt_side_files() {
+    let world = cv_testkit::World::in_process("affordance-errors", cv_core::env::Env::enter_isolated);
+    let dir = world.home.join(".claude/tasks/parent");
+    assert!(cv_core::affordance::json_files(&dir).unwrap().is_empty());
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("1.json"), "{broken").unwrap();
+    let error = cv_core::affordance::json_files(&dir).unwrap_err();
+    assert!(format!("{error:#}").contains("1.json"));
+    let r = SessionRef::new("parent", Harness::Claude, world.proj.join("parent.jsonl"));
+    fs::write(&r.path, "{\"type\":\"user\",\"uuid\":\"u\",\"sessionId\":\"parent\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n").unwrap();
+    let adapter = cv_core::harness::rootless(Harness::Claude).unwrap();
+    assert!(adapter.store_affordances(&r).is_err());
+    assert!(cv_core::affordance::read(adapter, &r).is_err());
+    fs::write(dir.join("1.json"), r#"{"subject":"repair","status":"pending"}"#).unwrap();
+    assert_eq!(adapter.store_affordances(&r).unwrap().len(), 1);
+}

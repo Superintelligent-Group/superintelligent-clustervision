@@ -444,10 +444,10 @@ pub trait Adapter: Send + Sync {
 
     /// The affordances that live only in a side store beside the transcript (a todo file, a
     /// table, a state row): the session's current plan, goals, schedules. Rows have no message
-    /// index (`docs/design/AFFORDANCES.md`). Default: the store keeps none. Unreadable side files
-    /// are skipped, never an error: the transcript is the session; this is a view over its store.
-    fn store_affordances(&self, _r: &SessionRef) -> Vec<crate::affordance::Affordance> {
-        Vec::new()
+    /// index (`docs/design/AFFORDANCES.md`). Default: the store keeps none. Missing optional side
+    /// files are empty; unreadable files or rows are errors.
+    fn store_affordances(&self, _r: &SessionRef) -> anyhow::Result<Vec<crate::affordance::Affordance>> {
+        Ok(Vec::new())
     }
 
     /// The affordances the session's own harness bag records once per session (a permission

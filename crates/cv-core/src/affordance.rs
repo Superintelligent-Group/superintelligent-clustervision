@@ -168,26 +168,41 @@ pub fn plan_state(kind: Kind, tool: impl Into<String>, items: Vec<Item>) -> Opti
     (!items.is_empty()).then(|| Affordance::store(kind, tool, items_summary(&items), items))
 }
 
-/// The JSON files of `dir` (sorted by name, numerically when the stems are numbers), parsed;
-/// unreadable ones skipped. The shared reader behind the per-file side stores.
-pub fn json_files(dir: &std::path::Path) -> Vec<(String, Value)> {
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return Vec::new();
+/// Read an optional JSON side file. Absence is empty; I/O and decode failures retain its path.
+pub(crate) fn side_json(path: &std::path::Path) -> anyhow::Result<Option<Value>> {
+    use anyhow::Context;
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
     };
-    let mut files: Vec<(String, Value)> = rd
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|x| x == "json"))
-        .filter_map(|p| {
-            let stem = p.file_stem()?.to_str()?.to_string();
-            let v = serde_json::from_str(&std::fs::read_to_string(&p).ok()?).ok()?;
-            Some((stem, v))
-        })
-        .collect();
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .with_context(|| format!("decoding {}", path.display()))
+}
+
+/// The JSON files of `dir`, sorted by name (numeric stems sort numerically).
+/// Only a missing directory is empty; a failed entry, read or decode is an error.
+pub fn json_files(dir: &std::path::Path) -> anyhow::Result<Vec<(String, Value)>> {
+    let mut files = Vec::new();
+    for entry in crate::harness::side_entries(dir)? {
+        let path = entry.path();
+        if !path.extension().is_some_and(|x| x == "json") {
+            continue;
+        }
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| anyhow::anyhow!("non-UTF-8 JSON filename: {}", path.display()))?;
+        if let Some(value) = side_json(&path)? {
+            files.push((stem.to_owned(), value));
+        }
+    }
     files.sort_by(|a, b| match (a.0.parse::<u64>(), b.0.parse::<u64>()) {
         (Ok(x), Ok(y)) => x.cmp(&y),
         _ => a.0.cmp(&b.0),
     });
-    files
+    Ok(files)
 }
 
 /// The session-bag key under which an adapter lists the approval modes a session ran under, in
@@ -1487,7 +1502,7 @@ pub fn read(adapter: &dyn crate::harness::Adapter, r: &crate::ir::SessionRef) ->
     // Session facts can arrive at EOF; they still precede message rows, exactly as of_session.
     let mut rows = session_rows(&s);
     rows.extend(messages);
-    rows.extend(adapter.store_affordances(r));
+    rows.extend(adapter.store_affordances(r)?);
     Ok(rows)
 }
 
@@ -1644,8 +1659,13 @@ mod tests {
                 sink.meta(&s);
                 Ok(s)
             }
-            fn store_affordances(&self, _: &crate::SessionRef) -> Vec<Affordance> {
-                vec![Affordance::store(Kind::Plan, "todo.json", "side store", Vec::new())]
+            fn store_affordances(&self, _: &crate::SessionRef) -> anyhow::Result<Vec<Affordance>> {
+                Ok(vec![Affordance::store(
+                    Kind::Plan,
+                    "todo.json",
+                    "side store",
+                    Vec::new(),
+                )])
             }
         }
         let r = crate::SessionRef::new(
@@ -1665,7 +1685,7 @@ mod tests {
         let adapter: &dyn crate::harness::Adapter = &fixture;
         let full = adapter.parse(&r).unwrap();
         let mut expected = of_session(&full).unwrap();
-        expected.extend(adapter.store_affordances(&r));
+        expected.extend(adapter.store_affordances(&r).unwrap());
         let actual = read(adapter, &r).unwrap();
         assert_eq!(
             serde_json::to_value(&actual).unwrap(),

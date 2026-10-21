@@ -252,33 +252,31 @@ impl Adapter for Goose {
     }
 
     /// The todo extension's state: `sessions.extension_data["todo.v0"].content` (a markdown list).
-    fn store_affordances(&self, r: &SessionRef) -> Vec<crate::affordance::Affordance> {
+    fn store_affordances(&self, r: &SessionRef) -> anyhow::Result<Vec<crate::affordance::Affordance>> {
         if r.path.extension().is_some_and(|e| e == "jsonl") {
-            return Vec::new();
+            return Ok(Vec::new());
         }
-        let Ok(conn) = open_ro(&r.path) else {
-            return Vec::new();
-        };
-        let data: Option<String> = conn
-            .read(|reader, _| {
-                Ok(
-                    reader.query_row("SELECT extension_data FROM sessions WHERE id = ?1", [&r.id], |row| {
-                        row.get(0)
-                    })?,
-                )
-            })
-            .ok()
-            .flatten();
+        let conn = open_ro(&r.path)?;
+        let data: Option<String> = conn.read(|reader, _| {
+            Ok(
+                reader.query_row("SELECT extension_data FROM sessions WHERE id = ?1", [&r.id], |row| {
+                    row.get(0)
+                })?,
+            )
+        })?;
         let Some(todo) = data
-            .and_then(|d| serde_json::from_str::<Value>(&d).ok())
+            .map(|d| serde_json::from_str::<Value>(&d))
+            .transpose()?
             .and_then(|v| v.get("todo.v0").cloned())
         else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
         let items = crate::affordance::items_of(&todo);
-        crate::affordance::plan_state(crate::affordance::Kind::Plan, "extension_data[todo.v0]", items)
-            .into_iter()
-            .collect()
+        Ok(
+            crate::affordance::plan_state(crate::affordance::Kind::Plan, "extension_data[todo.v0]", items)
+                .into_iter()
+                .collect(),
+        )
     }
 }
 

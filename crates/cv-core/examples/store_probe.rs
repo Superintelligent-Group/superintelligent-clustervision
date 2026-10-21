@@ -332,7 +332,7 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
             });
             let s = adapter.try_stream(r, &opts, &mut sink)?;
             if a.operation == "count" {
-                out.detail = serde_json::to_value(counter.finish(&s, &adapter.store_affordances(r)))?;
+                out.detail = serde_json::to_value(counter.finish(&s, &adapter.store_affordances(r)?))?;
             }
         }
         "tools" | "tools-collect" => {
@@ -449,7 +449,7 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
             out.messages = s.messages.len();
             if a.operation == "affordances" {
                 out.rows = cv_core::affordance::of_session(&s)?;
-                out.rows.extend(adapter.store_affordances(r));
+                out.rows.extend(adapter.store_affordances(r)?);
                 out.detail = affordance_detail(&out.rows, a.hash_output)?;
             }
             out.session = Some(s);

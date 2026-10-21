@@ -265,7 +265,7 @@ fn summarize_one(adapter: &dyn Adapter, r: &SessionRef, version_dir: &Path) -> V
     for a in cv_core::affordance::of_session(&s)
         .unwrap()
         .into_iter()
-        .chain(adapter.store_affordances(r))
+        .chain(adapter.store_affordances(r).unwrap())
     {
         *affordances
             .entry(format!("{}/{}", a.kind.as_str(), a.action))
@@ -884,7 +884,7 @@ fn query_facts_match_collected_corpus() {
                 let rows = cv_core::affordance::of_session(&full)
                     .unwrap()
                     .into_iter()
-                    .chain(adapter.store_affordances(&r));
+                    .chain(adapter.store_affordances(&r).unwrap());
                 let mut counts = cv_core::affordance::Counts::new();
                 for row in rows {
                     *counts.entry(row.kind).or_default() += 1;

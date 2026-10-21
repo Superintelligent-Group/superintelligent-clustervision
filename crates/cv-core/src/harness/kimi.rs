@@ -296,21 +296,21 @@ impl Adapter for Kimi {
 
     /// The todo list `SetTodoList` keeps in the session dir's `state.json` (`todos: [{title,
     /// status}]`). A legacy flat session (no `context.jsonl` in its dir) has no state file.
-    fn store_affordances(&self, r: &SessionRef) -> Vec<crate::affordance::Affordance> {
+    fn store_affordances(&self, r: &SessionRef) -> anyhow::Result<Vec<crate::affordance::Affordance>> {
         if !r.path.join("context.jsonl").is_file() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
-        let Some(todos) = fs::read_to_string(r.path.join("state.json"))
-            .ok()
-            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-            .and_then(|v| v.get("todos").cloned())
+        let Some(todos) =
+            crate::affordance::side_json(&r.path.join("state.json"))?.and_then(|v| v.get("todos").cloned())
         else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
         let items = crate::affordance::items_of(&todos);
-        crate::affordance::plan_state(crate::affordance::Kind::Plan, "state.json", items)
-            .into_iter()
-            .collect()
+        Ok(
+            crate::affordance::plan_state(crate::affordance::Kind::Plan, "state.json", items)
+                .into_iter()
+                .collect(),
+        )
     }
 
     fn resume_source(&self, r: &SessionRef) -> PathBuf {

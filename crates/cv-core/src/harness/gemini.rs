@@ -148,7 +148,7 @@ impl Adapter for Gemini {
 
     /// The per-session side files under `tmp/<project>/<session id>/`: the task tracker
     /// (`tracker/<id>.json`, `tracker_*` tools) and the plan-mode plans (`plans/*.md`).
-    fn store_affordances(&self, r: &SessionRef) -> Vec<crate::affordance::Affordance> {
+    fn store_affordances(&self, r: &SessionRef) -> anyhow::Result<Vec<crate::affordance::Affordance>> {
         side_affordances(&r.path, &r.id)
     }
 }
@@ -1177,31 +1177,30 @@ fn session_ref(s: &Session, path: &Path, harness: Harness) -> SessionRef {
 
 /// `tracker/*.json` as the session's plan and each `plans/*.md` as one plan row (its first
 /// heading), from the session's directory beside `chats/`.
-fn side_affordances(recording: &Path, id: &str) -> Vec<crate::affordance::Affordance> {
+fn side_affordances(recording: &Path, id: &str) -> Result<Vec<crate::affordance::Affordance>> {
     use crate::affordance::{item_of, json_files, plan_state, Affordance, Kind};
     let Some(project) = recording
         .ancestors()
         .find(|a| a.file_name().is_some_and(|n| n == "chats"))
         .and_then(Path::parent)
     else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let dir = project.join(id);
     let mut out = Vec::new();
-    let items: Vec<_> = json_files(&dir.join("tracker"))
+    let items: Vec<_> = json_files(&dir.join("tracker"))?
         .iter()
         .filter_map(|(_, v)| item_of(v))
         .collect();
     out.extend(plan_state(Kind::Plan, "tracker/", items));
-    let mut plans: Vec<PathBuf> = fs::read_dir(dir.join("plans"))
+    let mut plans: Vec<PathBuf> = super::side_entries(&dir.join("plans"))?
         .into_iter()
-        .flatten()
-        .filter_map(|e| e.ok().map(|e| e.path()))
+        .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|x| x == "md"))
         .collect();
     plans.sort();
     for p in plans {
-        let text = fs::read_to_string(&p).unwrap_or_default();
+        let text = fs::read_to_string(&p)?;
         let head = text
             .lines()
             .map(|l| l.trim_start_matches('#').trim())
@@ -1215,7 +1214,7 @@ fn side_affordances(recording: &Path, id: &str) -> Vec<crate::affordance::Afford
             Vec::new(),
         ));
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]

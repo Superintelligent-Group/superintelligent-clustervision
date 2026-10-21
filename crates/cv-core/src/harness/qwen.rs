@@ -200,7 +200,7 @@ impl Adapter for Qwen {
 
     /// The cron jobs `cron_create` persists per project in `tmp/<sha256(cwd)>/scheduled_tasks.json`
     /// ([`scheduled_tasks`]), for a session JSONL.
-    fn store_affordances(&self, r: &SessionRef) -> Vec<crate::affordance::Affordance> {
+    fn store_affordances(&self, r: &SessionRef) -> anyhow::Result<Vec<crate::affordance::Affordance>> {
         scheduled_tasks(r)
     }
 }
@@ -211,48 +211,41 @@ impl Adapter for Qwen {
 /// (`createdAt` inside the session's first..last record). The file is per project
 /// (`Storage.getGlobalTempDir()/getProjectHash(cwd)`, the sha256 of the cwd), so sub-agent
 /// transcripts, which share their parent's window, take none.
-fn scheduled_tasks(r: &SessionRef) -> Vec<crate::affordance::Affordance> {
+fn scheduled_tasks(r: &SessionRef) -> Result<Vec<crate::affordance::Affordance>> {
     let chats = r.path.parent();
     if chats.and_then(Path::file_name).is_none_or(|n| n != "chats") {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let Some(qwen_dir) = chats
         .and_then(Path::parent)
         .and_then(Path::parent)
         .and_then(Path::parent)
     else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let Some(cwd) = r.cwd.as_ref().and_then(|c| c.to_str()) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let file = qwen_dir
         .join("tmp")
         .join(crate::digest::sha256_hex(cwd.as_bytes()))
         .join("scheduled_tasks.json");
-    let read = || {
-        std::fs::read_to_string(&file)
-            .ok()
-            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-            .unwrap_or(Value::Null)
-    };
+    let read = || crate::affordance::side_json(&file).map(|v| v.unwrap_or(Value::Null));
     if !crate::source::inventory_scoped() {
         // A single session needs one linear filter, not a time index for unrelated owners.
-        return task_rows_for_session(read(), r);
+        return Ok(task_rows_for_session(read()?, r));
     }
     let mut baseline = crate::source::ReadSet::default();
     baseline.record(&file);
     // The inventory's complete read set is this same file, already captured before the
     // affordance pass by source::Probe::dependencies(Qwen). Cache hits require that exact
     // baseline; the enclosing publication receipt revalidates it, so no dynamic guard is lost.
-    let Ok((inventory, _reads)) = crate::source::inventory("qwen-scheduled-tasks", &file, &baseline, || {
-        let inventory = TaskInventory::from_value(read());
+    let (inventory, _reads) = crate::source::inventory("qwen-scheduled-tasks", &file, &baseline, || {
+        let inventory = TaskInventory::from_value(read()?);
         let retained = inventory.retained_bytes();
         Ok((inventory, baseline.clone(), retained))
-    }) else {
-        return Vec::new();
-    };
-    inventory.for_session(r)
+    })?;
+    Ok(inventory.for_session(r))
 }
 
 fn task_affordance(task: &Value) -> crate::affordance::Affordance {
@@ -929,8 +922,8 @@ mod tests {
         )?;
         let _scope = crate::source::read_scope();
         let before = crate::source::Probe::default().snapshot(&reference);
-        assert_eq!(scheduled_tasks(&reference)[0].summary, "first");
-        assert_eq!(scheduled_tasks(&reference)[0].summary, "first");
+        assert_eq!(scheduled_tasks(&reference).unwrap()[0].summary, "first");
+        assert_eq!(scheduled_tasks(&reference).unwrap()[0].summary, "first");
         #[cfg(feature = "sqlite")]
         {
             crate::catalog::sync(std::slice::from_ref(&reference));
@@ -948,19 +941,19 @@ mod tests {
             serde_json::to_vec(&serde_json::json!([{"id":"changed schedule","sessionId":"session"}]))?,
         )?;
         assert!(!crate::source::unchanged(&reference, &before));
-        assert_eq!(scheduled_tasks(&reference)[0].summary, "changed schedule");
+        assert_eq!(scheduled_tasks(&reference).unwrap()[0].summary, "changed schedule");
         #[cfg(feature = "sqlite")]
         assert!(
             crate::catalog::AffordanceTable::load().counts(&reference).is_none(),
             "has:schedule must not reuse counts after a per-project edit"
         );
         fs::remove_file(&file)?;
-        assert!(scheduled_tasks(&reference).is_empty());
+        assert!(scheduled_tasks(&reference).unwrap().is_empty());
         fs::write(
             &file,
             serde_json::to_vec(&serde_json::json!([{"id":"recreated","sessionId":"session"}]))?,
         )?;
-        assert_eq!(scheduled_tasks(&reference)[0].summary, "recreated");
+        assert_eq!(scheduled_tasks(&reference).unwrap()[0].summary, "recreated");
         Ok(())
     }
 
@@ -986,7 +979,7 @@ mod tests {
         fs::write(&file, serde_json::to_vec(&value)?)?;
         let expected = task_rows_for_session(value, &reference);
         let _scope = crate::source::read_scope();
-        let first = scheduled_tasks(&reference);
+        let first = scheduled_tasks(&reference).unwrap();
         assert_eq!(serde_json::to_value(&first)?, serde_json::to_value(&expected)?);
         let mut baseline = crate::source::ReadSet::default();
         baseline.record(&file);
@@ -1000,7 +993,7 @@ mod tests {
             first.len()
         );
         let charged = inventory.retained_bytes();
-        let second = scheduled_tasks(&reference);
+        let second = scheduled_tasks(&reference).unwrap();
         assert_eq!(serde_json::to_value(second)?, serde_json::to_value(expected)?);
         assert!(inventory.time_index.get().is_some());
         assert_eq!(
@@ -1084,10 +1077,10 @@ mod tests {
         let mut r = SessionRef::new("s1", Harness::Qwen, home.join("projects/-p/chats/s1.jsonl"));
         r.cwd = Some(PathBuf::from("/p"));
         (r.created_at, r.updated_at) = (at(1_000), at(2_000));
-        let got: Vec<String> = scheduled_tasks(&r).into_iter().map(|a| a.summary).collect();
+        let got: Vec<String> = scheduled_tasks(&r).unwrap().into_iter().map(|a| a.summary).collect();
         assert_eq!(got, ["own · 0 9 * * * · a", "made · */5 * * * * · c · recurring"]);
         r.path = home.join("projects/-p/subagents/s1/agent-x.jsonl");
-        assert!(scheduled_tasks(&r).is_empty());
+        assert!(scheduled_tasks(&r).unwrap().is_empty());
         let _ = fs::remove_dir_all(&home);
     }
 

@@ -475,9 +475,9 @@ fn message_with_blocks(v: &Value, blocks: Vec<Block>, lead: bool, prompted: &mut
 /// The side-database rows of a lead session (see the module docs): schedule fires from
 /// `sessions.db` / `cron.db`, team runs from `teams.db`. A child file (`<sid>/<stem>`) has none.
 #[cfg(feature = "sqlite")]
-pub fn store_affordances(r: &SessionRef) -> Vec<crate::affordance::Affordance> {
+pub fn store_affordances(r: &SessionRef) -> anyhow::Result<Vec<crate::affordance::Affordance>> {
     if r.id.contains('/') {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let Some(db) = r
         .path
@@ -486,21 +486,21 @@ pub fn store_affordances(r: &SessionRef) -> Vec<crate::affordance::Affordance> {
         .and_then(Path::parent)
         .map(|d| d.join("db"))
     else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    let mut out = schedule_fires(&db, &r.id);
-    out.extend(team_runs(&db.join("teams.db"), &r.id));
-    out
+    let mut out = schedule_fires(&db, &r.id)?;
+    out.extend(team_runs(&db.join("teams.db"), &r.id)?);
+    Ok(out)
 }
 
 #[cfg(not(feature = "sqlite"))]
-pub fn store_affordances(_r: &SessionRef) -> Vec<crate::affordance::Affordance> {
-    Vec::new()
+pub fn store_affordances(_r: &SessionRef) -> anyhow::Result<Vec<crate::affordance::Affordance>> {
+    Ok(Vec::new())
 }
 
 /// One `schedule`/`fire` row per execution that ran as `sid`.
 #[cfg(feature = "sqlite")]
-fn schedule_fires(db: &Path, sid: &str) -> Vec<crate::affordance::Affordance> {
+fn schedule_fires(db: &Path, sid: &str) -> Result<Vec<crate::affordance::Affordance>> {
     use super::store::sqlite::{open_ro, table_exists};
     use crate::affordance::{Affordance, Kind};
     const QUERIES: [(&str, &str, &str, &str); 2] = [
@@ -521,9 +521,10 @@ fn schedule_fires(db: &Path, sid: &str) -> Vec<crate::affordance::Affordance> {
     ];
     let mut out = Vec::new();
     for (file, runs, specs, sql) in QUERIES {
-        let Ok(conn) = open_ro(&db.join(file)) else {
+        if !db.join(file).try_exists()? {
             continue;
-        };
+        }
+        let conn = open_ro(&db.join(file))?;
         type Row = (
             Option<String>,
             Option<String>,
@@ -531,19 +532,17 @@ fn schedule_fires(db: &Path, sid: &str) -> Vec<crate::affordance::Affordance> {
             Option<String>,
             Option<String>,
         );
-        let rows: Vec<Row> = conn
-            .read(|conn, _| {
-                if !table_exists(conn, runs) || !table_exists(conn, specs) {
-                    return Ok(Vec::new());
-                }
-                Ok(conn.prepare(sql).and_then(|mut st| {
-                    st.query_map([sid], |row| {
-                        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
-                    })?
-                    .collect()
-                })?)
-            })
-            .unwrap_or_default();
+        let rows: Vec<Row> = conn.read(|conn, _| {
+            if !table_exists(conn, runs) || !table_exists(conn, specs) {
+                return Ok(Vec::new());
+            }
+            Ok(conn.prepare(sql).and_then(|mut st| {
+                st.query_map([sid], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+                })?
+                .collect()
+            })?)
+        })?;
         for (name, cron, prompt, status, at) in rows {
             let summary = [name, cron, prompt, status]
                 .into_iter()
@@ -563,32 +562,31 @@ fn schedule_fires(db: &Path, sid: &str) -> Vec<crate::affordance::Affordance> {
             });
         }
     }
-    out
+    Ok(out)
 }
 
 /// The lead's team, from `team_events` (keyed `team_name = <lead session id>`): one
 /// `subagent_spawn`/`state` row per run, in the order the runs were queued, then one per teammate
 /// spawned that never ran.
 #[cfg(feature = "sqlite")]
-fn team_runs(teams_db: &Path, sid: &str) -> Vec<crate::affordance::Affordance> {
+fn team_runs(teams_db: &Path, sid: &str) -> Result<Vec<crate::affordance::Affordance>> {
     use super::store::sqlite::{open_ro, table_exists};
     use crate::affordance::{Affordance, Kind};
-    let Ok(conn) = open_ro(teams_db) else {
-        return Vec::new();
-    };
-    let events: Vec<(String, String, String)> = conn
-        .read(|conn, _| {
-            if !table_exists(conn, "team_events") {
-                return Ok(Vec::new());
-            }
-            Ok(conn
-                .prepare("SELECT ts, event_type, payload_json FROM team_events WHERE team_name = ?1 ORDER BY id")
-                .and_then(|mut st| {
-                    st.query_map([sid], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
-                        .collect()
-                })?)
-        })
-        .unwrap_or_default();
+    if !teams_db.try_exists()? {
+        return Ok(Vec::new());
+    }
+    let conn = open_ro(teams_db)?;
+    let events: Vec<(String, String, String)> = conn.read(|conn, _| {
+        if !table_exists(conn, "team_events") {
+            return Ok(Vec::new());
+        }
+        Ok(conn
+            .prepare("SELECT ts, event_type, payload_json FROM team_events WHERE team_name = ?1 ORDER BY id")
+            .and_then(|mut st| {
+                st.query_map([sid], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                    .collect()
+            })?)
+    })?;
     /// One team run as its events tell it: the last status and result win.
     struct Run {
         queued: Option<DateTime<Utc>>,
@@ -603,9 +601,7 @@ fn team_runs(teams_db: &Path, sid: &str) -> Vec<crate::affordance::Affordance> {
     let mut run_positions = std::collections::HashMap::new();
     let mut teammates: Vec<(Option<DateTime<Utc>>, String)> = Vec::new();
     for (ts, ty, payload) in events {
-        let Ok(p) = serde_json::from_str::<Value>(&payload) else {
-            continue;
-        };
+        let p = serde_json::from_str::<Value>(&payload)?;
         let at = parse_ts(&ts);
         if ty == "teammate_spawned" {
             if let Some(a) = p.get("agentId").and_then(Value::as_str) {
@@ -667,7 +663,7 @@ fn team_runs(teams_db: &Path, sid: &str) -> Vec<crate::affordance::Affordance> {
             out.push(row(at, format!("{agent}: spawned, never ran")));
         }
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -934,7 +930,12 @@ mod tests {
             }
             transaction.commit().unwrap();
         }
-        let rows = team_runs(&path, "lead");
+        assert!(team_runs(&path, "lead").is_err(), "corrupt side rows are reported");
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute("DELETE FROM team_events WHERE payload_json = '{malformed'", [])
+            .unwrap();
+        let rows = team_runs(&path, "lead").unwrap();
         assert_eq!(rows.len(), count * 2 + 1);
         for (index, row) in rows[..count].iter().enumerate() {
             assert_eq!(
@@ -947,7 +948,7 @@ mod tests {
             assert_eq!(row.summary, format!("idle-{index}: spawned, never ran"));
         }
         assert_eq!(rows.last().unwrap().summary, "idle-0: spawned, never ran");
-        assert!(team_runs(&path, "other lead").is_empty());
+        assert!(team_runs(&path, "other lead").unwrap().is_empty());
     }
 
     #[cfg(feature = "sqlite")]
@@ -997,7 +998,7 @@ mod tests {
         );
         let mut r = SessionRef::new(sid, Harness::Cline, path);
         r.created_at = parse_ts("2026-10-11T00:00:00Z");
-        let rows = store_affordances(&r);
+        let rows = store_affordances(&r).unwrap();
         let got: Vec<(Kind, &str, &str)> = rows.iter().map(|a| (a.kind, a.action, a.summary.as_str())).collect();
         assert_eq!(
             got,
@@ -1013,7 +1014,10 @@ mod tests {
             Harness::Cline,
             dir.join("agent_x.messages.json"),
         );
-        assert!(store_affordances(&child).is_empty(), "a child file has no side rows");
+        assert!(
+            store_affordances(&child).unwrap().is_empty(),
+            "a child file has no side rows"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 }

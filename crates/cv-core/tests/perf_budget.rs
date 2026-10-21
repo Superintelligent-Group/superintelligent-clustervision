@@ -24,7 +24,7 @@ fn count_pass(adapter: &dyn Adapter, r: &SessionRef) -> (usize, cv_core::afforda
     let s = adapter
         .try_stream(r, &Demand::LEAN.with_spans(), &mut sink)
         .expect("stream");
-    (n, counter.finish(&s, &adapter.store_affordances(r)))
+    (n, counter.finish(&s, &adapter.store_affordances(r).unwrap()))
 }
 
 fn best_of<T>(runs: usize, mut f: impl FnMut() -> T) -> (f64, T) {

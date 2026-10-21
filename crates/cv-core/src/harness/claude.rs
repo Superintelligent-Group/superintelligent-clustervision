@@ -463,8 +463,8 @@ impl Adapter for Claude {
 
     /// The task list (`TaskCreate`/`TaskUpdate`) Claude Code keeps beside the transcripts:
     /// `<config>/tasks/<session id>/<n>.json`.
-    fn store_affordances(&self, r: &SessionRef) -> Vec<crate::affordance::Affordance> {
-        task_list(&r.path, &r.id).into_iter().collect()
+    fn store_affordances(&self, r: &SessionRef) -> anyhow::Result<Vec<crate::affordance::Affordance>> {
+        Ok(task_list(&r.path, &r.id)?.into_iter().collect())
     }
 
     fn copied_before(&self, r: &SessionRef, sink: &mut dyn MessageSink) -> Option<chrono::DateTime<chrono::Utc>> {
@@ -1326,17 +1326,24 @@ impl Claude {
 
 /// `<config>/tasks/<session id>/*.json` (`{id, subject, description, status, blocks, blockedBy}`)
 /// as the session's plan, found from the transcript's own path (`<config>/projects/<p>/<id>.jsonl`).
-fn task_list(transcript: &Path, id: &str) -> Option<crate::affordance::Affordance> {
-    let config = transcript
+fn task_list(transcript: &Path, id: &str) -> Result<Option<crate::affordance::Affordance>> {
+    let Some(config) = transcript
         .ancestors()
-        .find(|a| a.file_name().is_some_and(|n| n == "projects"))?
-        .parent()?;
+        .find(|a| a.file_name().is_some_and(|n| n == "projects"))
+        .and_then(Path::parent)
+    else {
+        return Ok(None);
+    };
     let dir = config.join("tasks").join(id);
-    let items: Vec<_> = crate::affordance::json_files(&dir)
+    let items: Vec<_> = crate::affordance::json_files(&dir)?
         .iter()
         .filter_map(|(_, v)| crate::affordance::item_of(v))
         .collect();
-    crate::affordance::plan_state(crate::affordance::Kind::Plan, "tasks/", items)
+    Ok(crate::affordance::plan_state(
+        crate::affordance::Kind::Plan,
+        "tasks/",
+        items,
+    ))
 }
 
 #[cfg(test)]

@@ -200,28 +200,26 @@ impl Adapter for Grok {
     /// The todo list `todo_write` keeps in the session directory (`plan.json` `{todos: {id: …}}`),
     /// then the per-prompt restore points of `rewind_points.jsonl`, then every hook run
     /// `updates.jsonl` recorded ([`hook_runs`]).
-    fn store_affordances(&self, r: &SessionRef) -> Vec<crate::affordance::Affordance> {
-        let plan = fs::read_to_string(r.path.join("plan.json"))
-            .ok()
-            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-            .and_then(|v| {
-                let items = crate::affordance::items_of(&v);
-                crate::affordance::plan_state(crate::affordance::Kind::Plan, "plan.json", items)
-            });
-        plan.into_iter()
-            .chain(rewind_points(&r.path))
-            .chain(hook_runs(&r.path))
-            .collect()
+    fn store_affordances(&self, r: &SessionRef) -> anyhow::Result<Vec<crate::affordance::Affordance>> {
+        let plan = crate::affordance::side_json(&r.path.join("plan.json"))?.and_then(|v| {
+            let items = crate::affordance::items_of(&v);
+            crate::affordance::plan_state(crate::affordance::Kind::Plan, "plan.json", items)
+        });
+        Ok(plan
+            .into_iter()
+            .chain(rewind_points(&r.path)?)
+            .chain(hook_runs(&r.path)?)
+            .collect())
     }
 }
 
 /// `rewind_points.jsonl`: one line per prompt, `{prompt_index, created_at, file_snapshots,
 /// after_snapshots}` — the files as they were before (and after) that prompt, which `/rewind`
 /// puts back. Each line is a checkpoint.
-fn rewind_points(dir: &Path) -> Vec<crate::affordance::Affordance> {
+fn rewind_points(dir: &Path) -> Result<Vec<crate::affordance::Affordance>> {
     use crate::affordance::{Affordance, Kind};
     let mut out = Vec::new();
-    if jsonl::for_each_record(&dir.join("rewind_points.jsonl"), |v| {
+    let read = jsonl::for_each_record(&dir.join("rewind_points.jsonl"), |v| {
         let Some(v) = Fields::parse(v, &["created_at", "file_snapshots", "prompt_index"])? else {
             return Ok(());
         };
@@ -252,13 +250,14 @@ fn rewind_points(dir: &Path) -> Vec<crate::affordance::Affordance> {
             &summary,
         ));
         Ok(())
-    })
-    .is_err()
-    {
-        out.clear();
+    });
+    if let Err(error) = read {
+        if !super::is_not_found(&error) {
+            return Err(error);
+        }
     }
 
-    out
+    Ok(out)
 }
 
 /// A number field, or None for any other value.
@@ -280,10 +279,10 @@ fn string(v: Option<JsonView<'_>>, key: &str) -> Result<Option<String>> {
 
 /// The `hook_execution` updates, reduced to metadata. Unknown update/run payloads are validated
 /// at the line boundary but never materialized.
-fn hook_runs(dir: &Path) -> Vec<crate::affordance::Affordance> {
+fn hook_runs(dir: &Path) -> Result<Vec<crate::affordance::Affordance>> {
     use crate::affordance::{Affordance, Kind};
     let mut out = Vec::new();
-    if jsonl::for_each_record(&dir.join("updates.jsonl"), |v| {
+    let read = jsonl::for_each_record(&dir.join("updates.jsonl"), |v| {
         let Some(params) = v.get("params")? else { return Ok(()) };
         let Some(u) = params.get("update")? else { return Ok(()) };
         if string(Some(u), "sessionUpdate")?.as_deref() != Some("hook_execution") {
@@ -328,13 +327,14 @@ fn hook_runs(dir: &Path) -> Vec<crate::affordance::Affordance> {
             }
         }
         Ok(())
-    })
-    .is_err()
-    {
-        out.clear();
+    });
+    if let Err(error) = read {
+        if !super::is_not_found(&error) {
+            return Err(error);
+        }
     }
 
-    out
+    Ok(out)
 }
 
 /// Static metadata/enrichment shared by whole and suffix passes. Mutable sidecars are verified
@@ -1309,7 +1309,7 @@ mod tests {
             Affordance::store_event(Kind::Hook, "run", None, "updates.jsonl", "hook: selected · ok"),
         ];
         assert_eq!(
-            serde_json::to_value(hook_runs(dir)).unwrap(),
+            serde_json::to_value(hook_runs(dir).unwrap()).unwrap(),
             serde_json::to_value(expected).unwrap()
         );
         let snapshots = format!(
@@ -1333,17 +1333,17 @@ mod tests {
             Affordance::store_event(Kind::Checkpoint, "create", None, "rewind_points.jsonl", "prompt"),
         ];
         assert_eq!(
-            serde_json::to_value(rewind_points(dir)).unwrap(),
+            serde_json::to_value(rewind_points(dir).unwrap()).unwrap(),
             serde_json::to_value(expected).unwrap()
         );
         // A non-UTF-8 line is one rejected record; the rows around it stand.
         let mut bad = updates.into_bytes();
         bad.extend_from_slice(b"\n\xff");
         fs::write(dir.join("updates.jsonl"), bad).unwrap();
-        assert_eq!(hook_runs(dir).len(), 4);
+        assert_eq!(hook_runs(dir).unwrap().len(), 4);
         assert_eq!(read_update_enrichment(dir).len(), 1);
         fs::write(dir.join("rewind_points.jsonl"), b"{}\n\xff").unwrap();
-        assert_eq!(rewind_points(dir).len(), 1);
+        assert_eq!(rewind_points(dir).unwrap().len(), 1);
     }
 
     fn enrich_from(s: &str) -> HashMap<String, ToolEnrich> {

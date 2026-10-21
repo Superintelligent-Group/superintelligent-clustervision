@@ -763,11 +763,15 @@ pub fn stream_counted(
         .take()
         .or_else(|| pass.from.cloned())
         .filter(|_| !counting.stopped);
-    let counted = (!counting.stopped).then(|| Counted {
-        turns: counting.turns,
-        dependencies: counting.dependencies,
-        counts: counting.affordances.finish(&session, &adapter.store_affordances(r)),
-    });
+    let counted = (!counting.stopped)
+        .then(|| -> Result<Counted> {
+            Ok(Counted {
+                turns: counting.turns,
+                dependencies: counting.dependencies,
+                counts: counting.affordances.finish(&session, &adapter.store_affordances(r)?),
+            })
+        })
+        .transpose()?;
     if let (true, Some(source), Some(counted)) = (pass.record, &source, &counted) {
         counted.record_with_source(r, source);
     }
@@ -1308,9 +1312,9 @@ mod tests {
             self.ended.store(true, std::sync::atomic::Ordering::Relaxed);
             Ok(session)
         }
-        fn store_affordances(&self, _: &SessionRef) -> Vec<crate::affordance::Affordance> {
+        fn store_affordances(&self, _: &SessionRef) -> anyhow::Result<Vec<crate::affordance::Affordance>> {
             self.side_reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Vec::new()
+            Ok(Vec::new())
         }
     }
 

@@ -115,7 +115,7 @@ impl<'a> SessionFacts<'a> {
         if self.affordances.get().is_none() {
             let mut rows = crate::affordance::of_session(self.session)?;
             if let Some(a) = crate::harness::for_harness(self.r.harness) {
-                rows.extend(a.store_affordances(self.r));
+                rows.extend(a.store_affordances(self.r)?);
             }
             let _ = self.affordances.set(rows.into_iter().map(|a| a.kind).collect());
         }

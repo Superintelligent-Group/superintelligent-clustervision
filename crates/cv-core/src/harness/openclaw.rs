@@ -302,7 +302,7 @@ impl Adapter for OpenClaw {
 
     /// The cron and sub-agent registries in the state dir that name this session's key
     /// ([`registry`]).
-    fn store_affordances(&self, r: &SessionRef) -> Vec<crate::affordance::Affordance> {
+    fn store_affordances(&self, r: &SessionRef) -> anyhow::Result<Vec<crate::affordance::Affordance>> {
         registry::affordances(r)
     }
 }
