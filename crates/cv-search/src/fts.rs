@@ -3337,6 +3337,20 @@ mod tests {
     }
 
     #[test]
+    fn searcher_explicit_index_filters_aliases_before_ranking() {
+        let world = cv_testkit::World::in_process("searcher-index", cv_core::env::Env::enter_isolated);
+        let dir = world.base.join("chosen-index");
+        let (index, f) = open_or_create(&dir).unwrap();
+        let mut writer = open_writer(&index, 15_000_000).unwrap();
+        for (id, harness) in [("a", "codex"), ("b", "claude"), ("c", "claude")] {
+            writer.add_document(tantivy::doc!(f.id => id, f.kind => KIND_BODY, f.harness => harness, f.body => "needle")).unwrap();
+        }
+        writer.commit().unwrap();
+        let found = crate::Searcher::default().search_in(&dir, "needle", crate::SearchFilter { harness: Some("CC"), ..Default::default() }, 2, crate::Source::Index).unwrap();
+        assert_eq!(found.hits.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(), ["b", "c"]);
+    }
+
+    #[test]
     fn empty_index_identity_is_repaired_once_across_concurrent_readers() {
         let world = cv_testkit::World::in_process("empty-index-identity", cv_core::env::Env::enter_isolated);
         let dir = world.base.join("index");

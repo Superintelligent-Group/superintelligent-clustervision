@@ -158,19 +158,28 @@ pub struct Searcher {
 
 impl Searcher {
     /// Errors are the path's own (an unusable index, an invalid query, a missing model); the
-    /// caller adds the door's pointer. Filters apply before ranking and once more after it.
+    /// caller adds the door's pointer. Filters apply before ranking.
     pub fn search(&self, query: &str, filter: SearchFilter<'_>, limit: usize, source: Source) -> Result<Found> {
+        self.search_in(&default_tantivy_dir(), query, filter, limit, source)
+    }
+
+    /// Search with an explicit full-text index location; live and semantic sources use their
+    /// configured stores. This avoids changing the process environment to select an index.
+    pub fn search_in(&self, dir: &std::path::Path, query: &str, filter: SearchFilter<'_>, limit: usize, source: Source) -> Result<Found> {
         let mut found = Found {
             hits: Vec::new(),
             source,
             notes: Vec::new(),
             truncated: false,
         };
-        let dir = default_tantivy_dir();
+        let harness = filter.harness.and_then(cv_core::Harness::parse);
+        if filter.harness.is_some() && harness.is_none() {
+            return Ok(found);
+        }
+        let filter = SearchFilter { harness: harness.map(cv_core::Harness::as_str), ..filter };
         match source {
             Source::Live => {
-                let want = filter.harness.and_then(cv_core::Harness::parse);
-                let live = cv_core::scan::live_search_filtered(query, want, limit, |r| {
+                let live = cv_core::scan::live_search_filtered(query, harness, limit, |r| {
                     filter.cwd.is_none_or(|needle| {
                         r.cwd
                             .as_ref()
@@ -189,30 +198,23 @@ impl Searcher {
                 }
                 return Ok(found);
             }
-            Source::Index => found.hits = fts::text_search_indexed_filtered(&dir, query, limit, filter)?,
+            Source::Index => found.hits = fts::text_search_indexed_filtered(dir, query, limit, filter)?,
             #[cfg(feature = "semantic")]
             Source::Semantic => found.hits = self.semantic.search(query, limit, filter)?,
             #[cfg(not(feature = "semantic"))]
             Source::Semantic => anyhow::bail!("semantic search is not built into this cv"),
         }
-        found.hits.retain(|h| {
-            filter.harness.is_none_or(|w| h.harness == w)
-                && filter
-                    .cwd
-                    .is_none_or(|needle| h.cwd.as_ref().is_some_and(|c| c.contains(needle)))
-        });
-        found.hits.truncate(limit);
         if source == Source::Index {
-            match fts::enrich_text_snippets(&dir, query, filter.scope, &mut found.hits) {
+            match fts::enrich_text_snippets(dir, query, filter.scope, &mut found.hits) {
                 Ok(None) => {}
                 Ok(Some(why)) => found.notes.push(Note::SnippetsUnavailable(why)),
                 Err(e) => found.notes.push(Note::SnippetsUnavailable(format!("{e:#}"))),
             }
             // Named on hits and misses: a hit list can be missing rows, not only an empty one.
-            if let Some(stale) = fts::staleness_note(&dir) {
+            if let Some(stale) = fts::staleness_note(dir) {
                 found.notes.push(Note::Stale(stale));
             }
-            if found.hits.is_empty() && !fts::has_subagent_docs(&dir) {
+            if found.hits.is_empty() && !fts::has_subagent_docs(dir) {
                 found.notes.push(Note::NoSubagents);
             }
         }
