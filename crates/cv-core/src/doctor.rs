@@ -103,7 +103,7 @@ impl Report {
     }
 
     /// The machine-readable diagnosis — `cv doctor --json` and the MCP `doctor` tool share this.
-    /// Existing field names are retained: `conversational` and tool/attachment values are cumulative
+    /// `conversational` and tool/attachment values are cumulative
     /// byte-based estimates, not measured provider tokens or a current-window breakdown. `thinking`
     /// includes opaque payloads. `peak_context` is maximum recorded prompt usage;
     /// `fixed_overhead_est` is the maximum first nonzero prompt usage across sessions and includes

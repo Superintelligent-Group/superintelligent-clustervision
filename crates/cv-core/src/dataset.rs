@@ -76,8 +76,8 @@ fn training_role(m: &Message, chat: bool) -> Option<&'static str> {
 const SPAN_CHUNK: usize = 1 << 20; // 1 MiB
 
 /// Stream one message's blocks as training text to `emit`, resolving span content **in chunks** (so a
-/// giant field is never materialized whole). Byte-identical to the old `parts.join("\n\n")`: the same
-/// parts, separated by `\n\n`, with empty/redacted text turns producing no part.
+/// giant field is never materialized whole). Parts are separated by `\n\n`, with empty/redacted
+/// text turns producing no part.
 fn render_blocks_into<'a>(
     blocks: impl IntoIterator<Item = &'a Block>,
     resolver: &crate::lazy::Resolver,
@@ -95,8 +95,8 @@ type RedactCtx<'a> = (&'a crate::redact::RedactOptions, &'a mut crate::redact::R
 /// Without `redact`, span content is chunk-resolved straight to `emit` (a giant field is never held
 /// whole). With `redact`, each text field is scrubbed **per block** — resolve (a span must be
 /// scanned whole to redact it), scrub, emit, drop — so the peak is one field, and nothing is cloned
-/// when a field is clean ([`scrub_cow`](crate::redact::scrub_cow) borrows). This replaced a
-/// clone-the-whole-`Message`-then-redact path; tool inputs materialize only for structural scrubbing.
+/// when a field is clean ([`scrub_cow`](crate::redact::scrub_cow) borrows). Tool inputs materialize
+/// only for structural scrubbing.
 fn render_blocks_impl<'a>(
     blocks: impl IntoIterator<Item = &'a Block>,
     resolver: &crate::lazy::Resolver,

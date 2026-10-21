@@ -1,16 +1,14 @@
 //! A persistent cache for the cheap metadata that `discover` produces.
 //!
 //! Discovery's expensive step is reading + JSON-parsing every transcript to extract metadata.
-//! Exact cache hits require unchanged `(mtime, size)` and captured file identity, rejecting appends,
-//! timestamp-preserving replacements and rewrites. A hit returns stored [`SessionRef`]s without
+//! Exact cache hits require the current interpretation version, unchanged `(mtime, size)`, and
+//! captured file identity, rejecting appends, timestamp-preserving replacements and rewrites. A hit returns stored [`SessionRef`]s without
 //! reading transcript content; full discovery still freshly enumerates each harness's inventory.
 //!
 //! It's process-global and shared by `cv` and the desktop app via the `scan_cache` table in
 //! the shared catalog db (see [`crate::catalog`], which owns the DDL; the rows also feed the
 //! freshness probe's append detection). Reads are tolerant — a missing or unreadable cache simply
 //! means everything is re-scanned (and the cache rebuilt), said once per process.
-//! Entries are reused only when interpretation, tuple, and captured file identity match.
-//! Captured source identities also reject replacement or rewrites with restored timestamps.
 //! Opted-in adapters may continue metadata on growth under their immutable-prefix contract,
 //! using independent reducer state and sampled resume guards, never stale published refs.
 
@@ -93,8 +91,7 @@ struct Cache {
 
 /// What discovery's cached rows mean is the one stored-format version
 /// ([`crate::source::VERSION`]): bump that when discovery changes the interpretation of unchanged
-/// source bytes. 5 is 0.18's, covering the `sessions.writer_version` column; unknown writer
-/// versions are filled only by ordinary source reads.
+/// source bytes. Unknown writer versions are filled only by ordinary source reads.
 #[cfg(feature = "sqlite")]
 pub(crate) const INTERPRETATION_VERSION: u32 = crate::source::VERSION;
 /// Every live cache by catalog. Each environment ([`crate::env`]) retains its current catalog's;
