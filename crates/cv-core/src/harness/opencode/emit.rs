@@ -338,6 +338,7 @@ fn write_database(
     drop(part_insert);
     drop(message_insert);
     drop(session_insert);
+    // Revalidate after source reads and before committing any staged database changes.
     crate::harness::wire::write::check_source_fields(session)?;
     tx.commit()?;
     Ok(())

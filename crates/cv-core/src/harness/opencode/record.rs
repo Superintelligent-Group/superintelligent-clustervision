@@ -297,7 +297,7 @@ impl Record {
                 push_extra_array(bag, "compactions", hydrated()?);
                 self.compaction = true;
             }
-            // Unknown / future part type: never drop it silently — stash verbatim.
+            // Missing or empty types are ignored; named unknown types are preserved.
             "" => {}
             _ => push_extra_array(bag, "unknown_parts", hydrated()?),
         }

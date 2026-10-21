@@ -140,6 +140,8 @@ pub(crate) fn text_summary<T: std::borrow::Borrow<crate::lazy::Text>>(
                 head.push(s);
             }
             crate::lazy::Text::Source(_) | crate::lazy::Text::Span(_) => {
+                // Discovery titles are optional hints: failed text reads contribute no prefix.
+                // Transcript consumers use checked reads and report source failures separately.
                 let prefix = text.try_resolve_prefix(resolver, 1024).unwrap_or_default();
                 present |= !prefix.is_empty();
                 head.push(&prefix);
