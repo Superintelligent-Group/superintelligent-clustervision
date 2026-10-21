@@ -385,14 +385,20 @@ pub(crate) fn thinking_placeholder(signature: Option<&str>, encrypted: Option<&s
 
 /// Whether any message content field is still a lazy [`Span`](crate::lazy::Span) (see [`emit`]).
 fn has_unresolved_spans(session: &Session) -> bool {
-    session.messages.iter().any(|m| {
-        m.content.iter().any(|b| match b {
-            Block::Text { text } | Block::Thinking { text, .. } => text.is_lazy(),
-            Block::ToolResult { content, .. } => content.is_lazy(),
-            Block::ToolUse { input, .. } => matches!(input, crate::Json::Source(_)),
-            _ => false,
+    session
+        .messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .any(|block| {
+            block.text().is_some_and(crate::Text::is_lazy)
+                || matches!(
+                    block,
+                    Block::ToolUse {
+                        input: crate::Json::Source(_),
+                        ..
+                    }
+                )
         })
-    })
 }
 
 /// Resolve complete values before a full-output consumer touches them. Ordinary owned sessions

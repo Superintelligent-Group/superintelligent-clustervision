@@ -16,7 +16,7 @@ struct Collect {
     implicit: PathBuf,
     reads: ReadSet,
     sources: HashMap<PathBuf, JsonSource>,
-    error: Option<anyhow::Error>,
+    latch: crate::stream::Latch,
 }
 impl Collect {
     fn capture(&mut self, path: &Path) -> Result<()> {
@@ -35,7 +35,7 @@ impl Collect {
             return Ok(());
         }
         for block in &message.content {
-            if let Some(crate::Text::Span(span)) = text(block) {
+            if let Some(crate::Text::Span(span)) = block.text() {
                 let path = span.source.clone().unwrap_or_else(|| self.implicit.clone());
                 self.capture(&path)?;
             }
@@ -47,14 +47,14 @@ impl Collect {
 impl MessageSink for Collect {
     fn message(&mut self, message: crate::Message) -> Flow {
         if let Err(error) = self.note(message) {
-            self.error = Some(error);
+            self.latch.fail(error);
             Flow::Stop
         } else {
             Flow::Continue
         }
     }
     fn take_error(&mut self) -> Option<anyhow::Error> {
-        self.error.take()
+        self.latch.take("emit preparation")
     }
     fn meta(&mut self, metadata: &Session) {
         if let Some(path) = &metadata.source_path {
@@ -66,23 +66,9 @@ impl MessageSink for Collect {
         // Absence/directory membership are read-set guards, not retained body files.
         if fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) {
             if let Err(error) = self.capture(path) {
-                self.error = Some(error);
+                self.latch.fail(error);
             }
         }
-    }
-}
-fn text(block: &crate::Block) -> Option<&crate::Text> {
-    match block {
-        crate::Block::Text { text } | crate::Block::Thinking { text, .. } => Some(text),
-        crate::Block::ToolResult { content, .. } => Some(content),
-        _ => None,
-    }
-}
-fn text_mut(block: &mut crate::Block) -> Option<&mut crate::Text> {
-    match block {
-        crate::Block::Text { text } | crate::Block::Thinking { text, .. } => Some(text),
-        crate::Block::ToolResult { content, .. } => Some(content),
-        _ => None,
     }
 }
 pub(super) fn parse(
@@ -115,7 +101,7 @@ pub(super) fn selected(
         implicit: reference.path.clone(),
         reads,
         sources: HashMap::new(),
-        error: None,
+        latch: Default::default(),
     };
     if fs::metadata(&primary).is_ok_and(|metadata| metadata.is_file()) {
         sink.capture(&primary)?;
@@ -132,7 +118,7 @@ pub(super) fn selected(
     );
     for message in &mut sink.messages {
         for block in &mut message.content {
-            let Some(value) = text_mut(block) else { continue };
+            let Some(value) = block.text_mut() else { continue };
             let crate::Text::Span(span) = value else { continue };
             let span = span.clone();
             let path = std::path::absolute(
@@ -222,7 +208,7 @@ mod tests {
                 .messages
                 .iter()
                 .flat_map(|m| &m.content)
-                .all(|block| text(block).is_none_or(|t| t.inline_str().is_some())));
+                .all(|block| block.text().is_none_or(|t| t.inline_str().is_some())));
             let checked_options = Demand {
                 spans: true,
                 ..owned_options
@@ -253,7 +239,7 @@ mod tests {
                 .messages
                 .iter()
                 .flat_map(|m| &m.content)
-                .any(|block| matches!(text(block), Some(Text::Source(_)))));
+                .any(|block| matches!(block.text(), Some(Text::Source(_)))));
             let mut materialized = actual.clone();
             materialized.materialize()?;
             assert_serialized_equal(&materialized, &expected)?;
@@ -322,7 +308,7 @@ mod tests {
             .messages
             .iter()
             .flat_map(|m| &m.content)
-            .any(|block| matches!(text(block), Some(Text::Source(_)))));
+            .any(|block| matches!(block.text(), Some(Text::Source(_)))));
         let mut materialized = actual.clone();
         materialized.materialize()?;
         assert_serialized_equal(&materialized, &expected)?;
@@ -391,13 +377,13 @@ mod tests {
                 .messages
                 .iter()
                 .flat_map(|m| &m.content)
-                .all(|b| !matches!(text(b), Some(Text::Span(_) | Text::Source(_)))));
+                .all(|b| !matches!(b.text(), Some(Text::Span(_) | Text::Source(_)))));
             let actual = super::super::parse_for_emit(&adapter, &reference, Harness::Gemini)?;
             assert!(actual
                 .messages
                 .iter()
                 .flat_map(|m| &m.content)
-                .any(|b| matches!(text(b), Some(Text::Source(_)))));
+                .any(|b| matches!(b.text(), Some(Text::Source(_)))));
             let mut materialized = actual.clone();
             materialized.materialize()?;
             assert_serialized_equal(&materialized, &expected)?;

@@ -21,12 +21,15 @@ fn files(root: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>>> {
     Ok(out)
 }
 fn has_sources(session: &Session) -> bool {
-    session.messages.iter().flat_map(|m| &m.content).any(|b| match b {
-        Block::Text { text } | Block::Thinking { text, .. } | Block::ToolResult { content: text, .. } => {
-            matches!(text, crate::Text::Source(_))
-        }
-        Block::ToolUse { input, .. } => matches!(input, crate::Json::Source(_)),
-        _ => false,
+    session.messages.iter().flat_map(|m| &m.content).any(|block| {
+        block.text().is_some_and(|text| matches!(text, crate::Text::Source(_)))
+            || matches!(
+                block,
+                Block::ToolUse {
+                    input: crate::Json::Source(_),
+                    ..
+                }
+            )
     })
 }
 fn check(adapter: &dyn Adapter, reference: &SessionRef, target: Harness, output: &Path, source: &Path) -> Result<()> {

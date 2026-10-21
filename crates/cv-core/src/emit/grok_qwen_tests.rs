@@ -247,22 +247,18 @@ fn capture_bodies(session: &mut Session, base: &Path) -> Result<()> {
         for block in &mut message.content {
             index += 1;
             let path = base.join(format!("{index}.json"));
-            match block {
-                Block::Text { text } | Block::Thinking { text, .. } | Block::ToolResult { content: text, .. } => {
-                    let raw = serde_json::to_vec(&text.inline_str().unwrap())?;
-                    fs::write(&path, &raw)?;
-                    // For tiny/empty leaves also force a captured Source while retaining strict acceptance.
-                    let json = crate::Json::source(&path, 0, raw.len() as u64)?;
-                    if let crate::Json::Source(source) = json {
-                        *text = crate::lazy::Text::Source(crate::lazy::SourceText::new(source));
-                    }
+            if let Some(text) = block.text_mut() {
+                let raw = serde_json::to_vec(&text.inline_str().unwrap())?;
+                fs::write(&path, &raw)?;
+                // For tiny/empty leaves also force a captured Source while retaining strict acceptance.
+                let json = crate::Json::source(&path, 0, raw.len() as u64)?;
+                if let crate::Json::Source(source) = json {
+                    *text = crate::lazy::Text::Source(crate::lazy::SourceText::new(source));
                 }
-                Block::ToolUse { input, .. } => {
-                    let raw = serde_json::to_vec(input.resolve()?.as_ref())?;
-                    fs::write(&path, &raw)?;
-                    *input = crate::Json::source(&path, 0, raw.len() as u64)?;
-                }
-                _ => {}
+            } else if let Block::ToolUse { input, .. } = block {
+                let raw = serde_json::to_vec(input.resolve()?.as_ref())?;
+                fs::write(&path, &raw)?;
+                *input = crate::Json::source(&path, 0, raw.len() as u64)?;
             }
         }
     }

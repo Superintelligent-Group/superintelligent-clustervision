@@ -934,6 +934,20 @@ pub enum Block {
 }
 
 impl Block {
+    /// The text carried by this block, including thinking and tool output.
+    pub fn text(&self) -> Option<&crate::lazy::Text> {
+        match self {
+            Self::Text { text } | Self::Thinking { text, .. } | Self::ToolResult { content: text, .. } => Some(text),
+            _ => None,
+        }
+    }
+    pub fn text_mut(&mut self) -> Option<&mut crate::lazy::Text> {
+        match self {
+            Self::Text { text } | Self::Thinking { text, .. } | Self::ToolResult { content: text, .. } => Some(text),
+            _ => None,
+        }
+    }
+
     /// The block's serde `type` tag (`tool_use`, …): the one spelling of the wire word.
     pub fn type_tag(&self) -> &'static str {
         match self {

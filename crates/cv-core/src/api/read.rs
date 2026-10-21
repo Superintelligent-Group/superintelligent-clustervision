@@ -208,10 +208,7 @@ pub(super) fn window(
         return Ok((shell, whole));
     }
     // `stable` is `verify`'s primary check on this same baseline and read set.
-    anyhow::ensure!(
-        stable && sink.reads.fresh(&mut Probe::default()),
-        "API window source changed before publication"
-    );
+    anyhow::ensure!(stable, "API window source changed before publication");
     if let (Some(key), Some((index, checkpoint, meta))) = (key, sink.checkpoint.take()) {
         cache.insert(Entry {
             key,
@@ -229,7 +226,7 @@ pub(super) fn window(
 
 fn verify(r: &SessionRef, primary: &std::path::Path, before: &Baseline, sink: &WindowSink) -> Result<()> {
     anyhow::ensure!(
-        fresh(r, &before.with_reads(&sink.reads), primary) && sink.reads.fresh(&mut Probe::default()),
+        fresh(r, &before.with_reads(&sink.reads), primary),
         "API window source changed before publication"
     );
     Ok(())

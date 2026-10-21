@@ -518,8 +518,7 @@ pub fn stage_record(
         resolver: crate::lazy::Resolver,
         facts: Option<crate::query::QueryReducer<'a>>,
         messages: usize,
-        error: Option<anyhow::Error>,
-        failed: bool,
+        latch: crate::stream::Latch,
     }
     impl Sink<'_> {
         fn render(&mut self, mut message: Message) -> anyhow::Result<()> {
@@ -559,14 +558,13 @@ pub fn stage_record(
             match result {
                 Ok(()) => crate::Flow::Continue,
                 Err(error) => {
-                    self.failed = true;
-                    self.error = Some(error);
+                    self.latch.fail(error);
                     crate::Flow::Stop
                 }
             }
         }
         fn take_error(&mut self) -> Option<anyhow::Error> {
-            self.error.take()
+            self.latch.take("dataset")
         }
     }
     let mut bytes = std::io::BufWriter::with_capacity(64 * 1024, crate::harness::store::bytes::ByteStage::new());
@@ -580,8 +578,7 @@ pub fn stage_record(
         resolver: crate::lazy::Resolver::new(Some(r.path.clone())),
         facts: query.map(crate::query::QueryReducer::new),
         messages: 0,
-        error: None,
-        failed: false,
+        latch: Default::default(),
     };
     let counted_query = query.is_some_and(crate::SessionQuery::needs_counted);
     let read = crate::stream::stream_counted(
@@ -593,7 +590,7 @@ pub fn stage_record(
     );
     let (session, counted) = match read {
         Ok(done) => (done.session, done.counted),
-        Err(error) if sink.failed => return Err(error),
+        Err(error) if sink.latch.failed() => return Err(error),
         Err(error) => return Err(InputError(error).into()),
     };
     let counts = counted.filter(|_| counted_query).map(|c| c.counts);

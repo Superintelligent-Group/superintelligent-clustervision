@@ -12,7 +12,7 @@ pub(super) struct Accumulator {
     pending: Vec<Message>,
     answered: std::collections::HashSet<String>,
     resolver: crate::lazy::Resolver,
-    error: Option<anyhow::Error>,
+    latch: crate::stream::Latch,
 }
 impl Accumulator {
     pub(super) fn new(target: Harness, thinking: ThinkingMode, resolver: crate::lazy::Resolver) -> Self {
@@ -24,7 +24,7 @@ impl Accumulator {
             pending: Vec::new(),
             answered: Default::default(),
             resolver,
-            error: None,
+            latch: Default::default(),
         }
     }
     pub(super) fn note(&mut self, message: &Message) -> Result<()> {
@@ -65,16 +65,19 @@ impl Accumulator {
 }
 impl MessageSink for Accumulator {
     fn message(&mut self, message: Message) -> Flow {
+        if self.latch.failed() {
+            return Flow::Stop;
+        }
         match self.note(&message) {
             Ok(()) => Flow::Continue,
             Err(error) => {
-                self.error = Some(error);
+                self.latch.fail(error);
                 Flow::Stop
             }
         }
     }
     fn take_error(&mut self) -> Option<anyhow::Error> {
-        self.error.take()
+        self.latch.take("fidelity projection")
     }
     fn meta(&mut self, session: &Session) {
         self.resolver = session.resolver();

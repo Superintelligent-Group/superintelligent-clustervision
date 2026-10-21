@@ -76,8 +76,7 @@ impl Report {
             unnamed: HashMap::new(),
             startup: None,
             compactions: CompactionSink::new(false),
-            error: None,
-            failed: false,
+            latch: Default::default(),
         }
     }
 
@@ -157,17 +156,14 @@ pub struct SessionPass<'a> {
     /// First nonzero recorded prompt usage, including conversation.
     startup: Option<u64>,
     compactions: CompactionSink,
-    error: Option<anyhow::Error>,
-    failed: bool,
+    latch: crate::stream::Latch,
 }
 
 impl SessionPass<'_> {
     /// Fold the session's compactions and fixed-overhead estimate into the report.
-    pub fn finish(self) -> anyhow::Result<()> {
-        if self.failed {
-            return Err(self
-                .error
-                .unwrap_or_else(|| anyhow::anyhow!("doctor source read failed")));
+    pub fn finish(mut self) -> anyhow::Result<()> {
+        if let Some(error) = self.latch.take("doctor source read") {
+            return Err(error);
         }
         let rep = self.rep;
         for (id, t) in self.unnamed {
@@ -256,18 +252,15 @@ impl SessionPass<'_> {
 
 impl MessageSink for SessionPass<'_> {
     fn take_error(&mut self) -> Option<anyhow::Error> {
-        self.error
-            .take()
-            .or_else(|| self.failed.then(|| anyhow::anyhow!("doctor source read failed")))
+        self.latch.take("doctor source read")
     }
 
     fn message(&mut self, m: Message) -> Flow {
-        if self.failed {
+        if self.latch.failed() {
             return Flow::Stop;
         }
         if let Err(error) = self.observe(&m) {
-            self.failed = true;
-            self.error = Some(error);
+            self.latch.fail(error);
             return Flow::Stop;
         }
         self.compactions.message(m)
