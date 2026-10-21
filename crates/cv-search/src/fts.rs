@@ -2253,26 +2253,7 @@ impl<'w> ChunkSink<'w> {
     /// and runs of whitespace collapse away), truncated at [`PREVIEW_CHARS`]. No-op once full, so
     /// the cost is bounded no matter how large the session is.
     fn extend_preview(&mut self, s: &str) {
-        let mut n = self.preview.chars().count();
-        if n >= PREVIEW_CHARS {
-            return;
-        }
-        for word in s.split_whitespace() {
-            if n >= PREVIEW_CHARS {
-                break;
-            }
-            if !self.preview.is_empty() {
-                self.preview.push(' ');
-                n += 1;
-            }
-            for c in word.chars() {
-                if n >= PREVIEW_CHARS {
-                    break;
-                }
-                self.preview.push(c);
-                n += 1;
-            }
-        }
+        Preview::new(&self.preview).push(&mut self.preview, s);
     }
 
     fn record_span(&mut self, sp: &cv_core::Span) {
@@ -2387,18 +2368,45 @@ impl<'w> ChunkSink<'w> {
     }
 }
 
+/// Collapse whitespace across formatter fragments, bounded in Unicode characters.
+struct Preview {
+    chars: usize,
+    word_open: bool,
+}
+impl Preview {
+    fn new(text: &str) -> Self {
+        Self { chars: text.chars().count(), word_open: false }
+    }
+    fn push(&mut self, out: &mut String, text: &str) {
+        for c in text.chars() {
+            if self.chars >= PREVIEW_CHARS { break; }
+            if c.is_whitespace() {
+                self.word_open = false;
+            } else {
+                if !self.word_open && !out.is_empty() {
+                    out.push(' ');
+                    self.chars += 1;
+                }
+                if self.chars < PREVIEW_CHARS {
+                    out.push(c);
+                    self.chars += 1;
+                }
+                self.word_open = true;
+            }
+        }
+    }
+}
+
 /// Canonical writer fragments are UTF-8; the reducer owns splitting and output failures.
 struct JsonChunks<'a, 'w> {
     sink: &'a mut ChunkSink<'w>,
-    preview_chars: usize,
-    word_open: bool,
+    preview: Preview,
 }
 impl<'a, 'w> JsonChunks<'a, 'w> {
     fn new(sink: &'a mut ChunkSink<'w>) -> Self {
         Self {
-            preview_chars: sink.preview.chars().count(),
+            preview: Preview::new(&sink.preview),
             sink,
-            word_open: false,
         }
     }
 }
@@ -2406,27 +2414,8 @@ impl std::io::Write for JsonChunks<'_, '_> {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         let s =
             std::str::from_utf8(bytes).map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-        // Formatter fragments can split a word. Carry its state across writes so the preview
-        // stays identical to extend_preview on the former single serialized string.
-        if self.preview_chars < PREVIEW_CHARS && !self.sink.in_context {
-            for c in s.chars() {
-                if self.preview_chars >= PREVIEW_CHARS {
-                    break;
-                }
-                if c.is_whitespace() {
-                    self.word_open = false;
-                } else {
-                    if !self.word_open && !self.sink.preview.is_empty() {
-                        self.sink.preview.push(' ');
-                        self.preview_chars += 1;
-                    }
-                    if self.preview_chars < PREVIEW_CHARS {
-                        self.sink.preview.push(c);
-                        self.preview_chars += 1;
-                    }
-                    self.word_open = true;
-                }
-            }
+        if !self.sink.in_context {
+            self.preview.push(&mut self.sink.preview, s);
         }
         self.sink.push_body(s);
         if self.sink.failed || self.sink.err.is_some() {
@@ -3652,11 +3641,7 @@ mod tests {
             "last": "done"
         });
         let expected = format!("Edit {input}\n");
-        let mut ignore = |_doc: TantivyDocument| -> Result<()> { Ok(()) };
-        let mut former = ChunkSink::new(&mut ignore, &f, &r, 1, 1, Default::default());
-        former.extend_preview("Edit");
-        former.extend_preview(&input.to_string());
-        let expected_preview = former.preview;
+        let expected_preview: String = expected.chars().take(PREVIEW_CHARS).collect();
         let mut bodies = Vec::new();
         let mut out = |doc: TantivyDocument| -> Result<()> {
             if let Some(body) = doc.get_first(f.body).and_then(|value| value.as_str()) {
@@ -3937,12 +3922,6 @@ mod tests {
         let source = cv_core::source::Probe::default().snapshot(&r);
         let adapter = cv_core::harness::claude::Claude::with_config_dir(path.parent().unwrap());
         let fields = fields_of(&build_schema()).unwrap();
-        fn hash(mut hash: u64, bytes: &[u8]) -> u64 {
-            for &byte in bytes {
-                hash = (hash ^ u64::from(byte)).wrapping_mul(1_099_511_628_211);
-            }
-            hash
-        }
         let initial = 14_695_981_039_346_656_037;
         let mut digest = initial;
         let mut body_bytes = 0;
@@ -3950,7 +3929,7 @@ mod tests {
         let mut body_docs = 0;
         let mut emit = |doc: TantivyDocument| -> Result<()> {
             if let Some(body) = doc.get_first(fields.body).and_then(|value| value.as_str()) {
-                digest = hash(digest, body.as_bytes());
+                digest = body_hash(digest, body.as_bytes());
                 body_bytes += body.len();
                 largest_body = largest_body.max(body.len());
                 body_docs += 1;
