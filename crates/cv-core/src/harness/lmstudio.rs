@@ -108,9 +108,10 @@ impl Adapter for LmStudio {
             if !is_conversation_file(&path) {
                 continue;
             }
-            if let Some(found) =
-                crate::Skipped::listed(&path, crate::discover_cache::cached_scan_checked(&path, || scan(&path).map(Some)))
-            {
+            if let Some(found) = crate::Skipped::listed(
+                &path,
+                crate::discover_cache::cached_scan_checked(&path, || scan(&path).map(Some)),
+            ) {
                 out.push(found);
             }
         }

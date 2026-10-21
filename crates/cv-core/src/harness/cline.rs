@@ -640,14 +640,14 @@ fn text_views<'a>(
             } else {
                 None
             };
-            if if discovery {
-                text.is_none()
+            let selected = if discovery {
+                text.is_some()
             } else {
-                part.string("type")?.as_deref() != Some("text")
-            } {
-                continue;
+                part.string("type")?.as_deref() == Some("text")
+            };
+            if selected {
+                visit(text)?;
             }
-            visit(text)?;
         }
     }
     Ok(())
