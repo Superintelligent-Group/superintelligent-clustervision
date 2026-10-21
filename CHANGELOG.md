@@ -150,7 +150,7 @@
 - CI runs the Codex hooks against a digest-pinned real `codex` 0.162.1: trust from `hooks/list`, and SessionStart/UserPromptSubmit running under `codex exec`.
 - macOS runs nightly and on rc tags: APFS identity, publish, SQLite and mmap gates; a separate workflow smokes the published Darwin artifact natively.
 - `tools/dump-hash.sh` streams one sha256 per command, session and demand over `tools/dump-hash.manifest`: the byte-identity gate for output-preserving changes.
-- Shared cv-core modules name a harness variant, directly or through an alias, only inside an exhaustive match; out-of-tree adapters inherit defaults for new `Adapter` methods.
+- Shared modules in cv-core, `cv` and cv-search name a harness, even through an alias, only inside exhaustive matches; new `Adapter` methods have defaults.
 
 **Breaking (library): cv-core, cv-search and cv-testkit APIs.** Rust callers migrate as follows; the CLI, HTTP and MCP are unaffected.
 - `emit::Delta {field, before, after}` and `formats::Finding` become one `emit::Divergence {what, a, b, expected, at}`; serialized, `at` is `where` and `FidelityReport.deltas` elements change keys.
