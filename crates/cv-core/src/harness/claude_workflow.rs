@@ -971,12 +971,27 @@ impl Miner {
 /// recovers the run id, which keys the `subagents/workflows/<runId>/` debris dir — agent
 /// transcripts and journaled results produced before the crash, i.e. the harvestable work.
 pub fn ghost_launches(session_path: &Path) -> Vec<WorkflowLaunch> {
+    // Ghost matching needs only identity, name and resume ancestry, never scripts or results.
+    let states = crate::par_filter_map(state_paths(session_path), |path| {
+        let source = crate::json::JsonSource::capture(&path).ok()?;
+        source
+            .read_document(|view| {
+                let mut fields = serde_json::Map::new();
+                for key in ["runId", "workflowName", "resumeFromRunId"] {
+                    if let Some(value) = crate::affordance::input::field_string(view, key)? {
+                        fields.insert(key.into(), Value::String(value));
+                    }
+                }
+                Ok(parse_state(&Value::Object(fields)))
+            })
+            .ok()
+    });
     let mut ghosts = compute_ghosts(
         launches(session_path).unwrap_or_else(|error| {
             crate::env::warn_once("workflow launches", format!("{}: {error:#}", session_path.display()));
             Vec::new()
         }),
-        &workflows(session_path),
+        &states,
     );
     let mut orphans = OrphanScripts::new(orphan_scripts(session_path));
     for g in &mut ghosts {
