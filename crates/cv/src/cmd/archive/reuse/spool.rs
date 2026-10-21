@@ -3,10 +3,7 @@
 use super::*;
 pub(super) use crate::cmd::session_json::write_session;
 use cv_core::bytes::{ByteSource, ByteStage};
-use cv_core::projection::Counted;
 pub(super) use cv_core::projection::Prefix;
-use std::cell::Cell;
-use std::rc::Rc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct FirstUser {
@@ -40,49 +37,43 @@ impl Turns {
     }
 }
 
+pub(super) struct Spooled {
+    pub bytes: ByteSource,
+    pub messages: usize,
+    pub turns: Turns,
+    pub first_user: Option<FirstUser>,
+}
+
 pub(super) struct Spool {
-    stage: Option<Counted<BufWriter<ByteStage>>>,
+    stage: BufWriter<ByteStage>,
     resolver: cv_core::Resolver,
     messages: usize,
     turns: Turns,
     error: Option<anyhow::Error>,
     first_user: Option<FirstUser>,
-    written: Rc<Cell<u64>>,
 }
 impl Spool {
-    pub fn new(r: &SessionRef) -> Self {
-        let written = Rc::new(Cell::new(0));
+    pub fn new(path: &Path) -> Self {
         Self {
-            stage: Some(Counted {
-                inner: BufWriter::with_capacity(64 * 1024, ByteStage::default()),
-                position: written.clone(),
-            }),
-            resolver: cv_core::Resolver::new(Some(r.path.clone())),
+            stage: BufWriter::with_capacity(64 * 1024, ByteStage::default()),
+            resolver: cv_core::Resolver::new(Some(path.to_owned())),
             messages: 0,
             turns: Turns::default(),
             error: None,
             first_user: None,
-            written,
         }
     }
-    pub fn finish(mut self) -> Result<(ByteSource, usize, Turns, Option<FirstUser>, u64)> {
-        if let Some(error) = self.error.take() {
+    pub fn finish(self) -> Result<Spooled> {
+        if let Some(error) = self.error {
             return Err(error);
         }
-        let stage = self
-            .stage
-            .take()
-            .unwrap()
-            .inner
-            .into_inner()
-            .map_err(|error| error.into_error())?;
-        Ok((
-            stage.finish()?,
-            self.messages,
-            self.turns,
-            self.first_user,
-            self.written.get(),
-        ))
+        let stage = self.stage.into_inner().map_err(|error| error.into_error())?;
+        Ok(Spooled {
+            bytes: stage.finish()?,
+            messages: self.messages,
+            turns: self.turns,
+            first_user: self.first_user,
+        })
     }
 }
 impl cv_core::MessageSink for Spool {
@@ -102,7 +93,7 @@ impl cv_core::MessageSink for Spool {
                     });
                 }
             }
-            let stage = self.stage.as_mut().unwrap();
+            let stage = &mut self.stage;
             cv_core::projection::write_frame(stage, &message, &self.resolver, None)?;
             self.turns.push(self.messages, message.is_turn());
             self.messages += 1;
@@ -128,12 +119,17 @@ mod tests {
 
     fn stage(session: &Session) -> (ByteSource, Option<FirstUser>) {
         let r = SessionRef::new(&session.id, session.harness, PathBuf::from("unused"));
-        let mut spool = Spool::new(&r);
+        let mut spool = Spool::new(&r.path);
         spool.meta(session);
         for message in &session.messages {
             assert_eq!(spool.message(message.clone()), Flow::Continue);
         }
-        let (bytes, count, turns, first, _) = spool.finish().unwrap();
+        let Spooled {
+            bytes,
+            messages: count,
+            turns,
+            first_user: first,
+        } = spool.finish().unwrap();
         assert_eq!(count, session.messages.len());
         for n in 0..=count {
             assert_eq!(
@@ -187,7 +183,7 @@ mod tests {
         assert_eq!(left, right);
         assert_eq!(label.unwrap().head, source_label.unwrap().head);
         fs::write(&sidecar, "new metadata").unwrap();
-        let mut spool = Spool::new(&SessionRef::new("source-label", Harness::Codex, path));
+        let mut spool = Spool::new(&path);
         assert_eq!(spool.message(lazy.messages.remove(0)), Flow::Stop);
         assert!(spool.take_error().is_some());
     }

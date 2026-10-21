@@ -1,7 +1,7 @@
 //! Consumer source stamps and bounded temporary serialization for the durable archive.
 use super::*;
 mod spool;
-use spool::{FirstUser, Prefix, Spool};
+use spool::{FirstUser, Prefix, Spool, Spooled};
 use std::io::{BufWriter, Read};
 
 const STATE_BYTES: u64 = 1024 * 1024;
@@ -227,7 +227,7 @@ impl Archive {
                 prefix_bytes: 0,
             });
         }
-        let mut spool = Spool::new(r);
+        let mut spool = Spool::new(&r.path);
         let mut pass = cv_core::watch::read_session_into(
             adapter,
             r,
@@ -247,12 +247,17 @@ impl Archive {
         if pass.resumed && old.is_none() {
             // Older state has no canonical prefix range, or its artifact changed. The existing
             // checked adapter handles the whole fallback; discard only this owned partial spool.
-            spool = Spool::new(r);
+            spool = Spool::new(&r.path);
             pass = cv_core::watch::read_session_into(adapter, r, None, 0, &mut spool)?;
         }
-        let (spooled, messages, turns, mut first_user, spool_bytes) = spool.finish()?;
-        #[cfg(not(test))]
-        let _ = spool_bytes;
+        let Spooled {
+            bytes: spooled,
+            messages,
+            turns,
+            mut first_user,
+        } = spool.finish()?;
+        #[cfg(test)]
+        let spool_bytes = spooled.len();
         #[cfg(test)]
         let prefix_bytes = old
             .and_then(|stored| stored.prefix.as_ref())
