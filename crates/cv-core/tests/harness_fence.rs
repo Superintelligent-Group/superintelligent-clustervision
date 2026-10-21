@@ -1,9 +1,7 @@
 //! The adapter-boundary fence (the `dependency_fence.rs` shape): a shared module names a harness
 //! only inside an exhaustive `match`. Everywhere else the fact belongs to the `Adapter` (a method
 //! with a default), so a `Harness::<Name>` literal in product code outside `src/harness/` and
-//! `src/formats.rs` is a leak. Today's leaks are allowlisted per file below; a new one fails this
-//! test, and a move that removes one fails it too until its count is lowered (or its line deleted),
-//! so the allowlist only ever shrinks.
+//! `src/formats.rs` is a leak, and any one fails this test.
 //!
 //! The scan is textual and approximate, on purpose: `#[cfg(test)]`/`#[test]` items are skipped to
 //! their closing brace (or `;`), `tests.rs`/`*_tests.rs` files and `tests/` directories are not
@@ -13,18 +11,12 @@
 //! partial list does not count). Rust's own exhaustiveness checking is the real judge; this fence
 //! only has to tell a per-harness table from a special case.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use cv_core::Harness;
 use regex::Regex;
-
-/// Product files outside the adapters that still name a harness outside an exhaustive match, with
-/// how many literals each holds. Lower a count (or delete the line) with the move that earns it.
-#[rustfmt::skip]
-const ALLOWLIST: &[(&str, usize)] = &[
-];
 
 fn source_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")
@@ -186,7 +178,7 @@ fn harness_names_stay_inside_exhaustive_matches() {
         }
     }
 
-    let mut sites: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut sites = Vec::new();
     for path in files.iter().filter(|p| !test_only.contains(*p)) {
         let text = fs::read_to_string(path).unwrap();
         let code: Vec<String> = text.lines().map(|l| code_only(l, &strings)).collect();
@@ -202,45 +194,17 @@ fn harness_names_stay_inside_exhaustive_matches() {
                 if name == "ALL" || name == "COUNT" {
                     continue;
                 }
-                sites.entry(rel.clone()).or_default().push(format!(
-                    "{rel}:{}: {}",
-                    i + 1,
-                    text.lines().nth(i).unwrap().trim()
-                ));
+                sites.push(format!("{rel}:{}: {}", i + 1, text.lines().nth(i).unwrap().trim()));
             }
         }
     }
 
-    let allowed: BTreeMap<&str, usize> = ALLOWLIST.iter().copied().collect();
-    let mut problems = Vec::new();
-    for (file, found) in &sites {
-        let n = allowed.get(file.as_str()).copied().unwrap_or(0);
-        if found.len() > n {
-            problems.push(format!(
-                "{file}: {} harness literal(s) outside an exhaustive match, {n} allowed:\n    {}",
-                found.len(),
-                found.join("\n    ")
-            ));
-        } else if found.len() < n {
-            problems.push(format!(
-                "{file}: {} literal(s) left, {n} allowed — lower the ALLOWLIST count",
-                found.len()
-            ));
-        }
-    }
-    for (file, n) in ALLOWLIST {
-        if !sites.contains_key(*file) {
-            problems.push(format!(
-                "{file}: {n} allowed but none found — delete its ALLOWLIST line"
-            ));
-        }
-    }
     assert!(
-        problems.is_empty(),
+        sites.is_empty(),
         "adapter boundary fence breached:\n  {}\n\
          The law: a shared module names a harness only inside an exhaustive `match` (a per-harness \
          table). A special case for one harness is an `Adapter` method with a default. If the site \
-         is a table, make the match name every variant; if it is a move, lower the count it leaves.",
-        problems.join("\n  ")
+         is a table, make the match name every variant.",
+        sites.join("\n  ")
     );
 }
