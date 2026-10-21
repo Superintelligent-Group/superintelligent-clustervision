@@ -520,7 +520,7 @@ pub fn stage_record(
             if rendered && message.kind == MessageKind::SystemPrompt {
                 message.content.retain(|block| matches!(block, Block::Text { .. }));
                 self.systems
-                    .push(deferred::DeferredMessage::new(message, &mut self.sources))?;
+                    .push(deferred::DeferredMessage::stage(message, &mut self.sources))?;
             }
             Ok(())
         }
@@ -536,7 +536,7 @@ pub fn stage_record(
                     if training_role(&message, matches!(self.record.fmt, Format::Chatml)).is_some()
                         && !message_is_empty(&message)
                     {
-                        deferred.push(deferred::DeferredMessage::new(message, &mut self.sources))?;
+                        deferred.push(deferred::DeferredMessage::stage(message, &mut self.sources))?;
                     }
                     if !self.wait_query && self.messages >= self.min_messages {
                         for row in self.deferred.take().expect("deferred messages").rows()? {

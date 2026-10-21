@@ -18,7 +18,7 @@ pub(super) struct DeferredMessage {
     sources: Vec<(SourceSlot, SourceDescriptor)>,
 }
 impl DeferredMessage {
-    pub(super) fn new(mut message: Message, registry: &mut SourceRegistry) -> Self {
+    pub(super) fn stage(mut message: Message, registry: &mut SourceRegistry) -> Self {
         // The query has already inspected the original message. Only training rendering uses
         // this projection; unconsumed rich sidecars/IDs/usage need not occupy the private spool.
         message.id = None;
@@ -253,7 +253,7 @@ mod tests {
         let mut ordered = crate::spill::Ordered::default();
         for _ in 0..1000 {
             ordered
-                .push(DeferredMessage::new(original.clone(), &mut registry))
+                .push(DeferredMessage::stage(original.clone(), &mut registry))
                 .unwrap();
         }
         assert_eq!(registry.owner_counts(), (1, 1));
@@ -319,7 +319,7 @@ mod tests {
         let mut ordered = crate::spill::Ordered::default();
         for _ in 0..1000 {
             ordered
-                .push(DeferredMessage::new(original.clone(), &mut registry))
+                .push(DeferredMessage::stage(original.clone(), &mut registry))
                 .unwrap();
         }
         let temporary_bytes = ordered.spilled_bytes().unwrap();
@@ -358,7 +358,7 @@ mod tests {
                 message.content.push(Block::Text {
                     text: "a\n\"🌙".repeat(size).into(),
                 });
-                DeferredMessage::new(message, &mut SourceRegistry::default())
+                DeferredMessage::stage(message, &mut SourceRegistry::default())
                     .write(&mut bytes)
                     .unwrap();
             }
@@ -392,7 +392,7 @@ mod tests {
             input: Json::source(&path, 0, 4).unwrap(),
         });
         let mut registry = SourceRegistry::default();
-        let staged = DeferredMessage::new(message, &mut registry);
+        let staged = DeferredMessage::stage(message, &mut registry);
         let encoded = serde_json::to_value(&staged).unwrap();
         for failure in ["index", "type", "placeholder", "source", "duplicate"] {
             let mut corrupted = encoded.clone();
