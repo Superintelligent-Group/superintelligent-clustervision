@@ -572,6 +572,77 @@ mod tests {
         format!("{}{body}{}", &doc[..a], &doc[b..])
     }
 
+    /// Every key list `cv schema --json` publishes for an IR noun is the key set that noun
+    /// serializes with every optional field present (§1's discipline for §3's nouns).
+    #[test]
+    fn published_nouns_are_their_serialized_keys() {
+        let schema = data_schema_json();
+        let published = |v: &Value| -> std::collections::BTreeSet<String> {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .map(|k| k.as_str().unwrap().to_string())
+                .collect()
+        };
+        let keys =
+            |v: Value| -> std::collections::BTreeSet<String> { v.as_object().unwrap().keys().cloned().collect() };
+        let at = "2026-01-02T03:04:05Z";
+        let message = json!({"id": "m", "parent_id": "p", "role": "user", "kind": "prompt", "origin": "human",
+            "timestamp": at, "model": "m", "content": [{"type": "text", "text": "t"}],
+            "usage": {"input_tokens": 1}, "extra": {"claude": {}}});
+        let lineage = json!({"forked_from": "a", "parent": "b", "spawned_by_tool_use": "c", "continued_in": "d",
+            "continues": "e", "agent_path": "f"});
+        let session = json!({"principal": "p", "id": "s", "harness": "claude", "cwd": "/c", "title": "t",
+            "created_at": at, "updated_at": at, "model": "m", "git": {"branch": "b"}, "system_prompt": "s",
+            "lineage": lineage, "messages": [message], "source_path": "/s", "extra": {"claude": {}}});
+        let parsed: cv_core::Session = serde_json::from_value(session).unwrap();
+        assert_eq!(
+            keys(serde_json::to_value(&parsed).unwrap()),
+            published(&schema["session"]["fields"])
+        );
+        assert_eq!(
+            keys(serde_json::to_value(&parsed.lineage).unwrap()),
+            published(&schema["session"]["lineage"])
+        );
+        assert_eq!(
+            keys(serde_json::to_value(&parsed.messages[0]).unwrap()),
+            published(&schema["message"]["fields"])
+        );
+
+        let at: chrono::DateTime<chrono::Utc> = at.parse().unwrap();
+        let some = |s: &str| Some(s.to_string());
+        let lane = cv_core::lanes::Lane {
+            agent_id: "a".into(),
+            session_id: "agent-a".into(),
+            path: "/a".into(),
+            agent_type: some("t"),
+            description: some("d"),
+            tool_use_id: some("u"),
+            workflow: some("w"),
+            model: some("m"),
+            started_at: Some(at),
+            last_turn_at: Some(at),
+            duration_ms: Some(1),
+            messages: 1,
+            tool_calls: 1,
+            tokens: Default::default(),
+            status: cv_core::lanes::LaneStatus::Running,
+            status_source: cv_core::lanes::StatusSource::Transcript,
+            last_text: some("l"),
+            last_tool: some("b"),
+            stranded: false,
+            failure_cause: some("context"),
+            resets_at: Some(at),
+            failure_detail: some("f"),
+            endpoint: some("lane:a"),
+            endpoint_source: Some(cv_core::lanes::EndpointSource::Transcript),
+            tasks: Some(Vec::new()),
+        };
+        let lane = serde_json::to_value(&lane).unwrap();
+        assert_eq!(keys(lane["tokens"].clone()), published(&schema["lane"]["tokens"]));
+        assert_eq!(keys(lane), published(&schema["lane"]["keys"]));
+    }
+
     #[test]
     fn data_schema_names_the_session_row_keys() {
         let v = data_schema_json();
