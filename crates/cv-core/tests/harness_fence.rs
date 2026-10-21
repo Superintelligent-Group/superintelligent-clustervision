@@ -7,11 +7,11 @@
 //!
 //! The scan is textual and approximate, on purpose: `#[cfg(test)]`/`#[test]` items are skipped to
 //! their closing brace (or `;`), `tests.rs`/`*_tests.rs` files and `tests/` directories are not
-//! read, `//` comment lines are ignored, string and char literals are masked before braces are
-//! counted, and a `match` is exhaustive when the literals inside its brace-matched body name every
-//! variant of [`Harness::ALL`] (a `_` arm beside a partial list does not count). Rust's own
-//! exhaustiveness checking is the real judge; this fence only has to tell a per-harness table from
-//! a special case.
+//! read, `//` comment lines are ignored, string (raw ones included, one line at a time) and char
+//! literals are masked before braces are counted, and a `match` is exhaustive when the literals
+//! inside its brace-matched body name every variant of [`Harness::ALL`] (a `_` arm beside a
+//! partial list does not count). Rust's own exhaustiveness checking is the real judge; this fence
+//! only has to tell a per-harness table from a special case.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -25,7 +25,6 @@ use regex::Regex;
 const ALLOWLIST: &[(&str, usize)] = &[
     ("affordance.rs", 8),
     ("affordance/text.rs", 2),
-    ("dataset.rs", 1),
     ("distill.rs", 1),
     ("emit.rs", 2),
     ("emit/fidelity.rs", 17),
@@ -172,7 +171,10 @@ fn harness_names_stay_inside_exhaustive_matches() {
     let mut files = Vec::new();
     fenced_files(&root, &mut files);
     assert!(files.len() > 20, "the fence read {} files: wrong root?", files.len());
-    let strings = Regex::new(r#""(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])'"#).unwrap();
+    // Raw strings first (`r"…"`, `r#"…"#`, `r##"…"##`): a JSON fixture inside one holds quotes
+    // and braces that would otherwise end the plain-string match early and unbalance the count.
+    let strings =
+        Regex::new(r####"\bb?r##".*?"##|\bb?r#".*?"#|\bb?r"[^"]*"|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])'"####).unwrap();
     let literal = Regex::new(r"\bHarness::[A-Z][A-Za-z]*").unwrap();
     let all: BTreeSet<String> = Harness::ALL.iter().map(|h| format!("{h:?}")).collect();
 
