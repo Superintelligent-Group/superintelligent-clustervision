@@ -1520,6 +1520,28 @@ mod imp {
         }
 
         #[test]
+        fn a_skipped_source_write_that_fails_keeps_the_old_list_and_warns_once() {
+            let _w = crate::test_world("catalog-skipped-sources-refused");
+            let skip = |p: &str| crate::Skipped {
+                path: PathBuf::from(p),
+                why: format!("{p} is locked"),
+            };
+            let mut conn = open().unwrap();
+            record_skipped_in(&mut conn, &[(Harness::Claude, &[skip("/old")])]).unwrap();
+            conn.execute_batch(
+                "CREATE TRIGGER refuse_skipped BEFORE INSERT ON skipped_sources BEGIN SELECT RAISE(ABORT,'refused'); END;",
+            )
+            .unwrap();
+            let mut reader = super::super::reader::Reader::open().unwrap();
+            reader.record_skipped(&[(Harness::Claude, &[skip("/new")])]);
+            assert_eq!(skipped_sources(), [(Harness::Claude, skip("/old"))]);
+            assert!(
+                !crate::env::warn_once(super::super::reader::SKIPPED_LIST, "already reported"),
+                "the refused write was reported"
+            );
+        }
+
+        #[test]
         fn lookup_matches_literal_case_sensitive_prefixes() {
             let w = crate::test_world("catalog-literal-prefix");
             let ids = [

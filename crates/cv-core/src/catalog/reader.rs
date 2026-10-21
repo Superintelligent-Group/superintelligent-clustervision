@@ -4,6 +4,10 @@ use crate::Harness;
 
 /// No transaction spans filesystem scans. Separate operations reopen the current catalog path;
 /// this owner has no process-global connection or schema cache.
+/// What a failed skipped-source write warns about ([`crate::env::warn_once`]).
+#[cfg(feature = "sqlite")]
+pub(crate) const SKIPPED_LIST: &str = "the skipped-source list `cv doctor` shows";
+
 pub(crate) struct Reader {
     #[cfg(feature = "sqlite")]
     conn: std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>,
@@ -240,11 +244,12 @@ impl Reader {
     }
 
     /// Persist what each listed harness's discovery could not open (see
-    /// [`crate::harness::Discovered`]). A catalog that cannot take the write keeps its old rows.
+    /// [`crate::harness::Discovered`]). A catalog that cannot take the write keeps its old rows and
+    /// says so once per process, so `cv doctor`'s list is never stale in silence.
     pub(crate) fn record_skipped(&mut self, rows: &[(crate::Harness, &[crate::Skipped])]) {
         #[cfg(feature = "sqlite")]
-        {
-            let _ = super::imp::record_skipped_in(&mut self.conn.lock().unwrap(), rows);
+        if let Err(error) = super::imp::record_skipped_in(&mut self.conn.lock().unwrap(), rows) {
+            crate::env::warn_once(SKIPPED_LIST, format_args!("{error:#}"));
         }
         #[cfg(not(feature = "sqlite"))]
         let _ = rows;

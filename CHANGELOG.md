@@ -136,6 +136,7 @@
 **Skips: counted, reported, or warned once.**
 - A source discovery cannot open (an unreadable dir, a locked or corrupt database) is no longer silently empty: `cv doctor` names it.
 - `cv doctor --json` gains `skipped_sources` when discovery skipped any; per-file `cv: skipping` lines become one stderr summary.
+- When the catalog cannot record discovery's skipped sources, cv says so once on stderr; `cv doctor` shows the previous list.
 - **Breaking (library):** `Adapter::discover` returns `Discovered { refs, skipped }`; an out-of-tree adapter returns `Ok(refs.into())`.
 - A catalog, usage cache or scan cache that cannot open prints one stderr line per process; a failed open is retried, never remembered.
 - Devin, Hermes and Goose sessions whose row vanished error instead of reading as an empty session.
