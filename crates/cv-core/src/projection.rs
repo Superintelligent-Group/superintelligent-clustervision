@@ -99,8 +99,10 @@ impl Head {
     }
 }
 
-/// Where [`searchable`] writes: the complete projection, or a bounded head of it.
-trait Searchable {
+/// Where [`searchable`] writes: complete bytes, a bounded head, or an index's chunk reducer.
+/// Consumers own decoding budgets and dependency capture; block selection and separators live
+/// in the walker alone.
+pub trait Searchable {
     fn full(&self) -> bool {
         false
     }
@@ -112,19 +114,24 @@ trait Searchable {
         check: &mut dyn FnMut() -> anyhow::Result<()>,
     ) -> anyhow::Result<()>;
     fn json(&mut self, json: &crate::json::Json, check: &mut dyn FnMut() -> anyhow::Result<()>) -> anyhow::Result<()>;
+    /// Optional consumer enrichment after the block's own projection (for example, a persisted
+    /// tool output). Called only while the consumer still demands bytes.
+    fn after_block(&mut self, _block: &crate::Block) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 /// The searchable projection of one message, spelled once: text, thinking and tool-result text
 /// each followed by a newline; a tool call as `name input` (canonical JSON) and a newline; a
 /// file's path (else its source) and a newline; an image nothing. `check` runs before each
-/// block, at each decoded text chunk and JSON write, and once at the end.
-fn searchable(
-    message: &crate::Message,
+/// block and once at the end, and is passed to the consumer for checks during text/JSON reads.
+pub fn searchable(
+    blocks: &[crate::Block],
     resolver: &Resolver,
     out: &mut impl Searchable,
     check: &mut dyn FnMut() -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
-    for block in &message.content {
+    for block in blocks {
         check()?;
         if out.full() {
             break;
@@ -149,6 +156,9 @@ fn searchable(
                 }
             }
             crate::Block::Image { .. } => {}
+        }
+        if !out.full() {
+            out.after_block(block)?;
         }
     }
     check()
@@ -228,7 +238,7 @@ pub fn searchable_text_checked(
     mut check: impl FnMut() -> anyhow::Result<()>,
 ) -> anyhow::Result<String> {
     let mut bytes = Vec::new();
-    searchable(message, resolver, &mut bytes, &mut check)?;
+    searchable(&message.content, resolver, &mut bytes, &mut check)?;
     Ok(String::from_utf8(bytes)?)
 }
 
@@ -256,7 +266,7 @@ pub fn searchable_prefix_checked(
         limit: limit.saturating_add(4),
         stopped: false,
     };
-    searchable(message, resolver, &mut head, &mut check)?;
+    searchable(&message.content, resolver, &mut head, &mut check)?;
     let mut text = head.into_string();
     let truncated = text.len() > limit;
     let mut end = text.len().min(limit);

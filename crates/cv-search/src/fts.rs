@@ -1867,79 +1867,67 @@ impl<'w> ChunkSink<'w> {
         }
     }
 
-    /// Append one block's searchable text — identical projection to
-    /// [`cv_core::ir::Message::append_searchable`], but chunk-resolving span content.
-    fn append_block(&mut self, r: &cv_core::Resolver, b: &cv_core::Block) {
-        use cv_core::Block;
-        if self.failed || self.err.is_some() {
-            return;
+    fn append_blocks(&mut self, resolver: &cv_core::Resolver, blocks: &[cv_core::Block]) {
+        if let Err(error) = cv_core::projection::searchable(blocks, resolver, self, &mut || Ok(())) {
+            if !self.failed && self.err.is_none() {
+                self.err = Some(error);
+            }
         }
-        match b {
-            Block::Text { text } | Block::Thinking { text, .. } => {
-                self.append_text(r, text);
-                self.push_chunk("\n");
+    }
+
+    #[cfg(test)]
+    fn append_block(&mut self, resolver: &cv_core::Resolver, block: &cv_core::Block) {
+        self.append_blocks(resolver, std::slice::from_ref(block));
+    }
+}
+
+impl cv_core::projection::Searchable for ChunkSink<'_> {
+    fn full(&self) -> bool {
+        self.failed || self.err.is_some()
+    }
+    fn str(&mut self, text: &str) {
+        self.push_chunk(text);
+    }
+    fn text(
+        &mut self,
+        text: &cv_core::Text,
+        resolver: &cv_core::Resolver,
+        _: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        self.append_text(resolver, text);
+        anyhow::ensure!(!self.failed && self.err.is_none(), "search text output failed");
+        Ok(())
+    }
+    fn json(&mut self, input: &cv_core::Json, _: &mut dyn FnMut() -> Result<()>) -> Result<()> {
+        if let cv_core::Json::Source(range) = input {
+            if range.path() != self.primary_path {
+                self.dependencies.record(range.path());
             }
-            Block::ToolUse { name, input, .. } => {
-                if let cv_core::json::Json::Source(range) = input {
-                    if range.path() != self.primary_path {
-                        self.dependencies.record(range.path());
-                    }
-                    if let Some(reads) = range.dependencies() {
-                        self.dependencies.merge(reads);
-                    }
-                }
-                self.push_chunk(name);
-                self.push_chunk(" ");
-                // Canonical JSON streams into bounded body documents without owning a value tree.
-                if let Err(error) = input.write_canonical(&mut JsonChunks::new(self)) {
-                    if !self.failed && self.err.is_none() {
-                        self.err = Some(error.context("serializing tool input for search"));
-                    }
-                }
-                self.push_chunk("\n");
+            if let Some(reads) = range.dependencies() {
+                self.dependencies.merge(reads);
             }
-            Block::ToolResult { content, .. } => {
-                self.append_text(r, content);
-                if self.failed || self.err.is_some() {
-                    return;
-                }
-                self.push_chunk("\n");
-                // A persisted-output stub (Claude Code parked the real output in
-                // `<session>/tool-results/<id>.txt`): index the file's head too, so the text the tool
-                // produced is findable even though the transcript holds only the pointer.
-                if let Some(p) = b.persisted_output_path() {
-                    self.dependencies.record(Path::new(p));
-                    match cv_core::lazy::read_head_checked(std::path::Path::new(p), PERSISTED_INDEX_CAP) {
-                        Ok(head) => {
-                            if let cv_core::lazy::PersistedHead::Unreadable(reason) = &head {
-                                if !self.failed && self.err.is_none() {
-                                    self.err = Some(anyhow::anyhow!("reading persisted search output {p}: {reason}"));
-                                }
-                                return;
-                            }
-                            if let Some(t) = head.indexed_text(p) {
-                                for piece in t.as_bytes().chunks(CHUNK_BYTES) {
-                                    self.push_chunk(&String::from_utf8_lossy(piece));
-                                }
-                                self.push_chunk("\n");
-                            }
-                        }
-                        Err(error) => {
-                            if !self.failed && self.err.is_none() {
-                                self.err = Some(error.context("reading persisted search output"));
-                            }
-                        }
-                    }
-                }
-            }
-            Block::File { path, source, .. } => {
-                if let Some(p) = path.as_deref().or(source.as_deref()) {
-                    self.push_chunk(p);
-                    self.push_chunk("\n");
-                }
-            }
-            Block::Image { .. } => {}
         }
+        input
+            .write_canonical(&mut JsonChunks::new(self))
+            .context("serializing tool input for search")
+    }
+    fn after_block(&mut self, block: &cv_core::Block) -> Result<()> {
+        // A persisted-output stub points to text absent from the transcript itself.
+        if let Some(path) = block.persisted_output_path() {
+            self.dependencies.record(Path::new(path));
+            let head = cv_core::lazy::read_head_checked(Path::new(path), PERSISTED_INDEX_CAP)
+                .context("reading persisted search output")?;
+            if let cv_core::lazy::PersistedHead::Unreadable(reason) = &head {
+                anyhow::bail!("reading persisted search output {path}: {reason}");
+            }
+            if let Some(text) = head.indexed_text(path) {
+                for piece in text.as_bytes().chunks(CHUNK_BYTES) {
+                    self.push_chunk(&String::from_utf8_lossy(piece));
+                }
+                self.push_chunk("\n");
+            }
+        }
+        Ok(())
     }
 }
 
@@ -2087,9 +2075,7 @@ impl cv_core::MessageSink for ChunkSink<'_> {
         let copied = matches!((m.timestamp, self.copied_before), (Some(at), Some(before)) if at < before);
         if !copied {
             self.switch_to(!m.kind.is_exchange());
-            for b in &m.content {
-                self.append_block(&r, b);
-            }
+            self.append_blocks(&r, &m.content);
         }
         self.resolver = r;
         self.msgs += 1;

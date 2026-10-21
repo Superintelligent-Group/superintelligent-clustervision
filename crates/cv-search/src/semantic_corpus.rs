@@ -86,74 +86,44 @@ impl DocSink {
             cv_core::Text::Inline(_) => {}
         }
     }
-    /// Message::append_searchable's projection, plus persisted-output heads, within one budget.
-    fn append_searchable(&mut self, message: &Message) {
-        for block in &message.content {
-            if self.body.full() {
-                break;
+}
+
+impl cv_core::projection::Searchable for DocSink {
+    fn full(&self) -> bool {
+        self.body.full()
+    }
+    fn str(&mut self, text: &str) {
+        self.body.push(text);
+    }
+    fn text(&mut self, text: &cv_core::Text, resolver: &Resolver, _: &mut dyn FnMut() -> Result<()>) -> Result<()> {
+        self.read_text(text);
+        self.body.try_push_text(text, resolver)
+    }
+    fn json(&mut self, input: &cv_core::Json, _: &mut dyn FnMut() -> Result<()>) -> Result<()> {
+        if !self.body.full() {
+            if let cv_core::Json::Source(range) = input {
+                self.reads.record(range.path());
+                if let Some(reads) = range.dependencies() {
+                    self.reads.merge(reads);
+                }
             }
-            match block {
-                Block::Text { text } | Block::Thinking { text, .. } => {
-                    self.read_text(text);
-                    if let Err(error) = self.body.try_push_text(text, &self.resolver) {
-                        self.error = Some(error);
-                        return;
-                    }
-                    self.body.push("\n");
-                }
-                Block::ToolUse { name, input, .. } => {
-                    self.body.push(name);
-                    self.body.push(" ");
-                    if !self.body.full() {
-                        if let cv_core::json::Json::Source(range) = input {
-                            self.reads.record(range.path());
-                            if let Some(reads) = range.dependencies() {
-                                self.reads.merge(reads);
-                            }
-                        }
-                        if let Err(error) = self.body.push_json(input) {
-                            self.error = Some(error);
-                            return;
-                        }
-                    }
-                    self.body.push("\n");
-                }
-                Block::ToolResult { content, .. } => {
-                    self.read_text(content);
-                    if let Err(error) = self.body.try_push_text(content, &self.resolver) {
-                        self.error = Some(error);
-                        return;
-                    }
-                    self.body.push("\n");
-                    if !self.body.full() {
-                        if let Some(path) = block.persisted_output_path() {
-                            self.reads.record(std::path::Path::new(path));
-                            match cv_core::lazy::read_head_checked(std::path::Path::new(path), self.body.remaining()) {
-                                Ok(head) => {
-                                    if let Some(text) = head.indexed_text(path) {
-                                        self.body.push(&text);
-                                        self.body.push("\n");
-                                    }
-                                }
-                                Err(error) => {
-                                    self.error = Some(error);
-                                    return;
-                                }
-                            }
-                        }
-                    }
-                }
-                Block::File { path, source, .. } => {
-                    if let Some(path) = path.as_deref().or(source.as_deref()) {
-                        self.body.push(path);
-                        self.body.push("\n");
-                    }
-                }
-                Block::Image { .. } => {}
+            self.body.push_json(input)?;
+        }
+        Ok(())
+    }
+    fn after_block(&mut self, block: &Block) -> Result<()> {
+        if let Some(path) = block.persisted_output_path() {
+            self.reads.record(std::path::Path::new(path));
+            let head = cv_core::lazy::read_head_checked(std::path::Path::new(path), self.body.remaining())?;
+            if let Some(text) = head.indexed_text(path) {
+                self.body.push(&text);
+                self.body.push("\n");
             }
         }
+        Ok(())
     }
 }
+
 impl MessageSink for DocSink {
     fn dependency(&mut self, path: &std::path::Path) {
         self.reads.record(path);
@@ -187,7 +157,9 @@ impl MessageSink for DocSink {
         }
         let copied = matches!((message.timestamp, self.copied_before), (Some(at), Some(before)) if at < before);
         if message.kind.is_exchange() && !copied {
-            self.append_searchable(&message);
+            let resolver = std::mem::replace(&mut self.resolver, Resolver::new(None));
+            self.error = cv_core::projection::searchable(&message.content, &resolver, self, &mut || Ok(())).err();
+            self.resolver = resolver;
         }
         if self.error.is_some() || (self.body.full() && self.first_prompt.is_some()) {
             Flow::Stop
@@ -424,8 +396,7 @@ mod tests {
     }
 
     #[test]
-    fn semantic_head_matches_materialized_projection_and_labels() {
-        // Independent owned projection; fake embedding consumer reads the same resulting head.
+    fn semantic_head_has_canonical_blocks_and_prompt_label() {
         let messages = [
             message(
                 Role::Assistant,
@@ -446,22 +417,15 @@ mod tests {
             ),
             message(Role::User, vec![text(""), text("first\nuser"), text("second")]),
         ];
-        let mut expected = String::new();
         let mut actual = sink();
-        for m in &messages {
-            m.append_searchable(&mut expected).unwrap();
-            actual.message(m.clone());
+        for m in messages {
+            actual.message(m);
         }
-        assert_eq!(actual.body.as_str(), expected);
         assert_eq!(
-            actual.first_prompt,
-            messages[1].prompt_title(&Resolver::new(None)).unwrap()
+            actual.body.as_str(),
+            "tool {\"a\":[1,true,\"é\\n\\\"\"],\"z\":null}\nthought\na.rs\n\nfirst\nuser\nsecond\n"
         );
-        let fake_embed = |body: &str| {
-            body.bytes()
-                .fold(0u64, |sum, byte| sum.wrapping_mul(31).wrapping_add(byte as u64))
-        };
-        assert_eq!(fake_embed(actual.body.as_str()), fake_embed(&expected));
+        assert_eq!(actual.first_prompt.as_deref(), Some("first user second"));
     }
 
     #[test]
