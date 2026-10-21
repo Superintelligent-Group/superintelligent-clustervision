@@ -622,7 +622,7 @@ pub(crate) fn cmd_dataset(
                 continue;
             }
         }
-        if ctx.emit_ref(r)? == Flow::LimitHit {
+        if ctx.emit_ref(r)? == DatasetFlow::LimitHit {
             break;
         }
         // `--subagents`: a Claude session fans out into a forest of sub-agent transcripts (both
@@ -635,7 +635,7 @@ pub(crate) fn cmd_dataset(
                 if out.is_some() {
                     extra_sources.push(info.session.path.clone());
                 }
-                if ctx.emit_ref(&info.session)? == Flow::LimitHit {
+                if ctx.emit_ref(&info.session)? == DatasetFlow::LimitHit {
                     break 'outer;
                 }
             }
@@ -696,7 +696,7 @@ fn publish_dataset<'a>(
 
 /// Whether the emit loop should keep going or stop because `--limit` was reached.
 #[derive(PartialEq, Eq)]
-enum Flow {
+enum DatasetFlow {
     Continue,
     LimitHit,
 }
@@ -716,21 +716,21 @@ struct EmitCtx<'a> {
 }
 
 impl EmitCtx<'_> {
-    /// Parse one ref and stream it as a record if it passes the filters. Returns [`Flow::LimitHit`]
+    /// Parse one ref and stream it as a record if it passes the filters. Returns [`DatasetFlow::LimitHit`]
     /// once `--limit` records have been emitted.
-    fn emit_ref(&mut self, r: &cv_core::ir::SessionRef) -> Result<Flow> {
+    fn emit_ref(&mut self, r: &cv_core::ir::SessionRef) -> Result<DatasetFlow> {
         if self.limit.is_some_and(|limit| *self.emitted >= limit) {
-            return Ok(Flow::LimitHit);
+            return Ok(DatasetFlow::LimitHit);
         }
 
         // Catalog-cheap prefilter (everything but `model:`) prunes before we pay to parse.
         if let Some(q) = self.query {
             if !q.prefilter(r) {
-                return Ok(Flow::Continue);
+                return Ok(DatasetFlow::Continue);
             }
         }
         let Some(adapter) = cv_core::harness::for_harness(r.harness) else {
-            return Ok(Flow::Continue);
+            return Ok(DatasetFlow::Continue);
         };
         let record = match cv_core::dataset::stage_record(
             adapter.as_ref(),
@@ -744,7 +744,7 @@ impl EmitCtx<'_> {
             Ok(record) => record,
             Err(error) if error.is::<cv_core::dataset::InputError>() => {
                 eprintln!("cv dataset: skipping {} ({}): {error:#}", r.id, r.harness);
-                return Ok(Flow::Continue);
+                return Ok(DatasetFlow::Continue);
             }
             Err(error) => return Err(error),
         };
@@ -752,12 +752,12 @@ impl EmitCtx<'_> {
             record.publish(self.writer)?;
             *self.emitted += 1;
             if self.limit.is_some_and(|l| *self.emitted >= l) {
-                return Ok(Flow::LimitHit);
+                return Ok(DatasetFlow::LimitHit);
             }
         } else {
             *self.skipped += 1;
         }
-        Ok(Flow::Continue)
+        Ok(DatasetFlow::Continue)
     }
 }
 

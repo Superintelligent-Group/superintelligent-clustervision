@@ -28,8 +28,8 @@ use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use cmd::hooks::{HookName, HooksCmd};
 use cmd::task::TaskCmd;
 use cmd::{
-    archive, blame, browse, cat, compose, config, doctor, events, formats, hooks, live, orchestrate, pack, port,
-    recipes, schema, search, serve, share, task, tools, view, workflow,
+    archive, blame, browse, cat, config, doctor, events, formats, hooks, live, pack, port, recipes, reshape, schema,
+    search, serve, session_reports, share, task, tools, view, workflow,
 };
 use std::path::PathBuf;
 use util::{usage, UsageError, WindowArgs};
@@ -1328,7 +1328,7 @@ fn run() -> Result<()> {
                      everywhere else)",
                 );
             }
-            compose::cmd_dataset(
+            reshape::cmd_dataset(
             &format,
             harness,
             query,
@@ -1422,7 +1422,7 @@ fn run() -> Result<()> {
                      --declassify-tokens-file) — nothing will be snipped. cv ships no built-in list."
                 );
             }
-            compose::cmd_prune(
+            reshape::cmd_prune(
                 &id,
                 harness,
                 min_size,
@@ -1460,7 +1460,7 @@ fn run() -> Result<()> {
                      pass `--full` for the whole history",
                 );
             }
-            compose::cmd_rewind(&id, harness, agent, at.as_deref(), out, to, full, thinking.as_deref().map(util::parse_thinking).transpose()?, dry_run, json, BUILD_VERSION)
+            reshape::cmd_rewind(&id, harness, agent, at.as_deref(), out, to, full, thinking.as_deref().map(util::parse_thinking).transpose()?, dry_run, json, BUILD_VERSION)
         }
         Cmd::Config { add_export, rm_export } => config::cmd_config(add_export, rm_export),
         Cmd::Schema { json, commands } => schema::cmd_schema(&build_cli(), json, commands),
@@ -1510,19 +1510,19 @@ fn run() -> Result<()> {
             json,
         } => {
             let filter = if running {
-                orchestrate::LaneFilter::Running
+                session_reports::LaneFilter::Running
             } else if done {
-                orchestrate::LaneFilter::Done
+                session_reports::LaneFilter::Done
             } else if stranded {
-                orchestrate::LaneFilter::Stranded
+                session_reports::LaneFilter::Stranded
             } else if unfinished {
-                orchestrate::LaneFilter::Unfinished
+                session_reports::LaneFilter::Unfinished
             } else {
-                orchestrate::LaneFilter::All
+                session_reports::LaneFilter::All
             };
             let scope = match (id, recent) {
-                (Some(id), _) => orchestrate::LaneScope::Session { id, harness },
-                (None, Some(n)) => orchestrate::LaneScope::Recent {
+                (Some(id), _) => session_reports::LaneScope::Session { id, harness },
+                (None, Some(n)) => session_reports::LaneScope::Recent {
                     n,
                     dir: match cwd {
                         Some(d) => d,
@@ -1531,7 +1531,7 @@ fn run() -> Result<()> {
                 },
                 (None, None) => unreachable!("clap requires <ID> unless --recent is present"),
             };
-            orchestrate::cmd_lanes(scope, filter, since, tasks, json)
+            session_reports::cmd_lanes(scope, filter, since, tasks, json)
         }
         Cmd::Deferrals {
             id,
@@ -1549,7 +1549,7 @@ fn run() -> Result<()> {
                 );
             }
             // An unmatched deferral is a finding, not a failure: plain exit 1, no error text.
-            if !orchestrate::cmd_deferrals(&id, harness, at, open_tasks, phrases_file, json)? {
+            if !session_reports::cmd_deferrals(&id, harness, at, open_tasks, phrases_file, json)? {
                 std::process::exit(1);
             }
             Ok(())
@@ -1684,7 +1684,7 @@ fn run() -> Result<()> {
             } else {
                 None
             };
-            compose::cmd_splice(
+            reshape::cmd_splice(
                 &specs,
                 harness,
                 out,

@@ -31,7 +31,7 @@ pub(crate) struct ShowView {
 
 /// What `--kind` selects: each family has one compact view.
 enum KindView {
-    /// `prompt` / `answer`: what the person said (`orchestrate::print_prompts`).
+    /// `prompt` / `answer`: what the person said (`session_reports::print_prompts`).
     Said { prompts: bool, answers: bool },
     /// `compaction_boundary` / `compaction_summary`: the compaction seams, each boundary paired
     /// with its summary (`compaction::print_compactions`).
@@ -167,7 +167,7 @@ pub(crate) fn cmd_show(
                 let range = show_range(&r, window, pre_compaction)?
                     .map(|w| w.bounds(|| count_messages(adapter.as_ref(), &r)))
                     .transpose()?;
-                crate::cmd::orchestrate::print_prompts(&r, adapter.as_ref(), range, prompts, answers, json)
+                crate::cmd::session_reports::print_prompts(&r, adapter.as_ref(), range, prompts, answers, json)
             }
             KindView::Affordances(kinds) => {
                 if window.max_bytes.is_some() {

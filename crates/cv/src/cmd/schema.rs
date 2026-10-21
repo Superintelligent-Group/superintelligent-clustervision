@@ -145,7 +145,7 @@ pub(crate) fn data_schema_json() -> Value {
             "description": "one row of `deferrals --json`: a place the assistant put something off",
             "keys": ["index", "timestamp", "phrase", "context", "matched"],
             "phrase": "the label of the phrase that fired — the built-in table's labels are listed under `default_phrases`; `--phrases-file` (or `<config>/deferrals.txt`) replaces the table with your own",
-            "default_phrases": crate::cmd::orchestrate::default_phrase_labels(),
+            "default_phrases": crate::cmd::session_reports::default_phrase_labels(),
             "matched": "with --open-tasks: {task_id, title, state, shared[]} or absent when no task shares ≥3 significant words",
         },
         "query": query::schema_json(),
