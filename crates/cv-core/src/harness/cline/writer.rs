@@ -69,6 +69,8 @@ fn blocks(
             anthropic::write::block(writer, block, &anthropic::ANTHROPIC, user, resolver)?;
         }
     }
+    // The first user turn carries cwd even without a title; only the optional task wrapper
+    // above depends on a title. The reader recovers cwd from this environment trailer.
     if let Some(cwd) = cwd {
         separate(writer)?;
         text_block(

@@ -67,6 +67,8 @@ impl Record<'_> {
         if !self.generated {
             return false;
         }
+        // Object borrows values from its base map. Pointer identity means extras did not
+        // replace content, so it is still the generated placeholder for the IR blocks.
         self.base
             .get("message")
             .and_then(|m| m.get("content"))
@@ -218,6 +220,8 @@ impl Record<'_> {
                 first = false;
                 blocks::block(writer, b, &anthropic::ANTHROPIC, self.role != Role::Assistant, resolver)?;
             }
+            // Generated content uses the ordinary empty-turn fallback. Replayed content below
+            // instead marks a nonempty native array emptied by Drop as reasoning omitted.
             if first && self.default_empty() {
                 serde_json::to_writer(&mut *writer, &json!({"type":"text","text":""}))?;
             }
