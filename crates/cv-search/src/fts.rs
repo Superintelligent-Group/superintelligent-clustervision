@@ -995,7 +995,9 @@ fn sig(primary: Option<cv_core::source::FileId>) -> (i64, i64) {
 }
 
 /// The search index's source record payload: its documents live in the index, keyed per index
-/// (`fts:<cv-index-id>`), so the record carries nothing else.
+/// (`fts:<cv-index-id>`), so the record carries nothing else. The shared `source::VERSION`
+/// invalidates both skip and append admission: pre-version-6 duplicate rows are replaced by
+/// the ordinary whole-session delete/write, with no separate index version or repair pass.
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 struct InIndex;
 
@@ -1012,7 +1014,6 @@ struct PlanState {
     /// refresh must not reap.
     folded: HashSet<String>,
     metadata: HashMap<String, DiscoveryMetadata>,
-    duplicate_meta: HashSet<String>,
     event_sync: cv_core::events::SyncTable,
     affordances: cv_core::catalog::AffordanceTable,
     marks: cv_core::resume::MarkTable,
@@ -1023,7 +1024,7 @@ struct PlanState {
 
 impl PlanState {
     fn load(index: &Index, f: &Fields, dir: &Path, rebuild: bool) -> Result<Self> {
-        let (existing, folded, metadata, duplicate_meta) = if rebuild {
+        let (existing, folded, metadata) = if rebuild {
             Default::default()
         } else {
             read_indexed_metadata(index, f, true)
@@ -1034,7 +1035,6 @@ impl PlanState {
             existing,
             folded,
             metadata,
-            duplicate_meta,
             // One query each for the event skip-table and the affordance counts `has:<kind>` reads.
             event_sync: cv_core::events::SyncTable::load(),
             affordances: cv_core::catalog::AffordanceTable::load(),
@@ -1051,7 +1051,6 @@ impl PlanState {
         let Self {
             existing,
             metadata,
-            duplicate_meta,
             event_sync,
             affordances,
             marks,
@@ -1089,10 +1088,9 @@ impl PlanState {
             fts: !fts_fresh,
             events,
             existing: existing.contains_key(&r.id),
-            grew: !duplicate_meta.contains(&r.id)
-                && existing
-                    .get(&r.id)
-                    .is_some_and(|&(_, old_size)| old_size > 0 && size > old_size)
+            grew: existing
+                .get(&r.id)
+                .is_some_and(|&(_, old_size)| old_size > 0 && size > old_size)
                 && (!events || event_sync.can_resume(r, prov)),
             prov: prov.clone(),
             mark: marks.get(r).cloned(),
@@ -2098,7 +2096,7 @@ type IndexedSigs = (HashMap<String, (i64, i64)>, HashSet<String>);
 /// Read the [`IndexedSigs`] off every live meta doc in the index (one per session; stored fields
 /// are tiny, so this is cheap).
 fn read_indexed_sigs(index: &Index, f: &Fields) -> Result<IndexedSigs> {
-    let (sigs, folded, _, _) = read_indexed_metadata(index, f, false)?;
+    let (sigs, folded, _) = read_indexed_metadata(index, f, false)?;
     Ok((sigs, folded))
 }
 
@@ -2106,7 +2104,6 @@ type IndexedMetadata = (
     HashMap<String, (i64, i64)>,
     HashSet<String>,
     HashMap<String, DiscoveryMetadata>,
-    HashSet<String>,
 );
 
 fn read_indexed_metadata(index: &Index, f: &Fields, read_metadata: bool) -> Result<IndexedMetadata> {
@@ -2116,7 +2113,6 @@ fn read_indexed_metadata(index: &Index, f: &Fields, read_metadata: bool) -> Resu
     let mut out = HashMap::new();
     let mut folded = HashSet::new();
     let mut metadata = HashMap::new();
-    let mut duplicates = HashSet::new();
     let metas = searcher
         .search(&kind_query(f, KIND_META), &DocSetCollector)
         .context("listing meta docs")?;
@@ -2132,34 +2128,27 @@ fn read_indexed_metadata(index: &Index, f: &Fields, read_metadata: bool) -> Resu
         // Keep identity even when the incremental stamp is malformed: the session must be
         // deleted/replaced, rather than admitted as new alongside its existing stale meta row.
         let (mt, sz) = mt.zip(sz).unwrap_or((i64::MIN, i64::MIN));
-        {
-            if doc.get_first(f.parent_id).is_some() {
-                folded.insert(id.clone());
-            }
-            if read_metadata {
-                if let Some(stamp) = doc
-                    .get_first(f.discovery_metadata)
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| {
-                        serde_json::from_str(s)
-                            .inspect_err(|error| {
-                                cv_core::env::warn_once("search metadata", format_args!("{id}: {error}"));
-                            })
-                            .ok()
-                    })
-                {
-                    metadata.insert(id.clone(), stamp);
-                }
-            }
-            if out.insert(id.clone(), (mt, sz)).is_some() && read_metadata {
-                duplicates.insert(id);
+        if doc.get_first(f.parent_id).is_some() {
+            folded.insert(id.clone());
+        }
+        if read_metadata {
+            if let Some(stamp) = doc
+                .get_first(f.discovery_metadata)
+                .and_then(|v| v.as_str())
+                .and_then(|s| {
+                    serde_json::from_str(s)
+                        .inspect_err(|error| {
+                            cv_core::env::warn_once("search metadata", format_args!("{id}: {error}"));
+                        })
+                        .ok()
+                })
+            {
+                metadata.insert(id.clone(), stamp);
             }
         }
+        out.insert(id, (mt, sz));
     }
-    for id in &duplicates {
-        metadata.remove(id);
-    }
-    Ok((out, folded, metadata, duplicates))
+    Ok((out, folded, metadata))
 }
 
 /// Matches the docs of one `kind`.
@@ -4668,23 +4657,6 @@ mod tests {
         for refs in [vec![older.clone(), newer.clone()], vec![newer.clone(), older.clone()]] {
             assert_eq!(preferred_index_copies(refs)[0].path, preferred.path);
         }
-        // Repair a current-schema index with duplicate meta documents even if both carry
-        // exactly the preferred metadata and guards, then skip its next unchanged pass.
-        index_refs(&dir, &[newer.clone(), newer.clone()], true).unwrap();
-        assert_eq!(stored(&dir).len(), 4);
-        assert_eq!(
-            sweep(&dir, vec![older.clone(), newer.clone()], false, false)
-                .unwrap()
-                .changed,
-            1
-        );
-        assert_eq!(stored(&dir), stored(&oracle));
-        assert_eq!(
-            sweep(&dir, vec![newer.clone(), older.clone()], false, false)
-                .unwrap()
-                .changed,
-            0
-        );
         // A stale supplied ref cannot hide a still-live copy; no live copy must still error.
         std::fs::remove_file(&newer.path).unwrap();
         let fallback = sweep(&dir, vec![newer.clone(), older.clone()], false, false).unwrap();
@@ -4700,7 +4672,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_meta_repair_with_valid_append_mark_replaces_the_whole_prefix() {
+    fn fts_source_version_replaces_old_rows_even_with_a_valid_append_mark() {
         let home = IsolatedHome::new();
         let dir = tmpdir();
         let oracle = tmpdir();
@@ -4713,9 +4685,25 @@ mod tests {
             cv_core::resume::MarkTable::load().get(&r).is_some(),
             "fixture must establish a production checkpoint"
         );
-        // The independent old collector creates duplicate prefix/meta records, while leaving
-        // the valid production checkpoint available for the subsequent real append.
+        // Model an older index: repeated rows, a previous Record version, and a still-valid
+        // checkpoint. The version alone must force a complete replacement on upgrade.
         index_refs(&dir, &[r.clone(), r.clone()], true).unwrap();
+        let conn = rusqlite::Connection::open(home.home.join("catalog.db")).unwrap();
+        let consumer = source_consumer(&dir).unwrap();
+        let bytes: Vec<u8> = conn
+            .query_row(
+                "SELECT record FROM source_dependencies WHERE consumer=?1 AND id=?2",
+                rusqlite::params![consumer, r.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut record: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        record["version"] = (cv_core::source::VERSION - 1).into();
+        conn.execute(
+            "UPDATE source_dependencies SET record=?1 WHERE consumer=?2 AND id=?3",
+            rusqlite::params![serde_json::to_vec(&record).unwrap(), consumer, r.id],
+        )
+        .unwrap();
         use std::io::Write;
         writeln!(
             std::fs::OpenOptions::new().append(true).open(&r.path).unwrap(),
@@ -4742,10 +4730,10 @@ mod tests {
         }
         .plan()
         .unwrap();
-        assert!(plan.jobs[0].existing && plan.jobs[0].dependencies_fresh);
+        assert!(plan.jobs[0].existing && plan.jobs[0].grew);
         assert!(
-            !plan.jobs[0].grew,
-            "corruption must disable otherwise valid append reuse"
+            !plan.jobs[0].dependencies_fresh,
+            "older records cannot certify an append"
         );
         let repaired = sweep(&dir, vec![r.clone()], false, false).unwrap();
         assert_eq!((repaired.changed, repaired.resumed, repaired.errors), (1, 0, 0));
@@ -5111,7 +5099,7 @@ mod tests {
             .unwrap();
         writer.commit().unwrap();
         drop(writer);
-        let (sigs, _, metadata, _) = read_indexed_metadata(&index, &f, true).unwrap();
+        let (sigs, _, metadata) = read_indexed_metadata(&index, &f, true).unwrap();
         assert_eq!(sigs.get("repair"), Some(&(i64::MIN, i64::MIN)));
         assert!(!metadata.contains_key("repair"));
         assert_eq!(newest_indexed_mtime(&dir), None);
@@ -5121,7 +5109,15 @@ mod tests {
         let result = sweep(&dir, vec![reference], false, false).unwrap();
         assert_eq!((result.changed, result.errors), (1, 0));
         let (index, f) = open_or_create(&dir).unwrap();
-        assert!(read_indexed_metadata(&index, &f, true).unwrap().3.is_empty());
+        assert_eq!(
+            index
+                .reader()
+                .unwrap()
+                .searcher()
+                .search(&kind_query(&f, KIND_META), &tantivy::collector::Count)
+                .unwrap(),
+            1
+        );
         let hit = text_search_indexed(&dir, "needle", 1).unwrap().remove(0);
         assert_eq!(hit.title.as_deref(), Some("current needle"));
         // Anonymous metadata cannot be repaired by deleting a session-id term.

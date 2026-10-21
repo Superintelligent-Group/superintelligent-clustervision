@@ -484,28 +484,22 @@ fn refresh(
         )
     };
     let compatible = old.model == model && old.model_reads.as_ref().is_some_and(|r| r.fresh(&mut Probe::default()));
-    // Old stores may contain duplicate identities from earlier refreshes. Ambiguous rows must
-    // all be replaced, even if one path's provenance looks fresh: do not silently choose a vector.
-    let mut lookup = std::collections::HashMap::new();
-    for (i, r) in old.meta.iter().enumerate() {
-        lookup
-            .entry((r.session.harness.as_str(), r.session.id.as_str()))
-            .and_modify(|index| *index = None)
-            .or_insert(Some(i));
-    }
+    // The header's source::VERSION already rejects stores predating unique row publication.
+    let lookup: std::collections::HashMap<_, _> = old
+        .meta
+        .iter()
+        .enumerate()
+        .map(|(i, r)| ((r.session.harness.as_str(), r.session.id.as_str()), i))
+        .collect();
     let mut keep = vec![false; old.meta.len()];
     let mut changed = Vec::new();
     let mut before = Probe::default();
     for &r in &refs {
         let snapshot = before.snapshot(r);
-        let reusable = lookup
-            .get(&(r.harness.as_str(), r.id.as_str()))
-            .copied()
-            .flatten()
-            .filter(|&i| {
-                let m = &old.meta[i];
-                compatible && m.session == *r && m.source.as_ref().is_some_and(|old| old.fresh(&snapshot, &mut before))
-            });
+        let reusable = lookup.get(&(r.harness.as_str(), r.id.as_str())).copied().filter(|&i| {
+            let m = &old.meta[i];
+            compatible && m.session == *r && m.source.as_ref().is_some_and(|old| old.fresh(&snapshot, &mut before))
+        });
         if let Some(i) = reusable {
             keep[i] = true;
         }
@@ -1400,7 +1394,9 @@ mod tests {
         let input = dir.join("session.jsonl");
         let path = dir.join("vectors.bin");
         std::fs::write(&input, "body").unwrap();
-        std::fs::write(&path, [&b"CVEMBED\x02"[..], &[0; 64]].concat()).unwrap();
+        let mut prior = *MAGIC;
+        prior[7] -= 1;
+        std::fs::write(&path, [&prior[..], &[0; 64]].concat()).unwrap();
         assert!(semantic_search(&path, "query", 1)
             .unwrap_err()
             .to_string()
@@ -1491,42 +1487,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(std::fs::read(&store).unwrap(), std::fs::read(rebuilt).unwrap());
-        // Legacy duplicate rows are ambiguous even when their provenance is fresh. Poison one
-        // vector and require a new projection, rather than silently retaining the last row.
-        let mut legacy = load_store(&store).unwrap();
-        legacy
-            .meta
-            .push(serde_json::from_value(serde_json::to_value(&legacy.meta[0]).unwrap()).unwrap());
-        legacy.vectors.resize(legacy.vectors.len() + legacy.dim, 999.0);
-        save_store(&store, &legacy).unwrap();
-        read.set(0);
-        encoded.set(0);
-        saved.set(0);
-        refresh(
-            &store,
-            &refs,
-            "fake",
-            ReadSet::default(),
-            |r| {
-                read.set(read.get() + 1);
-                fake_doc(r, None)
-            },
-            |b| {
-                encoded.set(encoded.get() + b.len());
-                fake_encode(b)
-            },
-            |p, s| {
-                saved.set(saved.get() + 1);
-                save_store(p, s)
-            },
-        )
-        .unwrap();
-        assert_eq!((read.get(), encoded.get(), saved.get()), (1, 1, 1));
-        assert_eq!(load_store(&store).unwrap().meta.len(), 1);
-        assert_eq!(
-            load_store(&store).unwrap().vectors,
-            fake_encode(&["identical".into()]).unwrap().concat()
-        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
