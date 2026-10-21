@@ -759,3 +759,34 @@ fn fixed_target_identity_reproduces_openclaw_corpus_bytes() -> Result<()> {
     );
     Ok(())
 }
+
+/// The index is claimed as it was read: another writer's update (or a new index) between the
+/// read and the publish refuses the emit, and neither file is published.
+#[test]
+fn an_index_changed_after_the_read_is_refused_and_nothing_is_published() -> Result<()> {
+    let world = crate::test_world("openclaw-claimed-index");
+    let session = fixture(&world.base)?;
+    for prior in [Some(r#"{"old":{"label":"index"}}"#), None] {
+        let out = world.base.join(format!("out-{}", prior.is_some()));
+        let dir = out.join("agents/main/sessions");
+        fs::create_dir_all(&dir)?;
+        if let Some(prior) = prior {
+            fs::write(dir.join("sessions.json"), prior)?;
+        }
+        let other = r#"{"other":{"label":"a concurrent update"}}"#;
+        let options = EmitOptions {
+            new_id: Some("fixed".into()),
+            ..Default::default()
+        };
+        let error = stream::emit_after_stage(&session, &out, &options, || {
+            Ok(fs::write(dir.join("sessions.json"), other)?)
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("changed while cv updated it"), "{error}");
+        assert_eq!(fs::read_to_string(dir.join("sessions.json"))?, other);
+        assert!(!dir.join("fixed.jsonl").exists());
+        assert_eq!(fs::read_dir(&dir)?.count(), 1);
+    }
+    Ok(())
+}

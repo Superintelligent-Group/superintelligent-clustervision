@@ -109,6 +109,7 @@
 - `cv rewind` refuses a bodyless turn record only when re-emitting (`--thinking portable`) would drop it; a native copy keeps it.
 - `cv port` to Codex writes the source's recorded `cli_version`, or Codex's empty unknown, instead of cv's own version.
 - `cv port` to OpenClaw no longer writes `usage.totalTokens`; OpenClaw derives the total from the recorded counts.
+- `cv port` to OpenClaw refuses, publishing nothing, when `sessions.json` changed after cv read it, instead of overwriting the other writer's update.
 - `cv port` to LM Studio no longer writes `tokenCount: 0`; cv does not know the chat's last prompt token count.
 - `cv port` to Continue refuses a tool turn with no tool result instead of writing an empty `toolCallId`.
 - `cv port` to Gemini derives message ids from the session id and turn index (UUID v5), so a re-emit writes the same ids.

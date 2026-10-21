@@ -120,6 +120,15 @@ fn tool_result(writer: &mut dyn Write, blocks: &[Block], timestamp: i64, resolve
 }
 
 pub(super) fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<EmitResult> {
+    emit_after_stage(session, out_dir, opts, || Ok(()))
+}
+
+pub(super) fn emit_after_stage(
+    session: &Session,
+    out_dir: &Path,
+    opts: &EmitOptions,
+    after_stage: impl FnOnce() -> Result<()>,
+) -> Result<EmitResult> {
     wire::check_source_fields(session)?;
     let resolver = session.resolver();
     // Match explicit-title precedence, first-user selection, whitespace filtering and truncation.
@@ -301,9 +310,15 @@ pub(super) fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Res
             index_path.display()
         )
     };
-    let mut index: Map<String, Value> = match fs::read(&index_path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).with_context(refused)?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Map::new(),
+    // The index is claimed as read: the file this update was computed from, or none.
+    let (read, mut index): (Option<crate::source::FileId>, Map<String, Value>) = match fs::File::open(&index_path) {
+        Ok(mut file) => {
+            let id = crate::source::FileId::of(&file.metadata().with_context(refused)?);
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut file, &mut bytes).with_context(refused)?;
+            (id, serde_json::from_slice(&bytes).with_context(refused)?)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (None, Map::new()),
         Err(e) => return Err(e).with_context(refused),
     };
     let mut entry = Map::new();
@@ -326,6 +341,14 @@ pub(super) fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Res
     let mut set = crate::publish::Set::new();
     lines.stage_into(&mut set, &file_path, opts.claim())?;
     crate::harness::store::stage_into(&mut set, index_stage, &index_path, crate::publish::Claim::Replace)?;
+    after_stage()?;
+    // Another writer's index update since the read would be lost under ours: refuse, publish nothing.
+    if crate::source::FileId::at(&index_path) != read {
+        anyhow::bail!(
+            "the OpenClaw index {} changed while cv updated it; rerun",
+            index_path.display()
+        );
+    }
     set.publish()?;
     Ok(EmitResult {
         path: file_path,
