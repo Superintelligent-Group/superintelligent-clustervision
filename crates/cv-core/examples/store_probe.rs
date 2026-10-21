@@ -784,7 +784,8 @@ mod tests {
 
     #[test]
     fn digest_resolves_escaped_spans_and_ignores_json_map_insertion_order() {
-        let path = std::env::temp_dir().join(format!("cv-probe-hash-{}.json", uuid::Uuid::new_v4()));
+        let world = cv_testkit::World::in_process("probe-hash", cv_core::env::Env::enter_isolated);
+        let path = world.base.join("input.json");
         let text = "escaped\n\"quote\"\\☃".repeat(1024);
         let quoted = serde_json::to_string(&text).unwrap();
         let raw_input = r#"{"a":0,"z":{"a":1,"b":2}}"#;

@@ -37,8 +37,7 @@ fn share_corpus(w: &World) {
             ]}
         }),
     ];
-    let body: String = lines.iter().map(|l| format!("{l}\n")).collect();
-    fs::write(w.home.join(".claude/projects/-work-proj/sharesess.jsonl"), body).unwrap();
+    w.write_session("sharesess", &lines);
 }
 
 /// No `src=`/`href=` attribute may point at the network. (Fragment anchors and data: are fine.)

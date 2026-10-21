@@ -22,8 +22,8 @@ fn logical_rows(db: &Path, id: &str) -> Result<Value> {
 }
 #[test]
 fn complete_v2_replay_matches_native_rows_owned_and_public_ir() -> Result<()> {
-    let root = std::env::temp_dir().join(format!("cv-complete-opencode-{}", Uuid::new_v4()));
-    fs::create_dir_all(&root)?;
+    let world = crate::test_world("complete-opencode");
+    let root = world.proj.clone();
     let source = root.join("source.db");
     fs::copy(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/opencode/2.0.25/.local/share/opencode/opencode.db"),
@@ -99,13 +99,13 @@ fn complete_v2_replay_matches_native_rows_owned_and_public_ir() -> Result<()> {
             }
         }
     }
-    fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[test]
 fn embedded_v2_attachments_keep_bytes_external_references_report_loss() -> Result<()> {
-    let root = std::env::temp_dir().join(format!("cv-opencode-attachments-{}", Uuid::new_v4()));
+    let world = crate::test_world("opencode-attachments");
+    let root = world.proj.clone();
     let mut session = Session::new("foreign", Harness::Claude);
     let mut user = crate::Message::new(Role::User);
     user.content.push(Block::Image {
@@ -130,14 +130,13 @@ fn embedded_v2_attachments_keep_bytes_external_references_report_loss() -> Resul
         report.deltas.iter().any(|d| d.what == "block:image" && !d.expected),
         "unavailable model input is an explicit fidelity loss"
     );
-    fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[test]
 fn complete_v2_edits_groups_models_and_raw_only_sources_are_guarded() -> Result<()> {
-    let root = std::env::temp_dir().join(format!("cv-opencode-edit-{}", Uuid::new_v4()));
-    fs::create_dir_all(&root)?;
+    let world = crate::test_world("opencode-edit");
+    let root = world.proj.clone();
     let source = root.join("source.db");
     fs::copy(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/opencode/2.0.25/.local/share/opencode/opencode.db"),
@@ -334,14 +333,13 @@ fn complete_v2_edits_groups_models_and_raw_only_sources_are_guarded() -> Result<
             connection,
         )
     })?;
-    fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[test]
 fn complete_legacy_producers_match_owned_preparation() -> Result<()> {
-    let root = std::env::temp_dir().join(format!("cv-opencode-legacy-{}", Uuid::new_v4()));
-    fs::create_dir_all(&root)?;
+    let world = crate::test_world("opencode-legacy");
+    let root = world.proj.clone();
     let corpus = Path::new(env!("CARGO_MANIFEST_DIR"));
     let sqlite = root.join("source.db");
     fs::copy(
@@ -388,6 +386,5 @@ fn complete_legacy_producers_match_owned_preparation() -> Result<()> {
             }
         }
     }
-    fs::remove_dir_all(root)?;
     Ok(())
 }
