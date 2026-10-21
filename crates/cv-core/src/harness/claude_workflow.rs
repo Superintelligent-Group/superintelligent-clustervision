@@ -1083,8 +1083,8 @@ fn compute_ghosts(launches: Vec<WorkflowLaunch>, states: &[Workflow]) -> Vec<Wor
         .collect()
 }
 
-/// `meta.name` from an inline workflow script: the first `name: '<…>'` / `name: "<…>"` after the
-/// script head (the `meta` literal is required to open the script, so first occurrence is it).
+/// Heuristic `meta.name` from an inline workflow script: interpret the first `name` substring
+/// as a quoted property. An earlier identifier containing `name` can hide or mimic the property.
 fn meta_name(script: &str) -> Option<String> {
     let i = script.find("name")?;
     let rest = script[i + 4..].trim_start().strip_prefix(':')?.trim_start();
@@ -1093,8 +1093,8 @@ fn meta_name(script: &str) -> Option<String> {
     Some(body[..body.find(quote)?].to_string())
 }
 
-/// Split a `scriptPath` basename `<name>-wf_<runId>.js` into `(name, wf_<runId>)`. Either half is
-/// `None` when the basename doesn't carry it.
+/// Split a `scriptPath` basename `<name>-wf_<runId>.js` into `(name, wf_<runId>)`. Without the
+/// `-wf_` separator, the whole stem is the name and the run id is `None`.
 fn script_path_identity(p: &str) -> (Option<String>, Option<String>) {
     let stem = Path::new(p).file_stem().and_then(|s| s.to_str()).unwrap_or(p);
     match stem.rsplit_once("-wf_") {

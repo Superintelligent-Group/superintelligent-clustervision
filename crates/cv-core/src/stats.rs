@@ -477,7 +477,7 @@ impl TokenStats {
         let subs: Vec<SessionRef> = crate::par_flat_map(refs.to_vec(), |r| subagent_usage_refs(&r));
         stats.subagents = subs.len();
         let mut fold = TokenFold::default();
-        // Bound completed spool retention to one spill::ordered::BUDGET per configured worker.
+        // Bound completed spool retention to one spill::ordered::MEMORY_BYTES per configured worker.
         // Main sessions precede every subagent, matching the existing first-response-ID oracle.
         for group in [refs, subs.as_slice()] {
             for chunk in group.chunks(parse_workers()) {

@@ -1005,7 +1005,7 @@ fn optional_document<T>(path: &Path, visit: impl for<'a> FnOnce(JsonView<'a>) ->
 /// - `updated`: the last event's `ts` (the caller keeps it only if it's newer than the mtime guess).
 /// - `first_user_ts`: same first `ts`, which the streaming core stamps onto the first user turn.
 ///
-/// `(created_at, updated_at, last_api_start)` extracted from a task's `ui_messages.json`.
+/// The three timestamp hints extracted from a task's `ui_messages.json`.
 type UiTimes = (Option<DateTime<Utc>>, Option<DateTime<Utc>>, Option<DateTime<Utc>>);
 
 /// Reduce timestamps while skipping UI text payloads under the original whole-Value boundary.

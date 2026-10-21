@@ -1,6 +1,6 @@
 //! Claude Code adapter — `~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl`, plus the same
 //! layout under any extra roots (`$CLAUDE_CONFIG_DIR`, `$CLUSTERVISION_CLAUDE_ROOTS`, the
-//! `claude-roots` file; see [`Claude::new`]).
+//! `claude-roots` file; see [`Claude::detect`]).
 //!
 //! See `docs/FORMATS.md`. Key points: one session per `.jsonl` file; each line is a typed record;
 //! `cwd` is read from inside the transcript (the dir-name encoding is lossy), and the conversation is
