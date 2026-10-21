@@ -109,7 +109,7 @@ impl Adapter for LmStudio {
                 continue;
             }
             if let Some(found) =
-                crate::Skipped::listed(&path, crate::discover_cache::cached_scan_checked(&path, || scan(&path)))
+                crate::Skipped::listed(&path, crate::discover_cache::cached_scan_checked(&path, || scan(&path).map(Some)))
             {
                 out.push(found);
             }
@@ -656,7 +656,7 @@ fn is_conversation_file(path: &Path) -> bool {
 }
 
 /// Build a cheap [`SessionRef`] without parsing every step.
-fn scan(path: &Path) -> Result<Option<SessionRef>> {
+fn scan(path: &Path) -> Result<SessionRef> {
     let source = JsonSource::capture(path)?;
     let doc = source.read_document(scan_view)?;
 
@@ -675,13 +675,13 @@ fn scan(path: &Path) -> Result<Option<SessionRef>> {
     let updated_at = file_mtime(path).or(created_at);
     let message_count = doc.messages.count;
 
-    Ok(Some(SessionRef {
+    Ok(SessionRef {
         title,
         created_at,
         updated_at,
         message_count: Some(message_count),
         ..SessionRef::new(id, Harness::LmStudio, path.to_path_buf())
-    }))
+    })
 }
 
 /// Validate one turn at a time, including unused versions/fields, while retaining only the
@@ -1056,7 +1056,7 @@ mod tests {
         if !path.exists() {
             return; // fixture optional in minimal checkouts
         }
-        let r = scan(&path).unwrap().unwrap();
+        let r = scan(&path).unwrap();
         assert_eq!(r.id, "sample");
         assert_eq!(r.title.as_deref(), Some("Hello there"));
         assert_eq!(r.message_count, Some(2));
@@ -1185,7 +1185,7 @@ mod tests {
             ]}"#,
         )
         .unwrap();
-        let r = scan(&path).unwrap().unwrap();
+        let r = scan(&path).unwrap();
 
         // Default parse: only the selected version — no branches.
         let normal = LmStudio { root: None }.parse(&r).unwrap();
@@ -1290,7 +1290,7 @@ mod tests {
         assert!(result.path.exists(), "emitted file exists");
 
         // Re-parse the emitted file with this adapter.
-        let r = scan(&result.path).unwrap().unwrap();
+        let r = scan(&result.path).unwrap();
         let parsed = LmStudio { root: None }.parse(&r).unwrap();
 
         assert_eq!(parsed.messages.len(), 2, "both turns survive");
@@ -1329,7 +1329,7 @@ mod tests {
         if !path.exists() {
             return; // fixture optional in minimal checkouts
         }
-        let r = scan(&path).unwrap().unwrap();
+        let r = scan(&path).unwrap();
         let s = LmStudio { root: None }.parse(&r).unwrap();
         assert_eq!(s.messages.len(), 2);
 
@@ -1393,7 +1393,7 @@ mod tests {
         )
         .unwrap();
 
-        let r = scan(&path).unwrap().unwrap();
+        let r = scan(&path).unwrap();
 
         struct StopFirst {
             seen: Vec<String>,
@@ -1487,7 +1487,7 @@ mod tests {
         let first = adapter.discover()?;
         assert_eq!(first.len(), 8);
         for reference in &first {
-            let direct = scan(&reference.path)?.unwrap();
+            let direct = scan(&reference.path)?;
             assert_eq!(serde_json::to_value(reference)?, serde_json::to_value(&direct)?);
             assert_eq!(reference.message_count, Some(128));
             let hit = crate::discover_cache::cached_scan(&reference.path, || {
@@ -1555,7 +1555,7 @@ mod tests {
         let mut frozen = Frozen::new("lmstudio-scan");
         for (case, text) in cases.into_iter().enumerate() {
             fs::write(&path, &text).unwrap();
-            let actual = scan(&path).ok().flatten().map(|r| {
+            let actual = scan(&path).ok().map(|r| {
                 assert_eq!(r.id, "sample");
                 assert_eq!(r.updated_at, file_mtime(&path).or(r.created_at));
                 (r.title, r.created_at, r.message_count)
