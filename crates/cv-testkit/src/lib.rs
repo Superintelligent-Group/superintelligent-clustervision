@@ -147,7 +147,7 @@ impl World {
     /// the guard that keeps the first entered on this thread. The process is never mutated.
     pub fn in_process<S>(tag: &str, enter: impl FnOnce(Vars, Vars) -> S) -> InProcess<S> {
         let world = World::new(tag);
-        let nowhere = std::env::temp_dir().join(format!("cv-test-unscoped-{}", std::process::id()));
+        let nowhere = world.base.join("unscoped");
         let outside = inherited_with(world_env(&nowhere.join("home"), &nowhere.join("cvhome")));
         let scope = enter(inherited_with(world.env()), outside);
         InProcess { scope, world }
@@ -265,12 +265,11 @@ impl World {
     /// the CLI no longer writes.
     pub fn append_task_log(&self, lines: &[Value]) {
         let dir = self.cv_home.join("tasks");
-        fs::create_dir_all(&dir).unwrap();
-        let mut f = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(dir.join("events.jsonl"))
-            .unwrap();
+        let path = dir.join("events.jsonl");
+        if !path.exists() {
+            self.seed_task_log(&[]);
+        }
+        let mut f = fs::OpenOptions::new().append(true).open(path).unwrap();
         f.write_all(jsonl(lines).as_bytes()).unwrap();
     }
 }
