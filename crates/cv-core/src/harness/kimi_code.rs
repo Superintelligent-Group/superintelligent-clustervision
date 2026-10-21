@@ -1526,12 +1526,7 @@ impl<'a> Ctx<'a> {
         let Some(prompt) = v.get("systemPrompt").and_then(Value::as_str).filter(|p| !p.is_empty()) else {
             return self.carry(v, ts, sink);
         };
-        let hash = {
-            use std::hash::{Hash, Hasher};
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            prompt.hash(&mut h);
-            h.finish()
-        };
+        let hash = crate::source::digest(prompt.as_bytes());
         if !self.seen_prompts.insert(hash) {
             return self.carry(v, ts, sink);
         }

@@ -950,7 +950,6 @@ pub(crate) fn fresh_in<T: Payload + PartialEq>(
 }
 
 /// A 64-bit digest of `bytes`, for a payload that binds output the consumer keeps elsewhere.
-#[cfg(feature = "sqlite")]
 pub(crate) fn digest(bytes: &[u8]) -> u64 {
     fnv1a(0xcbf2_9ce4_8422_2325, bytes)
 }

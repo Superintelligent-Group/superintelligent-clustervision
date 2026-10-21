@@ -1041,6 +1041,37 @@ fn borrowed_text<'a>(row: &'a rusqlite::Row<'_>, index: Option<usize>) -> Option
     }
 }
 
+/// Explicit FNV-1a framing: optional fields have a presence byte, strings end in 0xff
+/// (not a UTF-8 byte), and numbers use little endian. No std::Hash layout is persisted.
+#[derive(Clone)]
+struct GenerationHash(u64);
+impl GenerationHash {
+    fn new() -> Self {
+        Self(0xcbf2_9ce4_8422_2325)
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.0 = (self.0 ^ u64::from(*byte)).wrapping_mul(0x100_0000_01b3);
+        }
+    }
+    fn text(&mut self, text: Option<&str>) {
+        self.write(&[u8::from(text.is_some())]);
+        if let Some(text) = text {
+            self.write(text.as_bytes());
+            self.write(&[0xff]);
+        }
+    }
+    fn number(&mut self, value: Option<u64>) {
+        self.write(&[u8::from(value.is_some())]);
+        if let Some(value) = value {
+            self.write(&value.to_le_bytes());
+        }
+    }
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
 /// Hermes's copied-generation identity precedes lazy body selection and extra projection.
 /// Borrowing the native cells preserves the original String/Option hashing without body copies.
 #[cfg(test)]
@@ -1064,20 +1095,13 @@ fn generation_identity(
     conn: &Connection,
     incremental_content: bool,
 ) -> Result<GenerationIdentity> {
-    use std::hash::{Hash, Hasher};
-    let mut hash = std::collections::hash_map::DefaultHasher::new();
-    borrowed_text(row, index("role")).unwrap_or_default().hash(&mut hash);
+    let mut hash = GenerationHash::new();
+    hash.text(Some(borrowed_text(row, index("role")).unwrap_or_default()));
     let content_present;
     if incremental_content {
         let mut content_hash = hash.clone();
         let present = if borrowed_text(row, index("content")).is_some_and(|kind| kind == "text") {
-            // Use Option's own prefix, followed by str's bytes and terminator. This preserves
-            // the pinned DefaultHasher's borrowed-String identity without owning the body.
-            struct StringPrefix;
-            impl Hash for StringPrefix {
-                fn hash<H: Hasher>(&self, _: &mut H) {}
-            }
-            Some(StringPrefix).hash(&mut content_hash);
+            content_hash.write(&[1]);
             super::store::sqlite::with_cell_reader(
                 conn,
                 "messages",
@@ -1095,22 +1119,23 @@ fn generation_identity(
         };
         content_present = present;
         if present {
-            content_hash.write_u8(0xff);
+            content_hash.write(&[0xff]);
             hash = content_hash;
         } else {
-            None::<&str>.hash(&mut hash);
+            hash.text(None);
         }
     } else {
         let content = borrowed_text(row, index("content"));
         content_present = content.is_some();
-        content.hash(&mut hash);
+        hash.text(content);
     }
-    index("timestamp")
-        .and_then(|i| row.get::<_, Option<f64>>(i).ok().flatten())
-        .map(f64::to_bits)
-        .hash(&mut hash);
+    hash.number(
+        index("timestamp")
+            .and_then(|i| row.get::<_, Option<f64>>(i).ok().flatten())
+            .map(f64::to_bits),
+    );
     for key in ["tool_call_id", "tool_calls", "tool_name"] {
-        borrowed_text(row, index(key)).hash(&mut hash);
+        hash.text(borrowed_text(row, index(key)));
     }
     Ok(GenerationIdentity {
         hash: hash.finish(),
@@ -1139,16 +1164,16 @@ impl GenerationDedup {
         conn: &Connection,
         incremental: bool,
     ) -> Result<bool> {
-        use std::hash::{Hash, Hasher};
-        let mut header = std::collections::hash_map::DefaultHasher::new();
-        borrowed_text(row, index("role")).unwrap_or_default().hash(&mut header);
+        let mut header = GenerationHash::new();
+        header.text(Some(borrowed_text(row, index("role")).unwrap_or_default()));
         for column in ["tool_call_id", "tool_calls", "tool_name"] {
-            borrowed_text(row, index(column)).hash(&mut header);
+            header.text(borrowed_text(row, index(column)));
         }
-        index("timestamp")
-            .and_then(|i| row.get::<_, Option<f64>>(i).ok().flatten())
-            .map(f64::to_bits)
-            .hash(&mut header);
+        header.number(
+            index("timestamp")
+                .and_then(|i| row.get::<_, Option<f64>>(i).ok().flatten())
+                .map(f64::to_bits),
+        );
         let id: i64 = row.get(index(if incremental { "_content_rowid" } else { "id" }).unwrap())?;
         let fingerprint = self.fingerprint(header.finish());
         if self.index.is_none() {
