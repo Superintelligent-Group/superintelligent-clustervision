@@ -37,8 +37,9 @@ whole source before its first callback; a sink can collect everything; a bounded
 can decode a whole field first. Each bound must hold across the composed path.
 
 By default, a full read certifies computed counts and affordances into the catalog so later
-listings need not recompute; `cv events` refreshes a stale session's events before returning
-rows. Global `--frozen` (or `CV_FROZEN=1`), resolved once by `cv_core::env::frozen()`, records
+listings need not recompute. **Read commands leave harness transcripts untouched but may write
+derived cv state:** `cv events` refreshes stale events and counts in `catalog.db` before returning
+rows (`cv events --help`). Global `--frozen` (or `CV_FROZEN=1`), resolved once by `cv_core::env::frozen()`, records
 nothing: stale events stream directly, `cv ls` keeps the dash for an unknown count, and the
 catalog (including skipped sources), scan cache and usage cache are not written. Commands
 whose purpose is writing stores or sessions (`index`, hook installation/removal, reshaping,
@@ -49,7 +50,7 @@ whose purpose is writing stores or sessions (`index`, hook installation/removal,
 - Discovery already parallelizes adapters and many per-file scans (`cv-core/src/lib.rs`).
   Warm ordinary listings use the catalog and scoped freshness probes; they need no body parse.
 - The common API is `Adapter::stream` plus `MessageSink`. `parse` is collection over that API.
-  `ParseOptions` separates full extras, format-complete carriers, lazy text spans and offsets.
+  `Demand { tier, spans, offsets }` selects extras/carriers, lazy text and offsets.
 - Claude/Codex have lazy source spans and resumable stream state. Codex has a useful direct path
   for giant tool outputs; most unchanged index jobs are skipped.
 - FTS already combines text, event and affordance extraction in one pass, uses one writer,
@@ -213,35 +214,32 @@ footprint observations explain investigations; they do not override work countin
 explicit-root adapters and frozen scratch sources; never mutate the real stores. Cold/warm
 identifies application state, not a claim that the OS page cache was evicted.
 
-## Open gaps
+## Open gaps and landed closures
 
-- **Discovery demands.** Claude, Codex, Grok, Kimi and Kimi Code share record projections and
-  all but Claude defer counts; Hermes and Goose read native session metadata without replaying conversations. Zed
-  projects snapshot metadata without decoding message bodies, retaining whole-cell validation. Complete
-  reads publish certified counts; direct discovery, including directory refs, reuses them through
-  the shared cache connection after cache locks drop. Validation uses a fresh bounded Probe batch,
-  never observations retained across calls. Qwen and other adapter ports remain; Cursor CLI uses
-  counted turns to exclude empty stores. Preserve inclusion and exact metadata when removing counts.
-  Shared SQLite/portable selections now serve OpenClaw, Hermes, Qwen tasks, Goose and exports;
-  their native allocation, source validation and workload tradeoffs remain real costs.
-- **Three message windowings.** `api::WindowSink`, the text renderer's own window pass in
-  `cv/src/cmd/view.rs` and `cv/src/cmd/pack.rs`'s relevance sink still select windows separately.
-  CLI and HTTP search now share `cv_search::Searcher::search`, including notes and snippets.
-- **Removed in 0.17**, so they need no gap: `loom::splice`, `spill::Temporary`, the catalog's
-  `affordance_sig` and no-op `note_affordances`, the unordered events publication path, the
-  pre-binary semantic store migration, and the four sink latches (one `stream::Latch`).
-- **Explicit remaining costs.** Grok sibling lineage keeps per-query sibling metadata guards. Kimi
-  wire enrichment and Kimi Code's auxiliary session index reread changed prefixes. Claude
-  compaction fork inference can inspect sibling prefixes and bodies. External SQLite schemas
-  remain read-only. OpenClaw custom schemas or indexed native query plans retain native SQL;
-  repeated ordinary scans use a private derived index. Its admission estimate does not bound a
-  giant cell's native SQLite allocation. Zed discovery still grows Serde string scratch; Hermes raw
-  reasoning/provider extras and native row/FTS allocation remain owned.
-- **Resume-mark sampling** (correctness boundary 3) cannot detect an arbitrary prefix rewrite
-  followed by growth, or at the same length, without reading the prefix or a change signal.
-- **First-run listing and full recount** need final composed fleet measurements, including
-  compressed Codex. Historical measurements in `PERF.md` are not current performance promises.
-- **Zed authored-thread capture.** The isolated GUI attempt could not drive the GPUI agent editor
-  and produced no threads; see `tools/harness-corpus/zed/README.md`.
-- **Sharpened native child under a live parent.** Installing one and measuring its resumed
-  behavior is an unrun experiment; byte savings do not establish preserved reasoning.
+Audited against `git log v0.17.0..HEAD` on 2026-10-21; a closure below names its commit.
+
+- **Discovery demands, partly closed.** Claude's shared record heads (`576db8c1`), deferred
+  Codex/Grok/Kimi/Kimi Code counts (`08a8dfb8`, `991c617e`, `efe87b52`, `ba6616ed`), metadata-only
+  Hermes/Goose/Zed listings (`734af650`, `2ab873aa`, `80295ea7`), and Continue/OpenCode JSON-tree
+  count deferral (`a200e811`, `d358ff0e`) landed. Certified-count reuse is `93faa442`.
+  **Open:** Qwen discovery still replays records into messages to count; Cursor CLI counts to
+  exclude empty stores. Removing these reads needs to preserve inclusion and exact metadata.
+  Shared selections landed for OpenClaw/Hermes/Qwen tasks/Goose/exports (`62f0ccda`, `0a6a3b22`,
+  `7475e978`, `20980e64`, `646b8fb6`); native allocations and validation still cost work.
+- **Three message windowings, open.** `api::WindowSink`, the text renderer's window pass in
+  `cv/src/cmd/view.rs` and `cv/src/cmd/pack.rs`'s relevance sink still select separately.
+  `5770a811` types forward/tail windows but does not unify the selectors. Search already shares
+  `cv_search::Searcher::search` across CLI and HTTP; that is not a windowing closure.
+- **Format-dependent costs, open.** Grok sibling lineage retains per-query metadata guards;
+  Kimi wire enrichment and Kimi Code's auxiliary index reread changed prefixes; Claude fork
+  inference can inspect sibling bodies. These dependencies can change independently of the main
+  transcript. External SQLite schemas remain read-only; OpenClaw custom queries and giant native
+  cells still allocate in SQLite. Zed discovery grows Serde scratch; Hermes reasoning/provider
+  extras and row/FTS allocation remain owned. Rust heap gates do not bound those native costs.
+- **Resume-mark sampling, a known limit.** Boundary 3 cannot detect every prefix rewrite plus
+  growth, or every same-length edit during captured-read admission. No trusted change signal is
+  available; whole-prefix hashing was measured and rejected (see `PERF.md`, Resume marks).
+- **Fleet measurements, open.** First-run listing, full recount and repeated unchanged indexing
+  still need a composed fleet measurement including compressed Codex. `6049df0a` keeps writer
+  observations off discovery's work path; it does not remeasure the historical second-pass
+  defect. The dated `PERF.md` results are not current performance promises.

@@ -130,3 +130,20 @@ otherwise reads only the appended suffix. Watch resumes on every append, and the
 store is 33,168 transcripts holding 36.3 GB. A full check therefore turns every resumed pass back
 into a whole read of bytes already seen. Detecting such edits needs a writer or filesystem change
 signal, which no harness provides.
+
+## Open measurement gaps
+
+Audited against `git log v0.17.0..HEAD` on 2026-10-21:
+
+- **First listing and full recount remain unmeasured on the current fleet.** Count deferral
+  (`08a8dfb8`, `734af650`, `2ab873aa`, `80295ea7`, `a200e811`, `d358ff0e`) changed the work;
+  the 0.17 measurements above cannot stand in for a new composed run with compressed Codex.
+- **Repeated unchanged indexing needs fleet confirmation.** `6049df0a` removed discovery's
+  writer-observation work and `1aec79ae` checks unchanged compressed rollouts. These close that
+  regression case, not the historical fleet-wide second-pass measurement. No current fleet
+  result establishes that every baseline holds across repeated passes.
+- **Upgrade cost is unknown.** The 0.16.1 upgrade gate (`1ff6669c`) checks migrated output against
+  a clean index; it does not measure fleet upgrade time, heap or re-embedding cost.
+- **Arbitrary prefix-edit detection remains limited** by the samples described above. A full
+  hash contradicts the measured suffix-only work goal; no harness supplies a trusted change
+  signal. Native SQLite allocation and whole-process RSS likewise remain outside Rust heap gates.
