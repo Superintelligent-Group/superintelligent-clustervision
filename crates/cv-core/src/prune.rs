@@ -1138,63 +1138,32 @@ fn source_turn_prune(
                 continue;
             }
             kept_blocks.push(original_block.to_json()?);
-            if opts.declassify {
-                if let Some(value) = projected.as_mut() {
-                    // This pass sees the generated thinking marker, as the owned pass does.
-                    let text = value.get("text").and_then(Value::as_str).unwrap_or("");
-                    let hits = declassify_hits(text, opts);
-                    if hits >= opts.declassify_min_hits {
-                        let size = text.len();
-                        let lines = text.lines().count().max(1);
-                        let id = format!("{key}#declass{index}");
-                        let marker = build_marker(
-                            &id,
-                            "declassified",
-                            &Value::Null,
-                            "text",
-                            size,
-                            lines,
-                            new_id,
-                            opts.drop,
-                        );
-                        saved += str_tokens(text).saturating_sub(str_tokens(&marker));
-                        declassified.push(source_payload(
-                            value.clone().into(),
-                            id,
-                            "content",
-                            "declassified",
-                            size,
-                            lines,
-                        ));
-                        *value = serde_json::json!({"type":"text", "text":marker});
-                    }
-                } else if ty.as_deref() == Some("text") {
-                    let text = block.get("text");
-                    let (stats, hits) = source_declassify_stats(text, opts)?;
-                    if hits >= opts.declassify_min_hits {
-                        let id = format!("{key}#declass{index}");
-                        let marker = build_marker(
-                            &id,
-                            "declassified",
-                            &Value::Null,
-                            "text",
-                            stats.bytes,
-                            stats.lines(),
-                            new_id,
-                            opts.drop,
-                        );
-                        saved += crate::ir::est_tokens_bytes(stats.bytes, TokenKind::Text)
-                            .saturating_sub(str_tokens(&marker));
-                        declassified.push(source_payload(
-                            original_block.to_json()?,
-                            id,
-                            "content",
-                            "declassified",
-                            stats.bytes,
-                            stats.lines(),
-                        ));
-                        projected = Some(serde_json::json!({"type":"text", "text":marker}));
-                    }
+            if opts.declassify && ty.as_deref() == Some("text") {
+                let text = block.get("text");
+                let (stats, hits) = source_declassify_stats(text, opts)?;
+                if hits >= opts.declassify_min_hits {
+                    let id = format!("{key}#declass{index}");
+                    let marker = build_marker(
+                        &id,
+                        "declassified",
+                        &Value::Null,
+                        "text",
+                        stats.bytes,
+                        stats.lines(),
+                        new_id,
+                        opts.drop,
+                    );
+                    saved +=
+                        crate::ir::est_tokens_bytes(stats.bytes, TokenKind::Text).saturating_sub(str_tokens(&marker));
+                    declassified.push(source_payload(
+                        original_block.to_json()?,
+                        id,
+                        "content",
+                        "declassified",
+                        stats.bytes,
+                        stats.lines(),
+                    ));
+                    projected = Some(serde_json::json!({"type":"text", "text":marker}));
                 }
             }
             if let Some(projected) = projected {
@@ -1980,7 +1949,7 @@ fn pin_usage(u: &mut serde_json::Map<String, Value>, honest: u64) {
 }
 
 mod declassify;
-use declassify::{declassify_hits, source_declassify_stats};
+use declassify::source_declassify_stats;
 /// Snip the eligible payloads on one (old) user line, in place. `line_key` (the line's uuid or a
 /// file-position fallback) keys sidecar ids for blocks that carry no `tool_use_id` of their own.
 mod retrieve;
