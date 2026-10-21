@@ -53,6 +53,9 @@
 - Restore standalone wasm and no-default-features builds by gating the SQLite-only compaction resolver constructor.
 
 - Read-only checkpointed catalogs retain writer-version observations and warm listings without accepting publications or bypassing live WAL contents.
+- Codex and Gemini string parsing and uploaded-file ingestion return codec failures instead of successful partial sessions.
+
+- Compressed Codex rollouts use the independent `zstd` feature; builds without it report unreadable sources instead of parsing compressed bytes as JSONL.
 
 - Document `cv events` catalog writes and `--frozen`; update the manual for 0.18 counts, flags, diagnostics and migrations.
 - Qwen emission preserves absent cache counts and incomplete totals, and rejects overflowing usage aggregates.

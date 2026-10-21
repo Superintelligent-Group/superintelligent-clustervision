@@ -331,7 +331,7 @@ pub(crate) fn scan_session_file(path: &Path, harness: Harness) -> Result<Vec<Ses
         return Ok(vec![r]);
     } else if is_checkpoint(&name) {
         let text = fs::read_to_string(path)?;
-        if let Some(s) = parse_checkpoint(&text, &name, Some(path.to_path_buf())) {
+        if let Some(s) = parse_checkpoint(&text, &name, Some(path.to_path_buf()))? {
             return Ok(vec![session_ref(&s, path, harness)]);
         }
     }
@@ -393,7 +393,7 @@ fn parse_bounded(r: &SessionRef, name: &str) -> Result<Session> {
     let text = fs::read_to_string(&r.path).with_context(|| format!("reading {}", r.path.display()))?;
     // Checkpoint: one session per file.
     if is_checkpoint(name) {
-        if let Some(s) = parse_checkpoint(&text, name, Some(r.path.clone())) {
+        if let Some(s) = parse_checkpoint(&text, name, Some(r.path.clone()))? {
             return Ok(s);
         }
     }
@@ -808,62 +808,47 @@ impl RecordingReplay {
 ///   `sessionId`+`projectHash` metadata line),
 /// - a gemini-cli checkpoint (`{history:[…]}` or a bare `Content[]` array),
 /// - or the `logs.json` array of `{sessionId,messageId,message,…}` entries (possibly several sessions).
-pub fn parse_all_str(text: &str, source_path: Option<PathBuf>) -> Vec<Session> {
+pub fn parse_all_str(text: &str, source_path: Option<PathBuf>) -> Result<Vec<Session>> {
     parse_all_str_for(Harness::Gemini, text, source_path)
 }
 
 /// [`parse_all_str`] tagged as `harness` — Qwen Code shares the format, so its harness-specific
 /// facts (`extra["qwen"]`) and the session tag must say "qwen", not "gemini".
-pub fn parse_all_str_for(harness: Harness, text: &str, source_path: Option<PathBuf>) -> Vec<Session> {
-    let mut out = parse_all_str_inner(harness, text, source_path);
+pub fn parse_all_str_for(harness: Harness, text: &str, source_path: Option<PathBuf>) -> Result<Vec<Session>> {
+    let mut out = parse_all_str_inner(harness, text, source_path)?;
     for s in &mut out {
         s.harness = harness;
     }
-    out
+    Ok(out)
 }
 
-fn parse_all_str_inner(harness: Harness, text: &str, source_path: Option<PathBuf>) -> Vec<Session> {
-    // Chat recording? (object with sessionId+messages, or jsonl with a metadata line)
-    if let Some(s) = parse_chat_recording(text, harness, source_path.clone()).unwrap_or_else(|error| {
-        crate::env::warn_once("Gemini string recording", format!("{error:#}"));
-        None
-    }) {
-        return vec![s];
+fn parse_all_str_inner(harness: Harness, text: &str, source_path: Option<PathBuf>) -> Result<Vec<Session>> {
+    // Parse an owned input once, then give its view to the same document/part codecs as files.
+    let value = serde_json::from_str::<Value>(text).ok();
+    if let Some(session) = parse_chat_recording(text, value.as_ref(), harness, source_path.clone())? {
+        return Ok(vec![session]);
     }
-
-    let trimmed = text.trim_start();
-    // Checkpoint object `{history:[…]}`.
-    if trimmed.starts_with('{') {
-        if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(text) {
-            if map.contains_key("history") {
-                if let Some(s) = parse_checkpoint(text, "", source_path.clone()) {
-                    return vec![s];
-                }
-            }
+    let Some(value) = value else { return Ok(Vec::new()) };
+    if value.get("history").is_some() {
+        return Ok(checkpoint((&value).into(), "", source_path)?.into_iter().collect());
+    }
+    if let Some(items) = value.as_array() {
+        if items
+            .iter()
+            .take(8)
+            .any(|it| it.get("messageId").is_some() && it.get("message").is_some())
+        {
+            return Ok(parse_logs(&value, source_path));
+        }
+        if items
+            .iter()
+            .take(8)
+            .any(|it| it.get("role").is_some() && it.get("parts").is_some())
+        {
+            return Ok(checkpoint((&value).into(), "", source_path)?.into_iter().collect());
         }
     }
-    // Array: either a logs.json (entries have messageId/message) or a bare checkpoint Content[].
-    if trimmed.starts_with('[') {
-        if let Ok(Value::Array(items)) = serde_json::from_str::<Value>(text) {
-            let looks_logs = items
-                .iter()
-                .take(8)
-                .any(|it| it.get("messageId").is_some() && it.get("message").is_some());
-            if looks_logs {
-                return parse_logs_str(text, source_path);
-            }
-            let looks_checkpoint = items
-                .iter()
-                .take(8)
-                .any(|it| it.get("role").is_some() && it.get("parts").is_some());
-            if looks_checkpoint {
-                if let Some(s) = parse_checkpoint(text, "", source_path) {
-                    return vec![s];
-                }
-            }
-        }
-    }
-    Vec::new()
+    Ok(Vec::new())
 }
 
 // ---------------------------------------------------------------------------
@@ -872,13 +857,15 @@ fn parse_all_str_inner(harness: Harness, text: &str, source_path: Option<PathBuf
 
 /// Parse a Gemini `logs.json` from its text contents into one [`Session`] per distinct `sessionId`.
 fn parse_logs_str(text: &str, source_path: Option<PathBuf>) -> Vec<Session> {
-    let entries: Vec<Value> = serde_json::from_str::<Value>(text)
-        .ok()
-        .and_then(|v| v.as_array().cloned())
-        .unwrap_or_default();
+    let value = serde_json::from_str::<Value>(text).unwrap_or_default();
+    parse_logs(&value, source_path)
+}
+
+fn parse_logs(value: &Value, source_path: Option<PathBuf>) -> Vec<Session> {
+    let entries = value.as_array().map(Vec::as_slice).unwrap_or_default();
 
     let mut by_session: BTreeMap<String, Vec<&Value>> = BTreeMap::new();
-    for e in &entries {
+    for e in entries {
         let sid = e.get("sessionId").and_then(Value::as_str).unwrap_or("").to_string();
         by_session.entry(sid).or_default().push(e);
     }
@@ -940,7 +927,12 @@ fn parse_logs_str(text: &str, source_path: Option<PathBuf>) -> Vec<Session> {
 /// JSON object (`{sessionId, messages:[…]}`) or the modern append-only JSONL log (metadata line +
 /// message records + `$set` / `$rewindTo` control records), through the same readers as a file.
 /// `None` if the text is not a recording.
-fn parse_chat_recording(text: &str, harness: Harness, source_path: Option<PathBuf>) -> Result<Option<Session>> {
+fn parse_chat_recording(
+    text: &str,
+    value: Option<&Value>,
+    harness: Harness,
+    source_path: Option<PathBuf>,
+) -> Result<Option<Session>> {
     let resolver = crate::lazy::Resolver::new(None);
     let d = record::Demand {
         harness,
@@ -950,8 +942,8 @@ fn parse_chat_recording(text: &str, harness: Harness, source_path: Option<PathBu
     let mut sink = CollectSink::default();
     // A modern recording's metadata line also starts with `{`, but a whole-file parse of
     // multi-line JSONL fails, so it falls through to the line replay.
-    let document = match serde_json::from_str::<Value>(text) {
-        Ok(value @ Value::Object(_)) => document((&value).into(), source_path.as_deref(), d, &mut sink, true)?,
+    let document = match value {
+        Some(value @ Value::Object(_)) => document(value.into(), source_path.as_deref(), d, &mut sink, true)?,
         _ => None,
     };
     let mut session = match document {
@@ -1048,14 +1040,26 @@ struct EmitState {
 
 /// Parse a gemini-cli checkpoint into an IR [`Session`]. The id is derived from the `checkpoint-<tag>`
 /// filename when available (the `tag` is percent-encoded by gemini-cli; we decode it best-effort).
-fn parse_checkpoint(text: &str, file_name: &str, source_path: Option<PathBuf>) -> Option<Session> {
-    let v: Value = serde_json::from_str(text).ok()?;
-    let history = match &v {
-        Value::Array(a) => a.clone(),
-        Value::Object(map) => map.get("history").and_then(Value::as_array).cloned()?,
-        _ => return None,
+fn parse_checkpoint(text: &str, file_name: &str, source_path: Option<PathBuf>) -> Result<Option<Session>> {
+    let Ok(value) = serde_json::from_str::<Value>(text) else {
+        return Ok(None);
     };
+    checkpoint((&value).into(), file_name, source_path)
+}
 
+fn checkpoint(
+    view: crate::json::JsonView<'_>,
+    file_name: &str,
+    source_path: Option<PathBuf>,
+) -> Result<Option<Session>> {
+    let history = if view.is_array()? {
+        Some(view)
+    } else {
+        view.get("history")?
+    };
+    let Some(history) = history.map(|v| v.array()).transpose()?.flatten() else {
+        return Ok(None);
+    };
     let id = checkpoint_id(file_name);
     let resolver = crate::lazy::Resolver::new(None);
     let parts_demand = record::Demand {
@@ -1066,9 +1070,11 @@ fn parse_checkpoint(text: &str, file_name: &str, source_path: Option<PathBuf>) -
     let mut messages = Vec::new();
     let mut title: Option<String> = None;
 
-    for content in &history {
-        let Some(obj) = content.as_object() else { continue };
-        let role = match obj.get("role").and_then(Value::as_str) {
+    for content in history {
+        let Some(obj) = super::store::document::Fields::parse(content?, &["role", "parts"])? else {
+            continue;
+        };
+        let role = match obj.string("role")?.as_deref() {
             Some("model") | Some("assistant") => Role::Assistant,
             Some("system") => Role::System,
             _ => Role::User, // gemini uses "user" for both prompts and tool responses
@@ -1078,10 +1084,7 @@ fn parse_checkpoint(text: &str, file_name: &str, source_path: Option<PathBuf>) -
             m.kind = MessageKind::SystemPrompt;
         }
         if let Some(parts) = obj.get("parts") {
-            if let Err(error) = record::content_blocks(parts.into(), parts_demand, &mut m.content) {
-                crate::env::warn_once("Gemini checkpoint parts", format!("{error:#}"));
-                return None;
-            }
+            record::content_blocks(parts, parts_demand, &mut m.content)?;
         }
         // If this "user" turn is purely tool results, retag it as a Tool turn.
         if role == Role::User
@@ -1122,7 +1125,7 @@ fn parse_checkpoint(text: &str, file_name: &str, source_path: Option<PathBuf>) -
     }
 
     if messages.is_empty() {
-        return None;
+        return Ok(None);
     }
 
     // The file is a `/chat save <tag>` point that `/chat resume <tag>` restores: a checkpoint.
@@ -1144,7 +1147,7 @@ fn parse_checkpoint(text: &str, file_name: &str, source_path: Option<PathBuf>) -
             cp.insert("tag".into(), Value::String(tag));
         }
     }
-    Some(s)
+    Ok(Some(s))
 }
 
 fn checkpoint_id(file_name: &str) -> String {
@@ -1376,7 +1379,7 @@ mod tests {
             fs::write(&path, &text).unwrap();
             let adapter = Gemini { roots: vec![] };
             let reference = SessionRef::new("source", Harness::Gemini, path.clone());
-            let pure = parse_all_str(&text, Some(path.clone())).remove(0);
+            let pure = parse_all_str(&text, Some(path.clone())).unwrap().remove(0);
             assert!(json_inputs(&pure).iter().all(|j| matches!(j, crate::Json::Owned(_))));
             for opts in [
                 stream::Demand::RICH,
@@ -1613,7 +1616,7 @@ mod tests {
     #[test]
     fn parses_logs_json_grouped_by_session() {
         let text = fixture("logs.json");
-        let mut sessions = parse_all_str(&text, None);
+        let mut sessions = parse_all_str(&text, None).unwrap();
         sessions.sort_by(|a, b| a.id.cmp(&b.id));
         assert_eq!(sessions.len(), 2);
         assert_eq!(sessions[0].id, "sess-a");
@@ -1625,7 +1628,7 @@ mod tests {
     #[test]
     fn parses_legacy_chat_recording() {
         let text = fixture("session_legacy.json");
-        let sessions = parse_all_str(&text, None);
+        let sessions = parse_all_str(&text, None).unwrap();
         assert_eq!(sessions.len(), 1);
         let s = &sessions[0];
         assert_eq!(s.id, "9aeb2942-7c46-47b7-aded-13772d4d4e63");
@@ -1701,7 +1704,7 @@ mod tests {
         // (`utils/sessionUtils.ts:97`): slash commands, `?` queries, the `<session_context>` preamble,
         // `<hook_context>` hook output — and `info` / `warning` / `error` records.
         let text = fixture("session_ignored_user_content.jsonl");
-        let sessions = parse_all_str(&text, None);
+        let sessions = parse_all_str(&text, None).unwrap();
         assert_eq!(sessions.len(), 1);
         let s = &sessions[0];
         assert_eq!(
@@ -1737,7 +1740,7 @@ mod tests {
     #[test]
     fn every_turn_states_the_model_its_record_names() {
         let text = fixture("session_model_fallback.jsonl");
-        let s = &parse_all_str(&text, None)[0];
+        let s = &parse_all_str(&text, None).unwrap()[0];
         assert_eq!(s.model.as_deref(), Some("gemini-3-pro"));
         assert_eq!(s.messages[1].model.as_deref(), Some("gemini-3-pro"));
         assert_eq!(s.messages[2].model.as_deref(), Some("gemini-3-flash"));
@@ -1849,7 +1852,7 @@ mod tests {
     #[test]
     fn parses_modern_jsonl_with_rewind_and_set() {
         let text = fixture("session_modern.jsonl");
-        let sessions = parse_all_str(&text, None);
+        let sessions = parse_all_str(&text, None).unwrap();
         assert_eq!(sessions.len(), 1);
         let s = &sessions[0];
         assert_eq!(s.id, "11112222-3333-4444-5555-666677778888");
@@ -1901,7 +1904,9 @@ mod tests {
     #[test]
     fn parses_checkpoint_history() {
         let text = fixture("checkpoint.json");
-        let s = parse_checkpoint(&text, "checkpoint-my%20tag.json", None).expect("checkpoint");
+        let s = parse_checkpoint(&text, "checkpoint-my%20tag.json", None)
+            .unwrap()
+            .expect("checkpoint");
         assert_eq!(s.id, "checkpoint-my tag");
         // user, model(text+thinking+tooluse), tool(result), model(text)
         let roles: Vec<Role> = s.messages.iter().map(|m| m.role).collect();
@@ -1922,7 +1927,7 @@ mod tests {
     #[test]
     fn parses_legacy_array_checkpoint_via_parse_all() {
         let text = fixture("checkpoint_legacy_array.json");
-        let sessions = parse_all_str(&text, None);
+        let sessions = parse_all_str(&text, None).unwrap();
         assert_eq!(sessions.len(), 1);
         let s = &sessions[0];
         assert_eq!(s.messages.len(), 2);
@@ -1933,9 +1938,9 @@ mod tests {
 
     #[test]
     fn tolerates_garbage() {
-        assert!(parse_all_str("not json at all", None).is_empty());
-        assert!(parse_all_str("{}", None).is_empty());
-        assert!(parse_all_str("[]", None).is_empty());
+        assert!(parse_all_str("not json at all", None).unwrap().is_empty());
+        assert!(parse_all_str("{}", None).unwrap().is_empty());
+        assert!(parse_all_str("[]", None).unwrap().is_empty());
     }
 
     // ── on-disk streaming paths ──────────────────────────────────────────────
@@ -1969,6 +1974,7 @@ mod tests {
     fn assert_stream_matches_pure(name: &str) {
         let (dir, file) = chats_fixture(name);
         let id = parse_all_str(&fixture(name), None)
+            .unwrap()
             .into_iter()
             .next()
             .expect("fixture parses to one session")
@@ -1978,7 +1984,7 @@ mod tests {
 
         // Reference: the pure parser, with source_path set to the on-disk file for an apples-to-
         // apples comparison.
-        let reference = parse_all_str(&fixture(name), Some(file.clone()));
+        let reference = parse_all_str(&fixture(name), Some(file.clone())).unwrap();
         let reference = reference.into_iter().next().unwrap();
 
         let via_parse = adapter.parse(&r).expect("on-disk parse");
@@ -2024,7 +2030,7 @@ mod tests {
         streamed.messages = sink.messages;
         assert_eq!(
             as_json(&streamed),
-            as_json(&parse_all_str(text, Some(file.clone())).remove(0))
+            as_json(&parse_all_str(text, Some(file.clone())).unwrap().remove(0))
         );
         fs::remove_dir_all(dir).unwrap();
     }
@@ -2070,7 +2076,7 @@ mod tests {
         s.materialize().unwrap();
         assert_eq!(
             as_json(&s),
-            as_json(&parse_all_str(&text, Some(file.clone())).remove(0))
+            as_json(&parse_all_str(&text, Some(file.clone())).unwrap().remove(0))
         );
         fs::remove_dir_all(dir).unwrap();
     }
@@ -2098,7 +2104,7 @@ mod tests {
         for end in [6, lines.len()] {
             let text = lines[..end].iter().map(Value::to_string).collect::<Vec<_>>().join("\n");
             fs::write(&file, &text).unwrap();
-            let reference = parse_all_str(&text, Some(file.clone())).remove(0);
+            let reference = parse_all_str(&text, Some(file.clone())).unwrap().remove(0);
             for opts in [
                 stream::Demand::RICH,
                 stream::Demand::LEAN.with_spans(),
@@ -2147,7 +2153,7 @@ mod tests {
                  {{\"$set\":{{\"messages\":[]}},\"unknown\":{unknown}}}"
             );
             fs::write(&file, &text).unwrap();
-            let reference = parse_all_str(&text, Some(file.clone())).remove(0);
+            let reference = parse_all_str(&text, Some(file.clone())).unwrap().remove(0);
             assert_eq!(reference.messages.len(), 2);
             for opts in [
                 stream::Demand::LEAN.with_spans(),
@@ -2475,7 +2481,7 @@ mod tests {
             ),
         ]
         .join("\n");
-        let s = &parse_all_str(&text, None)[0];
+        let s = &parse_all_str(&text, None).unwrap()[0];
         assert_eq!(
             kinds(s),
             vec![
@@ -2526,7 +2532,7 @@ mod tests {
         for (content, roles) in cases {
             let record = serde_json::json!({"id":"u", "type":"user", "content":content});
             let text = serde_json::json!({"sessionId":"source", "messages":[record]}).to_string();
-            let session = parse_all_str(&text, None).remove(0);
+            let session = parse_all_str(&text, None).unwrap().remove(0);
             let actual: Vec<_> = session.messages.iter().map(|m| m.role).collect();
             assert_eq!(actual, roles, "content={content}");
         }
@@ -2547,7 +2553,7 @@ mod tests {
         ] {
             let record = serde_json::json!({"id":"u", "type":"user", "content":"prompt", "displayContent":display});
             let text = serde_json::json!({"sessionId":"source", "messages":[record]}).to_string();
-            let session = parse_all_str(&text, None).remove(0);
+            let session = parse_all_str(&text, None).unwrap().remove(0);
             let actual = session.messages[0]
                 .harness_extra(Harness::Gemini)
                 .and_then(|bag| bag.get("display_text"))
@@ -2565,7 +2571,7 @@ mod tests {
             r#"{"id":"g1","timestamp":"2026-10-11T00:00:02.000Z","type":"gemini","content":"","toolCalls":[{"id":"a1","name":"invoke_agent","args":{"agent_name":"codebase_investigator"},"status":"success","agentId":"child-1","timestamp":"2026-10-11T00:00:03.000Z","result":[{"functionResponse":{"id":"a1","name":"invoke_agent","response":{"output":"done"}}}]}]}"#,
         ]
         .join("\n");
-        let s = &parse_all_str(&text, None)[0];
+        let s = &parse_all_str(&text, None).unwrap()[0];
         assert_eq!(
             kinds(s),
             vec![
@@ -2605,7 +2611,7 @@ mod tests {
     #[test]
     fn a_merged_checkpoint_turn_splits_the_preamble_from_the_prompt() {
         let text = r#"{"history":[{"role":"user","parts":[{"text":"<session_context>\nctx\n</session_context>"},{"text":"Say saved."}]},{"role":"model","parts":[{"text":"saved"}]}]}"#;
-        let s = parse_checkpoint(text, "checkpoint-x.json", None).unwrap();
+        let s = parse_checkpoint(text, "checkpoint-x.json", None).unwrap().unwrap();
         assert_eq!(
             kinds(&s),
             vec![

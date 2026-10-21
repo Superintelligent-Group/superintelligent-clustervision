@@ -12,6 +12,7 @@ use wasm_bindgen::prelude::*;
 pub fn ingest_zip(bytes: &[u8]) -> Result<String, JsValue> {
     let files = cv_core::ingest::archive::extract(Cursor::new(bytes), Default::default())
         .map_err(|error| JsValue::from_str(&format!("zip: {error:#}")))?;
-    let sessions = cv_core::ingest::ingest_files(files);
+    let sessions =
+        cv_core::ingest::ingest_files(files).map_err(|error| JsValue::from_str(&format!("transcript: {error:#}")))?;
     serde_json::to_string(&sessions).map_err(|error| JsValue::from_str(&format!("json: {error}")))
 }

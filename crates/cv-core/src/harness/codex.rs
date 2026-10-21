@@ -235,9 +235,8 @@ impl Adapter for Codex {
                     continue;
                 }
                 // `.jsonl.zst`: Codex compresses rollouts colder than 7 days in place
-                // (rollout/src/compression.rs); `.tmp` are its staging files. The zstd decoder rides
-                // the `sqlite` feature (`store::zst`), so compressed rollouts are only listed when we can
-                // read them.
+                // (rollout/src/compression.rs); `.tmp` are its staging files. Discovery reports a
+                // missing zstd capability as an unreadable source, never as an empty transcript.
                 if !name.ends_with(".jsonl") && !name.ends_with(".json") && !is_zst_rollout(name) {
                     continue;
                 }
@@ -350,9 +349,9 @@ impl ResumeState {
 }
 
 /// A `rollout-*.jsonl.zst`: Codex's in-place compression of cold rollouts (readable only with the
-/// `sqlite` feature, which brings the `store::zst` decoder).
+/// `zstd` byte-source capability).
 fn is_zst_rollout(name: &str) -> bool {
-    cfg!(feature = "zstd") && name.ends_with(".jsonl.zst")
+    name.ends_with(".jsonl.zst")
 }
 
 fn is_zst_path(path: &Path) -> bool {
@@ -491,7 +490,7 @@ pub fn hook_header(path: &Path) -> Result<Option<Session>> {
 /// legacy single-JSON layout. `id` is the fallback session id (used when the transcript carries no
 /// `session_meta`/header id); `source_path` records provenance when known. Each record goes
 /// through the same codec as a file read, over an owned value.
-pub fn parse_str(id: &str, text: &str, is_jsonl: bool, source_path: Option<PathBuf>) -> Session {
+pub fn parse_str(id: &str, text: &str, is_jsonl: bool, source_path: Option<PathBuf>) -> Result<Session> {
     // Start the id empty so a transcript-provided id (session_meta / bare header / legacy
     // `session.id`) is authoritative; the `id` argument is only the fallback when none is present.
     let mut s = Session {
@@ -503,14 +502,12 @@ pub fn parse_str(id: &str, text: &str, is_jsonl: bool, source_path: Option<PathB
     let demand = Demand::from(&stream::Demand::LEAN);
     if is_jsonl {
         let mut det = EventDetector::default();
-        let detected = super::store::jsonl::slice(text.as_bytes(), |line| {
-            Ok(line
-                .view
-                .map(nl_flags)
-                .transpose()?
-                .map_or(Flow::Continue, |flags| det.feed(flags)))
-        });
-        super::note_read_error(&mut s, detected);
+        super::store::jsonl::slice(text.as_bytes(), |line| {
+            Ok(match line.view.map(nl_flags).transpose()? {
+                Some(flags) => det.feed(flags),
+                None => Flow::Continue,
+            })
+        })?;
         let mut reader = Reader {
             session: &mut s,
             ctx: &mut ctx,
@@ -520,17 +517,17 @@ pub fn parse_str(id: &str, text: &str, is_jsonl: bool, source_path: Option<PathB
             source: None,
         };
         let mut skipped = 0;
-        let read = super::store::jsonl::slice(text.as_bytes(), |line| {
+        super::store::jsonl::slice(text.as_bytes(), |line| {
             if let Some(view) = line.view {
                 reader.record(view)?;
             } else {
                 skipped += u64::from(!line.blank);
             }
             Ok(Flow::Continue)
-        });
-        super::note_read_error(&mut s, read);
+        })?;
         super::Unparsed(skipped).note(&mut s);
-    } else if let Ok(root) = serde_json::from_str::<Value>(text) {
+    } else {
+        let root = serde_json::from_str::<Value>(text)?;
         let root = JsonView::from(&root);
         let mut reader = Reader {
             session: &mut s,
@@ -540,16 +537,13 @@ pub fn parse_str(id: &str, text: &str, is_jsonl: bool, source_path: Option<PathB
             demand,
             source: None,
         };
-        let read = legacy::items(&mut reader, root);
-        super::note_read_error(&mut s, read);
-    } else {
-        super::Unparsed(u64::from(!text.trim().is_empty())).note(&mut s);
+        legacy::items(&mut reader, root)?;
     }
     s.messages = out;
     if s.id.is_empty() {
         s.id = id.to_string();
     }
-    s
+    Ok(s)
 }
 
 /// What [`EventDetector`] reads of a record: whether it carries natural-language text as an
@@ -1233,7 +1227,7 @@ mod tests {
         assert_eq!(scan.cwd.as_deref(), Some(Path::new("/child")));
         assert_eq!(ctx.writer_version.as_deref(), Some("0.163"));
         assert_eq!(scan.title.as_deref(), Some("own prompt"));
-        let session = parse_str("child", &raw, true, None);
+        let session = parse_str("child", &raw, true, None).unwrap();
         assert_eq!(
             session.messages.iter().filter_map(Message::text).collect::<Vec<_>>(),
             ["own prompt"]
@@ -1689,7 +1683,7 @@ mod tests {
     /// Doing it here means every test below that builds a session enforces it for free.
     fn parse_jsonl(lines: &[impl std::borrow::Borrow<str>]) -> Session {
         let text = lines.join("\n");
-        let s = parse_str("fallback-id", &text, true, None);
+        let s = parse_str("fallback-id", &text, true, None).unwrap();
         crate::harness::assert_no_flat_keys(&s);
         s
     }
@@ -1721,7 +1715,7 @@ mod tests {
     #[test]
     fn bare_header_provides_id() {
         // No session_meta: first line is a bare {id,timestamp} header.
-        let s = parse_str("", &fixture("bare_header_provides_id.jsonl"), true, None);
+        let s = parse_str("", &fixture("bare_header_provides_id.jsonl"), true, None).unwrap();
         assert_eq!(s.id, "hdr-1");
         assert_eq!(s.messages.len(), 1);
     }
@@ -1900,7 +1894,7 @@ mod tests {
         );
 
         // And it matches the inline (bulk) parse of the same record.
-        let inline = parse_str("fallback", &String::from_utf8(data).unwrap(), true, Some(path.clone()));
+        let inline = parse_str("fallback", &String::from_utf8(data).unwrap(), true, Some(path.clone())).unwrap();
         let inline_c = inline
             .messages
             .iter()
@@ -1926,7 +1920,7 @@ mod tests {
             &stream::Demand::LEAN.with_spans(),
         );
         lazy.materialize().unwrap();
-        let full = parse_str("fallback", text, true, Some(path));
+        let full = parse_str("fallback", text, true, Some(path)).unwrap();
         assert_eq!(serde_json::to_value(lazy).unwrap(), serde_json::to_value(full).unwrap());
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -2069,7 +2063,7 @@ mod tests {
             tc(100, 100),
             tc(250, 150),
         ];
-        let s = parse_str("s", &lines.join("\n"), true, None);
+        let s = parse_str("s", &lines.join("\n"), true, None).unwrap();
         let usages: Vec<Option<u64>> = s
             .messages
             .iter()
@@ -2094,7 +2088,7 @@ mod tests {
         // Line 7: trailing assistant message with no token_count after it: held, then flushed at EOF.
         let lines = fixture_lines("stream_attaches_usage_like_parse.jsonl");
         let text = lines.join("\n");
-        let parsed = parse_str("s", &text, true, None);
+        let parsed = parse_str("s", &text, true, None).unwrap();
 
         let streamed = stream_text("s", &text, &stream::Demand::RICH);
 
@@ -2203,7 +2197,7 @@ mod tests {
         // Line 2 is truncated mid-write.
         let lines = fixture_lines("corrupt_lines_are_counted_identically_on_both_paths.jsonl");
         let text = lines.join("\n");
-        let parsed = parse_str("s", &text, true, None);
+        let parsed = parse_str("s", &text, true, None).unwrap();
         assert_eq!(parsed.messages.len(), 2);
         assert_eq!(
             parsed
@@ -2303,7 +2297,7 @@ mod tests {
     #[test]
     fn legacy_2025_json_layout() {
         let text = fixture("legacy_2025_json_layout.json");
-        let s = parse_str("fallback", &text, false, None);
+        let s = parse_str("fallback", &text, false, None).unwrap();
         assert_eq!(s.id, "legacy-1");
         // user text, reasoning, tool use, tool result => 4 messages (no event_msg dedup in legacy).
         assert_eq!(s.messages.len(), 4);

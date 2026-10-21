@@ -1423,13 +1423,15 @@ mod tests {
             include_str!("../tests/fixtures/codex/code_mode_patch.jsonl"),
             true,
             None,
-        );
+        )
+        .unwrap();
         let direct = crate::harness::codex::parse_str(
             "direct",
             include_str!("../tests/fixtures/codex/direct_patch.jsonl"),
             true,
             None,
-        );
+        )
+        .unwrap();
         for session in [&nested, &direct] {
             assert_eq!(session.messages.len(), 3);
             let mut before = EventSink::new(None);

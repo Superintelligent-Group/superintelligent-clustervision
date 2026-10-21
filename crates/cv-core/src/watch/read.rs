@@ -804,7 +804,7 @@ mod tests {
                 });
                 let text = std::fs::read_to_string(fixtures.join(rel)).unwrap();
                 std::fs::write(&path, &text).unwrap();
-                let id = crate::harness::gemini::parse_all_str(&text, Some(path.clone()))[0]
+                let id = crate::harness::gemini::parse_all_str(&text, Some(path.clone())).unwrap()[0]
                     .id
                     .clone();
                 SessionRef::new(id, harness, path)

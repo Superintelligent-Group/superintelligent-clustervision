@@ -567,11 +567,11 @@ impl jsonl::Codec for Replay<'_> {
                 *seen = true;
                 sink.message(m)
             };
-            let flow = record::ingest(view, &mut self.s, &mut self.st, self.demand, false, &mut noted)?;
+            let flow = record::record(view, &mut self.s, &mut self.st, self.demand, false, &mut noted)?;
             self.st.listed = self.seen && self.st.first_prompt.is_some();
             return Ok(flow);
         }
-        if record::ingest(view, &mut self.s, &mut self.st, self.demand, self.stopped, sink)? == Flow::Stop {
+        if record::record(view, &mut self.s, &mut self.st, self.demand, self.stopped, sink)? == Flow::Stop {
             self.stopped = true;
         }
         Ok(Flow::Continue)
@@ -1088,7 +1088,7 @@ mod tests {
     /// resulting session as [`Harness::Qwen`] — the pure-text mirror of what the adapter's on-disk
     /// paths do, used here to cross-check them.
     fn parse_qwen_str(text: &str, source_path: Option<PathBuf>) -> Vec<Session> {
-        let mut sessions = crate::harness::gemini::parse_all_str_for(Harness::Qwen, text, source_path);
+        let mut sessions = crate::harness::gemini::parse_all_str_for(Harness::Qwen, text, source_path).unwrap();
         for s in &mut sessions {
             s.harness = Harness::Qwen;
         }

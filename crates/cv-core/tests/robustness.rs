@@ -422,7 +422,7 @@ fn crlf_and_truncated_final_line_keep_good_records() {
         r#"{"timestamp":"2026-01-01T00:00:02Z","type":"response_item","payload":{"type":"mess"#,
     ];
     let crlf = codex_lines.join("\r\n");
-    let s = cv_core::harness::codex::parse_str("live", &crlf, true, None);
+    let s = cv_core::harness::codex::parse_str("live", &crlf, true, None).unwrap();
     assert_eq!(s.id, "sx");
     assert_eq!(s.messages.len(), 1, "codex: the complete record parses");
     assert_eq!(s.messages[0].text().as_deref(), Some("do it"));
@@ -434,7 +434,7 @@ fn crlf_and_truncated_final_line_keep_good_records() {
         r#"{"id":"m2","type":"gemini","content":"answ"#,
     ];
     let crlf = gem_lines.join("\r\n");
-    let sessions = cv_core::harness::gemini::parse_all_str(&crlf, None);
+    let sessions = cv_core::harness::gemini::parse_all_str(&crlf, None).unwrap();
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].id, "g1");
     assert_eq!(

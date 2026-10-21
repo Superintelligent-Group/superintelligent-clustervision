@@ -81,6 +81,7 @@ impl Read {
     }
 
     /// Positioned bytes from the captured descriptor, for an adapter's compression decoder.
+    #[cfg(feature = "zstd")]
     pub(crate) fn reader(&self) -> anyhow::Result<impl std::io::BufRead + '_> {
         ranges::reader(
             &self.file,
@@ -133,6 +134,7 @@ impl Read {
 
     /// This source read through `backing`, its decoded copy (`len` bytes at its start): views
     /// keep the original's identity and its completion guards.
+    #[cfg(feature = "zstd")]
     pub(crate) fn decoded(mut self, backing: std::sync::Arc<super::bytes::ByteSource>, len: u64) -> Self {
         self.decoded = Some((backing, len));
         self

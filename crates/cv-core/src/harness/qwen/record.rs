@@ -61,7 +61,7 @@ const TOP: &[&str] = &[
 
 /// One record: fold its session facts, then (unless the sink already stopped) hand its messages
 /// to `sink`. Returns false once the sink has stopped.
-pub(super) fn ingest(
+pub(super) fn record(
     view: JsonView<'_>,
     s: &mut Session,
     st: &mut ReplayState,
