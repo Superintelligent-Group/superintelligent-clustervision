@@ -249,25 +249,18 @@ pub(super) fn contains(text: &Text, resolver: &Resolver, needle: &'static str) -
     Ok(search.found)
 }
 
+/// Whether an error result reads as one of `harness`'s denials
+/// ([`crate::harness::Adapter::denials`]), tried in order.
 pub(super) fn denied(text: &Text, resolver: &Resolver, harness: Harness) -> Result<bool> {
-    Ok(match harness {
-        Harness::Claude => {
-            (starts_with(text, resolver, "Permission to use ")? && contains(text, resolver, " denied")?)
-                || starts_with(text, resolver, "The user doesn't want to proceed with this tool use")?
+    let denials = crate::harness::rootless(harness).map_or(&[][..], |adapter| adapter.denials());
+    for denial in denials {
+        if starts_with(text, resolver, denial.prefix)?
+            && denial.also.map_or(Ok(true), |needle| contains(text, resolver, needle))?
+        {
+            return Ok(true);
         }
-        Harness::OpenCode => {
-            starts_with(
-                text,
-                resolver,
-                "The user has specified a rule which prevents you from using this specific tool call",
-            )? || starts_with(
-                text,
-                resolver,
-                "The user rejected permission to use this specific tool call",
-            )?
-        }
-        _ => false,
-    })
+    }
+    Ok(false)
 }
 
 pub(super) fn plain_summary(text: &Text, resolver: &Resolver) -> Result<String> {

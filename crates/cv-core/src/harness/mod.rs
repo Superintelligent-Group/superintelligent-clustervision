@@ -407,6 +407,12 @@ pub trait Adapter: Send + Sync {
         Vec::new()
     }
 
+    /// The wordings of an error tool result that mean the call was denied (an approval refused, a
+    /// rule matched). Default: the harness words none.
+    fn denials(&self) -> &'static [crate::affordance::Denial] {
+        &[]
+    }
+
     /// The affordances `m`'s harness bag records outside its blocks (a patch or snapshot part
     /// riding the turn), in order. Default: the bag records none.
     fn message_affordances(&self, _m: &Message) -> Vec<crate::affordance::BagHit> {

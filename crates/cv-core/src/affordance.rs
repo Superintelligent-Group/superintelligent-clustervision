@@ -1043,6 +1043,15 @@ enum Hit<'a> {
     },
 }
 
+/// How a harness words an error result that is the user (or a rule) refusing the call: the text
+/// starts with `prefix` and, when given, also contains `also`
+/// ([`crate::harness::Adapter::denials`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Denial {
+    pub prefix: &'static str,
+    pub also: Option<&'static str>,
+}
+
 /// One affordance a message's harness bag records outside its blocks
 /// ([`crate::harness::Adapter::message_affordances`]): a row with no call of its own.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -196,6 +196,20 @@ impl Adapter for OpenCode {
         Harness::OpenCode
     }
 
+    fn denials(&self) -> &'static [crate::affordance::Denial] {
+        use crate::affordance::Denial;
+        &[
+            Denial {
+                prefix: "The user has specified a rule which prevents you from using this specific tool call",
+                also: None,
+            },
+            Denial {
+                prefix: "The user rejected permission to use this specific tool call",
+                also: None,
+            },
+        ]
+    }
+
     /// The session's permission ruleset (`[{permission, pattern, action}]`) and its staged revert.
     fn session_affordances(&self, s: &Session) -> Vec<crate::affordance::Affordance> {
         use crate::affordance::{items_summary, session_row, short, Item, Kind};

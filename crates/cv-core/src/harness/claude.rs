@@ -228,6 +228,20 @@ impl Adapter for Claude {
         Harness::Claude
     }
 
+    fn denials(&self) -> &'static [crate::affordance::Denial] {
+        use crate::affordance::Denial;
+        &[
+            Denial {
+                prefix: "Permission to use ",
+                also: Some(" denied"),
+            },
+            Denial {
+                prefix: "The user doesn't want to proceed with this tool use",
+                also: None,
+            },
+        ]
+    }
+
     fn hook_event(&self, payload: &serde_json::Value) -> Result<Option<crate::hooks::Event>> {
         hook::hook_event(payload)
     }
