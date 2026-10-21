@@ -372,8 +372,9 @@ enum Cmd {
         id: Option<String>,
         #[arg(long)]
         harness: Option<String>,
-        /// Instead of one session: the N most recently active Claude sessions whose cwd is
-        /// `--cwd` (default: the current directory), each row tagged with its session.
+        /// Instead of one session: the N most recently active sessions (of a harness whose hooks
+        /// record lanes: Claude Code, Codex) whose cwd is `--cwd` (default: the current
+        /// directory), each row tagged with its session.
         #[arg(long, value_name = "N")]
         recent: Option<usize>,
         /// With --recent: the project directory the sessions ran in.

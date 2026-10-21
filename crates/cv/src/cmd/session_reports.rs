@@ -330,7 +330,7 @@ pub(crate) fn cmd_lanes(
         LaneScope::Recent { n, dir } => {
             let mut refs: Vec<SessionRef> = cv_core::sessions()
                 .into_iter()
-                .filter(|r| r.harness == cv_core::ir::Harness::Claude)
+                .filter(|r| cv_core::harness::rootless(r.harness).is_some_and(|a| a.lane_stops().is_some()))
                 .filter(|r| r.cwd.as_deref().is_some_and(|c| same_dir(c, &dir)))
                 .collect();
             refs.sort_by_key(|r| std::cmp::Reverse(r.updated_at.or(r.created_at)));
@@ -343,7 +343,7 @@ pub(crate) fn cmd_lanes(
                     home_rel(&dir),
                     ids.join(" ")
                 ),
-                format!("no Claude sessions with sub-agents in {}", home_rel(&dir)),
+                format!("no sessions with lanes in {}", home_rel(&dir)),
                 refs,
             )
         }
@@ -566,7 +566,9 @@ pub(crate) fn cmd_lanes(
             "\n{returned} lane(s) show `returned`: the transcript ends in a final report and no stop was ever recorded — the harness lost the notification (a restart). Their returns are the ↩ lines; they count as done."
         );
     }
-    if multi && filter == LaneFilter::Unfinished && !lanes.is_empty() {
+    // `cv adopt` moves lanes between sessions of a harness with derived copies (Claude's).
+    let adoptable = sessions.iter().any(|r| cv_core::harness::has_derived_copies(r.harness));
+    if multi && filter == LaneFilter::Unfinished && !lanes.is_empty() && adoptable {
         println!("\n→ rescue into a live session: cv adopt <agent-id>… --into <live-session>  (the transcript moves; see `cv adopt --help`)");
     }
     Ok(())
