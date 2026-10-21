@@ -80,7 +80,7 @@ pub enum TaskEventKind {
     Superseded {
         by_task: String,
     },
-    /// Add tags (deduplicated, lowercase labels such as `decision`, `deploy`, `lean`). Tags are
+    /// Add tags (deduplicated, case-sensitive labels such as `decision`, `deploy`, `lean`). Tags are
     /// additive: a task's tag set is the union of every `tagged` event on it.
     Tagged {
         tags: Vec<String>,

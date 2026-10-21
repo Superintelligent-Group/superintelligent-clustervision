@@ -424,6 +424,7 @@ impl Disk {
             bucket = self.find(text, hash)?.0;
         }
         let start = self.end;
+        // Slot offset zero means vacant; occupied offsets are biased by one, including byte zero.
         let offset = start.checked_add(1).context("spill offset overflow")?;
         let end = start.checked_add(text.len() as u64).context("spill size overflow")?;
         let slot = Slot {
@@ -534,6 +535,7 @@ impl Disk {
                     }
                     Slot {
                         hash,
+                        // Zero is the vacant-slot sentinel; store the byte offset plus one.
                         offset: start.checked_add(1).context("spill offset overflow")?,
                         len,
                     }

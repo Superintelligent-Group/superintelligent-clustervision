@@ -222,7 +222,8 @@ pub fn parse_duration(s: &str) -> Option<chrono::Duration> {
 }
 
 /// The millisecond timestamp a UUID v7 carries in its first 48 bits, if `s` is one (or a prefix
-/// long enough to hold them: the first 12 hex digits).
+/// long enough to hold them plus the version nibble: at least 13 hex digits, ignoring hyphens).
+/// Shorter task-id prefixes can select tasks but cannot supply a --since timestamp.
 pub fn uuid_v7_timestamp(s: &str) -> Option<DateTime<Utc>> {
     let hex: String = s.chars().filter(|c| *c != '-').take(13).collect();
     if hex.len() < 13 || !hex.chars().all(|c| c.is_ascii_hexdigit()) || &hex[12..13] != "7" {
@@ -360,7 +361,7 @@ fn base_inbox_reason(task: &TaskProjection, endpoint: &str) -> Option<(InboxReas
     }
 }
 
-/// Compact human age for terminal rows: `42s`, `12m`, `5h`, `3d`. Truncating division at each
+/// Compact human age for inbox items, deadline phrases and terminal rows: `42s`, `12m`, `5h`, `3d`. Truncating division at each
 /// unit boundary; future timestamps (clock skew) saturate to `0s`, never a negative.
 pub fn age_short(since: DateTime<Utc>, now: DateTime<Utc>) -> String {
     let secs = now.signed_duration_since(since).num_seconds().max(0);
