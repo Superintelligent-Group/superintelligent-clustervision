@@ -586,14 +586,18 @@ fn append_event(task_id: Option<&str>, from: &str, kind: TaskEventKind) -> Resul
     Ok(report.event.task_id)
 }
 
+/// Read explicit text (including `-` for stdin), otherwise the selected file.
+fn text_arg(text: Option<String>, file: Option<PathBuf>) -> Result<Option<String>> {
+    match (text, file) {
+        (Some(text), _) => text_or_stdin(text).map(Some),
+        (None, Some(file)) => read_text_arg(&file).map(Some),
+        (None, None) => Ok(None),
+    }
+}
+
 /// `--note TEXT` (`-` = stdin) or `--note-file PATH`, whichever was given.
 fn note_arg(note: Option<String>, note_file: Option<PathBuf>) -> Result<Option<String>> {
-    let text = match (note, note_file) {
-        (Some(n), _) => text_or_stdin(n)?,
-        (None, Some(f)) => read_text_arg(&f)?,
-        (None, None) => return Ok(None),
-    };
-    Ok(Some(text).filter(|t| !t.trim().is_empty()))
+    Ok(text_arg(note, note_file)?.filter(|text| !text.trim().is_empty()))
 }
 
 /// Append several events after validating the whole batch ([`task::append_events`]). One
@@ -703,10 +707,8 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
                 None => None,
             };
             let issue = absolutize_issue(issue, repo.as_deref());
-            let body = match &body_file {
-                Some(p) => read_text_arg(p)?,
-                None => text_or_stdin(body)?,
-            };
+            let body = text_arg(body_file.is_none().then_some(body), body_file)?
+                .expect("body has a default when no file is supplied");
             let tags = tags.as_deref().map(parse_tags).unwrap_or_default();
             // Relations name other tasks: resolve every prefix BEFORE the open, so a typo refuses
             // the whole command instead of leaving a task opened with half its relations.
@@ -900,11 +902,7 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
             from,
         } => {
             let id = resolve_target(&id)?;
-            let text = match (text, file) {
-                (Some(t), _) => text_or_stdin(t)?,
-                (None, Some(f)) => read_text_arg(&f)?,
-                (None, None) => unreachable!("clap requires text or --file"),
-            };
+            let text = text_arg(text, file)?.expect("clap requires text or --file");
             append_event(Some(&id), &from_or_cv(from), TaskEventKind::Noted { text, session_ref }).map(|_| ())
         }
         TaskCmd::Done {
@@ -942,11 +940,7 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
             refuse_token(token)?;
             let from = require_from(from)?;
             let id = resolve_target(&id)?;
-            let text = match (text, file) {
-                (Some(t), _) => text_or_stdin(t)?,
-                (None, Some(f)) => read_text_arg(&f)?,
-                (None, None) => unreachable!("clap requires text or --file"),
-            };
+            let text = text_arg(text, file)?.expect("clap requires text or --file");
             let text = text.trim_end().to_string();
             append_event(Some(&id), &from, TaskEventKind::StatusSet { text }).map(|_| ())
         }
@@ -1038,10 +1032,8 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
                 ),
                 None => None,
             };
-            let body = match &body_file {
-                Some(p) => read_text_arg(p)?,
-                None => text_or_stdin(body)?,
-            };
+            let body = text_arg(body_file.is_none().then_some(body), body_file)?
+                .expect("body has a default when no file is supplied");
             let now = Utc::now();
             let deadline = match by {
                 Some(b) => Some(task::parse_deadline(&b, now).map_err(|e| anyhow::anyhow!(e))?),
