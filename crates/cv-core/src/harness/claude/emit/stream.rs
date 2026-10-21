@@ -760,12 +760,15 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
             project.join(format!("{new_id}.jsonl"))
         }
     };
+    // The three rules hold before the file is published: a violation is a bug in cv, and it
+    // leaves nothing behind.
+    let check = |staged: &Path| super::verify::verify_as(staged, &file_path, c.agent.as_deref());
     if opts.thinking != ThinkingMode::Native {
         let source = lines.into_source()?;
         let (stage, _) = crate::harness::claude::replay::normalize(source, opts.thinking)?;
-        crate::harness::store::publish_stage(stage, &file_path, opts.claim())?;
+        crate::harness::store::publish_stage_checked(stage, &file_path, opts.claim(), check)?;
     } else {
-        lines.publish(&file_path, opts.claim())?;
+        lines.publish_checked(&file_path, opts.claim(), check)?;
     }
     let resume = match (&c.agent, &cwd) {
         (Some(agent), _) => format!(

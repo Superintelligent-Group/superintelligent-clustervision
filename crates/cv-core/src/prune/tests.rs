@@ -2669,3 +2669,54 @@ fn prune_refuses_a_malformed_line_inside_the_kept_window() {
         "the source is untouched"
     );
 }
+
+/// Append a record to every file `tag` staged in `dir`: a turn whose parent is in neither file, so
+/// the resume walk from it loses the whole session.
+pub(crate) fn break_staged(dir: &Path, tag: &str) -> Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with(&format!(".cv-{tag}-")))
+        {
+            let mut file = std::fs::OpenOptions::new().append(true).open(&path)?;
+            std::io::Write::write_all(
+                &mut file,
+                br#"{"type":"user","uuid":"stray","parentUuid":"nowhere","message":{"role":"user","content":"x"}}
+"#,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// The staged session is verified resumable against its source before it is published: a break
+/// the source does not have refuses the prune, and neither the session nor its sidecar is left.
+#[test]
+fn a_staged_prune_that_breaks_resume_is_refused_and_leaves_nothing() {
+    let world = crate::test_world("prune");
+    let dir = world.proj.clone();
+    let src = fixture(&dir, &"Y".repeat(5000));
+    let before = std::fs::read(&src).unwrap();
+    let opts = PruneOptions {
+        min_size: 2048,
+        keep_last: 0,
+        new_id: Some("aaaa".into()),
+        ..Default::default()
+    };
+    let err = prune_session_after_stage(crate::Harness::Claude, &src, &opts, || break_staged(&dir, "prune"))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("aaaa.jsonl:"), "{err}");
+    assert!(err.contains("parentUuid nowhere names no record"), "{err}");
+    let mut left: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    left.sort();
+    assert_eq!(left, [src.file_name().unwrap().to_string_lossy()]);
+    assert_eq!(std::fs::read(&src).unwrap(), before);
+    // Untampered, the same prune publishes.
+    prune_session(crate::Harness::Claude, &src, &opts).unwrap();
+}

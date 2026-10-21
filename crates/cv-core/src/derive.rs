@@ -100,6 +100,33 @@ pub(crate) fn identity(harness: Harness) -> Result<Identity> {
         .and_then(|adapter| adapter.identity())
         .ok_or_else(|| anyhow::anyhow!("{harness} sessions have no derived copies"))
 }
+/// Refuse a staged derived copy of `source` that breaks resume where the source did not, before it
+/// is published as `destination`: Claude's rules ([`crate::harness::claude::verify_derived`]), the
+/// one harness with derived copies. `source_agent` and `agent` are the sub-agent ids each one
+/// carries (`None`: a main-thread session). The caller drops the staged file on error, so nothing
+/// is left.
+pub(crate) fn verify(
+    harness: Harness,
+    source: &JsonSource,
+    file: &std::fs::File,
+    source_agent: Option<&str>,
+    staged: &std::path::Path,
+    destination: &std::path::Path,
+    agent: Option<&str>,
+) -> Result<()> {
+    match harness {
+        Harness::Claude => {
+            crate::harness::claude::verify_derived(source, file, source_agent, staged, destination, agent)
+        }
+        _ => Ok(()),
+    }
+}
+
+/// The agent id a sub-agent transcript `agent-<id>.jsonl` carries on every record.
+pub(crate) fn agent_of(path: &std::path::Path) -> Option<&str> {
+    path.file_stem()?.to_str()?.strip_prefix("agent-")
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Counts {
     pub lines: usize,

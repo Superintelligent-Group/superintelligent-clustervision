@@ -1,14 +1,14 @@
 //! The Claude emitter: an IR [`Session`] written as a Claude Code transcript that `claude --resume`
 //! accepts — the Anthropic codec run backwards plus the JSONL writer, and the resumability rules
 //! (linear parents, no orphan `tool_use`, sidechain identity) that make the result resumable,
-//! checked by [`verify_claude_resumable`] inside `emit_verified`. Registered in
+//! checked by [`verify_claude_resumable`] on the staged file before it is published. Registered in
 //! `crate::emit::emitter_for`; the shared skeleton is in [`crate::emit`].
 
 use crate::emit::*;
 use crate::harness::wire::anthropic;
 use crate::harness::EmitResult;
 use crate::ir::{Block, Harness, MessageKind, Role, Session};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use chrono::{SecondsFormat, Utc};
 use serde_json::{json, Map, Value};
 use std::fs;
@@ -69,11 +69,25 @@ pub use stream::emit;
 /// Check a written Claude transcript against the three rules [`emit`] establishes: no
 /// dangling `parentUuid`, no `tool_use` without its `tool_result`, and one identity (`agent`
 /// `None`: no record with `isSidechain: true`; `Some`: every record `isSidechain: true` with that
-/// `agentId`). The post-emit assertion [`emit_verified`] runs on every Claude emit; an error here
-/// is a bug in cv, never in the input.
+/// `agentId`). Every Claude emit runs it on its staged file before publishing; an error there is a
+/// bug in cv, never in the input, and leaves nothing behind.
 mod verify;
 pub fn verify_claude_resumable(path: &Path, agent: Option<&str>) -> Result<()> {
     verify::verify(path, agent)
+}
+
+/// Check a reshape's staged `output` (prune, rewind, adopt) before it is published as
+/// `destination`: it keeps [`verify_claude_resumable`]'s rules except where `source`'s captured
+/// extent already breaks them the same way. An error names `destination`'s record.
+pub(crate) fn verify_derived(
+    source: &crate::json::JsonSource,
+    file: &fs::File,
+    source_agent: Option<&str>,
+    output: &Path,
+    destination: &Path,
+    agent: Option<&str>,
+) -> Result<()> {
+    verify::verify_derived(source, file, source_agent, output, destination, agent)
 }
 
 /// The verbatim meta record a format-complete carrier message stashed (an object under
@@ -154,6 +168,56 @@ mod checked_verifier_tests {
             }
         }
         frozen.check()?;
+        Ok(())
+    }
+
+    /// A reshape's copy is held to its source: what the source already breaks, a parent the
+    /// source holds before the copy starts, a dangling parent off the resume walk and a request
+    /// blob's blocks are no break; a link the copy drops from its own range is.
+    #[test]
+    fn a_derived_copy_may_only_keep_its_sources_breaks() -> Result<()> {
+        let world = cv_testkit::World::new("claude-derived-verifier");
+        let (source, output) = (world.base.join("source.jsonl"), world.base.join("output.jsonl"));
+        let check = |src: &str, out: &str| -> Result<()> {
+            fs::write(&source, src)?;
+            fs::write(&output, out)?;
+            let captured = crate::json::JsonSource::capture(&source)?;
+            verify_derived(&captured, &fs::File::open(&source)?, None, &output, &output, None)
+        };
+        let u = |id: &str, parent: &str| format!(r#"{{"type":"user","uuid":"{id}","parentUuid":"{parent}"}}"#);
+        let call =
+            r#"{"type":"assistant","uuid":"c","parentUuid":"b","message":{"content":[{"type":"tool_use","id":"t"}]}}"#;
+        let blob = r#"{"type":"api-request-blob","message":{"content":[{"type":"tool_use","id":"t2"}]}}"#;
+        // Inherited: the continuation's parent and the still-running call.
+        let src = format!("{}\n{}\n{call}\n", u("a", "elsewhere"), u("b", "a"));
+        check(&src, &src)?;
+        // The copy starts past `a`; `x` hangs off a parent written later; a blob is no turn.
+        let src = format!(
+            "{}\n{}\n{}\n{}\n{}\n",
+            u("a", "root"),
+            u("b", "a"),
+            u("x", "z"),
+            u("c", "b"),
+            u("z", "c")
+        );
+        let src = src.replacen(r#""parentUuid":"root""#, r#""parentUuid":null"#, 1);
+        check(
+            &src,
+            &format!("{}\n{}\n{}\n{blob}\n", u("b", "a"), u("x", "z"), u("c", "b")),
+        )?;
+        // Dropped from the copy's own range: the walk from `c` stops at `b`.
+        let err = check(&src, &format!("{}\n{}\n", u("a", "root"), u("c", "b"))).unwrap_err();
+        assert!(err.to_string().contains(":2: parentUuid b names no record"), "{err}");
+        // A call the source answers.
+        let answered = format!(
+            "{call}\n{}\n",
+            r#"{"type":"user","uuid":"r","parentUuid":"c","message":{"content":[{"type":"tool_result","tool_use_id":"t"}]}}"#
+        );
+        let err = check(&answered, &format!("{call}\n")).unwrap_err();
+        assert!(
+            err.to_string().contains("tool_use t has no tool_result; the source"),
+            "{err}"
+        );
         Ok(())
     }
 }

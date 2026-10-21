@@ -220,12 +220,13 @@ pub(crate) const META_TYPES: &[&str] = &[
     "api-request-blob",
 ];
 
-/// The keys [`Demand::Facts`] selects: what prune, rewind and fork recognition decide on, never a
-/// body.
+/// The keys [`Demand::Facts`] selects: what prune, rewind, fork recognition and the resumability
+/// check decide on, never a body.
 const FACT_KEYS: &[&str] = &[
     "type",
     "subtype",
     "isSidechain",
+    "agentId",
     "isApiErrorMessage",
     "sessionId",
     "cwd",
@@ -259,6 +260,8 @@ pub(crate) struct Facts {
     pub ty: String,
     pub subtype: Option<String>,
     pub sidechain: bool,
+    /// `agentId`: the sub-agent a sidechain record belongs to.
+    pub agent_id: Option<String>,
     pub api_error: bool,
     pub session_id: Option<String>,
     pub cwd: Option<String>,
@@ -335,6 +338,7 @@ impl Facts {
             ty,
             subtype: top.string("subtype")?,
             sidechain: flag("isSidechain")?,
+            agent_id: top.string("agentId")?,
             api_error: flag("isApiErrorMessage")?,
             session_id: top.string("sessionId")?,
             cwd: top.string("cwd")?,

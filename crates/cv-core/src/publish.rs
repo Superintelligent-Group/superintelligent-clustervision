@@ -275,7 +275,7 @@ pub fn publish_reader(destination: &Path, tag: &str, bytes: impl io::Read, claim
 }
 
 /// Stage everything `bytes` yields for `destination`, as [`publish_reader`] publishes it.
-fn stage_reader(destination: &Path, tag: &str, mut bytes: impl io::Read, claim: Claim) -> Result<Staged> {
+pub(crate) fn stage_reader(destination: &Path, tag: &str, mut bytes: impl io::Read, claim: Claim) -> Result<Staged> {
     let replaced = match claim {
         Claim::Replace => std::fs::metadata(destination).ok().filter(|m| m.is_file()),
         Claim::New => None,

@@ -100,6 +100,7 @@
 **Reshaping.**
 - Hermes and OpenCode exports reject unreadable sources before creating output directories or databases, while retaining transaction publication guards.
 - `cv prune`, `cv rewind` and agent adoption refuse a source line that is not one JSON record instead of copying it; blank lines pass.
+- `cv prune`, `cv rewind`, `cv adopt` and Claude ports verify the staged session resumes before publishing; a break its source lacks refuses and leaves nothing.
 - `cv rewind` copies to the end of the file (`cost-state` and other tail records were dropped).
 - `cv rewind`: an explicit cut omits a malformed later line while closing open calls; an unterminated last line asks for a rerun.
 - `cv rewind` refuses a bodyless turn record only when re-emitting (`--thinking portable`) would drop it; a native copy keeps it.

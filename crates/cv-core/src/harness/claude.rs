@@ -31,6 +31,7 @@ use crate::lazy::Text;
 use crate::stream::{Checkpoint, CollectSink, Demand, Flow, MessageSink, Start, Tier};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+pub(crate) use emit::verify_derived;
 pub use emit::{emit, verify_claude_resumable};
 use serde_json::{Map, Value};
 use std::collections::HashSet;

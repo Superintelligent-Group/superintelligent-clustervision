@@ -9,6 +9,7 @@
 //!
 //! The free function [`emit`] is the public entry point, re-exported by the crate root.
 
+#[cfg(test)]
 use crate::harness::claude::verify_claude_resumable;
 use crate::harness::EmitResult;
 use crate::ir::{Block, Harness, Message, MessageKind, Role, Session, SessionRef};
@@ -195,8 +196,6 @@ impl std::fmt::Display for ThinkingMode {
 type EmitFn = fn(&Session, &Path, &EmitOptions) -> Result<EmitResult>;
 
 /// A check an emitter runs on what it wrote (the written path, the sub-agent id it wrote as).
-type VerifyFn = fn(&Path, Option<&str>) -> Result<()>;
-
 /// The ONE emit registry: which harnesses can be written, and by what. [`emit`] dispatches through
 /// it and [`supported_targets`] is derived from it, so the dispatcher and the CLI's `--to` list can
 /// never drift apart. Adding a target = adding an arm here (nothing else to keep in sync). A
@@ -233,34 +232,6 @@ fn emitter_for(target: Harness) -> Result<EmitFn, &'static str> {
         | Harness::ClaudeExport
         | Harness::OpenSession => return Err("is not supported yet"),
     })
-}
-
-/// The check [`emit_report`] runs on what `target`'s emitter wrote, where the emitter owns one:
-/// Claude's resumability rules.
-fn verifier_for(target: Harness) -> Option<VerifyFn> {
-    match target {
-        Harness::Claude => Some(verify_claude_resumable),
-        Harness::Codex
-        | Harness::Grok
-        | Harness::OpenCode
-        | Harness::OpenClaw
-        | Harness::Gemini
-        | Harness::Hermes
-        | Harness::LmStudio
-        | Harness::Cline
-        | Harness::Roo
-        | Harness::Continue
-        | Harness::Qwen
-        | Harness::Cursor
-        | Harness::Goose
-        | Harness::Zed
-        | Harness::Devin
-        | Harness::Kimi
-        | Harness::KimiCode
-        | Harness::ChatGptExport
-        | Harness::ClaudeExport
-        | Harness::OpenSession => None,
-    }
 }
 
 /// Emit `session` into `target`'s native format under `out_dir` (the target harness's storage root,
@@ -478,11 +449,9 @@ pub fn emit_report(
     opts: &EmitOptions,
 ) -> Result<(EmitResult, FidelityReport)> {
     let before = source_features(target, opts.thinking, session)?;
+    // An emitter that owns a check on its output (Claude's three resumability rules) runs it on
+    // the staged file, before publishing.
     let result = emit(session, target, out_dir, opts)?;
-    // An emitter that owns a check on its output (Claude's three resumability rules) runs it.
-    if let Some(verify) = verifier_for(target) {
-        verify(&result.path, opts.sidechain_of.as_ref().map(|(_, a)| a.as_str()))?;
-    }
     // Re-parse at the fidelity the SOURCE was parsed at, as its reader declared. Re-parsing a
     // complete session plainly compared it against a lean one: impossible deltas such as
     // `per-message model: 2106 → 836` on an 836-message session, because the source's carriers (and
@@ -1066,17 +1035,20 @@ mod tests {
                 new_id: Some("fixed-id".into()),
                 ..Default::default()
             };
-            let new = emit(
-                &session,
-                Harness::Claude,
-                &world.base.join(format!("new-{case}")),
-                &opts,
-            )?;
-            let bytes = fs::read(&new.path)?;
-            frozen.insert(
-                format!("case-{case}"),
-                json!([bytes.len(), crate::digest::sha256_hex(&bytes)]),
-            );
+            // An override that leaves a `tool_use` in a record the writer keeps is not resumable:
+            // the staged file is refused and nothing is published.
+            let out = world.base.join(format!("new-{case}"));
+            let verdict = match emit(&session, Harness::Claude, &out, &opts) {
+                Ok(new) => {
+                    let bytes = fs::read(&new.path)?;
+                    json!([bytes.len(), crate::digest::sha256_hex(&bytes)])
+                }
+                Err(error) => {
+                    assert!(!out.join("-").join("fixed-id.jsonl").exists());
+                    json!(error.to_string().replace(out.to_str().unwrap(), "<out>"))
+                }
+            };
+            frozen.insert(format!("case-{case}"), verdict);
         }
         frozen.check()?;
         Ok(())

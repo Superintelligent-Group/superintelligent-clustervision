@@ -1044,3 +1044,41 @@ fn checked_derivation_preserves_large_results_and_closes_parallel_calls() {
     crate::harness::claude::emit::verify_claude_resumable(&result.new_path, None).unwrap();
     assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
 }
+
+/// A cut whose call is answered only after the user's next prompt: the copy stops at the prompt,
+/// so the rewind would hold a call its source answers. It is refused before anything is published.
+#[test]
+fn a_cut_that_would_leave_an_answered_call_open_is_refused_and_leaves_nothing() {
+    let world = crate::test_world("rewind");
+    let dir = world.proj.clone();
+    let src = dir.join(format!("{SID}.jsonl"));
+    write_jsonl(
+        &src,
+        &[
+            rec("user", "u0", None, text("user", "read it")),
+            rec("assistant", "a0", Some("u0"), bash("t1", "cat notes")),
+            rec("user", "u1", Some("a0"), text("user", "never mind")),
+            rec("assistant", "a1", Some("u1"), text("assistant", "stopping")),
+            rec("user", "t1r", Some("a1"), result("t1", "notes")),
+        ],
+    );
+    let out = dir.join("out");
+    let err = rewind_session(&sref(&src, SID), &opts(CutAt::Message(idx_of(&src, "a0")), &out))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("tool_use t1 has no tool_result"), "{err}");
+    assert!(err.contains("nothing was written"), "{err}");
+    assert_eq!(std::fs::read_dir(&out).unwrap().count(), 0);
+    // A call its source never answers either (a live session's last) is kept.
+    let live = dir.join("live");
+    write_jsonl(
+        &live.join(format!("{SID}.jsonl")),
+        &[
+            rec("user", "u0", None, text("user", "read it")),
+            rec("assistant", "a0", Some("u0"), bash("t1", "cat notes")),
+        ],
+    );
+    let src = live.join(format!("{SID}.jsonl"));
+    let res = rewind_session(&sref(&src, SID), &opts(CutAt::End, &live.join("out"))).unwrap();
+    assert_eq!(uuids(&read_lines(&res.new_path)), ["u0", "a0"]);
+}

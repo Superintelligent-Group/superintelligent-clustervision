@@ -957,6 +957,16 @@ fn rewind_session_after_scan(
     if let Some(w) = writer.take() {
         use crate::publish::{Claim, Set, Staged};
         let transcript = w.into_inner().map_err(|e| e.into_error())?;
+        // A sub-agent's copy is a standalone session.
+        crate::derive::verify(
+            r.harness,
+            &source_guard.source,
+            &file,
+            crate::derive::agent_of(&r.path),
+            transcript.path(),
+            &res.new_path,
+            None,
+        )?;
         let body = serde_json::to_string_pretty(&provenance(&res, opts))? + "\n";
         let mut provenance_file = Staged::create(&out_dir, "rewind", mode)?;
         provenance_file.write_all(body.as_bytes())?;

@@ -423,6 +423,15 @@ fn select_kept_turns(
 /// ([`crate::harness::Adapter::identity`]: Claude's `<id>.jsonl`), into a new session. Returns
 /// what happened.
 pub fn prune_session(harness: crate::ir::Harness, src_path: &Path, opts: &PruneOptions) -> Result<PruneResult> {
+    prune_session_after_stage(harness, src_path, opts, || Ok(()))
+}
+
+fn prune_session_after_stage(
+    harness: crate::ir::Harness,
+    src_path: &Path,
+    opts: &PruneOptions,
+    after_stage: impl FnOnce() -> Result<()>,
+) -> Result<PruneResult> {
     if let Some(id) = &opts.new_id {
         crate::restamp::validate_output_id(id)?;
     }
@@ -765,8 +774,12 @@ pub fn prune_session(harness: crate::ir::Harness, src_path: &Path, opts: &PruneO
             .as_ref()
             .map(|dst| stage_resources(&resource_dir.join(src_stem), dst))
             .transpose()?;
+        after_stage()?;
         source.check_metadata(file.metadata()?)?;
         source.check()?;
+        // A sub-agent's copy is a standalone session.
+        let agent = crate::derive::agent_of(src_path);
+        crate::derive::verify(harness, &source, &file, agent, transcript.path(), &new_path, None)?;
         // Serialization and writes complete before publication. Sidecar and transcript publish
         // as one set, the sidecar first, so a transcript never names markers its sidecar cannot
         // answer.
@@ -2353,7 +2366,7 @@ fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 #[cfg(test)]
 #[path = "prune/sidecar_tests.rs"]

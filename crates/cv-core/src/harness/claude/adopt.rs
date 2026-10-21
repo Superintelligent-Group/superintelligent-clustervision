@@ -302,6 +302,17 @@ fn execute_after_stage(
         meta_source.check_metadata(meta_file.metadata()?)?;
         meta_source.check()?;
     }
+    if let Some(staged) = &transcript {
+        crate::derive::verify(
+            Harness::Claude,
+            &source,
+            &file,
+            Some(&p.agent.agent_id),
+            staged.path(),
+            &p.dest,
+            Some(&p.agent.agent_id),
+        )?;
+    }
     if write && !force {
         refuse_destinations()?;
     }
@@ -537,6 +548,26 @@ mod tests {
                 .all(|entry| !entry.file_name().to_string_lossy().starts_with(".cv-adopt-")));
             cleanup_owned_test_root(&root);
         }
+    }
+
+    /// The staged transcript is verified resumable against the agent's own before it is published:
+    /// a break the source does not have refuses the adoption and publishes neither file.
+    #[test]
+    fn a_staged_adoption_that_breaks_resume_is_refused_and_leaves_nothing() {
+        let root = fixture("breaks-resume");
+        let into = sf(&root, LIVE);
+        let agent = find_agent(AGENT, Some(&sf(&root, DEAD))).unwrap().remove(0);
+        let p = plan(agent, vec![], &into);
+        let dir = p.dest.parent().unwrap().to_path_buf();
+        let err = execute_after_stage(&p, true, false, || crate::prune::tests::break_staged(&dir, "adopt"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("parentUuid nowhere names no record"), "{err}");
+        assert!(!p.dest.exists());
+        assert!(!p.dest.with_extension("meta.json").exists());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        execute(&p, true, false).unwrap();
+        cleanup_owned_test_root(&root);
     }
 
     #[test]
