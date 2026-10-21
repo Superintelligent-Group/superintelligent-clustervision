@@ -183,58 +183,108 @@ const CODEX_EDIT: Spec = Spec {
     asynchronous: false,
 };
 fn specs(harness: Harness) -> impl Iterator<Item = &'static Spec> {
-    SPECS.iter().map(move |spec| {
-        if harness == Harness::Codex && spec.name == HookName::Edit {
-            &CODEX_EDIT
-        } else {
-            spec
-        }
+    let edit = host(harness).and_then(|h| h.edit);
+    SPECS.iter().map(move |spec| match edit {
+        Some(edit) if spec.name == HookName::Edit => edit,
+        _ => spec,
     })
 }
 
 // ───────────────────────────── settings file ─────────────────────────────
 
-/// Claude Code's config dir: `$CLAUDE_CONFIG_DIR`, else `~/.claude`.
-fn claude_config_dir() -> Option<PathBuf> {
-    cv_core::env::var_os("CLAUDE_CONFIG_DIR")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| crate::util::dirs_home().map(|h| h.join(".claude")))
+/// A harness with a verified hook contract, as `cv hooks` writes and reads its settings.
+struct Host {
+    harness: Harness,
+    /// The variable that moves the user-scope config dir, and the dir's name under the home (and
+    /// under a project).
+    config_var: &'static str,
+    dir: &'static str,
+    /// The file the hook entries live in.
+    settings: &'static str,
+    /// The Edit hook's entry where it differs from [`SPECS`]'.
+    edit: Option<&'static Spec>,
+    /// A handler runs only once the harness's own config trusts it (Codex's `trusted_hash`).
+    trust: bool,
+    /// The settings also hold the compaction policy `cv doctor` reports.
+    policy: bool,
 }
 
-/// Codex's home: `$CODEX_HOME`, else `~/.codex`.
-fn codex_home() -> Option<PathBuf> {
-    cv_core::env::var_os("CODEX_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| crate::util::dirs_home().map(|h| h.join(".codex")))
-}
-
-/// `(settings.json or hooks.json, skills/cv/SKILL.md)` for a harness and scope.
-fn paths(harness: Harness, scope: Scope) -> Result<(PathBuf, PathBuf)> {
-    let dir = match scope {
-        Scope::User if harness == Harness::Claude => {
-            claude_config_dir().context("no home directory: cannot locate ~/.claude")?
-        }
-        Scope::User => codex_home().context("no home directory: cannot locate ~/.codex")?,
-        Scope::Project => {
-            std::env::current_dir()
-                .context("reading the current directory")?
-                .join(if harness == Harness::Claude {
-                    ".claude"
-                } else {
-                    ".codex"
-                })
-        }
-    };
-    Ok((
-        dir.join(if harness == Harness::Claude {
-            "settings.json"
-        } else {
-            "hooks.json"
+/// The one per-harness table of `cv hooks`: `None` for a harness with no verified hook contract.
+fn host(h: Harness) -> Option<Host> {
+    match h {
+        Harness::Claude => Some(Host {
+            harness: h,
+            config_var: "CLAUDE_CONFIG_DIR",
+            dir: ".claude",
+            settings: "settings.json",
+            edit: None,
+            trust: false,
+            policy: true,
         }),
-        dir.join("skills").join("cv").join("SKILL.md"),
-    ))
+        Harness::Codex => Some(Host {
+            harness: h,
+            config_var: "CODEX_HOME",
+            dir: ".codex",
+            settings: "hooks.json",
+            edit: Some(&CODEX_EDIT),
+            trust: true,
+            policy: false,
+        }),
+        Harness::Grok
+        | Harness::OpenCode
+        | Harness::Gemini
+        | Harness::Hermes
+        | Harness::OpenClaw
+        | Harness::Cursor
+        | Harness::Kimi
+        | Harness::KimiCode
+        | Harness::Qwen
+        | Harness::LmStudio
+        | Harness::Cline
+        | Harness::Roo
+        | Harness::Continue
+        | Harness::Goose
+        | Harness::Zed
+        | Harness::Devin
+        | Harness::ChatGptExport
+        | Harness::ClaudeExport
+        | Harness::OpenSession => None,
+    }
+}
+
+/// Every harness `cv hooks` can install into, in [`Harness::ALL`] order.
+fn hosts() -> impl Iterator<Item = Host> {
+    Harness::ALL.iter().filter_map(|h| host(*h))
+}
+
+/// Whether `harness`'s handlers need the harness's own trust ([`Host::trust`]).
+fn needs_trust(harness: Harness) -> bool {
+    host(harness).is_some_and(|h| h.trust)
+}
+
+impl Host {
+    /// The user-scope config dir: the host's variable (`$CLAUDE_CONFIG_DIR`, `$CODEX_HOME`), else
+    /// its dir under the home.
+    fn user_dir(&self) -> Option<PathBuf> {
+        cv_core::env::var_os(self.config_var)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| crate::util::dirs_home().map(|h| h.join(self.dir)))
+    }
+}
+
+/// `(settings file, skills/cv/SKILL.md)` for a harness and scope.
+fn paths(harness: Harness, scope: Scope) -> Result<(PathBuf, PathBuf)> {
+    let host = host(harness).with_context(|| format!("{harness} has no verified hook contract"))?;
+    let dir = match scope {
+        Scope::User => host
+            .user_dir()
+            .with_context(|| format!("no home directory: cannot locate ~/{}", host.dir))?,
+        Scope::Project => std::env::current_dir()
+            .context("reading the current directory")?
+            .join(host.dir),
+    };
+    Ok((dir.join(host.settings), dir.join("skills").join("cv").join("SKILL.md")))
 }
 
 // ───────────────────────────── Codex trust ─────────────────────────────
@@ -327,7 +377,11 @@ fn codex_hook_hash(event: &str, matcher: Option<&str>, handler: &Value) -> Strin
 /// `[hooks.state]` of Codex's user `config.toml`: state key → `trusted_hash`. The TUI records
 /// trust there for project hooks too.
 fn codex_trust_store() -> HashMap<String, String> {
-    let Some(text) = codex_home().and_then(|h| std::fs::read_to_string(h.join("config.toml")).ok()) else {
+    let Some(text) = hosts()
+        .find(|h| h.trust)
+        .and_then(|h| h.user_dir())
+        .and_then(|h| std::fs::read_to_string(h.join("config.toml")).ok())
+    else {
         return HashMap::new();
     };
     let Ok(config) = text.parse::<toml::Table>() else {
@@ -544,10 +598,9 @@ fn present(harness: Harness, settings: &Value) -> HashMap<(&'static str, Option<
 }
 
 fn hook_harness(harness: &str) -> Result<Harness> {
-    match harness {
-        "claude" => Ok(Harness::Claude),
-        "codex" => Ok(Harness::Codex),
-        _ => bail!("`cv hooks` supports verified Claude Code (`claude`) and Codex (`codex`) hooks; {harness:?} has no verified hook contract"),
+    match Harness::parse(harness).filter(|h| host(*h).is_some()) {
+        Some(h) => Ok(h),
+        None => bail!("`cv hooks` supports verified Claude Code (`claude`) and Codex (`codex`) hooks; {harness:?} has no verified hook contract"),
     }
 }
 
@@ -586,7 +639,7 @@ pub(crate) fn cmd_hooks(cmd: HooksCmd) -> Result<()> {
                 println!("cv hooks: installed {}", changed.join(" · "));
                 println!("  (takes effect in new harness sessions; `cv hooks show` lists the entries, `cv hooks remove` deletes them)");
             }
-            if harness == Harness::Codex {
+            if needs_trust(harness) {
                 println!(
                     "  Codex trust: {}",
                     trust_summary(&codex_trust(&settings_path, &after), scope)
@@ -632,9 +685,9 @@ pub(crate) fn cmd_hooks(cmd: HooksCmd) -> Result<()> {
             let have = present(harness, &before);
             let skill_present = std::fs::read_to_string(&skill_path).ok().as_deref() == Some(SKILL);
             // Codex: the trust each present entry has today (the file as it is, not as install would leave it).
-            let trust = match harness {
-                Harness::Codex => codex_trust(&settings_path, &before),
-                _ => Vec::new(),
+            let trust = match needs_trust(harness) {
+                true => codex_trust(&settings_path, &before),
+                false => Vec::new(),
             };
             let trust_of = |s: &Spec| {
                 trust
@@ -661,7 +714,7 @@ pub(crate) fn cmd_hooks(cmd: HooksCmd) -> Result<()> {
                     "skill_path": skill_path, "skill_present": skill_present,
                     "before": before, "after": after, "would_change": after != before || !skill_present,
                 });
-                if harness == Harness::Codex {
+                if needs_trust(harness) {
                     out["trust"] = json!(trust_summary(&trust, scope));
                 }
                 println!("{}", serde_json::to_string_pretty(&out)?);
@@ -694,7 +747,7 @@ pub(crate) fn cmd_hooks(cmd: HooksCmd) -> Result<()> {
                     format!("✓ present · + `cv hooks install {harness}` adds · ~ replaces (another cv binary's path)")
                 }
             );
-            if harness == Harness::Codex && !trust.is_empty() {
+            if needs_trust(harness) && !trust.is_empty() {
                 println!("Codex trust: {}", trust_summary(&trust, scope));
             }
             Ok(())
@@ -736,9 +789,9 @@ impl ScopeHooks {
                 let (path, _) = paths(harness, scope).ok()?;
                 let (entries, trust, settings) = match read_settings(&path) {
                     Ok(settings) => {
-                        let trust = match harness {
-                            Harness::Codex => codex_trust(&path, &settings),
-                            _ => Vec::new(),
+                        let trust = match needs_trust(harness) {
+                            true => codex_trust(&path, &settings),
+                            false => Vec::new(),
                         };
                         (Ok(present(harness, &settings).len()), trust, Some(settings))
                     }
@@ -783,13 +836,14 @@ impl ScopeHooks {
     }
 }
 
-/// Claude's hooks per scope, and the policy in force — what `cv doctor` prints.
+/// The policy host's hooks per scope (Claude's), and the policy in force — what `cv doctor` prints.
 pub(crate) fn status() -> (Vec<ScopeHooks>, Policy) {
     let mut scopes = Vec::new();
     let mut auto = None;
     let mut idle = None;
     let mut env_block: HashMap<String, String> = HashMap::new();
-    for (scope, settings) in ScopeHooks::read(Harness::Claude) {
+    let policy_hosts = hosts().filter(|h| h.policy);
+    for (scope, settings) in policy_hosts.flat_map(|h| ScopeHooks::read(h.harness)) {
         scopes.push(scope);
         let Some(settings) = settings else { continue };
         if let Some(b) = settings.get("autoCompactEnabled").and_then(Value::as_bool) {
@@ -820,10 +874,11 @@ pub(crate) fn status() -> (Vec<ScopeHooks>, Policy) {
     )
 }
 
-/// Codex's hooks per scope, the scopes worth a row only.
+/// The trust hosts' hooks per scope (Codex's), the scopes worth a row only.
 fn codex_status() -> Vec<ScopeHooks> {
-    ScopeHooks::read(Harness::Codex)
-        .into_iter()
+    hosts()
+        .filter(|h| h.trust)
+        .flat_map(|h| ScopeHooks::read(h.harness))
         .map(|(scope, _)| scope)
         .filter(ScopeHooks::reportable)
         .collect()
@@ -890,14 +945,15 @@ pub(crate) fn doctor_json() -> Value {
 
 // ───────────────────────────── the hook bodies ─────────────────────────────
 
-/// The harness a `cv hook` call speaks for: `--harness`, else Claude.
+/// The harness a `cv hook` call speaks for: `--harness`, else Claude (the default every
+/// `cv hooks` subcommand names).
 fn hook_call_harness(flag: Option<&str>) -> Result<Harness> {
     if cv_core::env::var_os("CV_HOOK_HARNESS").is_some() {
         return crate::util::usage(
             "`$CV_HOOK_HARNESS` was removed in 0.18.0 — `cv hooks install codex` writes `--harness codex`",
         );
     }
-    flag.map_or(Ok(Harness::Claude), hook_harness)
+    hook_harness(flag.unwrap_or("claude"))
 }
 
 /// `cv hook <name>`: read stdin, run the body, print its one-line JSON (or nothing). A body that
@@ -952,7 +1008,25 @@ fn selector(harness: Harness, id: &str) -> String {
     match harness {
         Harness::Claude => short_id(id),
         Harness::Codex => format!("codex:{id}"),
-        h => format!("{h}:{}", short_id(id)),
+        Harness::Grok
+        | Harness::OpenCode
+        | Harness::Gemini
+        | Harness::Hermes
+        | Harness::OpenClaw
+        | Harness::Cursor
+        | Harness::Kimi
+        | Harness::KimiCode
+        | Harness::Qwen
+        | Harness::LmStudio
+        | Harness::Cline
+        | Harness::Roo
+        | Harness::Continue
+        | Harness::Goose
+        | Harness::Zed
+        | Harness::Devin
+        | Harness::ChatGptExport
+        | Harness::ClaudeExport
+        | Harness::OpenSession => format!("{harness}:{}", short_id(id)),
     }
 }
 

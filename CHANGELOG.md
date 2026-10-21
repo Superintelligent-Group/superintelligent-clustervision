@@ -80,6 +80,7 @@
 - Codex's edit guard denies a conflicting edit outright (Codex hooks have no `ask`); Claude's still asks.
 - `cv hooks install|show codex` and `cv doctor` report each Codex hook as trusted, untrusted or modified, with the review step Codex requires.
 - The Codex edit guard no longer denies a patch over a file edited by the same root thread's parent or sub-agents.
+- `cv hooks` and `cv hook --harness` accept every spelling `--harness` does (`cc`, `claude-code`).
 - **Breaking:** installed hooks run `cv hook <name> --harness <h>`; `$CV_HOOK_HARNESS` exits 2 with a pointer to `cv hooks install codex`.
 
 **Waiting commands.**
