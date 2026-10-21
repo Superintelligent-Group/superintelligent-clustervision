@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Document `cv events` catalog writes and `--frozen`; update the manual for 0.18 counts, flags, diagnostics and migrations.
+
 - Add global `--frozen` (`CV_FROZEN=1`): read without updating cv stores; stream stale events and reject commands that write stores or sessions.
 - Usage cache eviction failures warn once and preserve committed projections; later publications retry eviction.
 

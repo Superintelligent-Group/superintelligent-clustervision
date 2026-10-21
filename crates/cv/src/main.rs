@@ -264,6 +264,9 @@ enum Cmd {
     ///
     /// Events are ingested during `cv index`; a session that isn't cataloged yet (or whose file
     /// changed since) is ingested on the spot — one streamed pass, large content stays on disk.
+    /// This read command writes derived events and counts to cv's catalog; it never changes
+    /// harness transcripts. Use global --frozen (or CV_FROZEN=1) to stream stale events without
+    /// publishing them or updating other cv stores; see --frozen in the global options.
     Events {
         id: String,
         #[arg(long)]

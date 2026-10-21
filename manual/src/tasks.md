@@ -228,6 +228,9 @@ task 019f6e4b-74c5-74f0-a493-1f8131ca38d5  [done]  action
 Later, `cv task sweep --repo ~/code/demo` lists every still-open task that names a branch now
 merged into `main` — what git can say, offered as a candidate, closed by a person.
 
+`cv task events --kind <kind>` rejects unknown event kinds with exit 2 and lists the known
+kinds; `/api/events?kind=` returns 400 for the same mistake.
+
 `cv task show <id> --events` (or `GET /api/task/{id}/events`) prints the raw durable history —
 for this task: `opened`, `claimed`, `noted`, `done`.
 

@@ -200,7 +200,7 @@ Some careful properties make it safe to lean on:
 
 One more guard keeps discovery fast on pathological inputs. Some transcripts are *enormous* — Codex rollout logs can run to hundreds of megabytes. Fully parsing those during a *listing* would defeat the point of the cheap-`SessionRef` design.
 
-So the file-based adapters cap how much they read during discovery. The Codex adapter is the clearest example: plain files up to a `FULL_SCAN_CAP` (8 MiB) are parsed in full; larger plain files are **sampled head + tail** (1 MiB each). The head carries `id` / `cwd` / `title` / `created_at`; the tail's last record carries the real `updated_at`. The middle of a sampled plain rollout is never read, so `message_count` is 0 (not counted), not an extrapolation. Compressed `.jsonl.zst` rollouts are decoded and counted in full, regardless of size. A subsequent index pass can populate exact catalog counts.
+So the file-based adapters cap how much they read during discovery. The Codex adapter is the clearest example: plain files up to a `FULL_SCAN_CAP` (8 MiB) are parsed in full; larger plain files are **sampled head + tail** (1 MiB each). The head carries `id` / `cwd` / `title` / `created_at`; the tail's last record carries the real `updated_at`. Codex discovery leaves `message_count` as `null` (not counted), including compressed `.jsonl.zst` rollouts; zero is reserved for a counted session with no turns. Compressed metadata still requires decoding the source. A full read or index pass certifies exact catalog counts.
 
 ### Sub-agents
 

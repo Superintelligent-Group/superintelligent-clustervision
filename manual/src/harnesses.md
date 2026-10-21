@@ -54,6 +54,11 @@ deliberately don't write back to), Kimi CLI (a frozen store), OpenSession (an ex
 to resume in), and the two account-data **exports** (`chatgpt-export` / `claude-export`, registered
 via `cv config --add-export`).
 
+Claude Code 2.1.304 is the verified writer in the committed corpus, including request-ledger
+records, fork sub-agents, retries and the harness's `--max-turns` option. Unknown records are
+carried in complete reads rather than counted as turns; `cv doctor` compares observed writer
+versions with this corpus coverage.
+
 ## Claude Code sessions outside `~/.claude`
 
 Claude Code keeps its sessions in `~/.claude/projects/` unless `CLAUDE_CONFIG_DIR` moves its config
