@@ -1131,14 +1131,15 @@ fn run_job(
     f: &Fields,
     tx: &std::sync::mpsc::SyncSender<Out>,
     admission: &std::sync::Arc<Admission>,
+    marks: &cv_core::resume::Reader,
 ) -> bool {
     let Some(adapter) = cv_core::harness::for_harness(job.r.harness) else {
         return true;
     };
     // Bytes discovery decoded stay alive for this pass only.
     let out = match job.decoded.take() {
-        Some(decoded) => decoded.run(|| job_out(job, f, tx, admission, adapter.as_ref())),
-        None => job_out(job, f, tx, admission, adapter.as_ref()),
+        Some(decoded) => decoded.run(|| job_out(job, f, tx, admission, marks, adapter.as_ref())),
+        None => job_out(job, f, tx, admission, marks, adapter.as_ref()),
     };
     tx.send(out).is_ok()
 }
@@ -1149,10 +1150,11 @@ fn job_out(
     f: &Fields,
     tx: &std::sync::mpsc::SyncSender<Out>,
     admission: &std::sync::Arc<Admission>,
+    marks: &cv_core::resume::Reader,
     adapter: &dyn cv_core::Adapter,
 ) -> Out {
     let version = cv_core::resume::version(adapter, RESUME_TAG);
-    let from = resumable_from(&job, &version);
+    let from = resumable_from(&job, &version, marks);
     // A resume the adapter declines touched nothing: read the session whole instead.
     let resumed = match &from {
         Some(cp) => job_pass(&job, f, tx, admission, adapter, Some(cp)).transpose(),
@@ -1215,12 +1217,12 @@ const RESUME_TAG: &str = "fts5";
 /// The checkpoint `job` can resume from: the source grew, its sampled mark still matches, and
 /// its state covers every consumer this pass feeds. Growth is interpreted under the adapter's
 /// immutable-prefix append contract; the mark's samples do not prove the whole prefix unchanged.
-fn resumable_from(job: &Job, version: &str) -> Option<cv_core::stream::Checkpoint> {
+fn resumable_from(job: &Job, version: &str, marks: &cv_core::resume::Reader) -> Option<cv_core::stream::Checkpoint> {
     if !job.grew || !job.dependencies_fresh {
         return None;
     }
     let head = job.mark.as_ref()?;
-    let cp = cv_core::resume::state(&job.r, head)?;
+    let cp = marks.state(&job.r, head)?;
     head.admit(&cv_core::source::primary_path(&job.r), version, &cp)?;
     cp.messages()?;
     if job.fts {

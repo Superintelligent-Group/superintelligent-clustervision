@@ -212,6 +212,7 @@ pub(super) fn run_fed(
             let tx = tx.clone();
             let admission = &admission;
             scope.spawn(cv_core::env::carry(move || {
+                let marks = cv_core::resume::Reader::default();
                 sources.run(|| loop {
                     let group = {
                         let mut q = queue.lock().unwrap();
@@ -234,7 +235,7 @@ pub(super) fn run_fed(
                         bytes: job_cost(&group),
                     };
                     for job in group {
-                        if !run_job(job, f, &tx, admission) {
+                        if !run_job(job, f, &tx, admission, &marks) {
                             return; // the writer is gone
                         }
                     }

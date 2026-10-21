@@ -131,7 +131,23 @@ mod imp {
 
     /// The checkpoint `r`'s mark holds, when it is still the one `head` describes.
     pub fn state(r: &SessionRef, head: &MarkHead) -> Option<Checkpoint> {
-        let conn = open()?;
+        Reader::default().state(r, head)
+    }
+
+    /// One operation's lazy catalog reader, reused by every job in an index worker.
+    pub struct Reader(crate::discover_cache::read::Context);
+    impl Default for Reader {
+        fn default() -> Self {
+            Self(crate::discover_cache::read::Context::current())
+        }
+    }
+    impl Reader {
+        pub fn state(&self, r: &SessionRef, head: &MarkHead) -> Option<Checkpoint> {
+            self.0.with_connection(|conn| state_in(conn, r, head)).flatten()
+        }
+    }
+
+    fn state_in(conn: &Connection, r: &SessionRef, head: &MarkHead) -> Option<Checkpoint> {
         let (h, i, p) = key(r);
         let (offset, hash, version, text, identity): (i64, i64, String, String, Option<String>) = conn
             .query_row(
@@ -201,7 +217,7 @@ mod imp {
 }
 
 #[cfg(feature = "sqlite")]
-pub use imp::{state, update, MarkTable};
+pub use imp::{state, update, MarkTable, Reader};
 
 /// Without the catalog there are no marks: every pass reads the whole file.
 #[cfg(not(feature = "sqlite"))]
@@ -318,5 +334,15 @@ mod tests {
         std::fs::write(&path, &grown.as_bytes()[..offset as usize - 1]).unwrap();
         assert!(head.admit(&path, "v1", &cp).is_none(), "truncated before the mark");
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(not(feature = "sqlite"))]
+#[derive(Default)]
+pub struct Reader;
+#[cfg(not(feature = "sqlite"))]
+impl Reader {
+    pub fn state(&self, _: &SessionRef, _: &MarkHead) -> Option<Checkpoint> {
+        None
     }
 }
