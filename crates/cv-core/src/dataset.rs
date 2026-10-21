@@ -44,9 +44,8 @@ fn training_role(m: &Message, chat: bool) -> Option<&'static str> {
             }
         }
         MessageKind::ToolResult => "tool",
-        // A sub-agent spawn or return (the only other kinds `Message::is_model_visible` admits)
-        // trains as the role that carried it.
-        _ => match m.role {
+        // A sub-agent spawn or return trains as the role that carried it.
+        MessageKind::SubagentSpawn | MessageKind::SubagentReturn => match m.role {
             Role::System => "system",
             Role::User => {
                 if chat {
@@ -64,6 +63,12 @@ fn training_role(m: &Message, chat: bool) -> Option<&'static str> {
             }
             Role::Tool => "tool",
         },
+        MessageKind::Notice
+        | MessageKind::CompactionBoundary
+        | MessageKind::ModelChange
+        | MessageKind::Error
+        | MessageKind::Branch
+        | MessageKind::Carrier => return None,
     })
 }
 
