@@ -402,4 +402,3 @@ mod tests {
         assert_eq!(label(sniff("history.jsonl", &text)), 1);
     }
 }
-

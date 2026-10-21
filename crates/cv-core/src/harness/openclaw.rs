@@ -589,8 +589,13 @@ impl<'a> ChildMarker<'a> {
                 return;
             }
             self.window.extend_from_slice(chunk);
-            self.found = memchr::memmem::find_iter(&self.window, self.key.as_bytes())
-                .any(|at| memchr::memmem::find(&self.window[at.saturating_sub(CHILD_KEY_LOOKBEHIND)..at], b"childSessionKey").is_some());
+            self.found = memchr::memmem::find_iter(&self.window, self.key.as_bytes()).any(|at| {
+                memchr::memmem::find(
+                    &self.window[at.saturating_sub(CHILD_KEY_LOOKBEHIND)..at],
+                    b"childSessionKey",
+                )
+                .is_some()
+            });
             let keep = self.key.len().saturating_add(CHILD_KEY_LOOKBEHIND);
             let start = self.window.len().saturating_sub(keep);
             self.window.copy_within(start.., 0);

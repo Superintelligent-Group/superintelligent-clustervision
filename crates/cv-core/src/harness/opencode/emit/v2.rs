@@ -1,4 +1,5 @@
 //! Native 2.0.25 schema; one checked, contiguous TEXT row at a time.
+use super::super::v2::DETAILS_KEY;
 use crate::{
     emit::*,
     harness::wire::write::{self, ObjectWriter},
@@ -8,9 +9,8 @@ use crate::{
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
-use std::{collections::HashMap, io::Write};
+use std::{borrow::Cow, collections::HashMap, io::Write};
 use uuid::Uuid;
-use super::super::v2::DETAILS_KEY;
 
 /// Native empty-store bootstrap: install the complete schema and record its migration frontier.
 /// The SQL and IDs are one versioned unit taken from the native-written 2.0.25 corpus.
@@ -264,7 +264,7 @@ pub(super) fn write_database(
         } else {
             "user"
         };
-        let ty = {
+        {
             row.field("time", json!({"created":ts,"completed":ts}))?;
             if ty == "assistant" {
                 row.field(
@@ -303,11 +303,11 @@ pub(super) fn write_database(
                     let mut values = Vec::new();
                     for block in &msg.content {
                         match block {
-                            Block::Text { text } => values.push(text.clone()),
+                            Block::Text { text } => values.push(Cow::Borrowed(text)),
                             Block::Thinking { .. } => {
                                 let fate = thinking::fate(block, Harness::OpenCode, opts.thinking, &resolver)?;
                                 if let Some(text) = thinking::text_with_fate(block, fate) {
-                                    values.push(text.into_owned());
+                                    values.push(text);
                                 }
                             }
                             _ => {}
@@ -334,10 +334,10 @@ pub(super) fn write_database(
                             _ => None,
                         };
                         if let Some(text) = unavailable {
-                            values.push(text.into());
+                            values.push(Cow::Owned(text.into()));
                         }
                     }
-                    write::joined_text(w, values.iter(), &resolver)
+                    write::joined_text(w, values.iter().map(|text| text.as_ref()), &resolver)
                 })?;
                 if let Some(metadata) = extra.and_then(|b| b.get("metadata")) {
                     row.field("metadata", metadata)?;
@@ -357,8 +357,7 @@ pub(super) fn write_database(
                     row.field("files", files)?;
                 }
             }
-            ty
-        };
+        }
         row.finish()?;
         insert
             .execute(params![mid, id, ty, seq, ts, String::from_utf8(bytes)?])
