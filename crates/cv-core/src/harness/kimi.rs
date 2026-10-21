@@ -1219,7 +1219,7 @@ fn wire_timestamp(view: Option<JsonView<'_>>) -> Result<Option<DateTime<Utc>>> {
         .transpose()?
         .flatten()
         .and_then(|n| n.as_f64())
-        .and_then(epoch_to_dt))
+        .map(epoch_to_dt))
 }
 
 /// First and last event timestamps in a wire file (epoch floats), for created/updated bounds.
@@ -1237,9 +1237,9 @@ fn wire_time_bounds(wire: &Path) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
     Some((first?, last?))
 }
 
-fn epoch_to_dt(secs: f64) -> Option<DateTime<Utc>> {
+fn epoch_to_dt(secs: f64) -> DateTime<Utc> {
     let nanos = (secs * 1e9).round() as i64;
-    Some(DateTime::<Utc>::from_timestamp_nanos(nanos))
+    DateTime::<Utc>::from_timestamp_nanos(nanos)
 }
 
 // ---------------------------------------------------------------------------
@@ -1395,7 +1395,7 @@ mod tests {
         assert_eq!(native.title.as_deref(), Some("native title"));
         assert_eq!(
             (native.created_at, native.updated_at),
-            (epoch_to_dt(9.0), epoch_to_dt(2.0))
+            (Some(epoch_to_dt(9.0)), Some(epoch_to_dt(2.0)))
         );
         assert!(!jsonl::OPENED.with(|paths| paths.borrow().contains(&live)));
         assert_eq!(native.message_count, None);
@@ -1599,8 +1599,8 @@ mod tests {
             "{\"timestamp\":1700000000}\n{\"timestamp\":1700000001}\n",
         )?;
         let last = adapter.discover()?.remove(0);
-        assert_eq!(last.created_at, epoch_to_dt(1700000000.0));
-        assert_eq!(last.updated_at, epoch_to_dt(1700000001.0));
+        assert_eq!(last.created_at, Some(epoch_to_dt(1700000000.0)));
+        assert_eq!(last.updated_at, Some(epoch_to_dt(1700000001.0)));
         assert_eq!(
             fs::read_to_string(live)?,
             body,
@@ -1650,8 +1650,8 @@ mod tests {
                 (&serde_json::json!([{"text":""},{"text":body}])).into(),
             ))?);
             assert_eq!(actual.title, expected, "{title}");
-            assert_eq!(actual.created_at, epoch_to_dt(1.0));
-            assert_eq!(actual.updated_at, epoch_to_dt(9.0));
+            assert_eq!(actual.created_at, Some(epoch_to_dt(1.0)));
+            assert_eq!(actual.updated_at, Some(epoch_to_dt(9.0)));
         }
         // A non-UTF-8 wire line is one rejected record.
         let mut file = fs::OpenOptions::new().append(true).open(dir.join("wire.jsonl"))?;
@@ -1659,7 +1659,7 @@ mod tests {
         file.write_all(b"\xff")?;
         assert_eq!(
             wire_time_bounds(&dir.join("wire.jsonl")),
-            Some((epoch_to_dt(1.0).unwrap(), epoch_to_dt(9.0).unwrap()))
+            Some((epoch_to_dt(1.0), epoch_to_dt(9.0)))
         );
         Ok(())
     }
@@ -2143,11 +2143,11 @@ mod tests {
                 "present null token_usage is default Usage"
             );
             assert!(e.statuses[1].usage.is_none());
-            assert_eq!(e.first_timestamp, epoch_to_dt(1700000000.));
+            assert_eq!(e.first_timestamp, Some(epoch_to_dt(1700000000.)));
         }
         assert_eq!(
             wire_time_bounds(&path),
-            Some((epoch_to_dt(1700000000.).unwrap(), epoch_to_dt(1700000001.).unwrap()))
+            Some((epoch_to_dt(1700000000.), epoch_to_dt(1700000001.)))
         );
         // A non-UTF-8 line is one rejected record; the enrichment around it stands.
         let mut invalid = text.into_bytes();
@@ -2746,8 +2746,8 @@ mod tests {
             "{\"timestamp\":1700000000}\n{\"timestamp\":1700000001}\n",
         )?;
         let refreshed = subagent_refs(&main);
-        assert_eq!(refreshed[0].created_at, epoch_to_dt(1700000000.0));
-        assert_eq!(refreshed[0].updated_at, epoch_to_dt(1700000001.0));
+        assert_eq!(refreshed[0].created_at, Some(epoch_to_dt(1700000000.0)));
+        assert_eq!(refreshed[0].updated_at, Some(epoch_to_dt(1700000001.0)));
         assert_eq!(fs::read_to_string(child.join("context.jsonl"))?, body);
         Ok(())
     }
