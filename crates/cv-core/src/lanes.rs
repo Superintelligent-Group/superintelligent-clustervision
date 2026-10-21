@@ -99,7 +99,8 @@ pub struct LaneEvent {
     pub last_text: Option<String>,
 }
 
-/// `$CLUSTERVISION_HOME/lanes.jsonl` (default `~/.clustervision/lanes.jsonl`).
+/// `$CLUSTERVISION_HOME/lanes.jsonl` (default `~/.clustervision/lanes.jsonl`);
+/// falls back to the working directory when no cv home can be resolved.
 pub fn ledger_path() -> PathBuf {
     crate::env::Env::current()
         .cv_home()
@@ -107,8 +108,9 @@ pub fn ledger_path() -> PathBuf {
         .join("lanes.jsonl")
 }
 
-/// Append one row: a single `O_APPEND` `write_all` of one line, so concurrent hooks never tear
-/// each other's records (the board's idiom; no lock needed for append-only rows).
+/// Append one stored lane event with `O_APPEND`, without a read-modify-write transaction.
+/// `write_all` may retry a short write: readers tolerate torn lines, not transactional append
+/// isolation. See [`crate::lockfile`] for stores that require serialized transactions.
 pub fn append_lane_event(ev: &LaneEvent) -> std::io::Result<()> {
     if crate::env::frozen() {
         return Err(std::io::Error::other("--frozen forbids writing lanes"));
