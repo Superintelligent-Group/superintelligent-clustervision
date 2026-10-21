@@ -595,6 +595,7 @@ fn session_uuid(session_dir: &Path) -> &str {
 /// parsing one gives a session whose `lineage.parent` is the uuid and `lineage.agent_path` the
 /// agent id. Sub-agents are not listed by `discover` (like the Claude adapter's `subagents/`).
 pub fn subagent_refs(main: &SessionRef) -> Result<Vec<SessionRef>> {
+    use anyhow::Context;
     let _cache_scope = crate::discover_cache::read::Context::current().enter();
     let mut out = Vec::new();
     for e in super::side_entries(&main.path.join("agents"))? {
@@ -604,6 +605,12 @@ pub fn subagent_refs(main: &SessionRef) -> Result<Vec<SessionRef>> {
         };
         let dir = e.path();
         let wire = dir.join("wire.jsonl");
+        if !wire
+            .try_exists()
+            .with_context(|| format!("checking {}", wire.display()))?
+        {
+            continue;
+        }
         let reference = crate::discover_cache::cached_scan_checked(&wire, || {
             let w = scan_wire(&wire)?;
             Ok(Some(SessionRef {
