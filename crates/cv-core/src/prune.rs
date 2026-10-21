@@ -1793,19 +1793,20 @@ fn tur_is_image_source(value: crate::json::JsonView<'_>) -> Result<bool> {
     Ok(file.get("base64").is_some() || file.string("type")?.is_some_and(|ty| ty.starts_with("image/")))
 }
 
+/// One sidecar line, written field by field in [`SidecarEntry`]'s order, the original payload
+/// through the shared canonical source writer.
 fn write_source_payload(payload: &SourcePayload, writer: &mut impl Write) -> Result<()> {
-    // Serialize the established struct layout, then replace only its own null content slot with
-    // the shared canonical source writer. The slot follows input; rfind excludes nested inputs.
-    let encoded = serde_json::to_vec(&payload.entry)?;
-    let anchor = b",\"content\":null,\"size\":";
-    let at = encoded
-        .windows(anchor.len())
-        .rposition(|bytes| bytes == anchor)
-        .context("missing sidecar content slot")?;
-    let start = at + b",\"content\":".len();
-    writer.write_all(&encoded[..start])?;
-    payload.original.write_canonical(writer)?;
-    writer.write_all(&encoded[start + 4..])?;
+    let e = &payload.entry;
+    let mut o = crate::harness::wire::write::ObjectWriter::new(writer)?;
+    o.field("id", &e.id)?;
+    o.field("slot", &e.slot)?;
+    o.field("name", &e.name)?;
+    o.field("input", &e.input)?;
+    o.field_with("content", |mut w| payload.original.write_canonical(&mut w))?;
+    o.field("size", e.size)?;
+    o.field("line_count", e.line_count)?;
+    o.field("kind", &e.kind)?;
+    o.finish()?;
     writer.write_all(b"\n")?;
     Ok(())
 }
