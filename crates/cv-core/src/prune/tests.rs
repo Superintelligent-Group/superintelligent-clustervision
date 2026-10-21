@@ -24,20 +24,15 @@ fn fixture(dir: &Path, big: &str) -> PathBuf {
     path
 }
 
-fn tmpdir() -> PathBuf {
-    let d = std::env::temp_dir().join(format!("cv-prune-test-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&d).unwrap();
-    d
-}
-
 fn assistant_usage(total: u64) -> Value {
     serde_json::json!({"type":"assistant",
         "message":{"usage":{"input_tokens":total,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}})
 }
 
 /// Read fixture values through prune's own decision pass (estimates included), as JSONL.
-fn pv(lines: &[Value]) -> Vec<Option<Decision>> {
-    let dir = tmpdir();
+fn fixture_decisions(lines: &[Value]) -> Vec<Option<Decision>> {
+    let world = crate::test_world("prune");
+    let dir = world.proj.clone();
     let path = dir.join("decisions.jsonl");
     std::fs::write(&path, lines.iter().map(|l| l.to_string() + "\n").collect::<String>()).unwrap();
     let source = crate::json::JsonSource::capture(&path).unwrap();
@@ -61,7 +56,7 @@ fn pv(lines: &[Value]) -> Vec<Option<Decision>> {
         Some(read.unwrap())
     })
     .collect();
-    std::fs::remove_dir_all(dir).ok();
+
     decisions
 }
 
@@ -69,7 +64,7 @@ fn pv(lines: &[Value]) -> Vec<Option<Decision>> {
 fn window_cutoff_sizes_by_real_recorded_usage() {
     // 5 assistant turns, cumulative usage 100k..500k (one compaction segment) — 100k per turn.
     let lines: Vec<Value> = (1..=5).map(|k| assistant_usage(k * 100_000)).collect();
-    let parsed = pv(&lines);
+    let parsed = fixture_decisions(&lines);
     // budget 250k → the LARGEST tail whose real size stays ≤ 250k is turns 3,4 (200k real).
     // (Keeping turn 2 as well would be 300k — over budget; the contract is ≤, never ≥.)
     assert_eq!(usage_window_cutoff(&parsed, 250_000), Some((3, 200_000, false)));
@@ -77,7 +72,7 @@ fn window_cutoff_sizes_by_real_recorded_usage() {
     assert_eq!(usage_window_cutoff(&parsed, 9_000_000), Some((0, 500_000, false)));
     // no usage records → None (caller falls back to a byte estimate).
     assert_eq!(
-        usage_window_cutoff(&pv(&[serde_json::json!({"type":"user"})]), 100),
+        usage_window_cutoff(&fixture_decisions(&[serde_json::json!({"type":"user"})]), 100),
         None
     );
 }
@@ -87,7 +82,10 @@ fn window_cutoff_keeps_single_huge_turn_but_flags_overshoot() {
     let lines: Vec<Value> = (1..=5).map(|k| assistant_usage(k * 100_000)).collect();
     // Even the newest turn alone (100k) busts a 50k budget: keep that one turn, flag it — the
     // caller must warn that the ≤-budget contract could not be honored.
-    assert_eq!(usage_window_cutoff(&pv(&lines), 50_000), Some((4, 100_000, true)));
+    assert_eq!(
+        usage_window_cutoff(&fixture_decisions(&lines), 50_000),
+        Some((4, 100_000, true))
+    );
 }
 
 #[test]
@@ -98,7 +96,10 @@ fn window_cutoff_skips_sidechain_usage() {
     side["isSidechain"] = Value::Bool(true);
     let lines = [assistant_usage(100_000), side, assistant_usage(200_000)];
     // Main turns: 0 (100k) and 1 (200k → delta 100k). Budget 150k → keep from main turn 1.
-    assert_eq!(usage_window_cutoff(&pv(&lines), 150_000), Some((1, 100_000, false)));
+    assert_eq!(
+        usage_window_cutoff(&fixture_decisions(&lines), 150_000),
+        Some((1, 100_000, false))
+    );
 }
 
 #[test]
@@ -111,12 +112,16 @@ fn window_cutoff_reads_stashed_usage_after_revive() {
     let lines = [mk(100_000), mk(200_000), mk(300_000)];
     // Sizing must use the stashed 100/200/300k (100k per turn), NOT the pinned 50k — else windowing
     // a chained (already-revived) session would size by garbage. Budget 150k fits one turn (100k).
-    assert_eq!(usage_window_cutoff(&pv(&lines), 150_000), Some((2, 100_000, false)));
+    assert_eq!(
+        usage_window_cutoff(&fixture_decisions(&lines), 150_000),
+        Some((2, 100_000, false))
+    );
 }
 
 #[test]
 fn prunes_old_payloads_into_new_session_keeping_recent() {
-    let dir = tmpdir();
+    let world = crate::test_world("prune");
+    let dir = world.proj.clone();
     let big = "X".repeat(5000); // > default min_size 2048
     let src = fixture(&dir, &big);
 
@@ -173,12 +178,12 @@ fn prunes_old_payloads_into_new_session_keeping_recent() {
     for line in out.lines() {
         serde_json::from_str::<serde_json::Value>(line).expect("valid json line");
     }
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
 fn drop_mode_writes_no_sidecar_and_never_advertises_retrieve() {
-    let dir = tmpdir();
+    let world = crate::test_world("prune");
+    let dir = world.proj.clone();
     let big = "Y".repeat(5000);
     let src = fixture(&dir, &big);
     // keep_last 0 → every turn is "old", so the drop removes ALL big payloads.
@@ -206,12 +211,12 @@ fn drop_mode_writes_no_sidecar_and_never_advertises_retrieve() {
         "drop markers say the payload is gone"
     );
     assert!(!out.contains("--retrieve"), "drop markers must not advertise retrieval");
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
 fn drop_thinking_omits_old_reasoning_and_relinks_emptied_records() {
-    let dir = tmpdir();
+    let world = crate::test_world("prune");
+    let dir = world.proj.clone();
     let big = "R".repeat(5000);
     let sid = "22222222-2222-4222-8222-222222222222";
     // Old thinking-only record a0 (outside keep_last) and a recent one a2 (within it).
@@ -265,12 +270,12 @@ fn drop_thinking_omits_old_reasoning_and_relinks_emptied_records() {
     // The dropped block is retrievable by record uuid and block index.
     let restored = retrieve(r.sidecar_path.as_ref().unwrap(), "a0#think0").unwrap();
     assert_eq!(restored.get("thinking").and_then(|v| v.as_str()), Some(big.as_str()));
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
 fn revive_rewrites_stale_usage_below_loaded_content() {
-    let dir = tmpdir();
+    let world = crate::test_world("prune");
+    let dir = world.proj.clone();
     let sid = "33333333-3333-4333-8333-333333333333";
     // A compaction boundary, then a small post-boundary window whose last assistant turn still
     // carries a giant *recorded* usage (the stale wall) even though the content is tiny.
@@ -329,7 +334,6 @@ fn revive_rewrites_stale_usage_below_loaded_content() {
     assert_eq!(u["cache_read_input_tokens"], 0);
     assert_eq!(u["cache_creation_input_tokens"], 0);
     assert_eq!(u["input_tokens"].as_u64().unwrap(), honest);
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
@@ -376,7 +380,8 @@ fn revive_pins_usage_iterations_too() {
     // the top-level usage but left `iterations[*]` at the stale wall figure — and that is what the
     // gate reads now, so it refused the (small) session client-side with a synthesized "Prompt is
     // too long" before sending anything.
-    let dir = tmpdir();
+    let world = crate::test_world("prune");
+    let dir = world.proj.clone();
     let sid = "44444444-4444-4444-8444-444444444444";
     let line = |uuid: &str, role: &str, content: serde_json::Value, usage: Option<serde_json::Value>| {
         let mut m = serde_json::json!({"role":role,"content":content});
@@ -485,14 +490,14 @@ fn revive_pins_usage_iterations_too() {
         .collect();
     std::fs::write(&stripped, without).unwrap();
     assert_eq!(window(&stripped, "77777777-7777-4777-8777-777777777777"), Some(honest));
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
 fn synthetic_notices_are_not_turns() {
     // Claude Code's client-side "Prompt is too long" rows are `assistant` records with
     // `model: "<synthetic>"`. They ride along as records but never count as turns.
-    let dir = tmpdir();
+    let world = crate::test_world("prune");
+    let dir = world.proj.clone();
     let sid = "55555555-5555-4555-8555-555555555555";
     let mk = |ty: &str, uuid: &str, content: Value| {
         serde_json::json!({"type":ty,"sessionId":sid,"uuid":uuid,"timestamp":"2026-09-19T00:00:00Z",
@@ -531,14 +536,18 @@ fn synthetic_notices_are_not_turns() {
         "notices are kept as records, just not counted"
     );
     let lines: Vec<Value> = out.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
-    let turns = pv(&lines).iter().flatten().filter(|d| d.is_main_turn()).count();
+    let turns = fixture_decisions(&lines)
+        .iter()
+        .flatten()
+        .filter(|d| d.is_main_turn())
+        .count();
     assert_eq!(turns, 2);
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
 fn window_keeps_last_singleton_records_and_restamps_both_id_spellings() {
-    let dir = tmpdir();
+    let world = crate::test_world("prune");
+    let dir = world.proj.clone();
     let sid = "66666666-6666-4666-8666-666666666666";
     let turn = |ty: &str, uuid: &str, text: &str| {
         serde_json::json!({"type":ty,"sessionId":sid,"session_id":sid,"uuid":uuid,"timestamp":"2026-09-19T00:00:00Z",
@@ -579,14 +588,14 @@ fn window_keeps_last_singleton_records_and_restamps_both_id_spellings() {
     // both id spellings restamped — the source id is gone entirely
     assert!(!out.contains(sid));
     assert_eq!(out.matches(&format!("\"session_id\":\"{}\"", r.new_id)).count(), 2);
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
 fn thinking_flatten_snips_signature_only_blocks() {
     // Fable-era transcripts keep `thinking: ""` + a ~600-byte signature per turn. On the wire those
     // blocks still cost hundreds of tokens each, so `--thinking` must not skip them for being small.
-    let dir = tmpdir();
+    let world = crate::test_world("prune");
+    let dir = world.proj.clone();
     let sid = "77777777-7777-4777-8777-777777777777";
     let sig = "C".repeat(600);
     let mk = |uuid: &str, ty: &str, content: Value| {
@@ -620,7 +629,6 @@ fn thinking_flatten_snips_signature_only_blocks() {
     );
     let a1 = out.lines().find(|l| l.contains("\"uuid\":\"a1\"")).unwrap();
     assert!(a1.contains(&sig));
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
@@ -634,7 +642,7 @@ fn rendered_attachments_count_toward_byte_estimates() {
         serde_json::json!({"type":"assistant","uuid":"a0","message":{"role":"assistant","content":[{"type":"text","text":"ok"}],
             "usage":{"input_tokens":100,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}),
     ];
-    let parsed = pv(&lines);
+    let parsed = fixture_decisions(&lines);
     let out: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
     let honest = honest_window_tokens(
         &parsed,
@@ -655,7 +663,8 @@ fn rendered_attachments_count_toward_byte_estimates() {
 
 #[test]
 fn revive_honors_recorded_delta_evidence_over_low_byte_estimate() {
-    let dir = tmpdir();
+    let world = crate::test_world("prune");
+    let dir = world.proj.clone();
     let sid = "44444444-4444-4444-8444-444444444444";
     // No boundary, nothing snipped in the second span: the recorded usage DELTA (30k between a0 and
     // a1) is hard evidence that span really costs 30k, even though its byte estimate is tiny (e.g.
@@ -696,7 +705,6 @@ fn revive_honors_recorded_delta_evidence_over_low_byte_estimate() {
         honest < 80_000,
         "…but still shed the snipped payload's stale total, got {honest}"
     );
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// Fixture for the full `--window` behavior: a leading summary (title) record, two prompt/reply
@@ -724,7 +732,8 @@ fn window_fixture(dir: &Path) -> PathBuf {
 
 #[test]
 fn window_prune_reroots_within_budget_and_keeps_bookend_records() {
-    let dir = tmpdir();
+    let world = crate::test_world("prune");
+    let dir = world.proj.clone();
     let src = window_fixture(&dir);
     // 120k budget: each pair costs 100k real, so only the newest pair fits (≤ contract).
     let opts = PruneOptions {
@@ -749,12 +758,12 @@ fn window_prune_reroots_within_budget_and_keeps_bookend_records() {
     // the summary (title) record survives the head drop; the trailing snapshot survives the tail
     assert!(out.contains("my session title"), "leading summary record kept");
     assert!(out.contains("file-history-snapshot"), "trailing non-turn record kept");
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
 fn window_overshoot_keeps_the_huge_turn_and_warns() {
-    let dir = tmpdir();
+    let world = crate::test_world("prune");
+    let dir = world.proj.clone();
     let sid = "66666666-6666-4666-8666-666666666666";
     // No usage records → byte-estimate path. The NEWEST turn alone dwarfs the budget.
     let huge = "H".repeat(70_000); // ≈ 20k estimated tokens
@@ -786,12 +795,12 @@ fn window_overshoot_keeps_the_huge_turn_and_warns() {
         out.contains(&huge),
         "the one oversized turn is still kept — never an empty session"
     );
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
 fn window_and_revive_ignore_sidechain_turns() {
-    let dir = tmpdir();
+    let world = crate::test_world("prune");
+    let dir = world.proj.clone();
     let sid = "77777777-7777-4777-8777-777777777777";
     let usage =
         |n: u64| serde_json::json!({"input_tokens":n,"cache_read_input_tokens":0,"cache_creation_input_tokens":0});
@@ -850,12 +859,12 @@ fn window_and_revive_ignore_sidechain_turns() {
         scv["parentUuid"].is_null(),
         "sidechain parent untouched (was already null)"
     );
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
 fn sidecar_ids_are_unique_and_round_trip_arrays_and_objects() {
-    let dir = tmpdir();
+    let world = crate::test_world("prune");
+    let dir = world.proj.clone();
     let sid = "88888888-8888-4888-8888-888888888888";
     let big_a = "A".repeat(4000);
     let big_b = "B".repeat(4000);
@@ -914,12 +923,12 @@ fn sidecar_ids_are_unique_and_round_trip_arrays_and_objects() {
         retrieve(&sc, "uB#tr0#tur").unwrap(),
         serde_json::json!({"stdout":big_b,"exit":0})
     );
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
 fn retrieve_errors_on_duplicate_ids_instead_of_guessing() {
-    let dir = tmpdir();
+    let world = crate::test_world("prune");
+    let dir = world.proj.clone();
     let sc = dir.join("dup.flat.jsonl");
     let entry = |content: &str| {
         serde_json::json!({"id":"dup","slot":"content","name":"Read","input":null,
@@ -935,12 +944,12 @@ fn retrieve_errors_on_duplicate_ids_instead_of_guessing() {
     assert!(err.contains("2 times"), "duplicate id must be an error, got: {err}");
     // a non-duplicated id in the same file still errors as not-found (with the listing)
     assert!(retrieve(&sc, "absent").is_err());
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
 fn double_prune_is_idempotent() {
-    let dir = tmpdir();
+    let world = crate::test_world("prune");
+    let dir = world.proj.clone();
     let big = "D".repeat(5000);
     let src = fixture(&dir, &big);
     let opts = PruneOptions {
@@ -961,14 +970,14 @@ fn double_prune_is_idempotent() {
     // the originals are still retrievable from the FIRST sidecar
     let restored = retrieve(r1.sidecar_path.as_ref().unwrap(), "toolu_1").unwrap();
     assert_eq!(restored.as_str().unwrap(), big);
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
 fn pruned_session_reparses_via_claude_adapter_with_intact_turns() {
     // The in-repo resume-safety proxy: the pruned file must still parse through the Claude harness
     // adapter with the same turn structure (ids, roles, count) as the source.
-    let dir = tmpdir();
+    let world = crate::test_world("prune");
+    let dir = world.proj.clone();
     let big = "P".repeat(5000);
     let src = fixture(&dir, &big);
     let opts = PruneOptions {
@@ -997,12 +1006,12 @@ fn pruned_session_reparses_via_claude_adapter_with_intact_turns() {
     let r2 = prune_session(&src2, &opts).unwrap();
     let tail = crate::harness::claude::parse_str("tail", &std::fs::read_to_string(&r2.new_path).unwrap(), None);
     assert!(!tail.messages.is_empty(), "windowed tail still parses into turns");
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
 fn dry_run_writes_nothing() {
-    let dir = tmpdir();
+    let world = crate::test_world("prune");
+    let dir = world.proj.clone();
     let big = "Z".repeat(5000);
     let src = fixture(&dir, &big);
     let opts = PruneOptions {
@@ -1013,12 +1022,12 @@ fn dry_run_writes_nothing() {
     let r = prune_session(&src, &opts).unwrap();
     assert!(r.pruned_count >= 1);
     assert!(!r.new_path.exists(), "dry run must not write the new session");
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
 fn keep_last_large_spares_everything() {
-    let dir = tmpdir();
+    let world = crate::test_world("prune");
+    let dir = world.proj.clone();
     let big = "Q".repeat(5000);
     let src = fixture(&dir, &big);
     let opts = PruneOptions {
@@ -1027,7 +1036,6 @@ fn keep_last_large_spares_everything() {
     };
     let r = prune_session(&src, &opts).unwrap();
     assert_eq!(r.pruned_count, 0, "nothing is old enough to snip");
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
@@ -1036,7 +1044,8 @@ fn declassify_snips_all_security_prose_keeps_benign() {
     // OR recent — can downgrade a resumed seat. --declassify snips EVERY security-dense message (user
     // string + assistant text blocks) into the sidecar (recency does NOT protect it, unlike the
     // tool/thinking passes), while leaving benign turns verbatim.
-    let dir = tmpdir();
+    let world = crate::test_world("prune");
+    let dir = world.proj.clone();
     let sid = "22222222-2222-4222-8222-222222222222";
     let secret_user = "We have a cross-tenant auth bypass exploit; the credential exfil risk is high.";
     let secret_asst = "The vulnerability lets an attacker exfil credentials via the exploit chain.";
@@ -1096,14 +1105,13 @@ fn declassify_snips_all_security_prose_keeps_benign() {
     let sidecar = r.sidecar_path.clone().expect("sidecar written");
     let got = retrieve(&sidecar, "u0#declass").unwrap();
     assert_eq!(got.as_str(), Some(secret_user), "snipped prose retrievable verbatim");
-
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
 fn declassify_spares_benign_sessions_entirely() {
     // A session with < min_hits security terms per message must be left byte-untouched by declassify.
-    let dir = tmpdir();
+    let world = crate::test_world("prune");
+    let dir = world.proj.clone();
     let sid = "33333333-3333-4333-8333-333333333333";
     let lines = [
         serde_json::json!({"type":"user","sessionId":sid,"uuid":"u0","timestamp":"2026-07-01T00:00:00Z",
@@ -1132,7 +1140,6 @@ fn declassify_spares_benign_sessions_entirely() {
         out.contains("the security fix we shipped"),
         "benign-density prose kept verbatim"
     );
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
@@ -1149,7 +1156,7 @@ fn decision_roster_preserves_selection_and_revive_evidence() {
     ];
     // Recorded from the owned-row and decision-roster readings, which agreed, before both were
     // replaced by the typed facts.
-    let facts = pv(&rows);
+    let facts = fixture_decisions(&rows);
     for (budget, kept) in [
         (0, (2, 4, Some(120), true)),
         (1, (2, 4, Some(120), true)),
@@ -1174,7 +1181,8 @@ fn decision_roster_preserves_selection_and_revive_evidence() {
 
 #[test]
 fn sidecar_preparation_failure_preserves_existing_transcript() {
-    let dir = tmpdir();
+    let world = crate::test_world("prune");
+    let dir = world.proj.clone();
     let src = fixture(&dir, &"payload".repeat(1024));
     let new_id = "22222222-2222-4222-8222-222222222222";
     let transcript = dir.join(format!("{new_id}.jsonl"));
@@ -1193,7 +1201,6 @@ fn sidecar_preparation_failure_preserves_existing_transcript() {
         .file_name()
         .to_string_lossy()
         .starts_with(".cv-prune-")));
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 /// Sidecar and transcript are one publication: under `--force` the sidecar replaces its name,
@@ -1201,7 +1208,8 @@ fn sidecar_preparation_failure_preserves_existing_transcript() {
 /// put back rather than lost.
 #[test]
 fn a_failed_transcript_claim_restores_the_replaced_sidecar() {
-    let dir = tmpdir();
+    let world = crate::test_world("prune");
+    let dir = world.proj.clone();
     let src = fixture(&dir, &"payload".repeat(1024));
     let new_id = "22222222-2222-4222-8222-222222222222";
     let sidecar = dir.join(format!("{new_id}.flat.jsonl"));
@@ -1219,12 +1227,12 @@ fn a_failed_transcript_claim_restores_the_replaced_sidecar() {
     assert!(!std::fs::read_dir(&dir)
         .unwrap()
         .any(|e| e.unwrap().file_name().to_string_lossy().starts_with(".cv-")));
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
 fn renamed_source_cannot_be_its_own_prune_destination() {
-    let dir = tmpdir();
+    let world = crate::test_world("prune");
+    let dir = world.proj.clone();
     let src = fixture(&dir, &"payload".repeat(1024));
     let new_id = "22222222-2222-4222-8222-222222222222";
     let renamed = dir.join(format!("{new_id}.jsonl"));
@@ -1237,12 +1245,12 @@ fn renamed_source_cannot_be_its_own_prune_destination() {
     };
     assert!(prune_session(&renamed, &options).is_err());
     assert_eq!(std::fs::read(renamed).unwrap(), original);
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
 fn giant_ignored_row_preserves_raw_bytes_and_recorded_usage() {
-    let dir = tmpdir();
+    let world = crate::test_world("prune");
+    let dir = world.proj.clone();
     let sid = "11111111-1111-4111-8111-111111111111";
     let new_id = "22222222-2222-4222-8222-222222222222";
     let line = format!(" {{ \"sessionId\":\"{sid}\", \"type\":\"user\", \"message\":{{\"content\":\"prompt\"}}, \"unrelated\":\"{}[PRUNED id=fake]{}\" }}", "x".repeat(1024 * 1024), "x".repeat(1024 * 1024));
@@ -1265,7 +1273,6 @@ fn giant_ignored_row_preserves_raw_bytes_and_recorded_usage() {
     // A marker-shaped string outside the model-visible content is no evidence: nothing was pruned,
     // so the recorded prompt stands and nothing is rewritten.
     assert_eq!(result.usage_rewritten, 0);
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -1289,7 +1296,8 @@ fn marker_writer_detects_every_chunk_split_with_bounded_tail() {
 fn existing_output_is_refused_and_force_replaces_the_name_not_the_inode() {
     use std::os::unix::fs::{symlink, MetadataExt};
     for symbolic in [true, false] {
-        let dir = tmpdir();
+        let world = crate::test_world("prune");
+        let dir = world.proj.clone();
         let source = fixture(&dir, &"payload".repeat(1024));
         let new_id = "22222222-2222-4222-8222-222222222222";
         let target = dir.join("existing-target");
@@ -1318,14 +1326,14 @@ fn existing_output_is_refused_and_force_replaces_the_name_not_the_inode() {
             .file_type()
             .is_symlink());
         assert!(std::fs::read_to_string(&destination).unwrap().contains(MARKER_PREFIX));
-        std::fs::remove_dir_all(dir).unwrap();
     }
 }
 
 #[cfg(unix)]
 #[test]
 fn hardlinked_source_is_rejected_before_truncation() {
-    let dir = tmpdir();
+    let world = crate::test_world("prune");
+    let dir = world.proj.clone();
     let source = fixture(&dir, &"payload".repeat(1024));
     let original = std::fs::read(&source).unwrap();
     let new_id = "22222222-2222-4222-8222-222222222222";
@@ -1337,7 +1345,6 @@ fn hardlinked_source_is_rejected_before_truncation() {
     };
     assert!(prune_session(&source, &options).is_err());
     assert_eq!(std::fs::read(source).unwrap(), original);
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -1796,7 +1803,7 @@ fn staged_usage_projection_preserves_mixed_raw_framing_and_source_guard() -> Res
     let source = crate::json::JsonSource::capture(&path)?;
     let mut stage = ByteStage::new();
     stage.write_all(raw.as_bytes())?;
-    let facts = [None, pv(std::slice::from_ref(&row)).remove(0), None];
+    let facts = [None, fixture_decisions(std::slice::from_ref(&row)).remove(0), None];
     let (output, rewritten, honest, stale) =
         revive_staged(&source, stage.finish()?, &facts, &[false; 3], None, true, None)?;
     assert_eq!(rewritten, 1);
@@ -1825,7 +1832,7 @@ fn staged_usage_trim_preserves_whitespace_only_buffers_and_eof_failure() -> Resu
     let raw = format!("{}{}{}\r\n", " ".repeat(2 * 65536), row, "\t".repeat(2 * 65536));
     std::fs::write(&path, &raw)?;
     let source = crate::json::JsonSource::capture(&path)?;
-    let facts = [pv(std::slice::from_ref(&row)).remove(0)];
+    let facts = [fixture_decisions(std::slice::from_ref(&row)).remove(0)];
     let mut stage = ByteStage::new();
     stage.write_all(raw.as_bytes())?;
     let (output, rewritten, honest, _) = revive_staged(&source, stage.finish()?, &facts, &[false], None, true, None)?;
@@ -2097,7 +2104,8 @@ fn sigma_context_batches_long_ordinary_runs_without_changing_matches() {
 
 #[test]
 fn malformed_large_rows_refuse_before_staging_and_invalid_utf8_is_named_first() -> Result<()> {
-    let dir = tmpdir();
+    let world = crate::test_world("prune");
+    let dir = world.proj.clone();
     let source = dir.join("source.jsonl");
     let prefix = " malformed sessionId=old ";
     let malformed = format!(
@@ -2168,13 +2176,14 @@ fn malformed_large_rows_refuse_before_staging_and_invalid_utf8_is_named_first() 
     );
     assert_eq!(error.to_string(), "stream did not contain valid UTF-8");
     assert_eq!(std::fs::read(dir.join("new.jsonl"))?, previous);
-    std::fs::remove_dir_all(dir)?;
+
     Ok(())
 }
 
 #[test]
 fn rejected_large_json_keeps_strict_owned_value_acceptance() -> Result<()> {
-    let dir = tmpdir();
+    let world = crate::test_world("prune");
+    let dir = world.proj.clone();
     let path = dir.join("source.jsonl");
     let padding = " ".repeat(1024 * 1024);
     for raw in [
@@ -2214,7 +2223,7 @@ fn rejected_large_json_keeps_strict_owned_value_acceptance() -> Result<()> {
             }
         }
     }
-    std::fs::remove_dir_all(dir)?;
+
     Ok(())
 }
 
@@ -2405,7 +2414,8 @@ fn parent_prune_keeps_embedded_sidechains_out_of_own_turns() -> Result<()> {
 
 #[test]
 fn prune_rejects_output_ids_that_escape_or_alias_resource_directories() {
-    let dir = tmpdir();
+    let world = crate::test_world("prune");
+    let dir = world.proj.clone();
     let source = fixture(&dir, "original payload");
     let original = std::fs::read(&source).unwrap();
     for id in [
@@ -2431,14 +2441,14 @@ fn prune_rejects_output_ids_that_escape_or_alias_resource_directories() {
         assert_eq!(std::fs::read(&source).unwrap(), original);
     }
     assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// `--copy-resources` never merges into an existing resource directory: it is refused, and with
 /// `force` the new directory replaces it whole (stale entries gone, a symlink replaced, not followed).
 #[test]
 fn copied_resources_are_refused_or_replaced_whole_never_merged() {
-    let dir = tmpdir();
+    let world = crate::test_world("prune");
+    let dir = world.proj.clone();
     let source = fixture(&dir, &"payload".repeat(1024));
     let resources = dir.join(source.file_stem().unwrap()).join("subagents");
     std::fs::create_dir_all(&resources).unwrap();
@@ -2491,18 +2501,17 @@ fn copied_resources_are_refused_or_replaced_whole_never_merged() {
     assert!(!std::fs::read_dir(&dir)
         .unwrap()
         .any(|e| e.unwrap().file_name().to_string_lossy().starts_with(".cv-")));
-    std::fs::remove_dir_all(dir).ok();
 }
 
 #[test]
 fn resource_destination_that_contains_the_source_is_refused() {
-    let dir = tmpdir();
+    let world = crate::test_world("prune");
+    let dir = world.proj.clone();
     let source = dir.join("outer/source-resources");
     std::fs::create_dir_all(&source).unwrap();
     std::fs::write(source.join("agent.jsonl"), b"original resource").unwrap();
     assert!(stage_resources(&source, &dir.join("outer")).is_err());
     assert_eq!(std::fs::read(source.join("agent.jsonl")).unwrap(), b"original resource");
-    std::fs::remove_dir_all(dir).ok();
 }
 
 #[test]
@@ -2512,7 +2521,7 @@ fn byte_window_accounts_for_trailing_reminders_and_prompt_snap_overshoot() {
         ..Default::default()
     };
     let message = |role: &str, text: &str| serde_json::json!({"type":role,"message":{"content":text}});
-    let rows = pv(&[
+    let rows = fixture_decisions(&[
         message("user", "first"),
         message("assistant", "answer"),
         message("user", "latest"),
@@ -2520,7 +2529,7 @@ fn byte_window_accounts_for_trailing_reminders_and_prompt_snap_overshoot() {
         serde_json::json!({"type":"attachment","rendered":[{"content":"x".repeat(1000)}]}),
     ]);
     assert_eq!(select_kept_turns(&rows, &options, 4), (2, 4, None, true));
-    let rows = pv(&[
+    let rows = fixture_decisions(&[
         message("user", "first"),
         message("assistant", "answer"),
         message("user", &"x".repeat(1000)),
@@ -2602,7 +2611,8 @@ fn standalone_prune_preserves_unmodified_metadata_bytes_at_every_size() {
 /// that copied it verbatim would publish an unresumable session. Refuse before staging.
 #[test]
 fn prune_refuses_a_malformed_line_inside_the_kept_window() {
-    let dir = tmpdir();
+    let world = crate::test_world("prune");
+    let dir = world.proj.clone();
     let sid = "44444444-4444-4444-8444-444444444444";
     let line = |uuid: &str, parent: Option<&str>, role: &str, content: &str| {
         serde_json::json!({"type":role,"sessionId":sid,"uuid":uuid,"parentUuid":parent,
@@ -2642,5 +2652,4 @@ fn prune_refuses_a_malformed_line_inside_the_kept_window() {
         input,
         "the source is untouched"
     );
-    std::fs::remove_dir_all(&dir).ok();
 }
