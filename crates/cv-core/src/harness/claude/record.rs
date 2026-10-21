@@ -736,7 +736,8 @@ impl<'a> Record<'a, '_> {
     /// A non-conversational meta record carried verbatim under [`crate::stream::Demand::COMPLETE`] so a
     /// `parse → emit` round-trip reproduces it. Modeled as an empty-content `System` message —
     /// render/dataset/count all skip empty turns — with the full original record stashed under
-    /// `extra["_record"]` for the emitter to replay byte-for-byte.
+    /// `extra["_record"]` for replay with JSON values and key order preserved; serialization
+    /// may normalize whitespace and numeric spelling.
     fn carrier(&self) -> Result<Message> {
         let mut m = Message::of_kind(Role::System, MessageKind::Carrier, Origin::Harness);
         m.id = self.top.string("uuid")?;
@@ -757,7 +758,7 @@ impl<'a> Record<'a, '_> {
     /// A model-visible `attachment` record (one with a non-empty `rendered[]`) as a
     /// [`Role::System`] message: one text block per rendered item, exactly the text appended to
     /// the prompt. `None` when nothing was rendered. Under `complete` the message is also a carrier
-    /// of the verbatim record, so the emitter replays it byte-for-byte while lean consumers still
+    /// of the record, so the emitter preserves its JSON values and key order while lean consumers still
     /// see its text. `origin` is [`Origin::Hook`] for `hook_*` attachments (a user-configured
     /// hook's stdout) and [`Origin::Harness`] otherwise. The attachment kind always rides in
     /// `extra["claude"]["attachment_type"]`; the full `attachment` object only under rich demand.

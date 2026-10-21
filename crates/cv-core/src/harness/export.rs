@@ -1,3 +1,5 @@
+//! Readers for account exports into cv; the CLI export group writes sessions out.
+//!
 //! **Account data-export** adapters — the archives you download from ChatGPT ("Export data") and
 //! Claude.ai. Both pack *many* conversations into one big JSON file (`conversations.json`, often split
 //! `conversations-000.json … -NNN.json`), so unlike the per-session harnesses one file yields many

@@ -101,6 +101,8 @@ fn load_bounded(path: &Path, selected: Option<&str>, admission_bytes: usize) -> 
                 let Some(record) = Fields::parse(view, CONVERSATION_FIELDS)? else {
                     continue;
                 };
+                // Account archives are assumed uniform: only record zero selects the export
+                // shape. A missing discriminator there leaves the archive unrecognized.
                 if position == 0 {
                     shapes = [record.get("mapping").is_some(), record.get("chat_messages").is_some()];
                 }

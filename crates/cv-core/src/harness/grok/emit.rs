@@ -20,7 +20,8 @@ use std::fs;
 use std::path::Path;
 use uuid::Uuid;
 
-/// Percent-encode everything except unreserved chars, so `/` → `%2F` (matching Grok's dir layout).
+/// Encode Grok's directory delimiters (including `.`), spaces, percent signs and controls;
+/// this is Grok's path spelling, not the standard URI unreserved-character set.
 const GROK_ENCODE: &AsciiSet = &CONTROLS.add(b'/').add(b' ').add(b'.').add(b'%').add(b':').add(b'\\');
 
 pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<EmitResult> {

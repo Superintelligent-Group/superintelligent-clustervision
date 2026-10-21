@@ -164,6 +164,8 @@ pub(super) fn content(
                 _ => continue,
             };
             if let Text::Span(span) = text {
+                // Text spans exclude JSON quotes; a source JSON value must include both.
+                // Reattach the opening byte and two quote bytes before validating the range.
                 let offset = span
                     .offset
                     .checked_sub(1)
