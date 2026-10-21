@@ -354,7 +354,6 @@ fn stream_lines(
 ) -> Result<Session> {
     use super::store::jsonl::ranges;
     let source = read.source();
-    let len = source.len();
     let mut tree = false;
     read.lines(0, |line| {
         tree = line.view.map(is_leaf_entry).transpose()?.unwrap_or(false);
@@ -362,18 +361,23 @@ fn stream_lines(
     })?;
     let mut fold = Fold::new(r, facts, opts);
     if tree {
-        // A tree is read whole: invalid UTF-8 anywhere, even off the branch, rejects it.
-        if !ranges::valid_utf8(&mut ranges::reader(read, ranges::Range { offset: 0, len })?)? {
-            return Err(
-                std::io::Error::new(std::io::ErrorKind::InvalidData, "stream did not contain valid UTF-8").into(),
-            );
-        }
         let mut descriptors = Vec::new();
         let mut records = Vec::new();
         read.lines(0, |line| {
             if let Some(view) = line.view {
                 descriptors.push(record::navigation(view)?);
                 records.push(view.source_range()?.context("a transcript line has a source range")?);
+            } else if !line.blank {
+                anyhow::ensure!(
+                    ranges::valid_utf8(&mut ranges::reader(
+                        read,
+                        ranges::Range {
+                            offset: line.at,
+                            len: line.end - line.at,
+                        }
+                    )?)?,
+                    "stream did not contain valid UTF-8"
+                );
             }
             Ok(Flow::Continue)
         })?;
