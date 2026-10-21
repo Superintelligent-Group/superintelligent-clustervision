@@ -1212,7 +1212,7 @@ impl Default for BodySummary {
         }
     }
 }
-#[cfg(all(test, feature = "probe-heap"))]
+#[cfg(test)]
 fn body_hash(mut hash: u64, bytes: &[u8]) -> u64 {
     for &byte in bytes {
         hash = (hash ^ byte as u64).wrapping_mul(0x100000001b3);
@@ -3969,13 +3969,13 @@ mod tests {
         assert_eq!(rows[0].target.as_deref(), Some("/perf/a.rs"));
         let prefix = b"Inspect the file\nEdit {\"file_path\":\"/perf/a.rs\",\"content\":\"";
         let suffix = b"\",\"metadata\":{\"n\":3,\"flag\":true}}\n";
-        let mut expected = hash(initial, prefix);
+        let mut expected = body_hash(initial, prefix);
         let x = [b'x'; 4096];
         for _ in 0..input_bytes / x.len() {
-            expected = hash(expected, &x);
+            expected = body_hash(expected, &x);
         }
-        expected = hash(expected, &x[..input_bytes % x.len()]);
-        expected = hash(expected, suffix);
+        expected = body_hash(expected, &x[..input_bytes % x.len()]);
+        expected = body_hash(expected, suffix);
         assert_eq!(digest, expected, "canonical searchable JSON must be exact");
         assert_eq!(body_bytes, prefix.len() + input_bytes + suffix.len());
         eprintln!(
