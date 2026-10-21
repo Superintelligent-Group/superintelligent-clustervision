@@ -554,11 +554,14 @@ impl KeyFacts {
     }
 }
 
+// Enough room for the childSessionKey field plus quotes, colon and JSON-escaped delimiters.
+const CHILD_KEY_LOOKBEHIND: usize = 24;
+
 /// Whether `text` records `key` as a spawned child ([`ChildMarker`]'s policy over one string).
 #[cfg(test)]
 fn names_child(text: &str, key: &str) -> bool {
     text.match_indices(key).any(|(i, _)| {
-        let start = text.floor_char_boundary(i.saturating_sub(24));
+        let start = text.floor_char_boundary(i.saturating_sub(CHILD_KEY_LOOKBEHIND));
         text[start..i].contains("childSessionKey")
     })
 }
@@ -587,8 +590,8 @@ impl<'a> ChildMarker<'a> {
             }
             self.window.extend_from_slice(chunk);
             self.found = memchr::memmem::find_iter(&self.window, self.key.as_bytes())
-                .any(|at| memchr::memmem::find(&self.window[at.saturating_sub(24)..at], b"childSessionKey").is_some());
-            let keep = self.key.len().saturating_add(24);
+                .any(|at| memchr::memmem::find(&self.window[at.saturating_sub(CHILD_KEY_LOOKBEHIND)..at], b"childSessionKey").is_some());
+            let keep = self.key.len().saturating_add(CHILD_KEY_LOOKBEHIND);
             let start = self.window.len().saturating_sub(keep);
             self.window.copy_within(start.., 0);
             self.window.truncate(self.window.len() - start);
