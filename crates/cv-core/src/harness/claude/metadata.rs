@@ -53,6 +53,7 @@ impl Scan {
                 if state.session.id == scan.session.id
                     && state.session.path == scan.session.path
                     && state.session.harness == Harness::Claude
+                    // Each counted turn requires at least one source byte; reject impossible counts.
                     && state.session.message_count.is_some_and(|n| n as u64 <= cp.offset)
                 {
                     scan.writer_version = state.writer_version;

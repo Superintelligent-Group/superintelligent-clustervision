@@ -675,7 +675,8 @@ pub(super) fn ingest(
         return Ok(Flow::Continue);
     };
     r.stamp(&mut msg);
-    // Record-local models must not depend on how much of a transcript preceded the window.
+    // Keep the message model record-local; the session default is the first non-synthetic
+    // model encountered in this read, so a window can have a different session default.
     if session.model.is_none() && msg.model.as_deref() != Some(SYNTHETIC_MODEL) {
         session.model = msg.model.clone();
     }

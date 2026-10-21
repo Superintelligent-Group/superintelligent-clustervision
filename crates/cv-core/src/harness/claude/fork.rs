@@ -14,6 +14,8 @@
 //! without itself looking copied, or holds the boundary `uuid` past its own first record. Only
 //! those few candidates are read whole. Siblings that are themselves forks of the same source are
 //! never chosen; a fork of a fork resolves to the original.
+//! Out-of-order head timestamps can falsely suggest a fork, costing a sibling-directory scan,
+//! candidate head reads, and whole-file searches for candidates requiring a boundary match.
 
 use crate::harness::store::{document::Fields, jsonl};
 use crate::json::JsonSource;

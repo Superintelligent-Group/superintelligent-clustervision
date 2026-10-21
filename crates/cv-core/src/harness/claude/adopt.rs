@@ -88,6 +88,7 @@ pub fn find_session(spec: &str) -> Result<SessionFile> {
         bail!("{spec} is a sub-agent id; this wants a session id");
     }
     match crate::find(spec, Some(Harness::Claude))? {
+        // Check the resolved id too: a short selector need not itself start with agent-.
         Some((r, _)) if !r.id.starts_with("agent-") => {
             SessionFile::of(r).with_context(|| format!("{spec}: the transcript has no project dir"))
         }
@@ -160,7 +161,7 @@ fn agents_in(session: &SessionFile, want: &str) -> Vec<AgentFile> {
 /// Every copy of an agent (full id or unique prefix; `agent-` optional) in any session's
 /// `subagents/` ([`crate::find_subagent_parents`]), or only in `from` when given. Newest copy
 /// first. Copies of ONE agent in several sessions (an earlier adoption) are expected; a prefix
-/// matching two different agent ids is an error.
+/// matching two different agent ids is an error unless an exact id matches, which wins first.
 pub fn find_agent(spec: &str, from: Option<&SessionFile>) -> Result<Vec<AgentFile>> {
     let want = spec.strip_prefix("agent-").unwrap_or(spec);
     let sessions: Vec<SessionFile> = match from {
