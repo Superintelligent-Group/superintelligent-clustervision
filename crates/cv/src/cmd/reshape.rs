@@ -589,16 +589,10 @@ fn finish_composed(args: ComposedArgs) -> Result<()> {
             }
         }
     }
-    match export.as_deref() {
-        None => {
-            println!("\n(use --export md|json to print it, or --harness <harness> [--out <dir>] to emit it)");
-        }
-        Some("json" | "md" | "markdown") => {
-            staged
-                .context("composed export was not staged")?
-                .copy_to(&mut std::io::stdout().lock())?;
-        }
-        Some(other) => bail!("unknown export format {other:?} (use md or json)"),
+    if let Some(staged) = staged {
+        staged.copy_to(&mut std::io::stdout().lock())?;
+    } else {
+        println!("\n(use --export md|json to print it, or --harness <harness> [--out <dir>] to emit it)");
     }
     Ok(())
 }
@@ -633,9 +627,11 @@ pub(crate) fn cmd_dataset(args: DatasetArgs<'_>) -> Result<()> {
     } = args;
     use std::io::Write;
     let out = file;
-    if !matches!(format, "chatml" | "sharegpt") {
-        bail!("unknown format {format:?} (use chatml or sharegpt)");
-    }
+    let fmt = match format {
+        "chatml" => cv_core::dataset::Format::Chatml,
+        "sharegpt" => cv_core::dataset::Format::ShareGpt,
+        _ => bail!("unknown format {format:?} (use chatml or sharegpt)"),
+    };
     if let Some(path) = &out {
         crate::util::user_file_claim(path, force)?;
     }
@@ -643,10 +639,6 @@ pub(crate) fn cmd_dataset(args: DatasetArgs<'_>) -> Result<()> {
     let query = match query {
         Some(q) => Some(cv_core::SessionQuery::parse(&q).map_err(|e| anyhow::anyhow!(e))?),
         None => None,
-    };
-    let fmt = match format {
-        "chatml" => cv_core::dataset::Format::Chatml,
-        _ => cv_core::dataset::Format::ShareGpt,
     };
     // `--redact-only <classes>` scopes redaction to specific secret classes (and implies it);
     // plain `--redact` scrubs every class.
