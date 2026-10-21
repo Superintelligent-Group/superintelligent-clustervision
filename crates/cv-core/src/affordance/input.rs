@@ -33,7 +33,8 @@ pub(crate) fn scalar_prefix(view: JsonView<'_>, cap: usize) -> Result<Option<Str
         .map(|number| number.to_string()))
 }
 
-/// Scan before allocating so an all-whitespace string emits no owned item. Trimming uses decoded
+/// Reject all-whitespace strings even when `trim` is false; otherwise preserve whitespace unless
+/// trimming was requested. Scan before allocating. Trimming uses decoded
 /// byte bounds; a huge ignored whitespace tail does not become a transient String allocation.
 pub(crate) fn item_string(view: JsonView<'_>, trim: bool) -> Result<Option<String>> {
     let mut offset = 0;

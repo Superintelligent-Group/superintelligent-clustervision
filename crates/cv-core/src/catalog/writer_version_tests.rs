@@ -96,6 +96,8 @@ fn old_catalog_migrates_once_and_normal_publication_observes() {
 
 #[test]
 fn discovery_observes_newest_claude_tail_and_canonical_codex_meta() {
+    // Claude folds the newest recorded writer version; Codex trusts its first canonical
+    // session_meta, even when later copied parent metadata names a newer version.
     let w = crate::test_world("writer-discovery");
     let claude = w.base.join("claude/projects/project");
     std::fs::create_dir_all(&claude).unwrap();
