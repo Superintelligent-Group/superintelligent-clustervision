@@ -717,13 +717,25 @@ fn source_consumer(dir: &Path) -> Result<String> {
     let read = |file: &Path| -> Result<Option<String>> {
         match std::fs::read_to_string(file) {
             Ok(id) if !id.trim().is_empty() => Ok(Some(format!("fts:{}", id.trim()))),
-            Ok(_) => anyhow::bail!("empty search index identity {}", file.display()),
+            Ok(_) => Ok(None),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e).with_context(|| format!("reading {}", file.display())),
         }
     };
     if let Some(consumer) = read(&file)? {
         return Ok(consumer);
+    }
+    // Serialize missing/empty identity repair; never unlink this lock inode.
+    let lock = std::fs::OpenOptions::new().write(true).create(true).truncate(false)
+        .open(dir.join(".cv-index-id.lock"))?;
+    lock.lock().context("locking search index identity repair")?;
+    if let Some(consumer) = read(&file)? {
+        return Ok(consumer);
+    }
+    match std::fs::remove_file(&file) {
+        Ok(()) => {},
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+        Err(e) => return Err(e).context("removing empty search index identity"),
     }
     // Write the whole identity aside, then link it into place: a concurrent first open either
     // wins the link or reads the winner's complete identity, never a partial one.
@@ -3322,6 +3334,21 @@ mod tests {
             mark: None,
             decoded: None,
         }
+    }
+
+    #[test]
+    fn empty_index_identity_is_repaired_once_across_concurrent_readers() {
+        let world = cv_testkit::World::in_process("empty-index-identity", cv_core::env::Env::enter_isolated);
+        let dir = world.base.join("index");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("cv-index-id"), "  ").unwrap();
+        let identities = std::thread::scope(|scope| {
+            let readers: Vec<_> = (0..4).map(|_| scope.spawn(|| source_consumer(&dir).unwrap())).collect();
+            readers.into_iter().map(|r| r.join().unwrap()).collect::<Vec<_>>()
+        });
+        assert!(identities.iter().all(|id| id == &identities[0]));
+        assert!(uuid::Uuid::parse_str(identities[0].strip_prefix("fts:").unwrap()).is_ok());
+        assert_eq!(source_consumer(&dir).unwrap(), identities[0]);
     }
 
     #[cfg(feature = "probe-heap")]
