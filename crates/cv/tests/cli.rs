@@ -841,6 +841,7 @@ fn export_formats() {
         .unwrap()
         .write_all(b"\xff\n")
         .unwrap();
+    // Pin Claude so this assertion exercises its malformed-record policy explicitly.
     let (with_invalid_row, _) = w.cv_ok(&["export", "giant-export", "--format", "md", "--harness", "claude"]);
     assert_eq!(with_invalid_row, full);
 

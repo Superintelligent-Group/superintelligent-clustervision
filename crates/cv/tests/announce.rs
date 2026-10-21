@@ -1,7 +1,7 @@
 //! The behaviour contract behind docs/INTERFACE-V2.md §2, "blocking is opt-in and announced":
 //! every command `cv schema --commands --json` lists, run with stdout piped and stdin from
 //! /dev/null, exits within 5 s — except the two daemons (`serve`, `watch`), which must have said
-//! on stderr within 1 s what they are doing. Then the follow/for flags and the terminal-on-stdin
+//! on stderr within the 3 s test allowance what they are doing (see ANNOUNCE). Then the follow/for flags and the terminal-on-stdin
 //! readers, case by case. An agent ran `cv scry` once with no idea what it did; it printed nothing
 //! and waited forever (2026-10-18). This file is what makes that impossible again.
 

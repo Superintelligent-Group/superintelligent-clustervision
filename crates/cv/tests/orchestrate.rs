@@ -303,7 +303,7 @@ fn lanes_table_status_tokens_and_the_strand_class() {
     assert_eq!(a["status_source"], "task_notification");
     assert_eq!(a["stranded"], false);
     // Two usage-bearing assistant rows with distinct message ids: 100+10 input, 50+5 output,
-    // 1000 cache read → total 1165; two tool calls counted? one (Bash) — the text turn has none.
+    // 1000 cache read → total 1165; only Bash is a tool call, while the text turn contributes usage.
     assert_eq!(a["tokens"]["total"], 1165, "{a}");
     assert_eq!(a["tool_calls"], 1);
     let b = by_id("bbb2");

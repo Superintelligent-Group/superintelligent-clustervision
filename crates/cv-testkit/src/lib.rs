@@ -254,6 +254,8 @@ impl World {
     pub fn seed_task_log(&self, lines: &[Value]) {
         let dir = self.cv_home.join("tasks");
         fs::create_dir_all(&dir).unwrap();
+        // Mirrors cv-core/src/task/store.rs LOG_FORMAT/LOG_VERSION. The dependency fence
+        // keeps testkit independent of core, so format changes must update both spellings.
         let body = format!("{{\"format\":\"cv-task-log\",\"v\":1}}\n{}", jsonl(lines));
         fs::write(dir.join("events.jsonl"), body).unwrap();
     }
@@ -326,7 +328,9 @@ fn output_with_stdin(mut cmd: Command, text: &str) -> std::process::Output {
 }
 
 /// Claude Code transcript records, in the shapes the real harness writes. Every record carries
-/// `sessionId: "s"`; [`with`] adds or overrides fields.
+/// `sessionId: "s"`; [`with`] adds or overrides fields. The reference grammar is
+/// cv-core/src/harness/claude/record.rs and the harness-written cv-core/tests/corpus/claude data;
+/// the dependency fence prevents these independent builders from importing the codec.
 pub mod claude {
     use serde_json::{json, Value};
 

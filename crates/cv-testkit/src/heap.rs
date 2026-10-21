@@ -1,5 +1,5 @@
 //! Requested live Rust allocation counters for isolated diagnostic processes.
-//! Installing `Allocator` is opt-in; SQLite/C heaps, mmap, stacks and allocator overhead are excluded.
+//! Installing `Allocator` is opt-in; the GlobalAlloc implementation below defines what is counted.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
