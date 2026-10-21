@@ -26,33 +26,31 @@ pub(super) fn content(writer: &mut dyn Write, blocks: &[Block], mode: ThinkingMo
             projected.field("type", "text")?;
             projected.field_with("text", |w| wire::text(w, &text, resolver))?;
             projected.finish()?;
-        } else if let Block::ToolUse {
-            id,
-            name,
-            input,
-            namespace: Some(namespace),
-        } = block
-        {
-            if namespace == crate::affordance::DEFERRED {
-                // The adapter's own wrapper supplies OpenClaw's distinct {id,args} keys.
-                let crate::affordance::DeferredWrapper { name_key, args_key } =
-                    crate::harness::openclaw::DEFERRED_WRAPPER;
-                let mut call = ObjectWriter::new(writer)?;
-                call.field("type", anthropic::OPENCLAW.tool_use.0)?;
-                call.field("id", id)?;
-                call.field("name", crate::affordance::DEFERRED)?;
-                call.field_with(anthropic::OPENCLAW.tool_use.1, |w| {
-                    let mut wrapper = ObjectWriter::new(w)?;
-                    wrapper.field(name_key, name)?;
-                    wrapper.field_with(args_key, |w| input.write_canonical(&mut &mut *w))?;
-                    wrapper.finish()
-                })?;
-                call.finish()?;
-            } else {
-                anthropic::write::block(writer, block, &anthropic::OPENCLAW, false, resolver)?;
-            }
         } else {
-            anthropic::write::block(writer, block, &anthropic::OPENCLAW, false, resolver)?;
+            match block {
+                Block::ToolUse {
+                    id,
+                    name,
+                    input,
+                    namespace: Some(namespace),
+                } if namespace == crate::affordance::DEFERRED => {
+                    // The adapter's own wrapper supplies OpenClaw's distinct {id,args} keys.
+                    let crate::affordance::DeferredWrapper { name_key, args_key } =
+                        crate::harness::openclaw::DEFERRED_WRAPPER;
+                    let mut call = ObjectWriter::new(writer)?;
+                    call.field("type", anthropic::OPENCLAW.tool_use.0)?;
+                    call.field("id", id)?;
+                    call.field("name", crate::affordance::DEFERRED)?;
+                    call.field_with(anthropic::OPENCLAW.tool_use.1, |w| {
+                        let mut wrapper = ObjectWriter::new(w)?;
+                        wrapper.field(name_key, name)?;
+                        wrapper.field_with(args_key, |w| input.write_canonical(&mut &mut *w))?;
+                        wrapper.finish()
+                    })?;
+                    call.finish()?;
+                }
+                _ => anthropic::write::block(writer, block, &anthropic::OPENCLAW, false, resolver)?,
+            }
         }
     }
     writer.write_all(b"]")?;
