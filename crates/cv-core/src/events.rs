@@ -240,11 +240,12 @@ pub(crate) fn release_scratch(events: &mut Vec<Event>) {
     }
 }
 
-/// Correlate native completed file changes with already-classified visible calls by exact ID.
+/// Correlate native completed file changes by exact call ID and resolved target.
+/// Call markers and target pairs share one bounded set; completions use the other.
 /// Code-mode nested calls have their own native IDs and no visible ToolUse counterpart.
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 struct ExtractorState {
-    inferred_edits: std::collections::BTreeSet<String>,
+    inferred_keys: std::collections::BTreeSet<String>,
     #[serde(default)]
     completed: std::collections::BTreeSet<String>,
 }
@@ -268,14 +269,14 @@ impl Default for EventExtractor {
 impl EventExtractor {
     fn resume(state: ExtractorState) -> Result<Self> {
         anyhow::ensure!(
-            state.completed.is_subset(&state.inferred_edits),
+            state.completed.is_subset(&state.inferred_keys) && state.completed.iter().all(|key| key.starts_with('c')),
             "invalid inferred call checkpoint"
         );
         let mut extractor = Self {
-            pending: state.inferred_edits.len() - state.completed.len(),
+            pending: state.inferred_keys.iter().filter(|key| key.starts_with('c')).count() - state.completed.len(),
             ..Self::default()
         };
-        for id in state.inferred_edits {
+        for id in state.inferred_keys {
             extractor.inferred_edits.insert(id)?;
         }
         for id in state.completed {
@@ -292,20 +293,31 @@ impl EventExtractor {
 
     fn checkpoint(&self) -> Option<ExtractorState> {
         Some(ExtractorState {
-            inferred_edits: self.inferred_edits.memory_values()?.iter().cloned().collect(),
+            inferred_keys: self.inferred_edits.memory_values()?.iter().cloned().collect(),
             completed: self.completed.memory_values()?.iter().cloned().collect(),
         })
     }
 
     fn note_inferred(&mut self, id: &str) -> Result<()> {
-        if self.inferred_edits.insert_borrowed(id)? {
+        if self.inferred_edits.insert(format!("c{id}"))? {
             self.pending += 1;
         }
         Ok(())
     }
 
+    // Length-prefix the ID so arbitrary ID/path bytes cannot alias another pair or a call key.
+    fn target_key(id: &str, target: &str) -> String {
+        format!("p{}:{id}{target}", id.len())
+    }
+
+    fn note_target(&mut self, id: &str, target: &str) -> Result<()> {
+        self.note_inferred(id)?;
+        self.inferred_edits.insert(Self::target_key(id, target))?;
+        Ok(())
+    }
+
     fn complete(&mut self, id: &str) -> Result<()> {
-        if self.inferred_edits.contains(id)? && self.completed.insert_borrowed(id)? {
+        if self.inferred_edits.contains(&format!("c{id}"))? && self.completed.insert(format!("c{id}"))? {
             self.pending = self.pending.saturating_sub(1);
             if self.pending == 0 {
                 self.inferred_edits.clear();
@@ -355,17 +367,24 @@ fn extract_message(
     let ts = m.timestamp.map(|t| t.timestamp());
     // A file edit the harness record states outside its tool blocks, unless a call already did.
     if let Some(edit) = crate::harness::native_edit(m).filter(|edit| tool.is_none_or(|name| name == edit.tool)) {
-        if edit.id.map(|id| extractor.inferred_edits.contains(id)).transpose()? == Some(false) {
+        if let Some(id) = edit.id {
             let paths: std::collections::BTreeSet<_> = edit.paths.iter().map(|path| absolutize(path, cwd)).collect();
-            staged.extend(paths.into_iter().map(|path| Event {
-                msg_idx,
-                ts,
-                kind: "file_edit",
-                tool: Some(edit.tool.into()),
-                target: Some(path),
-                detail: None,
-                call: false,
-            }));
+            for path in paths {
+                if !extractor
+                    .inferred_edits
+                    .contains(&EventExtractor::target_key(id, &path))?
+                {
+                    staged.push(Event {
+                        msg_idx,
+                        ts,
+                        kind: "file_edit",
+                        tool: Some(edit.tool.into()),
+                        target: Some(path),
+                        detail: None,
+                        call: false,
+                    });
+                }
+            }
         }
     }
     for b in &m.content {
@@ -376,8 +395,10 @@ fn extract_message(
                 }
                 let before = staged.len();
                 extract_call_into(name, input, msg_idx, ts, cwd, &mut staged)?;
-                if staged[before..].iter().any(|event| event.kind == "file_edit") {
-                    extractor.note_inferred(id)?;
+                for event in staged[before..].iter().filter(|event| event.kind == "file_edit") {
+                    if let Some(target) = &event.target {
+                        extractor.note_target(id, target)?;
+                    }
                 }
             }
             Block::ToolResult {
@@ -452,6 +473,8 @@ fn classify_tool_view(
     input: JsonView<'_>,
     cwd: Option<&Path>,
 ) -> Result<Vec<(&'static str, Option<String>)>> {
+    let workdir = arguments::file_key(input, &["workdir", "cwd"])?.map(|path| PathBuf::from(absolutize(&path, cwd)));
+    let cwd = workdir.as_deref().or(cwd);
     let lname = name.to_ascii_lowercase();
     if lname.contains("patch") {
         let files = arguments::patch_rows(input)?;
@@ -684,6 +707,8 @@ mod db {
         agent_id: Option<String>,
         workflow: Option<String>,
         cwd: Option<String>,
+        // Required: old catalogs/checkpoints lack target-level correlation and must replay.
+        target_correlation: bool,
     }
 
     impl crate::source::Payload for Attributed {
@@ -696,6 +721,7 @@ mod db {
             agent_id: prov.agent_id.clone(),
             workflow: prov.workflow.clone(),
             cwd: r.cwd.as_ref().map(|p| p.to_string_lossy().into_owned()),
+            target_correlation: true,
         }
     }
 
@@ -1435,19 +1461,73 @@ mod tests {
     }
 
     #[test]
+    fn native_edits_reconcile_resolved_targets_and_command_workdir() {
+        let fixture = include_str!("../tests/fixtures/codex/direct_patch.jsonl");
+        for shell_cd in [false, true] {
+            let mut session = crate::harness::codex::parse_str("direct", fixture, true, None);
+            if shell_cd {
+                let Block::ToolUse { input, .. } = &mut session.messages[0].content[0] else {
+                    panic!("fixture must start with the shell call");
+                };
+                *input = json!({"cmd": "cd /home/corpus/project && apply_patch <<'PATCH'\n*** Begin Patch\n*** Update File: notes.txt\n*** End Patch\nPATCH"}).into();
+            }
+            // The native completion knows an additional path not understood by inference.
+            session.messages[1].extra["codex"]["item"]["changes"]["/home/corpus/project/extra.txt"] =
+                json!({"type":"update", "unified_diff":"", "move_path":null});
+            let mut before = EventSink::new(Some("/different/session".into()));
+            before.observe_message(&session.messages[0]);
+            let mut cp = Checkpoint::new(42);
+            before.checkpoint(&mut cp);
+            let cp = serde_json::from_slice(&serde_json::to_vec(&cp).unwrap()).unwrap();
+            let mut after = EventSink::resume(&cp).unwrap();
+            for message in &session.messages[1..] {
+                after.observe_message(message);
+            }
+            let mut paths: Vec<_> = before
+                .events()
+                .iter()
+                .chain(after.events())
+                .filter(|e| e.kind == "file_edit")
+                .map(|e| e.target.as_deref().unwrap())
+                .collect();
+            paths.sort();
+            assert_eq!(
+                paths,
+                ["/home/corpus/project/extra.txt", "/home/corpus/project/notes.txt"]
+            );
+        }
+    }
+
+    #[test]
     fn inferred_call_identity_spills_exactly_and_defers_checkpoints_until_closed() {
         let _world = crate::test_world("events-spilled-calls");
         let mut sink = EventSink::new(None);
         for i in 0..3000 {
-            sink.extractor.note_inferred(&format!("pending-{i}")).unwrap();
+            sink.extractor
+                .note_target(&format!("pending-{i}"), &format!("/repo/file-{i}.rs"))
+                .unwrap();
         }
         assert!(!sink.wants_checkpoint(1));
         let mut checkpoint = Checkpoint::new(1);
         sink.checkpoint(&mut checkpoint);
         assert!(EventSink::resume(&checkpoint).is_none());
-        assert!(sink.extractor.inferred_edits.contains("pending-0").unwrap());
-        assert!(sink.extractor.inferred_edits.contains("pending-2999").unwrap());
+        assert!(sink.extractor.inferred_edits.contains("cpending-0").unwrap());
+        assert!(sink.extractor.inferred_edits.contains("cpending-2999").unwrap());
         assert!(!sink.extractor.inferred_edits.contains("absent").unwrap());
+        let mut session = crate::harness::codex::parse_str(
+            "direct",
+            include_str!("../tests/fixtures/codex/direct_patch.jsonl"),
+            true,
+            None,
+        );
+        let native = &mut session.messages[1];
+        native.extra["codex"]["item"]["id"] = json!("pending-0");
+        native.extra["codex"]["item"]["changes"] = json!({
+            "/repo/file-0.rs": {"type":"update"}, "/repo/missed.rs": {"type":"update"}
+        });
+        sink.observe_message(native);
+        assert_eq!(sink.events().len(), 1);
+        assert_eq!(sink.events()[0].target.as_deref(), Some("/repo/missed.rs"));
         sink.extractor.complete("pending-0").unwrap();
         sink.extractor.complete("pending-0").unwrap();
         assert_eq!(sink.extractor.pending, 2999);

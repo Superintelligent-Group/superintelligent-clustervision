@@ -58,6 +58,7 @@ impl ExactStrings {
 
     /// Borrow keys that only need writing/comparison after spill. In-memory retention still owns
     /// its exact bytes, and uses the same payload-plus-slot budget as owned insertion.
+    #[cfg(feature = "sqlite")]
     pub(crate) fn insert_borrowed(&mut self, text: &str) -> Result<bool> {
         self.insert_text(Cow::Borrowed(text))
     }

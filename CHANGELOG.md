@@ -24,6 +24,7 @@
 - **Breaking (library):** `store_affordances` and `json_files` return `Result`; failed side-store reads now fail affordance views and count publication.
 
 - **Breaking (library):** forest and subagent-reference APIs return `Result`; unreadable forests fail views, queries, indexing and stats instead of hiding agents.
+- Reconcile native edits by call and resolved path; honor tool working directories and avoid guessing relative paths in compound shell commands.
 
 - Document `cv events` catalog writes and `--frozen`; update the manual for 0.18 counts, flags, diagnostics and migrations.
 - Qwen emission preserves absent cache counts and incomplete totals, and rejects overflowing usage aggregates.

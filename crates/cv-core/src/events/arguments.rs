@@ -221,7 +221,14 @@ pub(super) fn command_rows(view: JsonView<'_>, cap: usize) -> Result<Option<(Str
             patch.push(chunk);
             Ok(())
         })?;
-        patch.finish()
+        // A compound shell command may change directories before applying a patch. Without
+        // interpreting shell grammar, only a leading apply_patch has a known relative base.
+        // Absolute headers remain usable; native completions supply unresolved relative edits.
+        patch
+            .finish()
+            .into_iter()
+            .filter(|path| trigger.apply || std::path::Path::new(path).is_absolute())
+            .collect()
     } else {
         Vec::new()
     };
