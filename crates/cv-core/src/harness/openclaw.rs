@@ -2283,7 +2283,13 @@ mod tests {
             s.messages
         );
         for m in &s.messages {
-            assert!(m.extra.keys().all(|k| k == "openclaw"), "{:?}", m.extra);
+            assert!(
+                m.extra
+                    .keys()
+                    .all(|k| k == "openclaw" || (k == crate::ir::CV_NAMESPACE && m.is_synthesized())),
+                "{:?}",
+                m.extra
+            );
         }
 
         // Complete parse: everything rides along; off-branch rows are tagged.
@@ -2325,7 +2331,9 @@ mod tests {
         assert_eq!(si.text().as_deref(), Some("[session named: Named session]"));
         for m in &sink.messages {
             assert!(
-                m.extra.keys().all(|k| k == "openclaw" || k == crate::ir::CARRIER_KEY),
+                m.extra.keys().all(|k| k == "openclaw"
+                    || k == crate::ir::CARRIER_KEY
+                    || (k == crate::ir::CV_NAMESPACE && m.is_synthesized())),
                 "{:?}",
                 m.extra
             );
@@ -2446,7 +2454,7 @@ mod tests {
         assert_eq!(ocbag(compaction)["record_type"], "compaction");
         assert_eq!(ocbag(compaction)["tokensBefore"], 4321);
         assert_eq!(ocbag(compaction)["firstKeptEntryId"], "u1");
-        assert_eq!(compaction.text().as_deref(), Some("[conversation compacted]"));
+        assert!(compaction.content.is_empty() && compaction.is_synthesized());
         // The summary that seeds the next window is its own turn, hanging off the boundary; it is
         // the store's synthetic text, so it carries no entry id (hence the id list skips it).
         let summary = &s.messages[6];

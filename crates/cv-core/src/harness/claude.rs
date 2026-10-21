@@ -2015,6 +2015,22 @@ mod tests {
     }
 
     #[test]
+    fn bodyless_compaction_is_declared_without_transcript_text() {
+        let s = parse_str(
+            "s",
+            r#"{"type":"system","subtype":"compact_boundary","uuid":"b","parentUuid":"p","compactMetadata":{"trigger":"auto","preTokens":42}}"#,
+            None,
+        );
+        let m = &s.messages[0];
+        assert!(m.content.is_empty() && m.is_synthesized());
+        assert_eq!(m.kind, MessageKind::CompactionBoundary);
+        assert_eq!(m.id.as_deref(), Some("b"));
+        assert_eq!(m.parent_id.as_deref(), Some("p"));
+        assert_eq!(cl(m)["compactMetadata"]["preTokens"], 42);
+        assert!(crate::render::turn_label(m).contains("compaction_boundary"));
+    }
+
+    #[test]
     fn stop_hook_summary_with_output_surfaces_and_keeps_hook_metadata() {
         // A Stop-hook that fired with output (and a sibling that did nothing): the first surfaces
         // as a readable ⛓ line carrying its hook command + context; the no-op one stays dropped.

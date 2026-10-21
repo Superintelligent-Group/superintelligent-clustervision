@@ -829,7 +829,7 @@ impl<'a> Record<'a, '_> {
     /// notices) have no body and are dropped. `subtype`/`level`/metadata go to `extra` either way.
     fn system(&self) -> Result<Option<Message>> {
         // Format-complete: `system` records are carried verbatim. The lean passes *render* them
-        // (slash-command distillation, the synthesized `[conversation compacted]` marker, the ⛓
+        // (slash-command distillation, the compaction boundary, the ⛓
         // hook one-liner), which is lossy; carrying the raw record (system bodies are small
         // notices) is the only way `parse → emit` reproduces it.
         if self.opts.tier == Tier::Complete {
@@ -853,7 +853,7 @@ impl<'a> Record<'a, '_> {
                 }
             }
             return match render_hook_summary(&Value::Object(hooks)) {
-                Some(body) => self.system_msg(Text::Inline(body), &subtype),
+                Some(body) => self.system_msg(Some(Text::Inline(body)), &subtype),
                 None => Ok(None),
             };
         }
@@ -871,22 +871,18 @@ impl<'a> Record<'a, '_> {
             return Ok(None);
         }
         if let Some(text) = retry {
-            return self.system_msg(Text::Inline(text), &subtype);
+            return self.system_msg(Some(Text::Inline(text)), &subtype);
         }
         // Slash-command records wrap their payload in pseudo-XML tags; distill the tag soup to a
         // readable one/two-liner (these are always small, so they stay inline).
         if subtype == "local_command" {
             if let Some(c) = content.map(|v| v.resolve()).transpose()? {
                 if let Some(rendered) = render_slash_command(c.as_str().unwrap_or_default()) {
-                    return self.system_msg(Text::Inline(rendered), &subtype);
+                    return self.system_msg(Some(Text::Inline(rendered)), &subtype);
                 }
             }
         }
-        let text = match content {
-            Some(c) => c.lazy_text(self.opts.spans)?.unwrap_or_default(),
-            // compact_boundary often has only structured metadata; synthesize a marker.
-            None => Text::Inline("[conversation compacted]".to_string()),
-        };
+        let text = content.map(|c| c.lazy_text(self.opts.spans)).transpose()?.flatten();
         self.system_msg(text, &subtype)
     }
 
@@ -917,7 +913,7 @@ impl<'a> Record<'a, '_> {
         Ok(text.filter(|t| !t.trim().is_empty()))
     }
 
-    fn system_msg(&self, text: Text, subtype: &str) -> Result<Option<Message>> {
+    fn system_msg(&self, text: Option<Text>, subtype: &str) -> Result<Option<Message>> {
         // The subtype says what the notice IS: a compaction marker, an error the model never
         // answered, a Stop hook's output, a scheduled wakeup, or a plain harness notice.
         let (kind, origin) = match subtype {
@@ -958,23 +954,21 @@ impl<'a> Record<'a, '_> {
                 }
             }
         }
-        let mut extra = Map::new();
+        let mut m = match text {
+            Some(text) => {
+                let mut m = Message::of_kind(Role::System, kind, origin);
+                m.content.push(Block::Text { text });
+                m
+            }
+            None => Message::synthesized(kind, origin),
+        };
+        m.id = self.top.string("uuid")?;
+        m.parent_id = self.top.string("parentUuid")?;
+        m.timestamp = self.timestamp()?;
         if !bag.is_empty() {
-            extra.insert(Harness::Claude.as_str().into(), Value::Object(bag));
+            m.extra.insert(Harness::Claude.as_str().into(), Value::Object(bag));
         }
-        Ok(Some(Message {
-            complete_record: None,
-            id: self.top.string("uuid")?,
-            parent_id: self.top.string("parentUuid")?,
-            role: Role::System,
-            kind,
-            origin,
-            timestamp: self.timestamp()?,
-            model: None,
-            content: vec![Block::Text { text }],
-            usage: None,
-            extra,
-        }))
+        Ok(Some(m))
     }
 
     /// A `user` or `assistant` record. `None` when it has no `message` at all.

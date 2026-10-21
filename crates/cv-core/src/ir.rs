@@ -742,10 +742,10 @@ impl Message {
         m
     }
 
-    /// A turn cv inferred that the store never wrote as a record of its own (the compaction
-    /// boundary before a summary row, where the harness keeps only the summary). It has no content
-    /// and no id: nothing is invented but the turn itself, and that is declared in
-    /// `extra["cv"]["synthesized"] = {kind, origin}`. Renderers label it by kind
+    /// A contentless turn cv supplies for a harness boundary: inferred before a summary row,
+    /// or representing a structured boundary with no native text. It starts without an id;
+    /// adapters may retain the source record's identity and metadata. The representation is
+    /// declared in `extra["cv"]["synthesized"] = {kind, origin}`. Renderers label it by kind
     /// ([`crate::render::turn_label`]), so the text a reader sees comes from cv, not the transcript.
     pub fn synthesized(kind: MessageKind, origin: Origin) -> Self {
         let mut m = Message::of_kind(Role::System, kind, origin);

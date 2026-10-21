@@ -385,7 +385,15 @@ fn control(view: JsonView<'_>, top: &Fields<'_>, ty: &str, common: &Common, span
         "model_change" | "thinking_level_change" => MessageKind::ModelChange,
         _ => MessageKind::Notice,
     };
-    let mut m = common.message(Role::System, kind, Origin::Harness);
+    let mut m = if ty == "compaction" {
+        let mut m = Message::synthesized(kind, Origin::Harness);
+        m.id = common.id.clone();
+        m.parent_id = common.parent.clone();
+        m.timestamp = common.timestamp;
+        m
+    } else {
+        common.message(Role::System, kind, Origin::Harness)
+    };
     let bag = m.harness_extra_mut(Harness::OpenClaw);
     bag.insert("record_type".into(), Value::from(ty));
     view.for_each_entry(|key, value| {
@@ -395,7 +403,7 @@ fn control(view: JsonView<'_>, top: &Fields<'_>, ty: &str, common: &Common, span
         Ok(())
     })?;
     let text: Text = match ty {
-        "compaction" => "[conversation compacted]".into(),
+        "compaction" => Text::default(),
         "branch_summary" => lazy(top.get("summary"), spans)?,
         "reset" => format!(
             "[session reset: {}]",
@@ -599,14 +607,11 @@ fn message(top: &Fields<'_>, common: &Common, spans: bool) -> Result<Vec<Message
     }
     // The old single-record form: the record IS the compaction. The boundary keeps the entry's id
     // (what a later `firstKeptEntryId` / label points at) and counts; the summary hangs off it.
-    let mut boundary = Message::of_kind(Role::System, MessageKind::CompactionBoundary, Origin::Harness);
+    let mut boundary = Message::synthesized(MessageKind::CompactionBoundary, Origin::Harness);
     boundary.id = m.id.take();
     boundary.parent_id = m.parent_id.take();
     boundary.timestamp = m.timestamp;
-    boundary.extra = std::mem::take(&mut m.extra);
-    boundary.content.push(Block::Text {
-        text: "[conversation compacted]".into(),
-    });
+    boundary.extra.extend(std::mem::take(&mut m.extra));
     m.parent_id = boundary.id.clone();
     m.harness_extra_mut(Harness::OpenClaw)
         .insert("message_role".into(), Value::from(role_str));

@@ -462,7 +462,7 @@
         "assistant/reply"
       ],
       "blocks": {
-        "text": 17,
+        "text": 15,
         "thinking": 4,
         "tool_result": 1,
         "tool_use": 1

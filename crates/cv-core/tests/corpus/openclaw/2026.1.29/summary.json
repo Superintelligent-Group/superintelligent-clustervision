@@ -306,7 +306,7 @@
         "system/compaction_summary"
       ],
       "blocks": {
-        "text": 3,
+        "text": 2,
         "thinking": 2,
         "tool_result": 1,
         "tool_use": 1
