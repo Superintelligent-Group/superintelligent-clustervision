@@ -40,7 +40,12 @@ impl<const N: usize> StoredHead<N> {
 fn stored_id(store: &StoreReader, doc: DocId, id: Field) -> tantivy::Result<Option<String>> {
     stored_id_observed(store, doc, id, || {})
 }
-fn stored_id_observed(store: &StoreReader, doc: DocId, id: Field, fallback: impl FnOnce()) -> tantivy::Result<Option<String>> {
+fn stored_id_observed(
+    store: &StoreReader,
+    doc: DocId,
+    id: Field,
+    fallback: impl FnOnce(),
+) -> tantivy::Result<Option<String>> {
     let mut first: StoredHead<1> = store.get(doc)?;
     if let Some((field, value)) = first.fields[0].take() {
         if field == id {
@@ -256,7 +261,8 @@ impl SessionSegment {
             reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         if self.full_documents {
-            self.store.get::<TantivyDocument>(doc)
+            self.store
+                .get::<TantivyDocument>(doc)
                 .map(|stored| stored.get_first(self.id).and_then(|v| v.as_str()).map(str::to_owned))
         } else {
             stored_id_observed(&self.store, doc, self.id, || {
@@ -416,15 +422,27 @@ mod tests {
         let title = schema.add_text_field("title", tantivy::schema::STORED);
         let index = tantivy::Index::create_in_ram(schema.build());
         let mut writer = index.writer_with_num_threads(1, 15_000_000).unwrap();
-        for doc in [tantivy::doc!(id => "first"), tantivy::doc!(title => "title", id => "later"), tantivy::doc!(title => "missing")] {
+        for doc in [
+            tantivy::doc!(id => "first"),
+            tantivy::doc!(title => "title", id => "later"),
+            tantivy::doc!(title => "missing"),
+        ] {
             writer.add_document(doc).unwrap();
         }
         writer.commit().unwrap();
         let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut collector = TopSessions::new(id, 10);
         collector.fallback_reads = Some(count.clone());
-        let hits = index.reader().unwrap().searcher().search(&tantivy::query::AllQuery, &collector).unwrap();
-        assert_eq!(hits.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(), ["first", "later"]);
+        let hits = index
+            .reader()
+            .unwrap()
+            .searcher()
+            .search(&tantivy::query::AllQuery, &collector)
+            .unwrap();
+        assert_eq!(
+            hits.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
+            ["first", "later"]
+        );
         assert_eq!(count.load(std::sync::atomic::Ordering::Relaxed), 2);
     }
 

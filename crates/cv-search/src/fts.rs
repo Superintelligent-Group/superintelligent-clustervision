@@ -2375,11 +2375,16 @@ struct Preview {
 }
 impl Preview {
     fn new(text: &str) -> Self {
-        Self { chars: text.chars().count(), word_open: false }
+        Self {
+            chars: text.chars().count(),
+            word_open: false,
+        }
     }
     fn push(&mut self, out: &mut String, text: &str) {
         for c in text.chars() {
-            if self.chars >= PREVIEW_CHARS { break; }
+            if self.chars >= PREVIEW_CHARS {
+                break;
+            }
             if c.is_whitespace() {
                 self.word_open = false;
             } else {
