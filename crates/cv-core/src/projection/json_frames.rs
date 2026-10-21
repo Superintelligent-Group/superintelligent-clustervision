@@ -130,7 +130,7 @@ pub fn write_frames(
     };
     let mut array = Array {
         field,
-        frames: frames.reader()?,
+        frames: Some(frames.reader()?),
         framing,
         position,
         depth: 0,
@@ -167,7 +167,7 @@ pub fn write_frames(
 
 struct Array<'a> {
     field: &'a str,
-    frames: Box<dyn Read + 'a>,
+    frames: Option<Box<dyn Read + 'a>>,
     framing: Framing<'a>,
     position: Rc<Cell<u64>>,
     depth: usize,
@@ -204,7 +204,10 @@ impl Array<'_> {
             self.record_end();
             inner.end_array_value(w)?;
         }
-        let frames = std::mem::replace(&mut self.frames, Box::new(io::empty()));
+        let frames = self
+            .frames
+            .take()
+            .ok_or_else(|| io::Error::other("JSON frames already consumed"))?;
         let mut frames = io::BufReader::with_capacity(64 * 1024, frames);
         while !frames.fill_buf()?.is_empty() {
             if frames.fill_buf()?[0] != 0x1e {
