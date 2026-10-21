@@ -584,11 +584,12 @@ fn read_jsonl(
             sink,
             &mut published,
         )
-    })?;
+    });
     if published {
+        // Completion validates the source even when the consumer stopped with an error.
         read.check()?;
     }
-    Ok(session)
+    session
 }
 
 /// Where a retained message lives: a byte range of the source, or an owned value (records of a

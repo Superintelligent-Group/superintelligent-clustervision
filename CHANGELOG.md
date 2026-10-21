@@ -39,6 +39,8 @@
 
 - Reconcile native edits by call and resolved path; honor tool working directories and avoid guessing relative paths in compound shell commands.
 - Semantic indexing caps transcript heads at 64 KiB of decoded text, independent of JSON escaping, with bounded heap.
+- Gemini JSONL reads report source mutation even when the final consumer callback also fails.
+
 - Restore standalone wasm and no-default-features builds by gating the SQLite-only compaction resolver constructor.
 
 - Read-only checkpointed catalogs retain writer-version observations and warm listings without accepting publications or bypassing live WAL contents.
