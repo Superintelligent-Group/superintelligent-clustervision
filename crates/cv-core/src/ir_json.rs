@@ -240,6 +240,8 @@ impl<W: Write> SerializeStruct for Fields<'_, W> {
         self.writer
             .write_all(if self.pretty { b": " } else { b":" })
             .map_err(OutputError::from)?;
+        // Serde supplies these keys from the IR derives. Intercept only source-backed fields
+        // to stream their contents; every other field keeps its ordinary serde representation.
         match (self.context, key) {
             (Context::Session(session), "messages") => self.messages(&session.messages),
             (Context::Message(message), "content") => self.content(&message.content),
@@ -394,9 +396,8 @@ impl<W: Write> Write for BaseIndent<'_, W> {
     }
 }
 
-// Whitespace-only transform of already canonical JSON. Delimiters inside escaped string
-// chunks are untouched; the stack holds only a nonempty bit for each nesting level.
 /// Whitespace transform for already validated compact JSON, preserving string bytes.
+/// The stack holds only a nonempty bit for each nesting level.
 /// This is not a JSON parser or acceptance boundary. One writer represents one complete value.
 pub struct PrettyJson<'a, W> {
     writer: &'a mut W,

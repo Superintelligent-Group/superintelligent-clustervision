@@ -1176,7 +1176,7 @@ impl SessionRef {
     }
 
     /// A ref for a transcript named by path alone: the id is the file stem, the harness is the
-    /// caller's, and nothing else is known (no cwd/title/timestamps, `message_count` 0). The one
+    /// caller's, and nothing else is known (no cwd/title/timestamps, `message_count: None`). The one
     /// spelling for "read this file as a session" — a CLI given a path, a test over a fixture, a
     /// reshape verb opening the file it just wrote.
     pub fn from_path(path: impl Into<PathBuf>, harness: Harness) -> SessionRef {

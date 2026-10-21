@@ -508,7 +508,7 @@ pub struct HarnessCensus {
     pub block_types: BTreeMap<String, u64>,
     /// The record vocabulary the adapter did NOT interpret: carriers, keyed by their record type.
     pub records: BTreeMap<String, RecordStat>,
-    /// Which of the manifest's `handled`/`carried` types did not show up in these sessions
+    /// Which of the manifest's `carried` types did not show up in these sessions
     /// (informational: either rare, or the sample is small).
     pub unseen_manifest_types: Vec<String>,
 }
