@@ -9,7 +9,7 @@ pub struct SourceText {
     pub(crate) skip: usize,
     // Immutable producer count for a complete generated string. Private deferred transport may
     // omit this optional optimization; restored strings retain the checked decoding fallback.
-    pub(crate) known_len: Option<usize>,
+    known_len: Option<usize>,
 }
 impl PartialEq for SourceText {
     fn eq(&self, other: &Self) -> bool {
@@ -23,6 +23,13 @@ impl SourceText {
             range,
             skip: 0,
             known_len: None,
+        }
+    }
+    /// A producer-validated string whose decoded byte count is already known.
+    pub(crate) fn generated(range: Arc<JsonRange>, decoded_len: usize) -> Self {
+        Self {
+            known_len: Some(decoded_len),
+            ..Self::new(range)
         }
     }
     pub fn path(&self) -> &std::path::Path {

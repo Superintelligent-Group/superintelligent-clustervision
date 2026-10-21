@@ -360,9 +360,10 @@ impl JsonSource {
             // The controlled producer has completed and strictly encoded this entire string.
             // Construct its descriptor without remapping/scanning the bytes it just emitted.
             range.check_retained_bounds()?;
-            let mut text = crate::lazy::SourceText::new(Arc::new(range));
-            text.known_len = Some(decoded_len);
-            Ok(crate::lazy::Text::Source(text))
+            Ok(crate::lazy::Text::Source(crate::lazy::SourceText::generated(
+                Arc::new(range),
+                decoded_len,
+            )))
         } else {
             range.with_validation(Validation::Cached, |view| {
                 view.source_text()?.context("constructed JSON string")
