@@ -346,6 +346,8 @@ pub struct Identity {
 /// A whole-session parse is not a fourth method: it is [`stream::collect`](crate::stream::collect)
 /// over `stream`, spelled `adapter.parse(&r)` on a `dyn Adapter`, so the streaming and the
 /// whole-session readers cannot diverge.
+/// Incremental reads are optional: checkpoint/resume methods default to declining, while
+/// source and dependency methods describe the inputs consumers must validate before reuse.
 ///
 /// `Send + Sync` so [`crate::discover_all`] can fan discovery across adapters in parallel. Every
 /// adapter holds only path data (connections are opened per call), so this bound is always satisfied.

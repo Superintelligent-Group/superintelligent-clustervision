@@ -29,7 +29,9 @@ The workspace also contains the CLI crate and `cv-testkit`.
 - `cv`: `cv <verb>`, `cv mcp`, `cv serve`, `cv watch`. The former `cvd` and `cv-mcp` binaries are
   these subcommands. The MCP roster is generated from the in-process clap tree, so it cannot skew
   from the CLI (it once shelled out to whatever `cv` was on PATH, and found a stale one).
-- **An adapter is `roots + discover + record-to-Message stream`, plus its emitter.** Its size is
+- **An adapter is `roots + discover + record-to-Message stream`, plus its emitter.** Optional
+  checkpoint/resume methods default to declining; source/dependency methods bound safe reuse
+  (`harness::Adapter`). This incremental store glue is part of **G** below. Its size is
   `S + Q + C + G + E`: the store description **S** (60-150 lines, plus about 25 per SQL table
   queried); genuine format quirks **Q** (0-400: Gemini's `$set`/`$rewindTo` replay, Kimi's
   rotation fingerprints, Codex's held `token_count`, OpenClaw's tree selection, Devin's forest);
