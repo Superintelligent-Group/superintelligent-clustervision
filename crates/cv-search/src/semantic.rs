@@ -28,6 +28,11 @@
 //! the vectors — is fixed-width. A pre-binary all-JSON store is rejected like any bad magic:
 //! `cv index --semantic` rebuilds it.
 
+
+#[cfg(test)]
+#[path = "semantic_actual_probe.rs"]
+mod actual_probe;
+
 use crate::Hit;
 use anyhow::{bail, Context, Result};
 use cv_core::source::{Baseline, Probe, ReadSet};
@@ -376,7 +381,7 @@ pub fn embed_sessions(path: &Path, refs: &[cv_core::SessionRef]) -> Result<usize
         );
     }
     // No model acquisition is needed to remove the last session or publish an empty inventory.
-    let spec = resolve_model(!refs.is_empty())?;
+    let spec = resolve_model(true)?;
     let key = spec.as_ref().map_or_else(model_id, |s| s.key.clone());
     let reads = spec.as_ref().map_or_else(ReadSet::default, |s| s.reads.clone());
     let mut model = None;
@@ -503,19 +508,18 @@ fn refresh(
     let mut before = Probe::default();
     for &r in &refs {
         let snapshot = before.snapshot(r);
-        let reused = compatible
-            && lookup
-                .get(&(r.harness.as_str(), r.id.as_str()))
-                .copied()
-                .flatten()
-                .is_some_and(|i| {
-                    let m = &old.meta[i];
-                    let fresh =
-                        m.session == *r && m.source.as_ref().is_some_and(|old| old.fresh(&snapshot, &mut before));
-                    keep[i] |= fresh;
-                    fresh
-                });
-        if !reused {
+        let reusable = lookup
+            .get(&(r.harness.as_str(), r.id.as_str()))
+            .copied()
+            .flatten()
+            .filter(|&i| {
+                let m = &old.meta[i];
+                compatible && m.session == *r && m.source.as_ref().is_some_and(|old| old.fresh(&snapshot, &mut before))
+            });
+        if let Some(i) = reusable {
+            keep[i] = true;
+        }
+        if reusable.is_none() {
             changed.push((r, snapshot));
         }
     }
@@ -2697,7 +2701,3 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 }
-
-#[cfg(test)]
-#[path = "semantic_actual_probe.rs"]
-mod actual_probe;
