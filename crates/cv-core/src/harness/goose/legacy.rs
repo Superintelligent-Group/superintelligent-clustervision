@@ -222,7 +222,15 @@ mod tests {
     fn metadata_discovery_preserves_header_and_whole_utf8_policy() {
         let world = crate::test_world("goose-legacy-discovery");
         let path = world.base.join("legacy.jsonl");
-        let observe = |r: Option<SessionRef>| serde_json::to_value(r).unwrap();
+        // Frozen from the retired whole-file `Value` reader (decision 11: goldens, not oracles).
+        let mut frozen = crate::emit::frozen::Frozen::new("goose-legacy-discovery");
+        let mut observe = |label: String| {
+            let mut r = serde_json::to_value(discover("legacy", &path).ok()).unwrap();
+            if let Some(r) = r.as_object_mut() {
+                r.remove("path");
+            }
+            frozen.insert(label, r);
+        };
         let cases: Vec<Vec<u8>> = vec![
   vec![], b"\n".to_vec(), b"{bad}\nnull\n[1]\n3\ntrue\n{}\n".to_vec(),
   br#"{"description":"old","description":"new","working_dir":"/repo","created_at":1704067200,"updated_at":"2024-01-01 12:00:00"}
@@ -248,12 +256,9 @@ mod tests {
         let mut cases = cases;
         cases.push([b"{}\n{bad".as_slice(), &vec![b'x'; 70_000], b"\xff\n{}\n"].concat());
         cases.push([b"{}\n{bad".as_slice(), &vec![b'x'; 70_000], b"\n{}\n"].concat());
-        for bytes in cases {
+        for (i, bytes) in cases.into_iter().enumerate() {
             std::fs::write(&path, bytes).unwrap();
-            assert_eq!(
-                observe(discover("legacy", &path).ok()),
-                observe(legacy_oracle("legacy", &path))
-            );
+            observe(format!("case {i}"));
         }
         for escaped in [false, true] {
             let body = if escaped { "\\n雪" } else { "x雪" }.repeat(100_000);
@@ -261,28 +266,23 @@ mod tests {
             let row = serde_json::json!({"role":"user","content":[{"type":"text","text":body}]});
             let text = format!("{header}\n{row}\n{{\"role\":\"assistant\",\"content\":[]}}");
             std::fs::write(&path, text).unwrap();
-            assert_eq!(
-                observe(discover("legacy", &path).ok()),
-                observe(legacy_oracle("legacy", &path))
-            );
+            observe(format!("body escaped={escaped}"));
         }
-        for title in [
+        for (j, title) in [
             " ".repeat(100_000),
             format!("{}Meaning", " \u{2003}".repeat(100_000)),
             "雪\n".repeat(100_000),
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             std::fs::write(&path, serde_json::json!({"description":title}).to_string()).unwrap();
-            assert_eq!(
-                observe(discover("legacy", &path).ok()),
-                observe(legacy_oracle("legacy", &path))
-            );
+            observe(format!("title {j}"));
         }
         let deep = format!("{{}}\n{}0{}\n{{\"role\":\"user\"}}\n", "[".repeat(129), "]".repeat(129));
         std::fs::write(&path, deep).unwrap();
-        assert_eq!(
-            observe(discover("legacy", &path).ok()),
-            observe(legacy_oracle("legacy", &path))
-        );
+        observe("deep".to_string());
+        frozen.check().unwrap();
     }
 
     fn collected(path: &Path, opts: &Demand) -> Session {
@@ -444,34 +444,5 @@ mod tests {
             &mut ChangeAtStop(path.clone())
         )
         .is_err());
-    }
-
-    fn legacy_oracle(name: &str, path: &Path) -> Option<SessionRef> {
-        let text = std::fs::read_to_string(path).ok()?;
-        let mut lines = text.lines();
-        let header: Value = lines
-            .next()
-            .and_then(|l| serde_json::from_str(l).ok())
-            .unwrap_or(Value::Null);
-        let title = header
-            .get("description")
-            .and_then(Value::as_str)
-            .filter(|s| !s.trim().is_empty())
-            .map(|s| crate::ir::truncate(s, crate::ir::Head::TITLE));
-        let cwd = header
-            .get("working_dir")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .map(PathBuf::from);
-        Some(SessionRef {
-            id: name.to_string(),
-            harness: Harness::Goose,
-            path: path.to_path_buf(),
-            cwd,
-            title,
-            created_at: header.get("created_at").and_then(parse_ts_value),
-            updated_at: header.get("updated_at").and_then(parse_ts_value),
-            message_count: None,
-        })
     }
 }

@@ -202,35 +202,6 @@ mod tests {
         json!({"type": "queue-operation", "operation": "enqueue", "timestamp": ts})
     }
 
-    fn legacy_head(path: &Path) -> Option<Head> {
-        let mut newest: Option<DateTime<Utc>> = None;
-        for line in BufReader::new(fs::File::open(path).ok()?).lines().take(HEAD_LINES) {
-            let Ok(line) = line else { break };
-            let Ok(v) = serde_json::from_str::<Value>(&line) else {
-                continue;
-            };
-            let at = v
-                .get("timestamp")
-                .and_then(Value::as_str)
-                .and_then(super::super::parse_ts);
-            if let Some(uuid) = v.get("uuid").and_then(Value::as_str) {
-                let boundary = v.get("subtype").and_then(Value::as_str) == Some("compact_boundary")
-                    && v.get("parentUuid").is_none_or(Value::is_null);
-                return Some(Head {
-                    uuid: uuid.into(),
-                    at,
-                    boundary,
-                    copied: boundary || matches!((at,newest), (Some(a),Some(n)) if a<n),
-                    began: newest,
-                });
-            }
-            if let Some(a) = at {
-                newest = Some(newest.map_or(a, |n| n.max(a)));
-            }
-        }
-        None
-    }
-
     #[test]
     fn projected_heads_match_value_validation_and_physical_line_limits() {
         let w = crate::test_world("fork-head-projection");
@@ -264,14 +235,17 @@ mod tests {
             )
             .into_bytes(),
         );
-        let observe = |head: Option<Head>| head.map(|h| (h.uuid, h.at, h.boundary, h.copied, h.began));
+        // Frozen from the retired line/`Value` head reader (decision 11: goldens, not oracles).
+        let mut frozen = crate::emit::frozen::Frozen::new("claude-fork-heads");
         for (i, bytes) in cases.iter().enumerate() {
             fs::write(&path, bytes).unwrap();
-            assert_eq!(observe(head(&path)), observe(legacy_head(&path)), "case {i}");
+            let observed = head(&path).map(|h| (h.uuid, h.at, h.boundary, h.copied, h.began));
+            frozen.insert(format!("case {i}"), serde_json::to_value(observed).unwrap());
         }
+        frozen.check().unwrap();
         // An invalid UTF-8 line is one rejected record, not the end of the file.
         fs::write(&path, [b"\xff\n".as_slice(), uuid.as_bytes()].concat()).unwrap();
-        assert_eq!(observe(head(&path)).map(|h| h.0), Some("shared".to_owned()));
+        assert_eq!(head(&path).map(|h| h.uuid).as_deref(), Some("shared"));
         fs::write(&path, [b"prefix\n\xff\n".as_slice(), b"needle\n"].concat()).unwrap();
         assert!(holds(&path, "needle"));
     }

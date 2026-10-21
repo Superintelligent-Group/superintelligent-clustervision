@@ -1,13 +1,14 @@
 //! The recorded-output oracle: a test names a golden under `tests/fixtures/emit-frozen/`, inserts
 //! labelled entries, and `check` compares them with the file (shared by every emitter and
-//! distill test, not by Grok and Qwen alone).
+//! distill test and by the readers whose retired oracles it froze: Goose legacy discovery,
+//! Claude fork heads; token stats froze its own in the purge lane).
 use anyhow::Result;
 use serde_json::Value;
 use std::{fs, path::Path};
 
 /// Output goldens per test under `tests/fixtures/emit-frozen/`, frozen from retired oracles
-/// (the pre-streaming emitters, distill's pre-sharing products). `CV_REGEN_CORPUS=1` rewrites
-/// them; explain every diff in the commit.
+/// (the pre-streaming emitters, distill's pre-sharing products, the reader oracles above).
+/// `CV_REGEN_CORPUS=1` rewrites them; explain every diff in the commit.
 pub(crate) struct Frozen(pub(crate) std::collections::BTreeMap<String, Value>, &'static str);
 
 impl Frozen {
