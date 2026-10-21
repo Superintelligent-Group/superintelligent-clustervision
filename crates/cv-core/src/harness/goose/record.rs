@@ -164,8 +164,10 @@ pub(super) fn content(
                 _ => continue,
             };
             if let Text::Span(span) = text {
-                let crate::json::Json::Source(range) = source.validated_range(span.offset - 1, span.len + 2)? else {
-                    unreachable!("validated range is source-backed");
+                let offset = span.offset.checked_sub(1).context("Goose string span has no opening quote")?;
+                let len = span.len.checked_add(2).context("Goose quoted string span overflows")?;
+                let crate::json::Json::Source(range) = source.validated_range(offset, len)? else {
+                    anyhow::bail!("validated Goose string range is not source-backed");
                 };
                 *text = Text::Source(crate::lazy::SourceText::new(range));
             }
@@ -182,7 +184,7 @@ fn control(item: JsonView<'_>, ty: Option<&str>, d: &mut Decoded, opts: &Demand,
         item,
         &["kind", "message", "msg", "toolName", "data", "actionType", "id"],
     )?
-    .expect("object with type");
+    .context("Goose control record must be an object with a type")?;
     let (prefix, payload, suffix) = match ty {
         Some("error") => (
             format!("[error: {}] ", fields.string("kind")?.unwrap_or_else(|| "other".into())),
