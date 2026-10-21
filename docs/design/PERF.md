@@ -21,6 +21,11 @@ This document records measurements rather than latency, throughput, or fleet-siz
 First-run discovery, unchanged indexing, appends and full recounts need separate measurements:
 they do different work, and a result on one fleet is not a promise for another.
 
+An API window publication validates one baseline with the captured read set attached; it does
+not separately revalidate that same set. Cache admission and publication remain separate
+checks because a source can change between them. The number of file identity checks therefore
+scales with distinct dependencies and publication boundaries, not message count.
+
 ## How to measure without lying
 
 - Copy the catalog and index into a scratch `CLUSTERVISION_HOME`; transcripts are read-only. For
