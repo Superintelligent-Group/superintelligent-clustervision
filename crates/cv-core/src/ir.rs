@@ -1000,6 +1000,11 @@ impl PartialEq for Usage {
 }
 
 impl Usage {
+    /// Whether the source recorded no token counts or cost (recorded zeroes are present).
+    pub fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
+
     /// Every prompt token the call read: uncached input + cache reads + cache writes.
     pub fn prompt_tokens(&self) -> u64 {
         self.input_tokens
