@@ -190,11 +190,10 @@ impl State {
 
 /// One session's position, as the cursor carries it. The field names are the wire: `t` the
 /// trigger, `n` the parsed count, `b` a byte baseline not yet resolved (see [`Mark::Bytes`]),
-/// `more` the pending flag. Optional fields keep a cursor issued before they existed decoding.
+/// `more` the pending flag. Exactly one of `n` and `b` holds the mark.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Pos {
     t: (Option<usize>, Option<i64>),
-    /// Absent while `b` holds the mark (a cursor issued before it was optional says 0 there).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     n: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -221,16 +220,12 @@ impl From<&State> for Pos {
     }
 }
 
-impl From<Pos> for State {
-    fn from(p: Pos) -> State {
-        State {
-            trigger: p.t,
-            mark: match p.b {
-                Some(len) => Mark::Bytes(len),
-                None => Mark::Messages(p.n.unwrap_or(0)),
-            },
-            pending: p.more,
-            read: p.r,
+impl Pos {
+    fn mark(&self) -> Option<Mark> {
+        match (self.n, self.b) {
+            (Some(n), None) => Some(Mark::Messages(n)),
+            (None, Some(len)) => Some(Mark::Bytes(len)),
+            _ => None,
         }
     }
 }
@@ -246,7 +241,7 @@ pub struct Cursor {
     o: BTreeMap<String, Pos>,
 }
 
-const CURSOR_VERSION: u32 = 1;
+const CURSOR_VERSION: u32 = 2;
 
 impl Cursor {
     /// The compact string a caller carries between polls.
@@ -254,9 +249,12 @@ impl Cursor {
         serde_json::to_string(self).expect("a cursor serializes")
     }
 
-    /// `None` when `s` is not a cursor this build issued (unparseable, or another version).
+    /// `None` when `s` is not a cursor this build issued (unparseable, another version, or a
+    /// position without exactly one mark).
     pub fn decode(s: &str) -> Option<Cursor> {
-        serde_json::from_str::<Cursor>(s).ok().filter(|c| c.v == CURSOR_VERSION)
+        serde_json::from_str::<Cursor>(s)
+            .ok()
+            .filter(|c| c.v == CURSOR_VERSION && c.o.values().all(|p| p.mark().is_some()))
     }
 
     /// How many sessions the cursor positions.
@@ -395,7 +393,19 @@ impl Watcher {
     pub fn from_cursor(filter: Filter, cursor: Cursor, discover: fn() -> Vec<SessionRef>) -> Self {
         Watcher {
             filter,
-            seen: cursor.o.into_iter().map(|(k, p)| (k, State::from(p))).collect(),
+            seen: cursor
+                .o
+                .into_iter()
+                .filter_map(|(k, p)| {
+                    let state = State {
+                        trigger: p.t,
+                        mark: p.mark()?,
+                        pending: p.more,
+                        read: p.r,
+                    };
+                    Some((k, state))
+                })
+                .collect(),
             discover,
         }
     }
@@ -1600,8 +1610,8 @@ mod tests {
     }
 
     #[test]
-    fn optional_resume_state_is_bounded_and_old_cursors_keep_positions() {
-        let _world = crate::test_world("watch-optional_resume_state_is_bounded_and_old_cursors_keep_positions");
+    fn optional_resume_state_is_bounded_and_marks_are_exclusive() {
+        let _world = crate::test_world("watch-optional_resume_state_is_bounded_and_marks_are_exclusive");
         let mut watcher = Watcher::with_discovery(Filter::default(), true, Vec::new);
         let r = sref(
             Harness::Claude,
@@ -1622,8 +1632,8 @@ mod tests {
         assert_eq!(cursor.len(), 32);
         assert_eq!(cursor.o.values().filter(|pos| pos.r.is_some()).count(), 8);
         assert!(cursor.encode().len() < 512 * 1024 + 4096);
-        let old = Cursor::decode(r#"{"v":1,"o":{"old":{"t":[8,null],"n":3,"more":true}}}"#).unwrap();
-        assert_eq!(old.o["old"].n, Some(3));
+        let sparse = Cursor::decode(r#"{"v":2,"o":{"s":{"t":[8,null],"n":3,"more":true}}}"#).unwrap();
+        assert_eq!(sparse.o["s"].n, Some(3));
         let byte_mark = Pos::from(&State {
             trigger: (None, None),
             mark: Mark::Bytes(5),
@@ -1631,10 +1641,13 @@ mod tests {
             read: None,
         });
         assert_eq!(serde_json::to_string(&byte_mark).unwrap(), r#"{"t":[null,null],"b":5}"#);
-        let issued: Pos = serde_json::from_str(r#"{"t":[null,null],"n":0,"b":5}"#).unwrap();
-        assert!(matches!(State::from(issued).mark, Mark::Bytes(5)));
-        assert!(old.o["old"].more);
-        assert!(old.o["old"].r.is_none());
+        assert!(sparse.o["s"].more);
+        assert!(sparse.o["s"].r.is_none());
+        for unmarked in [r#"{"t":[null,null],"n":0,"b":5}"#, r#"{"t":[null,null]}"#] {
+            assert!(Cursor::decode(&format!(r#"{{"v":2,"o":{{"x":{unmarked}}}}}"#)).is_none(), "{unmarked}");
+        }
+        let v1 = r#"{"v":1,"o":{"x":{"t":[8,null],"n":3}}}"#;
+        assert!(Cursor::decode(v1).is_none(), "a 0.17 cursor starts a fresh baseline");
     }
 
     #[test]

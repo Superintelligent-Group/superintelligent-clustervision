@@ -518,7 +518,7 @@ fn observe_stream_bounded_read_only_tail() {
     assert_eq!(v["messages"].as_array().unwrap().len(), 0, "{text}");
     assert_eq!(v["more_pending"], false, "{text}");
     assert!(
-        v["cursor"].as_str().unwrap().contains("\"v\":1"),
+        v["cursor"].as_str().unwrap().contains("\"v\":2"),
         "cursor is versioned: {text}"
     );
 
