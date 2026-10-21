@@ -102,13 +102,15 @@ fn subagent_events(
     let mut out = Vec::new();
     for s in subs {
         let mut sink = EventSink::new(s.session.cwd.clone());
-        // Best-effort: a single unreadable sub-agent transcript shouldn't abort the whole forest.
-        if adapter
-            .stream(&s.session, &Demand::LEAN.with_spans(), &mut sink)
-            .is_err()
-        {
-            continue;
-        }
+        adapter
+            .try_stream(&s.session, &Demand::LEAN.with_spans(), &mut sink)
+            .with_context(|| {
+                format!(
+                    "reading events for subagent {} ({})",
+                    s.session.id,
+                    s.session.path.display()
+                )
+            })?;
         let evs: Vec<_> = sink
             .into_events()?
             .into_iter()
@@ -232,4 +234,24 @@ pub(crate) fn cmd_touched(path: &str, edits_only: bool, json: bool) -> Result<()
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn unreadable_subagent_events_fail_with_identity() {
+        let world = crate::test_world("events-unreadable-agent");
+        let agent = cv_core::AgentRef {
+            session: cv_core::SessionRef::new("agent-failed", cv_core::Harness::Claude, &world.home),
+            agent_type: None,
+            description: None,
+            tool_use_id: None,
+            workflow: None,
+            result_status: None,
+            result_summary: None,
+        };
+        let error = subagent_events(vec![agent], cv_core::Harness::Claude, None).unwrap_err();
+        assert!(format!("{error:#}").contains("agent-failed"));
+    }
 }

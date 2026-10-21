@@ -156,7 +156,7 @@ impl Archive {
 
     fn catalog_entries(raw: &str) -> Vec<CatalogEntry> {
         let mut map: BTreeMap<(String, String), CatalogEntry> = BTreeMap::new();
-        for line in raw.lines() {
+        for (index, line) in raw.lines().enumerate() {
             let line = line.trim();
             if line.is_empty() {
                 continue;
@@ -171,7 +171,7 @@ impl Archive {
                         }
                     }
                 }
-                Err(e) => eprintln!("cv archive: skipping corrupt catalog line: {e}"),
+                Err(e) => eprintln!("cv archive: skipping corrupt catalog line {}: {e}", index + 1),
             }
         }
         map.into_values().collect()
@@ -347,7 +347,17 @@ pub(crate) fn cmd_watch(archive: &Archive, interval: f64, harness: Option<String
     // Not `Watcher::run` (which never returns and takes the closure by value): a manual loop keeps
     // ownership of `archive` and reads identically.
     loop {
-        watcher.poll_sources(|kind, r, previous| archive_event(archive, r, kind, previous));
+        let mut fatal = None;
+        watcher.poll_sources(|kind, r, previous| match archive_event(archive, r, kind, previous) {
+            Ok(pass) => pass,
+            Err(error) => {
+                fatal = Some(error);
+                None
+            }
+        });
+        if let Some(error) = fatal {
+            return Err(error);
+        }
         std::thread::sleep(interval);
     }
 }
@@ -358,13 +368,18 @@ fn archive_event(
     r: &SessionRef,
     kind: EventKind,
     previous: usize,
-) -> Option<(usize, cv_core::watch::ReadState)> {
-    let adapter = cv_core::harness::for_harness(r.harness)?;
-    let pass = match archive.store_ref(adapter.as_ref(), r) {
+) -> Result<Option<(usize, cv_core::watch::ReadState)>> {
+    let adapter = cv_core::harness::rootless(r.harness).with_context(|| {
+        format!(
+            "archive cannot read {}: no adapter for {} in this build",
+            r.id, r.harness
+        )
+    })?;
+    let pass = match archive.store_ref(adapter, r) {
         Ok(pass) => pass,
         Err(e) => {
             eprintln!("[archive-fail] {} {}: {e:#}", r.harness, short_id(&r.id));
-            return None;
+            return Ok(None);
         }
     };
     match pass.outcome {
@@ -383,7 +398,7 @@ fn archive_event(
         }
         StoreOutcome::Skipped => {}
     }
-    Some((pass.total, pass.read))
+    Ok(Some((pass.total, pass.read)))
 }
 
 /// `cv archive ls`: what's in the archive, newest activity first.
@@ -429,6 +444,25 @@ pub(crate) fn cmd_path(archive: &Archive) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn archive_event_retries_a_failed_source_then_reads_without_a_detected_store() {
+        let world = cv_testkit::World::in_process("archive-detached", cv_core::env::Env::enter_isolated);
+        let archive = Archive::resolve(Some(world.base.join("archive"))).unwrap();
+        let path = world.base.join("detached.jsonl");
+        fs::create_dir(&path).unwrap();
+        let r = SessionRef::new("detached", Harness::Claude, &path);
+        assert!(archive_event(&archive, &r, EventKind::New, 0).unwrap().is_none());
+        fs::remove_dir(&path).unwrap();
+        fs::write(
+            &path,
+            r#"{"type":"user","uuid":"u","sessionId":"detached","message":{"role":"user","content":"hello"}}
+"#,
+        )
+        .unwrap();
+        assert!(archive_event(&archive, &r, EventKind::New, 0).unwrap().is_some());
+        assert_eq!(archive.load_catalog().unwrap().len(), 1);
+    }
 
     #[test]
     fn archive_ids_are_single_components_without_encoding_collisions() {

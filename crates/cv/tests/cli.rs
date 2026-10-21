@@ -4306,3 +4306,11 @@ fn frozen_catalog_does_not_migrate_or_touch_live_wal() {
     w.cv_ok(&["--frozen", "events", "alphasess", "--json"]);
     assert_eq!(before, frozen_store_snapshot(&w.cv_home));
 }
+
+#[test]
+fn archive_ls_names_each_skipped_catalog_line() {
+    let w = World::new("archive-corrupt-catalog");
+    fs::write(w.cv_home.join("catalog.jsonl"), "\n{broken\n").unwrap();
+    let (_, error) = w.cv_ok(&["archive", "ls"]);
+    assert!(error.contains("skipping corrupt catalog line 2"), "{error}");
+}

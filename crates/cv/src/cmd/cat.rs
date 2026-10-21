@@ -102,11 +102,11 @@ fn print_result(
                 .context("reading transcript tool result")?;
             // 2. A prune marker: the original lives in the sidecar next to the transcript.
             if text.trim_start().starts_with(cv_core::prune::MARKER_PREFIX) {
-                if sidecar.is_file() {
-                    if let Ok(v) = cv_core::prune::retrieve(sidecar, tool_use_id) {
-                        eprintln!("✦ from prune sidecar {}", sidecar.display());
-                        return print_value(&mut out, &v);
-                    }
+                if sidecar.try_exists()? {
+                    let v = cv_core::prune::retrieve(sidecar, tool_use_id)
+                        .with_context(|| format!("reading prune sidecar {}", sidecar.display()))?;
+                    eprintln!("✦ from prune sidecar {}", sidecar.display());
+                    return print_value(&mut out, &v);
                 }
                 eprintln!(
                     "⚠ {} was pruned but no sidecar holds it (hard-dropped with `--drop`?) — printing the marker",
@@ -125,11 +125,11 @@ fn print_result(
 
     // Not in the transcript at all: a sidecar can still carry it (e.g. a `toolUseResult`-only
     // stash from a prune of a session whose result block was itself dropped).
-    if sidecar.is_file() {
-        if let Ok(v) = cv_core::prune::retrieve(sidecar, tool_use_id) {
-            eprintln!("✦ from prune sidecar {}", sidecar.display());
-            return print_value(&mut out, &v);
-        }
+    if sidecar.try_exists()? {
+        let v = cv_core::prune::retrieve(sidecar, tool_use_id)
+            .with_context(|| format!("reading prune sidecar {}", sidecar.display()))?;
+        eprintln!("✦ from prune sidecar {}", sidecar.display());
+        return print_value(&mut out, &v);
     }
     usage(format!(
         "no tool result {tool_use_id:?} in {} — `cv tools {} --timeline` lists its tool calls",
@@ -187,6 +187,20 @@ fn print_value(out: &mut impl Write, v: &serde_json::Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn corrupt_sidecar_is_an_error_with_its_path_not_a_drop_hint() {
+        let world = crate::test_world("cat-corrupt-sidecar");
+        let sidecar = world.base.join("s.flat.jsonl");
+        std::fs::write(&sidecar, [0xff, b'\n']).unwrap();
+        let session = cv_core::Session::new("s", cv_core::Harness::Claude);
+        let mut out = Vec::new();
+        let error = print_result(&session, "s", "tool", &sidecar, &mut out).unwrap_err();
+        let error = format!("{error:#}");
+        assert!(error.contains("s.flat.jsonl"), "{error}");
+        assert!(!error.contains("--drop"));
+        assert!(out.is_empty());
+    }
 
     #[test]
     fn retained_result_prints_exact_text_and_rejects_source_failure_without_output() {

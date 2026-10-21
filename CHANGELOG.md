@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `cv cat` reports corrupt sidecar reads instead of attributing them to `--drop`.
+- `cv events --subagents` reports unreadable agent transcripts with their identity and path.
+- Archive watch uses source-path adapters, fails unavailable adapters, and names retryable reads; archive listing reports corrupt catalog line numbers.
+
 - Indexing rejects unreadable persisted outputs; search propagates metadata query failures and names optional index-metadata failures before retrying.
 
 - **Breaking (library):** `events::ingest_all` takes named `IngestOptions` instead of two positional booleans.
