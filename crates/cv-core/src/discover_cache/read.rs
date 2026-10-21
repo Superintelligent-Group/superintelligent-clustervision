@@ -148,7 +148,7 @@ impl Context {
     #[cfg(feature = "sqlite")]
     pub(crate) fn with_connection_mut<T>(&self, f: impl FnOnce(&mut rusqlite::Connection) -> T) -> Option<T> {
         let connection = self.connection()?;
-        let mut connection = connection.lock().ok()?;
+        let mut connection = connection.lock().inspect_err(super::note).ok()?;
         Some(f(&mut connection))
     }
     #[cfg(feature = "sqlite")]

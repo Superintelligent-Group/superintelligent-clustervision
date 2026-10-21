@@ -98,7 +98,9 @@ mod imp {
             .map(PathBuf::from)
             .or_else(|| Some(env.cache_dir()?.join("clustervision")))?;
         if !crate::env::frozen() {
-            let _ = std::fs::create_dir_all(&dir);
+            if let Err(error) = std::fs::create_dir_all(&dir) {
+                crate::env::warn_once("the catalog", format_args!("{}: {error}", dir.display()));
+            }
         }
         Some(dir.join("catalog.db"))
     }
@@ -132,7 +134,13 @@ mod imp {
             }
             return open_read_only(path);
         }
-        let conn = open_writable(path).or_else(|| open_read_only(path));
+        let conn = match open_writable(path) {
+            Ok(conn) => Some(conn),
+            Err(error) => {
+                crate::env::warn_once("the catalog", format_args!("{}: {error}", path.display()));
+                open_read_only(path)
+            }
+        };
         if conn.is_none() {
             // Every consumer degrades to scanning; the process says so once.
             crate::env::warn_once(
@@ -141,6 +149,12 @@ mod imp {
             );
         }
         conn
+    }
+
+    fn note_sql(error: &rusqlite::Error) {
+        if !matches!(error, rusqlite::Error::QueryReturnedNoRows) {
+            crate::env::warn_once("the catalog", error);
+        }
     }
 
     /// A catalog this process may not write (a sandbox denying writes to the home, a read-only
@@ -166,16 +180,22 @@ mod imp {
             .into_iter()
             .filter(|query| !crate::env::frozen() || *query == "immutable=1")
             .find_map(|query| {
-                let conn = Connection::open_with_flags(format!("file:{file}?{query}"), flags).ok()?;
-                conn.busy_timeout(Duration::from_secs(5)).ok()?;
+                let conn = Connection::open_with_flags(format!("file:{file}?{query}"), flags)
+                    .inspect_err(note_sql)
+                    .ok()?;
+                conn.busy_timeout(Duration::from_secs(5)).inspect_err(note_sql).ok()?;
                 let stored: String = conn
                     .query_row(
                         "SELECT value FROM catalog_meta WHERE key='discovery_version'",
                         [],
                         |row| row.get(0),
                     )
+                    .inspect_err(note_sql)
                     .ok()?;
-                let schema: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0)).ok()?;
+                let schema: i64 = conn
+                    .query_row("PRAGMA user_version", [], |row| row.get(0))
+                    .inspect_err(note_sql)
+                    .ok()?;
                 (stored == version && schema == SCHEMA).then_some(conn)
             })
     }
@@ -186,14 +206,77 @@ mod imp {
     /// wrote (its event tables used 0-3).
     const SCHEMA: i64 = 4;
 
-    fn open_writable(path: &Path) -> Option<Connection> {
-        let mut conn = Connection::open(path).ok()?;
-        // WAL + a busy timeout so concurrent cv processes don't error each other out.
-        conn.busy_timeout(Duration::from_secs(5)).ok()?;
-        let rebuilt = rebuild_other_schema(&mut conn)?;
-        conn.execute_batch(
-            "PRAGMA journal_mode=WAL;
-             CREATE TABLE IF NOT EXISTS sessions(
+    fn open_writable(path: &Path) -> rusqlite::Result<Connection> {
+        let mut conn = Connection::open(path)?;
+        conn.busy_timeout(Duration::from_secs(5))?;
+        conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+        let schema: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        let version = crate::discover_cache::INTERPRETATION_VERSION.to_string();
+        // A stamp certifies the complete CREATE phase. Drop, create and stamp commit together.
+        // Current catalogs take the read-only fast path without acquiring a writer lock.
+        if schema == SCHEMA {
+            let old: Option<String> = conn
+                .query_row(
+                    "SELECT value FROM catalog_meta WHERE key='discovery_version'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if old.as_deref() == Some(&version) {
+                return Ok(conn);
+            }
+        }
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let schema: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        let mut rebuilt = false;
+        if schema != SCHEMA {
+            let tables = tx
+                .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")?
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rebuilt = !tables.is_empty();
+            for table in tables {
+                tx.execute_batch(&format!("DROP TABLE \"{}\";", table.replace('"', "\"\"")))?;
+            }
+            tx.execute_batch(SCHEMA_SQL)?;
+        }
+        let old: Option<String> = tx
+            .query_row(
+                "SELECT value FROM catalog_meta WHERE key='discovery_version'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let changed = old.as_deref() != Some(&version);
+        if changed {
+            tx.execute("DELETE FROM watched", [])?;
+            tx.execute("DELETE FROM primary_sources", [])?;
+            tx.execute("DELETE FROM catalog_meta WHERE key='last_full_sync'", [])?;
+            tx.execute(
+                "INSERT OR REPLACE INTO catalog_meta(key,value) VALUES('discovery_version',?1)",
+                [&version],
+            )?;
+            if old.is_some() || rebuilt {
+                tx.execute(
+                    "INSERT OR REPLACE INTO catalog_meta(key,value) VALUES('rediscovery_notice',?1)",
+                    [&version],
+                )?;
+            }
+        }
+        tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA};"))?;
+        tx.commit()?;
+        if changed {
+            crate::discover_cache::invalidate_interpretation(path);
+        }
+        if rebuilt {
+            if let Err(error) = conn.execute_batch("VACUUM;") {
+                crate::env::warn_once("catalog compaction", error);
+            }
+        }
+        Ok(conn)
+    }
+
+    const SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS sessions(
                  harness       TEXT NOT NULL,
                  id            TEXT NOT NULL,
                  path          TEXT NOT NULL,
@@ -252,90 +335,7 @@ mod imp {
                  path    TEXT NOT NULL,
                  why     TEXT NOT NULL,
                  PRIMARY KEY(harness, path)
-             );",
-        )
-        .ok()?;
-        let version = crate::discover_cache::INTERPRETATION_VERSION.to_string();
-        let old: Option<String> = conn
-            .query_row(
-                "SELECT value FROM catalog_meta WHERE key='discovery_version'",
-                [],
-                |row| row.get(0),
-            )
-            .ok();
-        if old.as_deref() != Some(version.as_str()) {
-            let tx = conn
-                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-                .ok()?;
-            // Recheck under the writer lock: a concurrent new process may already have upgraded.
-            let old: Option<String> = tx
-                .query_row(
-                    "SELECT value FROM catalog_meta WHERE key='discovery_version'",
-                    [],
-                    |row| row.get(0),
-                )
-                .ok();
-            if old.as_deref() != Some(version.as_str()) {
-                tx.execute("DELETE FROM watched", []).ok()?;
-                tx.execute("DELETE FROM primary_sources", []).ok()?;
-                tx.execute("DELETE FROM catalog_meta WHERE key='last_full_sync'", [])
-                    .ok()?;
-                tx.execute(
-                    "INSERT OR REPLACE INTO catalog_meta(key,value) VALUES('discovery_version',?1)",
-                    [&version],
-                )
-                .ok()?;
-                if old.is_some() || rebuilt {
-                    // An earlier cv built this catalog: the next full discovery says why it is slow.
-                    tx.execute(
-                        "INSERT OR REPLACE INTO catalog_meta(key,value) VALUES('rediscovery_notice',?1)",
-                        [&version],
-                    )
-                    .ok()?;
-                }
-                tx.commit().ok()?;
-                crate::discover_cache::invalidate_interpretation(path);
-            }
-        }
-        Some(conn)
-    }
-
-    /// Drop every table of a catalog stamped with another [`SCHEMA`] and stamp this one, under
-    /// the writer lock (a concurrent open may have rebuilt it already). `Some(true)` when tables
-    /// were dropped: the next full discovery says why it is slow.
-    fn rebuild_other_schema(conn: &mut Connection) -> Option<bool> {
-        let stamped = |conn: &Connection| {
-            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
-                .ok()
-        };
-        if stamped(conn)? == SCHEMA {
-            return Some(false);
-        }
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .ok()?;
-        if stamped(&tx)? == SCHEMA {
-            return Some(false);
-        }
-        let tables: Vec<String> = tx
-            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
-            .ok()?
-            .query_map([], |row| row.get(0))
-            .ok()?
-            .collect::<rusqlite::Result<_>>()
-            .ok()?;
-        for table in &tables {
-            tx.execute_batch(&format!("DROP TABLE \"{}\";", table.replace('"', "\"\"")))
-                .ok()?;
-        }
-        tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA};")).ok()?;
-        tx.commit().ok()?;
-        if !tables.is_empty() {
-            // SQLite keeps the freed pages; reclaim them once (a busy db keeps them for reuse).
-            let _ = conn.execute_batch("VACUUM;");
-        }
-        Some(!tables.is_empty())
-    }
+             );";
 
     fn watch_is_fresh(path: &Path, recorded: Watched) -> bool {
         match std::fs::metadata(path) {
@@ -437,16 +437,22 @@ mod imp {
             return;
         }
         let Some(mut conn) = open() else { return };
-        let Ok(tx) = conn.transaction() else { return };
-        if insert_refs(&tx, refs, &Default::default()).is_ok()
+        let Ok(tx) = conn.transaction().inspect_err(note_sql) else {
+            return;
+        };
+        if insert_refs(&tx, refs, &Default::default())
+            .inspect_err(note_sql)
+            .is_ok()
             && refs
                 .iter()
                 .map(|r| r.harness)
                 .collect::<HashSet<_>>()
                 .into_iter()
-                .all(|h| publish_writer_versions(&tx, h).is_ok())
+                .all(|h| publish_writer_versions(&tx, h).inspect_err(note_sql).is_ok())
         {
-            let _ = tx.commit();
+            if let Err(error) = tx.commit() {
+                note_sql(&error);
+            }
         }
     }
 
@@ -460,31 +466,35 @@ mod imp {
         } else {
             "SELECT harness,id,path FROM sessions WHERE ?1 IS NULL ORDER BY rowid"
         };
-        let Ok(mut stmt) = conn.prepare(sql) else {
+        let Ok(mut stmt) = conn.prepare(sql).inspect_err(note_sql) else {
             return Default::default();
         };
-        let Ok(rows) = stmt.query_map([h.map(Harness::as_str)], |row| {
-            let name: String = row.get(0)?;
-            let Some(harness) = Harness::parse(&name) else {
-                return Ok(None);
-            };
-            Ok(Some(SessionRef {
-                cwd: None,
-                title: None,
-                created_at: None,
-                updated_at: None,
-                message_count: None,
-                ..SessionRef::new(
-                    row.get::<_, String>(1)?,
-                    harness,
-                    PathBuf::from(row.get::<_, String>(2)?),
-                )
-            }))
-        }) else {
+        let Ok(rows) = stmt
+            .query_map([h.map(Harness::as_str)], |row| {
+                let name: String = row.get(0)?;
+                let Some(harness) = Harness::parse(&name) else {
+                    return Ok(None);
+                };
+                Ok(Some(SessionRef {
+                    cwd: None,
+                    title: None,
+                    created_at: None,
+                    updated_at: None,
+                    message_count: None,
+                    ..SessionRef::new(
+                        row.get::<_, String>(1)?,
+                        harness,
+                        PathBuf::from(row.get::<_, String>(2)?),
+                    )
+                }))
+            })
+            .inspect_err(note_sql)
+        else {
             return Default::default();
         };
         rows.filter_map(Result::transpose)
             .collect::<rusqlite::Result<Vec<_>>>()
+            .inspect_err(note_sql)
             .unwrap_or_default()
     }
 
@@ -526,11 +536,19 @@ mod imp {
             return;
         }
         // Reserve the writer before reading old rows; deferred upgrades cannot wait safely.
-        let Ok(tx) = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate) else {
+        let Ok(tx) = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .inspect_err(note_sql)
+        else {
             return;
         };
-        if publish_harness_in(&tx, h, refs, watches, sources, true).is_ok() {
-            let _ = tx.commit();
+        if publish_harness_in(&tx, h, refs, watches, sources, true)
+            .inspect_err(note_sql)
+            .is_ok()
+        {
+            if let Err(error) = tx.commit() {
+                note_sql(&error);
+            }
         }
     }
 
@@ -562,7 +580,7 @@ mod imp {
     #[cfg(test)]
     fn matches_sessions<'a>(refs: impl Iterator<Item = &'a SessionRef>) -> bool {
         open()
-            .and_then(|conn| matches_sessions_in(&conn, refs).ok())
+            .and_then(|conn| matches_sessions_in(&conn, refs).inspect_err(note_sql).ok())
             .unwrap_or(false)
     }
 
@@ -580,19 +598,29 @@ mod imp {
             return;
         }
         // Reserve the writer before reading old rows; deferred upgrades cannot wait safely.
-        let Ok(tx) = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate) else {
+        let Ok(tx) = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .inspect_err(note_sql)
+        else {
             return;
         };
-        let Ok(equal) = matches_sessions_in(&tx, rows.iter().flat_map(|(_, refs, _, _)| refs.iter())) else {
+        let Ok(equal) =
+            matches_sessions_in(&tx, rows.iter().flat_map(|(_, refs, _, _)| refs.iter())).inspect_err(note_sql)
+        else {
             return;
         };
         for ((h, refs, watches, _), sources) in rows.iter().zip(sources) {
-            if publish_harness_in(&tx, *h, refs, watches, sources, !equal).is_err() {
+            if publish_harness_in(&tx, *h, refs, watches, sources, !equal)
+                .inspect_err(note_sql)
+                .is_err()
+            {
                 return;
             }
         }
-        if stamp_full_sync_in(&tx).is_ok() {
-            let _ = tx.commit();
+        if stamp_full_sync_in(&tx).inspect_err(note_sql).is_ok() {
+            if let Err(error) = tx.commit() {
+                note_sql(&error);
+            }
         }
     }
 
@@ -759,7 +787,10 @@ mod imp {
         let mut watched_harnesses: HashSet<Harness> = HashSet::new();
         let mut watched_paths: HashSet<(Harness, String)> = HashSet::new();
         {
-            let mut stmt = conn.prepare("SELECT harness, path, id FROM watched").ok()?;
+            let mut stmt = conn
+                .prepare("SELECT harness, path, id FROM watched")
+                .inspect_err(note_sql)
+                .ok()?;
             let rows = stmt
                 .query_map([], |r| {
                     Ok((
@@ -768,9 +799,10 @@ mod imp {
                         Watched::stored(r.get(2)?),
                     ))
                 })
+                .inspect_err(note_sql)
                 .ok()?;
             for row in rows {
-                let (h, path, recorded) = row.ok()?;
+                let (h, path, recorded) = row.inspect_err(note_sql).ok()?;
                 let Some(h) = Harness::parse(&h) else { continue };
                 watched_harnesses.insert(h);
                 watched_paths.insert((h, path.clone()));
@@ -785,7 +817,7 @@ mod imp {
 
         // Every primary source, with one identity-aware metadata probe shared across paths.
         {
-            let mut stmt = conn.prepare("SELECT DISTINCT s.harness,s.path,p.reads FROM sessions s LEFT JOIN primary_sources p ON p.harness=s.harness AND p.path=s.path").ok()?;
+            let mut stmt = conn.prepare("SELECT DISTINCT s.harness,s.path,p.reads FROM sessions s LEFT JOIN primary_sources p ON p.harness=s.harness AND p.path=s.path").inspect_err(note_sql).ok()?;
             let rows = stmt
                 .query_map([], |r| {
                     Ok((
@@ -794,15 +826,22 @@ mod imp {
                         r.get::<_, Option<String>>(2)?,
                     ))
                 })
+                .inspect_err(note_sql)
                 .ok()?;
             let mut probe = crate::source::Probe::default();
             for row in rows {
-                let (h, _, json) = row.ok()?;
+                let (h, _, json) = row.inspect_err(note_sql).ok()?;
                 let Some(h) = Harness::parse(&h) else { continue };
                 if stale.contains(&h) {
                     continue;
                 }
-                let reads = json.and_then(|s| serde_json::from_str::<crate::source::ReadSet>(&s).ok());
+                let reads = json.and_then(|s| {
+                    serde_json::from_str::<crate::source::ReadSet>(&s)
+                        .inspect_err(|error| {
+                            crate::env::warn_once("the catalog", error);
+                        })
+                        .ok()
+                });
                 if !reads.is_some_and(|reads| reads.fresh(&mut probe)) {
                     mark(&mut stale, h);
                 }
@@ -843,10 +882,12 @@ mod imp {
     pub(super) fn all_sessions_in(conn: &Connection) -> Option<Vec<SessionRef>> {
         let mut stmt = conn
             .prepare(&format!("SELECT {REF_COLUMNS} FROM sessions ORDER BY rowid"))
+            .inspect_err(note_sql)
             .ok()?;
-        let rows = stmt.query_map([], row_to_ref).ok()?;
+        let rows = stmt.query_map([], row_to_ref).inspect_err(note_sql).ok()?;
         rows.filter_map(Result::transpose)
             .collect::<rusqlite::Result<Vec<_>>>()
+            .inspect_err(note_sql)
             .ok()
     }
 
@@ -864,8 +905,12 @@ mod imp {
         conn.query_row("SELECT value FROM catalog_meta WHERE key='last_full_sync'", [], |r| {
             r.get::<_, String>(0)
         })
+        .inspect_err(note_sql)
         .ok()?
         .parse()
+        .inspect_err(|error| {
+            crate::env::warn_once("the catalog", error);
+        })
         .ok()
     }
 
@@ -967,7 +1012,10 @@ mod imp {
             counts: counts(),
             turns,
         };
-        let Ok(tx) = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate) else {
+        let Ok(tx) = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .inspect_err(note_sql)
+        else {
             return;
         };
         let current = count_record_in(&tx, r);
@@ -998,7 +1046,9 @@ mod imp {
             Ok(())
         };
         if write().is_ok() {
-            let _ = tx.commit();
+            if let Err(error) = tx.commit() {
+                note_sql(&error);
+            }
         }
     }
 
@@ -1008,11 +1058,13 @@ mod imp {
         conn.prepare_cached(
             "SELECT record FROM source_dependencies WHERE consumer=?1 AND harness=?2 AND id=?3 AND path=?4",
         )
+        .inspect_err(note_sql)
         .ok()?
         .query_row(
             params![Counted::TAG, r.harness.as_str(), r.id, r.path.to_string_lossy()],
             |row| row.get(0),
         )
+        .inspect_err(note_sql)
         .ok()
     }
 
@@ -1200,14 +1252,16 @@ mod imp {
             .prepare_cached(&format!(
                 "SELECT {REF_COLUMNS} FROM sessions WHERE id=?1 AND (?2 IS NULL OR harness=?2) ORDER BY rowid"
             ))
+            .inspect_err(note_sql)
             .ok()?;
         let mut rows = stmt
             .query_map(params![id, harness.map(Harness::as_str)], |row| {
                 row_to_ref_projected(row, overrides)
             })
+            .inspect_err(note_sql)
             .ok()?;
         // Unknown newer harness rows are skipped, as in lookup; the first known exact copy wins.
-        rows.find_map(|row| row.ok().flatten())
+        rows.find_map(|row| row.inspect_err(note_sql).ok().flatten())
     }
 
     /// All catalog rows whose id equals `id` or starts with it, optionally constrained to one
@@ -1254,6 +1308,34 @@ mod imp {
                 updated_at: None,
                 message_count: None,
             }
+        }
+
+        #[test]
+        fn failed_schema_creation_never_stamps_or_drops_the_previous_catalog() {
+            let world = crate::test_world("catalog-create-error");
+            let path = world.base.join("catalog.db");
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("PRAGMA user_version=3; CREATE TABLE preserved(x); INSERT INTO preserved VALUES (7); CREATE VIEW sessions AS SELECT 1;").unwrap();
+            assert!(open_writable(&path).is_err());
+            assert_eq!(
+                conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                3
+            );
+            assert_eq!(
+                conn.query_row("SELECT x FROM preserved", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                7
+            );
+            conn.execute_batch("DROP VIEW sessions").unwrap();
+            let rebuilt = open_writable(&path).unwrap();
+            assert_eq!(
+                rebuilt
+                    .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                SCHEMA
+            );
+            assert!(rebuilt.prepare("SELECT * FROM sessions").is_ok());
         }
 
         #[test]

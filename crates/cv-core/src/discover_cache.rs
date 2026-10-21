@@ -20,6 +20,17 @@ use std::sync::{Arc, OnceLock, RwLock};
 
 pub(crate) mod read;
 
+fn note(error: &impl std::fmt::Display) {
+    crate::env::warn_once("the scan cache", error);
+}
+
+#[cfg(feature = "sqlite")]
+fn note_sql(error: &rusqlite::Error) {
+    if !matches!(error, rusqlite::Error::QueryReturnedNoRows) {
+        note(error);
+    }
+}
+
 enum Payload {
     #[cfg(feature = "sqlite")]
     Encoded { refs: String, reads: String },
@@ -39,6 +50,7 @@ impl Payload {
         if let Self::Encoded { refs, reads } = self {
             *self = serde_json::from_str(refs)
                 .and_then(|refs| serde_json::from_str(reads).map(|reads| Self::Parsed { refs, reads }))
+                .inspect_err(note)
                 .unwrap_or(Self::Invalid);
         }
         match self {
@@ -113,7 +125,7 @@ fn current_cache() -> Arc<Cache> {
 }
 fn existing_cache(path: &Path) -> Option<Arc<Cache>> {
     let key = read::catalog_key(path);
-    CACHE.get()?.read().ok()?.get(&key)?.upgrade()
+    CACHE.get()?.read().inspect_err(note).ok()?.get(&key)?.upgrade()
 }
 
 #[cfg(feature = "sqlite")]
@@ -144,7 +156,7 @@ fn load() -> Cache {
 
 #[cfg(feature = "sqlite")]
 fn load_entry(conn: &rusqlite::Connection, path: &Path, key: (u64, u64)) -> Option<Entry> {
-    let mut statement = conn.prepare_cached("SELECT refs,source_reads,continuation FROM scan_cache WHERE path=?1 AND mtime_ns=?2 AND size=?3 AND interpretation_version=?4").ok()?;
+    let mut statement = conn.prepare_cached("SELECT refs,source_reads,continuation FROM scan_cache WHERE path=?1 AND mtime_ns=?2 AND size=?3 AND interpretation_version=?4").inspect_err(note_sql).ok()?;
     let (refs, reads, continuation) = statement
         .query_row(
             rusqlite::params![
@@ -161,6 +173,7 @@ fn load_entry(conn: &rusqlite::Connection, path: &Path, key: (u64, u64)) -> Opti
                 ))
             },
         )
+        .inspect_err(note_sql)
         .ok()?;
     Some(Entry {
         mtime_ns: key.0,
@@ -173,8 +186,8 @@ fn load_entry(conn: &rusqlite::Connection, path: &Path, key: (u64, u64)) -> Opti
 
 #[cfg(feature = "sqlite")]
 fn load_previous(conn: &rusqlite::Connection, path: &Path, size: u64) -> Option<(u64, String)> {
-    conn.prepare_cached("SELECT size,continuation FROM scan_cache WHERE path=?1 AND size<?2 AND interpretation_version=?3 AND continuation IS NOT NULL").ok()?
-        .query_row(rusqlite::params![path.to_string_lossy(),size as i64,INTERPRETATION_VERSION], |row| Ok((row.get::<_, i64>(0)? as u64,row.get(1)?))).ok()
+    conn.prepare_cached("SELECT size,continuation FROM scan_cache WHERE path=?1 AND size<?2 AND interpretation_version=?3 AND continuation IS NOT NULL").inspect_err(note_sql).ok()?
+        .query_row(rusqlite::params![path.to_string_lossy(),size as i64,INTERPRETATION_VERSION], |row| Ok((row.get::<_, i64>(0)? as u64,row.get(1)?))).inspect_err(note_sql).ok()
 }
 
 #[cfg(feature = "sqlite")]
@@ -355,7 +368,7 @@ where
         if old_size > size {
             return None;
         }
-        let prior: ScanContinuation = serde_json::from_str(&text).ok()?;
+        let prior: ScanContinuation = serde_json::from_str(&text).inspect_err(note).ok()?;
         (prior.dependencies.fresh(&mut crate::source::Probe::default())
             && prior.head.admit(path, version?, &prior.checkpoint).is_some())
         .then_some(prior)
@@ -379,7 +392,7 @@ where
                 && reads.fresh_or_grown(&mut crate::source::Probe::default())
                 && state.dependencies.fresh(&mut crate::source::Probe::default())
         })
-        .and_then(|state| serde_json::to_string(&state).ok());
+        .and_then(|state| serde_json::to_string(&state).inspect_err(note).ok());
     // Only cache hits — empty results are cheap to recompute (a failed name/content check that never
     // read the file) and caching them would bloat the table with every non-transcript path.
     if !refs.is_empty() {
@@ -420,7 +433,7 @@ where
 pub(crate) fn captured_reads(path: &Path) -> Option<crate::source::ReadSet> {
     let cache = read::Context::current().cached()?;
     {
-        let entries = cache.entries.read().ok()?;
+        let entries = cache.entries.read().inspect_err(note).ok()?;
         let e = entries.get(path)?;
         if let Some((_, reads)) = e.payload.known() {
             return Some(reads.clone());
@@ -429,7 +442,7 @@ pub(crate) fn captured_reads(path: &Path) -> Option<crate::source::ReadSet> {
             return None;
         }
     }
-    let mut entries = cache.entries.write().ok()?;
+    let mut entries = cache.entries.write().inspect_err(note).ok()?;
     let (_, reads) = entries.get_mut(path)?.payload.parsed()?;
     Some(reads.clone())
 }
@@ -571,6 +584,25 @@ fn flush(conn: &mut rusqlite::Connection, cache: &Cache, prune: bool) -> rusqlit
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn failed_scan_cache_read_reports_and_retries_after_repair() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let path = Path::new("fixture.jsonl");
+        assert!(load_entry(&conn, path, (1, 2)).is_none());
+        assert!(!crate::env::warn_once("the scan cache", "already reported"));
+        conn.execute_batch(
+            "CREATE TABLE scan_cache(path,mtime_ns,size,interpretation_version,refs,source_reads,continuation)",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO scan_cache VALUES (?1,1,2,?2,'[]','[]',NULL)",
+            rusqlite::params![path.to_string_lossy(), INTERPRETATION_VERSION],
+        )
+        .unwrap();
+        assert!(load_entry(&conn, path, (1, 2)).is_some());
+    }
 
     #[test]
     fn auxiliary_scan_baselines_invalidate_changes_and_preserve_raced_stamps() {
