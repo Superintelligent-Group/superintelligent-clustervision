@@ -211,7 +211,7 @@ pub(crate) fn binary_text_columns(conn: &Connection, table: &str, names: &[&str]
         )
         .optional()?
         .flatten();
-    if !ddl.is_some_and(|ddl| !ddl.to_ascii_uppercase().contains("COLLATE")) {
+    if ddl.is_none_or(|ddl| ddl.to_ascii_uppercase().contains("COLLATE")) {
         return Ok(false);
     }
     let mut stmt = conn.prepare("SELECT name,type FROM pragma_table_info(?1)")?;
