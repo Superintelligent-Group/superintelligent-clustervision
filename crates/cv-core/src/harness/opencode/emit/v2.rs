@@ -10,6 +10,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use std::{collections::HashMap, io::Write};
 use uuid::Uuid;
+use super::super::v2::DETAILS_KEY;
 
 /// Native empty-store bootstrap: install the complete schema and record its migration frontier.
 /// The SQL and IDs are one versioned unit taken from the native-written 2.0.25 corpus.
@@ -725,14 +726,14 @@ fn tool_state(
                 let mut metadata = ObjectWriter::new(w)?;
                 if let Some(native) = details.get("metadata").and_then(Value::as_object) {
                     for (key, value) in native {
-                        if key != "clustervision.details" {
+                        if key != DETAILS_KEY {
                             metadata.field(key, value)?;
                         }
                     }
                 }
                 if details.get("metadata").is_some() || details.get("title").is_some() || details.get("time").is_some()
                 {
-                    metadata.field("clustervision.details", details)?;
+                    metadata.field(DETAILS_KEY, details)?;
                 } else if let Some(fields) = details.as_object() {
                     for (key, value) in fields {
                         metadata.field(key, value)?;

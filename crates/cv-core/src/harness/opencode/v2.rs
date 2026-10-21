@@ -25,6 +25,10 @@
 //! Anything else is kept verbatim as a `Carrier` under `complete`, and is counted in
 //! `extra["opencode"]["unknown_message_types"]` on the session otherwise — never silently dropped.
 
+/// cv preserves tool-result details in OpenCode's free-form metadata under this key.
+/// The reader restores the original IR value; it is not an OpenCode-native status field.
+pub(super) const DETAILS_KEY: &str = "clustervision.details";
+
 use super::record::{find_signature, get, nonempty, owned, push_extra_array, string, usage, Ctx};
 use crate::ir::*;
 use crate::json::JsonView;
@@ -457,7 +461,7 @@ fn tool_blocks(c: JsonView<'_>, ctx: Ctx<'_>) -> Result<(Block, Vec<Block>)> {
             is_error,
             tool_name: (!name.is_empty()).then_some(name),
             status: (!status.is_empty()).then_some(status),
-            details: match owned(get(get(state, "metadata")?, "clustervision.details")?)? {
+            details: match owned(get(get(state, "metadata")?, DETAILS_KEY)?)? {
                 Some(details) => Some(details),
                 None => (!details.is_empty()).then_some(Value::Object(details)),
             },
