@@ -313,10 +313,10 @@ fn discover_db(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([], |row| {
         let id: String = row.get(0)?;
-        let title: Option<String> = row.get(1).ok().flatten();
-        let wd: Option<String> = row.get(2).ok().flatten();
-        let created: Option<String> = row.get(3).ok().flatten();
-        let updated: Option<String> = row.get(4).ok().flatten();
+        let title: Option<String> = row.get(1)?;
+        let wd: Option<String> = row.get(2)?;
+        let created: Option<String> = row.get(3)?;
+        let updated: Option<String> = row.get(4)?;
         Ok((id, title, wd, created, updated))
     })?;
     let mut out = Vec::new();
@@ -501,14 +501,14 @@ fn stream_db_opts_with_reads(
     let (title, wd, created, updated, provider, model_cfg, session_type, parent_id): MetaRow = conn
         .query_row(&sel, [&r.id], |row| {
             Ok((
-                row.get(0).ok().flatten(),
-                row.get(1).ok().flatten(),
-                row.get(2).ok().flatten(),
-                row.get(3).ok().flatten(),
-                row.get(4).ok().flatten(),
-                row.get(5).ok().flatten(),
-                row.get(6).ok().flatten(),
-                row.get(7).ok().flatten(),
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
             ))
         })
         .with_context(|| format!("goose session {:?}", r.id))?;

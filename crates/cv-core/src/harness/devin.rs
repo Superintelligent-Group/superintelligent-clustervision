@@ -499,6 +499,11 @@ fn spawning_call(agent: &str, forest: &Forest) -> Option<String> {
 /// surfaces. `agent_id` is the child's `agent_type`; a completion receipt provides its spawning
 /// tool call. Devin records no per-agent description.
 pub fn subagent_tree(db: &Path, session_id: &str) -> Result<Vec<crate::AgentRef>> {
+    // Child refs address a chain within the root session, not another sessions row. The native
+    // store attaches every subagent head to the root; a child has no separately nested forest.
+    if session_id.contains('/') {
+        return Ok(Vec::new());
+    }
     let conn = open_ro(db)?;
     conn.read(|conn, _| {
         let select = Select::of(conn, "sessions")
@@ -614,18 +619,18 @@ fn stream_session(
     let (wd, backend, model, agent_mode, created, last, title, main_chain_id, cogs, wdirs, hidden, smeta): SessionRow =
         conn.query_row(&sql, [session_id], |row| {
             Ok((
-                row.get(0).ok().flatten(),
-                row.get(1).ok().flatten(),
-                row.get(2).ok().flatten(),
-                row.get(3).ok().flatten(),
-                row.get(4).ok().flatten(),
-                row.get(5).ok().flatten(),
-                row.get(6).ok().flatten(),
-                row.get(7).ok().flatten(),
-                row.get(8).ok().flatten(),
-                row.get(9).ok().flatten(),
-                row.get(10).ok().flatten(),
-                row.get(11).ok().flatten(),
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+                row.get(8)?,
+                row.get(9)?,
+                row.get(10)?,
+                row.get(11)?,
             ))
         })
         .with_context(|| format!("devin session {session_id:?}"))?;
@@ -1275,6 +1280,7 @@ mod tests {
         assert_eq!(subs[0].session.id, "fixture-alpha/sidekick");
         assert_eq!(subs[0].agent_type.as_deref(), Some("sidekick"));
         assert_eq!(subs[0].session.message_count, Some(5));
+        assert!(subagent_tree(&fixture(), &subs[0].session.id).unwrap().is_empty());
         // ...and the parent records the ghost head.
         let conn = open_ro(&fixture()).unwrap();
         let s = parse_db(&conn, &sref("fixture-alpha")).unwrap();

@@ -342,22 +342,20 @@ impl Adapter for Hermes {
     }
 }
 
-/// Row shape of the per-session metadata SELECT in [`stream_conn`] (columns guarded by
-/// `session_has_col`, absent ones selected as NULL): model, started_at, ended_at, title, source,
-/// parent_session_id, end_reason, cwd, git_branch, last_activity_at, model_config.
-type SessionMetaRow = (
-    Option<String>,
-    Option<f64>,
-    Option<f64>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<f64>,
-    Option<String>,
-);
+/// Per-session metadata. Historical absent columns are selected as NULL; unreadable cells fail.
+struct SessionMetaRow {
+    model: Option<String>,
+    started: Option<f64>,
+    ended: Option<f64>,
+    title: Option<String>,
+    source: Option<String>,
+    parent: Option<String>,
+    end_reason: Option<String>,
+    cwd: Option<String>,
+    git_branch: Option<String>,
+    last_activity: Option<f64>,
+    model_config: Option<String>,
+}
 
 /// The most recent of a session's activity stamps: Hermes bumps `last_activity_at` on every turn
 /// while `ended_at` stays NULL for a live session, so it is the honest `updated_at`.
@@ -429,12 +427,12 @@ fn refs_conn(conn: &Connection, path: &Path, delegates_of: Option<&HashSet<Strin
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([], |row| {
         let id: String = row.get(0)?;
-        let title: Option<String> = row.get(1).ok().flatten();
-        let started: Option<f64> = row.get(2).ok().flatten();
-        let ended: Option<f64> = row.get(3).ok().flatten();
-        let cwd: Option<String> = row.get(4).ok().flatten();
-        let last: Option<f64> = row.get(5).ok().flatten();
-        let model_config: Option<String> = row.get(6).ok().flatten();
+        let title: Option<String> = row.get(1)?;
+        let started: Option<f64> = row.get(2)?;
+        let ended: Option<f64> = row.get(3)?;
+        let cwd: Option<String> = row.get(4)?;
+        let last: Option<f64> = row.get(5)?;
+        let model_config: Option<String> = row.get(6)?;
         Ok((id, title, started, ended, cwd, last, model_config))
     })?;
     let mut out = Vec::new();
@@ -714,21 +712,33 @@ fn stream_conn_with_reads(
         ]);
     let has_parent = select.has("parent_session_id");
     let meta_sql = format!("SELECT {} FROM sessions WHERE id = ?1", select.list());
-    let (model, started, ended, title, source, parent, end_reason, cwd, git_branch, last_activity, model_config): SessionMetaRow =
-        conn.query_row(&meta_sql, [&r.id], |row| {
-            Ok((
-                row.get(0).ok().flatten(),
-                row.get(1).ok().flatten(),
-                row.get(2).ok().flatten(),
-                row.get(3).ok().flatten(),
-                row.get(4).ok().flatten(),
-                row.get(5).ok().flatten(),
-                row.get(6).ok().flatten(),
-                row.get(7).ok().flatten(),
-                row.get(8).ok().flatten(),
-                row.get(9).ok().flatten(),
-                row.get(10).ok().flatten(),
-            ))
+    let SessionMetaRow {
+        model,
+        started,
+        ended,
+        title,
+        source,
+        parent,
+        end_reason,
+        cwd,
+        git_branch,
+        last_activity,
+        model_config,
+    } = conn
+        .query_row(&meta_sql, [&r.id], |row| {
+            Ok(SessionMetaRow {
+                model: row.get(0)?,
+                started: row.get(1)?,
+                ended: row.get(2)?,
+                title: row.get(3)?,
+                source: row.get(4)?,
+                parent: row.get(5)?,
+                end_reason: row.get(6)?,
+                cwd: row.get(7)?,
+                git_branch: row.get(8)?,
+                last_activity: row.get(9)?,
+                model_config: row.get(10)?,
+            })
         })
         .with_context(|| format!("hermes session {:?}", r.id))?;
 

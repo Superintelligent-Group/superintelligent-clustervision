@@ -98,16 +98,25 @@ impl Adapter for Grok {
         // interpreting kind must not bless a later version of the summary.
         let summary_path = r.path.join("summary.json");
         probe.exists(&summary_path)?;
+        let note = |error: &anyhow::Error| {
+            crate::env::warn_once(
+                "Grok dependencies",
+                format_args!("{}: {error:#}", summary_path.display()),
+            );
+        };
+        const SUBAGENT_KIND: &str = "subagent";
         let subagent = JsonSource::capture(&summary_path)
+            .inspect_err(note)
             .ok()?
             .read_document(|view| {
                 let kind = view
                     .get("session_kind")?
-                    .map(|kind| crate::projection::string_prefix(kind, 9))
+                    .map(|kind| crate::projection::string_prefix(kind, SUBAGENT_KIND.len() + 1))
                     .transpose()?
                     .flatten();
-                Ok(kind.as_deref() == Some("subagent"))
+                Ok(kind.as_deref() == Some(SUBAGENT_KIND))
             })
+            .inspect_err(note)
             .ok()?;
         if subagent {
             let group = r.path.parent()?;
@@ -706,6 +715,16 @@ mod tests {
         let mut s = adapter.try_stream(r, opts, &mut all).unwrap();
         s.messages = all.messages;
         s
+    }
+
+    #[test]
+    fn dependency_decode_failure_is_named_and_never_certified() {
+        let world = crate::test_world("grok-dependency-error");
+        fs::write(world.home.join("summary.json"), "{broken").unwrap();
+        let r = SessionRef::new("fixture", Harness::Grok, &world.home);
+        let mut deps = Dependencies::default();
+        assert!(ROOTLESS.dependencies(&r, &mut Probe::default(), &mut deps).is_none());
+        assert!(!crate::env::warn_once("Grok dependencies", "already reported"));
     }
 
     #[test]

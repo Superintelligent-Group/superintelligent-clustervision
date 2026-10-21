@@ -77,18 +77,30 @@ pub struct OpenCode {
     root: Option<PathBuf>,
     /// The canonical SQLite store, if present (and the `sqlite` feature is on).
     db: Option<PathBuf>,
+    skipped: Vec<crate::Skipped>,
 }
 
 /// This adapter with no roots: it discovers nothing and answers every fact that does not depend on
 /// where the store lives ([`super::rootless`]).
-pub(crate) static ROOTLESS: OpenCode = OpenCode { root: None, db: None };
+pub(crate) static ROOTLESS: OpenCode = OpenCode {
+    root: None,
+    db: None,
+    skipped: Vec::new(),
+};
 
 impl OpenCode {
     pub fn detect() -> Self {
         let data = data_dir();
         let root = data.as_ref().map(|d| d.join("storage")).filter(|p| p.exists());
-        let db = data.as_deref().and_then(resolve_db);
-        OpenCode { root, db }
+        let mut skipped = Vec::new();
+        let db = data.as_deref().and_then(|data| match resolve_db(data) {
+            Ok(db) => db,
+            Err(error) => {
+                skipped.extend(crate::Skipped::of(data, &error));
+                None
+            }
+        });
+        OpenCode { root, db, skipped }
     }
 
     /// An adapter rooted at an explicit JSON storage dir (`…/opencode/storage`) instead of `$HOME` —
@@ -98,6 +110,7 @@ impl OpenCode {
         OpenCode {
             root: Some(root),
             db: None,
+            skipped: Vec::new(),
         }
     }
 
@@ -110,7 +123,11 @@ impl OpenCode {
         let db = Some(data.join("opencode.db")).filter(|p| p.is_file());
         #[cfg(not(feature = "sqlite"))]
         let db = None;
-        OpenCode { root, db }
+        OpenCode {
+            root,
+            db,
+            skipped: Vec::new(),
+        }
     }
 
     /// An adapter over one explicit `opencode.db` (tests, alternate data dirs). No JSON tree.
@@ -119,6 +136,7 @@ impl OpenCode {
         OpenCode {
             root: None,
             db: Some(db),
+            skipped: Vec::new(),
         }
     }
 
@@ -126,7 +144,10 @@ impl OpenCode {
     /// their ids so the JSON walk can skip duplicates.
     #[cfg(feature = "sqlite")]
     fn discover_db(&self) -> (crate::Discovered, HashSet<String>) {
-        let mut out = crate::Discovered::default();
+        let mut out = crate::Discovered {
+            refs: Vec::new(),
+            skipped: self.skipped.clone(),
+        };
         let Some(db) = &self.db else {
             return (out, HashSet::new());
         };
@@ -136,7 +157,13 @@ impl OpenCode {
     }
     #[cfg(not(feature = "sqlite"))]
     fn discover_db(&self) -> (crate::Discovered, HashSet<String>) {
-        (crate::Discovered::default(), HashSet::new())
+        (
+            crate::Discovered {
+                refs: Vec::new(),
+                skipped: self.skipped.clone(),
+            },
+            HashSet::new(),
+        )
     }
 
     fn message_dir(&self, sid: &str) -> Option<PathBuf> {
@@ -158,37 +185,35 @@ fn data_dir() -> Option<PathBuf> {
 /// `$OPENCODE_DB` (absolute, or relative to the data dir; `:memory:` means none), else
 /// `opencode.db` (release channels), else the newest `opencode-<channel>.db`.
 #[cfg(feature = "sqlite")]
-fn resolve_db(data: &Path) -> Option<PathBuf> {
+fn resolve_db(data: &Path) -> Result<Option<PathBuf>> {
     if let Some(v) = crate::env::var_os("OPENCODE_DB") {
         if v == ":memory:" {
-            return None;
+            return Ok(None);
         }
         let v = PathBuf::from(v);
-        let p = if v.is_absolute() { v } else { data.join(v) };
-        return p.is_file().then_some(p);
+        let path = if v.is_absolute() { v } else { data.join(v) };
+        return Ok(path.try_exists()?.then_some(path));
     }
     let main = data.join("opencode.db");
-    if main.is_file() {
-        return Some(main);
+    if main.try_exists()? {
+        return Ok(Some(main));
     }
-    let mut channel: Vec<(std::time::SystemTime, PathBuf)> = fs::read_dir(data)
-        .ok()?
-        .flatten()
-        .filter_map(|e| {
-            let p = e.path();
-            let name = p.file_name()?.to_str()?;
-            if !(name.starts_with("opencode-") && name.ends_with(".db")) {
-                return None;
-            }
-            Some((e.metadata().ok()?.modified().ok()?, p))
-        })
-        .collect();
+    let mut channel = Vec::new();
+    for entry in super::side_entries(data)? {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if name.starts_with("opencode-") && name.ends_with(".db") {
+            channel.push((entry.metadata()?.modified()?, path));
+        }
+    }
     channel.sort();
-    channel.pop().map(|(_, p)| p)
+    Ok(channel.pop().map(|(_, path)| path))
 }
 #[cfg(not(feature = "sqlite"))]
-fn resolve_db(_data: &Path) -> Option<PathBuf> {
-    None
+fn resolve_db(_data: &Path) -> Result<Option<PathBuf>> {
+    Ok(None)
 }
 
 impl Adapter for OpenCode {
@@ -327,7 +352,11 @@ impl Adapter for OpenCode {
             }
             // A file that cannot be opened is undetermined; one that does not decode names no part
             // dir (the stream skips it too), and the message dir's own entry covers its repair.
-            let file = fs::File::open(message).ok()?;
+            let file = fs::File::open(message)
+                .inspect_err(|error| {
+                    crate::env::warn_once("OpenCode dependencies", format_args!("{}: {error}", message.display()));
+                })
+                .ok()?;
             let Ok(id) = serde_json::from_reader::<_, MessageId>(std::io::BufReader::new(file)) else {
                 continue;
             };
@@ -674,7 +703,8 @@ mod db {
                 "SELECT session_id, COUNT(*) FROM session_message WHERE type IN ('user', 'assistant') GROUP BY session_id",
             )?;
             let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
-            for (sid, n) in rows.flatten() {
+            for row in rows {
+                let (sid, n) = row?;
                 counts.insert(sid, n.max(0) as usize);
             }
         }
@@ -683,12 +713,12 @@ mod db {
         )?;
         let refs = stmt
             .query_map([], |r| session_ref(db, r))?
-            .flatten()
-            .map(|mut r| {
+            .map(|row| {
+                let mut r = row?;
                 r.message_count = Some(counts.get(&r.id).copied().unwrap_or(0));
-                r
+                Ok(r)
             })
-            .collect();
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(refs)
     }
 
@@ -721,9 +751,11 @@ mod db {
         let mut refs: Vec<SessionRef> = conn
             .prepare("SELECT id, directory, title, time_created, time_updated FROM session ORDER BY time_updated DESC")?
             .query_map([], |r| session_ref(db, r))?
-            .flatten()
-            .filter(|reference| !seen.contains(&reference.id))
-            .collect();
+            .filter_map(|row| match row {
+                Ok(reference) if seen.contains(&reference.id) => None,
+                other => Some(other),
+            })
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         if refs.is_empty() {
             return Ok(refs);
         }
@@ -733,7 +765,7 @@ mod db {
         let mut stmt = conn.prepare(&format!("SELECT session_id, {} FROM message", cells.select("data")))?;
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
-            let Ok(sid) = row.get::<_, String>(0) else { continue };
+            let sid = row.get::<_, String>(0)?;
             if !wanted.contains(sid.as_str()) {
                 continue;
             }
@@ -1107,6 +1139,19 @@ mod tests {
             message.materialize(&crate::lazy::Resolver::new(None)).unwrap();
         }
         (owned, spans)
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn database_discovery_reports_a_failed_directory_read() {
+        let world = crate::test_world("opencode-db-path-error");
+        let data = world.home.join(".local/share/opencode");
+        fs::create_dir_all(data.parent().unwrap()).unwrap();
+        fs::write(&data, "not a directory").unwrap();
+        assert!(resolve_db(&data).is_err());
+        let discovered = OpenCode::detect().discover().unwrap();
+        assert_eq!(discovered.skipped.len(), 1);
+        assert_eq!(discovered.skipped[0].path, data);
     }
 
     #[test]
@@ -2293,6 +2338,7 @@ mod tests {
         let oc = OpenCode {
             root: Some(base),
             db: Some(db.clone()),
+            skipped: Vec::new(),
         };
         let refs = oc.discover().unwrap();
         assert_eq!(refs.len(), 1, "duplicate collapsed: {refs:?}");
@@ -2301,6 +2347,7 @@ mod tests {
         let oc_json_only = OpenCode {
             root: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/opencode/parts_gen")),
             db: None,
+            skipped: Vec::new(),
         };
         assert_eq!(oc_json_only.discover().unwrap().len(), 1);
         fs::remove_dir_all(&dir).ok();

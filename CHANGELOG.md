@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Native database listings and reads report failed row decoding; OpenCode reports database discovery failures and Zed rejects unreadable listing cells.
+
 - Multi-file publication reports destination metadata failures before replacing files.
 
 - **Breaking (library):** `store_affordances` and `json_files` return `Result`; failed side-store reads now fail affordance views and count publication.

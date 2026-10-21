@@ -170,17 +170,17 @@ fn discover_db(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
     while let Some(row) = rows.next()? {
         // A row without a text id is not an addressable thread (nothing could open it); the
         // rest of the row's columns are optional facts.
-        let Ok(id) = row.get::<_, String>(0) else { continue };
-        let summary = row.get::<_, Option<String>>(1).ok().flatten();
-        let updated = row.get::<_, Option<String>>(2).ok().flatten();
-        let created = row.get::<_, Option<String>>(3).ok().flatten();
-        let folders = row.get::<_, Option<String>>(4).ok().flatten();
-        let order = row.get::<_, Option<String>>(5).ok().flatten();
-        let data_type = row.get::<_, Option<String>>(6).ok().flatten();
-        let thread = thread_cell(conn, &cells, &id, data_type.as_deref())
-            .ok()
-            .flatten()
-            .and_then(|cell| cells.read(cell, listing).ok().flatten());
+        let id = row.get::<_, String>(0)?;
+        let summary = row.get::<_, Option<String>>(1)?;
+        let updated = row.get::<_, Option<String>>(2)?;
+        let created = row.get::<_, Option<String>>(3)?;
+        let folders = row.get::<_, Option<String>>(4)?;
+        let order = row.get::<_, Option<String>>(5)?;
+        let data_type = row.get::<_, Option<String>>(6)?;
+        let thread = thread_cell(conn, &cells, &id, data_type.as_deref())?
+            .map(|cell| cells.read(cell, listing))
+            .transpose()?
+            .flatten();
         let cwd = thread.flatten();
         out.push(SessionRef {
             cwd: cwd.or_else(|| first_folder_path(folders.as_deref(), order.as_deref())),
@@ -1035,17 +1035,15 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_blob_is_tolerated_everywhere() {
+    fn corrupt_blob_is_reported_by_discovery_and_annotated_by_parse() {
         let c = mk(SCHEMA);
         insert(&c, "bad", "corrupt one", "zstd", b"\x28\xb5\x2f\xfdnot really zstd");
         insert(&c, "good", "fine one", "zstd", &zstd_blob(&legacy_thread()));
 
-        // discover lists both; the corrupt one just has no count/cwd.
-        let refs = discover(&c);
-        assert_eq!(refs.len(), 2);
-        let bad = refs.iter().find(|r| r.id == "bad").unwrap();
-        assert_eq!(bad.message_count, None);
-        assert_eq!(bad.title.as_deref(), Some("corrupt one"));
+        assert!(
+            discover_db(&c, &db_path(&c)).is_err(),
+            "a failed projection is not an empty cwd"
+        );
 
         // parse returns the row's metadata + a flag, never an error.
         let s = parse_thread(&c, &sref("bad")).unwrap();
@@ -1079,10 +1077,10 @@ mod tests {
         for (id, data_type, data) in &cases {
             insert(&c, id, id, data_type, data);
         }
-        for r in discover(&c) {
-            assert_eq!(r.message_count, None, "{}", r.id);
-            let s = parse_thread(&c, &sref(&r.id)).unwrap();
-            assert!(s.messages.is_empty(), "{}", r.id);
+        assert!(discover_db(&c, &db_path(&c)).is_err());
+        for (id, _, _) in &cases {
+            let s = parse_thread(&c, &sref(id)).unwrap();
+            assert!(s.messages.is_empty(), "{id}");
             assert_eq!(
                 s.harness_extra(Harness::Zed).and_then(|b| b.get("undecodable_blob")),
                 Some(&Value::Bool(true))
