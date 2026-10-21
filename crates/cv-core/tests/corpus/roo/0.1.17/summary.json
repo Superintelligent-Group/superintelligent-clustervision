@@ -22,6 +22,19 @@
       "subagent_spawns": 0,
       "subagent_returns": 0,
       "affordances": {},
+      "tool_histogram": {
+        "tools": {
+          "attempt_completion": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 1,
+        "total_errors": 0
+      },
       "lineage": {
         "parent": "2c417d0e-1c66-489a-8805-96088d0418be"
       },
@@ -54,6 +67,19 @@
       "affordances": {
         "approval/ask": 1
       },
+      "tool_histogram": {
+        "tools": {
+          "mcp--corpus--add": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 1,
+        "total_errors": 0
+      },
       "lineage": {},
       "model": null,
       "skipped_lines": 0
@@ -85,6 +111,19 @@
       "subagent_spawns": 0,
       "subagent_returns": 0,
       "affordances": {},
+      "tool_histogram": {
+        "tools": {
+          "attempt_completion": {
+            "calls": 2,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 2,
+        "total_errors": 0
+      },
       "lineage": {},
       "model": null,
       "skipped_lines": 0
@@ -115,6 +154,19 @@
       "affordances": {
         "subagent_return/return": 1,
         "subagent_spawn/spawn": 1
+      },
+      "tool_histogram": {
+        "tools": {
+          "new_task": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 1,
+        "total_errors": 0
       },
       "lineage": {},
       "model": null,
@@ -152,6 +204,33 @@
         "approval/ask": 1,
         "question/ask": 1
       },
+      "tool_histogram": {
+        "tools": {
+          "ask_followup_question": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "attempt_completion": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "read_file": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 1,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 3,
+        "total_errors": 0
+      },
       "lineage": {},
       "model": null,
       "skipped_lines": 0
@@ -179,6 +258,19 @@
       "subagent_spawns": 0,
       "subagent_returns": 0,
       "affordances": {},
+      "tool_histogram": {
+        "tools": {
+          "attempt_completion": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 1,
+        "total_errors": 0
+      },
       "lineage": {},
       "model": null,
       "skipped_lines": 0
@@ -232,6 +324,40 @@
         "approval/ask": 7,
         "checkpoint/create": 2
       },
+      "tool_histogram": {
+        "tools": {
+          "apply_diff": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "attempt_completion": {
+            "calls": 2,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "execute_command": {
+            "calls": 3,
+            "edits": 0,
+            "reads": 0,
+            "commands": 3,
+            "errors": 0
+          },
+          "read_file": {
+            "calls": 3,
+            "edits": 0,
+            "reads": 3,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 9,
+        "total_errors": 0
+      },
       "lineage": {},
       "model": null,
       "skipped_lines": 0
@@ -264,6 +390,19 @@
       "subagent_spawns": 0,
       "subagent_returns": 0,
       "affordances": {},
+      "tool_histogram": {
+        "tools": {
+          "attempt_completion": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 1,
+        "total_errors": 0
+      },
       "lineage": {},
       "model": null,
       "skipped_lines": 0
@@ -295,6 +434,19 @@
       "subagent_returns": 0,
       "affordances": {
         "approval/ask": 1
+      },
+      "tool_histogram": {
+        "tools": {
+          "switch_mode": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 1,
+        "total_errors": 0
       },
       "lineage": {},
       "model": null,
@@ -331,6 +483,26 @@
       "affordances": {
         "approval/ask": 2,
         "plan/write": 2
+      },
+      "tool_histogram": {
+        "tools": {
+          "attempt_completion": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "update_todo_list": {
+            "calls": 2,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 3,
+        "total_errors": 0
       },
       "lineage": {},
       "model": null,

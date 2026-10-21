@@ -40,6 +40,40 @@
         "schedule/create": 1,
         "schedule/state": 1
       },
+      "tool_histogram": {
+        "tools": {
+          "exec": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 1,
+            "errors": 0
+          },
+          "openclaw:core:automations": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "tool_describe": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "tool_search": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 4,
+        "total_errors": 0
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -76,6 +110,26 @@
       "subagent_returns": 0,
       "affordances": {
         "model_change/change": 2
+      },
+      "tool_histogram": {
+        "tools": {
+          "mcp:corpus:corpus__add": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "tool_search": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 2,
+        "total_errors": 0
       },
       "lineage": {},
       "model": "glm-5.3-flash",
@@ -119,6 +173,26 @@
         "subagent_spawn/spawn": 1,
         "subagent_spawn/state": 1
       },
+      "tool_histogram": {
+        "tools": {
+          "sessions_spawn": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "sessions_yield": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 2,
+        "total_errors": 0
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -145,6 +219,11 @@
       "subagent_returns": 0,
       "affordances": {
         "model_change/change": 2
+      },
+      "tool_histogram": {
+        "tools": {},
+        "total_calls": 0,
+        "total_errors": 0
       },
       "lineage": {
         "parent": "36d24063-c7fd-4a6b-894a-bd054c1befef"
@@ -209,6 +288,40 @@
         "background_job/start": 1,
         "model_change/change": 2
       },
+      "tool_histogram": {
+        "tools": {
+          "edit": {
+            "calls": 1,
+            "edits": 1,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "exec": {
+            "calls": 3,
+            "edits": 0,
+            "reads": 0,
+            "commands": 3,
+            "errors": 0
+          },
+          "process": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "read": {
+            "calls": 3,
+            "edits": 0,
+            "reads": 3,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 8,
+        "total_errors": 0
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -236,6 +349,11 @@
         "model_change/change": 2,
         "schedule/fire": 1,
         "schedule/state": 1
+      },
+      "tool_histogram": {
+        "tools": {},
+        "total_calls": 0,
+        "total_errors": 0
       },
       "lineage": {},
       "model": "glm-5.3-flash",
@@ -279,6 +397,40 @@
       "subagent_returns": 0,
       "affordances": {
         "model_change/change": 2
+      },
+      "tool_histogram": {
+        "tools": {
+          "exec": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 1,
+            "errors": 0
+          },
+          "memory_search": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "tool_call": {
+            "calls": 0,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 1
+          },
+          "web_fetch": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 3,
+        "total_errors": 1
       },
       "lineage": {},
       "model": "glm-5.3-flash",
@@ -330,6 +482,19 @@
         "branch/branch": 1,
         "model_change/change": 4
       },
+      "tool_histogram": {
+        "tools": {
+          "read": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 1,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 1,
+        "total_errors": 0
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -362,6 +527,11 @@
       "subagent_returns": 0,
       "affordances": {
         "model_change/change": 2
+      },
+      "tool_histogram": {
+        "tools": {},
+        "total_calls": 0,
+        "total_errors": 0
       },
       "lineage": {},
       "model": "glm-5.3-flash",
@@ -396,6 +566,19 @@
       "subagent_returns": 0,
       "affordances": {
         "model_change/change": 2
+      },
+      "tool_histogram": {
+        "tools": {
+          "view_image": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 1,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 1,
+        "total_errors": 0
       },
       "lineage": {},
       "model": "glm-5.3-flash",

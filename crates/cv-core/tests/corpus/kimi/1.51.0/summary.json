@@ -148,6 +148,96 @@
         "subagent_return/return": 1,
         "subagent_spawn/spawn": 1
       },
+      "tool_histogram": {
+        "tools": {
+          "Agent": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "EnterPlanMode": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "ExitPlanMode": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "FetchURL": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "ReadFile": {
+            "calls": 3,
+            "edits": 0,
+            "reads": 3,
+            "commands": 0,
+            "errors": 0
+          },
+          "ReadMediaFile": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 1,
+            "commands": 0,
+            "errors": 0
+          },
+          "SetTodoList": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "Shell": {
+            "calls": 4,
+            "edits": 0,
+            "reads": 0,
+            "commands": 4,
+            "errors": 1
+          },
+          "StrReplaceFile": {
+            "calls": 1,
+            "edits": 1,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "TaskOutput": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "WriteFile": {
+            "calls": 1,
+            "edits": 1,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "add": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 17,
+        "total_errors": 1
+      },
       "lineage": {},
       "model": null,
       "skipped_lines": 0,
@@ -175,6 +265,11 @@
           "subagent_returns": 0,
           "affordances": {
             "checkpoint/state": 1
+          },
+          "tool_histogram": {
+            "tools": {},
+            "total_calls": 0,
+            "total_errors": 0
           },
           "lineage": {
             "parent": "73116dbd-aaa3-4aa1-a83b-8757b7b7df61",

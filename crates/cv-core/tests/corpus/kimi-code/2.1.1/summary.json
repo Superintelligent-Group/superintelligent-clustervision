@@ -19,6 +19,11 @@
       "affordances": {
         "approval/state": 1
       },
+      "tool_histogram": {
+        "tools": {},
+        "total_calls": 0,
+        "total_errors": 0
+      },
       "lineage": {},
       "model": "__kimi_env_model__",
       "skipped_lines": 0,
@@ -56,6 +61,11 @@
         "approval/state": 1,
         "branch/branch": 1,
         "hook/output": 2
+      },
+      "tool_histogram": {
+        "tools": {},
+        "total_calls": 0,
+        "total_errors": 0
       },
       "lineage": {},
       "model": "__kimi_env_model__",
@@ -95,6 +105,11 @@
         "branch/branch": 1,
         "fork/fork": 1,
         "hook/output": 2
+      },
+      "tool_histogram": {
+        "tools": {},
+        "total_calls": 0,
+        "total_errors": 0
       },
       "lineage": {
         "forked_from": "394727b0-b9f3-48a8-ba09-db98727c722d"
@@ -314,6 +329,145 @@
         "subagent_return/return": 3,
         "subagent_spawn/spawn": 3
       },
+      "tool_histogram": {
+        "tools": {
+          "Agent": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "AgentSwarm": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "Bash": {
+            "calls": 4,
+            "edits": 0,
+            "reads": 0,
+            "commands": 4,
+            "errors": 1
+          },
+          "CreateGoal": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "CronCreate": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "CronDelete": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "CronList": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "Edit": {
+            "calls": 1,
+            "edits": 1,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "EnterPlanMode": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "ExitPlanMode": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "FetchURL": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "Glob": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "Read": {
+            "calls": 4,
+            "edits": 0,
+            "reads": 4,
+            "commands": 0,
+            "errors": 1
+          },
+          "Skill": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "TaskOutput": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "TodoList": {
+            "calls": 2,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "UpdateGoal": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "Write": {
+            "calls": 1,
+            "edits": 1,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "mcp__corpus__add": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 26,
+        "total_errors": 2
+      },
       "lineage": {},
       "model": "__kimi_env_model__",
       "skipped_lines": 0,
@@ -341,6 +495,11 @@
           "subagent_returns": 0,
           "affordances": {
             "approval/state": 1
+          },
+          "tool_histogram": {
+            "tools": {},
+            "total_calls": 0,
+            "total_errors": 0
           },
           "lineage": {
             "parent": "de6f5485-ae7f-4f68-821e-230bdde5dc56",
@@ -373,6 +532,11 @@
           "affordances": {
             "approval/state": 1
           },
+          "tool_histogram": {
+            "tools": {},
+            "total_calls": 0,
+            "total_errors": 0
+          },
           "lineage": {
             "parent": "de6f5485-ae7f-4f68-821e-230bdde5dc56",
             "agent_path": "agent-1"
@@ -403,6 +567,11 @@
           "subagent_returns": 0,
           "affordances": {
             "approval/state": 1
+          },
+          "tool_histogram": {
+            "tools": {},
+            "total_calls": 0,
+            "total_errors": 0
           },
           "lineage": {
             "parent": "de6f5485-ae7f-4f68-821e-230bdde5dc56",

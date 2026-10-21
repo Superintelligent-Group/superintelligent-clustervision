@@ -45,6 +45,33 @@
       "affordances": {
         "approval/state": 1
       },
+      "tool_histogram": {
+        "tools": {
+          "edit": {
+            "calls": 1,
+            "edits": 1,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "read_file": {
+            "calls": 3,
+            "edits": 0,
+            "reads": 3,
+            "commands": 0,
+            "errors": 0
+          },
+          "run_shell_command": {
+            "calls": 2,
+            "edits": 0,
+            "reads": 0,
+            "commands": 2,
+            "errors": 1
+          }
+        },
+        "total_calls": 6,
+        "total_errors": 1
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -72,6 +99,11 @@
         "approval/state": 1,
         "hook/output": 1
       },
+      "tool_histogram": {
+        "tools": {},
+        "total_calls": 0,
+        "total_errors": 0
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -98,6 +130,11 @@
       "subagent_returns": 0,
       "affordances": {
         "approval/state": 1
+      },
+      "tool_histogram": {
+        "tools": {},
+        "total_calls": 0,
+        "total_errors": 0
       },
       "lineage": {},
       "model": "glm-5.3-flash",
@@ -130,6 +167,19 @@
       "affordances": {
         "approval/state": 1,
         "skill/load": 1
+      },
+      "tool_histogram": {
+        "tools": {
+          "skill": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 1,
+        "total_errors": 0
       },
       "lineage": {},
       "model": "glm-5.3-flash",
@@ -167,6 +217,26 @@
       "subagent_returns": 0,
       "affordances": {
         "goal/update": 1
+      },
+      "tool_histogram": {
+        "tools": {
+          "tool_search": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "update_goal": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 2,
+        "total_errors": 0
       },
       "lineage": {},
       "model": "glm-5.3-flash",
@@ -215,6 +285,26 @@
       "affordances": {
         "approval/state": 1
       },
+      "tool_histogram": {
+        "tools": {
+          "read_file": {
+            "calls": 3,
+            "edits": 0,
+            "reads": 3,
+            "commands": 0,
+            "errors": 0
+          },
+          "tool_search": {
+            "calls": 4,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 7,
+        "total_errors": 0
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -255,6 +345,33 @@
         "schedule/list": 1,
         "schedule/state": 1
       },
+      "tool_histogram": {
+        "tools": {
+          "cron_create": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "cron_list": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "tool_search": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 3,
+        "total_errors": 0
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -291,6 +408,26 @@
         "subagent_return/return": 1,
         "subagent_spawn/spawn": 1
       },
+      "tool_histogram": {
+        "tools": {
+          "agent": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "tool_search": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 2,
+        "total_errors": 0
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -323,6 +460,19 @@
         "approval/state": 1,
         "background_job/start": 1
       },
+      "tool_histogram": {
+        "tools": {
+          "run_shell_command": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 1,
+            "errors": 0
+          }
+        },
+        "total_calls": 1,
+        "total_errors": 0
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -354,6 +504,19 @@
       "affordances": {
         "approval/state": 1,
         "plan/write": 1
+      },
+      "tool_histogram": {
+        "tools": {
+          "todo_write": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 1,
+        "total_errors": 0
       },
       "lineage": {},
       "model": "glm-5.3-flash",
@@ -389,6 +552,26 @@
       "affordances": {
         "approval/state": 1
       },
+      "tool_histogram": {
+        "tools": {
+          "tool_search": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "web_fetch": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 2,
+        "total_errors": 0
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -415,6 +598,11 @@
       "subagent_returns": 0,
       "affordances": {
         "approval/state": 1
+      },
+      "tool_histogram": {
+        "tools": {},
+        "total_calls": 0,
+        "total_errors": 0
       },
       "lineage": {},
       "model": "glm-5.3-flash",
@@ -448,6 +636,19 @@
         "approval/state": 1,
         "skill/load": 1
       },
+      "tool_histogram": {
+        "tools": {
+          "skill": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 1
+          }
+        },
+        "total_calls": 1,
+        "total_errors": 1
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -475,6 +676,11 @@
       "affordances": {
         "approval/state": 1,
         "fork/fork": 1
+      },
+      "tool_histogram": {
+        "tools": {},
+        "total_calls": 0,
+        "total_errors": 0
       },
       "lineage": {
         "forked_from": "f543aadd-5ca8-4211-8e6a-1ef3726ff97c"
@@ -512,6 +718,26 @@
       "affordances": {
         "approval/state": 1
       },
+      "tool_histogram": {
+        "tools": {
+          "mcp__corpus__add": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "tool_search": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 2,
+        "total_errors": 0
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -535,6 +761,11 @@
       "subagent_spawns": 0,
       "subagent_returns": 0,
       "affordances": {},
+      "tool_histogram": {
+        "tools": {},
+        "total_calls": 0,
+        "total_errors": 0
+      },
       "lineage": {
         "parent": "698cf212-e0c5-4e7c-8cee-b035567fa40a",
         "spawned_by_tool_use": "call_aef88df0d81241659680dfa0",
@@ -570,6 +801,11 @@
       "affordances": {
         "approval/state": 1
       },
+      "tool_histogram": {
+        "tools": {},
+        "total_calls": 0,
+        "total_errors": 0
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -604,6 +840,19 @@
       "affordances": {
         "approval/state": 1
       },
+      "tool_histogram": {
+        "tools": {
+          "tool_search": {
+            "calls": 2,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 2,
+        "total_errors": 0
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -633,6 +882,11 @@
       "affordances": {
         "approval/state": 1
       },
+      "tool_histogram": {
+        "tools": {},
+        "total_calls": 0,
+        "total_errors": 0
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -657,6 +911,11 @@
       "subagent_returns": 0,
       "affordances": {
         "approval/state": 1
+      },
+      "tool_histogram": {
+        "tools": {},
+        "total_calls": 0,
+        "total_errors": 0
       },
       "lineage": {},
       "model": "glm-5.3-flash",
@@ -699,6 +958,33 @@
         "approval/state": 1,
         "plan/create": 2,
         "plan/read": 1
+      },
+      "tool_histogram": {
+        "tools": {
+          "task_create": {
+            "calls": 2,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 1
+          },
+          "task_list": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "team_create": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 4,
+        "total_errors": 1
       },
       "lineage": {},
       "model": "glm-5.3-flash",

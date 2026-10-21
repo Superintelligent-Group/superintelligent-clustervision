@@ -32,6 +32,11 @@
       "affordances": {
         "approval/state": 1
       },
+      "tool_histogram": {
+        "tools": {},
+        "total_calls": 0,
+        "total_errors": 0
+      },
       "lineage": {},
       "model": "gpt-6-luna",
       "skipped_lines": 0
@@ -116,6 +121,26 @@
       "affordances": {
         "approval/state": 1
       },
+      "tool_histogram": {
+        "tools": {
+          "apply_patch": {
+            "calls": 0,
+            "edits": 1,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "exec": {
+            "calls": 10,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 10,
+        "total_errors": 0
+      },
       "lineage": {},
       "model": "gpt-6-luna",
       "skipped_lines": 0
@@ -144,6 +169,11 @@
       "subagent_returns": 0,
       "affordances": {
         "approval/state": 1
+      },
+      "tool_histogram": {
+        "tools": {},
+        "total_calls": 0,
+        "total_errors": 0
       },
       "lineage": {},
       "model": "gpt-6-luna",
@@ -183,6 +213,11 @@
       "subagent_returns": 0,
       "affordances": {
         "approval/state": 1
+      },
+      "tool_histogram": {
+        "tools": {},
+        "total_calls": 0,
+        "total_errors": 0
       },
       "lineage": {},
       "model": "gpt-6-luna",
@@ -260,6 +295,19 @@
         "approval/deny": 4,
         "approval/state": 1
       },
+      "tool_histogram": {
+        "tools": {
+          "exec": {
+            "calls": 8,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 8,
+        "total_errors": 0
+      },
       "lineage": {},
       "model": "gpt-6-luna",
       "skipped_lines": 0
@@ -319,6 +367,33 @@
         "subagent_return/return": 1,
         "subagent_spawn/spawn": 1
       },
+      "tool_histogram": {
+        "tools": {
+          "list_agents": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "spawn_agent": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "wait_agent": {
+            "calls": 2,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 4,
+        "total_errors": 0
+      },
       "lineage": {},
       "model": "gpt-6-luna",
       "skipped_lines": 0
@@ -366,6 +441,19 @@
       "affordances": {
         "approval/state": 1
       },
+      "tool_histogram": {
+        "tools": {
+          "exec": {
+            "calls": 3,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 3,
+        "total_errors": 0
+      },
       "lineage": {
         "parent": "01a12c67-d6ee-74e3-a296-8c936b563a50",
         "agent_path": "/root/say_ok"
@@ -410,6 +498,19 @@
       "subagent_returns": 0,
       "affordances": {
         "approval/state": 1
+      },
+      "tool_histogram": {
+        "tools": {
+          "exec": {
+            "calls": 2,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 2,
+        "total_errors": 0
       },
       "lineage": {},
       "model": "gpt-6-luna",

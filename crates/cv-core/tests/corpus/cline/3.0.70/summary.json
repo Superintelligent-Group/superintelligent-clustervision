@@ -18,6 +18,11 @@
       "subagent_spawns": 0,
       "subagent_returns": 0,
       "affordances": {},
+      "tool_histogram": {
+        "tools": {},
+        "total_calls": 0,
+        "total_errors": 0
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -55,6 +60,33 @@
       "subagent_spawns": 0,
       "subagent_returns": 0,
       "affordances": {},
+      "tool_histogram": {
+        "tools": {
+          "editor": {
+            "calls": 1,
+            "edits": 1,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "read_files": {
+            "calls": 2,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "run_commands": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 4,
+        "total_errors": 0
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -87,6 +119,19 @@
         "subagent_return/return": 1,
         "subagent_spawn/spawn": 1
       },
+      "tool_histogram": {
+        "tools": {
+          "spawn_agent": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 1,
+        "total_errors": 0
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -110,6 +155,11 @@
       "subagent_spawns": 0,
       "subagent_returns": 0,
       "affordances": {},
+      "tool_histogram": {
+        "tools": {},
+        "total_calls": 0,
+        "total_errors": 0
+      },
       "lineage": {
         "parent": "1791750921112_4i2p2",
         "agent_path": "agent_4906d67a-65d4-4233-bb2f-c8ebc64f2d45"
@@ -156,6 +206,40 @@
         "subagent_spawn/spawn": 1,
         "subagent_spawn/state": 1
       },
+      "tool_histogram": {
+        "tools": {
+          "team_await_runs": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "team_cleanup": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "team_run_task": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "team_spawn_teammate": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 4,
+        "total_errors": 0
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -178,6 +262,11 @@
       "subagent_spawns": 0,
       "subagent_returns": 0,
       "affordances": {},
+      "tool_histogram": {
+        "tools": {},
+        "total_calls": 0,
+        "total_errors": 0
+      },
       "lineage": {
         "parent": "1791750938370_7ouqo",
         "agent_path": "helper"
@@ -213,6 +302,19 @@
       "subagent_spawns": 0,
       "subagent_returns": 0,
       "affordances": {},
+      "tool_histogram": {
+        "tools": {
+          "run_commands": {
+            "calls": 2,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 2,
+        "total_errors": 0
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -242,6 +344,19 @@
       "subagent_spawns": 0,
       "subagent_returns": 0,
       "affordances": {},
+      "tool_histogram": {
+        "tools": {
+          "corpus__add": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 1,
+        "total_errors": 0
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -271,6 +386,19 @@
       "subagent_spawns": 0,
       "subagent_returns": 0,
       "affordances": {},
+      "tool_histogram": {
+        "tools": {
+          "fetch_web_content": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 1,
+        "total_errors": 0
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -304,6 +432,26 @@
       "subagent_returns": 0,
       "affordances": {
         "question/ask": 1
+      },
+      "tool_histogram": {
+        "tools": {
+          "ask_question": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "read_files": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 2,
+        "total_errors": 0
       },
       "lineage": {},
       "model": "glm-5.3-flash",

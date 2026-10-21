@@ -35,6 +35,26 @@
       "affordances": {
         "approval/state": 1
       },
+      "tool_histogram": {
+        "tools": {
+          "apply_patch": {
+            "calls": 0,
+            "edits": 1,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "exec": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 1,
+        "total_errors": 0
+      },
       "lineage": {},
       "model": "gpt-6-luna",
       "skipped_lines": 0
@@ -80,6 +100,11 @@
       "affordances": {
         "approval/state": 1
       },
+      "tool_histogram": {
+        "tools": {},
+        "total_calls": 0,
+        "total_errors": 0
+      },
       "lineage": {},
       "model": "gpt-6-luna",
       "skipped_lines": 0
@@ -124,6 +149,19 @@
       "subagent_returns": 0,
       "affordances": {
         "approval/state": 1
+      },
+      "tool_histogram": {
+        "tools": {
+          "exec": {
+            "calls": 2,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 2,
+        "total_errors": 0
       },
       "lineage": {},
       "model": "gpt-6-luna",
@@ -186,6 +224,33 @@
         "subagent_return/return": 1,
         "subagent_spawn/spawn": 1
       },
+      "tool_histogram": {
+        "tools": {
+          "list_agents": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "spawn_agent": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "wait_agent": {
+            "calls": 2,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 4,
+        "total_errors": 0
+      },
       "lineage": {},
       "model": "gpt-6-luna",
       "skipped_lines": 0
@@ -226,6 +291,19 @@
       "subagent_returns": 0,
       "affordances": {
         "approval/state": 1
+      },
+      "tool_histogram": {
+        "tools": {
+          "exec": {
+            "calls": 2,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 2,
+        "total_errors": 0
       },
       "lineage": {
         "parent": "01a14d81-f1dd-7bc2-8aa4-55aa88a84990",

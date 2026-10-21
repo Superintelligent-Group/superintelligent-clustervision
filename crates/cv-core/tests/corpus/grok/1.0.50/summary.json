@@ -32,6 +32,11 @@
         "fork/fork": 1,
         "hook/run": 6
       },
+      "tool_histogram": {
+        "tools": {},
+        "total_calls": 0,
+        "total_errors": 0
+      },
       "lineage": {
         "forked_from": "c5f345ba-402c-46e9-838e-6c95011d9809"
       },
@@ -70,6 +75,19 @@
         "checkpoint/create": 1,
         "hook/run": 1
       },
+      "tool_histogram": {
+        "tools": {
+          "read_file": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 1,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 1,
+        "total_errors": 0
+      },
       "lineage": {},
       "model": "corpus-glm",
       "skipped_lines": 0
@@ -99,6 +117,11 @@
       "affordances": {
         "checkpoint/create": 1,
         "hook/run": 1
+      },
+      "tool_histogram": {
+        "tools": {},
+        "total_calls": 0,
+        "total_errors": 0
       },
       "lineage": {},
       "model": "corpus-glm",
@@ -139,6 +162,19 @@
         "checkpoint/create": 1,
         "hook/run": 1,
         "plan/write": 2
+      },
+      "tool_histogram": {
+        "tools": {
+          "todo_write": {
+            "calls": 2,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 2,
+        "total_errors": 0
       },
       "lineage": {},
       "model": "corpus-glm",
@@ -181,6 +217,26 @@
         "plan/enter": 1,
         "plan/exit": 1
       },
+      "tool_histogram": {
+        "tools": {
+          "enter_plan_mode": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "exit_plan_mode": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 2,
+        "total_errors": 0
+      },
       "lineage": {},
       "model": "corpus-glm",
       "skipped_lines": 0
@@ -222,6 +278,26 @@
         "hook/run": 1,
         "subagent_spawn/spawn": 1
       },
+      "tool_histogram": {
+        "tools": {
+          "get_command_or_subagent_output": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "spawn_subagent": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 2,
+        "total_errors": 0
+      },
       "lineage": {},
       "model": "corpus-glm",
       "skipped_lines": 0
@@ -254,6 +330,19 @@
       "subagent_returns": 0,
       "affordances": {
         "checkpoint/create": 1
+      },
+      "tool_histogram": {
+        "tools": {
+          "read_file": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 1,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 1,
+        "total_errors": 0
       },
       "lineage": {
         "parent": "01a12cc9-eafa-7c50-9da1-929449f3db16",
@@ -305,6 +394,33 @@
         "checkpoint/create": 1,
         "hook/run": 1
       },
+      "tool_histogram": {
+        "tools": {
+          "get_command_or_subagent_output": {
+            "calls": 2,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "monitor": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 1,
+            "errors": 0
+          },
+          "run_terminal_command": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 1,
+            "errors": 0
+          }
+        },
+        "total_calls": 4,
+        "total_errors": 0
+      },
       "lineage": {},
       "model": "corpus-glm",
       "skipped_lines": 0
@@ -350,6 +466,33 @@
         "schedule/delete": 1,
         "schedule/list": 1
       },
+      "tool_histogram": {
+        "tools": {
+          "scheduler_create": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "scheduler_delete": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "scheduler_list": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 3,
+        "total_errors": 0
+      },
       "lineage": {},
       "model": "corpus-glm",
       "skipped_lines": 0
@@ -389,6 +532,26 @@
         "checkpoint/create": 1,
         "hook/run": 1
       },
+      "tool_histogram": {
+        "tools": {
+          "search_tool": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "use_tool": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 2,
+        "total_errors": 0
+      },
       "lineage": {},
       "model": "corpus-glm",
       "skipped_lines": 0
@@ -418,6 +581,11 @@
       "affordances": {
         "checkpoint/create": 1,
         "hook/run": 1
+      },
+      "tool_histogram": {
+        "tools": {},
+        "total_calls": 0,
+        "total_errors": 0
       },
       "lineage": {},
       "model": "corpus-glm",
@@ -467,6 +635,47 @@
         "checkpoint/create": 1,
         "hook/run": 1
       },
+      "tool_histogram": {
+        "tools": {
+          "Workflow: corpus-hello": {
+            "calls": 0,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 1
+          },
+          "Workflow: launch script": {
+            "calls": 0,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 1
+          },
+          "read_file": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 1,
+            "commands": 0,
+            "errors": 0
+          },
+          "run_terminal_command": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 1,
+            "errors": 0
+          },
+          "workflow": {
+            "calls": 3,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 5,
+        "total_errors": 2
+      },
       "lineage": {},
       "model": "corpus-glm",
       "skipped_lines": 0
@@ -492,6 +701,11 @@
       "subagent_returns": 0,
       "affordances": {
         "checkpoint/create": 1
+      },
+      "tool_histogram": {
+        "tools": {},
+        "total_calls": 0,
+        "total_errors": 0
       },
       "lineage": {
         "parent": "01a12ccb-416d-70d0-a49b-a1acd0f28ef2",
@@ -523,6 +737,11 @@
       "affordances": {
         "checkpoint/create": 1
       },
+      "tool_histogram": {
+        "tools": {},
+        "total_calls": 0,
+        "total_errors": 0
+      },
       "lineage": {
         "parent": "01a12ccb-416d-70d0-a49b-a1acd0f28ef2",
         "agent_path": "general-purpose"
@@ -552,6 +771,11 @@
       "subagent_returns": 0,
       "affordances": {
         "hook/run": 1
+      },
+      "tool_histogram": {
+        "tools": {},
+        "total_calls": 0,
+        "total_errors": 0
       },
       "lineage": {},
       "model": "corpus-glm",
@@ -614,6 +838,40 @@
         "checkpoint/create": 5,
         "hook/run": 6
       },
+      "tool_histogram": {
+        "tools": {
+          "read_file": {
+            "calls": 2,
+            "edits": 0,
+            "reads": 2,
+            "commands": 0,
+            "errors": 0
+          },
+          "run_terminal_command": {
+            "calls": 3,
+            "edits": 0,
+            "reads": 0,
+            "commands": 3,
+            "errors": 0
+          },
+          "search_replace": {
+            "calls": 1,
+            "edits": 1,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "write": {
+            "calls": 1,
+            "edits": 1,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 7,
+        "total_errors": 0
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -645,6 +903,11 @@
       "affordances": {
         "checkpoint/create": 4,
         "hook/run": 5
+      },
+      "tool_histogram": {
+        "tools": {},
+        "total_calls": 0,
+        "total_errors": 0
       },
       "lineage": {},
       "model": "glm-5.3",

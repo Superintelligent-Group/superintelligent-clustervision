@@ -34,6 +34,11 @@
         "branch/branch": 1,
         "hook/output": 2
       },
+      "tool_histogram": {
+        "tools": {},
+        "total_calls": 0,
+        "total_errors": 0
+      },
       "lineage": {},
       "model": "__kimi_env_model__",
       "skipped_lines": 0,
@@ -240,6 +245,145 @@
         "subagent_return/return": 1,
         "subagent_spawn/spawn": 2
       },
+      "tool_histogram": {
+        "tools": {
+          "Agent": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "AgentSwarm": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "Bash": {
+            "calls": 4,
+            "edits": 0,
+            "reads": 0,
+            "commands": 4,
+            "errors": 1
+          },
+          "CreateGoal": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "CronCreate": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "CronDelete": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "CronList": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "Edit": {
+            "calls": 1,
+            "edits": 1,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "EnterPlanMode": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "ExitPlanMode": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "FetchURL": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "Glob": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "Read": {
+            "calls": 3,
+            "edits": 0,
+            "reads": 3,
+            "commands": 0,
+            "errors": 0
+          },
+          "Skill": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "TaskOutput": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "TodoList": {
+            "calls": 2,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "UpdateGoal": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "Write": {
+            "calls": 1,
+            "edits": 1,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          },
+          "mcp__corpus__add": {
+            "calls": 1,
+            "edits": 0,
+            "reads": 0,
+            "commands": 0,
+            "errors": 0
+          }
+        },
+        "total_calls": 25,
+        "total_errors": 1
+      },
       "lineage": {},
       "model": "__kimi_env_model__",
       "skipped_lines": 0,
@@ -269,6 +413,11 @@
           "subagent_returns": 0,
           "affordances": {
             "approval/state": 1
+          },
+          "tool_histogram": {
+            "tools": {},
+            "total_calls": 0,
+            "total_errors": 0
           },
           "lineage": {
             "parent": "bd89ed75-cad6-44de-a84b-3799983eb639",
@@ -303,6 +452,11 @@
           "affordances": {
             "approval/state": 1
           },
+          "tool_histogram": {
+            "tools": {},
+            "total_calls": 0,
+            "total_errors": 0
+          },
           "lineage": {
             "parent": "bd89ed75-cad6-44de-a84b-3799983eb639",
             "agent_path": "agent-1"
@@ -336,6 +490,11 @@
           "affordances": {
             "approval/state": 1
           },
+          "tool_histogram": {
+            "tools": {},
+            "total_calls": 0,
+            "total_errors": 0
+          },
           "lineage": {
             "parent": "bd89ed75-cad6-44de-a84b-3799983eb639",
             "agent_path": "agent-2"
@@ -363,6 +522,11 @@
       "subagent_returns": 0,
       "affordances": {
         "approval/state": 1
+      },
+      "tool_histogram": {
+        "tools": {},
+        "total_calls": 0,
+        "total_errors": 0
       },
       "lineage": {},
       "model": "__kimi_env_model__",
