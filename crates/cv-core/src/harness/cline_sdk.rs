@@ -532,7 +532,7 @@ fn schedule_fires(db: &Path, sid: &str) -> Vec<crate::affordance::Affordance> {
             Option<String>,
         );
         let rows: Vec<Row> = conn
-            .read(|conn| {
+            .read(|conn, _| {
                 if !table_exists(conn, runs) || !table_exists(conn, specs) {
                     return Ok(Vec::new());
                 }
@@ -577,7 +577,7 @@ fn team_runs(teams_db: &Path, sid: &str) -> Vec<crate::affordance::Affordance> {
         return Vec::new();
     };
     let events: Vec<(String, String, String)> = conn
-        .read(|conn| {
+        .read(|conn, _| {
             if !table_exists(conn, "team_events") {
                 return Ok(Vec::new());
             }

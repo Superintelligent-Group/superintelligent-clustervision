@@ -64,7 +64,7 @@
 mod emit;
 pub use emit::emit;
 
-use super::store::sqlite::{columns, open_ro, table_exists, Cells};
+use super::store::sqlite::{open_ro, table_exists, Cells, Select};
 use super::wire::openai;
 use super::{ts_from_epoch, Adapter};
 use crate::ir::*;
@@ -289,7 +289,8 @@ impl Adapter for Hermes {
         // than failing the whole scan.
         let mut out = crate::Discovered::default();
         for db in &self.dbs {
-            let refs = super::store::sqlite::cached_discover(db, || open_ro(db)?.read(|conn| discover_conn(conn, db)));
+            let refs =
+                super::store::sqlite::cached_discover(db, || open_ro(db)?.read(|conn, _| discover_conn(conn, db)));
             if let Some(refs) = out.keep(db, refs) {
                 out.refs.extend(refs);
             }
@@ -323,8 +324,8 @@ impl Adapter for Hermes {
             let sink: &mut dyn MessageSink = &mut spawns;
             // Route by the ref's own DB path (set at discovery time), NOT a single self.db — this is
             // what lets one Hermes adapter span many profile DBs without id collisions.
-            super::store::sqlite::read(&r.path, |conn| {
-                stream_conn_with_reads(conn, r, opts, sink, conn.reads())
+            super::store::sqlite::read(&r.path, |conn, reads| {
+                stream_conn_with_reads(conn, r, opts, sink, reads)
             })
         })
     }
@@ -334,7 +335,7 @@ impl Adapter for Hermes {
         let Ok(conn) = open_ro(&r.path) else {
             return Vec::new();
         };
-        conn.read(|conn| {
+        conn.read(|conn, _| {
             if !table_exists(conn, "state_meta") {
                 return Ok(Vec::new());
             }
@@ -396,8 +397,8 @@ pub fn subagent_refs(parent: &SessionRef) -> Vec<SessionRef> {
     let Ok(conn) = open_ro(&parent.path) else {
         return Vec::new();
     };
-    conn.read(|conn| {
-        let chain: HashSet<String> = if columns(conn, "sessions").contains("parent_session_id") {
+    conn.read(|conn, _| {
+        let chain: HashSet<String> = if Select::of(conn, "sessions").has("parent_session_id") {
             session_lineage_root_to_tip(conn, &parent.id).into_iter().collect()
         } else {
             HashSet::from([parent.id.clone()])
@@ -413,26 +414,16 @@ pub fn subagent_refs(parent: &SessionRef) -> Vec<SessionRef> {
 /// [`discover_conn`]); with it set, only the delegate runs whose `_delegate_from` is in the set.
 fn refs_conn(conn: &Connection, path: &Path, delegates_of: Option<&HashSet<String>>) -> Result<Vec<SessionRef>> {
     // Older schemas may lack `title`, `parent_session_id`, …: select what exists, NULL for the rest.
-    let scols = columns(conn, "sessions");
-    let expr = |col: &str| {
-        if scols.contains(col) {
-            col.to_string()
-        } else {
-            "NULL".to_string()
-        }
-    };
-    let has_parent = scols.contains("parent_session_id");
-    let sql = format!(
-        "SELECT id, {title}, started_at, ended_at, {cwd}, {last}, {model_config} \
-         FROM sessions ORDER BY started_at DESC",
-        title = expr("title"),
-        cwd = expr("cwd"),
-        last = expr("last_activity_at"),
-        model_config = expr("model_config"),
-    );
+    let select = Select::of(conn, "sessions")
+        .always(&["id"])
+        .probed(&["title"])
+        .always(&["started_at", "ended_at"])
+        .probed(&["cwd", "last_activity_at", "model_config"]);
+    let sql = format!("SELECT {} FROM sessions ORDER BY started_at DESC", select.list());
+    let has_parent = select.has("parent_session_id");
     // Compression ancestors: parents (ended in compression) that some session continues from.
     let mut compression_parents: HashSet<String> = HashSet::new();
-    if has_parent && scols.contains("end_reason") {
+    if has_parent && select.has("end_reason") {
         let mut stmt = conn.prepare(
             "SELECT DISTINCT p.id FROM sessions p JOIN sessions c ON c.parent_session_id = p.id \
              WHERE p.end_reason IN ('compression', 'orphaned_compression')",
@@ -558,7 +549,9 @@ fn read_session_facts(
     opts: &stream::Demand,
 ) -> Result<SessionFacts> {
     let mut meta = serde_json::Map::new();
-    let scols = columns(conn, "sessions");
+    let select = Select::of(conn, "sessions")
+        .present(SESSION_META_TEXT_COLS)
+        .present(SESSION_META_INT_COLS);
     if opts.tier >= Tier::Rich {
         if let Some(s) = source.filter(|s| !s.is_empty()) {
             meta.insert("source".into(), Value::String(s.to_string()));
@@ -566,35 +559,41 @@ fn read_session_facts(
         if let Some(e) = end_reason.filter(|s| !s.is_empty()) {
             meta.insert("end_reason".into(), Value::String(e.to_string()));
         }
-        for col in SESSION_META_TEXT_COLS {
-            if !scols.contains(*col) {
-                continue;
-            }
-            let v: Option<String> = conn
-                .query_row(&format!("SELECT {col} FROM sessions WHERE id = ?1"), [id], |row| {
-                    row.get::<_, Option<String>>(0)
-                })
-                .ok()
-                .flatten();
-            if let Some(v) = v.filter(|s| !s.is_empty()) {
-                meta.insert((*col).into(), Value::String(v));
+        // One row read for every column the bag carries; a value of another type reads as absent.
+        let mut text: Vec<(&str, Option<String>)> = Vec::new();
+        let mut ints: Vec<(&str, Option<i64>)> = Vec::new();
+        if !select.list().is_empty() {
+            let row = conn.query_row(
+                &format!("SELECT {} FROM sessions WHERE id = ?1", select.list()),
+                [id],
+                |row| {
+                    let at = |c: &str| select.at(c);
+                    text = SESSION_META_TEXT_COLS
+                        .iter()
+                        .filter_map(|c| at(c).map(|i| (*c, row.get::<_, Option<String>>(i).ok().flatten())))
+                        .collect();
+                    ints = SESSION_META_INT_COLS
+                        .iter()
+                        .filter_map(|c| at(c).map(|i| (*c, row.get::<_, Option<i64>>(i).ok().flatten())))
+                        .collect();
+                    Ok(())
+                },
+            );
+            if row.is_err() {
+                (text, ints) = (Vec::new(), Vec::new());
             }
         }
-        for col in SESSION_META_INT_COLS {
-            if !scols.contains(*col) {
-                continue;
+        for (col, v) in text {
+            if let Some(v) = v.filter(|s| !s.is_empty()) {
+                meta.insert(col.into(), Value::String(v));
             }
-            let v: Option<i64> = conn
-                .query_row(&format!("SELECT {col} FROM sessions WHERE id = ?1"), [id], |row| {
-                    row.get::<_, Option<i64>>(0)
-                })
-                .ok()
-                .flatten();
+        }
+        for (col, v) in ints {
             // Only carry non-zero aggregates: a freshly-emitted DB leaves these at their DEFAULT 0, so
             // storing 0 would make the round-trip "lose" a value that was never meaningfully set. emit
             // writes back exactly the keys present here, so omitting 0 keeps emit→parse symmetric.
             if let Some(v) = v.filter(|n| *n != 0) {
-                meta.insert((*col).into(), Value::Number(v.into()));
+                meta.insert(col.into(), Value::Number(v.into()));
             }
         }
     }
@@ -609,13 +608,13 @@ fn read_session_facts(
             .filter(|s| !s.is_empty())
     };
     let mut system_prompt = None;
-    if scols.contains("system_prompt_hash") && table_exists(conn, "system_prompts") {
+    if select.has("system_prompt_hash") && table_exists(conn, "system_prompts") {
         system_prompt = str_col(
             "SELECT sp.prompt FROM sessions s JOIN system_prompts sp ON sp.hash = s.system_prompt_hash \
              WHERE s.id = ?1",
         );
     }
-    if system_prompt.is_none() && scols.contains("system_prompt") {
+    if system_prompt.is_none() && select.has("system_prompt") {
         system_prompt = str_col("SELECT system_prompt FROM sessions WHERE id = ?1");
     }
     let mut bag = serde_json::Map::new();
@@ -624,14 +623,16 @@ fn read_session_facts(
     // very transcript cv also parses natively. Surface it in the bag (full demand) so consumers can
     // dedupe; the messages themselves carry `Origin::Import` on every demand.
     let mut imported_from = None;
-    if scols.contains("origin_json") {
+    if select.has("origin_json") {
         let cells = Cells::new(conn, path, reads, "sessions")?;
-        let sql = format!("SELECT {} FROM sessions WHERE id = ?1", cells.select("origin_json"));
+        let origin = Select::of(conn, "sessions").cell(&cells, "origin_json");
+        let at = origin.index("origin_json")?;
+        let sql = format!("SELECT {} FROM sessions WHERE id = ?1", origin.list());
         let mut statement = conn.prepare(&sql)?;
         let mut rows = statement.query([id])?;
         if let Some(cell) = rows
             .next()?
-            .map(|row| cells.cell(conn, "sessions", "origin_json", row, 0))
+            .map(|row| cells.cell(conn, "sessions", "origin_json", row, at))
             .transpose()?
             .flatten()
         {
@@ -667,17 +668,13 @@ fn read_session_facts(
 /// a session that ended in compression; `None` when the store does not say, an error when it
 /// cannot be asked. A child whose id is not text is no session cv can name.
 fn compression_child(conn: &Connection, id: &str) -> Result<Option<String>> {
-    let scols = columns(conn, "sessions");
-    if !scols.contains("parent_session_id") {
+    let select = Select::of(conn, "sessions").always(&["id"]).probed(&["model_config"]);
+    if !select.has("parent_session_id") {
         return Ok(None);
     }
-    let model_config = if scols.contains("model_config") {
-        "model_config"
-    } else {
-        "NULL"
-    };
     let mut stmt = conn.prepare(&format!(
-        "SELECT id, {model_config} FROM sessions WHERE parent_session_id = ?1 ORDER BY started_at ASC"
+        "SELECT {} FROM sessions WHERE parent_session_id = ?1 ORDER BY started_at ASC",
+        select.list()
     ))?;
     let mut rows = stmt.query([id])?;
     while let Some(row) = rows.next()? {
@@ -708,28 +705,21 @@ fn stream_conn_with_reads(
     reads: &crate::source::ReadSet,
 ) -> Result<Session> {
     // session-level metadata (guard optional columns for historical schemas).
-    let scols = columns(conn, "sessions");
-    let expr = |col: &str| {
-        if scols.contains(col) {
-            col.to_string()
-        } else {
-            "NULL".to_string()
-        }
-    };
-    let has_parent = scols.contains("parent_session_id");
-    let meta_sql = format!(
-        "SELECT {model}, started_at, ended_at, {title}, {source}, {parent}, {end_reason}, {cwd}, \
-         {git_branch}, {last}, {model_config} FROM sessions WHERE id = ?1",
-        model = expr("model"),
-        title = expr("title"),
-        source = expr("source"),
-        parent = expr("parent_session_id"),
-        end_reason = expr("end_reason"),
-        cwd = expr("cwd"),
-        git_branch = expr("git_branch"),
-        last = expr("last_activity_at"),
-        model_config = expr("model_config"),
-    );
+    let select = Select::of(conn, "sessions")
+        .probed(&["model"])
+        .always(&["started_at", "ended_at"])
+        .probed(&[
+            "title",
+            "source",
+            "parent_session_id",
+            "end_reason",
+            "cwd",
+            "git_branch",
+            "last_activity_at",
+            "model_config",
+        ]);
+    let has_parent = select.has("parent_session_id");
+    let meta_sql = format!("SELECT {} FROM sessions WHERE id = ?1", select.list());
     let (model, started, ended, title, source, parent, end_reason, cwd, git_branch, last_activity, model_config): SessionMetaRow =
         conn.query_row(&meta_sql, [&r.id], |row| {
             Ok((
@@ -830,9 +820,6 @@ fn stream_conn_with_reads(
         ..Session::new(r.id.clone(), Harness::Hermes)
     };
 
-    let cols = columns(conn, "messages");
-    let has = |c: &str| cols.contains(c);
-
     // Build the SELECT defensively: required cols always present; optional cols gated by probe.
     // Plain columns are selected by name; every JSON column (and `content`) as a cell, which the
     // row decoder reads through `cells`. Generation identity reads `content` and
@@ -840,33 +827,33 @@ fn stream_conn_with_reads(
     // incremental, the cell itself otherwise).
     let cells = Cells::new(conn, &r.path, reads, "messages")?;
     let incremental = super::store::sqlite::incremental_utf8_table(conn, "messages");
-    let mut names: Vec<String> = ["id", "role", "tool_call_id", "tool_calls", "tool_name", "timestamp"]
-        .map(String::from)
-        .to_vec();
-    names.extend(
-        OPTIONAL_MSG_COLS
-            .iter()
-            .filter(|c| has(c) && !CELL_COLS.contains(c))
-            .map(|c| c.to_string()),
-    );
-    let mut select_list = names.clone();
-    select_list.push(cells.select("content"));
-    names.extend(if incremental {
-        ["_content_rowid".to_string(), "content".to_string()]
-    } else {
-        ["content".to_string(), "content#type".to_string()]
-    });
+    let plain: Vec<&str> = OPTIONAL_MSG_COLS
+        .iter()
+        .copied()
+        .filter(|c| !CELL_COLS.contains(c))
+        .collect();
+    let mut select = Select::of(conn, "messages")
+        .always(&["id", "role", "tool_call_id", "tool_calls", "tool_name", "timestamp"])
+        .present(&plain)
+        .cell_named(
+            &cells,
+            "content",
+            if incremental {
+                ["_content_rowid".to_string(), "content".to_string()]
+            } else {
+                ["content".to_string(), "content#type".to_string()]
+            },
+        );
     for column in CELL_COLS {
-        select_list.push(cells.select(if has(column) { column } else { "NULL" }));
-        names.extend([format!("{column}#"), format!("{column}#type")]);
+        select = select.cell_named(&cells, column, [format!("{column}#"), format!("{column}#type")]);
     }
-    let select_list = select_list.join(", ");
-    let idx = |name: &str| names.iter().position(|c| c == name);
+    let select_list = select.list();
+    let idx = |name: &str| select.at(name);
 
     // Row visibility (schema v12+): Hermes's display projection is `(active = 1 OR compacted = 1)`
     // — live rows plus the history a compaction summarized away — which drops rewound rows and the
     // superseded originals of carried tails. `complete` reads every row instead and tags the flags.
-    let has_flags = has("active") && has("compacted");
+    let has_flags = select.has("active") && select.has("compacted");
     let visibility = if has_flags && opts.tier != Tier::Complete {
         " AND (active = 1 OR compacted = 1)"
     } else {
@@ -875,7 +862,7 @@ fn stream_conn_with_reads(
     // Display-generation dedup (`_dedupe_display_generations`): a compaction copies the protected
     // tail into each generation — same role/content/timestamp/tool fields, different id/flags — so
     // each logical message is emitted once (its first row; the copies are byte-identical).
-    let dedup_generations = has("compacted") && opts.tier != Tier::Complete;
+    let dedup_generations = select.has("compacted") && opts.tier != Tier::Complete;
     let mut generations = GenerationDedup::default();
 
     // Hand the session-level metadata to the sink before the body (header-rendering sinks use it).
@@ -984,9 +971,9 @@ fn session_lineage_root_to_tip(conn: &Connection, session_id: &str) -> Vec<Strin
     if session_id.is_empty() {
         return vec![session_id.to_string()];
     }
-    let scols = columns(conn, "sessions");
-    let has_end_reason = scols.contains("end_reason");
-    let has_model_config = scols.contains("model_config");
+    let probe = Select::of(conn, "sessions");
+    let has_end_reason = probe.has("end_reason");
+    let has_model_config = probe.has("model_config");
     let str_col = |col: &str, id: &str| -> Option<String> {
         conn.query_row(&format!("SELECT {col} FROM sessions WHERE id = ?1"), [id], |row| {
             row.get::<_, Option<String>>(0)

@@ -41,7 +41,7 @@ pub(super) fn discover(home: &Path, out: &mut crate::Discovered) {
             }
             let path = entry.path();
             let result = open_ro(path).and_then(|conn| {
-                conn.read(|conn| -> Result<SessionRef> {
+                conn.read(|conn, reads| -> Result<SessionRef> {
                     let mut collector = Count::default();
                     let r = SessionRef::new("cli:", Harness::Cursor, path);
                     let session = read_with_reads(
@@ -49,7 +49,7 @@ pub(super) fn discover(home: &Path, out: &mut crate::Discovered) {
                         &r,
                         &crate::stream::Demand::LEAN.with_spans(),
                         true,
-                        conn.reads(),
+                        reads,
                         &mut collector,
                     )?;
                     if let Some(error) = collector.error {
@@ -99,12 +99,13 @@ impl MessageSink for Count {
     }
 }
 pub(super) fn stream(
-    conn: &crate::harness::store::sqlite::ReadConnection,
+    conn: &Connection,
+    reads: &crate::source::ReadSet,
     r: &SessionRef,
     opts: &crate::stream::Demand,
     sink: &mut dyn MessageSink,
 ) -> Result<Session> {
-    read_with_reads(conn, r, opts, false, conn.reads(), sink)
+    read_with_reads(conn, r, opts, false, reads, sink)
 }
 
 #[cfg(test)]
@@ -150,7 +151,7 @@ fn read_snapshot(
     sink: &mut dyn MessageSink,
     cells: &Cells,
 ) -> Result<Session> {
-    let _snapshot = conn.is_autocommit().then(|| conn.unchecked_transaction()).transpose()?;
+    let _snapshot = crate::harness::store::sqlite::snapshot(conn)?;
     let encoded: String = conn.query_row("SELECT value FROM meta WHERE key='0'", [], |row| row.get(0))?;
     let metadata: Value = serde_json::from_slice(&decode_hex(&encoded)?).context("Cursor CLI metadata JSON")?;
     let id = metadata

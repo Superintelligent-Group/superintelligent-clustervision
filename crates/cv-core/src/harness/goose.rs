@@ -113,7 +113,7 @@
 //!   can pair it to a prior request by id (we do this within a session).
 //! * `model` is reconstructed from `provider_name` + `model_config_json.model_name` when present.
 
-use super::store::sqlite::{columns, open_ro, Cells};
+use super::store::sqlite::{open_ro, Cells, Select};
 use super::wire::anthropic;
 use super::{ts_from_epoch, Adapter};
 use crate::ir::*;
@@ -216,7 +216,7 @@ impl Adapter for Goose {
         // Modern SQLite store: one that cannot open or read is skipped and reported.
         if let Some(db) = self.db_path() {
             let refs =
-                super::store::sqlite::cached_discover(&db, || open_ro(&db)?.read(|reader| discover_db(reader, &db)));
+                super::store::sqlite::cached_discover(&db, || open_ro(&db)?.read(|reader, _| discover_db(reader, &db)));
             for r in out.keep(&db, refs).into_iter().flatten() {
                 seen_ids.insert(r.id.clone());
                 out.refs.push(r);
@@ -245,8 +245,8 @@ impl Adapter for Goose {
             if r.path.extension().is_some_and(|e| e == "jsonl") {
                 return legacy::stream(&r.id, &r.path, opts, sink);
             }
-            super::store::sqlite::read(&r.path, |conn| {
-                stream_db_opts_with_reads(conn, r, opts, sink, conn.reads())
+            super::store::sqlite::read(&r.path, |conn, reads| {
+                stream_db_opts_with_reads(conn, r, opts, sink, reads)
             })
         })
     }
@@ -260,7 +260,7 @@ impl Adapter for Goose {
             return Vec::new();
         };
         let data: Option<String> = conn
-            .read(|reader| {
+            .read(|reader, _| {
                 Ok(
                     reader.query_row("SELECT extension_data FROM sessions WHERE id = ?1", [&r.id], |row| {
                         row.get(0)
@@ -300,19 +300,18 @@ fn title_expr(has: impl Fn(&str) -> bool) -> &'static str {
 }
 
 fn discover_db(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
-    let cols = columns(conn, "sessions");
-    let has = |c: &str| cols.contains(c);
-    let title_expr = title_expr(has);
-    let working_dir = if has("working_dir") { "working_dir" } else { "NULL" };
-    let created = if has("created_at") { "created_at" } else { "NULL" };
-    let updated = if has("updated_at") { "updated_at" } else { "NULL" };
+    let probe = Select::of(conn, "sessions");
+    let title = title_expr(|c| probe.has(c));
     // Order by updated_at when present; the column always existed in the modern schema.
-    let order = if has("updated_at") {
+    let order = if probe.has("updated_at") {
         "ORDER BY updated_at DESC"
     } else {
         ""
     };
-    let sql = format!("SELECT id, {title_expr}, {working_dir}, {created}, {updated} FROM sessions {order}");
+    let select = probe
+        .always(&["id", title])
+        .probed(&["working_dir", "created_at", "updated_at"]);
+    let sql = format!("SELECT {} FROM sessions {order}", select.list());
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([], |row| {
         let id: String = row.get(0)?;
@@ -347,7 +346,7 @@ fn discover_db(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
 /// holds its ids. Two indexed lookups, and only for a copied session.
 fn copied_message_id(conn: &Connection, id: &str, created_at: Option<DateTime<Utc>>) -> Option<String> {
     let created_at = created_at?;
-    if !columns(conn, "messages").contains("message_id") {
+    if !Select::of(conn, "messages").has("message_id") {
         return None;
     }
     let (first, at): (String, i64) = conn
@@ -478,29 +477,18 @@ fn stream_db_opts_with_reads(
     wal.push("-wal");
     reads.record(Path::new(&wal));
     let cells = Cells::new(conn, &r.path, &reads, "messages")?;
-    let cols = columns(conn, "sessions");
-    let has = |c: &str| cols.contains(c);
-    let title_expr = title_expr(has);
-    let sel = format!(
-        "SELECT {title}, {wd}, {created}, {updated}, {provider}, {model_cfg}, {stype}, {parent} \
-         FROM sessions WHERE id = ?1",
-        title = title_expr,
-        wd = if has("working_dir") { "working_dir" } else { "NULL" },
-        created = if has("created_at") { "created_at" } else { "NULL" },
-        updated = if has("updated_at") { "updated_at" } else { "NULL" },
-        provider = if has("provider_name") { "provider_name" } else { "NULL" },
-        model_cfg = if has("model_config_json") {
-            "model_config_json"
-        } else {
-            "NULL"
-        },
-        stype = if has("session_type") { "session_type" } else { "NULL" },
-        parent = if has("parent_session_id") {
-            "parent_session_id"
-        } else {
-            "NULL"
-        },
-    );
+    let probe = Select::of(conn, "sessions");
+    let title = title_expr(|c| probe.has(c));
+    let select = probe.always(&[title]).probed(&[
+        "working_dir",
+        "created_at",
+        "updated_at",
+        "provider_name",
+        "model_config_json",
+        "session_type",
+        "parent_session_id",
+    ]);
+    let sel = format!("SELECT {} FROM sessions WHERE id = ?1", select.list());
     /// One optional TEXT value per metadata column the query selects.
     type MetaRow = (
         Option<String>,
@@ -563,19 +551,21 @@ fn stream_db_opts_with_reads(
     // All session metadata is known up front, so hand it to the sink before the body.
     sink.meta(&s);
 
-    let mcols = columns(conn, "messages");
-    let has_msg = |c: &str| mcols.contains(c);
-    let msg_id = if has_msg("message_id") { "message_id" } else { "NULL" };
-    let metadata = if has_msg("metadata_json") {
-        "metadata_json"
-    } else {
-        "NULL"
-    };
+    let select = Select::of(conn, "messages")
+        .always(&["role"])
+        .cell(&cells, "content_json")
+        .always(&["created_timestamp"])
+        .probed(&["message_id"])
+        .cell(&cells, "metadata_json");
+    let (role_at, content_at, created_at) = (
+        select.index("role")?,
+        select.index("content_json")?,
+        select.index("created_timestamp")?,
+    );
+    let (id_at, metadata_at) = (select.index("message_id")?, select.index("metadata_json")?);
     let sql = format!(
-        "SELECT role, {}, created_timestamp, {msg_id}, {} \
-         FROM messages WHERE session_id = ?1 ORDER BY created_timestamp, id",
-        cells.select("content_json"),
-        cells.select(metadata),
+        "SELECT {} FROM messages WHERE session_id = ?1 ORDER BY created_timestamp, id",
+        select.list()
     );
     let mut stmt = conn.prepare(&sql)?;
     let mut rows = stmt.query([&r.id])?;
@@ -588,11 +578,11 @@ fn stream_db_opts_with_reads(
     // still reads as it did: empty content, an empty role).
     let mut unparsed = super::Unparsed::default();
     while let Some(row) = rows.next()? {
-        let metadata = match cells.cell(conn, "messages", metadata, row, 5)? {
+        let metadata = match cells.cell(conn, "messages", "metadata_json", row, metadata_at)? {
             Some(cell) => cells.read(cell, |v| record::metadata(v, rich))?,
             None => None,
         };
-        let decoded = match cells.cell(conn, "messages", "content_json", row, 1)? {
+        let decoded = match cells.cell(conn, "messages", "content_json", row, content_at)? {
             Some(cell) => cells
                 .read(cell, |v| record::content(v, &mut tool_names, opts, Some(cells.out())))?
                 .unwrap_or_else(|| {
@@ -601,14 +591,14 @@ fn stream_db_opts_with_reads(
                 }),
             None => Decoded::default(),
         };
-        let role = row.get::<_, String>(0).unwrap_or_else(|_| {
+        let role = row.get::<_, String>(role_at).unwrap_or_else(|_| {
             unparsed.count();
             String::new()
         });
         let row = DbMsg {
             role,
-            created: row.get::<_, Option<i64>>(3).ok().flatten(),
-            id: row.get::<_, Option<String>>(4).ok().flatten(),
+            created: row.get::<_, Option<i64>>(created_at).ok().flatten(),
+            id: row.get::<_, Option<String>>(id_at).ok().flatten(),
             metadata,
         };
         let Some(mut m) = row.into_message_decoded(decoded, &mut history, opts.tier >= Tier::Rich) else {

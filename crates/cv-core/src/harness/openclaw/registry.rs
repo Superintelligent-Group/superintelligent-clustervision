@@ -67,7 +67,7 @@ fn session_key(r: &SessionRef) -> Option<String> {
 #[cfg(feature = "sqlite")]
 fn sqlite_session_key(r: &SessionRef) -> Option<String> {
     let conn = super::open_ro(&r.path).ok()?;
-    conn.read(|conn| {
+    conn.read(|conn, _| {
         Ok(conn.query_row(
             "SELECT session_key FROM session_windows WHERE session_id = ?1",
             [&r.id],
@@ -134,7 +134,7 @@ fn sqlite_registries(state: &Path, key: &str) -> (Vec<Value>, Vec<Run>) {
     let Ok(conn) = super::open_ro(&state.join("state").join("openclaw.sqlite")) else {
         return Default::default();
     };
-    conn.read(|conn| {
+    conn.read(|conn, _| {
         let parse = |t: String| serde_json::from_str::<Value>(&t).ok();
         let jobs = if table_exists(conn, "cron_jobs") {
             // Decode and filter each row before retaining it. Payload ownership remains authoritative:

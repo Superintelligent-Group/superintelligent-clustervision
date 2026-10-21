@@ -1092,7 +1092,7 @@ struct ScanAcc {
 #[cfg(feature = "sqlite")]
 fn discover_sqlite(db: &Path) -> Result<Vec<SessionRef>> {
     let conn = open_ro(db)?;
-    conn.read(|conn| {
+    conn.read(|conn, reads| {
         let mut windows = conn.prepare(
             "SELECT w.session_id, w.created_at, w.updated_at, w.transcript_updated_at, w.display_name, \
          n.label, n.display_name, n.entry_json \
@@ -1121,7 +1121,7 @@ fn discover_sqlite(db: &Path) -> Result<Vec<SessionRef>> {
                 row.get(7)?,
             ))
         })?;
-        let events = Events::new(conn, db, conn.reads())?;
+        let events = Events::new(conn, db, reads)?;
         let mut out = Vec::new();
         for row in rows {
             let (session_id, created, updated, transcript_updated, w_display, n_label, n_display, entry_json) = row?;
@@ -1278,17 +1278,17 @@ fn discover_sqlite(_db: &Path) -> Result<Vec<SessionRef>> {
 /// of every cell, then decodes only the selected ones.
 #[cfg(feature = "sqlite")]
 fn stream_sqlite(r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
-    super::store::sqlite::read(&r.path, |conn| {
+    super::store::sqlite::read(&r.path, |conn, reads| {
         // Navigation and payload reads must see the same history: a concurrent leaf update cannot
         // change which rows the second pass emits. A deferred read transaction writes no store data.
-        let snapshot = conn.unchecked_transaction()?;
-        let events = Events::new(&snapshot, &r.path, conn.reads())?;
-        let facts = sqlite_key_facts(&snapshot, r, conn.reads(), &events)?;
+        let _snapshot = super::store::sqlite::snapshot(conn)?;
+        let events = Events::new(conn, &r.path, reads)?;
+        let facts = sqlite_key_facts(conn, r, reads, &events)?;
         // The whole transcript's diagnostics, even if the sink stops at its first turn.
         let mut cells = Vec::new();
         let mut skipped = 0;
         let mut tree = false;
-        events.each(&snapshot, &r.id, |cell| {
+        events.each(conn, &r.id, |cell| {
             match cell
                 .map(|cell| events.cells.read(cell, is_leaf_entry))
                 .transpose()?

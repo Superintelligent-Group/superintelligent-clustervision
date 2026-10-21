@@ -144,7 +144,7 @@
 
 mod record;
 
-use super::store::sqlite::{columns, open_ro, table_exists, Cell, Cells};
+use super::store::sqlite::{open_ro, table_exists, Cell, Cells, Select};
 use super::store::xdg_data_dir;
 use super::{ts_from_epoch, Adapter, Unparsed};
 use crate::ir::*;
@@ -224,7 +224,8 @@ impl Adapter for Devin {
         };
         // One database: one that cannot open (locked, unreadable, not a database) is skipped.
         let mut found = crate::Discovered::default();
-        let refs = super::store::sqlite::cached_discover(&db, || open_ro(&db)?.read(|conn| discover_conn(conn, &db)));
+        let refs =
+            super::store::sqlite::cached_discover(&db, || open_ro(&db)?.read(|conn, _| discover_conn(conn, &db)));
         if let Some(refs) = found.keep(&db, refs) {
             found.refs = refs;
         }
@@ -242,8 +243,8 @@ impl Adapter for Devin {
             let mut spawns = crate::affordance::AffordanceSink::new(Harness::Devin, sink);
             let sink: &mut dyn MessageSink = &mut spawns;
             let conn = open_ro(&r.path)?;
-            conn.read(|conn| {
-                let cells = Cells::new(conn, &r.path, conn.reads(), "message_nodes")?;
+            conn.read(|conn, reads| {
+                let cells = Cells::new(conn, &r.path, reads, "message_nodes")?;
                 stream_conn(conn, r, sink, &cells, opts.spans)
             })
         })
@@ -284,21 +285,22 @@ fn load_forest(conn: &Connection, session_id: &str, cells: &Cells) -> Result<For
         let (node, parent) = r?;
         f.parents.insert(node, parent);
     }
-    let metadata = if columns(conn, "message_nodes").contains("metadata") {
-        cells.select("metadata")
-    } else {
-        "NULL, NULL".into()
-    };
+    let select = Select::of(conn, "message_nodes")
+        .always(&["node_id", "created_at"])
+        .cell(cells, "chat_message")
+        .cell(cells, "metadata");
+    let (node_at, created_at) = (select.index("node_id")?, select.index("created_at")?);
+    let (chat_at, meta_at) = (select.index("chat_message")?, select.index("metadata")?);
     let mut statement = conn.prepare(&format!(
-        "SELECT node_id, created_at, {}, {metadata} FROM message_nodes WHERE session_id=?1 ORDER BY node_id",
-        cells.select("chat_message")
+        "SELECT {} FROM message_nodes WHERE session_id=?1 ORDER BY node_id",
+        select.list()
     ))?;
     let mut rows = statement.query([session_id])?;
     while let Some(row) = rows.next()? {
-        let node: i64 = row.get(0)?;
-        let created = row.get::<_, Option<i64>>(1).ok().flatten();
-        let chat = cells.cell(conn, "message_nodes", "chat_message", row, 2)?;
-        let meta = cells.cell(conn, "message_nodes", "metadata", row, 4)?;
+        let node: i64 = row.get(node_at)?;
+        let created = row.get::<_, Option<i64>>(created_at).ok().flatten();
+        let chat = cells.cell(conn, "message_nodes", "chat_message", row, chat_at)?;
+        let meta = cells.cell(conn, "message_nodes", "metadata", row, meta_at)?;
         if let Some(facts) = meta
             .map(|meta| cells.read(meta, record::facts))
             .transpose()?
@@ -437,15 +439,12 @@ fn child_ref(
 }
 
 fn discover_conn(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
-    let cols = columns(conn, "sessions");
-    let has = |c: &str| cols.contains(c);
-    let sel = |c: &str| if has(c) { c.to_string() } else { "NULL".to_string() };
-    let sql = format!(
-        "SELECT id, working_directory, {}, created_at, last_activity_at, {} \
-         FROM sessions ORDER BY last_activity_at DESC",
-        sel("title"),
-        sel("main_chain_id"),
-    );
+    let select = Select::of(conn, "sessions")
+        .always(&["id", "working_directory"])
+        .probed(&["title"])
+        .always(&["created_at", "last_activity_at"])
+        .probed(&["main_chain_id"]);
+    let sql = format!("SELECT {} FROM sessions ORDER BY last_activity_at DESC", select.list());
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([], |row| {
         Ok((
@@ -503,21 +502,14 @@ pub fn subagent_tree(db: &Path, session_id: &str) -> Vec<crate::AgentRef> {
     let Ok(conn) = open_ro(db) else {
         return Vec::new();
     };
-    conn.read(|conn| {
-        let cols = columns(conn, "sessions");
-        let sel = |c: &str| {
-            if cols.contains(c) {
-                c.to_string()
-            } else {
-                "NULL".to_string()
-            }
-        };
+    conn.read(|conn, _| {
+        let select = Select::of(conn, "sessions")
+            .always(&["working_directory"])
+            .probed(&["title"])
+            .always(&["created_at", "last_activity_at"]);
         let (wd, title, created, last): (Option<String>, Option<String>, Option<i64>, Option<i64>) = conn
             .query_row(
-                &format!(
-                    "SELECT working_directory, {}, created_at, last_activity_at FROM sessions WHERE id = ?1",
-                    sel("title")
-                ),
+                &format!("SELECT {} FROM sessions WHERE id = ?1", select.list()),
                 [session_id],
                 |row| {
                     Ok((
@@ -612,20 +604,25 @@ fn stream_session(
     cells: &Cells,
     spans: bool,
 ) -> Result<Session> {
-    let _snapshot = conn.is_autocommit().then(|| conn.unchecked_transaction()).transpose()?;
-    let cols = columns(conn, "sessions");
-    let has = |c: &str| cols.contains(c);
-    let sel = |c: &str| if has(c) { c.to_string() } else { "NULL".to_string() };
-    let sql = format!(
-        "SELECT working_directory, backend_type, model, agent_mode, created_at, last_activity_at, \
-         {}, {}, {}, {}, {}, {} FROM sessions WHERE id = ?1",
-        sel("title"),
-        sel("main_chain_id"),
-        sel("cogs_json"),
-        sel("workspace_dirs"),
-        sel("hidden"),
-        sel("metadata"),
-    );
+    let _snapshot = super::store::sqlite::snapshot(conn)?;
+    let select = Select::of(conn, "sessions")
+        .always(&[
+            "working_directory",
+            "backend_type",
+            "model",
+            "agent_mode",
+            "created_at",
+            "last_activity_at",
+        ])
+        .probed(&[
+            "title",
+            "main_chain_id",
+            "cogs_json",
+            "workspace_dirs",
+            "hidden",
+            "metadata",
+        ]);
+    let sql = format!("SELECT {} FROM sessions WHERE id = ?1", select.list());
     let (wd, backend, model, agent_mode, created, last, title, main_chain_id, cogs, wdirs, hidden, smeta): SessionRow =
         conn.query_row(&sql, [session_id], |row| {
             Ok((

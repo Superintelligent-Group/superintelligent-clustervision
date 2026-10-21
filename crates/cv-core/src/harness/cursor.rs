@@ -174,7 +174,7 @@ impl Adapter for Cursor {
         // Each database that cannot open or read is skipped and reported.
         if let Some(db) = self.global_db() {
             let rows = open_ro(&db).and_then(|conn| {
-                conn.read(|conn| {
+                conn.read(|conn, _| {
                     let mut rows = Vec::new();
                     discover_global(conn, &db, &cwd_map, &mut rows);
                     Ok(rows)
@@ -193,7 +193,7 @@ impl Adapter for Cursor {
             }
             let cwd = workspace_cwd(&ws);
             let rows = open_ro(&db).and_then(|conn| {
-                conn.read(|conn| {
+                conn.read(|conn, _| {
                     let mut rows = Vec::new();
                     legacy::discover(conn, &db, cwd.as_deref(), &mut rows)?;
                     Ok(rows)
@@ -223,14 +223,14 @@ impl Adapter for Cursor {
                 sink.dependency(&PathBuf::from(path));
             }
             let conn = open_ro(&r.path)?;
-            conn.read(|conn| {
+            conn.read(|conn, reads| {
                 if r.id.starts_with("cli:") {
-                    return cli::stream(conn, r, opts, sink);
+                    return cli::stream(conn, reads, r, opts, sink);
                 }
                 if let Some(legacy_id) = r.id.strip_prefix("legacy:") {
-                    return legacy::stream(conn, conn.reads(), r, legacy_id, opts.spans, sink);
+                    return legacy::stream(conn, reads, r, legacy_id, opts.spans, sink);
                 }
-                stream_global(conn, conn.reads(), r, opts.spans, sink)
+                stream_global(conn, reads, r, opts.spans, sink)
             })
         })
     }
@@ -249,7 +249,7 @@ impl Cursor {
                 continue;
             };
             let Ok(conn) = open_ro(&db) else { continue };
-            let Ok(Some(v)) = conn.read(|conn| {
+            let Ok(Some(v)) = conn.read(|conn, _| {
                 Ok(item_table_get(conn, "composer.composerData")
                     .and_then(|raw| serde_json::from_str::<Value>(&raw).ok()))
             }) else {
@@ -400,7 +400,7 @@ fn stream_global(
     spans: bool,
     sink: &mut dyn MessageSink,
 ) -> Result<Session> {
-    let _snapshot = conn.is_autocommit().then(|| conn.unchecked_transaction()).transpose()?;
+    let _snapshot = super::store::sqlite::snapshot(conn)?;
     let cells = Cells::new(conn, &r.path, reads, "cursorDiskKV")?;
     let key = format!("composerData:{}", r.id);
     let cell = source::cell(conn, &cells, "cursorDiskKV", &key)?.with_context(|| format!("{key} missing"))?;

@@ -35,6 +35,9 @@ pub(crate) struct ReadConnection {
     _scope: Option<ReadScope>,
 }
 
+/// Tests read the store the way cv sees it without the bracket; product code has only
+/// [`ReadConnection::read`].
+#[cfg(test)]
 impl std::ops::Deref for ReadConnection {
     type Target = Connection;
     fn deref(&self) -> &Connection {
@@ -43,13 +46,19 @@ impl std::ops::Deref for ReadConnection {
 }
 
 impl ReadConnection {
+    #[cfg(test)]
     pub(crate) fn reads(&self) -> &crate::source::ReadSet {
         &self.reads
     }
 
-    pub(crate) fn read<T>(&self, operation: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
+    /// The one way to the connection: `operation` runs between the before and after checks of
+    /// every captured path, and gets the reader's dependencies to carry into lazy captures.
+    pub(crate) fn read<T>(
+        &self,
+        operation: impl FnOnce(&Connection, &crate::source::ReadSet) -> Result<T>,
+    ) -> Result<T> {
         check_reads(&self.reads)?;
-        let result = operation(self);
+        let result = operation(&self.connection, &self.reads);
         // A mutation takes precedence over a body/SQL failure too.
         check_reads(&self.reads)?;
         result
@@ -194,8 +203,18 @@ fn sidecar(path: &Path, suffix: &str) -> std::path::PathBuf {
     name.into()
 }
 
+/// One consistent view of `conn` for the reads that follow, until the returned guard drops: a
+/// deferred read transaction (it writes nothing), or none when an enclosing one already holds the
+/// snapshot. Navigation and payload queries of one operation must see the same history.
+pub(crate) fn snapshot(conn: &Connection) -> Result<Option<rusqlite::Transaction<'_>>> {
+    Ok(conn.is_autocommit().then(|| conn.unchecked_transaction()).transpose()?)
+}
+
 /// Complete one adapter operation under the reader's existing before/after provenance checks.
-pub(crate) fn read<T>(path: &Path, operation: impl FnOnce(&ReadConnection) -> Result<T>) -> Result<T> {
+pub(crate) fn read<T>(
+    path: &Path,
+    operation: impl FnOnce(&Connection, &crate::source::ReadSet) -> Result<T>,
+) -> Result<T> {
     open_ro(path)?.read(operation)
 }
 
@@ -610,6 +629,93 @@ pub(crate) fn for_each_utf8(reader: &mut dyn std::io::Read, visit: impl FnMut(&s
     crate::utf8::read(reader, crate::utf8::Verdict::Reject, visit)
 }
 
+/// A SELECT list built against the schema this database has, every entry named so a reader asks
+/// [`Select::at`] for its index instead of counting positions (a [`Cells`] cell takes two). Every
+/// SQLite store grows its schema by `ALTER TABLE`, so a probed column the table lacks reads as
+/// `NULL` and one query serves every version.
+pub(crate) struct Select {
+    columns: HashSet<String>,
+    list: Vec<String>,
+    names: Vec<String>,
+}
+
+impl Select {
+    /// A list over `table`, whose columns are probed once.
+    pub(crate) fn of(conn: &Connection, table: &str) -> Self {
+        Self {
+            columns: columns(conn, table),
+            list: Vec::new(),
+            names: Vec::new(),
+        }
+    }
+
+    /// Whether the table has `column`.
+    pub(crate) fn has(&self, column: &str) -> bool {
+        self.columns.contains(column)
+    }
+
+    /// Each of `exprs` as written: columns every schema has, or expressions, named by their text.
+    pub(crate) fn always(mut self, exprs: &[&str]) -> Self {
+        for expr in exprs {
+            self.list.push((*expr).to_string());
+            self.names.push((*expr).to_string());
+        }
+        self
+    }
+
+    /// Each of `columns`, or `NULL` where the table lacks it.
+    pub(crate) fn probed(mut self, columns: &[&str]) -> Self {
+        for column in columns {
+            self.list
+                .push(if self.has(column) { column } else { "NULL" }.to_string());
+            self.names.push((*column).to_string());
+        }
+        self
+    }
+
+    /// Each of `columns` the table has; an absent one is not selected and [`Self::at`] answers
+    /// `None` for it.
+    pub(crate) fn present(mut self, columns: &[&str]) -> Self {
+        for column in columns.iter().filter(|c| self.columns.contains(**c)) {
+            self.list.push((*column).to_string());
+            self.names.push((*column).to_string());
+        }
+        self
+    }
+
+    /// The pair `cells` reads `column` from ([`Cells::select`]; `NULL` where the table lacks it),
+    /// named `column` at the index [`Cells::cell`] takes.
+    pub(crate) fn cell(self, cells: &Cells, column: &str) -> Self {
+        let names = [column.to_string(), format!("{column}#type")];
+        self.cell_named(cells, column, names)
+    }
+
+    /// [`Self::cell`] with both positions named by the caller (a reader that reads the pair's
+    /// rowid or type itself).
+    pub(crate) fn cell_named(mut self, cells: &Cells, column: &str, names: [String; 2]) -> Self {
+        self.list
+            .push(cells.select(if self.has(column) { column } else { "NULL" }));
+        self.names.extend(names);
+        self
+    }
+
+    /// Where `name` reads from; `None` for a name the list does not hold.
+    pub(crate) fn at(&self, name: &str) -> Option<usize> {
+        self.names.iter().position(|n| n == name)
+    }
+
+    /// Where `name`, which this list always selects, reads from.
+    pub(crate) fn index(&self, name: &str) -> Result<usize> {
+        self.at(name)
+            .with_context(|| format!("{name} is not in the SELECT list"))
+    }
+
+    /// The comma-joined list, for `SELECT {list} FROM …`.
+    pub(crate) fn list(&self) -> String {
+        self.list.join(", ")
+    }
+}
+
 /// The columns present on `table` (`PRAGMA table_info`). Every SQLite-backed harness grows its
 /// schema by `ALTER TABLE` across versions, so an adapter probes before it selects; an unknown
 /// table yields the empty set.
@@ -688,7 +794,7 @@ mod tests {
             .execute_batch("CREATE TABLE t(x); INSERT INTO t VALUES(1);")
             .unwrap();
         let reader = open_ro(&database).unwrap();
-        let result = reader.read(|connection| {
+        let result = reader.read(|connection, _| {
             // The harness switches mode after the reader's before-operation guard. Closing
             // its connection checkpoints the WAL and removes its coordination sidecars.
             let writer = Connection::open(&database)?;
@@ -784,7 +890,7 @@ mod tests {
         let first = open_ro(&database).unwrap();
         assert_eq!(
             first
-                .read(|r| Ok(r.query_row("SELECT x FROM t", [], |row| row.get::<_, i64>(0))?))
+                .read(|r, _| Ok(r.query_row("SELECT x FROM t", [], |row| row.get::<_, i64>(0))?))
                 .unwrap(),
             7
         );
@@ -802,7 +908,7 @@ mod tests {
             let reader = open_ro(&database).unwrap();
             assert_eq!(reader._snapshot.as_ref().unwrap().directory, private_directory);
             reader
-                .read(|r| Ok(r.query_row("SELECT x FROM t", [], |row| row.get::<_, i64>(0))?))
+                .read(|r, _| Ok(r.query_row("SELECT x FROM t", [], |row| row.get::<_, i64>(0))?))
                 .unwrap();
         }
         assert!(private_directory.exists());
@@ -916,7 +1022,7 @@ mod tests {
         assert!(!old_reads.fresh(&mut crate::source::Probe::default()));
         assert_eq!(
             second
-                .read(|r| Ok(r.query_row("SELECT x FROM t", [], |row| row.get::<_, i64>(0))?))
+                .read(|r, _| Ok(r.query_row("SELECT x FROM t", [], |row| row.get::<_, i64>(0))?))
                 .unwrap(),
             8
         );
@@ -957,7 +1063,7 @@ mod tests {
             assert!(reader._snapshot.is_none());
             assert_eq!(
                 reader
-                    .read(|r| Ok(r.query_row("SELECT x FROM t", [], |row| row.get::<_, i64>(0))?))
+                    .read(|r, _| Ok(r.query_row("SELECT x FROM t", [], |row| row.get::<_, i64>(0))?))
                     .unwrap(),
                 7
             );
@@ -984,7 +1090,7 @@ mod tests {
         let reader = open_ro(&database).unwrap();
         assert_eq!(
             reader
-                .read(|r| Ok(r.query_row("SELECT COUNT(*) FROM t", [], |row| row.get::<_, i64>(0))?))
+                .read(|r, _| Ok(r.query_row("SELECT COUNT(*) FROM t", [], |row| row.get::<_, i64>(0))?))
                 .unwrap(),
             1
         );
@@ -1002,7 +1108,7 @@ mod tests {
         );
         drop(immutable);
         let failure = reader
-            .read::<()>(|_| {
+            .read::<()>(|_, _| {
                 writer.execute("INSERT INTO t VALUES(8)", [])?;
                 anyhow::bail!("body failure")
             })

@@ -54,7 +54,7 @@
 
 mod record;
 
-use super::store::sqlite::{columns, open_ro, Cell, Cells};
+use super::store::sqlite::{open_ro, Cell, Cells, Select};
 use super::wire::anthropic;
 use super::Adapter;
 use crate::ir::*;
@@ -131,7 +131,7 @@ impl Adapter for Zed {
         // The one database: one that cannot open or read is skipped and reported (the harness
         // lists nothing), not a discovery failure that keeps the previous listing.
         let mut found = crate::Discovered::default();
-        let refs = super::store::sqlite::cached_discover(db, || open_ro(db)?.read(|conn| discover_db(conn, db)));
+        let refs = super::store::sqlite::cached_discover(db, || open_ro(db)?.read(|conn, _| discover_db(conn, db)));
         if let Some(refs) = found.keep(db, refs) {
             found.refs = refs;
         }
@@ -146,8 +146,8 @@ impl Adapter for Zed {
     fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| {
             let conn = open_ro(&r.path)?;
-            conn.read(|conn| {
-                let cells = Cells::new(conn, &r.path, conn.reads(), "threads")?;
+            conn.read(|conn, reads| {
+                let cells = Cells::new(conn, &r.path, reads, "threads")?;
                 stream_thread(conn, r, sink, &cells, opts.spans)
             })
         })
@@ -155,18 +155,14 @@ impl Adapter for Zed {
 }
 
 fn discover_db(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
-    let _snapshot = conn.is_autocommit().then(|| conn.unchecked_transaction()).transpose()?;
-    let cols = columns(conn, "threads");
-    let has = |c: &str| cols.contains(c);
-    let sel = |c: &'static str| if has(c) { c } else { "NULL" };
+    let _snapshot = super::store::sqlite::snapshot(conn)?;
+    let select = Select::of(conn, "threads")
+        .always(&["id", "summary", "updated_at"])
+        .probed(&["created_at", "folder_paths", "folder_paths_order"])
+        .always(&["data_type"]);
     // Sorting only metadata keeps every complete blob out of SQLite's temporary sorter; each
     // thread's cell is then read by key.
-    let sql = format!(
-        "SELECT id, summary, updated_at, {}, {}, {}, data_type FROM threads ORDER BY updated_at DESC",
-        sel("created_at"),
-        sel("folder_paths"),
-        sel("folder_paths_order"),
-    );
+    let sql = format!("SELECT {} FROM threads ORDER BY updated_at DESC", select.list());
     let cells = Cells::new(conn, db, &crate::source::ReadSet::default(), "threads")?;
     let mut stmt = conn.prepare(&sql)?;
     let mut rows = stmt.query([])?;
@@ -236,18 +232,13 @@ fn stream_thread(
     cells: &Cells,
     spans: bool,
 ) -> Result<Session> {
-    let _snapshot = conn.is_autocommit().then(|| conn.unchecked_transaction()).transpose()?;
-    let cols = columns(conn, "threads");
-    let has = |c: &str| cols.contains(c);
-    let sel = |c: &'static str| if has(c) { c } else { "NULL" };
-    let sql = format!(
-        "SELECT summary, updated_at, {}, {}, {}, {}, data_type, {} FROM threads WHERE id = ?1",
-        sel("created_at"),
-        sel("parent_id"),
-        sel("folder_paths"),
-        sel("folder_paths_order"),
-        sel("worktree_branch"),
-    );
+    let _snapshot = super::store::sqlite::snapshot(conn)?;
+    let select = Select::of(conn, "threads")
+        .always(&["summary", "updated_at"])
+        .probed(&["created_at", "parent_id", "folder_paths", "folder_paths_order"])
+        .always(&["data_type"])
+        .probed(&["worktree_branch"]);
+    let sql = format!("SELECT {} FROM threads WHERE id = ?1", select.list());
     let mut stmt = conn.prepare(&sql)?;
     let mut rows = stmt.query([&r.id])?;
     let row = rows.next()?.with_context(|| format!("zed thread {} not found", r.id))?;
@@ -1026,7 +1017,7 @@ mod tests {
         );
         // The internal SQLite snapshot remains consistent, but publication through the real
         // adapter must reject a source changed by a callback rather than recapture its identity.
-        assert!(reader.read(|conn| parse_thread(conn, &sref("t"))).is_err());
+        assert!(reader.read(|conn, _| parse_thread(conn, &sref("t"))).is_err());
         let adapter = Zed::with_root(&world.base);
         let mut reference = sref("t");
         reference.path = path;

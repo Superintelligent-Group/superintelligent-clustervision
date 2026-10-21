@@ -69,7 +69,7 @@ pub(super) fn stream(
 ) -> Result<Session> {
     // Keep cell lookup and subsequent body reads on one SQLite snapshot; reuse an existing
     // transaction when the caller already opened one.
-    let _snapshot = conn.is_autocommit().then(|| conn.unchecked_transaction()).transpose()?;
+    let _snapshot = crate::harness::store::sqlite::snapshot(conn)?;
     let cells = Cells::new(conn, &r.path, reads, "ItemTable")?;
     let cell = source::cell(conn, &cells, "ItemTable", CHAT_KEY)?.context("legacy chatdata missing")?;
     let session = cells

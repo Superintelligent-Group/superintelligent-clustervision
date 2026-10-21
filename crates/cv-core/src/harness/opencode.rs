@@ -604,7 +604,7 @@ mod db {
     /// (2.x) or holds nothing for the session.
     pub(super) fn todos(r: &SessionRef) -> Option<crate::affordance::Affordance> {
         let conn = open_ro(&r.path).ok()?;
-        conn.read(|conn| {
+        conn.read(|conn, _| {
             if !has_table(conn, "todo") {
                 return Ok(None);
             }
@@ -648,7 +648,7 @@ mod db {
     pub(super) fn discover(db: &Path) -> Result<Vec<SessionRef>> {
         crate::harness::store::sqlite::cached_discover(db, || {
             let conn = open_ro(db)?;
-            conn.read(|reader| discover_snapshot(db, reader.reads(), reader))
+            conn.read(|reader, reads| discover_snapshot(db, reads, reader))
         })
     }
 
@@ -657,7 +657,7 @@ mod db {
         reads: &crate::source::ReadSet,
         conn: &rusqlite::Connection,
     ) -> Result<Vec<SessionRef>> {
-        let _transaction = conn.unchecked_transaction()?;
+        let _snapshot = crate::harness::store::sqlite::snapshot(conn)?;
         let mut refs = if has_table(conn, "session_v2") && has_table(conn, "session_message") {
             discover_v2(conn, db)?
         } else {
@@ -780,7 +780,7 @@ mod db {
     /// `message` row with its `part` rows hydrated and mapped one message at a time.
     pub(super) fn stream(r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
         let conn = open_ro(&r.path)?;
-        conn.read(|reader| stream_snapshot(r, opts, sink, reader.reads(), reader))
+        conn.read(|reader, reads| stream_snapshot(r, opts, sink, reads, reader))
     }
 
     fn stream_snapshot(
@@ -790,7 +790,7 @@ mod db {
         reads: &crate::source::ReadSet,
         conn: &rusqlite::Connection,
     ) -> Result<Session> {
-        let _transaction = conn.unchecked_transaction()?;
+        let _snapshot = crate::harness::store::sqlite::snapshot(conn)?;
         // The 2.x tables win for a session in both (a migrated database; module doc of `v2`).
         let v2 = has_table(conn, "session_v2")
             && conn
