@@ -44,6 +44,26 @@ fn boundary(uuid: &str, ts: &str) -> serde_json::Value {
 
 const SID: &str = "orchsess";
 
+/// The rendered `cv lanes` row of lane `id`: the line that starts with its short id. Semantic
+/// checks read `--json`; this only keeps the table honest about what it shows for a lane.
+fn lane_row<'a>(out: &'a str, id: &str) -> &'a str {
+    out.lines()
+        .find(|l| l.trim_start().starts_with(id))
+        .unwrap_or_else(|| panic!("no row for {id}:\n{out}"))
+}
+
+/// Per deferral phrase (in order): its message index and the task `--open-tasks` matched it to
+/// (the `matched` object, absent when none shares enough words), with the gate's exit status.
+fn deferral_matches(w: &World) -> (i32, Vec<(u64, Option<serde_json::Value>)>) {
+    let (_, code, json, err) = w.cv(&["deferrals", SID, "--open-tasks", "--json"]);
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap_or_else(|e| panic!("{e}: {json}\n{err}"));
+    let rows = rows
+        .iter()
+        .map(|r| (r["index"].as_u64().expect("index"), r.get("matched").cloned()))
+        .collect();
+    (code, rows)
+}
+
 /// The parent: two human prompts, a `/compact` with its bookkeeping rows, an AskUserQuestion
 /// answer, two replies with deferral phrases (one matching a task, one not), three lane
 /// notifications, and a human prompt after the compaction.
@@ -242,7 +262,7 @@ fn lanes_table_status_tokens_and_the_strand_class() {
     );
     // The lost-notification lane: `returned`, its report on the ↩ line, counted as done, and
     // explained in the footer.
-    assert!(out.contains("ddd4      returned"), "{out}");
+    assert!(lane_row(&out, "ddd4").contains("returned"), "{out}");
     assert!(out.contains("↩ All 12 tests pass; nothing left to do."), "{out}");
     assert!(out.contains("the harness lost the notification"), "{out}");
     // Launch order, one row per lane, the telling columns present.
@@ -348,7 +368,13 @@ fn deferrals_find_the_phrases_and_open_tasks_gates_on_unmatched() {
     // No tasks yet: everything is UNMATCHED and the exit status says so.
     let (ok, code, out, _) = w.cv(&["deferrals", SID, "--open-tasks"]);
     assert!(!ok && code == 1, "unmatched deferrals exit 1: code={code}\n{out}");
-    assert!(out.contains("UNMATCHED") && !out.contains("MATCHED   "), "{out}");
+    assert!(out.contains("UNMATCHED"), "{out}");
+    let (code, matches) = deferral_matches(&w);
+    assert_eq!(code, 1);
+    assert!(
+        !matches.is_empty() && matches.iter().all(|(_, m)| m.is_none()),
+        "{matches:?}"
+    );
 
     // A task sharing three significant words with the first deferral matches it; the second
     // stays unmatched, so the gate still fails.
@@ -361,9 +387,21 @@ fn deferrals_find_the_phrases_and_open_tasks_gates_on_unmatched() {
     ]);
     let (ok, code, out, _) = w.cv(&["deferrals", SID, "--open-tasks"]);
     assert!(!ok && code == 1, "{out}");
-    assert!(out.contains("MATCHED   ") && out.contains("exhaustive"), "{out}");
-    assert!(out.contains("(shared: "), "{out}");
-    assert!(out.contains("UNMATCHED"), "the hermes one has no task:\n{out}");
+    assert!(out.contains("(shared: ") && out.contains("UNMATCHED"), "{out}");
+    let (code, matches) = deferral_matches(&w);
+    assert_eq!(code, 1);
+    // Every phrase of the integrator reply (message 3) matches the task; the hermes one (10) not.
+    for (index, matched) in &matches {
+        match index {
+            3 => {
+                let m = matched.as_ref().unwrap_or_else(|| panic!("{matches:?}"));
+                assert!(m["title"].as_str().unwrap().contains("exhaustive"), "{m}");
+                assert!(m["shared"].as_array().unwrap().len() >= 3, "{m}");
+            }
+            10 => assert!(matched.is_none(), "{matches:?}"),
+            _ => panic!("a deferral outside messages 3 and 10: {matches:?}"),
+        }
+    }
 
     // Cover the second with a task: the gate passes.
     w.cv_ok(&[
@@ -550,7 +588,7 @@ fn lanes_failure_cause_from_the_transcript() {
     run("hhh8", "LANE-H: died quietly", vec![]);
 
     let (out, _) = w.cv_ok(&["lanes", SID]);
-    assert!(out.contains("eee5      failed:rate-limited"), "{out}");
+    assert!(lane_row(&out, "eee5").contains("failed:rate-limited"), "{out}");
     assert!(
         out.contains("✗ You've hit your session limit · resets 9pm (America/New_York) (resets "),
         "{out}"
@@ -559,13 +597,17 @@ fn lanes_failure_cause_from_the_transcript() {
         out.contains("resume with one message after the reset: SendMessage to eee5"),
         "{out}"
     );
-    assert!(out.contains("fff6      failed:context"), "{out}");
+    assert!(lane_row(&out, "fff6").contains("failed:context"), "{out}");
     assert!(out.contains("✗ Prompt is too long → it cannot be resumed"), "{out}");
     assert!(
-        out.contains("ggg7      completed"),
+        lane_row(&out, "ggg7").contains("completed"),
         "a resumed lane is not dead:\n{out}"
     );
-    assert!(out.contains("hhh8      failed "), "no notice: plain failed:\n{out}");
+    let h = lane_row(&out, "hhh8");
+    assert!(
+        h.contains("failed") && !h.contains("failed:"),
+        "no notice: plain failed:\n{out}"
+    );
     assert!(
         out.contains("4 sub-agents: 0 running · 1 completed · 3 other (1 context · 1 rate-limited)"),
         "{out}"
@@ -578,8 +620,11 @@ fn lanes_failure_cause_from_the_transcript() {
     assert_eq!(e["status"], "failed");
     assert_eq!(e["failure_cause"], "rate-limited");
     assert_eq!(e["resets_at"], "2026-10-02T01:00:00Z");
+    assert_eq!(by_id("fff6")["status"], "failed");
     assert_eq!(by_id("fff6")["failure_cause"], "context");
+    assert_eq!(by_id("ggg7")["status"], "completed");
     assert!(by_id("ggg7").get("failure_cause").is_none());
+    assert_eq!(by_id("hhh8")["status"], "failed");
     assert!(by_id("hhh8").get("failure_cause").is_none());
 }
 
