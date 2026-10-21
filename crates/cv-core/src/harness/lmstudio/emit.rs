@@ -129,6 +129,7 @@ fn write_version(
             "singleStep"
         },
     )?;
+    // LM Studio has no tool role: tool results use a user turn with bracketed text parts.
     version.field(
         "role",
         if msg.role == Role::Assistant {
@@ -196,8 +197,7 @@ fn write_version(
             for (i, (b, _)) in blocks.iter().enumerate() {
                 if i != 0 {
                     w.write_all(b",")?;
-                } // one part per represented block
-                  // Strip the single-part array by directly writing its content to a wrapper.
+                }
                 part(w, b, resolver)?;
             }
             w.write_all(b"]")?;

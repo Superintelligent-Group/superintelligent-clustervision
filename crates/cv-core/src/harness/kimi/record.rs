@@ -103,6 +103,7 @@ pub(super) fn message(
             // Prefer the richer wire return_value if we have it; else the context text parts.
             let (content, is_error, details) = match enrich.tool_results.get(&id) {
                 Some(result) => (enrich.output(result), result.is_error, enrich.extras(result)),
+                // Context-only tool rows carry no failure flag; the wire sidecar supplies it.
                 None => (join(fields.get("content"), spans)?, false, None),
             };
             let mut m = Message::of_kind(Role::Tool, MessageKind::ToolResult, Origin::Harness);
