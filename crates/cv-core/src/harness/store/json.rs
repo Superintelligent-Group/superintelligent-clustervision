@@ -16,12 +16,12 @@ pub(crate) fn trim(bytes: &[u8]) -> &[u8] {
 
 /// [`trim`] over text.
 pub(crate) fn trim_str(text: &str) -> &str {
-    text.trim_matches(|c: char| c.is_ascii() && is_whitespace(&(c as u8)))
+    text.trim_matches([' ', '\t', '\n', '\r'])
 }
 
 /// The bytes a validation pass reads: a slice in memory, or a positioned source read in windows
 /// (`document::range::Windowed`). Indexes are relative to the pass's first byte.
-pub(crate) trait Bytes {
+pub(crate) trait ValidationBytes {
     fn get(&mut self, i: usize) -> Option<u8>;
     /// `len` bytes from `i`; None past the end (never at a window boundary).
     fn slice(&mut self, i: usize, len: usize) -> Option<&[u8]>;
@@ -31,7 +31,7 @@ pub(crate) trait Bytes {
     /// (`strict`), or by JSON grammar alone.
     fn number(&mut self, i: usize, end: usize, strict: bool) -> bool;
 }
-impl Bytes for &[u8] {
+impl ValidationBytes for &[u8] {
     #[inline]
     fn get(&mut self, i: usize) -> Option<u8> {
         (**self).get(i).copied()
@@ -49,7 +49,7 @@ impl Bytes for &[u8] {
 }
 /// `str` bytes: UTF-8 is known.
 pub(crate) struct Text<'a>(pub &'a [u8]);
-impl Bytes for Text<'_> {
+impl ValidationBytes for Text<'_> {
     #[inline]
     fn get(&mut self, i: usize) -> Option<u8> {
         self.0.get(i).copied()
@@ -83,7 +83,7 @@ pub(crate) fn number_accepted(token: &[u8], strict: bool) -> bool {
 /// and container, so a caller can index them for later structural selection.
 /// Returns the value's bounds, or None when it is not accepted.
 pub(crate) fn validate_value(
-    b: &mut impl Bytes,
+    b: &mut impl ValidationBytes,
     strict: bool,
     depth: usize,
     mut span: impl FnMut(u8, usize, usize),
@@ -173,7 +173,7 @@ pub(crate) fn validate_value(
 
 /// After a comma: an object's next key and colon, or an array's next value start.
 fn key_or_value(
-    b: &mut impl Bytes,
+    b: &mut impl ValidationBytes,
     i: usize,
     object: bool,
     strict: bool,
@@ -186,7 +186,7 @@ fn key_or_value(
     }
 }
 
-fn skip_ws(b: &mut impl Bytes, mut i: usize) -> usize {
+fn skip_ws(b: &mut impl ValidationBytes, mut i: usize) -> usize {
     while b.get(i).is_some_and(|c| is_whitespace(&c)) {
         i += 1;
     }
@@ -194,7 +194,7 @@ fn skip_ws(b: &mut impl Bytes, mut i: usize) -> usize {
 }
 
 /// An object key and its colon; the offset after the colon.
-fn key(b: &mut impl Bytes, i: usize, strict: bool, span: &mut impl FnMut(u8, usize, usize)) -> Option<usize> {
+fn key(b: &mut impl ValidationBytes, i: usize, strict: bool, span: &mut impl FnMut(u8, usize, usize)) -> Option<usize> {
     if b.get(i) != Some(b'"') {
         return None;
     }
@@ -205,7 +205,7 @@ fn key(b: &mut impl Bytes, i: usize, strict: bool, span: &mut impl FnMut(u8, usi
 }
 
 /// The end of a valid JSON string starting at the quote `i`.
-fn string(b: &mut impl Bytes, i: usize, strict: bool) -> Option<usize> {
+fn string(b: &mut impl ValidationBytes, i: usize, strict: bool) -> Option<usize> {
     let mut j = i + 1;
     loop {
         j = special(b, j);
@@ -242,7 +242,7 @@ fn string(b: &mut impl Bytes, i: usize, strict: bool) -> Option<usize> {
 }
 
 /// The first quote, backslash or control byte at or after `j`, eight bytes at a time.
-fn special(b: &mut impl Bytes, mut j: usize) -> usize {
+fn special(b: &mut impl ValidationBytes, mut j: usize) -> usize {
     const ONES: u64 = u64::from_ne_bytes([1; 8]);
     const HIGH: u64 = u64::from_ne_bytes([0x80; 8]);
     let zero = |x: u64| x.wrapping_sub(ONES) & !x & HIGH;

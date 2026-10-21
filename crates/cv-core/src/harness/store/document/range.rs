@@ -640,7 +640,7 @@ impl<'s> Windowed<'s> {
         }
     }
 }
-impl super::super::json::Bytes for Windowed<'_> {
+impl super::super::json::ValidationBytes for Windowed<'_> {
     fn get(&mut self, i: usize) -> Option<u8> {
         self.load(i, 1).then(|| self.buf[i - self.start])
     }
@@ -1304,7 +1304,7 @@ mod syntax_tests {
         std::fs::write(&path, format!("[null,\"{}\"]", "a".repeat(WINDOW * 3))).unwrap();
         let source = RangeSource::open(&path).unwrap();
         let mut windowed = Windowed::new(&source, source.range());
-        assert_eq!(super::super::super::json::Bytes::get(&mut windowed, 0), Some(b'['));
+        assert_eq!(super::super::super::json::ValidationBytes::get(&mut windowed, 0), Some(b'['));
         std::fs::OpenOptions::new()
             .write(true)
             .open(&path)
