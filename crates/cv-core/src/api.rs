@@ -128,11 +128,8 @@ pub fn route_staged(parts: &[&str], query: &str) -> anyhow::Result<Option<Staged
     };
     let result = message_window(harness, id, query);
     let mut output = crate::bytes::ByteStage::default();
-    let position = std::rc::Rc::new(std::cell::Cell::new(0));
-    let mut counted = crate::projection::Counted {
-        inner: &mut output,
-        position: position.clone(),
-    };
+    let mut counted = crate::projection::Counted::new(&mut output);
+    let position = counted.position.clone();
     let status = match result {
         Ok((r, mut sink)) => {
             let frames = sink.finish()?;

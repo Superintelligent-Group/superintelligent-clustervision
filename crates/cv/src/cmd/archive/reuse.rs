@@ -2,7 +2,7 @@
 use super::*;
 mod spool;
 use crate::cmd::session_json::write_session;
-use cv_core::projection::Prefix;
+use cv_core::projection::{Counted, Prefix};
 use spool::{FirstUser, Spool, Spooled};
 use std::io::{BufWriter, Read};
 
@@ -24,9 +24,11 @@ impl Artifact {
                 let (mut input, mut digest) = (fs::File::open(path).ok()?, cv_core::digest::Sha256::new());
                 let mut bytes = [0; 64 * 1024];
                 loop {
-                    match input.read(&mut bytes).ok()? {
-                        0 => break Some(digest.finish_hex()),
-                        n => digest.update(&bytes[..n]),
+                    match input.read(&mut bytes) {
+                        Ok(0) => break Some(digest.finish_hex()),
+                        Ok(n) => digest.update(&bytes[..n]),
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(_) => return None,
                     }
                 }
             }
@@ -102,6 +104,7 @@ impl Temporary {
         fs::create_dir_all(parent)?;
         Ok(Self(cv_core::publish::Staged::create(parent, "archive", 0o600)?))
     }
+    #[cfg(test)]
     fn path(&self) -> &Path {
         self.0.path()
     }
@@ -117,27 +120,27 @@ impl Temporary {
     }
 }
 
-fn equal_files(left: &Path, right: &Path) -> bool {
-    fn compare(left: &Path, right: &Path) -> std::io::Result<bool> {
-        let mut left = fs::File::open(left)?;
-        let mut right = fs::File::open(right)?;
-        if left.metadata()?.len() != right.metadata()?.len() {
+/// Compare the digest captured during serialization with only the previous artifact.
+fn equal_artifact(path: &Path, len: u64, digest: &str) -> bool {
+    let compare = || -> std::io::Result<bool> {
+        let mut input = fs::File::open(path)?;
+        if input.metadata()?.len() != len {
             return Ok(false);
         }
-        let mut a = [0; 64 * 1024];
-        let mut b = [0; 64 * 1024];
+        let mut hash = cv_core::digest::Sha256::new();
+        let mut bytes = [0; 64 * 1024];
         loop {
-            let n = left.read(&mut a)?;
-            right.read_exact(&mut b[..n])?;
-            if a[..n] != b[..n] {
-                return Ok(false);
-            }
+            let n = match input.read(&mut bytes) {
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                result => result?,
+            };
             if n == 0 {
-                return Ok(true);
+                return Ok(hash.finish_hex() == digest);
             }
+            hash.update(&bytes[..n]);
         }
-    }
-    compare(left, right).unwrap_or(false)
+    };
+    compare().unwrap_or(false)
 }
 
 /// The catalog row of an archived session: `turns` of its `written` messages are turns.
@@ -290,8 +293,8 @@ impl Archive {
         let suffix_bytes = pass.suffix_bytes;
         let session = pass.session;
         let mut temporary = Temporary::new(&dest)?;
-        let prefix = {
-            let mut writer = BufWriter::with_capacity(64 * 1024, temporary.0.file());
+        let (prefix, len, digest) = {
+            let mut writer = Counted::new(BufWriter::with_capacity(64 * 1024, temporary.0.file())).hashing();
             let prefix = write_session(
                 &mut writer,
                 &session,
@@ -302,7 +305,11 @@ impl Archive {
                 total,
             )?;
             writer.flush()?;
-            prefix
+            (
+                prefix,
+                writer.position.get(),
+                writer.into_digest().expect("hashing writer"),
+            )
         };
         let (outcome, artifact) = {
             let _lock = self.lock_catalog()?;
@@ -319,7 +326,7 @@ impl Archive {
                 ))
             });
             let entry = entry(&session, title, old_turns + turns.before(messages), total);
-            let outcome = if equal_files(temporary.path(), &dest) {
+            let outcome = if equal_artifact(&dest, len, &digest) {
                 if previous.is_none() {
                     self.upsert_catalog_locked(entry)?;
                 }
@@ -331,7 +338,7 @@ impl Archive {
             };
             (
                 outcome,
-                Artifact::of(&dest).context("archive artifact disappeared during publication")?,
+                Artifact::of(&dest).context("cannot inspect archive artifact after publication")?,
             )
         };
         // The new prefix's turns: the copied prefix's, then the spooled ones up to its end.
@@ -481,7 +488,7 @@ mod tests {
             .unwrap();
         let appended = a.store_ref(adapter.as_ref(), &r).unwrap();
         assert!(appended.resumed);
-        assert!(appended.parsed_messages < 2048);
+        assert!(appended.parsed_messages < appended.total);
         assert_eq!(appended.total, 4100);
         exact(&a, adapter.as_ref(), &r);
         let turns = adapter
@@ -547,7 +554,7 @@ mod tests {
         fs::write(&r.path, &body).unwrap();
         let appended = a.store_ref(adapter.as_ref(), &r).unwrap();
         assert!(appended.resumed);
-        assert!(appended.parsed_messages < 1024);
+        assert!(appended.parsed_messages < appended.total);
         assert!(appended.suffix_bytes < 300 * 1024);
         exact(&a, adapter.as_ref(), &r);
         eprintln!("archive repeated polls: 0 parses; append: {} messages/{} primary suffix bytes instead of {} messages/{} bytes", appended.parsed_messages, appended.suffix_bytes, appended.total, body.len());

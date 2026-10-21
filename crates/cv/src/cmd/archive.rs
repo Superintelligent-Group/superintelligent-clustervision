@@ -224,11 +224,7 @@ impl Archive {
             });
             return Ok(());
         }
-        let raw = match fs::read_to_string(&path) {
-            Ok(s) => s,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
-        };
+        let raw = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
         #[cfg(test)]
         self.catalog_bytes_scanned
             .set(self.catalog_bytes_scanned.get() + raw.len() as u64);

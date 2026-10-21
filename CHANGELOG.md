@@ -49,6 +49,8 @@
 - Goose reports bare model names; providers stay in the Goose metadata bag and never substitute for missing models.
 
 - Claude and OpenClaw compaction boundaries carry no invented text; `show` labels contentless boundaries by kind and marks them synthesized.
+- Library: construct `projection::Counted` with `Counted::new`; `hashing()` captures an optional SHA-256 digest during writes.
+
 - MCP errors for removed properties name their replacement arguments.
 
 - `pack --json` returns bundle content or emitted artifact paths and resume hints without scraping human output.

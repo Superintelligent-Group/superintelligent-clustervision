@@ -59,10 +59,32 @@ pub fn write_frame(
 pub struct Counted<W> {
     pub inner: W,
     pub position: Rc<Cell<u64>>,
+    digest: Option<crate::digest::Sha256>,
 }
+impl<W> Counted<W> {
+    pub fn new(inner: W) -> Self {
+        Self {
+            inner,
+            position: Rc::new(Cell::new(0)),
+            digest: None,
+        }
+    }
+    /// Capture a content digest during serialization, so publication never re-reads its stage.
+    pub fn hashing(mut self) -> Self {
+        self.digest = Some(crate::digest::Sha256::new());
+        self
+    }
+    pub fn into_digest(self) -> Option<String> {
+        self.digest.map(crate::digest::Sha256::finish_hex)
+    }
+}
+
 impl<W: Write> Write for Counted<W> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         let n = self.inner.write(bytes)?;
+        if let Some(digest) = &mut self.digest {
+            digest.update(&bytes[..n]);
+        }
         self.position.set(
             self.position
                 .get()
@@ -125,11 +147,8 @@ pub fn write_frames(
     framing: Framing<'_>,
 ) -> anyhow::Result<Option<Prefix>> {
     anyhow::ensure!(field.len() <= KEY_BYTES, "JSON frame field exceeds key budget");
-    let position = Rc::new(Cell::new(0));
-    let mut counted = Counted {
-        inner: out,
-        position: position.clone(),
-    };
+    let mut counted = Counted::new(out);
+    let position = counted.position.clone();
     let mut array = Array {
         field,
         frames: Some(frames.reader()?),

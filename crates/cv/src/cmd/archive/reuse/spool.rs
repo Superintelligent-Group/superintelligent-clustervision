@@ -191,6 +191,28 @@ mod tests {
     }
 
     #[test]
+    fn first_nonempty_prompt_supplies_archive_label() {
+        let mut session = Session::new("label", Harness::Claude);
+        session.messages = vec![message(""), message("first substantive prompt")];
+        let (_, first) = stage(&session);
+        let first = first.unwrap();
+        assert_eq!(first.ordinal, 2);
+        assert_eq!(cv_core::label_from(None, first.head.as_deref()), session.label());
+    }
+
+    #[test]
+    fn explicit_archive_title_precedes_prompt_label() {
+        let mut session = Session::new("label", Harness::Claude);
+        session.title = Some("explicit title".into());
+        session.messages = vec![message("a different prompt")];
+        let (_, first) = stage(&session);
+        assert_eq!(
+            cv_core::label_from(session.title.as_deref(), first.unwrap().head.as_deref()),
+            "explicit title"
+        );
+    }
+
+    #[test]
     fn derived_pretty_output_and_relocated_prefix_are_exact() {
         let root = std::env::temp_dir().join(format!("cv-archive-frame-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&root).unwrap();
@@ -205,14 +227,7 @@ mod tests {
             message(&"wide\n".repeat(20_000)),
         ];
         for stable in 0..=session.messages.len() {
-            let (bytes, first) = stage(&session);
-            let first = first.unwrap();
-            assert_eq!(first.ordinal, 2, "empty first user must not lock the label source");
-            assert_eq!(
-                cv_core::label_from(session.title.as_deref(), first.head.as_deref()),
-                session.label(),
-                "the explicit title must outrank the captured prompt fallback"
-            );
+            let (bytes, _) = stage(&session);
             let mut header = session.clone();
             header.messages.clear();
             let mut full = Vec::new();
