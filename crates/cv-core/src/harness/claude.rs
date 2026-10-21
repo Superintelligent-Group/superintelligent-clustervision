@@ -364,10 +364,13 @@ impl Adapter for Claude {
             deps.files.push(r.path.with_extension("meta.json"));
         }
         deps.directories.push(r.path.with_extension("").join("tool-results"));
+        // Every agent transcript lives under `<session>/subagents/`, a workflow agent a tier deeper
+        // in `subagents/workflows/<run>/`; the nearest `workflows` ancestor is that tier, not the
+        // session's own `workflows/` state dir.
         if let Some(session) = r
             .path
             .ancestors()
-            .find(|p| p.file_name().is_some_and(|n| n == "subagents" || n == "workflows"))
+            .find(|p| p.file_name().is_some_and(|n| n == "subagents"))
             .and_then(Path::parent)
         {
             // By identity, not entry by entry: an agent reads a few of its parent's spilled outputs
@@ -1350,6 +1353,35 @@ mod tests {
     use std::sync::LazyLock;
 
     static NO_BAG: LazyLock<Map<String, Value>> = LazyLock::new(Map::new);
+
+    /// A workflow agent at `<session>/subagents/workflows/<run>/agent-*.jsonl` reads its session's
+    /// spilled outputs, so `<session>/tool-results` is its dependency, not `subagents/tool-results`.
+    #[test]
+    fn workflow_agent_depends_on_its_sessions_tool_results() {
+        let session = Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "tests/corpus/claude/2.1.304/.claude/projects/-home-corpus-project/e55ea121-48f2-441c-a430-fd701a8d9604",
+        );
+        for agent in [
+            session.join("subagents/workflows/wf_5039b6e7-1a7/agent-ac6a8f09d2adefeb4.jsonl"),
+            session.join("subagents/agent-direct.jsonl"),
+        ] {
+            let r = SessionRef::new("agent", Harness::Claude, agent.clone());
+            let mut deps = crate::source::Dependencies::default();
+            ROOTLESS
+                .dependencies(&r, &mut crate::source::Probe::default(), &mut deps)
+                .unwrap();
+            assert!(
+                deps.files.contains(&session.join("tool-results")),
+                "{agent:?}: {:?}",
+                deps.files
+            );
+            assert!(
+                !deps.files.iter().any(|f| f.ends_with("subagents/tool-results")),
+                "{:?}",
+                deps.files
+            );
+        }
+    }
 
     /// The message's `extra["claude"]` bag (empty when it recorded nothing).
     fn cl(m: &Message) -> &Map<String, Value> {

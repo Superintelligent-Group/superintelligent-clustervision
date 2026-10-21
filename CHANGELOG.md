@@ -85,6 +85,7 @@
 - A Claude fork sub-agent's `fork-context-ref` sets `lineage.forked_from` and `extra.claude.fork_context`; a retried request's `api_error` renders as an error line.
 - Claude Code 2.1.304 is the verified writer: its corpus (request ledger, fork sub-agent, retried request, `--max-turns`) is committed and golden-tested.
 - A folded sub-agent's freshness stamp declares its parent's `tool-results` directory by identity, not entry by entry.
+- A workflow agent's freshness stamp names its session's `tool-results`, not `subagents/tool-results`, so its parent's new spilled outputs mark it stale.
 
 **Titles and affordances.**
 - `has:subagents` matches the forest `agents` counts: Claude workflow agents and Codex and Devin forests too, not only Claude's top-level agents.
