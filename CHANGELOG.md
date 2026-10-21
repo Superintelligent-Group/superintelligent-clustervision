@@ -39,6 +39,8 @@
 
 - Reconcile native edits by call and resolved path; honor tool working directories and avoid guessing relative paths in compound shell commands.
 - Semantic indexing caps transcript heads at 64 KiB of decoded text, independent of JSON escaping, with bounded heap.
+- Read-only checkpointed catalogs retain writer-version observations and warm listings without accepting publications or bypassing live WAL contents.
+
 - Document `cv events` catalog writes and `--frozen`; update the manual for 0.18 counts, flags, diagnostics and migrations.
 - Qwen emission preserves absent cache counts and incomplete totals, and rejects overflowing usage aggregates.
 - OpenCode emission keeps unknown working directories empty instead of substituting the invoking process’s directory.

@@ -123,16 +123,8 @@ mod imp {
         #[cfg(test)]
         OPEN_COUNT.with(|n| n.set(n.get() + 1));
         if crate::env::frozen() {
-            // Even mode=ro can create/update WAL shared memory. A frozen command uses an
-            // immutable checkpoint only; with an outstanding WAL it falls back to sources.
-            if ["-wal", "-journal"].iter().any(|suffix| {
-                let mut sidecar = path.as_os_str().to_os_string();
-                sidecar.push(suffix);
-                std::fs::metadata(sidecar).is_ok_and(|m| m.len() > 0)
-            }) {
-                return None;
-            }
-            return open_read_only(path);
+            // Even mode=ro can create/update WAL shared memory.
+            return open_checkpoint(path);
         }
         let conn = match open_writable(path) {
             Ok(conn) => Some(conn),
@@ -157,10 +149,34 @@ mod imp {
         }
     }
 
-    /// Read-only catalogs use SQLite's WAL-aware reader. Never fall back to immutable on a
-    /// live WAL: it ignores committed frames. Frozen reads reach this only after `open_at`
-    /// rejects every nonempty WAL/journal, and cannot create coordination files.
+    /// Prefer SQLite's WAL-aware reader. A closed, checkpointed read-only copy may lack
+    /// writable WAL coordination files; only that case can use the immutable reader.
     fn open_read_only(path: &Path) -> Option<Connection> {
+        read_only_connection(path, "mode=ro").or_else(|| open_checkpoint(path))
+    }
+
+    fn checkpoint_only(path: &Path) -> bool {
+        ["-wal", "-journal"].iter().all(|suffix| {
+            let mut sidecar = path.as_os_str().to_os_string();
+            sidecar.push(suffix);
+            match std::fs::metadata(sidecar) {
+                Ok(m) => m.is_file() && m.len() == 0,
+                Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+            }
+        })
+    }
+
+    /// Immutable is valid only for a checkpoint, never as a way around a live WAL read error.
+    /// As with frozen reads, the copy must remain read-only for the connection's lifetime.
+    fn open_checkpoint(path: &Path) -> Option<Connection> {
+        if !checkpoint_only(path) {
+            return None;
+        }
+        let conn = read_only_connection(path, "immutable=1")?;
+        checkpoint_only(path).then_some(conn)
+    }
+
+    fn read_only_connection(path: &Path, query: &str) -> Option<Connection> {
         use rusqlite::OpenFlags;
         let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_NO_MUTEX;
         let file = path
@@ -169,8 +185,9 @@ mod imp {
             .replace('?', "%3f")
             .replace('#', "%23");
         let version = crate::discover_cache::INTERPRETATION_VERSION.to_string();
-        let query = if crate::env::frozen() { "immutable=1" } else { "mode=ro" };
-        let conn = Connection::open_with_flags(format!("file:{file}?{query}"), flags).inspect_err(note_sql).ok()?;
+        let conn = Connection::open_with_flags(format!("file:{file}?{query}"), flags)
+            .inspect_err(note_sql)
+            .ok()?;
         conn.busy_timeout(Duration::from_secs(5)).inspect_err(note_sql).ok()?;
         let stored: String = conn
             .query_row(
@@ -178,8 +195,12 @@ mod imp {
                 [],
                 |row| row.get(0),
             )
-            .inspect_err(note_sql).ok()?;
-        let schema: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0)).inspect_err(note_sql).ok()?;
+            .inspect_err(note_sql)
+            .ok()?;
+        let schema: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .inspect_err(note_sql)
+            .ok()?;
         (stored == version && schema == SCHEMA).then_some(conn)
     }
 
@@ -1831,14 +1852,60 @@ mod imp {
             let read = std::panic::catch_unwind(crate::sessions_impl);
             set_mode(0o755);
             let (listed, full) = read.unwrap();
-            assert!(
-                full,
-                "without writable WAL coordination, scan rather than ignore live WAL frames"
-            );
+            assert!(!full, "a closed read-only checkpoint also serves the warm route");
             assert_eq!(
                 serde_json::to_value(listed).unwrap(),
                 serde_json::to_value(&discovered).unwrap()
             );
+        }
+
+        #[test]
+        fn checkpoint_reader_rejects_wal_and_journal_contents() {
+            let w = crate::test_world("reader-checkpoint");
+            let r = db_ref(Harness::Claude, w.base.join("recorded"));
+            sync(std::slice::from_ref(&r));
+            let path = db_path().unwrap();
+            assert!(open_checkpoint(&path).is_some());
+            let writer = open_db().unwrap();
+            writer
+                .execute_batch("PRAGMA wal_autocheckpoint=0; UPDATE sessions SET writer_version='9.0.0';")
+                .unwrap();
+            assert!(open_checkpoint(&path).is_none(), "never ignore committed WAL frames");
+            let reader = open_read_only(&path).unwrap();
+            let observed: String = reader
+                .query_row("SELECT writer_version FROM sessions", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(observed, "9.0.0");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                // A copied WAL without shared memory cannot coordinate in a read-only
+                // directory. Returning the older main-file row here would lose evidence.
+                let copy = w.base.join("uncoordinated");
+                std::fs::create_dir(&copy).unwrap();
+                let copied = copy.join("catalog.db");
+                for name in ["catalog.db", "catalog.db-wal"] {
+                    std::fs::copy(w.cv_home.join(name), copy.join(name)).unwrap();
+                    std::fs::set_permissions(copy.join(name), std::fs::Permissions::from_mode(0o444)).unwrap();
+                }
+                if crate::publish::tests::read_only(&copy, true) {
+                    let rejected = open_read_only(&copied).is_none();
+                    crate::publish::tests::read_only(&copy, false);
+                    assert!(rejected, "an unreadable live WAL must not serve the checkpoint");
+                }
+            }
+            drop(reader);
+            drop(writer);
+            assert!(open_checkpoint(&path).is_some());
+            for suffix in ["-wal", "-journal"] {
+                let sidecar = w.cv_home.join(format!("catalog.db{suffix}"));
+                std::fs::write(&sidecar, b"unreadable recovery data").unwrap();
+                assert!(
+                    open_checkpoint(&path).is_none(),
+                    "{suffix} must not fall back to immutable"
+                );
+                std::fs::remove_file(sidecar).unwrap();
+            }
         }
 
         #[test]
