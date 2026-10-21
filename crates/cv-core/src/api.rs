@@ -508,7 +508,8 @@ fn compactions(harness: &str, id: &str) -> (u16, Value) {
             v
         })
         .collect();
-    // A bare array, like every other list this API serves.
+    // A bare array: a list with nothing beside its rows is bare; one that carries warnings is an
+    // object naming both (`tasks`, `events`, `inbox`).
     ok(json!(out))
 }
 

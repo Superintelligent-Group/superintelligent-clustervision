@@ -77,8 +77,7 @@ pub const RETURNED_QUIET_SECS: i64 = 600;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LaneEvent {
     pub ts: DateTime<Utc>,
-    /// `start` or `stop`.
-    pub event: String,
+    pub event: LaneEventKind,
     /// The parent session's id (the hook's `session_id`).
     pub session_id: String,
     /// The bare agent id (`agent-` stripped, as `SendMessage` uses it).
@@ -96,6 +95,54 @@ pub struct LaneEvent {
     /// The head of `last_assistant_message` on a stop (capped by the writer).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_text: Option<String>,
+}
+
+/// What one lane-ledger row records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaneEventKind {
+    /// A sub-agent started (`SubagentStart`).
+    Start,
+    /// A sub-agent stopped (`SubagentStop`).
+    Stop,
+}
+
+/// A lane's status: cv's own three verdicts, or the word a harness notice or a workflow journal
+/// recorded, kept as spelled (`completed`, `failed`, `killed`, `stopped`, `done`, `partial`, …).
+/// It serializes as that one word.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LaneStatus {
+    /// No stop recorded anywhere, and the transcript does not read as finished.
+    Running,
+    /// Parked: a stop hook (in the transcript or the ledger) fired at or after the last turn.
+    Stopped,
+    /// Finished with no stop recorded anywhere: the harness lost the notification.
+    Returned,
+    /// As the harness's notice or the workflow journal recorded it.
+    Recorded(String),
+}
+
+impl LaneStatus {
+    pub fn as_str(&self) -> &str {
+        match self {
+            LaneStatus::Running => "running",
+            LaneStatus::Stopped => "stopped",
+            LaneStatus::Returned => "returned",
+            LaneStatus::Recorded(word) => word,
+        }
+    }
+}
+
+impl std::fmt::Display for LaneStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl Serialize for LaneStatus {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
 }
 
 /// `$CLUSTERVISION_HOME/lanes.jsonl` (default `~/.clustervision/lanes.jsonl`);
@@ -139,7 +186,10 @@ pub fn read_ledger() -> Vec<LaneEvent> {
 /// The latest `stop` per bare agent id — what [`status_of`] consults.
 fn ledger_stops(rows: &[LaneEvent], session_id: &str) -> HashMap<String, DateTime<Utc>> {
     let mut m: HashMap<String, DateTime<Utc>> = HashMap::new();
-    for r in rows.iter().filter(|r| r.event == "stop" && r.session_id == session_id) {
+    for r in rows
+        .iter()
+        .filter(|r| r.event == LaneEventKind::Stop && r.session_id == session_id)
+    {
         let e = m.entry(r.agent_id.clone()).or_insert(r.ts);
         *e = (*e).max(r.ts);
     }
@@ -242,7 +292,7 @@ pub struct Lane {
     pub tokens: LaneTokens,
     /// `running` · `completed` · `stopped` · `failed` · `killed` · `returned` (finished, no stop
     /// recorded — a lost notification), or a journaled workflow status.
-    pub status: String,
+    pub status: LaneStatus,
     pub status_source: StatusSource,
     /// The last assistant text turn — the return value for a finished agent, the last narration
     /// for a running one.
@@ -388,7 +438,7 @@ impl Lane {
 
     /// Finished with no stop recorded anywhere: the harness lost this lane's notification.
     pub fn lost_notification(&self) -> bool {
-        self.status == "returned"
+        self.status == LaneStatus::Returned
     }
 
     /// Any activity (start or last turn) at or after `since`.
@@ -397,7 +447,7 @@ impl Lane {
     }
 
     pub fn is_running(&self) -> bool {
-        self.status == "running"
+        self.status == LaneStatus::Running
     }
 }
 
@@ -688,9 +738,9 @@ fn status_of(
     ledger_stop: Option<DateTime<Utc>>,
     ends_in_report: bool,
     now: DateTime<Utc>,
-) -> (String, StatusSource) {
+) -> (LaneStatus, StatusSource) {
     if let Some(s) = sub.result_status.as_deref().filter(|s| !s.is_empty()) {
-        return (s.to_string(), StatusSource::Journal);
+        return (LaneStatus::Recorded(s.to_string()), StatusSource::Journal);
     }
     // A notification that post-dates the last turn describes the current stop; an older one
     // describes a stop the agent has since been resumed from.
@@ -701,16 +751,16 @@ fn status_of(
             (None, _) => end.stopped() == Some(true),
         };
         if current {
-            return (n.status.clone(), StatusSource::TaskNotification);
+            return (LaneStatus::Recorded(n.status.clone()), StatusSource::TaskNotification);
         }
     }
     if end.stopped() == Some(true) {
-        return ("stopped".into(), StatusSource::SubagentStop);
+        return (LaneStatus::Stopped, StatusSource::SubagentStop);
     }
     // The hook ledger saw the stop before the transcript recorded it (or the harness never
     // wrote the attachment): a stop at or after the last turn parks the lane the same way.
     if ledger_stop.is_some_and(|ts| end.last_turn_at.is_none_or(|lt| ts >= lt)) {
-        return ("stopped".into(), StatusSource::HookLedger);
+        return (LaneStatus::Stopped, StatusSource::HookLedger);
     }
     // No journal, no notification, no stop hook — but the transcript ends in a final report and
     // has been quiet for a while: the lane returned and nobody recorded it (a harness restart
@@ -720,9 +770,9 @@ fn status_of(
         .last_turn_at
         .is_some_and(|t| now.signed_duration_since(t).num_seconds() >= RETURNED_QUIET_SECS);
     if ends_in_report && quiet {
-        return ("returned".into(), StatusSource::Transcript);
+        return (LaneStatus::Returned, StatusSource::Transcript);
     }
-    ("running".into(), StatusSource::Transcript)
+    (LaneStatus::Running, StatusSource::Transcript)
 }
 
 fn lane_of(
@@ -755,7 +805,7 @@ fn lane_of(
     let last_text = sub.result_summary.clone().or(p.last_text);
     let parked = matches!(status.as_str(), "completed" | "stopped" | "returned");
     let stranded = parked && last_text.as_deref().is_some_and(text_is_waiting);
-    let cause = failure_cause(&status, &end);
+    let cause = failure_cause(status.as_str(), &end);
     let notice = end
         .api_error
         .as_ref()
@@ -805,7 +855,7 @@ pub fn lanes_of(parent: &SessionRef) -> Result<Vec<Lane>> {
             let mut stops = HashMap::new();
             for row in rows
                 .iter()
-                .filter(|row| row.event == "stop" && agents.contains(row.agent_id.as_str()))
+                .filter(|row| row.event == LaneEventKind::Stop && agents.contains(row.agent_id.as_str()))
             {
                 stops
                     .entry(row.agent_id.clone())
@@ -1022,7 +1072,7 @@ mod tests {
             messages: 0,
             tool_calls: 0,
             tokens: LaneTokens::default(),
-            status: "running".into(),
+            status: LaneStatus::Running,
             status_source: StatusSource::Transcript,
             last_text: None,
             last_tool: None,
@@ -1154,15 +1204,15 @@ mod tests {
         };
         assert_eq!(
             status_of(&sub, &running, None, None, false, now),
-            ("running".into(), StatusSource::Transcript)
+            (LaneStatus::Running, StatusSource::Transcript)
         );
         assert_eq!(
             status_of(&sub, &running, None, DateTime::from_timestamp(100, 0), false, now),
-            ("stopped".into(), StatusSource::HookLedger)
+            (LaneStatus::Stopped, StatusSource::HookLedger)
         );
         assert_eq!(
             status_of(&sub, &running, None, DateTime::from_timestamp(50, 0), false, now),
-            ("running".into(), StatusSource::Transcript),
+            (LaneStatus::Running, StatusSource::Transcript),
             "a stop before the last turn is a stop the lane was resumed from"
         );
         let stopped = SubagentEnd {
@@ -1174,9 +1224,9 @@ mod tests {
             StatusSource::SubagentStop
         );
         // The reducer keeps the newest stop per agent, bare id.
-        let row = |ts: i64, ev: &str| LaneEvent {
+        let row = |ts: i64, event: LaneEventKind| LaneEvent {
             ts: DateTime::from_timestamp(ts, 0).unwrap(),
-            event: ev.into(),
+            event,
             session_id: "s".into(),
             agent_id: "a1".into(),
             agent_type: None,
@@ -1185,20 +1235,20 @@ mod tests {
             cwd: None,
             last_text: None,
         };
-        let mut unrelated = row(200, "stop");
+        let mut unrelated = row(200, LaneEventKind::Stop);
         unrelated.session_id = "another-parent".into();
         let stops = ledger_stops(
             &[
-                row(10, "start"),
-                row(20, "stop"),
-                row(30, "stop"),
-                row(5, "stop"),
+                row(10, LaneEventKind::Start),
+                row(20, LaneEventKind::Stop),
+                row(30, LaneEventKind::Stop),
+                row(5, LaneEventKind::Stop),
                 unrelated,
             ],
             "s",
         );
         assert_eq!(stops.get("a1").copied(), DateTime::from_timestamp(30, 0));
-        assert!(ledger_stops(&[row(300, "stop")], "another-parent").is_empty());
+        assert!(ledger_stops(&[row(300, LaneEventKind::Stop)], "another-parent").is_empty());
     }
 
     #[test]

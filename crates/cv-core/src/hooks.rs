@@ -168,7 +168,7 @@ fn lineage_root(
         let registered = ledger
             .iter()
             .rev()
-            .find(|row| row.event == "start" && row.agent_id == id);
+            .find(|row| row.event == crate::lanes::LaneEventKind::Start && row.agent_id == id);
         let parent = path
             .as_deref()
             // An unreadable header falls back to the ledger's registration.

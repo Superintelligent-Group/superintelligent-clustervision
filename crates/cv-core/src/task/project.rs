@@ -31,9 +31,17 @@ pub struct TaskFilter {
     pub decisions: Option<bool>,
 }
 
-/// The state vocabulary [`TaskFilter::state`] accepts: every [`TaskState`] string, as [`list`]
-/// matches them.
-pub const STATE_VOCABULARY: [&str; 6] = ["open", "claimed", "done", "abandoned", "superseded", "resolved"];
+/// The state vocabulary [`TaskFilter::state`] accepts: every [`TaskState`]'s spelling, in
+/// [`TaskState::ALL`] order.
+pub const STATE_VOCABULARY: [&str; 6] = {
+    let mut words = [""; 6];
+    let mut i = 0;
+    while i < TaskState::ALL.len() {
+        words[i] = TaskState::ALL[i].as_str();
+        i += 1;
+    }
+    words
+};
 
 /// List tasks matching `filter`, oldest first (task ids are time-sortable uuid v7).
 ///
@@ -41,20 +49,13 @@ pub const STATE_VOCABULARY: [&str; 6] = ["open", "claimed", "done", "abandoned",
 /// result — a typo'd `--state redy` used to look exactly like "no matching tasks" on every
 /// surface (CLI, MCP, HTTP), which all inherit this rejection.
 pub fn list<'m>(model: &'m TaskReadModel, filter: &TaskFilter) -> Result<Vec<&'m TaskProjection>, String> {
-    if let Some(state) = &filter.state {
-        if !STATE_VOCABULARY.contains(&state.as_str()) {
-            return Err(format!(
-                "unknown state {state:?} (expected one of {})",
-                STATE_VOCABULARY.join("|")
-            ));
-        }
-    }
+    let state = filter.state.as_deref().map(str::parse::<TaskState>).transpose()?;
     Ok(model
         .tasks
         .values()
         .filter(|t| {
-            if let Some(state) = &filter.state {
-                if t.state.as_str() != state {
+            if let Some(state) = state {
+                if t.state != state {
                     return false;
                 }
             } else if !filter.include_terminal && t.state.is_terminal() {

@@ -1127,7 +1127,7 @@ mod tests {
             .unwrap();
             crate::lanes::LaneEvent {
                 ts: chrono::Utc::now(),
-                event: "start".into(),
+                event: crate::lanes::LaneEventKind::Start,
                 session_id: parent.into(),
                 agent_id: id.into(),
                 agent_type: Some("default".into()),
@@ -1141,7 +1141,7 @@ mod tests {
         crate::lanes::append_lane_event(&row("grandchild", "child", "child")).unwrap();
         let mut child = row("child", "root", "root");
         crate::lanes::append_lane_event(&child).unwrap();
-        child.event = "stop".into();
+        child.event = crate::lanes::LaneEventKind::Stop;
         crate::lanes::append_lane_event(&child).unwrap();
         crate::lanes::append_lane_event(&row("foreign", "root", "another-parent")).unwrap();
         let forest = crate::subagent_tree_of(&parent);

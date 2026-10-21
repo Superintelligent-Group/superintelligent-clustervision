@@ -461,7 +461,7 @@ pub(crate) fn cmd_lanes(
         } else if let Some(c) = &l.failure_cause {
             format!("{}:{c}", l.status)
         } else {
-            truncate(&l.status, 10)
+            truncate(l.status.as_str(), 10)
         }
     };
     let sw = lanes

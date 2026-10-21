@@ -1232,8 +1232,8 @@ fn hook_start(ev: &Event) -> Result<Option<Value>> {
 /// `SubagentStart` / `SubagentStop`: one row in the lane ledger; no output, no model action.
 fn hook_lane(ev: &Event) -> Result<Option<Value>> {
     let event = match ev.event.as_deref() {
-        Some("SubagentStart") => "start",
-        Some("SubagentStop") => "stop",
+        Some("SubagentStart") => cv_core::lanes::LaneEventKind::Start,
+        Some("SubagentStop") => cv_core::lanes::LaneEventKind::Stop,
         _ => return Ok(None),
     };
     let Some(agent) = ev.agent.as_ref() else {
@@ -1246,7 +1246,7 @@ fn hook_lane(ev: &Event) -> Result<Option<Value>> {
         .map(|l| cv_core::ir::truncate(l.trim(), 200));
     cv_core::lanes::append_lane_event(&LaneEvent {
         ts: chrono::Utc::now(),
-        event: event.into(),
+        event,
         session_id: ev.session.id.clone(),
         agent_id: agent.id.clone(),
         agent_type: agent.kind.clone(),
