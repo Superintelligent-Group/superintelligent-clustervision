@@ -32,49 +32,15 @@
 - A reader checks its source after a slow callback, per mapped window, at a checkpoint and at EOF; a replacement detected there is an error.
 - Native Codex file-change records feed `cv touched`, tool histograms and query facts, including code-mode edits, without duplicating visible patch calls.
 - `cv index --subagents` folds the sub-agent forest from stat-keyed metadata instead of re-parsing every transcript each pass.
-- `message_count` is `null` (a dash in `cv ls`) until a session is counted; `cv stats` reports the uncounted sessions beside the total.
-- Goose listings defer exact counts to complete reads while preserving native headers, session inclusion, and legacy whole-file UTF-8 validation.
-
-- Hermes listings read native session metadata without scanning message bodies; indexing or complete reads supply source-certified canonical turn counts.
-- Zed listings preserve native metadata without decoding messages for counts; complete reads supply source-certified counts.
-
-- Listings reuse source-certified exact turn counts after complete reads, preserving them across harmless metadata refreshes and invalidating changed sources.
-- Kimi Code listings use complete native state metadata directly and defer exact counts; incomplete metadata retains transcript-derived titles and timestamps.
-- Kimi Code reads detect callback source changes before continuing a new step or completing an unfinished one.
-
-- Kimi listings use native titles or stop at the first fallback prompt; exact counts come from complete reads or indexing.
 - Kimi reads reject callback changes to captured transcripts and wire enrichment, including final messages from older rotated segments.
-- Grok reads reject source changes during message/checkpoint callbacks, including held reasoning at EOF.
-
 - JSON listings and filtered windows reuse filesystem metadata for shared stores while rechecking presence at rendering.
 - Hermes keeps generation membership in private indexed storage while preserving exact duplicate detection and lazy message bodies.
-
 - Repeated OpenClaw parent lookups share private indexed facts; one-query operations keep native startup cost, query order, malformed values, and source guards.
-- Codex listings defer exact counts to indexing or complete reads; transcript metadata and compressed decode reuse stay unchanged.
-- Codex reads check the source after a slow callback, a checkpoint, the first metadata and at EOF, and reject a replaced or truncated file.
-- Claude reads check the source after a slow callback, a checkpoint and at EOF, and reject a replaced or truncated file before touching its mapping again.
-
-- Catalog publication waits for concurrent writers before comparing rows, preventing avoidable lost discovery updates during indexing.
-
-- Claude listings count turns during discovery (the record heads are read anyway); the count is never deferred.
 - Claude reads report source deletion or replacement during callbacks even after an intentional stop with owned content.
 - Preserve untouched native records while sharing Claude prune, rewind, and adoption derivation.
 - Claude Code 2.1.304 corpus: the request ledger (`api-request`, `-shape`, `-blob`), `isolation-latch` and unknown record types are carried, never read as turns.
 - A Claude fork sub-agent's `fork-context-ref` sets `lineage.forked_from` and `extra.claude.fork_context`; a retried request's `api_error` renders as an error line.
 - Claude Code 2.1.304 is the verified writer: its corpus (request ledger, fork sub-agent, retried request, `--max-turns`) is committed and golden-tested.
-
-- Grok listings use native summaries and stop after finding fallback titles; exact message counts appear after indexing or a complete read.
-- `cv doctor` compares observed Claude/Codex writer versions with corpus coverage, including unknown sessions; observations come from normal discovery.
-- Cataloged writer versions and interpretation 6 trigger an announced rediscovery and consumer reread after upgrading; writer observations add no JSON field.
-- A compatibility gate checks the latest release against CLI schemas, serialized messages, session rows, MCP tools, HTTP routes, and exit codes.
-- Native Codex file-change records now feed `cv touched`, tool histograms and query facts, including code-mode edits, without duplicating visible patch calls.
-
-- `cv hooks install codex` adds compaction recovery, session context, lane tracking, decision reminders and live edit guards in user or project scope.
-- `cv hooks install|show codex` and `cv doctor` report each Codex hook as trusted, untrusted or modified, with the review step Codex requires.
-- The Codex edit guard no longer denies a patch over a file edited by the same root thread's parent or sub-agents.
-- Affordances include Claude slash-loaded skills, Kimi Code todo state and legacy agents, and Roo returns carried alongside user text.
-- Emitted fallback titles use meaningful prompts; Cursor CLI titles omit leading timestamp metadata while transcript text stays intact.
-- `cv index --subagents` walks the sub-agent forest by its stat-keyed metadata instead of re-parsing every transcript each pass.
 - A folded sub-agent's freshness stamp declares its parent's `tool-results` directory by identity, not entry by entry.
 
 **Titles and affordances.**
@@ -106,6 +72,8 @@
 - `cv doctor` adds a Writer versions row: the newest Claude/Codex version seen in the stores versus the newest the corpus verified, plus unknown sessions.
 - `cv hooks install codex` (user scope or `--scope project`, `.codex/hooks.json`) installs Claude's five hooks: compaction recovery, start context, lanes, decisions, edit guard.
 - Codex's edit guard denies a conflicting edit outright (Codex hooks have no `ask`); Claude's still asks.
+- `cv hooks install|show codex` and `cv doctor` report each Codex hook as trusted, untrusted or modified, with the review step Codex requires.
+- The Codex edit guard no longer denies a patch over a file edited by the same root thread's parent or sub-agents.
 - **Breaking:** installed hooks run `cv hook <name> --harness <h>`; `$CV_HOOK_HARNESS` exits 2 with a pointer to `cv hooks install codex`.
 
 **Waiting commands.**
@@ -170,7 +138,7 @@
 - The size gate reports each crate's and module's drift since the last release tag; `tools/size-budget.txt` and `check-size.py --write` are gone.
 - A compatibility gate downloads the released 0.17.0 binary (digest-pinned) and compares CLI schemas, session rows, messages, MCP tools, HTTP routes and exit codes.
 - The upgrade gate runs the released 0.16.1 binary over every corpus version, then compares the migrated rows, events and `show` output with a clean index.
-- The upgrade gate requires the first listing over a 0.16.1 catalog to leave uncounted exactly what a fresh one does, and `cv index` to count all.
+- The upgrade gate requires a first listing over a 0.16.1 catalog to leave uncounted what a fresh one does; `cv index` counts all.
 - macOS runs nightly and on rc tags: APFS identity, publish, SQLite and mmap gates; a separate workflow smokes the published Darwin artifact natively.
 - `tools/dump-hash.sh` streams one sha256 per command, session and demand over `tools/dump-hash.manifest`: the byte-identity gate for output-preserving changes.
 
@@ -190,7 +158,7 @@
 - cv-testkit: `heap::begin`/`end` return a `Measurement` instead of a `usize`.
 
 **After upgrading, once.**
-- The first listing rediscovers the fleet (announced on stderr; `cv index` does it ahead of time): catalog schema 4 drops an older catalog whole and rebuilds it.
+- The first listing rediscovers the fleet (announced on stderr; `cv index` does it ahead): catalog schema 4 drops an older catalog and rebuilds it.
 - Every store, mark and watch state invalidates once: `source::VERSION` 6 is the one interpretation version all check; nothing expires per release.
 
 ## 0.17.0 — 2026-10-17 — stream, never materialize
