@@ -295,7 +295,8 @@ fn lanes_table_status_tokens_and_the_strand_class() {
     assert_eq!(d["stranded"], false);
     let by_id = |id: &str| rows.iter().find(|r| r["agent_id"] == id).unwrap().clone();
     let a = by_id("aaa1");
-    assert_eq!(a["duration_ms"], 285_000, "duration from first to last turn");
+    // The last assistant turn is 10:04:50; the 10:04:55 stop hook is bookkeeping.
+    assert_eq!(a["duration_ms"], 280_000, "duration from first to last turn");
     assert_eq!(a["status"], "completed");
     assert_eq!(a["status_source"], "task_notification");
     assert_eq!(a["stranded"], false);
