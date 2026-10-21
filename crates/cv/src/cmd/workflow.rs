@@ -110,6 +110,17 @@ fn refuse_run_flags(flags: &[&str], listing: &str) -> Result<()> {
     }
 }
 
+/// Recorded states share glyphs; callers choose the marker for an unrecorded state.
+fn state_glyph(state: Option<&str>, fallback: &'static str) -> &'static str {
+    match state {
+        Some("done") => "✓",
+        Some("error") => "✗",
+        Some("progress") => "…",
+        Some("start") => "▸",
+        _ => fallback,
+    }
+}
+
 /// `--follow`: poll the run's state file (the harness flushes it as agents progress) and stream
 /// agent state TRANSITIONS as feed lines — `12:03:41  ✓ verify:merkle → done (312,004 tok)` —
 /// then, when the run reaches a terminal status or `--for` elapses, emit the full render (honoring
@@ -140,12 +151,7 @@ fn follow_workflow(
                 continue;
             }
             seen.insert(a.index, state.clone());
-            let glyph = match state.as_str() {
-                "done" => "✓",
-                "error" => "✗",
-                "progress" => "…",
-                _ => "▸",
-            };
+            let glyph = state_glyph(Some(&state), "▸");
             let tok = a.tokens.map(|t| format!(" ({} tok)", fmt_int(t))).unwrap_or_default();
             println!(
                 "{now}  {glyph} {} → {state}{tok}",
@@ -255,8 +261,7 @@ fn workflow_by_name_fleetwide(
                 Ok(None) => {}
                 Err(e) => return crate::util::resolve_found(Err(e), name, want).map(|_| ()),
             }
-        }
-        if !ghosts.is_empty() {
+        } else {
             refuse_run_flags(run_flags, "ghost launches")?;
             println!(
                 "no recorded run named {name:?} — but {} GHOST launch(es) match (state never persisted; crash/kill before write?):\n",
@@ -518,13 +523,7 @@ fn workflow_result_preview(value: &serde_json::Value) -> Result<(String, bool)> 
 /// One agent line inside a workflow's phase tree: state glyph, label, id, telemetry, and the head
 /// of its result.
 fn render_workflow_agent(a: &cv_core::WorkflowAgent) {
-    let glyph = match a.state.as_deref() {
-        Some("done") => "✓",
-        Some("error") => "✗",
-        Some("progress") => "…",
-        Some("start") => "▸",
-        _ => "•",
-    };
+    let glyph = state_glyph(a.state.as_deref(), "•");
     let id = a.agent_id.as_deref().map(short_id).unwrap_or_else(|| "—".into());
     let label = a.label.as_deref().unwrap_or("(agent)");
     let mut tele = Vec::new();
