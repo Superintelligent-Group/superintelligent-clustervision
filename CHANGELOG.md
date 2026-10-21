@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `prune`, `rewind`, and `port` accept `--skills keep|drop|drop-stale`, including legacy command-file skills; the default preserves restored skills unchanged.
+
 - `cv cat` reports corrupt sidecar reads instead of attributing them to `--drop`.
 - `cv events --subagents` reports unreadable agent transcripts with their identity and path.
 - Archive watch uses source-path adapters, fails unavailable adapters, and names retryable reads; archive listing reports corrupt catalog line numbers.

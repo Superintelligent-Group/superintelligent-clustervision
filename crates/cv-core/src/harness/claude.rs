@@ -21,6 +21,7 @@ pub(crate) mod replay;
 /// The sidecar tree beside a transcript (`subagents/`, `workflows/`, `journal.jsonl`): every path
 /// spelled once, and the one journal parser.
 pub mod sidecar;
+pub mod skills;
 use super::store::jsonl;
 use super::wire::anthropic;
 use crate::ir::*;

@@ -126,6 +126,9 @@ and `splice <id>:A..B` use the same `A..B` grammar.
 (write somewhere other than the real store), `--json` (machine output where supported), `--limit N`, `--fresh` (bypass the catalog), `--all` (include what is
 hidden by default: finished lanes, archived sessions, terminal tasks).
 
+**Restored skills:** `prune`, `rewind`, and Claude-target `port` accept `--skills keep|drop|drop-stale`,
+parallel to `--thinking`. The default `keep` preserves existing transcript and report bytes.
+
 **Global:** `--frozen` (`CV_FROZEN=1`) leaves cv stores untouched; commands whose purpose is to
 write stores or sessions error with exit 2.
 

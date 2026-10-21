@@ -4316,3 +4316,109 @@ fn archive_ls_names_each_skipped_catalog_line() {
     let (_, error) = w.cv_ok(&["archive", "ls"]);
     assert!(error.contains("skipping corrupt catalog line 2"), "{error}");
 }
+
+/// The policy reaches all three reshape doors and must not mistake legacy command files for
+/// deleted skills. JSON and provenance at the default keep their existing shape.
+#[test]
+fn cli_skills_policy_on_prune_rewind_and_port() {
+    use serde_json::{json, Value};
+    let w = World::new("skills-policy");
+    let commands = w.home.join(".claude/commands/a");
+    fs::create_dir_all(&commands).unwrap();
+    fs::write(
+        commands.join("b.md"),
+        "---\ndescription: current command\n---\n\nCurrent command.\n",
+    )
+    .unwrap();
+    let source = w.write_session("skills-source", &[
+        user_line("u", "2026-01-01T00:00:00Z", "continue"),
+        json!({"type":"attachment", "uuid":"r", "parentUuid":"u", "isSidechain":false,
+            "cwd":"/work/proj", "attachment":{"type":"invoked_skills", "skills":[
+                {"name":"a:b", "path":"userSettings:a:b", "content":"Base directory for this skill: /skills/a:b\n\nCurrent command."},
+                {"name":"gone", "path":"userSettings:gone", "content":"Gone."}
+            ]}, "rendered":[{"content":"Old restored text"}], "renderedRole":"system"}),
+        claude::with(user_line("u2", "2026-01-01T00:01:00Z", "next"), json!({"parentUuid":"r"})),
+    ]);
+    let before = fs::read(&source).unwrap();
+    for command in ["prune", "rewind", "port"] {
+        for policy in ["keep", "drop-stale", "drop"] {
+            let out = w.base.join(format!("{command}-{policy}"));
+            let new_id = format!("derived-{command}-{policy}");
+            let mut args = vec![command, "claude:skills-source", "--skills", policy];
+            if command == "prune" {
+                args.extend(["--to", &new_id, "--json"]);
+            } else {
+                args.extend(["--out", out.to_str().unwrap(), "--thinking", "native"]);
+                if command == "rewind" {
+                    args.extend(["--to", &new_id, "--full", "--json"]);
+                } else {
+                    args.push("--no-context");
+                }
+            }
+            if command != "port" && policy != "keep" {
+                let mut dry = args.clone();
+                dry.push("--dry-run");
+                let (stdout, _) = w.cv_ok(&dry);
+                let report: Value = serde_json::from_str(&stdout).unwrap();
+                assert!(report["dry_run"].as_bool().unwrap());
+                assert!(report["new_path"].is_null());
+                assert_eq!(report["skills"]["dropped"], if policy == "drop" { 2 } else { 1 });
+            }
+            let (stdout, _) = w.cv_ok(&args);
+            let output = if command == "port" {
+                // This fixture has one cwd and port writes one project subdirectory.
+                let project = fs::read_dir(&out).unwrap().next().unwrap().unwrap().path();
+                fs::read_dir(project)
+                    .unwrap()
+                    .map(|e| e.unwrap().path())
+                    .find(|p| p.extension().is_some_and(|e| e == "jsonl"))
+                    .unwrap()
+            } else {
+                let report: Value = serde_json::from_str(&stdout).unwrap();
+                assert_eq!(report.get("skills").is_some(), policy != "keep");
+                if policy != "keep" {
+                    assert_eq!(report["skills"]["dropped"], if policy == "drop" { 2 } else { 1 });
+                }
+                if command == "rewind" {
+                    let receipt: Value =
+                        serde_json::from_slice(&fs::read(report["provenance_path"].as_str().unwrap()).unwrap())
+                            .unwrap();
+                    assert_eq!(receipt.get("skills").is_some(), policy != "keep");
+                }
+                PathBuf::from(report["new_path"].as_str().unwrap())
+            };
+            let records: Vec<Value> = fs::read_to_string(output)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            let restored = records
+                .iter()
+                .find(|r| r.pointer("/attachment/type") == Some(&json!("invoked_skills")))
+                .unwrap();
+            let names: Vec<_> = restored["attachment"]["skills"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|s| s["name"].as_str().unwrap())
+                .collect();
+            assert_eq!(
+                names,
+                match policy {
+                    "keep" => vec!["a:b", "gone"],
+                    "drop-stale" => vec!["a:b"],
+                    _ => vec![],
+                }
+            );
+            assert_eq!(restored.get("rendered").is_some(), policy == "keep");
+        }
+    }
+    assert_eq!(fs::read(source).unwrap(), before);
+    for command in ["prune", "rewind", "port"] {
+        let (_, code, _, _) = w.cv(&[command, "claude:skills-source", "--skills", "invalid"]);
+        assert_eq!(code, 2);
+    }
+    let (_, code, _, error) = w.cv(&["port", "claude:skills-source", "--harness", "codex", "--skills", "drop"]);
+    assert_eq!(code, 2);
+    assert!(error.contains("requires a Claude target"));
+}

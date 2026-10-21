@@ -3,6 +3,7 @@
 use crate::cmd::port::emit_session;
 use crate::util::{dry_run_nulls, parse_harness, parse_range, report, short_id, usage};
 use anyhow::{bail, Context, Result};
+use cv_core::harness::claude::skills::SkillsPolicy;
 use cv_core::ir::{human_bytes, Block, Harness, Message, Role, Session};
 use cv_core::EmitOptions;
 use std::fmt::Write as _;
@@ -57,6 +58,7 @@ pub(crate) struct PruneArgs<'a> {
     pub declassify: bool,
     pub declassify_tokens: Option<String>,
     pub declassify_tokens_file: Option<PathBuf>,
+    pub skills_policy: SkillsPolicy,
     pub dry_run: bool,
     pub json: bool,
 }
@@ -78,6 +80,7 @@ pub(crate) fn cmd_prune(args: PruneArgs<'_>) -> Result<()> {
         declassify,
         declassify_tokens,
         declassify_tokens_file,
+        skills_policy,
         dry_run,
         json,
     } = args;
@@ -112,6 +115,7 @@ pub(crate) fn cmd_prune(args: PruneArgs<'_>) -> Result<()> {
         keep_range,
         declassify,
         declassify_tokens, // caller-supplied (external); cv ships no built-in list. min_hits from Default (2).
+        skills_policy,
         dry_run,
         force,
         ..Default::default()
@@ -190,6 +194,7 @@ pub(crate) fn cmd_prune(args: PruneArgs<'_>) -> Result<()> {
             }
         }
     }
+    skills_line(&mut h, &res.skills);
     for w in &res.warnings {
         let _ = writeln!(h, "  ⚠ {w}");
     }
@@ -209,6 +214,17 @@ pub(crate) fn cmd_prune(args: PruneArgs<'_>) -> Result<()> {
         let _ = writeln!(h, "  resume with: claude --resume {}", res.new_id);
     }
     report(json, &h, &v)
+}
+
+/// Report only an explicitly selected policy; keep preserves existing output.
+pub(crate) fn skills_line(h: &mut String, s: &cv_core::harness::claude::skills::SkillsReport) {
+    if !s.is_keep() {
+        let _ = writeln!(
+            h,
+            "  skills ({}): dropped {} restored skill(s), {} chars, kept {} · {} record(s) rewritten",
+            s.policy, s.dropped, s.dropped_chars, s.kept, s.records
+        );
+    }
 }
 
 // ---------- rewind ----------
@@ -247,6 +263,7 @@ pub(crate) struct RewindArgs<'a> {
     pub to: Option<String>,
     pub full: bool,
     pub thinking: Option<cv_core::emit::ThinkingMode>,
+    pub skills_policy: SkillsPolicy,
     pub dry_run: bool,
     pub json: bool,
     pub generator: &'a str,
@@ -262,6 +279,7 @@ pub(crate) fn cmd_rewind(args: RewindArgs<'_>) -> Result<()> {
         to,
         full,
         thinking,
+        skills_policy,
         dry_run,
         json,
         generator,
@@ -286,6 +304,7 @@ pub(crate) fn cmd_rewind(args: RewindArgs<'_>) -> Result<()> {
         &r,
         &cv_core::rewind::RewindOptions {
             at: cut,
+            skills_policy,
             full,
             thinking,
             out_dir: out,
@@ -367,6 +386,7 @@ pub(crate) fn cmd_rewind(args: RewindArgs<'_>) -> Result<()> {
         human_bytes(res.bytes_written),
     );
     let _ = writeln!(h, "  thinking: {}", res.thinking);
+    skills_line(&mut h, &res.skills);
     for w in &res.warnings {
         let _ = writeln!(h, "  ⚠ {w}");
     }
@@ -585,7 +605,8 @@ fn finish_composed(args: ComposedArgs) -> Result<()> {
                 thinking,
                 ..Default::default()
             },
-        );
+        )
+        .map(drop);
     }
 
     // Complete checked demands before publishing either the report or the exported document.

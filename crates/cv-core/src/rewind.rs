@@ -64,6 +64,7 @@
 //! mints a new sha the session never printed.
 
 use crate::harness::claude::record::Facts;
+use crate::harness::claude::skills::{self, SkillsPolicy, SkillsReport};
 use crate::ir::{Block, Message, MessageKind, SessionRef};
 use crate::lazy::Resolver;
 use crate::offsets::OFFSET_KEY;
@@ -409,6 +410,8 @@ pub struct RewindOptions {
     /// Portable replay removes signed thinking and repairs tool IDs; native keeps archival bytes.
     /// `None`: [`crate::emit::ThinkingMode::replay_default`] over the models the window records.
     pub thinking: Option<crate::emit::ThinkingMode>,
+    /// Which invoked skills the derived session restores.
+    pub skills_policy: SkillsPolicy,
     /// Recorded in the provenance sidecar as `cv_version`.
     pub generator: String,
 }
@@ -463,6 +466,9 @@ pub struct RewindResult {
     pub warnings: Vec<String>,
     /// The thinking policy applied (`native` or `portable`), chosen or defaulted.
     pub thinking: &'static str,
+    /// Restored skills policy, omitted at its byte-preserving default.
+    #[serde(skip_serializing_if = "SkillsReport::is_keep")]
+    pub skills: SkillsReport,
     pub dry_run: bool,
 }
 
@@ -622,6 +628,7 @@ fn rewind_session_after_scan(
         standalone: subagent,
         identity,
     };
+    let staged = opts.skills_policy != SkillsPolicy::Keep || window.thinking == crate::emit::ThinkingMode::Portable;
     let Copied {
         start_line,
         cut_line,
@@ -636,7 +643,7 @@ fn rewind_session_after_scan(
         cwds,
         source_sha256,
         replay_stage,
-    } = copy(r, &source_guard, &file, size, &window, &rewrite, &mut writer)?;
+    } = copy(r, &source_guard, &file, size, &window, &rewrite, staged, &mut writer)?;
     let Window {
         cut_idx,
         cut_off,
@@ -680,19 +687,27 @@ fn rewind_session_after_scan(
         ));
     }
 
-    if thinking == crate::emit::ThinkingMode::Portable {
-        let source = replay_stage.finish()?;
-        let (stage, changes) = crate::harness::claude::replay::normalize(source, thinking)?;
-        bytes_written = stage.len();
-        lines_written -= changes.records;
-        if changes.ids + changes.thinking + changes.dropped != 0 {
-            warnings.push(format!(
-                "portable replay: remapped {} tool ID(s), demoted {} thinking block(s) to text, removed {} without plaintext ({} record(s) left empty)",
-                changes.ids, changes.thinking, changes.dropped, changes.records
-            ));
+    let mut skills = SkillsReport {
+        policy: opts.skills_policy.as_str(),
+        ..Default::default()
+    };
+    if staged {
+        let mut source = replay_stage.finish()?;
+        if thinking == crate::emit::ThinkingMode::Portable {
+            let (stage, changes) = crate::harness::claude::replay::normalize(source, thinking)?;
+            lines_written -= changes.records;
+            if changes.ids + changes.thinking + changes.dropped != 0 {
+                warnings.push(format!(
+                    "portable replay: remapped {} tool ID(s), demoted {} thinking block(s) to text, removed {} without plaintext ({} record(s) left empty)",
+                    changes.ids, changes.thinking, changes.dropped, changes.records
+                ));
+            }
+            source = stage.finish()?;
         }
+        (source, skills) = skills::apply(source, opts.skills_policy, skills::config_dir_of(&r.path).as_deref())?;
+        bytes_written = source.len()?;
         if let Some(w) = writer.as_mut() {
-            stage.finish()?.copy_to(w)?;
+            source.copy_to(w)?;
         }
     }
 
@@ -727,6 +742,7 @@ fn rewind_session_after_scan(
         cut_cwd,
         warnings,
         thinking: thinking.as_str(),
+        skills,
         dry_run: opts.dry_run,
     };
 
@@ -917,6 +933,7 @@ struct Copied {
 /// Pass 2 — one sequential read of the prefix frames, hashes and counts every line, and copies
 /// the window's records (rewritten to `new_id`) into `writer`, or into the replay stage when the
 /// copy re-emits. Past an explicit cut it copies only what closes the cut's open calls.
+#[allow(clippy::too_many_arguments)]
 fn copy(
     r: &SessionRef,
     source_guard: &PrefixReadGuard,
@@ -924,6 +941,7 @@ fn copy(
     size: u64,
     w: &Window,
     rewrite: &crate::derive::Rewrite<'_>,
+    staged: bool,
     writer: &mut Option<std::io::BufWriter<crate::publish::Staged>>,
 ) -> Result<Copied> {
     let Window {
@@ -1050,7 +1068,7 @@ fn copy(
             selected.newline = true;
         }
         let selected = std::iter::once(Ok(selected));
-        let counts = if thinking == crate::emit::ThinkingMode::Portable {
+        let counts = if staged {
             crate::derive::derive(&source_guard.source, file, selected, rewrite, &mut replay_stage)?
         } else if let Some(w) = writer.as_mut() {
             crate::derive::derive(&source_guard.source, file, selected, rewrite, w)?
@@ -1105,7 +1123,7 @@ fn provenance(res: &RewindResult, opts: &RewindOptions) -> Value {
         CutAt::Commit(_) => "commit",
         CutAt::End => "end",
     };
-    serde_json::json!({
+    let mut value = serde_json::json!({
         "format": "cv-rewind",
         "v": 1,
         "source": {
@@ -1150,7 +1168,11 @@ fn provenance(res: &RewindResult, opts: &RewindOptions) -> Value {
         },
         "derived_at": chrono::Utc::now().to_rfc3339(),
         "cv_version": opts.generator,
-    })
+    });
+    if !res.skills.is_keep() {
+        value["skills"] = serde_json::json!(res.skills);
+    }
+    value
 }
 
 /// The first `cwd` a transcript records (within its first few hundred lines), if any.

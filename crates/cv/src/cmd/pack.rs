@@ -908,6 +908,7 @@ fn emit_pack_session(
         },
         json,
     )
+    .map(drop)
 }
 
 /// Write a text bundle to `--out` (with a stderr note) or stdout.

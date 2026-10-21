@@ -68,6 +68,7 @@ commands have it is in the [reference](reference.md)):
 | `--all` | include what is hidden by default |
 | `--thinking <mode>` | reasoning policy: `native`, `portable`, `text`, `drop`; rewind accepts native/portable |
 | `--strict` | `port`: fail on unexpected fidelity loss; `index`: fail on any unreadable session |
+| `--skills <p>` | restored skills in a new Claude session: `keep`, `drop`, `drop-stale` |
 
 **`--thinking` and replay.** Thinking blocks come in two shapes. A few carry plaintext. Most carry
 only a provider **signature** — an opaque, vendor-bound blob with no text at all (on one real
@@ -100,6 +101,21 @@ a Claude session, a portable rewind of the same session, and a portable rewind o
 Note that `cv prune --drop-thinking` is a different thing: it omits old reasoning to shrink a
 session you intend to resume. It was spelled `--thinking` before 0.11.0, and was renamed precisely
 so that one word does not mean two things.
+
+**`--skills` and restored skills.** Claude Code records each skill a session invokes with
+the text it had then, and every compaction writes all of them back as one `invoked_skills` record;
+`--resume` rebuilds the set from those records after the last compaction. Nothing forgets an
+entry, so a skill invoked once comes back with its old text at every later compaction, even after
+its file changed or the skill was removed. `cv prune`, `cv rewind` and `cv port` (to Claude)
+take `--skills`: `keep` (the default) copies the records, `drop` empties them, and
+`drop-stale` drops each skill whose file (a user skill under the config dir, a project skill
+under the recorded cwd) is gone or differs from the stored text. That file is the skill's
+`skills/<name>/SKILL.md` when it is there, else the legacy `commands/<name>.md` a slash command
+became (a nested `a:b` name is `commands/a/b.md`); bundled and plugin skills have no file to
+compare and are kept. A rewritten record loses its stored rendering, so Claude Code renders
+it again from the kept list; a dropped skill can still be invoked and then gets its current text.
+Invocation-time substitutions can make even a current file differ from its stored text.
+Non-default policies add a `skills` object to the report and `--json` (`dropped`, `dropped_chars`, `kept`, `records`).
 
 **JSON is snake_case, everywhere.** Every `--json` output and every MCP payload uses snake_case keys, and timestamps are RFC 3339 strings. There is **one** session-row shape, and `ls`, `search` and the MCP tools all emit it:
 

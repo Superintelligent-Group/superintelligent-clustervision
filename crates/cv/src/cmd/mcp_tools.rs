@@ -613,6 +613,31 @@ fn invalid(msg: String) -> anyhow::Error {
 mod tests {
     use super::*;
 
+    #[test]
+    fn skills_policy_uses_the_same_name_in_mcp_and_cli() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let tree = crate::build_cli();
+                let tools = CliTools::from_tree(&tree).unwrap();
+                for name in ["prune", "rewind", "port"] {
+                    let command = tools.find(name).unwrap();
+                    let descriptor = tool_descriptor(command);
+                    let properties = &descriptor["inputSchema"]["properties"];
+                    assert!(properties.get("skills_policy").is_none());
+                    assert_eq!(properties["skills"]["enum"], json!(["keep", "drop", "drop-stale"]));
+                    let argv = build_argv(command, &json!({"id":"source", "skills":"drop-stale"})).unwrap();
+                    assert!(argv.windows(2).any(|args| args == ["--skills", "drop-stale"]));
+                    tree.clone()
+                        .try_get_matches_from(std::iter::once("cv".to_owned()).chain(argv))
+                        .unwrap();
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
     /// `WINDOW_SELECTORS` is `WindowArgs`' own flags plus `pre_compaction`: a window flag added to
     /// the shared struct must reach the MCP default-window rule, never a hand copy of the list.
     #[test]

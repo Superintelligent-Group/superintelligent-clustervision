@@ -553,6 +553,9 @@ enum Cmd {
         /// version-controllable home for your term list — e.g. tuned from a classifier-trip corpus.
         #[arg(long, value_name = "PATH")]
         declassify_tokens_file: Option<PathBuf>,
+        /// Restored Claude skills: keep all, drop all, or drop entries whose files changed or disappeared.
+        #[arg(long = "skills", value_parser = ["keep", "drop", "drop-stale"], default_value = "keep")]
+        skills: String,
         /// Report what would be pruned without writing anything.
         #[arg(long)]
         dry_run: bool,
@@ -602,6 +605,9 @@ enum Cmd {
         /// refused here. Default: native when every model the window records is `claude-*`, else portable.
         #[arg(long, value_parser = ["native", "portable"])]
         thinking: Option<String>,
+        /// Restored Claude skills: keep all, drop all, or drop entries whose files changed or disappeared.
+        #[arg(long = "skills", value_parser = ["keep", "drop", "drop-stale"], default_value = "keep")]
+        skills: String,
         /// Report the window that would be written without writing anything.
         #[arg(long)]
         dry_run: bool,
@@ -781,6 +787,9 @@ enum Cmd {
         /// Default: native when every recorded model is `claude-*`, else portable.
         #[arg(long, value_parser = ["native", "text", "drop", "portable"])]
         thinking: Option<String>,
+        /// Restored Claude skills: keep all, drop all, or drop entries whose files changed or disappeared.
+        #[arg(long = "skills", value_parser = ["keep", "drop", "drop-stale"], default_value = "keep")]
+        skills: String,
     },
     /// Print (or with --launch, run) the resume incantation for a session in its native harness.
     Resume {
@@ -1318,7 +1327,8 @@ fn run() -> Result<()> {
             no_context,
             strict,
             thinking,
-        } => port::cmd_port(&id, harness, cwd, out, no_context, strict, thinking.as_deref().map(util::parse_thinking).transpose()?),
+            skills,
+        } => port::cmd_port(&id, harness, cwd, out, no_context, strict, thinking.as_deref().map(util::parse_thinking).transpose()?, skills.parse()?),
         Cmd::Scry {
             harness,
             cwd,
@@ -1381,13 +1391,14 @@ fn run() -> Result<()> {
             declassify,
             declassify_tokens,
             declassify_tokens_file,
+            skills,
             dry_run,
             json,
         } => {
             reshape::cmd_prune(reshape::PruneArgs {
                 id: &id, harness, min_size, keep_last, to, force, drop, thinking: drop_thinking,
                 copy_resources, revive: !no_revive, window, keep, declassify,
-                declassify_tokens, declassify_tokens_file, dry_run, json,
+                declassify_tokens, declassify_tokens_file, skills_policy: skills.parse()?, dry_run, json,
             })
         }
         Cmd::Rewind {
@@ -1399,6 +1410,7 @@ fn run() -> Result<()> {
             to,
             from_compaction,
             thinking,
+            skills,
             full,
             dry_run,
             json,
@@ -1409,7 +1421,7 @@ fn run() -> Result<()> {
                      pass `--full` for the whole history",
                 );
             }
-            reshape::cmd_rewind(reshape::RewindArgs { id: &id, harness, agent, at: at.as_deref(), out, to, full, thinking: thinking.as_deref().map(util::parse_thinking).transpose()?, dry_run, json, generator: BUILD_VERSION })
+            reshape::cmd_rewind(reshape::RewindArgs { id: &id, harness, agent, at: at.as_deref(), out, to, full, thinking: thinking.as_deref().map(util::parse_thinking).transpose()?, skills_policy: skills.parse()?, dry_run, json, generator: BUILD_VERSION })
         }
         Cmd::Config { add_export, rm_export } => config::cmd_config(add_export, rm_export),
         Cmd::Schema { json, commands } => schema::cmd_schema(&build_cli(), json, commands),

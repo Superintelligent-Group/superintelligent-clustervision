@@ -16,6 +16,7 @@ fn main() -> Result<()> {
             dry_run: false,
             thinking: Some(cv_core::emit::ThinkingMode::Native),
             generator: "operation-probe".into(),
+            skills_policy: Default::default(),
         };
         #[cfg(feature = "probe-heap")]
         let baseline = cv_testkit::heap::begin();

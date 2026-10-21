@@ -13,6 +13,7 @@
 
 use crate::util::{home_rel, parse_harness, resolve, shell_quote, usage};
 use anyhow::{bail, Context, Result};
+use cv_core::harness::claude::skills::SkillsPolicy;
 use cv_core::ir::{Harness, Session};
 use cv_core::EmitOptions;
 use std::fs;
@@ -20,6 +21,7 @@ use std::path::{Path, PathBuf};
 
 use cv_core::emit::parse_for_emit;
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn cmd_port(
     id: &str,
     harness: Option<String>,
@@ -28,6 +30,7 @@ pub(crate) fn cmd_port(
     no_context: bool,
     strict: bool,
     thinking: Option<cv_core::emit::ThinkingMode>,
+    skills_policy: SkillsPolicy,
 ) -> Result<()> {
     // The source harness rides on the id (`codex:019e…`); `--harness` is the TARGET.
     let (r, adapter) = resolve(id, None)?;
@@ -35,6 +38,12 @@ pub(crate) fn cmd_port(
         Some(s) => Harness::parse(s).with_context(|| format!("unknown target harness: {s}"))?,
         None => r.harness, // a pure rehome
     };
+    if skills_policy != SkillsPolicy::Keep && !cv_core::harness::has_derived_copies(to_h) {
+        return usage(format!(
+            "--skills {} requires a Claude target (target: {to_h})",
+            skills_policy.as_str()
+        ));
+    }
     let session = parse_for_emit(adapter.as_ref(), &r, to_h)?;
     let thinking = thinking.unwrap_or_else(|| {
         cv_core::emit::ThinkingMode::replay_default(
@@ -46,7 +55,7 @@ pub(crate) fn cmd_port(
         )
     });
     let new_cwd = cwd.clone();
-    emit_session(
+    let written = emit_session(
         &session,
         to_h,
         out,
@@ -58,6 +67,15 @@ pub(crate) fn cmd_port(
             ..Default::default()
         },
     )?;
+
+    if skills_policy != SkillsPolicy::Keep {
+        use cv_core::harness::claude::skills::{config_dir_of, rewrite_file};
+        let config = config_dir_of(&written).or_else(|| config_dir_of(&r.path));
+        let report = rewrite_file(&written, skills_policy, config.as_deref())?;
+        let mut h = String::new();
+        crate::cmd::reshape::skills_line(&mut h, &report);
+        print!("{h}");
+    }
 
     // Carry the project's context files to the new home, so the ported session keeps its memory.
     if !no_context {
@@ -126,7 +144,12 @@ fn copy_context_if_absent(from: &Path, to: &Path) -> std::io::Result<Option<u64>
     }
 }
 
-pub(crate) fn emit_session(session: &Session, to_h: Harness, out: Option<PathBuf>, opts: EmitOptions) -> Result<()> {
+pub(crate) fn emit_session(
+    session: &Session,
+    to_h: Harness,
+    out: Option<PathBuf>,
+    opts: EmitOptions,
+) -> Result<PathBuf> {
     emit_session_output(session, to_h, out, opts, false)
 }
 
@@ -136,7 +159,7 @@ pub(crate) fn emit_session_output(
     out: Option<PathBuf>,
     opts: EmitOptions,
     json: bool,
-) -> Result<()> {
+) -> Result<PathBuf> {
     if !cv_core::emit::supported_targets().contains(&to_h) {
         // A caller mistake, not a failure (exit 2): the source parsed, the target cannot be written.
         return usage(format!(
@@ -173,7 +196,7 @@ pub(crate) fn emit_session_output(
     for w in &warnings {
         eprintln!("  ⚠ lossy: {w}");
     }
-    Ok(())
+    Ok(res.path)
 }
 
 // ---------- resume ----------
