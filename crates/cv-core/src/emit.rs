@@ -199,9 +199,10 @@ type VerifyFn = fn(&Path, Option<&str>) -> Result<()>;
 
 /// The ONE emit registry: which harnesses can be written, and by what. [`emit`] dispatches through
 /// it and [`supported_targets`] is derived from it, so the dispatcher and the CLI's `--to` list can
-/// never drift apart. Adding a target = adding an arm here (nothing else to keep in sync).
-fn emitter_for(target: Harness) -> Option<EmitFn> {
-    Some(match target {
+/// never drift apart. Adding a target = adding an arm here (nothing else to keep in sync). A
+/// harness with no emitter in this build answers why, as the tail of `emit to <target> …`.
+fn emitter_for(target: Harness) -> Result<EmitFn, &'static str> {
+    Ok(match target {
         Harness::Claude => crate::harness::claude::emit,
         Harness::Codex => crate::harness::codex::emit,
         Harness::Grok => crate::harness::grok::emit,
@@ -218,7 +219,7 @@ fn emitter_for(target: Harness) -> Option<EmitFn> {
         // gemini-cli recording it no longer reads.
         Harness::Qwen => crate::harness::qwen::emit,
         #[cfg(not(feature = "sqlite"))]
-        Harness::Hermes => return None,
+        Harness::Hermes => return Err("requires the `sqlite` feature"),
         // Parse-only harnesses (Cursor, Goose, desktop apps, …) aren't conversion targets. Kimi
         // (`~/.kimi`) is not one either: kimi-cli froze that store in 2026-06 and migrates it to
         // `~/.kimi-code` on open, so a session written there was a port to nowhere.
@@ -230,7 +231,7 @@ fn emitter_for(target: Harness) -> Option<EmitFn> {
         | Harness::KimiCode
         | Harness::ChatGptExport
         | Harness::ClaudeExport
-        | Harness::OpenSession => return None,
+        | Harness::OpenSession => return Err("is not supported yet"),
     })
 }
 
@@ -265,13 +266,7 @@ fn verifier_for(target: Harness) -> Option<VerifyFn> {
 /// Emit `session` into `target`'s native format under `out_dir` (the target harness's storage root,
 /// or any directory for a dry run). Returns where it was written + how to resume it.
 pub fn emit(session: &Session, target: Harness, out_dir: &Path, opts: &EmitOptions) -> Result<EmitResult> {
-    #[cfg(not(feature = "sqlite"))]
-    if target == Harness::Hermes {
-        anyhow::bail!("emit to hermes requires the `sqlite` feature");
-    }
-    let Some(f) = emitter_for(target) else {
-        anyhow::bail!("emit to {target} is not supported yet");
-    };
+    let f = emitter_for(target).map_err(|why| anyhow::anyhow!("emit to {target} {why}"))?;
     // Every registered writer consumes guarded fields and projects thinking per block.
     // Keep that contract at the writer boundary so direct and dispatched emission agree.
     f(session, out_dir, opts)
@@ -515,7 +510,7 @@ pub fn supported_targets() -> &'static [Harness] {
         Harness::ALL
             .iter()
             .copied()
-            .filter(|&h| emitter_for(h).is_some())
+            .filter(|&h| emitter_for(h).is_ok())
             .collect()
     })
 }
@@ -603,7 +598,7 @@ pub fn parse_for_emit(
     target: Harness,
 ) -> Result<Session> {
     let mut options = ParsedAt::for_port(reference.harness, target).demand();
-    let checked = emitter_for(target).is_some();
+    let checked = emitter_for(target).is_ok();
     if checked {
         options.spans = true;
     }

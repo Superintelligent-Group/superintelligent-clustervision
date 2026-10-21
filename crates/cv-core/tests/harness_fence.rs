@@ -23,7 +23,7 @@ use regex::Regex;
 /// Product files outside the adapters that still name a harness outside an exhaustive match, with
 /// how many literals each holds. Lower a count (or delete the line) with the move that earns it.
 const ALLOWLIST: &[(&str, usize)] = &[
-    ("emit.rs", 2),
+    ("emit.rs", 1),
     ("emit/fidelity.rs", 17),
     ("emit/fidelity/accumulator.rs", 5),
     ("lanes.rs", 4),
