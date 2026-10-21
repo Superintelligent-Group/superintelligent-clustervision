@@ -20,13 +20,16 @@ pub(crate) struct Line<'v> {
     pub blank: bool,
 }
 
-/// One captured source, shared by whole, resumed and bounded discovery reads. Adapters own
-/// their codec state and checkpoint policy; this boundary owns opening and identity rechecks.
+/// One captured source, shared by whole, resumed and bounded discovery reads. A transcript read
+/// goes through [`drive`]; this boundary owns opening and identity rechecks.
 pub(crate) struct Read {
     source: crate::json::JsonSource,
     file: File,
     /// Bytes through which [`Self::check_backing_at`] last verified the backing file.
     checked_through: std::sync::atomic::AtomicU64,
+    /// A private decoded copy of a compressed source ([`Self::decoded`]): its lines are read
+    /// instead, with the original's provenance. Its offsets are not file positions.
+    decoded: Option<(std::sync::Arc<super::bytes::ByteSource>, u64)>,
 }
 
 impl ranges::At for Read {
@@ -49,7 +52,18 @@ impl Read {
             source,
             file,
             checked_through: std::sync::atomic::AtomicU64::new(0),
+            decoded: None,
         })
+    }
+
+    /// The bytes a pass reads: the source's, or its decoded copy's.
+    pub(crate) fn len(&self) -> u64 {
+        self.decoded.as_ref().map_or(self.source.len(), |(_, len)| *len)
+    }
+
+    /// Whether lines come from a decoded copy, whose offsets cannot resume a file.
+    pub(crate) fn is_decoded(&self) -> bool {
+        self.decoded.is_some()
     }
 
     pub(crate) fn source(&self) -> &crate::json::JsonSource {
@@ -67,7 +81,10 @@ impl Read {
         )
     }
 
-    /// Recheck the opened inode before resuming mapped bytes after a consumer callback.
+    /// Recheck the opened inode before resuming mapped bytes after a consumer callback. Called
+    /// by the line passes ([`Self::check_backing_at`]), [`Self::check`] and the guard of a driven
+    /// read ([`crate::stream::Guard`]): after a slow callback, the session metadata and a
+    /// checkpoint. Nothing else calls it.
     pub(crate) fn check_backing(&self) -> anyhow::Result<()> {
         self.source.check_metadata(self.file.metadata()?)
     }
@@ -79,37 +96,40 @@ impl Read {
     /// truncated file before the next mapping, and a checkpoint always forces one.
     const CHECK_EVERY: u64 = 8 << 20;
 
-    /// [`Self::check_backing`] once per [`Self::CHECK_EVERY`] bytes of consumed input, keyed by the
-    /// offset the reader has reached. Call it after a sink callback; call `check_backing` itself
-    /// where the next step depends on the file being intact (a checkpoint, EOF).
     /// A sink callback longer than this is one during which the file could plausibly have been
-    /// replaced or truncated (a consumer that writes, talks to a network, or blocks); the backing
-    /// is checked right after it. A faster callback can still mutate the source; detection then
-    /// waits for CHECK_EVERY consumed bytes, a checkpoint or EOF, against the pinned descriptor.
+    /// replaced or truncated (a consumer that writes, talks to a network, or blocks); the guard
+    /// checks the backing right after it. A faster callback can still mutate the source;
+    /// detection then waits for CHECK_EVERY consumed bytes, a checkpoint or EOF.
     pub(crate) const SLOW_CALLBACK: std::time::Duration = std::time::Duration::from_micros(200);
 
-    /// After a sink callback that began at `started`: the full check when the callback was slow
-    /// ([`Self::SLOW_CALLBACK`]), the windowed one otherwise.
+    // TRANSITIONAL(K1): the readers not yet on `drive`.
     pub(crate) fn check_backing_after(&self, started: std::time::Instant, offset: u64) -> anyhow::Result<()> {
         if started.elapsed() < Self::SLOW_CALLBACK {
             return self.check_backing_at(offset);
         }
-        self.check_backing()?;
-        self.checked_through.store(offset, std::sync::atomic::Ordering::Relaxed);
-        Ok(())
+        self.check_backing()
     }
-
-    /// The full check after a callback that began at `started` and was slow, for a callback
-    /// inside one record's interpretation (the record goes on reading mapped bytes); the caller's
-    /// per-record [`Self::check_backing_after`] owns the windowed one.
     pub(crate) fn check_backing_if_slow(&self, started: std::time::Instant) -> anyhow::Result<()> {
         if started.elapsed() < Self::SLOW_CALLBACK {
             return Ok(());
         }
         self.check_backing()
     }
+    pub(crate) fn decoded_lines(
+        &self,
+        backing: &std::sync::Arc<super::bytes::ByteSource>,
+        len: u64,
+        from: u64,
+        visit: impl FnMut(Line<'_>) -> anyhow::Result<crate::stream::Flow>,
+    ) -> anyhow::Result<()> {
+        let read = for_each_decoded_line(&self.source, backing, len, from, visit);
+        self.check()?;
+        read
+    }
 
-    pub(crate) fn check_backing_at(&self, offset: u64) -> anyhow::Result<()> {
+    /// [`Self::check_backing`] once per [`Self::CHECK_EVERY`] bytes of consumed input, keyed by the
+    /// offset the pass has reached: every line pass runs it after each visit.
+    fn check_backing_at(&self, offset: u64) -> anyhow::Result<()> {
         use std::sync::atomic::Ordering;
         let through = self.checked_through.load(Ordering::Relaxed);
         if offset < through.saturating_add(Self::CHECK_EVERY) {
@@ -126,17 +146,12 @@ impl Read {
         self.source.check()
     }
 
-    /// Decoded bytes retain the original source's identity and use its completion guards.
-    pub(crate) fn decoded(
-        &self,
-        backing: &std::sync::Arc<super::bytes::ByteSource>,
-        len: u64,
-        from: u64,
-        visit: impl FnMut(Line<'_>) -> anyhow::Result<crate::stream::Flow>,
-    ) -> anyhow::Result<()> {
-        let read = for_each_decoded_line(&self.source, backing, len, from, visit);
-        self.check()?;
-        read
+    /// This source read through `backing`, its decoded copy (`len` bytes at its start): views
+    /// keep the original's identity and its completion guards.
+    #[allow(dead_code)] // TRANSITIONAL(K1): Codex moves onto it next.
+    pub(crate) fn decoded(mut self, backing: std::sync::Arc<super::bytes::ByteSource>, len: u64) -> Self {
+        self.decoded = Some((backing, len));
+        self
     }
 
     /// Whole or resumed read through the captured EOF. An unterminated record at actual EOF
@@ -147,9 +162,9 @@ impl Read {
         visit: impl FnMut(Line<'_>) -> anyhow::Result<crate::stream::Flow>,
     ) -> anyhow::Result<()> {
         if from == 0 {
-            self.prefix(self.source.len(), visit)
+            self.prefix(self.len(), visit)
         } else {
-            self.snapshot(from, self.source.len(), visit)
+            self.snapshot(from, self.len(), visit)
         }
     }
 
@@ -160,7 +175,7 @@ impl Read {
         limit: u64,
         visit: impl FnMut(Line<'_>) -> anyhow::Result<crate::stream::Flow>,
     ) -> anyhow::Result<()> {
-        self.visit_with_end(0, self.source.len().min(limit), false, visit)
+        self.visit_with_end(0, self.len().min(limit), false, visit)
     }
 
     /// A historical byte length intentionally acts as that snapshot's EOF, rather than a
@@ -171,7 +186,7 @@ impl Read {
         to: u64,
         visit: impl FnMut(Line<'_>) -> anyhow::Result<crate::stream::Flow>,
     ) -> anyhow::Result<()> {
-        self.visit_with_end(from, to.min(self.source.len()), true, visit)
+        self.visit_with_end(from, to.min(self.len()), true, visit)
     }
 
     fn visit_with_end(
@@ -181,15 +196,172 @@ impl Read {
         snapshot: bool,
         mut visit: impl FnMut(Line<'_>) -> anyhow::Result<crate::stream::Flow>,
     ) -> anyhow::Result<()> {
-        let read = for_each_line(&self.source, &self.file, from, to, |line| {
-            if !snapshot && !line.complete && to < self.source.len() {
+        let len = self.len();
+        let visit = |line: Line<'_>| {
+            if !snapshot && !line.complete && to < len {
                 return Ok(crate::stream::Flow::Continue);
             }
-            visit(line)
-        });
+            let end = line.end;
+            let flow = visit(line)?;
+            // After the visit's callbacks, before the framer touches its mapping again.
+            self.check_backing_at(end)?;
+            Ok(flow)
+        };
+        let read = match &self.decoded {
+            Some((backing, len)) => for_each_decoded_line(&self.source, backing, *len, from, visit),
+            None => for_each_line(&self.source, &self.file, from, to, visit),
+        };
         self.check()?;
         read
     }
+}
+
+/// One JSONL wire format's record codec, as [`drive`] runs it: a record in, messages to the sink,
+/// state carried between records. Everything around the record is the driver's.
+pub(crate) trait Codec {
+    /// The version of what a checkpoint keeps ([`Self::state`]) and of what a record parses to:
+    /// bump it when either changes. A checkpoint of another version is declined ([`restore`]).
+    const VERSION: u32;
+
+    /// Whether the session records its rejected lines (`cv.skipped_lines`). Claude's reader never
+    /// has, and starting would change its output.
+    const NOTES_SKIPPED: bool = true;
+
+    /// One accepted record, starting at byte `at`.
+    fn record(
+        &mut self,
+        view: crate::json::JsonView<'_>,
+        at: u64,
+        sink: &mut dyn crate::stream::MessageSink,
+    ) -> anyhow::Result<crate::stream::Flow>;
+
+    /// Nothing is held back after the last record: a checkpoint here resumes exactly.
+    fn settled(&self) -> bool {
+        true
+    }
+
+    /// The demand this codec reads at: a checkpoint keeps it, and a read at another declines it.
+    fn demand(&self) -> crate::stream::Demand;
+
+    /// The session the records accumulate into: the driver notes its rejected lines there before
+    /// [`Self::finish`].
+    fn session(&mut self) -> &mut crate::ir::Session;
+
+    /// What a checkpoint keeps of this codec, restored by the adapter through [`restore`].
+    fn state(&self) -> impl serde::Serialize + '_;
+
+    /// The read ended (at EOF, or `stopped` by the sink): deliver what is held unless stopped,
+    /// and return the session.
+    fn finish(self, stopped: bool, sink: &mut dyn crate::stream::MessageSink) -> anyhow::Result<crate::ir::Session>;
+}
+
+/// What a driven read's checkpoint keeps under [`crate::stream::ADAPTER_LAYER`].
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Stamped<S> {
+    version: u32,
+    demand: crate::stream::Demand,
+    skipped: u64,
+    state: S,
+}
+
+/// The codec state `from` holds for a codec of `version`; `None` (decline the resume) for
+/// another version, another state or no state.
+pub(crate) fn restore<S: serde::de::DeserializeOwned>(from: &crate::stream::Checkpoint, version: u32) -> Option<S> {
+    from.get::<Stamped<S>>(crate::stream::ADAPTER_LAYER)
+        .filter(|stamped| stamped.version == version)
+        .map(|stamped| stamped.state)
+}
+
+/// A checkpoint at `offset` holding `state` as a driven read of `C` would (tests build marks).
+#[cfg(test)]
+pub(crate) fn checkpoint<C: Codec>(
+    offset: u64,
+    demand: crate::stream::Demand,
+    state: &impl serde::Serialize,
+) -> crate::stream::Checkpoint {
+    let mut cp = crate::stream::Checkpoint::new(offset);
+    cp.put(
+        crate::stream::ADAPTER_LAYER,
+        &Stamped {
+            version: C::VERSION,
+            demand,
+            skipped: 0,
+            state,
+        },
+    );
+    cp
+}
+
+/// The one JSONL transcript read: records `from..to` of `read` (a whole read starts at 0, a
+/// resumed one at its checkpoint, `to` is EOF unless a past length is asked for), each through
+/// `codec`. The driver owns the rest: declining a checkpoint past EOF, counting rejected lines
+/// ([`super::super::note_skipped_lines`], carried through checkpoints), offering a checkpoint
+/// after every finished line the codec has [`Codec::settled`] on, the consumer guard (its
+/// errors and the backing checks after a slow callback, the session metadata and a checkpoint:
+/// [`crate::stream::Guard`]), and the final check after the codec's held output.
+/// `Ok(None)`: `from` lies beyond the file; nothing reached `sink`.
+pub(crate) fn drive<C: Codec>(
+    read: &Read,
+    from: crate::stream::Start<'_>,
+    mut codec: C,
+    sink: &mut dyn crate::stream::MessageSink,
+) -> anyhow::Result<Option<crate::ir::Session>> {
+    use crate::stream::{Flow, MessageSink, Start};
+    let len = read.len();
+    let (at, to, mut skipped) = match from {
+        Start::Whole => (0, len, 0),
+        Start::Prefix(to) => (0, to.min(len), 0),
+        Start::Checkpoint(_) if read.is_decoded() => return Ok(None),
+        Start::Checkpoint(cp) => {
+            let Some(stamped) = cp
+                .get::<Stamped<serde::de::IgnoredAny>>(crate::stream::ADAPTER_LAYER)
+                .filter(|stamped| stamped.version == C::VERSION && stamped.demand == codec.demand())
+            else {
+                return Ok(None);
+            };
+            (cp.offset, len, stamped.skipped)
+        }
+    };
+    if at > len {
+        return Ok(None);
+    }
+    crate::stream::guarded(sink, read, |guard| {
+        let mut stopped = false;
+        read.snapshot(at, to, |line| {
+            match line.view {
+                Some(view) => {
+                    if codec.record(view, line.at, guard)? == Flow::Stop || guard.failed() {
+                        stopped = true;
+                        return Ok(Flow::Stop);
+                    }
+                }
+                None => skipped += u64::from(!line.blank),
+            }
+            // Only after a line its writer finished (a blank or rejected one too): a partial last
+            // line is re-read whole next time.
+            if line.complete && !read.is_decoded() && codec.settled() && guard.wants_checkpoint(line.end) {
+                let mut cp = crate::stream::Checkpoint::new(line.end);
+                cp.put(
+                    crate::stream::ADAPTER_LAYER,
+                    &Stamped {
+                        version: C::VERSION,
+                        demand: codec.demand(),
+                        skipped,
+                        state: codec.state(),
+                    },
+                );
+                guard.checkpoint(&mut cp);
+            }
+            stopped = guard.failed();
+            Ok(if stopped { Flow::Stop } else { Flow::Continue })
+        })?;
+        if C::NOTES_SKIPPED {
+            super::super::note_skipped_lines(codec.session(), skipped);
+        }
+        let session = codec.finish(stopped, guard)?;
+        read.check()?;
+        Ok(Some(session))
+    })
 }
 
 /// Pure in-memory JSONL, through the same positioned framer and Value-compatible line
@@ -568,8 +740,48 @@ fn in_memory(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use crate::stream::Flow;
+
+    /// Run the test `name` (its full path) again in a child process with core dumps off, and
+    /// report whether this is that child: a regression in a test that truncates a mapped source
+    /// SIGBUSes the child, never the shared runner. The parent asserts the child passed.
+    #[cfg(unix)]
+    pub(crate) fn in_child(name: &str) -> bool {
+        const CHILD: &str = "CV_TEST_MAPPED_TRUNCATION_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            return true;
+        }
+        use std::os::unix::process::CommandExt;
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.args(["--exact", name]).env(CHILD, "1");
+        unsafe {
+            command.pre_exec(|| {
+                let limit = libc::rlimit {
+                    rlim_cur: 0,
+                    rlim_max: 0,
+                };
+                if libc::setrlimit(libc::RLIMIT_CORE, &limit) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success(), "{name} child {} failed: {status}", child.id());
+                return false;
+            }
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                let _ = child.wait();
+                panic!("{name} child {} timed out", child.id());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
 
     #[test]
     fn bounded_prefix_is_not_a_valid_unterminated_eof_record() -> anyhow::Result<()> {

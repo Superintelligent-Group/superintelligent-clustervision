@@ -24,14 +24,14 @@
 //! also preflight before creating output so an already-unreadable source leaves no files behind.
 //! Any other recheck duplicates one of these.
 
-use crate::harness::Adapter;
+use crate::harness::{store::jsonl, Adapter};
 use crate::ir::{Message, Session, SessionRef};
 use anyhow::Result;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 /// How much of a session a read asks for. The tiers are ordered: each one is everything the one
 /// below it is plus more, so `tier >= Tier::Facts` reads "at least the reducer facts".
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Tier {
     /// The listing facts discovery reads (id, cwd, title, timestamps, writer version); a codec
     /// that has a discovery path builds no message bodies, others read as [`Tier::Lean`].
@@ -63,7 +63,7 @@ pub enum Tier {
 /// [`Demand::USAGE`]; text ⇒ [`Demand::LEAN`]. Add [`with_spans`](Demand::with_spans) when the
 /// consumer skips, windows or chunks large fields (they arrive as checked source ranges;
 /// adapters without a span path hand inline content, so spans are never less correct).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Demand {
     pub tier: Tier,
     /// Large content stays in the source as [`Span`](crate::lazy::Span)s / checked source
@@ -206,9 +206,29 @@ pub trait MessageSink {
 /// An intentional stop succeeds only without source or consumer errors; it never suppresses
 /// invalidation detected during completion. Discard staged output from every failed pass.
 pub fn checked<T>(sink: &mut dyn MessageSink, read: impl FnOnce(&mut dyn MessageSink) -> Result<T>) -> Result<T> {
-    let mut guard = ErrorGuard {
+    guard(sink, None, |guard| read(guard))
+}
+
+/// [`checked`] over a read of the captured transcript `backing`, whose descriptor the guard
+/// rechecks after a slow callback ([`jsonl::Read::SLOW_CALLBACK`]), after the session metadata
+/// and after a checkpoint, before the reader touches mapped bytes again ([`Guard`]).
+pub(crate) fn guarded<T>(
+    sink: &mut dyn MessageSink,
+    backing: &jsonl::Read,
+    read: impl FnOnce(&mut Guard<'_>) -> Result<T>,
+) -> Result<T> {
+    guard(sink, Some(backing), read)
+}
+
+fn guard<'a, T>(
+    sink: &'a mut dyn MessageSink,
+    backing: Option<&'a jsonl::Read>,
+    read: impl FnOnce(&mut Guard<'a>) -> Result<T>,
+) -> Result<T> {
+    let mut guard = Guard {
         inner: sink,
         latch: Latch::default(),
+        backing,
     };
     if let Some(error) = guard.take_error() {
         return Err(error);
@@ -263,11 +283,41 @@ impl Latch {
     }
 }
 
-struct ErrorGuard<'a> {
+/// The consumer guard of a checked read: a consumer's first failure stops delivery and is
+/// returned after the reader. Over a captured transcript ([`guarded`]) it also owns the backing
+/// checks: after a callback slower than [`jsonl::Read::SLOW_CALLBACK`] (a consumer that writes
+/// or blocks), and always after the session metadata and a checkpoint (the next resume depends
+/// on the file being intact). A failed check is the read's error, latched like a consumer's, so
+/// the reader stops before its mapping is touched again.
+pub(crate) struct Guard<'a> {
     inner: &'a mut dyn MessageSink,
     latch: Latch,
+    backing: Option<&'a jsonl::Read>,
 }
-impl MessageSink for ErrorGuard<'_> {
+impl Guard<'_> {
+    /// A callback or a backing check has failed: the reader must stop.
+    pub(crate) fn failed(&self) -> bool {
+        self.latch.failed()
+    }
+    /// The timer for a callback, when the guard has a backing to check after it.
+    fn start(&self) -> Option<std::time::Instant> {
+        self.backing.map(|_| std::time::Instant::now())
+    }
+    /// After a callback that began at `started`: recheck the backing if it was slow (or, with
+    /// `None`, always), and latch what the consumer reported.
+    fn after(&mut self, started: Option<std::time::Instant>, forced: bool) {
+        self.latch.capture(self.inner);
+        let Some(backing) = self.backing else {
+            return;
+        };
+        if forced || started.is_some_and(|started| started.elapsed() >= jsonl::Read::SLOW_CALLBACK) {
+            if let Err(error) = backing.check_backing() {
+                self.latch.fail(error);
+            }
+        }
+    }
+}
+impl MessageSink for Guard<'_> {
     fn tier(&self) -> Tier {
         self.inner.tier()
     }
@@ -279,37 +329,58 @@ impl MessageSink for ErrorGuard<'_> {
         if self.latch.failed() {
             return Flow::Stop;
         }
-        self.inner.try_message(m).unwrap_or_else(|error| {
+        let started = self.start();
+        let flow = self.inner.try_message(m).unwrap_or_else(|error| {
             self.latch.fail(error);
             Flow::Stop
-        })
+        });
+        self.after(started, false);
+        if self.latch.failed() {
+            Flow::Stop
+        } else {
+            flow
+        }
     }
     fn meta(&mut self, s: &Session) {
         if !self.latch.failed() {
             self.inner.meta(s);
-            self.latch.capture(self.inner);
+            self.after(None, true);
         }
     }
     fn dependency(&mut self, path: &std::path::Path) {
         if !self.latch.failed() {
+            let started = self.start();
             self.inner.dependency(path);
-            self.latch.capture(self.inner);
+            self.after(started, false);
         }
     }
     fn wants_checkpoint(&mut self, offset: u64) -> bool {
         if self.latch.failed() {
             return false;
         }
+        let started = self.start();
         let wants = self.inner.wants_checkpoint(offset);
-        self.latch.capture(self.inner);
+        self.after(started, false);
         wants && !self.latch.failed()
     }
     fn checkpoint(&mut self, cp: &mut Checkpoint) {
         if !self.latch.failed() {
             self.inner.checkpoint(cp);
-            self.latch.capture(self.inner);
+            self.after(None, true);
         }
     }
+}
+
+/// Where an [`Adapter::transcript`] read starts and ends.
+#[derive(Debug, Clone, Copy)]
+pub enum Start<'c> {
+    /// The whole session.
+    Whole,
+    /// From a checkpoint an earlier read of the same file took (then shorter), to EOF.
+    Checkpoint(&'c Checkpoint),
+    /// The first `len` bytes of an append-only transcript, read as that past state's EOF: the
+    /// session as it was when the file was `len` bytes long ([`Adapter::append_only`]).
+    Prefix(u64),
 }
 
 /// A point a pass over an append-only transcript can resume from: `offset` is the byte after the
@@ -678,7 +749,9 @@ pub fn stream_counted(
             let state = cp.get::<CounterState>(COUNTER_LAYER).ok_or(Declined)?;
             counting.restore(state, cp.offset);
             counting.space_after(cp);
-            adapter.try_resume(r, opts, &mut counting, cp)?.ok_or(Declined)?
+            adapter
+                .transcript(r, opts, Start::Checkpoint(cp), &mut counting)?
+                .ok_or(Declined)?
         }
         None => adapter.try_stream(r, opts, &mut counting)?,
     };
@@ -962,9 +1035,10 @@ mod tests {
             .affordances
             .finish(&Session::new("facts", crate::Harness::Claude), &[]);
         assert_eq!(counted.get(&crate::affordance::Kind::Checkpoint), Some(&1));
-        let mut guard = ErrorGuard {
+        let mut guard = Guard {
             inner: &mut facts,
             latch: Latch::default(),
+            backing: None,
         };
         assert_eq!(guard.tier(), Tier::Facts);
         let affordance = crate::affordance::AffordanceSink::new(crate::Harness::Claude, &mut guard);
@@ -1561,7 +1635,7 @@ mod tests {
         let adapter = crate::harness::for_harness(crate::Harness::Qwen).unwrap();
         let mut keep = Keep::default();
         assert!(adapter
-            .resume(&legacy, &Demand::LEAN.with_spans(), &mut keep, cp)
+            .transcript(&legacy, &Demand::LEAN.with_spans(), Start::Checkpoint(cp), &mut keep)
             .unwrap()
             .is_none());
         assert!(

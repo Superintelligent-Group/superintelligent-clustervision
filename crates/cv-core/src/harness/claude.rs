@@ -28,8 +28,8 @@ use crate::ir::{MessageKind, Origin};
 use crate::json::{Json, JsonSource};
 use crate::lanes::{ApiErrorNotice, SubagentEnd, TaskNotice};
 use crate::lazy::Text;
-use crate::stream::{Checkpoint, CollectSink, Demand, Flow, MessageSink, Tier, ADAPTER_LAYER};
-use anyhow::Result;
+use crate::stream::{Checkpoint, CollectSink, Demand, Flow, MessageSink, Start, Tier};
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 pub use emit::{emit, verify_claude_resumable};
 use serde_json::{Map, Value};
@@ -328,7 +328,7 @@ impl Adapter for Claude {
         r.path
             .extension()
             .is_some_and(|e| e == "jsonl")
-            .then_some(count_prefix_checked as super::CountPrefix)
+            .then_some(super::count_prefix as super::CountPrefix)
     }
 
     /// The `subagents/` sidecar: directly spawned agents and, a tier deeper, workflow agents.
@@ -425,19 +425,14 @@ impl Adapter for Claude {
     }
 
     fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
-        crate::stream::checked(sink, |sink| {
-            let session = new_session_for(&r.id, Some(r.path.clone()), opts);
-            let s = read(session, &r.path, 0, None, opts, sink, &mut || Ok(()))?;
-            Ok(with_fork_source(s, &r.path, sink))
-        })
+        self.transcript(r, opts, Start::Whole, sink)?
+            .context("a whole read never declines")
     }
 
     fn resume_format(&self) -> Option<u32> {
-        Some(RESUME_FORMAT)
+        Some(1)
     }
 
-    /// The state at a line boundary is the session accumulated so far (the spawn tracker holds
-    /// nothing there: Claude's spawns all return later, as their own records).
     fn resume(
         &self,
         r: &SessionRef,
@@ -445,12 +440,41 @@ impl Adapter for Claude {
         sink: &mut dyn MessageSink,
         from: &Checkpoint,
     ) -> Result<Option<Session>> {
+        self.transcript(r, opts, Start::Checkpoint(from), sink)
+    }
+
+    /// A checkpoint keeps the session accumulated so far (the spawn tracker holds nothing at a
+    /// line boundary: Claude's spawns all return later, as their own records). A prefix read is
+    /// the session as it was, without the other files a fork source is found in.
+    fn transcript(
+        &self,
+        r: &SessionRef,
+        opts: &Demand,
+        from: Start<'_>,
+        sink: &mut dyn MessageSink,
+    ) -> Result<Option<Session>> {
         crate::stream::checked(sink, |sink| {
-            let Some(session) = from.get::<Session>(ADAPTER_LAYER) else {
+            let session = match from {
+                Start::Checkpoint(cp) => match jsonl::restore(cp, <Transcript as jsonl::Codec>::VERSION) {
+                    Some(session) => session,
+                    None => return Ok(None),
+                },
+                _ => new_session_for(&r.id, Some(r.path.clone()), opts),
+            };
+            let read = jsonl::Read::open(&r.path)?;
+            let codec = Transcript {
+                session,
+                opts,
+                source: read.source(),
+            };
+            let mut spawns = crate::affordance::AffordanceSink::new(Harness::Claude, sink);
+            let Some(s) = jsonl::drive(&read, from, codec, &mut spawns)? else {
                 return Ok(None);
             };
-            let s = read(session, &r.path, from.offset, None, opts, sink, &mut || Ok(()))?;
-            Ok(Some(with_fork_source(s, &r.path, sink)))
+            Ok(Some(match from {
+                Start::Prefix(_) => s,
+                _ => with_fork_source(s, &r.path, sink),
+            }))
         })
     }
 
@@ -464,10 +488,6 @@ impl Adapter for Claude {
         fork::copied_before(&r.path, sink)
     }
 }
-
-/// What a checkpoint's adapter state means: bump when the session the stream accumulates, or what
-/// a record parses to, changes.
-const RESUME_FORMAT: u32 = 1;
 
 /// A `--fork-session` copy names no source; the records it shares with one do ([`fork`]). Runs
 /// after every stream, whole or resumed, since it reads other files.
@@ -510,91 +530,43 @@ pub fn stream_str(
     session
 }
 
-/// How many messages a full parse of the transcript's first `len` bytes yields — the count a
-/// parse would have returned when the file was `len` bytes long, since a Claude transcript only
-/// grows by appending. `check` runs at every line, including lines that emit no message.
-pub(crate) fn count_prefix_checked(r: &SessionRef, len: u64, check: &mut dyn FnMut() -> Result<()>) -> Result<usize> {
-    let mut n = 0usize;
-    let mut count = |_: Message| {
-        n += 1;
-        Flow::Continue
-    };
-    let opts = Demand::RICH;
-    read(
-        new_session_for(&r.id, Some(r.path.clone()), &opts),
-        &r.path,
-        0,
-        Some(len),
-        &opts,
-        &mut count,
-        check,
-    )?;
-    Ok(n)
+/// The Claude record codec over one captured transcript: each record accumulates into the session
+/// (a checkpoint's, or a fresh shell at 0). A message holding a source descriptor makes the
+/// reader recheck the source's identity before going on.
+struct Transcript<'r> {
+    session: Session,
+    opts: &'r Demand,
+    source: &'r JsonSource,
 }
 
-/// Stream the transcript's first `len` bytes: the session as it was at that length.
-pub(crate) fn stream_prefix(r: &SessionRef, len: u64, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
-    crate::stream::checked(sink, |sink| {
-        read(
-            new_session_for(&r.id, Some(r.path.clone()), opts),
-            &r.path,
-            0,
-            Some(len),
-            opts,
-            sink,
-            &mut || Ok(()),
-        )
-    })
-}
+impl jsonl::Codec for Transcript<'_> {
+    const VERSION: u32 = 1;
+    const NOTES_SKIPPED: bool = false;
 
-/// The one Claude read: lines `from..to` (EOF by default) of the captured transcript, each through
-/// the record codec, accumulating into `session` (a checkpoint's state, or a fresh shell at 0).
-/// After every finished line the sink may take a [`Checkpoint`] holding the session so far; a
-/// partial last line is read but re-read whole next time. A message holding a source descriptor
-/// makes the reader recheck the source's identity before going on, and once more at the end.
-fn read(
-    mut session: Session,
-    path: &Path,
-    from: u64,
-    to: Option<u64>,
-    opts: &Demand,
-    sink: &mut dyn MessageSink,
-    check: &mut dyn FnMut() -> Result<()>,
-) -> Result<Session> {
-    let read = jsonl::Read::open(path)?;
-    let source = read.source();
-    let to = to.map_or(source.len(), |to| to.min(source.len()));
-    let mut spawns = crate::affordance::AffordanceSink::new(Harness::Claude, sink);
-    crate::stream::checked(&mut spawns, |sink| {
-        read.snapshot(from, to, |line| {
-            check()?;
-            let started = std::time::Instant::now();
-            if let Some(view) = line.view {
-                let mut sourced = false;
-                let flow = record::ingest(&mut session, view, Some(line.at), opts, sink, &mut sourced)?;
-                if sourced {
-                    source.check()?;
-                }
-                if flow == Flow::Stop {
-                    return Ok(Flow::Stop);
-                }
-            }
-            // Only after a line its writer finished: a partial last line is re-read whole next time.
-            if line.complete && sink.wants_checkpoint(line.end) {
-                let mut cp = Checkpoint::new(line.end);
-                cp.put(ADAPTER_LAYER, &session);
-                sink.checkpoint(&mut cp);
-                // The next resume depends on the file being intact: always check.
-                read.check_backing()?;
-            }
-            // After the callbacks, before the framer touches its mapping again: the full check if
-            // a callback was slow enough for the file to have changed under it, else once per
-            // window of input.
-            read.check_backing_after(started, line.end)?;
-            Ok(Flow::Continue)
-        })
-    })?;
-    Ok(session)
+    fn record(&mut self, view: crate::json::JsonView<'_>, at: u64, sink: &mut dyn MessageSink) -> Result<Flow> {
+        let mut sourced = false;
+        let flow = record::ingest(&mut self.session, view, Some(at), self.opts, sink, &mut sourced)?;
+        if sourced {
+            self.source.check()?;
+        }
+        Ok(flow)
+    }
+
+    fn demand(&self) -> Demand {
+        *self.opts
+    }
+
+    fn session(&mut self) -> &mut Session {
+        &mut self.session
+    }
+
+    fn state(&self) -> impl serde::Serialize + '_ {
+        &self.session
+    }
+
+    fn finish(self, _: bool, _: &mut dyn MessageSink) -> Result<Session> {
+        Ok(self.session)
+    }
 }
 
 /// An empty Claude [`Session`] shell, ready to accumulate records. A sub-agent transcript (by its
@@ -2569,8 +2541,11 @@ mod tests {
         fs::write(&path, &text).unwrap();
         let reference = SessionRef::new("source", Harness::Claude, path.clone());
         let adapter = Claude::with_config_dir(&world.proj);
-        let mut cp = Checkpoint::new(first.len() as u64);
-        cp.put(ADAPTER_LAYER, &new_session("source", Some(path.clone())));
+        let cp = jsonl::checkpoint::<Transcript>(
+            first.len() as u64,
+            Demand::LEAN.with_spans(),
+            &new_session("source", Some(path.clone())),
+        );
         let mut sink = CollectSink::default();
         adapter
             .resume(&reference, &Demand::LEAN.with_spans(), &mut sink, &cp)
@@ -2627,47 +2602,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn callback_truncation_is_rejected_before_resuming_mapped_records() {
-        const CHILD: &str = "CV_TEST_CLAUDE_CALLBACK_TRUNCATION";
-        if std::env::var_os(CHILD).is_none() {
-            use std::os::unix::process::CommandExt;
-            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-            command
-                .args([
-                    "--exact",
-                    "harness::claude::tests::callback_truncation_is_rejected_before_resuming_mapped_records",
-                ])
-                .env(CHILD, "1");
-            // A regression may SIGBUS the child; never the shared runner or a core dump.
-            unsafe {
-                command.pre_exec(|| {
-                    let limit = libc::rlimit {
-                        rlim_cur: 0,
-                        rlim_max: 0,
-                    };
-                    if libc::setrlimit(libc::RLIMIT_CORE, &limit) != 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    Ok(())
-                });
-            }
-            let mut child = command.spawn().unwrap();
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-            loop {
-                if let Some(status) = child.try_wait().unwrap() {
-                    assert!(
-                        status.success(),
-                        "callback truncation child {} failed: {status}",
-                        child.id()
-                    );
-                    return;
-                }
-                if std::time::Instant::now() >= deadline {
-                    child.kill().unwrap();
-                    let _ = child.wait();
-                    panic!("callback truncation child {} timed out", child.id());
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
+        if !crate::harness::store::jsonl::tests::in_child(
+            "harness::claude::tests::callback_truncation_is_rejected_before_resuming_mapped_records",
+        ) {
+            return;
         }
         struct Mutate {
             path: PathBuf,
@@ -2906,16 +2844,12 @@ mod tests {
 
     /// Stream a transcript file through the one reader.
     fn stream_file(id: &str, path: &Path, opts: &Demand, sink: &mut dyn MessageSink) -> Session {
-        read(
-            new_session_for(id, Some(path.to_path_buf()), opts),
-            path,
-            0,
-            None,
-            opts,
-            sink,
-            &mut || Ok(()),
-        )
-        .unwrap()
+        // A prefix through EOF: the whole transcript, without the fork-source lookup.
+        let r = SessionRef::new(id, Harness::Claude, path);
+        ROOTLESS
+            .transcript(&r, opts, Start::Prefix(u64::MAX), sink)
+            .unwrap()
+            .unwrap()
     }
 
     #[test]

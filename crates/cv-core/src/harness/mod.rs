@@ -432,6 +432,29 @@ pub trait Adapter: Send + Sync {
         crate::stream::checked(sink, |sink| self.resume(r, opts, sink, from))
     }
 
+    /// Read `r` from `from`: whole, from a checkpoint an earlier read of the same file took (then
+    /// shorter), or as the first bytes of an append-only transcript ([`Start`](crate::stream::Start)).
+    /// A continued read delivers to `sink` exactly what the whole read would after that point and
+    /// returns the session the whole read returns; the caller has checked that the bytes before
+    /// the checkpoint are the ones it was taken on. Consumer failures are errors, as in
+    /// [`Self::try_stream`]. `Ok(None)`: this adapter or this file cannot start there (no state,
+    /// another layout, another codec version); nothing reached `sink`. A JSONL transcript is read
+    /// by the one driver ([`store::jsonl::drive`]), whose checkpoints are the only ones a read
+    /// offers. Default: a whole read streams, any other start declines.
+    fn transcript(
+        &self,
+        r: &SessionRef,
+        opts: &Demand,
+        from: crate::stream::Start<'_>,
+        sink: &mut dyn MessageSink,
+    ) -> Result<Option<Session>> {
+        match from {
+            crate::stream::Start::Whole => self.try_stream(r, opts, sink).map(Some),
+            crate::stream::Start::Checkpoint(cp) => self.try_resume(r, opts, sink, cp),
+            crate::stream::Start::Prefix(_) => Ok(None),
+        }
+    }
+
     /// The affordances that live only in a side store beside the transcript (a todo file, a
     /// table, a state row): the session's current plan, goals, schedules. Rows have no message
     /// index (`docs/design/AFFORDANCES.md`). Default: the store keeps none. Unreadable side files
@@ -708,6 +731,40 @@ pub enum WatchPolicy {
 /// Counts the messages a parse of `r`'s first `len` bytes returns ([`Adapter::append_only`]),
 /// calling `check` at its cooperative boundaries.
 pub type CountPrefix = fn(r: &SessionRef, len: u64, check: &mut dyn FnMut() -> Result<()>) -> Result<usize>;
+
+/// [`CountPrefix`] through [`Adapter::transcript`] from [`Start::Prefix`](crate::stream::Start::Prefix).
+pub(crate) fn count_prefix(r: &SessionRef, len: u64, check: &mut dyn FnMut() -> Result<()>) -> Result<usize> {
+    struct Count<'c> {
+        messages: usize,
+        check: &'c mut dyn FnMut() -> Result<()>,
+        error: Option<anyhow::Error>,
+    }
+    impl MessageSink for Count<'_> {
+        fn message(&mut self, _: Message) -> crate::stream::Flow {
+            self.messages += 1;
+            crate::stream::Flow::Continue
+        }
+        fn wants_checkpoint(&mut self, _: u64) -> bool {
+            if let Err(error) = (self.check)() {
+                self.error = Some(error);
+            }
+            false
+        }
+        fn take_error(&mut self) -> Option<anyhow::Error> {
+            self.error.take()
+        }
+    }
+    let adapter = rootless(r.harness).ok_or_else(|| anyhow::anyhow!("no adapter for {}", r.harness))?;
+    let mut count = Count {
+        messages: 0,
+        check,
+        error: None,
+    };
+    adapter
+        .transcript(r, &Demand::RICH, crate::stream::Start::Prefix(len), &mut count)?
+        .ok_or_else(|| anyhow::anyhow!("{} declined a byte prefix of {}", r.harness, r.path.display()))?;
+    Ok(count.messages)
+}
 
 /// The `Workflow`-tool runs a store records beside its sessions ([`Adapter::workflows`]).
 pub trait Workflows: Sync {

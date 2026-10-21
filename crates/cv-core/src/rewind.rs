@@ -615,7 +615,13 @@ fn rewind_session_after_scan(
         }),
         foreign: Vec::new(),
     };
-    crate::harness::claude::stream_prefix(r, size, &Demand::LEAN.with_spans().with_offsets(), &mut scan)?;
+    crate::harness::Adapter::transcript(
+        &crate::harness::claude::ROOTLESS,
+        r,
+        &Demand::LEAN.with_spans().with_offsets(),
+        crate::stream::Start::Prefix(size),
+        &mut scan,
+    )?;
     if let Some(error) = scan.take_error() {
         return Err(error);
     }

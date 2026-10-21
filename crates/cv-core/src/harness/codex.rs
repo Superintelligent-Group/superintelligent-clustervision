@@ -759,7 +759,7 @@ impl Rollout {
     /// Every line `from..to` through the shared JSONL byte source.
     fn lines(&self, from: u64, to: u64, visit: impl FnMut(jsonl::Line<'_>) -> Result<Flow>) -> Result<()> {
         match &self.decoded {
-            Some(backing) => self.input.decoded(backing, self.len, from, visit),
+            Some(backing) => self.input.decoded_lines(backing, self.len, from, visit),
             None => self.input.snapshot(from, to, visit),
         }
     }
