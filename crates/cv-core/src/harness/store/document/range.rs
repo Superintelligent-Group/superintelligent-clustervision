@@ -18,7 +18,8 @@ const WINDOW: usize = 64 * 1024;
 /// so each later structural selection (record, message, content, block) skips them in O(1).
 const SKIP_MIN: u64 = 128;
 
-/// Memoize at most 1024 recent long endpoints, keyed by absolute offset. Nested record wrappers
+/// Memoize at most 1024 insertion-ordered long endpoints, keyed by absolute offset. Reads do not
+/// refresh eviction order. Nested record wrappers
 /// reuse body bounds without retaining offsets for the entire history. Eviction affects only
 /// scan cost, not data.
 const ENDPOINTS: usize = 1024;
@@ -425,6 +426,9 @@ impl<'a> Cursor<'a> {
         self.consume(1);
         // Only quotes can end a string. Carry slash parity across refill boundaries so
         // dense escaped bodies remain vectorized rather than visiting every backslash.
+        // An all-backslash window extends the previous run, so XOR its parity. Any intervening
+        // non-backslash ends that run; a quote inherits prior parity only when its entire
+        // window prefix is backslashes (slashes == n).
         let mut trailing_odd = false;
         loop {
             let bytes = self.fill_buf()?;
@@ -834,6 +838,7 @@ impl<'a> RangeSource<'a> {
     }
     /// An object's entries as Value keeps them: each key at its first position, with its final
     /// value. None for a nonobject. Narrow objects dedupe by scanning; wide ones by a position map.
+    /// Retains all decoded keys (borrowing when possible); prefer get/select_each for selected keys.
     pub fn entries(&self, range: Range) -> Result<Option<Entries<'a>>> {
         let Some(iter) = self.object(range)? else {
             return Ok(None);

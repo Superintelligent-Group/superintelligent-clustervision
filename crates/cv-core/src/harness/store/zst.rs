@@ -22,6 +22,7 @@ pub(crate) fn decoder<R: Read>(input: R) -> io::Result<impl Read> {
 }
 
 /// The decoded size the first frame header of `path` declares (RFC 8878 §3.1.1.1), if any.
+/// An unverified size hint only; callers must capture/check the source before trusting its data.
 pub(crate) fn content_size(path: &std::path::Path) -> Option<u64> {
     let mut head = [0u8; 18];
     let mut file = std::fs::File::open(path).ok()?;

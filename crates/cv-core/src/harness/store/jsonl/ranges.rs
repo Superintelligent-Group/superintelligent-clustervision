@@ -303,7 +303,8 @@ impl<S: ?Sized> Records<'_, S> {
     }
     /// Optionally retain small physical records during framing, avoiding a second positioned
     /// read. Above this fixed cap the scratch is cleared; giant records remain only ranges.
-    /// The scratch grows with the records it holds, never past the cap.
+    /// The scratch grows with the records it holds, never past the cap. Set this before iteration;
+    /// changing it cannot retroactively retain a record already returned by next().
     pub(crate) fn keep_small_records(&mut self, limit: usize) {
         self.small_limit = limit;
     }
