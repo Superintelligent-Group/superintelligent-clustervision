@@ -559,6 +559,41 @@ fn selected_tool_agents(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn selected_tools_preserve_unfiltered_native_edit_attribution() {
+        let session = crate::harness::codex::parse_str(
+            "direct",
+            include_str!("../tests/fixtures/codex/direct_patch.jsonl"),
+            true,
+            None,
+        );
+        let mut messages = session.messages.clone();
+        let mut visible = crate::Message::new(crate::Role::Assistant);
+        visible.content.push(crate::Block::ToolUse {
+            id: "visible-patch".into(),
+            name: "apply_patch".into(),
+            namespace: None,
+            input: serde_json::json!({"patch":"*** Begin Patch\n*** Add File: /repo/visible.txt\n+ok\n*** End Patch"})
+                .into(),
+        });
+        messages.insert(0, visible);
+        let all = ToolHistogram::from_messages(&messages, None).unwrap();
+        assert_eq!(all.tools["apply_patch"].calls, 1);
+        assert_eq!(all.tools["apply_patch"].edits, 1);
+        for tool in ["apply_patch", "exec_command"] {
+            let mut selected = ToolHistogram::default();
+            let mut extractor = events::EventExtractor::default();
+            let mut scratch = Vec::new();
+            for (idx, message) in messages.iter().enumerate() {
+                selected
+                    .note_message(message, idx, None, &mut scratch, Some(tool), &mut extractor)
+                    .unwrap();
+            }
+            assert_eq!(selected.tools.len(), 1);
+            assert_eq!(selected.tools[tool], all.tools[tool]);
+        }
+    }
+
     use super::*;
     use crate::ir::{Block, Message, Role};
     use serde_json::json;
@@ -781,10 +816,11 @@ mod tests {
             scratch: Vec::new(),
             fail: None,
         };
-        assert_eq!(histogram.message(m.clone()), Flow::Continue);
-        assert_eq!(histogram.histogram.total_calls, 1);
-        assert_eq!(histogram.histogram.tools.len(), 1);
-        assert_eq!(histogram.histogram.tools["Read"].reads, 1);
+        // Histograms correlate native completions with every call before selecting rows.
+        // Missing excluded arguments cannot silently change canonical edit attribution.
+        assert_eq!(histogram.message(m.clone()), Flow::Stop);
+        assert!(histogram.take_error().is_some());
+        assert!(histogram.histogram.tools.is_empty());
         let mut selected = CallSink::new(None);
         selected.tool = Some("Read".into());
         assert_eq!(selected.message(m), Flow::Continue);

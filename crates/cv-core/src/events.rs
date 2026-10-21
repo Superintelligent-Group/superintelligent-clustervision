@@ -366,7 +366,7 @@ fn extract_message(
     let mut staged = Vec::new();
     let ts = m.timestamp.map(|t| t.timestamp());
     // A file edit the harness record states outside its tool blocks, unless a call already did.
-    if let Some(edit) = crate::harness::native_edit(m).filter(|edit| tool.is_none_or(|name| name == edit.tool)) {
+    if let Some(edit) = crate::harness::native_edit(m) {
         if let Some(id) = edit.id {
             let paths: std::collections::BTreeSet<_> = edit.paths.iter().map(|path| absolutize(path, cwd)).collect();
             for path in paths {
@@ -390,9 +390,6 @@ fn extract_message(
     for b in &m.content {
         match b {
             Block::ToolUse { id, name, input, .. } => {
-                if tool.is_some_and(|selected| selected != name) {
-                    continue;
-                }
                 let before = staged.len();
                 extract_call_into(name, input, msg_idx, ts, cwd, &mut staged)?;
                 for event in staged[before..].iter().filter(|event| event.kind == "file_edit") {
@@ -407,9 +404,6 @@ fn extract_message(
                 tool_name,
                 ..
             } => {
-                if tool.is_some_and(|selected| tool_name.as_deref() != Some(selected)) {
-                    continue;
-                }
                 // Never materialize a lazy span just for a 200-char detail — an unresolved span
                 // (a giant failed-command dump) simply contributes no detail.
                 let detail = content
@@ -435,7 +429,12 @@ fn extract_message(
             extractor.complete(tool_use_id)?;
         }
     }
-    out.extend(staged);
+    // Correlation always sees every call. Select only the canonical attributed rows.
+    out.extend(
+        staged
+            .into_iter()
+            .filter(|event| tool.is_none_or(|name| event.tool.as_deref() == Some(name))),
+    );
     Ok(())
 }
 
