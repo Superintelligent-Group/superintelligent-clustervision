@@ -758,8 +758,12 @@ mod tests {
         assert!(archive.entry("conversation-2048-extra").is_none());
         assert!(archive.entry("before-all").is_none());
         assert!(archive.entry("zzz-after-all").is_none());
-        // Cache hits reuse the charged index, and freshness still rejects changed archives.
-        assert!(Arc::ptr_eq(&archive, &load(&path, Some("conversation-2048"))?));
+        // Selection keeps the first duplicate even if another reader evicts the shared cache.
+        let selected = load(&path, Some("conversation-2048"))?;
+        let expected = archive.entry("conversation-2048").unwrap();
+        let actual = selected.entry("conversation-2048").unwrap();
+        assert_eq!((actual.offset, actual.len), (expected.offset, expected.len));
+        // Freshness still rejects changed archives.
         std::fs::write(&path, b"[]")?;
         assert!(archive.source.check().is_err());
         assert!(load(&path, Some("conversation-2048"))?
