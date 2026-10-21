@@ -91,13 +91,14 @@ fn carry_context(src: &Path, dst: &Path) {
             continue;
         }
         let to = dst.join(name);
+        let already_exists = || eprintln!("  ↳ context: {name} already exists at target — left as-is");
         if to.exists() {
-            eprintln!("  ↳ context: {name} already exists at target — left as-is");
+            already_exists();
             continue;
         }
         match fs::create_dir_all(dst).and_then(|_| copy_context_if_absent(&from, &to)) {
             Ok(Some(_)) => copied.push(*name),
-            Ok(None) => eprintln!("  ↳ context: {name} already exists at target — left as-is"),
+            Ok(None) => already_exists(),
             Err(e) => eprintln!("  ↳ context: couldn't copy {name}: {e}"),
         }
     }
