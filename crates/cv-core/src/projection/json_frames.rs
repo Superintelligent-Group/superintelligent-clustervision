@@ -10,6 +10,9 @@ use std::io::{self, BufRead, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::rc::Rc;
 
+/// Maximum decoded byte length of a root key considered for frame injection.
+const KEY_BYTES: usize = 128;
+
 /// RS cannot occur unescaped in JSON; each compact message is one frame. The complete frame is
 /// counted while only its first `remaining + 1` bytes are retained (`None` keeps it whole):
 /// discarding still reports successful writes, so every lazy demand and source check runs.
@@ -119,7 +122,7 @@ pub fn write_frames(
     frames: &ByteSource,
     framing: Framing<'_>,
 ) -> anyhow::Result<Option<Prefix>> {
-    anyhow::ensure!(field.len() <= 128, "JSON frame field exceeds key budget");
+    anyhow::ensure!(field.len() <= KEY_BYTES, "JSON frame field exceeds key budget");
     let position = Rc::new(Cell::new(0));
     let mut counted = Counted {
         inner: out,
@@ -281,7 +284,7 @@ impl<F: Formatter> Formatter for &mut Shell<'_, '_, F> {
     }
     fn write_string_fragment<W: ?Sized + Write>(&mut self, out: &mut W, part: &str) -> io::Result<()> {
         if self.array.reading_key {
-            if self.array.key.len().saturating_add(part.len()) <= 128 {
+            if self.array.key.len().saturating_add(part.len()) <= KEY_BYTES {
                 self.array.key.push_str(part);
             } else {
                 self.array.reading_key = false;
@@ -302,7 +305,7 @@ impl<F: Formatter> Formatter for &mut Shell<'_, '_, F> {
                 CharEscape::Tab => '\t',
                 CharEscape::AsciiControl(byte) => char::from(*byte),
             };
-            if self.array.key.len() + character.len_utf8() <= 128 {
+            if self.array.key.len() + character.len_utf8() <= KEY_BYTES {
                 self.array.key.push(character);
             } else {
                 self.array.reading_key = false;
