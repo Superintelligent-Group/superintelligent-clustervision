@@ -24,26 +24,30 @@ pub(crate) fn cmd_events(
         // with, so the two doors cannot drift.
         let mut out: Vec<serde_json::Value> = rows.iter().map(cv_core::rows::event_row).collect();
         if subagents {
-            out.extend(subagent_events(&r, kind.as_deref())?.into_iter().flat_map(|(s, evs)| {
-                let agent_id = s.agent_id().to_string();
-                let parent = r.id.clone();
-                let harness = r.harness.as_str().to_string();
-                evs.into_iter().map(move |e| {
-                    cv_core::rows::event_row(&events::EventRow {
-                        harness: harness.clone(),
-                        session_id: parent.clone(),
-                        msg_idx: e.msg_idx as i64,
-                        ts: e.ts,
-                        kind: e.kind.to_string(),
-                        tool: e.tool,
-                        target: e.target,
-                        detail: e.detail,
-                        parent_id: Some(parent.clone()),
-                        agent_id: Some(agent_id.clone()),
-                        workflow: s.workflow.clone(),
-                    })
-                })
-            }));
+            out.extend(
+                subagent_events(cv_core::subagent_tree_of(&r), r.harness, kind.as_deref())?
+                    .into_iter()
+                    .flat_map(|(s, evs)| {
+                        let agent_id = s.agent_id().to_string();
+                        let parent = r.id.clone();
+                        let harness = r.harness.as_str().to_string();
+                        evs.into_iter().map(move |e| {
+                            cv_core::rows::event_row(&events::EventRow {
+                                harness: harness.clone(),
+                                session_id: parent.clone(),
+                                msg_idx: e.msg_idx as i64,
+                                ts: e.ts,
+                                kind: e.kind.to_string(),
+                                tool: e.tool,
+                                target: e.target,
+                                detail: e.detail,
+                                parent_id: Some(parent.clone()),
+                                agent_id: Some(agent_id.clone()),
+                                workflow: s.workflow.clone(),
+                            })
+                        })
+                    }),
+            );
         }
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
@@ -82,19 +86,19 @@ pub(crate) fn cmd_events(
     Ok(())
 }
 
-/// Stream every sub-agent of `r` through an [`EventSink`] and collect its events (filtered by
+/// Stream each selected sub-agent through an [`EventSink`] and collect its events (filtered by
 /// `kind`), skipping agents with none. Lazy parse → result bodies never materialize.
 fn subagent_events(
-    r: &cv_core::SessionRef,
+    subs: Vec<cv_core::AgentRef>,
+    harness: cv_core::Harness,
     kind: Option<&str>,
 ) -> Result<Vec<(cv_core::AgentRef, Vec<cv_core::events::Event>)>> {
     use cv_core::events::EventSink;
     use cv_core::Demand;
-    let subs = cv_core::subagent_tree_of(r);
     if subs.is_empty() {
         return Ok(Vec::new());
     }
-    let adapter = cv_core::harness::for_harness(r.harness).with_context(|| format!("no adapter for {}", r.harness))?;
+    let adapter = cv_core::harness::for_harness(harness).with_context(|| format!("no adapter for {harness}"))?;
     let mut out = Vec::new();
     for s in subs {
         let mut sink = EventSink::new(s.session.cwd.clone());
@@ -119,8 +123,9 @@ fn subagent_events(
 
 /// Print each sub-agent's events grouped under the agent (with the agent's type/task as a header).
 fn print_subagent_events(r: &cv_core::SessionRef, kind: Option<&str>) -> Result<()> {
-    let per_agent = subagent_events(r, kind)?;
-    let n_agents = cv_core::subagent_tree_of(r).len();
+    let subs = cv_core::subagent_tree_of(r);
+    let n_agents = subs.len();
+    let per_agent = subagent_events(subs, r.harness, kind)?;
     let mut total = 0usize;
     for (s, evs) in &per_agent {
         total += evs.len();
