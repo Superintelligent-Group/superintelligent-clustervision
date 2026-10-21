@@ -14,17 +14,28 @@ use cv_core::tools::{ForestTools, ToolHistogram};
 /// * `--workflow <run>` — restrict to one workflow's agents
 /// * `--across` — one row per agent (the per-agent breakdown), instead of the aggregate
 /// * `--timeline` — the time-ordered tool-call timeline
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn cmd_tools(
-    id: &str,
-    harness: Option<String>,
-    agent: Option<String>,
-    tool: Option<String>,
-    workflow: Option<String>,
-    across: bool,
-    timeline: bool,
-    json: bool,
-) -> Result<()> {
+pub(crate) struct ToolsArgs<'a> {
+    pub id: &'a str,
+    pub harness: Option<String>,
+    pub agent: Option<String>,
+    pub tool: Option<String>,
+    pub workflow: Option<String>,
+    pub across: bool,
+    pub timeline: bool,
+    pub json: bool,
+}
+
+pub(crate) fn cmd_tools(args: ToolsArgs<'_>) -> Result<()> {
+    let ToolsArgs {
+        id,
+        harness,
+        agent,
+        tool,
+        workflow,
+        across,
+        timeline,
+        json,
+    } = args;
     if tool.is_some() && agent.is_some() && !timeline {
         return crate::util::usage(
             "`cv tools --tool` and `--agent` are two different views; pass `--timeline` to narrow by both",

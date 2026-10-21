@@ -215,18 +215,30 @@ fn select_refs(
     Ok(total)
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn cmd_ls(
-    harness: Option<String>,
-    cwd: Option<String>,
-    query: Option<String>,
-    limit: usize,
-    sort_by: &str,
-    asc: bool,    // print the shown window oldest-first (the feed order)
-    fresh: bool,  // force a full re-discovery instead of trusting the probed catalog
-    json: bool,   // emit the rows as one JSON array of session rows instead of the table
-    enrich: bool, // --json only: add transcript-derived git + display_title (one parse per emitted row)
-) -> Result<()> {
+pub(crate) struct LsArgs<'a> {
+    pub harness: Option<String>,
+    pub cwd: Option<String>,
+    pub query: Option<String>,
+    pub limit: usize,
+    pub sort_by: &'a str,
+    pub asc: bool,
+    pub fresh: bool,
+    pub json: bool,
+    pub enrich: bool,
+}
+
+pub(crate) fn cmd_ls(args: LsArgs<'_>) -> Result<()> {
+    let LsArgs {
+        harness,
+        cwd,
+        query,
+        limit,
+        sort_by,
+        asc,
+        fresh,
+        json,
+        enrich,
+    } = args;
     let want = parse_harness(&harness)?;
     let query = crate::cmd::query::build(query)?;
     // An empty machine window requires no inventory or enrichment; still validate inputs.

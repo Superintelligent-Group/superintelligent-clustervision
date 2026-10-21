@@ -1261,7 +1261,7 @@ fn run() -> Result<()> {
             fresh,
             json,
             enrich,
-        } => browse::cmd_ls(harness, cwd, query, limit, &sort_by, asc, fresh, json, enrich),
+        } => browse::cmd_ls(browse::LsArgs { harness, cwd, query, limit, sort_by: &sort_by, asc, fresh, json, enrich }),
         Cmd::Search {
             query,
             harness,
@@ -1328,18 +1328,7 @@ fn run() -> Result<()> {
                      everywhere else)",
                 );
             }
-            reshape::cmd_dataset(
-            &format,
-            harness,
-            query,
-            subagents,
-            limit,
-            min_messages,
-            redact,
-            redact_only,
-            file,
-            force,
-            )
+            reshape::cmd_dataset(reshape::DatasetArgs { format: &format, harness, query, subagents, limit, min_messages, redact, redact_only, file, force })
         }
         Cmd::Port {
             id,
@@ -1422,24 +1411,7 @@ fn run() -> Result<()> {
                      --declassify-tokens-file) — nothing will be snipped. cv ships no built-in list."
                 );
             }
-            reshape::cmd_prune(
-                &id,
-                harness,
-                min_size,
-                keep_last,
-                to,
-                force,
-                drop,
-                drop_thinking,
-                copy_resources,
-                !no_revive,
-                window,
-                keep_range,
-                declassify,
-                tokens,
-                dry_run,
-                json,
-            )
+            reshape::cmd_prune(reshape::PruneArgs { id: &id, harness, min_size, keep_last, to, force, drop, thinking: drop_thinking, copy_resources, revive: !no_revive, window, keep_range, declassify, declassify_tokens: tokens, dry_run, json })
         }
         Cmd::Rewind {
             id,
@@ -1460,7 +1432,7 @@ fn run() -> Result<()> {
                      pass `--full` for the whole history",
                 );
             }
-            reshape::cmd_rewind(&id, harness, agent, at.as_deref(), out, to, full, thinking.as_deref().map(util::parse_thinking).transpose()?, dry_run, json, BUILD_VERSION)
+            reshape::cmd_rewind(reshape::RewindArgs { id: &id, harness, agent, at: at.as_deref(), out, to, full, thinking: thinking.as_deref().map(util::parse_thinking).transpose()?, dry_run, json, generator: BUILD_VERSION })
         }
         Cmd::Config { add_export, rm_export } => config::cmd_config(add_export, rm_export),
         Cmd::Schema { json, commands } => schema::cmd_schema(&build_cli(), json, commands),
@@ -1485,7 +1457,7 @@ fn run() -> Result<()> {
             for_,
             revive,
             revive_all,
-        } => workflow::cmd_workflow(&id, run_id, harness, json, script, results, follow, for_, revive, revive_all),
+        } => workflow::cmd_workflow(workflow::WorkflowArgs { id: &id, run_id, harness, json, script, results, follow, for_, revive, revive_all }),
         Cmd::Tools {
             id,
             harness,
@@ -1495,7 +1467,7 @@ fn run() -> Result<()> {
             across,
             timeline,
             json,
-        } => tools::cmd_tools(&id, harness, agent, tool, wf, across, timeline, json),
+        } => tools::cmd_tools(tools::ToolsArgs { id: &id, harness, agent, tool, workflow: wf, across, timeline, json }),
         Cmd::Lanes {
             id,
             harness,
@@ -1684,18 +1656,7 @@ fn run() -> Result<()> {
             } else {
                 None
             };
-            reshape::cmd_splice(
-                &specs,
-                harness,
-                out,
-                export,
-                cwd,
-                generate,
-                gen_model,
-                util::parse_thinking(&thinking)?,
-                resumable,
-                json,
-            )
+            reshape::cmd_splice(reshape::SpliceArgs { specs: &specs, harness, out, export, cwd, generate, gen_model, thinking: util::parse_thinking(&thinking)?, resumable, json })
         }
         // Removed commands: one line each, pointing at the replacement; exit 2.
         Cmd::Timeline { .. } => usage(

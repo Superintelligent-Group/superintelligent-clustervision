@@ -13,25 +13,44 @@ use std::path::PathBuf;
 
 /// `cv prune <id>` — compact a Claude session into a new resumable one (see [`cv_core::prune`]).
 /// Stashed originals come back with `cv cat <new-id> <tool_use_id>`.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn cmd_prune(
-    id: &str,
-    harness: Option<String>,
-    min_size: usize,
-    keep_last: usize,
-    to: Option<String>,
-    force: bool,
-    drop: bool,
-    thinking: bool,
-    copy_resources: bool,
-    revive: bool,
-    window: Option<u64>,
-    keep_range: Option<(usize, Option<usize>)>,
-    declassify: bool,
-    declassify_tokens: Vec<String>,
-    dry_run: bool,
-    json: bool, // also emit the report as one JSON object on stdout (the human report stays on stderr)
-) -> Result<()> {
+pub(crate) struct PruneArgs<'a> {
+    pub id: &'a str,
+    pub harness: Option<String>,
+    pub min_size: usize,
+    pub keep_last: usize,
+    pub to: Option<String>,
+    pub force: bool,
+    pub drop: bool,
+    pub thinking: bool,
+    pub copy_resources: bool,
+    pub revive: bool,
+    pub window: Option<u64>,
+    pub keep_range: Option<(usize, Option<usize>)>,
+    pub declassify: bool,
+    pub declassify_tokens: Vec<String>,
+    pub dry_run: bool,
+    pub json: bool,
+}
+
+pub(crate) fn cmd_prune(args: PruneArgs<'_>) -> Result<()> {
+    let PruneArgs {
+        id,
+        harness,
+        min_size,
+        keep_last,
+        to,
+        force,
+        drop,
+        thinking,
+        copy_resources,
+        revive,
+        window,
+        keep_range,
+        declassify,
+        declassify_tokens,
+        dry_run,
+        json,
+    } = args;
     let want = parse_harness(&harness)?;
     let (r, _adapter) = crate::cmd::distill::resolve_source(id, want)?;
 
@@ -181,20 +200,34 @@ pub(crate) fn parse_cut(at: Option<&str>) -> Result<cv_core::rewind::CutAt> {
 /// `cv rewind <id>` — derive the agent as of a past message or commit (see [`cv_core::rewind`]).
 /// `<id>` is any session id, an `agent-…` sub-agent id, or a transcript path; `--agent` picks a
 /// sub-agent under `<id>` the way `cv show --agent` does.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn cmd_rewind(
-    id: &str,
-    harness: Option<String>,
-    agent: Option<String>,
-    at: Option<&str>,
-    out: Option<PathBuf>,
-    to: Option<String>,
-    full: bool,
-    thinking: Option<cv_core::emit::ThinkingMode>,
-    dry_run: bool,
-    json: bool,
-    generator: &str,
-) -> Result<()> {
+pub(crate) struct RewindArgs<'a> {
+    pub id: &'a str,
+    pub harness: Option<String>,
+    pub agent: Option<String>,
+    pub at: Option<&'a str>,
+    pub out: Option<PathBuf>,
+    pub to: Option<String>,
+    pub full: bool,
+    pub thinking: Option<cv_core::emit::ThinkingMode>,
+    pub dry_run: bool,
+    pub json: bool,
+    pub generator: &'a str,
+}
+
+pub(crate) fn cmd_rewind(args: RewindArgs<'_>) -> Result<()> {
+    let RewindArgs {
+        id,
+        harness,
+        agent,
+        at,
+        out,
+        to,
+        full,
+        thinking,
+        dry_run,
+        json,
+        generator,
+    } = args;
     let cut = parse_cut(at)?;
     let (r, _adapter) = crate::cmd::distill::resolve_source(id, parse_harness(&harness)?)?;
     let r = match &agent {
@@ -362,19 +395,32 @@ fn parse_splice_spec(spec: &str) -> Result<SpliceSpec> {
 /// Where a splice goes. `resumable` is `--session` / `--agent-of` (a Claude transcript the harness
 /// resumes, shared with `distill`); otherwise `--harness`/`--out` emit to a harness and nothing at
 /// all prints a summary (with `--export md|json`, the composed session).
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn cmd_splice(
-    specs: &[String],
-    harness: Option<String>,
-    out: Option<PathBuf>,
-    export: Option<String>,
-    cwd: Option<PathBuf>,
-    generate: bool,
-    gen_model: Option<String>,
-    thinking: cv_core::emit::ThinkingMode,
-    resumable: Option<crate::cmd::distill::Target>,
-    json: bool,
-) -> Result<()> {
+pub(crate) struct SpliceArgs<'a> {
+    pub specs: &'a [String],
+    pub harness: Option<String>,
+    pub out: Option<PathBuf>,
+    pub export: Option<String>,
+    pub cwd: Option<PathBuf>,
+    pub generate: bool,
+    pub gen_model: Option<String>,
+    pub thinking: cv_core::emit::ThinkingMode,
+    pub resumable: Option<crate::cmd::distill::Target>,
+    pub json: bool,
+}
+
+pub(crate) fn cmd_splice(args: SpliceArgs<'_>) -> Result<()> {
+    let SpliceArgs {
+        specs,
+        harness,
+        out,
+        export,
+        cwd,
+        generate,
+        gen_model,
+        thinking,
+        resumable,
+        json,
+    } = args;
     if let Some(format) = export.as_deref() {
         if !matches!(format, "json" | "md" | "markdown") {
             bail!("unknown export format {format:?} (use md or json)");
@@ -423,33 +469,45 @@ pub(crate) fn cmd_splice(
         }
         return report(json, &h, &serde_json::to_value(&e)?);
     }
-    finish_composed(
-        spliced,
+    finish_composed(ComposedArgs {
+        session: spliced,
         to_h,
-        harness.is_some(),
+        explicit_to: harness.is_some(),
         out,
         export,
         cwd,
         generate,
         gen_model,
         thinking,
-    )
+    })
 }
 
 /// Shared tail for splice: emit to a harness when `--harness`/`--out` is in play, otherwise
 /// print a summary and (with `--export md|json`) the composed session to stdout.
-#[allow(clippy::too_many_arguments)]
-fn finish_composed(
-    mut session: Session,
-    to_h: Harness,
-    explicit_to: bool,
-    out: Option<PathBuf>,
-    export: Option<String>,
-    cwd: Option<PathBuf>,
-    generate: bool,
-    gen_model: Option<String>,
-    thinking: cv_core::emit::ThinkingMode,
-) -> Result<()> {
+pub(crate) struct ComposedArgs {
+    pub session: Session,
+    pub to_h: Harness,
+    pub explicit_to: bool,
+    pub out: Option<PathBuf>,
+    pub export: Option<String>,
+    pub cwd: Option<PathBuf>,
+    pub generate: bool,
+    pub gen_model: Option<String>,
+    pub thinking: cv_core::emit::ThinkingMode,
+}
+
+fn finish_composed(args: ComposedArgs) -> Result<()> {
+    let ComposedArgs {
+        mut session,
+        to_h,
+        explicit_to,
+        out,
+        export,
+        cwd,
+        generate,
+        gen_model,
+        thinking,
+    } = args;
     // The generative half of looming: grow the composed branch with an LLM-generated continuation.
     if generate {
         match crate::llm::available_provider() {
@@ -547,19 +605,32 @@ fn finish_composed(
 
 // ---------- dataset ----------
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn cmd_dataset(
-    format: &str,
-    harness: Option<String>,
-    query: Option<String>,
-    subagents: bool,
-    limit: Option<usize>,
-    min_messages: usize,
-    redact: bool,
-    redact_only: Option<String>,
-    file: Option<PathBuf>,
-    force: bool,
-) -> Result<()> {
+pub(crate) struct DatasetArgs<'a> {
+    pub format: &'a str,
+    pub harness: Option<String>,
+    pub query: Option<String>,
+    pub subagents: bool,
+    pub limit: Option<usize>,
+    pub min_messages: usize,
+    pub redact: bool,
+    pub redact_only: Option<String>,
+    pub file: Option<PathBuf>,
+    pub force: bool,
+}
+
+pub(crate) fn cmd_dataset(args: DatasetArgs<'_>) -> Result<()> {
+    let DatasetArgs {
+        format,
+        harness,
+        query,
+        subagents,
+        limit,
+        min_messages,
+        redact,
+        redact_only,
+        file,
+        force,
+    } = args;
     use std::io::Write;
     let out = file;
     if !matches!(format, "chatml" | "sharegpt") {

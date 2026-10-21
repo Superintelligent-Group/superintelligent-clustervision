@@ -12,19 +12,32 @@ use cv_core::ir::truncate;
 /// accept **names**: `run` matches a workflow name (exact, else unique prefix) as well as a run id,
 /// and when `<session>` matches no session id it's resolved as a workflow name across the whole
 /// catalog — session titles are auto-generated and rarely mention the workflow you remember.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn cmd_workflow(
-    id: &str,
-    run_id: Option<String>,
-    harness: Option<String>,
-    json: bool,
-    script: bool,
-    results: bool,
-    follow: bool,
-    for_: Option<String>,
-    revive: bool,
-    revive_all: bool,
-) -> Result<()> {
+pub(crate) struct WorkflowArgs<'a> {
+    pub id: &'a str,
+    pub run_id: Option<String>,
+    pub harness: Option<String>,
+    pub json: bool,
+    pub script: bool,
+    pub results: bool,
+    pub follow: bool,
+    pub for_: Option<String>,
+    pub revive: bool,
+    pub revive_all: bool,
+}
+
+pub(crate) fn cmd_workflow(args: WorkflowArgs<'_>) -> Result<()> {
+    let WorkflowArgs {
+        id,
+        run_id,
+        harness,
+        json,
+        script,
+        results,
+        follow,
+        for_,
+        revive,
+        revive_all,
+    } = args;
     // Flags that act on one run: a command that lists instead of rendering a run refuses them.
     let run_flags: Vec<&str> = [
         ("--script", script),
