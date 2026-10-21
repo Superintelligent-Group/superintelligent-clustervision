@@ -281,7 +281,7 @@ pub fn row(boundaries: &[Compaction], n: usize) -> Value {
     v
 }
 
-/// A [`Session`]-level convenience (used by tests / whole-session consumers): detect compactions
+/// Test convenience: detect compactions
 /// from an already-parsed session's messages, without re-streaming. Mirrors [`CompactionSink`]'s
 /// logic on `session.messages`, resolving retained lazy text against `session.source_path` and
 /// returning demanded summary read errors.

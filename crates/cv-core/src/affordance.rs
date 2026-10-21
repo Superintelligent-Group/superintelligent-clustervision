@@ -324,6 +324,8 @@ pub fn classify_tool_view(h: Harness, name: &str, input: JsonView<'_>) -> Result
         (H::Qwen, "task_list" | "task_get") | (_, "tracker_list_tasks" | "tracker_get_task" | "tracker_visualize") => {
             (Plan, "read")
         }
+        // Unknown tracker operations count as plan updates; only the explicit rows above
+        // distinguish reads and creates. This prefix is a classification heuristic.
         (_, n) if n.starts_with("tracker_") => (Plan, "update"),
         // plan mode
         (_, "EnterPlanMode" | "enter_plan_mode") => (Plan, "enter"),
