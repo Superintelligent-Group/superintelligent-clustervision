@@ -241,11 +241,12 @@ heap and clean timing runs, and state whether the scratch catalog is new or alre
 
 `tools/check-heap-budget.py MMAP_HEAP_PROBE --no-mmap-probe RANGED_HEAP_PROBE --only events`
 is the event retention gate run in CI. It generates 20,000 and 200,000
-small Claude Edit records with distinct targets, verifies every persisted row and the source stamp,
-checks temporary-file cleanup and I/O accounting, and bounds Rust heap at 1 MiB with 256 KiB growth.
-The retained `events-collected` oracle must produce identical rows and demonstrate growing heap.
-The focused event case uses only the mmap binary. Native SQLite memory, giant tool arguments and
-crash cleanup remain outside this heap guarantee.
+calls per case: unfinished Claude Edits, open-many/close-in-reverse/reopen, and Codex visible patches
+with native completions adding another path. Both mmap and positioned probes (with `sqlite`) verify
+every persisted row and source stamp, temporary-file cleanup and I/O accounting, with unchanged
+1 MiB Rust heap and 256 KiB growth limits. The retained `events-collected` control must produce
+identical rows and demonstrate growing heap. Native SQLite memory, giant native diffs/tool
+arguments and crash cleanup remain outside this heap guarantee.
 
 `hash --raw-order` resolves content but preserves IR map insertion order in message and metadata
 digests. It detects serialization-order drift that the default canonical digest deliberately

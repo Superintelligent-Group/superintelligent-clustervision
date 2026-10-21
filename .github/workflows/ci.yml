@@ -142,7 +142,6 @@ jobs:
           python3 -I tools/check-heap-budget.py /tmp/cv-store-probe-mmap --no-mmap-probe target/release/examples/store_probe --only active
           python3 -I tools/check-heap-budget.py /tmp/cv-store-probe-mmap --no-mmap-probe target/release/examples/store_probe --only query
           python3 -I tools/check-heap-budget.py /tmp/cv-store-probe-mmap --no-mmap-probe target/release/examples/store_probe --only doctor
-          python3 -I tools/check-heap-budget.py /tmp/cv-store-probe-mmap --no-mmap-probe target/release/examples/store_probe --only events
           python3 -I tools/check-heap-budget.py /tmp/cv-store-probe-mmap --no-mmap-probe target/release/examples/store_probe --only active --format zed
           python3 -I tools/check-heap-budget.py /tmp/cv-store-probe-mmap --no-mmap-probe target/release/examples/store_probe --only portable-docs
           python3 -I tools/check-heap-budget.py /tmp/cv-store-probe-mmap --no-mmap-probe target/release/examples/store_probe --only selected-docs
@@ -153,6 +152,7 @@ jobs:
           python3 tools/perf-sqlite-check.py --probe /tmp/cv-store-probe-mmap --hermes-giant --sizes 16777216 67108864
           python3 tools/perf-sqlite-check.py --probe /tmp/cv-store-probe-mmap --giant-discovery --sizes 16777216 67108864
           cargo build --release -p clustervision-core --example store_probe --no-default-features --features sqlite,probe-heap
+          python3 -I tools/check-heap-budget.py /tmp/cv-store-probe-mmap --no-mmap-probe target/release/examples/store_probe --only events
           python3 -I tools/check-heap-budget.py /tmp/cv-store-probe-mmap --no-mmap-probe target/release/examples/store_probe --only portable-selected-payloads
 
       # Exercises the production worker/tee/channel/Tantivy path, not a queue-only mock.
