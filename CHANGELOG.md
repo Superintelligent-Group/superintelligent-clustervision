@@ -115,6 +115,7 @@
 - `tests/announce.rs` pins it: every command on a pipe exits within 5 s or is a daemon that announced within 1 s.
 - **Breaking:** watch and `observe_stream` cursors are version 2 (one mark per position); a 0.17 cursor starts a fresh baseline.
 - `ls --json --asc` with a query selects the same sessions as descending, reversed; an absent session no longer takes a window slot.
+- **Breaking:** a tag-only `decision` (nothing posed, written before 0.15) reads as an assigned action, not a decision owed; the page's tagged-decision card is gone.
 - `cv events` keeps every extracted event; the per-message `(kind, target)` dedup inherited from 0.9.10's unique index is gone.
 - A follower cursor's byte mark on a compressed Codex rollout no longer resumes from a decoded-stream prefix; it is unresolved, like any non-append-only session.
 

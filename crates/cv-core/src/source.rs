@@ -1720,8 +1720,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)]
-    fn counts_publish_captured_primary_and_legacy_record_stays_stale() {
+    fn counts_publish_captured_primary_and_a_concurrent_edit_stays_stale() {
         let w = crate::test_world("source-counts-publish");
         let path = w.base.join("plain.jsonl");
         std::fs::write(&path, "before").unwrap();

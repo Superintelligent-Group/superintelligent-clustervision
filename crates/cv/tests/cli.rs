@@ -15,10 +15,10 @@ use std::{fs, str};
 /// A planted secret that `cv export --redact` must scrub (matches cv_core::redact's sk- recognizer).
 const SECRET: &str = "sk-abcDEF1234567890ghijkl";
 
-/// A legacy decision: opened assigned to `who` and tagged `decision`, with nothing posed — the
-/// shape `cv task open --tags decision` wrote before it was refused. Stamped a few seconds
-/// ahead so it sorts after anything the test just opened.
-fn plant_legacy_tag_decision(w: &World, id: &str, title: &str, who: &str) {
+/// A tag-only decision: opened assigned to `who` and tagged `decision`, with nothing posed — the
+/// shape `cv task open --tags decision` wrote before it was refused; it reads as an assigned
+/// action. Stamped a few seconds ahead so it sorts after anything the test just opened.
+fn plant_tag_only_decision(w: &World, id: &str, title: &str, who: &str) {
     let ts = chrono_at(3);
     w.append_task_log(&[
         serde_json::json!({"id": id, "task_id": id, "ts": ts, "by": "cv", "event": "opened",
@@ -2341,20 +2341,20 @@ fn task_inbox_orders_decisions_first_and_renders_markdown() {
         "orchestrator:x",
     ]);
     let d = opened_task_id(&out);
-    plant_legacy_tag_decision(
+    plant_tag_only_decision(
         &w,
         "01a0f000-0000-7000-8000-00000000000b",
-        "legacy decision by tag",
+        "tagged, never posed",
         "ember",
     );
 
     let (out, _) = w.cv_ok(&["task", "inbox", "ember"]);
-    let dec = out.find("decisions owed (2):").expect(&out);
-    let assigned = out.find("assigned actions (1):").expect(&out);
+    let dec = out.find("decisions owed (1):").expect(&out);
+    let assigned = out.find("assigned actions (2):").expect(&out);
     let claimed = out.find("claimed work (1):").expect(&out);
     assert!(dec < assigned && assigned < claimed, "group order:\n{out}");
     assert!(
-        out.find("P6: WHO MAY REFILL").unwrap() < out.find("legacy decision by tag").unwrap(),
+        assigned < out.find("tagged, never posed").unwrap(),
         "{out}"
     );
 
@@ -2363,9 +2363,9 @@ fn task_inbox_orders_decisions_first_and_renders_markdown() {
     let expected = "\
 # Inbox for ember — <ts>
 
-2 decision(s) owed · 1 assigned action(s) · 1 claimed · 3 unread
+1 decision(s) owed · 2 assigned action(s) · 1 claimed · 3 unread
 
-## Decisions owed (2)
+## Decisions owed (1)
 
 ### 1. P6: WHO MAY REFILL a purse
 
@@ -2377,13 +2377,9 @@ fn task_inbox_orders_decisions_first_and_renders_markdown() {
 
 today anyone may fund any purse.
 
-### 2. legacy decision by tag
+## Assigned actions (2)
 
-`<id>` · open · waiting <age> ago by cv · **unread** (last: cv)
-
-## Assigned actions (1)
-
-### 3. write the docs
+### 2. write the docs
 
 `<id>` · open · waiting <age> ago by cv · **unread** (last: orchestrator:x)
 
@@ -2394,6 +2390,10 @@ Second paragraph.
 notes (1):
 
 - _orchestrator:x, <ts>:_ a note with two lines
+
+### 3. tagged, never posed
+
+`<id>` · open · waiting <age> ago by cv · **unread** (last: cv)
 
 ## Claimed work (1)
 

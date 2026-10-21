@@ -254,10 +254,9 @@ pub fn blocks<'m>(model: &'m TaskReadModel, task_id: &str) -> Vec<&'m TaskProjec
         .collect()
 }
 
-/// The tag that marked a task as a decision before `posed` existed (and that `pose` kept writing
-/// until 0.15.0). A tag-only decision in an old log still lands in its assignee's inbox under
-/// `decisions owed`; a new one is refused at write time ([`super::ReduceError::BareDecisionTag`]) —
-/// a decision is posed, with options, never tagged.
+/// The tag that marked a task as a decision before `posed` existed (0.15.0). Writing it to a task
+/// with nothing posed is refused ([`super::ReduceError::BareDecisionTag`]): a decision is posed,
+/// with options, never tagged.
 pub const DECISION_TAG: &str = "decision";
 /// A decision the decider parked for discussion (`cv task discuss` / the page's "needs discussion"):
 /// it stays open and resolvable, but it is no longer *owed* — the ball is with whoever posed it.
@@ -286,7 +285,7 @@ pub fn unique_prefix_len<'a>(ids: impl IntoIterator<Item = &'a str>, min: usize)
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InboxReason {
-    /// A live decision (a posed one, or a task tagged [`DECISION_TAG`]) assigned to you: someone
+    /// A live posed decision assigned to you: someone
     /// is waiting on your call, not your work. Listed before everything else.
     DecisionOwed,
     /// A decision you parked with [`DISCUSS_TAG`]: open, still yours to resolve, but the next
@@ -345,13 +344,13 @@ pub fn inbox<'m>(model: &'m TaskReadModel, endpoint: &str) -> Vec<InboxEntry<'m>
 
 fn base_inbox_reason(task: &TaskProjection, endpoint: &str) -> Option<(InboxReason, DateTime<Utc>)> {
     let assigned = task.assignee.as_deref().is_some_and(|have| same_actor(have, endpoint));
-    if assigned && !task.state.is_terminal() && (task.is_decision() || task.tags.iter().any(|t| t == DECISION_TAG)) {
+    if assigned && !task.state.is_terminal() && task.is_decision() {
         if task.tags.iter().any(|t| t == DISCUSS_TAG) {
             // Parked: ages from the discussion request (its last event), not from the pose.
             return Some((InboxReason::Discussing, task.last_ts));
         }
         // A posed decision ages from when it was asked, not from the last note on it.
-        let since = task.decision.as_ref().map(|d| d.posed_at).unwrap_or(task.last_ts);
+        let since = task.decision.as_ref().map_or(task.last_ts, |d| d.posed_at);
         return Some((InboxReason::DecisionOwed, since));
     }
     match task.state {
