@@ -42,6 +42,12 @@ enum KindView {
 }
 
 fn parse_kinds(spec: &str) -> Result<KindView> {
+    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    enum Family {
+        Said,
+        Compactions,
+        Affordances,
+    }
     const SAID: [&str; 2] = ["prompt", "answer"];
     const SEAMS: [&str; 2] = ["compaction_boundary", "compaction_summary"];
     let kinds: Vec<&str> = spec.split(',').map(str::trim).filter(|k| !k.is_empty()).collect();
@@ -53,11 +59,11 @@ fn parse_kinds(spec: &str) -> Result<KindView> {
     );
     let family = |k: &str| {
         if SAID.contains(&k) {
-            Some(0)
+            Some(Family::Said)
         } else if SEAMS.contains(&k) {
-            Some(1)
+            Some(Family::Compactions)
         } else if k == "affordances" || cv_core::affordance::Kind::parse(k).is_some() {
-            Some(2)
+            Some(Family::Affordances)
         } else {
             None
         }
@@ -65,15 +71,15 @@ fn parse_kinds(spec: &str) -> Result<KindView> {
     if let Some(k) = kinds.iter().find(|k| family(k).is_none()) {
         return usage(format!("no `--kind` view for {k:?} — {accepted}"));
     }
-    let families: std::collections::BTreeSet<u8> = kinds.iter().filter_map(|k| family(k)).collect();
+    let families: std::collections::BTreeSet<Family> = kinds.iter().filter_map(|k| family(k)).collect();
     match families.iter().copied().collect::<Vec<_>>().as_slice() {
         [] => usage(format!("`--kind` is empty — {accepted}")),
-        [0] => Ok(KindView::Said {
+        [Family::Said] => Ok(KindView::Said {
             prompts: kinds.contains(&"prompt"),
             answers: kinds.contains(&"answer"),
         }),
-        [1] => Ok(KindView::Compactions),
-        [2] => Ok(KindView::Affordances(
+        [Family::Compactions] => Ok(KindView::Compactions),
+        [Family::Affordances] => Ok(KindView::Affordances(
             cv_core::affordance::parse_kinds(&kinds).expect("every word checked above"),
         )),
         _ => usage(format!("`--kind {spec}` mixes two views — {accepted}")),
@@ -589,16 +595,7 @@ pub(crate) fn resolve_subagent(parent: &SessionRef, agent_id: &str) -> Result<cv
     let subs = cv_core::subagent_tree_filtered_of(parent, cv_core::SubagentDemand::Rich, None, |id, _| {
         id.starts_with(agent_id) || id.strip_prefix("agent-").is_some_and(|bare| bare.starts_with(agent_id))
     });
-    // Match on the full session id (`agent-…`), the bare agentId, or a prefix of either.
-    let matches: Vec<&cv_core::AgentRef> = subs
-        .iter()
-        .filter(|s| {
-            s.session.id == agent_id
-                || s.agent_id() == agent_id
-                || s.session.id.starts_with(agent_id)
-                || s.agent_id().starts_with(agent_id)
-        })
-        .collect();
+    let matches: Vec<&cv_core::AgentRef> = subs.iter().collect();
     match matches.as_slice() {
         [one] => Ok((*one).clone()),
         [] => usage(format!(
