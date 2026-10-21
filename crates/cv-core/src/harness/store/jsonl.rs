@@ -45,8 +45,12 @@ impl Read {
     pub(crate) fn open(path: &Path) -> anyhow::Result<Self> {
         #[cfg(test)]
         OPENED.with(|paths| paths.borrow_mut().push(path.to_path_buf()));
-        let source = crate::json::JsonSource::capture(path)?;
-        let file = File::open(path)?;
+        Self::with(crate::json::JsonSource::capture(path)?)
+    }
+
+    /// A read of `source`, a capture the caller already holds (one taken with its read set).
+    pub(crate) fn with(source: crate::json::JsonSource) -> anyhow::Result<Self> {
+        let file = File::open(source.path())?;
         source.check_metadata(file.metadata()?)?;
         Ok(Self {
             source,
@@ -68,6 +72,11 @@ impl Read {
 
     pub(crate) fn source(&self) -> &crate::json::JsonSource {
         &self.source
+    }
+
+    /// Records read again by range from this descriptor ([`Records`]).
+    pub(crate) fn records(&self) -> Records<'_> {
+        Records::new(&self.source, &self.file)
     }
 
     /// Positioned bytes from the captured descriptor, for an adapter's compression decoder.
@@ -406,7 +415,7 @@ pub(crate) fn for_each_record(
 ///
 /// Records are trimmed of JSON whitespace only (space, tab, LF, CR). Read errors end the
 /// visit with an error. `file` must be the descriptor the caller checked against `source`.
-pub(crate) fn for_each_line(
+fn for_each_line(
     source: &crate::json::JsonSource,
     file: &File,
     from: u64,
@@ -418,7 +427,7 @@ pub(crate) fn for_each_line(
 
 /// [`for_each_line`] over the source's private decoded bytes (a decompressed copy, `len` bytes
 /// long, at the start of `backing`): views keep the original's provenance, offsets are decoded.
-pub(crate) fn for_each_decoded_line(
+fn for_each_decoded_line(
     source: &crate::json::JsonSource,
     backing: &std::sync::Arc<super::bytes::ByteSource>,
     len: u64,

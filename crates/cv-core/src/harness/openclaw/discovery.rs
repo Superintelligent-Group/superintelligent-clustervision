@@ -109,18 +109,16 @@ fn timestamp(value: Option<JsonView<'_>>) -> Result<Option<DateTime<Utc>>> {
 }
 
 pub(super) fn scan(path: &Path, index: &Index) -> Result<SessionRef> {
-    let source = JsonSource::capture(path)?;
-    let file = fs::File::open(path)?;
-    source.check_metadata(file.metadata()?)?;
+    let read = jsonl::Read::open(path)?;
     let mut acc = ScanAcc::default();
-    jsonl::for_each_line(&source, &file, 0, source.len(), |line| {
+    read.lines(0, |line| {
         match line.view {
             Some(view) => feed(view, &mut acc)?,
             // Invalid UTF-8 is not one JSON value, so only a rejected line can hold it; the prior
             // read_to_string rejected every invalid byte, even on malformed rows.
             None if !line.blank => anyhow::ensure!(
                 ranges::valid_utf8(&mut ranges::reader(
-                    &file,
+                    &read,
                     ranges::Range {
                         offset: line.at,
                         len: line.end - line.at
@@ -132,8 +130,6 @@ pub(super) fn scan(path: &Path, index: &Index) -> Result<SessionRef> {
         }
         Ok(Flow::Continue)
     })?;
-    source.check_metadata(file.metadata()?)?;
-    source.check()?;
     let id = if acc.id.is_empty() {
         session_id_from_filename(path)
     } else {

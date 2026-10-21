@@ -338,26 +338,38 @@ fn stream_jsonl(
     sink: &mut dyn MessageSink,
     source: &crate::json::JsonSource,
 ) -> Result<Session> {
-    use super::store::jsonl::{for_each_line, ranges};
-    let file = fs::File::open(&r.path).with_context(|| format!("reading {}", r.path.display()))?;
-    source.check_metadata(file.metadata()?)?;
+    use super::store::jsonl::Read;
+    let read = Read::with(source.clone()).with_context(|| format!("reading {}", r.path.display()))?;
+    crate::stream::guarded(sink, &read, |sink| stream_lines(r, facts, opts, sink, &read))
+}
+
+/// [`stream_jsonl`] over the opened source, its callbacks guarded.
+fn stream_lines(
+    r: &SessionRef,
+    facts: &KeyFacts,
+    opts: &Demand,
+    sink: &mut dyn MessageSink,
+    read: &super::store::jsonl::Read,
+) -> Result<Session> {
+    use super::store::jsonl::ranges;
+    let source = read.source();
     let len = source.len();
     let mut tree = false;
-    for_each_line(source, &file, 0, len, |line| {
+    read.lines(0, |line| {
         tree = line.view.map(is_leaf_entry).transpose()?.unwrap_or(false);
         Ok(if tree { Flow::Stop } else { Flow::Continue })
     })?;
     let mut fold = Fold::new(r, facts, opts);
     if tree {
         // A tree is read whole: invalid UTF-8 anywhere, even off the branch, rejects it.
-        if !ranges::valid_utf8(&mut ranges::reader(&file, ranges::Range { offset: 0, len })?)? {
+        if !ranges::valid_utf8(&mut ranges::reader(read, ranges::Range { offset: 0, len })?)? {
             return Err(
                 std::io::Error::new(std::io::ErrorKind::InvalidData, "stream did not contain valid UTF-8").into(),
             );
         }
         let mut descriptors = Vec::new();
         let mut records = Vec::new();
-        for_each_line(source, &file, 0, len, |line| {
+        read.lines(0, |line| {
             if let Some(view) = line.view {
                 descriptors.push(record::navigation(view)?);
                 records.push(view.source_range()?.context("a transcript line has a source range")?);
@@ -374,14 +386,13 @@ fn stream_jsonl(
             }
         }
     } else {
-        for_each_line(source, &file, 0, len, |line| match line.view {
+        read.lines(0, |line| match line.view {
             Some(view) => fold.push(record::record(view, opts)?, true, None, sink),
             None => Ok(Flow::Continue),
         })?;
     }
     let session = fold.finish(sink);
-    source.check_metadata(file.metadata()?)?;
-    source.check()?;
+    read.check()?;
     Ok(session)
 }
 

@@ -18,7 +18,6 @@
 //! candidate head reads, and whole-file searches for candidates requiring a boundary match.
 
 use crate::harness::store::{document::Fields, jsonl};
-use crate::json::JsonSource;
 use crate::stream::Flow;
 use chrono::{DateTime, Utc};
 #[cfg(test)]
@@ -46,13 +45,11 @@ struct Head {
 /// The head through the record codec's byte source: at most [`HEAD_LINES`] physical lines,
 /// counting blank and rejected ones, reading only the four fields that recognize a copy.
 fn head(path: &Path) -> Option<Head> {
-    let source = JsonSource::capture(path).ok()?;
-    let file = fs::File::open(path).ok()?;
-    source.check_metadata(file.metadata().ok()?).ok()?;
+    let read = jsonl::Read::open(path).ok()?;
     let mut newest: Option<DateTime<Utc>> = None;
     let mut found = None;
     let mut lines = 0;
-    jsonl::for_each_line(&source, &file, 0, source.len(), |line| {
+    read.lines(0, |line| {
         lines += 1;
         if let Some(fields) = line
             .view

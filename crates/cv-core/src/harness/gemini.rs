@@ -552,7 +552,7 @@ fn document(
 }
 
 /// Read a *modern* append-only JSONL recording. A later record can replace or truncate earlier
-/// messages, so a first pass over [`for_each_line`](super::store::jsonl::for_each_line) reaches
+/// messages, so a first pass over the lines ([`jsonl::Read::lines`](super::store::jsonl::Read::lines)) reaches
 /// EOF retaining only keys and byte ranges, never a superseded message's content; the effective
 /// messages are then read again by range, in order, through the codec.
 ///
@@ -563,29 +563,30 @@ fn read_jsonl(
     opts: &stream::Demand,
     sink: &mut dyn MessageSink,
 ) -> Result<Option<Session>> {
-    let source = JsonSource::capture(path)?;
-    let file = fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    source.check_metadata(file.metadata()?)?;
+    let read = super::store::jsonl::Read::open(path).with_context(|| format!("opening {}", path.display()))?;
     let mut replay = RecordingReplay::default();
-    super::store::jsonl::for_each_line(&source, &file, 0, source.len(), |line| {
+    read.lines(0, |line| {
         if let Some(view) = line.view {
             replay.ingest(view)?;
         }
         Ok(Flow::Continue)
     })?;
     let resolver = crate::lazy::Resolver::new(Some(path.to_path_buf()));
-    let mut records = super::store::jsonl::Records::new(&source, &file);
+    let mut records = read.records();
     let mut published = false;
-    let session = replay.emit(
-        record::Demand::of(harness, opts, &source, &resolver),
-        Some(path),
-        Some(&mut records),
-        sink,
-        &mut published,
-    )?;
+    // The effective records are read again by range between callbacks: under the guard, a slow
+    // callback's backing check stops the read before the next range is touched.
+    let session = crate::stream::guarded(sink, &read, |sink| {
+        replay.emit(
+            record::Demand::of(harness, opts, read.source(), &resolver),
+            Some(path),
+            Some(&mut records),
+            sink,
+            &mut published,
+        )
+    })?;
     if published {
-        source.check_metadata(file.metadata()?)?;
-        source.check()?;
+        read.check()?;
     }
     Ok(session)
 }
