@@ -21,7 +21,7 @@ pub(crate) struct DigestOptions {
     /// Model id (OpenRouter provider-prefixed, e.g. `anthropic/claude-…`, or an Anthropic model).
     /// Overrides the provider default when set.
     pub model: Option<String>,
-    /// Digest a whole project (all sessions for a cwd) rather than a single session.
+    /// Label the prompt as project-scoped; the caller assembles any multi-session input.
     pub project: bool,
 }
 
@@ -70,7 +70,8 @@ enum Provider {
     Anthropic {
         key: String,
     },
-    /// A configured OpenAI-compatible server (LM Studio, Ollama, vLLM, …).
+    /// A configured OpenAI-compatible server (LM Studio, Ollama, vLLM, …); the variant name
+    /// does not restrict which compatible server can supply the endpoint.
     LmStudio {
         base: String,
     },

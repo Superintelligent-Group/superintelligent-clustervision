@@ -841,7 +841,7 @@ fn prompt_bundle(task: &str, sources: &[PackSource], rollup: &[(String, usize, i
 /// The `session` format: a synthetic resumable session in the target harness — one user message
 /// framing the task with the full bundle, plus a short assistant acknowledgment so the resumed
 /// harness opens on a clean turn boundary. Emitted through the same `cv_core::emit` path
-/// `cv convert` uses (prints the written path + resume hint).
+/// `cv port` uses (prints the written path + resume hint).
 fn emit_pack_session(
     task: &str,
     sources: &[PackSource],

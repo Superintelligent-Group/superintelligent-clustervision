@@ -1,15 +1,15 @@
+//! `cv port` / `cv resume` — producing a copy of a session that runs elsewhere (another harness,
+//! another working directory, or both), and launching one in its native harness.
+//!
+//! `--harness` picks the target harness (default: the source's) and `--cwd` the new home.
+//! The source is never touched.
+//!
 //! Claude replay `--thinking` defaults to native when every recorded model is `claude-*` and to
 //! portable otherwise. Portable turns thinking plaintext into ordinary text, removes reasoning that
 //! has no plaintext (signature-only, redacted), and gives illegal tool IDs one collision-free
 //! mapping at both endpoints. The source remains unchanged. Native preserves archival format
 //! fidelity, including provider signatures and identifiers. Other targets use the text policy in
 //! portable mode.
-//! `cv port` / `cv resume` — producing a copy of a session that runs elsewhere (another harness,
-//! another working directory, or both), and launching one in its native harness.
-//!
-//! `port` is the one verb for "make this session runnable somewhere else": 0.10's `convert` (same
-//! place, different harness) and `port` (different place) were the same act, so `--harness` picks
-//! the target harness (default: the source's) and `--cwd` the new home. The source is never touched.
 
 use crate::util::{home_rel, parse_harness, resolve, shell_quote, usage};
 use anyhow::{bail, Context, Result};
