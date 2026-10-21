@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Usage-cache read, publication, commit and rollback failures report named diagnostics and retry without publishing partial projections.
+
 - Catalog and scan-cache failures warn once; catalog schema replacement commits its tables and version stamp atomically.
 
 - Native database listings and reads report failed row decoding; OpenCode reports database discovery failures and Zed rejects unreadable listing cells.
