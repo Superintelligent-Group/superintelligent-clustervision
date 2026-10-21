@@ -198,18 +198,19 @@ impl Searcher {
                 }
                 return Ok(found);
             }
-            Source::Index => found.hits = fts::text_search_indexed_filtered(dir, query, limit, filter)?,
+            Source::Index => {
+                let (hits, note) = fts::search_with_snippets(dir, query, limit, filter)?;
+                found.hits = hits;
+                if let Some(why) = note {
+                    found.notes.push(Note::SnippetsUnavailable(why));
+                }
+            }
             #[cfg(feature = "semantic")]
             Source::Semantic => found.hits = self.semantic.search(query, limit, filter)?,
             #[cfg(not(feature = "semantic"))]
             Source::Semantic => anyhow::bail!("semantic search is not built into this cv"),
         }
         if source == Source::Index {
-            match fts::enrich_text_snippets(dir, query, filter.scope, &mut found.hits) {
-                Ok(None) => {}
-                Ok(Some(why)) => found.notes.push(Note::SnippetsUnavailable(why)),
-                Err(e) => found.notes.push(Note::SnippetsUnavailable(format!("{e:#}"))),
-            }
             // Named on hits and misses: a hit list can be missing rows, not only an empty one.
             if let Some(stale) = fts::staleness_note(dir) {
                 found.notes.push(Note::Stale(stale));

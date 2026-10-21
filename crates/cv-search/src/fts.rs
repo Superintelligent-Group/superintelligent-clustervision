@@ -2520,9 +2520,13 @@ pub fn enrich_text_snippets(dir: &Path, query: &str, scope: crate::Scope, hits: 
     let (index, f) = open_existing(dir)?;
     let reader = index.reader().context("opening index reader")?;
     let searcher = reader.searcher();
+    enrich_snippets(&searcher, &f, query, scope, hits)
+}
+
+fn enrich_snippets(searcher: &tantivy::Searcher, f: &Fields, query: &str, scope: crate::Scope, hits: &mut [Hit]) -> Result<Option<String>> {
     let (mut unreadable, mut first) = (0usize, None);
     for hit in hits {
-        let doc = meta_doc(&searcher, &f, &hit.id);
+        let doc = meta_doc(searcher, f, &hit.id);
         let path = doc.as_ref().and_then(|d| d.get_first(f.path)).and_then(|v| v.as_str());
         // The stored preview stands in when the live read cannot: marked when the source is
         // gone, returned as the search's note when it is there but cannot be read. A hit whose
@@ -2559,9 +2563,7 @@ pub fn enrich_text_snippets(dir: &Path, query: &str, scope: crate::Scope, hits: 
 /// A hit whose present source cannot be read keeps its preview here; [`crate::Searcher::search`]
 /// is the door that reports it (`Note::SnippetsUnavailable`).
 pub fn text_search(dir: &Path, query: &str, limit: usize) -> Result<Vec<Hit>> {
-    let mut hits = text_search_indexed(dir, query, limit)?;
-    enrich_text_snippets(dir, query, crate::Scope::Exchange, &mut hits)?;
-    Ok(hits)
+    Ok(search_with_snippets(dir, query, limit, crate::SearchFilter::default())?.0)
 }
 
 /// Rank indexed sessions using their stored previews, without reading source transcripts.
@@ -2577,6 +2579,12 @@ pub fn text_search_indexed_filtered(
     limit: usize,
     filter: crate::SearchFilter<'_>,
 ) -> Result<Vec<Hit>> {
+    let (index, f, searcher) = query_index(dir)?;
+    let decisions = std::sync::Arc::new(MetadataDecisions::new(&searcher, &f, filter));
+    ranked_search(&index, &f, &searcher, query, limit, filter, decisions)
+}
+
+fn query_index(dir: &Path) -> Result<(Index, Fields, tantivy::Searcher)> {
     if !dir.join("meta.json").exists() {
         anyhow::bail!("no full-text index at {}; build it with `cv index`", dir.display());
     }
@@ -2591,8 +2599,15 @@ pub fn text_search_indexed_filtered(
     let reader = index.reader().with_context(unusable)?;
     let searcher = reader.searcher();
 
+    Ok((index, f, searcher))
+}
+
+pub(crate) fn search_with_snippets(dir: &Path, query: &str, limit: usize, filter: crate::SearchFilter<'_>) -> Result<(Vec<Hit>, Option<String>)> {
+    let (index, f, searcher) = query_index(dir)?;
     let decisions = std::sync::Arc::new(MetadataDecisions::new(&searcher, &f, filter));
-    ranked_search(&index, &f, &searcher, query, limit, filter, decisions)
+    let mut hits = ranked_search(&index, &f, &searcher, query, limit, filter, decisions)?;
+    let note = enrich_snippets(&searcher, &f, query, filter.scope, &mut hits)?;
+    Ok((hits, note))
 }
 
 fn ranked_search(
