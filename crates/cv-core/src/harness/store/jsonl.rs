@@ -115,18 +115,6 @@ impl Read {
         }
         self.check_backing()
     }
-    pub(crate) fn decoded_lines(
-        &self,
-        backing: &std::sync::Arc<super::bytes::ByteSource>,
-        len: u64,
-        from: u64,
-        visit: impl FnMut(Line<'_>) -> anyhow::Result<crate::stream::Flow>,
-    ) -> anyhow::Result<()> {
-        let read = for_each_decoded_line(&self.source, backing, len, from, visit);
-        self.check()?;
-        read
-    }
-
     /// [`Self::check_backing`] once per [`Self::CHECK_EVERY`] bytes of consumed input, keyed by the
     /// offset the pass has reached: every line pass runs it after each visit.
     fn check_backing_at(&self, offset: u64) -> anyhow::Result<()> {
@@ -148,7 +136,6 @@ impl Read {
 
     /// This source read through `backing`, its decoded copy (`len` bytes at its start): views
     /// keep the original's identity and its completion guards.
-    #[allow(dead_code)] // TRANSITIONAL(K1): Codex moves onto it next.
     pub(crate) fn decoded(mut self, backing: std::sync::Arc<super::bytes::ByteSource>, len: u64) -> Self {
         self.decoded = Some((backing, len));
         self

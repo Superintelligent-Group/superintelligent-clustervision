@@ -1501,10 +1501,8 @@ mod tests {
         let r = sref(Harness::Codex, zst);
         let full = harness::for_harness(Harness::Codex).unwrap().parse(&r).unwrap();
         assert!(!full.messages.is_empty(), "the compressed fixture parses");
-        // The decoder would count a prefix of the DECODED stream, which is what a byte mark
-        // resolved to before the adapter declared the rollout not append-only.
-        let decoded = crate::harness::codex::count_prefix_checked(&r, CODEX.len() as u64, &mut || Ok(()));
-        assert!(decoded.is_ok_and(|n| n > 0));
+        // Its reader declines a byte prefix outright: decoded offsets are not file positions.
+        assert!(crate::harness::count_prefix(&r, CODEX.len() as u64, &mut || Ok(())).is_err());
         assert_ne!(baseline(&r), Some(Mark::Bytes(CODEX.len() as u64)));
         for len in [1, CODEX.len() as u64 / 2, CODEX.len() as u64] {
             assert_eq!(resolve(&r, Mark::Bytes(len)), None, "byte mark {len}");
