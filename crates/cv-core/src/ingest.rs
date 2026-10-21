@@ -9,6 +9,9 @@ use crate::harness::{claude, codex, gemini};
 use crate::ir::Session;
 use crate::json::JsonView;
 
+#[cfg(feature = "zip-ingest")]
+pub mod archive;
+
 /// Strict borrowed shape inspection: ignored uploaded bodies never become a second Value tree.
 fn inspect<T>(text: &str, f: impl FnOnce(JsonView<'_>) -> T) -> Option<T> {
     let source = RangeSource::text(None, text, 0, false);
@@ -400,5 +403,3 @@ mod tests {
     }
 }
 
-#[cfg(feature = "zip-ingest")]
-pub mod archive;
