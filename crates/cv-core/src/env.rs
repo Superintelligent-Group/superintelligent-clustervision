@@ -224,7 +224,7 @@ impl Scope {
     fn update(key: &str, value: Option<&OsStr>) {
         SCOPED.with(|s| {
             let mut slot = s.borrow_mut();
-            let mut env = slot.as_deref().cloned().unwrap_or_else(|| (*Env::process()).clone());
+            let mut env = slot.as_deref().expect("updating an entered environment").clone();
             env.set(key, value);
             *slot = Some(Arc::new(env));
         });
