@@ -206,7 +206,8 @@ pub(crate) fn resume_lines(h: Harness, id: &str, cwd: Option<&Path>) -> Vec<Stri
 }
 
 /// Best-known resume incantation per harness: the program + its args (the cwd is handled
-/// separately, since most harnesses resume relative to the directory they're launched in).
+/// separately, since most harnesses resume relative to the directory they're launched in). A
+/// per-harness table, so a new harness states its own.
 fn resume_command(h: Harness, id: &str) -> (String, Vec<String>) {
     match h {
         Harness::Claude => ("claude".into(), vec!["--resume".into(), id.into()]),
@@ -222,8 +223,18 @@ fn resume_command(h: Harness, id: &str) -> (String, Vec<String>) {
         Harness::KimiCode => ("kimi".into(), vec!["--session".into(), format!("session_{id}")]),
         Harness::Qwen => ("qwen".into(), vec!["--resume".into(), id.into()]),
         Harness::Devin => ("devin".into(), vec!["--resume".into(), id.into()]),
-        // Desktop/IDE apps (and any future harness) have no documented CLI resume.
-        _ => (
+        // Desktop/IDE apps, Goose, the account exports and OpenSession documents have no
+        // documented CLI resume.
+        Harness::Cursor
+        | Harness::LmStudio
+        | Harness::Cline
+        | Harness::Roo
+        | Harness::Continue
+        | Harness::Goose
+        | Harness::Zed
+        | Harness::ChatGptExport
+        | Harness::ClaudeExport
+        | Harness::OpenSession => (
             format!("# no CLI resume for {h}; open the app and find the session"),
             vec![id.into()],
         ),
