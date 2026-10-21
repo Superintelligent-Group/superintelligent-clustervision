@@ -306,34 +306,13 @@ impl ReducedFacts {
     }
 }
 
-struct PendingTarget(String);
-impl crate::spill::Record for PendingTarget {
-    type ReadState = ();
-    fn heap_bytes(&self) -> usize {
-        self.0.capacity()
-    }
-    fn write(&self, writer: &mut impl std::io::Write) -> anyhow::Result<()> {
-        writer.write_all(&(self.0.len() as u64).to_le_bytes())?;
-        writer.write_all(self.0.as_bytes())?;
-        Ok(())
-    }
-    fn read(reader: &mut impl std::io::BufRead, _: &mut ()) -> anyhow::Result<Self> {
-        let mut len = [0; 8];
-        reader.read_exact(&mut len)?;
-        let len = usize::try_from(u64::from_le_bytes(len))?;
-        let mut bytes = vec![0; len];
-        reader.read_exact(&mut bytes)?;
-        Ok(Self(String::from_utf8(bytes)?))
-    }
-}
-
 struct FactSink {
     facts: ReducedFacts,
     tools: Vec<String>,
     exact_tools: Vec<String>,
     targets: Vec<String>,
     exact_targets: Vec<String>,
-    pending_targets: crate::spill::Ordered<PendingTarget>,
+    pending_targets: crate::spill::Ordered<String>,
     events: bool,
     fail: Option<anyhow::Error>,
 }
@@ -395,14 +374,14 @@ impl FactSink {
         if self.targets_settled() {
             self.pending_targets = Default::default();
         } else if !absolute {
-            self.pending_targets.push(PendingTarget(target))?;
+            self.pending_targets.push(target)?;
         }
         Ok(())
     }
 
     fn finish(mut self, session: &Session) -> anyhow::Result<ReducedFacts> {
         for row in self.pending_targets.rows()? {
-            let PendingTarget(p) = row?;
+            let p = row?;
             let path = std::path::Path::new(&p);
             let resolved = match session.cwd.as_deref() {
                 Some(cwd) => cwd.join(path).to_string_lossy().to_lowercase(),
