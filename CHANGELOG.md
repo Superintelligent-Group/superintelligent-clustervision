@@ -24,6 +24,8 @@
 - **Breaking (library):** `store_affordances` and `json_files` return `Result`; failed side-store reads now fail affordance views and count publication.
 
 - **Breaking (library):** forest and subagent-reference APIs return `Result`; unreadable forests fail views, queries, indexing and stats instead of hiding agents.
+- Initialize the sweep catalog before feeding jobs, preventing concurrent cold opens from failing search baseline invalidation.
+
 - Failed partial spill-index reads preserve cached membership data for safe retry and eviction.
 
 - Failed spill appends truncate partially written bytes while preserving valid buffered keys; cleanup failures prevent unsafe reuse.

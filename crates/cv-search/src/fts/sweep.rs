@@ -195,6 +195,9 @@ pub(super) fn run_fed(
     let (tx, rx) = mpsc::sync_channel::<Out>(2 * workers);
     let admission = std::sync::Arc::clone(&writer.admission);
     let sources = cv_core::source::read_scope();
+    // Initialize the catalog before the feeder opens it to invalidate old baselines. Racing
+    // first opens can fail SQLite's transition to WAL before any jobs are admitted.
+    let mut catalog = cv_core::catalog::Writer::open();
 
     std::thread::scope(|scope| -> Result<Ran> {
         let (queue, wake) = (&queue, &wake);
@@ -246,7 +249,6 @@ pub(super) fn run_fed(
             admission: &admission,
             complete: false,
         };
-        let mut catalog = cv_core::catalog::Writer::open();
         let mut open: HashSet<String> = HashSet::new();
         let mut since_commit = 0usize;
         let mut ran = Ran::default();
