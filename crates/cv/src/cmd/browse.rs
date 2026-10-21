@@ -198,12 +198,7 @@ fn select_refs(
 
     if json {
         if let Some(q) = query {
-            let presence = if asc {
-                cv_core::query::WindowPresence::Any
-            } else {
-                cv_core::query::WindowPresence::Existing
-            };
-            cv_core::query::filter_refs_limited(refs, q, &crate::cmd::query::text_sets(q)?, limit, presence)?;
+            cv_core::query::filter_refs_limited(refs, q, &crate::cmd::query::text_sets(q)?, limit)?;
         }
     }
     let total = refs.len();
@@ -506,28 +501,14 @@ mod window_tests {
                 .unwrap();
             assert!(cv_core::source::FileId::at(&path).is_none());
             let mut selected = refs.clone();
-            cv_core::query::filter_refs_limited(
-                &mut selected,
-                &query,
-                &texts,
-                2,
-                cv_core::query::WindowPresence::Existing,
-            )
-            .unwrap();
+            cv_core::query::filter_refs_limited(&mut selected, &query, &texts, 2).unwrap();
             let rows = json_rows(selected.iter(), 2);
             assert_eq!(rows.len(), 2);
             assert!(rows.iter().all(|(_, row)| row["size_bytes"] == content.len()));
         }
         // The rendering phase must not retain the query's earlier presence observation.
         let mut selected = refs;
-        cv_core::query::filter_refs_limited(
-            &mut selected,
-            &query,
-            &texts,
-            2,
-            cv_core::query::WindowPresence::Existing,
-        )
-        .unwrap();
+        cv_core::query::filter_refs_limited(&mut selected, &query, &texts, 2).unwrap();
         std::fs::remove_file(path).unwrap();
         assert!(json_rows(selected.iter(), 2).is_empty());
     }
@@ -730,6 +711,8 @@ mod window_tests {
                 for limit in [0, 1, 3, 6, usize::MAX] {
                     let mut baseline = refs.clone();
                     apply_query(&mut baseline, &query).unwrap();
+                    // An absent session occupies no window slot, ascending or not.
+                    baseline.retain(|r| r.path.exists());
                     match sort {
                         "created" => baseline.sort_by_key(|r| std::cmp::Reverse(r.created_at.or(r.updated_at))),
                         "messages" => baseline.sort_by_key(|r| std::cmp::Reverse(r.message_count)),

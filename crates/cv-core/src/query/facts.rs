@@ -692,17 +692,8 @@ impl<'a> RefQuery<'a> {
     }
 }
 
-/// Which matching refs occupy a ranked machine-readable window.
-#[derive(Clone, Copy)]
-pub enum WindowPresence {
-    /// Only refs with readable file metadata occupy the window (`ls --json`).
-    Existing,
-    /// Every matching ref occupies the window; existence is checked after selecting/reversing
-    /// it (`ls --json --asc` retains this historical selection rule).
-    Any,
-}
-
-/// Select at most `limit` matches from already-ranked refs. Unlike [`filter_refs`], this has no
+/// Select at most `limit` matches from already-ranked refs; only refs with readable file metadata
+/// occupy the window. Unlike [`filter_refs`], this has no
 /// exact-total contract: only reads needed to decide the requested window can fail it. An
 /// unreadable lower-ranked tail is never evaluated. Stable ties and ranking belong to the caller;
 /// selected refs preserve their input order. A read error leaves the caller's list intact.
@@ -714,7 +705,6 @@ pub fn filter_refs_limited(
     query: &SessionQuery,
     text_sets: &TextSets,
     limit: usize,
-    presence: WindowPresence,
 ) -> anyhow::Result<()> {
     if limit == 0 {
         refs.clear();
@@ -726,8 +716,8 @@ pub fn filter_refs_limited(
     let mut keep = vec![false; refs.len()];
     let mut selected = 0;
     for (index, r) in refs.iter().enumerate() {
-        // An absent ref cannot appear in an Existing window, so its body is not needed.
-        if matches!(presence, WindowPresence::Existing) && plan.probe.size(&r.path).is_none() {
+        // An absent ref cannot appear in the window, so its body is not needed.
+        if plan.probe.size(&r.path).is_none() {
             continue;
         }
         let matches = match plan.cheap(r)? {
@@ -905,14 +895,14 @@ mod tests {
         };
         assert_eq!(fresh(), [false, false, false]);
         let mut zero = refs.clone();
-        filter_refs_limited(&mut zero, &query, &TextSets::empty(), 0, WindowPresence::Existing).unwrap();
+        filter_refs_limited(&mut zero, &query, &TextSets::empty(), 0).unwrap();
         assert_eq!(fresh(), [false, false, false]);
         let mut initial = refs.clone();
-        filter_refs_limited(&mut initial, &query, &TextSets::empty(), 1, WindowPresence::Existing).unwrap();
+        filter_refs_limited(&mut initial, &query, &TextSets::empty(), 1).unwrap();
         assert_eq!(initial[0].id, refs[1].id);
         assert_eq!(fresh(), [true, true, false]);
         let mut warm = refs.clone();
-        filter_refs_limited(&mut warm, &query, &TextSets::empty(), 1, WindowPresence::Existing).unwrap();
+        filter_refs_limited(&mut warm, &query, &TextSets::empty(), 1).unwrap();
         assert_eq!(warm[0].id, initial[0].id);
         assert_eq!(fresh(), [true, true, false]);
         // The warm prefix is decided by cheap cached facts; only Unknown invokes reduce.
@@ -967,23 +957,23 @@ mod tests {
         ];
         let query = SessionQuery::parse("tool:edit").unwrap();
         let mut one = refs.clone();
-        filter_refs_limited(&mut one, &query, &TextSets::empty(), 1, WindowPresence::Existing).unwrap();
+        filter_refs_limited(&mut one, &query, &TextSets::empty(), 1).unwrap();
         assert_eq!(one.len(), 1);
         assert_eq!(one[0].id, "good");
         let mut two = refs.clone();
-        assert!(filter_refs_limited(&mut two, &query, &TextSets::empty(), 2, WindowPresence::Existing).is_err());
+        assert!(filter_refs_limited(&mut two, &query, &TextSets::empty(), 2).is_err());
         assert_eq!(
             two.iter().map(|r| &r.id).collect::<Vec<_>>(),
             refs.iter().map(|r| &r.id).collect::<Vec<_>>()
         );
         assert!(filter_refs(&mut refs.clone(), &query, &TextSets::empty()).is_err());
         let mut zero = refs;
-        filter_refs_limited(&mut zero, &query, &TextSets::empty(), 0, WindowPresence::Any).unwrap();
+        filter_refs_limited(&mut zero, &query, &TextSets::empty(), 0).unwrap();
         assert!(zero.is_empty());
     }
 
     #[test]
-    fn limited_window_presence_preserves_ascending_preselection_and_boolean_shortcircuit() {
+    fn limited_window_skips_absent_refs_and_boolean_shortcircuits() {
         let world = crate::test_world("query_window_presence");
         let missing = missing_source();
         let path = world.home.join("present-unreadable.jsonl");
@@ -993,18 +983,8 @@ mod tests {
         let query = SessionQuery::parse("tool:edit OR text:hit").unwrap();
         let texts = TextSets::resolve(&query, |_| refs.iter().map(|r| r.id.clone()).collect());
         let mut existing = refs.clone();
-        filter_refs_limited(&mut existing, &query, &texts, 1, WindowPresence::Existing).unwrap();
+        filter_refs_limited(&mut existing, &query, &texts, 1).unwrap();
         assert_eq!(existing[0].id, present.id);
-        let mut any = refs.clone();
-        filter_refs_limited(&mut any, &query, &texts, 1, WindowPresence::Any).unwrap();
-        assert_eq!(any[0].id, missing.id);
-        // All rows share rank in this input. Window selection retains the exact stable tie order.
-        let mut all = refs.clone();
-        filter_refs_limited(&mut all, &query, &texts, usize::MAX, WindowPresence::Any).unwrap();
-        assert_eq!(
-            all.iter().map(|r| &r.id).collect::<Vec<_>>(),
-            refs.iter().map(|r| &r.id).collect::<Vec<_>>()
-        );
     }
 
     #[test]
