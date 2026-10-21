@@ -360,7 +360,10 @@ impl Adapter for OpenCode {
                 Ok((id, reads.clone(), bytes))
             })
             .inspect_err(|error| {
-                crate::env::warn_once("OpenCode dependencies", format_args!("{}: {error:#}", message.display()));
+                crate::env::warn_once(
+                    "OpenCode dependencies",
+                    format_args!("{}: {error:#}", message.display()),
+                );
             })
             .ok()?;
             if let Some(id) = id.as_ref() {

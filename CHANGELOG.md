@@ -20,7 +20,7 @@
 - **Breaking (library):** `events::ingest_all` takes named `IngestOptions` instead of two positional booleans.
 
 - **Breaking (library):** agent end, return, task-notice and workflow-launch reads return `Result`; aborted reads no longer imply missing or running agents.
-- String-entry readers preserve named read failures; invalid legacy Codex documents count as unparsed instead of returning an unmarked empty session.
+- String-entry readers preserve named read failures; invalid legacy Codex documents return errors instead of unmarked empty sessions.
 
 - Usage-cache read, publication, commit and rollback failures report named diagnostics and retry without publishing partial projections.
 
@@ -403,6 +403,7 @@ APFS clone of 5,421 sessions, Claude 38 GB, Codex 40 GB compressed; live: ~7,000
 - Semantic vectors embed the exchange only, not injected context or fork copies; `cv index --semantic` re-embeds once. `/api/search?semantic=1&kind=context` is a 400.
 - `cv search` with no usable index errors at once naming the cause and fix, never scanning unasked; `--scan` (`/api/search?scan=1`) asks for the live scan.
 - Every indexed `cv search` answer, hit or miss, names how many sessions the index trails and by how long (stderr under `--json`; `X-Cv-Search-Note`).
+- `cv search`: when live snippets cannot be generated the indexed previews stand in, with a note, as `/api/search` already did.
 - `cv search`, `ls` and `show` work in a home they may not write (a sandbox deny-write rule): the index and catalog open read-only.
 - `-q` supports compact OR expressions (`a|b`) and exact metadata equality (`field="x"`); unsupported text equality reports the syntax to use.
 - Search fills the requested session limit despite dominant matching chunks or rare harness/cwd filters; equal scores rank by session id in any index order.
@@ -445,6 +446,7 @@ APFS clone of 5,421 sessions, Claude 38 GB, Codex 40 GB compressed; live: ~7,000
 - Task inboxes project brief text without copying rich histories; aliases, unread cursors and terminal output keep consistent semantics.
 - Lane views show task-log warnings and retryable loading errors; an empty selection skips task enrichment while keeping forest totals.
 - Lane summaries index task assignments once instead of rescanning per lane; an invalid or overflowing duration is an error, not a panic.
+- `/api/tasks/inbox/{who}` takes `since=` and `all=` like `/api/inbox`.
 - Deferral matching reuses each command's task word sets; shared-word output is built only for the winning match.
 
 **Hooks**
@@ -456,6 +458,7 @@ APFS clone of 5,421 sessions, Claude 38 GB, Codex 40 GB compressed; live: ~7,000
 - HTTP limits concurrent connections and incomplete request lifetimes; overload shedding bounds retained sockets and drain work; keepalive bursts no longer strand queued requests.
 - HTTP rejects malformed framing, headers, authorities and numeric parameters; a body framing error closes the connection; task requests enforce body limits and media types.
 - `GET /api/session/{harness}/{id}/export` and the browser's download export the complete session as Markdown or OpenSession, including messages beyond the loaded page.
+- `cv archive sync` takes its inventory from the index sweep (one corpus walk, the index refreshed on the way); a home whose index cannot be written falls back to discovery.
 - MCP cancellation targets one request, releases its resources and keeps unrelated work and the connection running; a disconnect cancels and reaps children.
 - MCP bounds concurrent tools and the response backlog, preserves control replies, and releases oversized request buffers between frames.
 - MCP validates envelopes, arguments and observation filters before execution; `observe_stream` polls within the remaining timeout and matches messages incrementally.
@@ -489,6 +492,8 @@ APFS clone of 5,421 sessions, Claude 38 GB, Codex 40 GB compressed; live: ~7,000
 - CI caps live Rust heap on generated large Claude, Codex and Gemini sessions and escaped span decoding.
 
 **Fixes**
+- One freshness record per consumer and session, verified on load (counts, events, search, usage); watches record file identities. Each rereads once after upgrading.
+- A live `.jsonl` beside its writer is admitted by content (same file, sampled prefix intact), never by waiting; index, events, counts, vectors reread once.
 - Reading a live session no longer fails with "JSON source changed" when its writer appends: `.jsonl` sources may grow; truncation and rewrites still fail.
 - Large text spanned from a whole-document `.json` transcript fails its demand once the file changes, grown or not; only `.jsonl` logs may grow.
 - A transcript replaced or rewritten after parsing fails its first lazy read instead of returning the replacement's bytes; heads and windows reject changed sources.
@@ -511,6 +516,10 @@ APFS clone of 5,421 sessions, Claude 38 GB, Codex 40 GB compressed; live: ~7,000
 - Manual: search defaults and fallbacks, affordance views, MCP window exceptions, the calibrated estimator, `--drop-thinking` and the prompt-row schema read as the binary behaves.
 
 **Removals**
+- **Breaking:** `GET /api/backlog` is removed (410 pointer); the inbox page reads `/api/tasks?detail=1`, which adds the backlog columns.
+- **Breaking:** `POST /api/task/{id}/reopen` is removed (410): a closed task stays closed; open a new task and note the old id.
+- **Breaking:** MCP no longer offers `hook` (it reads Claude Code's hook JSON on stdin; a call did nothing); calling it points at `hooks_install`.
+- Pre-binary `embeddings.json` semantic stores are no longer read or migrated (querying them already failed); `cv index --semantic` rebuilds.
 
 ## 0.16.1 — 2026-10-12 — approvals, checkpoints, and the side files
 
