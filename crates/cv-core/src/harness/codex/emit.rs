@@ -167,7 +167,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
                 )?;
             }
             Role::Assistant => {
-                let first_record = lines.len();
+                let first_record = lines.record_count();
                 // Split assistant content into NL text (event_msg) and structured items.
                 for b in &msg.content {
                     match crate::emit::thinking::fate(b, Harness::Codex, opts.thinking, &resolver)? {
@@ -254,7 +254,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
                 // ported session read back `usage: 393 → 0`. Only when the turn actually wrote
                 // records Codex reads back: trailing nothing (or only an empty `reasoning` item,
                 // which its reader drops) the event would synthesize a bare usage-only turn.
-                if lines.len() > first_record
+                if lines.record_count() > first_record
                     && !unrepresentable_checked(Harness::Codex, opts.thinking, msg, &resolver)?
                 {
                     if let Some(info) = codex_token_usage(msg.usage.as_ref()) {

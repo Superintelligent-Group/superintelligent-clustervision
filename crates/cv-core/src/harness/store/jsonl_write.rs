@@ -19,7 +19,7 @@ impl JsonlStage {
             failed: false,
         }
     }
-    pub(crate) fn len(&self) -> usize {
+    pub(crate) fn record_count(&self) -> usize {
         self.records
     }
     pub(crate) fn is_empty(&self) -> bool {
