@@ -798,6 +798,21 @@ fn call_tool(name: &str, args: &Value, cancelled: Cancellation<'_>) -> anyhow::R
     }
 }
 
+/// Check cancellation and the same observation deadline during discovery and polling.
+fn check_observation(
+    cancelled: Cancellation<'_>,
+    start: Instant,
+    timeout: Duration,
+    expired: &std::cell::Cell<bool>,
+) -> anyhow::Result<()> {
+    cancelled.check()?;
+    if start.elapsed() >= timeout {
+        expired.set(true);
+        anyhow::bail!("observation deadline reached");
+    }
+    Ok(())
+}
+
 /// Block until a newly-emitted message matches `regex` (or `timeout_secs` elapses). The polling loop
 /// runs on its request's own thread, so blocking is fine.
 fn await_omen(args: &Value, cancelled: Cancellation<'_>) -> anyhow::Result<String> {
@@ -815,12 +830,7 @@ fn await_omen(args: &Value, cancelled: Cancellation<'_>) -> anyhow::Result<Strin
     let start = Instant::now();
     let expired = std::cell::Cell::new(false);
     let watcher = Watcher::try_with_discovery(filter, false, cv_core::discover_all, || {
-        cancelled.check()?;
-        if start.elapsed() >= timeout {
-            expired.set(true);
-            anyhow::bail!("observation deadline reached");
-        }
-        Ok(())
+        check_observation(cancelled, start, timeout, &expired)
     });
     let mut watcher = match watcher {
         Ok(watcher) => watcher,
@@ -860,14 +870,7 @@ fn await_poll(
     timeout: Duration,
 ) -> anyhow::Result<Option<Value>> {
     let expired = std::cell::Cell::new(false);
-    let check = || {
-        cancelled.check()?;
-        if start.elapsed() >= timeout {
-            expired.set(true);
-            anyhow::bail!("observation deadline reached");
-        }
-        Ok(())
-    };
+    let check = || check_observation(cancelled, start, timeout, &expired);
     let mut matched = None;
     let result = watcher.try_poll_messages(&check, |kind, reference, message| {
         let resolver = cv_core::Resolver::new(Some(reference.path.clone()));
