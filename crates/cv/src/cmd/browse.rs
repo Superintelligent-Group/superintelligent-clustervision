@@ -128,6 +128,7 @@ impl TitleUsers {
             .or_else(|| session.title.clone())
             .or(self.fallback)
             .or_else(|| session.synth_title());
+        session.messages.clear();
         (session, title)
     }
 }
@@ -971,7 +972,7 @@ mod enrich_tests {
         baseline.messages = old.0;
         assert_eq!(title, baseline.synth_title());
         assert_eq!(title.as_deref(), Some("later fallback"));
-        assert_eq!(actual.messages.len(), 2); // Stable noise removed; deferred suffix unchanged.
+        assert!(actual.messages.is_empty());
         assert_eq!(adapter.callbacks.load(std::sync::atomic::Ordering::Relaxed), 3);
         assert_eq!(old_adapter.callbacks.load(std::sync::atomic::Ordering::Relaxed), 3);
     }
@@ -1008,7 +1009,7 @@ mod enrich_tests {
         };
         let (actual, title) = compare_streams(&adapter, &reference);
         assert_eq!(title.as_deref(), Some("right EOF source"));
-        assert_eq!(actual.messages.len(), 2);
+        assert!(actual.messages.is_empty());
         assert!(cv_core::catalog::AffordanceTable::load().counts(&reference).is_some());
         adapter.metadata.title = Some("explicit EOF title".into());
         adapter.callbacks.store(0, std::sync::atomic::Ordering::Relaxed);
