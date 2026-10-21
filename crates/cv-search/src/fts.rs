@@ -3086,6 +3086,22 @@ mod tests {
         queue.draining = false;
         queue.stopped = true;
         assert_eq!(queue.next_fitting(), None);
+
+        let mut group = small;
+        group.extend(large);
+        assert_eq!(job_cost(&group), 7 * IN_FLIGHT_BYTES / 8);
+        group[0].r.path = "/missing.jsonl.zst".into();
+        assert_eq!(
+            job_cost(&group),
+            IN_FLIGHT_BYTES,
+            "compressed size cannot undercharge a group"
+        );
+        group[0].r.path = "/missing".into();
+        for job in &mut group {
+            job.size = i64::MAX;
+        }
+        group.extend(queue.groups.pop().unwrap());
+        assert_eq!(job_cost(&group), IN_FLIGHT_BYTES, "aggregate source sizes saturate");
     }
 
     #[test]
