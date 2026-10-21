@@ -53,6 +53,7 @@ impl Namespace {
         // namespace remains private and identity checked; this hash is a name, not authority.
         let home = crate::env::home_dir().unwrap_or_default();
 
+        // FNV-1a gives this namespace a stable spelling; DefaultHasher does not promise that.
         let hash = home
             .as_os_str()
             .to_string_lossy()

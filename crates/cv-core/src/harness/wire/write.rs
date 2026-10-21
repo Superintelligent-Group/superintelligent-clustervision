@@ -88,6 +88,8 @@ impl<'a> Object<'a> {
     pub(crate) fn remove(&mut self, key: &str) {
         if let Some(i) = self.position(key) {
             self.fields.remove(i);
+            // Removal shifts every following position; rebuild the small overlay index so
+            // subsequent replacements still address the correct field.
             if self.index.is_some() {
                 self.index = Some(self.fields.iter().enumerate().map(|(i, (k, _))| (*k, i)).collect());
             }

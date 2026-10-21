@@ -141,6 +141,8 @@ pub(crate) fn part_from_view(
         let nested = |key| -> anyhow::Result<Option<crate::json::JsonView<'_>>> {
             part.get(key)?.map(|v| v.get("url")).transpose().map(Option::flatten)
         };
+        // Presence wins before type checking: an image_url object without a string url
+        // shadows later aliases rather than falling through to an unrelated url field.
         let url = nested("image_url")?
             .or(part.get("image_url")?)
             .or(nested("imageUrl")?)
