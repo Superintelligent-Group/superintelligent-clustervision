@@ -247,6 +247,10 @@ pub enum Returns {
     ResultUnless(&'static str),
     /// The result is only an acknowledgement; the return arrives later as its own record.
     Later,
+    /// The result is the answer, and may ride inside the next prompt beside the user's own text
+    /// (Roo's `new_task`): that message stays a prompt, the result is named after this spawn tool
+    /// (the reader leaves it unnamed) and counted as a return detail.
+    ResultInPrompt(&'static str),
 }
 
 fn flag(input: JsonView<'_>, key: &str) -> Result<bool> {
@@ -390,7 +394,7 @@ pub fn spawn_returns(h: Harness, name: &str) -> Option<Returns> {
         (H::Goose, "delegate") => Returns::Result,
         (H::Grok, "spawn_subagent") => Returns::Later,
         (H::Kimi, "Agent") => Returns::ResultUnless("background"),
-        (H::Roo, "new_task") => Returns::Result,
+        (H::Roo, "new_task") => Returns::ResultInPrompt("new_task"),
         (H::Cline, "spawn_agent") => Returns::Result,
         (H::Cline, "team_spawn_teammate") => Returns::Later,
         (H::Devin, "run_subagent") => Returns::Result,
@@ -613,7 +617,7 @@ fn refine_spawn(h: Harness, m: &mut Message, open: &mut std::collections::HashMa
         }
         _ if !open.is_empty() && !m.content.is_empty() => {
             let all_results = m.content.iter().all(|b| matches!(b, Block::ToolResult { .. }));
-            if !all_results && h != Harness::Roo {
+            if !all_results && !open.values().any(|r| matches!(r, Returns::ResultInPrompt(_))) {
                 return Ok(());
             }
             let mut returned = false;
@@ -626,10 +630,11 @@ fn refine_spawn(h: Harness, m: &mut Message, open: &mut std::collections::HashMa
                 } = b
                 {
                     match open.remove(tool_use_id.as_str()) {
-                        Some(Returns::Result) => {
+                        Some(Returns::Result) => returned = true,
+                        Some(Returns::ResultInPrompt(spawn)) => {
                             returned = true;
-                            if !all_results && h == Harness::Roo {
-                                *tool_name = Some("new_task".into());
+                            if !all_results {
+                                *tool_name = Some(spawn.into());
                             }
                         }
                         // A lazy span is a large result: an answer, not a launch receipt.
@@ -1072,11 +1077,15 @@ fn detail_hits<'a>(
         else {
             continue;
         };
-        if h == Harness::Roo && m.kind != MessageKind::SubagentReturn && tool_name.as_deref() == Some("new_task") {
+        let in_prompt = tool_name
+            .as_deref()
+            .and_then(|name| spawn_returns(h, name))
+            .is_some_and(|r| matches!(r, Returns::ResultInPrompt(_)));
+        if in_prompt && m.kind != MessageKind::SubagentReturn {
             out.push(Hit::Detail {
                 kind: Kind::SubagentReturn,
                 action: "return",
-                tool: Some("new_task"),
+                tool: tool_name.as_deref(),
                 tool_use_id: Some(tool_use_id),
                 summary: if summaries {
                     text::plain_summary(content, resolver)?
