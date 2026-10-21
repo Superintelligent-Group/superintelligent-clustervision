@@ -28,7 +28,7 @@ use cv_core::lanes::LaneEvent;
 use cv_core::sanitize::sanitize_line;
 use serde_json::{json, Map, Value};
 
-use crate::short_id;
+use crate::util::short_id;
 use crate::util::{fmt_int, shell_quote};
 
 /// The skill installed beside the hooks. It lives inside this crate (`crates/cv/skill/SKILL.md`) so the

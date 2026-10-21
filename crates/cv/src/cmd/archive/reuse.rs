@@ -259,7 +259,7 @@ impl Archive {
             mut first_user,
         } = spool.finish()?;
         #[cfg(test)]
-        let spool_bytes = spooled.len();
+        let spool_bytes = spooled.byte_len()?;
         #[cfg(test)]
         let prefix_bytes = old
             .and_then(|stored| stored.prefix.as_ref())

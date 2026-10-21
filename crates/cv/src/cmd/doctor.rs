@@ -65,7 +65,7 @@ pub(crate) fn cmd_doctor(id: Option<String>, harness: Option<String>, recent: us
         )?;
         pass.finish()?;
         if label.is_empty() {
-            label = crate::short_id(&rr.id);
+            label = crate::util::short_id(&rr.id);
         }
     }
 
