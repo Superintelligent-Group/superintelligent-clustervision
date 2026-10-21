@@ -1681,14 +1681,21 @@ fn blame_outside_repo_and_missing_file() {
     let w = World::new("blame");
     standard_corpus(&w);
 
-    // A path that exists nowhere, outside any git repo: must not panic. Either outcome (clean
-    // degradation to catalog-only mode, or a clear error) is fine — but never a panic/signal.
-    let (_ok, code, out, err) = w.cv(&["blame", "/not/a/file"]);
-    assert_ne!(code, -1, "cv blame died by signal\nstderr:\n{err}");
-    assert!(!err.contains("panicked"), "panic in blame:\n{err}");
+    // A path that exists nowhere, outside any git repo: blame degrades to catalog-only mode,
+    // says so first, and finds no session that edited it.
+    let (ok, code, out, err) = w.cv(&["blame", "/not/a/file"]);
     assert!(
-        out.contains("not inside a git repository") || !err.trim().is_empty(),
-        "blame must explain itself\nstdout:\n{out}\nstderr:\n{err}"
+        ok && code == 0,
+        "blame degrades, never fails\nstdout:\n{out}\nstderr:\n{err}"
+    );
+    assert!(
+        out.starts_with("(not inside a git repository — event-catalog matches only, no commit correlation)\n"),
+        "blame names its mode first:\n{out}"
+    );
+    // Nothing was indexed in this world, so the catalog has no edit events to match.
+    assert!(
+        out.contains("no edit events found — run `cv index` first"),
+        "no session edited it:\n{out}"
     );
 }
 
@@ -1891,14 +1898,18 @@ fn extra_claude_roots_are_listed_and_read() {
 
 // ───────────────────────────── task substrate: identity + sanitizing ─────────────────────────────
 
-/// Extract the task id `cv task open` prints on its own line (the uuid-shaped one).
-fn opened_task_id(stdout: &str) -> String {
-    stdout
-        .lines()
-        .map(str::trim)
-        .find(|l| l.len() == 36 && l.chars().filter(|c| *c == '-').count() == 4)
-        .unwrap_or_else(|| panic!("no task id in open output:\n{stdout}"))
-        .to_string()
+/// The id of the one task titled `title`, read from the task projection
+/// (`task list --all --json`), not from the human line `open`/`decide` print.
+fn task_id_titled(w: &World, title: &str) -> String {
+    let (json, _) = w.cv_ok(&["task", "list", "--all", "--json"]);
+    let tasks: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
+    let ids: Vec<&str> = tasks
+        .iter()
+        .filter(|t| t["title"] == title)
+        .map(|t| t["task_id"].as_str().expect("task_id"))
+        .collect();
+    assert_eq!(ids.len(), 1, "one task titled {title:?}:\n{json}");
+    ids[0].to_string()
 }
 
 /// G4: identity is environment, not assertion — CV_ENDPOINT is the default `--from`, an explicit
@@ -1909,7 +1920,8 @@ fn task_identity_resolution_order() {
 
     // Open needs no ceremony: bare command records "cv".
     let (out, _) = w.cv_ok(&["task", "open", "first task"]);
-    let id = opened_task_id(&out);
+    let id = task_id_titled(&w, "first task");
+    assert!(out.lines().any(|l| l.trim() == id), "open prints its id:\n{out}");
     let (json, _) = w.cv_ok(&["task", "show", &id, "--json"]);
     assert!(json.contains(r#""opened_by": "cv""#), "{json}");
 
@@ -1952,13 +1964,27 @@ fn task_surfaces_sanitize_and_age() {
     let w = World::new("task-ansi");
 
     let bomb = "evil\u{1b}]0;pwned\u{7}title \u{1b}[31mred\nline";
-    let (out, _) = w.cv_ok(&["task", "open", bomb]);
-    let id = opened_task_id(&out);
+    w.cv_ok(&["task", "open", bomb]);
+    let id = task_id_titled(&w, bomb);
 
     let (out, _) = w.cv_ok(&["task", "list"]);
     assert!(!out.contains('\u{1b}'), "list leaks ESC:\n{out:?}");
     assert!(out.contains("eviltitle red line"), "stripped title renders:\n{out}");
-    assert!(out.contains("0s") || out.contains("1s"), "age column present:\n{out}");
+    // The age column, read from the script format (`id state assignee repo age title blocked_by`).
+    let (tsv, _) = w.cv_ok(&["task", "list", "--tsv"]);
+    let row: Vec<&str> = tsv
+        .lines()
+        .map(|l| l.split('\t').collect::<Vec<_>>())
+        .find(|f| f[0] == id)
+        .unwrap_or_else(|| panic!("no row for {id}:\n{tsv}"));
+    let age = row[4];
+    assert!(
+        age.len() >= 2
+            && age[..age.len() - 1].bytes().all(|b| b.is_ascii_digit())
+            && age.ends_with(['s', 'm', 'h', 'd']),
+        "age is a count and a unit: {age:?} in {row:?}"
+    );
+    assert!(!row[5].contains('\u{1b}'), "tsv title leaks ESC: {row:?}");
 
     let (out, _) = w.cv_ok(&["task", "show", &id]);
     assert!(!out.contains('\u{1b}'), "show leaks ESC:\n{out:?}");
@@ -1976,8 +2002,8 @@ fn task_surfaces_sanitize_and_age() {
 #[test]
 fn task_land_facet_verbs_and_flags_are_removed_with_pointers() {
     let w = World::new("task-land-removed");
-    let (out, _) = w.cv_ok(&["task", "open", "finish it"]);
-    let id = opened_task_id(&out);
+    w.cv_ok(&["task", "open", "finish it"]);
+    let id = task_id_titled(&w, "finish it");
     let removed: &[&[&str]] = &[
         &["task", "propose", &id, "--branch", "x"],
         &["task", "reroute", &id, "--to", "y"],
@@ -2051,15 +2077,15 @@ fn task_open_relations_tags_and_file_bodies() {
     )
     .unwrap();
 
-    let (out, _) = w.cv_ok(&[
+    w.cv_ok(&[
         "task",
         "open",
         "FOUNDATION: the thing others wait on",
         "--tags",
         "lean,deploy",
     ]);
-    let a = opened_task_id(&out);
-    let (out, _) = w.cv_ok(&[
+    let a = task_id_titled(&w, "FOUNDATION: the thing others wait on");
+    w.cv_ok(&[
         "task",
         "open",
         "DEPENDENT: needs the foundation",
@@ -2070,9 +2096,9 @@ fn task_open_relations_tags_and_file_bodies() {
         "--tags",
         "lean",
     ]);
-    let b = opened_task_id(&out);
-    let (out, _) = w.cv_ok(&["task", "open", "UPSTREAM: blocks the foundation", "--blocks", &a]);
-    let c = opened_task_id(&out);
+    let b = task_id_titled(&w, "DEPENDENT: needs the foundation");
+    w.cv_ok(&["task", "open", "UPSTREAM: blocks the foundation", "--blocks", &a]);
+    let c = task_id_titled(&w, "UPSTREAM: blocks the foundation");
 
     // The body came from the file.
     let (json, _) = w.cv_ok(&["task", "show", &b, "--json"]);
@@ -2206,7 +2232,7 @@ fn task_sweep_names_merged_branches_and_missing_issue_paths_without_closing() {
     fs::write(repo.join("plan.md"), "plan").unwrap();
 
     let r = repo.to_str().unwrap();
-    let (out, _) = w.cv_ok(&[
+    w.cv_ok(&[
         "task",
         "open",
         "K-RAN: run claim",
@@ -2215,7 +2241,7 @@ fn task_sweep_names_merged_branches_and_missing_issue_paths_without_closing() {
         "--body",
         "one commit on branch `k-ran`, not pushed",
     ]);
-    let merged = opened_task_id(&out);
+    let merged = task_id_titled(&w, "K-RAN: run claim");
     w.cv_ok(&[
         "task",
         "open",
@@ -2226,7 +2252,7 @@ fn task_sweep_names_merged_branches_and_missing_issue_paths_without_closing() {
         "work is on `p3b1`",
     ]);
     w.cv_ok(&["task", "open", "PLAN: keep", "--repo", r, "--issue", "plan.md"]);
-    let (out, _) = w.cv_ok(&[
+    w.cv_ok(&[
         "task",
         "open",
         "GONE: issue file deleted",
@@ -2235,7 +2261,7 @@ fn task_sweep_names_merged_branches_and_missing_issue_paths_without_closing() {
         "--issue",
         "docs/gone.md",
     ]);
-    let gone = opened_task_id(&out);
+    let gone = task_id_titled(&w, "GONE: issue file deleted");
     w.cv_ok(&[
         "task",
         "open",
@@ -2304,10 +2330,10 @@ fn normalize(s: &str) -> String {
 #[test]
 fn task_inbox_orders_decisions_first_and_renders_markdown() {
     let w = World::new("inbox-md");
-    let (out, _) = w.cv_ok(&["task", "open", "the claimed one", "--body", "claimed body"]);
-    let c = opened_task_id(&out);
+    w.cv_ok(&["task", "open", "the claimed one", "--body", "claimed body"]);
+    let c = task_id_titled(&w, "the claimed one");
     assert!(w.cv_env(&["task", "claim", &c], &[("CV_ENDPOINT", "ember")]).0);
-    let (out, _) = w.cv_ok(&[
+    w.cv_ok(&[
         "task",
         "open",
         "write the docs",
@@ -2316,7 +2342,7 @@ fn task_inbox_orders_decisions_first_and_renders_markdown() {
         "--body",
         "First line of the action.\n\nSecond paragraph.",
     ]);
-    let a = opened_task_id(&out);
+    let a = task_id_titled(&w, "write the docs");
     w.cv_ok(&[
         "task",
         "note",
@@ -2325,7 +2351,7 @@ fn task_inbox_orders_decisions_first_and_renders_markdown() {
         "--from",
         "orchestrator:x",
     ]);
-    let (out, _) = w.cv_ok(&[
+    w.cv_ok(&[
         "task",
         "decide",
         "P6: WHO MAY REFILL a purse",
@@ -2340,7 +2366,7 @@ fn task_inbox_orders_decisions_first_and_renders_markdown() {
         "--from",
         "orchestrator:x",
     ]);
-    let d = opened_task_id(&out);
+    let d = task_id_titled(&w, "P6: WHO MAY REFILL a purse");
     plant_tag_only_decision(
         &w,
         "01a0f000-0000-7000-8000-00000000000b",
@@ -2410,14 +2436,14 @@ claimed body
 #[test]
 fn task_show_notes_last_and_grep() {
     let w = World::new("notes-filter");
-    let (out, _) = w.cv_ok(&[
+    w.cv_ok(&[
         "task",
         "open",
         "EMBER: everything only ember can do",
         "--assignee",
         "ember",
     ]);
-    let parent = opened_task_id(&out);
+    let parent = task_id_titled(&w, "EMBER: everything only ember can do");
     for n in [
         "move the build base from /tank (slow) to NVMe?",
         "PUSH also ~/dev/cv: one unsigned commit.",
@@ -2444,7 +2470,7 @@ fn task_show_notes_last_and_grep() {
 fn task_note_reads_stdin_and_open_absolutizes_issue() {
     let w = World::new("stdin-paths");
     fs::write(w.base.join("PLAN.md"), "# plan\n").unwrap();
-    let (ok, _, out, err) = w.cv_stdin(
+    let (ok, _, _, err) = w.cv_stdin(
         &[
             "task",
             "open",
@@ -2457,7 +2483,7 @@ fn task_note_reads_stdin_and_open_absolutizes_issue() {
         "a `code span` body\nwith two lines\n",
     );
     assert!(ok, "{err}");
-    let a = opened_task_id(&out);
+    let a = task_id_titled(&w, "with a heredoc body");
     let (json, _) = w.cv_ok(&["task", "show", &a, "--json"]);
     let t: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(t["body"], "a `code span` body\nwith two lines\n");
@@ -2476,23 +2502,23 @@ fn task_note_reads_stdin_and_open_absolutizes_issue() {
     let (out, _) = w.cv_ok(&["task", "show", &a]);
     assert!(out.contains("note from stdin"), "{out}");
 
-    let (out, _) = w.cv_ok(&["task", "open", "handle", "--issue", "#42"]);
-    let b = opened_task_id(&out);
+    w.cv_ok(&["task", "open", "handle", "--issue", "#42"]);
+    let b = task_id_titled(&w, "handle");
     let (json, _) = w.cv_ok(&["task", "show", &b, "--json"]);
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&json).unwrap()["issue"],
         "#42"
     );
-    let (out, _) = w.cv_ok(&["task", "open", "url", "--issue", "https://x.y/issues/4"]);
-    let c = opened_task_id(&out);
+    w.cv_ok(&["task", "open", "url", "--issue", "https://x.y/issues/4"]);
+    let c = task_id_titled(&w, "url");
     let (json, _) = w.cv_ok(&["task", "show", &c, "--json"]);
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&json).unwrap()["issue"],
         "https://x.y/issues/4"
     );
     // A relative path that does not exist yet is still rooted at the cwd.
-    let (out, _) = w.cv_ok(&["task", "open", "future doc", "--issue", "docs/later.md"]);
-    let d = opened_task_id(&out);
+    w.cv_ok(&["task", "open", "future doc", "--issue", "docs/later.md"]);
+    let d = task_id_titled(&w, "future doc");
     let (json, _) = w.cv_ok(&["task", "show", &d, "--json"]);
     let issue = serde_json::from_str::<serde_json::Value>(&json).unwrap()["issue"]
         .as_str()
@@ -2593,7 +2619,7 @@ fn task_list_and_inbox_scope_to_recent_and_all_shows_old() {
 #[test]
 fn task_inbox_unread_and_events_since() {
     let w = World::new("unread-events");
-    let (out, _) = w.cv_ok(&[
+    w.cv_ok(&[
         "task",
         "open",
         "A: touched by the orchestrator last",
@@ -2602,8 +2628,8 @@ fn task_inbox_unread_and_events_since() {
         "--from",
         "orchestrator:x",
     ]);
-    let a = opened_task_id(&out);
-    let (out, _) = w.cv_ok(&[
+    let a = task_id_titled(&w, "A: touched by the orchestrator last");
+    w.cv_ok(&[
         "task",
         "open",
         "B: ember spoke last",
@@ -2612,9 +2638,9 @@ fn task_inbox_unread_and_events_since() {
         "--from",
         "orchestrator:x",
     ]);
-    let b = opened_task_id(&out);
+    let b = task_id_titled(&w, "B: ember spoke last");
     w.cv_ok(&["task", "note", &b, "on it", "--from", "ember"]);
-    let (out, _) = w.cv_ok(&[
+    w.cv_ok(&[
         "task",
         "open",
         "C: web ember spoke last",
@@ -2623,7 +2649,7 @@ fn task_inbox_unread_and_events_since() {
         "--from",
         "orchestrator:x",
     ]);
-    let c = opened_task_id(&out);
+    let c = task_id_titled(&w, "C: web ember spoke last");
     w.cv_ok(&["task", "note", &c, "via the page", "--from", "web:ember"]);
 
     let (out, _) = w.cv_ok(&["task", "inbox", "ember", "--unread"]);
@@ -2742,7 +2768,7 @@ fn serve(w: &World, who: &str) -> (std::process::Child, String) {
 #[test]
 fn the_inbox_records_the_same_events_as_the_cli() {
     let w = World::new("serve");
-    let (out, _) = w.cv_ok(&[
+    w.cv_ok(&[
         "task",
         "decide",
         "PAY §7: tariff",
@@ -2755,8 +2781,8 @@ fn the_inbox_records_the_same_events_as_the_cli() {
         "--from",
         "orchestrator:x",
     ]);
-    let d = opened_task_id(&out);
-    let (out, _) = w.cv_ok(&[
+    let d = task_id_titled(&w, "PAY §7: tariff");
+    w.cv_ok(&[
         "task",
         "open",
         "push dregg-infra",
@@ -2765,7 +2791,7 @@ fn the_inbox_records_the_same_events_as_the_cli() {
         "--from",
         "orchestrator:x",
     ]);
-    let a = opened_task_id(&out);
+    let a = task_id_titled(&w, "push dregg-infra");
     let (mut child, addr) = serve(&w, "ember");
     let result = std::panic::catch_unwind(|| {
         // The page itself is served inline; it names its own origin story.
@@ -3305,7 +3331,7 @@ fn task_provisional_resolution_veto_and_confirm() {
         "--from",
         "orchestrator:o",
     ]);
-    let d = opened_task_id(&out);
+    let d = task_id_titled(&w, "build base: /tank or NVMe");
     assert!(
         out.contains("resolved") && out.contains("provisionally on the default"),
         "{out}"
@@ -3321,13 +3347,24 @@ fn task_provisional_resolution_veto_and_confirm() {
     );
     assert!(out.contains("cv task resolve <id> --confirm --from ember"), "{out}");
     let (json, _) = w.cv_ok(&["task", "inbox", "ember", "--json"]);
-    assert!(json.contains("\"provisional\""), "{json}");
+    let inbox: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(inbox["counts"]["provisional"], 1, "{json}");
+    let item = inbox["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == d.as_str());
+    assert_eq!(
+        item.map(|i| &i["reason"]),
+        Some(&serde_json::json!("provisional")),
+        "{json}"
+    );
     let (out, _) = w.cv_ok(&["task", "show", &d]);
     assert!(out.contains("[resolved]") && out.contains("PROVISIONAL"), "{out}");
     assert!(out.contains("veto?:    cv task resolve"), "{out}");
 
     // The poser cannot pick a non-default provisionally; a third party cannot override.
-    let (out, _) = w.cv_ok(&[
+    w.cv_ok(&[
         "task",
         "decide",
         "Q2",
@@ -3340,7 +3377,7 @@ fn task_provisional_resolution_veto_and_confirm() {
         "--from",
         "orchestrator:o",
     ]);
-    let d2 = opened_task_id(&out);
+    let d2 = task_id_titled(&w, "Q2");
     let (_, err) = w.cv_fails(&[
         "task",
         "resolve",
@@ -3385,17 +3422,28 @@ fn task_provisional_resolution_veto_and_confirm() {
     assert_eq!(t["decision"]["resolution"]["choice"], "move to NVMe");
     assert!(t["decision"]["resolution"].get("provisional").is_none(), "{json}");
     assert_eq!(t["decision"]["superseded_provisional"]["provisional"], true, "{json}");
-    let (out, _) = w.cv_ok(&["task", "inbox", "ember"]);
+    // Vetoed, it is no longer made for ember: not an open item, counted as closed.
+    let (json, _) = w.cv_ok(&["task", "inbox", "ember", "--json"]);
+    let inbox: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(inbox["counts"]["provisional"], 0, "{json}");
     assert!(
-        out.contains("(inbox empty for ember)") || !out.contains("made for you"),
-        "{out}"
+        inbox["items"].as_array().unwrap().iter().all(|i| i["id"] != d.as_str()),
+        "{json}"
+    );
+    assert!(
+        inbox["closed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["id"] == d.as_str()),
+        "{json}"
     );
     // A second answer is refused as it always was.
     let (_, err) = w.cv_fails(&["task", "resolve", &d, "--accept-default", "--from", "ember"]);
     assert!(err.contains("cannot apply resolved"), "{err}");
 
     // Confirm through the page.
-    let (out, _) = w.cv_ok(&[
+    w.cv_ok(&[
         "task",
         "decide",
         "Q3",
@@ -3409,7 +3457,7 @@ fn task_provisional_resolution_veto_and_confirm() {
         "--from",
         "orchestrator:o",
     ]);
-    let d3 = opened_task_id(&out);
+    let d3 = task_id_titled(&w, "Q3");
     let (mut child, addr) = serve(&w, "ember");
     let result = std::panic::catch_unwind(|| {
         let (status, body) = http(&addr, "GET", "/api/inbox?who=ember", None);
