@@ -17,7 +17,8 @@
 //! Out-of-order head timestamps can falsely suggest a fork, costing a sibling-directory scan,
 //! candidate head reads, and whole-file searches for candidates requiring a boundary match.
 
-use crate::harness::store::{document::Fields, jsonl};
+use super::record::Facts;
+use crate::harness::store::jsonl;
 use crate::stream::Flow;
 use chrono::{DateTime, Utc};
 #[cfg(test)]
@@ -42,8 +43,8 @@ struct Head {
     began: Option<DateTime<Utc>>,
 }
 
-/// The head through the record codec's byte source: at most [`HEAD_LINES`] physical lines,
-/// counting blank and rejected ones, reading only the four fields that recognize a copy.
+/// The head through the record codec's byte source and its typed [`Facts`]: at most
+/// [`HEAD_LINES`] physical lines, counting blank and rejected ones.
 fn head(path: &Path) -> Option<Head> {
     let read = jsonl::Read::open(path).ok()?;
     let mut newest: Option<DateTime<Utc>> = None;
@@ -51,20 +52,12 @@ fn head(path: &Path) -> Option<Head> {
     let mut lines = 0;
     read.lines(0, |line| {
         lines += 1;
-        if let Some(fields) = line
-            .view
-            .map(|view| Fields::parse(view, &["uuid", "timestamp", "subtype", "parentUuid"]))
-            .transpose()?
-            .flatten()
-        {
-            let at = fields.string("timestamp")?.as_deref().and_then(super::parse_ts);
-            if let Some(uuid) = fields.string("uuid")? {
-                let boundary = fields.string("subtype")?.as_deref() == Some("compact_boundary")
-                    && fields
-                        .get("parentUuid")
-                        .map(|v| v.is_null())
-                        .transpose()?
-                        .unwrap_or(true);
+        if let Some(view) = line.view {
+            let (facts, _) = Facts::parse(view)?;
+            let at = facts.timestamp.as_deref().and_then(super::parse_ts);
+            if let Some(uuid) = facts.uuid {
+                // A head boundary has no string parent, as decoded by `Facts::parent`.
+                let boundary = facts.subtype.as_deref() == Some("compact_boundary") && facts.parent.flatten().is_none();
                 let older = matches!((at, newest), (Some(a), Some(n)) if a < n);
                 found = Some(Head {
                     uuid,

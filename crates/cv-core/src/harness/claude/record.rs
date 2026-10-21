@@ -220,7 +220,8 @@ pub(crate) const META_TYPES: &[&str] = &[
     "api-request-blob",
 ];
 
-/// The keys [`Demand::Facts`] selects: what prune and rewind decide on, never a body.
+/// The keys [`Demand::Facts`] selects: what prune, rewind and fork recognition decide on, never a
+/// body.
 const FACT_KEYS: &[&str] = &[
     "type",
     "subtype",
@@ -228,6 +229,7 @@ const FACT_KEYS: &[&str] = &[
     "isApiErrorMessage",
     "sessionId",
     "cwd",
+    "timestamp",
     "uuid",
     "parentUuid",
     "logicalParentUuid",
@@ -248,7 +250,8 @@ pub(crate) struct FactBlock {
     pub tool_use_id: Option<String>,
 }
 
-/// A record's decision facts, typed: what `cv prune` and `cv rewind` select on. Strings are
+/// A record's decision facts, typed: what `cv prune` and `cv rewind` select on, and what a fork's
+/// head is recognized by ([`super::fork`]). Strings are
 /// `Some` only when the record holds a string there; flags are `true` only for a JSON `true`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Facts {
@@ -259,6 +262,8 @@ pub(crate) struct Facts {
     pub api_error: bool,
     pub session_id: Option<String>,
     pub cwd: Option<String>,
+    /// `timestamp`, as recorded.
+    pub timestamp: Option<String>,
     pub uuid: Option<String>,
     /// `parentUuid`: `None` when the key is absent, `Some(None)` when it is null or not a string.
     pub parent: Option<Option<String>>,
@@ -333,6 +338,7 @@ impl Facts {
             api_error: flag("isApiErrorMessage")?,
             session_id: top.string("sessionId")?,
             cwd: top.string("cwd")?,
+            timestamp: top.string("timestamp")?,
             uuid: top.string("uuid")?,
             parent: match top.get("parentUuid") {
                 Some(_) => Some(top.string("parentUuid")?),
