@@ -243,15 +243,7 @@ mod tests {
         session.messages = vec![result, orphan, command, signed, carrier, call];
         for model in [None, Some("late-default".into())] {
             session.model = model;
-            for target in [
-                Harness::Claude,
-                Harness::Codex,
-                Harness::Grok,
-                Harness::Gemini,
-                Harness::Qwen,
-                Harness::LmStudio,
-                Harness::OpenCode,
-            ] {
+            for target in Harness::ALL {
                 for thinking in [ThinkingMode::Native, ThinkingMode::Text, ThinkingMode::Drop] {
                     assert_eq!(
                         source_features(target, thinking, &session)?,
