@@ -11,6 +11,8 @@ pub fn for_each_lossy_utf8_chunk(input: impl Read, f: impl FnMut(&str) -> io::Re
 
 /// Write one quoted JSON string without retaining its complete decoded or escaped bytes.
 pub fn write_json_string(out: &mut impl Write, input: impl Read) -> io::Result<()> {
+    // Each chunk serializes as a string. Suppress its quotes so the escaped fragments
+    // compose inside the single pair written around the complete stream.
     struct Fragment;
     impl Formatter for Fragment {
         fn begin_string<W: ?Sized + Write>(&mut self, _: &mut W) -> io::Result<()> {

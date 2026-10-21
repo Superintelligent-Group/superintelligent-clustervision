@@ -115,6 +115,8 @@ pub fn write_json_array(
 }
 
 /// [`write_json_array`] with the pretty and archive options; returns the recorded [`Prefix`].
+/// Stage output before publishing: a missing field or mismatched total can fail after envelope
+/// bytes have already been written to out.
 pub fn write_frames(
     out: &mut impl Write,
     envelope: &impl Serialize,
@@ -297,6 +299,8 @@ impl<F: Formatter> Formatter for &mut Shell<'_, '_, F> {
     }
     fn write_char_escape<W: ?Sized + Write>(&mut self, out: &mut W, escape: CharEscape) -> io::Result<()> {
         if self.array.reading_key {
+            // Match decoded key spelling, including escaped quotes; dropping an escape
+            // could alias a different key to the requested array field.
             let character = match &escape {
                 CharEscape::Quote => '"',
                 CharEscape::ReverseSolidus => '\\',

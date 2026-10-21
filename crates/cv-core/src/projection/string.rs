@@ -5,7 +5,8 @@ use anyhow::Result;
 
 /// Visit decoded chunks until `fold` returns true. Returns false only for a nonstring. Only the
 /// [`Stop`](crate::stream::Stop) it raises is intercepted; source/decoder failures remain errors. Callers keep
-/// reducer state staged until the enclosing with_view succeeds.
+/// reducer state staged until the enclosing with_view succeeds. The bool means "was a string",
+/// including early stops; callers track completion in their own reducer state.
 pub(crate) fn string_until(view: JsonView<'_>, mut fold: impl FnMut(&str) -> bool) -> Result<bool> {
     let stop = |chunk: &str| {
         if fold(chunk) {
