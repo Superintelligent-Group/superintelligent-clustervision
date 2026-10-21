@@ -41,6 +41,8 @@ impl SourceText {
     pub(crate) fn json(&self) -> Json {
         Json::Source(self.range.clone())
     }
+    /// Upper bound for the retained decoded body: the range includes its two JSON quotes;
+    /// the skipped prefix counts decoded bytes. Escapes may make the actual body shorter.
     pub fn raw_len(&self) -> usize {
         usize::try_from(self.range.len().saturating_sub(2))
             .unwrap_or(usize::MAX)
