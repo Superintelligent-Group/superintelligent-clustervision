@@ -153,7 +153,7 @@ fn open_or_create(dir: &Path) -> Result<(Index, Fields)> {
     // No `meta.json` → nothing here is an index (a fresh dir, or stray leftovers from a failed
     // create): safe to start clean.
     if !dir.join("meta.json").exists() {
-        let _ = std::fs::remove_dir_all(dir);
+        std::fs::remove_dir_all(dir).with_context(|| format!("clearing incomplete index at {}", dir.display()))?;
         std::fs::create_dir_all(dir).with_context(|| format!("recreating tantivy dir {}", dir.display()))?;
         let index = Index::create_in_dir(dir, build_schema())
             .with_context(|| format!("creating tantivy index in {}", dir.display()))?;
@@ -552,10 +552,8 @@ fn report(swept: Swept, rebuild: bool, strict: bool) -> Result<Indexed> {
             "{unread} session(s) could not be read and stay out of the index until a later pass (first: {} ({}): {})",
             first.id, first.harness, first.reason
         );
-        anyhow::ensure!(
-            !strict && swept.changed + swept.unchanged != 0,
-            "index incomplete: {summary}"
-        );
+        anyhow::ensure!(!strict, "index incomplete: {summary}");
+        anyhow::ensure!(swept.changed + swept.unchanged != 0, "index incomplete: {summary}");
         eprintln!("cv: warning: {summary}");
     }
     Ok(Indexed {
@@ -835,12 +833,18 @@ fn sweep_refs(dir: &Path, refs: &[cv_core::SessionRef], rebuild: bool, subagents
     };
     // Readers can decide an unchanged sweep without starting Tantivy worker threads. If a
     // different writer publishes while we plan, retry against one stable committed snapshot.
+    let mut retries = 0;
     let (plan, planned_meta) = loop {
         let before = std::fs::read(dir.join("meta.json"))?;
         let plan = planner.plan()?;
         let compact = compaction_candidates(dir, &index)?.is_some();
         if std::fs::read(dir.join("meta.json"))? != before {
-            continue;
+            retries += 1;
+            if retries < 3 {
+                continue;
+            }
+            // A busy index falls back to planning under the writer lock below.
+            break (plan, before);
         }
         if !rebuild && plan.jobs.is_empty() && plan.missing.is_empty() && !compact {
             return Ok(Swept {
@@ -923,6 +927,7 @@ struct SweepPlanner<'a> {
 }
 
 impl SweepPlanner<'_> {
+    // The borrow keeps the writer lock alive while we validate or replace the plan.
     fn under_writer(&self, plan: SweepPlan, planned_meta: &[u8], _writer: &Writer) -> Result<SweepPlan> {
         if std::fs::read(self.dir.join("meta.json"))? != planned_meta {
             self.plan()
