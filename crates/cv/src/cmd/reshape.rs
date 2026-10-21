@@ -92,7 +92,7 @@ pub(crate) fn cmd_prune(args: PruneArgs<'_>) -> Result<()> {
     let want = parse_harness(&harness)?;
     let (r, _adapter) = crate::cmd::distill::resolve_source(id, want)?;
 
-    if r.harness != Harness::Claude {
+    if !cv_core::harness::has_derived_copies(r.harness) {
         bail!(
             "cv prune currently supports Claude Code sessions only (got {})",
             r.harness
@@ -272,7 +272,7 @@ pub(crate) fn cmd_rewind(args: RewindArgs<'_>) -> Result<()> {
         Some(a) => crate::cmd::view::resolve_subagent(&r, a)?.session,
         None => r,
     };
-    if r.harness != Harness::Claude {
+    if !cv_core::harness::has_derived_copies(r.harness) {
         return usage(format!(
             "cv rewind currently supports Claude Code sessions only (got {}) — `cv splice {}:..N` composes a \
              prefix of any harness",
@@ -295,14 +295,14 @@ pub(crate) fn cmd_rewind(args: RewindArgs<'_>) -> Result<()> {
         },
     )?;
     let cwd = res.cwd.as_deref().map(std::path::Path::new);
-    let resume = crate::cmd::port::resume_lines(Harness::Claude, &res.new_id, cwd);
+    let resume = crate::cmd::port::resume_lines(r.harness, &res.new_id, cwd);
     // Claude Code finds a session by its project dir; a rewind written anywhere else must be moved
     // there first. (`--out` defaults to it, so this only fires for an explicit elsewhere.)
     let home = cv_core::rewind::project_dir(&r.path);
     let relocate = res.new_path.parent().is_some_and(|d| d != home);
 
     let mut v = serde_json::to_value(&res)?;
-    v["harness"] = "claude".into();
+    v["harness"] = r.harness.as_str().into();
     v["resume"] = serde_json::json!(resume);
     dry_run_nulls(&mut v, pinned, &["new_path", "provenance_path"], &["new_id", "resume"]);
 

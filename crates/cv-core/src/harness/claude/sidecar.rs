@@ -46,6 +46,24 @@ pub fn agent_meta(path: &Path) -> serde_json::Map<String, Value> {
     meta
 }
 
+/// For a Claude sub-agent transcript `s` read by its path: the launch description and agent type
+/// its `<stem>.meta.json` sidecar records, copied into the bag where the parse left them unset (a
+/// sub-agent reached through its parent's forest has them from there instead). Any other
+/// harness's session is left as it is.
+pub fn label_from_meta(s: &mut crate::ir::Session, transcript: &Path) {
+    if s.harness != crate::ir::Harness::Claude {
+        return;
+    }
+    let meta = read_or_default(&transcript.with_extension("meta.json"));
+    for (k, key) in [("description", "agent_description"), ("agentType", "agent_type")] {
+        if let Some(v) = meta.get(k).and_then(Value::as_str) {
+            s.harness_extra_mut(crate::ir::Harness::Claude)
+                .entry(key)
+                .or_insert_with(|| Value::from(v));
+        }
+    }
+}
+
 /// `<dir>/<stem>/` for a transcript at `<dir>/<stem>.jsonl`: the session's sidecar root.
 pub fn session_dir(transcript: &Path) -> Option<PathBuf> {
     let stem = transcript.file_stem()?.to_str()?;

@@ -776,6 +776,23 @@ pub fn all() -> Vec<Box<dyn Adapter>> {
     ORDER.into_iter().filter_map(for_harness).collect()
 }
 
+/// Whether `h`'s adapter declares derived copies ([`Adapter::identity`]): what `cv prune`,
+/// `cv rewind`, `cv adopt` and a distilled agent write.
+pub fn has_derived_copies(h: Harness) -> bool {
+    rootless(h).is_some_and(|a| a.identity().is_some())
+}
+
+/// The harness a derived session is written into when nothing names one (`cv distill --session |
+/// --agent-of`, `cv adopt`, a bare transcript path): the one adapter that declares derived copies.
+/// A second such adapter makes this a choice for a flag; `one_derived_host` fails until then.
+pub fn derived_host() -> Harness {
+    Harness::ALL
+        .iter()
+        .copied()
+        .find(|h| has_derived_copies(*h))
+        .expect("the Claude adapter, always built, declares derived copies")
+}
+
 /// The adapter for `h` with no roots, `None` when it is not registered in this build. It
 /// discovers nothing; a shared module asks it the facts that do not depend on where the store
 /// lives (the [`Adapter`] methods after [`Adapter::resume`]) without detecting the store.
@@ -971,6 +988,13 @@ mod tests {
                 assert_eq!(adapter.harness(), h);
             }
         }
+    }
+
+    #[test]
+    fn one_derived_host() {
+        // A second adapter with derived copies makes `derived_host` a choice the CLI must offer.
+        let hosts: Vec<Harness> = Harness::ALL.into_iter().filter(|h| has_derived_copies(*h)).collect();
+        assert_eq!(hosts, [derived_host()]);
     }
 
     #[test]

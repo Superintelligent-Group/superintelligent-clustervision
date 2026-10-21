@@ -70,7 +70,7 @@ pub(crate) fn resolve_source(
 ) -> Result<(SessionRef, Box<dyn cv_core::harness::Adapter>)> {
     let p = Path::new(spec);
     let resolved = if p.is_file() {
-        let h = harness.unwrap_or(Harness::Claude);
+        let h = harness.unwrap_or_else(cv_core::harness::derived_host);
         let a = cv_core::harness::for_harness(h).with_context(|| format!("no adapter for {h}"))?;
         (SessionRef::from_path(p, h), a)
     } else {
@@ -79,8 +79,8 @@ pub(crate) fn resolve_source(
     Ok(resolved)
 }
 
-/// Resolve a session spec: an existing transcript path (read as Claude unless `--harness` says
-/// otherwise), else an id / `harness:id` / agent id through the normal resolver.
+/// Resolve a session spec: an existing transcript path (read as the derived host's, Claude's,
+/// unless `--harness` says otherwise), else an id / `harness:id` / agent id through the normal resolver.
 #[cfg(test)]
 fn load(spec: &str, harness: Option<Harness>) -> Result<(Session, PathBuf)> {
     let (r, adapter) = resolve_source(spec, harness)?;
@@ -120,15 +120,8 @@ fn load_findings(spec: &str) -> Result<Session> {
 fn enrich_path_meta(s: &mut Session, p: &Path) {
     // A sub-agent transcript read by path: its label lives in the sibling `<stem>.meta.json`
     // (the resolver path reads it through the parent's sub-agent tree instead).
-    if s.harness == Harness::Claude && p.is_file() {
-        let meta = sidecar::read_or_default(&p.with_extension("meta.json"));
-        for (k, key) in [("description", "agent_description"), ("agentType", "agent_type")] {
-            if let Some(v) = meta.get(k).and_then(Value::as_str) {
-                s.harness_extra_mut(Harness::Claude)
-                    .entry(key)
-                    .or_insert_with(|| json!(v));
-            }
-        }
+    if p.is_file() {
+        sidecar::label_from_meta(s, p);
     }
 }
 
@@ -182,7 +175,7 @@ pub(crate) fn emit_to(
         Target::Session { cwd, out } => {
             let out_dir = match out {
                 Some(d) => d.clone(),
-                None => cv_core::harness::for_harness(Harness::Claude)
+                None => cv_core::harness::for_harness(cv_core::harness::derived_host())
                     .and_then(|a| a.root())
                     .context("Claude Code's store was not found; pass --out <dir>")?,
             };
@@ -261,7 +254,7 @@ fn agent_meta(source_path: &Path, description: &str, model: Option<&str>) -> Val
 /// read-back (anything the IR carried that the file does not comes back as a warning) and the
 /// resumability rules ([`cv_core::harness::claude::verify_claude_resumable`], an error — it means a bug in cv).
 fn emit_resumable(ir: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<cv_core::EmitResult> {
-    let (res, warnings) = cv_core::emit::emit_verified(ir, Harness::Claude, out_dir, opts)?;
+    let (res, warnings) = cv_core::emit::emit_verified(ir, cv_core::harness::derived_host(), out_dir, opts)?;
     for w in &warnings {
         eprintln!("  ⚠ lossy: {w}");
     }
@@ -272,9 +265,9 @@ fn emit_resumable(ir: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<cv
 fn root_transcript(root: &str) -> Result<SessionRef> {
     let p = Path::new(root);
     let r = if p.is_file() {
-        SessionRef::from_path(p, Harness::Claude)
+        SessionRef::from_path(p, cv_core::harness::derived_host())
     } else {
-        resolve(root, Some(Harness::Claude))?.0
+        resolve(root, Some(cv_core::harness::derived_host()))?.0
     };
     if r.id.starts_with("agent-") {
         return usage(format!(

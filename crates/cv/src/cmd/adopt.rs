@@ -9,7 +9,7 @@ use crate::util::{fmt_local, home_rel, report, short_id, usage};
 use anyhow::{Context, Result};
 use cv_core::harness::claude::adopt::{self, AgentFile, Plan, SessionFile};
 use cv_core::harness::claude::sidecar;
-use cv_core::ir::{human_bytes, Harness};
+use cv_core::ir::human_bytes;
 use serde_json::json;
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -17,7 +17,7 @@ use std::path::PathBuf;
 /// Every Claude root cv reads (the store plus `CLUSTERVISION_CLAUDE_ROOTS` / `claude-roots`
 /// entries): the fleet lookup spans all of them; named here only in a miss's message.
 fn roots() -> Result<Vec<PathBuf>> {
-    let roots = cv_core::harness::for_harness(Harness::Claude)
+    let roots = cv_core::harness::for_harness(cv_core::harness::derived_host())
         .map(|a| a.roots())
         .unwrap_or_default();
     if roots.is_empty() {
