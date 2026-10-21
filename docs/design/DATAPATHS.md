@@ -66,7 +66,7 @@ whose purpose is writing stores or sessions (`index`, hook installation/removal,
 
 This describes implementation, not a blanket performance claim. Required navigation state and
 demanded output are not themselves avoidable bloat. Shared under every row since 0.17: one line
-reader (`store::jsonl::for_each_line`, mapped or positioned; mapped windows start at 8 MiB and
+reader (`store::jsonl::Read`, mapped or positioned, driven by `jsonl::drive` for transcripts; mapped windows start at 8 MiB and
 grow to hold a longer line), one validator
 (`store::json::validate_value`), one string-body codec, one checked span resolver (`lazy`), one
 JSON-whitespace trim rule, and one SQLite cell reader (`store::sqlite::Cells`).
@@ -74,7 +74,7 @@ JSON-whitespace trim rule, and one SQLite cell reader (`store::sqlite::Cells`).
 | Store / format | Current traversal and retained state | Remaining costs / limits |
 |---|---|---|
 | Claude JSONL | One record codec (`claude/record.rs`, see [`CODEC.md`](CODEC.md)) over the shared JSONL reader in both builds; lazy text/arguments, facts, usage, discovery and fork heads are demands on it; checkpoints | Complete-mode carriers and metadata, rich `toolUseResult` sidecars and array tool results under 64 KiB remain owned |
-| Codex JSONL | one record codec over `jsonl::for_each_line` (mapped or positioned); bounded authority prepass; demand picks spans/inline/heads, never the decoder | Full/unknown metadata remains owned, and discovery retains its small-file full-scan / sampled head-tail policy |
+| Codex JSONL | one record codec over `jsonl::drive` (mapped or positioned); bounded authority prepass; demand picks spans/inline/heads, never the decoder | Full/unknown metadata remains owned, and discovery retains its small-file full-scan / sampled head-tail policy |
 | Codex legacy JSON / zstd | Legacy documents feed the same codec item by item; compressed modern JSONL decodes once per read into one arena read by the same line source; `cv index` reads discovery's arena, within a 2 GiB decoded window | Demanded rich fallback fields; decoded/staged disk extent; no general compressed incremental marks |
 | Gemini legacy JSON | Checked selected string/canonical/composite results and formatted thoughts; native mmap or portable range projections | Full/complete modes and rich display extras still own required payloads |
 | Gemini JSONL | Native mmap and portable checked-range replay retain compact order/keys; selected composite bodies use one session arena | Must scan complete history for replacements/rewinds; required metadata and rich display extras remain owned |
@@ -133,10 +133,10 @@ Key sources: `cv/src/cmd/view.rs`, `cv-core/src/{api,affordance,watch,lazy,strea
 
 A listing reports what the metadata read already produced and nothing it would have to read more
 for. A JSONL adapter whose discovery walks every record head anyway (Claude, and the adapters that
-read every turn: Cursor, Cline, Devin, Gemini, Qwen, LM Studio, OpenClaw, OpenCode's database,
+read every turn: Cursor, Cline, Devin, Gemini, LM Studio, OpenClaw, OpenCode's database,
 OpenSession, the exports) counts for free and reports `Some(n)`, so `Some(0)` is a session with no
 turns. An adapter for which counting means decoding message bodies, opening a second store or
-reading files the listing does not need (Codex, Grok, Kimi, Kimi Code, Zed, Hermes, Goose,
+reading files the listing does not need (Codex, Grok, Kimi, Kimi Code, Qwen, Zed, Hermes, Goose,
 Continue, OpenCode's JSON tree) reports `None`, "not counted", until a full
 read or `cv index` certifies the number; the catalog keeps a certified count across metadata
 refreshes that leave the source unchanged and drops it when the source changes. `--json` emits
@@ -222,8 +222,8 @@ Audited against `git log v0.17.0..HEAD` on 2026-10-21; a closure below names its
   Codex/Grok/Kimi/Kimi Code counts (`08a8dfb8`, `991c617e`, `efe87b52`, `ba6616ed`), metadata-only
   Hermes/Goose/Zed listings (`734af650`, `2ab873aa`, `80295ea7`), and Continue/OpenCode JSON-tree
   count deferral (`a200e811`, `d358ff0e`) landed. Certified-count reuse is `93faa442`.
-  **Open:** Qwen discovery still replays records into messages to count; Cursor CLI counts to
-  exclude empty stores. Removing these reads needs to preserve inclusion and exact metadata.
+  Qwen discovery reads facts only once presence and the first prompt are known (K1). **Open:**
+  Cursor CLI counts to exclude empty stores. Removing these reads needs to preserve inclusion and exact metadata.
   Shared selections landed for OpenClaw/Hermes/Qwen tasks/Goose/exports (`62f0ccda`, `0a6a3b22`,
   `7475e978`, `20980e64`, `646b8fb6`); native allocations and validation still cost work.
 - **Three message windowings, open.** `api::WindowSink`, the text renderer's window pass in

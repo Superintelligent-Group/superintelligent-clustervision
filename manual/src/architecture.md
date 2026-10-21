@@ -141,14 +141,14 @@ pub trait Adapter: Send + Sync {
 
 `discover` + `stream` are the read path. A whole-session parse is not a fifth method:
 `adapter.parse(&r)` is `stream::collect` over `stream`, so the streaming and the materializing
-readers cannot diverge. The trait's other methods all have defaults: `try_stream`/`try_resume`
-(a read that may continue from a verified checkpoint), `dependencies` (the side files a read of
+readers cannot diverge. The trait's other methods all have defaults: `try_stream`, `transcript`
+(a read whole, from a verified checkpoint, or as an append-only file's past prefix), `dependencies` (the side files a read of
 one session consults, so freshness can watch them), `store_affordances` (plans, goals and
 schedules that live only in a side store) and `copied_before` (the turns a fork copied from its
 source). The shared pieces an adapter imports instead of retyping live beside the trait:
 `harness/wire/{anthropic,openai}` (the two content shapes most stores persist, read into blocks
-and written back) and `harness/store` (`jsonl::for_each_line`, the one line reader in both
-builds; `json::validate_value`; `sqlite::Cells` and `open_ro`, which opens every database
+and written back) and `harness/store` (`jsonl::Read`, the one line reader in both builds, and
+`jsonl::drive`, the one transcript lifecycle over it; `json::validate_value`; `sqlite::Cells` and `open_ro`, which opens every database
 read-only; `write_jsonl`, `xdg_data_dir`). Every family reads through one record codec over one
 byte source; `docs/design/CODEC.md` is the rule.
 

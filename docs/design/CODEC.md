@@ -6,7 +6,7 @@ those paths agree. The rule now: **a wire format has one decoder, parameterized 
 build differs only in its byte source.** Discovery must share that classification too; remaining
 count-only scans are tracked in [`DATAPATHS.md`](DATAPATHS.md).
 
-**Byte source.** `store::jsonl::for_each_line(source, file, from, to, visit)` yields each
+**Byte source.** A captured `store::jsonl::Read` (`lines`, `prefix`, `snapshot`) yields each
 physical line once as a `Line { at, end, complete, view }`, with `view: Option<JsonView>` (None
 for blank, non-UTF-8 or rejected lines). Mapped builds borrow lines from successive 8 MiB windows (grown for a longer line); positioned
 builds (and a failed mapping) read lines up to 64 KiB into one buffer and leave a giant line in
@@ -28,8 +28,20 @@ over `INLINE_MAX` stays in the source: primary transcript text uses `Span` in bo
 independent files, cells and decoded backing use checked `Text::Source`. Large tool arguments
 become `Json::Source`. Lean, facts, usage, rich and
 complete are which fields get resolved, never which code runs. Discovery, fork heads and
-prefix counts are demands on the same reader. The driver rechecks source identity after a
-record that published a source descriptor and at completion; the identity is
+prefix counts are demands on the same reader.
+
+**One lifecycle.** A JSONL transcript is `Adapter::transcript(r, demand, Start, sink)`
+(`Whole`, `Checkpoint`, `Prefix(len)`), read by `jsonl::drive(read, from, codec, sink)`. The
+adapter owns only its `Codec { record, settled, demand, session, state, finish, VERSION }`;
+the driver owns the rest: declining a start past EOF or a checkpoint of another codec version
+or demand (`jsonl::restore`), counting rejected lines, offering a checkpoint after every
+finished line the codec is settled on, the guard, and the final check after held output. Kimi's
+rotated segments keep their own loop (its checkpoint sits at a line's start) but use the same
+guard and stamp. Who checks the backing, and when, has one answer each: `stream::Guard` after a
+callback slower than `SLOW_CALLBACK`, after the session metadata and after a checkpoint; the
+line pass once per 8 MiB window; `Read::check` at EOF. No reader calls `check_backing`.
+The reader rechecks source identity after a record that published a source descriptor and at
+completion; the identity is
 `source::FileId`, and a `.jsonl` that grew under the read is admitted by content
 (`FileId::admits`: same inode, at least as long, sampled prefix unchanged), with the trailing
 partial line held back. Every span a reader hands out resolves through one checked resolver in
@@ -63,7 +75,7 @@ one sorted `sha256  command  session  demand` line per `ls`/`show`/`export`/`sea
 demand in both builds. Two runs of one binary print equal sets whatever `--scratch` is called (the path is masked); a commit that changes output
 pastes the lines it moved into its message. Results are never committed.
 
-**Byte sources by family.** JSONL (Claude, the OpenAI family, Gemini's jsonl era): `for_each_line`.
+**Byte sources by family.** JSONL (Claude, the OpenAI family, Gemini's jsonl era): `jsonl::Read`.
 JSON documents (Gemini's document era, cline, roo, cline_sdk, lmstudio, opensession, the exports):
 `JsonSource::read_document`/`read_archive`, with an owned view (`(&Value).into()`) for string entry
 points. SQLite stores (opencode, cursor, devin, goose, zed, openclaw, hermes): `store::sqlite::Cells`,
