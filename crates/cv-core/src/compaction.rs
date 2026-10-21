@@ -95,6 +95,11 @@ impl CompactionSink {
         }
     }
 
+    pub(crate) fn with_source(mut self, path: &std::path::Path) -> Self {
+        self.resolver = Some(crate::Resolver::new(Some(path.to_owned())));
+        self
+    }
+
     /// Finish a scan, rejecting partial results when a demanded summary failed.
     pub fn into_boundaries(self) -> anyhow::Result<Vec<Compaction>> {
         match self.error {

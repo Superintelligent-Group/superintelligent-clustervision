@@ -492,27 +492,14 @@ fn session_events(harness: &str, id: &str, query: &str) -> (u16, Value) {
 /// context it can no longer see. `pre_compaction_span` is the `[start, boundary)` range that was
 /// compacted away, in the same numbering `/messages` uses.
 fn compactions(harness: &str, id: &str) -> (u16, Value) {
-    let (r, _) = match lookup(harness, id) {
+    let (r, adapter) = match lookup(harness, id) {
         Ok(x) => x,
         Err(e) => return e,
     };
-    let boundaries = match crate::compaction::detect(&r, true) {
-        Ok(b) => b,
-        Err(e) => return err(500, &format!("compaction scan failed: {e:#}")),
-    };
-    let out: Vec<Value> = (0..boundaries.len())
-        .map(|n| {
-            let mut v = crate::compaction::row(&boundaries, n);
-            if let Some(obj) = v.as_object_mut() {
-                // An addition for the dashboard, never a rename: the CLI's keys stay the CLI's.
-                obj.insert("headline".into(), json!(boundaries[n].headline(n + 1)));
-            }
-            v
-        })
-        .collect();
-    // A bare array: a list with nothing beside its rows is bare; one that carries warnings is an
-    // object naming both (`tasks`, `events`, `inbox`).
-    ok(json!(out))
+    match read::compactions(read::shared(), adapter.as_ref(), &r) {
+        Ok(value) => ok(value),
+        Err(e) => err(500, &format!("compaction scan failed: {e:#}")),
+    }
 }
 
 /// `GET /api/touched?path=&edits_only=` — sessions whose tool events touched a file (exact or

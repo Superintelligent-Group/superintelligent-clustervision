@@ -206,6 +206,11 @@ impl std::hash::Hash for Entry {
 /// cursors (`events` schema, task log, watch cursor) version a byte layout, not an interpretation.
 pub const VERSION: u32 = 6;
 
+/// Version identity for non-Record read state; keep the same interpretation authority.
+pub(crate) fn consumer_version(consumer: impl std::fmt::Display) -> String {
+    format!("v{VERSION}/{consumer}")
+}
+
 /// Exact auxiliary records, not a content digest: the inventory a pass captured before reading
 /// (`entries`) and, once the pass completed, every path it read (`reads`; `None` is a before-pass
 /// inventory, not a complete read set). Each is the JSON its one serializer wrote, kept as text:

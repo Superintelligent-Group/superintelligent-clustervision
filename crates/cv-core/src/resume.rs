@@ -71,7 +71,7 @@ impl MarkHead {
 /// bumps one of those. The adapter's codec version rides in the checkpoint itself
 /// ([`crate::harness::store::jsonl::Codec::VERSION`]), so a mark of another codec is declined.
 pub fn version(adapter: &dyn Adapter, consumer: &str) -> String {
-    format!("v{}/{}/{consumer}", crate::source::VERSION, adapter.harness().as_str())
+    crate::source::consumer_version(format_args!("{}/{consumer}", adapter.harness().as_str()))
 }
 
 /// A session and its new mark (`None`: it has none any more), for [`update`].

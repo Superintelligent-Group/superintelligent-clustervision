@@ -235,48 +235,29 @@ fn verify(r: &SessionRef, primary: &std::path::Path, before: &Baseline, sink: &W
     Ok(())
 }
 
-pub(super) fn head(cache: &Cache, adapter: &dyn Adapter, r: &SessionRef) -> Result<Value> {
-    let primary = adapter.resume_source(r);
-    let key = Key::admitted(r, &primary, format!("v{}/api-head1", crate::source::VERSION), false);
+fn value(
+    cache: &Cache,
+    r: &SessionRef,
+    primary: &std::path::Path,
+    consumer: &str,
+    read: impl FnOnce(&mut ReadSet) -> Result<Value>,
+) -> Result<Value> {
+    let key = Key::admitted(r, primary, crate::source::consumer_version(consumer), false);
     if let Some(entry) = key.as_ref().and_then(|key| cache.get(key)) {
-        if fresh(r, &entry.source, &primary) {
+        if fresh(r, &entry.source, primary) {
             if let Payload::Head(value) = entry.payload {
                 return Ok(value);
             }
         } else {
-            cache.remove(key.as_ref().expect("cached head has a key"));
+            cache.remove(key.as_ref().expect("cached value has a key"));
         }
     }
-    let (before, reads) = captured(r, &primary);
-    struct Counter {
-        primary: std::path::PathBuf,
-        total: usize,
-        reads: ReadSet,
-    }
-    impl crate::MessageSink for Counter {
-        fn message(&mut self, message: crate::Message) -> Flow {
-            note_message_sources(&message, &self.primary, &mut self.reads);
-            self.total += 1;
-            Flow::Continue
-        }
-        fn dependency(&mut self, path: &std::path::Path) {
-            self.reads.record(path);
-        }
-    }
-    let mut counter = Counter {
-        primary: primary.clone(),
-        total: 0,
-        reads,
-    };
-    let shell = adapter.try_stream(r, &Demand::LEAN.with_spans(), &mut counter)?;
-    let mut value = session_meta_json(&shell);
-    let map = value.as_object_mut().expect("session metadata is an object");
-    map.insert("total".into(), json!(counter.total));
-    map.insert("extra".into(), Value::Object(shell.extra));
-    let source = before.with_reads(&counter.reads);
+    let (before, mut reads) = captured(r, primary);
+    let value = read(&mut reads)?;
+    let source = before.with_reads(&reads);
     anyhow::ensure!(
-        fresh(r, &source, &primary) && counter.reads.fresh(&mut Probe::default()),
-        "API head source changed before publication"
+        fresh(r, &source, primary) && reads.fresh(&mut Probe::default()),
+        "API source changed before publication"
     );
     if let Some(key) = key.filter(|_| bounded_size(&value).is_some()) {
         cache.insert(Entry {
@@ -287,6 +268,77 @@ pub(super) fn head(cache: &Cache, adapter: &dyn Adapter, r: &SessionRef) -> Resu
         });
     }
     Ok(value)
+}
+
+pub(super) fn head(cache: &Cache, adapter: &dyn Adapter, r: &SessionRef) -> Result<Value> {
+    let primary = adapter.resume_source(r);
+    value(cache, r, &primary, "api-head1", |reads| {
+        struct Counter {
+            primary: std::path::PathBuf,
+            total: usize,
+            reads: ReadSet,
+        }
+        impl crate::MessageSink for Counter {
+            fn message(&mut self, message: crate::Message) -> Flow {
+                note_message_sources(&message, &self.primary, &mut self.reads);
+                self.total += 1;
+                Flow::Continue
+            }
+            fn dependency(&mut self, path: &std::path::Path) {
+                self.reads.record(path);
+            }
+        }
+        let mut counter = Counter {
+            primary: primary.clone(),
+            total: 0,
+            reads: std::mem::take(reads),
+        };
+        let shell = adapter.try_stream(r, &Demand::LEAN.with_spans(), &mut counter)?;
+        let mut value = session_meta_json(&shell);
+        let map = value.as_object_mut().expect("session metadata is an object");
+        map.insert("total".into(), json!(counter.total));
+        map.insert("extra".into(), Value::Object(shell.extra));
+        *reads = counter.reads;
+        Ok(value)
+    })
+}
+
+pub(super) fn compactions(cache: &Cache, adapter: &dyn Adapter, r: &SessionRef) -> Result<Value> {
+    let primary = adapter.resume_source(r);
+    value(cache, r, &primary, "api-compactions1", |reads| {
+        struct Sink<'a> {
+            inner: crate::compaction::CompactionSink,
+            primary: &'a std::path::Path,
+            reads: &'a mut ReadSet,
+        }
+        impl crate::MessageSink for Sink<'_> {
+            fn message(&mut self, m: crate::Message) -> Flow {
+                note_message_sources(&m, self.primary, self.reads);
+                self.inner.message(m)
+            }
+            fn dependency(&mut self, path: &std::path::Path) {
+                self.reads.record(path);
+            }
+        }
+        let mut sink = Sink {
+            inner: crate::compaction::CompactionSink::new(true).with_source(&r.path),
+            primary: &primary,
+            reads,
+        };
+        adapter.try_stream(r, &Demand::FACTS.with_spans(), &mut sink)?;
+        let boundaries = sink.inner.into_boundaries()?;
+        Ok(Value::Array(
+            (0..boundaries.len())
+                .map(|n| {
+                    let mut row = crate::compaction::row(&boundaries, n);
+                    row.as_object_mut()
+                        .expect("compaction row")
+                        .insert("headline".into(), json!(boundaries[n].headline(n + 1)));
+                    row
+                })
+                .collect(),
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -541,6 +593,28 @@ mod tests {
             checked >= 30,
             "expected frozen Claude/Codex/Kimi-Code native JSONL fixtures, found {checked}"
         );
+    }
+
+    #[test]
+    fn compactions_reuse_verified_rows_and_invalidate_on_append() {
+        let world = crate::test_world("api-compaction-cache");
+        let r = fixture(&world, 3);
+        let inner = crate::harness::claude::Claude::with_config_dir(&world.home.join(".claude"));
+        let adapter = Observed::new(&inner);
+        let cache = Cache::default();
+        assert_eq!(compactions(&cache, &adapter, &r).unwrap(), json!([]));
+        let count = adapter.messages.load(Ordering::Relaxed);
+        assert_eq!(compactions(&cache, &adapter, &r).unwrap(), json!([]));
+        assert_eq!(adapter.messages.load(Ordering::Relaxed), count);
+        use std::io::Write as _;
+        writeln!(std::fs::OpenOptions::new().append(true).open(&r.path).unwrap(),
+            r#"{{"type":"system","subtype":"compact_boundary","uuid":"boundary","compactMetadata":{{"trigger":"auto","preTokens":1000}}}}"#).unwrap();
+        let rows = compactions(&cache, &adapter, &r).unwrap();
+        assert_eq!(rows[0]["boundary_msg_idx"], 3);
+        assert!(adapter.messages.load(Ordering::Relaxed) > count);
+        let count = adapter.messages.load(Ordering::Relaxed);
+        assert_eq!(compactions(&cache, &adapter, &r).unwrap(), rows);
+        assert_eq!(adapter.messages.load(Ordering::Relaxed), count);
     }
 
     #[test]
