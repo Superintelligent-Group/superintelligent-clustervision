@@ -49,7 +49,7 @@
         "total_errors": 0
       },
       "lineage": {},
-      "model": "openai/glm-4.7-flash",
+      "model": "glm-4.7-flash",
       "skipped_lines": 0
     },
     {
@@ -92,7 +92,7 @@
         "total_errors": 1
       },
       "lineage": {},
-      "model": "openai/glm-5.3-flash",
+      "model": "glm-5.3-flash",
       "skipped_lines": 0
     },
     {
@@ -135,7 +135,7 @@
         "total_errors": 0
       },
       "lineage": {},
-      "model": "openai/glm-5.3-flash",
+      "model": "glm-5.3-flash",
       "skipped_lines": 0
     },
     {
@@ -164,7 +164,7 @@
         "total_errors": 0
       },
       "lineage": {},
-      "model": "openai/glm-5.3-flash",
+      "model": "glm-5.3-flash",
       "skipped_lines": 0
     },
     {
@@ -194,7 +194,7 @@
         "total_errors": 0
       },
       "lineage": {},
-      "model": "openai/glm-5.3-flash",
+      "model": "glm-5.3-flash",
       "skipped_lines": 0
     },
     {
@@ -237,7 +237,7 @@
         "total_errors": 0
       },
       "lineage": {},
-      "model": "openai/glm-5.3-flash",
+      "model": "glm-5.3-flash",
       "skipped_lines": 0
     },
     {
@@ -264,7 +264,7 @@
         "total_errors": 0
       },
       "lineage": {},
-      "model": "openai/glm-5.3-flash",
+      "model": "glm-5.3-flash",
       "skipped_lines": 0
     },
     {
@@ -319,7 +319,7 @@
       "lineage": {
         "forked_from": "20261011_1"
       },
-      "model": "openai/glm-4.7-flash",
+      "model": "glm-4.7-flash",
       "skipped_lines": 0
     },
     {
@@ -464,7 +464,7 @@
         "total_errors": 2
       },
       "lineage": {},
-      "model": "openai/glm-5.3-flash",
+      "model": "glm-5.3-flash",
       "skipped_lines": 0
     },
     {
@@ -507,7 +507,7 @@
         "total_errors": 0
       },
       "lineage": {},
-      "model": "openai/glm-5.3-flash",
+      "model": "glm-5.3-flash",
       "skipped_lines": 0
     },
     {
@@ -544,7 +544,7 @@
         "total_errors": 0
       },
       "lineage": {},
-      "model": "openai/glm-5.3-flash",
+      "model": "glm-5.3-flash",
       "skipped_lines": 0
     },
     {
@@ -587,7 +587,7 @@
         "total_errors": 0
       },
       "lineage": {},
-      "model": "openai/glm-5.3-flash",
+      "model": "glm-5.3-flash",
       "skipped_lines": 0
     },
     {
@@ -633,7 +633,7 @@
         "total_errors": 0
       },
       "lineage": {},
-      "model": "openai/glm-5.3-flash",
+      "model": "glm-5.3-flash",
       "skipped_lines": 0
     },
     {
@@ -664,7 +664,7 @@
       "lineage": {
         "parent": "20261011_6"
       },
-      "model": "openai/glm-5.3-flash",
+      "model": "glm-5.3-flash",
       "skipped_lines": 0
     },
     {
@@ -711,7 +711,7 @@
         "total_errors": 0
       },
       "lineage": {},
-      "model": "openai/glm-5.3-flash",
+      "model": "glm-5.3-flash",
       "skipped_lines": 0
     },
     {
@@ -756,7 +756,7 @@
         "total_errors": 0
       },
       "lineage": {},
-      "model": "openai/glm-5.3-flash",
+      "model": "glm-5.3-flash",
       "skipped_lines": 0
     }
   ]

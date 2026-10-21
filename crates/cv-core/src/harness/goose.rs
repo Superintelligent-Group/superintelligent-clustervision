@@ -111,7 +111,7 @@
 //!   folded into user/assistant content (we recover [`Role::Tool`] heuristically). The MCP tool name
 //!   lives on the *request*, not the *response*, so a `toolResponse` only carries `tool_name` when we
 //!   can pair it to a prior request by id (we do this within a session).
-//! * `model` is reconstructed from `provider_name` + `model_config_json.model_name` when present.
+//! * `model` is `model_config_json.model_name`; `provider_name` stays in the Goose bag.
 
 use super::store::sqlite::{open_ro, Cells, Select};
 use super::wire::anthropic;
@@ -515,16 +515,21 @@ fn stream_db_opts_with_reads(
         })
         .with_context(|| format!("goose session {:?}", r.id))?;
 
-    let model = reconstruct_model(provider.as_deref(), model_cfg.as_deref());
+    let model = recorded_model(model_cfg.as_deref());
     // The session's kind (`user`/`scheduled`/`sub_agent`/`hidden`/…, v13+) is a Goose fact and
     // decides where its prompts came from; the spawning session of a sub-agent (`parent_session_id`,
     // v15+) is first-class lineage.
     let session_type = session_type.filter(|t| !t.is_empty());
     let prompt_origin = prompt_origin(session_type.as_deref());
     let mut extra = serde_json::Map::new();
+    let mut bag = serde_json::Map::new();
     if let Some(t) = session_type {
-        let mut bag = serde_json::Map::new();
         bag.insert("session_type".into(), Value::String(t));
+    }
+    if let Some(provider) = provider.filter(|p| !p.is_empty()) {
+        bag.insert("provider_name".into(), Value::String(provider));
+    }
+    if !bag.is_empty() {
         extra.insert(Harness::Goose.as_str().into(), Value::Object(bag));
     }
     let created_at = created.as_deref().and_then(parse_ts_text).or(r.created_at);
@@ -699,7 +704,7 @@ fn omit_rich_details(message: &mut Message) {
 
 /// Fold a row's `metadata_json` (`MessageMetadata`, message.rs:828-853) into the message: `usage.*`
 /// → [`Usage`] (real per-response counts and the provider-reported `cost`; the `tokens` column is
-/// never written), the inference's `provider/model` → `model` when it differs from the session's,
+/// never written), the inference's recorded model → `model`,
 /// and the whole object under `extra["goose"]["metadata"]` so `userVisible` / `agentVisible` /
 /// `isCompaction` / latency survive for consumers that care.
 ///
@@ -739,35 +744,30 @@ fn apply_metadata(m: &mut Message, meta: Value, compaction_summary: bool) {
         }
     }
     if let Some(inf) = meta.get("inference") {
-        // The same `provider/model` shape as `Session::model` (`reconstruct_model`): the resolved
-        // snapshot the row records, else the requested model.
+        // The resolved snapshot the row records, else the requested model. Its provider stays
+        // in the inference metadata; it cannot stand in for an absent model.
         let model = inf
             .get("resolvedModel")
             .or_else(|| inf.get("requestedModel"))
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty());
-        let provider = inf.get("provider").and_then(Value::as_str).filter(|s| !s.is_empty());
-        m.model = model.map(|name| match provider {
-            Some(p) => format!("{p}/{name}"),
-            None => name.to_string(),
-        });
+        m.model = model.map(str::to_owned);
     }
     if meta.is_object() {
         m.harness_extra_mut(Harness::Goose).insert("metadata".into(), meta);
     }
 }
 
-/// Reconstruct a `provider/model` string from the session's provider + model_config_json.
-fn reconstruct_model(provider: Option<&str>, model_cfg: Option<&str>) -> Option<String> {
-    let model_name = model_cfg
+/// The model's recorded name; a provider alone supplies no model fact.
+fn recorded_model(model_cfg: Option<&str>) -> Option<String> {
+    model_cfg
         .and_then(|j| serde_json::from_str::<Value>(j).ok())
-        .and_then(|v| v.get("model_name").and_then(Value::as_str).map(str::to_string));
-    match (provider.filter(|p| !p.is_empty()), model_name) {
-        (Some(p), Some(m)) => Some(format!("{p}/{m}")),
-        (None, Some(m)) => Some(m),
-        (Some(p), None) => Some(p.to_string()),
-        (None, None) => None,
-    }
+        .and_then(|v| {
+            v.get("model_name")
+                .and_then(Value::as_str)
+                .filter(|m| !m.is_empty())
+                .map(str::to_owned)
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -1035,6 +1035,23 @@ mod tests {
     }
 
     #[test]
+    fn provider_without_model_stays_in_the_bag() {
+        let c = mk(SCHEMA);
+        c.execute(
+            "INSERT INTO sessions (id, working_dir, provider_name) VALUES ('s', '/fixture', 'anthropic')",
+            [],
+        )
+        .unwrap();
+        let s = parse_db(&c, &sref(&c, "s")).unwrap();
+        assert!(s.model.is_none());
+        assert_eq!(s.harness_extra(Harness::Goose).unwrap()["provider_name"], "anthropic");
+        let mut m = Message::new(Role::Assistant);
+        apply_metadata(&mut m, serde_json::json!({"inference":{"provider":"anthropic"}}), false);
+        assert!(m.model.is_none());
+        assert_eq!(bag(&m)["metadata"]["inference"]["provider"], "anthropic");
+    }
+
+    #[test]
     fn parses_modern_db_text_and_tools() {
         let c = mk(SCHEMA);
         c.execute(
@@ -1065,7 +1082,7 @@ mod tests {
         let s = parse_db(&c, &sref(&c, "s1")).unwrap();
         assert_eq!(s.title.as_deref(), Some("Build a thing"));
         assert_eq!(s.cwd.as_deref().map(|p| p.to_str().unwrap()), Some("/home/u/proj"));
-        assert_eq!(s.model.as_deref(), Some("anthropic/claude-sonnet-4"));
+        assert_eq!(s.model.as_deref(), Some("claude-sonnet-4"));
         assert!(s.created_at.is_some());
         assert_eq!(s.messages.len(), 3);
 
@@ -1124,9 +1141,9 @@ mod tests {
 
         // A stub-provider turn: prompt, the injected `<turn-context>` row (hidden from the user →
         // System / injected context), the reply with real usage; the session model is
-        // provider/model and the reply records the same shape from its inference metadata.
+        // the bare model and the reply records the same shape from its inference metadata.
         let s = parse_db(&c, &sref(&c, "20260919_3")).unwrap();
-        assert_eq!(s.model.as_deref(), Some("openai/stub-model"));
+        assert_eq!(s.model.as_deref(), Some("stub-model"));
         assert_eq!(
             kinds(&s),
             vec![
@@ -1144,11 +1161,7 @@ mod tests {
         assert_eq!(bag(&s.messages[1])["metadata"]["turnContext"], true);
         assert!(s.messages[1].text().unwrap().starts_with("<turn-context>"));
         let a = &s.messages[2];
-        assert_eq!(
-            a.model.as_deref(),
-            Some("openai/stub-model"),
-            "the row's inference metadata"
-        );
+        assert_eq!(a.model.as_deref(), Some("stub-model"), "the row's inference metadata");
         let u = a.usage.as_ref().unwrap();
         assert_eq!(
             (u.input_tokens, u.output_tokens, u.cache_read_tokens, u.cost_usd),
@@ -1460,7 +1473,7 @@ mod tests {
                 ..Default::default()
             }
         );
-        assert_eq!(s.model.as_deref(), Some("anthropic/claude-sonnet-4-5"));
+        assert_eq!(s.model.as_deref(), Some("claude-sonnet-4-5"));
         // prompt / reply / the compaction pair (boundary synthesized before the agent-only summary)
         assert_eq!(
             kinds(&s),
@@ -1478,7 +1491,7 @@ mod tests {
         assert_eq!(u.cost_usd, Some(0.0041), "provider-reported cost is first-class");
         assert_eq!(
             m.model.as_deref(),
-            Some("anthropic/claude-sonnet-4-5-20250929"),
+            Some("claude-sonnet-4-5-20250929"),
             "the resolved snapshot differs from the session model, so it is recorded"
         );
         assert_eq!(bag(m)["metadata"]["usage"]["costSource"], "provider_reported");
@@ -2065,10 +2078,7 @@ mod tests {
                 ..
             }
         ));
-        assert_eq!(
-            (m.kind, m.model.as_deref()),
-            (MessageKind::InjectedContext, Some("p/m"))
-        );
+        assert_eq!((m.kind, m.model.as_deref()), (MessageKind::InjectedContext, Some("m")));
         assert_eq!(
             m.usage.as_ref().map(|u| (u.input_tokens, u.cost_usd)),
             Some((Some(9), Some(0.25)))
