@@ -62,11 +62,11 @@ pub(super) fn retrieve_captured(
         }
         let Some(content) = found else {
             let mut message = format!("id {id:?} not found in sidecar. available: ");
-            for (i, available) in available.iter().enumerate() {
+            for (i, candidate) in available.iter().enumerate() {
                 if i != 0 {
                     message.push_str(", ");
                 }
-                available.with_view(|view| {
+                candidate.with_view(|view| {
                     view.for_each_str_chunk(|part| {
                         message.push_str(part);
                         Ok(())
