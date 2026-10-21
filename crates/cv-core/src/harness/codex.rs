@@ -2180,6 +2180,16 @@ mod tests {
                 (Some(90), Some(20), Some(10))
             );
         }
+        let usage_notice = parsed
+            .messages
+            .iter()
+            .find(|m| bag_get(m, "codex_event").and_then(Value::as_str) == Some("token_count"))
+            .unwrap();
+        assert_eq!(
+            (usage_notice.kind, usage_notice.origin),
+            (MessageKind::Notice, Origin::Harness)
+        );
+        assert!(usage_notice.content.is_empty());
         // function_call ToolUse msg attached nothing (it has its own pending usage slot untouched);
         // the stale snapshot became a carrier; the trailing assistant survived the EOF flush.
         assert_eq!(parsed.messages.last().unwrap().text().as_deref(), Some("bye"));

@@ -257,7 +257,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
                 if lines.record_count() > first_record
                     && !unrepresentable_checked(Harness::Codex, opts.thinking, msg, &resolver)?
                 {
-                    if let Some(info) = codex_token_usage(msg.usage.as_ref()) {
+                    if let Some(info) = codex_token_usage(msg.usage.as_ref())? {
                         writer::value(
                             &mut lines,
                             &ts,
@@ -342,14 +342,18 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
 /// `reasoning_output_tokens`). Only the fields actually present are written, so a Codex source
 /// round-trips with the same key set. `None` when there is nothing Codex's parser would read back
 /// (it requires at least one of input / output / cached-input).
-fn codex_token_usage(usage: Option<&crate::ir::Usage>) -> Option<Value> {
-    let u = usage?;
+fn codex_token_usage(usage: Option<&crate::ir::Usage>) -> Result<Option<Value>> {
+    let Some(u) = usage else { return Ok(None) };
     let mut m = Map::new();
     // The IR's `input_tokens` excludes the cache counts; Codex's includes them.
-    let input = u.input_tokens.map(|i| {
-        i.saturating_add(u.cache_read_tokens.unwrap_or(0))
-            .saturating_add(u.cache_creation_tokens.unwrap_or(0))
-    });
+    let input = u
+        .input_tokens
+        .map(|i| {
+            i.checked_add(u.cache_read_tokens.unwrap_or(0))
+                .and_then(|n| n.checked_add(u.cache_creation_tokens.unwrap_or(0)))
+                .context("Codex input token count overflows u64")
+        })
+        .transpose()?;
     for (key, val) in [
         ("input_tokens", input),
         ("cached_input_tokens", u.cache_read_tokens),
@@ -362,13 +366,17 @@ fn codex_token_usage(usage: Option<&crate::ir::Usage>) -> Option<Value> {
         }
     }
     if u.input_tokens.is_none() && u.output_tokens.is_none() && u.cache_read_tokens.is_none() {
-        return None;
+        return Ok(None);
     }
     // Codex's own totals are input + output (cached input is a *subset* of its `input_tokens`, not
     // an addend — 35507 + 55 = 35562 in a real 0.155 record whose cached count was 34432).
-    let total: u64 = u.total_tokens();
-    m.insert("total_tokens".into(), json!(total));
-    Some(Value::Object(m))
+    if let (Some(input), Some(output)) = (input, u.output_tokens) {
+        let total = input
+            .checked_add(output)
+            .context("Codex total token count overflows u64")?;
+        m.insert("total_tokens".into(), json!(total));
+    }
+    Ok(Some(Value::Object(m)))
 }
 
 fn codex_git(g: &GitInfo) -> Value {
@@ -444,17 +452,31 @@ mod staged_tests {
     }
 
     #[test]
-    fn usage_wire_aggregates_saturate_large_component_counts() {
+    fn usage_wire_rejects_overflow_and_keeps_partial_counts_partial() {
+        for usage in [
+            crate::ir::Usage {
+                input_tokens: Some(u64::MAX),
+                cache_read_tokens: Some(1),
+                ..Default::default()
+            },
+            crate::ir::Usage {
+                input_tokens: Some(u64::MAX),
+                output_tokens: Some(1),
+                ..Default::default()
+            },
+        ] {
+            assert!(codex_token_usage(Some(&usage))
+                .unwrap_err()
+                .to_string()
+                .contains("overflows u64"));
+        }
         let value = codex_token_usage(Some(&crate::ir::Usage {
-            input_tokens: Some(u64::MAX),
-            cache_read_tokens: Some(1),
-            cache_creation_tokens: Some(2),
             output_tokens: Some(3),
             ..Default::default()
         }))
+        .unwrap()
         .unwrap();
-        assert_eq!(value["input_tokens"], u64::MAX);
-        assert_eq!(value["total_tokens"], u64::MAX);
-        assert_eq!(value["cached_input_tokens"], 1);
+        assert_eq!(value["output_tokens"], 3);
+        assert!(value.get("input_tokens").is_none() && value.get("total_tokens").is_none());
     }
 }

@@ -3,6 +3,8 @@
 ## Unreleased
 
 - Document `cv events` catalog writes and `--frozen`; update the manual for 0.18 counts, flags, diagnostics and migrations.
+- Codex usage-only records are harness notices; emission rejects overflowing counts and omits totals when components are unknown.
+
 - Goose reports bare model names; providers stay in the Goose metadata bag and never substitute for missing models.
 
 - Claude and OpenClaw compaction boundaries carry no invented text; `show` labels contentless boundaries by kind and marks them synthesized.

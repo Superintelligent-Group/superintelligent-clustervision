@@ -829,7 +829,8 @@ impl Reader<'_> {
             .last()
             .is_some_and(|m| m.role == Role::Assistant && m.usage.is_none());
         if !attach {
-            let mut nm = Message::new(Role::Assistant);
+            // A native usage event belongs to the assistant's accounting, but is not a reply.
+            let mut nm = Message::of_kind(Role::Assistant, MessageKind::Notice, Origin::Harness);
             nm.timestamp = ts;
             bag(&mut nm).insert("codex_event".into(), Value::String(USAGE_FROM_RECORD.into()));
             self.out.push(nm);
@@ -900,7 +901,8 @@ impl Reader<'_> {
                 .last()
                 .is_some_and(|m| m.role == Role::Assistant && m.usage.is_none());
         if !attach {
-            let mut nm = Message::new(Role::Assistant);
+            // A native usage event belongs to the assistant's accounting, but is not a reply.
+            let mut nm = Message::of_kind(Role::Assistant, MessageKind::Notice, Origin::Harness);
             nm.timestamp = ts;
             bag(&mut nm).insert("codex_event".into(), Value::String("token_count".into()));
             self.out.push(nm);
