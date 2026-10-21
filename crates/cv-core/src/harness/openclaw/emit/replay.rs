@@ -131,7 +131,7 @@ impl Native {
         if !self.enabled {
             return Ok(None);
         }
-        let message = &messages[0];
+        let message = messages.first().context("OpenClaw replay requires a current message")?;
         if !message.extra.contains_key(crate::ir::CARRIER_KEY) {
             if let Some(record) = &message.complete_record {
                 let group = if record.unchanged(Harness::OpenClaw, messages) {
