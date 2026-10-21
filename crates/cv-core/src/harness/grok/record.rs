@@ -122,7 +122,9 @@ pub(super) fn message(
         return Ok((true, Some(m)));
     }
 
-    let Kind::Turn(role) = kind else { unreachable!() };
+    let Kind::Turn(role) = kind else {
+        anyhow::bail!("Grok record is not a turn");
+    };
     let mut m = Message::new(role);
     let content = join(top.get("content"), spans)?;
     let synthetic = top.string("synthetic_reason")?;
@@ -162,7 +164,7 @@ pub(super) fn message(
         for call in calls {
             let block = openai::tool_call_from_view(call?, spans.is_some())?;
             let Block::ToolUse { id, .. } = &block else {
-                unreachable!()
+                anyhow::bail!("Grok tool call did not decode as a tool use");
             };
             // Stash sidecar enrichment so nothing is lost (ir.rs has no field for it yet).
             if let Some(e) = enrich.get(id) {
