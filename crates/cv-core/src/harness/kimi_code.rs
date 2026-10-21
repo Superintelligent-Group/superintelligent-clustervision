@@ -97,7 +97,7 @@ use crate::ir::*;
 use crate::json::{JsonSource, JsonView};
 use crate::lazy::Text;
 use crate::source::{Dependencies, Probe};
-use crate::stream::{Checkpoint, Demand, Flow, MessageSink, Tier};
+use crate::stream::{Checkpoint, Demand, Flow, MessageSink, Start, Tier};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
@@ -285,14 +285,9 @@ impl Adapter for KimiCode {
     }
 
     fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
-        crate::stream::checked(sink, |sink| {
-            let (s, wire) = session_header(r);
-            sink.meta(&s);
-            if !wire.is_file() {
-                return Ok(s);
-            }
-            Ok(stream_wire(&wire, 0, s, Ctx::new(opts), 0, sink)?.expect("offset 0 is inside every file"))
-        })
+        use anyhow::Context;
+        self.transcript(r, opts, Start::Whole, sink)?
+            .context("a whole read never declines")
     }
 
     fn resume_format(&self) -> Option<u32> {
@@ -311,22 +306,46 @@ impl Adapter for KimiCode {
         sink: &mut dyn MessageSink,
         from: &Checkpoint,
     ) -> Result<Option<Session>> {
+        self.transcript(r, opts, Start::Checkpoint(from), sink)
+    }
+
+    /// An agent's wire log through the driver, after the header its state file gives. Catalog
+    /// fallbacks and static sidecar metadata are refreshed rather than kept in a checkpoint; the
+    /// caller verifies those dependencies before accepting a suffix.
+    fn transcript(
+        &self,
+        r: &SessionRef,
+        opts: &Demand,
+        from: Start<'_>,
+        sink: &mut dyn MessageSink,
+    ) -> Result<Option<Session>> {
         crate::stream::checked(sink, |sink| {
-            let Some(state) = from.get::<ResumeState>(crate::stream::ADAPTER_LAYER) else {
-                return Ok(None);
+            let ctx = match from {
+                Start::Checkpoint(cp) => match jsonl::restore::<ResumeState>(cp, <Wire as jsonl::Codec>::VERSION) {
+                    Some(state) if state.wire == self.resume_source(r) => state.ctx.restore(opts),
+                    _ => return Ok(None),
+                },
+                _ => Ctx::new(opts),
             };
-            let wire = self.resume_source(r);
-            if state.wire != wire || state.flavor != Flavor::of(opts) {
-                return Ok(None);
+            let (s, wire) = session_header(r);
+            if let Start::Checkpoint(cp) = from {
+                if fs::metadata(&wire)?.len() < cp.offset {
+                    return Ok(None);
+                }
             }
-            if fs::metadata(&wire)?.len() < from.offset {
-                return Ok(None);
-            }
-            // Catalog fallbacks and static sidecar metadata are refreshed rather than retained in
-            // the checkpoint. The caller verifies those dependencies before accepting the suffix.
-            let (s, _) = session_header(r);
             sink.meta(&s);
-            stream_wire(&wire, from.offset, s, state.ctx.restore(opts), state.skipped, sink)
+            if !wire.is_file() {
+                return Ok(Some(s));
+            }
+            let input = jsonl::Read::open(&wire)?;
+            let mut codec = Wire {
+                s,
+                ctx,
+                wire: &wire,
+                input: &input,
+            };
+            codec.ctx.init_model(codec.s.model.as_deref());
+            jsonl::drive(&input, from, codec, sink)
         })
     }
 }
@@ -419,33 +438,10 @@ fn session_header(r: &SessionRef) -> (Session, PathBuf) {
     (s, wire)
 }
 
-#[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-struct Flavor {
-    extra: bool,
-    spans: bool,
-    offsets: bool,
-    complete: bool,
-    #[serde(default)]
-    facts: bool,
-}
-impl Flavor {
-    fn of(opts: &Demand) -> Self {
-        Self {
-            extra: opts.tier >= Tier::Facts,
-            spans: opts.spans,
-            offsets: opts.offsets,
-            complete: opts.tier == Tier::Complete,
-            facts: opts.tier == Tier::Facts,
-        }
-    }
-}
-
-#[derive(serde::Deserialize)]
-struct ResumeState {
-    wire: PathBuf,
-    flavor: Flavor,
-    ctx: SavedCtx,
-    skipped: u64,
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ResumeState<P = PathBuf, C = SavedCtx> {
+    wire: P,
+    ctx: C,
 }
 
 #[derive(serde::Deserialize)]
@@ -529,72 +525,55 @@ impl<'v> MessageHead<'v> {
     }
 }
 
-/// The one Kimi Code read: records `at..` of an agent's wire log, each through the record
-/// codec. After a finished record with no step held (a pending step is amended by later parts,
-/// results and usage; its EOF flush is provisional) the sink may take a checkpoint with the
-/// rejected-line count so far. `Ok(None)`: `at` lies beyond the file.
-fn stream_wire(
-    wire: &Path,
-    at: u64,
-    mut s: Session,
-    mut ctx: Ctx<'_>,
-    prior_skipped: u64,
-    sink: &mut dyn MessageSink,
-) -> Result<Option<Session>> {
-    ctx.init_model(s.model.as_deref());
-    let input = jsonl::Read::open(wire)?;
-    if at > input.source().len() {
-        return Ok(None);
-    }
-    let mut skipped = prior_skipped;
-    input.lines(at, |line| {
-        let Some(view) = line.view else {
-            skipped += u64::from(!line.blank);
-            return Ok(Flow::Continue);
-        };
-        let started = std::time::Instant::now();
-        let flow = ctx.record(view, Some(&input), sink)?;
-        input.check_backing_after(started, line.end)?;
-        if flow != Flow::Stop && line.complete && ctx.step.is_none() && sink.wants_checkpoint(line.end) {
-            input.check_backing()?;
-            checkpoint_wire(&ctx, wire, line.end, skipped, sink);
-            input.check_backing()?;
-        }
-        Ok(flow)
-    })?;
-    if !ctx.stopped {
-        ctx.flush_step(sink);
-    }
-    input.check()?;
-    s.model = ctx.model_bindings.first.take().or(s.model);
-    s.harness_extra_mut(Harness::KimiCode).append(&mut ctx.facts);
-    if let Some(pv) = ctx.protocol_version.take() {
-        s.harness_extra_mut(Harness::KimiCode)
-            .insert("protocol_version".into(), Value::String(pv));
-    }
-    super::Unparsed(skipped).note(&mut s);
-    Ok(Some(s))
+/// The Kimi Code record codec over one agent's wire log. A pending step is amended by later
+/// parts, results and usage (its EOF flush is provisional), so the codec is settled only when
+/// no step is held; a checkpoint keeps the log it was taken on.
+struct Wire<'r> {
+    s: Session,
+    ctx: Ctx<'r>,
+    wire: &'r Path,
+    input: &'r jsonl::Read,
 }
 
-fn checkpoint_wire(ctx: &Ctx<'_>, wire: &Path, offset: u64, skipped: u64, sink: &mut dyn MessageSink) {
-    #[derive(serde::Serialize)]
-    struct State<'a, 'b> {
-        wire: &'a Path,
-        flavor: Flavor,
-        ctx: &'a Ctx<'b>,
-        skipped: u64,
+impl jsonl::Codec for Wire<'_> {
+    const VERSION: u32 = 2;
+
+    fn record(&mut self, view: JsonView<'_>, _: u64, sink: &mut dyn MessageSink) -> Result<Flow> {
+        self.ctx.record(view, Some(self.input), sink)
     }
-    let mut checkpoint = Checkpoint::new(offset);
-    checkpoint.put(
-        crate::stream::ADAPTER_LAYER,
-        &State {
-            wire,
-            flavor: Flavor::of(ctx.opts),
-            ctx,
-            skipped,
-        },
-    );
-    sink.checkpoint(&mut checkpoint);
+
+    fn settled(&self) -> bool {
+        self.ctx.step.is_none()
+    }
+
+    fn demand(&self) -> Demand {
+        *self.ctx.opts
+    }
+
+    fn session(&mut self) -> &mut Session {
+        &mut self.s
+    }
+
+    fn state(&self) -> impl serde::Serialize + '_ {
+        ResumeState {
+            wire: self.wire,
+            ctx: &self.ctx,
+        }
+    }
+
+    fn finish(mut self, _: bool, sink: &mut dyn MessageSink) -> Result<Session> {
+        if !self.ctx.stopped {
+            self.ctx.flush_step(sink);
+        }
+        let s = &mut self.s;
+        s.model = self.ctx.model_bindings.first.take().or(s.model.take());
+        s.harness_extra_mut(Harness::KimiCode).append(&mut self.ctx.facts);
+        if let Some(pv) = self.ctx.protocol_version.take() {
+            s.harness_extra_mut(Harness::KimiCode)
+                .insert("protocol_version".into(), Value::String(pv));
+        }
+        Ok(self.s)
+    }
 }
 
 /// The session's own transcript: the `main` agent's wire log.
@@ -1094,15 +1073,9 @@ impl<'a> Ctx<'a> {
             "content.part" | "tool.call" => {
                 let uuid = fields.string("stepUuid")?.unwrap_or_default();
                 let metadata = Value::Object(fields.project(&["stepUuid", "turnId", "step"])?);
-                let may_flush = self.step.as_ref().is_some_and(|step| step.uuid != uuid);
-                let started = std::time::Instant::now();
+                // The record's `part` is still read from the mapping after a flushing callback: a
+                // slow one's backing check (the driver's guard) stops the read here.
                 let flow = self.ensure_step(&uuid, &metadata, ts, sink);
-                // The record's `part` is still read from the mapping after a flushing callback.
-                if may_flush {
-                    if let Some(input) = input {
-                        input.check_backing_if_slow(started)?;
-                    }
-                }
                 if flow == Flow::Stop {
                     return Ok(self.stop());
                 }
@@ -1889,10 +1862,6 @@ mod tests {
             session.harness_extra_mut(Harness::KimiCode).extend(ctx.facts);
             assert!(affordance::session_rows(&session).is_empty());
         }
-        assert!(
-            Flavor::of(&Demand::FACTS.with_spans()) != Flavor::of(&Demand::LEAN.with_spans()),
-            "rich and presence-only checkpoints cannot substitute for one another"
-        );
         Ok(())
     }
 
@@ -2014,7 +1983,7 @@ mod tests {
                 );
             }
             let mut old = full.checkpoints.last().unwrap().1.clone();
-            old.state.get_mut(crate::stream::ADAPTER_LAYER).unwrap()["ctx"]
+            old.state.get_mut(crate::stream::ADAPTER_LAYER).unwrap()["state"]["ctx"]
                 .as_object_mut()
                 .unwrap()
                 .remove("model_bindings");
@@ -2423,8 +2392,7 @@ mod tests {
             );
             let last = full.checkpoints.last().unwrap();
             assert_eq!(
-                last.1
-                    .get::<ResumeState>(crate::stream::ADAPTER_LAYER)
+                jsonl::restore::<ResumeState>(&last.1, <Wire as jsonl::Codec>::VERSION)
                     .unwrap()
                     .ctx
                     .call_names

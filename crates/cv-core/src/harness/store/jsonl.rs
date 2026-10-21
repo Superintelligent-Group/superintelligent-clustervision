@@ -109,12 +109,6 @@ impl Read {
         }
         self.check_backing()
     }
-    pub(crate) fn check_backing_if_slow(&self, started: std::time::Instant) -> anyhow::Result<()> {
-        if started.elapsed() < Self::SLOW_CALLBACK {
-            return Ok(());
-        }
-        self.check_backing()
-    }
     /// [`Self::check_backing`] once per [`Self::CHECK_EVERY`] bytes of consumed input, keyed by the
     /// offset the pass has reached: every line pass runs it after each visit.
     fn check_backing_at(&self, offset: u64) -> anyhow::Result<()> {
@@ -227,7 +221,8 @@ pub(crate) trait Codec {
         true
     }
 
-    /// The demand this codec reads at: a checkpoint keeps it, and a read at another declines it.
+    /// The demand this codec's state depends on: a checkpoint keeps it, and a read at another
+    /// declines it. A codec whose state is the same at every demand answers the default.
     fn demand(&self) -> crate::stream::Demand;
 
     /// The session the records accumulate into: the driver notes its rejected lines there before
