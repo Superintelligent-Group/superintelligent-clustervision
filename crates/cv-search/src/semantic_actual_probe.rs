@@ -6,7 +6,7 @@
 use super::*;
 use std::cell::Cell;
 thread_local! { static CALLS: Cell<[usize; 3]> = const { Cell::new([0; 3]) }; }
-pub(super) fn record(index: usize) {
+fn record(index: usize) {
     CALLS.with(|calls| {
         let mut value = calls.get();
         value[index] += 1;
@@ -18,6 +18,18 @@ fn reset() {
 }
 fn calls() -> [usize; 3] {
     CALLS.with(Cell::get)
+}
+
+// Inject observations at the same operation boundaries used by production.
+fn embed_sessions(path: &Path, refs: &[cv_core::SessionRef]) -> Result<usize> {
+    embed_with(path, refs, |r| { record(0); crate::read_corpus_doc(r) },
+        |spec| { record(1); load_model(spec) },
+        |path, store| { record(2); save_store(path, store) })
+}
+fn semantic_search(path: &Path, query: &str, k: usize) -> Result<Vec<Hit>> {
+    ResidentSearch::new(path.to_path_buf()).search(query, k, crate::SearchFilter::default(),
+        || resolve_model(false), |spec| { record(1); load_model(spec) },
+        |model, query| model.encode_single(query))
 }
 
 fn copy_tree(source: &Path, destination: &Path) {
