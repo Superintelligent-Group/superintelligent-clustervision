@@ -245,6 +245,21 @@ impl Adapter for Claude {
         Some(subagent_end(transcript))
     }
 
+    /// Claude Code writes one JSONL line per content block of a streamed response, each
+    /// repeating the response's `usage`, and a resumed session copies its predecessor's history
+    /// into the new file, so the same `message.id` recurs within and across transcripts.
+    fn usage_key(&self, m: &Message) -> Option<String> {
+        m.harness_extra(Harness::Claude)
+            .and_then(|b| b.get("message.id"))
+            .and_then(Value::as_str)
+            .map(|id| format!("claude:{id}"))
+    }
+
+    /// Tiny native transcripts cost less to parse than to validate and replay a ledger.
+    fn usage_cache_floor(&self) -> u64 {
+        64 * 1024
+    }
+
     fn denials(&self) -> &'static [crate::affordance::Denial] {
         use crate::affordance::Denial;
         &[
@@ -721,15 +736,6 @@ fn persisted_output(text: &str) -> Option<(String, Option<String>)> {
 /// sidecars carry each agent's purpose and outcome. Newest first.
 pub fn subagent_tree(parent_path: &std::path::Path) -> Vec<AgentRef> {
     subagent_tree_inner(parent_path, crate::SubagentDemand::Rich, None, &|_, _| true)
-}
-
-/// Token aggregation needs the full forest and its metadata order, without task descriptions or
-/// journaled return bodies. Unchanged child metadata reuses the versioned discovery scan cache.
-pub(crate) fn subagent_session_refs(parent_path: &std::path::Path) -> Vec<SessionRef> {
-    subagent_tree_inner(parent_path, crate::SubagentDemand::Sessions, None, &|_, _| true)
-        .into_iter()
-        .map(|s| s.session)
-        .collect()
 }
 
 pub(crate) fn subagent_tree_filtered(
@@ -2339,7 +2345,13 @@ mod tests {
         let refs: Vec<_> = tree.iter().map(|s| &s.session).collect();
         for _ in 0..2 {
             assert_eq!(
-                serde_json::to_vec(&subagent_session_refs(&parent)).unwrap(),
+                serde_json::to_vec(
+                    &subagent_tree_filtered(&parent, crate::SubagentDemand::Sessions, None, &|_, _| true)
+                        .into_iter()
+                        .map(|s| s.session)
+                        .collect::<Vec<_>>()
+                )
+                .unwrap(),
                 serde_json::to_vec(&refs).unwrap(),
                 "cold and cached refs preserve both tiers and ordering"
             );

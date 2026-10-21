@@ -191,21 +191,10 @@ struct UsageHit {
     usage: Usage,
 }
 
-/// The identity that makes two messages *the same API call*, when the harness records one.
-///
-/// Claude Code writes one JSONL line per content block of a streamed response, each repeating the
-/// response's `usage`, and a resumed session copies its predecessor's history into the new file —
-/// so the same `message.id` recurs within and across transcripts. Other harnesses record usage once
-/// per call and carry no such id, so they are never deduplicated.
+/// The identity that makes two messages *the same API call*, when the harness records one
+/// ([`crate::harness::Adapter::usage_key`]); a harness without one is never deduplicated.
 pub(crate) fn usage_key(h: Harness, m: &Message) -> Option<String> {
-    match h {
-        Harness::Claude => m
-            .harness_extra(Harness::Claude)
-            .and_then(|b| b.get("message.id"))
-            .and_then(Value::as_str)
-            .map(|id| format!("claude:{id}")),
-        _ => None,
-    }
+    crate::harness::rootless(h)?.usage_key(m)
 }
 
 /// A transcript is staged until EOF: failures discard every hit and missing per-message models
@@ -239,10 +228,10 @@ fn usage_hits(
         return Ok(None);
     };
     #[cfg(feature = "sqlite")]
-    // Tiny native transcripts cost less to parse than to validate and replay a ledger.
+    // Below its adapter's floor a transcript costs less to parse than to validate and replay a ledger.
     let cache = cache.filter(|_| {
-        !matches!(r.harness, Harness::Claude | Harness::Codex)
-            || std::fs::metadata(adapter.resume_source(r)).is_ok_and(|metadata| metadata.len() >= 64 * 1024)
+        let floor = adapter.usage_cache_floor();
+        floor == 0 || std::fs::metadata(adapter.resume_source(r)).is_ok_and(|metadata| metadata.len() >= floor)
     });
     #[cfg(feature = "sqlite")]
     let source = cache.map(|_| crate::source::Probe::default().snapshot(r));
@@ -402,11 +391,13 @@ fn read_string(reader: &mut impl BufRead, limit: Option<usize>) -> Result<Option
     }
 }
 
+/// Token aggregation needs the full forest and its metadata order, without task descriptions or
+/// journaled return bodies ([`crate::SubagentDemand::Sessions`]).
 fn subagent_usage_refs(r: &SessionRef) -> Vec<SessionRef> {
-    match r.harness {
-        Harness::Claude => crate::harness::claude::subagent_session_refs(&r.path),
-        _ => crate::subagent_tree_of(r).into_iter().map(|s| s.session).collect(),
-    }
+    crate::subagent_tree_filtered_of(r, crate::SubagentDemand::Sessions, None, |_, _| true)
+        .into_iter()
+        .map(|s| s.session)
+        .collect()
 }
 
 fn parse_workers() -> usize {

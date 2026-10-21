@@ -24,7 +24,6 @@ use regex::Regex;
 /// how many literals each holds. Lower a count (or delete the line) with the move that earns it.
 #[rustfmt::skip]
 const ALLOWLIST: &[(&str, usize)] = &[
-    ("stats.rs", 5),
     ("watch/read.rs", 2),
 ];
 

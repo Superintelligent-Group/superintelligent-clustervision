@@ -178,6 +178,11 @@ impl Adapter for Codex {
             .then_some(count_prefix_checked as super::CountPrefix)
     }
 
+    /// Tiny native transcripts cost less to parse than to validate and replay a ledger.
+    fn usage_cache_floor(&self) -> u64 {
+        64 * 1024
+    }
+
     /// A descendant's hook row names its own parent, so a stop counts by forest membership.
     fn lane_stops(&self) -> Option<crate::lanes::StopScope> {
         Some(crate::lanes::StopScope::Forest)

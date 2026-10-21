@@ -558,6 +558,18 @@ pub trait Adapter: Send + Sync {
         None
     }
 
+    /// The identity that makes two of this harness's messages *the same API call*, when its
+    /// store repeats one (so usage is counted once). Default: every message is its own call.
+    fn usage_key(&self, _m: &Message) -> Option<String> {
+        None
+    }
+
+    /// The primary size below which parsing a transcript costs less than validating and
+    /// replaying its usage-cache ledger, so the cache is skipped. Default: 0, always use it.
+    fn usage_cache_floor(&self) -> u64 {
+        0
+    }
+
     /// How a change to `r` shows on disk, so the catalog's freshness probe knows what to watch.
     /// Default: as a directory change ([`WatchPolicy::Tree`]).
     fn watch_policy(&self, _r: &SessionRef) -> WatchPolicy {
