@@ -660,21 +660,26 @@ fn show_one_subagent(
     render_text(adapter, &sub.session, range, window.max_bytes, false)
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum ExportFormat {
+    Markdown,
+    OpenSession,
+}
+
 /// Complete export staged privately before HTTP download publication. Uses the native
 /// emitters without CLI window or pipe budgets; requested payloads remain message-sized.
 pub(crate) fn stage_export(
     adapter: &dyn Adapter,
     r: &SessionRef,
-    format: &str,
+    format: ExportFormat,
 ) -> Result<(cv_core::bytes::ByteSource, u64)> {
     let _reads = cv_core::source::read_scope();
-    if format == "opensession" {
+    if matches!(format, ExportFormat::OpenSession) {
         let (body, next) = staged_session_json_inner(adapter, r, None, None, true, true)?;
         anyhow::ensure!(next.is_none(), "full export unexpectedly truncated");
         let bytes = body.byte_len()?;
         return Ok((body, bytes));
     }
-    anyhow::ensure!(format == "markdown", "unsupported export format");
     let mut output = std::io::BufWriter::with_capacity(64 * 1024, cv_core::bytes::ByteStage::default());
     let outcome = stream_session_render_inner(
         adapter,
@@ -712,7 +717,7 @@ pub(crate) fn cmd_export(
             if !redact && range.is_none() && window.max_bytes.is_none() {
                 // The same checked complete document serves native save and HTTP download.
                 // Finish every source demand before stdout can receive even a header prefix.
-                let (body, _) = stage_export(adapter.as_ref(), &r, "markdown")?;
+                let (body, _) = stage_export(adapter.as_ref(), &r, ExportFormat::Markdown)?;
                 let mut out = std::io::BufWriter::new(std::io::stdout().lock());
                 body.copy_to(&mut out)?;
                 out.flush()?;
@@ -753,7 +758,7 @@ pub(crate) fn cmd_export(
         "json" => {
             if !redact && range.is_none() && window.max_bytes.is_none() {
                 // Checked and complete, like the Markdown document above.
-                let (body, _) = stage_export(adapter.as_ref(), &r, "opensession")?;
+                let (body, _) = stage_export(adapter.as_ref(), &r, ExportFormat::OpenSession)?;
                 let mut out = std::io::BufWriter::new(std::io::stdout().lock());
                 body.copy_to(&mut out)?;
                 out.flush()?;
@@ -1848,7 +1853,7 @@ mod tests {
                     .try_stream(r, opts, sink)
             }
         }
-        let (body, bytes) = stage_export(&Lazy, &reference, "markdown")?;
+        let (body, bytes) = stage_export(&Lazy, &reference, ExportFormat::Markdown)?;
         let mut checked = Vec::new();
         body.copy_to(&mut checked)?;
         assert_eq!(checked, native);
@@ -1889,7 +1894,7 @@ mod tests {
             }
         }
         let r = SessionRef::new("download-guard", Harness::Claude, path);
-        for format in ["markdown", "opensession"] {
+        for format in [ExportFormat::Markdown, ExportFormat::OpenSession] {
             std::fs::write(&auxiliary, "before")?;
             let mut published = Vec::new();
             let result = stage_export(&ChangesDependency(auxiliary.clone()), &r, format).and_then(|(body, _)| {

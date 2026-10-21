@@ -782,16 +782,24 @@ cv_core::routes! {
 
 fn export(harness: &str, id: &str, query: &str) -> Result<Download, (u16, Value)> {
     let format = Query::parse(query).get("format").unwrap_or_else(|| "markdown".into());
-    let (content_type, extension) = match format.as_str() {
-        "markdown" => ("text/markdown; charset=utf-8", "md"),
-        "opensession" => ("application/json", "opensession.json"),
+    let (content_type, extension, format) = match format.as_str() {
+        "markdown" => (
+            "text/markdown; charset=utf-8",
+            "md",
+            super::view::ExportFormat::Markdown,
+        ),
+        "opensession" => (
+            "application/json",
+            "opensession.json",
+            super::view::ExportFormat::OpenSession,
+        ),
         _ => return Err(err(400, "format must be markdown or opensession")),
     };
     let harness = Harness::parse(harness).ok_or_else(|| err(400, "unknown harness"))?;
     let (r, adapter) = cv_core::find(id, Some(harness))
         .map_err(|error| err(500, &error.to_string()))?
         .ok_or_else(|| err(404, "session not found"))?;
-    let (body, bytes) = super::view::stage_export(adapter.as_ref(), &r, &format)
+    let (body, bytes) = super::view::stage_export(adapter.as_ref(), &r, format)
         .map_err(|error| err(500, &format!("export failed: {error:#}")))?;
     let safe_id: String =
         r.id.chars()
