@@ -265,6 +265,10 @@ fn live_scan(task: &str, fetch: usize) -> Result<Vec<cv_search::Hit>> {
     live_scan_adapters(task, fetch, adapters.iter().map(|adapter| adapter.as_ref()))
 }
 
+fn lexical_score<'a>(text: &str, needle: &str, words: impl Iterator<Item = &'a str>) -> i64 {
+    words.filter(|word| text.contains(word)).count() as i64 + if text.contains(needle) { 5 } else { 0 }
+}
+
 fn live_scan_adapters<'a>(
     task: &str,
     fetch: usize,
@@ -288,10 +292,7 @@ fn live_scan_adapters<'a>(
                 .try_stream(&r, &Demand::LEAN.with_spans(), &mut sink)
                 .with_context(|| format!("scanning {}:{} for pack", r.harness, r.id))?;
             let low = sink.hay.as_str().to_lowercase();
-            let mut score = words.iter().filter(|w| low.contains(**w)).count() as i64;
-            if low.contains(&needle) {
-                score += 5;
-            }
+            let score = lexical_score(&low, &needle, words.iter().copied());
             if score == 0 {
                 continue;
             }
@@ -552,10 +553,7 @@ fn best_window_observing(
                 return Flow::Continue;
             }
             let low = text.to_lowercase();
-            let mut score = self.words.iter().filter(|w| low.contains(w.as_str())).count() as i64;
-            if low.contains(&self.needle) {
-                score += 5;
-            }
+            let score = lexical_score(&low, &self.needle, self.words.iter().map(String::as_str));
             if score > self.best_score {
                 self.best_score = score;
                 self.window.clear();
