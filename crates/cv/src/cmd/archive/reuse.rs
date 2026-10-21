@@ -1,7 +1,9 @@
 //! Consumer source stamps and bounded temporary serialization for the durable archive.
 use super::*;
 mod spool;
-use spool::{FirstUser, Prefix, Spool, Spooled};
+use crate::cmd::session_json::write_session;
+use cv_core::projection::Prefix;
+use spool::{FirstUser, Spool, Spooled};
 use std::io::{BufWriter, Read};
 
 const STATE_BYTES: u64 = 1024 * 1024;
@@ -291,7 +293,7 @@ impl Archive {
         let mut temporary = Temporary::new(&dest)?;
         let prefix = {
             let mut writer = BufWriter::with_capacity(64 * 1024, temporary.0.file());
-            let prefix = spool::write_session(
+            let prefix = write_session(
                 &mut writer,
                 &session,
                 &spooled,
