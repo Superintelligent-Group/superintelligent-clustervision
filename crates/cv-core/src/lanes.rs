@@ -137,51 +137,6 @@ pub fn read_ledger() -> Vec<LaneEvent> {
         .collect()
 }
 
-/// Codex hook membership is a native UUID/parent relation, verified against each child's header.
-/// This also makes the registered forest available to tools and query consumers of the one API.
-pub(crate) fn codex_hook_forest(parent: &SessionRef) -> Vec<AgentRef> {
-    let rows = read_ledger();
-    let mut known = std::collections::HashSet::from([parent.id.clone()]);
-    let mut out = Vec::new();
-    loop {
-        let before = known.len();
-        for row in &rows {
-            if !known.contains(&row.session_id) || known.contains(&row.agent_id) {
-                continue;
-            }
-            let Some(path) = row.agent_transcript_path.as_deref() else {
-                continue;
-            };
-            // A child whose transcript cannot be read yet is not listed (the ledger keeps it).
-            let Ok(Some(head)) = crate::harness::codex::hook_header(path) else {
-                continue;
-            };
-            if head.id != row.agent_id || head.lineage.parent.as_deref() != Some(row.session_id.as_str()) {
-                continue;
-            }
-            known.insert(head.id.clone());
-            let mut session = SessionRef::new(head.id, crate::Harness::Codex, path);
-            session.cwd = head.cwd;
-            session.created_at = head.created_at.or(Some(row.ts));
-            session.updated_at = Some(row.ts);
-            out.push(AgentRef {
-                session,
-                agent_type: row.agent_type.clone(),
-                description: None,
-                tool_use_id: None,
-                workflow: None,
-                result_status: None,
-                result_summary: None,
-            });
-        }
-        if known.len() == before {
-            break;
-        }
-    }
-    out.sort_by_key(|s| std::cmp::Reverse(s.session.created_at));
-    out
-}
-
 /// The latest `stop` per bare agent id — what [`status_of`] consults.
 fn ledger_stops(rows: &[LaneEvent], session_id: &str) -> HashMap<String, DateTime<Utc>> {
     let mut m: HashMap<String, DateTime<Utc>> = HashMap::new();
@@ -806,44 +761,6 @@ pub fn lanes_of(parent: &SessionRef) -> Result<Vec<Lane>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn codex_hook_forest_verifies_native_parents_and_follows_descendants() {
-        let world = crate::test_world("codex-hook-forest");
-        let parent = SessionRef::new("root", crate::Harness::Codex, world.base.join("root.jsonl"));
-        let row = |id: &str, parent: &str, actual_parent: &str| {
-            let path = world.base.join(format!("{id}.jsonl"));
-            std::fs::write(
-                &path,
-                serde_json::json!({"type":"session_meta", "payload":{"id":id,"parent_thread_id":actual_parent}})
-                    .to_string()
-                    + "\n",
-            )
-            .unwrap();
-            LaneEvent {
-                ts: Utc::now(),
-                event: "start".into(),
-                session_id: parent.into(),
-                agent_id: id.into(),
-                agent_type: Some("default".into()),
-                transcript_path: None,
-                agent_transcript_path: Some(path),
-                cwd: None,
-                last_text: None,
-            }
-        };
-        // Descendant first; duplicated stop; wrong native parent must never become membership.
-        append_lane_event(&row("grandchild", "child", "child")).unwrap();
-        let mut child = row("child", "root", "root");
-        append_lane_event(&child).unwrap();
-        child.event = "stop".into();
-        append_lane_event(&child).unwrap();
-        append_lane_event(&row("foreign", "root", "another-parent")).unwrap();
-        let forest = crate::subagent_tree_of(&parent);
-        let ids: std::collections::HashSet<_> = forest.iter().map(|s| s.session.id.as_str()).collect();
-        assert_eq!(ids, std::collections::HashSet::from(["child", "grandchild"]));
-        assert!(forest.iter().all(|s| s.session.harness == crate::Harness::Codex));
-    }
 
     /// The first `CV_ENDPOINT=<kind>:<name>` a shell command sets (`export CV_ENDPOINT=lane:x; …`,
     /// `CV_ENDPOINT="lane:x" cv task …`). `<name>` never starts with `/`, so a URL
