@@ -18,7 +18,7 @@
 
 **Listing and counts.** A first `cv ls` lists without counting where counting is not free.
 - `message_count` is `null` (a dash in the table) until a full read or `cv index` certifies it; `0` means a session with no turns.
-- Claude counts at discovery (its record heads are read anyway); Codex, Grok, Kimi, Kimi Code, Hermes, Goose and Zed are not counted until then.
+- Claude counts at discovery (its record heads are read anyway); Codex, Grok, Kimi, Kimi Code, Qwen, Hermes, Goose and Zed are not counted until then.
 - **Breaking:** an uncounted session's `message_count` was `0`; `ls --json`, `/api/sessions` and search rows now emit `null`.
 - `cv stats` reports "N not counted yet" beside the total (`uncounted` in `--json` and `/api/stats`); `--sort-by messages` (descending) ranks uncounted last.
 - A certified count survives metadata refreshes that leave the source unchanged and is dropped when the source changes.

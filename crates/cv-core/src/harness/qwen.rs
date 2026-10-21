@@ -16,10 +16,11 @@
 //!
 //! Missing dirs degrade gracefully to empty results.
 
+use super::store::jsonl;
 use super::{parse_ts, Adapter};
 use crate::ir::*;
 use crate::source::{Dependencies, Probe};
-use crate::stream::{self, Checkpoint, Flow, MessageSink, ADAPTER_LAYER};
+use crate::stream::{self, Checkpoint, Flow, MessageSink};
 use anyhow::{Context, Result};
 use record::Demand;
 use serde::{Deserialize, Serialize};
@@ -82,7 +83,7 @@ impl Adapter for Qwen {
     /// The chronological `projects/.../chats/*.jsonl` ChatRecords grow by appended lines; the
     /// legacy gemini-shaped recording is rewritten whole.
     fn append_only(&self, r: &SessionRef) -> Option<super::CountPrefix> {
-        is_session_jsonl(&r.path).then_some(count_prefix_checked as super::CountPrefix)
+        is_session_jsonl(&r.path).then_some(super::count_prefix as super::CountPrefix)
     }
 
     fn dependencies(&self, r: &SessionRef, _probe: &mut Probe, deps: &mut Dependencies) -> Option<()> {
@@ -154,32 +155,10 @@ impl Adapter for Qwen {
     }
 
     fn stream(&self, r: &SessionRef, opts: &stream::Demand, sink: &mut dyn MessageSink) -> Result<Session> {
-        crate::stream::checked(sink, |sink| {
-            if is_session_jsonl(&r.path) {
-                let source = crate::json::JsonSource::capture(&r.path)?;
-                let demand = Demand::of(opts, &source);
-                let s = session_shell(&r.path, sink);
-                return replay(
-                    &r.path,
-                    &source,
-                    s,
-                    ReplayState::default(),
-                    0,
-                    None,
-                    demand,
-                    sink,
-                    &mut || Ok(()),
-                )
-                .map(|session| session.expect("replay from offset zero is within the captured source"));
-            }
-            // The gemini-cli shape: the streaming machinery (mmap + RawValue for legacy whole-file
-            // JSON, line streaming for JSONL recordings) is shared and re-tags the session as Qwen.
-            crate::harness::gemini::stream_for(Harness::Qwen, r, opts, sink)
-        })
+        self.transcript(r, opts, stream::Start::Whole, sink)?
+            .context("a whole read never declines")
     }
 
-    /// Project ChatRecords are chronological: each complete physical record finalizes all its
-    /// emitted messages, including rewind/compression markers. Legacy Gemini replay is excluded.
     fn resume_format(&self) -> Option<u32> {
         Some(1)
     }
@@ -191,27 +170,45 @@ impl Adapter for Qwen {
         sink: &mut dyn MessageSink,
         from: &Checkpoint,
     ) -> Result<Option<Session>> {
+        self.transcript(r, opts, stream::Start::Checkpoint(from), sink)
+    }
+
+    /// A project ChatRecord transcript through the driver. The gemini-cli shape (mmap + RawValue
+    /// for legacy whole-file JSON, line streaming for JSONL recordings) is read by the shared
+    /// Gemini machinery re-tagged as Qwen; it is rewritten whole, so it neither resumes nor
+    /// reads as a prefix.
+    fn transcript(
+        &self,
+        r: &SessionRef,
+        opts: &stream::Demand,
+        from: stream::Start<'_>,
+        sink: &mut dyn MessageSink,
+    ) -> Result<Option<Session>> {
         crate::stream::checked(sink, |sink| {
             if !is_session_jsonl(&r.path) {
-                return Ok(None);
+                return match from {
+                    stream::Start::Whole => crate::harness::gemini::stream_for(Harness::Qwen, r, opts, sink).map(Some),
+                    _ => Ok(None),
+                };
             }
-            let Some(state) = from.get::<ReplayCheckpoint>(ADAPTER_LAYER) else {
-                return Ok(None);
+            let (s, st) = match from {
+                stream::Start::Checkpoint(cp) => {
+                    match jsonl::restore::<ReplayCheckpoint>(cp, <Replay as jsonl::Codec>::VERSION) {
+                        Some(state) => (state.session, state.replay),
+                        None => return Ok(None),
+                    }
+                }
+                _ => (session_shell(&r.path, sink), ReplayState::default()),
             };
-            let source = crate::json::JsonSource::capture(&r.path)?;
-            let demand = Demand::of(opts, &source);
-            let (s, replay_state) = (state.session, state.replay);
-            replay(
-                &r.path,
-                &source,
+            let read = jsonl::Read::open(&r.path)?;
+            let codec = Replay {
                 s,
-                replay_state,
-                from.offset,
-                None,
-                demand,
-                sink,
-                &mut || Ok(()),
-            )
+                st,
+                demand: Demand::of(opts, read.source()),
+                stopped: false,
+                seen: false,
+            };
+            jsonl::drive(&read, from, codec, sink)
         })
     }
 
@@ -489,31 +486,29 @@ fn subagent_parent(path: &Path) -> Option<String> {
         .flatten()
 }
 
+/// Listing facts only: the session's id, cwd, title and time span, read through the driver at
+/// the discovery demand. Once a message is known to exist and the first prompt is read, records
+/// only fold their session facts and a title change; no message is built. The count is left to
+/// a full read, which certifies it.
 fn scan_session_jsonl(path: &Path) -> Result<Option<SessionRef>> {
-    let mut messages = 0usize;
-    let mut turns = 0usize;
-    let mut sink = |m: Message| {
-        messages += 1;
-        turns += usize::from(matches!(m.role, Role::User | Role::Assistant));
-        Flow::Continue
+    let shell = session_shell(path, &mut crate::stream::Discard);
+    let read = jsonl::Read::open(path)?;
+    let codec = Replay {
+        s: shell,
+        st: ReplayState::default(),
+        demand: Demand::Discovery,
+        stopped: false,
+        seen: false,
     };
-    let source = crate::json::JsonSource::capture(path)?;
-    let shell = session_shell(path, &mut sink);
-    let Some(s) = replay(
-        path,
-        &source,
-        shell,
-        ReplayState::default(),
-        0,
-        None,
-        Demand::of(&stream::Demand::DISCOVERY, &source),
-        &mut sink,
-        &mut || Ok(()),
-    )?
+    let mut seen = false;
+    let Some(s) = jsonl::drive(&read, stream::Start::Whole, codec, &mut |_: Message| {
+        seen = true;
+        Flow::Continue
+    })?
     else {
         return Ok(None);
     };
-    if messages == 0 && s.created_at.is_none() {
+    if !seen && s.created_at.is_none() {
         return Ok(None);
     }
     let mut r = SessionRef::new(s.id.clone(), Harness::Qwen, path.to_path_buf());
@@ -521,7 +516,6 @@ fn scan_session_jsonl(path: &Path) -> Result<Option<SessionRef>> {
     r.title = s.title.clone();
     r.created_at = s.created_at;
     r.updated_at = s.updated_at;
-    r.message_count = Some(turns);
     Ok(Some(r))
 }
 
@@ -535,7 +529,10 @@ struct ReplayState {
     spawn_calls: BTreeSet<String>,
     /// `functionCall` id → the tool's name (unwrapped from `tool_call`), for the results.
     call_names: std::collections::BTreeMap<String, String>,
-    skipped: u64,
+    /// Discovery has what it lists of the body (a message exists, the first prompt is read):
+    /// later records fold their session facts and a title change only.
+    #[serde(skip)]
+    pub(super) listed: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -567,89 +564,65 @@ fn session_shell(path: &Path, sink: &mut dyn MessageSink) -> Session {
     s
 }
 
-/// The message count an append-only project transcript had at a byte baseline, including an
-/// incomplete final physical record exactly as the whole parser would have accepted it then.
-/// Legacy Gemini shapes cannot pin old logical output with a physical byte prefix.
-pub(crate) fn count_prefix_checked(r: &SessionRef, len: u64, check: &mut dyn FnMut() -> Result<()>) -> Result<usize> {
-    anyhow::ensure!(
-        is_session_jsonl(&r.path),
-        "Qwen recording is not chronological project JSONL"
-    );
-    let mut count = 0;
-    let mut sink = |_: Message| {
-        count += 1;
-        Flow::Continue
-    };
-    let source = crate::json::JsonSource::capture(&r.path)?;
-    let shell = session_shell(&r.path, &mut sink);
-    replay(
-        &r.path,
-        &source,
-        shell,
-        ReplayState::default(),
-        0,
-        Some(len),
-        Demand::Owned,
-        &mut sink,
-        check,
-    )?;
-    Ok(count)
+/// The Qwen ChatRecord codec over one project transcript: each record folds into the session and
+/// replay state (a checkpoint's, or a fresh shell at 0). A complete ChatRecord never changes an
+/// earlier message, so the codec is settled after every finished line, and a valid but unfinished
+/// EOF record is replayed from the previous boundary on append. After the sink stops, records
+/// still fold their session facts through EOF (never settled again).
+struct Replay<'r> {
+    s: Session,
+    st: ReplayState,
+    demand: Demand<'r>,
+    stopped: bool,
+    /// Discovery: a message was delivered.
+    seen: bool,
 }
 
-/// The one Qwen read: records `at..to` (EOF by default) of the captured transcript, each through
-/// the record codec, accumulating into `s` and `st` (a checkpoint's state, or a fresh shell at 0).
-/// A complete ChatRecord never changes an earlier message: checkpoints are offered only after a
-/// finished line, so a valid but unfinished EOF record is replayed from the previous boundary on
-/// append. After the sink stops, records still fold their session facts through EOF. `Ok(None)`:
-/// `at` lies beyond the file.
-#[allow(clippy::too_many_arguments)] // The replay state, its window and the demand.
-fn replay(
-    path: &Path,
-    source: &crate::json::JsonSource,
-    mut s: Session,
-    mut st: ReplayState,
-    at: u64,
-    to: Option<u64>,
-    demand: Demand<'_>,
-    sink: &mut dyn MessageSink,
-    check: &mut dyn FnMut() -> Result<()>,
-) -> Result<Option<Session>> {
-    let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    source.check_metadata(file.metadata()?)?;
-    if at > source.len() {
-        return Ok(None);
-    }
-    let to = to.map_or(source.len(), |to| to.min(source.len()));
-    let mut stopped = false;
-    super::store::jsonl::for_each_line(source, &file, at, to, |line| {
-        check()?;
-        match line.view {
-            Some(view) => {
-                if record::ingest(view, &mut s, &mut st, demand, stopped, sink)? == Flow::Stop {
-                    stopped = true;
-                }
-            }
-            None => st.skipped += u64::from(!line.blank),
+impl jsonl::Codec for Replay<'_> {
+    const VERSION: u32 = 1;
+
+    fn record(&mut self, view: crate::json::JsonView<'_>, _: u64, sink: &mut dyn MessageSink) -> Result<Flow> {
+        if matches!(self.demand, Demand::Discovery) {
+            let seen = &mut self.seen;
+            let mut noted = |m: Message| {
+                *seen = true;
+                sink.message(m)
+            };
+            let flow = record::ingest(view, &mut self.s, &mut self.st, self.demand, false, &mut noted)?;
+            self.st.listed = self.seen && self.st.first_prompt.is_some();
+            return Ok(flow);
         }
-        if !stopped && line.complete && sink.wants_checkpoint(line.end) {
-            let mut cp = Checkpoint::new(line.end);
-            cp.put(
-                ADAPTER_LAYER,
-                &ReplayCheckpoint {
-                    session: &s,
-                    replay: &st,
-                },
-            );
-            sink.checkpoint(&mut cp);
+        if record::ingest(view, &mut self.s, &mut self.st, self.demand, self.stopped, sink)? == Flow::Stop {
+            self.stopped = true;
         }
         Ok(Flow::Continue)
-    })?;
-    source.check_metadata(file.metadata()?)?;
-    source.check()?;
-    s.model = st.session_model.take();
-    s.title = st.title.take().or(st.first_prompt.take());
-    super::Unparsed(st.skipped).note(&mut s);
-    Ok(Some(s))
+    }
+
+    fn settled(&self) -> bool {
+        !self.stopped
+    }
+
+    /// The replay state is the same at every demand but discovery's, which never checkpoints.
+    fn demand(&self) -> stream::Demand {
+        stream::Demand::default()
+    }
+
+    fn session(&mut self) -> &mut Session {
+        &mut self.s
+    }
+
+    fn state(&self) -> impl Serialize + '_ {
+        ReplayCheckpoint {
+            session: &self.s,
+            replay: &self.st,
+        }
+    }
+
+    fn finish(mut self, _: bool, _: &mut dyn MessageSink) -> Result<Session> {
+        self.s.model = self.st.session_model.take();
+        self.s.title = self.st.title.take().or(self.st.first_prompt.take());
+        Ok(self.s)
+    }
 }
 
 #[cfg(test)]
@@ -834,28 +807,15 @@ mod tests {
     fn discovery_demand_matches_the_whole_replay_with_giant_system_payloads() -> Result<()> {
         let world = crate::test_world("qwen-discovery-selected");
         let body = "body λ\n".repeat(512 * 1024);
+        // The whole read's facts; discovery leaves the count to it.
         let oracle = |path: &Path| -> Result<Option<SessionRef>> {
             let mut messages = 0;
-            let mut turns = 0;
-            let mut sink = |m: Message| {
+            let mut sink = |_: Message| {
                 messages += 1;
-                turns += usize::from(matches!(m.role, Role::User | Role::Assistant));
                 Flow::Continue
             };
-            let source = crate::json::JsonSource::capture(path)?;
-            let shell = session_shell(path, &mut sink);
-            let session = replay(
-                path,
-                &source,
-                shell,
-                ReplayState::default(),
-                0,
-                None,
-                Demand::Owned,
-                &mut sink,
-                &mut || Ok(()),
-            )?
-            .unwrap();
+            let r = SessionRef::new("", Harness::Qwen, path);
+            let session = ROOTLESS.stream(&r, &stream::Demand::RICH, &mut sink)?;
             if messages == 0 && session.created_at.is_none() {
                 return Ok(None);
             }
@@ -864,7 +824,6 @@ mod tests {
             reference.title = session.title;
             reference.created_at = session.created_at;
             reference.updated_at = session.updated_at;
-            reference.message_count = Some(turns);
             Ok(Some(reference))
         };
         let rows = [

@@ -150,6 +150,15 @@ fn emit(
     let subtype = r.string("subtype")?;
     let provenance = r.string("provenance")?;
     let payload = r.get("systemPayload");
+    if matches!(demand, Demand::Discovery)
+        && st.listed
+        && !matches!(
+            (ty.as_str(), subtype.as_deref()),
+            ("system", Some("custom_title" | "parent_session"))
+        )
+    {
+        return Ok(Flow::Continue);
+    }
     let blocks = || -> Result<Vec<Block>> {
         if ty == "system" {
             system_blocks(payload, subtype.as_deref(), demand)
