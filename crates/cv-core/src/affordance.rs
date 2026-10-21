@@ -307,100 +307,159 @@ pub fn classify_tool_json(h: Harness, name: &str, value: &Json) -> Result<Option
 }
 
 pub fn classify_tool_view(h: Harness, name: &str, input: JsonView<'_>) -> Result<Option<(Kind, &'static str)>> {
-    use Harness as H;
     use Kind::*;
     // OpenClaw names a deferred core tool `openclaw:core:<tool>`.
     let name = name.rsplit(':').next().unwrap_or(name);
-    Ok(Some(match (h, name) {
-        // plan: whole-list writes
-        (
-            _,
-            "TodoWrite" | "todo_write" | "todowrite" | "write_todos" | "todo__todo_write" | "SetTodoList" | "TodoList",
-        )
-        | (_, "update_plan" | "Checklist" | "update_todo_list")
-        | (H::Hermes, "todo") => (Plan, "write"),
-        (H::Hermes, "todo_list") => (Plan, "read"),
-        (_, "todoread") => (Plan, "read"),
-        // plan: item-wise task lists
-        (_, "TaskCreate") | (H::Qwen, "task_create") | (_, "tracker_create_task") => (Plan, "create"),
-        (_, "TaskUpdate") | (H::Qwen, "task_update") | (_, "tracker_update_task") => (Plan, "update"),
-        (_, "TaskList" | "TaskGet") if h != H::Kimi && h != H::KimiCode => (Plan, "read"),
-        (H::Qwen, "task_list" | "task_get") | (_, "tracker_list_tasks" | "tracker_get_task" | "tracker_visualize") => {
-            (Plan, "read")
-        }
-        // Unknown tracker operations count as plan updates; only the explicit rows above
-        // distinguish reads and creates. This prefix is a classification heuristic.
-        (_, n) if n.starts_with("tracker_") => (Plan, "update"),
-        // plan mode
-        (_, "EnterPlanMode" | "enter_plan_mode") => (Plan, "enter"),
-        (_, "ExitPlanMode" | "exit_plan_mode") => (Plan, "exit"),
-        // goal
-        (_, "CreateGoal") => (Goal, "create"),
-        (_, "UpdateGoal" | "update_goal" | "SetGoalBudget") => (Goal, "update"),
-        (_, "GetGoal" | "get_goal") => (Goal, "read"),
-        // schedule
-        (_, "CronCreate" | "cron_create" | "scheduler_create" | "ScheduleWakeup" | "loop_wakeup") => {
-            (Schedule, "create")
-        }
-        (_, "CronDelete" | "cron_delete" | "scheduler_delete") => (Schedule, "delete"),
-        (_, "CronList" | "cron_list" | "scheduler_list") => (Schedule, "list"),
-        (H::Hermes, "cronjob" | "cronjob_manage") | (H::OpenClaw, "cron" | "automations") => {
-            (Schedule, action_verb(input)?)
-        }
-        // background jobs
-        (_, "Bash") if flag(input, "run_in_background")? => (BackgroundJob, "start"),
-        (_, "run_terminal_command") if flag(input, "background")? || flag(input, "is_background")? => {
-            (BackgroundJob, "start")
-        }
-        (_, "run_shell_command") if flag(input, "is_background")? => (BackgroundJob, "start"),
-        (H::Hermes, "terminal") | (H::OpenClaw, "exec") if flag(input, "background")? => (BackgroundJob, "start"),
-        (_, "Monitor" | "monitor") => (BackgroundJob, "start"),
-        (_, "BashOutput" | "TaskOutput" | "get_command_or_subagent_output" | "WaitFor" | "CheckBackgroundJob") => {
-            (BackgroundJob, "read")
-        }
-        (H::Kimi | H::KimiCode, "TaskList") => (BackgroundJob, "read"),
-        (_, "KillShell" | "TaskStop" | "kill_command_or_subagent") => (BackgroundJob, "stop"),
-        (H::Hermes, "process" | "process_manage") | (H::OpenClaw, "process") => match action_verb(input)? {
+    let process = |input| -> Result<(Kind, &'static str)> {
+        Ok(match action_verb(input)? {
             "stop" => (BackgroundJob, "stop"),
             _ => (BackgroundJob, "read"),
+        })
+    };
+    // The names a harness gives a meaning of its own; every other name reads the same in all.
+    let own = match h {
+        Harness::Hermes => match name {
+            "todo" => Some((Plan, "write")),
+            "todo_list" => Some((Plan, "read")),
+            "cronjob" | "cronjob_manage" => Some((Schedule, action_verb(input)?)),
+            "terminal" if flag(input, "background")? => Some((BackgroundJob, "start")),
+            "process" | "process_manage" => Some(process(input)?),
+            "clarify" => Some((Question, "ask")),
+            _ => None,
         },
-        // sub-agents
-        (_, n) if spawn_returns(h, n).is_some() => (SubagentSpawn, "spawn"),
-        (H::KimiCode, "Agent" | "AgentSwarm") => (SubagentSpawn, "spawn"),
-        // skills
-        (_, "Skill" | "activate_skill" | "load_skill" | "Skills") | (H::OpenCode | H::Qwen | H::Roo, "skill") => {
-            (Skill, "load")
+        Harness::OpenClaw => match name {
+            "cron" | "automations" => Some((Schedule, action_verb(input)?)),
+            "exec" if flag(input, "background")? => Some((BackgroundJob, "start")),
+            "process" => Some(process(input)?),
+            _ => None,
+        },
+        Harness::Qwen => match name {
+            "task_create" => Some((Plan, "create")),
+            "task_update" => Some((Plan, "update")),
+            "task_list" | "task_get" => Some((Plan, "read")),
+            "skill" => Some((Skill, "load")),
+            _ => None,
+        },
+        // Kimi's `TaskList` lists background tasks, and its `TaskGet` reads no plan.
+        Harness::Kimi | Harness::KimiCode => match name {
+            "TaskList" => Some((BackgroundJob, "read")),
+            "TaskGet" => return Ok(None),
+            "Agent" | "AgentSwarm" if h == Harness::KimiCode => Some((SubagentSpawn, "spawn")),
+            _ => None,
+        },
+        Harness::OpenCode => match name {
+            "skill" => Some((Skill, "load")),
+            "question" => Some((Question, "ask")),
+            _ => None,
+        },
+        Harness::Roo => match name {
+            "skill" => Some((Skill, "load")),
+            _ => None,
+        },
+        Harness::Claude
+        | Harness::Codex
+        | Harness::Grok
+        | Harness::Gemini
+        | Harness::Cursor
+        | Harness::LmStudio
+        | Harness::Cline
+        | Harness::Continue
+        | Harness::Goose
+        | Harness::Zed
+        | Harness::Devin
+        | Harness::ChatGptExport
+        | Harness::ClaudeExport
+        | Harness::OpenSession => None,
+    };
+    if own.is_some() {
+        return Ok(own);
+    }
+    Ok(Some(match name {
+        // plan: whole-list writes
+        "TodoWrite" | "todo_write" | "todowrite" | "write_todos" | "todo__todo_write" | "SetTodoList" | "TodoList"
+        | "update_plan" | "Checklist" | "update_todo_list" => (Plan, "write"),
+        "todoread" => (Plan, "read"),
+        // plan: item-wise task lists
+        "TaskCreate" | "tracker_create_task" => (Plan, "create"),
+        "TaskUpdate" | "tracker_update_task" => (Plan, "update"),
+        "TaskList" | "TaskGet" => (Plan, "read"),
+        "tracker_list_tasks" | "tracker_get_task" | "tracker_visualize" => (Plan, "read"),
+        // Unknown tracker operations count as plan updates; only the explicit rows above
+        // distinguish reads and creates. This prefix is a classification heuristic.
+        n if n.starts_with("tracker_") => (Plan, "update"),
+        // plan mode
+        "EnterPlanMode" | "enter_plan_mode" => (Plan, "enter"),
+        "ExitPlanMode" | "exit_plan_mode" => (Plan, "exit"),
+        // goal
+        "CreateGoal" => (Goal, "create"),
+        "UpdateGoal" | "update_goal" | "SetGoalBudget" => (Goal, "update"),
+        "GetGoal" | "get_goal" => (Goal, "read"),
+        // schedule
+        "CronCreate" | "cron_create" | "scheduler_create" | "ScheduleWakeup" | "loop_wakeup" => (Schedule, "create"),
+        "CronDelete" | "cron_delete" | "scheduler_delete" => (Schedule, "delete"),
+        "CronList" | "cron_list" | "scheduler_list" => (Schedule, "list"),
+        // background jobs
+        "Bash" if flag(input, "run_in_background")? => (BackgroundJob, "start"),
+        "run_terminal_command" if flag(input, "background")? || flag(input, "is_background")? => {
+            (BackgroundJob, "start")
         }
-        (_, "skill_manage") => (Skill, "manage"),
+        "run_shell_command" if flag(input, "is_background")? => (BackgroundJob, "start"),
+        "Monitor" | "monitor" => (BackgroundJob, "start"),
+        "BashOutput" | "TaskOutput" | "get_command_or_subagent_output" | "WaitFor" | "CheckBackgroundJob" => {
+            (BackgroundJob, "read")
+        }
+        "KillShell" | "TaskStop" | "kill_command_or_subagent" => (BackgroundJob, "stop"),
+        // sub-agents
+        n if spawn_returns(h, n).is_some() => (SubagentSpawn, "spawn"),
+        // skills
+        "Skill" | "activate_skill" | "load_skill" | "Skills" => (Skill, "load"),
+        "skill_manage" => (Skill, "manage"),
         // questions to the person
-        (_, "AskUserQuestion" | "ask_user" | "ask_user_question" | "ask_followup_question" | "ask_question")
-        | (_, "AskQuestion")
-        | (H::Hermes, "clarify")
-        | (H::OpenCode, "question") => (Question, "ask"),
+        "AskUserQuestion"
+        | "ask_user"
+        | "ask_user_question"
+        | "ask_followup_question"
+        | "ask_question"
+        | "AskQuestion" => (Question, "ask"),
         _ => return Ok(None),
     }))
 }
 
 /// Whether `(h, name)` spawns a sub-agent, and how its result relates to the return.
 pub fn spawn_returns(h: Harness, name: &str) -> Option<Returns> {
-    use Harness as H;
-    Some(match (h, name) {
+    let one = |tool: &str, returns| (name == tool).then_some(returns);
+    match h {
         // Claude marks a synchronous return itself (from `toolUseResult`), per record.
-        (H::Claude, "Agent" | "Task" | "Workflow") => Returns::Later,
-        (H::OpenCode, "task") => Returns::Result,
-        (H::OpenCode, "subagent") => Returns::ResultUnless("in the background"),
-        (H::Hermes, "delegate_task") => Returns::ResultUnless("\"dispatched\""),
-        (H::OpenClaw, "sessions_spawn") => Returns::Later,
-        (H::Goose, "delegate") => Returns::Result,
-        (H::Grok, "spawn_subagent") => Returns::Later,
-        (H::Kimi, "Agent") => Returns::ResultUnless("background"),
-        (H::Roo, "new_task") => Returns::ResultInPrompt("new_task"),
-        (H::Cline, "spawn_agent") => Returns::Result,
-        (H::Cline, "team_spawn_teammate") => Returns::Later,
-        (H::Devin, "run_subagent") => Returns::Result,
-        (H::Continue, "Subagent") => Returns::Result,
-        _ => return None,
-    })
+        Harness::Claude => matches!(name, "Agent" | "Task" | "Workflow").then_some(Returns::Later),
+        Harness::OpenCode => match name {
+            "task" => Some(Returns::Result),
+            "subagent" => Some(Returns::ResultUnless("in the background")),
+            _ => None,
+        },
+        Harness::Cline => match name {
+            "spawn_agent" => Some(Returns::Result),
+            "team_spawn_teammate" => Some(Returns::Later),
+            _ => None,
+        },
+        Harness::Hermes => one("delegate_task", Returns::ResultUnless("\"dispatched\"")),
+        Harness::OpenClaw => one("sessions_spawn", Returns::Later),
+        Harness::Goose => one("delegate", Returns::Result),
+        Harness::Grok => one("spawn_subagent", Returns::Later),
+        Harness::Kimi => one("Agent", Returns::ResultUnless("background")),
+        Harness::Roo => one("new_task", Returns::ResultInPrompt("new_task")),
+        Harness::Devin => one("run_subagent", Returns::Result),
+        Harness::Continue => one("Subagent", Returns::Result),
+        Harness::Codex
+        | Harness::Gemini
+        | Harness::Cursor
+        | Harness::KimiCode
+        | Harness::Qwen
+        | Harness::LmStudio
+        | Harness::Zed
+        | Harness::ChatGptExport
+        | Harness::ClaudeExport
+        | Harness::OpenSession => None,
+    }
 }
 
 /// The deferred-tool wrapper Hermes, OpenClaw 10.1 and Qwen route lazily loaded tools through.
@@ -934,71 +993,17 @@ fn call_summary(kind: Kind, view: JsonView<'_>, items: &[Item]) -> Result<String
     Ok(text.finish())
 }
 
-/// Record-shaped affordances: messages the harness wrote that no `MessageKind` names.
-fn record(
-    h: Harness,
-    m: &Message,
-    resolver: &crate::lazy::Resolver,
-) -> Result<Option<(Kind, &'static str, &'static str)>> {
-    use Harness as H;
-    let bag = m.harness_extra(h);
-    let bag_str = |k: &str| bag.and_then(|b| b.get(k)).and_then(Value::as_str);
-    let head = match m.content.first() {
+/// Record-shaped affordances: messages the harness wrote that no `MessageKind` names, as the
+/// adapter that owns the record reads them.
+fn record(h: Harness, m: &Message, resolver: &crate::lazy::Resolver) -> Result<Option<RecordHit>> {
+    let Some(adapter) = crate::harness::rootless(h) else {
+        return Ok(None);
+    };
+    let text = match m.content.first() {
         Some(Block::Text { text }) => Some(text),
         _ => None,
     };
-    let starts_with = |prefix| -> Result<bool> {
-        Ok(head
-            .map(|head| text::starts_with(head, resolver, prefix))
-            .transpose()?
-            .unwrap_or(false))
-    };
-    Ok(match h {
-        H::Claude
-            if m.kind == MessageKind::InjectedContext
-                && m.origin == Origin::Harness
-                && m.harness_extra(h)
-                    .is_none_or(|bag| !bag.contains_key("sourceToolUseID"))
-                && starts_with("Base directory for this skill:")? =>
-        {
-            Some((Kind::Skill, "load", "slash command"))
-        }
-        H::Claude if m.kind == MessageKind::InjectedContext && starts_with("<task-notification>")? => {
-            Some((Kind::BackgroundJob, "complete", "task-notification"))
-        }
-        H::Kimi if starts_with("<notification")? => Some((Kind::BackgroundJob, "complete", "notification")),
-        H::KimiCode => match bag_str("origin_kind").unwrap_or("") {
-            "task" | "background_task" => Some((Kind::BackgroundJob, "complete", "task")),
-            "skill_activation" => Some((Kind::Skill, "load", "skill_activation")),
-            "hook_result" => Some((Kind::Hook, "output", "hook_result")),
-            _ => None,
-        },
-        H::Hermes => match bag_str("display_kind").unwrap_or("") {
-            "process_complete" => Some((Kind::BackgroundJob, "complete", "process_complete")),
-            "skill_invocation" => Some((Kind::Skill, "load", "skill_invocation")),
-            _ => None,
-        },
-        // An MCP call Codex refused because the approval policy could not ask (`never`).
-        H::Codex
-            if bag_str("item_type") == Some("McpToolCall")
-                && head
-                    .map(|head| text::contains(head, resolver, "requires approval"))
-                    .transpose()?
-                    .unwrap_or(false) =>
-        {
-            Some((Kind::Approval, "deny", "McpToolCall"))
-        }
-        H::OpenCode
-            if bag
-                .and_then(|b| b.get("metadata"))
-                .and_then(|v| v.get("source"))
-                .and_then(Value::as_str)
-                == Some("shell") =>
-        {
-            Some((Kind::BackgroundJob, "complete", "synthetic"))
-        }
-        _ => None,
-    })
+    adapter.record_affordance(m, &FirstText { text, resolver })
 }
 
 /// A message's one-line summary from its complete first text or tool output. The reducer searches
@@ -1060,6 +1065,35 @@ pub struct BagHit {
     pub action: &'static str,
     pub tool: &'static str,
     pub summary: String,
+}
+
+/// The affordance one of a harness's own records is (a skill load, a completion notice, a refused
+/// call) when no `MessageKind` names it ([`crate::harness::Adapter::record_affordance`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecordHit {
+    pub kind: Kind,
+    pub action: &'static str,
+    pub tool: &'static str,
+}
+
+/// A message's leading text block, read through its resolver, for an adapter's record test.
+pub struct FirstText<'a> {
+    text: Option<&'a crate::lazy::Text>,
+    resolver: &'a crate::lazy::Resolver,
+}
+
+impl FirstText<'_> {
+    /// Whether the text, leading whitespace aside, starts with `prefix`; false with no text.
+    pub fn starts_with(&self, prefix: &str) -> Result<bool> {
+        self.text
+            .map_or(Ok(false), |text| text::starts_with(text, self.resolver, prefix))
+    }
+
+    /// Whether the text contains `needle`; false with no text.
+    pub fn contains(&self, needle: &'static str) -> Result<bool> {
+        self.text
+            .map_or(Ok(false), |text| text::contains(text, self.resolver, needle))
+    }
 }
 
 /// The first eight characters of a snapshot hash, for a summary.
@@ -1191,7 +1225,7 @@ fn hits<'a>(h: Harness, m: &'a Message, resolver: &crate::lazy::Resolver, summar
     let message = match by_kind {
         Some((kind, action)) => Some((kind, action, None)),
         None => record(h, m, resolver)?
-            .map(|(kind, action, tool)| (kind, action, Some(tool)))
+            .map(|hit| (hit.kind, hit.action, Some(hit.tool)))
             .or(match m.origin {
                 Origin::Hook => Some((Kind::Hook, "output", None)),
                 Origin::Scheduler => Some((Kind::Schedule, "fire", None)),

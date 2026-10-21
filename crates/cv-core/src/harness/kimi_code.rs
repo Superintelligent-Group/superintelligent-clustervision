@@ -134,6 +134,37 @@ impl KimiCode {
 }
 
 impl Adapter for KimiCode {
+    /// The `origin_kind` the reader keeps: a finished task, a skill activation, a hook's result.
+    fn record_affordance(
+        &self,
+        m: &Message,
+        _first: &crate::affordance::FirstText<'_>,
+    ) -> Result<Option<crate::affordance::RecordHit>> {
+        use crate::affordance::{Kind, RecordHit};
+        let origin = m
+            .harness_extra(Harness::KimiCode)
+            .and_then(|bag| bag.get("origin_kind"))
+            .and_then(Value::as_str);
+        Ok(match origin.unwrap_or("") {
+            "task" | "background_task" => Some(RecordHit {
+                kind: Kind::BackgroundJob,
+                action: "complete",
+                tool: "task",
+            }),
+            "skill_activation" => Some(RecordHit {
+                kind: Kind::Skill,
+                action: "load",
+                tool: "skill_activation",
+            }),
+            "hook_result" => Some(RecordHit {
+                kind: Kind::Hook,
+                action: "output",
+                tool: "hook_result",
+            }),
+            _ => None,
+        })
+    }
+
     /// The session's todo state (`tools.update_store`), even when it is empty but present.
     fn session_affordances(&self, s: &Session) -> Vec<crate::affordance::Affordance> {
         use crate::affordance::{item_of, items_summary, session_row, Item, Kind};

@@ -50,7 +50,7 @@
 - Kimi Code: the latest `TodoList` state is a `plan/state` row; legacy `Agent`/`AgentSwarm` calls are spawns and their completed or failed results returns.
 - Roo: a `new_task` result carried beside user text is a `subagent_return` detail; the turn stays a prompt.
 - **Breaking (library):** `affordance::Returns` gains `ResultInPrompt`, the spawn-table row for Roo's `new_task`.
-- **Breaking (library):** `SubagentEnd` and `ApiErrorNotice` move from `harness::claude` to `lanes`.
+- **Breaking (library):** `SubagentEnd`, `ApiErrorNotice` and `TaskNotice` move from `harness::claude` to `lanes`.
 
 **Reshaping.**
 - Hermes and OpenCode exports reject unreadable sources before creating output directories or databases, while retaining transaction publication guards.
@@ -144,7 +144,7 @@
 - The upgrade gate requires a first listing over a 0.16.1 catalog to leave uncounted what a fresh one does; `cv index` counts all.
 - macOS runs nightly and on rc tags: APFS identity, publish, SQLite and mmap gates; a separate workflow smokes the published Darwin artifact natively.
 - `tools/dump-hash.sh` streams one sha256 per command, session and demand over `tools/dump-hash.manifest`: the byte-identity gate for output-preserving changes.
-- Shared cv-core modules name no harness outside an exhaustive match; out-of-tree adapters inherit defaults for the new `Adapter` fact methods.
+- Shared cv-core modules name a harness variant, directly or through an alias, only inside an exhaustive match; out-of-tree adapters inherit defaults for new `Adapter` methods.
 
 **Breaking (library): cv-core, cv-search and cv-testkit APIs.** Rust callers migrate as follows; the CLI, HTTP and MCP are unaffected.
 - `emit::Delta {field, before, after}` and `formats::Finding` become one `emit::Divergence {what, a, b, expected, at}`; serialized, `at` is `where` and `FidelityReport.deltas` elements change keys.

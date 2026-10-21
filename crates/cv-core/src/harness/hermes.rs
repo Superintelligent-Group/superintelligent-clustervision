@@ -226,6 +226,32 @@ impl Hermes {
 }
 
 impl Adapter for Hermes {
+    /// The `display_kind` the reader keeps: a finished process, a skill invocation.
+    fn record_affordance(
+        &self,
+        m: &Message,
+        _first: &crate::affordance::FirstText<'_>,
+    ) -> Result<Option<crate::affordance::RecordHit>> {
+        use crate::affordance::{Kind, RecordHit};
+        let display = m
+            .harness_extra(Harness::Hermes)
+            .and_then(|bag| bag.get("display_kind"))
+            .and_then(Value::as_str);
+        Ok(match display.unwrap_or("") {
+            "process_complete" => Some(RecordHit {
+                kind: Kind::BackgroundJob,
+                action: "complete",
+                tool: "process_complete",
+            }),
+            "skill_invocation" => Some(RecordHit {
+                kind: Kind::Skill,
+                action: "load",
+                tool: "skill_invocation",
+            }),
+            _ => None,
+        })
+    }
+
     fn harness(&self) -> Harness {
         Harness::Hermes
     }

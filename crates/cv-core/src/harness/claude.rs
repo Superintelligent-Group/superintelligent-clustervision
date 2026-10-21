@@ -26,7 +26,7 @@ use super::wire::anthropic;
 use crate::ir::*;
 use crate::ir::{MessageKind, Origin};
 use crate::json::{Json, JsonSource};
-use crate::lanes::{ApiErrorNotice, SubagentEnd};
+use crate::lanes::{ApiErrorNotice, SubagentEnd, TaskNotice};
 use crate::lazy::Text;
 use crate::stream::{Checkpoint, CollectSink, Demand, Flow, MessageSink, Tier, ADAPTER_LAYER};
 use anyhow::Result;
@@ -229,6 +229,35 @@ impl Adapter for Claude {
         Harness::Claude
     }
 
+    /// A skill a slash command loaded and a `<task-notification>` a stopped task queued: both
+    /// injected context Claude Code writes as user turns.
+    fn record_affordance(
+        &self,
+        m: &Message,
+        first: &crate::affordance::FirstText<'_>,
+    ) -> Result<Option<crate::affordance::RecordHit>> {
+        use crate::affordance::{Kind, RecordHit};
+        if m.kind != MessageKind::InjectedContext {
+            return Ok(None);
+        }
+        if m.origin == Origin::Harness
+            && m.harness_extra(Harness::Claude)
+                .is_none_or(|bag| !bag.contains_key("sourceToolUseID"))
+            && first.starts_with("Base directory for this skill:")?
+        {
+            return Ok(Some(RecordHit {
+                kind: Kind::Skill,
+                action: "load",
+                tool: "slash command",
+            }));
+        }
+        Ok(first.starts_with("<task-notification>")?.then_some(RecordHit {
+            kind: Kind::BackgroundJob,
+            action: "complete",
+            tool: "task-notification",
+        }))
+    }
+
     /// `<agent>.meta.json`'s `description`, as the reader copies it into the bag.
     fn agent_description<'s>(&self, s: &'s Session) -> Option<&'s str> {
         s.harness_extra(Harness::Claude)
@@ -243,6 +272,10 @@ impl Adapter for Claude {
 
     fn subagent_end(&self, transcript: &std::path::Path) -> Option<SubagentEnd> {
         Some(subagent_end(transcript))
+    }
+
+    fn task_notices(&self, parent: &SessionRef) -> std::collections::HashMap<String, TaskNotice> {
+        task_notices(&parent.path)
     }
 
     /// Claude Code writes one JSONL line per content block of a streamed response, each
@@ -1054,16 +1087,6 @@ pub fn subagent_end(path: &std::path::Path) -> SubagentEnd {
         return SubagentEnd::default();
     }
     end
-}
-
-/// The harness-side status of one sub-agent, as the parent transcript's `<task-notification>`
-/// records report it (`completed` / `failed` / `killed` / `stopped`), with the notification's
-/// timestamp. A notification fires each time the agent stops, so this is the LAST one per
-/// agent id.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct TaskNotice {
-    pub status: String,
-    pub ts: Option<DateTime<Utc>>,
 }
 
 /// Scan a parent transcript for `<task-notification>` records and reduce them to the last notice

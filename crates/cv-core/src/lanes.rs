@@ -17,7 +17,6 @@ use chrono::{DateTime, Utc};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use crate::harness::claude::{task_notices, TaskNotice};
 use crate::ir::{Block, Message, MessageKind, Role, SessionRef, Usage};
 use crate::stream::{Demand, Flow};
 use crate::AgentRef;
@@ -174,6 +173,16 @@ pub struct SubagentEnd {
     /// the agent, if anything did. A resume clears it (the next real record is a new turn).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_error: Option<ApiErrorNotice>,
+}
+
+/// The harness-side status of one sub-agent, as the parent's own records report it
+/// (`completed` / `failed` / `killed` / `stopped`, Claude's `<task-notification>`), with the
+/// notice's timestamp. A notice fires each time the agent stops, so this is the LAST one per
+/// agent id ([`crate::harness::Adapter::task_notices`]).
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskNotice {
+    pub status: String,
+    pub ts: Option<DateTime<Utc>>,
 }
 
 /// One of Claude Code's synthetic API-error notices, as the transcript records it: the notice
@@ -785,7 +794,9 @@ fn lane_of(
 /// changing or unreadable source cannot silently remove a lane from the forest.
 pub fn lanes_of(parent: &SessionRef) -> Result<Vec<Lane>> {
     let subs = crate::subagent_tree_of(parent);
-    let notices = task_notices(&parent.path);
+    let notices = crate::harness::rootless(parent.harness)
+        .map(|adapter| adapter.task_notices(parent))
+        .unwrap_or_default();
     let rows = read_ledger();
     let ledger = match crate::harness::rootless(parent.harness).and_then(|adapter| adapter.lane_stops()) {
         Some(StopScope::Parent) => ledger_stops(&rows, &parent.id),

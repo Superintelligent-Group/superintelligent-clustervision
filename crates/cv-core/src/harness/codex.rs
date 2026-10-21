@@ -134,6 +134,26 @@ impl Codex {
 }
 
 impl Adapter for Codex {
+    /// An MCP call Codex refused because the approval policy could not ask (`never`).
+    fn record_affordance(
+        &self,
+        m: &Message,
+        first: &crate::affordance::FirstText<'_>,
+    ) -> Result<Option<crate::affordance::RecordHit>> {
+        let mcp = m
+            .harness_extra(Harness::Codex)
+            .and_then(|bag| bag.get("item_type"))
+            .and_then(Value::as_str)
+            == Some("McpToolCall");
+        Ok(
+            (mcp && first.contains("requires approval")?).then_some(crate::affordance::RecordHit {
+                kind: crate::affordance::Kind::Approval,
+                action: "deny",
+                tool: "McpToolCall",
+            }),
+        )
+    }
+
     fn harness(&self) -> Harness {
         Harness::Codex
     }

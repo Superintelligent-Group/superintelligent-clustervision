@@ -8,8 +8,10 @@
 //! read, `//` comment lines are ignored, string (raw ones included, one line at a time) and char
 //! literals are masked before braces are counted, and a `match` is exhaustive when the literals
 //! inside its brace-matched body name every variant of [`Harness::ALL`] (a `_` arm beside a
-//! partial list does not count). Rust's own exhaustiveness checking is the real judge; this fence
-//! only has to tell a per-harness table from a special case.
+//! partial list does not count). A file's `use Harness as H` (or `type H = Harness`) makes `H::Name`
+//! a literal too, and importing the variants themselves (`Harness::*`, `Harness::{…}`) is a breach,
+//! since bare variant names cannot be told from any other. Rust's own exhaustiveness checking is
+//! the real judge; this fence only has to tell a per-harness table from a special case.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -132,11 +134,7 @@ fn exhaustive_ranges(code: &[String], keep: &[bool], literal: &Regex, all: &BTre
             }
             let Some(end) = end else { continue };
             let named: BTreeSet<String> = (start..=end)
-                .flat_map(|i| {
-                    literal
-                        .find_iter(&code[i])
-                        .map(|v| v.as_str()["Harness::".len()..].to_string())
-                })
+                .flat_map(|i| literal.captures_iter(&code[i]).map(|v| v[1].to_string()))
                 .collect();
             if all.is_subset(&named) {
                 ranges.push((start, end));
@@ -156,7 +154,8 @@ fn harness_names_stay_inside_exhaustive_matches() {
     // and braces that would otherwise end the plain-string match early and unbalance the count.
     let strings =
         Regex::new(r####"\bb?r##".*?"##|\bb?r#".*?"#|\bb?r"[^"]*"|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])'"####).unwrap();
-    let literal = Regex::new(r"\bHarness::[A-Z][A-Za-z]*").unwrap();
+    let alias = Regex::new(r"\bHarness\s+as\s+(\w+)|\btype\s+(\w+)\s*=\s*(?:\w+::)*Harness\s*;").unwrap();
+    let variants_import = Regex::new(r"\bHarness::(?:\*|\{)").unwrap();
     let all: BTreeSet<String> = Harness::ALL.iter().map(|h| format!("{h:?}")).collect();
 
     // A file a parent declares under `#[cfg(test)] mod name;` is a test file by another name.
@@ -183,14 +182,25 @@ fn harness_names_stay_inside_exhaustive_matches() {
         let text = fs::read_to_string(path).unwrap();
         let code: Vec<String> = text.lines().map(|l| code_only(l, &strings)).collect();
         let keep = product_mask(&code);
-        let fenced = exhaustive_ranges(&code, &keep, &literal, &all);
         let rel = path.strip_prefix(&root).unwrap().to_str().unwrap().to_string();
+        // `Harness` and every name this file's product code aliases it to.
+        let mut names = vec!["Harness".to_string()];
+        for (i, line) in code.iter().enumerate().filter(|(i, _)| keep[*i]) {
+            for c in alias.captures_iter(line) {
+                names.push(c.get(1).or(c.get(2)).unwrap().as_str().to_string());
+            }
+            if variants_import.is_match(line) {
+                sites.push(format!("{rel}:{}: {}", i + 1, text.lines().nth(i).unwrap().trim()));
+            }
+        }
+        let literal = Regex::new(&format!(r"\b(?:{})::([A-Z][A-Za-z]*)", names.join("|"))).unwrap();
+        let fenced = exhaustive_ranges(&code, &keep, &literal, &all);
         for (i, line) in code.iter().enumerate() {
             if !keep[i] || fenced.iter().any(|(a, b)| (*a..=*b).contains(&i)) {
                 continue;
             }
-            for m in literal.find_iter(line) {
-                let name = &m.as_str()["Harness::".len()..];
+            for m in literal.captures_iter(line) {
+                let name = &m[1];
                 if name == "ALL" || name == "COUNT" {
                     continue;
                 }

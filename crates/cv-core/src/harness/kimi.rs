@@ -136,6 +136,21 @@ impl Adapter for Kimi {
         Harness::Kimi
     }
 
+    /// A `<notification>` turn: a background task finished.
+    fn record_affordance(
+        &self,
+        _m: &Message,
+        first: &crate::affordance::FirstText<'_>,
+    ) -> Result<Option<crate::affordance::RecordHit>> {
+        Ok(first
+            .starts_with("<notification")?
+            .then_some(crate::affordance::RecordHit {
+                kind: crate::affordance::Kind::BackgroundJob,
+                action: "complete",
+                tool: "notification",
+            }))
+    }
+
     fn dependencies(&self, r: &SessionRef, probe: &mut Probe, deps: &mut Dependencies) -> Option<()> {
         if let Some(root) = r
             .path

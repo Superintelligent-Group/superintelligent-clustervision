@@ -192,6 +192,25 @@ fn resolve_db(_data: &Path) -> Option<PathBuf> {
 }
 
 impl Adapter for OpenCode {
+    /// A synthetic turn whose metadata names the `shell` source: a shell command finished.
+    fn record_affordance(
+        &self,
+        m: &Message,
+        _first: &crate::affordance::FirstText<'_>,
+    ) -> Result<Option<crate::affordance::RecordHit>> {
+        let shell = m
+            .harness_extra(Harness::OpenCode)
+            .and_then(|bag| bag.get("metadata"))
+            .and_then(|v| v.get("source"))
+            .and_then(Value::as_str)
+            == Some("shell");
+        Ok(shell.then_some(crate::affordance::RecordHit {
+            kind: crate::affordance::Kind::BackgroundJob,
+            action: "complete",
+            tool: "synthetic",
+        }))
+    }
+
     fn harness(&self) -> Harness {
         Harness::OpenCode
     }

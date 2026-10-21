@@ -419,6 +419,17 @@ pub trait Adapter: Send + Sync {
         &[]
     }
 
+    /// The affordance `m` is as one of this harness's own records that no `MessageKind` names (a
+    /// skill load, a completion notice, a refused call), its leading text read through `first`.
+    /// Default: the harness writes none.
+    fn record_affordance(
+        &self,
+        _m: &Message,
+        _first: &crate::affordance::FirstText<'_>,
+    ) -> Result<Option<crate::affordance::RecordHit>> {
+        Ok(None)
+    }
+
     /// The affordances `m`'s harness bag records outside its blocks (a patch or snapshot part
     /// riding the turn), in order. Default: the bag records none.
     fn message_affordances(&self, _m: &Message) -> Vec<crate::affordance::BagHit> {
@@ -521,6 +532,12 @@ pub trait Adapter: Send + Sync {
     /// notice), when the store records it there. Default: it records none.
     fn subagent_end(&self, _transcript: &std::path::Path) -> Option<crate::lanes::SubagentEnd> {
         None
+    }
+
+    /// The last status notice `parent`'s own records give each sub-agent, by agent id. Default:
+    /// the parent records none.
+    fn task_notices(&self, _parent: &SessionRef) -> std::collections::HashMap<String, crate::lanes::TaskNotice> {
+        std::collections::HashMap::new()
     }
 
     /// The newest compaction boundary in the last `tail` bytes of `transcript`:
