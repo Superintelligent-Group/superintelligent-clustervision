@@ -81,7 +81,7 @@ use crate::ir::*;
 use crate::json::{JsonSource, JsonView};
 use crate::lazy::{Text, INLINE_MAX};
 use crate::source::{Dependencies, Probe};
-use crate::stream::{Checkpoint, Demand, Flow, MessageSink, Tier};
+use crate::stream::{Checkpoint, Demand, Flow, MessageSink, Start, Tier};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -272,29 +272,26 @@ impl Adapter for Kimi {
     }
 
     fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
-        crate::stream::checked(sink, |sink| {
-            // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
-            let mut spawns = crate::affordance::AffordanceSink::new(Harness::Kimi, sink);
-            let sink: &mut dyn MessageSink = &mut spawns;
-            let (transcript, wire) = locate_transcript(&r.path, &r.id);
-            let segments = transcript_segments(&r.path, &transcript);
-            note_config_dependency(self, sink);
-            let (s, enrich) = session_header(self, r, opts, &segments, wire.as_deref());
-            sink.meta(&s);
-            let primary = self.resume_source(r);
-            // Offer checkpoints only when layout discovery and resume_source agree on the
-            // final segment; a byte offset in another segment cannot resume this stream.
-            let capture = segments.last() == Some(&primary);
-            stream_context(
-                s,
-                &segments,
-                &enrich,
-                opts,
-                ContextState::default(),
-                ContextStart { at: None, capture },
-                sink,
-            )
-        })
+        self.transcript(r, opts, Start::Whole, sink)?
+            .context("a whole read never declines")
+    }
+
+    /// The rotated segments then the live `context.jsonl`, each through the record codec; a
+    /// checkpoint resumes the live file only. Its own segment loop ([`visit_segments`]), not
+    /// [`jsonl::drive`]: a checkpoint is offered mid-record, at the start of the line whose
+    /// message flushes the held one, and the callbacks go through the same guard per segment.
+    fn transcript(
+        &self,
+        r: &SessionRef,
+        opts: &Demand,
+        from: Start<'_>,
+        sink: &mut dyn MessageSink,
+    ) -> Result<Option<Session>> {
+        match from {
+            Start::Whole => self.whole(r, opts, sink).map(Some),
+            Start::Checkpoint(cp) => self.resumed(r, opts, sink, cp),
+            Start::Prefix(_) => Ok(None),
+        }
     }
 
     /// The todo list `SetTodoList` keeps in the session dir's `state.json` (`todos: [{title,
@@ -317,7 +314,17 @@ impl Adapter for Kimi {
     }
 
     fn resume_format(&self) -> Option<u32> {
-        Some(1)
+        Some(CONTEXT_VERSION)
+    }
+
+    fn resume(
+        &self,
+        r: &SessionRef,
+        opts: &Demand,
+        sink: &mut dyn MessageSink,
+        from: &Checkpoint,
+    ) -> Result<Option<Session>> {
+        self.transcript(r, opts, Start::Checkpoint(from), sink)
     }
 
     fn resume_source(&self, r: &SessionRef) -> PathBuf {
@@ -336,8 +343,43 @@ impl Adapter for Kimi {
             r.path.join(format!("{}.jsonl", r.id))
         }
     }
+}
 
-    fn resume(
+/// What a Kimi checkpoint's state means: bump when it, or what a record parses to, changes.
+const CONTEXT_VERSION: u32 = 1;
+
+impl Kimi {
+    fn whole(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
+        crate::stream::checked(sink, |sink| {
+            // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
+            let mut spawns = crate::affordance::AffordanceSink::new(Harness::Kimi, sink);
+            let sink: &mut dyn MessageSink = &mut spawns;
+            let (transcript, wire) = locate_transcript(&r.path, &r.id);
+            let segments = transcript_segments(&r.path, &transcript);
+            note_config_dependency(self, sink);
+            let (s, enrich) = session_header(self, r, opts, &segments, wire.as_deref());
+            sink.meta(&s);
+            let primary = self.resume_source(r);
+            // Offer checkpoints only when layout discovery and resume_source agree on the
+            // final segment; a byte offset in another segment cannot resume this stream.
+            let capture = segments.last() == Some(&primary);
+            stream_context(
+                s,
+                &segments,
+                &enrich,
+                opts,
+                ContextState::default(),
+                ContextStart {
+                    at: None,
+                    capture,
+                    skipped: 0,
+                },
+                sink,
+            )
+        })
+    }
+
+    fn resumed(
         &self,
         r: &SessionRef,
         opts: &Demand,
@@ -345,11 +387,11 @@ impl Adapter for Kimi {
         from: &Checkpoint,
     ) -> Result<Option<Session>> {
         crate::stream::checked(sink, |sink| {
-            let Some(state) = from.get::<ContextCheckpoint>(crate::stream::ADAPTER_LAYER) else {
+            let Some((state, skipped)) = jsonl::restore_at::<ContextCheckpoint>(from, CONTEXT_VERSION, *opts) else {
                 return Ok(None);
             };
             let primary = self.resume_source(r);
-            if state.primary != primary || state.flavor != context_flavor(opts) {
+            if state.primary != primary {
                 return Ok(None);
             }
             let (transcript, wire) = locate_transcript(&r.path, &r.id);
@@ -373,6 +415,7 @@ impl Adapter for Kimi {
                 ContextStart {
                     at: Some(from.offset),
                     capture: true,
+                    skipped,
                 },
                 &mut spawns,
             )?))
@@ -438,15 +481,6 @@ fn session_header(
     (s, enrich)
 }
 
-fn context_flavor(opts: &Demand) -> [bool; 4] {
-    [
-        opts.tier >= Tier::Facts,
-        opts.spans,
-        opts.offsets,
-        opts.tier == Tier::Complete,
-    ]
-}
-
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 struct ContextState {
     call_names: BTreeMap<String, String>,
@@ -454,19 +488,19 @@ struct ContextState {
     first_user_seen: bool,
     checkpoints: u64,
     rotated: Option<String>,
-    skipped: u64,
 }
-#[derive(serde::Deserialize)]
-struct ContextCheckpoint {
-    primary: PathBuf,
-    segments: Vec<PathBuf>,
-    flavor: [bool; 4],
-    ctx: ContextState,
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ContextCheckpoint<P = PathBuf, V = Vec<PathBuf>, C = ContextState> {
+    primary: P,
+    segments: V,
+    ctx: C,
 }
 
 struct ContextStart {
     at: Option<u64>,
     capture: bool,
+    /// Rejected lines before `at` (a checkpoint's count).
+    skipped: u64,
 }
 
 fn stream_context(
@@ -480,12 +514,13 @@ fn stream_context(
 ) -> Result<Session> {
     let mut pending: Option<(Message, JsonSource)> = None;
     let mut stopped = false;
-    let prior_skipped = ctx.skipped;
+    let prior_skipped = start.skipped;
     let mut accept = |view: JsonView<'_>,
                       input: &jsonl::Read,
                       starts: Option<&str>,
                       position: Option<u64>,
-                      skipped: u64|
+                      skipped: u64,
+                      sink: &mut dyn MessageSink|
      -> Result<Flow> {
         if let Some(name) = starts {
             ctx.rotated = Some(name.into());
@@ -524,34 +559,18 @@ fn stream_context(
                 stopped = true;
                 return Ok(Flow::Stop);
             }
-            if let Some(offset) = position.filter(|_| start.capture) {
-                let wanted = sink.wants_checkpoint(offset);
-                input.check_backing()?;
-                if wanted {
-                    #[derive(serde::Serialize)]
-                    struct State<'a> {
-                        primary: &'a Path,
-                        segments: &'a [PathBuf],
-                        flavor: [bool; 4],
-                        ctx: &'a ContextState,
-                    }
-                    // The current checkpoint carrier is not part of the prefix yet.
-                    ctx.checkpoints -= checkpoint_record;
-                    ctx.skipped = prior_skipped + skipped;
-                    let mut cp = Checkpoint::new(offset);
-                    cp.put(
-                        crate::stream::ADAPTER_LAYER,
-                        &State {
-                            primary: segments.last().unwrap(),
-                            segments,
-                            flavor: context_flavor(opts),
-                            ctx: &ctx,
-                        },
-                    );
-                    sink.checkpoint(&mut cp);
-                    input.check_backing()?;
-                    ctx.checkpoints += checkpoint_record;
-                }
+            if position.is_some_and(|offset| start.capture && sink.wants_checkpoint(offset)) {
+                // The current checkpoint carrier is not part of the prefix yet.
+                ctx.checkpoints -= checkpoint_record;
+                let mut cp = Checkpoint::new(position.unwrap_or_default());
+                let state = ContextCheckpoint {
+                    primary: segments.last().unwrap(),
+                    segments,
+                    ctx: &ctx,
+                };
+                jsonl::stamp(&mut cp, CONTEXT_VERSION, *opts, prior_skipped + skipped, &state);
+                sink.checkpoint(&mut cp);
+                ctx.checkpoints += checkpoint_record;
             }
         }
         note_call_names(&m, &mut ctx.call_names);
@@ -594,7 +613,7 @@ fn stream_context(
         pending = Some((m, input.source().clone()));
         Ok(Flow::Continue)
     };
-    let skipped = visit_segments(segments, start.at, &mut accept)?;
+    let skipped = visit_segments(segments, start.at, sink, &mut accept)?;
     if !stopped {
         if let Some((last, source)) = pending {
             sink.message(last);
@@ -697,12 +716,18 @@ fn scan(id: &str, transcript: &Path, dir: &Path, cwd: Option<PathBuf>) -> Result
     // title: state.json.custom_title (modern only) else first user text from the transcript.
     let mut title = read_custom_title(dir);
     if title.is_none() {
-        visit_segments(&transcript_segments(dir, transcript), None, &mut |view, _, _, _, _| {
-            if let Some(record) = record::Record::of(view)? {
-                title = record.title()?;
-            }
-            Ok(if title.is_some() { Flow::Stop } else { Flow::Continue })
-        })?;
+        let segments = transcript_segments(dir, transcript);
+        visit_segments(
+            &segments,
+            None,
+            &mut crate::stream::Discard,
+            &mut |view, _, _, _, _, _| {
+                if let Some(record) = record::Record::of(view)? {
+                    title = record.title()?;
+                }
+                Ok(if title.is_some() { Flow::Stop } else { Flow::Continue })
+            },
+        )?;
     } else {
         // A summary title avoids body reads, while the primary path must remain present.
         if crate::source::FileId::of(&fs::metadata(transcript)?) != Some(primary) {
@@ -792,8 +817,9 @@ fn transcript_segments(dir: &Path, transcript: &Path) -> Vec<PathBuf> {
 }
 
 /// A record visitor of [`visit_segments`]: the record, its segment's source, the rotated-in
-/// segment's name, a checkpoint anchor, and the rejected lines before it.
-type SegmentRecord<'a> = dyn FnMut(JsonView<'_>, &jsonl::Read, Option<&str>, Option<u64>, u64) -> Result<Flow> + 'a;
+/// segment's name, a checkpoint anchor, the rejected lines before it, and the guarded sink.
+type SegmentRecord<'a> =
+    dyn FnMut(JsonView<'_>, &jsonl::Read, Option<&str>, Option<u64>, u64, &mut dyn MessageSink) -> Result<Flow> + 'a;
 
 /// Every record of every segment, in order: the live one from `at` alone when resuming. kimi-cli
 /// rotates the live file on `/clear`, on a compaction (`Context.clear`) and on a rewind
@@ -803,7 +829,12 @@ type SegmentRecord<'a> = dyn FnMut(JsonView<'_>, &jsonl::Read, Option<&str>, Opt
 /// source, the segment's name at its first new record (never for the first segment), the start of
 /// a finished live-file line (a checkpoint anchor; a partial last line is replayed from an older
 /// one) and the rejected lines before it. Returns the count of rejected lines.
-fn visit_segments(segments: &[PathBuf], at: Option<u64>, accept: &mut SegmentRecord<'_>) -> Result<u64> {
+fn visit_segments(
+    segments: &[PathBuf],
+    at: Option<u64>,
+    sink: &mut dyn MessageSink,
+    accept: &mut SegmentRecord<'_>,
+) -> Result<u64> {
     let mut skipped = 0;
     let mut prev = Vec::new();
     for (index, path) in segments.iter().enumerate() {
@@ -832,37 +863,38 @@ fn visit_segments(segments: &[PathBuf], at: Option<u64>, accept: &mut SegmentRec
         let mut announce = shared;
         let mut start = from;
         let mut stopped = false;
-        input.lines(from, |line| {
-            let line_start = std::mem::replace(&mut start, line.end);
-            // Older segments need fingerprints for their successor; the live one only until its
-            // copied prefix diverges.
-            if !live || shared {
-                let Some(hash) = fingerprint(&input, &line)? else {
-                    skipped += 1;
+        // Each segment's callbacks are guarded against its own descriptor ([`crate::stream::Guard`]).
+        crate::stream::guarded(sink, &input, |guard| {
+            input.lines(from, |line| {
+                let line_start = std::mem::replace(&mut start, line.end);
+                // Older segments need fingerprints for their successor; the live one only until its
+                // copied prefix diverges.
+                if !live || shared {
+                    let Some(hash) = fingerprint(&input, &line)? else {
+                        skipped += 1;
+                        return Ok(Flow::Continue);
+                    };
+                    if !live {
+                        cur.push(hash);
+                    }
+                    let matches = shared && prev.get(line_index) == Some(&hash);
+                    line_index += 1;
+                    if matches {
+                        return Ok(Flow::Continue);
+                    }
+                    shared = false;
+                }
+                let Some(view) = line.view else {
+                    skipped += u64::from(!line.blank);
                     return Ok(Flow::Continue);
                 };
-                if !live {
-                    cur.push(hash);
-                }
-                let matches = shared && prev.get(line_index) == Some(&hash);
-                line_index += 1;
-                if matches {
-                    return Ok(Flow::Continue);
-                }
-                shared = false;
-            }
-            let Some(view) = line.view else {
-                skipped += u64::from(!line.blank);
-                return Ok(Flow::Continue);
-            };
-            let starts = announce.then_some(name);
-            announce = false;
-            let position = (live && line.complete).then_some(line_start);
-            let started = std::time::Instant::now();
-            let flow = accept(view, &input, starts, position, skipped)?;
-            input.check_backing_after(started, line.end)?;
-            stopped = flow == Flow::Stop;
-            Ok(flow)
+                let starts = announce.then_some(name);
+                announce = false;
+                let position = (live && line.complete).then_some(line_start);
+                let flow = accept(view, &input, starts, position, skipped, guard)?;
+                stopped = flow == Flow::Stop || guard.failed();
+                Ok(if stopped { Flow::Stop } else { flow })
+            })
         })?;
         if stopped {
             break;
@@ -1465,8 +1497,14 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
     #[test]
     fn callbacks_cannot_resume_mapped_context_after_truncation() -> Result<()> {
+        if !crate::harness::store::jsonl::tests::in_child(
+            "harness::kimi::tests::callbacks_cannot_resume_mapped_context_after_truncation",
+        ) {
+            return Ok(());
+        }
         struct Shrink {
             path: PathBuf,
             stage: u8,
@@ -1482,6 +1520,9 @@ mod tests {
                         .set_len(0)
                         .unwrap();
                     self.hit = true;
+                    // A callback that changed the file is a slow one by construction; the guard
+                    // checks the backing after a slow callback, before the mapping is touched.
+                    std::thread::sleep(crate::harness::store::jsonl::Read::SLOW_CALLBACK * 10);
                 }
             }
         }
@@ -1777,8 +1818,7 @@ mod tests {
             adapter.try_stream(&reference, &options, &mut full)?;
             let last = full.checkpoints.last().unwrap();
             assert_eq!(
-                last.1
-                    .get::<ContextCheckpoint>(crate::stream::ADAPTER_LAYER)
+                jsonl::restore::<ContextCheckpoint>(&last.1, CONTEXT_VERSION)
                     .unwrap()
                     .ctx
                     .call_names

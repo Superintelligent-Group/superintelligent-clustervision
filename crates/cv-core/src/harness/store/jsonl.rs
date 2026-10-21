@@ -102,13 +102,6 @@ impl Read {
     /// detection then waits for CHECK_EVERY consumed bytes, a checkpoint or EOF.
     pub(crate) const SLOW_CALLBACK: std::time::Duration = std::time::Duration::from_micros(200);
 
-    // TRANSITIONAL(K1): the readers not yet on `drive`.
-    pub(crate) fn check_backing_after(&self, started: std::time::Instant, offset: u64) -> anyhow::Result<()> {
-        if started.elapsed() < Self::SLOW_CALLBACK {
-            return self.check_backing_at(offset);
-        }
-        self.check_backing()
-    }
     /// [`Self::check_backing`] once per [`Self::CHECK_EVERY`] bytes of consumed input, keyed by the
     /// offset the pass has reached: every line pass runs it after each visit.
     fn check_backing_at(&self, offset: u64) -> anyhow::Result<()> {
@@ -254,6 +247,37 @@ pub(crate) fn restore<S: serde::de::DeserializeOwned>(from: &crate::stream::Chec
         .map(|stamped| stamped.state)
 }
 
+/// [`restore`] at `demand`, with the rejected lines counted before the checkpoint.
+pub(crate) fn restore_at<S: serde::de::DeserializeOwned>(
+    from: &crate::stream::Checkpoint,
+    version: u32,
+    demand: crate::stream::Demand,
+) -> Option<(S, u64)> {
+    from.get::<Stamped<S>>(crate::stream::ADAPTER_LAYER)
+        .filter(|stamped| stamped.version == version && stamped.demand == demand)
+        .map(|stamped| (stamped.state, stamped.skipped))
+}
+
+/// Put `state` in `cp` as a driven read's checkpoint keeps it: with its codec's `version`, the
+/// `demand` it depends on and the rejected lines before it ([`restore_at`] reads it back).
+pub(crate) fn stamp(
+    cp: &mut crate::stream::Checkpoint,
+    version: u32,
+    demand: crate::stream::Demand,
+    skipped: u64,
+    state: &impl serde::Serialize,
+) {
+    cp.put(
+        crate::stream::ADAPTER_LAYER,
+        &Stamped {
+            version,
+            demand,
+            skipped,
+            state,
+        },
+    );
+}
+
 /// A checkpoint at `offset` holding `state` as a driven read of `C` would (tests build marks).
 #[cfg(test)]
 pub(crate) fn checkpoint<C: Codec>(
@@ -262,15 +286,7 @@ pub(crate) fn checkpoint<C: Codec>(
     state: &impl serde::Serialize,
 ) -> crate::stream::Checkpoint {
     let mut cp = crate::stream::Checkpoint::new(offset);
-    cp.put(
-        crate::stream::ADAPTER_LAYER,
-        &Stamped {
-            version: C::VERSION,
-            demand,
-            skipped: 0,
-            state,
-        },
-    );
+    stamp(&mut cp, C::VERSION, demand, 0, state);
     cp
 }
 
@@ -295,13 +311,10 @@ pub(crate) fn drive<C: Codec>(
         Start::Prefix(to) => (0, to.min(len), 0),
         Start::Checkpoint(_) if read.is_decoded() => return Ok(None),
         Start::Checkpoint(cp) => {
-            let Some(stamped) = cp
-                .get::<Stamped<serde::de::IgnoredAny>>(crate::stream::ADAPTER_LAYER)
-                .filter(|stamped| stamped.version == C::VERSION && stamped.demand == codec.demand())
-            else {
+            let Some((_, skipped)) = restore_at::<serde::de::IgnoredAny>(cp, C::VERSION, codec.demand()) else {
                 return Ok(None);
             };
-            (cp.offset, len, stamped.skipped)
+            (cp.offset, len, skipped)
         }
     };
     if at > len {
@@ -323,15 +336,7 @@ pub(crate) fn drive<C: Codec>(
             // line is re-read whole next time.
             if line.complete && !read.is_decoded() && codec.settled() && guard.wants_checkpoint(line.end) {
                 let mut cp = crate::stream::Checkpoint::new(line.end);
-                cp.put(
-                    crate::stream::ADAPTER_LAYER,
-                    &Stamped {
-                        version: C::VERSION,
-                        demand: codec.demand(),
-                        skipped,
-                        state: codec.state(),
-                    },
-                );
+                stamp(&mut cp, C::VERSION, codec.demand(), skipped, &codec.state());
                 guard.checkpoint(&mut cp);
             }
             stopped = guard.failed();

@@ -16,9 +16,10 @@
 //!
 //! **Who owns the source guarantee.** A reader captures its source (identity, length, the
 //! dependencies it consults) before it reads a byte and binds its descriptor to that capture. It
-//! rechecks only where something can have changed under it: after a sink callback that was slow
-//! (`jsonl::Read::check_backing_after`, `SLOW_CALLBACK`), once per window of mapped input
-//! (`check_backing_at`), at a checkpoint, and at EOF (`Read::check`: descriptor and path). A
+//! rechecks only where something can have changed under it, and one owner places each check: the
+//! guard of a JSONL read ([`Guard`], [`jsonl::drive`]) after a slow sink callback
+//! (`SLOW_CALLBACK`), after the session metadata and after a checkpoint; the line pass once per
+//! window of mapped input; `Read::check` at EOF (descriptor and path). A
 //! consumer that publishes (a writer's commit, a cache insert, an archive rename) rechecks once,
 //! immediately before publishing; a span demand checks its own source (`lazy::Resolver`). Emitters
 //! also preflight before creating output so an already-unreadable source leaves no files behind.
