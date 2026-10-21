@@ -909,7 +909,10 @@ mod tests {
         frozen.insert("in order", first.clone());
         let check = || {
             let new = TokenStats::compute(&refs).unwrap();
-            assert_eq!(serde_json::to_vec(&new.to_json()).unwrap(), serde_json::to_vec(&first).unwrap());
+            assert_eq!(
+                serde_json::to_vec(&new.to_json()).unwrap(),
+                serde_json::to_vec(&first).unwrap()
+            );
             assert_eq!(new.duplicates, 2);
             assert_eq!(new.failed, 1);
             assert_eq!(new.rows.iter().find(|r| r.harness == "claude").unwrap().model, "first");
@@ -968,7 +971,10 @@ mod tests {
         let expected = TokenStats::compute(std::slice::from_ref(&r)).unwrap().to_json();
         let mut frozen = crate::emit::frozen::Frozen::new("stats-tiny");
         frozen.insert("tiny", expected.clone());
-        assert_eq!(TokenStats::compute(std::slice::from_ref(&r)).unwrap().to_json(), expected);
+        assert_eq!(
+            TokenStats::compute(std::slice::from_ref(&r)).unwrap().to_json(),
+            expected
+        );
         assert!(usage_cache::Cache::new()
             .unwrap()
             .load(&r, &crate::source::Probe::default().snapshot(&r))

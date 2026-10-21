@@ -2353,10 +2353,7 @@ fn task_inbox_orders_decisions_first_and_renders_markdown() {
     let assigned = out.find("assigned actions (2):").expect(&out);
     let claimed = out.find("claimed work (1):").expect(&out);
     assert!(dec < assigned && assigned < claimed, "group order:\n{out}");
-    assert!(
-        assigned < out.find("tagged, never posed").unwrap(),
-        "{out}"
-    );
+    assert!(assigned < out.find("tagged, never posed").unwrap(), "{out}");
 
     let (md, _) = w.cv_ok(&["task", "inbox", "ember", "--md"]);
     let got = normalize(&md);
@@ -4218,7 +4215,7 @@ fn frozen_writer_commands_exit_two_before_resolving_or_writing() {
 }
 
 #[test]
-fn frozen_events_match_catalog_order_and_deduplication() {
+fn frozen_events_match_catalog_order_and_keep_every_event() {
     let w = World::new("frozen-event-order");
     w.write_session("eventorder", &[
         user_line("u1", "2026-01-01T10:00:00Z", "fix it"),
@@ -4232,7 +4229,8 @@ fn frozen_events_match_catalog_order_and_deduplication() {
     let (frozen, _) = w.cv_ok(&["--frozen", "events", "eventorder", "--json"]);
     let (ordinary, _) = w.cv_ok(&["events", "eventorder", "--json"]);
     let rows: Vec<serde_json::Value> = serde_json::from_str(&ordinary).unwrap();
-    assert_eq!(rows.len(), 3, "{ordinary}");
+    // Both edits of /work/a are rows: no dedup on (message, kind, target).
+    assert_eq!(rows.len(), 4, "{ordinary}");
     assert_eq!(frozen, ordinary);
 }
 
