@@ -511,6 +511,18 @@ pub trait Adapter: Send + Sync {
         None
     }
 
+    /// How this harness's hook rows in cv's lane ledger name the sub-agents whose `stop` counts
+    /// for a parent. Default: its hooks write no lane rows.
+    fn lane_stops(&self) -> Option<crate::lanes::StopScope> {
+        None
+    }
+
+    /// Where the sub-agent transcript at `transcript` ended (last turn, last stop, a fatal API
+    /// notice), when the store records it there. Default: it records none.
+    fn subagent_end(&self, _transcript: &std::path::Path) -> Option<crate::lanes::SubagentEnd> {
+        None
+    }
+
     /// The newest compaction boundary in the last `tail` bytes of `transcript`:
     /// `(trigger, tokens before)`. Default: the store records none a tail read can find.
     fn last_compact_boundary(

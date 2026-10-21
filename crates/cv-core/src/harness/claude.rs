@@ -26,6 +26,7 @@ use super::wire::anthropic;
 use crate::ir::*;
 use crate::ir::{MessageKind, Origin};
 use crate::json::{Json, JsonSource};
+use crate::lanes::{ApiErrorNotice, SubagentEnd};
 use crate::lazy::Text;
 use crate::stream::{Checkpoint, CollectSink, Demand, Flow, MessageSink, Tier, ADAPTER_LAYER};
 use anyhow::Result;
@@ -233,6 +234,15 @@ impl Adapter for Claude {
         s.harness_extra(Harness::Claude)
             .and_then(|bag| bag.get("agent_description"))
             .and_then(Value::as_str)
+    }
+
+    /// `SubagentStart`/`SubagentStop` rows name the parent session.
+    fn lane_stops(&self) -> Option<crate::lanes::StopScope> {
+        Some(crate::lanes::StopScope::Parent)
+    }
+
+    fn subagent_end(&self, transcript: &std::path::Path) -> Option<SubagentEnd> {
+        Some(subagent_end(transcript))
     }
 
     fn denials(&self) -> &'static [crate::affordance::Denial] {
@@ -914,51 +924,6 @@ pub fn subagent_return(path: &std::path::Path) -> Option<String> {
     })
     .ok()?;
     last
-}
-
-/// Where a sub-agent transcript ends: the timestamp of its last conversational record (`user` or
-/// `assistant`) and of its last `SubagentStop` hook attachment. Claude Code appends a
-/// `SubagentStop` attachment each time the agent stops; a `SendMessage` resume appends new turns
-/// after it. So `stopped_at > last_turn_at` means the agent is parked — finished or waiting —
-/// and `last_turn_at > stopped_at` (or no stop at all) means it is running, or died without the
-/// hook firing (a harness restart). Keeps timing and error facts, discarding ordinary content after each record.
-#[derive(Debug, Clone, Default, serde::Serialize)]
-pub struct SubagentEnd {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_turn_at: Option<DateTime<Utc>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stopped_at: Option<DateTime<Utc>>,
-    /// The last API-error notice (`isApiErrorMessage`) with no real turn after it — what killed
-    /// the agent, if anything did. A resume clears it (the next real record is a new turn).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub api_error: Option<ApiErrorNotice>,
-}
-
-/// One of Claude Code's synthetic API-error notices, as the transcript records it: the notice
-/// text (`You've hit your session limit · resets 9pm (America/New_York)`, `Prompt is too long`),
-/// the `error` class (`rate_limit`, `invalid_request`), the HTTP status when present, and the
-/// quota's reset instant (`quotaLimits.resetsAt`, epoch seconds) for a rate limit.
-#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
-pub struct ApiErrorNotice {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ts: Option<DateTime<Utc>>,
-    pub text: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub resets_at: Option<DateTime<Utc>>,
-}
-
-impl SubagentEnd {
-    /// Parked (a `SubagentStop` fired after the last turn)? `None` when the transcript has no
-    /// stop record at all — which is *also* what a killed harness leaves behind, so the caller
-    /// pairs this with the parent's `<task-notification>` status before saying "running".
-    pub fn stopped(&self) -> Option<bool> {
-        let stop = self.stopped_at?;
-        Some(self.last_turn_at.is_none_or(|t| stop >= t))
-    }
 }
 
 pub fn subagent_end(path: &std::path::Path) -> SubagentEnd {

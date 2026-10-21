@@ -17,7 +17,7 @@ use chrono::{DateTime, Utc};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use crate::harness::claude::{subagent_end, task_notices, ApiErrorNotice, SubagentEnd, TaskNotice};
+use crate::harness::claude::{task_notices, TaskNotice};
 use crate::ir::{Block, Message, MessageKind, Role, SessionRef, Usage};
 use crate::stream::{Demand, Flow};
 use crate::AgentRef;
@@ -145,6 +145,62 @@ fn ledger_stops(rows: &[LaneEvent], session_id: &str) -> HashMap<String, DateTim
         *e = (*e).max(r.ts);
     }
     m
+}
+
+/// How a harness's hook rows in the lane ledger name the lanes whose `stop` counts for a parent
+/// ([`crate::harness::Adapter::lane_stops`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopScope {
+    /// Rows whose `session_id` is the parent: its direct sub-agents.
+    Parent,
+    /// Rows whose `agent_id` is any member of the parent's forest, at any depth (a descendant's
+    /// row names its own parent).
+    Forest,
+}
+
+/// Where a sub-agent transcript ends: the timestamp of its last conversational record (`user` or
+/// `assistant`) and of its last `SubagentStop` hook attachment. Claude Code appends a
+/// `SubagentStop` attachment each time the agent stops; a `SendMessage` resume appends new turns
+/// after it. So `stopped_at > last_turn_at` means the agent is parked — finished or waiting —
+/// and `last_turn_at > stopped_at` (or no stop at all) means it is running, or died without the
+/// hook firing (a harness restart). Keeps timing and error facts, discarding ordinary content after each record.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct SubagentEnd {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_turn_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stopped_at: Option<DateTime<Utc>>,
+    /// The last API-error notice (`isApiErrorMessage`) with no real turn after it — what killed
+    /// the agent, if anything did. A resume clears it (the next real record is a new turn).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_error: Option<ApiErrorNotice>,
+}
+
+/// One of Claude Code's synthetic API-error notices, as the transcript records it: the notice
+/// text (`You've hit your session limit · resets 9pm (America/New_York)`, `Prompt is too long`),
+/// the `error` class (`rate_limit`, `invalid_request`), the HTTP status when present, and the
+/// quota's reset instant (`quotaLimits.resetsAt`, epoch seconds) for a rate limit.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+pub struct ApiErrorNotice {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ts: Option<DateTime<Utc>>,
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<DateTime<Utc>>,
+}
+
+impl SubagentEnd {
+    /// Parked (a `SubagentStop` fired after the last turn)? `None` when the transcript has no
+    /// stop record at all — which is *also* what a killed harness leaves behind, so the caller
+    /// pairs this with the parent's `<task-notification>` status before saying "running".
+    pub fn stopped(&self) -> Option<bool> {
+        let stop = self.stopped_at?;
+        Some(self.last_turn_at.is_none_or(|t| stop >= t))
+    }
 }
 
 /// One sub-agent, summarized.
@@ -666,13 +722,11 @@ fn lane_of(
     ledger: &HashMap<String, DateTime<Utc>>,
 ) -> Result<Lane> {
     let p = pass(&sub.session)?;
-    // `subagent_end` reads Claude's jsonl sidecars; other harnesses' child sessions live inside
-    // their own stores (a `.db` path here), where a jsonl scan is meaningless.
-    let end = if sub.session.harness == crate::ir::Harness::Claude {
-        subagent_end(&sub.session.path)
-    } else {
-        SubagentEnd::default()
-    };
+    // Only a store that records the end beside the transcript answers; other harnesses' child
+    // sessions live inside their own stores (a `.db` path here), where there is nothing to scan.
+    let end = crate::harness::rootless(sub.session.harness)
+        .and_then(|adapter| adapter.subagent_end(&sub.session.path))
+        .unwrap_or_default();
     let agent_id = sub.agent_id().to_string();
     let (status, status_source) = status_of(
         &sub,
@@ -733,23 +787,23 @@ pub fn lanes_of(parent: &SessionRef) -> Result<Vec<Lane>> {
     let subs = crate::subagent_tree_of(parent);
     let notices = task_notices(&parent.path);
     let rows = read_ledger();
-    let ledger = if parent.harness == crate::Harness::Codex {
-        let agents: std::collections::HashSet<_> = subs.iter().map(|sub| sub.agent_id()).collect();
-        let mut stops = HashMap::new();
-        for row in rows
-            .iter()
-            .filter(|row| row.event == "stop" && agents.contains(row.agent_id.as_str()))
-        {
+    let ledger = match crate::harness::rootless(parent.harness).and_then(|adapter| adapter.lane_stops()) {
+        Some(StopScope::Parent) => ledger_stops(&rows, &parent.id),
+        Some(StopScope::Forest) => {
+            let agents: std::collections::HashSet<_> = subs.iter().map(|sub| sub.agent_id()).collect();
+            let mut stops = HashMap::new();
+            for row in rows
+                .iter()
+                .filter(|row| row.event == "stop" && agents.contains(row.agent_id.as_str()))
+            {
+                stops
+                    .entry(row.agent_id.clone())
+                    .and_modify(|at: &mut DateTime<Utc>| *at = (*at).max(row.ts))
+                    .or_insert(row.ts);
+            }
             stops
-                .entry(row.agent_id.clone())
-                .and_modify(|at: &mut DateTime<Utc>| *at = (*at).max(row.ts))
-                .or_insert(row.ts);
         }
-        stops
-    } else if parent.harness == crate::Harness::Claude {
-        ledger_stops(&rows, &parent.id)
-    } else {
-        HashMap::new()
+        None => HashMap::new(),
     };
     let mut lanes = crate::par_filter_map(subs, |s| Some(lane_of(s, &notices, &ledger)))
         .into_iter()

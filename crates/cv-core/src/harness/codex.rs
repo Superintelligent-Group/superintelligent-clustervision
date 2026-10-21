@@ -178,6 +178,11 @@ impl Adapter for Codex {
             .then_some(count_prefix_checked as super::CountPrefix)
     }
 
+    /// A descendant's hook row names its own parent, so a stop counts by forest membership.
+    fn lane_stops(&self) -> Option<crate::lanes::StopScope> {
+        Some(crate::lanes::StopScope::Forest)
+    }
+
     /// Membership comes from installed hooks, each child verified against its own header.
     fn forest(
         &self,
