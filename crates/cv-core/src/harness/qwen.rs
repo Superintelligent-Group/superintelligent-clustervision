@@ -9,7 +9,7 @@
 //!    `assistant`, `tool_result`, `system`. `message` is a Gemini `Content` (`{role, parts}`: `text`,
 //!    `thought`, `functionCall`, `functionResponse`, `inlineData`). Sub-agent transcripts are
 //!    `projects/<cwd>/subagents/<parentSessionId>/agent-<agentId>.jsonl` (+ `.meta.json`), the same
-//!    record shape. `<sanitized cwd>` is the cwd with every non-alphanumeric byte a dash.
+//!    record shape. `<sanitized cwd>` is the cwd with every non-ASCII-alphanumeric character a dash.
 //! 2. **gemini-cli recordings** (the fork's original layout) — `~/.qwen/tmp/<projectHash>/{logs.json,
 //!    chats/session-*.json|jsonl, checkpoint-*.json}`, byte-identical to Gemini's: delegated to
 //!    [`crate::harness::gemini`] and re-tagged [`Harness::Qwen`].

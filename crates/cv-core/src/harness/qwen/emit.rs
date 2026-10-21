@@ -27,7 +27,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-/// The project dir name for a cwd: every non-alphanumeric byte a dash (`/home/u/p` → `-home-u-p`).
+/// cv's Qwen project-directory spelling: replace each non-ASCII-alphanumeric character with
+/// one dash (`/home/u/p` → `-home-u-p`). This is lossy: the session record retains the exact cwd,
+/// and unique session IDs keep colliding directory spellings from overwriting one another.
 fn sanitize_cwd(cwd: &str) -> String {
     cwd.chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
