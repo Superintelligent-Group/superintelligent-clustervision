@@ -127,6 +127,16 @@ fn copy_context_if_absent(from: &Path, to: &Path) -> std::io::Result<Option<u64>
 }
 
 pub(crate) fn emit_session(session: &Session, to_h: Harness, out: Option<PathBuf>, opts: EmitOptions) -> Result<()> {
+    emit_session_output(session, to_h, out, opts, false)
+}
+
+pub(crate) fn emit_session_output(
+    session: &Session,
+    to_h: Harness,
+    out: Option<PathBuf>,
+    opts: EmitOptions,
+    json: bool,
+) -> Result<()> {
     if !cv_core::emit::supported_targets().contains(&to_h) {
         // A caller mistake, not a failure (exit 2): the source parsed, the target cannot be written.
         return usage(format!(
@@ -148,9 +158,17 @@ pub(crate) fn emit_session(session: &Session, to_h: Harness, out: Option<PathBuf
     // Verified emit: after writing, re-parse the output with the target's own adapter and diff it
     // against the source IR, so a lossy conversion is *visible* instead of silent.
     let (res, warnings) = cv_core::emit::emit_verified(session, to_h, &out_dir, &opts)?;
-    println!("✦ wrote {} ({})", res.path.display(), res.new_id);
-    if let Some(hint) = res.resume_hint {
-        println!("  ↳ {hint}");
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"path": res.path, "id": res.new_id, "harness": to_h,
+            "resume_hint": res.resume_hint, "warnings": warnings})
+        );
+    } else {
+        println!("✦ wrote {} ({})", res.path.display(), res.new_id);
+        if let Some(hint) = res.resume_hint {
+            println!("  ↳ {hint}");
+        }
     }
     for w in &warnings {
         eprintln!("  ⚠ lossy: {w}");

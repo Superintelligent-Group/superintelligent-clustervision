@@ -39,15 +39,28 @@ const MAX_FILES_PER_SOURCE: usize = 8;
 /// Rows of the cross-source file rollup.
 const MAX_ROLLUP: usize = 12;
 
-pub(crate) fn cmd_pack(
-    task: &str,
-    format: &str,
-    harness: Option<String>,
-    limit: usize,
-    out: Option<PathBuf>,
-    force: bool,
-    thinking: cv_core::emit::ThinkingMode,
-) -> Result<()> {
+pub(crate) struct PackArgs<'a> {
+    pub task: &'a str,
+    pub format: &'a str,
+    pub harness: Option<String>,
+    pub limit: usize,
+    pub out: Option<PathBuf>,
+    pub force: bool,
+    pub thinking: cv_core::emit::ThinkingMode,
+    pub json: bool,
+}
+
+pub(crate) fn cmd_pack(args: PackArgs<'_>) -> Result<()> {
+    let PackArgs {
+        task,
+        format,
+        harness,
+        limit,
+        out,
+        force,
+        thinking,
+        json,
+    } = args;
     if let (Some(path), "md" | "prompt") = (&out, format) {
         crate::util::user_file_claim(path, force)?;
     }
@@ -62,7 +75,14 @@ pub(crate) fn cmd_pack(
     // 1. RECALL — the most relevant past sessions for the task.
     let hits = recall(task, limit)?;
     if hits.is_empty() {
-        println!("no relevant past sessions for {task:?} — nothing to pack");
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({"task": task, "format": format, "sources": [], "content": null, "path": null})
+            );
+        } else {
+            println!("no relevant past sessions for {task:?} — nothing to pack");
+        }
         return Ok(());
     }
 
@@ -95,9 +115,23 @@ pub(crate) fn cmd_pack(
 
     // 3. EMIT.
     match format {
-        "md" => write_text(&md_bundle(task, &sources, &rollup), out, force, "context pack"),
-        "prompt" => write_text(&prompt_bundle(task, &sources, &rollup), out, force, "context prompt"),
-        _ => emit_pack_session(task, &sources, &rollup, to_h.expect("validated above"), out, thinking),
+        "md" => write_text(&md_bundle(task, &sources, &rollup), out, force, "context pack", json),
+        "prompt" => write_text(
+            &prompt_bundle(task, &sources, &rollup),
+            out,
+            force,
+            "context prompt",
+            json,
+        ),
+        _ => emit_pack_session(
+            task,
+            &sources,
+            &rollup,
+            to_h.expect("validated above"),
+            out,
+            thinking,
+            json,
+        ),
     }
 }
 
@@ -849,6 +883,7 @@ fn emit_pack_session(
     to_h: Harness,
     out: Option<PathBuf>,
     thinking: cv_core::emit::ThinkingMode,
+    json: bool,
 ) -> Result<()> {
     let bundle = md_bundle(task, sources, rollup);
     let now = Utc::now();
@@ -888,7 +923,7 @@ fn emit_pack_session(
         messages: vec![user, ack],
         ..Session::new(format!("pack-{}", now.timestamp()), to_h)
     };
-    crate::cmd::port::emit_session(
+    crate::cmd::port::emit_session_output(
         &session,
         to_h,
         out,
@@ -896,16 +931,22 @@ fn emit_pack_session(
             thinking,
             ..Default::default()
         },
+        json,
     )
 }
 
 /// Write a text bundle to `--out` (with a stderr note) or stdout.
-fn write_text(text: &str, out: Option<PathBuf>, force: bool, what: &str) -> Result<()> {
+fn write_text(text: &str, out: Option<PathBuf>, force: bool, what: &str, json: bool) -> Result<()> {
     match out {
         Some(path) => {
             crate::util::write_user_file(&path, text.as_bytes(), force)?;
-            eprintln!("✦ wrote {what} → {}", path.display());
+            if json {
+                println!("{}", serde_json::json!({"path": path, "content": null}));
+            } else {
+                eprintln!("✦ wrote {what} → {}", path.display());
+            }
         }
+        None if json => println!("{}", serde_json::json!({"path": null, "content": text})),
         None => print!("{text}"),
     }
     Ok(())

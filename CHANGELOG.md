@@ -49,6 +49,7 @@
 - Goose reports bare model names; providers stay in the Goose metadata bag and never substitute for missing models.
 
 - Claude and OpenClaw compaction boundaries carry no invented text; `show` labels contentless boundaries by kind and marks them synthesized.
+- `pack --json` returns bundle content or emitted artifact paths and resume hints without scraping human output.
 
 - Add global `--frozen` (`CV_FROZEN=1`): read without updating cv stores; stream stale events and reject commands that write stores or sessions.
 - Usage cache eviction failures warn once and preserve committed projections; later publications retry eviction.

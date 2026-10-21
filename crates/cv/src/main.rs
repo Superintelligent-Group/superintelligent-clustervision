@@ -878,6 +878,9 @@ enum Cmd {
         /// other targets use the text policy.
         #[arg(long, default_value = "native", value_parser = ["native", "text", "drop", "portable"])]
         thinking: String,
+        /// Return the bundle or written artifact as a JSON result.
+        #[arg(long)]
+        json: bool,
     },
 
     // ───────────────────────────── Fleet & live ─────────────────────────────
@@ -1359,7 +1362,8 @@ fn run() -> Result<()> {
             out,
             force,
             thinking,
-        } => pack::cmd_pack(&task, &format, harness, limit, out, force, util::parse_thinking(&thinking)?),
+            json,
+        } => pack::cmd_pack(pack::PackArgs { task: &task, format: &format, harness, limit, out, force, thinking: util::parse_thinking(&thinking)?, json }),
         Cmd::Stats { query, json, tokens } => browse::cmd_stats(query, json, tokens),
         Cmd::Prune {
             id,
