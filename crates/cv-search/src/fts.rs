@@ -2664,7 +2664,9 @@ fn ranked_search(
                 (is_meta, Some(doc))
             }
         };
-        let doc = if is_meta {
+        // Filtered hits must display the same authoritative metadata that admitted them.
+        // Unfiltered queries retain the matching meta row in compatible duplicate indexes.
+        let doc = if is_meta && filter.harness.is_none() && filter.cwd.is_none() {
             match candidate_doc {
                 Some(doc) => doc,
                 None => load_candidate()?,
@@ -4126,6 +4128,8 @@ mod tests {
         }
         writer.add_document(tantivy::doc!(f.id => "wanted", f.kind => KIND_BODY, f.body => "needle padding padding", f.harness => "codex", f.cwd => "/stale/path")).unwrap();
         writer.add_document(tantivy::doc!(f.id => "wanted", f.kind => KIND_META, f.harness => "codex", f.cwd => "/repo/mixed.Path/project", f.preview => "current preview")).unwrap();
+        // A compatible duplicate can win on its old title; display still follows admission.
+        writer.add_document(tantivy::doc!(f.id => "wanted", f.kind => KIND_META, f.title => "metaneedle", f.harness => "claude", f.cwd => "/old/project", f.preview => "old preview")).unwrap();
         writer.commit().unwrap();
         drop(writer);
         for filter in [
@@ -4148,6 +4152,11 @@ mod tests {
             let hits = text_search_indexed_filtered(&dir, "needle", 1, filter).unwrap();
             assert_eq!(hits.len(), 1);
             assert_eq!(hits[0].id, "wanted");
+            assert_eq!(hits[0].snippet, "current preview");
+            let hits = text_search_indexed_filtered(&dir, "metaneedle", 1, filter).unwrap();
+            assert_eq!(hits.len(), 1);
+            assert_eq!(hits[0].harness, "codex");
+            assert_eq!(hits[0].cwd.as_deref(), Some("/repo/mixed.Path/project"));
             assert_eq!(hits[0].snippet, "current preview");
         }
         for cwd in ["MIXED", "/stale/path"] {
