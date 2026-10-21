@@ -358,7 +358,12 @@ pub(crate) fn cmd_mcp(tree: clap::Command) -> anyhow::Result<()> {
             }
             continue;
         }
-        let blocking = params.as_ref().and_then(|p| p.get("name")).and_then(Value::as_str) == Some("await_omen");
+        let blocking = params
+            .as_ref()
+            .and_then(|p| p.get("name"))
+            .and_then(Value::as_str)
+            .and_then(NativeTool::find)
+            .is_some_and(NativeTool::blocking);
         let admission = if blocking { &polls } else { &ordinary };
         // Side-effect notifications wait: silently dropping them would change the protocol.
         let Some(permit) = admission.acquire(id.is_none(), &cancelled) else {
@@ -633,38 +638,74 @@ fn tool_list() -> Value {
     tools
 }
 
-pub(crate) fn base_tool_list() -> Value {
-    json!([
-        {
-            "name": "await_omen",
-            "description": "Block until another agent's session emits a message matching a regex, then return it. Watches live for new/appended messages (text, thinking, or tool results) across harnesses. Use to wait on a sibling agent — e.g. await_omen(regex='BUILD (PASSED|FAILED)', cwd_contains='/myproj'). Returns when matched or when timeout_secs elapses.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "regex": { "type": "string", "description": "Rust regex to match against newly-emitted message text." },
-                    "harness": { "type": "string", "description": "Only watch this harness." },
-                    "cwd_contains": { "type": "string", "description": "Only watch sessions whose cwd contains this substring." },
-                    "timeout_secs": { "type": "number", "description": "Give up after this many seconds (default 120)." },
-                    "interval_secs": { "type": "number", "description": "Poll interval (default 2)." }
-                },
-                "required": ["regex"]
-            }
-        },
-        {
-            "name": "observe_stream",
-            "description": "The NON-BLOCKING sibling of await_omen: drain the newly-appended messages from another agent's session(s) since an opaque cursor and return IMMEDIATELY with a fresh cursor — so a senior orchestrator can poll a junior agent's live activity on its own cadence (await_omen blocks until ONE regex matches; observe_stream tails the incremental stream of everything). The first call (no cursor) records a baseline and returns no backlog — pass the returned cursor to the next call to get only what was appended since. Read-only (never writes the board); bounded by max_messages + char_cap. Scope it with cwd_contains and/or harness, e.g. observe_stream(cwd_contains='/junior-proj').",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "cwd_contains": { "type": "string", "description": "Only observe sessions whose recorded cwd contains this substring." },
-                    "harness": { "type": "string", "description": "Only observe this harness (any name `cv ls --harness` takes)." },
-                    "since_cursor": { "type": "string", "description": "Opaque cursor from a previous observe_stream call. Omit on the first call to start from the current tail (baseline; returns no messages)." },
-                    "max_messages": { "type": "number", "description": "Max messages to return this call (default 50). Remaining unread messages are reported as more_pending; poll again with the returned cursor to drain them." },
-                    "char_cap": { "type": "number", "description": "Optional cap on total characters of message text returned; the last message is truncated to fit (default 16000)." }
-                }
-            }
+#[derive(Clone, Copy)]
+enum NativeTool {
+    AwaitOmen,
+    ObserveStream,
+}
+
+impl NativeTool {
+    const ALL: [Self; 2] = [Self::AwaitOmen, Self::ObserveStream];
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::AwaitOmen => "await_omen",
+            Self::ObserveStream => "observe_stream",
         }
-    ])
+    }
+
+    fn find(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|tool| tool.name() == name)
+    }
+
+    fn blocking(self) -> bool {
+        matches!(self, Self::AwaitOmen)
+    }
+
+    fn call(self, args: &Value, cancelled: Cancellation<'_>) -> anyhow::Result<String> {
+        match self {
+            Self::AwaitOmen => await_omen(args, cancelled),
+            Self::ObserveStream => observe_stream(args, cancelled),
+        }
+    }
+
+    fn descriptor(self) -> Value {
+        match self {
+            Self::AwaitOmen => json!(        {
+                "name": self.name(),
+                "description": "Block until another agent's session emits a message matching a regex, then return it. Watches live for new/appended messages (text, thinking, or tool results) across harnesses. Use to wait on a sibling agent — e.g. await_omen(regex='BUILD (PASSED|FAILED)', cwd_contains='/myproj'). Returns when matched or when timeout_secs elapses.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "regex": { "type": "string", "description": "Rust regex to match against newly-emitted message text." },
+                        "harness": { "type": "string", "description": "Only watch this harness." },
+                        "cwd_contains": { "type": "string", "description": "Only watch sessions whose cwd contains this substring." },
+                        "timeout_secs": { "type": "number", "description": "Give up after this many seconds (default 120)." },
+                        "interval_secs": { "type": "number", "description": "Poll interval (default 2)." }
+                    },
+                    "required": ["regex"]
+                }
+            }),
+            Self::ObserveStream => json!(        {
+                "name": self.name(),
+                "description": "The NON-BLOCKING sibling of await_omen: drain the newly-appended messages from another agent's session(s) since an opaque cursor and return IMMEDIATELY with a fresh cursor — so a senior orchestrator can poll a junior agent's live activity on its own cadence (await_omen blocks until ONE regex matches; observe_stream tails the incremental stream of everything). The first call (no cursor) records a baseline and returns no backlog — pass the returned cursor to the next call to get only what was appended since. Read-only (never writes the board); bounded by max_messages + char_cap. Scope it with cwd_contains and/or harness, e.g. observe_stream(cwd_contains='/junior-proj').",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "cwd_contains": { "type": "string", "description": "Only observe sessions whose recorded cwd contains this substring." },
+                        "harness": { "type": "string", "description": "Only observe this harness (any name `cv ls --harness` takes)." },
+                        "since_cursor": { "type": "string", "description": "Opaque cursor from a previous observe_stream call. Omit on the first call to start from the current tail (baseline; returns no messages)." },
+                        "max_messages": { "type": "number", "description": "Max messages to return this call (default 50). Remaining unread messages are reported as more_pending; poll again with the returned cursor to drain them." },
+                        "char_cap": { "type": "number", "description": "Optional cap on total characters of message text returned; the last message is truncated to fit (default 16000)." }
+                    }
+                }
+            }),
+        }
+    }
+}
+
+pub(crate) fn base_tool_list() -> Value {
+    Value::Array(NativeTool::ALL.into_iter().map(NativeTool::descriptor).collect())
 }
 
 fn ok_response(id: Value, result: Value) -> Value {
@@ -769,9 +810,10 @@ enum ToolOutput {
     Command(super::mcp_tools::CommandOutput),
 }
 fn call_tool(name: &str, args: &Value, cancelled: Cancellation<'_>) -> anyhow::Result<ToolOutput> {
+    if let Some(tool) = NativeTool::find(name) {
+        return tool.call(args, cancelled).map(ToolOutput::Text);
+    }
     match name {
-        "await_omen" => await_omen(args, cancelled).map(ToolOutput::Text),
-        "observe_stream" => observe_stream(args, cancelled).map(ToolOutput::Text),
         // Removed in 0.15.0 (the coordination board): a pointer, never a silent "unknown tool".
         n if n.starts_with("board_") => anyhow::bail!(
             "{n} was removed in 0.15.0 with the coordination board — the task log is the fleet's record: \
