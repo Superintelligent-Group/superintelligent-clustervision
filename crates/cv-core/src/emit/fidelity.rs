@@ -98,7 +98,17 @@ fn reparse_with(
             &crate::harness::qwen::Qwen::detect(),
             &sref(result.new_id.clone(), result.path.clone()),
         ),
-        other => anyhow::bail!("re-parse for {other} not supported"),
+        #[cfg(not(feature = "sqlite"))]
+        Harness::Hermes => anyhow::bail!("re-parse for {target} not supported"),
+        Harness::Cursor
+        | Harness::Goose
+        | Harness::Zed
+        | Harness::Devin
+        | Harness::Kimi
+        | Harness::KimiCode
+        | Harness::ChatGptExport
+        | Harness::ClaudeExport
+        | Harness::OpenSession => anyhow::bail!("re-parse for {target} not supported"),
     }
 }
 
