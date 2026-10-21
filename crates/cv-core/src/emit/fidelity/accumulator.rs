@@ -99,6 +99,13 @@ pub(super) fn marker(text: &crate::lazy::Text, resolver: &crate::lazy::Resolver)
     })
 }
 
+/// `message` reduced to the facts the feature counts read, written in a small presence-marker
+/// language over the IR's own types rather than a type of its own: an optional field present in
+/// the source is `Some("")` (an id, a model, a signature) or `Some(Value::Null)` (details), absent
+/// stays `None`; a text is its [`marker`] (`/`, `?`, `x` or empty, first block only) and every other
+/// body is emptied once validated; a tool id survives only where the target answers calls by id
+/// ([`write_rules`]`.answered_calls_only`); a result's `tool_name` is `x` when nonempty; images and
+/// files keep only their kind.
 fn project(message: &Message, resolver: &crate::lazy::Resolver, target: Harness) -> Result<Message> {
     let rules = write_rules(target);
     let keep_ids = rules.answered_calls_only;
