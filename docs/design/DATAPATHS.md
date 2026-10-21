@@ -226,6 +226,8 @@ Audited against `git log v0.17.0..HEAD` on 2026-10-21; a closure below names its
   Cursor CLI counts to exclude empty stores. Removing these reads needs to preserve inclusion and exact metadata.
   Shared selections landed for OpenClaw/Hermes/Qwen tasks/Goose/exports (`62f0ccda`, `0a6a3b22`,
   `7475e978`, `20980e64`, `646b8fb6`); native allocations and validation still cost work.
+- **Archive inventory.** `archive sync` uses `index_all`'s references; `cv/src/cmd/archive` owns
+  its checked artifact projection. An unavailable index falls back to discovery with a diagnostic.
 - **Three message windowings, closed.** JSON, text rendering and pack relevance excerpts share
   `api::MessageWindow`; renderers retain their own byte accounting and metadata timing.
   CLI and HTTP search share `cv_search::Searcher::search`, including notes and snippets.
