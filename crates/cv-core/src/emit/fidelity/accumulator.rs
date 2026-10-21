@@ -262,6 +262,18 @@ mod tests {
             golden,
             include_str!("../../../tests/fixtures/emit-frozen/fidelity-features.txt")
         );
+        let facts = source_features(Harness::Claude, ThinkingMode::Native, &session)?;
+        assert_eq!(facts.tool_use, 1, "only the answered call survives");
+        assert_eq!(facts.tool_result, 1);
+        assert_eq!(facts.results_with_name, 1);
+        assert_eq!(facts.results_is_error, 1);
+        assert_eq!(facts.results_with_details, 1);
+        assert_eq!(facts.thinking_text, 0, "Unicode whitespace is blank");
+        assert_eq!(facts.model_eff, 1, "the command has an explicit model");
+        session.model = Some("late-default".into());
+        let facts = source_features(Harness::Claude, ThinkingMode::Native, &session)?;
+        assert_eq!(facts.model_eff, facts.role_counts.values().sum::<usize>());
+        assert!(!facts.kind_counts.contains_key("carrier"));
         Ok(())
     }
 }

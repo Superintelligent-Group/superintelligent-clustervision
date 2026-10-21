@@ -53,6 +53,8 @@
 - Restore standalone wasm and no-default-features builds by gating the SQLite-only compaction resolver constructor.
 
 - Read-only checkpointed catalogs retain writer-version observations and warm listings without accepting publications or bypassing live WAL contents.
+- Byte prefixes and character-bounded labels retain separate limits and formatting policies within the shared `projection::Head` builder.
+
 - Claude reports malformed nonblank JSONL records in `cv.skipped_lines`, including incomplete trailing records.
 
 - Codex and Gemini string parsing and uploaded-file ingestion return codec failures instead of successful partial sessions.

@@ -665,8 +665,8 @@ pub(super) fn diff_fidelity(
     input: &Session,
     reparsed: &Session,
 ) -> FidelityReport {
-    let before = source_features(target, thinking, input).unwrap();
-    let after = source_features(target, thinking, reparsed).unwrap();
+    let before = source_features(target, thinking, input).expect("source fidelity facts");
+    let after = source_features(target, thinking, reparsed).expect("reparsed fidelity facts");
     diff_features(target, thinking, input, reparsed, before, after)
 }
 
