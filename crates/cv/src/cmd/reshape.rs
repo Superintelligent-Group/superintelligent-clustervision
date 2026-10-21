@@ -13,6 +13,34 @@ use std::path::PathBuf;
 
 /// `cv prune <id>` — compact a Claude session into a new resumable one (see [`cv_core::prune`]).
 /// Stashed originals come back with `cv cat <new-id> <tool_use_id>`.
+/// Resolve the caller-supplied `--declassify` term list from a CSV flag and/or a file (one term per
+/// line, `#` comments + blanks ignored). Terms are lowercased + de-duplicated. cv ships NO built-in
+/// list — the terms are always external (config/data), so cv's own source carries no domain shitlist.
+pub(crate) fn resolve_declassify_tokens(csv: Option<String>, file: Option<PathBuf>) -> Result<Vec<String>> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    let mut push = |t: &str| {
+        let t = t.trim().to_ascii_lowercase();
+        if !t.is_empty() && seen.insert(t.clone()) {
+            out.push(t);
+        }
+    };
+    if let Some(csv) = csv {
+        for t in csv.split(',') {
+            push(t);
+        }
+    }
+    if let Some(path) = file {
+        let body = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading --declassify-tokens-file {}", path.display()))?;
+        for line in body.lines() {
+            let line = line.split('#').next().unwrap_or("");
+            push(line);
+        }
+    }
+    Ok(out)
+}
+
 pub(crate) struct PruneArgs<'a> {
     pub id: &'a str,
     pub harness: Option<String>,
@@ -25,9 +53,10 @@ pub(crate) struct PruneArgs<'a> {
     pub copy_resources: bool,
     pub revive: bool,
     pub window: Option<u64>,
-    pub keep_range: Option<(usize, Option<usize>)>,
+    pub keep: Option<String>,
     pub declassify: bool,
-    pub declassify_tokens: Vec<String>,
+    pub declassify_tokens: Option<String>,
+    pub declassify_tokens_file: Option<PathBuf>,
     pub dry_run: bool,
     pub json: bool,
 }
@@ -45,12 +74,21 @@ pub(crate) fn cmd_prune(args: PruneArgs<'_>) -> Result<()> {
         copy_resources,
         revive,
         window,
-        keep_range,
+        keep,
         declassify,
         declassify_tokens,
+        declassify_tokens_file,
         dry_run,
         json,
     } = args;
+    let keep_range = keep.as_deref().map(parse_range).transpose()?;
+    let declassify_tokens = resolve_declassify_tokens(declassify_tokens, declassify_tokens_file)?;
+    if declassify && declassify_tokens.is_empty() {
+        eprintln!(
+            "cv prune --declassify: no terms supplied (--declassify-tokens / \
+             --declassify-tokens-file) — nothing will be snipped. cv ships no built-in list."
+        );
+    }
     let want = parse_harness(&harness)?;
     let (r, _adapter) = crate::cmd::distill::resolve_source(id, want)?;
 

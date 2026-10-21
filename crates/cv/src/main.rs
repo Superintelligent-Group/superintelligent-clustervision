@@ -34,34 +34,6 @@ use cmd::{
 use std::path::PathBuf;
 use util::{usage, UsageError, WindowArgs};
 
-/// Resolve the caller-supplied `--declassify` term list from a CSV flag and/or a file (one term per
-/// line, `#` comments + blanks ignored). Terms are lowercased + de-duplicated. cv ships NO built-in
-/// list — the terms are always external (config/data), so cv's own source carries no domain shitlist.
-fn resolve_declassify_tokens(csv: Option<String>, file: Option<PathBuf>) -> Result<Vec<String>> {
-    let mut seen = std::collections::BTreeSet::new();
-    let mut out = Vec::new();
-    let mut push = |t: &str| {
-        let t = t.trim().to_ascii_lowercase();
-        if !t.is_empty() && seen.insert(t.clone()) {
-            out.push(t);
-        }
-    };
-    if let Some(csv) = csv {
-        for t in csv.split(',') {
-            push(t);
-        }
-    }
-    if let Some(path) = file {
-        let body = std::fs::read_to_string(&path)
-            .with_context(|| format!("reading --declassify-tokens-file {}", path.display()))?;
-        for line in body.lines() {
-            let line = line.split('#').next().unwrap_or("");
-            push(line);
-        }
-    }
-    Ok(out)
-}
-
 /// Version with the embedded build commit (set by build.rs; "unknown" outside git), so the
 /// binary in your PATH is checkable against source.
 const BUILD_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("CV_BUILD_SHA"), ")");
@@ -1403,15 +1375,11 @@ fn run() -> Result<()> {
             dry_run,
             json,
         } => {
-            let keep_range = keep.as_deref().map(util::parse_range).transpose()?;
-            let tokens = resolve_declassify_tokens(declassify_tokens, declassify_tokens_file)?;
-            if declassify && tokens.is_empty() {
-                eprintln!(
-                    "cv prune --declassify: no terms supplied (--declassify-tokens / \
-                     --declassify-tokens-file) — nothing will be snipped. cv ships no built-in list."
-                );
-            }
-            reshape::cmd_prune(reshape::PruneArgs { id: &id, harness, min_size, keep_last, to, force, drop, thinking: drop_thinking, copy_resources, revive: !no_revive, window, keep_range, declassify, declassify_tokens: tokens, dry_run, json })
+            reshape::cmd_prune(reshape::PruneArgs {
+                id: &id, harness, min_size, keep_last, to, force, drop, thinking: drop_thinking,
+                copy_resources, revive: !no_revive, window, keep, declassify,
+                declassify_tokens, declassify_tokens_file, dry_run, json,
+            })
         }
         Cmd::Rewind {
             id,
@@ -1699,6 +1667,7 @@ fn run() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cmd::reshape::resolve_declassify_tokens;
 
     #[test]
     fn declassify_tokens_resolve_from_csv_and_file() {
