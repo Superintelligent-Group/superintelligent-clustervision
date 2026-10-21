@@ -399,7 +399,8 @@ def codex_thinking_gate(binary, root, env):
         peak = checked_peak(json.loads(child.stderr))
         output = Path(report["path"])
         digest, rows = codex_output_digest(output)
-        # Independent frozen whole-port output/report from the pre-projection dispatcher.
+        # Frozen whole-port output: partial usage has no invented total; the report
+        # declares timestamps supplied by the target (including split accounting turns).
         expected_digest, expected_rows, expected_report = CODEX_THINKING_EXPECTED[mode]
         assert digest == expected_digest and rows == expected_rows
         assert report["messages"] == 5 and report["fidelity"] == expected_report
@@ -410,15 +411,17 @@ def codex_thinking_gate(binary, root, env):
     shutil.rmtree(directory)
 
 
-CODEX_THINKING_EXPECTED = {'text': ['cc7670ce4e3e93f0ae3099f76bb771d2ff100c393486ed6302c3cefd4e16aa5d',
+CODEX_THINKING_EXPECTED = {'text': ['c6bc76805ca65ae2f0d545d380dd97b7b3cad84630acf7d51ab375ffcdca199e',
           14,
           {'deltas': [{'what': 'thinking(signature)', 'a': '1', 'b': '0', 'expected': True, 'where': 'codex'},
+                      {'what': 'timestamps supplied by target', 'a': '4', 'b': '6', 'expected': True, 'where': 'codex'},
                       {'what': 'message ids', 'a': '4', 'b': '0', 'expected': True, 'where': 'codex'},
                       {'what': 'message ids (tool turns)', 'a': '1', 'b': '0', 'expected': True, 'where': 'codex'}]}],
- 'drop': ['cb0d4dd02494a631c0d197a4951f4536fb5d27016d62f39e61dc88b5fd298562',
+ 'drop': ['f44659d7fbb0e8de2c128e5eda50ad5b9e2917866f1c1c55ee82d3da85705190',
           13,
           {'deltas': [{'what': 'thinking(text)', 'a': '1', 'b': '0', 'expected': True, 'where': 'codex'},
                       {'what': 'thinking(signature)', 'a': '1', 'b': '0', 'expected': True, 'where': 'codex'},
+                      {'what': 'timestamps supplied by target', 'a': '4', 'b': '5', 'expected': True, 'where': 'codex'},
                       {'what': 'message ids', 'a': '4', 'b': '0', 'expected': True, 'where': 'codex'},
                       {'what': 'message ids (tool turns)', 'a': '1', 'b': '0', 'expected': True, 'where': 'codex'}]}]}
 
