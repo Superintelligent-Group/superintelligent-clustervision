@@ -662,6 +662,29 @@ pub(crate) fn select_forest(
         .collect()
 }
 
+/// The [`Adapter::forest`] of a store whose sub-agents are plain session refs with no sidecar
+/// facts (no agent type, launching call or journaled outcome): one member per ref, newest first.
+pub(crate) fn ref_forest(
+    refs: Vec<SessionRef>,
+    workflow: Option<&str>,
+    select: &(dyn Fn(&str, Option<&str>) -> bool + Sync),
+) -> Vec<crate::AgentRef> {
+    let mut forest: Vec<crate::AgentRef> = refs
+        .into_iter()
+        .map(|session| crate::AgentRef {
+            session,
+            agent_type: None,
+            description: None,
+            tool_use_id: None,
+            workflow: None,
+            result_status: None,
+            result_summary: None,
+        })
+        .collect();
+    forest.sort_by_key(|s| std::cmp::Reverse(s.session.created_at));
+    select_forest(forest, workflow, select)
+}
+
 /// How a session's change shows on disk ([`Adapter::watch_policy`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WatchPolicy {

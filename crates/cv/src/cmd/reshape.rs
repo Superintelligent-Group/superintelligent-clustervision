@@ -726,13 +726,14 @@ pub(crate) fn cmd_dataset(args: DatasetArgs<'_>) -> Result<()> {
         if ctx.emit_ref(r)? == DatasetFlow::LimitHit {
             break;
         }
-        // `--subagents`: a Claude session fans out into a forest of sub-agent transcripts (both
-        // directly-spawned and `Workflow`-spawned) that live in sidecar files `discover_all` never
-        // lists. For a distillation corpus those agent transcripts are first-class training data —
-        // and a parent on one model often spawns sub-agents on another, so a `model:` query that
-        // misses them misses most of the matching turns. Walk the forest and emit each match too.
-        if subagents && r.harness == cv_core::ir::Harness::Claude {
-            for info in cv_core::harness::claude::subagent_tree(&r.path) {
+        // `--subagents`: a session fans out into a forest of sub-agent transcripts (Claude's
+        // direct and `Workflow`-spawned agents, Codex's children, Kimi's and Hermes's delegates)
+        // that `discover_all` never lists. For a distillation corpus those agent transcripts are
+        // first-class training data — and a parent on one model often spawns sub-agents on
+        // another, so a `model:` query that misses them misses most of the matching turns. Walk
+        // the adapter's forest and emit each match too.
+        if subagents {
+            for info in cv_core::subagent_tree_of(r) {
                 if out.is_some() {
                     extra_sources.push(info.session.path.clone());
                 }

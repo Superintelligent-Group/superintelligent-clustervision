@@ -47,6 +47,7 @@
 
 **Titles and affordances.**
 - `has:subagents` matches the forest `agents` counts: Claude workflow agents and Codex and Devin forests too, not only Claude's top-level agents.
+- Kimi, Kimi Code and Hermes sub-agents join the forest (`has:subagents`, `agents>=1`, `show --tree`, `tools`, `stats`); `dataset --subagents` reads every harness's forest.
 - An emitted session's fallback title is its `cv ls` title (the meaningful prompt); Cursor CLI titles omit the leading `<timestamp>` metadata.
 - `has:skill` and `--kind affordances` count a Claude skill loaded by slash command (its "Base directory for this skill:" body), once per activation.
 - Kimi Code: the latest `TodoList` state is a `plan/state` row; legacy `Agent`/`AgentSwarm` calls are spawns and their completed or failed results returns.

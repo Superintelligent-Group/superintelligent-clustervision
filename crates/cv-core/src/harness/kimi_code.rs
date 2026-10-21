@@ -193,6 +193,17 @@ impl Adapter for KimiCode {
         Harness::KimiCode
     }
 
+    /// The `agents/agent-N/` transcripts beside the session ([`subagent_refs`]).
+    fn forest(
+        &self,
+        r: &SessionRef,
+        _demand: crate::SubagentDemand,
+        workflow: Option<&str>,
+        select: &(dyn Fn(&str, Option<&str>) -> bool + Sync),
+    ) -> Vec<crate::AgentRef> {
+        super::ref_forest(subagent_refs(r), workflow, select)
+    }
+
     fn dependencies(&self, r: &SessionRef, _probe: &mut Probe, deps: &mut Dependencies) -> Option<()> {
         let (session, agent) = split_agent_path(&r.path);
         deps.files.push(session.join("state.json"));
@@ -2949,6 +2960,8 @@ mod tests {
         assert_eq!(subs.len(), 1, "{subs:?}");
         let sub = &subs[0];
         assert_eq!(sub.id, format!("{SID}/agent-0"));
+        let forest = crate::subagent_tree_of(&main);
+        assert_eq!(forest.iter().map(|a| &a.session.id).collect::<Vec<_>>(), [&sub.id]);
         assert_eq!(sub.path, main.path.join("agents").join("agent-0"));
         assert_eq!(sub.title.as_deref(), Some("Extract IPA verifier math"));
         assert_eq!(

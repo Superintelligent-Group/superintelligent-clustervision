@@ -820,9 +820,10 @@ enum Cmd {
         /// `harness:claude msgs>=20`, `after:2026-01-01 cwd:/pug` (implicit AND; see `cv schema`).
         #[arg(long, short = 'q')]
         query: Option<String>,
-        /// Also emit each Claude session's sub-agent forest (directly- and `Workflow`-spawned
-        /// transcripts in sidecar files). These are first-class training data — and a parent on one
-        /// model often spawns sub-agents on another, so `model:` queries need this to catch them.
+        /// Also emit each session's sub-agent forest (the transcripts its adapter keeps beside it:
+        /// Claude's direct and `Workflow` agents, Codex children, Kimi and Hermes delegates). These
+        /// are first-class training data — and a parent on one model often spawns sub-agents on
+        /// another, so `model:` queries need this to catch them.
         #[arg(long)]
         subagents: bool,
         /// Stop after N emitted records.

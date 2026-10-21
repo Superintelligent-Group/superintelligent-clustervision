@@ -136,6 +136,17 @@ impl Adapter for Kimi {
         Harness::Kimi
     }
 
+    /// The `subagents/<agent_id>/` transcripts beside the session ([`subagent_refs`]).
+    fn forest(
+        &self,
+        r: &SessionRef,
+        _demand: crate::SubagentDemand,
+        workflow: Option<&str>,
+        select: &(dyn Fn(&str, Option<&str>) -> bool + Sync),
+    ) -> Vec<crate::AgentRef> {
+        super::ref_forest(subagent_refs(r), workflow, select)
+    }
+
     /// A `<notification>` turn: a background task finished.
     fn record_affordance(
         &self,
@@ -2786,6 +2797,12 @@ mod tests {
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].id, "p1/a1b2");
         assert_eq!(refs[0].title.as_deref(), Some("do it"));
+        // The forest every consumer asks (`has:subagents`, `agents>=1`, `--agent`) holds them.
+        let forest = crate::subagent_tree_of(&main);
+        assert_eq!(
+            forest.iter().map(|a| a.session.id.as_str()).collect::<Vec<_>>(),
+            ["p1/a1b2"]
+        );
         let s = Kimi {
             sessions: None,
             root: None,

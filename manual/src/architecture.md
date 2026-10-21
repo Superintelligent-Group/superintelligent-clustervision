@@ -204,7 +204,7 @@ So the file-based adapters cap how much they read during discovery. The Codex ad
 
 ### Sub-agents
 
-Sub-agent sessions (currently Claude Code's `Task` sub-agents) are **not** in the main pool — there can be thousands of them, so pulling them all into every listing would be wasteful. They're fetched lazily per parent via `subagents_of(&SessionRef)`, which is what powers the sub-agent trees in the app.
+Sub-agent sessions (each adapter's `forest`: Claude, Codex, Devin, Kimi, Kimi Code, Hermes) are **not** in the main pool — there can be thousands of them, so pulling them all into every listing would be wasteful. They're fetched lazily per parent via `subagent_tree_of(&SessionRef)`, which is what powers the sub-agent trees in the app.
 
 ### Finding one session
 

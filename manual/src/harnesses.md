@@ -106,6 +106,10 @@ as a tree — see [sub-agent trees in the app](viewing-and-sharing.md).
 - **Claude Code** writes Task sub-agents to a sibling `<sid>/subagents/agent-<id>.jsonl` (each with a
   `.meta.json` carrying `agentType` and `description`). The discovery walk is depth-limited so these
   don't get mistaken for top-level sessions; they're attached to their parent instead.
+- **Kimi** keeps each sub-agent in `<session>/subagents/<agent_id>/context.jsonl`, **Kimi Code** in
+  `<session>/agents/agent-N/wire.jsonl`, and **Hermes** marks a delegate run with
+  `model_config._delegate_from`; discovery leaves them out and each parent's forest lists them, as
+  `<parent>/<agent>` for the two Kimis.
 - **Grok** tags subagent sessions with `session_kind: "subagent"` (primary sessions instead carry an
   `agent_name`); the kind is preserved in the message `extra`.
 - **Gemini** dir-nests subagent recordings under `chats/<parentId>/<id>.jsonl`; **Qwen** writes them to `subagents/<parentId>/agent-<id>.jsonl`.

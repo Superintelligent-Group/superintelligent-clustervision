@@ -588,8 +588,12 @@ fn show_subagents(r: &SessionRef, json: bool) -> Result<()> {
 /// One sub-agent of `parent` by its `agent-…` id, bare agentId, or a unique prefix of either — the
 /// resolution `cv show --agent` and `cv rewind --agent` share. No match / several → exit 2.
 pub(crate) fn resolve_subagent(parent: &SessionRef, agent_id: &str) -> Result<cv_core::AgentRef> {
+    // A member id is the agent's own (Claude's `agent-<id>`) or `<parent>/<agent>` (Kimi, Kimi
+    // Code): either spelling's agent part is what a caller types.
     let subs = cv_core::subagent_tree_filtered_of(parent, cv_core::SubagentDemand::Rich, None, |id, _| {
-        id.starts_with(agent_id) || id.strip_prefix("agent-").is_some_and(|bare| bare.starts_with(agent_id))
+        [id, id.rsplit('/').next().unwrap_or(id)].into_iter().any(|id| {
+            id.starts_with(agent_id) || id.strip_prefix("agent-").is_some_and(|bare| bare.starts_with(agent_id))
+        })
     });
     let matches: Vec<&cv_core::AgentRef> = subs.iter().collect();
     match matches.as_slice() {

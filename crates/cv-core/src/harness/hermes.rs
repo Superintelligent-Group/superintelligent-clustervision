@@ -256,6 +256,17 @@ impl Adapter for Hermes {
         Harness::Hermes
     }
 
+    /// The delegate runs of the conversation's compression chain ([`subagent_refs`]).
+    fn forest(
+        &self,
+        r: &SessionRef,
+        _demand: crate::SubagentDemand,
+        workflow: Option<&str>,
+        select: &(dyn Fn(&str, Option<&str>) -> bool + Sync),
+    ) -> Vec<crate::AgentRef> {
+        super::ref_forest(subagent_refs(r), workflow, select)
+    }
+
     /// Every dir holding a `state.db` (home + each profile), the first `state.db`'s first:
     /// `emit_hermes` writes `<root>/state.db`, the same file this adapter reads first. The db files
     /// themselves are the catalog's per-session file-watches, so growth in place is still noticed.
@@ -2924,6 +2935,10 @@ mod tests {
         let kids = subagent_refs(tip);
         assert_eq!(kids.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), vec!["d1", "d2"]);
         assert!(kids.iter().all(|k| k.path == db && k.harness == Harness::Hermes));
+        // The forest is the same delegates, newest first.
+        let mut forest: Vec<String> = crate::subagent_tree_of(tip).into_iter().map(|a| a.session.id).collect();
+        forest.sort();
+        assert_eq!(forest, ["d1", "d2"]);
         let x = refs.iter().find(|r| r.id == "x").unwrap();
         assert_eq!(
             subagent_refs(x).iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),

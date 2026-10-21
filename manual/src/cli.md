@@ -907,7 +907,7 @@ cv dataset -q "model:fable" --subagents --file fable.jsonl   # a queried slice +
 cv dataset -q "harness:claude" --redact-only private_key     # strip PEM keys, keep the rest
 ```
 
-`--subagents` also emits each Claude session's sub-agent transcripts: a parent on one model often
+`--subagents` also emits each session's sub-agent transcripts (every adapter's forest): a parent on one model often
 spawns sub-agents on another, and most model usage lives in the forest, so a `model:` query
 usually wants it. `--redact-only <classes>` scopes the scrub to a comma list (`private_key`,
 `api_key`, `jwt`, `email`, `blob`, `assignment`). The removed `cv dataset --out` exits 2

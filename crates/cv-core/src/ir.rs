@@ -1225,10 +1225,14 @@ pub struct AgentRef {
 }
 
 impl AgentRef {
-    /// The agent's own id: the transcript id with Claude's `agent-` prefix stripped, the key the
-    /// workflow journal and the transcript records use.
+    /// The agent's own id: the agent part of a `<parent>/<agent>` transcript id (Kimi, Kimi Code),
+    /// else the transcript id with Claude's `agent-` prefix stripped, the key the workflow journal
+    /// and the transcript records use.
     pub fn agent_id(&self) -> &str {
-        self.session.id.strip_prefix("agent-").unwrap_or(&self.session.id)
+        match self.session.id.rsplit_once('/') {
+            Some((_, agent)) => agent,
+            None => self.session.id.strip_prefix("agent-").unwrap_or(&self.session.id),
+        }
     }
 }
 
