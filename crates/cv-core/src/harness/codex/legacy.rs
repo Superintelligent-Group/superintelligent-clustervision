@@ -10,8 +10,10 @@ use crate::json::InvalidJson;
 fn read<T>(path: &Path, f: impl for<'a> FnOnce(&JsonSource, JsonView<'a>) -> Result<T>) -> Result<Option<T>> {
     let source = JsonSource::capture(path)?;
     let file = fs::File::open(path)?;
-    source.check_metadata(file.metadata()?)?;
-    if file.metadata()?.len() == 0 {
+    let metadata = file.metadata()?;
+    let len = metadata.len();
+    source.check_metadata(metadata)?;
+    if len == 0 {
         source.check()?;
         return Ok(None);
     }
