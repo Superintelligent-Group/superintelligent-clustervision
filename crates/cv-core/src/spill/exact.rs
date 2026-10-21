@@ -311,6 +311,20 @@ impl Index {
         Ok(())
     }
 }
+#[cfg(test)]
+thread_local! {
+    static FAIL_APPEND_AFTER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+fn write_key(file: &mut File, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(test)]
+    if let Some(prefix) = FAIL_APPEND_AFTER.with(|fault| fault.take()) {
+        file.write_all(&bytes[..prefix.min(bytes.len())])?;
+        return Err(std::io::Error::other("injected partial append"));
+    }
+    file.write_all(bytes)
+}
+
 struct Disk {
     data: File,
     index: Index,
@@ -396,7 +410,7 @@ impl Disk {
             if self.pending.is_empty() && text.len() >= APPEND_BYTES {
                 let count = text.len() / APPEND_BYTES * APPEND_BYTES;
                 self.data.seek(SeekFrom::Start(self.flushed))?;
-                self.data.write_all(&text[..count]).context("writing exact set key")?;
+                write_key(&mut self.data, &text[..count]).context("writing exact set key")?;
                 self.flushed += count as u64;
                 text = &text[count..];
                 continue;
@@ -406,9 +420,7 @@ impl Disk {
             text = &text[count..];
             if self.pending.len() == APPEND_BYTES {
                 self.data.seek(SeekFrom::Start(self.flushed))?;
-                self.data
-                    .write_all(&self.pending)
-                    .context("writing exact set key window")?;
+                write_key(&mut self.data, &self.pending).context("writing exact set key window")?;
                 self.flushed += self.pending.len() as u64;
                 self.pending.clear();
             }
@@ -454,26 +466,27 @@ impl Disk {
     fn flush_pending(&mut self) -> Result<()> {
         if !self.pending.is_empty() {
             self.data.seek(SeekFrom::Start(self.flushed))?;
-            self.data.write_all(&self.pending).context("flushing exact set keys")?;
+            write_key(&mut self.data, &self.pending).context("flushing exact set keys")?;
             self.flushed += self.pending.len() as u64;
             self.pending.clear();
         }
         Ok(())
     }
 
-    /// Forget every byte past `start`: still pending, truncate the window; already written,
-    /// truncate the file (every pending byte then lies past `start`).
+    /// Discard unpublished physical bytes even when write_all failed before advancing flushed.
+    /// Keep the valid pending prefix; failed cleanup permanently prevents reuse.
     fn discard_suffix(&mut self, start: u64) -> Result<()> {
-        if let Some(kept) = start.checked_sub(self.flushed) {
-            self.pending.truncate(usize::try_from(kept).unwrap_or(usize::MAX));
-            return Ok(());
-        }
-        let result = self.data.set_len(start).context("discarding unpublished exact set key");
+        let boundary = start.min(self.flushed);
+        let result = self
+            .data
+            .set_len(boundary)
+            .context("discarding unpublished exact set key");
         if result.is_err() {
             self.failed = true;
         }
-        self.flushed = start;
-        self.pending.clear();
+        self.pending
+            .truncate(usize::try_from(start - boundary).unwrap_or(usize::MAX));
+        self.flushed = boundary;
         result
     }
 
@@ -675,10 +688,41 @@ mod tests {
         assert!(!stream(&mut disk, b"", 3).unwrap());
     }
 
+    #[test]
+    fn partial_append_failure_truncates_physical_suffix_and_keeps_pending_prefix() {
+        for retained in [0, 8, APPEND_BYTES + 8] {
+            for streamed in [false, true] {
+                let mut disk = Disk::new(0).unwrap();
+                let prefix = vec![b'r'; retained];
+                assert!(disk.insert(&prefix, 1).unwrap());
+                if streamed {
+                    disk.flush_pending().unwrap();
+                }
+                let boundary = disk.flushed;
+                FAIL_APPEND_AFTER.with(|fault| fault.set(Some(4096)));
+                let failed = vec![b'f'; APPEND_BYTES];
+                let error = if streamed {
+                    // Fail the final flush, after the producer successfully staged a short key.
+                    disk.insert_stream(|visit| visit(&failed[..8000]), CollisionHash)
+                        .unwrap_err()
+                } else {
+                    disk.insert(&failed, 2).unwrap_err()
+                };
+                assert!(format!("{error:#}").contains("injected partial append"));
+                assert_eq!(disk.data.metadata().unwrap().len(), boundary);
+                assert_eq!(disk.flushed + disk.pending.len() as u64, retained as u64);
+                assert!(!disk.failed);
+                assert!(disk.find(&prefix, 1).unwrap().1);
+                assert!(disk.insert(b"after", 3).unwrap());
+                assert!(disk.find(b"after", 3).unwrap().1);
+            }
+        }
+    }
+
     /// A key whose bytes fail to reach the append file is no member, and leaves no bytes behind
     /// for the next key's offset to miss: `insert` rolls back as `insert_stream` does.
     #[test]
-    fn a_failed_insert_leaves_no_orphan_bytes() {
+    fn failed_rollback_cleanup_poison_prevents_reuse() {
         let world = cv_testkit::World::new("exact-insert-rollback");
         let mut disk = Disk::new(0).unwrap();
         assert!(disk.insert(b"retained", 1).unwrap());
@@ -692,15 +736,10 @@ mod tests {
             "{error:#}"
         );
         assert_eq!((disk.end, disk.flushed + disk.pending.len() as u64), (8, 8));
+        assert!(disk.failed, "a failed physical truncation must poison reuse");
         disk.data = writable;
-        let big = vec![b'b'; APPEND_BYTES * 2 + 3];
-        for (key, hash) in [(&b"after"[..], 3), (&big, 4)] {
-            assert!(disk.insert(key, hash).unwrap());
-        }
-        for (key, hash) in [(&b"retained"[..], 1), (&b"after"[..], 3), (&big, 4)] {
-            assert!(disk.find(key, hash).unwrap().1);
-        }
-        assert!(!disk.find(&failed, 2).unwrap().1);
+        assert!(disk.find(b"retained", 1).is_err());
+        assert!(disk.insert(b"after", 3).is_err());
     }
 
     #[cfg(feature = "sqlite")]

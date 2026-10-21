@@ -24,6 +24,8 @@
 - **Breaking (library):** `store_affordances` and `json_files` return `Result`; failed side-store reads now fail affordance views and count publication.
 
 - **Breaking (library):** forest and subagent-reference APIs return `Result`; unreadable forests fail views, queries, indexing and stats instead of hiding agents.
+- Failed spill appends truncate partially written bytes while preserving valid buffered keys; cleanup failures prevent unsafe reuse.
+
 - Tool-filtered histograms correlate all calls before selection, preserving edit counts and failing if required correlation arguments are unreadable.
 
 - Reconcile native edits by call and resolved path; honor tool working directories and avoid guessing relative paths in compound shell commands.
