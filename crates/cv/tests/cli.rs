@@ -2701,23 +2701,18 @@ fn task_inbox_unread_and_events_since() {
 
 // ───────────────────────────── the inbox on cv serve ─────────────────────────────
 
-/// A minimal HTTP/1.1 client over a TcpStream (the test crate has no HTTP dependency).
 fn http(addr: &str, method: &str, path: &str, body: Option<&str>) -> (u16, String) {
-    use std::io::{Read, Write};
-    let mut s = std::net::TcpStream::connect(addr).expect("connect to cv serve");
-    s.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
-    let body = body.unwrap_or("");
-    let req = format!(
-        "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
+    let raw = cv_testkit::http::raw_request(
+        addr,
+        method,
+        path,
+        &[("Content-Type", "application/json")],
+        Some(body.unwrap_or("")),
     );
-    s.write_all(req.as_bytes()).unwrap();
-    let mut raw = Vec::new();
-    s.read_to_end(&mut raw).unwrap();
-    let text = String::from_utf8_lossy(&raw).into_owned();
-    let (head, body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
-    let status: u16 = head.split_whitespace().nth(1).unwrap_or("0").parse().unwrap_or(0);
-    (status, body.to_string())
+    (
+        cv_testkit::http::status(&raw),
+        cv_testkit::http::parts(&raw).1.to_owned(),
+    )
 }
 
 /// Start `cv serve` on an ephemeral port in this world; returns (child, addr).

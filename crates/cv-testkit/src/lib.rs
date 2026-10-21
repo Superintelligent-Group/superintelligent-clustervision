@@ -18,6 +18,7 @@
 //! a path-only dev-dependency.
 
 pub mod heap;
+pub mod http;
 
 use serde_json::Value;
 use std::ffi::{OsStr, OsString};
