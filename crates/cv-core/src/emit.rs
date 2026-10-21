@@ -1,14 +1,13 @@
-//! port-a-sesh: emit an IR [`Session`] back into a harness's native on-disk format.
+//! Emit an IR [`Session`] back into a harness's native on-disk format.
 //!
-//! This is the engine behind `cv convert` (cross-harness) and `cv port` (rehome a session to another
-//! cwd / move local↔remote). Conversion is `parse(source) -> IR -> emit(target)`.
+//! This is the engine behind `cv port`: cross-harness conversion and rehoming a session to
+//! another cwd or machine. Conversion is `parse(source) -> IR -> emit(target)`.
 //!
 //! Correctness bar: a session emitted for harness H must round-trip back through that harness's
 //! parser (`emit(s, H) |> parse == s`, modulo fields H cannot represent). See `docs/FORMATS.md` for
 //! each target's on-disk schema.
 //!
-//! NOTE: This module is owned by the port-a-sesh work. The free function [`emit`] is the public entry
-//! point; `cv-core::lib` re-exports it and the `cv` CLI calls it.
+//! The free function [`emit`] is the public entry point, re-exported by the crate root.
 
 use crate::harness::claude::verify_claude_resumable;
 use crate::harness::EmitResult;
