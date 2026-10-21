@@ -292,7 +292,10 @@ impl Index {
                 write_page_at(&mut self.file, &page.bytes, offset).context("writing exact set index page")?;
             }
             let offset = number.checked_mul(PAGE_BYTES as u64).context("spill index overflow")?;
-            read_page_at(&mut self.file, &mut page.bytes, offset).context("reading exact set index page")?;
+            // read_exact_at may replace a prefix before failing. Publish bytes and tag together.
+            let mut replacement = [0; PAGE_BYTES];
+            read_page_at(&mut self.file, &mut replacement, offset).context("reading exact set index page")?;
+            page.bytes = replacement;
             page.key = Some(number);
             page.dirty = false;
         }
@@ -635,6 +638,27 @@ impl<H: Hasher> ChunkHash<H> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn partial_index_read_preserves_cached_page_on_reuse() {
+        let other = CACHE_PAGES as u64;
+        let mut index = Index::new((other + 1) * SLOTS_PER_PAGE).unwrap();
+        let old = [0xa5; SLOT_BYTES as usize];
+        index.write(0, &old).unwrap(); // dirty page zero shares its cache slot with `other`
+        let offset = other * PAGE_BYTES as u64;
+        index.file.set_len(offset + 128).unwrap();
+        write_page_at(&mut index.file, &[0x5a; 128], offset).unwrap();
+        assert!(index.read(other * SLOTS_PER_PAGE).is_err()); // prefix read, then EOF
+        assert_eq!(
+            index.read(0).unwrap(),
+            old,
+            "failed replacement must not retag mixed bytes"
+        );
+        // Successful retry/eviction must not flush damaged bytes under the old page's offset.
+        index.file.set_len(offset + PAGE_BYTES as u64).unwrap();
+        assert_eq!(index.read(other * SLOTS_PER_PAGE).unwrap(), [0x5a; SLOT_BYTES as usize]);
+        assert_eq!(index.read(0).unwrap(), old);
+    }
+
     #[derive(Default)]
     struct CollisionHash;
     impl Hasher for CollisionHash {
