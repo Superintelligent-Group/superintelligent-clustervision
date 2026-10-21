@@ -407,6 +407,12 @@ pub trait Adapter: Send + Sync {
         Vec::new()
     }
 
+    /// The launch description of the sub-agent `s` is, as this harness's bag in `s` records it
+    /// (the store keeps it beside the transcript). Default: the harness records none.
+    fn agent_description<'s>(&self, _s: &'s Session) -> Option<&'s str> {
+        None
+    }
+
     /// The wordings of an error tool result that mean the call was denied (an approval refused, a
     /// rule matched). Default: the harness words none.
     fn denials(&self) -> &'static [crate::affordance::Denial] {

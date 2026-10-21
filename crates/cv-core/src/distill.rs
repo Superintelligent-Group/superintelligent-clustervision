@@ -650,10 +650,11 @@ fn validate_analysis_sources(session: &Session) -> anyhow::Result<()> {
 }
 
 fn analysis_label(session: &Session, resolver: &crate::Resolver) -> anyhow::Result<String> {
-    if let Some(description) = session
-        .harness_extra(crate::Harness::Claude)
-        .and_then(|bag| bag.get("agent_description"))
-        .and_then(Value::as_str)
+    // Every adapter is asked: a bag is keyed by the harness that wrote it, not by `session.harness`.
+    if let Some(description) = crate::Harness::ALL
+        .iter()
+        .filter_map(|h| crate::harness::rootless(*h))
+        .find_map(|adapter| adapter.agent_description(session))
     {
         return Ok(description.to_owned());
     }

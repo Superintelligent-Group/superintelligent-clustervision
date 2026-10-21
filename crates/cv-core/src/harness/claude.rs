@@ -228,6 +228,13 @@ impl Adapter for Claude {
         Harness::Claude
     }
 
+    /// `<agent>.meta.json`'s `description`, as the reader copies it into the bag.
+    fn agent_description<'s>(&self, s: &'s Session) -> Option<&'s str> {
+        s.harness_extra(Harness::Claude)
+            .and_then(|bag| bag.get("agent_description"))
+            .and_then(Value::as_str)
+    }
+
     fn denials(&self) -> &'static [crate::affordance::Denial] {
         use crate::affordance::Denial;
         &[
