@@ -160,6 +160,8 @@
 - cv-search's root `text_search*`, `enrich_text_snippets`, `embed_all` and `semantic_search_filtered` become `Searcher::{search, search_in}` and `embed_sessions`.
 - `fts::enrich_text_snippets` returns `Result<Option<String>>` (a degradation note). New fields (`Stats.uncounted`, `HarnessCensus.first_error`, `LaneWork.unread`) break exhaustive literals.
 - cv-testkit: `heap::begin`/`end` return a `Measurement` instead of a `usize`.
+- `source::rename_consumer` is gone: a consumer missing its baselines under a new identity rereads the source instead of migrating them.
+- `query::WindowPresence` is gone: `filter_refs_limited` drops its presence argument and always skips absent sources before choosing the window.
 
 **After upgrading, once.**
 - The first listing rediscovers the fleet (announced on stderr; `cv index` does it ahead): catalog schema 4 drops an older catalog and rebuilds it.
