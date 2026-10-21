@@ -85,7 +85,7 @@ fn parts(w: &mut dyn Write, block: &Block, resolver: &Resolver) -> Result<()> {
     Ok(())
 }
 fn blocks<'a>(msg: &'a Message, mode: ThinkingMode, resolver: &Resolver) -> Result<Vec<(Cow<'a, Block>, bool)>> {
-    let blocks = msg
+    let mut blocks = msg
         .content
         .iter()
         .filter_map(|b| match projected(b, mode, resolver) {
@@ -94,7 +94,6 @@ fn blocks<'a>(msg: &'a Message, mode: ThinkingMode, resolver: &Resolver) -> Resu
             Err(e) => Some(Err(e)),
         })
         .collect::<Result<Vec<_>>>()?;
-    let mut blocks = blocks;
     blocks.retain(|(b, _)| {
         !matches!(b.as_ref(), Block::File { .. } | Block::Image { .. }) || emit_file_part(b).is_some()
     });
