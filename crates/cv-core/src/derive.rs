@@ -118,11 +118,31 @@ pub(crate) fn verify(
     destination: &std::path::Path,
     agent: Option<&str>,
 ) -> Result<()> {
+    // One verifier per harness that declares derived copies (a table, like the emit registry).
     match harness {
         Harness::Claude => {
             crate::harness::claude::verify_derived(source, file, source_agent, staged, destination, agent)
         }
-        _ => Ok(()),
+        Harness::Codex
+        | Harness::Grok
+        | Harness::OpenCode
+        | Harness::OpenClaw
+        | Harness::Gemini
+        | Harness::Hermes
+        | Harness::LmStudio
+        | Harness::Cline
+        | Harness::Roo
+        | Harness::Continue
+        | Harness::Qwen
+        | Harness::Cursor
+        | Harness::Goose
+        | Harness::Zed
+        | Harness::Devin
+        | Harness::Kimi
+        | Harness::KimiCode
+        | Harness::ChatGptExport
+        | Harness::ClaudeExport
+        | Harness::OpenSession => Ok(()),
     }
 }
 
