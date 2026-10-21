@@ -1318,7 +1318,7 @@ fn run() -> Result<()> {
             existing,
             follow,
             for_,
-        } => live::cmd_scry(harness, cwd, interval, existing, follow, for_),
+        } => live::cmd_scry(live::ScryArgs { harness, cwd, interval, existing, follow, for_ }),
         Cmd::Index {
             semantic,
             rebuild,

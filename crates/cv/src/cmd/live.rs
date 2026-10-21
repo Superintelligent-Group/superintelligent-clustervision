@@ -5,15 +5,25 @@ use anyhow::Result;
 use cv_core::ir::{truncate, SessionRef};
 use cv_core::watch::{EventKind, Filter, SessionEvent, Watcher};
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn cmd_scry(
-    harness: Option<String>,
-    cwd: Option<String>,
-    interval: f64,
-    existing: bool,
-    follow: bool,
-    for_: Option<String>,
-) -> Result<()> {
+/// `cv scry`'s options, named once at the command boundary.
+pub(crate) struct ScryArgs {
+    pub harness: Option<String>,
+    pub cwd: Option<String>,
+    pub interval: f64,
+    pub existing: bool,
+    pub follow: bool,
+    pub for_: Option<String>,
+}
+
+pub(crate) fn cmd_scry(args: ScryArgs) -> Result<()> {
+    let ScryArgs {
+        harness,
+        cwd,
+        interval,
+        existing,
+        follow,
+        for_,
+    } = args;
     let interval = poll_interval(interval)?;
     let filter = Filter {
         harness: parse_harness(&harness)?,

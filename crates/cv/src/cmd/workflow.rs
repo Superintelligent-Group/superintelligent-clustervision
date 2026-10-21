@@ -25,6 +25,16 @@ pub(crate) struct WorkflowArgs<'a> {
     pub revive_all: bool,
 }
 
+/// How a run renders: `cv workflow`'s output flags, named once at the command boundary.
+#[derive(Clone, Copy)]
+struct Render {
+    json: bool,
+    script: bool,
+    results: bool,
+    revive: bool,
+    revive_all: bool,
+}
+
 pub(crate) fn cmd_workflow(args: WorkflowArgs<'_>) -> Result<()> {
     let WorkflowArgs {
         id,
@@ -50,6 +60,13 @@ pub(crate) fn cmd_workflow(args: WorkflowArgs<'_>) -> Result<()> {
     .into_iter()
     .filter_map(|(name, set)| set.then_some(name))
     .collect();
+    let render = Render {
+        json,
+        script,
+        results,
+        revive,
+        revive_all,
+    };
     let (want, id) = crate::util::split_harness_id(id, crate::util::parse_harness(&harness)?);
     // find_cheap: don't pay a full fleet re-discovery before trying the id as a workflow name —
     // the name path escalates to a full `find` itself once every cheaper reading has missed.
@@ -60,7 +77,7 @@ pub(crate) fn cmd_workflow(args: WorkflowArgs<'_>) -> Result<()> {
     };
     let Some((r, _adapter)) = found else {
         // Not a session id → maybe it's a workflow name ("the stark-kill session" problem).
-        return workflow_by_name_fleetwide(id, want, json, script, results, revive, revive_all, &run_flags);
+        return workflow_by_name_fleetwide(id, want, render, &run_flags);
     };
 
     // No run id → list the session's workflows (a directory of runs).
@@ -70,14 +87,7 @@ pub(crate) fn cmd_workflow(args: WorkflowArgs<'_>) -> Result<()> {
     };
 
     if follow || for_.is_some() {
-        return follow_workflow(
-            &r,
-            &run_id,
-            json,
-            script,
-            results,
-            Wait::resolve(true, for_.as_deref())?,
-        );
+        return follow_workflow(&r, &run_id, render, Wait::resolve(true, for_.as_deref())?);
     }
 
     let mut wf = cv_core::workflow_of(&r, &run_id).with_context(|| {
@@ -95,7 +105,7 @@ pub(crate) fn cmd_workflow(args: WorkflowArgs<'_>) -> Result<()> {
         )
     })?;
     wf.attach_journal(&r.path);
-    emit_workflow(&wf, json, script, results, revive, revive_all, Some(r.path.as_path()))
+    emit_workflow(&wf, render, Some(r.path.as_path()))
 }
 
 /// A flag that acts on one run, given where there is no single run to act on: a usage error, not a
@@ -125,14 +135,7 @@ fn state_glyph(state: Option<&str>, fallback: &'static str) -> &'static str {
 /// agent state TRANSITIONS as feed lines — `12:03:41  ✓ verify:merkle → done (312,004 tok)` —
 /// then, when the run reaches a terminal status or `--for` elapses, emit the full render (honoring
 /// `--json`/`--script`/`--results`). Waits for the state file if the run hasn't registered yet.
-fn follow_workflow(
-    r: &cv_core::SessionRef,
-    key: &str,
-    json: bool,
-    script: bool,
-    results: bool,
-    wait: Wait,
-) -> Result<()> {
+fn follow_workflow(r: &cv_core::SessionRef, key: &str, render: Render, wait: Wait) -> Result<()> {
     use std::collections::HashMap;
     let mut seen: HashMap<u64, String> = HashMap::new(); // agent index → last printed state
     wait.announce("workflow", &format!("run {key:?}"));
@@ -170,21 +173,25 @@ fn follow_workflow(
         }
         let mut wf = wf;
         wf.attach_journal(&r.path);
-        return emit_workflow(&wf, json, script, results, false, false, Some(r.path.as_path()));
+        let render = Render {
+            revive: false,
+            revive_all: false,
+            ..render
+        };
+        return emit_workflow(&wf, render, Some(r.path.as_path()));
     }
 }
 
 /// Shared single-run output: `--json` gets the full structure (journal results included);
 /// otherwise the rendered view, with `--results` appending each agent's full journaled return.
-fn emit_workflow(
-    wf: &cv_core::Workflow,
-    json: bool,
-    script: bool,
-    results: bool,
-    revive: bool,
-    revive_all: bool,
-    session_path: Option<&std::path::Path>,
-) -> Result<()> {
+fn emit_workflow(wf: &cv_core::Workflow, render: Render, session_path: Option<&std::path::Path>) -> Result<()> {
+    let Render {
+        json,
+        script,
+        results,
+        revive,
+        revive_all,
+    } = render;
     if revive {
         return render_revive(wf, revive_all, session_path);
     }
@@ -236,15 +243,10 @@ fn render_journal_results(w: &cv_core::Workflow) {
 /// several list themselves with ready-to-paste commands. A miss falls through to a ghost-launch
 /// scan — a name with no recorded run anywhere may still be a launch whose state was never
 /// persisted (crash/power loss), and that is precisely when someone hunts it by name.
-#[allow(clippy::too_many_arguments)]
 fn workflow_by_name_fleetwide(
     name: &str,
     want: Option<cv_core::ir::Harness>,
-    json: bool,
-    script: bool,
-    results: bool,
-    revive: bool,
-    revive_all: bool,
+    render: Render,
     run_flags: &[&str],
 ) -> Result<()> {
     let hits = cv_core::find_workflows_by_name(name);
@@ -256,7 +258,7 @@ fn workflow_by_name_fleetwide(
             match cv_core::find(name, want) {
                 Ok(Some((r, _adapter))) => {
                     refuse_run_flags(run_flags, "a session's run list")?;
-                    return list_workflows(&r, json);
+                    return list_workflows(&r, render.json);
                 }
                 Ok(None) => {}
                 Err(e) => return crate::util::resolve_found(Err(e), name, want).map(|_| ()),
@@ -292,14 +294,14 @@ fn workflow_by_name_fleetwide(
         let (r, wf) = &hits[0];
         let mut wf = wf.clone();
         wf.attach_journal(&r.path);
-        if !json {
+        if !render.json {
             println!(
                 "(in session {} — {})\n",
                 short_id(&r.id),
                 r.title.as_deref().unwrap_or("untitled")
             );
         }
-        return emit_workflow(&wf, json, script, results, revive, revive_all, Some(r.path.as_path()));
+        return emit_workflow(&wf, render, Some(r.path.as_path()));
     }
     refuse_run_flags(run_flags, "the runs matching a name")?;
     println!("# {} workflow run(s) matching {name:?}:\n", hits.len());
