@@ -4,7 +4,7 @@
 //! file X / ran command Y / hit error Z". Every [`Block::ToolUse`]/[`Block::ToolResult`] streaming
 //! past is distilled into a tiny normalized [`Event`] row (kind + tool + target), persisted into the
 //! same SQLite catalog as [`crate::catalog`]'s `sessions` table. That makes `cv touched <path>`
-//! an indexed lookup instead of a corpus re-parse, and is the substrate for a future `cv blame`
+//! an indexed lookup instead of a corpus re-parse, and is the substrate for `cv blame`
 //! (line of code → the session whose reasoning wrote it).
 //!
 //! Tool names differ wildly across harnesses (claude `Edit`/`Read`/`Bash`, codex
