@@ -1050,7 +1050,12 @@ impl<'a> Ctx<'a> {
                 if event_type == "content.part" {
                     if let Some(part) = fields.get("part") {
                         if let Some(block) = openai::part_from_view(part, &openai::KIMI_CODE, &mut text)? {
-                            self.step.as_mut().unwrap().msg.content.push(block);
+                            self.step
+                                .as_mut()
+                                .expect("ensure_step installed the current step")
+                                .msg
+                                .content
+                                .push(block);
                         }
                     }
                 } else {
@@ -1062,12 +1067,17 @@ impl<'a> Ctx<'a> {
                         .map(|v| v.argument(spans.is_some()))
                         .transpose()?
                         .unwrap_or_else(|| Value::Null.into());
-                    self.step.as_mut().unwrap().msg.content.push(Block::ToolUse {
-                        id,
-                        name,
-                        input,
-                        namespace: None,
-                    });
+                    self.step
+                        .as_mut()
+                        .expect("ensure_step installed the current step")
+                        .msg
+                        .content
+                        .push(Block::ToolUse {
+                            id,
+                            name,
+                            input,
+                            namespace: None,
+                        });
                 }
                 Flow::Continue
             }
