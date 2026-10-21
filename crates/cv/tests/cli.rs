@@ -4000,17 +4000,12 @@ fn show_and_doctor_read_a_session_its_writer_is_appending_to() {
     });
 }
 
-/// `cv index --json` names what it indexed and what it could not read; a session whose persisted
-/// tool output belongs to another user is indexed without it, so even `--strict` succeeds.
-#[cfg(unix)]
+/// An unreadable persisted output fails the whole session's publication; repair retries it.
 #[test]
-fn index_json_reports_unreadable_sessions_and_an_unreadable_tool_output_only_degrades() {
-    use std::os::unix::fs::PermissionsExt;
+fn index_json_rejects_unreadable_tool_output_and_retries_after_repair() {
     let w = World::new("index-unreadable-output");
     let output = w.base.join("elsewhere").join("tool-results").join("big.txt");
-    fs::create_dir_all(output.parent().unwrap()).unwrap();
-    fs::write(&output, "hidden").unwrap();
-    fs::set_permissions(&output, fs::Permissions::from_mode(0o000)).unwrap();
+    fs::create_dir_all(&output).unwrap(); // Deterministic failed read, including as root.
     let stub = format!(
         "<persisted-output>\nOutput too large (66KB). Full output saved to: {}\n\nPreview (first 2KB):\nzqpreview\n</persisted-output>",
         output.display()
@@ -4022,13 +4017,20 @@ fn index_json_reports_unreadable_sessions_and_an_unreadable_tool_output_only_deg
             claude::tool_result("u2", "2026-01-01T10:01:00Z", "t1", &stub),
         ],
     );
+    let (stdout, error) = w.cv_fails(&["index", "--json", "--strict"]);
+    assert!(stdout.is_empty(), "{stdout}");
+    assert!(
+        error.contains("degraded") && error.contains(output.to_str().unwrap()),
+        "{error}"
+    );
+    fs::remove_dir(&output).unwrap();
+    fs::write(&output, "zqrestored").unwrap();
     let (json, _) = w.cv_ok(&["index", "--json", "--strict"]);
     let report: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(report["indexed"], 1, "{report}");
-    assert_eq!(report["unreadable"], serde_json::json!([]), "{report}");
-    let (hits, _) = w.cv_ok(&["search", "zqpreview"]);
+    assert_eq!(report["errors"], 0, "{report}");
+    let (hits, _) = w.cv_ok(&["search", "zqrestored"]);
     assert!(hits.contains("degraded"), "{hits}");
-    fs::set_permissions(&output, fs::Permissions::from_mode(0o644)).unwrap();
 }
 
 /// The skip policy's second channel, under an injected failure: a project directory cv cannot
