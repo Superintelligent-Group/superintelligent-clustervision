@@ -45,6 +45,8 @@ fn reparse_with(
             )
         }
         Harness::Codex => collect(
+            // The rollout's own `session_meta` names the session; the ref id is only Codex's
+            // fallback for a file without one, which a just-emitted rollout never is.
             &crate::harness::codex::Codex::detect(),
             &sref(String::new(), result.path.clone()),
         ),
@@ -357,9 +359,9 @@ impl Features {
             if !target_holds(target, Field::UsageCacheCreation) && usage.cache_creation_tokens.is_some() {
                 f.unheld_cache_creation += 1;
             }
-        }
-        if m.usage.as_ref().and_then(|u| u.cost_usd).is_some() && m.role == Role::Assistant {
-            f.cost += 1;
+            if usage.cost_usd.is_some() {
+                f.cost += 1;
+            }
         }
         // Effective model: a turn's own model, else the session default (a target that records the
         // model once per session still carries it, so raw `Message::model` would flag non-losses).

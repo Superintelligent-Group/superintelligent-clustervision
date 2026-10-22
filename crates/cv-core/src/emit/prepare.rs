@@ -71,6 +71,41 @@ impl MessageSink for Collect {
         }
     }
 }
+/// Bind one retained block text: a wire-form span is replaced by the checked JSON string it
+/// covers (quotes included) from the captured source, non-span text passes through.
+fn bind_span(
+    sources: &HashMap<PathBuf, JsonSource>,
+    primary: &Path,
+    session: &Session,
+    value: &mut crate::Text,
+) -> Result<()> {
+    let crate::Text::Span(span) = &*value else {
+        return Ok(());
+    };
+    let owned = span.source.as_ref().or(session.source_path.as_ref());
+    let path = std::path::absolute(owned.map(|path| path.as_path()).unwrap_or(primary))?;
+    let source = sources
+        .get(&path)
+        .ok_or_else(|| anyhow::anyhow!("uncaptured retained span source: {}", path.display()))?;
+    source.check()?;
+    // A wire-form span covers a JSON string's body: bind that string, quotes included, in the
+    // capture just checked rather than a fresh stat of the live path.
+    let (offset, len) = span
+        .offset
+        .checked_sub(1)
+        .zip(span.len.checked_add(2))
+        .filter(|(offset, len)| offset.checked_add(*len).is_some_and(|end| end <= source.len()))
+        .with_context(|| format!("retained span is outside its source {}", path.display()))?;
+    let bound = source
+        .read(ReadInput::Range(offset, len), Validation::Value, |view| {
+            view.source_text()
+        })?
+        .with_context(|| format!("retained span is not a JSON string in {}", path.display()))?;
+    source.check()?;
+    *value = bound;
+    Ok(())
+}
+
 pub(super) fn parse(
     adapter: &dyn crate::harness::Adapter,
     reference: &SessionRef,
@@ -119,34 +154,7 @@ pub(super) fn selected(
     for message in &mut sink.messages {
         for block in &mut message.content {
             let Some(value) = block.text_mut() else { continue };
-            let crate::Text::Span(span) = value else { continue };
-            let span = span.clone();
-            let path = std::path::absolute(
-                span.source
-                    .as_ref()
-                    .or(session.source_path.as_ref())
-                    .unwrap_or(&primary),
-            )?;
-            let source = sink
-                .sources
-                .get(&path)
-                .ok_or_else(|| anyhow::anyhow!("uncaptured retained span source: {}", path.display()))?;
-            source.check()?;
-            // A wire-form span covers a JSON string's body: bind that string, quotes included,
-            // in the capture just checked rather than a fresh stat of the live path.
-            let (offset, len) = span
-                .offset
-                .checked_sub(1)
-                .zip(span.len.checked_add(2))
-                .filter(|(offset, len)| offset.checked_add(*len).is_some_and(|end| end <= source.len()))
-                .with_context(|| format!("retained span is outside its source {}", path.display()))?;
-            let bound = source
-                .read(ReadInput::Range(offset, len), Validation::Value, |view| {
-                    view.source_text()
-                })?
-                .with_context(|| format!("retained span is not a JSON string in {}", path.display()))?;
-            source.check()?;
-            *value = bound;
+            bind_span(&sink.sources, &primary, &session, value)?;
         }
     }
 
