@@ -199,10 +199,6 @@ impl Adapter for Kimi {
         let Some(sessions) = &self.sessions else {
             return Ok(Default::default());
         };
-        let mut shared_reads = crate::source::ReadSet::default();
-        if let Some(root) = &self.root {
-            shared_reads.record(&root.join("kimi.json"));
-        }
         // hash (dir basename, possibly "<kaos>_<md5>") -> cwd, from kimi.json.
         let hash_to_cwd = self
             .root
@@ -249,7 +245,9 @@ impl Adapter for Kimi {
                 } else {
                     continue;
                 };
-                let mut reads = shared_reads.clone();
+                // `kimi.json` supplies only the cwd, applied after the cache: in the key, every
+                // rewrite of the registry rescanned every session of the store.
+                let mut reads = crate::source::ReadSet::default();
                 reads.record(&dir.join("state.json"));
                 if is_modern_transcript(&transcript) {
                     // Capture membership before enumerating rotations, and each existing file
@@ -261,7 +259,13 @@ impl Adapter for Kimi {
                     }
                 }
                 let hit = crate::discover_cache::cached_scan_with_reads(&transcript, reads, || {
-                    scan(&id, &transcript, &dir, cwd.clone())
+                    scan(&id, &transcript, &dir, None)
+                })
+                .map(|r| {
+                    r.map(|mut r| {
+                        r.cwd.clone_from(&cwd);
+                        r
+                    })
                 });
                 if let Some(found) = crate::Skipped::listed(&transcript, hit) {
                     out.push(found);
@@ -682,7 +686,12 @@ fn default_model_from_config(config_toml: &Path) -> Option<String> {
 /// Cheap scan of one transcript into a `SessionRef`. `dir` is the session's source dir (the
 /// `<uuid>/` dir for modern, the hash dir for legacy). `Ok(None)` when the transcript is not a
 /// file; `Err` when it cannot be read.
+#[cfg(test)]
+static SCANNED: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
 fn scan(id: &str, transcript: &Path, dir: &Path, cwd: Option<PathBuf>) -> Result<Option<SessionRef>> {
+    #[cfg(test)]
+    SCANNED.lock().unwrap().push(transcript.to_path_buf());
     let meta = fs::metadata(transcript)?;
     if !meta.is_file() {
         return Ok(None);
@@ -1437,6 +1446,56 @@ mod tests {
     use super::*;
     use crate::harness::Parse;
     use serde_json::json;
+
+    /// `kimi.json` is the cwd registry kimi-cli rewrites as work dirs change; a rewrite rescans
+    /// no session, and every session takes the cwd the registry now names.
+    #[test]
+    fn a_registry_rewrite_rescans_no_session() -> Result<()> {
+        let world = crate::test_world("kimi_registry_rewrite");
+        let context = crate::discover_cache::read::Context::current();
+        let _scope = context.enter();
+        let root = world.home.join(".kimi");
+        let registry = |cwd: &str, extra: &str| {
+            fs::write(
+                root.join("kimi.json"),
+                format!("{{\"work_dirs\":[{{\"path\":\"{cwd}\"}}{extra}]}}"),
+            )
+        };
+        let hash = md5_hex(b"/work");
+        for i in 0..4 {
+            let dir = root
+                .join("sessions")
+                .join(&hash)
+                .join(format!("0000000{i}-0000-4000-8000-000000000000"));
+            fs::create_dir_all(&dir)?;
+            fs::write(
+                dir.join("context.jsonl"),
+                "{\"role\":\"user\",\"content\":\"hi\"}\n{\"role\":\"assistant\",\"content\":\"hello\"}\n",
+            )?;
+        }
+        registry("/work", "")?;
+        let scanned = || {
+            let mut all = SCANNED.lock().unwrap();
+            let mine = all.iter().filter(|p| p.starts_with(&root)).count();
+            all.retain(|p| !p.starts_with(&root));
+            mine
+        };
+        let adapter = Kimi::with_home(&root);
+        let first = adapter.discover()?;
+        assert_eq!((first.len(), scanned()), (4, 4));
+        assert!(first.iter().all(|r| r.cwd.as_deref() == Some(Path::new("/work"))));
+        registry("/work", ",{\"path\":\"/elsewhere\"}")?;
+        let again = adapter.discover()?;
+        assert_eq!((again.len(), scanned()), (4, 0), "a registry rewrite rescans nothing");
+        assert!(again.iter().all(|r| r.cwd.as_deref() == Some(Path::new("/work"))));
+        registry("/moved", "")?;
+        assert!(
+            adapter.discover()?.iter().all(|r| r.cwd.is_none()),
+            "the registry's current cwd"
+        );
+        assert_eq!(scanned(), 0);
+        Ok(())
+    }
 
     #[test]
     fn custom_title_skips_context_reads_and_fallback_stops_at_first_title() -> Result<()> {
