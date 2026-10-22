@@ -9,7 +9,6 @@
 use super::{PruneOptions, SourceTextStats};
 use anyhow::Result;
 
-
 /// Match lowercase substrings with token-sized overlap, retaining valid UTF-8 boundaries.
 pub(super) struct DeclassMatcher<'a> {
     tokens: &'a [String],
@@ -261,7 +260,6 @@ mod tests {
             .filter(|token| !token.is_empty() && lower.contains(token.as_str()))
             .count()
     }
-
 
     #[test]
     fn source_declassify_matches_case_and_line_semantics_across_chunks() -> Result<()> {

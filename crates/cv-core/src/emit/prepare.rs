@@ -141,7 +141,9 @@ pub(super) fn selected(
                 .filter(|(offset, len)| offset.checked_add(*len).is_some_and(|end| end <= source.len()))
                 .with_context(|| format!("retained span is outside its source {}", path.display()))?;
             let bound = source
-                .read(ReadInput::Range(offset, len), Validation::Value, |view| view.source_text())?
+                .read(ReadInput::Range(offset, len), Validation::Value, |view| {
+                    view.source_text()
+                })?
                 .with_context(|| format!("retained span is not a JSON string in {}", path.display()))?;
             source.check()?;
             *value = bound;

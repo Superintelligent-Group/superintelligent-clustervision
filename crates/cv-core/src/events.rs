@@ -1465,7 +1465,7 @@ mod tests {
     fn native_edits_reconcile_resolved_targets_and_command_workdir() {
         let fixture = include_str!("../tests/fixtures/codex/direct_patch.jsonl");
         for shell_cd in [false, true] {
-            let mut session = crate::harness::codex::parse_str("direct", fixture, true, None);
+            let mut session = crate::harness::codex::parse_str("direct", fixture, true, None).unwrap();
             if shell_cd {
                 let Block::ToolUse { input, .. } = &mut session.messages[0].content[0] else {
                     panic!("fixture must start with the shell call");
@@ -1520,7 +1520,8 @@ mod tests {
             include_str!("../tests/fixtures/codex/direct_patch.jsonl"),
             true,
             None,
-        );
+        )
+        .unwrap();
         let native = &mut session.messages[1];
         native.extra["codex"]["item"]["id"] = json!("pending-0");
         native.extra["codex"]["item"]["changes"] = json!({

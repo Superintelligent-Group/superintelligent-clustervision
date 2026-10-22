@@ -137,7 +137,10 @@ mod tests {
         let bytes = format!("\"x{}\\ud800\"", "a".repeat(70_000));
         std::fs::write(&path, &bytes)?;
         let source = JsonSource::capture(&path)?;
-        assert!(source.read(ReadInput::Range(0, source.len()), Validation::Value, |v| v.source_text()).is_err());
+        assert!(source
+            .read(ReadInput::Range(0, source.len()), Validation::Value, |v| v
+                .source_text())
+            .is_err());
         // A wire-form span over the same malformed string is refused like source text.
         let resolver = Resolver::new(Some(path.clone()));
         let span = Text::Span(crate::lazy::Span {

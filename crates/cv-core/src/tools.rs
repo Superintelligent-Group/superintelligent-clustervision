@@ -566,7 +566,8 @@ mod tests {
             include_str!("../tests/fixtures/codex/direct_patch.jsonl"),
             true,
             None,
-        );
+        )
+        .unwrap();
         let mut messages = session.messages.clone();
         let mut visible = crate::Message::new(crate::Role::Assistant);
         visible.content.push(crate::Block::ToolUse {
