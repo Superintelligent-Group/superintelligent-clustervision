@@ -883,6 +883,11 @@ impl<'a> JsonView<'a> {
             View::Source(_) => Ok(self.kind()? == Some(b'"')),
         }
     }
+    /// A weaker [`Self::is_string`]: an unreadable source counts as absence, for a type probe of a
+    /// field the codec skips rather than fails on.
+    pub fn may_be_string(self) -> bool {
+        self.is_string().unwrap_or(false)
+    }
     pub fn is_object(self) -> Result<bool> {
         match self.0 {
             View::Owned(value) => Ok(value.is_object()),

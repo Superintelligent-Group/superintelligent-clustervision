@@ -4,6 +4,7 @@
 //! (`crate::stream::Demand` plus the sink's projection) chooses which fields are resolved, never which code
 //! runs; a field nobody asked for is skipped by the view, not decoded and dropped.
 
+use super::notification::NotificationSummary;
 use super::*;
 use crate::harness::store::document::Fields;
 use crate::json::JsonView;
@@ -787,7 +788,7 @@ impl<'a> Record<'a, '_> {
         }
         let att_type = attachment
             .get("type")?
-            .filter(|v| v.is_string().unwrap_or(false))
+            .filter(|v| v.may_be_string())
             .map(|v| v.resolve().map(|v| v.as_str().unwrap_or_default().to_owned()))
             .transpose()?
             .unwrap_or_else(|| "attachment".into());
@@ -838,7 +839,7 @@ impl<'a> Record<'a, '_> {
             return Ok(Some(self.carrier()?));
         }
         let subtype = self.top.string("subtype")?.unwrap_or_default();
-        let content = self.top.get("content").filter(|v| v.is_string().unwrap_or(false));
+        let content = self.top.get("content").filter(|v| v.may_be_string());
         // `stop_hook_summary` carries no `content`, but it IS the record of a Stop-hook firing:
         // surface it as a readable line when there's something to show (output or an error).
         if subtype == "stop_hook_summary" {
@@ -934,7 +935,7 @@ impl<'a> Record<'a, '_> {
                 .filter(|v| v.is_object().unwrap_or(false))
             {
                 let mut fields = Map::new();
-                if let Some(value) = meta.get("trigger")?.filter(|v| v.is_string().unwrap_or(false)) {
+                if let Some(value) = meta.get("trigger")?.filter(|v| v.may_be_string()) {
                     fields.insert("trigger".into(), value.resolve()?.into_owned());
                 }
                 for key in ["preTokens", "durationMs"] {
@@ -1005,7 +1006,7 @@ impl<'a> Record<'a, '_> {
         let origin_kind = match self.top.get("origin") {
             Some(origin) => origin
                 .get("kind")?
-                .filter(|v| v.is_string().unwrap_or(false))
+                .filter(|v| v.may_be_string())
                 .map(|v| v.resolve().map(|v| v.as_str().unwrap_or_default().to_owned()))
                 .transpose()?,
             None => None,
@@ -1028,7 +1029,7 @@ impl<'a> Record<'a, '_> {
                 for (index, item) in items.enumerate() {
                     let item = item?;
                     if index == 0 && role == Role::User {
-                        if let Some(text) = item.get("text")?.filter(|v| v.is_string().unwrap_or(false)) {
+                        if let Some(text) = item.get("text")?.filter(|v| v.may_be_string()) {
                             head = Some(classify_head(text, user_origin)?);
                         }
                     }
@@ -1069,7 +1070,7 @@ impl<'a> Record<'a, '_> {
                 sidecar.get("agentId")?.is_some()
                     && sidecar
                         .get("status")?
-                        .filter(|v| v.is_string().unwrap_or(false))
+                        .filter(|v| v.may_be_string())
                         .map(|v| v.resolve().map(|v| v.as_str() == Some("async_launched")))
                         .transpose()?
                         != Some(true)
@@ -1198,8 +1199,8 @@ fn block(item: JsonView<'_>, spans: bool) -> Result<Option<Block>> {
         joined_over,
     )?;
     if let Some(Block::ToolResult { content, details, .. }) = &mut block {
-        let stub = match item.get("content")?.filter(|v| v.is_string().unwrap_or(false)) {
-            Some(raw) if head(raw, PERSISTED.len())? == PERSISTED => {
+        let stub = match item.get("content")?.filter(|v| v.may_be_string()) {
+            Some(raw) if string_head(raw, PERSISTED.len())? == PERSISTED => {
                 persisted_output(raw.resolve()?.as_str().unwrap_or_default())
             }
             Some(_) => None,
@@ -1243,7 +1244,7 @@ fn parse_usage(v: JsonView<'_>) -> Result<Usage> {
 
 /// The first `chars` characters of a string after its leading whitespace, decoded in place:
 /// classification never owns or windows a giant body.
-fn head(view: JsonView<'_>, chars: usize) -> Result<String> {
+fn string_head(view: JsonView<'_>, chars: usize) -> Result<String> {
     let mut head = String::new();
     let mut n = 0;
     view.for_each_char(|c| {
@@ -1260,14 +1261,14 @@ fn head(view: JsonView<'_>, chars: usize) -> Result<String> {
 /// harness `<task-notification>` is a sub-agent's return when its first `<summary>` names an agent
 /// or a workflow; that summary can follow a giant output, so it is found by streaming.
 fn classify_head(text: JsonView<'_>, origin: Origin) -> Result<(String, (MessageKind, Origin))> {
-    let prefix = head(text, 64)?;
+    let prefix = string_head(text, 64)?;
     let kind = if origin == Origin::Harness && prefix.starts_with("<task-notification>") {
         let mut summary = NotificationSummary::default();
         text.for_each_str_chunk(|chunk| {
             summary.push(chunk);
             Ok(())
         })?;
-        if summary.complete && ((summary.agent_possible && summary.agent == 6) || summary.workflow_found) {
+        if summary.is_agent_return() {
             (MessageKind::SubagentReturn, Origin::Subagent)
         } else {
             (MessageKind::InjectedContext, Origin::Harness)
@@ -1276,110 +1277,6 @@ fn classify_head(text: JsonView<'_>, origin: Origin) -> Result<(String, (Message
         user_kind_from_head(origin, &prefix)
     };
     Ok((prefix, kind))
-}
-
-/// tag_inner's first `<summary>` and its first following `</summary>`, across decoder windows,
-/// with bounded state: tag and word suffixes are carried, the summary itself never copied.
-struct NotificationSummary {
-    opened: bool,
-    complete: bool,
-    pending: String,
-    scratch: String,
-    leading: bool,
-    agent_possible: bool,
-    agent: usize,
-    workflow_found: bool,
-    workflow: usize,
-}
-impl Default for NotificationSummary {
-    fn default() -> Self {
-        Self {
-            opened: false,
-            complete: false,
-            pending: String::new(),
-            scratch: String::new(),
-            leading: true,
-            agent_possible: true,
-            agent: 0,
-            workflow_found: false,
-            workflow: 0,
-        }
-    }
-}
-impl NotificationSummary {
-    fn push(&mut self, chunk: &str) {
-        if self.complete {
-            return;
-        }
-        self.scratch.clear();
-        self.scratch.push_str(&self.pending);
-        self.scratch.push_str(chunk);
-        self.pending.clear();
-        let mut body = self.scratch.as_str();
-        if !self.opened {
-            if let Some(at) = body.find("<summary>") {
-                self.opened = true;
-                body = &body[at + 9..];
-            } else {
-                let n = suffix(body.as_bytes(), b"<summary>", false);
-                self.pending.push_str(&body[body.len() - n..]);
-                return;
-            }
-        }
-        if let Some(at) = body.find("</summary>") {
-            body = &body[..at];
-            self.complete = true;
-        } else {
-            let n = suffix(body.as_bytes(), b"</summary>", false);
-            self.pending.push_str(&body[body.len() - n..]);
-            body = &body[..body.len() - n];
-        }
-        if self.leading {
-            body = body.trim_start();
-            self.leading = body.is_empty();
-        }
-        if self.agent_possible && self.agent < 6 {
-            let n = body.len().min(6 - self.agent);
-            if body.as_bytes()[..n] == b"Agent "[self.agent..self.agent + n] {
-                self.agent += n;
-            } else {
-                self.agent_possible = false;
-            }
-        }
-        if !self.workflow_found {
-            const WORD: &[u8] = b"workflow";
-            // Only a proper suffix can bridge windows. Never copy the complete summary.
-            let mut bridge = [0; 14];
-            bridge[..self.workflow].copy_from_slice(&WORD[..self.workflow]);
-            let n = body.len().min(7);
-            bridge[self.workflow..self.workflow + n].copy_from_slice(&body.as_bytes()[..n]);
-            let bridge = &bridge[..self.workflow + n];
-            let contains = |bytes: &[u8]| {
-                memchr::memchr2_iter(b'w', b'W', bytes).any(|at| {
-                    bytes
-                        .get(at..at + 8)
-                        .is_some_and(|word| word.eq_ignore_ascii_case(WORD))
-                })
-            };
-            self.workflow_found = contains(bridge) || contains(body.as_bytes());
-            self.workflow = suffix(if body.len() < 7 { bridge } else { body.as_bytes() }, WORD, true);
-        }
-    }
-}
-
-/// Longest proper suffix matching an ASCII tag/word prefix (therefore a UTF-8 boundary).
-fn suffix(body: &[u8], wanted: &[u8], insensitive: bool) -> usize {
-    (1..wanted.len().min(body.len() + 1))
-        .rev()
-        .find(|&n| {
-            let end = &body[body.len() - n..];
-            if insensitive {
-                end.eq_ignore_ascii_case(&wanted[..n])
-            } else {
-                end == &wanted[..n]
-            }
-        })
-        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -1486,11 +1383,7 @@ mod tests {
                     summary.push(&body[start..end]);
                     start = end;
                 }
-                assert_eq!(
-                    summary.complete && ((summary.agent_possible && summary.agent == 6) || summary.workflow_found),
-                    expected,
-                    "width {width}"
-                );
+                assert_eq!(summary.is_agent_return(), expected, "width {width}");
             }
         }
     }
