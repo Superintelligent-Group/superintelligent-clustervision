@@ -39,7 +39,7 @@
 - **Breaking (library):** `events::ingest_all` takes named `IngestOptions` instead of two positional booleans.
 
 - **Breaking (library):** agent end, return, task-notice and workflow-launch reads return `Result`; aborted reads no longer imply missing or running agents.
-- String-entry readers preserve named read failures; invalid legacy Codex documents return errors instead of unmarked empty sessions.
+- String-entry readers preserve named read failures; a malformed legacy Codex `.json` rollout is a named read failure, skipped in listings, never an empty session.
 
 - Usage-cache read, publication, commit and rollback failures report named diagnostics and retry without publishing partial projections.
 

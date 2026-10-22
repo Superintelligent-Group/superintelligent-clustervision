@@ -55,7 +55,6 @@ use chrono::{DateTime, Utc};
 use record::{Demand, Reader};
 use serde_json::{Map, Value};
 use std::fs;
-use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use walkdir::WalkDir;
@@ -1056,11 +1055,7 @@ mod tests {
             &path,
             format!("{start}{{\"type\":\"reasoning\",\"ignored\":[true,]}}]}}"),
         )?;
-        let rejected = legacy::scan(&path)?;
-        assert!(
-            rejected.id.is_empty() && rejected.title.is_none(),
-            "a useful title cannot hide a malformed tail"
-        );
+        assert!(scan(&path).is_err(), "a useful title cannot hide a malformed tail");
         Ok(())
     }
 
