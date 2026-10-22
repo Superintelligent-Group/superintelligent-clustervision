@@ -2114,7 +2114,6 @@ mod tests {
             assert_eq!(store_state(&dir), before, "checkpointed: {checkpointed}");
         }
         drop(writer);
-        
     }
 
     /// A `session_message` cell that is not TEXT, empty, not UTF-8 or not exactly one JSON value
@@ -2213,7 +2212,6 @@ mod tests {
             );
         }
         drop(connection);
-        
     }
 
     #[cfg(feature = "sqlite")]
@@ -2265,7 +2263,6 @@ mod tests {
             "copied payload must validate original WAL"
         );
         drop(writer);
-        
     }
 
     #[cfg(feature = "sqlite")]
@@ -2387,7 +2384,6 @@ mod tests {
                 matches!(&s.messages[2].content[0], Block::ToolResult { content, .. } if content.matches_str("a\nb") == Some(true))
             );
             assert_eq!(s.messages[1].usage.as_ref().unwrap().cache_read_tokens, Some(20627));
-            
         }
     }
 
@@ -2418,7 +2414,6 @@ mod tests {
             skipped: Vec::new(),
         };
         assert_eq!(oc_json_only.discover().unwrap().len(), 1);
-        
     }
 
     /// A `reasoning` part whose text is empty but which carries a provider signature is the WHOLE

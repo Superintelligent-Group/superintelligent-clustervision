@@ -361,11 +361,7 @@ struct SessionMetaRow {
 /// The most recent of a session's activity stamps: Hermes bumps `last_activity_at` on every turn
 /// while `ended_at` stays NULL for a live session, so it is the honest `updated_at`.
 fn latest_of(stamps: [Option<f64>; 3]) -> Option<DateTime<Utc>> {
-    stamps
-        .into_iter()
-        .flatten()
-        .reduce(f64::max)
-        .and_then(ts_from_epoch)
+    stamps.into_iter().flatten().reduce(f64::max).and_then(ts_from_epoch)
 }
 
 /// One `SessionRef` per CONVERSATION. Excluded: delegate sub-agent runs
@@ -394,7 +390,9 @@ pub fn subagent_refs(parent: &SessionRef) -> Result<Vec<SessionRef>> {
     conn.read(|conn, _| {
         let probe = Select::of(conn, "sessions");
         let chain: HashSet<String> = if probe.has("parent_session_id") {
-            session_lineage_root_to_tip(conn, &parent.id, &probe).into_iter().collect()
+            session_lineage_root_to_tip(conn, &parent.id, &probe)
+                .into_iter()
+                .collect()
         } else {
             HashSet::from([parent.id.clone()])
         };
@@ -3535,12 +3533,18 @@ mod tests {
             )
             .unwrap();
         }
-        assert_eq!(session_lineage_root_to_tip(&conn, "s149", &Select::of(&conn, "sessions")).len(), 150);
+        assert_eq!(
+            session_lineage_root_to_tip(&conn, "s149", &Select::of(&conn, "sessions")).len(),
+            150
+        );
         let reference = SessionRef::new("s149", Harness::Hermes, at(&conn));
         assert_eq!(parse_conn(&conn, &reference).unwrap().messages.len(), 150);
         conn.execute("UPDATE sessions SET parent_session_id='s149' WHERE id='s0'", [])
             .unwrap();
-        assert_eq!(session_lineage_root_to_tip(&conn, "s149", &Select::of(&conn, "sessions")).len(), 150);
+        assert_eq!(
+            session_lineage_root_to_tip(&conn, "s149", &Select::of(&conn, "sessions")).len(),
+            150
+        );
     }
 
     #[test]
