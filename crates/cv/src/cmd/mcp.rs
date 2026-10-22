@@ -41,7 +41,7 @@
 use super::mcp_tools::CliTools;
 use anyhow::Context as _;
 use cv_core::scan::{ceil_char, floor_char};
-use cv_core::watch::{Cursor, Filter, Poll, Watcher};
+use cv_core::watch::{Cursor, Filter, Poll, Readers, Watcher};
 use cv_core::Harness;
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
@@ -948,6 +948,10 @@ fn await_poll(
 // observe_stream — the non-blocking tail of await_omen
 // ---------------------------------------------------------------------------
 
+/// The reader states behind every cursor this server issued, one per observed session
+/// ([`cv_core::watch::Readers`]): a cursor carries positions only.
+static READERS: std::sync::LazyLock<Readers> = std::sync::LazyLock::new(Readers::default);
+
 /// Non-blocking incremental tail: the messages appended to matching sessions since `since_cursor`
 /// plus a fresh cursor, returned at once. It is one `Watcher` poll with the watcher's state carried
 /// by the caller ([`cv_core::watch::Cursor`]) instead of by a process: the first call (no cursor)
@@ -970,7 +974,7 @@ fn observe_stream(args: &Value, cancelled: Cancellation<'_>) -> anyhow::Result<S
     let prev = arg_str(args, "since_cursor")?.and_then(Cursor::decode);
     let baseline = prev.is_none();
     let mut watcher = match prev {
-        Some(c) => Watcher::from_cursor(filter, c, cv_core::sessions),
+        Some(c) => Watcher::from_cursor(filter, c, cv_core::sessions, &READERS),
         None => Watcher::try_with_discovery(filter, false, cv_core::sessions, check)?,
     };
 
@@ -1063,7 +1067,8 @@ fn observe_poll_checked(
         "messages": out_msgs,
         "count": out_msgs.len(),
         "more_pending": more_pending,
-        "cursor": watcher.to_cursor().encode(),
+        "rereads": watcher.rereads(),
+        "cursor": watcher.to_cursor(&READERS).encode(),
     }))?)
 }
 
@@ -1158,7 +1163,7 @@ mod projection_tests {
             } taken
         })?;
         Ok(serde_json::to_string_pretty(
-            &json!({"baseline":false,"messages":rows,"count":rows.len(),"more_pending":more,"cursor":watcher.to_cursor().encode()}),
+            &json!({"baseline":false,"messages":rows,"count":rows.len(),"more_pending":more,"rereads":watcher.rereads(),"cursor":watcher.to_cursor(&READERS).encode()}),
         )?)
     }
 
@@ -1194,7 +1199,7 @@ mod projection_tests {
         let world = crate::test_world("observe-prefix-mutation");
         let path = world.write_session("observe-mutation", &[json!({"type":"assistant", "sessionId":"observe-mutation", "uuid":"a", "message":{"role":"assistant","content":"hello"}})]);
         let mut watcher = Watcher::with_discovery(Filter::default(), true, discover);
-        let before = watcher.to_cursor().encode();
+        let before = watcher.to_cursor(&READERS).encode();
         let result = watcher.try_poll(
             Poll {
                 max: 50,
@@ -1209,7 +1214,7 @@ mod projection_tests {
             },
         );
         assert!(result.is_err());
-        assert_eq!(watcher.to_cursor().encode(), before);
+        assert_eq!(watcher.to_cursor(&READERS).encode(), before);
     }
 
     #[cfg(feature = "probe-heap")]
@@ -1282,8 +1287,74 @@ mod projection_tests {
                 Ok(text)
             })
             .unwrap();
-            assert_eq!(output, oracle, "cap={cap}");
+            // Each cursor names its own watcher's reader generations; everything else is equal.
+            let without_cursor = |text: &str| {
+                let mut v: Value = serde_json::from_str(text).unwrap();
+                v.as_object_mut().unwrap().remove("cursor");
+                v
+            };
+            assert_eq!(without_cursor(&output), without_cursor(&oracle), "cap={cap}");
         }
+    }
+
+    #[test]
+    fn observe_over_many_sessions_rereads_none_of_them() {
+        // 0.17 carried reader state for eight sessions in the cursor: past eight, every session
+        // that had changed once was read from its start again on every later call.
+        let world = crate::test_world("observe-many-sessions");
+        let line = |sid: &str, uuid: &str| json!({"type":"user","sessionId":sid,"uuid":uuid,"message":{"role":"user","content":"activity"}});
+        let ids: Vec<String> = (0..12).map(|i| format!("observed-{i:02}")).collect();
+        for id in &ids {
+            world.write_session(id, &[line(id, "a")]);
+        }
+        let call = |cursor: Option<&str>| -> (Value, usize) {
+            let mut watcher = match cursor {
+                Some(c) => Watcher::from_cursor(Filter::default(), Cursor::decode(c).unwrap(), discover, &READERS),
+                None => Watcher::with_discovery(Filter::default(), false, discover),
+            };
+            let out = observe_poll(&mut watcher, cursor.is_none(), 500, 1_000_000, |m, _, _| {
+                message_text(m)
+            })
+            .unwrap();
+            let v: Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(v["rereads"], watcher.rereads(), "the output states its rereads");
+            (v, watcher.rereads())
+        };
+        let (base, _) = call(None);
+        for id in &ids {
+            world.write_session(id, &[line(id, "a"), line(id, "b")]);
+        }
+        let (grown, rereads) = call(base["cursor"].as_str());
+        assert_eq!(grown["count"], 12);
+        assert_eq!(
+            rereads, 0,
+            "each grown session resumes from its baseline's reader state"
+        );
+        let mut cursor = grown["cursor"].as_str().unwrap().to_string();
+        for _ in 0..3 {
+            let (quiet, rereads) = call(Some(&cursor));
+            assert_eq!(quiet["count"], 0);
+            assert_eq!(rereads, 0, "a session with a reader state is not read from its start");
+            cursor = quiet["cursor"].as_str().unwrap().to_string();
+        }
+        assert_eq!(READERS.len(), 12, "one reader state per observed session");
+        // Carried to a process that never issued it, the cursor reads each changed session
+        // from its start once, and says so.
+        for id in &ids {
+            world.write_session(id, &[line(id, "a"), line(id, "b"), line(id, "c")]);
+        }
+        let elsewhere = Readers::default();
+        let mut watcher = Watcher::from_cursor(
+            Filter::default(),
+            Cursor::decode(&cursor).unwrap(),
+            discover,
+            &elsewhere,
+        );
+        let out: Value = serde_json::from_str(
+            &observe_poll(&mut watcher, false, 500, 1_000_000, |m, _, _| message_text(m)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!((out["count"].as_u64(), out["rereads"].as_u64()), (Some(12), Some(12)));
     }
 
     #[test]
@@ -1297,10 +1368,10 @@ mod projection_tests {
             )]
         }
         let mut watcher = Watcher::with_discovery(Filter::default(), true, unreadable);
-        let before = watcher.to_cursor().encode();
+        let before = watcher.to_cursor(&READERS).encode();
         assert!(observe_poll(&mut watcher, false, 50, 16_000, |m, _, _| message_text(m)).is_err());
         assert_eq!(
-            watcher.to_cursor().encode(),
+            watcher.to_cursor(&READERS).encode(),
             before,
             "a demanded read failure leaves cursor position unchanged"
         );
@@ -1634,8 +1705,8 @@ mod admission_tests {
         assert_eq!(matched["matched_text"], "λ BUILD PASSED\n");
         assert_eq!(matched["id"], "omen");
         assert_eq!(matched["role"], "assistant");
-        let cursor = Cursor::decode(&watcher.to_cursor().encode()).unwrap();
-        let mut resumed = Watcher::from_cursor(Filter::default(), cursor, discover_omen);
+        let cursor = Cursor::decode(&watcher.to_cursor(&READERS).encode()).unwrap();
+        let mut resumed = Watcher::from_cursor(Filter::default(), cursor, discover_omen, &READERS);
         let mut tail = Vec::new();
         resumed
             .try_poll_messages(

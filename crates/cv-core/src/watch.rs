@@ -236,8 +236,13 @@ struct Pos {
     b: Option<u64>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     more: bool,
+    /// A reader state riding inline: what cursors before 0.18 carried for up to eight sessions.
+    /// Still read; never written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     r: Option<ReadState>,
+    /// The generation of this session's reader state in the issuing process's [`Readers`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    h: Option<u64>,
 }
 
 impl From<&State> for Pos {
@@ -252,6 +257,7 @@ impl From<&State> for Pos {
             b,
             more: s.pending,
             r: None,
+            h: None,
         }
     }
 }
@@ -303,6 +309,63 @@ impl Cursor {
     }
 }
 
+/// The reader states behind the cursors one process issued, one per observed session: each
+/// cursor position names its state's generation, and the state stays here, not on the wire. The
+/// bound is one state per session this process observed, whatever the number of sessions or the
+/// size of a state. A position whose generation is not here (a cursor another process issued,
+/// or a second observer of the session replaced its state) reads that session from its start
+/// once; [`Watcher::rereads`] counts those, and `observe_stream` reports them.
+pub struct Readers {
+    states: std::sync::Mutex<std::collections::HashMap<String, (u64, ReadState)>>,
+    next: std::sync::atomic::AtomicU64,
+}
+
+impl Default for Readers {
+    fn default() -> Self {
+        // Generations start at a per-process point, so another process's cursor does not name
+        // one of ours by coincidence.
+        let start = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos() as u64)
+            ^ (u64::from(std::process::id()) << 40);
+        Self {
+            states: Default::default(),
+            next: std::sync::atomic::AtomicU64::new(start),
+        }
+    }
+}
+
+impl Readers {
+    fn get(&self, key: &str, generation: u64) -> Option<ReadState> {
+        let states = self.states.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        states
+            .get(key)
+            .filter(|(held, _)| *held == generation)
+            .map(|(_, read)| read.clone())
+    }
+
+    fn put(&self, key: &str, read: &ReadState) -> u64 {
+        let generation = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.states
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key.to_string(), (generation, read.clone()));
+        generation
+    }
+
+    /// How many sessions hold a reader state.
+    pub fn len(&self) -> usize {
+        self.states
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 /// A stateful poller. Call [`poll`](Watcher::poll) repeatedly, or [`run`](Watcher::run) to loop;
 /// [`to_cursor`](Watcher::to_cursor) / [`from_cursor`](Watcher::from_cursor) carry the state
 /// across processes. Every poller in cv (`cv scry`, `cv watch`, MCP `await_omen` and
@@ -311,6 +374,11 @@ impl Cursor {
 pub struct Watcher {
     filter: Filter,
     seen: BTreeMap<String, State>,
+    /// The sessions whose reader state is the one stored under this generation in a
+    /// [`Readers`]: written by [`Watcher::to_cursor`] only for states that changed.
+    held: BTreeMap<String, u64>,
+    /// Updated sessions read from their start for want of a reader state ([`Watcher::rereads`]).
+    rereads: usize,
     /// Where sessions come from: [`crate::discover_all`] (stat the fleet, the default) or
     /// [`crate::sessions`] (the catalog fast path, for a poller that runs every few seconds).
     discover: Box<dyn FnMut() -> Vec<SessionRef>>,
@@ -381,6 +449,8 @@ impl Watcher {
         let mut w = Watcher {
             filter,
             seen: BTreeMap::new(),
+            held: BTreeMap::new(),
+            rereads: 0,
             discover: Box::new(discover),
         };
         if !emit_existing {
@@ -443,49 +513,67 @@ impl Watcher {
         Ok(watcher)
     }
 
-    /// Resume from a [`Cursor`]: the watcher stands exactly where the one that issued it stood.
-    pub fn from_cursor(filter: Filter, cursor: Cursor, discover: impl FnMut() -> Vec<SessionRef> + 'static) -> Self {
+    /// Resume from a [`Cursor`]: the watcher stands exactly where the one that issued it stood,
+    /// with each session's reader state from `readers` where the cursor names it.
+    pub fn from_cursor(
+        filter: Filter,
+        cursor: Cursor,
+        discover: impl FnMut() -> Vec<SessionRef> + 'static,
+        readers: &Readers,
+    ) -> Self {
+        let mut held = BTreeMap::new();
+        let seen = cursor
+            .o
+            .into_iter()
+            .filter_map(|(k, p)| {
+                let mark = p.mark()?;
+                let read = match p
+                    .h
+                    .and_then(|generation| Some((generation, readers.get(&k, generation)?)))
+                {
+                    Some((generation, read)) => {
+                        held.insert(k.clone(), generation);
+                        Some(read)
+                    }
+                    None => p.r,
+                };
+                let state = State {
+                    trigger: p.t,
+                    mark,
+                    pending: p.more,
+                    read,
+                };
+                Some((k, state))
+            })
+            .collect();
         Watcher {
             filter,
-            seen: cursor
-                .o
-                .into_iter()
-                .filter_map(|(k, p)| {
-                    let state = State {
-                        trigger: p.t,
-                        mark: p.mark()?,
-                        pending: p.more,
-                        read: p.r,
-                    };
-                    Some((k, state))
-                })
-                .collect(),
+            seen,
+            held,
+            rereads: 0,
             discover: Box::new(discover),
         }
     }
 
-    /// Where this watcher stands, to hand to [`Watcher::from_cursor`] later.
-    pub fn to_cursor(&self) -> Cursor {
-        // Keep the existing positions for every session, with at most eight <=64 KiB optional
-        // reader states. Omitted/older states replay once, preserving output and wire version.
-        let mut readers = 0;
-        Cursor {
-            v: CURSOR_VERSION,
-            o: self
-                .seen
-                .iter()
-                .map(|(k, s)| {
-                    let mut pos = Pos::from(s);
-                    if readers < 8 {
-                        if let Some(read) = s.read.as_ref().filter(|read| read.fits_cache(64 * 1024)) {
-                            pos.r = Some(read.clone());
-                            readers += 1;
-                        }
-                    }
-                    (k.clone(), pos)
-                })
-                .collect(),
+    /// Where this watcher stands, to hand to [`Watcher::from_cursor`] later. Every position
+    /// rides the wire; each reader state stays in `readers`, stored again only when it changed.
+    pub fn to_cursor(&mut self, readers: &Readers) -> Cursor {
+        let mut o = BTreeMap::new();
+        for (k, s) in &self.seen {
+            let mut pos = Pos::from(s);
+            if let Some(read) = &s.read {
+                let generation = *self.held.entry(k.clone()).or_insert_with(|| readers.put(k, read));
+                pos.h = Some(generation);
+            }
+            o.insert(k.clone(), pos);
         }
+        Cursor { v: CURSOR_VERSION, o }
+    }
+
+    /// Updated sessions this watcher read from their start because it held no reader state for
+    /// them: the cost a cursor carried to another process, or a shared session, pays once.
+    pub fn rereads(&self) -> usize {
+        self.rereads
     }
 
     fn key(r: &SessionRef) -> String {
@@ -517,6 +605,7 @@ impl Watcher {
             let Some(mark) = mark else {
                 continue;
             };
+            self.held.remove(&Self::key(&r));
             self.seen.insert(
                 Self::key(&r),
                 State {
@@ -720,12 +809,16 @@ impl Watcher {
                 );
                 continue;
             };
+            let previous = self.seen.get(&key).and_then(|state| state.read.as_ref());
+            if kind == EventKind::Updated && previous.is_none() {
+                self.rereads += 1;
+            }
             let result = deliver(
                 SessionPoll {
                     kind,
                     reference: &r,
                     adapter: adapter.as_ref(),
-                    previous: self.seen.get(&key).and_then(|state| state.read.as_ref()),
+                    previous,
                     from,
                     max: max.saturating_sub(consumed),
                 },
@@ -743,6 +836,7 @@ impl Watcher {
             let seen_to = from.min(pass.total) + taken;
             let left = !pass.reached_eof || pass.total > seen_to;
             pending |= left;
+            self.held.remove(&key);
             self.seen.insert(
                 key,
                 State {
@@ -792,6 +886,7 @@ impl Watcher {
             let Some((total, read)) = take(kind, &r, previous) else {
                 continue;
             };
+            self.held.remove(&key);
             self.seen.insert(
                 key,
                 State {
@@ -810,6 +905,7 @@ impl Watcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    static READERS: std::sync::LazyLock<Readers> = std::sync::LazyLock::new(Readers::default);
 
     /// Every pending event of one unbounded poll.
     fn events(watcher: &mut Watcher) -> Vec<SessionEvent> {
@@ -969,7 +1065,7 @@ mod tests {
             vec![SessionRef::new("prefix-cursor", Harness::Claude, PATH.get().unwrap())]
         }
         let mut watcher = Watcher::with_discovery(Filter::default(), false, discover);
-        let before = serde_json::to_value(watcher.to_cursor()).unwrap();
+        let before = serde_json::to_value(watcher.to_cursor(&READERS)).unwrap();
         use std::io::Write;
         writeln!(
             std::fs::OpenOptions::new()
@@ -995,7 +1091,7 @@ mod tests {
             format!("{error:#}").contains("cancelled while resolving byte prefix"),
             "{error:#}"
         );
-        assert_eq!(serde_json::to_value(watcher.to_cursor()).unwrap(), before);
+        assert_eq!(serde_json::to_value(watcher.to_cursor(&READERS)).unwrap(), before);
         let mut texts = Vec::new();
         watcher
             .try_poll_messages(
@@ -1068,9 +1164,9 @@ mod tests {
                 read: Some(read),
             },
         );
-        let cursor = watcher.to_cursor();
+        let cursor = watcher.to_cursor(&READERS);
         for incremental in [false, true] {
-            let mut watcher = Watcher::from_cursor(Filter::default(), cursor.clone(), discover);
+            let mut watcher = Watcher::from_cursor(Filter::default(), cursor.clone(), discover, &READERS);
             let mut texts = Vec::new();
             if incremental {
                 watcher
@@ -1162,14 +1258,14 @@ mod tests {
             )
             .unwrap());
         assert_eq!(delivered, ["message-0\n", "message-1\n"]);
-        let cursor = Cursor::decode(&watcher.to_cursor().encode()).unwrap();
-        let mut resumed = Watcher::from_cursor(Filter::default(), cursor, discover);
-        let before_failure = resumed.to_cursor().encode();
+        let cursor = Cursor::decode(&watcher.to_cursor(&READERS).encode()).unwrap();
+        let mut resumed = Watcher::from_cursor(Filter::default(), cursor, discover, &READERS);
+        let before_failure = resumed.to_cursor(&READERS).encode();
         assert!(resumed
             .try_poll_messages(|| Ok(()), |_, _, _| anyhow::bail!("projection failed"))
             .is_err());
         assert_eq!(
-            resumed.to_cursor().encode(),
+            resumed.to_cursor(&READERS).encode(),
             before_failure,
             "failed projection advanced position"
         );
@@ -1219,7 +1315,7 @@ mod tests {
         assert!(format!("{error:#}").contains("cancelled"), "{error:#}");
         assert_eq!(count, 1, "cancellation did not stop the active read");
         assert!(
-            watcher.to_cursor().is_empty(),
+            watcher.to_cursor(&READERS).is_empty(),
             "failed read accepted its delivered prefix"
         );
         stop.set(false);
@@ -1242,7 +1338,7 @@ mod tests {
             .unwrap_err();
         assert!(format!("{error:#}").contains("cancelled during projection"));
         assert!(
-            watcher.to_cursor().is_empty(),
+            watcher.to_cursor(&READERS).is_empty(),
             "cancelled projection accepted its position"
         );
         let error = watcher
@@ -1258,14 +1354,15 @@ mod tests {
             format!("{error:#}").contains("source changed") || format!("{error:#}").contains("identity changed"),
             "{error:#}"
         );
-        assert!(watcher.to_cursor().is_empty(), "stale match advanced position");
+        assert!(watcher.to_cursor(&READERS).is_empty(), "stale match advanced position");
     }
 
     #[test]
-    fn cursor_reader_budget_preserves_positions_and_wire_selection() {
-        let _world = crate::test_world("watch-cursor_reader_budget_preserves_positions_and_wire_selection");
+    fn every_observed_session_keeps_its_reader_state_whatever_its_size() {
+        let _world = crate::test_world("watch-every-reader-state");
+        let readers = Readers::default();
         let mut watcher = Watcher::with_discovery(Filter::default(), true, Vec::new);
-        for n in 0..16 {
+        for n in 0..32 {
             let r = sref(
                 Harness::Claude,
                 std::path::PathBuf::from("/nonexistent/cv-watch-budget"),
@@ -1286,11 +1383,13 @@ mod tests {
                 },
             );
         }
-        // The contract: every position survives; at most eight reader states ride the wire,
-        // and only ones that fit the reader cache — oversized states drop whole, never truncated.
-        let cursor = watcher.to_cursor();
-        assert_eq!(cursor.len(), 16);
-        assert_eq!(cursor.o.values().filter(|pos| pos.r.is_some()).count(), 8);
+        // The contract: every position rides the wire, no reader state does, and every state,
+        // of any size, is kept once for its session (32 here; 0.17 kept eight, under 64 KiB).
+        let cursor = watcher.to_cursor(&readers);
+        assert_eq!(cursor.len(), 32);
+        assert_eq!(readers.len(), 32);
+        assert!(cursor.o.values().all(|pos| pos.r.is_none() && pos.h.is_some()));
+        assert!(cursor.encode().len() < 32 * 128, "positions only on the wire");
         for (key, state) in &watcher.seen {
             let pos = &cursor.o[key];
             let expected = Pos::from(state);
@@ -1298,26 +1397,27 @@ mod tests {
             assert_eq!(pos.n, expected.n, "{key}: message mark must survive intact");
             assert_eq!(pos.b, expected.b, "{key}: byte mark must survive intact");
             assert_eq!(pos.more, expected.more, "{key}: pending must survive intact");
-            if let Some(read) = &pos.r {
-                assert_eq!(
-                    serde_json::to_value(read).unwrap(),
-                    serde_json::to_value(state.read.as_ref().unwrap()).unwrap(),
-                    "{key}: wire states ride whole"
-                );
-                assert!(read.fits_cache(64 * 1024), "{key}: wire states fit the cache");
-            }
         }
-        let resumed = Watcher::from_cursor(Filter::default(), Cursor::decode(&cursor.encode()).unwrap(), Vec::new);
+        let mut resumed = Watcher::from_cursor(
+            Filter::default(),
+            Cursor::decode(&cursor.encode()).unwrap(),
+            Vec::new,
+            &readers,
+        );
         for (key, state) in &watcher.seen {
             let restored = &resumed.seen[key];
             assert_eq!(restored.mark, state.mark);
             assert_eq!(restored.pending, state.pending);
             assert_eq!(
-                restored.read.is_some(),
-                cursor.o[key].r.is_some(),
-                "{key}: wire selection survives the round-trip"
+                serde_json::to_value(restored.read.as_ref().unwrap()).unwrap(),
+                serde_json::to_value(state.read.as_ref().unwrap()).unwrap(),
+                "{key}: the state comes back whole"
             );
         }
+        // An unchanged state is not stored again; another process's readers know none of them.
+        assert_eq!(resumed.to_cursor(&readers).encode(), cursor.encode());
+        let elsewhere = Watcher::from_cursor(Filter::default(), cursor, Vec::new, &Readers::default());
+        assert!(elsewhere.seen.values().all(|state| state.read.is_none()));
     }
 
     #[test]
@@ -1347,13 +1447,14 @@ mod tests {
                     b: None,
                     more: false,
                     r: None,
+                    h: None,
                 },
             )]
             .into_iter()
             .collect(),
         };
         for source_poll in [false, true] {
-            let mut watcher = Watcher::from_cursor(Filter::default(), cursor.clone(), replacement);
+            let mut watcher = Watcher::from_cursor(Filter::default(), cursor.clone(), replacement, &READERS);
             if source_poll {
                 assert_eq!(watcher.offer_sources(|_| true, |_, _, _| None), 0);
             } else {
@@ -1368,10 +1469,10 @@ mod tests {
                     )
                     .is_err());
             }
-            let encoded = watcher.to_cursor().encode();
+            let encoded = watcher.to_cursor(&READERS).encode();
             let cursor = Cursor::decode(&encoded).unwrap();
             assert!(cursor.is_empty(), "vanished position survived: {encoded}");
-            let mut resumed = Watcher::from_cursor(Filter::default(), cursor, original);
+            let mut resumed = Watcher::from_cursor(Filter::default(), cursor, original, &READERS);
             resumed.offer_sources(
                 |_| true,
                 |kind, _, previous| {
@@ -1626,8 +1727,8 @@ mod tests {
         let before = adapter.parse(&r).unwrap().messages.len();
 
         // Baseline: nothing emitted, one position recorded, as a byte mark (no parse).
-        let w = Watcher::with_discovery(Filter::default(), false, discover);
-        let cursor = w.to_cursor();
+        let mut w = Watcher::with_discovery(Filter::default(), false, discover);
+        let cursor = w.to_cursor(&READERS);
         assert_eq!(cursor.len(), 1);
         let encoded = cursor.encode();
         assert!(
@@ -1647,7 +1748,7 @@ mod tests {
             after > before + 1,
             "fixture must grow by several messages ({before} → {after})"
         );
-        let mut w = Watcher::from_cursor(Filter::default(), Cursor::decode(&encoded).unwrap(), discover);
+        let mut w = Watcher::from_cursor(Filter::default(), Cursor::decode(&encoded).unwrap(), discover, &READERS);
         let mut got = Vec::new();
         let pending = w.poll(
             Poll {
@@ -1663,11 +1764,11 @@ mod tests {
         );
         assert!(pending);
         assert_eq!(got.len(), 1);
-        let encoded = w.to_cursor().encode();
+        let encoded = w.to_cursor(&READERS).encode();
         assert!(encoded.contains("\"more\":true"), "{encoded}");
 
         // Resumed from that cursor with no budget: exactly the remainder, nothing twice.
-        let mut w = Watcher::from_cursor(Filter::default(), Cursor::decode(&encoded).unwrap(), discover);
+        let mut w = Watcher::from_cursor(Filter::default(), Cursor::decode(&encoded).unwrap(), discover, &READERS);
         let resumed = events(&mut w);
         assert_eq!(resumed.len(), 1);
         got.extend(resumed.into_iter().next().unwrap().new_messages);
@@ -1679,15 +1780,15 @@ mod tests {
         );
         assert!(events(&mut w).is_empty(), "idle: nothing pending, trigger unchanged");
         assert!(
-            !w.to_cursor().encode().contains("more"),
+            !w.to_cursor(&READERS).encode().contains("more"),
             "nothing pending rides the cursor"
         );
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn optional_resume_state_is_bounded_and_marks_are_exclusive() {
-        let _world = crate::test_world("watch-optional_resume_state_is_bounded_and_marks_are_exclusive");
+    fn cursor_carries_positions_only_and_marks_are_exclusive() {
+        let _world = crate::test_world("watch-cursor-positions-only");
         let mut watcher = Watcher::with_discovery(Filter::default(), true, Vec::new);
         let r = sref(
             Harness::Claude,
@@ -1704,10 +1805,13 @@ mod tests {
                 },
             );
         }
-        let cursor = watcher.to_cursor();
+        let cursor = watcher.to_cursor(&READERS);
         assert_eq!(cursor.len(), 32);
-        assert_eq!(cursor.o.values().filter(|pos| pos.r.is_some()).count(), 8);
-        assert!(cursor.encode().len() < 512 * 1024 + 4096);
+        assert!(
+            cursor.o.values().all(|pos| pos.r.is_none()),
+            "no reader state rides the wire"
+        );
+        assert!(cursor.encode().len() < 32 * 128);
         let sparse = Cursor::decode(r#"{"v":2,"o":{"s":{"t":[8,null],"n":3,"more":true}}}"#).unwrap();
         assert_eq!(sparse.o["s"].n, Some(3));
         let byte_mark = Pos::from(&State {
@@ -1751,7 +1855,7 @@ mod tests {
                 ),
                 0
             );
-            assert!(watcher.to_cursor().is_empty());
+            assert!(watcher.to_cursor(&READERS).is_empty());
         }
         assert_eq!(
             watcher.offer_sources(
@@ -1840,7 +1944,7 @@ mod tests {
                 |_| panic!("failed source emitted a message")
             )
             .is_err());
-        assert!(watcher.to_cursor().is_empty());
+        assert!(watcher.to_cursor(&READERS).is_empty());
         assert!(!watcher.poll(
             Poll {
                 max: 1,
@@ -1848,6 +1952,6 @@ mod tests {
             },
             |_| panic!("failed source emitted a message")
         ));
-        assert!(watcher.to_cursor().is_empty());
+        assert!(watcher.to_cursor(&READERS).is_empty());
     }
 }

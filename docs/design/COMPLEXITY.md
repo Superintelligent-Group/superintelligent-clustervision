@@ -43,6 +43,7 @@ or rewritten. Paths are relative to `crates/`.
 | `cv search` | O(postings) + `limit` snippets | same | + suffix read within `--live-bytes` | `cv-search` `search_suffixed` |
 | `stats --tokens` | O(S) | O(n) cache loads + a bounded sweep | one source reparsed | `stats/usage_cache.rs` |
 | `cv scry` / watch poll | O(n) stats per tick | O(n) | O(appended) from the anchor | `watch.rs`, `watch/read.rs` |
+| MCP `observe_stream` | O(n) stats | same | O(appended); a cursor from another process rereads each changed session once | `watch.rs` `Readers` |
 | `cv watch` archive | O(S) | O(n) baseline checks + 2n stats | O(appended) | `watch.rs` `offer_sources`, `archive/reuse.rs` |
 | `events ingest` | O(S) | O(n) | one reparse | `events.rs` `ingest_all` |
 | Workflow listing | O(r) state parses + r stats | same | same | `claude_workflow.rs` |
@@ -63,9 +64,6 @@ or rewritten. Paths are relative to `crates/`.
 - **API read cache** (`api/read.rs`): limits of 32 entries FIFO, 256 KiB per entry and 2 MiB
   total. Past them a page costs O(start) and a head costs O(s). Needs per-session offset
   certificates in the catalog (about 200 lines).
-- **MCP observe cursor**: keeps reader state for only 8 sessions. Every other changed session
-  is reparsed on each call. Needs the reader state kept server-side as a `source::Record`
-  (about 120 lines).
 - **`agent-…` lookups** read the catalog, not a rediscovery, but still list each session's
   sidecar dir. A by-id index cannot replace that: the scan cache holds an agent only after its
   forest was read and flushed, and an agent written since (or a copy) is in no record.
@@ -100,6 +98,8 @@ Safety caps (they bound memory, and the fallback is bounded too):
 - `catalog/reader.rs` Probe reset at 256 refs: one extra stat per 256 refs.
 
 Removed mode switches:
+- MCP observe cursor: reader state for eight sessions under 64 KiB each. It is now one state
+  per session in the serving process (`watch::Readers`), and the output's `rereads` counts the rest.
 - Usage cache: the FIFO eviction at 256 MiB / 65,536 sources, and the 16 MiB per-source limit.
 - Watch: the 64 KiB anchor limit.
 - Archive: the 1 MiB resume-state limit.

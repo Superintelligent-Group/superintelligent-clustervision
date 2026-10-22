@@ -174,10 +174,6 @@ impl ReadState {
         self.anchor.as_ref()?.checkpoint.messages()
     }
 
-    pub fn fits_cache(&self, limit: usize) -> bool {
-        fits(self, limit)
-    }
-
     /// The checkpoint suitable for a tail starting at `skip`. Growth is interpreted under the
     /// adapter's immutable-prefix contract; MarkHead samples do not prove arbitrary edits absent.
     fn from<'a>(

@@ -181,7 +181,10 @@ and returns no backlog.
 | `max_messages` | number | `50` | Max messages this call; the rest are flagged `more_pending`. |
 | `char_cap` | number | `16000` | Cap on total characters returned; the last message is truncated to fit. |
 
-Read-only — it writes nothing.
+Read-only — it writes nothing. The cursor carries positions only; each observed session's
+reader state stays in the `cv mcp` process, one per session. `rereads` counts the sessions
+this call read from their start for want of one: a cursor from another `cv mcp` process
+pays that once per changed session.
 
 Requests are dispatched concurrently, so a parked `await_omen` never
 head-of-line-blocks a `show` issued after it.
