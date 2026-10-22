@@ -488,7 +488,7 @@ pub(crate) fn persist(prune: bool) {
     if crate::env::frozen() {
         return;
     }
-    if persistence_cache(&read::Context::current().path(), prune).is_some() {
+    if persistence_cache(read::Context::current().path().unwrap_or(Path::new("")), prune).is_some() {
         #[cfg(feature = "sqlite")]
         read::Context::current().with_connection_mut(|conn| persist_in(conn, prune));
     }

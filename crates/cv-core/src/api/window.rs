@@ -10,7 +10,7 @@ use crate::stream::{Checkpoint, Flow, MessageSink, Tier};
 use crate::{Message, Resolver, Session};
 use anyhow::{Context as _, Result};
 use serde_json::Value;
-use std::io::{BufWriter, Write};
+use std::io::{BufRead, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 pub struct WindowSink {
@@ -144,16 +144,25 @@ impl WindowSink {
         self.kept.take().unwrap_or_default()
     }
 
-    /// The staged frames as values (the unstaged `/messages` reply).
+    /// The staged frames as values (the unstaged `/messages` reply). One frame decodes at a
+    /// time, straight off the staged source: the reply never duplicates the staged bytes.
     pub(super) fn values(&mut self) -> Result<Vec<Value>> {
         let frames = self.finish()?;
-        let mut bytes = Vec::new();
-        frames.copy_to(&mut bytes)?;
-        bytes
-            .split(|byte| *byte == 0x1e)
-            .filter(|frame| !frame.is_empty())
-            .map(|frame| serde_json::from_slice(frame).map_err(Into::into))
-            .collect()
+        let mut reader = std::io::BufReader::new(frames.reader()?);
+        let mut values = Vec::new();
+        let mut frame = Vec::new();
+        loop {
+            frame.clear();
+            if reader.read_until(0x1e, &mut frame)? == 0 {
+                return Ok(values);
+            }
+            if frame.last() == Some(&0x1e) {
+                frame.pop();
+            }
+            if !frame.is_empty() {
+                values.push(serde_json::from_slice(&frame)?);
+            }
+        }
     }
 
     fn in_window(&self, index: usize) -> bool {
