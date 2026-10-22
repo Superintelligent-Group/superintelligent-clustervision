@@ -936,16 +936,7 @@ mod db {
     /// baseline is captured **before** the streamed pass, so anything appended while we were
     /// reading still shows as stale next time.
     pub fn ingest_ref(r: &SessionRef) -> Result<usize> {
-        let adapter =
-            crate::harness::for_harness(r.harness).ok_or_else(|| anyhow::anyhow!("no adapter for {}", r.harness))?;
-        let source = crate::source::Probe::default().snapshot(r);
-        let mut sink = SpoolingSink::new(r.cwd.clone());
-        adapter.try_stream(r, &crate::stream::Demand::LEAN.with_spans(), &mut sink)?;
-        let source = source.with_reads(sink.inner().dependencies());
-        let events = sink.into_spool()?;
-        let len = events.len();
-        record_spooled_with_source(r, 0, events, &source, &Provenance::default())?;
-        Ok(len)
+        ingest_subagent(r, &Provenance::default())
     }
 
     /// (Re)ingest events for one sub-agent transcript, stamping `prov`enance on its catalog row so
@@ -1103,7 +1094,7 @@ mod db {
     /// distinct targets, ~⅓ of the event rows) and joins matches back through `idx_events_target`
     /// instead of scanning every event row.
     pub fn sessions_touching(path: &str, edits_only: bool) -> Result<Vec<TouchedSession>> {
-        let abs = absolutize(path, std::env::current_dir().ok().as_deref());
+        let abs = absolutize(path, crate::env::current_dir().as_deref());
         // Escape LIKE metacharacters in the user's path, then match any target ending in /<path>.
         let escaped = path
             .trim_start_matches("./")
@@ -2076,9 +2067,11 @@ mod tests {
             .unwrap();
         assert!(needs_ingest(&r), "missing captured authority still misses");
         ingest_ref(&r).unwrap();
+        // A real record of the previous writer version — the whole envelope cv wrote, with only
+        // the version rewound — not a hand-cut byte offset.
         conn.execute(
-            "UPDATE source_dependencies SET record=substr(record,1,53)||'{\"version\":2}' WHERE consumer='events'",
-            [],
+            "UPDATE source_dependencies SET record=CAST(json_set(CAST(record AS TEXT),'$.version',?1) AS BLOB) WHERE consumer='events'",
+            [crate::source::VERSION - 1],
         )
         .unwrap();
         assert!(needs_ingest(&r), "old source stamps cannot authorize empty reuse");

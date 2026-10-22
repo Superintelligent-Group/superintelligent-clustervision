@@ -367,9 +367,6 @@ impl JsonSource {
     pub(crate) fn metadata_bytes(&self) -> usize {
         std::mem::size_of::<CapturedSource>() + 2 * std::mem::size_of::<usize>() + self.0.path.capacity()
     }
-    pub(crate) fn same_identity(&self, other: &Self) -> bool {
-        self == other
-    }
     /// Caller must have syntax AND Value-compatible scalar/depth validation for this complete
     /// range since capture. Quotes/containers are included; surrounding whitespace is excluded.
     /// Never use this for a decoded JSON string that represents a different IR argument value.
@@ -380,15 +377,10 @@ impl JsonSource {
 }
 
 impl JsonRange {
-    pub(crate) fn check(&self) -> Result<()> {
-        self.source.check()?;
-        Ok(())
-    }
-
     /// The source still holds its capture and the decoded backing still holds this range. The
     /// backing is the arena, not the source, so one source check covers both.
     pub(crate) fn check_retained_bounds(&self) -> Result<()> {
-        self.check()?;
+        self.source.check()?;
         if let Some(bytes) = &self.decoded {
             let len = bytes.len()?;
             anyhow::ensure!(
@@ -457,7 +449,7 @@ impl JsonRange {
         validation: Validation,
         f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>,
     ) -> Result<T> {
-        self.check()?;
+        self.source.check()?;
         scoped(&self.source, self.decoded.as_deref(), self.extent(), |source| {
             self.with_source(source, validation, f)
         })

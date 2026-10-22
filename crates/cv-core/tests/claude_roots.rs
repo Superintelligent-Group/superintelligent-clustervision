@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 /// The catalog's recorded-watch fudge window (2s) plus margin; see `freshness.rs`.
 const FUDGE: std::time::Duration = std::time::Duration::from_millis(2100);
 
-fn world(tag: &str) -> cv_testkit::InProcess<cv_core::env::Scope> {
+fn world(tag: &str) -> cv_testkit::InProcess<cv_core::env::Isolated> {
     World::in_process(tag, cv_core::env::Env::enter_isolated)
 }
 

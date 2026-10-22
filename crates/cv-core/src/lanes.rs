@@ -183,13 +183,11 @@ pub fn read_ledger() -> Vec<LaneEvent> {
         .collect()
 }
 
-/// The latest `stop` per bare agent id — what [`status_of`] consults.
-fn ledger_stops(rows: &[LaneEvent], session_id: &str) -> HashMap<String, DateTime<Utc>> {
+/// The latest `stop` per bare agent id among the rows `keep` admits — what [`status_of`]
+/// consults. The parent scope keeps one parent's rows; the forest scope keeps the lanes' own.
+fn ledger_stops(rows: &[LaneEvent], mut keep: impl FnMut(&LaneEvent) -> bool) -> HashMap<String, DateTime<Utc>> {
     let mut m: HashMap<String, DateTime<Utc>> = HashMap::new();
-    for r in rows
-        .iter()
-        .filter(|r| r.event == LaneEventKind::Stop && r.session_id == session_id)
-    {
+    for r in rows.iter().filter(|r| r.event == LaneEventKind::Stop && keep(r)) {
         let e = m.entry(r.agent_id.clone()).or_insert(r.ts);
         *e = (*e).max(r.ts);
     }
@@ -455,7 +453,7 @@ impl Lane {
 /// against the tail of the last assistant text. They are the shapes that stranded four lanes on
 /// one day (`Waiting on notifications`, `I'll continue when the monitor fires`, `waiting for the
 /// … verdict`), generalized just enough to catch their siblings and no further.
-pub const STRAND_PATTERNS: &[&str] = &[
+const STRAND_PATTERNS: &[&str] = &[
     r"waiting (on|for) ([\w'’-]+ ){0,5}(notification|notifications|monitor|verdict|verdicts|build|builds|result|results|lane|lanes|run|job|report|reply|answer)\b",
     r"continue (when|once|after) (the |that |this |it )?\w*( \w+){0,2} ?(fires|lands|arrives|finishes|completes|returns|comes back|is ready|reports)\b",
     r"\b(i.?ll|i will|will) (continue|resume|pick (this|it|that) (back )?up|check back|follow up|report back|proceed) (when|once|after|as soon as)\b",
@@ -852,20 +850,10 @@ pub fn lanes_of(parent: &SessionRef) -> Result<Vec<Lane>> {
         .unwrap_or_default();
     let rows = read_ledger();
     let ledger = match crate::harness::rootless(parent.harness).and_then(|adapter| adapter.capabilities().lane_stops) {
-        Some(StopScope::Parent) => ledger_stops(&rows, &parent.id),
+        Some(StopScope::Parent) => ledger_stops(&rows, |row| row.session_id == parent.id),
         Some(StopScope::Forest) => {
             let agents: std::collections::HashSet<_> = subs.iter().map(|sub| sub.agent_id()).collect();
-            let mut stops = HashMap::new();
-            for row in rows
-                .iter()
-                .filter(|row| row.event == LaneEventKind::Stop && agents.contains(row.agent_id.as_str()))
-            {
-                stops
-                    .entry(row.agent_id.clone())
-                    .and_modify(|at: &mut DateTime<Utc>| *at = (*at).max(row.ts))
-                    .or_insert(row.ts);
-            }
-            stops
+            ledger_stops(&rows, |row| agents.contains(row.agent_id.as_str()))
         }
         None => HashMap::new(),
     };
@@ -1248,10 +1236,13 @@ mod tests {
                 row(5, LaneEventKind::Stop),
                 unrelated,
             ],
-            "s",
+            |r| r.session_id == "s",
         );
         assert_eq!(stops.get("a1").copied(), DateTime::from_timestamp(30, 0));
-        assert!(ledger_stops(&[row(300, LaneEventKind::Stop)], "another-parent").is_empty());
+        assert!(
+            ledger_stops(&[row(300, LaneEventKind::Stop)], |r| r.session_id == "another-parent").is_empty(),
+            "another parent's rows are not this parent's stops"
+        );
     }
 
     #[test]

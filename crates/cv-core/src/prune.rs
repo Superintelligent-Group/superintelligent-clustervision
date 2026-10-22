@@ -70,7 +70,7 @@ pub struct PruneOptions {
     /// relinked. Lossless (stashed in the sidecar like any other payload). Off by default — it
     /// changes more than tool output.
     pub thinking: bool,
-    /// Explicit new session id; otherwise a fresh UUIDv4.
+    /// Explicit new session id; otherwise a fresh UUIDv7.
     pub new_id: Option<String>,
     /// Also copy the session's `subagents/`/`workflows/` resource dir under the new id. Off by
     /// default — `claude --resume` doesn't need it, and for big sessions it can be hundreds of MB /
@@ -1346,18 +1346,16 @@ fn source_turn_prune(
                 })?;
             }
         }
-        Ok(Some((replacements, payloads, saved, estimate, images)))
-    })?;
-    Ok(
-        planned.map(|(replacements, payloads, saved, estimate, images)| SourcePrune {
-            record,
+        Ok(Some(SourcePrune {
+            record: record.clone(),
             replacements,
             payloads,
             saved,
             estimate,
             images,
-        }),
-    )
+        }))
+    })?;
+    Ok(planned)
 }
 fn source_payload(
     original: crate::Json,
@@ -1563,9 +1561,18 @@ impl<W: Write> Write for MarkerWriter<'_, W> {
             boundary.extend_from_slice(&bytes[..bytes.len().min(marker.len() - 1)]);
             self.found =
                 boundary.windows(marker.len()).any(|p| p == marker) || bytes.windows(marker.len()).any(|p| p == marker);
-            self.tail.extend_from_slice(bytes);
-            let keep = (marker.len() - 1).min(self.tail.len());
-            self.tail.drain(..self.tail.len() - keep);
+            // Keep only a marker's worth of stream bytes: the head of a chunk never joins the
+            // tail wholesale, so the copy stays bounded by `keep`, not by the stream.
+            let keep = marker.len() - 1;
+            if self.tail.len() + bytes.len() <= keep {
+                self.tail.extend_from_slice(bytes);
+            } else if bytes.len() >= keep {
+                self.tail.clear();
+                self.tail.extend_from_slice(&bytes[bytes.len() - keep..]);
+            } else {
+                self.tail.drain(..self.tail.len() + bytes.len() - keep);
+                self.tail.extend_from_slice(bytes);
+            }
         }
         Ok(n)
     }
@@ -1778,7 +1785,7 @@ fn anchored_window_tokens(parsed: &[Option<Decision>], before: &[Option<Est>], w
         .find_map(|v| v.facts.model.as_deref().filter(|m| *m != "<synthetic>"))
         .unwrap_or("");
     let scale = crate::ir::tokenizer_scale(model);
-    let size = |e: Est| e.tokens + e.signature + e.images * IMAGE_TOKENS;
+    let size = Est::total;
     let signature_credit = if SIGNATURES_COUNTED.contains(&model) {
         SIGNATURE_CREDIT
     } else {

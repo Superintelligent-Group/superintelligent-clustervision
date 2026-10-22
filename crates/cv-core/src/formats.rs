@@ -211,6 +211,8 @@ pub enum FindingKind {
     IgnoreLiteralUnused,
     /// The manifest names a source file that does not exist.
     SourceFileMissing,
+    /// The manifest itself does not parse.
+    ManifestInvalid,
 }
 
 impl FindingKind {
@@ -220,6 +222,7 @@ impl FindingKind {
             FindingKind::HandledRestatesArm => "handled_restates_arm",
             FindingKind::IgnoreLiteralUnused => "ignore_literal_unused",
             FindingKind::SourceFileMissing => "source_file_missing",
+            FindingKind::ManifestInvalid => "manifest_invalid",
         }
     }
 }
@@ -247,17 +250,22 @@ fn non_test_source(source: &str) -> &str {
 /// manifests are written against, so a new arm in an adapter fails the check until the manifest
 /// names it.
 pub fn type_literals(source: &str) -> BTreeSet<String> {
+    static PATTERNS: std::sync::OnceLock<Vec<regex::Regex>> = std::sync::OnceLock::new();
+    let patterns = PATTERNS.get_or_init(|| {
+        let lit = r#""([A-Za-z][A-Za-z0-9_.\-]*)""#;
+        [
+            format!(r"{lit}\s*(?:=>|\|)"),
+            format!(r"\|\s*{lit}"),
+            format!(r"Some\({lit}\)"),
+            format!(r"Some\(\w+ @ \({lit}"),
+        ]
+        .iter()
+        .map(|p| regex::Regex::new(p).expect("static regex"))
+        .collect()
+    });
     let body = non_test_source(source);
-    let lit = r#""([A-Za-z][A-Za-z0-9_.\-]*)""#;
-    let patterns = [
-        format!(r"{lit}\s*(?:=>|\|)"),
-        format!(r"\|\s*{lit}"),
-        format!(r"Some\({lit}\)"),
-        format!(r"Some\(\w+ @ \({lit}"),
-    ];
     let mut out = BTreeSet::new();
-    for p in patterns {
-        let re = regex::Regex::new(&p).expect("static regex");
+    for re in patterns {
         for c in re.captures_iter(body) {
             if let Some(m) = c.get(1) {
                 out.insert(m.as_str().to_string());
@@ -446,7 +454,7 @@ pub fn check_all(src_root: &Path) -> Vec<Divergence> {
             }
             Err(e) => out.push(finding(
                 h.as_str(),
-                FindingKind::SourceFileMissing,
+                FindingKind::ManifestInvalid,
                 format!("formats/{}.toml", h.as_str()),
                 format!("{e:#}"),
             )),
@@ -558,9 +566,6 @@ fn carrier_record_type(m: &crate::ir::Message, h: Harness) -> Option<String> {
 
 /// The N most recent sessions per harness (catalog-backed, newest first), keyed by harness name.
 fn recent_refs(harness: Option<Harness>, recent: usize) -> BTreeMap<&'static str, (Harness, Vec<SessionRef>)> {
-    if recent == 0 {
-        return BTreeMap::new();
-    }
     select_recent_refs(crate::sessions_for(harness), harness, recent)
 }
 

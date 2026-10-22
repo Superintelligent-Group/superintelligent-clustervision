@@ -19,7 +19,7 @@ mod util;
 
 /// A hermetic world whose environment this thread's library calls read (see `cv_core::env`).
 #[cfg(test)]
-fn test_world(tag: &str) -> cv_testkit::InProcess<cv_core::env::Scope> {
+fn test_world(tag: &str) -> cv_testkit::InProcess<cv_core::env::Isolated> {
     cv_testkit::World::in_process(tag, cv_core::env::Env::enter_isolated)
 }
 

@@ -193,7 +193,7 @@ impl TaskStore {
         anyhow::ensure!(!crate::env::frozen(), "--frozen forbids writing tasks");
         debug_assert!(!events.is_empty());
         fs::create_dir_all(&self.dir).with_context(|| format!("creating tasks dir {}", self.dir.display()))?;
-        let _lock = FileLock::acquire(self.lock_path())?;
+        let _lock = FileLock::acquire(&self.lock_path())?;
 
         // Replay under the lock: the candidate is validated against the exact state it will
         // land after.
