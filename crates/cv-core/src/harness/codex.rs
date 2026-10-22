@@ -352,7 +352,7 @@ impl ResumeState {
 /// A `rollout-*.jsonl.zst`: Codex's in-place compression of cold rollouts (readable only with the
 /// `sqlite` feature, which brings the `store::zst` decoder).
 fn is_zst_rollout(name: &str) -> bool {
-    cfg!(feature = "sqlite") && name.ends_with(".jsonl.zst")
+    cfg!(feature = "zstd") && name.ends_with(".jsonl.zst")
 }
 
 fn is_zst_path(path: &Path) -> bool {
@@ -683,11 +683,8 @@ impl Rollout {
         let backing = Arc::new(ByteSource::arena()?);
         let (offset, len) = backing.append(|writer| {
             let bytes = input.reader()?;
-            #[cfg(feature = "sqlite")]
             let mut bytes = super::store::zst::decoder(bytes)
                 .map_err(|e| anyhow::anyhow!("zstd header of {}: {e}", path.display()))?;
-            #[cfg(not(feature = "sqlite"))]
-            let mut bytes = bytes;
             std::io::copy(&mut bytes, &mut { writer })?;
             Ok(())
         })?;
@@ -1366,7 +1363,7 @@ mod tests {
 
     // Independent old buffered transport/collector: preserve .lines(), trim, lean/full fallback,
     // held-message EOF handling, and corruption counts while the production driver tracks bytes.
-    #[cfg(feature = "sqlite")]
+    #[cfg(feature = "zstd")]
     #[test]
     fn portable_decoded_text_keeps_source_identity_and_rejects_mid_read_changes() {
         let world = crate::test_world("codex-portable-source-change");
@@ -2688,7 +2685,20 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    #[cfg(feature = "sqlite")]
+    #[cfg(not(feature = "zstd"))]
+    #[test]
+    fn zst_without_decoder_is_an_error_not_jsonl() {
+        let world = crate::test_world("codex-no-decoder");
+        let path = world.base.join("rollout.jsonl.zst");
+        std::fs::write(&path, b"\x28\xb5\x2f\xfd").unwrap();
+        let error = match Rollout::open(&path) {
+            Ok(_) => panic!("compressed input must require a decoder"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("zstd"));
+    }
+
+    #[cfg(feature = "zstd")]
     #[test]
     fn zstd_compressed_rollouts_are_discovered_scanned_and_parsed() {
         let _world = crate::test_world("codex-zstd");
@@ -2728,7 +2738,7 @@ mod tests {
 
     /// Discovery under a handoff hands each rollout it decoded over once, never a plain one; a
     /// read of the same unchanged source on that thread uses those bytes, a changed one decodes.
-    #[cfg(feature = "sqlite")]
+    #[cfg(feature = "zstd")]
     #[test]
     fn discovery_hands_decoded_rollouts_to_the_reads_of_the_same_source() {
         let _world = crate::test_world("codex-handoff");
