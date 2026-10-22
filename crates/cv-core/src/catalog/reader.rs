@@ -156,9 +156,9 @@ impl Reader {
             else {
                 continue;
             };
-                let Some(turns) = record.payload.turns else {
-                    continue;
-                };
+            let Some(turns) = record.payload.turns else {
+                continue;
+            };
             #[cfg(test)]
             self.turn_snapshots.set(self.turn_snapshots.get() + 1);
             let source = probe.snapshot(r);
@@ -210,12 +210,17 @@ impl Reader {
     }
 
     pub(crate) fn primary_sessions(&self) -> Vec<SessionRef> {
-        super::imp::primary_refs_in(&self.conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner), None)
+        super::imp::primary_refs_in(
+            &self.conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+            None,
+        )
     }
 
     pub(crate) fn capture_primary_reads(&self, a: &dyn crate::Adapter) -> super::PrimaryReads {
-        let refs =
-            super::imp::primary_refs_in(&self.conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner), Some(a.harness()));
+        let refs = super::imp::primary_refs_in(
+            &self.conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+            Some(a.harness()),
+        );
         super::capture_primary_reads_from(a, &refs)
     }
 

@@ -24,9 +24,8 @@ fn main() -> Result<()> {
         .transpose()?;
     args.retain(|a| a != "--sqlite-heap");
     let positional = |index: usize| -> Result<&String> {
-        args.get(index).with_context(|| {
-            format!("missing positional {index} (usage: <source> <path> <output> <mode> [target])")
-        })
+        args.get(index)
+            .with_context(|| format!("missing positional {index} (usage: <source> <path> <output> <mode> [target])"))
     };
     let source = Harness::parse(positional(1)?).context("unknown source harness")?;
     let adapter = cv_core::harness::for_harness(source).context("source adapter")?;

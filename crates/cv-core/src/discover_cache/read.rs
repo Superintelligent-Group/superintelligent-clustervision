@@ -128,7 +128,10 @@ impl Context {
     }
     #[cfg(all(test, feature = "sqlite"))]
     pub(super) fn note_lookup(&self) {
-        self.0.counters.lookups.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.0
+            .counters
+            .lookups
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     #[cfg(all(test, feature = "sqlite"))]
     pub(super) fn note_row(&self) {
@@ -158,9 +161,7 @@ impl Context {
         self.0
             .connection
             .get_or_init(|| {
-                let Some(path) = self.0.path.as_deref() else {
-                    return None;
-                };
+                let path = self.0.path.as_deref()?;
                 #[cfg(test)]
                 self.0.counters.opens.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 crate::catalog::open_at(path).map(|connection| Arc::new(std::sync::Mutex::new(connection)))

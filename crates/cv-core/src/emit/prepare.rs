@@ -73,7 +73,12 @@ impl MessageSink for Collect {
 }
 /// Bind one retained block text: a wire-form span is replaced by the checked JSON string it
 /// covers (quotes included) from the captured source, non-span text passes through.
-fn bind_span(sources: &HashMap<PathBuf, JsonSource>, primary: &Path, session: &Session, value: &mut crate::Text) -> Result<()> {
+fn bind_span(
+    sources: &HashMap<PathBuf, JsonSource>,
+    primary: &Path,
+    session: &Session,
+    value: &mut crate::Text,
+) -> Result<()> {
     let crate::Text::Span(span) = &*value else {
         return Ok(());
     };
