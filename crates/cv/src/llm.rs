@@ -48,12 +48,7 @@ pub(crate) fn available_provider() -> Option<&'static str> {
 /// Picks a provider from the environment, builds a prompt from the rendered session, calls the
 /// chat model, and returns its Markdown text.
 pub(crate) fn digest(session: &cv_core::Session, opts: &DigestOptions) -> Result<String> {
-    let provider = provider_from_env().ok_or_else(|| {
-        anyhow!(
-            "no LLM API key found: set OPENROUTER_API_KEY (preferred) or ANTHROPIC_API_KEY \
-             to enable the digest"
-        )
-    })?;
+    let provider = provider_from_env().ok_or_else(no_provider)?;
     let prompt = build_prompt(session, opts)?;
     let model = opts
         .model
@@ -340,6 +335,15 @@ fn call_model(provider: &Provider, model: &str, prompt: &str) -> Result<String> 
 
 /// Pull the assistant text out of an OpenAI-shaped chat response
 /// (`choices[0].message.content`), with a clear error naming `who` when the shape is off.
+/// The one refusal when no provider is configured, naming every variable
+/// [`provider_from_env`] reads.
+fn no_provider() -> anyhow::Error {
+    anyhow!(
+        "no LLM provider: set OPENROUTER_API_KEY, ANTHROPIC_API_KEY, or LMSTUDIO_API_BASE \
+         (=local for a free local LM Studio server)"
+    )
+}
+
 fn extract_openai_text(v: &Value, who: &str) -> Result<String> {
     v["choices"][0]["message"]["content"]
         .as_str()
@@ -402,12 +406,7 @@ pub(crate) struct GenerateOptions {
 /// Forking/grafting happens in [`cv_core::splice`]; this produces a fresh continuation to append. With
 /// `LMSTUDIO_API_BASE` set this runs against a local model — free, offline looming.
 pub(crate) fn generate(session: &cv_core::Session, opts: &GenerateOptions) -> Result<String> {
-    let provider = provider_from_env().ok_or_else(|| {
-        anyhow!(
-            "no LLM provider: set OPENROUTER_API_KEY, ANTHROPIC_API_KEY, or LMSTUDIO_API_BASE \
-             (=local for a free local LM Studio server)"
-        )
-    })?;
+    let provider = provider_from_env().ok_or_else(no_provider)?;
     let model = opts
         .model
         .clone()
@@ -872,6 +871,14 @@ mod tests {
     }
 
     // ───────────────────────── response extraction error paths ─────────────────────────
+
+    #[test]
+    fn the_no_provider_refusal_names_every_variable_provider_from_env_reads() {
+        let message = no_provider().to_string();
+        for name in ["OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "LMSTUDIO_API_BASE"] {
+            assert!(message.contains(name), "{message}");
+        }
+    }
 
     #[test]
     fn openai_extraction_happy_and_sad() {
