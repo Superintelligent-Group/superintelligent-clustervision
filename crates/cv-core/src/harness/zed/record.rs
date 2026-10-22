@@ -88,8 +88,22 @@ fn text(fields: &Fields<'_>, key: &str, spans: bool) -> Result<Option<Text>> {
         .transpose()
         .map(Option::flatten)
 }
-fn nonempty<T: std::ops::Deref<Target = str>>(text: Option<T>) -> Option<T> {
-    text.filter(|text| !text.is_empty())
+/// One emptiness rule per type: `Text`'s inherent `is_empty` (span-safe `len`), `String`'s own.
+trait NonEmpty {
+    fn is_nonempty(&self) -> bool;
+}
+impl NonEmpty for Text {
+    fn is_nonempty(&self) -> bool {
+        !self.is_empty()
+    }
+}
+impl NonEmpty for String {
+    fn is_nonempty(&self) -> bool {
+        !self.is_empty()
+    }
+}
+fn nonempty<T: NonEmpty>(text: Option<T>) -> Option<T> {
+    text.filter(|text| text.is_nonempty())
 }
 fn nonnull(fields: &Fields<'_>, key: &str) -> Result<Option<Value>> {
     let Some(value) = fields.get(key) else { return Ok(None) };
