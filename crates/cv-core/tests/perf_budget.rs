@@ -148,7 +148,7 @@ fn corpus_blob(harness: &str, root: &std::path::Path, target: usize) -> (Box<dyn
     for e in walkdir::WalkDir::new(&corpus).sort_by_file_name() {
         let e = e.unwrap();
         let p = e.path();
-        if p.extension().is_some_and(|x| x == "jsonl") && !p.to_string_lossy().contains("/subagents/") {
+        if p.extension().is_some_and(|x| x == "jsonl") && !p.components().any(|c| c.as_os_str() == "subagents") {
             lines.extend(std::fs::read_to_string(p).unwrap().lines().map(str::to_string));
         }
     }

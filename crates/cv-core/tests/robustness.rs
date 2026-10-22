@@ -143,7 +143,10 @@ fn hostile_inputs() -> Vec<(&'static str, String)> {
         ),
     ];
 
-    // Deeply nested JSON (objects & arrays) — guard against recursion blowups.
+    // Deeply nested JSON (objects & arrays) — past serde_json's 128-deep recursion limit, so a
+    // parser that recursed on input shape fails with an error long before the stack is at risk.
+    // (catch_unwind below cannot see a stack overflow — the process aborts — so these inputs
+    // are what prove the depth limit fires first; they do not simulate one.)
     let mut nested = String::new();
     for _ in 0..2000 {
         nested.push_str("{\"a\":");
@@ -448,10 +451,12 @@ fn crlf_and_truncated_final_line_keep_good_records() {
 // 3. round-trip invariant (always runs)
 // ------------------------------------------------------------------------------------------------
 
-/// Re-parse an emitted session, given the EmitResult path + target harness. Returns the parsed IR.
-/// Handles the per-target quirks: env-rooted harnesses (OpenCode, Hermes) are discovered from a
-/// redirected HOME/HERMES_HOME; the rest parse their EmitResult path directly.
-fn emit_and_reparse(target: Harness) -> Option<Session> {
+/// Re-parse an emitted session, given the EmitResult path + target harness. Returns the parsed IR,
+/// panicking at the step that actually failed (discover, find, parse) with its cause — never
+/// deferring a discovery failure to a caller-side `None`. Handles the per-target quirks:
+/// env-rooted harnesses (OpenCode, Hermes) are discovered from a redirected HOME/HERMES_HOME; the
+/// rest parse their EmitResult path directly.
+fn emit_and_reparse(target: Harness) -> Session {
     let session = sample_session(target);
     let out = temp_dir();
 
@@ -465,22 +470,26 @@ fn emit_and_reparse(target: Harness) -> Option<Session> {
             let res = cv_core::emit::emit(&session, target, &storage, &Default::default()).expect("emit opencode");
             let _env = cv_core::env::Env::from_vars([("HOME", &home)]).enter();
             let adapter = cv_core::harness::for_harness(target).unwrap();
-            adapter
+            let refs = adapter
                 .discover()
-                .ok()
-                .and_then(|refs| refs.into_iter().find(|r| r.id == res.new_id))
-                .map(|r| adapter.parse(&r).expect("parse opencode"))
+                .unwrap_or_else(|e| panic!("{target}: discover after emit failed: {e:#}"));
+            let Some(r) = refs.into_iter().find(|r| r.id == res.new_id) else {
+                panic!("{target}: emitted session {} was not discovered", res.new_id);
+            };
+            adapter.parse(&r).expect("parse opencode")
         }
         // Hermes resolves its state.db from HERMES_HOME; emit into a dir, then discover from it.
         Harness::Hermes => {
             let res = cv_core::emit::emit(&session, target, &out, &Default::default()).expect("emit hermes");
             let _env = cv_core::env::Env::from_vars([("HERMES_HOME", &out)]).enter();
             let adapter = cv_core::harness::for_harness(target).unwrap();
-            adapter
+            let refs = adapter
                 .discover()
-                .ok()
-                .and_then(|refs| refs.into_iter().find(|r| r.id == res.new_id))
-                .map(|r| adapter.parse(&r).expect("parse hermes"))
+                .unwrap_or_else(|e| panic!("{target}: discover after emit failed: {e:#}"));
+            let Some(r) = refs.into_iter().find(|r| r.id == res.new_id) else {
+                panic!("{target}: emitted session {} was not discovered", res.new_id);
+            };
+            adapter.parse(&r).expect("parse hermes")
         }
         // Everything else: the EmitResult path is directly parseable by the adapter.
         _ => {
@@ -500,11 +509,9 @@ fn emit_and_reparse(target: Harness) -> Option<Session> {
                 updated_at: None,
                 message_count: None,
             };
-            Some(
-                adapter
-                    .parse(&r)
-                    .unwrap_or_else(|e| panic!("parse {target} failed: {e:#}")),
-            )
+            adapter
+                .parse(&r)
+                .unwrap_or_else(|e| panic!("parse {target} failed: {e:#}"))
         }
     }
 }
@@ -516,8 +523,7 @@ fn round_trip_all_supported_targets() {
 
     let mut checked = Vec::new();
     for &target in targets {
-        let parsed =
-            emit_and_reparse(target).unwrap_or_else(|| panic!("{target}: emitted session was not discoverable"));
+        let parsed = emit_and_reparse(target);
 
         // Two faithful-format quirks among the newer targets:
         //  - LM Studio has no tool structures on disk → tool turns flatten to text (lossy on tools);
