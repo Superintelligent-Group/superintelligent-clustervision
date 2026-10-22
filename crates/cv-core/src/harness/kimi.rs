@@ -2874,7 +2874,7 @@ mod tests {
 
     /// Write `name`→`contents` into a fresh hermetic world dir, return the dir. The caller keeps
     /// the world scoped; dropping it removes the dir.
-    fn write_temp(name: &str, contents: &str) -> (cv_testkit::InProcess<crate::env::Scope>, PathBuf) {
+    fn write_temp(name: &str, contents: &str) -> (cv_testkit::InProcess<crate::env::Isolated>, PathBuf) {
         let world = crate::test_world("kimi-write-temp");
         fs::write(world.base.join(name), contents).unwrap();
         let dir = world.base.clone();
