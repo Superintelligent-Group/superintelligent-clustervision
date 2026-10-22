@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Desktop ZIP imports report transcript decoding errors instead of attempting to serialize an ingestion result.
+
 - `prune`, `rewind`, and `port` accept `--skills keep|drop|drop-stale`, including legacy command-file skills; the default preserves restored skills unchanged.
 - **Breaking (library):** redaction and HTML message rendering require a resolver; Markdown consumers use `write_md_message`/`write_md_block` instead of removed buffering wrappers.
 
