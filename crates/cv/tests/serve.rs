@@ -1,7 +1,11 @@
-//! Integration tests for `cv archive` (`sync` idempotency against a fixture corpus) and the
-//! `cv serve` HTTP endpoints (status codes, JSON shapes, query parsing) — all hermetic via a
-//! temp `$HOME` + `$CLUSTERVISION_HOME` passed only to child processes.
+//! Integration tests for the `cv serve` HTTP endpoints (status codes, JSON shapes, query
+//! parsing) — all hermetic via a temp `$HOME` + `$CLUSTERVISION_HOME` passed only to child
+//! processes. (The `cv archive` tests live in `archive.rs`; the two-session fixture corpus they
+//! share with these tests is in `common/mod.rs`.)
 
+mod common;
+
+use common::world;
 use cv_core::rows::SEARCH_ROW_KEYS;
 use cv_testkit::http::status as raw_status;
 use cv_testkit::World;
@@ -9,42 +13,11 @@ use serde_json::{json, Value};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
-/// A world with the two-session fixture corpus every test starts from.
-fn world(tag: &str) -> World {
-    let w = World::new(tag);
-    write_fixtures(&w);
-    w
-}
-
-fn write_fixtures(w: &World) {
-    let alpha = [
-        json!({"type": "ai-title", "aiTitle": "alpha adventures"}),
-        json!({"type": "user", "uuid": "u1", "timestamp": "2026-01-01T10:00:00Z",
-               "cwd": "/work/proj",
-               "message": {"role": "user", "content": "please fix the zebrafish migration"}}),
-        json!({"type": "assistant", "uuid": "a1", "timestamp": "2026-01-02T10:00:00Z",
-               "message": {"role": "assistant", "content": [
-                   {"type": "text", "text": "done"}]}}),
-    ];
-    let beta = [
-        json!({"type": "user", "uuid": "b1", "timestamp": "2026-03-01T09:00:00Z",
-               "cwd": "/work/proj",
-               "message": {"role": "user", "content": "quokka census"}}),
-        json!({"type": "assistant", "uuid": "b2", "timestamp": "2026-03-01T09:05:00Z",
-               "message": {"role": "assistant", "content": [
-                   {"type": "text", "text": "seventeen"}]}}),
-    ];
-    for (name, lines) in [("alphasess", &alpha[..]), ("betasess", &beta[..])] {
-        let body: String = lines.iter().map(|l| format!("{l}\n")).collect();
-        fs::write(w.transcript(name), body).unwrap();
-    }
-}
-
-/// A third, tool-heavy session (separate from `write_fixtures` so the sync tests' "2
+/// A third, tool-heavy session (separate from `common::write_fixtures` so the archive tests' "2
 /// discovered" counts hold): 6 messages with an Edit, a failing Bash, a clean Bash, and a
 /// closing text — the raw material for the messages/events/touched endpoint tests.
 fn write_gamma(w: &World) {
@@ -119,83 +92,6 @@ fn write_web_root(w: &World) -> PathBuf {
     // A file a `../` escape would try to read; it lives beside (not under) the web root.
     fs::write(w.base.join("secret.txt"), "TOP SECRET").unwrap();
     web
-}
-
-fn count_lines(p: &Path) -> usize {
-    fs::read_to_string(p)
-        .unwrap_or_default()
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .count()
-}
-
-// ───────────────────────────── sync ─────────────────────────────
-
-#[test]
-fn sync_is_idempotent() {
-    let w = world("sync");
-
-    // First sync archives both sessions.
-    let (out, _) = w.cv_ok(&["archive", "sync"]);
-    assert!(
-        out.contains("2 archived, 0 skipped (unchanged) of 2 discovered"),
-        "{out}"
-    );
-    assert!(w.cv_home.join("archive/claude/alphasess.json").is_file());
-    assert!(w.cv_home.join("archive/claude/betasess.json").is_file());
-    assert_eq!(count_lines(&w.cv_home.join("catalog.jsonl")), 2);
-
-    // Second sync: nothing changed → nothing rewritten, no duplicate catalog rows.
-    let (out, _) = w.cv_ok(&["archive", "sync"]);
-    assert!(
-        out.contains("0 archived, 2 skipped (unchanged) of 2 discovered"),
-        "{out}"
-    );
-    assert_eq!(count_lines(&w.cv_home.join("catalog.jsonl")), 2, "no dupes on resync");
-
-    // ls shows each session exactly once.
-    let (out, _) = w.cv_ok(&["archive", "ls"]);
-    assert!(out.contains("2 session(s)"), "{out}");
-    assert_eq!(out.matches("alphases").count(), 1, "{out}");
-    assert!(out.contains("alpha adventures"), "{out}");
-
-    // Append a turn to one session: only that one re-archives; the catalog dedupes by key.
-    let mut body = fs::read_to_string(w.transcript("alphasess")).unwrap();
-    body.push_str(
-        &json!({"type": "user", "uuid": "u9", "timestamp": "2026-06-02T10:00:00Z",
-                "message": {"role": "user", "content": "one more thing"}})
-        .to_string(),
-    );
-    body.push('\n');
-    fs::write(w.transcript("alphasess"), body).unwrap();
-
-    let (out, _) = w.cv_ok(&["archive", "sync"]);
-    assert!(
-        out.contains("1 archived, 1 skipped (unchanged) of 2 discovered"),
-        "{out}"
-    );
-    let (out, _) = w.cv_ok(&["archive", "ls"]);
-    assert!(
-        out.contains("2 session(s)"),
-        "changed session must not duplicate:\n{out}"
-    );
-    assert!(out.contains("3 msgs"), "updated message count visible:\n{out}");
-
-    // The archived JSON is the parsed IR, scrubbed of nothing — spot-check its shape.
-    let archived: Value =
-        serde_json::from_str(&fs::read_to_string(w.cv_home.join("archive/claude/alphasess.json")).unwrap())
-            .expect("archived session is valid JSON");
-    assert_eq!(archived["id"], "alphasess");
-    assert_eq!(archived["messages"].as_array().unwrap().len(), 3);
-}
-
-#[test]
-fn ls_and_path_on_empty_archive() {
-    let w = world("empty");
-    let (out, _) = w.cv_ok(&["archive", "ls"]);
-    assert!(out.contains("archive empty"), "{out}");
-    let (out, _) = w.cv_ok(&["archive", "path"]);
-    assert_eq!(out.trim(), w.cv_home.display().to_string(), "{out}");
 }
 
 // ───────────────────────────── serve ─────────────────────────────
@@ -277,15 +173,11 @@ impl Drop for Reaper {
 /// Spawn `cv serve` on a free port and wait for the listener. Returns the port and the reaper
 /// keeping the child alive (drop it to kill the server).
 fn spawn_serve(w: &World) -> (u16, Reaper) {
-    spawn_serve_with(w, &[])
+    spawn_serve_cfg(w, &[], &[])
 }
 
-/// Like [`spawn_serve`] but with extra `serve` args (e.g. `["--web", dir]`).
-fn spawn_serve_with(w: &World, extra: &[&str]) -> (u16, Reaper) {
-    spawn_serve_cfg(w, extra, &[])
-}
-
-/// Like [`spawn_serve_with`] but also with extra child env vars (e.g. `CVD_TOKEN`).
+/// Like [`spawn_serve`] but with extra `serve` args (e.g. `["--web", dir]`) and extra child env
+/// vars (e.g. `CVD_TOKEN`).
 ///
 /// Binds `--port 0` (the OS assigns a genuinely free ephemeral port — no bind/release/rebind race
 /// under parallel tests) and parses the REAL port out of the startup banner on stderr. The child
@@ -706,7 +598,6 @@ fn serve_workflow_script() {
 #[test]
 fn serve_session_head() {
     let w = world("head");
-    write_fixtures(&w);
     let (port, _reaper) = spawn_serve(&w);
 
     let (status, v) = get_json(port, "/api/session/claude/alphasess/head");
@@ -745,9 +636,8 @@ fn serve_session_head() {
 #[test]
 fn serve_static_missing_asset_is_404_not_the_index() {
     let w = world("static");
-    write_fixtures(&w);
     let webroot = write_web_root(&w);
-    let (port, _reaper) = spawn_serve_with(&w, &["--web", webroot.to_str().unwrap()]);
+    let (port, _reaper) = spawn_serve_cfg(&w, &["--web", webroot.to_str().unwrap()], &[]);
 
     let (status, ct, _) = get_with_content_type(port, "/pkg/cv_web.js");
     assert_eq!(status, 404, "a missing module is a 404, not the index");
@@ -832,7 +722,7 @@ fn serve_compactions() {
 fn serve_static_web_hub() {
     let w = world("webhub");
     let web = write_web_root(&w);
-    let (port, _reaper) = spawn_serve_with(&w, &["--web", web.to_str().unwrap()]);
+    let (port, _reaper) = spawn_serve_cfg(&w, &["--web", web.to_str().unwrap()], &[]);
 
     // `/` serves index.html with an HTML content type.
     let (status, body) = http(port, "GET", "/");
@@ -1114,7 +1004,7 @@ fn serve_host_validation() {
 #[test]
 fn serve_token_auth() {
     let w = world("token");
-    let (port, _reaper) = spawn_serve_with(&w, &["--token", "opensesame"]);
+    let (port, _reaper) = spawn_serve_cfg(&w, &["--token", "opensesame"], &[]);
 
     let raw = raw_request(port, "GET", "/api/sessions", &[]);
     assert_eq!(raw_status(&raw), 401, "{raw}");
@@ -1193,8 +1083,12 @@ fn serve_search() {
     let arr = v.as_array().expect("array");
     assert_eq!(arr.len(), 1, "{v}");
     assert_eq!(arr[0]["id"], "alphasess", "{v}");
-    let keys: Vec<&str> = arr[0].as_object().unwrap().keys().map(String::as_str).collect();
-    assert_eq!(keys, SEARCH_ROW_KEYS, "search row must match §3 exactly: {v}");
+    // The §3 contract is the key SET (a JSON object has no order), not the wire order.
+    let mut keys: Vec<&str> = arr[0].as_object().unwrap().keys().map(String::as_str).collect();
+    let mut expected: Vec<&str> = SEARCH_ROW_KEYS.to_vec();
+    keys.sort_unstable();
+    expected.sort_unstable();
+    assert_eq!(keys, expected, "search row must match §3 exactly: {v}");
     // The session-row half is real (it came from a ref, not the index) and the search half is
     // filled the way a scoreless scan fills it.
     assert!(arr[0]["path"].as_str().is_some_and(|p| p.ends_with(".jsonl")), "{v}");
@@ -1294,17 +1188,19 @@ fn serve_stats() {
 
     let (status, v) = get_json(port, "/api/stats");
     assert_eq!(status, 200, "{v}");
-    let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+    // The §3 contract is the key SET (a JSON object has no order), not the wire order.
+    let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort_unstable();
     assert_eq!(
         keys,
         [
-            "sessions",
-            "messages",
-            "uncounted",
             "by_harness",
-            "top_cwds",
             "earliest_created",
-            "latest_updated"
+            "latest_updated",
+            "messages",
+            "sessions",
+            "top_cwds",
+            "uncounted"
         ],
         "stats payload must match `cv stats --json` exactly: {v}"
     );
@@ -1437,8 +1333,10 @@ fn request_headers_are_bounded_and_buffering_preserves_body_and_pipeline() {
     write!(stream, "GET /api/health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: 4\r\n\r\nbodyGET /api/health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n").unwrap();
     let mut raw = String::new();
     stream.read_to_string(&mut raw).unwrap();
+    // Count full status LINES (`HTTP/1.1 200 OK\r\n`), so a body that happens to quote a bare
+    // "HTTP/1.1 200" is never counted as a response.
     assert_eq!(
-        raw.matches("HTTP/1.1 200").count(),
+        raw.matches("HTTP/1.1 200 OK\r\n").count(),
         2,
         "buffered body/pipeline lost: {raw}"
     );
@@ -1493,6 +1391,10 @@ fn pipelined_requests_each_pass_the_host_check() {
     assert_eq!(statuses, ["200", "403", "403"], "{raw}");
 }
 
+/// The server's connection cap (`http::Limits::connections`' default): filling it with idle
+/// connections must shed the next newcomer, not queue it.
+const CONNECTION_CAP: usize = 64;
+
 /// Idle connections cannot lock the server out: past the connection cap a newcomer is answered
 /// 503 at once, never queued behind them, and each idle one is closed at the first-byte deadline.
 #[test]
@@ -1500,7 +1402,7 @@ fn idle_connections_are_shed_then_expire() {
     let w = world("idle-shed");
     let (port, _server) = spawn_serve(&w);
     std::thread::sleep(Duration::from_millis(200)); // let the readiness probe's connection end
-    let idle: Vec<TcpStream> = (0..64)
+    let idle: Vec<TcpStream> = (0..CONNECTION_CAP)
         .map(|_| TcpStream::connect(("127.0.0.1", port)).unwrap())
         .collect();
     std::thread::sleep(Duration::from_millis(300));
@@ -1634,7 +1536,7 @@ fn serve_carries_the_inbox_and_guards_its_writes() {
         ))
         .expect("seed open");
     let id = opened.task_id.clone();
-    let (port, _reaper) = spawn_serve_with(&w, &["--who", "ember"]);
+    let (port, _reaper) = spawn_serve_cfg(&w, &["--who", "ember"], &[]);
 
     for path in ["/", "/inbox"] {
         let (status, ct, body) = get_with_content_type(port, path);
