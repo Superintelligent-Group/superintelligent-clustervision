@@ -8,6 +8,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 
 const RETAINED_BYTES: usize = 16 * 1024 * 1024;
+/// Per-entry hash-map and path overhead counted alongside retained bytes, so many small
+/// entries cannot bypass admission.
+const ENTRY_BYTES: usize = 256;
 #[derive(Hash, PartialEq, Eq)]
 struct Key(TypeId, &'static str, PathBuf);
 struct Cached {
@@ -76,7 +79,7 @@ pub(crate) fn inventory<T: Send + Sync + 'static>(
             return Some(slot.clone());
         }
         // Count key/map/slot overhead too, so many empty inventories cannot bypass admission.
-        let bytes = 256usize.saturating_add(key.2.as_os_str().len());
+        let bytes = ENTRY_BYTES.saturating_add(key.2.as_os_str().len());
         if bytes > RETAINED_BYTES.saturating_sub(state.bytes) {
             return None;
         }
@@ -111,7 +114,7 @@ pub(crate) fn inventory<T: Send + Sync + 'static>(
     let value = Arc::new(value);
     if let (Some(context), Some(retained)) = (context.as_ref(), retained.as_deref_mut()) {
         let guard_bytes = reads.entries.keys().fold(0usize, |bytes, path| {
-            bytes.saturating_add(256usize.saturating_add(path.as_os_str().len()))
+            bytes.saturating_add(ENTRY_BYTES.saturating_add(path.as_os_str().len()))
         });
         let bytes = estimate.saturating_add(guard_bytes);
         let mut state = context.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);

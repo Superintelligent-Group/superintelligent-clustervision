@@ -46,11 +46,11 @@ impl ExactStrings {
     }
 
     pub(crate) fn contains(&mut self, text: &str) -> Result<bool> {
-        let hash = self.hash(text);
-        match &mut self.spill {
-            Some(disk) => Ok(disk.find(text.as_bytes(), hash)?.1),
-            None => Ok(self.memory.contains(text)),
+        if self.spill.is_some() {
+            let hash = self.hash(text);
+            return Ok(self.spill.as_mut().unwrap().find(text.as_bytes(), hash)?.1);
         }
+        Ok(self.memory.contains(text))
     }
 
     /// True only on first insertion. Empty strings, embedded NUL and hash collisions are exact.
@@ -127,15 +127,13 @@ impl ExactStrings {
         if self.spill.is_none() && estimated > self.limit {
             self.spill_memory()?;
         }
-        let hash = self.hash(&text);
-        match &mut self.spill {
-            Some(disk) => disk.insert(text.as_bytes(), hash),
-            None => {
-                let text = text.into_owned();
-                self.bytes += text.capacity();
-                Ok(self.memory.insert(text))
-            }
+        if self.spill.is_some() {
+            let hash = self.hash(&text);
+            return self.spill.as_mut().unwrap().insert(text.as_bytes(), hash);
         }
+        let text = text.into_owned();
+        self.bytes += text.capacity();
+        Ok(self.memory.insert(text))
     }
 
     fn memory_cost(&self, additional: usize) -> usize {
