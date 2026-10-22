@@ -663,7 +663,7 @@ pub struct Pass<'a> {
     /// larger suffix to reread on the next append.
     pub amortized: bool,
     /// Publish what a whole read counted to the catalog, against a source snapshot taken before
-    /// the read: a "not counted" (`0`) row gets the parse's turn count, so `cv ls` shows the real
+    /// the read (never from a [`Demand::COMPLETE`] read): a "not counted" (`0`) row gets the parse's turn count, so `cv ls` shows the real
     /// number from the first full read on, and the affordance counts that let `has:<kind>` answer
     /// from the catalog are recorded unless still fresh. A sweep that parses on many threads
     /// leaves this off and publishes [`Counted`] itself, on one.
@@ -780,7 +780,9 @@ pub fn stream_counted(
             })
         })
         .transpose()?;
-    if let (true, Some(source), Some(counted)) = (pass.record, &source, &counted) {
+    // A complete read also carries what left the conversation (rewound and superseded rows,
+    // carriers) for round-trip: it never certifies what the session counts.
+    if let (true, Some(source), Some(counted)) = (pass.record && opts.tier != Tier::Complete, &source, &counted) {
         counted.record_with_source(r, source);
     }
     Ok(Streamed {
