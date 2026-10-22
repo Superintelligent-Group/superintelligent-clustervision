@@ -36,16 +36,22 @@ pub struct Receiver {
 
 /// Decoded bytes alive (counted from before each decode), and whether the consumer is gone.
 struct Window {
-    state: Mutex<(u64, bool)>,
+    state: Mutex<WindowState>,
     freed: Condvar,
     limit: u64,
+}
+
+/// The window's live byte count and whether the consumer has gone (dropped its [`Receiver`]).
+struct WindowState {
+    live: u64,
+    consumer_gone: bool,
 }
 
 struct Permit(Arc<Window>, u64);
 
 impl Drop for Permit {
     fn drop(&mut self) {
-        self.0.state.lock().unwrap().0 -= self.1;
+        self.0.state.lock().unwrap().live -= self.1;
         self.0.freed.notify_all();
     }
 }
@@ -53,7 +59,10 @@ impl Drop for Permit {
 /// A handoff holding at most `limit` decoded bytes at once, or one larger rollout alone.
 pub fn channel(limit: u64) -> (Handoff, Receiver) {
     let window = Arc::new(Window {
-        state: Mutex::new((0, false)),
+        state: Mutex::new(WindowState {
+            live: 0,
+            consumer_gone: false,
+        }),
         freed: Condvar::new(),
         limit,
     });
@@ -80,7 +89,7 @@ impl Receiver {
 
 impl Drop for Receiver {
     fn drop(&mut self) {
-        self.window.state.lock().unwrap().1 = true;
+        self.window.state.lock().unwrap().consumer_gone = true;
         self.window.freed.notify_all();
     }
 }
@@ -92,13 +101,13 @@ impl Handoff {
     fn reserve(&self, bytes: Option<u64>) -> Option<Permit> {
         let bytes = bytes.unwrap_or(self.window.limit);
         let mut state = self.window.state.lock().unwrap();
-        while state.0 != 0 && state.0.saturating_add(bytes) > self.window.limit && !state.1 {
+        while state.live != 0 && state.live.saturating_add(bytes) > self.window.limit && !state.consumer_gone {
             state = self.window.freed.wait(state).unwrap();
         }
-        if state.1 {
+        if state.consumer_gone {
             return None;
         }
-        state.0 += bytes;
+        state.live += bytes;
         Some(Permit(self.window.clone(), bytes))
     }
 }
