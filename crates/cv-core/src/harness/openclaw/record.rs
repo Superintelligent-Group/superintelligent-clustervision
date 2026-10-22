@@ -445,12 +445,10 @@ fn control(view: JsonView<'_>, top: &Fields<'_>, ty: &str, common: &Common, span
 /// A `message` entry → its turn(s). The `compactionSummary` custom role (the pre-`compaction`-entry
 /// form) yields two: the boundary (the entry's id and token counts) and the summary.
 fn message(top: &Fields<'_>, common: &Common, spans: bool) -> Result<Vec<Message>> {
-    let Some(body) = top
-        .get("message")
-        .map(|m| Fields::parse(m, BODY))
-        .transpose()?
-        .flatten()
-    else {
+    let Some(container) = top.get("message") else {
+        return Ok(Vec::new());
+    };
+    let Some(body) = Fields::parse(container, BODY)? else {
         return Ok(Vec::new());
     };
     let Some(role_str) = body.string("role")? else {
@@ -540,7 +538,6 @@ fn message(top: &Fields<'_>, common: &Common, spans: bool) -> Result<Vec<Message
                     pieces.extend([Piece::Literal("\n"), Piece::String(output)]);
                 }
             }
-            let container = top.get("message").expect("parsed body");
             m.content.push(Block::Text {
                 text: joined(container, keep_source, &pieces)?,
             });

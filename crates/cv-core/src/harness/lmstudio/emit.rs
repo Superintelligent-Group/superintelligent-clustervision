@@ -235,6 +235,8 @@ pub(super) fn emit(session: &Session, out_dir: &Path, opts: &crate::emit::EmitOp
         .new_id
         .clone()
         .unwrap_or_else(|| created.timestamp_millis().to_string());
+    // `--out` naming convention (same as qwen's `projects_dir`): the flag may name the CLI's
+    // store root or the store dir inside it; accept either and write where the CLI reads.
     let conversations = crate::emit::out_dir_within(out_dir, "conversations");
     let file_path = conversations.join(format!("{new_id}.conversation.json"));
     let title = super::super::wire::write::fallback_title(session, &resolver)?.unwrap_or_else(|| "Untitled".into());
