@@ -94,6 +94,25 @@ pub fn temp_dir(tag: &str) -> PathBuf {
     dir
 }
 
+/// Mark `root` and everything under it (symlinks not followed) as last modified a minute ago:
+/// how a test steps past a "recently modified, not yet settled" window (the catalog's watch fudge)
+/// without sleeping through it. A later write stamps the real time, so it still reads as a change.
+pub fn settle(root: &Path) {
+    let then = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.is_dir() {
+            stack.extend(fs::read_dir(&path).unwrap().map(|e| e.unwrap().path()));
+        }
+        if !meta.file_type().is_symlink() {
+            fs::File::open(&path).unwrap().set_modified(then).unwrap();
+        }
+    }
+}
+
 /// Lines as a JSONL body, one per line, newline-terminated.
 pub fn jsonl(lines: &[Value]) -> String {
     lines.iter().map(|l| format!("{l}\n")).collect()

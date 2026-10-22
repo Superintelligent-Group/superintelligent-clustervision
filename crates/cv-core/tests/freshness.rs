@@ -3,16 +3,14 @@
 //! staleness-backstop escape hatch.
 //!
 //! Each test reads its own world's `HOME` and `CLUSTERVISION_HOME` in-process
-//! (`cv_testkit::World::in_process`). They also `sleep` past the probe's 2s watch-fudge window
-//! where a test needs recorded (non-zero) watch mtimes to be the thing that detects a change.
+//! (`cv_testkit::World::in_process`). Where a test needs recorded (non-zero) watch mtimes to be
+//! the thing that detects a change, it first ages its store past the probe's 2s watch-fudge
+//! window ([`cv_testkit::settle`]) instead of sleeping through it.
 
 use cv_core::ir::{Harness, SessionRef};
 use cv_testkit::World;
 use std::fs;
 use std::path::PathBuf;
-
-/// How long the recorded-watch fudge window is (catalog's WATCH_FUDGE = 2s) plus margin.
-const FUDGE: std::time::Duration = std::time::Duration::from_millis(2100);
 
 /// A hermetic in-process world for one test.
 fn world(tag: &str) -> cv_testkit::InProcess<cv_core::env::Isolated> {
@@ -86,7 +84,7 @@ fn new_session_files_detected() {
     let w = world("new");
     write_session(&w, "-work-proj", "alphasess", 2);
     cv_core::discover_all();
-    std::thread::sleep(FUDGE); // age past the watch fudge…
+    cv_testkit::settle(&w.home); // age past the watch fudge…
     cv_core::sessions(); // …and re-record real (non-zero) watch mtimes
 
     write_session(&w, "-work-proj", "betasess", 1); // new file in a watched dir
@@ -102,7 +100,7 @@ fn append_in_top_k_detected() {
     let w = world("append");
     let path = write_session(&w, "-work-proj", "alphasess", 2);
     cv_core::discover_all();
-    std::thread::sleep(FUDGE);
+    cv_testkit::settle(&w.home);
     cv_core::sessions(); // stabilize watches
 
     use std::io::Write;
@@ -127,14 +125,14 @@ fn vanished_sessions_dropped() {
     let alpha_path = write_session(&w, "-work-proj", "alphasess", 2);
     write_session(&w, "-work-other", "gammasess", 1);
     cv_core::discover_all();
-    std::thread::sleep(FUDGE);
+    cv_testkit::settle(&w.home);
     cv_core::sessions();
 
     fs::remove_file(&alpha_path).unwrap(); // unlink bumps the parent dir's mtime
     let refs = cv_core::sessions();
     assert_eq!(ids(&refs), vec!["gammasess"], "deleted session must not appear");
 
-    std::thread::sleep(FUDGE);
+    cv_testkit::settle(&w.home);
     cv_core::sessions();
     fs::remove_dir_all(w.home.join(".claude/projects/-work-other")).unwrap(); // watched dir itself vanishes
     let refs = cv_core::sessions();
@@ -152,7 +150,7 @@ fn warm_path_reads_catalog_and_full_discovery_heals() {
     let w = world("warm");
     let alpha = write_session(&w, "-work-proj", "alphasess", 2);
     cv_core::discover_all();
-    std::thread::sleep(FUDGE);
+    cv_testkit::settle(&w.home);
     cv_core::sessions();
 
     // Plant an alias row over an already captured source. Nothing on disk changes, so the
@@ -289,7 +287,7 @@ fn quiet_session_append_refreshes_catalog_and_follower() {
     }
     let quiet = write_session(&w, "-work-proj", "quietsess", 1); // updated 2026-01-01: rank 51
     cv_core::discover_all();
-    std::thread::sleep(FUDGE);
+    cv_testkit::settle(&w.home);
     cv_core::sessions();
     let mut watcher = cv_core::watch::Watcher::new(
         cv_core::watch::Filter {
@@ -384,7 +382,7 @@ fn same_size_restored_mtime_replacement_refreshes_catalog() {
     let w = world("replacement");
     let path = write_session(&w, "-work-proj", "replaced", 2);
     cv_core::discover_all();
-    std::thread::sleep(FUDGE);
+    cv_testkit::settle(&w.home);
     cv_core::sessions();
     let original = fs::metadata(&path).unwrap();
     let parent = path.parent().unwrap();

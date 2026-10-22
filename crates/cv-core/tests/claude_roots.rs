@@ -12,8 +12,16 @@ use cv_testkit::World;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The catalog's recorded-watch fudge window (2s) plus margin; see `freshness.rs`.
-const FUDGE: std::time::Duration = std::time::Duration::from_millis(2100);
+/// Age every session root (all live under the world's `home` and `base`, never its catalog)
+/// past the catalog's watch fudge; see `freshness.rs`.
+fn settle(w: &World) {
+    for entry in fs::read_dir(&w.base).unwrap() {
+        let path = entry.unwrap().path();
+        if path != w.cv_home {
+            cv_testkit::settle(&path);
+        }
+    }
+}
 
 fn world(tag: &str) -> cv_testkit::InProcess<cv_core::env::Isolated> {
     World::in_process(tag, cv_core::env::Env::enter_isolated)
@@ -256,7 +264,7 @@ fn catalog_sees_new_sessions_under_extra_roots() {
     );
 
     cv_core::discover_all();
-    std::thread::sleep(FUDGE); // age past the watch fudge…
+    settle(&w); // age past the watch fudge…
     cv_core::sessions(); // …and re-record real (non-zero) watch mtimes
     assert_eq!(
         claude_ids(&cv_core::sessions()),
@@ -270,7 +278,7 @@ fn catalog_sees_new_sessions_under_extra_roots() {
         "a new project directory under an extra root is seen"
     );
 
-    std::thread::sleep(FUDGE);
+    settle(&w);
     cv_core::sessions();
     write_session(&seats.join("two/claude/projects"), "-work-proj", "seattwosess");
     assert_eq!(
@@ -279,7 +287,7 @@ fn catalog_sees_new_sessions_under_extra_roots() {
         "a new seat under a `*` root is seen"
     );
 
-    std::thread::sleep(FUDGE);
+    settle(&w);
     cv_core::sessions();
     let later = w.base.join("later");
     write_session(&later.join("projects"), "-work-proj", "latersess");
