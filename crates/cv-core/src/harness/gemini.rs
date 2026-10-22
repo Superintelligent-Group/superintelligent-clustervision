@@ -98,12 +98,7 @@ impl Adapter for Gemini {
     }
 
     fn dependencies(&self, r: &SessionRef, _probe: &mut Probe, deps: &mut Dependencies) -> Option<()> {
-        if let Some(project) = r
-            .path
-            .ancestors()
-            .find(|p| p.file_name().is_some_and(|n| n == "chats"))
-            .and_then(Path::parent)
-        {
+        if let Some(project) = chats_project(&r.path) {
             deps.directories.push(project.join(&r.id).join("tracker"));
             deps.directories.push(project.join(&r.id).join("plans"));
         }
@@ -219,6 +214,8 @@ fn type_user_turn_from(m: &mut Message, text: &str) {
     let t = text.trim_start();
     let (kind, origin) = if t.starts_with("<hook_context>") {
         (MessageKind::InjectedContext, Origin::Hook)
+    // Emptiness is re-tested here: `is_ignored_user_content` would take it, but an empty or
+    // whitespace-only turn stays a human prompt.
     } else if !t.is_empty() && is_ignored_user_content(t) {
         (MessageKind::InjectedContext, Origin::Harness)
     } else {
@@ -241,6 +238,13 @@ fn parent_session_from_path(path: Option<&Path>) -> Option<String> {
         .flatten()
 }
 
+/// The project dir a recording hangs off: the parent of its `chats/` ancestor.
+fn chats_project(from: &Path) -> Option<&Path> {
+    from.ancestors()
+        .find(|p| p.file_name().is_some_and(|n| n == "chats"))
+        .and_then(Path::parent)
+}
+
 fn project_cwd(path: &Path) -> Option<PathBuf> {
     let comps: Vec<&std::ffi::OsStr> = path.components().map(|c| c.as_os_str()).collect();
     // The INNERMOST `tmp`, not the first: the layout is `<runtime>/tmp/<id>/chats/<file>`, and a
@@ -260,13 +264,31 @@ fn project_cwd(path: &Path) -> Option<PathBuf> {
 /// `short-id → project path`, one map per runtime root.
 type Registry = std::sync::Arc<std::collections::HashMap<String, PathBuf>>;
 
-/// The [`Registry`] for one runtime root, read once per process.
+/// What a runtime root's registry read saw: the root dir's own mtime (markers created or removed
+/// directly under it) and `projects.json`'s (the map rewritten).
+type RegistryStamp = (Option<std::time::SystemTime>, Option<std::time::SystemTime>);
+
+fn registry_stamp(runtime: &Path) -> RegistryStamp {
+    let modified = |p: &Path| fs::metadata(p).and_then(|m| m.modified()).ok();
+    (modified(runtime), modified(&runtime.join("projects.json")))
+}
+
+/// The [`Registry`] for one runtime root, read once per process — and re-read when the root's
+/// stamp moves, so a long-lived reader sees registrations made after it started.
 fn registry_for(runtime: &Path) -> Registry {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex, OnceLock};
-    static CACHE: OnceLock<Mutex<HashMap<PathBuf, Registry>>> = OnceLock::new();
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, (RegistryStamp, Registry)>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(hit) = cache.lock().ok().and_then(|c| c.get(runtime).cloned()) {
+    let stamp = registry_stamp(runtime);
+    let hit = match cache.lock() {
+        Ok(c) => c
+            .get(runtime)
+            .filter(|(seen, _)| *seen == stamp)
+            .map(|(_, registry)| registry.clone()),
+        Err(_) => None,
+    };
+    if let Some(hit) = hit {
         return hit;
     }
     let mut map: HashMap<String, PathBuf> = HashMap::new();
@@ -298,7 +320,7 @@ fn registry_for(runtime: &Path) -> Registry {
     }
     let arc = Arc::new(map);
     if let Ok(mut c) = cache.lock() {
-        c.insert(runtime.to_path_buf(), arc.clone());
+        c.insert(runtime.to_path_buf(), (stamp, arc.clone()));
     }
     arc
 }
@@ -331,7 +353,7 @@ pub(crate) fn scan_session_file(path: &Path, harness: Harness) -> Result<Vec<Ses
         return Ok(vec![r]);
     } else if is_checkpoint(&name) {
         let text = fs::read_to_string(path)?;
-        if let Some(s) = parse_checkpoint(&text, &name, Some(path.to_path_buf()))? {
+        if let Some(s) = parse_checkpoint(harness, &text, &name, Some(path.to_path_buf()))? {
             return Ok(vec![session_ref(&s, path, harness)]);
         }
     }
@@ -374,7 +396,7 @@ pub(crate) fn stream_for(
 
     // Bounded shapes (checkpoints, logs.json): a few KB–MB, never the OOM risk. Bridge through a
     // whole-Session parse and replay its messages into the sink.
-    let mut session = parse_bounded(r, &name)?;
+    let mut session = parse_bounded(harness, r, &name)?;
     session.harness = harness;
     let messages = std::mem::take(&mut session.messages);
     sink.meta(&session);
@@ -389,11 +411,11 @@ pub(crate) fn stream_for(
 /// Whole-`Session` parse for the bounded (non-streamed) shapes: gemini-cli checkpoints and
 /// `logs.json` (many sessions per file — picks the one matching `r.id`). These are small enough
 /// to materialize.
-fn parse_bounded(r: &SessionRef, name: &str) -> Result<Session> {
+fn parse_bounded(harness: Harness, r: &SessionRef, name: &str) -> Result<Session> {
     let text = fs::read_to_string(&r.path).with_context(|| format!("reading {}", r.path.display()))?;
     // Checkpoint: one session per file.
     if is_checkpoint(name) {
-        if let Some(s) = parse_checkpoint(&text, name, Some(r.path.clone()))? {
+        if let Some(s) = parse_checkpoint(harness, &text, name, Some(r.path.clone()))? {
             return Ok(s);
         }
     }
@@ -824,24 +846,25 @@ fn parse_all_str_inner(harness: Harness, text: &str, source_path: Option<PathBuf
         return Ok(vec![session]);
     }
     let Some(value) = value else { return Ok(Vec::new()) };
-    if value.get("history").is_some() {
-        return Ok(checkpoint((&value).into(), "", source_path)?.into_iter().collect());
-    }
-    if let Some(items) = value.as_array() {
-        if items
+    // ── p15-18 ──
+    let logs_shaped = value.as_array().is_some_and(|items| {
+        items
             .iter()
             .take(8)
             .any(|it| it.get("messageId").is_some() && it.get("message").is_some())
-        {
-            return Ok(parse_logs(&value, source_path));
-        }
-        if items
-            .iter()
-            .take(8)
-            .any(|it| it.get("role").is_some() && it.get("parts").is_some())
-        {
-            return Ok(checkpoint((&value).into(), "", source_path)?.into_iter().collect());
-        }
+    });
+    if logs_shaped {
+        return Ok(parse_logs(value, source_path));
+    }
+    let checkpoint_shaped = value.get("history").is_some()
+        || value.as_array().is_some_and(|items| {
+            items
+                .iter()
+                .take(8)
+                .any(|it| it.get("role").is_some() && it.get("parts").is_some())
+        });
+    if checkpoint_shaped {
+        return Ok(checkpoint(harness, (&value).into(), "", source_path)?.into_iter().collect());
     }
     Ok(Vec::new())
 }
@@ -853,13 +876,17 @@ fn parse_all_str_inner(harness: Harness, text: &str, source_path: Option<PathBuf
 /// Parse a Gemini `logs.json` from its text contents into one [`Session`] per distinct `sessionId`.
 fn parse_logs_str(text: &str, source_path: Option<PathBuf>) -> Vec<Session> {
     let value = serde_json::from_str::<Value>(text).unwrap_or_default();
-    parse_logs(&value, source_path)
+    parse_logs(value, source_path)
 }
 
-fn parse_logs(value: &Value, source_path: Option<PathBuf>) -> Vec<Session> {
-    let entries = value.as_array().map(Vec::as_slice).unwrap_or_default();
+fn parse_logs(value: Value, source_path: Option<PathBuf>) -> Vec<Session> {
+    // Consumed entry by entry: the file's tree and the built sessions never both stand complete.
+    let entries = match value {
+        Value::Array(entries) => entries,
+        _ => Vec::new(),
+    };
 
-    let mut by_session: BTreeMap<String, Vec<&Value>> = BTreeMap::new();
+    let mut by_session: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     for e in entries {
         let sid = e.get("sessionId").and_then(Value::as_str).unwrap_or("").to_string();
         by_session.entry(sid).or_default().push(e);
@@ -965,14 +992,7 @@ fn parse_chat_recording(
 /// top-level fields. `title` is the record's `summary` when present; the per-message scan fills in a
 /// first-user-turn fallback and the session `model`. `messages` is left empty — the caller streams
 /// them through the message codec (`record.rs`).
-const RECORD_METADATA: &[&str] = &[
-    "sessionId",
-    "startTime",
-    "lastUpdated",
-    "summary",
-    "directories",
-    "kind",
-];
+const RECORD_METADATA: &[&str] = &[DOCUMENT[0], DOCUMENT[1], DOCUMENT[2], DOCUMENT[3], DOCUMENT[4], DOCUMENT[6]];
 
 fn record_metadata(rec: &serde_json::Map<String, Value>, harness: Harness, source_path: Option<PathBuf>) -> Session {
     let id = rec.get("sessionId").and_then(Value::as_str).unwrap_or("").to_string();
@@ -1035,14 +1055,20 @@ struct EmitState {
 
 /// Parse a gemini-cli checkpoint into an IR [`Session`]. The id is derived from the `checkpoint-<tag>`
 /// filename when available (the `tag` is percent-encoded by gemini-cli; we decode it best-effort).
-fn parse_checkpoint(text: &str, file_name: &str, source_path: Option<PathBuf>) -> Result<Option<Session>> {
+fn parse_checkpoint(
+    harness: Harness,
+    text: &str,
+    file_name: &str,
+    source_path: Option<PathBuf>,
+) -> Result<Option<Session>> {
     let Ok(value) = serde_json::from_str::<Value>(text) else {
         return Ok(None);
     };
-    checkpoint((&value).into(), file_name, source_path)
+    checkpoint(harness, (&value).into(), file_name, source_path)
 }
 
 fn checkpoint(
+    harness: Harness,
     view: crate::json::JsonView<'_>,
     file_name: &str,
     source_path: Option<PathBuf>,
@@ -1058,7 +1084,7 @@ fn checkpoint(
     let id = checkpoint_id(file_name);
     let resolver = crate::lazy::Resolver::new(None);
     let parts_demand = record::Demand {
-        harness: Harness::Gemini,
+        harness,
         source: None,
         resolver: &resolver,
     };
@@ -1130,9 +1156,9 @@ fn checkpoint(
         title,
         messages,
         source_path,
-        ..Session::new(id, Harness::Gemini)
+        ..Session::new(id, harness)
     };
-    let bag = s.harness_extra_mut(Harness::Gemini);
+    let bag = s.harness_extra_mut(harness);
     crate::affordance::note_checkpoints(bag, 1, []);
     if let Some(cp) = bag
         .get_mut(crate::affordance::CHECKPOINTS_KEY)
@@ -1185,11 +1211,7 @@ fn session_ref(s: &Session, path: &Path, harness: Harness) -> SessionRef {
 /// heading), from the session's directory beside `chats/`.
 fn side_affordances(recording: &Path, id: &str) -> Result<Vec<crate::affordance::Affordance>> {
     use crate::affordance::{item_of, json_files, plan_state, Affordance, Kind};
-    let Some(project) = recording
-        .ancestors()
-        .find(|a| a.file_name().is_some_and(|n| n == "chats"))
-        .and_then(Path::parent)
-    else {
+    let Some(project) = chats_project(recording) else {
         return Ok(Vec::new());
     };
     let dir = project.join(id);
@@ -1899,7 +1921,7 @@ mod tests {
     #[test]
     fn parses_checkpoint_history() {
         let text = fixture("checkpoint.json");
-        let s = parse_checkpoint(&text, "checkpoint-my%20tag.json", None)
+        let s = parse_checkpoint(Harness::Gemini, &text, "checkpoint-my%20tag.json", None)
             .unwrap()
             .expect("checkpoint");
         assert_eq!(s.id, "checkpoint-my tag");
@@ -1945,18 +1967,13 @@ mod tests {
     // native `Adapter::stream`, asserting both reproduce the pure `parse_all_str` Session byte-for-
     // byte (Session has no `PartialEq`, so we compare its JSON serialization).
 
-    fn chats_fixture(name: &str) -> (PathBuf, PathBuf) {
-        let text = fixture(name);
-        let dir = std::env::temp_dir().join(format!(
-            "cv-gemini-stream-{}-{}",
-            std::process::id(),
-            uuid::Uuid::now_v7()
-        ));
-        let chats = dir.join("chats");
+    fn chats_fixture(name: &str) -> (cv_testkit::World, PathBuf) {
+        let world = cv_testkit::World::new("gemini-stream");
+        let chats = world.base.join("chats");
         fs::create_dir_all(&chats).unwrap();
         let file = chats.join(name);
-        fs::write(&file, text).unwrap();
-        (dir, file)
+        fs::write(&file, fixture(name)).unwrap();
+        (world, file)
     }
 
     fn as_json(s: &Session) -> Value {
@@ -1967,7 +1984,7 @@ mod tests {
     /// pure `parse_all_str` Session. `source_path` differs (on-disk paths carry provenance), so we
     /// blank it before comparing.
     fn assert_stream_matches_pure(name: &str) {
-        let (dir, file) = chats_fixture(name);
+        let (_world, file) = chats_fixture(name);
         let id = parse_all_str(&fixture(name), None)
             .unwrap()
             .into_iter()
@@ -2003,7 +2020,6 @@ mod tests {
             );
         }
 
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2014,7 +2030,7 @@ mod tests {
 
     #[test]
     fn legacy_stream_preserves_escaped_metadata_and_kind() {
-        let (dir, file) = chats_fixture("session_legacy.json");
+        let (_world, file) = chats_fixture("session_legacy.json");
         let text = r#"{"sessionId":"escaped\"id","startTime":"2026-01-01T00:00:00Z","summary":"line one\nline two","directories":["/tmp/quoted\"path"],"kind":"subagent","messages":[{"type":"user","id":"u","content":"hello"}]}"#;
         fs::write(&file, text).unwrap();
         let mut sink = CollectSink::default();
@@ -2027,7 +2043,6 @@ mod tests {
             as_json(&streamed),
             as_json(&parse_all_str(text, Some(file.clone())).unwrap().remove(0))
         );
-        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -2038,7 +2053,7 @@ mod tests {
 
     #[test]
     fn lazy_legacy_content_resolves_identically() {
-        let (dir, file) = chats_fixture("session_legacy.json");
+        let (_world, file) = chats_fixture("session_legacy.json");
         let giant = "giant output \n\t\"\\🌙".repeat(2000);
         let input = serde_json::json!({
             "sessionId": "lazy", "projectHash": "x", "kind": "subagent", "summary": "escaped\nsummary",
@@ -2073,12 +2088,11 @@ mod tests {
             as_json(&s),
             as_json(&parse_all_str(&text, Some(file.clone())).unwrap().remove(0))
         );
-        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn raw_jsonl_replay_and_lazy_fields_match_pure() {
-        let (dir, file) = chats_fixture("session_modern.jsonl");
+        let (_world, file) = chats_fixture("session_modern.jsonl");
         let giant = "escaped\n\t\"\\🌙".repeat(1200);
         let lines = [
             serde_json::json!({"sessionId":"replay","projectHash":"x","directories":["/tmp/q\"uote"]}),
@@ -2131,12 +2145,11 @@ mod tests {
                 )
             );
         }
-        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn raw_replay_rejects_invalid_values_before_navigation() {
-        let (dir, file) = chats_fixture("session_modern.jsonl");
+        let (_world, file) = chats_fixture("session_modern.jsonl");
         let deep = format!("{}0{}", "[".repeat(127), "]".repeat(127));
         for unknown in ["1e400", r#""\ud800""#, r#""\udc00""#, &deep] {
             let text = format!(
@@ -2187,14 +2200,13 @@ mod tests {
             sessions.push(as_json(&streamed));
         }
         assert!(sessions.windows(2).all(|s| s[0] == s[1]));
-        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn stream_honors_stop_early() {
         // A sink returning Stop after the first message halts the legacy-JSON streaming path without
         // emitting the rest.
-        let (dir, file) = chats_fixture("session_legacy.json");
+        let (_world, file) = chats_fixture("session_legacy.json");
         let r = SessionRef::new("9aeb2942-7c46-47b7-aded-13772d4d4e63", Harness::Gemini, file);
         let adapter = Gemini { roots: vec![] };
         let mut seen = 0usize;
@@ -2204,21 +2216,16 @@ mod tests {
         };
         let _ = adapter.stream(&r, &stream::Demand::RICH, &mut sink).unwrap();
         assert_eq!(seen, 1, "Stop after the first message must halt streaming");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A fake gemini-cli runtime root (`<runtime>/tmp/<id>/chats/<recording>` + registry files).
-    fn runtime_fixture(tag: &str, project_id: &str, recording: &str) -> (PathBuf, PathBuf) {
-        let runtime = std::env::temp_dir().join(format!(
-            "cv-gemini-{tag}-{}-{}",
-            std::process::id(),
-            uuid::Uuid::now_v7()
-        ));
-        let chats = runtime.join("tmp").join(project_id).join("chats");
+    fn runtime_fixture(tag: &str, project_id: &str, recording: &str) -> (cv_testkit::World, PathBuf) {
+        let world = cv_testkit::World::new(&format!("gemini-{tag}"));
+        let chats = world.base.join("tmp").join(project_id).join("chats");
         fs::create_dir_all(&chats).unwrap();
         let file = chats.join(recording);
         fs::write(&file, fixture(recording)).unwrap();
-        (runtime, file)
+        (world, file)
     }
 
     #[test]
@@ -2228,8 +2235,9 @@ mod tests {
         let (rt_a, _) = runtime_fixture("root-a", "proj", "session_modern.jsonl");
         let (rt_b, _) = runtime_fixture("root-b", "proj", "session_modern.jsonl");
         let (rt_c, _) = runtime_fixture("root-c", "proj", "session_legacy.json");
+        let (a, b, c) = (rt_a.base.clone(), rt_b.base.clone(), rt_c.base.clone());
         let adapter = Gemini {
-            roots: vec![rt_a.join("tmp"), rt_b.join("tmp"), rt_c.join("tmp")],
+            roots: vec![a.join("tmp"), b.join("tmp"), c.join("tmp")],
         };
         let refs = adapter.discover().unwrap();
         let mut ids: Vec<&str> = refs.iter().map(|r| r.id.as_str()).collect();
@@ -2242,10 +2250,7 @@ mod tests {
             ],
             "two distinct sessions across three roots; the duplicate collapsed"
         );
-        assert_eq!(adapter.roots().into_iter().next(), Some(rt_a.join("tmp")));
-        for d in [rt_a, rt_b, rt_c] {
-            let _ = fs::remove_dir_all(&d);
-        }
+        assert_eq!(adapter.roots().into_iter().next(), Some(rt_a.base.join("tmp")));
     }
 
     /// A runtime root that itself lives under a directory named `tmp` — `/tmp/...` on Linux, a
@@ -2253,7 +2258,8 @@ mod tests {
     /// matched that outer `tmp`, so `<runtime>` became `/` and every cwd came back `None`.
     #[test]
     fn runtime_root_under_a_tmp_directory_still_resolves_cwd() {
-        let outer = std::env::temp_dir().join(format!("cv-gemini-outer-{}", uuid::Uuid::now_v7()));
+        let world = cv_testkit::World::new("gemini-outer");
+        let outer = world.base.join("outer");
         let runtime = outer.join("tmp").join("gemini-runtime");
         let chats = runtime.join("tmp").join("proj-id").join("chats");
         fs::create_dir_all(&chats).unwrap();
@@ -2271,7 +2277,6 @@ mod tests {
             Some(Path::new("/Users/u/work/proj")),
             "the innermost `tmp` is the runtime's own"
         );
-        let _ = fs::remove_dir_all(&outer);
     }
 
     #[test]
@@ -2279,19 +2284,19 @@ mod tests {
         // `projects.json` maps path → short id; `history/<id>/.project_root` is the fallback marker.
         let (runtime, file) = runtime_fixture("registry", "claurdvoyant", "session_modern.jsonl");
         fs::write(
-            runtime.join("projects.json"),
+            runtime.base.join("projects.json"),
             r#"{"projects": {"/Users/u/pug/claurdvoyant": "claurdvoyant"}}"#,
         )
         .unwrap();
         let (runtime2, file2) = runtime_fixture("marker", "gemtest", "session_legacy.json");
-        fs::create_dir_all(runtime2.join("history").join("gemtest")).unwrap();
+        fs::create_dir_all(runtime2.base.join("history").join("gemtest")).unwrap();
         fs::write(
-            runtime2.join("history").join("gemtest").join(".project_root"),
+            runtime2.base.join("history").join("gemtest").join(".project_root"),
             "/Users/u/cvrt8/gemtest\n",
         )
         .unwrap();
         // hash-named dirs (pre-registry) have no mapping → None, as before
-        let (runtime3, file3) = runtime_fixture("hash", &"ab".repeat(32), "session_modern.jsonl");
+        let (_runtime3, file3) = runtime_fixture("hash", &"ab".repeat(32), "session_modern.jsonl");
 
         let refs = scan_session_file(&file, Harness::Gemini).unwrap();
         assert_eq!(refs[0].cwd.as_deref(), Some(Path::new("/Users/u/pug/claurdvoyant")));
@@ -2313,9 +2318,6 @@ mod tests {
         assert_eq!(s.cwd.as_deref(), Some(Path::new("/Users/u/pug/claurdvoyant")));
         // a record's own `directories[]` still wins (unchanged behaviour): covered by
         // `parses_legacy_chat_recording` fixtures carrying no registry at all.
-        for d in [runtime, runtime2, runtime3] {
-            let _ = fs::remove_dir_all(&d);
-        }
     }
 
     #[test]
@@ -2324,15 +2326,15 @@ mod tests {
         // `projects.json` pretty-printed with a nested `projects` map, and an identical bare-path
         // `.project_root` (no trailing newline) in BOTH `tmp/<id>/` and `history/<id>/`.
         let (runtime, file) = runtime_fixture("real-shapes", "gemtest-proj", "session_modern.jsonl");
-        fs::write(runtime.join("projects.json"), fixture("registry/projects.json")).unwrap();
+        fs::write(runtime.base.join("projects.json"), fixture("registry/projects.json")).unwrap();
         fs::write(
-            runtime.join("tmp").join("gemtest-proj").join(".project_root"),
+            runtime.base.join("tmp").join("gemtest-proj").join(".project_root"),
             fixture("registry/project_root"),
         )
         .unwrap();
-        fs::create_dir_all(runtime.join("history").join("gemtest-proj")).unwrap();
+        fs::create_dir_all(runtime.base.join("history").join("gemtest-proj")).unwrap();
         fs::write(
-            runtime.join("history").join("gemtest-proj").join(".project_root"),
+            runtime.base.join("history").join("gemtest-proj").join(".project_root"),
             fixture("registry/project_root"),
         )
         .unwrap();
@@ -2343,15 +2345,12 @@ mod tests {
         // and no history dir — e.g. one the CLI is still populating).
         let (runtime2, file2) = runtime_fixture("tmp-marker-only", "solo", "session_legacy.json");
         fs::write(
-            runtime2.join("tmp").join("solo").join(".project_root"),
+            runtime2.base.join("tmp").join("solo").join(".project_root"),
             "/Users/u/work/solo",
         )
         .unwrap();
         let refs2 = scan_session_file(&file2, Harness::Gemini).unwrap();
         assert_eq!(refs2[0].cwd.as_deref(), Some(Path::new("/Users/u/work/solo")));
-        for d in [runtime, runtime2] {
-            let _ = fs::remove_dir_all(&d);
-        }
     }
 
     #[test]
@@ -2361,9 +2360,9 @@ mod tests {
         // `<session_context>` preamble. gemini-cli ignores such content when rebuilding history
         // (`isIgnoredUserContent`), so it must not become the title; the turn itself stays.
         let (runtime, file) = runtime_fixture("real-0-46", "gemtest-proj", "session_0_46_session_context.jsonl");
-        fs::write(runtime.join("projects.json"), fixture("registry/projects.json")).unwrap();
+        fs::write(runtime.base.join("projects.json"), fixture("registry/projects.json")).unwrap();
         fs::write(
-            runtime.join("tmp").join("gemtest-proj").join(".project_root"),
+            runtime.base.join("tmp").join("gemtest-proj").join(".project_root"),
             fixture("registry/project_root"),
         )
         .unwrap();
@@ -2387,7 +2386,6 @@ mod tests {
         assert!(m.text().unwrap().starts_with("<session_context>"));
         assert_eq!(s.harness_extra(Harness::Gemini).unwrap()["kind"], "main");
         assert!(s.lineage.is_empty(), "a main recording has no parent");
-        let _ = fs::remove_dir_all(&runtime);
     }
 
     #[test]
@@ -2396,7 +2394,7 @@ mod tests {
         // (`chatRecordingService.ts`); its parent is the recording one level up.
         let (runtime, _) = runtime_fixture("subagent", "proj", "session_modern.jsonl");
         let parent_id = "11112222-3333-4444-5555-666677778888";
-        let child_dir = runtime.join("tmp").join("proj").join("chats").join(parent_id);
+        let child_dir = runtime.base.join("tmp").join("proj").join("chats").join(parent_id);
         fs::create_dir_all(&child_dir).unwrap();
         let child = child_dir.join("aaaa0000-0000-0000-0000-000000000001.jsonl");
         let text = fixture("session_modern.jsonl")
@@ -2424,13 +2422,12 @@ mod tests {
         assert_eq!(s.harness_extra(Harness::Gemini).unwrap()["kind"], "subagent");
         // the parent's own recording, one level up, has no parent
         let parent_refs =
-            scan_session_file(&runtime.join("tmp/proj/chats/session_modern.jsonl"), Harness::Gemini).unwrap();
+            scan_session_file(&runtime.base.join("tmp/proj/chats/session_modern.jsonl"), Harness::Gemini).unwrap();
         let mut sink = CollectSink::default();
         let p = adapter
             .stream(&parent_refs[0], &stream::Demand::RICH, &mut sink)
             .unwrap();
         assert!(p.lineage.is_empty());
-        let _ = fs::remove_dir_all(&runtime);
     }
 
     #[test]
@@ -2442,7 +2439,7 @@ mod tests {
         fs::write(file.with_extension("jsonl.unreadable-1700000000000"), &text).unwrap();
         fs::write(file.with_extension("jsonl.tmp-4242"), &text).unwrap();
         let adapter = Gemini {
-            roots: vec![runtime.join("tmp")],
+            roots: vec![runtime.base.join("tmp")],
         };
         let refs = adapter.discover().unwrap();
         assert_eq!(
@@ -2452,7 +2449,6 @@ mod tests {
             refs.iter().map(|r| &r.path).collect::<Vec<_>>()
         );
         assert!(refs[0].path.ends_with("session_modern.jsonl"));
-        let _ = fs::remove_dir_all(&runtime);
     }
 
     /// The 0.63.0 resume shape: a `$set.messages` re-sync from the API history carries the
@@ -2606,7 +2602,9 @@ mod tests {
     #[test]
     fn a_merged_checkpoint_turn_splits_the_preamble_from_the_prompt() {
         let text = r#"{"history":[{"role":"user","parts":[{"text":"<session_context>\nctx\n</session_context>"},{"text":"Say saved."}]},{"role":"model","parts":[{"text":"saved"}]}]}"#;
-        let s = parse_checkpoint(text, "checkpoint-x.json", None).unwrap().unwrap();
+        let s = parse_checkpoint(Harness::Gemini, text, "checkpoint-x.json", None)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             kinds(&s),
             vec![
