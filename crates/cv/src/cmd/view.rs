@@ -2429,8 +2429,8 @@ mod tests {
 
     #[test]
     fn json_windows_match_full_parse_with_late_metadata_and_extras() {
-        let _world = crate::test_world("json_windows_match_full_parse_with_late_metadata_and_extras");
-        let home = temp_home("json-window");
+        let world = crate::test_world("json_windows_match_full_parse_with_late_metadata_and_extras");
+        let home = world.base.clone();
         let r = claude_fixture(&home);
         let mut f = std::fs::OpenOptions::new().append(true).open(&r.path).unwrap();
         for record in [
@@ -2556,8 +2556,8 @@ mod tests {
 
     #[test]
     fn gemini_json_windows_preserve_lazy_content_and_replayed_metadata() {
-        let _world = crate::test_world("gemini_json_windows_preserve_lazy_content_and_replayed_metadata");
-        let home = temp_home("gemini-json-window");
+        let world = crate::test_world("gemini_json_windows_preserve_lazy_content_and_replayed_metadata");
+        let home = world.base.clone();
         std::fs::create_dir_all(home.join("chats")).unwrap();
         let adapter = cv_core::harness::gemini::Gemini::with_home(&home);
         let giant = "escaped\n\t\"\\🌙".repeat(1200);
@@ -2601,7 +2601,6 @@ mod tests {
             assert_eq!(first.title.as_deref(), metadata["summary"].as_str());
             assert_eq!(first.messages.len(), 1);
         }
-        std::fs::remove_dir_all(home).unwrap();
     }
 
     /// `--kind` picks one view family: what the person said, the compaction seams, or the
@@ -2630,12 +2629,6 @@ mod tests {
         assert!(err.contains("mixes two views"), "{err}");
         let err = parse_kinds("todo").err().expect("unknown word").to_string();
         assert!(err.contains("background_job"), "{err}");
-    }
-
-    fn temp_home(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("cv-view-render-{tag}-{}", std::process::id()));
-        std::fs::create_dir_all(&d).unwrap();
-        d
     }
 
     fn render(r: &SessionRef, range: Option<(usize, Option<usize>)>) -> String {
@@ -2722,7 +2715,8 @@ mod tests {
     /// full parse, and its header carries the model the skipped prefix provides.
     #[test]
     fn windowed_render_is_byte_identical_to_the_full_parse() {
-        let home = temp_home("claude");
+        let world = crate::test_world("windowed_render_is_byte_identical_to_the_full_parse");
+        let home = world.base.clone();
         let r = claude_fixture(&home);
         let full_header = {
             let full = render(&r, None);
@@ -2733,7 +2727,6 @@ mod tests {
             assert_eq!(header, full_header, "range {range:?} header");
             assert!(header.contains("claude-test"), "header model expected in {range:?}");
         }
-        std::fs::remove_dir_all(&home).ok();
     }
 
     /// `--max-bytes`: the render stops before the message that would overflow the budget and
@@ -2741,7 +2734,8 @@ mod tests {
     /// that fits everything reports no cut.
     #[test]
     fn byte_budget_cuts_and_reports_the_next_index() {
-        let home = temp_home("budget");
+        let world = crate::test_world("byte_budget_cuts_and_reports_the_next_index");
+        let home = world.base.clone();
         let r = claude_fixture(&home);
 
         // Message 2 is the ~9 KB giant: a 1 KB budget renders messages 0 and 1, then stops.
@@ -2781,15 +2775,14 @@ mod tests {
         );
         assert_eq!(oc.rendered, 8);
         assert_eq!(oc.next, None);
-
-        std::fs::remove_dir_all(&home).ok();
     }
 
     /// `--last n` keeps a ring of the last `n` messages in one pass; it must render exactly what the
     /// counted `total - n ..` range renders, budget cut and continuation index included.
     #[test]
     fn last_n_renders_what_the_counted_range_does() {
-        let home = temp_home("last");
+        let world = crate::test_world("last_n_renders_what_the_counted_range_does");
+        let home = world.base.clone();
         let r = claude_fixture(&home);
         for n in [0usize, 1, 3, 10, 11, 50] {
             for max_bytes in [None, Some(1024)] {
@@ -2811,7 +2804,6 @@ mod tests {
                 assert_eq!(ring, counted, "--last {n} (budget {max_bytes:?})");
             }
         }
-        std::fs::remove_dir_all(&home).ok();
     }
 
     /// A store whose metadata arrives after the body (codex delivers `meta` at EOF when no model is
@@ -2952,8 +2944,8 @@ mod tests {
     /// `None` — overrides the discovery title).
     #[test]
     fn codex_windowed_render_is_byte_identical_to_the_full_parse() {
-        let _world = crate::test_world("codex_windowed_render_is_byte_identical_to_the_full_parse");
-        let home = temp_home("codex");
+        let world = crate::test_world("codex_windowed_render_is_byte_identical_to_the_full_parse");
+        let home = world.base.clone();
 
         let path = home.join("rollout-r.jsonl");
         let big = "giant output\n\t\"\\🌙".repeat(1200);
@@ -2999,7 +2991,5 @@ mod tests {
 
         let adapter = cv_core::harness::for_harness(r.harness).unwrap();
         assert_json_windows(adapter.as_ref(), &r);
-
-        std::fs::remove_dir_all(&home).ok();
     }
 }

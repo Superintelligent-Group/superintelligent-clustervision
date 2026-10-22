@@ -99,6 +99,34 @@ pub fn jsonl(lines: &[Value]) -> String {
     lines.iter().map(|l| format!("{l}\n")).collect()
 }
 
+/// An RFC 3339 UTC "now" for seeded events (this crate has no chrono: the civil date is Howard
+/// Hinnant's algorithm, derived from the clock directly).
+pub fn now_rfc3339() -> String {
+    now_rfc3339_at(0)
+}
+
+/// [`now_rfc3339`] shifted by `offset` seconds.
+pub fn now_rfc3339_at(offset: u64) -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + offset;
+    let days = secs / 86_400;
+    let (h, m, s) = ((secs % 86_400) / 3600, (secs % 3600) / 60, secs % 60);
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if mo <= 2 { y + 1 } else { y };
+    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
+}
+
 /// An environment as `(name, value)` pairs.
 pub type Vars = Vec<(OsString, OsString)>;
 

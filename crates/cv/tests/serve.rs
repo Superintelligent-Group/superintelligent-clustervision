@@ -1731,6 +1731,189 @@ fn serve_carries_the_inbox_and_guards_its_writes() {
     assert_eq!(raw_status(&raw), 405, "{raw}");
 }
 
+/// A GET or POST with a JSON content type; returns (status, body).
+fn json_http(port: u16, method: &str, path: &str, body: Option<&str>) -> (u16, String) {
+    let raw = cv_testkit::http::raw_request(
+        &format!("127.0.0.1:{port}"),
+        method,
+        path,
+        &[("Content-Type", "application/json")],
+        Some(body.unwrap_or("")),
+    );
+    (raw_status(&raw), cv_testkit::http::parts(&raw).1.to_owned())
+}
+
+/// The page and the CLI are one store: GET the inbox for a fixture assignee (one decision, one
+/// action), POST resolve / done / note / discuss, and `cv task show --brief` reflects every event
+/// with the author `web:<assignee>`. The event feed route is the same query as `cv task events`.
+#[test]
+fn the_inbox_records_the_same_events_as_the_cli() {
+    let w = World::new("serve-cli-agreement");
+    w.cv_ok(&[
+        "task",
+        "decide",
+        "PAY §7: tariff",
+        "--for",
+        "ember",
+        "--default",
+        "1 credit/unit",
+        "--option",
+        "free tier",
+        "--from",
+        "orchestrator:x",
+    ]);
+    let titled = |title: &str| -> String {
+        let (json, _) = w.cv_ok(&["task", "list", "--all", "--json"]);
+        let tasks: Vec<Value> = serde_json::from_str(&json).unwrap();
+        let ids: Vec<&str> = tasks
+            .iter()
+            .filter(|t| t["title"] == title)
+            .map(|t| t["task_id"].as_str().expect("task_id"))
+            .collect();
+        assert_eq!(ids.len(), 1, "one task titled {title:?}:\n{json}");
+        ids[0].to_string()
+    };
+    let d = titled("PAY §7: tariff");
+    w.cv_ok(&[
+        "task",
+        "open",
+        "push dregg-infra",
+        "--assignee",
+        "ember",
+        "--from",
+        "orchestrator:x",
+    ]);
+    let a = titled("push dregg-infra");
+    let (port, _reaper) = spawn_serve_with(&w, &["--who", "ember"]);
+    // The page itself is served inline; it names its own origin story.
+    let (status, html) = json_http(port, "GET", "/", None);
+    assert_eq!(status, 200);
+    assert!(
+        html.contains("<title>cv inbox</title>") && html.contains("/api/inbox"),
+        "{}",
+        &html[..200.min(html.len())]
+    );
+    assert!(
+        !html.contains("<script src=") && !html.contains("<link rel=\"stylesheet\""),
+        "no external resources"
+    );
+    // A DNS-named Host is refused (rebinding).
+    let raw = cv_testkit::http::raw_request(
+        &format!("127.0.0.1:{port}"),
+        "GET",
+        "/api/inbox",
+        &[("Host", "evil.example")],
+        None,
+    );
+    assert_eq!(raw_status(&raw), 403);
+
+    let (status, body) = json_http(port, "GET", "/api/inbox?who=ember", None);
+    assert_eq!(status, 200, "{body}");
+    let page: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(page["who"], "ember");
+    assert_eq!(page["counts"]["decisions"], 1);
+    assert_eq!(page["counts"]["assigned"], 1);
+    let items = page["items"].as_array().unwrap();
+    assert_eq!(items[0]["reason"], "decision_owed");
+    assert_eq!(items[0]["decision"]["default"], "1 credit/unit");
+    assert_eq!(items[0]["decision"]["alternatives"], json!(["free tier"]));
+    assert_eq!(items[1]["reason"], "assigned_open");
+    // Without ?who the server's --who applies.
+    let (status, body) = json_http(port, "GET", "/api/inbox", None);
+    assert_eq!(status, 200);
+    assert!(body.contains("\"who\":\"ember\""), "{body}");
+
+    // Act: a note, then "needs discussion", then resolve with an option, then done.
+    let (status, body) = json_http(
+        port,
+        "POST",
+        &format!("/api/task/{d}/note"),
+        Some(r#"{"text":"reading PAY first"}"#),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("\"by\":\"web:ember\""), "{body}");
+    let (status, body) = json_http(
+        port,
+        "POST",
+        &format!("/api/task/{d}/discuss"),
+        Some(r#"{"text":"what is a unit?"}"#),
+    );
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = json_http(
+        port,
+        "POST",
+        &format!("/api/task/{d}/resolve"),
+        Some(r#"{"choice":"free tier","note":"for October"}"#),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("\"task_state\":\"resolved\""), "{body}");
+    let (status, body) = json_http(
+        port,
+        "POST",
+        &format!("/api/task/{d}/resolve"),
+        Some(r#"{"accept_default":true}"#),
+    );
+    assert_eq!(status, 400, "a second resolution is refused: {body}");
+    let (status, body) = json_http(
+        port,
+        "POST",
+        &format!("/api/task/{a}/done"),
+        Some(r#"{"observed":"pushed"}"#),
+    );
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = json_http(port, "POST", &format!("/api/task/{a}/done"), Some("{}"));
+    assert_eq!(status, 400, "{body}");
+    let (status, body) = json_http(port, "POST", &format!("/api/task/{a}/frobnicate"), Some("{}"));
+    assert_eq!(status, 400, "{body}");
+    let (status, body) = json_http(port, "POST", &format!("/api/task/{a}/note"), Some("not json"));
+    assert_eq!(status, 400, "{body}");
+
+    // The closed items show under the page's Resolved filter; the web-only reopen is a pointer.
+    let (status, body) = json_http(port, "GET", "/api/inbox?who=ember", None);
+    assert_eq!(status, 200);
+    let page: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(page["items"].as_array().unwrap().len(), 0);
+    assert_eq!(page["closed"].as_array().unwrap().len(), 2);
+    let (status, body) = json_http(port, "POST", &format!("/api/task/{a}/reopen"), Some("{}"));
+    assert_eq!(status, 410, "{body}");
+    assert!(body.contains("removed in 0.17"), "{body}");
+
+    // One task, with its history; the event feed is the same query as `cv task events`.
+    let (status, body) = json_http(port, "GET", &format!("/api/task/{d}?events=1"), None);
+    assert_eq!(status, 200);
+    let v: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["effective_state"], "resolved");
+    assert!(v["events"].as_array().unwrap().len() >= 6, "{body}");
+    let (status, body) = json_http(port, "GET", "/api/events?since=1h&kind=resolved,done", None);
+    assert_eq!(status, 200);
+    let rows: Vec<Value> = body.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(rows.len(), 2, "{body}");
+    assert!(rows.iter().all(|r| r["by"] == "web:ember"), "{body}");
+
+    // The CLI sees exactly what the page recorded, with the web author.
+    let (out, _) = w.cv_ok(&["task", "show", &d, "--brief"]);
+    assert!(out.contains("[resolved]"), "{out}");
+    assert!(
+        out.contains("resolved: free tier — by web:ember,") && out.contains("· for October"),
+        "{out}"
+    );
+    assert!(out.contains("web:ember") && out.contains("reading PAY first"), "{out}");
+    assert!(out.contains("NEEDS DISCUSSION: what is a unit?"), "{out}");
+    assert!(
+        out.contains("tags:     discuss"),
+        "a decision is posed, never tagged:\n{out}"
+    );
+    let (out, _) = w.cv_ok(&["task", "show", &a, "--brief"]);
+    assert!(
+        out.contains("[done]") && out.contains("self-reported") && out.contains("(pushed)"),
+        "{out}"
+    );
+    let (json, _) = w.cv_ok(&["task", "show", &a, "--events"]);
+    assert!(json.contains("\"by\": \"web:ember\""), "{json}");
+    let (out, _) = w.cv_ok(&["task", "events", "--since", "1h", "--kind", "resolved,done"]);
+    assert_eq!(out.lines().count(), 2, "the CLI feed and /api/events agree:\n{out}");
+}
+
 /// The removed names answer with a pointer and exit 2, never silently.
 #[test]
 fn removed_server_spellings_point_at_cv_serve() {
@@ -1756,6 +1939,188 @@ fn removed_server_spellings_point_at_cv_serve() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
+}
+
+/// The provisional decision lifecycle on the CLI: a provisional resolution reads as "made for
+/// you (veto?)", the poser cannot pick a non-default, a veto supersedes (keeping the provisional
+/// one), and confirming through the page records `web:<who>` with the provisional kept.
+#[test]
+fn task_provisional_resolution_veto_and_confirm() {
+    let w = World::new("provisional");
+    let (out, _) = w.cv_ok(&[
+        "task",
+        "decide",
+        "build base: /tank or NVMe",
+        "--for",
+        "ember",
+        "--default",
+        "keep /tank",
+        "--option",
+        "move to NVMe",
+        "--provisional",
+        "--from",
+        "orchestrator:o",
+    ]);
+    let titled = |title: &str| -> String {
+        let (json, _) = w.cv_ok(&["task", "list", "--all", "--json"]);
+        let tasks: Vec<Value> = serde_json::from_str(&json).unwrap();
+        let ids: Vec<&str> = tasks
+            .iter()
+            .filter(|t| t["title"] == title)
+            .map(|t| t["task_id"].as_str().expect("task_id"))
+            .collect();
+        assert_eq!(ids.len(), 1, "one task titled {title:?}:\n{json}");
+        ids[0].to_string()
+    };
+    let d = titled("build base: /tank or NVMe");
+    assert!(
+        out.contains("resolved") && out.contains("provisionally on the default"),
+        "{out}"
+    );
+    let (out, _) = w.cv_ok(&["task", "inbox", "ember"]);
+    assert!(
+        out.starts_with("made for you (veto?) (1):"),
+        "not owed, its own group:\n{out}"
+    );
+    assert!(
+        out.contains("⇒ made: keep /tank — by orchestrator:o · veto to: move to NVMe"),
+        "{out}"
+    );
+    assert!(out.contains("cv task resolve <id> --confirm --from ember"), "{out}");
+    let (json, _) = w.cv_ok(&["task", "inbox", "ember", "--json"]);
+    let inbox: Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(inbox["counts"]["provisional"], 1, "{json}");
+    let item = inbox["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == d.as_str());
+    assert_eq!(item.map(|i| &i["reason"]), Some(&json!("provisional")), "{json}");
+    let (out, _) = w.cv_ok(&["task", "show", &d]);
+    assert!(out.contains("[resolved]") && out.contains("PROVISIONAL"), "{out}");
+    assert!(out.contains("veto?:    cv task resolve"), "{out}");
+
+    // The poser cannot pick a non-default provisionally; a third party cannot override.
+    w.cv_ok(&[
+        "task",
+        "decide",
+        "Q2",
+        "--for",
+        "ember",
+        "--default",
+        "a",
+        "--option",
+        "b",
+        "--from",
+        "orchestrator:o",
+    ]);
+    let d2 = titled("Q2");
+    let (_, err) = w.cv_fails(&[
+        "task",
+        "resolve",
+        &d2,
+        "--choice",
+        "b",
+        "--provisional",
+        "--from",
+        "orchestrator:o",
+    ]);
+    assert!(err.contains("stands on the default"), "{err}");
+    let (_, err) = w.cv_fails(&[
+        "task",
+        "resolve",
+        &d,
+        "--choice",
+        "move to NVMe",
+        "--from",
+        "lane:someone",
+    ]);
+    assert!(err.contains("only the decision's assignee (ember)"), "{err}");
+    let (_, err) = w.cv_fails(&["task", "resolve", &d2, "--confirm", "--from", "ember"]);
+    assert!(err.contains("no provisional resolution to confirm"), "{err}");
+    // No identity: the cure names the decision's owner, never a guess.
+    let (_, err) = w.cv_fails(&["task", "resolve", &d2, "--accept-default"]);
+    assert!(
+        err.contains("records WHO decided") && err.contains("--accept-default --from ember"),
+        "{err}"
+    );
+
+    // The decider vetoes: a new resolution replaces the provisional one, which is kept.
+    let (out, _) = w.cv_ok(&["task", "resolve", &d, "--choice", "move to NVMe", "--from", "ember"]);
+    assert!(out.contains("→ move to NVMe (by ember)"), "{out}");
+    let (out, _) = w.cv_ok(&["task", "show", &d]);
+    assert!(out.contains("provisionally: keep /tank — by orchestrator:o"), "{out}");
+    assert!(
+        out.contains("resolved: move to NVMe — by ember") && !out.contains("PROVISIONAL"),
+        "{out}"
+    );
+    let (json, _) = w.cv_ok(&["task", "show", &d, "--json"]);
+    let t: Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(t["decision"]["resolution"]["choice"], "move to NVMe");
+    assert!(t["decision"]["resolution"].get("provisional").is_none(), "{json}");
+    assert_eq!(t["decision"]["superseded_provisional"]["provisional"], true, "{json}");
+    // Vetoed, it is no longer made for ember: not an open item, counted as closed.
+    let (json, _) = w.cv_ok(&["task", "inbox", "ember", "--json"]);
+    let inbox: Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(inbox["counts"]["provisional"], 0, "{json}");
+    assert!(
+        inbox["items"].as_array().unwrap().iter().all(|i| i["id"] != d.as_str()),
+        "{json}"
+    );
+    assert!(
+        inbox["closed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["id"] == d.as_str()),
+        "{json}"
+    );
+    // A second answer is refused as it always was.
+    let (_, err) = w.cv_fails(&["task", "resolve", &d, "--accept-default", "--from", "ember"]);
+    assert!(err.contains("cannot apply resolved"), "{err}");
+
+    // Confirm through the page.
+    w.cv_ok(&[
+        "task",
+        "decide",
+        "Q3",
+        "--for",
+        "ember",
+        "--default",
+        "x",
+        "--option",
+        "y",
+        "--provisional",
+        "--from",
+        "orchestrator:o",
+    ]);
+    let d3 = titled("Q3");
+    let (port, _reaper) = spawn_serve_with(&w, &["--who", "ember"]);
+    let (status, body) = json_http(port, "GET", "/api/inbox?who=ember", None);
+    assert_eq!(status, 200, "{body}");
+    let page: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(page["counts"]["provisional"], 1, "{body}");
+    assert_eq!(page["counts"]["decisions"], 1, "Q2 is still owed; Q3 is not: {body}");
+    let made: Vec<&Value> = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["reason"] == "provisional")
+        .collect();
+    assert_eq!(made.len(), 1, "{body}");
+    assert_eq!(made[0]["title"], "Q3");
+    let (status, body) = json_http(
+        port,
+        "POST",
+        &format!("/api/task/{d3}/resolve"),
+        Some(r#"{"confirm":true}"#),
+    );
+    assert_eq!(status, 200, "{body}");
+    let (json, _) = w.cv_ok(&["task", "show", &d3, "--json"]);
+    let t: Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(t["decision"]["resolution"]["by"], "web:ember");
+    assert_eq!(t["decision"]["resolution"]["choice"], "x");
+    assert_eq!(t["decision"]["superseded_provisional"]["by"], "orchestrator:o");
 }
 
 #[test]
