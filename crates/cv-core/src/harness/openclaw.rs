@@ -222,7 +222,7 @@ impl Adapter for OpenClaw {
         for root in &self.roots {
             // 1. The sqlite store (OpenClaw ≥ 2026-07-11): agents/<agentId>/agent/openclaw-agent*.sqlite
             for db in sqlite_stores(root) {
-                for r in out.keep(&db, discover_sqlite(&db)).into_iter().flatten() {
+                for r in out.keep(&db, discover_store(&db)).into_iter().flatten() {
                     seen.insert(r.id.clone());
                     out.refs.push(r);
                 }
@@ -1110,6 +1110,8 @@ struct ScanAcc {
 /// store and selects the rows by id.
 #[cfg(feature = "sqlite")]
 fn discover_sqlite(db: &Path) -> Result<Vec<SessionRef>> {
+    #[cfg(test)]
+    SQLITE_DISCOVERED.lock().unwrap().push(db.to_path_buf());
     let conn = open_ro(db)?;
     conn.read(|conn, reads| {
         let mut windows = conn.prepare(
@@ -1291,6 +1293,22 @@ fn unzstd(input: &mut dyn std::io::BufRead, out: &mut dyn std::io::Write, invali
 fn discover_sqlite(_db: &Path) -> Result<Vec<SessionRef>> {
     Ok(Vec::new())
 }
+
+/// [`discover_sqlite`] under the scan cache, keyed on the store and its WAL and journal, as every
+/// other SQLite adapter's discovery is: uncached, each listing refresh copied a WAL store and
+/// decompressed and decoded every window's `transcript_events`.
+#[cfg(feature = "sqlite")]
+fn discover_store(db: &Path) -> Result<Vec<SessionRef>> {
+    super::store::sqlite::cached_discover(db, || discover_sqlite(db))
+}
+
+#[cfg(not(feature = "sqlite"))]
+fn discover_store(db: &Path) -> Result<Vec<SessionRef>> {
+    discover_sqlite(db)
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+static SQLITE_DISCOVERED: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
 
 /// Replay one window's `transcript_events` rows (`ORDER BY seq`) through the record codec the
 /// JSONL path uses — `event_json` IS the JSONL line. Branch selection reads the navigation fields
@@ -1946,6 +1964,42 @@ mod tests {
         let mut session = OpenClaw { roots: vec![] }.stream(r, opts, &mut sink)?;
         session.messages = sink.messages;
         Ok(session)
+    }
+
+    /// An unchanged store is not decoded again at discovery; a write to it is.
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn unchanged_sqlite_store_is_not_rediscovered() {
+        let _world = crate::test_world("openclaw-sqlite-discovery-cache");
+        let context = crate::discover_cache::read::Context::current();
+        let _scope = context.enter();
+        let agents = tmp_agents();
+        let events: Vec<String> = fixture_text("v3-full.jsonl").lines().map(str::to_string).collect();
+        let db = write_store(&agents, "cached", &events);
+        let scans = || {
+            let mut all = SQLITE_DISCOVERED.lock().unwrap();
+            let mine = all.iter().filter(|p| **p == db).count();
+            all.retain(|p| *p != db);
+            mine
+        };
+        let adapter = OpenClaw {
+            roots: vec![agents.clone()],
+        };
+        let first = adapter.discover().unwrap();
+        assert_eq!(scans(), 1);
+        let again = adapter.discover().unwrap();
+        assert_eq!(scans(), 0, "an unchanged store is not decoded again");
+        assert_eq!(
+            serde_json::to_value(&first.refs).unwrap(),
+            serde_json::to_value(&again.refs).unwrap()
+        );
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute("UPDATE session_nodes SET updated_at = updated_at + 1", [])
+            .unwrap();
+        adapter.discover().unwrap();
+        assert_eq!(scans(), 1, "a write is read");
+        let _ = fs::remove_dir_all(agents.parent().unwrap());
     }
 
     #[cfg(feature = "sqlite")]

@@ -28,6 +28,8 @@
 
 - Goose legacy `.jsonl` sessions are rescanned at discovery only when the file changes.
 
+- OpenClaw SQLite stores are rediscovered only when the store changes, not on every listing refresh.
+
 - Search staleness counts the preferred copy of each session, avoiding false drift from older duplicates.
 
 ## 0.18.0-rc.1 — 2026-10-22 — the release an agent can trust
