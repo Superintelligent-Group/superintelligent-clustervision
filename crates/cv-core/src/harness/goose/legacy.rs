@@ -195,7 +195,7 @@ fn note_header(view: JsonView<'_>, session: &mut SessionRef) -> Result<()> {
                 }
                 Ok(())
             })?;
-            session.title = nonwhite.then(|| crate::ir::truncate(&prefix, crate::ir::Head::TITLE));
+            session.title = nonwhite.then(|| crate::ir::truncate(&prefix, crate::projection::Head::TITLE));
         }
     }
     session.cwd = fields

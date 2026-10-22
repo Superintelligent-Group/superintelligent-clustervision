@@ -34,7 +34,7 @@ pub fn write_markdown(s: &Session, out: &mut impl Write, resolver: &crate::Resol
 /// Exact character-bounded preview of concatenated plain-text blocks, including whitespace-only
 /// text. Checked demands scan discarded tails without retaining them.
 pub fn message_text_preview(m: &Message, resolver: &crate::Resolver, chars: usize) -> anyhow::Result<Option<String>> {
-    let mut head = crate::ir::Head::bounded(chars);
+    let mut head = crate::projection::Head::bounded(chars);
     let mut nonempty = false;
     for block in &m.content {
         if let Block::Text { text } = block {
@@ -90,7 +90,7 @@ pub fn write_md_block(b: &Block, out: &mut impl Write, resolver: &crate::Resolve
             out.write_all(b"\n```\n\n")?;
         }
         Block::ToolResult { content, is_error, .. } => {
-            let mut head = crate::ir::Head::bounded(4000);
+            let mut head = crate::projection::Head::bounded(4000);
             content.try_for_each_chunk(resolver, 64 * 1024, |part| {
                 head.push(part);
                 Ok(())

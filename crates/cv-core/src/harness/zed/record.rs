@@ -385,7 +385,7 @@ fn user_block(view: JsonView<'_>, spans: bool) -> Result<Option<Block>> {
         let data_ref = match fields.as_ref() {
             // A bounded head: a retained source payload is never fully decoded for a reference.
             Some(fields) => text(fields, "source", spans)?
-                .map(|text| crate::ir::Head::of_text(&text, &Resolver::new(None), 120))
+                .map(|text| crate::projection::Head::of_text(&text, &Resolver::new(None), 120))
                 .transpose()?,
             None => None,
         };

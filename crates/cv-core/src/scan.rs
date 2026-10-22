@@ -86,7 +86,9 @@ impl MessageSink for CapSink {
                 Block::ToolUse { name, input, .. } => {
                     self.hay.push(name);
                     self.hay.push(" ");
-                    self.hay.push_json(input).map(|()| self.hay.push("\n"))
+                    self.hay.push_json(input).map(|()| {
+                        self.hay.push("\n");
+                    })
                 }
                 Block::ToolResult { content, .. } => self.push_text(content),
                 Block::File { path, source, .. } => {

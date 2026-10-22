@@ -430,7 +430,7 @@ fn child_ref(
     };
     Some(SessionRef {
         cwd: parent.cwd.clone(),
-        title: Some(crate::ir::truncate(&title, crate::ir::Head::TITLE)),
+        title: Some(crate::ir::truncate(&title, crate::projection::Head::TITLE)),
         created_at: parent.created_at,
         updated_at: updated.and_then(ts_from_epoch).or(parent.updated_at),
         message_count: Some(chain_message_count(forest, Some(head))),
@@ -467,7 +467,7 @@ fn discover_conn(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
             cwd: wd.filter(|s| !s.is_empty()).map(PathBuf::from),
             title: title
                 .filter(|s| !s.trim().is_empty())
-                .map(|t| crate::ir::truncate(&t, crate::ir::Head::TITLE)),
+                .map(|t| crate::ir::truncate(&t, crate::projection::Head::TITLE)),
             created_at: created.and_then(ts_from_epoch),
             updated_at: last.and_then(ts_from_epoch).or_else(|| created.and_then(ts_from_epoch)),
             message_count: Some(chain_message_count(&forest, head)),

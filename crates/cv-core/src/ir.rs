@@ -5,6 +5,7 @@
 //! and harness-specific extras ride along in [`Message::extra`] so conversions can be as lossless
 //! as the target allows.
 
+use crate::projection::Head;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -1280,104 +1281,6 @@ fn meaningful_prompt(text: &str) -> Option<String> {
         return None;
     }
     Some(s.to_string())
-}
-
-/// A bounded head of a text, as [`truncate`] renders it: the first `max` characters (newlines
-/// flattened, `…` when cut), read with the one character of lookahead that tells a cut from an
-/// exact fit, and never more. A [`trimmed`](Self::trimmed) head is of the whitespace-trimmed
-/// text: leading whitespace is skipped and trailing whitespace dropped, with only the last
-/// non-whitespace position kept to decide it. Codecs bound titles with [`Head::TITLE`];
-/// renderers truncate further for their own width.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Head {
-    text: String,
-    chars: usize,
-    nonwhite: usize,
-    max: usize,
-    trim: bool,
-}
-impl Head {
-    /// The listing title bound: every codec's title, at every demand.
-    pub const TITLE: usize = 80;
-    pub fn bounded(max: usize) -> Self {
-        Self {
-            text: String::new(),
-            chars: 0,
-            nonwhite: 0,
-            max,
-            trim: false,
-        }
-    }
-    pub fn trimmed(max: usize) -> Self {
-        Self {
-            trim: true,
-            ..Self::bounded(max)
-        }
-    }
-    /// Characters a head of `max` keeps: `max` and the one of lookahead.
-    pub const fn kept(max: usize) -> usize {
-        max + 1
-    }
-    /// Feed one character; true once more input cannot change [`finish`](Self::finish) or
-    /// [`is_blank`](Self::is_blank).
-    pub fn push_char(&mut self, c: char) -> bool {
-        if self.done() || (self.trim && self.chars == 0 && c.is_whitespace()) {
-            return self.done();
-        }
-        if self.chars < Self::kept(self.max) {
-            self.text.push(c);
-            self.chars += 1;
-        }
-        if !c.is_whitespace() {
-            self.nonwhite = self.chars;
-        }
-        self.done()
-    }
-    /// Feed a chunk; true once done.
-    pub fn push(&mut self, s: &str) -> bool {
-        s.chars().any(|c| self.push_char(c)) || self.done()
-    }
-    pub fn done(&self) -> bool {
-        self.nonwhite > self.max || (!self.trim && self.chars > self.max && self.nonwhite > 0)
-    }
-    /// The lookahead is in: more characters cannot change the kept text.
-    pub fn full(&self) -> bool {
-        self.chars > self.max
-    }
-    /// Nothing but whitespace so far.
-    pub fn is_blank(&self) -> bool {
-        self.nonwhite == 0
-    }
-    /// The kept text so far (left-trimmed for a trimmed head).
-    pub fn as_str(&self) -> &str {
-        &self.text
-    }
-    pub fn finish(&self) -> String {
-        if self.trim {
-            let kept: String = self.text.chars().take(self.nonwhite).collect();
-            truncate(&kept, self.max)
-        } else {
-            truncate(&self.text, self.max)
-        }
-    }
-    /// The bounded head of a lazy text, reading at most `max + 1` characters of it.
-    pub(crate) fn of_text(
-        text: &crate::lazy::Text,
-        resolver: &crate::lazy::Resolver,
-        max: usize,
-    ) -> anyhow::Result<String> {
-        let (head, _) = crate::harness::store::document::text_head(text, resolver, Self::kept(max), false)?;
-        Ok(truncate(&head, max))
-    }
-    /// The bounded head of a JSON string; `None` for a nonstring.
-    pub(crate) fn of_string(view: crate::json::JsonView<'_>, max: usize) -> anyhow::Result<Option<String>> {
-        Ok(crate::projection::string_prefix(view, Self::kept(max))?.map(|head| truncate(&head, max)))
-    }
-    /// The bounded head of a value's canonical JSON (four bytes cover any character).
-    pub fn of_json(view: crate::json::JsonView<'_>, max: usize) -> anyhow::Result<String> {
-        let (head, _) = view.canonical_prefix(Self::kept(max).saturating_mul(4))?;
-        Ok(truncate(&head, max))
-    }
 }
 
 /// Flatten newlines to spaces and truncate to at most `max` chars, ending with `…` when cut.

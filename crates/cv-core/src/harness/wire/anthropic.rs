@@ -125,7 +125,7 @@ pub(crate) fn block_from_view_with(
                 let data_ref = data
                     .map(|v| -> anyhow::Result<_> {
                         let text = v.source_text()?.unwrap();
-                        crate::ir::Head::of_text(&text, &crate::lazy::Resolver::new(None), max)
+                        crate::projection::Head::of_text(&text, &crate::lazy::Resolver::new(None), max)
                     })
                     .transpose()?;
                 Block::Image {

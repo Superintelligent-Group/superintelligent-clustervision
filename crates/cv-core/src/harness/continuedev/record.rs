@@ -259,7 +259,7 @@ pub(super) fn title(view: Option<JsonView<'_>>, strict: bool) -> Result<Option<S
     if strict && !view.accepts_value()? {
         return Err(InvalidStruct("invalid title string").into());
     }
-    let mut head = crate::ir::Head::bounded(crate::ir::Head::TITLE);
+    let mut head = crate::projection::Head::bounded(crate::projection::Head::TITLE);
     view.for_each_str_chunk(|chunk| {
         head.push(chunk);
         Ok(())

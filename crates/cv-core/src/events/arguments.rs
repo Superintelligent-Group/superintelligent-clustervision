@@ -203,7 +203,7 @@ impl Trigger {
 }
 
 pub(super) fn command_rows(view: JsonView<'_>, cap: usize) -> Result<Option<(String, Vec<String>)>> {
-    let mut prefix = crate::ir::Head::bounded(cap);
+    let mut prefix = crate::projection::Head::bounded(cap);
     let mut trigger = Trigger::default();
     let exists = command_chunks(view, |chunk| {
         prefix.push(chunk);

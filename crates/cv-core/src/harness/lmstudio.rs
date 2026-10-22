@@ -707,7 +707,7 @@ fn scan_view(view: JsonView<'_>) -> Result<Scan> {
     };
     let mut scan = Scan::default();
     if let Some(name) = fields.get("name") {
-        let mut head = crate::ir::Head::trimmed(crate::ir::Head::TITLE);
+        let mut head = crate::projection::Head::trimmed(crate::projection::Head::TITLE);
         read_head(&mut head, name)?;
         let name = title(head);
         scan.name = name.filter(|name| name != "Untitled" && !name.starts_with("Untitled -"));
@@ -746,7 +746,7 @@ fn scan_view(view: JsonView<'_>) -> Result<Scan> {
         if !string_is(version.get("role"), "user")? {
             continue;
         }
-        let mut head = crate::ir::Head::bounded(crate::ir::Head::TITLE);
+        let mut head = crate::projection::Head::bounded(crate::projection::Head::TITLE);
         if let Some(content) = version.get("content") {
             if content.is_string()? {
                 read_head(&mut head, content)?;
@@ -770,10 +770,10 @@ fn scan_view(view: JsonView<'_>) -> Result<Scan> {
     Ok(scan)
 }
 
-/// Feed a JSON string into a title [`Head`](crate::ir::Head), stopping once it is decided. Called
+/// Feed a JSON string into a title [`Head`](crate::projection::Head), stopping once it is decided. Called
 /// only inside read_document, after whole-source Value validation: a prefix stop still passes its
 /// enclosing source-identity check; only the `Stop` it raises is swallowed.
-fn read_head(head: &mut crate::ir::Head, view: JsonView<'_>) -> Result<()> {
+fn read_head(head: &mut crate::projection::Head, view: JsonView<'_>) -> Result<()> {
     let result = view.for_each_str_chunk(|text| {
         if head.push(text) {
             Err(crate::stream::Stop.into())
@@ -787,7 +787,7 @@ fn read_head(head: &mut crate::ir::Head, view: JsonView<'_>) -> Result<()> {
     }
 }
 /// A title, or none for a blank one.
-fn title(head: crate::ir::Head) -> Option<String> {
+fn title(head: crate::projection::Head) -> Option<String> {
     (!head.is_blank()).then(|| head.finish())
 }
 
@@ -1433,8 +1433,8 @@ mod tests {
             for width in (1..19).chain(std::iter::once(chars.len().max(1))) {
                 for trim in [false, true] {
                     let mut head = match trim {
-                        true => crate::ir::Head::trimmed(80),
-                        false => crate::ir::Head::bounded(80),
+                        true => crate::projection::Head::trimmed(80),
+                        false => crate::projection::Head::bounded(80),
                     };
                     for chunk in chars.chunks(width) {
                         head.push(&chunk.iter().collect::<String>());
@@ -1442,7 +1442,7 @@ mod tests {
                     let expected = if trim { text.trim() } else { &text };
                     assert_eq!(
                         title(head),
-                        (!text.trim().is_empty()).then(|| crate::ir::truncate(expected, crate::ir::Head::TITLE))
+                        (!text.trim().is_empty()).then(|| crate::ir::truncate(expected, crate::projection::Head::TITLE))
                     );
                 }
             }
@@ -1458,7 +1458,7 @@ mod tests {
         std::fs::write(&path, &original).unwrap();
         let source = JsonSource::capture(&path).unwrap();
         let result = source.read_document(|view| {
-            let mut head = crate::ir::Head::trimmed(80);
+            let mut head = crate::projection::Head::trimmed(80);
             read_head(&mut head, view.get("name")?.unwrap())?;
             assert!(head.done());
             // A prefix stop must not bypass the enclosing check when the unread tail changes.

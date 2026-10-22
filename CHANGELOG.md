@@ -3,6 +3,7 @@
 ## Unreleased
 
 - `prune`, `rewind`, and `port` accept `--skills keep|drop|drop-stale`, including legacy command-file skills; the default preserves restored skills unchanged.
+- **Breaking (library):** `projection::Head` replaces `ir::Head`; byte prefixes and character labels share one builder with explicit budgets.
 
 - `cv cat` reports corrupt sidecar reads instead of attributing them to `--drop`.
 - `cv events --subagents` reports unreadable agent transcripts with their identity and path.

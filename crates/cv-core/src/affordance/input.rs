@@ -20,7 +20,7 @@ pub(crate) fn field_string(view: JsonView<'_>, key: &str) -> Result<Option<Strin
 }
 
 pub(crate) fn prefix(view: JsonView<'_>, cap: usize) -> Result<Option<String>> {
-    crate::ir::Head::of_string(view, cap)
+    crate::projection::Head::of_string(view, cap)
 }
 
 pub(crate) fn scalar_prefix(view: JsonView<'_>, cap: usize) -> Result<Option<String>> {
@@ -94,16 +94,16 @@ pub(crate) fn word(view: JsonView<'_>, words: &[&str]) -> Result<Option<usize>> 
     Ok(words.iter().position(|word| word.len() == bytes && *word == text))
 }
 
-/// The trimmed [`Head`](crate::ir::Head) of a string: `truncate(trim(text), cap)`.
+/// The trimmed [`Head`](crate::projection::Head) of a string: `truncate(trim(text), cap)`.
 pub(crate) fn trimmed_prefix(view: JsonView<'_>, cap: usize) -> Result<Option<String>> {
-    let mut head = crate::ir::Head::trimmed(cap);
+    let mut head = crate::projection::Head::trimmed(cap);
     let is_string = string_until(view, |chunk| head.push(chunk))?;
     Ok(is_string.then(|| head.finish()))
 }
 
 /// The untrimmed prefix of a nonblank string, for object item text whose whitespace is retained.
 pub(crate) fn nonblank_prefix(view: JsonView<'_>, cap: usize) -> Result<Option<String>> {
-    let mut out = crate::ir::Head::bounded(cap);
+    let mut out = crate::projection::Head::bounded(cap);
     let mut nonblank = false;
     let is_string = string_until(view, |chunk| {
         out.push(chunk);

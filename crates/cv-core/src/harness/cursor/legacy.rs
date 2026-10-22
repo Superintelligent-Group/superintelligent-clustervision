@@ -49,7 +49,7 @@ pub(super) fn discover(conn: &Connection, db: &Path, cwd: Option<&Path>, out: &m
                 cwd: cwd.map(Path::to_path_buf),
                 title: title
                     .filter(|s| !s.trim().is_empty())
-                    .map(|s| crate::ir::truncate(&s, crate::ir::Head::TITLE)),
+                    .map(|s| crate::ir::truncate(&s, crate::projection::Head::TITLE)),
                 message_count: Some(count),
                 ..SessionRef::new(format!("legacy:{tab_id}"), Harness::Cursor, db.to_path_buf())
             });

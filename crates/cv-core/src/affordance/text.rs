@@ -6,11 +6,11 @@ use anyhow::Result;
 const CHUNK: usize = 64 * 1024;
 const SUMMARY_CHARS: usize = 120;
 
-/// A summary is the trimmed [`Head`](crate::ir::Head) of `SUMMARY_CHARS`: exactly
+/// A summary is the trimmed [`Head`](crate::projection::Head) of `SUMMARY_CHARS`: exactly
 /// `truncate(trim(text), 120)`, a long whitespace tail never turning it into an ellipsis.
-type Trimmed = crate::ir::Head;
+type Trimmed = crate::projection::Head;
 fn trimmed() -> Trimmed {
-    crate::ir::Head::trimmed(SUMMARY_CHARS)
+    crate::projection::Head::trimmed(SUMMARY_CHARS)
 }
 
 /// The longest suffix that could continue an ASCII delimiter in the next decoded chunk.

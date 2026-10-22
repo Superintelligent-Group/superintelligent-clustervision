@@ -705,7 +705,7 @@ impl Demand<'_> {
 
 #[derive(Clone)]
 struct TextInfo {
-    head: crate::ir::Head,
+    head: crate::projection::Head,
     trimmed: String,
     trimmed_chars: usize,
     has_text: bool,
@@ -715,7 +715,7 @@ struct TextInfo {
 impl Default for TextInfo {
     fn default() -> Self {
         Self {
-            head: crate::ir::Head::bounded(crate::ir::Head::TITLE),
+            head: crate::projection::Head::bounded(crate::projection::Head::TITLE),
             trimmed: String::new(),
             trimmed_chars: 0,
             has_text: false,

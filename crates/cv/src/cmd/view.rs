@@ -1512,7 +1512,7 @@ pub(crate) fn show_message(m: &Message) -> Result<String> {
             Block::Thinking { text, .. } => s.push_str(&format!("[thinking] {}\n", truncate(text, 200))),
             Block::ToolUse { id, name, input, .. } => s.push_str(&format!(
                 "[tool_use {name} {id}] {}\n",
-                input.with_view(|view| cv_core::ir::Head::of_json(view, 200))?
+                input.with_view(|view| cv_core::projection::Head::of_json(view, 200))?
             )),
             Block::ToolResult {
                 tool_use_id,

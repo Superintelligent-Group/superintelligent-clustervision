@@ -2,6 +2,7 @@
 mod json_frames;
 mod json_string;
 mod string;
+use crate::ir::truncate;
 use crate::{Resolver, Text};
 pub use json_frames::{write_frame, write_frames, write_json_array, Counted, Framing, Prefix};
 pub use json_string::{for_each_lossy_utf8_chunk, write_json_string};
@@ -24,22 +25,118 @@ pub fn append_json(out: &mut String, json: &crate::json::Json) -> anyhow::Result
     json.write_canonical(&mut StringWriter(out))
 }
 
-/// A decoded UTF-8 byte prefix. Once a scalar does not fit, later writes cannot skip it.
-/// All text, punctuation, paths, names and streamed JSON formatting share this one budget.
+/// A bounded text projection: `new` selects an exact UTF-8 byte prefix; `bounded` or
+/// `trimmed` selects a character-limited display label with one character of lookahead.
+/// Once a byte-budget scalar does not fit, later writes cannot skip it.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Head {
     text: String,
     limit: usize,
     stopped: bool,
+    title: Option<Title>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Title {
+    chars: usize,
+    nonwhite: usize,
+    trim: bool,
 }
 impl Head {
+    /// The listing title bound: every codec's title, at every demand.
+    pub const TITLE: usize = 80;
+    /// Character-limited label, flattened and ellipsized by `finish`.
+    pub fn bounded(max: usize) -> Self {
+        Self {
+            text: String::new(),
+            limit: max,
+            stopped: false,
+            title: Some(Title {
+                chars: 0,
+                nonwhite: 0,
+                trim: false,
+            }),
+        }
+    }
+    /// Character-limited label after trimming surrounding whitespace.
+    pub fn trimmed(max: usize) -> Self {
+        let mut head = Self::bounded(max);
+        head.title.as_mut().unwrap().trim = true;
+        head
+    }
+    /// Characters retained, including the truncation lookahead.
+    pub const fn kept(max: usize) -> usize {
+        max.saturating_add(1)
+    }
+    pub fn push_char(&mut self, c: char) -> bool {
+        if self.title.is_none() {
+            return self.push(c.encode_utf8(&mut [0; 4]));
+        }
+        if self.done() {
+            return true;
+        }
+        let t = self.title.as_mut().unwrap();
+        if t.trim && t.chars == 0 && c.is_whitespace() {
+            return false;
+        }
+        if t.chars < Self::kept(self.limit) {
+            self.text.push(c);
+            t.chars += 1;
+        }
+        if !c.is_whitespace() {
+            t.nonwhite = t.chars;
+        }
+        self.done()
+    }
+    /// More input cannot change the resulting prefix or label.
+    pub fn done(&self) -> bool {
+        self.title.as_ref().map_or_else(
+            || self.full(),
+            |t| t.nonwhite > self.limit || (!t.trim && t.chars > self.limit && t.nonwhite > 0),
+        )
+    }
+    pub fn is_blank(&self) -> bool {
+        self.title
+            .as_ref()
+            .map_or_else(|| self.text.trim().is_empty(), |t| t.nonwhite == 0)
+    }
+    pub fn finish(&self) -> String {
+        match &self.title {
+            Some(t) if t.trim => truncate(&self.text.chars().take(t.nonwhite).collect::<String>(), self.limit),
+            Some(_) => truncate(&self.text, self.limit),
+            None => self.text.clone(),
+        }
+    }
+    /// The bounded head of a lazy text, reading at most `max + 1` characters of it.
+    pub(crate) fn of_text(
+        text: &crate::lazy::Text,
+        resolver: &crate::lazy::Resolver,
+        max: usize,
+    ) -> anyhow::Result<String> {
+        let (head, _) = crate::harness::store::document::text_head(text, resolver, Self::kept(max), false)?;
+        Ok(truncate(&head, max))
+    }
+    /// The bounded head of a JSON string; `None` for a nonstring.
+    pub(crate) fn of_string(view: crate::json::JsonView<'_>, max: usize) -> anyhow::Result<Option<String>> {
+        Ok(crate::projection::string_prefix(view, Self::kept(max))?.map(|head| truncate(&head, max)))
+    }
+    /// The bounded head of a value's canonical JSON (four bytes cover any character).
+    pub fn of_json(view: crate::json::JsonView<'_>, max: usize) -> anyhow::Result<String> {
+        let (head, _) = view.canonical_prefix(Self::kept(max).saturating_mul(4))?;
+        Ok(truncate(&head, max))
+    }
     pub fn new(limit: usize) -> Self {
         Self {
             text: String::with_capacity(limit),
             limit,
             stopped: false,
+            title: None,
         }
     }
     pub fn remaining(&self) -> usize {
+        if let Some(t) = &self.title {
+            return Self::kept(self.limit).saturating_sub(t.chars).saturating_mul(4);
+        }
         if self.stopped {
             0
         } else {
@@ -47,11 +144,16 @@ impl Head {
         }
     }
     pub fn full(&self) -> bool {
-        self.remaining() == 0
+        self.title
+            .as_ref()
+            .map_or_else(|| self.remaining() == 0, |t| t.chars > self.limit)
     }
-    pub fn push(&mut self, text: &str) {
+    pub fn push(&mut self, text: &str) -> bool {
+        if self.title.is_some() {
+            return text.chars().any(|c| self.push_char(c)) || self.done();
+        }
         if self.full() {
-            return;
+            return true;
         }
         let mut end = text.len().min(self.remaining());
         while !text.is_char_boundary(end) {
@@ -59,9 +161,20 @@ impl Head {
         }
         self.text.push_str(&text[..end]);
         self.stopped |= end < text.len();
+        self.full()
     }
     /// Checked text demand within the remaining decoded-byte budget.
     pub fn try_push_text(&mut self, text: &Text, resolver: &Resolver) -> anyhow::Result<()> {
+        if self.title.is_some() {
+            return crate::stream::stopped(text.try_for_each_chunk(resolver, 4096, |part| {
+                if self.push(part) {
+                    Err(crate::stream::Stop.into())
+                } else {
+                    Ok(())
+                }
+            }))
+            .map(|_| ());
+        }
         if !self.full() {
             if let Text::Source(source) = text {
                 let (prefix, truncated) = source.try_prefix_with_truncation(self.remaining())?;
@@ -265,6 +378,7 @@ pub fn searchable_prefix_checked(
         text: String::with_capacity(limit.saturating_add(4).min(64 * 1024)),
         limit: limit.saturating_add(4),
         stopped: false,
+        title: None,
     };
     searchable(&message.content, resolver, &mut head, &mut check)?;
     let mut text = head.into_string();

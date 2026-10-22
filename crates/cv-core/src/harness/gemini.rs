@@ -892,7 +892,7 @@ fn parse_logs_str(text: &str, source_path: Option<PathBuf>) -> Vec<Session> {
             .filter(|e| e.get("type").and_then(Value::as_str) == Some("user"))
             .filter_map(|e| e.get("message").and_then(Value::as_str))
             .find(|t| !is_ignored_user_content(t))
-            .map(|t| crate::ir::truncate(t, crate::ir::Head::TITLE));
+            .map(|t| crate::ir::truncate(t, crate::projection::Head::TITLE));
         let times: Vec<DateTime<Utc>> = items
             .iter()
             .filter_map(|e| e.get("timestamp").and_then(Value::as_str).and_then(parse_ts))
@@ -1111,7 +1111,7 @@ fn parse_checkpoint(text: &str, file_name: &str, source_path: Option<PathBuf>) -
             title = m
                 .text()
                 .filter(|t| !is_ignored_user_content(t))
-                .map(|t| crate::ir::truncate(&t, crate::ir::Head::TITLE));
+                .map(|t| crate::ir::truncate(&t, crate::projection::Head::TITLE));
         }
         if !m.content.is_empty() {
             messages.push(m);

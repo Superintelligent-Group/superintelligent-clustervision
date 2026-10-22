@@ -53,15 +53,15 @@ impl Marker {
     }
 }
 
-/// The first non-blank line, as a trimmed title [`Head`](crate::ir::Head).
+/// The first non-blank line, as a trimmed title [`Head`](crate::projection::Head).
 struct FirstLine {
-    line: crate::ir::Head,
+    line: crate::projection::Head,
     title: Option<String>,
 }
 impl Default for FirstLine {
     fn default() -> Self {
         Self {
-            line: crate::ir::Head::trimmed(crate::ir::Head::TITLE),
+            line: crate::projection::Head::trimmed(crate::projection::Head::TITLE),
             title: None,
         }
     }
@@ -79,7 +79,7 @@ impl FirstLine {
         if self.title.is_some() {
             return;
         }
-        let line = std::mem::replace(&mut self.line, crate::ir::Head::trimmed(crate::ir::Head::TITLE));
+        let line = std::mem::replace(&mut self.line, crate::projection::Head::trimmed(crate::projection::Head::TITLE));
         if !line.is_blank() {
             self.title = Some(line.finish());
         }

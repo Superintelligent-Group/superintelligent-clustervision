@@ -197,12 +197,12 @@ fn job_belongs(job: &Value, key: &str) -> bool {
 
 /// The public summary's bound.
 const SUMMARY: usize = 120;
-/// What a [`Head`](crate::ir::Head) of the summary keeps: its bound and one lookahead.
+/// What a [`Head`](crate::projection::Head) of the summary keeps: its bound and one lookahead.
 fn summary_prefix<'a>(parts: impl IntoIterator<Item = &'a str>) -> String {
     parts
         .into_iter()
         .flat_map(str::chars)
-        .take(crate::ir::Head::kept(SUMMARY))
+        .take(crate::projection::Head::kept(SUMMARY))
         .collect()
 }
 

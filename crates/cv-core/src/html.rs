@@ -429,7 +429,7 @@ fn input_preview(input: &crate::Json) -> anyhow::Result<String> {
     if let Some(preview) = input.with_view(|view| {
         for key in KEYS {
             if let Some(field) = view.get(key)? {
-                if let Some(head) = crate::ir::Head::of_string(field, 80)? {
+                if let Some(head) = crate::projection::Head::of_string(field, 80)? {
                     return Ok(Some(head));
                 }
             }
@@ -438,7 +438,7 @@ fn input_preview(input: &crate::Json) -> anyhow::Result<String> {
     })? {
         return Ok(preview);
     }
-    input.with_view(|view| crate::ir::Head::of_json(view, 80))
+    input.with_view(|view| crate::projection::Head::of_json(view, 80))
 }
 
 /// The 🔮 share theme: dark by default (deep violet-black with a soft crystal glow), light via

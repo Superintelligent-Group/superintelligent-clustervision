@@ -457,7 +457,7 @@ fn refs_conn(conn: &Connection, path: &Path, delegates_of: Option<&HashSet<Strin
         });
         out.push(SessionRef {
             cwd: cwd.filter(|c| !c.is_empty()).map(PathBuf::from),
-            title: title.map(|t| crate::ir::truncate(&t, crate::ir::Head::TITLE)),
+            title: title.map(|t| crate::ir::truncate(&t, crate::projection::Head::TITLE)),
             created_at: started.and_then(ts_from_epoch),
             updated_at: latest_of([ended, last, started]),
             message_count: None,

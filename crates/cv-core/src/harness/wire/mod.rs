@@ -259,7 +259,7 @@ mod tests {
             let source = crate::json::JsonSource::capture(&path)?;
             let title = source.read_range_value(0, source.len(), |view| text_title(Some(view)))?;
             let full = joined_owned(Some(&value), TEXT);
-            let expected = (!full.trim().is_empty()).then(|| crate::ir::truncate(&full, crate::ir::Head::TITLE));
+            let expected = (!full.trim().is_empty()).then(|| crate::ir::truncate(&full, crate::projection::Head::TITLE));
             assert_eq!(title, expected);
         }
         Ok(())

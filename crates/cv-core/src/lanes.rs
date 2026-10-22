@@ -551,11 +551,11 @@ pub fn tool_summary(name: &str, input: &crate::json::Json) -> Result<String> {
             "skill",
         ] {
             let Some(value) = view.get(key)? else { continue };
-            if let Some(head) = crate::ir::Head::of_string(value, 80)? {
+            if let Some(head) = crate::projection::Head::of_string(value, 80)? {
                 return Ok(head);
             }
         }
-        let head = crate::ir::Head::of_json(view, 80)?;
+        let head = crate::projection::Head::of_json(view, 80)?;
         Ok(if head == "{}" { String::new() } else { head })
     })?;
     Ok(if arg.is_empty() {

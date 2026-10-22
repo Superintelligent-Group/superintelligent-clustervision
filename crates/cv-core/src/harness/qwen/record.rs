@@ -493,7 +493,7 @@ fn content_blocks(message: Option<JsonView<'_>>, demand: Demand<'_>) -> Result<V
                         text_head(
                             &text,
                             &Resolver::new(None),
-                            crate::ir::Head::kept(crate::ir::Head::TITLE),
+                            crate::projection::Head::kept(crate::projection::Head::TITLE),
                             false,
                         )?
                         .0

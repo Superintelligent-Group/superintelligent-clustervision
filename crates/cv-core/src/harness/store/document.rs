@@ -120,14 +120,14 @@ pub(crate) fn text_head(
     Ok((head, present))
 }
 
-/// The same joined text/title as Message::text, as a title [`Head`](crate::ir::Head). When
+/// The same joined text/title as Message::text, as a title [`Head`](crate::projection::Head). When
 /// discovery filters whitespace-only text, scan any remaining whitespace with bounded state.
 pub(crate) fn text_summary<T: std::borrow::Borrow<crate::lazy::Text>>(
     texts: impl Iterator<Item = T>,
     resolver: &crate::lazy::Resolver,
     require_nonwhite: bool,
 ) -> Option<String> {
-    let mut head = crate::ir::Head::bounded(crate::ir::Head::TITLE);
+    let mut head = crate::projection::Head::bounded(crate::projection::Head::TITLE);
     let mut present = false;
     for (index, text) in texts.enumerate() {
         let text = text.borrow();

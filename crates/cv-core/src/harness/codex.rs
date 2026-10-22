@@ -917,10 +917,10 @@ fn consider_title(title: &mut Option<String>, candidate: String) {
     }
 }
 
-/// A listing title from a body: the trimmed [`Head`](crate::ir::Head) of its joined text, where
+/// A listing title from a body: the trimmed [`Head`](crate::projection::Head) of its joined text, where
 /// only parts of type `only` count when given.
 fn title_of(v: Option<JsonView<'_>>, only: Option<&str>) -> Result<String> {
-    let mut head = crate::ir::Head::trimmed(crate::ir::Head::TITLE);
+    let mut head = crate::projection::Head::trimmed(crate::projection::Head::TITLE);
     record::for_each_joined_char_of(v, only, |ch| !head.push_char(ch))?;
     Ok(head.finish())
 }

@@ -378,7 +378,7 @@ fn discover_global(conn: &Connection, db: &Path, cwd_map: &HashMap<String, PathB
             .get("name")
             .and_then(Value::as_str)
             .filter(|s| !s.trim().is_empty())
-            .map(|s| crate::ir::truncate(s, crate::ir::Head::TITLE));
+            .map(|s| crate::ir::truncate(s, crate::projection::Head::TITLE));
         out.push(SessionRef {
             cwd: cwd_map.get(composer_id).cloned(),
             title,
