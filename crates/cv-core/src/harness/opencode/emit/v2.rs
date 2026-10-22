@@ -191,14 +191,7 @@ pub(super) fn write_database(
                 };
                 if let Some(group) = group {
                     if !msg.extra.contains_key(crate::ir::CARRIER_KEY)
-                        && session.messages[index..index + group]
-                            .iter()
-                            .filter_map(|m| m.id.as_deref())
-                            .all(|id| identities.get(id) == Some(&1))
-                        && msg
-                            .id
-                            .as_deref()
-                            .is_some_and(|id| owners.get(id).copied().unwrap_or(0) == group - 1)
+                        && replayable(msg, index, group, &session.messages, &identities, &owners)
                         && replay_model_matches(
                             &record.value,
                             &session.messages[index..index + group],
@@ -221,15 +214,7 @@ pub(super) fn write_database(
         if session.harness == Harness::OpenCode && msg.id.as_deref().is_some_and(|id| identities.get(id) == Some(&1)) {
             if let Some(raw) = msg.extra.get(crate::ir::CARRIER_KEY) {
                 if let Some((ty, group)) = owned_replay(raw, &session.messages[index..]) {
-                    if session.messages[index..index + group]
-                        .iter()
-                        .filter_map(|m| m.id.as_deref())
-                        .all(|id| identities.get(id) == Some(&1))
-                        && msg
-                            .id
-                            .as_deref()
-                            .is_some_and(|id| owners.get(id).copied().unwrap_or(0) == group - 1)
-                    {
+                    if replayable(msg, index, group, &session.messages, &identities, &owners) {
                         let ts = msg.timestamp.map(|t| t.timestamp_millis()).unwrap_or(created + seq);
                         let mid = &message_ids[index];
                         let mut bytes = Vec::new();
@@ -516,6 +501,26 @@ fn remap_references(value: &mut Value, ids: &HashMap<&str, &str>, source_session
             remap_references(value, ids, source_session, new_session);
         }
     }
+}
+
+/// The replay admission shared by both arms: every message the group covers is a complete row,
+/// and the carrier owns exactly the group's tail.
+fn replayable(
+    msg: &Message,
+    index: usize,
+    group: usize,
+    messages: &[Message],
+    identities: &HashMap<&str, usize>,
+    owners: &HashMap<&str, usize>,
+) -> bool {
+    messages[index..index + group]
+        .iter()
+        .filter_map(|m| m.id.as_deref())
+        .all(|id| identities.get(id) == Some(&1))
+        && msg
+            .id
+            .as_deref()
+            .is_some_and(|id| owners.get(id).copied().unwrap_or(0) == group - 1)
 }
 
 fn owned_replay<'a>(raw: &'a Value, current: &[Message]) -> Option<(&'a str, usize)> {

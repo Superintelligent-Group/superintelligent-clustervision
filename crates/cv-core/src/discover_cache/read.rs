@@ -73,11 +73,11 @@ impl Context {
             path,
             connection: cell,
             cache: std::sync::OnceLock::new(),
-            #[cfg(test)]
+            #[cfg(all(test, feature = "sqlite"))]
             opens: Default::default(),
-            #[cfg(test)]
+            #[cfg(all(test, feature = "sqlite"))]
             lookups: Default::default(),
-            #[cfg(test)]
+            #[cfg(all(test, feature = "sqlite"))]
             rows: Default::default(),
         }))
     }
@@ -159,7 +159,7 @@ impl Context {
                 if self.0.path.as_os_str().is_empty() {
                     return None;
                 }
-                #[cfg(test)]
+                #[cfg(all(test, feature = "sqlite"))]
                 self.0.opens.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 crate::catalog::open_at(&self.0.path).map(|connection| Arc::new(std::sync::Mutex::new(connection)))
             })

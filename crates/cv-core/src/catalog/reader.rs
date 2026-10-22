@@ -35,11 +35,11 @@ impl Reader {
     pub(crate) fn from_connection(conn: std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>) -> Self {
         Self {
             conn,
-            #[cfg(test)]
+            #[cfg(all(test, feature = "sqlite"))]
             counts_lookups: std::cell::Cell::new(0),
-            #[cfg(test)]
+            #[cfg(all(test, feature = "sqlite"))]
             counts_rows: std::cell::Cell::new(0),
-            #[cfg(test)]
+            #[cfg(all(test, feature = "sqlite"))]
             turn_snapshots: std::cell::Cell::new(0),
         }
     }
@@ -67,10 +67,10 @@ impl Reader {
     ) -> Option<crate::affordance::Counts> {
         #[cfg(feature = "sqlite")]
         {
-            #[cfg(test)]
+            #[cfg(all(test, feature = "sqlite"))]
             self.counts_lookups.set(self.counts_lookups.get() + 1);
             let record = super::imp::count_record_in(&*self.conn.lock().ok()?, r)?;
-            #[cfg(test)]
+            #[cfg(all(test, feature = "sqlite"))]
             self.counts_rows.set(self.counts_rows.get() + 1);
             let record = crate::source::Record::<super::imp::Counted>::decode(&record)?;
             Some(record.admit(source, probe)?.counts.clone())
@@ -103,7 +103,7 @@ impl Reader {
                 let Some(turns) = record.payload.turns else {
                     continue;
                 };
-                #[cfg(test)]
+                #[cfg(all(test, feature = "sqlite"))]
                 self.turn_snapshots.set(self.turn_snapshots.get() + 1);
                 let source = probe.snapshot(r);
                 if record.admit(&source, &mut probe).is_some() {
