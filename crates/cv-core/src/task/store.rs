@@ -539,12 +539,14 @@ struct Fold {
     refused: Vec<String>,
 }
 
+#[cfg(feature = "sqlite")]
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Stored {
     prefix: crate::source::Prefix,
     fold: Fold,
 }
 
+#[cfg(feature = "sqlite")]
 const FOLD_CONSUMER: &str = "task-fold";
 
 impl Fold {
