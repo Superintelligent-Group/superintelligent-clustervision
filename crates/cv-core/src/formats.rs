@@ -211,8 +211,6 @@ pub enum FindingKind {
     IgnoreLiteralUnused,
     /// The manifest names a source file that does not exist.
     SourceFileMissing,
-    /// The manifest itself does not parse.
-    ManifestInvalid,
 }
 
 impl FindingKind {
@@ -222,7 +220,6 @@ impl FindingKind {
             FindingKind::HandledRestatesArm => "handled_restates_arm",
             FindingKind::IgnoreLiteralUnused => "ignore_literal_unused",
             FindingKind::SourceFileMissing => "source_file_missing",
-            FindingKind::ManifestInvalid => "manifest_invalid",
         }
     }
 }
@@ -454,7 +451,7 @@ pub fn check_all(src_root: &Path) -> Vec<Divergence> {
             }
             Err(e) => out.push(finding(
                 h.as_str(),
-                FindingKind::ManifestInvalid,
+                FindingKind::SourceFileMissing,
                 format!("formats/{}.toml", h.as_str()),
                 format!("{e:#}"),
             )),
@@ -566,6 +563,9 @@ fn carrier_record_type(m: &crate::ir::Message, h: Harness) -> Option<String> {
 
 /// The N most recent sessions per harness (catalog-backed, newest first), keyed by harness name.
 fn recent_refs(harness: Option<Harness>, recent: usize) -> BTreeMap<&'static str, (Harness, Vec<SessionRef>)> {
+    if recent == 0 {
+        return BTreeMap::new();
+    }
     select_recent_refs(crate::sessions_for(harness), harness, recent)
 }
 
