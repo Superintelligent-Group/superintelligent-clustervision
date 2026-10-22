@@ -116,7 +116,7 @@ pub struct Guard {
     adapter: &'static dyn crate::harness::Adapter,
     root: String,
     agent: Option<String>,
-    ledger: Vec<crate::lanes::LaneEvent>,
+    ledger: std::sync::Arc<[crate::lanes::LaneEvent]>,
 }
 
 impl Guard {
@@ -125,7 +125,7 @@ impl Guard {
         let adapter = crate::harness::rootless(ev.harness)?;
         let decision = adapter.capabilities().edit_guard?;
         let (root, ledger) = match decision {
-            EditGuard::Ask => (ev.session.id.clone(), Vec::new()),
+            EditGuard::Ask => (ev.session.id.clone(), std::sync::Arc::from([])),
             EditGuard::Deny => {
                 let ledger = crate::lanes::read_ledger();
                 (lineage_root(adapter, &ev.session.id, ev.transcript(), &ledger), ledger)

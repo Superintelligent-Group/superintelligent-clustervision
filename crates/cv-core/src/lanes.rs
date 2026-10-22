@@ -174,13 +174,42 @@ pub fn append_lane_event(ev: &LaneEvent) -> std::io::Result<()> {
 
 /// Every row of the ledger, file order. Unparseable lines (a torn append) are skipped. Empty
 /// when there is no ledger.
-pub fn read_ledger() -> Vec<LaneEvent> {
-    let Ok(text) = std::fs::read_to_string(ledger_path()) else {
-        return Vec::new();
+///
+/// Kept while the ledger stats as it did when it was parsed: a `--subagents` pass asks once per
+/// Codex parent (`hook_forest`), and parsing the whole ledger each time made the fold
+/// O(parents × ledger rows).
+pub fn read_ledger() -> std::sync::Arc<[LaneEvent]> {
+    use crate::source::FileId;
+    use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+    type Memo = HashMap<PathBuf, (FileId, Arc<[LaneEvent]>)>;
+    static MEMO: OnceLock<Mutex<Memo>> = OnceLock::new();
+    let path = ledger_path();
+    let Some(before) = FileId::at(&path) else {
+        return Arc::from([]);
     };
-    text.lines()
+    let memo = MEMO.get_or_init(Default::default);
+    if let Some((_, rows)) = memo
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&path)
+        .filter(|(seen, _)| *seen == before)
+    {
+        return Arc::clone(rows);
+    }
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Arc::from([]);
+    };
+    let rows: Arc<[LaneEvent]> = text
+        .lines()
         .filter_map(|l| serde_json::from_str::<LaneEvent>(l).ok())
-        .collect()
+        .collect();
+    // An append during the read leaves no entry: the next ask parses the ledger as it then stands.
+    if FileId::at(&path) == Some(before) {
+        memo.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(path, (before, Arc::clone(&rows)));
+    }
+    rows
 }
 
 /// The latest `stop` per bare agent id among the rows `keep` admits — what [`status_of`]

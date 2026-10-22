@@ -18,6 +18,8 @@
 
 - Claude fork inference reads each sibling's head once per file state, not once per session asking: a directory pass was quadratic.
 
+- Codex sub-agent forests parse the lane ledger once per ledger state, not once per parent.
+
 - Search staleness counts the preferred copy of each session, avoiding false drift from older duplicates.
 
 ## 0.18.0-rc.1 — 2026-10-22 — the release an agent can trust

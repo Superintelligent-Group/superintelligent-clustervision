@@ -411,7 +411,7 @@ fn hook_forest(parent: &SessionRef) -> Result<Vec<crate::AgentRef>> {
     let mut out = Vec::new();
     loop {
         let before = known.len();
-        for row in &rows {
+        for row in rows.iter() {
             if !known.contains(&row.session_id) || known.contains(&row.agent_id) {
                 continue;
             }
@@ -1016,6 +1016,23 @@ mod tests {
         let ids: std::collections::HashSet<_> = forest.iter().map(|s| s.session.id.as_str()).collect();
         assert_eq!(ids, std::collections::HashSet::from(["child", "grandchild"]));
         assert!(forest.iter().all(|s| s.session.harness == crate::Harness::Codex));
+        // A `--subagents` pass asks once per parent: the ledger is parsed once per file state.
+        let rows = crate::lanes::read_ledger();
+        crate::subagent_tree_of(&parent).unwrap();
+        crate::subagent_tree_of(&SessionRef::new(
+            "other",
+            crate::Harness::Codex,
+            world.base.join("other.jsonl"),
+        ))
+        .unwrap();
+        assert!(
+            std::sync::Arc::ptr_eq(&rows, &crate::lanes::read_ledger()),
+            "unchanged: not reparsed"
+        );
+        crate::lanes::append_lane_event(&row("late", "root", "root")).unwrap();
+        let after = crate::lanes::read_ledger();
+        assert!(!std::sync::Arc::ptr_eq(&rows, &after), "an append is read");
+        assert_eq!(after.len(), rows.len() + 1);
     }
 
     use crate::harness::Parse;
