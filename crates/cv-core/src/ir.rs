@@ -1195,14 +1195,15 @@ impl Message {
     }
 
     /// Whether this message is a conversational turn in [`SessionRef::message_count`]'s sense: a
-    /// typed prompt or a model reply. Tool results, injected context, notices, errors and carriers
+    /// typed prompt (one that spawns a sub-agent, an `@agent` mention, included) or a model reply
+    /// (one that spawns, included). Tool results, injected context, notices, errors and carriers
     /// are not. The count a full read certifies in the catalog's counts record.
     pub fn is_turn(&self) -> bool {
         matches!(
             (self.role, self.kind),
-            (Role::User, MessageKind::Prompt)
+            (Role::User | Role::Assistant, MessageKind::SubagentSpawn)
+                | (Role::User, MessageKind::Prompt)
                 | (Role::Assistant, MessageKind::Reply)
-                | (Role::Assistant, MessageKind::SubagentSpawn)
         )
     }
 
