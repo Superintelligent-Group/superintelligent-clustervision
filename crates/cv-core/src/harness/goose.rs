@@ -229,7 +229,10 @@ impl Adapter for Goose {
             if seen_ids.contains(&name) {
                 continue;
             }
-            if let Some(found) = crate::Skipped::listed(&path, legacy::discover(&name, &path).map(Some)) {
+            // A legacy file is read whole (its UTF-8 inclusion contract); the ref depends on its
+            // bytes and name alone, so it is cached under the file's identity.
+            let found = crate::discover_cache::cached_scan_checked(&path, || legacy::discover(&name, &path).map(Some));
+            if let Some(found) = crate::Skipped::listed(&path, found) {
                 out.push(found);
             }
         }
@@ -1947,6 +1950,41 @@ mod tests {
             matches!(&s.messages[2].content[0], Block::ToolResult { tool_name, content, .. }
             if tool_name.as_deref() == Some("developer__shell") && content.matches_str("/home/u/old") == Some(true))
         );
+    }
+
+    /// Legacy discovery reads a whole file; an unchanged file is not read again, a new legacy
+    /// session is read alone.
+    #[test]
+    fn unchanged_legacy_files_are_not_rescanned() -> Result<()> {
+        let world = crate::test_world("goose-legacy-cache");
+        let dir = world.base.join("sessions");
+        std::fs::create_dir_all(&dir)?;
+        let context = crate::discover_cache::read::Context::current();
+        let _scope = context.enter();
+        let write = |name: &str| {
+            std::fs::write(
+                dir.join(format!("{name}.jsonl")),
+                "{\"description\":\"legacy\",\"working_dir\":\"/w\"}\n{\"role\":\"user\",\"created\":1,\"content\":[]}\n",
+            )
+        };
+        for i in 0..4 {
+            write(&format!("s{i}"))?;
+        }
+        let scanned = || {
+            let mut all = legacy::SCANNED.lock().unwrap();
+            let mine = all.iter().filter(|p| p.starts_with(&dir)).count();
+            all.retain(|p| !p.starts_with(&dir));
+            mine
+        };
+        let adapter = Goose::with_sessions_dir(&dir);
+        let first = adapter.discover()?;
+        assert_eq!((first.refs.len(), scanned()), (4, 4));
+        let again = adapter.discover()?;
+        assert_eq!((again.refs.len(), scanned()), (4, 0), "unchanged files are not reread");
+        assert_eq!(serde_json::to_value(&first.refs)?, serde_json::to_value(&again.refs)?);
+        write("s4")?;
+        assert_eq!((adapter.discover()?.refs.len(), scanned()), (5, 1));
+        Ok(())
     }
 
     #[test]

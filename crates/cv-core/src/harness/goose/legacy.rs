@@ -131,7 +131,12 @@ fn read_message(
     Ok(Some(message))
 }
 
+#[cfg(test)]
+pub(super) static SCANNED: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
+
 pub(super) fn discover(name: &str, path: &Path) -> Result<SessionRef> {
+    #[cfg(test)]
+    SCANNED.lock().unwrap().push(path.to_path_buf());
     let source = JsonSource::capture(path)?;
     let file = std::fs::File::open(path)?;
     let metadata = file.metadata()?;
