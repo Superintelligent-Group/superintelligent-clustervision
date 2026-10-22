@@ -839,21 +839,7 @@ mod tests {
         let mut frozen = Frozen::new("lmstudio-turns");
         for (case, text) in cases.into_iter().enumerate() {
             let value: Value = serde_json::from_str(text).unwrap();
-            let fields = Fields::parse(JsonView::from(&value), &["versions", "currentlySelected"]).unwrap();
-            let actual = if let Some(fields) = fields {
-                if let Some(versions) = fields.get("versions") {
-                    projected_selected_version(&fields, versions)
-                        .unwrap()
-                        .and_then(|(_, version, _)| {
-                            projected_version(version, &mut None, &Demand::RICH, At(0, 0)).unwrap()
-                        })
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            let selected = serde_json::to_value(actual).unwrap();
+            let selected = serde_json::to_value(selected(&value)).unwrap();
             let mut actual = Vec::new();
             if let Some(fields) = Fields::parse(JsonView::from(&value), &["versions", "currentlySelected"]).unwrap() {
                 if let Some(versions) = fields.get("versions") {
