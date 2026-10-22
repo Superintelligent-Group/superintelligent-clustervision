@@ -47,20 +47,24 @@ pub(super) fn transcript(
                     } if msg.role == Role::Tool => Some((tool_use_id.as_str(), content)),
                     _ => None,
                 });
-                if let Some(result) = results.next() {
-                    write(Some(result))?;
-                    for result in results {
-                        write(Some(result))?;
+                match results.next() {
+                    // One native item per result, each answering its call by `toolCallId`.
+                    Some(first) => {
+                        write(Some(first))?;
+                        for result in results {
+                            write(Some(result))?;
+                        }
                     }
-                } else {
                     // A native tool message answers one call by `toolCallId`; a tool turn with no
                     // result has none to name, and an empty id is not one. Fail closed.
-                    anyhow::ensure!(
-                        msg.role != Role::Tool,
-                        "Continue cannot hold a tool turn with no tool result ({}): it has no toolCallId",
-                        msg.id.as_deref().unwrap_or("no id")
-                    );
-                    write(None)?;
+                    None => {
+                        anyhow::ensure!(
+                            msg.role != Role::Tool,
+                            "Continue cannot hold a tool turn with no tool result ({}): it has no toolCallId",
+                            msg.id.as_deref().unwrap_or("no id")
+                        );
+                        write(None)?;
+                    }
                 }
             }
             w.write_all(b"]")?;
@@ -169,31 +173,38 @@ fn item(
                 w.write_all(b"]")?;
                 Ok(())
             })?;
-            if msg.role == Role::Assistant && msg.content.iter().any(|b| matches!(b, Block::ToolUse { .. })) {
+            // The calls are collected once; the `toolCalls` field is written only when there is one.
+            let calls: Vec<_> = msg
+                .content
+                .iter()
+                .filter_map(|b| match b {
+                    Block::ToolUse { id, name, input, .. } if msg.role == Role::Assistant => Some((id, name, input)),
+                    _ => None,
+                })
+                .collect();
+            if !calls.is_empty() {
                 message.field_with("toolCalls", |w| {
                     w.write_all(b"[")?;
                     let mut first = true;
-                    for b in &msg.content {
-                        if let Block::ToolUse { id, name, input, .. } = b {
-                            if !first {
-                                w.write_all(b",")?;
-                            }
-                            first = false;
-                            let mut call = ObjectWriter::new(w)?;
-                            call.field("id", id)?;
-                            call.field("type", "function")?;
-                            call.field_with("function", |w| {
-                                let mut f = ObjectWriter::new(w)?;
-                                f.field("name", name)?;
-                                f.field_with("arguments", |w| {
-                                    crate::harness::store::text::generate_string(w, |builder| {
-                                        input.with_view(|view| builder.push_json(view))
-                                    })
-                                })?;
-                                f.finish()
-                            })?;
-                            call.finish()?;
+                    for (id, name, input) in &calls {
+                        if !first {
+                            w.write_all(b",")?;
                         }
+                        first = false;
+                        let mut call = ObjectWriter::new(w)?;
+                        call.field("id", id)?;
+                        call.field("type", "function")?;
+                        call.field_with("function", |w| {
+                            let mut f = ObjectWriter::new(w)?;
+                            f.field("name", name)?;
+                            f.field_with("arguments", |w| {
+                                crate::harness::store::text::generate_string(w, |builder| {
+                                    input.with_view(|view| builder.push_json(view))
+                                })
+                            })?;
+                            f.finish()
+                        })?;
+                        call.finish()?;
                     }
                     w.write_all(b"]")?;
                     Ok(())
@@ -558,9 +569,8 @@ mod tests {
         assert_eq!(fs::read(index)?, index_before);
         Ok(())
     }
-}
-#[test]
-fn wide_grouped_tool_results_preserve_each_item_and_empty_context() -> Result<()> {
+
+
     let world = crate::test_world("continue-wide-grouped-results");
     for count in [1, 128, 8192] {
         let mut session = Session::new("source", Harness::Continue);
@@ -598,6 +608,8 @@ fn wide_grouped_tool_results_preserve_each_item_and_empty_context() -> Result<()
     }
     Ok(())
 }
+
+
 /// A tool turn with no result has no `toolCallId` to write: the emit fails and publishes nothing.
 #[test]
 fn tool_turn_without_result_fails_closed() -> Result<()> {
@@ -613,8 +625,9 @@ fn tool_turn_without_result_fails_closed() -> Result<()> {
         new_id: Some("fixed".into()),
         ..Default::default()
     };
-    let err = super::emit(&session, &dest, &opts).unwrap_err();
+    let err = emit(&session, &dest, &opts).unwrap_err();
     assert!(format!("{err:#}").contains("toolCallId"), "{err:#}");
     assert!(!dest.join("fixed.json").exists());
     Ok(())
+}
 }
