@@ -46,6 +46,8 @@
 
 - Zed, Cursor, Devin, Hermes and OpenClaw re-decode only sessions whose rows moved, and read each shared table or registry once per state.
 
+- Claude fork inference no longer mistakes a SessionStart hook's earlier timestamp for a copied head; only a copied first prompt or boundary counts.
+
 - Search staleness counts the preferred copy of each session, avoiding false drift from older duplicates.
 
 - `cv search`, `/api/search` and `-q text:` read what the index has not seen live, from its resume mark, within `--live-bytes` (256 MiB); `--frozen` reads none.
