@@ -760,12 +760,18 @@ impl Watcher {
     }
 
     /// Offer every followed source on the same discovery/filter loop, without first reading its
-    /// message tail. No trigger gates the offer — the consumer validates source and derived
-    /// artifact freshness itself, performs its one required read and returns the completed
-    /// count/baseline only after publication succeeds. Failure leaves the previous position
-    /// untouched, so the next poll retries even without a new append.
+    /// message tail. The consumer validates source and derived artifact freshness itself,
+    /// performs its one required read and returns the completed count/baseline only after
+    /// publication succeeds. Failure leaves the previous position untouched, so the next poll
+    /// retries even without a new append.
+    ///
+    /// A followed source is offered again only when [`poll`](Self::poll) would read it (its
+    /// trigger moved, or its source no longer matches the accepted baseline) or when `kept`
+    /// says the consumer's own output for it no longer stands. An unchanged fleet costs one
+    /// baseline check and one `kept` per session, not one consumer validation each.
     pub fn offer_sources(
         &mut self,
+        mut kept: impl FnMut(&SessionRef) -> bool,
         mut take: impl FnMut(EventKind, &SessionRef, usize) -> Option<(usize, ReadState)>,
     ) -> usize {
         let _reads = crate::source::read_scope();
@@ -775,6 +781,7 @@ impl Watcher {
             let trigger = Self::trigger_of(&r);
             let (kind, previous) = match self.seen.get(&key) {
                 None => (EventKind::New, 0),
+                Some(state) if !state.stale(trigger, &r) && kept(&r) => continue,
                 Some(state) => {
                     let Some(previous) = resolve(&r, state.mark) else {
                         continue;
@@ -1348,7 +1355,7 @@ mod tests {
         for source_poll in [false, true] {
             let mut watcher = Watcher::from_cursor(Filter::default(), cursor.clone(), replacement);
             if source_poll {
-                assert_eq!(watcher.offer_sources(|_, _, _| None), 0);
+                assert_eq!(watcher.offer_sources(|_| true, |_, _, _| None), 0);
             } else {
                 assert!(watcher
                     .try_poll(
@@ -1365,11 +1372,14 @@ mod tests {
             let cursor = Cursor::decode(&encoded).unwrap();
             assert!(cursor.is_empty(), "vanished position survived: {encoded}");
             let mut resumed = Watcher::from_cursor(Filter::default(), cursor, original);
-            resumed.offer_sources(|kind, _, previous| {
-                assert_eq!(kind, EventKind::New);
-                assert_eq!(previous, 0, "reappeared identity inherited its removed position");
-                None
-            });
+            resumed.offer_sources(
+                |_| true,
+                |kind, _, previous| {
+                    assert_eq!(kind, EventKind::New);
+                    assert_eq!(previous, 0, "reappeared identity inherited its removed position");
+                    None
+                },
+            );
         }
     }
 
@@ -1731,31 +1741,83 @@ mod tests {
         let mut watcher = Watcher::with_discovery(Filter::default(), true, discover);
         for _ in 0..2 {
             assert_eq!(
-                watcher.offer_sources(|kind, _, previous| {
-                    assert_eq!(kind, EventKind::New);
-                    assert_eq!(previous, 0);
-                    None
-                }),
+                watcher.offer_sources(
+                    |_| true,
+                    |kind, _, previous| {
+                        assert_eq!(kind, EventKind::New);
+                        assert_eq!(previous, 0);
+                        None
+                    }
+                ),
                 0
             );
             assert!(watcher.to_cursor().is_empty());
         }
         assert_eq!(
-            watcher.offer_sources(|kind, r, previous| {
-                assert_eq!(kind, EventKind::New);
-                assert_eq!(previous, 0);
-                Some((4, ReadState::baseline(r)))
-            }),
+            watcher.offer_sources(
+                |_| true,
+                |kind, r, previous| {
+                    assert_eq!(kind, EventKind::New);
+                    assert_eq!(previous, 0);
+                    Some((4, ReadState::baseline(r)))
+                }
+            ),
             1
         );
         assert_eq!(
-            watcher.offer_sources(|kind, r, previous| {
-                assert_eq!(kind, EventKind::Updated);
-                assert_eq!(previous, 4);
-                Some((4, ReadState::baseline(r)))
-            }),
+            watcher.offer_sources(
+                |_| true,
+                |kind, r, previous| {
+                    assert_eq!(kind, EventKind::Updated);
+                    assert_eq!(previous, 4);
+                    Some((4, ReadState::baseline(r)))
+                }
+            ),
             1
         );
+    }
+
+    #[test]
+    fn an_unchanged_source_is_offered_once_and_one_change_offers_it_once_more() {
+        let world = crate::test_world("watch-unchanged-source-offered-once");
+        let path = world.base.join("offered.jsonl");
+        let line = |i: usize| {
+            format!(
+                "{}\n",
+                serde_json::json!({"type":"user","uuid":format!("u{i}"),"message":{"role":"user","content":"hi"}})
+            )
+        };
+        std::fs::write(&path, line(0)).unwrap();
+        let discovered = path.clone();
+        let mut watcher = Watcher::with_discovery(Filter::default(), true, move || {
+            vec![sref(Harness::Claude, discovered.clone())]
+        });
+        let mut offers = 0;
+        let mut offer = |watcher: &mut Watcher, kept: bool| {
+            watcher.offer_sources(
+                |_| kept,
+                |_, r, _| {
+                    offers += 1;
+                    let adapter = harness::for_harness(r.harness).unwrap();
+                    let pass = read::read(adapter.as_ref(), r, None, 0, 0).ok()?;
+                    Some((pass.total, pass.accepted(pass.total)))
+                },
+            )
+        };
+        assert_eq!(offer(&mut watcher, true), 1);
+        for _ in 0..3 {
+            assert_eq!(offer(&mut watcher, true), 0, "an unchanged source is not offered again");
+        }
+        assert_eq!(
+            offer(&mut watcher, false),
+            1,
+            "the consumer's own output went: offer again"
+        );
+        std::fs::write(&path, format!("{}{}", line(0), line(1))).unwrap();
+        assert_eq!(offer(&mut watcher, true), 1, "one change, one offer");
+        assert_eq!(offer(&mut watcher, true), 0);
+        drop(offer);
+        assert_eq!(offers, 3);
     }
 
     #[test]

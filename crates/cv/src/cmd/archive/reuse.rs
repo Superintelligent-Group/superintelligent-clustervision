@@ -163,6 +163,17 @@ fn entry(session: &Session, title: Option<String>, turns: usize, written: usize)
 }
 
 impl Archive {
+    /// The identities of what an archive pass left for `r` (its session file and resume state),
+    /// when both exist and the platform's file identity is exact enough to stand for their
+    /// content (Unix: inode and ctime). Elsewhere `None`: every pass validates in full.
+    pub(super) fn outputs(&self, r: &SessionRef) -> Option<[cv_core::source::FileId; 2]> {
+        if !cfg!(unix) {
+            return None;
+        }
+        let id = |path: PathBuf| cv_core::source::FileId::of(&fs::metadata(path).ok()?);
+        Some([id(self.session_path(r.harness, &r.id))?, id(self.source_path(r))?])
+    }
+
     fn source_path(&self, r: &SessionRef) -> PathBuf {
         self.home
             .join("archive-source")
