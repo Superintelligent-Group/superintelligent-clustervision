@@ -254,9 +254,8 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
                 // ported session read back `usage: 393 → 0`. Only when the turn actually wrote
                 // records Codex reads back: trailing nothing (or only an empty `reasoning` item,
                 // which its reader drops) the event would synthesize a bare usage-only turn.
-                if lines.record_count() > first_record
-                    && !unrepresentable_checked(Harness::Codex, opts.thinking, msg, &resolver)?
-                {
+                let representable = !unrepresentable_checked(Harness::Codex, opts.thinking, msg, &resolver)?;
+                if lines.record_count() > first_record && representable {
                     if let Some(info) = codex_token_usage(msg.usage.as_ref())? {
                         writer::value(
                             &mut lines,

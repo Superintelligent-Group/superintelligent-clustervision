@@ -117,18 +117,19 @@ fn holds(path: &Path, needle: &str) -> bool {
 /// When the fork at `path` began, so its records written earlier are its source's copied turns;
 /// `None` unless a source is found ([`source_tracked`]).
 pub(super) fn copied_before(path: &Path, sink: &mut dyn crate::MessageSink) -> Option<DateTime<Utc>> {
-    source_tracked(path, sink)?;
-    head(path)?.began
+    let (_, began) = source_tracked(path, sink)?;
+    began
 }
 
 /// The session id `path` was forked from, when its head says it is a fork and a sibling holds the
 /// records it copied.
 #[cfg(test)]
 pub(super) fn source(path: &Path) -> Option<String> {
-    source_tracked(path, &mut crate::stream::Discard)
+    source_tracked(path, &mut crate::stream::Discard).map(|(id, _)| id)
 }
 
-pub(super) fn source_tracked(path: &Path, sink: &mut dyn crate::MessageSink) -> Option<String> {
+/// The source's session id and `path`'s own head's begin time, from one head read.
+pub(super) fn source_tracked(path: &Path, sink: &mut dyn crate::MessageSink) -> Option<(String, Option<DateTime<Utc>>)> {
     let me = head(path)?;
     if !me.copied {
         return None;
@@ -146,12 +147,12 @@ pub(super) fn source_tracked(path: &Path, sink: &mut dyn crate::MessageSink) -> 
                 .and_then(|n| n.to_str())
                 .is_some_and(|n| n.ends_with(".jsonl") && !n.ends_with(".flat.jsonl"))
         })
+        .filter(|p| p.is_file())
         .filter(|p| {
             sink.dependency(p);
-            p.is_file()
+            // Live at the copied record's time: written since.
+            modified(p).is_some_and(|m| m >= at)
         })
-        // Live at the copied record's time: written since.
-        .filter(|p| modified(p).is_some_and(|m| m >= at))
         .filter_map(|p| {
             let h = head(&p)?;
             let first = h.at?;
@@ -169,6 +170,7 @@ pub(super) fn source_tracked(path: &Path, sink: &mut dyn crate::MessageSink) -> 
             }
         })
         .and_then(|(_, p, _)| p.file_stem().and_then(|s| s.to_str()).map(str::to_string))
+        .map(|id| (id, me.began))
 }
 
 #[cfg(test)]

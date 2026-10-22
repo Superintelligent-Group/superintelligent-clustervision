@@ -17,6 +17,7 @@ pub(crate) mod emit;
 mod fork;
 mod hook;
 mod metadata;
+mod notification;
 pub(crate) mod record;
 pub(crate) mod replay;
 /// The sidecar tree beside a transcript (`subagents/`, `workflows/`, `journal.jsonl`): every path
@@ -478,7 +479,7 @@ impl Adapter for Claude {
 /// after every stream, whole or resumed, since it reads other files.
 fn with_fork_source(mut s: Session, path: &Path, sink: &mut dyn MessageSink) -> Session {
     if s.lineage.parent.is_none() && s.lineage.forked_from.is_none() {
-        s.lineage.forked_from = fork::source_tracked(path, sink);
+        s.lineage.forked_from = fork::source_tracked(path, sink).map(|(id, _)| id);
     }
     s
 }
@@ -682,7 +683,7 @@ fn user_kind_from_head(origin: Origin, head: &str) -> (MessageKind, Origin) {
     }
     if head.starts_with("<task-notification>") {
         let summary = tag_inner(head, "summary").unwrap_or("").trim_start();
-        if summary.starts_with("Agent ") || record::contains_ascii_insensitive(summary.as_bytes(), b"workflow") {
+        if summary.starts_with("Agent ") || notification::contains_ascii_insensitive(summary.as_bytes(), b"workflow") {
             return (MessageKind::SubagentReturn, Origin::Subagent);
         }
     }
@@ -1125,7 +1126,9 @@ fn scan_at(path: &Path, from: Option<&Checkpoint>) -> Result<(SessionRef, Option
     metadata::FRAMED.with(|frames| frames.borrow_mut().push((offset, source.len() - offset)));
     scan.read(&read, offset)?;
     let checkpoint = scan.checkpoint();
-    Ok((scan.finish(), checkpoint))
+    let (session, writer_version) = scan.finish();
+    crate::discover_cache::read::Context::current().observe_writer(&session, writer_version.as_deref());
+    Ok((session, checkpoint))
 }
 
 /// The classification shared by owned and borrowed records. Content storage never chooses kind.

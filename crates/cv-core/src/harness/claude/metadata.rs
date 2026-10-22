@@ -161,9 +161,9 @@ impl Scan {
         Ok(())
     }
 
-    pub(super) fn finish(self) -> SessionRef {
-        crate::discover_cache::read::Context::current().observe_writer(&self.session, self.writer_version.as_deref());
-        self.session
+    /// The discovered reference and the writer version it read, for the caller to observe.
+    pub(super) fn finish(self) -> (SessionRef, Option<String>) {
+        (self.session, self.writer_version)
     }
 }
 
