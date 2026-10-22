@@ -609,15 +609,6 @@ mod db {
     use super::super::ts_from_epoch;
     use super::*;
     use rusqlite::types::ValueRef;
-    use std::collections::HashMap;
-
-    /// A message record whose `role` is `user` or `assistant`.
-    fn is_turn(view: crate::json::JsonView<'_>) -> Result<bool> {
-        Ok(matches!(
-            record::string(view.get("role")?)?.as_deref(),
-            Some("user" | "assistant")
-        ))
-    }
 
     /// Session columns the IR first-classes (`parent_id` is `Lineage::parent`; everything else lands
     /// in `Session::extra["opencode"]` verbatim).
@@ -685,15 +676,13 @@ mod db {
     pub(super) fn discover(db: &Path) -> Result<Vec<SessionRef>> {
         crate::harness::store::sqlite::cached_discover(db, || {
             let conn = open_ro(db)?;
-            conn.read(|reader, reads| discover_snapshot(db, reads, reader))
+            conn.read(|reader, _| discover_snapshot(db, reader))
         })
     }
 
-    fn discover_snapshot(
-        db: &Path,
-        reads: &crate::source::ReadSet,
-        conn: &rusqlite::Connection,
-    ) -> Result<Vec<SessionRef>> {
+    /// Counts stay unknown: a turn's kind can rest on its parts (`compaction`, an `@agent`
+    /// mention) or its `error`, so complete reads and indexing count and certify them.
+    fn discover_snapshot(db: &Path, conn: &rusqlite::Connection) -> Result<Vec<SessionRef>> {
         let _snapshot = crate::harness::store::sqlite::snapshot(conn)?;
         let mut refs = if has_table(conn, "session_v2") && has_table(conn, "session_message") {
             discover_v2(conn, db)?
@@ -702,33 +691,17 @@ mod db {
         };
         if has_table(conn, "session") && has_table(conn, "message") {
             let seen: HashSet<String> = refs.iter().map(|r| r.id.clone()).collect();
-            refs.extend(discover_v1(conn, db, reads, &seen)?);
+            refs.extend(discover_v1(conn, db, &seen)?);
         }
         Ok(refs)
     }
 
     fn discover_v2(conn: &rusqlite::Connection, db: &Path) -> Result<Vec<SessionRef>> {
-        let mut counts: HashMap<String, usize> = HashMap::new();
-        {
-            let mut stmt = conn.prepare(
-                "SELECT session_id, COUNT(*) FROM session_message WHERE type IN ('user', 'assistant') GROUP BY session_id",
-            )?;
-            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
-            for row in rows {
-                let (sid, n) = row?;
-                counts.insert(sid, n.max(0) as usize);
-            }
-        }
         let mut stmt = conn.prepare(
             "SELECT id, directory, title, time_created, time_updated FROM session_v2 ORDER BY time_updated DESC",
         )?;
         let refs = stmt
             .query_map([], |r| session_ref(db, r))?
-            .map(|row| {
-                let mut r = row?;
-                r.message_count = Some(counts.get(&r.id).copied().unwrap_or(0));
-                Ok(r)
-            })
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(refs)
     }
@@ -750,47 +723,16 @@ mod db {
         })
     }
 
-    /// Count the turns the stream reads: `message` cells whose final `role` is user or assistant.
-    fn discover_v1(
-        conn: &rusqlite::Connection,
-        db: &Path,
-        reads: &crate::source::ReadSet,
-        seen: &HashSet<String>,
-    ) -> Result<Vec<SessionRef>> {
-        // Migrated stores retain old message bodies. Select only surviving legacy sessions
-        // before touching those bodies; a fully migrated store needs no legacy message scan.
-        let mut refs: Vec<SessionRef> = conn
+    /// The 1.x sessions 2.x does not already cover.
+    fn discover_v1(conn: &rusqlite::Connection, db: &Path, seen: &HashSet<String>) -> Result<Vec<SessionRef>> {
+        Ok(conn
             .prepare("SELECT id, directory, title, time_created, time_updated FROM session ORDER BY time_updated DESC")?
             .query_map([], |r| session_ref(db, r))?
             .filter_map(|row| match row {
                 Ok(reference) if seen.contains(&reference.id) => None,
                 other => Some(other),
             })
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        if refs.is_empty() {
-            return Ok(refs);
-        }
-        let wanted: HashSet<&str> = refs.iter().map(|reference| reference.id.as_str()).collect();
-        let mut counts: HashMap<String, usize> = HashMap::new();
-        let cells = Cells::new(conn, db, reads, "message")?;
-        let mut stmt = conn.prepare(&format!("SELECT session_id, {} FROM message", cells.select("data")))?;
-        let mut rows = stmt.query([])?;
-        while let Some(row) = rows.next()? {
-            let sid = row.get::<_, String>(0)?;
-            if !wanted.contains(sid.as_str()) {
-                continue;
-            }
-            let Some(cell) = cells.cell(conn, "message", "data", row, 1)? else {
-                continue;
-            };
-            if cells.read(cell, |view| Ok(view.is_object()? && is_turn(view)?))? == Some(true) {
-                *counts.entry(sid).or_default() += 1;
-            }
-        }
-        for reference in &mut refs {
-            reference.message_count = Some(counts.get(&reference.id).copied().unwrap_or(0));
-        }
-        Ok(refs)
+            .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// One row as a JSON object keyed by column name (`NULL`s dropped, JSON columns decoded).
@@ -1082,31 +1024,27 @@ mod db {
                         std::ptr::null_mut(),
                     );
                 }
-                let refs = discover_snapshot(&path, &Default::default(), &conn)?;
+                let refs = discover_snapshot(&path, &conn)?;
                 assert_eq!(refs.len(), 1);
                 assert_eq!(refs[0].title.as_deref(), Some("current title"));
-                assert_eq!(
-                    refs[0].message_count,
-                    Some(0),
-                    "a migrated session with no turns is counted"
-                );
+                assert_eq!(refs[0].message_count, None, "discovery defers the count");
             }
             Ok(())
         }
 
         #[test]
-        fn mixed_store_keeps_unmigrated_counts_and_order() -> Result<()> {
+        fn mixed_store_keeps_unmigrated_sessions_in_order() -> Result<()> {
             let world = cv_testkit::World::new("opencode-mixed-discovery");
             let path = world.base.join("provenance");
             fs::write(&path, b"unchanged")?;
             let conn = rusqlite::Connection::open_in_memory()?;
             conn.execute_batch(r#"CREATE TABLE session(id TEXT PRIMARY KEY,directory TEXT,title TEXT,time_created INTEGER,time_updated INTEGER); CREATE TABLE message(id TEXT PRIMARY KEY,session_id TEXT,data TEXT); CREATE TABLE session_v2(id TEXT PRIMARY KEY,directory TEXT,title TEXT,time_created INTEGER,time_updated INTEGER); CREATE TABLE session_message(id TEXT PRIMARY KEY,session_id TEXT,type TEXT); INSERT INTO session VALUES('covered','/old','old',1,3),('older','/old','older',1,1),('newer','/old','newer',1,2); INSERT INTO session_v2 VALUES('covered','/new','current',2,2); INSERT INTO message VALUES('hidden','covered','{broken'),('orphan','missing','{broken'),('old','older','{"role":"user"}'),('new','newer','{"role":"system","role":"assistant"}');"#)?;
-            let refs = discover_snapshot(&path, &Default::default(), &conn)?;
+            let refs = discover_snapshot(&path, &conn)?;
             assert_eq!(
                 refs.iter()
                     .map(|r| (r.id.as_str(), r.message_count))
                     .collect::<Vec<_>>(),
-                vec![("covered", Some(0)), ("newer", Some(1)), ("older", Some(1))]
+                vec![("covered", None), ("newer", None), ("older", None)]
             );
             Ok(())
         }
@@ -2153,7 +2091,7 @@ mod tests {
 
     #[cfg(feature = "sqlite")]
     #[test]
-    fn sqlite_v1_discovery_counts_follow_readable_final_roles() {
+    fn sqlite_v1_turns_follow_readable_final_roles() {
         let world = cv_testkit::World::new("opencode-role-count");
         let dir = world.base.clone();
         let path = dir.join("opencode.db");
@@ -2200,7 +2138,7 @@ mod tests {
                 .into_iter()
                 .find(|reference| reference.id == id)
                 .unwrap();
-            assert_eq!(reference.message_count, Some(*new));
+            assert_eq!(reference.message_count, None, "discovery defers the count");
             let session = adapter.parse(&reference).unwrap();
             assert_eq!(
                 session
@@ -2210,6 +2148,7 @@ mod tests {
                     .count(),
                 *new
             );
+            assert_eq!(session.messages.iter().filter(|m| m.is_turn()).count(), *new);
         }
         drop(connection);
     }
@@ -2236,7 +2175,7 @@ mod tests {
         fs::remove_file(&shm).unwrap();
         let adapter = OpenCode::with_db(db);
         let reference = adapter.discover().unwrap().remove(0);
-        assert_eq!(reference.message_count, Some(2));
+        assert_eq!(reference.message_count, None);
         let mut messages = Vec::new();
         let mut sink = crate::stream::TryFnSink::new(|message| {
             messages.push(message);
@@ -2320,11 +2259,7 @@ mod tests {
             assert_eq!(r.path, db, "a db-backed ref points at the database");
             assert_eq!(r.cwd.as_deref(), Some(std::path::Path::new("/home/dev/proj")));
             assert_eq!(r.title.as_deref(), Some("Removing debug comments"));
-            assert_eq!(
-                r.message_count,
-                Some(2),
-                "user + assistant turns, from the role inside `data`"
-            );
+            assert_eq!(r.message_count, None, "discovery defers the count to a full read");
             assert!(r.created_at.is_some() && r.updated_at >= r.created_at);
 
             let s = oc.parse(r).unwrap();
