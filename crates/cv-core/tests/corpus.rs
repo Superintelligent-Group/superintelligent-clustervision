@@ -284,7 +284,12 @@ fn summarize_one(adapter: &dyn Adapter, r: &SessionRef, version_dir: &Path) -> V
     );
     json!({
         "id": s.id,
-        "path": r.path.strip_prefix(version_dir).unwrap_or(&r.path),
+        // No fallback: a session resolving outside its version dir would otherwise commit this
+        // machine's absolute paths into a summary that lives in git forever. (strip_prefix's Err
+        // is the path itself, so the expect panic names it.)
+        "path": r.path
+            .strip_prefix(version_dir)
+            .expect("session outside its version dir — a fallback would write machine paths"),
         "messages": s.messages.len(),
         "sequence": s.messages.iter().map(|m| format!("{}/{}", tag(m.role), tag(m.kind))).collect::<Vec<_>>(),
         "blocks": blocks,
@@ -363,8 +368,11 @@ fn every_corpus_version_reads_as_its_golden_summary() {
                 fs::read_to_string(&path).unwrap_or_else(|e| panic!("{label}: {e} (CV_REGEN_CORPUS=1 writes it)"));
             if want != text {
                 failures.push(format!(
-                    "{label}: summary differs from {}\n--- got:\n{text}",
-                    path.display()
+                    "{label}: summary differs from {} ({} bytes; the got text is the first \
+                     excerpt only — CV_REGEN_CORPUS=1 rewrites, then read the git diff)\n--- got:\n{}…",
+                    path.display(),
+                    text.len(),
+                    text.chars().take(2_000).collect::<String>()
                 ));
             }
         }
@@ -542,16 +550,26 @@ fn claude_corpus_workflow_runs_read_as_recorded() {
         let label = format!("claude/{}", v.file_name().unwrap().to_string_lossy());
         let mut refs = claude_adapter(&v).discover().expect("discover");
         refs.sort_by(|a, b| a.id.cmp(&b.id));
-        let children: usize = refs.iter().map(|r| claude_children(r).len()).sum();
-        let on_disk = walkdir::WalkDir::new(&v)
+        // The sets, not the counts: count equality would call a stray on disk a missed child
+        // and could miss a stray-plus-missed pair cancelling out.
+        let rel = |p: &Path| p.strip_prefix(&v).unwrap_or(p).display().to_string();
+        let mut in_tree: Vec<String> = refs.iter().flat_map(|r| claude_children(r)).map(|k| rel(&k.path)).collect();
+        in_tree.sort();
+        let mut on_disk: Vec<String> = walkdir::WalkDir::new(&v)
             .into_iter()
             .filter_map(|e| e.ok())
             .filter(|e| {
                 let n = e.file_name().to_string_lossy();
                 n.starts_with("agent-") && n.ends_with(".jsonl")
             })
-            .count();
-        assert_eq!(children, on_disk, "{label}: subagent_tree missed sub-agent transcripts");
+            .map(|e| rel(e.path()))
+            .collect();
+        on_disk.sort();
+        assert_eq!(
+            in_tree, on_disk,
+            "{label}: the tree's sub-agent transcripts and the agent-*.jsonl files on disk differ \
+             (a stray file on disk, or one subagent_tree missed)"
+        );
         let sessions: Vec<Value> = refs
             .iter()
             .filter_map(|r| {
@@ -586,8 +604,11 @@ fn claude_corpus_workflow_runs_read_as_recorded() {
         let want = fs::read_to_string(&path).unwrap_or_else(|e| panic!("{label}: {e} (CV_REGEN_CORPUS=1 writes it)"));
         if want != text {
             failures.push(format!(
-                "{label}: workflows differ from {}\n--- got:\n{text}",
-                path.display()
+                "{label}: workflows differ from {} ({} bytes; the got text is the first \
+                 excerpt only — CV_REGEN_CORPUS=1 rewrites, then read the git diff)\n--- got:\n{}…",
+                path.display(),
+                text.len(),
+                text.chars().take(2_000).collect::<String>()
             ));
         }
     }
