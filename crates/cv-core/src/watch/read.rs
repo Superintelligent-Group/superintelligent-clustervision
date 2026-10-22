@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 
 const CONSUMER: &str = "watch-full";
 const CHECKPOINT_EVERY: u64 = 256 * 1024;
-const ANCHOR_BYTES: usize = 64 * 1024;
 const METADATA_BYTES: usize = 16 * 1024;
 
 /// The state's version: the mark version ([`crate::resume::version`]). Never the cv release.
@@ -274,7 +273,6 @@ struct Tail<'a> {
     keep: usize,
     messages: Vec<Message>,
     before: Option<stream::Checkpoint>,
-    checkpoint_disabled: bool,
     last: Option<stream::Checkpoint>,
     stop_after_selection: bool,
 }
@@ -362,13 +360,13 @@ impl stream::MessageSink for Tail<'_> {
         }
     }
     fn wants_checkpoint(&mut self, _: u64) -> bool {
-        self.check() && !self.checkpoint_disabled
+        self.check()
     }
+    // No size cap: the pass is amortized (`stream::Pass::amortized`), so the counting layer
+    // spaces checkpoints at least their own encoded size apart and keeping each one costs no
+    // more than the bytes it covers. A cap here stopped anchoring at the first large state and
+    // made every later append re-read from the last small one.
     fn checkpoint(&mut self, cp: &mut stream::Checkpoint) {
-        if !fits(cp, ANCHOR_BYTES) {
-            self.checkpoint_disabled = true;
-            return;
-        }
         if cp.messages().is_some_and(|n| n <= self.skip) {
             self.before = Some(cp.clone());
         }
@@ -491,7 +489,6 @@ pub(super) fn pass(
         keep,
         messages: Vec::new(),
         before: from.cloned(),
-        checkpoint_disabled: false,
         last: from.cloned(),
         stop_after_selection,
     };
@@ -545,9 +542,6 @@ pub(super) fn pass(
     let source = captured.with_reads(&reads);
     let version = crate::resume::version(adapter, CONSUMER);
     let anchor = |cp: &stream::Checkpoint| {
-        if !fits(cp, ANCHOR_BYTES) {
-            return None;
-        }
         Some(Anchor {
             head: crate::resume::MarkHead::of(&primary, cp, &version)?,
             checkpoint: cp.clone(),
@@ -910,6 +904,45 @@ mod tests {
             suffix.parsed_messages,
             pending.parsed_messages,
             serde_json::to_vec(&state.anchor).unwrap().len()
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_checkpoint_state_past_64_kib_still_anchors_an_append() {
+        let dir = std::env::temp_dir().join(format!("cv-watch-wide-anchor-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("wide.jsonl");
+        // The session's cwd rides in every checkpoint, so each one encodes above 64 KiB.
+        let cwd = format!("/{}", "w".repeat(80 * 1024));
+        let line = |i: usize, cwd: Option<&str>| {
+            let mut v = serde_json::json!({"type":"user","uuid":format!("u{i}"),"sessionId":"wide",
+                "message":{"role":"user","content":format!("{i} {}", "x".repeat(256))}});
+            if let Some(cwd) = cwd {
+                v["cwd"] = cwd.into();
+            }
+            format!("{v}\n")
+        };
+        let mut body: String = (0..4096).map(|i| line(i, (i == 0).then_some(cwd.as_str()))).collect();
+        std::fs::write(&path, &body).unwrap();
+        let r = SessionRef::new("wide", Harness::Claude, &path);
+        let adapter = harness::for_harness(r.harness).unwrap();
+        let first = read(adapter.as_ref(), &r, None, 0, 0).unwrap();
+        assert_eq!(first.total, 4096);
+        let state = first.accepted(first.total);
+        let anchor = state.anchor.as_ref().expect("a wide state still anchors");
+        assert!(serde_json::to_vec(&anchor.checkpoint).unwrap().len() > 64 * 1024);
+        body.extend((4096..4100).map(|i| line(i, None)));
+        std::fs::write(&path, &body).unwrap();
+        // One append, one suffix read: not a re-read of the whole transcript.
+        let next = read(adapter.as_ref(), &r, Some(&state), 4096, usize::MAX).unwrap();
+        assert!(next.resumed);
+        assert!(next.parsed_messages < 1024, "replayed {}", next.parsed_messages);
+        let expected = adapter.parse(&r).unwrap();
+        assert_eq!(expected.cwd, Some(PathBuf::from(&cwd)));
+        assert_eq!(
+            serde_json::to_value(&next.messages).unwrap(),
+            serde_json::to_value(&expected.messages[4096..]).unwrap()
         );
         std::fs::remove_dir_all(dir).unwrap();
     }
