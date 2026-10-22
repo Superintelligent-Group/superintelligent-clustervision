@@ -607,3 +607,27 @@ fn consulted_fact_errors_propagate_through_negation_and_boolean_terms() {
     assert!(q("id:a OR tool:edit").matches(&facts).unwrap());
     assert!(!q("id:absent AND tool:edit").matches(&facts).unwrap());
 }
+
+#[test]
+fn created_is_never_answered_from_the_update_time() {
+    // The listing knows only when the session was last written; it was created in January.
+    let r = refx("a", Harness::Claude, None, None, 1);
+    let mut session = Session::new("a", Harness::Claude);
+    session.created_at = "2026-01-01T00:00:00Z".parse().ok();
+    let listing = Facts::from_ref(&r);
+    let parsed = Facts {
+        r: &r,
+        session: Some(&session),
+        ext: &NoExt,
+    };
+    assert_eq!(q("created>2026-05-01").eval(&listing).unwrap(), Tri::Unknown);
+    assert_eq!(q("created>2026-05-01").eval(&parsed).unwrap(), Tri::False);
+    assert_eq!(q("created<2026-02-01").eval(&parsed).unwrap(), Tri::True);
+    session.created_at = None;
+    let parsed = Facts {
+        r: &r,
+        session: Some(&session),
+        ext: &NoExt,
+    };
+    assert_eq!(q("created>2026-05-01").eval(&parsed).unwrap(), Tri::False);
+}

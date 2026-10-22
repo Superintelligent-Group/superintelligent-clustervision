@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `created:` no longer answers from the update time when a listing lacks a creation time; the parsed session decides, and none means no match.
 - A refused exclusive rename says whether the platform lacks it or the kernel/filesystem declined, with the OS error, instead of blaming the filesystem.
 - **Breaking (library):** `formats::FindingKind::ManifestInvalid` reports a manifest that does not parse, previously tagged `source_file_missing`.
 - Compaction scans report a failed summary read with its full cause chain instead of a flattened one-line copy.
