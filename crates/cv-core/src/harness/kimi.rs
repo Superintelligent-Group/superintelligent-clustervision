@@ -2313,7 +2313,6 @@ mod tests {
         // non-local KAOS → "<kaos>_<md5>"
         let h = md5_hex(b"/remote/proj");
         assert_eq!(map.get(&format!("box_{h}")).unwrap(), &PathBuf::from("/remote/proj"));
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2359,7 +2358,6 @@ mod tests {
             default_model_from_config(&dir.join("config.toml")).as_deref(),
             Some("kimi-code/kimi-for-coding")
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2611,9 +2609,6 @@ mod tests {
         // to run only in parse(), so streaming consumers saw assistant turns without usage.
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/kimi/modern/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/11111111-1111-1111-1111-111111111111");
-        if !dir.exists() {
-            return;
-        }
         let r = SessionRef {
             cwd: Some(PathBuf::from("/proj")),
             ..SessionRef::new("11111111-1111-1111-1111-111111111111", Harness::Kimi, dir.clone())
@@ -2648,9 +2643,6 @@ mod tests {
     fn parses_fixture_modern_session() {
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/kimi/modern/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/11111111-1111-1111-1111-111111111111");
-        if !dir.exists() {
-            return;
-        }
         let r = SessionRef {
             cwd: Some(PathBuf::from("/proj")),
             ..SessionRef::new("11111111-1111-1111-1111-111111111111", Harness::Kimi, dir.clone())
@@ -2690,9 +2682,6 @@ mod tests {
     fn parses_fixture_legacy_flat_session() {
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/kimi/legacy/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
-        if !dir.exists() {
-            return;
-        }
         let id = "22222222-2222-2222-2222-222222222222";
         let r = SessionRef::new(id, Harness::Kimi, dir.clone());
         let s = Kimi {
@@ -2771,7 +2760,6 @@ mod tests {
                 .and_then(|x| x.get("segment")),
             Some(&Value::String("context.jsonl".into()))
         );
-        fs::remove_dir_all(&dir).ok();
     }
 
     /// kimi-cli's `Agent` tool keeps each sub-agent under `<session>/subagents/<agent_id>/` in the
@@ -2864,20 +2852,10 @@ mod tests {
                 .and_then(|x| x.get("subagent").and_then(|a| a.get("subagent_type"))),
             Some(&Value::String("coder".into()))
         );
-        fs::remove_dir_all(&dir).ok();
     }
 
     fn write_temp(name: &str, contents: &str) -> PathBuf {
-        let mut d = std::env::temp_dir();
-        d.push(format!(
-            "cv-kimi-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&d).unwrap();
+        let d = cv_testkit::temp_dir("kimi");
         fs::write(d.join(name), contents).unwrap();
         d
     }

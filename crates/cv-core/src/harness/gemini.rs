@@ -1947,11 +1947,7 @@ mod tests {
 
     fn chats_fixture(name: &str) -> (PathBuf, PathBuf) {
         let text = fixture(name);
-        let dir = std::env::temp_dir().join(format!(
-            "cv-gemini-stream-{}-{}",
-            std::process::id(),
-            uuid::Uuid::now_v7()
-        ));
+        let dir = cv_testkit::temp_dir("gemini-stream");
         let chats = dir.join("chats");
         fs::create_dir_all(&chats).unwrap();
         let file = chats.join(name);
@@ -2209,11 +2205,7 @@ mod tests {
 
     /// A fake gemini-cli runtime root (`<runtime>/tmp/<id>/chats/<recording>` + registry files).
     fn runtime_fixture(tag: &str, project_id: &str, recording: &str) -> (PathBuf, PathBuf) {
-        let runtime = std::env::temp_dir().join(format!(
-            "cv-gemini-{tag}-{}-{}",
-            std::process::id(),
-            uuid::Uuid::now_v7()
-        ));
+        let runtime = cv_testkit::temp_dir(&format!("gemini-{tag}"));
         let chats = runtime.join("tmp").join(project_id).join("chats");
         fs::create_dir_all(&chats).unwrap();
         let file = chats.join(recording);
@@ -2253,7 +2245,7 @@ mod tests {
     /// matched that outer `tmp`, so `<runtime>` became `/` and every cwd came back `None`.
     #[test]
     fn runtime_root_under_a_tmp_directory_still_resolves_cwd() {
-        let outer = std::env::temp_dir().join(format!("cv-gemini-outer-{}", uuid::Uuid::now_v7()));
+        let outer = cv_testkit::temp_dir("gemini-outer");
         let runtime = outer.join("tmp").join("gemini-runtime");
         let chats = runtime.join("tmp").join("proj-id").join("chats");
         fs::create_dir_all(&chats).unwrap();

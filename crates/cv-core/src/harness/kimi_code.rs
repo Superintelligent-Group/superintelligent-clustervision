@@ -2754,7 +2754,7 @@ mod tests {
     /// A store mirroring a real `~/.kimi-code` (protocol 1.5): one session with a main agent + one
     /// sub-agent, a workspaces map, and an index with a tombstone for a second (deleted) session.
     fn fixture_root() -> PathBuf {
-        let root = std::env::temp_dir().join(format!("cv-kimi-code-{}", uuid::Uuid::new_v4()));
+        let root = cv_testkit::temp_dir("kimi-code");
         let sdir = root
             .join("sessions")
             .join("wd_proj_fd4cb822f4b3")
@@ -3187,7 +3187,7 @@ mod tests {
     /// context. A `kimi fork` (2.x) names its source in `state.json.forkedFrom`.
     #[test]
     fn undo_is_a_branch_and_fork_names_its_source() {
-        let root = std::env::temp_dir().join(format!("cv-kimi-code-{}", uuid::Uuid::new_v4()));
+        let root = cv_testkit::temp_dir("kimi-code");
         let sdir = root
             .join("sessions")
             .join("wd_p_000000000000")
@@ -3224,7 +3224,7 @@ mod tests {
     /// spawning step: they follow the step's reply, and the child's usage is not the parent's.
     #[test]
     fn subagent_records_are_spawn_and_return_after_the_step() {
-        let root = std::env::temp_dir().join(format!("cv-kimi-code-{}", uuid::Uuid::new_v4()));
+        let root = cv_testkit::temp_dir("kimi-code");
         let main = root
             .join("sessions")
             .join("wd_p_000000000000")
