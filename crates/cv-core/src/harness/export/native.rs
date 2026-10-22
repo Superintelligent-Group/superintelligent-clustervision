@@ -77,6 +77,8 @@ fn load_bounded(path: &Path, selected: Option<&str>, admission_bytes: usize) -> 
         std::env::current_dir()?.join(path)
     };
     for _ in 0..2 {
+        // Taken before the capture: an offset index published below describes this state.
+        let state = offsets_state(&key);
         let source = JsonSource::capture(path)?;
         {
             let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
@@ -90,12 +92,41 @@ fn load_bounded(path: &Path, selected: Option<&str>, admission_bytes: usize) -> 
                 guard.bytes -= hit.archive.charge;
             }
         }
+        // An archive past the roster cache: its offset index, when one describes this state.
+        if let Some(id) = selected {
+            if let Some(offsets) = offsets_record(&key, &state) {
+                let entries: Vec<Entry> = offsets
+                    .payload
+                    .0
+                    .get(id)
+                    .map(|&(offset, len)| Entry {
+                        id: id.to_owned(),
+                        offset,
+                        len,
+                        refs: [None, None],
+                    })
+                    .into_iter()
+                    .collect();
+                let by_id = entry_index(&entries);
+                return Ok(Arc::new(Archive {
+                    source,
+                    entries,
+                    by_id,
+                    charge: 0,
+                    undecodable: false,
+                }));
+            }
+        }
+        // Every conversation's first accepted range, for a selected read's index.
+        let mut offsets: HashMap<String, (u64, u64)> = HashMap::new();
         let mut shapes = [false; 2];
         let mut entries = Vec::new();
         let mut selected_entry = None;
         let mut payload_charge = key.capacity().saturating_add(source.metadata_bytes());
         let mut charge = payload_charge;
         let mut cacheable = true;
+        #[cfg(test)]
+        SCANS.lock().unwrap().push(key.clone());
         let scanned = source.read(ReadInput::Document, Validation::Syntax, |values| {
             let values = values.accepted_array()?;
             for (position, view) in values.into_iter().flatten().enumerate() {
@@ -125,6 +156,9 @@ fn load_bounded(path: &Path, selected: Option<&str>, admission_bytes: usize) -> 
                     continue;
                 };
                 let (offset, len) = view.source_range()?.context("export source range")?;
+                if selected.is_some() {
+                    offsets.entry(id.clone()).or_insert((offset, len));
+                }
                 if selected == Some(id.as_str()) && selected_entry.is_none() {
                     // Retain the first accepted duplicate, independent of cache admission. Reads
                     // receive their metadata in SessionRef and do not need unrelated discovery refs.
@@ -179,6 +213,9 @@ fn load_bounded(path: &Path, selected: Option<&str>, admission_bytes: usize) -> 
         source.check()?;
         if !cacheable && selected.is_some() {
             entries = selected_entry.into_iter().collect();
+            if !undecodable {
+                publish_offsets(&key, state, Offsets(offsets));
+            }
         }
         let by_id = entry_index(&entries);
         let archive = Arc::new(Archive {
@@ -211,6 +248,92 @@ fn load_bounded(path: &Path, selected: Option<&str>, admission_bytes: usize) -> 
         return Ok(archive);
     }
     anyhow::bail!("export changed while reading {}", path.display())
+}
+
+/// Where each conversation of an archive past the roster cache starts and ends (its first
+/// accepted duplicate), from one scan of the archive at one state. Without it every selected read
+/// of such an archive scanned the whole archive again to find its conversation: reading every
+/// conversation of it was quadratic. Kept in this process and as a catalog source record (the
+/// archive-wide consumer `export-offsets`, empty session id), admitted by the archive's identity
+/// like every source record, so a later process reads it without a scan.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Offsets(HashMap<String, (u64, u64)>);
+
+impl crate::source::Payload for Offsets {
+    const TAG: &'static str = "export-offsets";
+}
+
+/// The archive-wide ref an [`Offsets`] record is kept under (whichever export shape reads it).
+fn offsets_ref(key: &Path) -> SessionRef {
+    SessionRef::new(String::new(), Harness::ChatGptExport, key.to_path_buf())
+}
+
+/// The archive's state an [`Offsets`] record is admitted against.
+fn offsets_state(key: &Path) -> crate::source::Baseline {
+    crate::source::Probe::default()
+        .snapshot(&offsets_ref(key))
+        .with_reads(&Default::default())
+}
+
+#[cfg(test)]
+static SCANS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+type OffsetsMemo = Mutex<HashMap<PathBuf, Arc<crate::source::Record<Offsets>>>>;
+static OFFSETS: std::sync::LazyLock<OffsetsMemo> = std::sync::LazyLock::new(Default::default);
+
+/// The [`Offsets`] of the archive at `key` as of `now`: this process's, else the catalog's.
+fn offsets_record(key: &Path, now: &crate::source::Baseline) -> Option<Arc<crate::source::Record<Offsets>>> {
+    let mut probe = crate::source::Probe::default();
+    let memo = OFFSETS.lock().unwrap_or_else(|e| e.into_inner()).get(key).cloned();
+    if let Some(record) = memo.filter(|record| record.admit(now, &mut probe).is_some()) {
+        return Some(record);
+    }
+    #[cfg(feature = "sqlite")]
+    {
+        let stored = crate::discover_cache::read::Context::current()
+            .with_connection(|conn| {
+                crate::source::record_in::<Offsets>(conn, <Offsets as crate::source::Payload>::TAG, &offsets_ref(key))
+            })
+            .flatten()
+            .filter(|record| record.admit(now, &mut probe).is_some())?;
+        let record = Arc::new(stored);
+        OFFSETS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key.to_path_buf(), record.clone());
+        Some(record)
+    }
+    #[cfg(not(feature = "sqlite"))]
+    None
+}
+
+/// Keep `offsets`, scanned from the archive at `state`, in this process and the catalog; the
+/// publisher rechecks the archive's identity, and a frozen or unavailable catalog keeps none.
+fn publish_offsets(key: &Path, state: crate::source::Baseline, offsets: Offsets) {
+    #[cfg(feature = "sqlite")]
+    crate::discover_cache::read::Context::current().with_connection_mut(|conn| {
+        let mut publish = || -> Result<()> {
+            let tx = conn.transaction()?;
+            let mut probe = crate::source::Probe::default();
+            crate::source::publish_in(
+                &tx,
+                <Offsets as crate::source::Payload>::TAG,
+                &offsets_ref(key),
+                &state,
+                &offsets,
+                &mut probe,
+            )?;
+            tx.commit()?;
+            Ok(())
+        };
+        if let Err(error) = publish() {
+            crate::env::warn_once("the export offset catalog", error);
+        }
+    });
+    OFFSETS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(key.to_path_buf(), Arc::new(crate::source::Record::new(state, offsets)));
 }
 
 /// Every conversation of `kind` in the archives at `paths`; an archive that cannot be read or
@@ -766,6 +889,57 @@ mod tests {
             .entry("conversation-2048")
             .is_none());
         Ok(())
+    }
+
+    /// Reading every conversation of an archive past the roster cache scans it once: the first
+    /// selected read leaves the offset index, in this process and the catalog, that every later
+    /// read (another process's too) finds its conversation by. A changed archive scans again.
+    #[test]
+    fn selected_reads_past_the_roster_cache_scan_the_archive_once() {
+        let world = crate::test_world("export-offsets");
+        let context = crate::discover_cache::read::Context::current();
+        let _scope = context.enter();
+        let path = world.base.join("conversations.json");
+        let write = |n: usize| {
+            let values: Vec<_> = (0..n)
+                .map(|i| serde_json::json!({"uuid":format!("c{i}"),"chat_messages":[{"sender":"human","text":format!("body {i}")}]}))
+                .collect();
+            std::fs::write(&path, serde_json::to_vec(&values).unwrap()).unwrap();
+        };
+        let scans = || {
+            let mut all = SCANS.lock().unwrap();
+            let mine = all.iter().filter(|p| **p == path).count();
+            all.retain(|p| *p != path);
+            mine
+        };
+        let range = |id: &str| {
+            let archive = load_bounded(&path, Some(id), 1024).unwrap();
+            archive.entry(id).map(|e| (e.offset, e.len))
+        };
+        write(64);
+        let expected: Vec<_> = (0..64)
+            .map(|i| {
+                load(&path, None)
+                    .unwrap()
+                    .entry(&format!("c{i}"))
+                    .map(|e| (e.offset, e.len))
+            })
+            .collect();
+        // Only the oversized path is under test: no roster in this process's cache.
+        *CACHE.get_or_init(Mutex::default).lock().unwrap() = Cache::default();
+        scans();
+        for (i, expected) in expected.iter().enumerate() {
+            assert_eq!(range(&format!("c{i}")), *expected);
+        }
+        assert_eq!(range("absent"), None);
+        assert_eq!(scans(), 1);
+        // Another process: the catalog's record, no scan.
+        OFFSETS.lock().unwrap().clear();
+        assert_eq!(range("c7"), expected[7]);
+        assert_eq!(scans(), 0);
+        write(65);
+        assert!(range("c64").is_some());
+        assert_eq!(scans(), 1);
     }
 
     #[test]
