@@ -2,7 +2,7 @@
 use crate::{harness::Adapter, source, stream, Message, Session, SessionRef};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const CONSUMER: &str = "watch-full1";
 const CHECKPOINT_EVERY: u64 = 256 * 1024;
@@ -14,12 +14,15 @@ fn state_version(adapter: &dyn Adapter) -> String {
     crate::resume::version(adapter, CONSUMER)
 }
 
+/// True when `value` serializes within `limit` bytes. A value that cannot serialize at all also
+/// reads as not-fitting — on purpose: a checkpoint or metadata blob cv cannot serialize is no
+/// storable state, so both causes share the one boolean answer.
 fn fits(value: &impl Serialize, limit: usize) -> bool {
     struct Limited(usize);
     impl std::io::Write for Limited {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
             if bytes.len() > self.0 {
-                return Err(std::io::Error::other("checkpoint exceeds cache budget"));
+                return Err(std::io::Error::other("value exceeds the size budget"));
             }
             self.0 -= bytes.len();
             Ok(bytes.len())
@@ -40,6 +43,14 @@ struct Anchor {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Completed {
     session: Session,
+    total: usize,
+}
+
+/// Serialize-only mirror of [`Completed`], field-for-field: [`fits`] measures the wire size
+/// without first cloning the whole session for a value that may be dropped.
+#[derive(Serialize)]
+struct CompletedRef<'a> {
+    session: &'a Session,
     total: usize,
 }
 
@@ -127,20 +138,26 @@ impl ReadState {
         crate::harness::for_harness(r.harness).is_some_and(|adapter| self.fresh_with(adapter.as_ref(), r))
     }
 
+    /// The identity preamble every freshness predicate starts from: the same mark version, the
+    /// same logical session, and the same primary file the state was built against.
+    fn describes(&self, adapter: &dyn Adapter, r: &SessionRef, primary: &Path) -> bool {
+        self.version == state_version(adapter)
+            && self.path == r.path
+            && self.primary.as_deref() == Some(primary)
+    }
+
     /// Freshness against the same concrete adapter that will perform the next read.
     pub fn fresh_with(&self, adapter: &dyn Adapter, r: &SessionRef) -> bool {
         let mut probe = source::Probe::default();
         let now = probe.snapshot_from(r, &adapter.resume_source(r));
-        self.version == state_version(adapter)
-            && self.path == r.path
-            && self.primary.as_ref() == Some(&adapter.resume_source(r))
-            && self.source.fresh(&now, &mut probe)
+        self.describes(adapter, r, &adapter.resume_source(r)) && self.source.fresh(&now, &mut probe)
     }
 
+    /// The cheaper pre-read gate, distinct from [`Self::fresh`]: identity holds and the primary
+    /// source is unchanged since the baseline (a check against the live file, no dependency
+    /// re-probe) — enough to keep replaying a stable anchor, not enough to call the state fresh.
     pub(crate) fn baseline_unchanged(&self, r: &SessionRef) -> bool {
-        crate::harness::for_harness(r.harness).is_some_and(|adapter| self.version == state_version(adapter.as_ref()))
-            && self.path == r.path
-            && self.primary.as_ref() == Some(&source::primary_path(r))
+        crate::harness::for_harness(r.harness).is_some_and(|adapter| self.describes(adapter.as_ref(), r, &source::primary_path(r)))
             && source::unchanged(r, &self.source)
     }
 
@@ -162,9 +179,7 @@ impl ReadState {
         current: &source::Baseline,
         skip: usize,
     ) -> Option<&'a stream::Checkpoint> {
-        if self.version != state_version(adapter)
-            || self.path != r.path
-            || self.primary.as_ref() != Some(&adapter.resume_source(r))
+        if !self.describes(adapter, r, &adapter.resume_source(r))
             || current.primary_len() < self.source.primary_len()
             || !self.source.dependencies_fresh(current, &mut source::Probe::default())
         {
@@ -307,6 +322,9 @@ impl stream::MessageSink for Tail<'_> {
         if let (true, Some(output)) = (self.total >= self.skip, self.output.as_mut()) {
             self.total += 1;
             self.used_implicit_source |= message.content.iter().any(|block| {
+                // ToolUse input is absent here on purpose: its Json blocks carry their own source
+                // identity (record_message_reads, below, records them), so a ToolUse span is
+                // never an implicit-source span needing the materialization guard.
                 match block {
                     crate::Block::Text { text } | crate::Block::Thinking { text, .. } => text.as_span(),
                     crate::Block::ToolResult { content, .. } => content.as_span(),
@@ -448,7 +466,13 @@ pub(super) fn pass(
     } else {
         stream::Demand::RICH
     };
-    let mut sink = Tail {
+    // The one Tail literal, for both passes of this read: a fresh sink, and — when the adapter
+    // declines the resumed pass — the same sink restarted from nothing (no checkpoint, no
+    // carried-over progress), so the two spellings cannot drift.
+    let tail_sink = |check,
+                     output,
+                     skip,
+                     from: Option<&stream::Checkpoint>| Tail {
         check,
         output,
         resolver_source: Some(r.path.clone()),
@@ -465,6 +489,7 @@ pub(super) fn pass(
         last: from.cloned(),
         stop_after_selection,
     };
+    let mut sink = tail_sink(check, output, skip, from);
     let mut resumed = from.is_some();
     let pass = |from| stream::Pass {
         from,
@@ -479,23 +504,7 @@ pub(super) fn pass(
             resumed = false;
             let output = sink.output.take();
             let check = sink.check.take();
-            sink = Tail {
-                check,
-                output,
-                resolver_source: Some(r.path.clone()),
-                used_implicit_source: false,
-                primary: primary.clone(),
-                materialized_reads: source::ReadSet::default(),
-                error: None,
-                total: 0,
-                skip: if session_output { 0 } else { skip },
-                keep,
-                messages: Vec::new(),
-                before: None,
-                checkpoint_disabled: false,
-                last: None,
-                stop_after_selection,
-            };
+            sink = tail_sink(check, output, if session_output { 0 } else { skip }, None);
             stream::stream_counted(adapter, r, &opts, &mut sink, pass(None))?
         }
     };
@@ -565,11 +574,18 @@ pub(super) fn pass(
         0
     };
     let (session, total, completed) = if complete {
-        let cached = Completed {
+        // Size before clone: measure the borrow, then own a copy only if it fits.
+        let completed = fits(
+            &CompletedRef {
+                session: &done.session,
+                total: sink.total,
+            },
+            METADATA_BYTES,
+        )
+        .then(|| Completed {
             session: done.session.clone(),
             total: sink.total,
-        };
-        let completed = fits(&cached, METADATA_BYTES).then_some(cached);
+        });
         (done.session, sink.total, completed)
     } else if streaming_tail {
         (done.session, sink.total, None)
