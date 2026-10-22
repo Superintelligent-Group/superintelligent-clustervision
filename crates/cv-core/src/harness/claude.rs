@@ -113,6 +113,40 @@ const CONFIG_MARKERS: [&str; 5] = [
     "CLAUDE.md",
 ];
 
+/// The roots `claude-roots` lists, read once per file state: `detect` runs once per session in
+/// per-session loops (a source's primary path, a search's staleness), and read the file each time.
+fn configured_roots(path: &Path) -> Option<std::sync::Arc<[PathBuf]>> {
+    use crate::source::FileId;
+    use std::sync::{Arc, Mutex, PoisonError};
+    type Memo = std::collections::HashMap<PathBuf, (FileId, Arc<[PathBuf]>)>;
+    static MEMO: Mutex<Option<Memo>> = Mutex::new(None);
+    let before = FileId::at(path)?;
+    if let Some((_, roots)) = MEMO
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+        .and_then(|memo| memo.get(path))
+        .filter(|(seen, _)| *seen == before)
+    {
+        return Some(Arc::clone(roots));
+    }
+    let text = fs::read_to_string(path).ok()?;
+    let roots: Arc<[PathBuf]> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(PathBuf::from)
+        .collect();
+    // A write during the read stores nothing: the next call reads the file as it then stands.
+    if FileId::at(path) == Some(before) {
+        MEMO.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get_or_insert_with(Default::default)
+            .insert(path.to_path_buf(), (before, Arc::clone(&roots)));
+    }
+    Some(roots)
+}
+
 impl Claude {
     /// Collect the root entries, in priority order:
     /// 1. `$CLAUDE_CONFIG_DIR/projects` — Claude Code's own variable for moving its config dir, so
@@ -142,13 +176,8 @@ impl Claude {
         let cv_home = crate::env::var_os("CLUSTERVISION_HOME")
             .map(PathBuf::from)
             .or_else(|| home.as_ref().map(|h| h.join(".clustervision")));
-        if let Some(text) = cv_home.and_then(|d| fs::read_to_string(d.join("claude-roots")).ok()) {
-            entries.extend(
-                text.lines()
-                    .map(str::trim)
-                    .filter(|l| !l.is_empty() && !l.starts_with('#'))
-                    .map(PathBuf::from),
-            );
+        if let Some(listed) = cv_home.and_then(|d| configured_roots(&d.join("claude-roots"))) {
+            entries.extend(listed.iter().cloned());
         }
         let entries = entries
             .into_iter()
@@ -1343,6 +1372,22 @@ fn task_list(transcript: &Path, id: &str) -> Result<Option<crate::affordance::Af
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `claude-roots` is read once per file state, however many sessions ask for an adapter.
+    #[test]
+    fn claude_roots_are_read_once_per_file_state() {
+        let world = crate::test_world("claude-roots-memo");
+        let path = world.base.join("claude-roots");
+        std::fs::write(&path, "/one\n# note\n/two\n").unwrap();
+        let first = configured_roots(&path).unwrap();
+        assert_eq!(&*first, [PathBuf::from("/one"), PathBuf::from("/two")]);
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &configured_roots(&path).unwrap()),
+            "unchanged: not reread"
+        );
+        std::fs::write(&path, "/three\n").unwrap();
+        assert_eq!(&*configured_roots(&path).unwrap(), [PathBuf::from("/three")]);
+    }
     use crate::lazy::INLINE_MAX;
     use crate::Json;
     use std::sync::LazyLock;
