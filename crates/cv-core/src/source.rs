@@ -931,7 +931,11 @@ impl Probe {
             });
             self.rows.insert(store.clone(), certified);
         }
-        self.rows.get(&store)?.as_ref()?.get(&r.id).copied()
+        let key = match self.adapters.get(&r.harness) {
+            Some(Some(adapter)) => adapter.rows_key(r),
+            _ => &r.id,
+        };
+        self.rows.get(&store)?.as_ref()?.get(key).copied()
     }
 }
 

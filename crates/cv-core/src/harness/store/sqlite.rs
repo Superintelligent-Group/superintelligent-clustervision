@@ -21,6 +21,10 @@ use rusqlite::{Connection, OpenFlags};
 use std::collections::HashSet;
 use std::path::Path;
 
+mod certify;
+#[cfg(test)]
+pub(crate) use certify::assert_rows_move_alone;
+pub(crate) use certify::{fold_value, Certificates};
 mod derived;
 #[cfg(test)]
 pub(crate) mod export_tests;

@@ -733,21 +733,9 @@ fn read_session_facts(
 /// compression continuation), and its `state_meta` rows. The aggregates come from the
 /// `messages(session_id, …)` indexes; no `content` is read.
 fn rows_conn(conn: &Connection) -> Result<std::collections::HashMap<String, crate::source::Rows>> {
+    use super::store::sqlite::fold_value;
     use crate::source::Rows;
     use std::collections::HashMap;
-    fn fold_value(digest: u64, value: rusqlite::types::ValueRef<'_>) -> u64 {
-        use rusqlite::types::ValueRef;
-        let (tag, bytes): (u8, std::borrow::Cow<'_, [u8]>) = match value {
-            ValueRef::Null => (0, (&[][..]).into()),
-            ValueRef::Integer(i) => (1, i.to_le_bytes().to_vec().into()),
-            ValueRef::Real(f) => (2, f.to_bits().to_le_bytes().to_vec().into()),
-            ValueRef::Text(t) => (3, t.into()),
-            ValueRef::Blob(b) => (4, b.into()),
-        };
-        let digest = Rows::fold(digest, &[tag]);
-        let digest = Rows::fold(digest, &(bytes.len() as u64).to_le_bytes());
-        Rows::fold(digest, &bytes)
-    }
     struct Meta {
         row: u64,
         parent: Option<String>,

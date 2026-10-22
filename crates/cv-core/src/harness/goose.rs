@@ -254,6 +254,11 @@ impl Adapter for Goose {
         })
     }
 
+    /// Every session's certificate ([`rows_conn`]); a legacy `.jsonl` session is its own file.
+    fn rows(&self, store: &Path) -> Option<HashMap<String, crate::source::Rows>> {
+        open_ro(store).ok()?.read(|conn, _| rows_conn(conn)).ok()
+    }
+
     /// The todo extension's state: `sessions.extension_data["todo.v0"].content` (a markdown list).
     fn store_affordances(&self, r: &SessionRef) -> anyhow::Result<Vec<crate::affordance::Affordance>> {
         if r.path.extension().is_some_and(|e| e == "jsonl") {
@@ -339,6 +344,55 @@ fn discover_db(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
     Ok(out)
 }
 
+/// Every session's [`Rows`](crate::source::Rows) certificate: what a read of it consults besides
+/// message bodies. Its whole `sessions` row (title, cwd, model, `extension_data`, lineage); per
+/// message row, in rowid order, its rowid, `message_id`, role, `created_timestamp` (the read's
+/// order) and the byte lengths of `content_json` and `metadata_json`; and the session it was
+/// forked from ([`fork_source`]), which the earliest other holder of its first message decides.
+/// Goose rewrites rows in place (a compaction's `metadata_json`, a tool request's `tool_meta`
+/// merged into `content_json`, a moved `created_timestamp`) without touching the `sessions` row:
+/// the lengths and timestamps catch those, an equal-length rewrite of a body escapes.
+fn rows_conn(conn: &Connection) -> Result<HashMap<String, crate::source::Rows>> {
+    let mut certificates = super::store::sqlite::Certificates::default();
+    certificates.digest(conn, "SELECT id, * FROM sessions ORDER BY id")?;
+    let has = super::store::sqlite::columns(conn, "messages");
+    let column = |name: &str, expr: &str| {
+        if has.contains(name) {
+            expr.to_owned()
+        } else {
+            "NULL".to_owned()
+        }
+    };
+    certificates.rows(
+        conn,
+        &format!(
+            "SELECT session_id, id, {}, role, created_timestamp, octet_length(content_json), {} \
+             FROM messages ORDER BY session_id, id",
+            column("message_id", "message_id"),
+            column("metadata_json", "octet_length(metadata_json)"),
+        ),
+    )?;
+    let created: Vec<(String, Option<DateTime<Utc>>)> = {
+        let has = super::store::sqlite::columns(conn, "sessions");
+        let created = if has.contains("created_at") {
+            "created_at"
+        } else {
+            "NULL"
+        };
+        let mut stmt = conn.prepare(&format!("SELECT id, {created} FROM sessions"))?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })?;
+        rows.map(|row| row.map(|(id, at)| (id, at.as_deref().and_then(parse_ts_text))))
+            .collect::<rusqlite::Result<_>>()?
+    };
+    for (id, created) in created {
+        let parent = fork_source(conn, &id, created);
+        certificates.fold(&id, parent.as_deref().unwrap_or("").as_bytes());
+    }
+    Ok(certificates.0)
+}
+
 /// The session `id` was forked from. `goose session --resume --fork` copies every message, with
 /// its `message_id` and `created_timestamp`, into a new session and stores no link; so a session
 /// whose first message predates the session itself is a copy, and its source is the
@@ -392,7 +446,6 @@ fn binary_holder_ids(conn: &Connection) -> bool {
         .all(|(table, id)| super::store::sqlite::binary_text_columns(conn, table, &[id]).unwrap_or(false))
 }
 
-#[cfg(test)]
 fn fork_source(conn: &Connection, id: &str, created: Option<DateTime<Utc>>) -> Option<String> {
     let first = copied_message_id(conn, id, created)?;
     let (time, parent) = earliest_holder(conn, &first, Some(id))?;
@@ -1017,6 +1070,42 @@ mod tests {
 
     fn sref(c: &Connection, id: &str) -> SessionRef {
         SessionRef::new(id, Harness::Goose, at(c))
+    }
+
+    /// Every corpus version: a row written to one session moves its certificate alone, and every
+    /// other session reads exactly as before ([`super::super::store::sqlite::assert_rows_move_alone`]).
+    #[test]
+    fn corpus_rows_certify_each_session_and_move_only_with_its_rows() {
+        let corpus = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/goose");
+        let mut versions: Vec<_> = std::fs::read_dir(&corpus).unwrap().map(|e| e.unwrap().path()).collect();
+        versions.sort();
+        assert!(!versions.is_empty());
+        for version in versions {
+            let world = crate::test_world("goose-corpus-rows");
+            let dir = world.base.join("sessions");
+            std::fs::create_dir_all(&dir).unwrap();
+            let db = dir.join("sessions.db");
+            std::fs::copy(version.join("sessions/sessions.db"), &db).unwrap();
+            // A session whose messages no other session holds: no fork resolution consults it.
+            let leaf: String = Connection::open(&db)
+                .unwrap()
+                .query_row(
+                    "SELECT s.id FROM sessions s WHERE EXISTS (SELECT 1 FROM messages m WHERE m.session_id = s.id) \
+                     AND NOT EXISTS (SELECT 1 FROM messages m JOIN messages o ON o.message_id = m.message_id \
+                     AND o.session_id != m.session_id WHERE m.session_id = s.id) ORDER BY s.id LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            super::super::store::sqlite::assert_rows_move_alone(&Goose::with_sessions_dir(&dir), &db, &leaf, |c| {
+                c.execute(
+                    "INSERT INTO messages (message_id, session_id, role, content_json, created_timestamp, metadata_json) \
+                     VALUES ('zq', ?1, 'user', '[{\"type\":\"text\",\"text\":\"zqcertified\"}]', 4102444800, '{}')",
+                    [&leaf],
+                )
+                .unwrap();
+            });
+        }
     }
 
     #[test]

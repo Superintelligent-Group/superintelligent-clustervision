@@ -612,6 +612,12 @@ pub trait Adapter: Send + Sync {
         None
     }
 
+    /// The key of `r`'s certificate in [`Self::rows`]: its id, unless its read is wholly another
+    /// session's rows (a sub-agent chain stored in its parent session's forest). Default: its id.
+    fn rows_key<'a>(&self, r: &'a SessionRef) -> &'a str {
+        &r.id
+    }
+
     /// Whether `r`'s source is a SQLite database, whose `-wal`/`-journal` sidecars then guard it;
     /// `None` when that cannot be determined (no consumer certifies it). Default: by its extension.
     fn sqlite_source(&self, r: &SessionRef) -> Option<bool> {
