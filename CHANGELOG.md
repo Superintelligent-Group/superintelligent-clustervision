@@ -34,7 +34,7 @@
 
 - `cv search`, `/api/search` and `-q text:` read what the index has not seen live, from its resume mark, within `--live-bytes` (256 MiB); `--frozen` reads none.
 
-- A write to a Hermes store rereads only the sessions whose rows changed; the others stay indexed, counted and evented.
+- A write to a Hermes, Goose, OpenCode, Devin, Zed, Cursor or OpenClaw store rereads only the sessions whose rows changed.
 
 - `cv search` without an index answers from that live read instead of exiting 1; `--frozen` without an index still names `cv index`.
 

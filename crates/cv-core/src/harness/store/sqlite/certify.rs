@@ -83,6 +83,14 @@ impl Certificates {
             rows.digest = Rows::fold(Rows::fold(rows.digest, &(bytes.len() as u64).to_le_bytes()), bytes);
         }
     }
+
+    /// Fold `with`'s certificate (or its absence) into `id`'s digest: a read of `id` that
+    /// consults another session's rows.
+    pub(crate) fn fold_from(&mut self, id: &str, with: Option<Rows>) {
+        let with = with.map_or([0; 3], |w| [w.count, w.high as u64, w.digest]);
+        let bytes: Vec<u8> = with.iter().flat_map(|part| part.to_le_bytes()).collect();
+        self.fold(id, &bytes);
+    }
 }
 
 /// A shared store's certificates, tested the way every adapter's are: each session `read`

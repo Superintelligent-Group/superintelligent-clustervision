@@ -257,6 +257,14 @@ impl Adapter for OpenClaw {
         Ok(out)
     }
 
+    /// Every window's certificate in an agent's `.sqlite` store ([`sqlite_rows`]).
+    #[cfg(feature = "sqlite")]
+    fn rows(&self, store: &Path) -> Option<std::collections::HashMap<String, crate::source::Rows>> {
+        is_sqlite_store_path(store)
+            .then(|| open_ro(store).ok()?.read(|conn, _| sqlite_rows(conn)).ok())
+            .flatten()
+    }
+
     /// An agent's `.sqlite` store is written in place; a JSONL transcript is a file like any other.
     fn watch_policy(&self, r: &SessionRef) -> super::WatchPolicy {
         if is_sqlite_store_path(&r.path) {
@@ -943,6 +951,55 @@ fn sqlite_parent_candidates(
         .0
     };
     Ok(candidates)
+}
+
+/// Every window's [`Rows`](crate::source::Rows) certificate: what a read of it consults in its
+/// store besides event bodies. Per `transcript_events` row, in rowid order, its rowid, `seq` (the
+/// read's order) and the byte lengths of `event_json` and `event_zstd` (record headers, no body);
+/// its whole `session_windows` row (key, `spawned_by`); and its spawner lookup
+/// ([`sqlite_key_facts`]): the other windows under its `spawned_by` key, in the order the read
+/// meets them, and, when there are several (the read then searches their events for this
+/// window's key), each one's event certificate. The state database's registries are a separate
+/// file dependency, outside this certificate.
+#[cfg(feature = "sqlite")]
+fn sqlite_rows(conn: &rusqlite::Connection) -> Result<std::collections::HashMap<String, crate::source::Rows>> {
+    let _snapshot = super::store::sqlite::snapshot(conn)?;
+    let mut events = super::store::sqlite::Certificates::default();
+    let zstd = if super::store::sqlite::columns(conn, Events::TABLE).contains("event_zstd") {
+        "octet_length(event_zstd)"
+    } else {
+        "NULL"
+    };
+    events.rows(
+        conn,
+        &format!(
+            "SELECT session_id, rowid, seq, octet_length(event_json), {zstd} FROM transcript_events \
+             ORDER BY session_id, rowid"
+        ),
+    )?;
+    let mut certificates = super::store::sqlite::Certificates(events.0.clone());
+    certificates.digest(conn, "SELECT session_id, * FROM session_windows ORDER BY session_id")?;
+    let cols = super::store::sqlite::columns(conn, "session_windows");
+    if cols.contains("session_key") && cols.contains("spawned_by") {
+        let spawned: Vec<(String, String)> = conn
+            .prepare("SELECT session_id, spawned_by FROM session_windows WHERE spawned_by IS NOT NULL")?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut candidates =
+            conn.prepare("SELECT session_id FROM session_windows WHERE session_key=?1 AND session_id!=?2")?;
+        for (id, by) in spawned {
+            let found: Vec<String> = candidates
+                .query_map([&by, &id], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            for candidate in &found {
+                certificates.fold(&id, candidate.as_bytes());
+                if found.len() > 1 {
+                    certificates.fold_from(&id, events.0.get(candidate).copied());
+                }
+            }
+        }
+    }
+    Ok(certificates.0)
 }
 
 /// [`KeyFacts`] from `session_windows`. The spawner is the window under `spawned_by` — when that key
@@ -1773,6 +1830,47 @@ struct NavigationRow {
 mod tests {
     use super::*;
     use crate::harness::Parse;
+
+    /// The 2026.10.1 corpus agent store: an event appended to the window that spawned the
+    /// sub-agent moves its certificate alone (the sub-agent's spawner lookup names one candidate,
+    /// so it consults that window's id, not its events), and every other window reads exactly as
+    /// before.
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn corpus_rows_certify_each_session_and_move_only_with_its_rows() {
+        let world = crate::test_world("openclaw-corpus-rows");
+        let corpus = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/openclaw/2026.10.1");
+        for entry in WalkDir::new(&corpus) {
+            let entry = entry.unwrap();
+            let to = world.base.join(entry.path().strip_prefix(&corpus).unwrap());
+            if entry.file_type().is_dir() {
+                std::fs::create_dir_all(&to).unwrap();
+            } else {
+                std::fs::copy(entry.path(), &to).unwrap();
+            }
+        }
+        let db = world.base.join("agents/main/agent/openclaw-agent.sqlite");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let leaf: String = conn
+            .query_row(
+                "SELECT p.session_id FROM session_windows c JOIN session_windows p ON p.session_key = c.spawned_by \
+                 ORDER BY p.session_id LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+        let adapter = OpenClaw::with_state_dir(&world.base);
+        crate::harness::store::sqlite::assert_rows_move_alone(&adapter, &db, &leaf, |c| {
+            c.execute(
+                "INSERT INTO transcript_events (session_id, seq, event_json, created_at) \
+                 SELECT ?1, max(seq) + 1, '{\"type\":\"custom\",\"id\":\"zq\",\"customType\":\"zqcertified\"}', \
+                 4102444800000 FROM transcript_events WHERE session_id = ?1",
+                [&leaf],
+            )
+            .unwrap();
+        });
+    }
 
     fn fixture_ref(name: &str) -> SessionRef {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

@@ -232,7 +232,7 @@ Audited against `git log v0.17.0..HEAD` on 2026-10-21; a closure below names its
 - **Search freshness, closed.** A query is the index plus a live read of what it has not seen
   (`cv-search/src/fts/live.rs`), from FTS marks, same BM25 over summed statistics, within
   `--live-bytes`; `cv index` pre-pays, no timer. A shared SQLite store's write rereads only the
-  sessions whose `source::Rows` certificate moved (Hermes); rows above the mark are not yet read alone.
+  sessions whose `source::Rows` certificate moved (every SQLite store), each whole, not from a mark.
 - **Archive inventory.** `archive sync` uses `index_all`'s references; `cv/src/cmd/archive` owns
   its checked artifact projection. An unavailable index falls back to discovery with a diagnostic.
 - **Three message windowings, closed.** JSON, text rendering and pack relevance excerpts share
