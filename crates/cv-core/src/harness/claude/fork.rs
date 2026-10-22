@@ -31,6 +31,7 @@ use std::path::{Path, PathBuf};
 const HEAD_LINES: usize = 64;
 
 /// What a transcript's head says: its first `uuid` record and whether it looks copied.
+#[derive(Clone)]
 struct Head {
     uuid: String,
     at: Option<DateTime<Utc>>,
@@ -43,9 +44,47 @@ struct Head {
     began: Option<DateTime<Utc>>,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Heads this thread read from disk.
+    static HEAD_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// [`read_head`], kept while the file stats as it did when it was read. Fork inference reads the
+/// head of every eligible sibling for each session it is asked about, so one pass over a project
+/// directory of n copied-looking heads (a SessionStart hook's record is older than the prompt's
+/// queue record) read n² heads: `cv index` over 322 such sessions opened each transcript ~660 times.
+fn head(path: &Path) -> Option<Head> {
+    use crate::source::FileId;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock, PoisonError};
+    type Memo = HashMap<PathBuf, (FileId, Option<Head>)>;
+    static MEMO: OnceLock<Mutex<Memo>> = OnceLock::new();
+    let memo = MEMO.get_or_init(Default::default);
+    let before = FileId::at(path)?;
+    if let Some((_, hit)) = memo
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(path)
+        .filter(|(seen, _)| *seen == before)
+    {
+        return hit.clone();
+    }
+    let head = read_head(path);
+    // A write during the read leaves no entry: the next ask reads the file as it then stands.
+    if FileId::at(path) == Some(before) {
+        memo.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(path.to_path_buf(), (before, head.clone()));
+    }
+    head
+}
+
 /// The head through the record codec's byte source and its typed [`Facts`]: at most
 /// [`HEAD_LINES`] physical lines, counting blank and rejected ones.
-fn head(path: &Path) -> Option<Head> {
+fn read_head(path: &Path) -> Option<Head> {
+    #[cfg(test)]
+    HEAD_READS.with(|n| n.set(n.get() + 1));
     let read = jsonl::Read::open(path).ok()?;
     let mut newest: Option<DateTime<Utc>> = None;
     let mut found = None;
@@ -234,13 +273,13 @@ mod tests {
         let mut frozen = crate::emit::frozen::Frozen::new("claude-fork-heads");
         for (i, bytes) in cases.iter().enumerate() {
             fs::write(&path, bytes).unwrap();
-            let observed = head(&path).map(|h| (h.uuid, h.at, h.boundary, h.copied, h.began));
+            let observed = read_head(&path).map(|h| (h.uuid, h.at, h.boundary, h.copied, h.began));
             frozen.insert(format!("case {i}"), serde_json::to_value(observed).unwrap());
         }
         frozen.check().unwrap();
         // An invalid UTF-8 line is one rejected record, not the end of the file.
         fs::write(&path, [b"\xff\n".as_slice(), uuid.as_bytes()].concat()).unwrap();
-        assert_eq!(head(&path).map(|h| h.uuid).as_deref(), Some("shared"));
+        assert_eq!(read_head(&path).map(|h| h.uuid).as_deref(), Some("shared"));
         fs::write(&path, [b"prefix\n\xff\n".as_slice(), b"needle\n"].concat()).unwrap();
         assert!(holds(&path, "needle"));
     }
@@ -275,6 +314,53 @@ mod tests {
         assert_eq!(source(&fork).as_deref(), Some("src"));
         assert_eq!(source(&sibling).as_deref(), Some("src"));
         assert_eq!(source(&src), None, "the source's head is not a copy");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A directory of copied-looking heads (each session's hook record is older than its queue
+    /// record) asks fork inference about every sibling once per session; each head is read from
+    /// disk once per file state, not once per asking session, and an append rereads that one head.
+    #[test]
+    fn each_sibling_head_is_read_once_per_file_state() {
+        let dir = std::env::temp_dir().join(format!("cv-claude-fork-heads-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let n = 24;
+        let paths: Vec<PathBuf> = (0..n)
+            .map(|i| {
+                write(
+                    &dir,
+                    &format!("s{i:02}.jsonl"),
+                    &[
+                        queued("2026-10-11T21:00:01Z"),
+                        rec(&format!("u{i}"), None, "2026-10-11T21:00:00Z"),
+                    ],
+                )
+            })
+            .collect();
+        let reads = || HEAD_READS.with(std::cell::Cell::get);
+        let start = reads();
+        for p in &paths {
+            assert_eq!(source(p), None, "no sibling begins with another's uuid");
+        }
+        assert_eq!(
+            reads() - start,
+            n,
+            "one head read per transcript, not one per asking session"
+        );
+        let again = reads();
+        for p in &paths {
+            assert_eq!(source(p), None);
+        }
+        assert_eq!(reads() - again, 0, "unchanged heads are not reread");
+        let mut f = fs::OpenOptions::new().append(true).open(&paths[3]).unwrap();
+        std::io::Write::write_all(&mut f, b"{\"type\":\"user\"}\n").unwrap();
+        drop(f);
+        let after = reads();
+        for p in &paths {
+            assert_eq!(source(p), None);
+        }
+        assert_eq!(reads() - after, 1, "the appended transcript's head alone is reread");
         let _ = fs::remove_dir_all(&dir);
     }
 }
