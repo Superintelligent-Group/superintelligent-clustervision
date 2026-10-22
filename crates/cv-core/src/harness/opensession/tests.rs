@@ -820,7 +820,11 @@ mod projection_schema {
         ] {
             let variant = variant.as_str().unwrap();
             let field = field.as_object().unwrap().keys().next().unwrap().clone();
-            assert_eq!(rename("SomeVariantName", Some(rule), true), variant, "variant rule {rule}");
+            assert_eq!(
+                rename("SomeVariantName", Some(rule), true),
+                variant,
+                "variant rule {rule}"
+            );
             assert_eq!(rename("some_field_name", Some(rule), false), field, "field rule {rule}");
         }
         assert_eq!(rename("SomeVariantName", None, true), "SomeVariantName");

@@ -337,13 +337,9 @@ mod tests {
     #[test]
     fn a_scope_does_not_reach_a_thread_that_does_not_carry_it() {
         let _outer = Env::from_vars([("HOME", "/a")]).enter();
-        let scoped = std::thread::spawn(|| Env::scoped().is_some())
-            .join()
-            .unwrap();
+        let scoped = std::thread::spawn(|| Env::scoped().is_some()).join().unwrap();
         assert!(!scoped);
-        let carried = std::thread::spawn(carry(|| home_dir().is_some()))
-            .join()
-            .unwrap();
+        let carried = std::thread::spawn(carry(|| home_dir().is_some())).join().unwrap();
         assert!(carried);
     }
 

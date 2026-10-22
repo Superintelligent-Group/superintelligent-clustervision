@@ -118,7 +118,8 @@ fn write_database(session: &Session, opts: &EmitOptions, new_id: &str, conn: &mu
              END;"
         )
     };
-    tx.execute_batch(&fts_sql("messages_fts", "")).context("creating hermes messages_fts (FTS5)")?;
+    tx.execute_batch(&fts_sql("messages_fts", ""))
+        .context("creating hermes messages_fts (FTS5)")?;
     if let Err(e) = tx.execute_batch(&fts_sql("messages_fts_trigram", ", tokenize='trigram'")) {
         eprintln!("cv: hermes trigram FTS unavailable, skipping ({e}); unicode61 FTS still active");
     }

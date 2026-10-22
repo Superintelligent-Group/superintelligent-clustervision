@@ -272,11 +272,7 @@ fn checked_openclaw_title_policy_matches_frozen_explicit_and_meaningful_prompt()
     for title in [None, Some(""), Some("   "), Some("explicit λ")] {
         // Frozen labels keep the raw title; directory names only get a filesystem-safe spelling
         // of it, so a whitespace-only title does not name a whitespace-led directory.
-        let dir_title = |title: Option<&str>| {
-            title
-                .unwrap_or("none")
-                .replace([' ', '\t', '\n', '\r'], "_")
-        };
+        let dir_title = |title: Option<&str>| title.unwrap_or("none").replace([' ', '\t', '\n', '\r'], "_");
         for meaningful in [false, true] {
             let mut session = Session::new("source", Harness::Claude);
             session.created_at = Some("2026-10-12T12:00:00Z".parse()?);
@@ -605,14 +601,7 @@ fn native_complete_export_preserves_records_branch_links_and_one_compaction_pair
     // Text mode retains native reasoning when this target can hold it — the assumption the
     // per-mode expected rows below are built on, so it is pinned once, not per iteration.
     assert_eq!(
-        crate::emit::thinking_fate_with_presence(
-            Harness::OpenClaw,
-            ThinkingMode::Text,
-            true,
-            Some("sig"),
-            None,
-            false
-        ),
+        crate::emit::thinking_fate_with_presence(Harness::OpenClaw, ThinkingMode::Text, true, Some("sig"), None, false),
         ThinkingFate::Keep
     );
     for mode in ThinkingMode::ALL {

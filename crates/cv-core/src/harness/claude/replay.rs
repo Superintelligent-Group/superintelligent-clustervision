@@ -177,7 +177,10 @@ fn rewrite(bytes: ByteSource, mode: crate::emit::ThinkingMode, pass: Mode) -> Re
         }
         if source.accept(row, Validation::Value)?.is_none() {
             // A transform's pass-through keeps malformed lines verbatim; replay refuses them.
-            anyhow::ensure!(pass == Mode::DropEmpties, "portable Claude replay encountered invalid JSON");
+            anyhow::ensure!(
+                pass == Mode::DropEmpties,
+                "portable Claude replay encountered invalid JSON"
+            );
             return Ok(());
         }
         let (mut total, mut drops) = (0usize, 0usize);

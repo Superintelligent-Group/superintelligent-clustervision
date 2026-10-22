@@ -1007,10 +1007,7 @@ pub(crate) mod tests {
                         !blank && error.is::<crate::json::InvalidJson>(),
                         "prune, {name}: {error:#}"
                     );
-                    assert!(
-                        error.to_string().contains("line 2"),
-                        "prune, {name}: {error:#}"
-                    );
+                    assert!(error.to_string().contains("line 2"), "prune, {name}: {error:#}");
                     assert!(
                         !world.base.join(format!("{name}-pruned.jsonl")).exists(),
                         "prune, {name}"

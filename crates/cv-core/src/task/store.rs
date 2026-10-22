@@ -379,11 +379,7 @@ impl TaskStore {
                 )
             })
             .collect();
-        Ok(RawRead {
-            events,
-            warnings,
-            tail,
-        })
+        Ok(RawRead { events, warnings, tail })
     }
 }
 

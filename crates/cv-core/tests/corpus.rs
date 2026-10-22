@@ -553,7 +553,11 @@ fn claude_corpus_workflow_runs_read_as_recorded() {
         // The sets, not the counts: count equality would call a stray on disk a missed child
         // and could miss a stray-plus-missed pair cancelling out.
         let rel = |p: &Path| p.strip_prefix(&v).unwrap_or(p).display().to_string();
-        let mut in_tree: Vec<String> = refs.iter().flat_map(|r| claude_children(r)).map(|k| rel(&k.path)).collect();
+        let mut in_tree: Vec<String> = refs
+            .iter()
+            .flat_map(|r| claude_children(r))
+            .map(|k| rel(&k.path))
+            .collect();
         in_tree.sort();
         let mut on_disk: Vec<String> = walkdir::WalkDir::new(&v)
             .into_iter()

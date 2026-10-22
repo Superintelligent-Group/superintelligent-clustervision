@@ -129,7 +129,10 @@ pub(super) fn source(path: &Path) -> Option<String> {
 }
 
 /// The source's session id and `path`'s own head's begin time, from one head read.
-pub(super) fn source_tracked(path: &Path, sink: &mut dyn crate::MessageSink) -> Option<(String, Option<DateTime<Utc>>)> {
+pub(super) fn source_tracked(
+    path: &Path,
+    sink: &mut dyn crate::MessageSink,
+) -> Option<(String, Option<DateTime<Utc>>)> {
     let me = head(path)?;
     if !me.copied {
         return None;

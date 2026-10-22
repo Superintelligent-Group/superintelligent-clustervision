@@ -141,9 +141,7 @@ impl ReadState {
     /// The identity preamble every freshness predicate starts from: the same mark version, the
     /// same logical session, and the same primary file the state was built against.
     fn describes(&self, adapter: &dyn Adapter, r: &SessionRef, primary: &Path) -> bool {
-        self.version == state_version(adapter)
-            && self.path == r.path
-            && self.primary.as_deref() == Some(primary)
+        self.version == state_version(adapter) && self.path == r.path && self.primary.as_deref() == Some(primary)
     }
 
     /// Freshness against the same concrete adapter that will perform the next read.
@@ -157,7 +155,8 @@ impl ReadState {
     /// source is unchanged since the baseline (a check against the live file, no dependency
     /// re-probe) — enough to keep replaying a stable anchor, not enough to call the state fresh.
     pub(crate) fn baseline_unchanged(&self, r: &SessionRef) -> bool {
-        crate::harness::for_harness(r.harness).is_some_and(|adapter| self.describes(adapter.as_ref(), r, &source::primary_path(r)))
+        crate::harness::for_harness(r.harness)
+            .is_some_and(|adapter| self.describes(adapter.as_ref(), r, &source::primary_path(r)))
             && source::unchanged(r, &self.source)
     }
 
@@ -469,10 +468,7 @@ pub(super) fn pass(
     // The one Tail literal, for both passes of this read: a fresh sink, and — when the adapter
     // declines the resumed pass — the same sink restarted from nothing (no checkpoint, no
     // carried-over progress), so the two spellings cannot drift.
-    let tail_sink = |check,
-                     output,
-                     skip,
-                     from: Option<&stream::Checkpoint>| Tail {
+    let tail_sink = |check, output, skip, from: Option<&stream::Checkpoint>| Tail {
         check,
         output,
         resolver_source: Some(r.path.clone()),

@@ -3,7 +3,11 @@ use crate::emit::frozen::Frozen;
 use crate::emit::{EmitOptions, ThinkingMode};
 
 /// The files one Cline/Roo emit publishes into the task directory.
-const FILES: [&str; 3] = ["api_conversation_history.json", "task_metadata.json", "ui_messages.json"];
+const FILES: [&str; 3] = [
+    "api_conversation_history.json",
+    "task_metadata.json",
+    "ui_messages.json",
+];
 
 fn fixture() -> Result<Session> {
     let mut session = Session::new("source", Harness::Claude);
@@ -130,10 +134,7 @@ fn checked_cline_roo_match_frozen_pretty_all_modes() -> Result<()> {
                         rows.iter().map(|r| r["role"].as_str().unwrap()).collect::<Vec<_>>(),
                         ["user", "assistant", "user", "system", "assistant", "user"]
                     );
-                    assert!(rows[0]["content"][0]["text"]
-                        .as_str()
-                        .unwrap()
-                        .starts_with("<task>"));
+                    assert!(rows[0]["content"][0]["text"].as_str().unwrap().starts_with("<task>"));
                 } else if name == "task_metadata.json" {
                     assert!(parsed.is_object(), "{name}");
                 } else {
