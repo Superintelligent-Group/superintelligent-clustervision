@@ -621,6 +621,12 @@ pub trait Adapter: Send + Sync {
         (self.sqlite_source(r) == Some(true)).then(|| r.path.clone())
     }
 
+    /// The files a [`Self::rows_store`] is made of, whose identities (with their SQLite sidecars)
+    /// are its state: a write to any moves every certificate's cache. Default: the store itself.
+    fn rows_files(&self, store: &Path) -> Vec<PathBuf> {
+        vec![store.to_path_buf()]
+    }
+
     /// The key of `r`'s certificate in [`Self::rows`]: its id, unless its read is wholly another
     /// session's rows (a sub-agent chain stored in its parent session's forest). Default: its id.
     fn rows_key<'a>(&self, r: &'a SessionRef) -> &'a str {

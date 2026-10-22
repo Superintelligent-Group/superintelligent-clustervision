@@ -506,25 +506,120 @@ fn message_with_blocks(v: &Value, blocks: Vec<Block>, lead: bool, prompted: &mut
     Some(m)
 }
 
-/// The side-database rows of a lead session (see the module docs): schedule fires from
-/// `sessions.db` / `cron.db`, team runs from `teams.db`. A child file (`<sid>/<stem>`) has none.
-#[cfg(feature = "sqlite")]
-pub fn store_affordances(r: &SessionRef) -> anyhow::Result<Vec<crate::affordance::Affordance>> {
-    if r.id.contains('/') {
-        return Ok(Vec::new());
+/// The side databases under `<data>/db/` a lead session reads its rows of.
+pub(crate) const SIDE_DATABASES: [&str; 3] = ["sessions.db", "cron.db", "teams.db"];
+
+/// The `<data>/db/` directory of a lead session's side databases; a child file (`<sid>/<stem>`)
+/// reads none.
+pub(crate) fn side_store(r: &SessionRef) -> Option<PathBuf> {
+    if r.id.contains('/') || !is_sdk_path(&r.path) {
+        return None;
     }
-    let Some(db) = r
-        .path
+    r.path
         .parent()
         .and_then(Path::parent)
         .and_then(Path::parent)
         .map(|d| d.join("db"))
-    else {
+}
+
+/// The side-database rows of a lead session (see the module docs): schedule fires from
+/// `sessions.db` / `cron.db`, team runs from `teams.db`. A child file (`<sid>/<stem>`) has none.
+#[cfg(feature = "sqlite")]
+pub fn store_affordances(r: &SessionRef) -> anyhow::Result<Vec<crate::affordance::Affordance>> {
+    let Some(db) = side_store(r) else {
         return Ok(Vec::new());
     };
     let mut out = schedule_fires(&db, &r.id)?;
     out.extend(team_runs(&db.join("teams.db"), &r.id)?);
     Ok(out)
+}
+
+/// Every lead session's certificate in the side databases at `db` (`<data>/db/`): the rows its
+/// read takes ([`schedule_fires`], [`team_runs`]), each query's result digested per session, from
+/// one grouped query per database. Every session directory beside `db` is certified, rows or not.
+#[cfg(feature = "sqlite")]
+pub(crate) fn side_rows(db: &Path) -> Option<std::collections::HashMap<String, crate::source::Rows>> {
+    use super::store::sqlite::{open_ro, table_exists};
+    use crate::source::Rows;
+    use rusqlite::types::ValueRef;
+    let sessions = db.parent()?.join("sessions");
+    let mut certificates: std::collections::HashMap<String, Rows> = fs::read_dir(&sessions)
+        .ok()?
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .map(|sid| {
+            (
+                sid,
+                Rows {
+                    count: 0,
+                    high: 0,
+                    digest: Rows::SEED,
+                },
+            )
+        })
+        .collect();
+    // (database, tables the read requires, the read's query grouped by its session column first)
+    const QUERIES: [(&str, [&str; 2], &str); 3] = [
+        (
+            "sessions.db",
+            ["schedule_executions", "schedules"],
+            "SELECT e.session_id, s.name, s.cron_pattern, s.prompt, e.status, e.triggered_at FROM schedule_executions e \
+             JOIN schedules s ON s.schedule_id = e.schedule_id ORDER BY e.session_id, e.triggered_at",
+        ),
+        (
+            "cron.db",
+            ["cron_runs", "cron_specs"],
+            "SELECT r.session_id, p.title, p.schedule_expr, p.prompt, r.status, COALESCE(r.started_at, r.created_at) \
+             FROM cron_runs r JOIN cron_specs p ON p.spec_id = r.spec_id ORDER BY r.session_id, r.created_at",
+        ),
+        (
+            "teams.db",
+            ["team_events", "team_events"],
+            "SELECT team_name, ts, event_type, payload_json FROM team_events ORDER BY team_name, id",
+        ),
+    ];
+    for (index, (file, tables, sql)) in QUERIES.into_iter().enumerate() {
+        let path = db.join(file);
+        if !path.try_exists().ok()? {
+            continue;
+        }
+        open_ro(&path)
+            .ok()?
+            .read(|conn, _| {
+                if !tables.iter().all(|t| table_exists(conn, t)) {
+                    return Ok(());
+                }
+                let mut statement = conn.prepare(sql)?;
+                let columns = statement.column_count();
+                let mut rows = statement.query([])?;
+                while let Some(row) = rows.next()? {
+                    let Ok(sid) = row.get::<_, String>(0) else { continue };
+                    let Some(cert) = certificates.get_mut(&sid) else {
+                        continue;
+                    };
+                    cert.count += 1;
+                    cert.digest = Rows::fold(cert.digest, &[index as u8]);
+                    for column in 1..columns {
+                        let bytes: Vec<u8> = match row.get_ref(column)? {
+                            ValueRef::Null => b"n".to_vec(),
+                            ValueRef::Integer(i) => format!("i{i}").into_bytes(),
+                            ValueRef::Real(f) => format!("r{f}").into_bytes(),
+                            ValueRef::Text(t) => [b"t".as_slice(), &(t.len() as u64).to_le_bytes(), t].concat(),
+                            ValueRef::Blob(b) => [b"b".as_slice(), &(b.len() as u64).to_le_bytes(), b].concat(),
+                        };
+                        cert.digest = Rows::fold(cert.digest, &bytes);
+                    }
+                }
+                Ok(())
+            })
+            .ok()?;
+    }
+    Some(certificates)
+}
+
+#[cfg(not(feature = "sqlite"))]
+pub(crate) fn side_rows(_db: &Path) -> Option<std::collections::HashMap<String, crate::source::Rows>> {
+    None
 }
 
 #[cfg(not(feature = "sqlite"))]

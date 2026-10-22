@@ -663,8 +663,10 @@ impl Baseline {
         if absolute(&shared) != absolute(&primary) && self.primary != current.primary {
             return false;
         }
-        let mut store: Vec<PathBuf> = sqlite_sidecars(&shared).into();
-        store.push(shared);
+        let store = match probe.adapters.get(&r.harness) {
+            Some(Some(adapter)) => store_files(adapter.as_ref(), &shared),
+            _ => return false,
+        };
         let Some(store) = store.iter().map(|p| absolute(p)).collect::<Option<Vec<_>>>() else {
             return false;
         };
@@ -1046,13 +1048,10 @@ impl Probe {
         let store = (r.harness, absolute(&shared)?);
         if !self.rows.contains_key(&store) {
             let adapter = self.adapters.get(&r.harness).and_then(Option::as_ref);
-            let state = |path: &Path| -> State {
-                let mut files: Vec<PathBuf> = sqlite_sidecars(path).into();
-                files.push(path.to_path_buf());
-                files.iter().map(|f| FileId::at(f)).collect()
-            };
             let certified = adapter.and_then(|adapter| {
-                let before = state(&store.1);
+                let files = store_files(adapter.as_ref(), &shared);
+                let state = || -> State { files.iter().map(|f| FileId::at(f)).collect() };
+                let before = state();
                 let cached = STORES
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1073,7 +1072,7 @@ impl Probe {
                         std::sync::Arc::new(rows)
                     });
                     // Kept only when no write landed while certifying.
-                    if state(&store.1) == before {
+                    if state() == before {
                         STORES
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1090,6 +1089,20 @@ impl Probe {
         };
         self.rows.get(&store)?.as_ref()?.get(key).copied()
     }
+}
+
+/// The files whose identities are a shared store's state ([`Probe::rows`]): each of its
+/// [`crate::harness::Adapter::rows_files`] with its SQLite sidecars.
+fn store_files(adapter: &dyn crate::harness::Adapter, store: &Path) -> Vec<PathBuf> {
+    adapter
+        .rows_files(store)
+        .into_iter()
+        .flat_map(|file| {
+            let mut files: Vec<PathBuf> = sqlite_sidecars(&file).into();
+            files.push(file);
+            files
+        })
+        .collect()
 }
 
 /// The built-in adapter's actual append file, which may differ from a directory session key.

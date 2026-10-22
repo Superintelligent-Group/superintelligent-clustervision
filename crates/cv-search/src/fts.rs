@@ -5491,6 +5491,71 @@ mod tests {
         assert_eq!(refresh(), 0);
     }
 
+    /// Every Cline SDK lead session reads its own rows of the store's side databases, which
+    /// every session writes: a schedule fire, a cron run or a team event rereads its session
+    /// alone, and a write no session reads rereads none.
+    #[test]
+    fn a_cline_side_database_write_rereads_only_its_lead() {
+        let _home = IsolatedHome::new();
+        let (dir, data) = (tmpdir(), tmpdir());
+        let db = data.join("db");
+        std::fs::create_dir_all(&db).unwrap();
+        let refs: Vec<_> = ["100_aaaaa", "200_bbbbb", "300_ccccc"]
+            .iter()
+            .map(|sid| {
+                let session = data.join("sessions").join(sid);
+                std::fs::create_dir_all(&session).unwrap();
+                std::fs::write(session.join(format!("{sid}.json")), r#"{"cwd":"/work"}"#).unwrap();
+                let path = session.join(format!("{sid}.messages.json"));
+                std::fs::write(
+                    &path,
+                    serde_json::json!({"messages":[{"role":"user","content":format!("zqcline {sid}")}]}).to_string(),
+                )
+                .unwrap();
+                cv_core::SessionRef::new(*sid, cv_core::Harness::Cline, path)
+            })
+            .collect();
+        let exec = |file: &str, sql: &str| {
+            rusqlite::Connection::open(db.join(file))
+                .unwrap()
+                .execute_batch(sql)
+                .unwrap()
+        };
+        exec(
+            "sessions.db",
+            "CREATE TABLE schedules (schedule_id TEXT PRIMARY KEY, name TEXT NOT NULL, cron_pattern TEXT NOT NULL, prompt TEXT NOT NULL);
+             CREATE TABLE schedule_executions (execution_id TEXT PRIMARY KEY, schedule_id TEXT NOT NULL, session_id TEXT,
+               triggered_at TEXT NOT NULL, status TEXT NOT NULL);
+             CREATE TABLE sessions (session_id TEXT PRIMARY KEY, status TEXT);
+             INSERT INTO schedules VALUES ('s1', 'nightly', '0 3 * * *', 'tidy up');",
+        );
+        exec(
+            "teams.db",
+            "CREATE TABLE team_events (id INTEGER PRIMARY KEY AUTOINCREMENT, team_name TEXT NOT NULL, ts TEXT NOT NULL,
+               event_type TEXT NOT NULL, payload_json TEXT NOT NULL);",
+        );
+        let refresh = || sweep(&dir, refs.clone(), false, false).unwrap().changed;
+        assert_eq!(refresh(), 3);
+        assert_eq!(refresh(), 0);
+        // A session row (every session writes its own): no lead reads it.
+        exec("sessions.db", "INSERT INTO sessions VALUES ('400_ddddd', 'running');");
+        assert_eq!(refresh(), 0);
+        exec(
+            "sessions.db",
+            "INSERT INTO schedule_executions VALUES ('e1', 's1', '200_bbbbb', '2026-10-11T03:00:00Z', 'completed');",
+        );
+        assert!(cv_core::catalog::AffordanceTable::load().stale(&refs[1]));
+        assert!(!cv_core::catalog::AffordanceTable::load().stale(&refs[0]));
+        assert_eq!(refresh(), 1);
+        exec(
+            "teams.db",
+            r#"INSERT INTO team_events (team_name, ts, event_type, payload_json) VALUES
+               ('300_ccccc', '2026-10-11T05:00:00Z', 'teammate_spawned', '{"agentId":"helper"}');"#,
+        );
+        assert_eq!(refresh(), 1);
+        assert_eq!(refresh(), 0);
+    }
+
     /// The core invariant of `ChunkSink`: a body larger than [`CHUNK_BYTES`] is flushed into several
     /// tantivy docs that all share the session id. Search must (a) still find a term living only in a
     /// late chunk, and (b) dedup a term present in *every* chunk back to a single row per id.

@@ -38,6 +38,8 @@
 
 - A Kimi Code main-agent turn no longer rereads its sub-agents: each is certified by its own slice of `state.json`.
 
+- A write to the Cline SDK side databases rereads only the lead sessions whose schedule, cron or team rows changed.
+
 - Search staleness counts the preferred copy of each session, avoiding false drift from older duplicates.
 
 - `cv search`, `/api/search` and `-q text:` read what the index has not seen live, from its resume mark, within `--live-bytes` (256 MiB); `--frozen` reads none.

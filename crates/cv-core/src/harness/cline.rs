@@ -127,7 +127,7 @@ impl Adapter for Cline {
                 deps.files.push(dir.join(format!("{sid}.json")));
                 if !r.id.contains('/') {
                     if let Some(data) = dir.parent().and_then(Path::parent) {
-                        for name in ["sessions.db", "cron.db", "teams.db"] {
+                        for name in super::cline_sdk::SIDE_DATABASES {
                             let db = data.join("db").join(name);
                             deps.files.extend(sqlite_sidecars(&db));
                             deps.files.push(db);
@@ -161,6 +161,20 @@ impl Adapter for Cline {
             }
             stream_task_dir(&r.path, &r.id, Harness::Cline, opts, sink)
         })
+    }
+
+    /// An SDK lead session reads its own rows of the store's side databases, which every session
+    /// of the store writes: it is certified by them ([`super::cline_sdk::side_rows`]).
+    fn rows_store(&self, r: &SessionRef) -> Option<PathBuf> {
+        super::cline_sdk::side_store(r)
+    }
+
+    fn rows_files(&self, store: &Path) -> Vec<PathBuf> {
+        super::cline_sdk::SIDE_DATABASES.map(|name| store.join(name)).into()
+    }
+
+    fn rows(&self, store: &Path) -> Option<std::collections::HashMap<String, crate::source::Rows>> {
+        super::cline_sdk::side_rows(store)
     }
 
     /// The SDK store's side databases: schedule fires and team runs ([`super::cline_sdk`]).
