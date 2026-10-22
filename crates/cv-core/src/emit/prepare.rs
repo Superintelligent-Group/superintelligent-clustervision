@@ -119,8 +119,7 @@ pub(super) fn selected(
     for message in &mut sink.messages {
         for block in &mut message.content {
             let Some(value) = block.text_mut() else { continue };
-            let crate::Text::Span(span) = value else { continue };
-            let span = span.clone();
+            let crate::Text::Span(span) = &*value else { continue };
             let path = std::path::absolute(
                 span.source
                     .as_ref()

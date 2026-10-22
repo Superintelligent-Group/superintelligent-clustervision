@@ -130,10 +130,6 @@ pub(super) fn shared() -> &'static Cache {
     CACHE.get_or_init(Cache::default)
 }
 
-pub(super) fn note_message_sources(message: &crate::Message, primary: &std::path::Path, reads: &mut ReadSet) {
-    crate::source::record_message_reads(message, primary, reads);
-}
-
 fn captured(r: &SessionRef, primary: &std::path::Path) -> (Baseline, ReadSet) {
     let before = Probe::default().snapshot_from(r, primary);
     let mut reads = ReadSet::default();
@@ -240,13 +236,13 @@ fn value(
     read: impl FnOnce(&mut ReadSet) -> Result<Value>,
 ) -> Result<Value> {
     let key = Key::admitted(r, primary, crate::source::consumer_version(consumer), false);
-    if let Some(entry) = key.as_ref().and_then(|key| cache.get(key)) {
+    if let Some((key, entry)) = key.as_ref().and_then(|key| cache.get(key).map(|entry| (key, entry))) {
         if fresh(r, &entry.source, primary) {
             if let Payload::Head(value) = entry.payload {
                 return Ok(value);
             }
         } else {
-            cache.remove(key.as_ref().expect("cached value has a key"));
+            cache.remove(key);
         }
     }
     let (before, mut reads) = captured(r, primary);
@@ -274,7 +270,7 @@ pub(super) fn head(cache: &Cache, adapter: &dyn Adapter, r: &SessionRef) -> Resu
         }
         impl crate::MessageSink for Counter {
             fn message(&mut self, message: crate::Message) -> Flow {
-                note_message_sources(&message, &self.primary, &mut self.reads);
+                crate::source::record_message_reads(&message, &self.primary, &mut self.reads);
                 self.total += 1;
                 Flow::Continue
             }
@@ -307,7 +303,7 @@ pub(super) fn compactions(cache: &Cache, adapter: &dyn Adapter, r: &SessionRef) 
         }
         impl crate::MessageSink for Sink<'_> {
             fn message(&mut self, m: crate::Message) -> Flow {
-                note_message_sources(&m, self.primary, self.reads);
+                crate::source::record_message_reads(&m, self.primary, self.reads);
                 self.inner.message(m)
             }
             fn dependency(&mut self, path: &std::path::Path) {
