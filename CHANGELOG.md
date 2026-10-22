@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Qwen checkpoints keep their facts under the `qwen` bag and Qwen part decoding, no longer under `gemini`.
 - Builds without `sqlite` count extracted events instead of spooling them to private memory and temporary files that nothing could publish.
 - Followers announce a session unreadable when they started as new once it reads, instead of tracking it from a guessed message count.
 - `created:` no longer answers from the update time when a listing lacks a creation time; the parsed session decides, and none means no match.

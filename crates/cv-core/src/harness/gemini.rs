@@ -335,7 +335,7 @@ pub(crate) fn scan_session_file(path: &Path, harness: Harness) -> Result<Vec<Ses
         return Ok(vec![r]);
     } else if is_checkpoint(&name) {
         let text = fs::read_to_string(path)?;
-        if let Some(s) = parse_checkpoint(&text, &name, Some(path.to_path_buf()))? {
+        if let Some(s) = parse_checkpoint(harness, &text, &name, Some(path.to_path_buf()))? {
             return Ok(vec![session_ref(&s, path, harness)]);
         }
     }
@@ -378,7 +378,7 @@ pub(crate) fn stream_for(
 
     // Bounded shapes (checkpoints, logs.json): a few KB–MB, never the OOM risk. Bridge through a
     // whole-Session parse and replay its messages into the sink.
-    let mut session = parse_bounded(r, &name)?;
+    let mut session = parse_bounded(harness, r, &name)?;
     session.harness = harness;
     let messages = std::mem::take(&mut session.messages);
     sink.meta(&session);
@@ -393,11 +393,11 @@ pub(crate) fn stream_for(
 /// Whole-`Session` parse for the bounded (non-streamed) shapes: gemini-cli checkpoints and
 /// `logs.json` (many sessions per file — picks the one matching `r.id`). These are small enough
 /// to materialize.
-fn parse_bounded(r: &SessionRef, name: &str) -> Result<Session> {
+fn parse_bounded(harness: Harness, r: &SessionRef, name: &str) -> Result<Session> {
     let text = fs::read_to_string(&r.path).with_context(|| format!("reading {}", r.path.display()))?;
     // Checkpoint: one session per file.
     if is_checkpoint(name) {
-        if let Some(s) = parse_checkpoint(&text, name, Some(r.path.clone()))? {
+        if let Some(s) = parse_checkpoint(harness, &text, name, Some(r.path.clone()))? {
             return Ok(s);
         }
     }
@@ -846,7 +846,9 @@ fn parse_all_str_inner(harness: Harness, text: &str, source_path: Option<PathBuf
                 .any(|it| it.get("role").is_some() && it.get("parts").is_some())
         });
     if checkpoint_shaped {
-        return Ok(checkpoint((&value).into(), "", source_path)?.into_iter().collect());
+        return Ok(checkpoint(harness, (&value).into(), "", source_path)?
+            .into_iter()
+            .collect());
     }
     Ok(Vec::new())
 }
@@ -1044,14 +1046,20 @@ struct EmitState {
 
 /// Parse a gemini-cli checkpoint into an IR [`Session`]. The id is derived from the `checkpoint-<tag>`
 /// filename when available (the `tag` is percent-encoded by gemini-cli; we decode it best-effort).
-fn parse_checkpoint(text: &str, file_name: &str, source_path: Option<PathBuf>) -> Result<Option<Session>> {
+fn parse_checkpoint(
+    harness: Harness,
+    text: &str,
+    file_name: &str,
+    source_path: Option<PathBuf>,
+) -> Result<Option<Session>> {
     let Ok(value) = serde_json::from_str::<Value>(text) else {
         return Ok(None);
     };
-    checkpoint((&value).into(), file_name, source_path)
+    checkpoint(harness, (&value).into(), file_name, source_path)
 }
 
 fn checkpoint(
+    harness: Harness,
     view: crate::json::JsonView<'_>,
     file_name: &str,
     source_path: Option<PathBuf>,
@@ -1067,7 +1075,7 @@ fn checkpoint(
     let id = checkpoint_id(file_name);
     let resolver = crate::lazy::Resolver::new(None);
     let parts_demand = record::Demand {
-        harness: Harness::Gemini,
+        harness,
         source: None,
         resolver: &resolver,
     };
@@ -1139,9 +1147,9 @@ fn checkpoint(
         title,
         messages,
         source_path,
-        ..Session::new(id, Harness::Gemini)
+        ..Session::new(id, harness)
     };
-    let bag = s.harness_extra_mut(Harness::Gemini);
+    let bag = s.harness_extra_mut(harness);
     crate::affordance::note_checkpoints(bag, 1, []);
     if let Some(cp) = bag
         .get_mut(crate::affordance::CHECKPOINTS_KEY)
@@ -1904,7 +1912,7 @@ mod tests {
     #[test]
     fn parses_checkpoint_history() {
         let text = fixture("checkpoint.json");
-        let s = parse_checkpoint(&text, "checkpoint-my%20tag.json", None)
+        let s = parse_checkpoint(Harness::Gemini, &text, "checkpoint-my%20tag.json", None)
             .unwrap()
             .expect("checkpoint");
         assert_eq!(s.id, "checkpoint-my tag");
@@ -1922,6 +1930,22 @@ mod tests {
             .content
             .iter()
             .any(|b| matches!(b, Block::ToolResult { content, .. } if content.matches_str("4") == Some(true))));
+    }
+
+    /// Qwen writes gemini-cli's checkpoint shape; what cv derives from one belongs in Qwen's bag
+    /// and on Qwen's messages, never Gemini's.
+    #[test]
+    fn a_qwen_checkpoint_keeps_its_facts_under_qwen() {
+        let text = fixture("checkpoint.json");
+        let s = parse_checkpoint(Harness::Qwen, &text, "checkpoint-q.json", None)
+            .unwrap()
+            .expect("checkpoint");
+        assert_eq!(s.harness, Harness::Qwen);
+        assert!(s.extra.contains_key(Harness::Qwen.as_str()), "{:?}", s.extra.keys());
+        assert!(!s.extra.contains_key(Harness::Gemini.as_str()), "{:?}", s.extra.keys());
+        for m in &s.messages {
+            assert!(!m.extra.contains_key(Harness::Gemini.as_str()), "{:?}", m.extra);
+        }
     }
 
     #[test]
@@ -2587,7 +2611,9 @@ mod tests {
     #[test]
     fn a_merged_checkpoint_turn_splits_the_preamble_from_the_prompt() {
         let text = r#"{"history":[{"role":"user","parts":[{"text":"<session_context>\nctx\n</session_context>"},{"text":"Say saved."}]},{"role":"model","parts":[{"text":"saved"}]}]}"#;
-        let s = parse_checkpoint(text, "checkpoint-x.json", None).unwrap().unwrap();
+        let s = parse_checkpoint(Harness::Gemini, text, "checkpoint-x.json", None)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             kinds(&s),
             vec![
