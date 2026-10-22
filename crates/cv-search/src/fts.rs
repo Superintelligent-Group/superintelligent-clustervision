@@ -7354,7 +7354,10 @@ mod tests {
     fn append_compaction_keeps_the_cold_segment_above_the_bottom_tier() {
         let (work, ids, reads) = append_merge_control();
         assert_eq!(ids, ["cold", "hot"]);
-        assert_eq!(reads, 25, "one identity request per live body: the cold one and 24 appends");
+        assert_eq!(
+            reads, 25,
+            "one identity request per live body: the cold one and 24 appends"
+        );
         assert!(work.merges > 0, "{work:?}");
         assert_eq!(work.cold_rewrites, 0, "{work:?}");
         assert!(work.final_segments < 24, "{work:?}");

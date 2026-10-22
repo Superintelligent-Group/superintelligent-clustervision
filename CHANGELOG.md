@@ -233,6 +233,7 @@
 - `cv archive`'s resume state that exists but cannot be read is said once on stderr; the session is re-read.
 - `cv pack`'s opportunistic event ingest says once on stderr when it fails instead of dropping the error twice.
 - `cv workflow --revive` says when a lane's transcript read stopped early; `LaneWork` gains `unread`.
+- `cv workflow` claims no ghost launch for a session whose run-state file cannot be read; it names that file once on stderr.
 - `cv ls --json --enrich`: a row whose transcript cannot be read carries `enrich_error` instead of looking unenriched.
 - `cv search --scan` skips a session it cannot read and names the unscanned sources in its note, instead of failing the whole scan.
 - **Breaking (library):** `harness::wire::openai::tool_calls` returns `Result`; an entry that fails to decode is an error, not a shorter list.

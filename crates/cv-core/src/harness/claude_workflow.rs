@@ -971,12 +971,14 @@ impl Miner {
 /// Each ghost is enriched from what DID survive: its orphaned script file (written at launch)
 /// recovers the run id, which keys the `subagents/workflows/<runId>/` debris dir — agent
 /// transcripts and journaled results produced before the crash, i.e. the harvestable work.
+///
+/// A state file that exists but cannot be read is not evidence that its run was never recorded:
+/// it is named once on stderr and the session reports no ghosts, never a false one.
 pub fn ghost_launches(session_path: &Path) -> Vec<WorkflowLaunch> {
     // Ghost matching needs only identity, name and resume ancestry, never scripts or results.
-    let states = crate::par_filter_map(state_paths(session_path), |path| {
-        let source = crate::json::JsonSource::capture(&path).ok()?;
-        source
-            .read(ReadInput::Document, Validation::Value, |view| {
+    let read = crate::par_filter_map(state_paths(session_path), |path| {
+        let state = crate::json::JsonSource::capture(&path).and_then(|source| {
+            source.read(ReadInput::Document, Validation::Value, |view| {
                 let mut fields = serde_json::Map::new();
                 for key in ["runId", "workflowName", "resumeFromRunId"] {
                     if let Some(value) = crate::affordance::input::field_string(view, key)? {
@@ -985,8 +987,20 @@ pub fn ghost_launches(session_path: &Path) -> Vec<WorkflowLaunch> {
                 }
                 Ok(parse_state(&Value::Object(fields)))
             })
-            .ok()
+        });
+        Some(state.map_err(|error| (path, error)))
     });
+    let mut states = Vec::with_capacity(read.len());
+    for state in read {
+        match state {
+            Ok(state) => states.push(state),
+            Err((_, error)) if crate::harness::is_not_found(&error) => {}
+            Err((path, error)) => {
+                crate::env::warn_once("workflow run state", format!("{}: {error:#}", path.display()));
+                return Vec::new();
+            }
+        }
+    }
     let mut ghosts = compute_ghosts(
         launches(session_path).unwrap_or_else(|error| {
             crate::env::warn_once("workflow launches", format!("{}: {error:#}", session_path.display()));
@@ -1323,13 +1337,17 @@ mod tests {
 
         // The ghost carries its recovered run id + debris counts.
         let ghosts = ghost_launches(&sess);
-        std::fs::remove_dir_all(&dir).ok();
         assert_eq!(ghosts.len(), 1);
         let g = &ghosts[0];
         assert_eq!(g.name.as_deref(), Some("doomed-swarm"));
         assert_eq!(g.run_id.as_deref(), Some("wf_dead-2"));
         assert_eq!(g.debris_agents, Some(2));
         assert_eq!(g.journal_result_count, Some(1));
+
+        // A state file that cannot be read might be the doomed run's: no ghost is claimed.
+        std::fs::write(wfdir.join("wf_unreadable-3.json"), "{\"runId\": \"wf_unread").unwrap();
+        assert!(ghost_launches(&sess).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
