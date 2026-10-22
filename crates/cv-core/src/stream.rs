@@ -405,8 +405,12 @@ impl Checkpoint {
     /// Store `layer`'s state (serialization of these plain structs cannot fail; if it did, the
     /// layer would be missing and a resume would decline).
     pub fn put(&mut self, layer: &str, state: &impl Serialize) {
-        if let Ok(v) = serde_json::to_value(state) {
-            self.state.insert(layer.to_string(), v);
+        match serde_json::to_value(state) {
+            Ok(v) => {
+                self.state.insert(layer.to_string(), v);
+            }
+            // A release build keeps the documented decline; a debug build refuses to ship it.
+            Err(error) => debug_assert!(false, "checkpoint layer {layer:?} did not serialize: {error}"),
         }
     }
 
