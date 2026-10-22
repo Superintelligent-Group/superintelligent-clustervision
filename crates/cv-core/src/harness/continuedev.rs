@@ -172,10 +172,10 @@ impl Adapter for Continue {
                 };
                 let title = record::title(doc.get("title"), true)?;
                 let workspace = optional_string(doc.get("workspaceDirectory"))?;
-                let history = doc.get("history").map(JsonView::accepted_array).transpose()?;
-                if doc.get("history").is_some() && history.as_ref().is_some_and(Option::is_none) {
-                    return Err(InvalidStruct("expected Continue history array").into());
-                }
+                let history = match doc.get("history").map(JsonView::accepted_array).transpose()? {
+                    Some(None) => return Err(InvalidStruct("expected Continue history array").into()),
+                    array => array.flatten(),
+                };
                 if s.title.is_none() {
                     s.title = title;
                 }
@@ -184,7 +184,7 @@ impl Adapter for Continue {
                 }
                 sink.meta(&s);
                 let mut answered = std::collections::HashSet::<String>::new();
-                for item in history.into_iter().flatten().flatten() {
+                for item in history.into_iter().flatten() {
                     let Some(item) = item? else { continue };
                     let reply_id = record::reply_id(item)?;
                     if reply_id.is_some_and(|id| answered.contains(&id)) {
@@ -944,9 +944,7 @@ mod tests {
     fn parses_fixture_session() {
         let dir = fixtures();
         let path = dir.join("11111111-1111-1111-1111-111111111111.json");
-        if !path.exists() {
-            return;
-        }
+        assert!(path.exists(), "missing committed fixture {}", path.display());
         let r = SessionRef::new("11111111-1111-1111-1111-111111111111", Harness::Continue, path.clone());
         let s = Continue { sessions: None }.parse(&r).unwrap();
         crate::harness::assert_no_flat_keys(&s);
@@ -1049,9 +1047,8 @@ mod tests {
     #[test]
     fn discovers_from_index() {
         let dir = fixtures();
-        if !dir.join("sessions.json").exists() {
-            return;
-        }
+        let index = dir.join("sessions.json");
+        assert!(index.exists(), "missing committed fixture {}", index.display());
         let adapter = Continue {
             sessions: Some(dir.clone()),
         };
