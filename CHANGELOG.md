@@ -30,6 +30,8 @@
 
 - OpenClaw SQLite stores are rediscovered only when the store changes, not on every listing refresh.
 
+- A copied SQLite store with WAL frames is copied once per command, however large, not again whenever another database opens.
+
 - Search staleness counts the preferred copy of each session, avoiding false drift from older duplicates.
 
 - `cv search`, `/api/search` and `-q text:` read what the index has not seen live, from its resume mark, within `--live-bytes` (256 MiB); `--frozen` reads none.

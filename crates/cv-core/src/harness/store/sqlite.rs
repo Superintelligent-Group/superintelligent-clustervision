@@ -102,32 +102,16 @@ thread_local! {
     static BOUNDARY: std::cell::RefCell<std::sync::Weak<ReadBoundary>> = const { std::cell::RefCell::new(std::sync::Weak::new()) };
 }
 
+/// One private backing per store this operation copied, kept until the operation's last scope
+/// drops or the store's state moves (then the next open copies it again and the old backing goes
+/// once no reader holds it). Bounded by the number of distinct stores the operation opens, never by
+/// bytes: a store with WAL frames is copied once per state per operation, however large (an
+/// eviction by size copied a 4.2 GB store again each time another database opened). Disk is each
+/// such store's DB/WAL/journal bytes once (a clone on APFS shares its blocks until the store is
+/// written); memory is one small record per store.
 #[derive(Default)]
 struct SnapshotCacheState {
-    idle: std::collections::VecDeque<std::sync::Arc<ColdSnapshot>>,
-    idle_bytes: u64,
-    active: std::collections::HashMap<std::path::PathBuf, std::sync::Weak<ColdSnapshot>>,
-}
-
-const IDLE_BUDGET: u64 = 256 * 1024 * 1024;
-
-impl SnapshotCacheState {
-    fn discard_idle(&mut self, snapshot: &std::sync::Arc<ColdSnapshot>) {
-        if let Some(index) = self.idle.iter().position(|s| std::sync::Arc::ptr_eq(s, snapshot)) {
-            self.idle_bytes -= self.idle.remove(index).unwrap().copied_bytes;
-        }
-    }
-
-    fn retain_idle(&mut self, snapshot: &std::sync::Arc<ColdSnapshot>, budget: u64) {
-        self.discard_idle(snapshot);
-        // Permit one oversized backing alone. Its next session reuses it, while selecting any
-        // other database evicts it rather than allowing unbounded idle bytes.
-        while !self.idle.is_empty() && self.idle_bytes.saturating_add(snapshot.copied_bytes) > budget {
-            self.idle_bytes -= self.idle.pop_front().unwrap().copied_bytes;
-        }
-        self.idle_bytes += snapshot.copied_bytes;
-        self.idle.push_back(std::sync::Arc::clone(snapshot));
-    }
+    retained: std::collections::HashMap<std::path::PathBuf, std::sync::Arc<ColdSnapshot>>,
 }
 
 pub(crate) fn read_scope() -> ReadScope {
@@ -153,7 +137,7 @@ fn reader_scope() -> ReadScope {
     #[cfg(not(test))]
     static ACTIVE: std::sync::OnceLock<Mutex<Weak<SnapshotCache>>> = std::sync::OnceLock::new();
     // libtest runs tests concurrently in one process. A reader in another test must not
-    // retain this test's idle backings after its final scope drops.
+    // retain this test's backings after its final scope drops.
     #[cfg(test)]
     thread_local! {
         static ACTIVE: Mutex<Weak<SnapshotCache>> = const { Mutex::new(Weak::new()) };
@@ -184,7 +168,6 @@ struct ColdSnapshot {
     directory: std::path::PathBuf,
     directory_identity: snapshots::Identity,
     database: std::path::PathBuf,
-    copied_bytes: u64,
     _owner: Option<std::sync::Arc<snapshots::Owner>>,
 }
 
@@ -266,9 +249,8 @@ pub(crate) fn binary_text_columns(conn: &Connection, table: &str, names: &[&str]
 }
 
 /// Open a harness database without writing anything in its directory (see the module docs).
-/// Snapshots of WAL-mode stores with frames live in a private directory; an operation-local LRU
-/// retains at most 256 MiB of copied DB/WAL/journal bytes, or one larger backing alone. Weak
-/// lookup reuses active readers without increasing idle disk retention. `std::fs::copy` clones
+/// Snapshots of WAL-mode stores with frames live in a private directory, one per store and store
+/// state for the operation ([`SnapshotCacheState`]). `std::fs::copy` clones
 /// on APFS (0.01 s for a 267 MB store) and copies elsewhere (0.26 s for the same file here).
 pub(crate) fn open_ro(path: &Path) -> Result<ReadConnection> {
     open_ro_with_copy_check(path, |_| Ok(()))
@@ -291,18 +273,15 @@ fn open_ro_with_copy_check(path: &Path, copied: impl FnOnce(&Path) -> Result<()>
             .state
             .lock()
             .map_err(|_| anyhow::anyhow!("SQLite snapshot cache poisoned"))?;
-        cache.active.retain(|_, snapshot| snapshot.strong_count() > 0);
-        let existing = cache.active.get(&path).and_then(std::sync::Weak::upgrade);
-        if let Some(snapshot) = existing
-            .as_ref()
+        if let Some(snapshot) = cache
+            .retained
+            .get(&path)
             .filter(|s| s.reads.fresh(&mut crate::source::Probe::default()))
         {
-            cache.retain_idle(snapshot, IDLE_BUDGET);
             Some(Arc::clone(snapshot))
         } else {
-            if let Some(stale) = existing {
-                cache.discard_idle(&stale);
-            }
+            // A moved store's old backing goes once no reader holds it.
+            cache.retained.remove(&path);
             let owner = {
                 let mut slot = scope
                     .cache
@@ -316,12 +295,11 @@ fn open_ro_with_copy_check(path: &Path, copied: impl FnOnce(&Path) -> Result<()>
             };
             let directory = owner.snapshot_directory()?;
             let directory_identity = snapshots::snapshot_identity(&directory)?;
-            let mut snapshot = ColdSnapshot {
+            let snapshot = ColdSnapshot {
                 reads: reads.clone(),
                 database: directory.join("store.db"),
                 directory,
                 directory_identity,
-                copied_bytes: 0,
                 _owner: Some(owner),
             };
             #[cfg(unix)]
@@ -331,21 +309,17 @@ fn open_ro_with_copy_check(path: &Path, copied: impl FnOnce(&Path) -> Result<()>
             }
             // std::fs::copy uses clonefile on APFS and bounded OS copying elsewhere. Never copy
             // SHM: it contains live coordination state; SQLite rebuilds it only in our directory.
-            snapshot.copied_bytes = std::fs::copy(&path, &snapshot.database)?;
+            std::fs::copy(&path, &snapshot.database)?;
             for suffix in ["-wal", "-journal"] {
                 let original = sidecar(&path, suffix);
                 if original.exists() {
-                    snapshot.copied_bytes = snapshot
-                        .copied_bytes
-                        .checked_add(std::fs::copy(original, sidecar(&snapshot.database, suffix))?)
-                        .context("SQLite snapshot byte size overflow")?;
+                    std::fs::copy(original, sidecar(&snapshot.database, suffix))?;
                 }
             }
             copied(&snapshot.database)?;
             check_reads(&reads)?;
             let snapshot = Arc::new(snapshot);
-            cache.active.insert(path.clone(), Arc::downgrade(&snapshot));
-            cache.retain_idle(&snapshot, IDLE_BUDGET);
+            cache.retained.insert(path.clone(), Arc::clone(&snapshot));
             Some(snapshot)
         }
     } else {
@@ -850,7 +824,6 @@ mod tests {
             directory_identity: snapshots::snapshot_identity(&directory).unwrap(),
             directory: directory.clone(),
             database,
-            copied_bytes: 0,
             _owner: None,
         };
         let saved = directory.with_extension("saved");
@@ -976,7 +949,7 @@ mod tests {
         drop(again);
         assert!(first_backing.exists());
         drop(second);
-        assert!(second_backing.exists()); // Both small backings fit the byte budget.
+        assert!(second_backing.exists());
         drop(scope);
         assert!(!first_backing.exists());
         assert!(!second_backing.exists());
@@ -984,44 +957,30 @@ mod tests {
         std::fs::remove_dir_all(directory).unwrap();
     }
 
+    /// A copied store lives for the operation however many other databases it opens: a WAL
+    /// store is copied once per state, never again because another store was copied after it.
     #[test]
-    fn idle_byte_budget_evicts_lru_and_permits_only_one_oversized_backing() {
-        use std::sync::Arc;
-        fn backing(bytes: u64) -> Arc<ColdSnapshot> {
-            let (directory, database) = fixture();
-            std::fs::File::create(&database).unwrap().set_len(bytes).unwrap();
-            Arc::new(ColdSnapshot {
-                reads: crate::source::ReadSet::default(),
-                directory_identity: snapshots::snapshot_identity(&directory).unwrap(),
-                directory,
-                database,
-                copied_bytes: bytes,
-                _owner: None,
+    fn a_copied_store_outlives_every_other_open_in_its_operation() {
+        let _serial = SNAPSHOT_TEST.lock().unwrap();
+        let (directory, database) = fixture();
+        let _writer = live_store(&database, "CREATE TABLE t(x); INSERT INTO t VALUES(7);");
+        let others: Vec<_> = (0..4)
+            .map(|i| {
+                let other = directory.join(format!("other-{i}.db"));
+                (live_store(&other, "CREATE TABLE t(x);"), other)
             })
+            .collect();
+        let scope = read_scope();
+        let first = open_ro(&database).unwrap()._snapshot.unwrap().directory.clone();
+        for (_, other) in &others {
+            drop(open_ro(other).unwrap());
+            let again = open_ro_with_copy_check(&database, |_| panic!("an unchanged store was copied again")).unwrap();
+            assert_eq!(again._snapshot.as_ref().unwrap().directory, first);
         }
-        let mut cache = SnapshotCacheState::default();
-        let a = backing(100);
-        let b = backing(100);
-        let c = backing(100);
-        cache.retain_idle(&a, 256);
-        cache.retain_idle(&b, 256);
-        cache.retain_idle(&a, 256);
-        cache.retain_idle(&c, 256);
-        assert_eq!(cache.idle_bytes, 200);
-        assert_eq!(Arc::strong_count(&a), 2);
-        assert_eq!(Arc::strong_count(&b), 1); // Active reader survives idle eviction.
-        let b_path = b.directory.clone();
-        drop(b);
-        assert!(!b_path.exists());
-        let oversized = backing(300);
-        cache.retain_idle(&oversized, 256);
-        assert_eq!(cache.idle.len(), 1);
-        assert_eq!(cache.idle_bytes, 300);
-        let tiny = backing(1);
-        cache.retain_idle(&tiny, 256);
-        assert_eq!(cache.idle.len(), 1);
-        assert_eq!(cache.idle_bytes, 1);
-        assert_eq!(Arc::strong_count(&oversized), 1);
+        drop(scope);
+        assert!(!first.exists());
+        drop(others);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
