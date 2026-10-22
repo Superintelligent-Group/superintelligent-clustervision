@@ -57,6 +57,16 @@ pub(crate) fn capture_primary_reads_from(a: &dyn crate::Adapter, refs: &[Session
     out
 }
 
+/// One watched path as discovery recorded it: its identity, an optional file's stable absence
+/// (fresh until it appears), or unknown (unreadable, or modified too recently: never fresh).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(feature = "sqlite"), allow(dead_code))]
+pub(crate) enum Watched {
+    Unknown,
+    Absent,
+    Is(crate::source::FileId),
+}
+
 #[cfg(feature = "sqlite")]
 mod imp {
     use super::*;
@@ -2292,15 +2302,6 @@ mod imp {
 
 #[cfg(feature = "sqlite")]
 pub(crate) use imp::{all_sessions, db_path, open_at, open_db, watches_for};
-/// One watched path as discovery recorded it: its identity, an optional file's stable absence
-/// (fresh until it appears), or unknown (unreadable, or modified too recently: never fresh).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(feature = "sqlite"), allow(dead_code))]
-pub(crate) enum Watched {
-    Unknown,
-    Absent,
-    Is(crate::source::FileId),
-}
 
 #[cfg(feature = "sqlite")]
 pub use imp::{lookup, note_affordances_with_source, skipped_sources, sync, writer_versions, AffordanceTable};
